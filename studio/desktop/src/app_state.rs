@@ -389,7 +389,7 @@ impl App {
         })
     }
 
-    fn save_state(&self, cx: &Cx, slot: usize) {
+    pub(super) fn save_state(&self, cx: &Cx, slot: usize) {
         let valid_mounts: HashSet<String> = self.data.mounts.keys().cloned().collect();
         let mount_dock_items = self
             .ui

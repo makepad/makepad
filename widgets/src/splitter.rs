@@ -423,6 +423,10 @@ impl Splitter {
         self.align
     }
 
+    pub fn position(&self) -> f64 {
+        self.position
+    }
+
     pub fn set_align(&mut self, align: SplitterAlign) {
         self.align = align;
     }
@@ -479,5 +483,9 @@ impl SplitterRef {
 
     pub fn align(&self) -> Option<SplitterAlign> {
         self.borrow().map(|inner| inner.align())
+    }
+
+    pub fn position(&self) -> Option<f64> {
+        self.borrow().map(|inner| inner.position())
     }
 }

@@ -65,6 +65,7 @@ pub struct UiProfilerSamples {
 pub struct MountState {
     pub root: PathBuf,
     pub tab_id: Option<LiveId>,
+    pub sidebar_restore_width: Option<f64>,
     pub file_tree_data: Option<FileTreeData>,
     pub run_items: Vec<RunItem>,
     pub log_entries: VecDeque<UiLogEntry>,
@@ -86,6 +87,7 @@ impl Default for MountState {
         Self {
             root: PathBuf::new(),
             tab_id: None,
+            sidebar_restore_width: None,
             file_tree_data: None,
             run_items: Vec::new(),
             log_entries: VecDeque::new(),

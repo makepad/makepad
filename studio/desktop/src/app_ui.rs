@@ -139,6 +139,22 @@ script_mod! {
         }
     }
 
+    let CaptionSidebarToggle = ButtonFlatterIcon {
+        width: 38.0
+        height: 30.0
+        icon_walk: Walk {width: 17.0 height: 17.0}
+        draw_bg +: {
+            color: #x4C4C4C
+            color_hover: #x5C5C5C
+            color_down: #x3F3F3F
+            border_radius: 5.0
+        }
+        draw_icon +: {
+            color: #xD6D6D6
+            svg: crate_resource("self://resources/icons/icon_sidebar_toggle.svg")
+        }
+    }
+
     let STUDIO_PALETTE_1 = #B2FF64
     let STUDIO_PALETTE_2 = #80FFBF
     let STUDIO_PALETTE_3 = #80BFFF
@@ -209,9 +225,55 @@ script_mod! {
 
     mod.widgets.AppUI = Window {
         window.inner_size: vec2(1400 900)
-        caption_bar +: {
-            visible: false
-            height: 0.0
+        caption_bar := SolidView {
+            visible: true
+            height: 38.0
+            flow: Overlay
+            draw_bg.color: theme.color_bg_app
+
+            caption_label := View {
+                width: Fill
+                height: Fill
+                align: Center
+                label := Label {text: "Makepad"}
+            }
+
+            left_controls := View {
+                width: Fit
+                height: Fit
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                margin: Inset {left: 88.0 right: 0.0 top: 0.0 bottom: 0.0}
+
+                sidebar_toggle := CaptionSidebarToggle {}
+            }
+
+            voice_wave := VoiceWave {
+                width: Fit
+                height: Fit
+                align: Align {x: 1.0 y: 0.5}
+                margin: Inset {left: 0.0 right: 112.0 top: 0.0 bottom: 0.0}
+            }
+
+            windows_buttons := View {
+                visible: false
+                width: Fit
+                height: Fit
+                flow: Right
+                align: Align {x: 1.0 y: 0.5}
+                min := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMin width: 46 height: 29}
+                max := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMax width: 46 height: 29}
+                close := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsClose width: 46 height: 29}
+            }
+
+            web_fullscreen := View {
+                visible: false
+                width: Fit
+                height: Fit
+                align: Align {x: 1.0 y: 0.5}
+                margin: Inset {left: 0.0 right: 8.0 top: 0.0 bottom: 0.0}
+                fullscreen := DesktopButton {draw_bg.button_type: DesktopButtonType.Fullscreen width: 50 height: 36}
+            }
         }
         draw_bg +: {
             pixel: fn() {
@@ -224,7 +286,7 @@ script_mod! {
             height: Fill
             flow: Down
             spacing: 0.0
-            padding: 10.0
+            padding: Inset {left: 10.0 right: 10.0 top: 2.0 bottom: 10.0}
 
             RoundedView {
                 visible: false

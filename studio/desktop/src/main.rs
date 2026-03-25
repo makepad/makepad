@@ -68,7 +68,7 @@ script_mod! {
 
     load_all_resources() do #(App::script_component(vm)) {
         ui: Root {
-            AppUI {}
+            main_window := AppUI {}
         }
     }
 }
@@ -78,6 +78,13 @@ fn push_capped_deque<T>(entries: &mut std::collections::VecDeque<T>, entry: T, m
     while entries.len() > max_len {
         entries.pop_front();
     }
+}
+
+pub struct SidebarAnimation {
+    mount: String,
+    from_width: f64,
+    to_width: f64,
+    start_time: Option<f64>,
 }
 
 fn parse_path_line_column_token(token: &str) -> Option<(String, usize, usize)> {
@@ -117,6 +124,10 @@ pub struct App {
     pub file_filter_debounce_timer: Timer,
     #[rust]
     pub pending_file_filter: Option<(String, String)>,
+    #[rust]
+    pub sidebar_animation: Option<SidebarAnimation>,
+    #[rust]
+    pub sidebar_animation_next_frame: NextFrame,
 }
 
 impl MatchEvent for App {
@@ -127,6 +138,12 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(sidebar_toggle)).clicked(actions) {
+            if let Some(active_mount) = self.data.active_mount.clone() {
+                self.toggle_mount_sidebar(cx, &active_mount);
+            }
+        }
+
         if let Some(active_mount) = self.data.active_mount.clone() {
             if let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) {
                 if let Some(node_id) = workspace
@@ -300,6 +317,23 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui
             .handle_event(cx, event, &mut Scope::with_data(&mut self.data));
+
+        if let Event::NextFrame(ne) = event {
+            if self.sidebar_animation_next_frame.is_event(event).is_some() {
+                self.step_sidebar_animation(cx, ne.time);
+            }
+        }
+
+        if let Event::WindowDragQuery(dq) = event {
+            let main_window = self.ui.window(cx, ids!(main_window));
+            if Some(dq.window_id) == main_window.window_id() {
+                let button_rect = self.ui.button(cx, ids!(sidebar_toggle)).area().rect(cx);
+                if button_rect.contains(dq.abs) {
+                    dq.response.set(WindowDragQueryResponse::Client);
+                    cx.set_cursor(MouseCursor::Default);
+                }
+            }
+        }
 
         if matches!(event, Event::Signal) {
             self.drain_studio_messages(cx)
