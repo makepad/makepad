@@ -31,7 +31,7 @@ use crate::{
             Foundation::{HANDLE, HMODULE, S_FALSE},
             Graphics::{
                 Direct3D::{
-                    Fxc::D3DCompile, ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                    Fxc::D3DCompile, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
                 },
                 Direct3D11::{
@@ -1823,8 +1823,8 @@ pub struct CxOsDrawShader {
     pub scope_uniforms: D3d11Buffer,
     pub pixel_shader: ID3D11PixelShader,
     pub vertex_shader: ID3D11VertexShader,
-    pub pixel_shader_blob: ID3DBlob,
-    pub vertex_shader_blob: ID3DBlob,
+    pub pixel_shader_blob: Vec<u8>,
+    pub vertex_shader_blob: Vec<u8>,
     pub input_layout: ID3D11InputLayout,
     // Dynamic buffer indices looked up from shader output
     pub draw_call_uniform_buffer_id: Option<u32>,
@@ -1842,7 +1842,7 @@ impl CxOsDrawShader {
         mapping: &CxDrawShaderMapping,
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
-        fn compile_shader(target: &str, entry: &str, shader: &str) -> Result<ID3DBlob, String> {
+        fn compile_shader(target: &str, entry: &str, shader: &str) -> Result<Vec<u8>, String> {
             const D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY: u32 = 1 << 12;
             unsafe {
                 let shader_bytes = shader.as_bytes();
@@ -1863,7 +1863,10 @@ impl CxOsDrawShader {
                 )
                 .is_ok()
                 {
-                    return Ok(blob.unwrap());
+                    let blob = blob.unwrap();
+                    let ptr = blob.GetBufferPointer() as *const u8;
+                    let len = blob.GetBufferSize();
+                    return Ok(std::slice::from_raw_parts(ptr, len).to_vec());
                 };
                 let error = errors.unwrap();
                 let pointer = error.GetBufferPointer();
@@ -1871,6 +1874,45 @@ impl CxOsDrawShader {
                 let slice = std::slice::from_raw_parts(pointer as *const u8, size as usize);
                 return Err(String::from_utf8_lossy(slice).into_owned());
             }
+        }
+
+        fn hlsl_cache_key(hlsl: &str) -> u64 {
+            // FNV-1a 64-bit hash — stable across Rust versions
+            let mut hash: u64 = 0xcbf29ce484222325;
+            for byte in hlsl.bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            hash
+        }
+
+        fn shader_cache_dir() -> Option<std::path::PathBuf> {
+            let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
+            let path = std::path::PathBuf::from(local_app_data)
+                .join("makepad")
+                .join("d3d11_shader_cache");
+            std::fs::create_dir_all(&path).ok()?;
+            Some(path)
+        }
+
+        fn get_shader_bytes(
+            cache_dir: Option<&std::path::Path>,
+            cache_key: u64,
+            suffix: &str,
+            target: &str,
+            entry: &str,
+            hlsl: &str,
+        ) -> Result<Vec<u8>, String> {
+            if let Some(dir) = cache_dir {
+                let path = dir.join(format!("{:016x}{}.dxbc", cache_key, suffix));
+                if let Ok(bytes) = std::fs::read(&path) {
+                    return Ok(bytes);
+                }
+                let bytes = compile_shader(target, entry, hlsl)?;
+                let _ = std::fs::write(&path, &bytes);
+                return Ok(bytes);
+            }
+            compile_shader(target, entry, hlsl)
         }
         fn split_source(src: &str) -> String {
             let mut r = String::new();
@@ -1931,7 +1973,11 @@ impl CxOsDrawShader {
             std::char::from_u32(index as u32 + 65).unwrap_or('?')
         }
 
-        let vs_blob = match compile_shader("vs_5_0\0", "vertex_main\0", &hlsl) {
+        let cache_key = hlsl_cache_key(&hlsl);
+        let cache_dir = shader_cache_dir();
+        let cache_dir_ref = cache_dir.as_deref();
+
+        let vs_bytes = match get_shader_bytes(cache_dir_ref, cache_key, "_vs", "vs_5_0\0", "vertex_main\0", &hlsl) {
             Err(msg) => {
                 println!(
                     "Cannot compile vertexshader\n{}\n{}",
@@ -1940,10 +1986,10 @@ impl CxOsDrawShader {
                 );
                 std::process::exit(1);
             }
-            Ok(blob) => blob,
+            Ok(bytes) => bytes,
         };
 
-        let ps_blob = match compile_shader("ps_5_0\0", "pixel_main\0", &hlsl) {
+        let ps_bytes = match get_shader_bytes(cache_dir_ref, cache_key, "_ps", "ps_5_0\0", "pixel_main\0", &hlsl) {
             Err(msg) => {
                 println!(
                     "Cannot compile pixelshader\n{}\n{}",
@@ -1952,7 +1998,7 @@ impl CxOsDrawShader {
                 );
                 std::process::exit(1);
             }
-            Ok(blob) => blob,
+            Ok(bytes) => bytes,
         };
 
         let mut vs = None;
@@ -1960,10 +2006,7 @@ impl CxOsDrawShader {
             d3d11_cx
                 .device
                 .CreateVertexShader(
-                    std::slice::from_raw_parts(
-                        vs_blob.GetBufferPointer() as *const u8,
-                        vs_blob.GetBufferSize() as usize,
-                    ),
+                    &vs_bytes,
                     None,
                     Some(&mut vs),
                 )
@@ -1975,10 +2018,7 @@ impl CxOsDrawShader {
             d3d11_cx
                 .device
                 .CreatePixelShader(
-                    std::slice::from_raw_parts(
-                        ps_blob.GetBufferPointer() as *const u8,
-                        ps_blob.GetBufferSize() as usize,
-                    ),
+                    &ps_bytes,
                     None,
                     Some(&mut ps),
                 )
@@ -2089,10 +2129,7 @@ impl CxOsDrawShader {
         let input_layout_res = unsafe {
             d3d11_cx.device.CreateInputLayout(
                 &layout_desc,
-                std::slice::from_raw_parts(
-                    vs_blob.GetBufferPointer() as *const u8,
-                    vs_blob.GetBufferSize() as usize,
-                ),
+                &vs_bytes,
                 Some(&mut input_layout),
             )
         };
@@ -2143,8 +2180,8 @@ impl CxOsDrawShader {
             scope_uniforms,
             pixel_shader: ps.unwrap(),
             vertex_shader: vs.unwrap(),
-            pixel_shader_blob: ps_blob,
-            vertex_shader_blob: vs_blob,
+            pixel_shader_blob: ps_bytes,
+            vertex_shader_blob: vs_bytes,
             input_layout: input_layout.unwrap(),
             draw_call_uniform_buffer_id,
             pass_uniform_buffer_id,
