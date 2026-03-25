@@ -28,7 +28,9 @@ use {
     },
     makepad_network::NetworkRuntime,
     makepad_script::*,
-    makepad_studio_protocol::{RunViewFrameData, RunViewFrameRequest, ScreenshotRequest},
+    makepad_studio_protocol::{
+        RunViewFrameData, RunViewFrameRequest, ScreenshotRequest, WidgetSnapshot,
+    },
     std::{
         any::{Any, TypeId},
         cell::RefCell,
@@ -141,6 +143,7 @@ pub struct Cx {
     #[allow(dead_code)]
     pub(crate) run_view_frame_encode_in_flight: bool,
     pub(crate) widget_tree_dump_requests: Vec<u64>,
+    pub(crate) widget_snapshot_requests: Vec<u64>,
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches
     /// on the next event loop cycle. This ensures all views process the cache clear
@@ -153,6 +156,7 @@ pub struct Cx {
     pub widget_tree_ptr: *mut (),
     pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
     pub widget_query_callback: Option<fn(&Cx, &str) -> Vec<String>>,
+    pub widget_snapshot_callback: Option<fn(&Cx) -> Vec<WidgetSnapshot>>,
 
     pub net: Arc<NetworkRuntime>,
 }
@@ -401,7 +405,6 @@ impl Cx {
             run_view_frame_requests: Default::default(),
             run_view_frame_results: Default::default(),
             run_view_frame_encode_in_flight: false,
-            widget_tree_dump_requests: Default::default(),
 
             dependencies: Default::default(),
 
@@ -429,10 +432,13 @@ impl Cx {
 
             display_context: Default::default(),
 
+            widget_tree_dump_requests: Default::default(),
+            widget_snapshot_requests: Default::default(),
             widget_query_invalidation_event: None,
             widget_tree_ptr: std::ptr::null_mut(),
             widget_tree_dump_callback: None,
             widget_query_callback: None,
+            widget_snapshot_callback: None,
             net,
 
             script_data: CxScriptData {

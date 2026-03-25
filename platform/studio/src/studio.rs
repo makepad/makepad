@@ -201,6 +201,7 @@ pub enum AppToStudio {
     RunViewKeyFocusRect(RunViewKeyFocusRect),
     WidgetTreeDump(WidgetTreeDumpResponse),
     WidgetQuery(WidgetQueryResponse),
+    WidgetSnapshot(WidgetSnapshotResponse),
     TweakHits(TweakHitsResponse),
     BeforeStartup,
     CreateWindow {
@@ -276,6 +277,35 @@ pub struct WidgetQueryResponse {
     pub rects: Vec<String>,
 }
 
+#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone, PartialEq, Eq)]
+pub struct WidgetSnapshot {
+    pub id: String,
+    pub widget_type: String,
+    pub window_id: String,
+    pub window_index: usize,
+    pub visible: bool,
+    pub enabled: bool,
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+    pub text: Option<String>,
+    pub value: Option<String>,
+    pub checked: Option<bool>,
+    pub selected: Option<String>,
+}
+
+#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
+pub struct WidgetSnapshotRequest {
+    pub request_id: u64,
+}
+
+#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
+pub struct WidgetSnapshotResponse {
+    pub request_id: u64,
+    pub widgets: Vec<WidgetSnapshot>,
+}
+
 #[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
 pub struct TweakHitsResponse {
     pub window_id: usize,
@@ -304,6 +334,7 @@ pub enum StudioToApp {
     RunViewFrameRequest(RunViewFrameRequest),
     WidgetTreeDump(WidgetTreeDumpRequest),
     WidgetQuery(WidgetQueryRequest),
+    WidgetSnapshot(WidgetSnapshotRequest),
     KeepAlive,
     LiveChange {
         file_name: String,

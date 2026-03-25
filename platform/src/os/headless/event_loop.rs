@@ -81,6 +81,7 @@ impl Cx {
     }
 
     pub fn stdin_event_loop(&mut self) {
+        Cx::set_studio_stdout_mode(true);
         let (json_msg_tx, json_msg_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(std::io::stdin().lock());
@@ -103,12 +104,23 @@ impl Cx {
             }
         });
 
+        let mut windows = Vec::<HeadlessWindowState>::new();
         write_stdout_msg(&AppToStudio::BeforeStartup);
         self.call_event_handler(&Event::Startup);
+        let mut running = self.headless_handle_platform_ops(&mut windows, true);
+        if running {
+            let time_now = self.seconds_since_app_start();
+            if self.need_redrawing() {
+                self.call_draw_event(time_now);
+                self.headless_compile_shaders();
+                if self.screenshot_requests.is_empty() {
+                    self.headless_render_all_passes(time_now);
+                } else {
+                    let _ = self.headless_emit_frames(&mut windows, true, time_now);
+                }
+            }
+        }
         write_stdout_msg(&AppToStudio::AfterStartup);
-
-        let mut windows = Vec::<HeadlessWindowState>::new();
-        let mut running = true;
 
         while running {
             let msg = match json_msg_rx.recv() {
@@ -218,8 +230,8 @@ impl Cx {
                 }
                 StudioToApp::WindowGeomChange {
                     dpi_factor,
-                    left: _left,
-                    top: _top,
+                    left,
+                    top,
                     width,
                     height,
                     window_id,
@@ -237,7 +249,7 @@ impl Cx {
                     if self.windows.is_valid(window_id) {
                         let old_geom = self.windows[window_id].window_geom.clone();
                         let new_geom = WindowGeom {
-                            position: dvec2(0.0, 0.0),
+                            position: dvec2(left, top),
                             dpi_factor,
                             inner_size: dvec2(width, height),
                             ..Default::default()
@@ -294,10 +306,49 @@ impl Cx {
                     }
 
                     let mut rendered = false;
-                    if self.need_redrawing() && !self.screenshot_requests.is_empty() {
+                    if self.need_redrawing() {
                         self.call_draw_event(time_now);
                         self.headless_compile_shaders();
-                        rendered = self.headless_emit_frames(&mut windows, true, time_now);
+                        if self.screenshot_requests.is_empty() {
+                            self.headless_render_all_passes(time_now);
+                            rendered = true;
+                        } else {
+                            rendered = self.headless_emit_frames(&mut windows, true, time_now);
+                        }
+                    }
+
+                    if rendered
+                        || !self.os.stdin_timers.timers.is_empty()
+                        || !self.new_next_frames.is_empty()
+                    {
+                        write_stdout_msg(&AppToStudio::RequestAnimationFrame);
+                    }
+                }
+                other => {
+                    if self.dispatch_studio_msg(other, CxWindowPool::id_zero(), dvec2(0.0, 0.0)) {
+                        break;
+                    }
+
+                    running = self.headless_handle_platform_ops(&mut windows, true);
+                    if !running {
+                        break;
+                    }
+
+                    let time_now = self.os.stdin_timers.time_now();
+                    if !self.new_next_frames.is_empty() {
+                        self.call_next_frame_event(time_now);
+                    }
+
+                    let mut rendered = false;
+                    if self.need_redrawing() {
+                        self.call_draw_event(time_now);
+                        self.headless_compile_shaders();
+                        if self.screenshot_requests.is_empty() {
+                            self.headless_render_all_passes(time_now);
+                            rendered = true;
+                        } else {
+                            rendered = self.headless_emit_frames(&mut windows, true, time_now);
+                        }
                     }
 
                     if rendered
@@ -364,7 +415,7 @@ impl Cx {
                 "window_{window_id}_frame_{:06}.png",
                 state.frame_id
             ));
-            if let Err(err) = std::fs::write(&png_path, png) {
+            if let Err(err) = std::fs::write(&png_path, &png) {
                 crate::error!(
                     "headless frame write failed for `{}`: {}",
                     png_path.display(),
@@ -439,8 +490,11 @@ impl Cx {
                         windows.push(Default::default());
                     }
 
-                    // Headless: use 1920x1080 at 2x DPI for high-quality output
-                    let inner_size = dvec2(1920.0, 1080.0);
+                    let window = &mut self.windows[window_id];
+                    let inner_size = window
+                        .create_inner_size
+                        .unwrap_or_else(|| dvec2(1920.0, 1080.0));
+                    let position = window.create_position.unwrap_or_else(|| dvec2(0.0, 0.0));
                     let dpi_factor = 2.0;
 
                     let state = &mut windows[window_id.id()];
@@ -449,9 +503,10 @@ impl Cx {
                     state.width = inner_size.x.max(1.0) as u32;
                     state.height = inner_size.y.max(1.0) as u32;
 
-                    let window = &mut self.windows[window_id];
                     window.is_created = true;
+                    window.window_geom.position = position;
                     window.window_geom.inner_size = inner_size;
+                    window.window_geom.outer_size = inner_size;
                     window.window_geom.dpi_factor = dpi_factor;
                     if send_protocol {
                         write_stdout_msg(&AppToStudio::CreateWindow {
@@ -564,5 +619,6 @@ impl CxOsApi for Cx {
 
 fn write_stdout_msg(msg: &AppToStudio) {
     let _ = io::stdout().write_all(msg.to_json().as_bytes());
+    let _ = io::stdout().write_all(b"\n");
     let _ = io::stdout().flush();
 }
