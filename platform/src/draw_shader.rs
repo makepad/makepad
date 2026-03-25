@@ -27,6 +27,7 @@ pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
     pub debug_id: Option<LiveId>,
     pub depth_write: bool,
+    pub alpha_blend: bool,
     pub backface_culling: bool,
 }
 
@@ -36,6 +37,7 @@ impl Default for CxDrawShaderOptions {
             draw_call_group: LiveId(0),
             debug_id: None,
             depth_write: true,
+            alpha_blend: true,
             backface_culling: false,
         }
     }
