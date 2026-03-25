@@ -9,7 +9,7 @@ use super::{
     sdfer,
     sdfer::Sdfer,
 };
-use std::collections::{HashMap, HashSet};
+use fxhash::{FxHashMap, FxHashSet};
 //use std::{fs::File, io::BufWriter, path::Path, slice};
 
 #[derive(Debug)]
@@ -21,10 +21,10 @@ pub struct Rasterizer {
     outline_rasterization_mode: OutlineRasterizationMode,
     atlas: ColorAtlas,
     allocator: MultiPlaneAllocator,
-    cached_slots: HashMap<GlyphImageKey, AtlasSlot>,
-    outline_msdf_ready: HashSet<GlyphImageKey>,
-    outline_msdf_pending: HashSet<GlyphImageKey>,
-    outline_msdf_failed: HashSet<GlyphImageKey>,
+    cached_slots: FxHashMap<GlyphImageKey, AtlasSlot>,
+    outline_msdf_ready: FxHashSet<GlyphImageKey>,
+    outline_msdf_pending: FxHashSet<GlyphImageKey>,
+    outline_msdf_failed: FxHashSet<GlyphImageKey>,
     queued_msdf_jobs: Vec<QueuedMsdfJob>,
     atlas_epoch: u64,
 }
@@ -40,10 +40,10 @@ impl Rasterizer {
             outline_rasterization_mode: settings.outline_rasterization_mode,
             atlas: ColorAtlas::new(atlas_size),
             allocator: MultiPlaneAllocator::new(atlas_size),
-            cached_slots: HashMap::new(),
-            outline_msdf_ready: HashSet::new(),
-            outline_msdf_pending: HashSet::new(),
-            outline_msdf_failed: HashSet::new(),
+            cached_slots: FxHashMap::default(),
+            outline_msdf_ready: FxHashSet::default(),
+            outline_msdf_pending: FxHashSet::default(),
+            outline_msdf_failed: FxHashSet::default(),
             queued_msdf_jobs: Vec::new(),
             atlas_epoch: 0,
         }

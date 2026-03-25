@@ -12,11 +12,10 @@ use {
             geom::{Point, Rect as TextRect, Size, Transform},
             layouter::{
                 BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions,
-                SelectionRect, Style,
+                Style,
             },
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
-            selection::{Cursor, Selection},
         },
         turtle::*,
         turtle::{Align, Walk},
@@ -511,22 +510,22 @@ impl DrawText {
             0.0
         };
 
-        for SelectionRect {
-            rect_in_lpxs,
-            ascender_in_lpxs,
-        } in text.selection_rects(Selection {
-            anchor: Cursor {
-                index: 0,
-                prefer_next_row: false,
-            },
-            cursor: Cursor {
-                index: text.text.len(),
-                prefer_next_row: false,
-            },
-        }) {
+        for (row_index, row) in text.rows.iter().enumerate() {
+            let (start_x_in_lpxs, end_x_in_lpxs) = row_span_x_bounds_in_lpxs(
+                row,
+                row_index == 0,
+                row_index + 1 == text.rows.len(),
+            );
             let rect_in_lpxs = TextRect::new(
-                origin_in_lpxs + Size::from(rect_in_lpxs.origin) * self.font_scale,
-                rect_in_lpxs.size * self.font_scale,
+                Point::new(
+                    origin_in_lpxs.x
+                        + (row.origin_in_lpxs.x + start_x_in_lpxs) * self.font_scale,
+                    origin_in_lpxs.y + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale,
+                ),
+                Size::new(
+                    (end_x_in_lpxs - start_x_in_lpxs) * self.font_scale,
+                    (row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale,
+                ),
             );
             f(
                 cx,
@@ -536,7 +535,7 @@ impl DrawText {
                     rect_in_lpxs.size.width as f64,
                     rect_in_lpxs.size.height as f64,
                 ),
-                ascender_in_lpxs,
+                row.ascender_in_lpxs,
             )
         }
     }
@@ -988,6 +987,23 @@ fn is_emoji_char(ch: char) -> bool {
         ch as u32,
         0x2600..=0x27BF | 0x200D | 0xFE0F | 0x1F000..=0x1FAFF | 0x1FB00..=0x1FBFF
     )
+}
+
+fn row_span_x_bounds_in_lpxs(
+    row: &LaidoutRow,
+    is_first_row: bool,
+    _is_last_row: bool,
+) -> (f32, f32) {
+    let start_x_in_lpxs = if is_first_row {
+        row.glyphs
+            .first()
+            .map(|glyph| glyph.origin_in_lpxs.x)
+            .unwrap_or(row.width_in_lpxs)
+    } else {
+        0.0
+    };
+    let end_x_in_lpxs = row.width_in_lpxs;
+    (start_x_in_lpxs, end_x_in_lpxs.max(start_x_in_lpxs))
 }
 
 impl TextStyle {
