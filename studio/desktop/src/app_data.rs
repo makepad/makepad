@@ -65,6 +65,8 @@ pub struct UiProfilerSamples {
 pub struct MountState {
     pub root: PathBuf,
     pub tab_id: Option<LiveId>,
+    pub sidebar_restore_width: Option<f64>,
+    pub bottom_panel_restore_height: Option<f64>,
     pub file_tree_data: Option<FileTreeData>,
     pub run_items: Vec<RunItem>,
     pub log_entries: VecDeque<UiLogEntry>,
@@ -86,6 +88,8 @@ impl Default for MountState {
         Self {
             root: PathBuf::new(),
             tab_id: None,
+            sidebar_restore_width: None,
+            bottom_panel_restore_height: None,
             file_tree_data: None,
             run_items: Vec::new(),
             log_entries: VecDeque::new(),
@@ -140,6 +144,8 @@ pub struct AppData {
     pub file_filter_mount_by_query: HashMap<QueryId, String>,
     pub pending_stop_all_mount: Option<String>,
     pub pending_log_jumps: HashMap<String, (usize, usize)>,
+    /// Last `editor_split` ratio before hiding the Run preview column (no active run tabs).
+    pub run_panel_split_restore: HashMap<String, SplitterAlign>,
 }
 
 #[derive(Clone)]

@@ -1,6 +1,54 @@
 use super::*;
 
+fn run_preview_splitter_is_collapsed(align: SplitterAlign) -> bool {
+    matches!(align, SplitterAlign::Weighted(w) if w >= 0.999)
+}
+
 impl App {
+    pub(super) fn sync_run_preview_splitter(&mut self, cx: &mut Cx, mount: &str) {
+        let Some(dock) = self.mount_workspace_dock(cx, mount) else {
+            return;
+        };
+        let has_runs = self
+            .data
+            .run_tab_state
+            .values()
+            .any(|s| s.mount == mount);
+        let Some(items) = dock.clone_state() else {
+            return;
+        };
+        let Some(current) = items.get(&id!(editor_split)).and_then(|item| {
+            if let DockItem::Splitter { align, .. } = item {
+                Some(*align)
+            } else {
+                None
+            }
+        }) else {
+            return;
+        };
+        let collapsed = run_preview_splitter_is_collapsed(current);
+        if !has_runs && !collapsed {
+            self.data
+                .run_panel_split_restore
+                .insert(mount.to_string(), current);
+            dock.set_splitter_align(
+                cx,
+                id!(editor_split),
+                SplitterAlign::Weighted(1.0),
+                false,
+            );
+            return;
+        }
+        if has_runs && collapsed {
+            let align = self
+                .data
+                .run_panel_split_restore
+                .remove(mount)
+                .unwrap_or(SplitterAlign::Weighted(0.62));
+            dock.set_splitter_align(cx, id!(editor_split), align, false);
+        }
+    }
+
     pub(super) fn tab_id_from_widget_uid(cx: &Cx, widget_uid: WidgetUid) -> LiveId {
         let path = cx.widget_tree().path_to(widget_uid);
         path.get(path.len().wrapping_sub(2))
@@ -354,6 +402,7 @@ impl App {
                 if select {
                     dock.select_tab(cx, tab_id);
                 }
+                self.sync_run_preview_splitter(cx, mount);
                 return Some(tab_id);
             }
             self.data.run_tab_by_build.remove(&build_id);
@@ -396,6 +445,7 @@ impl App {
         dock.item(tab_id)
             .desktop_run_view(cx, ids!(run_view))
             .set_run_target(cx, build_id, None, addr.as_deref());
+        self.sync_run_preview_splitter(cx, mount);
         Some(tab_id)
     }
 
@@ -873,6 +923,7 @@ impl App {
     }
 
     pub(super) fn clear_build_tabs(&mut self, cx: &mut Cx, build_id: QueryId) {
+        let mount_for_sync = self.data.build_to_mount.get(&build_id).cloned();
         let run_tab_id = self.data.run_tab_by_build.remove(&build_id);
         let log_tab_id = self.data.log_tab_by_build.remove(&build_id);
         let profiler_tab_id = self.data.profiler_tab_by_build.remove(&build_id);
@@ -914,6 +965,9 @@ impl App {
         self.data.build_log_entries.remove(&build_id);
         self.data.build_to_mount.remove(&build_id);
         self.data.build_package.remove(&build_id);
+        if let Some(mount) = mount_for_sync {
+            self.sync_run_preview_splitter(cx, &mount);
+        }
     }
 
     pub(super) fn run_item(&mut self, cx: &mut Cx, mount: &str, name: &str) {
@@ -1084,7 +1138,10 @@ impl App {
     }
 
     pub(super) fn start_workspace_tab_drag(&mut self, cx: &mut Cx, tab_id: LiveId) {
-        if self.data.tab_to_mount.contains_key(&tab_id) || tab_id == id!(terminal_add) {
+        if self.data.tab_to_mount.contains_key(&tab_id)
+            || tab_id == id!(terminal_add)
+            || tab_id == id!(bottom_terminal_tab)
+        {
             return;
         }
         let Some(active_mount) = self.data.active_mount.clone() else {
@@ -1167,6 +1224,7 @@ impl App {
         if let Some(dock) = self.mount_workspace_dock(cx, &state.mount) {
             dock.close_tab(cx, tab_id);
         }
+        self.sync_run_preview_splitter(cx, &state.mount);
     }
 
     pub(super) fn close_log_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
