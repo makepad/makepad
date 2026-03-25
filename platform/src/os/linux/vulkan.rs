@@ -28,6 +28,8 @@ extern "C" {
     fn ANativeWindow_acquire(window: *mut ndk_sys::ANativeWindow);
 }
 
+const XR_FRAGMENT_DENSITY_MAP_FORMAT: vk::Format = vk::Format::R8G8_UNORM;
+
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_types: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -185,11 +187,17 @@ pub(crate) struct CxVulkanOpenXrMultiviewTarget {
     framebuffer: vk::Framebuffer,
     color_view: vk::ImageView,
     depth_target: VulkanTextureResource,
+    fragment_density_view: vk::ImageView,
 }
 
 pub(crate) struct CxVulkanOpenXrSwapchainImage {
     image: vk::Image,
     target: CxVulkanOpenXrMultiviewTarget,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CxVulkanOpenXrFoveationImageInfo {
+    pub image: vk::Image,
 }
 
 pub(crate) struct CxVulkanOpenXrDepthImage {
@@ -270,6 +278,8 @@ pub struct CxVulkan {
     debug_utils_loader: Option<ash::ext::debug_utils::Instance>,
     debug_messenger: vk::DebugUtilsMessengerEXT,
     xr_multiview_enabled: bool,
+    xr_fragment_density_map_enabled: bool,
+    xr_render_pass_uses_fragment_density_map: bool,
     xr_depth_dummy: Option<VulkanTextureResource>,
     xr_depth_dummy_multiview: Option<VulkanTextureResource>,
 }
@@ -547,6 +557,8 @@ impl CxVulkan {
             debug_utils_loader: None,
             debug_messenger: vk::DebugUtilsMessengerEXT::null(),
             xr_multiview_enabled: false,
+            xr_fragment_density_map_enabled: false,
+            xr_render_pass_uses_fragment_density_map: false,
             xr_depth_dummy: None,
             xr_depth_dummy_multiview: None,
         };
@@ -679,15 +691,15 @@ impl CxVulkan {
 
         let queue_family_index =
             match Self::pick_graphics_queue_family_for_device(&instance, physical_device) {
-            Ok(index) => index,
-            Err(err) => {
-                unsafe {
-                    surface_loader.destroy_surface(surface, None);
-                    ndk_sys::ANativeWindow_release(window);
-                    instance.destroy_instance(None);
+                Ok(index) => index,
+                Err(err) => {
+                    unsafe {
+                        surface_loader.destroy_surface(surface, None);
+                        ndk_sys::ANativeWindow_release(window);
+                        instance.destroy_instance(None);
+                    }
+                    return Err(err);
                 }
-                return Err(err);
-            }
             };
 
         let props = unsafe { instance.get_physical_device_properties(physical_device) };
@@ -711,25 +723,36 @@ impl CxVulkan {
                     .to_string(),
             );
         }
+        let xr_fragment_density_map_enabled =
+            Self::query_fragment_density_map_support(&instance, physical_device);
 
         let queue_priorities = [1.0f32];
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities)];
-        let device_extensions = [
+        let mut device_extensions = vec![
             vk::KHR_SWAPCHAIN_NAME.as_ptr(),
             vk::ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_NAME.as_ptr(),
         ];
-        let mut multiview_features = vk::PhysicalDeviceMultiviewFeatures::default()
-            .multiview(xr_multiview_enabled);
+        if xr_fragment_density_map_enabled {
+            device_extensions.push(vk::EXT_FRAGMENT_DENSITY_MAP_NAME.as_ptr());
+        }
+        let mut multiview_features =
+            vk::PhysicalDeviceMultiviewFeatures::default().multiview(xr_multiview_enabled);
         let mut sampler_ycbcr_features =
             vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default()
                 .sampler_ycbcr_conversion(true);
+        let mut fragment_density_map_features =
+            vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::default()
+                .fragment_density_map(xr_fragment_density_map_enabled);
         let mut device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
             .enabled_extension_names(&device_extensions);
         device_create_info = device_create_info.push_next(&mut sampler_ycbcr_features);
         device_create_info = device_create_info.push_next(&mut multiview_features);
+        if xr_fragment_density_map_enabled {
+            device_create_info = device_create_info.push_next(&mut fragment_density_map_features);
+        }
 
         let mut xr_vk_device = std::ptr::null();
         let mut xr_vk_device_result = 0;
@@ -915,6 +938,8 @@ impl CxVulkan {
             debug_utils_loader: None,
             debug_messenger: vk::DebugUtilsMessengerEXT::null(),
             xr_multiview_enabled,
+            xr_fragment_density_map_enabled,
+            xr_render_pass_uses_fragment_density_map: false,
             xr_depth_dummy: None,
             xr_depth_dummy_multiview: None,
         };
@@ -1021,11 +1046,67 @@ impl CxVulkan {
         multiview_features.multiview == vk::TRUE && multiview_props.max_multiview_view_count >= 2
     }
 
-    fn ensure_xr_render_pass_for_format(&mut self, color_format: vk::Format) -> Result<(), String> {
+    fn query_fragment_density_map_support(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+    ) -> bool {
+        let available_exts = match unsafe {
+            instance.enumerate_device_extension_properties(physical_device)
+        } {
+            Ok(exts) => exts,
+            Err(err) => {
+                crate::warning!(
+                    "Android Vulkan XR: failed to enumerate device extensions for fragment density map support: {err:?}"
+                );
+                return false;
+            }
+        };
+        let has_fragment_density_map_ext = available_exts.iter().any(|ext| {
+            let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
+            name.to_bytes() == vk::EXT_FRAGMENT_DENSITY_MAP_NAME.to_bytes()
+        });
+        if !has_fragment_density_map_ext {
+            return false;
+        }
+
+        let mut fragment_density_features =
+            vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::default();
+        let mut features2 =
+            vk::PhysicalDeviceFeatures2::default().push_next(&mut fragment_density_features);
+        unsafe {
+            instance.get_physical_device_features2(physical_device, &mut features2);
+        }
+        if fragment_density_features.fragment_density_map != vk::TRUE {
+            return false;
+        }
+
+        let format_props = unsafe {
+            instance.get_physical_device_format_properties(
+                physical_device,
+                XR_FRAGMENT_DENSITY_MAP_FORMAT,
+            )
+        };
+        format_props
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::FRAGMENT_DENSITY_MAP_EXT)
+    }
+
+    pub(crate) fn supports_openxr_fixed_foveation(&self) -> bool {
+        self.xr_fragment_density_map_enabled
+    }
+
+    fn ensure_xr_render_pass_for_format(
+        &mut self,
+        color_format: vk::Format,
+        use_fragment_density_map: bool,
+    ) -> Result<(), String> {
         if self.depth_format == vk::Format::UNDEFINED {
             self.depth_format = self.pick_depth_format()?;
         }
-        if self.swapchain_format == color_format && self.xr_render_pass != vk::RenderPass::null() {
+        if self.swapchain_format == color_format
+            && self.xr_render_pass != vk::RenderPass::null()
+            && self.xr_render_pass_uses_fragment_density_map == use_fragment_density_map
+        {
             return Ok(());
         }
 
@@ -1037,6 +1118,7 @@ impl CxVulkan {
         }
 
         self.swapchain_format = color_format;
+        self.xr_render_pass_uses_fragment_density_map = use_fragment_density_map;
 
         let color_attachment = vk::AttachmentDescription::default()
             .format(color_format)
@@ -1056,12 +1138,24 @@ impl CxVulkan {
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        let fragment_density_attachment = vk::AttachmentDescription::default()
+            .format(XR_FRAGMENT_DENSITY_MAP_FORMAT)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT)
+            .final_layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT);
         let color_ref = vk::AttachmentReference::default()
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         let depth_ref = vk::AttachmentReference::default()
             .attachment(1)
             .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        let fragment_density_ref = vk::AttachmentReference::default()
+            .attachment(2)
+            .layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT);
         let color_refs = [color_ref];
         let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
@@ -1072,22 +1166,50 @@ impl CxVulkan {
             .dst_subpass(0)
             .src_stage_mask(
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | if use_fragment_density_map {
+                        vk::PipelineStageFlags::FRAGMENT_DENSITY_PROCESS_EXT
+                    } else {
+                        vk::PipelineStageFlags::empty()
+                    },
             )
             .dst_stage_mask(
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | if use_fragment_density_map {
+                        vk::PipelineStageFlags::FRAGMENT_DENSITY_PROCESS_EXT
+                    } else {
+                        vk::PipelineStageFlags::empty()
+                    },
             )
             .dst_access_mask(
                 vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                    | if use_fragment_density_map {
+                        vk::AccessFlags::FRAGMENT_DENSITY_MAP_READ_EXT
+                    } else {
+                        vk::AccessFlags::empty()
+                    },
             )];
-        let attachments = [color_attachment, depth_attachment];
+        let attachments = if use_fragment_density_map {
+            vec![
+                color_attachment,
+                depth_attachment,
+                fragment_density_attachment,
+            ]
+        } else {
+            vec![color_attachment, depth_attachment]
+        };
         let subpasses = [subpass];
         let mut xr_render_pass_info = vk::RenderPassCreateInfo::default()
             .attachments(&attachments)
             .subpasses(&subpasses)
             .dependencies(&dependencies);
+        let mut fragment_density_info = vk::RenderPassFragmentDensityMapCreateInfoEXT::default()
+            .fragment_density_map_attachment(fragment_density_ref);
+        if use_fragment_density_map {
+            xr_render_pass_info = xr_render_pass_info.push_next(&mut fragment_density_info);
+        }
         let view_masks = [0b11u32];
         let correlation_masks = [0b11u32];
         let mut multiview_info = vk::RenderPassMultiviewCreateInfo::default()
@@ -1110,8 +1232,11 @@ impl CxVulkan {
         height: u32,
         depth_width: u32,
         depth_height: u32,
+        foveation_images: Option<&[CxVulkanOpenXrFoveationImageInfo]>,
     ) -> Result<CxVulkanOpenXrSessionData, String> {
-        self.ensure_xr_render_pass_for_format(color_format)?;
+        let use_fragment_density_map = self.xr_fragment_density_map_enabled
+            && foveation_images.is_some_and(|images| images.len() == color_images.len());
+        self.ensure_xr_render_pass_for_format(color_format, use_fragment_density_map)?;
         self.ensure_xr_depth_dummy_multiview()?;
 
         let depth_readback_buffer = if depth_width > 0 && depth_height > 0 {
@@ -1130,12 +1255,19 @@ impl CxVulkan {
         };
 
         let mut xr_color_images = Vec::with_capacity(color_images.len());
-        for &image in color_images {
-            let target = self.create_openxr_multiview_target(image, color_format, width, height)?;
-            xr_color_images.push(CxVulkanOpenXrSwapchainImage {
+        for (index, &image) in color_images.iter().enumerate() {
+            let target = self.create_openxr_multiview_target(
                 image,
-                target,
-            });
+                color_format,
+                width,
+                height,
+                if use_fragment_density_map {
+                    foveation_images.and_then(|images| images.get(index))
+                } else {
+                    None
+                },
+            )?;
+            xr_color_images.push(CxVulkanOpenXrSwapchainImage { image, target });
         }
 
         let mut xr_depth_images = Vec::with_capacity(depth_images.len());
@@ -1167,18 +1299,19 @@ impl CxVulkan {
                     break;
                 }
             };
-            let multiview_view = match self.create_openxr_depth_array_view(image, vk::Format::D16_UNORM) {
-                Ok(view) => view,
-                Err(err) => {
-                    for view in views {
-                        unsafe {
-                            self.device.destroy_image_view(view, None);
+            let multiview_view =
+                match self.create_openxr_depth_array_view(image, vk::Format::D16_UNORM) {
+                    Ok(view) => view,
+                    Err(err) => {
+                        for view in views {
+                            unsafe {
+                                self.device.destroy_image_view(view, None);
+                            }
                         }
+                        depth_view_error = Some(err);
+                        break;
                     }
-                    depth_view_error = Some(err);
-                    break;
-                }
-            };
+                };
             xr_depth_images.push(CxVulkanOpenXrDepthImage {
                 image,
                 views,
@@ -1211,6 +1344,7 @@ impl CxVulkan {
         color_format: vk::Format,
         width: u32,
         height: u32,
+        foveation_image: Option<&CxVulkanOpenXrFoveationImageInfo>,
     ) -> Result<CxVulkanOpenXrMultiviewTarget, String> {
         let color_view = unsafe {
             self.device.create_image_view(
@@ -1244,7 +1378,26 @@ impl CxVulkan {
                 }
             };
 
-        let attachments = [color_view, depth_target.view];
+        let fragment_density_view = if let Some(foveation_image) = foveation_image {
+            match self.create_openxr_fragment_density_view(foveation_image.image) {
+                Ok(view) => view,
+                Err(err) => {
+                    unsafe {
+                        self.device.destroy_image_view(color_view, None);
+                    }
+                    self.destroy_texture_resource(depth_target);
+                    return Err(err);
+                }
+            }
+        } else {
+            vk::ImageView::null()
+        };
+
+        let attachments = if fragment_density_view != vk::ImageView::null() {
+            vec![color_view, depth_target.view, fragment_density_view]
+        } else {
+            vec![color_view, depth_target.view]
+        };
         let framebuffer = match unsafe {
             self.device.create_framebuffer(
                 &vk::FramebufferCreateInfo::default()
@@ -1259,6 +1412,9 @@ impl CxVulkan {
             Ok(framebuffer) => framebuffer,
             Err(e) => {
                 unsafe {
+                    if fragment_density_view != vk::ImageView::null() {
+                        self.device.destroy_image_view(fragment_density_view, None);
+                    }
                     self.device.destroy_image_view(color_view, None);
                 }
                 self.destroy_texture_resource(depth_target);
@@ -1272,7 +1428,32 @@ impl CxVulkan {
             framebuffer,
             color_view,
             depth_target,
+            fragment_density_view,
         })
+    }
+
+    fn create_openxr_fragment_density_view(
+        &self,
+        image: vk::Image,
+    ) -> Result<vk::ImageView, String> {
+        unsafe {
+            self.device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(XR_FRAGMENT_DENSITY_MAP_FORMAT)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    ),
+                None,
+            )
+        }
+        .map_err(|e| format!("create_image_view(openxr fragment density map) failed: {e:?}"))
     }
 
     fn create_openxr_depth_view(
@@ -1330,10 +1511,16 @@ impl CxVulkan {
         for image in session.color_images {
             unsafe {
                 if image.target.framebuffer != vk::Framebuffer::null() {
-                    self.device.destroy_framebuffer(image.target.framebuffer, None);
+                    self.device
+                        .destroy_framebuffer(image.target.framebuffer, None);
+                }
+                if image.target.fragment_density_view != vk::ImageView::null() {
+                    self.device
+                        .destroy_image_view(image.target.fragment_density_view, None);
                 }
                 if image.target.color_view != vk::ImageView::null() {
-                    self.device.destroy_image_view(image.target.color_view, None);
+                    self.device
+                        .destroy_image_view(image.target.color_view, None);
                 }
             }
             self.destroy_texture_resource(image.target.depth_target);
@@ -1806,6 +1993,11 @@ impl CxVulkan {
                     stencil: 0,
                 },
             },
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    uint32: [0, 0, 0, 0],
+                },
+            },
         ];
 
         unsafe {
@@ -1821,7 +2013,11 @@ impl CxVulkan {
                             height: session.height,
                         },
                     })
-                    .clear_values(&clear_values),
+                    .clear_values(if self.xr_render_pass_uses_fragment_density_map {
+                        &clear_values
+                    } else {
+                        &clear_values[..2]
+                    }),
                 vk::SubpassContents::INLINE,
             );
             self.device.cmd_set_viewport(
@@ -1963,10 +2159,11 @@ impl CxVulkan {
         }
         let screenshot_request_ids = cx.take_studio_screenshot_request_ids(0);
         let run_view_request = cx.take_studio_run_view_frame_request(0);
-        let capture_swapchain =
-            !screenshot_request_ids.is_empty() || run_view_request.is_some();
+        let capture_swapchain = !screenshot_request_ids.is_empty() || run_view_request.is_some();
         if capture_swapchain && self.swapchain_readback_buffer.is_none() {
-            return Err("swapchain capture requested but readback buffer is unavailable".to_string());
+            return Err(
+                "swapchain capture requested but readback buffer is unavailable".to_string(),
+            );
         }
 
         unsafe {
@@ -3299,10 +3496,10 @@ impl CxVulkan {
                             .base_array_layer(face)
                             .layer_count(1),
                     );
-                face_views[face as usize] = unsafe {
-                    self.device.create_image_view(&face_view_info, None)
-                }
-                .map_err(|e| format!("create_image_view(texture face {face}) failed: {e:?}"))?;
+                face_views[face as usize] =
+                    unsafe { self.device.create_image_view(&face_view_info, None) }.map_err(
+                        |e| format!("create_image_view(texture face {face}) failed: {e:?}"),
+                    )?;
             }
         }
 
@@ -3434,10 +3631,10 @@ impl CxVulkan {
                             .base_array_layer(face)
                             .layer_count(1),
                     );
-                face_views[face as usize] = unsafe {
-                    self.device.create_image_view(&face_view_info, None)
-                }
-                .map_err(|e| format!("create_image_view(render_target face {face}) failed: {e:?}"))?;
+                face_views[face as usize] =
+                    unsafe { self.device.create_image_view(&face_view_info, None) }.map_err(
+                        |e| format!("create_image_view(render_target face {face}) failed: {e:?}"),
+                    )?;
             }
         }
 
@@ -3760,12 +3957,8 @@ impl CxVulkan {
 
     fn ensure_xr_depth_dummy_multiview(&mut self) -> Result<vk::ImageView, String> {
         if self.xr_depth_dummy_multiview.is_none() {
-            self.xr_depth_dummy_multiview = Some(self.create_sampled_depth_resource_layers(
-                1,
-                1,
-                vk::Format::D16_UNORM,
-                2,
-            )?);
+            self.xr_depth_dummy_multiview =
+                Some(self.create_sampled_depth_resource_layers(1, 1, vk::Format::D16_UNORM, 2)?);
         }
         Ok(self.xr_depth_dummy_multiview.as_ref().unwrap().view)
     }
@@ -5018,8 +5211,7 @@ impl CxVulkan {
             .os_shader_id
             .ok_or_else(|| format!("shader {} missing os_shader_id", packet.shader_index))?;
         let os_shader = &cx.draw_shaders.os_shaders[os_shader_id];
-        let vk_shader = os_shader
-            .vulkan_shader[packet.shader_variant]
+        let vk_shader = os_shader.vulkan_shader[packet.shader_variant]
             .as_ref()
             .ok_or_else(|| format!("shader {} missing Vulkan binary", packet.shader_index))?;
         let geometry_stride =
@@ -5325,8 +5517,7 @@ impl CxVulkan {
             .os_shader_id
             .ok_or_else(|| format!("shader {} missing os_shader_id", shader_index))?;
         let os_shader = &cx.draw_shaders.os_shaders[os_shader_id];
-        let vk_shader = os_shader
-            .vulkan_shader[shader_variant]
+        let vk_shader = os_shader.vulkan_shader[shader_variant]
             .as_ref()
             .ok_or_else(|| format!("shader {} missing Vulkan binary", shader_index))?;
         let vs_spv = vk_shader
@@ -6247,6 +6438,7 @@ impl CxVulkan {
             .dependencies(&dependencies);
         self.xr_render_pass = unsafe { self.device.create_render_pass(&xr_render_pass_info, None) }
             .map_err(|e| format!("create_render_pass(openxr) failed: {e:?}"))?;
+        self.xr_render_pass_uses_fragment_density_map = false;
 
         for image in &self.swapchain_images {
             let view_info = vk::ImageViewCreateInfo::default()
