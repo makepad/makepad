@@ -1,5 +1,7 @@
+#![allow(dead_code)]
+
+use super::xr_physics::{makepad_pose, RapierScene};
 use super::*;
-use super::physics::{makepad_pose, RapierScene};
 use std::{
     collections::{hash_map::DefaultHasher, HashSet},
     hash::{Hash, Hasher},
@@ -196,7 +198,11 @@ fn pack_depth_mesh_vertices(chunk: &XrDepthMeshChunk) -> Vec<f32> {
     vertices
 }
 
-impl XrScene {
+impl XrEnv {
+    pub(super) fn depth_debug_enabled(&self) -> bool {
+        self.depth_mesh
+    }
+
     pub(super) fn clear_depth_surface_mesh(&mut self) {
         self.depth_surface_mesh_generation = 0;
         self.depth_surface_mesh_update_sequence = 0;
@@ -229,7 +235,8 @@ impl XrScene {
                 geometry_id: geometry.geometry_id(),
                 fingerprint: chunk.fingerprint,
             };
-            self.depth_surface_mesh_chunks.insert(key, (geometry, handle));
+            self.depth_surface_mesh_chunks
+                .insert(key, (geometry, handle));
             self.depth_surface_mesh_upload_count =
                 self.depth_surface_mesh_upload_count.saturating_add(1);
         }
@@ -267,8 +274,7 @@ impl XrScene {
         let mut lookahead = velocity.scale(XR_DEPTH_QUERY_LOOKAHEAD_SECONDS);
         let lookahead_length = lookahead.length();
         if lookahead_length > XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE && lookahead_length > 1.0e-6 {
-            lookahead =
-                lookahead.scale(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / lookahead_length);
+            lookahead = lookahead.scale(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / lookahead_length);
         }
         XrDepthMeshQuery {
             key,
@@ -281,11 +287,15 @@ impl XrScene {
         }
     }
 
-    pub(super) fn sync_depth_query_surfaces(&mut self, cx: &mut Cx) {
+    pub(super) fn sync_depth_query_surfaces(
+        &mut self,
+        scene: Option<&mut RapierScene>,
+        cx: &mut Cx,
+    ) {
         if !XR_ENABLE_DEPTH_QUERY_PHYSICS {
             return;
         }
-        let Some(scene) = self.scene.as_mut() else {
+        let Some(scene) = scene else {
             return;
         };
         let depth_mesh = cx.xr_depth_mesh();

@@ -1,8 +1,10 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 use super::{
-    node::{xr_env_texture_from_scope, xr_passthrough_from_scope, xr_runtime_body_from_scope, XrNode},
-    scene_3d::{apply_scene_to_draw_pbr, scene_state_from_cx},
+    scene_draw::{apply_scene_to_draw_cube, apply_scene_to_draw_pbr, scene_state_from_cx},
+    xr_node::{
+        xr_env_texture_from_scope, xr_passthrough_from_scope, xr_widget_world_transform, XrNode,
+    },
 };
 
 const XR_REFRACTIVE_CAMERA_FOV_Y_DEGREES: f32 = 92.0;
@@ -14,8 +16,8 @@ const XR_REFRACTIVE_CORNER_SEGMENTS: usize = 3;
 script_mod! {
     use mod.prelude.widgets_internal.*
 
-    mod.widgets.XrRefractiveCubeBase = #(XrRefractiveCube::register_widget(vm))
-    mod.widgets.XrRefractiveCube = set_type_default() do mod.widgets.XrRefractiveCubeBase{
+    mod.widgets.RefractiveCubeBase = #(RefractiveCube::register_widget(vm))
+    mod.widgets.RefractiveCube = set_type_default() do mod.widgets.RefractiveCubeBase{
         body: mod.widgets.XrBodyKind.Dynamic
         size: vec3(0.12, 0.12, 0.12)
         color: vec4(0.80, 0.92, 1.0, 0.18)
@@ -39,7 +41,7 @@ script_mod! {
 }
 
 #[derive(Script, ScriptHook, Widget)]
-pub struct XrRefractiveCube {
+pub struct RefractiveCube {
     #[redraw]
     #[live]
     preview_cube: DrawCube,
@@ -64,7 +66,7 @@ pub struct XrRefractiveCube {
     node: XrNode,
 }
 
-impl XrRefractiveCube {
+impl RefractiveCube {
     pub fn half_extents(&self) -> Vec3f {
         vec3f(
             self.size.x.max(0.0) * 0.5,
@@ -77,34 +79,18 @@ impl XrRefractiveCube {
         &self.node
     }
 
-    fn world_transform(&self, cx: &mut Cx3d, scope: &mut Scope) -> Mat4f {
-        if let Some(runtime_body) = xr_runtime_body_from_scope(scope, self.widget_uid()) {
-            Mat4f::mul(
-                &runtime_body.pose.to_mat4(),
-                &Mat4f::nonuniform_scaled_translation(
-                    vec3(runtime_body.scale.x, runtime_body.scale.y, runtime_body.scale.z),
-                    vec3(0.0, 0.0, 0.0),
-                ),
-            )
-        } else {
-            let parent_world = cx.scene_world_transform_3d();
-            Mat4f::mul(&parent_world, &self.node.local_transform())
-        }
-    }
 }
 
-impl Widget for XrRefractiveCube {
+impl Widget for RefractiveCube {
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
         let Some(scene) = scene_state_from_cx(cx) else {
             return DrawStep::done();
         };
-        let world = self.world_transform(cx, scope);
+        let world = xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
         let half_extents = self.half_extents();
 
         if !scene.use_pass_camera {
-            self.preview_cube.set_use_pass_camera(false);
-            self.preview_cube
-                .set_camera_state(scene.view, scene.projection_viewport);
+            let _ = apply_scene_to_draw_cube(&mut self.preview_cube, cx);
             self.preview_cube.transform = world;
             self.preview_cube.cube_pos = vec3(0.0, 0.0, 0.0);
             self.preview_cube.cube_size = self.size;

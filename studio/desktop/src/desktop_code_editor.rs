@@ -1,4 +1,8 @@
-use crate::{app_data::AppData, makepad_code_editor::CodeEditor, makepad_widgets::*};
+use crate::{
+    app_data::AppData,
+    makepad_code_editor::{CodeEditor, CodeSession, text::Position},
+    makepad_widgets::*,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -84,5 +88,21 @@ impl Widget for DesktopCodeEditor {
                 }
             }
         }
+    }
+}
+
+impl DesktopCodeEditorRef {
+    pub fn set_cursor_and_scroll(
+        &self,
+        cx: &mut Cx,
+        pos: Position,
+        session: &mut CodeSession,
+    ) -> bool {
+        let Some(mut inner) = self.borrow_mut() else {
+            return false;
+        };
+        inner.editor.set_cursor_and_scroll(cx, pos, session);
+        inner.editor.set_key_focus(cx);
+        true
     }
 }

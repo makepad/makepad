@@ -79,12 +79,10 @@ script_mod! {
         scroll_bars: mod.widgets.ScrollBars {}
         draw_bg +: { color: theme.color_bg_container }
         draw_gutter +: {
-            draw_depth: 0.1
             text_style: theme.font_code
             color: theme.color_label_outer
         }
         draw_text +: {
-            draw_depth: 0.1
             text_style: theme.font_code
             get_brightness: fn() {
                 return 1.1

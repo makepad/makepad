@@ -1,6 +1,54 @@
 use super::*;
 
+fn run_preview_splitter_is_collapsed(align: SplitterAlign) -> bool {
+    matches!(align, SplitterAlign::Weighted(w) if w >= 0.999)
+}
+
 impl App {
+    pub(super) fn sync_run_preview_splitter(&mut self, cx: &mut Cx, mount: &str) {
+        let Some(dock) = self.mount_workspace_dock(cx, mount) else {
+            return;
+        };
+        let has_runs = self
+            .data
+            .run_tab_state
+            .values()
+            .any(|s| s.mount == mount);
+        let Some(items) = dock.clone_state() else {
+            return;
+        };
+        let Some(current) = items.get(&id!(editor_split)).and_then(|item| {
+            if let DockItem::Splitter { align, .. } = item {
+                Some(*align)
+            } else {
+                None
+            }
+        }) else {
+            return;
+        };
+        let collapsed = run_preview_splitter_is_collapsed(current);
+        if !has_runs && !collapsed {
+            self.data
+                .run_panel_split_restore
+                .insert(mount.to_string(), current);
+            dock.set_splitter_align(
+                cx,
+                id!(editor_split),
+                SplitterAlign::Weighted(1.0),
+                false,
+            );
+            return;
+        }
+        if has_runs && collapsed {
+            let align = self
+                .data
+                .run_panel_split_restore
+                .remove(mount)
+                .unwrap_or(SplitterAlign::Weighted(0.62));
+            dock.set_splitter_align(cx, id!(editor_split), align, false);
+        }
+    }
+
     pub(super) fn tab_id_from_widget_uid(cx: &Cx, widget_uid: WidgetUid) -> LiveId {
         let path = cx.widget_tree().path_to(widget_uid);
         path.get(path.len().wrapping_sub(2))
@@ -354,6 +402,7 @@ impl App {
                 if select {
                     dock.select_tab(cx, tab_id);
                 }
+                self.sync_run_preview_splitter(cx, mount);
                 return Some(tab_id);
             }
             self.data.run_tab_by_build.remove(&build_id);
@@ -396,6 +445,7 @@ impl App {
         dock.item(tab_id)
             .desktop_run_view(cx, ids!(run_view))
             .set_run_target(cx, build_id, None, addr.as_deref());
+        self.sync_run_preview_splitter(cx, mount);
         Some(tab_id)
     }
 
@@ -693,29 +743,65 @@ impl App {
         });
     }
 
-    pub(super) fn apply_cursor_jump(session: &CodeSession, line: usize, column: usize) {
-        session.set_selection(
-            Position {
-                line_index: line.saturating_sub(1),
-                byte_index: column.saturating_sub(1),
-            },
-            Affinity::Before,
-            SelectionMode::Simple,
-            NewGroup::Yes,
-        );
+    pub(super) fn log_jump_position(session: &CodeSession, line: usize, column: usize) -> Position {
+        let text = session.document().as_text();
+        let lines = text.as_lines();
+        let line_index = line
+            .saturating_sub(1)
+            .min(lines.len().saturating_sub(1));
+        let byte_index = lines
+            .get(line_index)
+            .map(|line_text| {
+                line_text
+                    .char_indices()
+                    .nth(column.saturating_sub(1))
+                    .map(|(byte_index, _)| byte_index)
+                    .unwrap_or_else(|| line_text.len())
+            })
+            .unwrap_or(0);
+        Position {
+            line_index,
+            byte_index,
+        }
     }
 
-    pub(super) fn apply_pending_log_jump(&mut self, path: &str, tab_id: LiveId) {
+    pub(super) fn try_apply_log_jump(
+        &mut self,
+        cx: &mut Cx,
+        tab_id: LiveId,
+        line: usize,
+        column: usize,
+    ) -> bool {
+        let Some(path) = self.data.tab_to_path.get(&tab_id).cloned() else {
+            return false;
+        };
+        let Some(mount) = Self::mount_from_virtual_path(&path) else {
+            return false;
+        };
+        let Some(dock) = self.mount_workspace_dock(cx, mount) else {
+            return false;
+        };
+        let editor = dock.item(tab_id).desktop_code_editor(cx, ids!(code_editor));
+        let Some(session) = self.data.sessions.get_mut(&tab_id) else {
+            return false;
+        };
+        let pos = Self::log_jump_position(session, line, column);
+        if !editor.set_cursor_and_scroll(cx, pos, session) {
+            return false;
+        }
+        dock.redraw_tab(cx, tab_id);
+        true
+    }
+
+    pub(super) fn apply_pending_log_jump(&mut self, cx: &mut Cx, path: &str, tab_id: LiveId) {
         let Some((line, column)) = self.data.pending_log_jumps.remove(path) else {
             return;
         };
-        let Some(session) = self.data.sessions.get(&tab_id) else {
+        if !self.try_apply_log_jump(cx, tab_id, line, column) {
             self.data
                 .pending_log_jumps
                 .insert(path.to_string(), (line, column));
-            return;
         };
-        Self::apply_cursor_jump(session, line, column);
     }
 
     pub(super) fn open_log_location(
@@ -730,13 +816,7 @@ impl App {
             return;
         };
 
-        if let Some(session) = self.data.sessions.get(&tab_id) {
-            Self::apply_cursor_jump(session, line, column);
-            if let Some(mount) = Self::mount_from_virtual_path(path) {
-                if let Some(dock) = self.mount_workspace_dock(cx, mount) {
-                    dock.redraw_tab(cx, tab_id);
-                }
-            }
+        if self.try_apply_log_jump(cx, tab_id, line, column) {
             self.set_status(cx, &format!("opened {}:{}:{}", path, line, column));
             return;
         }
@@ -843,6 +923,7 @@ impl App {
     }
 
     pub(super) fn clear_build_tabs(&mut self, cx: &mut Cx, build_id: QueryId) {
+        let mount_for_sync = self.data.build_to_mount.get(&build_id).cloned();
         let run_tab_id = self.data.run_tab_by_build.remove(&build_id);
         let log_tab_id = self.data.log_tab_by_build.remove(&build_id);
         let profiler_tab_id = self.data.profiler_tab_by_build.remove(&build_id);
@@ -884,6 +965,9 @@ impl App {
         self.data.build_log_entries.remove(&build_id);
         self.data.build_to_mount.remove(&build_id);
         self.data.build_package.remove(&build_id);
+        if let Some(mount) = mount_for_sync {
+            self.sync_run_preview_splitter(cx, &mount);
+        }
     }
 
     pub(super) fn run_item(&mut self, cx: &mut Cx, mount: &str, name: &str) {
@@ -899,6 +983,24 @@ impl App {
         };
         self.close_mount_run_and_log_tabs(cx, mount);
         self.set_status(cx, &format!("running {} on {}", name, mount));
+    }
+
+    pub(super) fn handle_log_view_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for action in actions {
+            let Some(widget_action) = action.as_widget_action() else {
+                continue;
+            };
+            let Some(log_action) = widget_action.action.downcast_ref::<DesktopLogViewAction>()
+            else {
+                continue;
+            };
+            match log_action {
+                DesktopLogViewAction::OpenLocation { path, line, column } => {
+                    self.open_log_location(cx, path, *line, *column);
+                }
+                DesktopLogViewAction::None => {}
+            }
+        }
     }
 
     pub(super) fn handle_run_view_actions(&mut self, actions: &Actions) {
@@ -1036,7 +1138,10 @@ impl App {
     }
 
     pub(super) fn start_workspace_tab_drag(&mut self, cx: &mut Cx, tab_id: LiveId) {
-        if self.data.tab_to_mount.contains_key(&tab_id) || tab_id == id!(terminal_add) {
+        if self.data.tab_to_mount.contains_key(&tab_id)
+            || tab_id == id!(terminal_add)
+            || tab_id == id!(bottom_terminal_tab)
+        {
             return;
         }
         let Some(active_mount) = self.data.active_mount.clone() else {
@@ -1119,6 +1224,7 @@ impl App {
         if let Some(dock) = self.mount_workspace_dock(cx, &state.mount) {
             dock.close_tab(cx, tab_id);
         }
+        self.sync_run_preview_splitter(cx, &state.mount);
     }
 
     pub(super) fn close_log_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {

@@ -6,6 +6,8 @@
 - Do not launch UI programs with raw `cargo run`, `cargo makepad`, or ad hoc cargo invocation when a runnable item exists.
 - Do not use bridge `Cargo` requests to run applications. Only launch apps from runnables via bridge `Run`.
 - Before starting a new UI run for the same target, send `ClearBuild` for the previous build so Studio stops it and removes its run/log/profiler tabs.
+- `cargo check` or `cargo build` never counts as UI verification. After changing UI/runtime code, you must clear the old build and start a fresh Studio run before trusting screenshots, widget dumps, or interaction results.
+- Do not keep inspecting an older already-running app after code changes. Re-run the target and verify against the new `build_id`.
 - Command-line-only tasks (builds, tests, linting, file ops, grep/ripgrep, etc.) can be run directly in the shell.
 - Prefer studio remote control for any workflow that needs screenshots, widget queries, clicks, typing, or runtime UI inspection.
 - Before using Studio protocol tools (`FindInFiles`, `ReadTextRange`, `WidgetTreeDump`, `WidgetQuery`, `Screenshot`, `Click`, `TypeText`, `Return`), always start one persistent Studio remote bridge process and reuse it for the entire interaction.
@@ -70,11 +72,12 @@
 3. Call `ListBuilds` and find any existing build for the same package/process.
 4. Send `ClearBuild` for that old `build_id`; do not wait for an acknowledgment before the next launch.
 5. Start the new UI app through `Run`, and wait for `BuildStarted` and `AppStarted`.
-6. For code search, use `FindInFiles` first, then `ReadTextRange` to window exact regions.
-7. Use direct shell cargo commands for non-launch tasks such as `check`, `build`, `test`, or `bench`.
-8. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
-9. For text input, click field first, then send text, then return.
-10. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
+6. After any code change that affects runtime/UI behavior, repeat steps 3-5 before doing screenshots, widget dumps, clicks, or visual conclusions.
+7. For code search, use `FindInFiles` first, then `ReadTextRange` to window exact regions.
+8. Use direct shell cargo commands for non-launch tasks such as `check`, `build`, `test`, or `bench`.
+9. Use `WidgetQuery` / `WidgetTreeDump` to get click targets.
+10. For text input, click field first, then send text, then return.
+11. Keep control packets compact (`auto_dump:false` on click/type/return for low latency).
 
 ## `Run` Defaults
 - `Run` always builds a `cargo run -p <process>` command with `--release`.
@@ -132,10 +135,11 @@ Use the Studio bridge `Run` flow instead of launching UI apps directly from the 
 2. Determine the package name locally.
 3. If an older instance is still running, clear it with `{"ClearBuild":{"build_id":[N]}}` and launch the replacement immediately without waiting for an acknowledgment.
 4. Launch it with `{"Run":{"mount":"makepad","process":"<package-name>","args":[]}}`.
+5. After editing UI/runtime code, do not inspect the previously running build. Always verify against the newly started build id from step 4.
 
 Do not use `ObserveMount` from the bridge. That call is for mount ownership/subscription and can steal RunView/framebuffer routing away from Studio desktop.
 
-Use direct shell cargo commands only for non-UI tasks such as `check`, `build`, `test`, and file/search operations.
+Use direct shell cargo commands only for non-UI tasks such as `check`, `build`, `test`, and file/search operations. They are not a substitute for a fresh Studio re-run.
 
 ## Cargo.toml Setup
 

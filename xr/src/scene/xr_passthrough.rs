@@ -92,7 +92,7 @@ impl XrPassthroughEnvAtlas {
     }
 }
 
-impl XrScene {
+impl XrEnv {
     pub(crate) fn passthrough_camera_center_offset_uv(&self) -> Vec2f {
         let source_size = self.passthrough_camera_source_size;
         let aspect = if source_size.y > 1.0 {
@@ -174,6 +174,9 @@ impl XrScene {
         self.passthrough_camera_textures = None;
         self.passthrough_camera_video = VideoYuvMetadata::disabled();
         self.passthrough_camera_has_frame = false;
+        if let Some(atlas) = self.passthrough_env_atlas.as_mut() {
+            atlas.reset_state();
+        }
     }
 
     pub(super) fn sync_passthrough_camera(&mut self, cx: &mut Cx) {
@@ -240,21 +243,8 @@ impl XrScene {
         let mut vertices = Vec::with_capacity(4 * 16);
         for (corner, uv) in corners.iter().zip(uvs.iter()) {
             vertices.extend_from_slice(&[
-                corner[0],
-                corner[1],
-                corner[2],
-                normal[0],
-                normal[1],
-                normal[2],
-                uv[0],
-                uv[1],
-                color[0],
-                color[1],
-                color[2],
-                color[3],
-                tangent[0],
-                tangent[1],
-                tangent[2],
+                corner[0], corner[1], corner[2], normal[0], normal[1], normal[2], uv[0], uv[1],
+                color[0], color[1], color[2], color[3], tangent[0], tangent[1], tangent[2],
                 tangent[3],
             ]);
         }
@@ -298,7 +288,7 @@ impl XrScene {
 
         let Self {
             passthrough_env_atlas,
-            draw_passthrough_cube_atlas,
+            draw_passthrough_env_atlas,
             ..
         } = self;
         let atlas =
@@ -306,7 +296,9 @@ impl XrScene {
         if atlas.pending_swap {
             atlas.finish_frame();
         }
-        atlas.pass.set_size(cx.cx.cx, dvec2(atlas_width, atlas_height));
+        atlas
+            .pass
+            .set_size(cx.cx.cx, dvec2(atlas_width, atlas_height));
         let previous_texture = atlas.current_texture().clone();
         let display_texture = atlas.initialized.then_some(previous_texture.clone());
         let target_texture = atlas.target_texture().clone();
@@ -322,152 +314,31 @@ impl XrScene {
         cx.begin_pass(&atlas.pass, Some(1.0));
         atlas.draw_list.begin_always(cx);
 
-        draw_passthrough_cube_atlas.draw_vars.options.depth_write = false;
-        draw_passthrough_cube_atlas.source_size = source_size;
-        draw_passthrough_cube_atlas.camera_enabled = camera_enabled;
-        draw_passthrough_cube_atlas.rotation_steps = rotation_steps;
-        draw_passthrough_cube_atlas.bootstrap_mix = bootstrap_mix;
-        draw_passthrough_cube_atlas.update_strength = XR_PASSTHROUGH_ENV_UPDATE_STRENGTH;
-        draw_passthrough_cube_atlas.camera_fov_y_degrees =
-            XR_PASSTHROUGH_ENV_CAMERA_FOV_Y_DEGREES;
-        draw_passthrough_cube_atlas.camera_projection_scale =
+        draw_passthrough_env_atlas.draw_vars.options.depth_write = false;
+        draw_passthrough_env_atlas.source_size = source_size;
+        draw_passthrough_env_atlas.camera_enabled = camera_enabled;
+        draw_passthrough_env_atlas.rotation_steps = rotation_steps;
+        draw_passthrough_env_atlas.bootstrap_mix = bootstrap_mix;
+        draw_passthrough_env_atlas.update_strength = XR_PASSTHROUGH_ENV_UPDATE_STRENGTH;
+        draw_passthrough_env_atlas.camera_fov_y_degrees = XR_PASSTHROUGH_ENV_CAMERA_FOV_Y_DEGREES;
+        draw_passthrough_env_atlas.camera_projection_scale =
             XR_PASSTHROUGH_ENV_CAMERA_PROJECTION_SCALE;
-        draw_passthrough_cube_atlas.camera_exposure = XR_PASSTHROUGH_CAMERA_EXPOSURE;
-        draw_passthrough_cube_atlas.camera_center_offset_uv = camera_center_offset_uv;
-        draw_passthrough_cube_atlas.camera_right = camera_right;
-        draw_passthrough_cube_atlas.camera_up = camera_up;
-        draw_passthrough_cube_atlas.camera_forward = camera_forward;
-        draw_passthrough_cube_atlas
+        draw_passthrough_env_atlas.camera_exposure = XR_PASSTHROUGH_CAMERA_EXPOSURE;
+        draw_passthrough_env_atlas.camera_center_offset_uv = camera_center_offset_uv;
+        draw_passthrough_env_atlas.camera_right = camera_right;
+        draw_passthrough_env_atlas.camera_up = camera_up;
+        draw_passthrough_env_atlas.camera_forward = camera_forward;
+        draw_passthrough_env_atlas
             .draw_vars
             .set_texture(0, &camera_texture);
-        draw_passthrough_cube_atlas
+        draw_passthrough_env_atlas
             .draw_vars
             .set_texture(1, &previous_texture);
-        draw_passthrough_cube_atlas.draw_geometry(cx, geometry_id);
+        draw_passthrough_env_atlas.draw_geometry(cx, geometry_id);
 
         atlas.draw_list.end(cx);
         cx.end_pass(&atlas.pass);
         atlas.pending_swap = true;
         display_texture
-    }
-
-    pub fn draw_reflective_rounded_cube(
-        &mut self,
-        cx: &mut Cx2d,
-        state: &XrState,
-        env_atlas: Option<Texture>,
-        pose: Pose,
-        half_extents: Vec3f,
-        corner_radius: f32,
-        base_color: Vec4f,
-        metallic: f32,
-        roughness: f32,
-        spec_strength: f32,
-        env_intensity: f32,
-        ambient: f32,
-        light_color: Vec3f,
-    ) {
-        self.prepare_pbr(cx);
-        self.draw_pbr.camera_pos = state.head_pose.position;
-        if let Some(env_atlas) = env_atlas {
-            self.draw_pbr.set_env_texture(None);
-            self.draw_pbr.set_env_atlas_texture(Some(env_atlas));
-        } else {
-            let env_tex = self.draw_pbr.default_env_texture(cx);
-            self.draw_pbr.set_env_texture(Some(env_tex));
-            self.draw_pbr.set_env_atlas_texture(None);
-        }
-        self.draw_pbr.ambient = ambient;
-        self.draw_pbr.spec_strength = spec_strength;
-        self.draw_pbr.env_intensity = env_intensity;
-        self.draw_pbr.light_color = light_color;
-        self.draw_pbr.set_base_color_factor(base_color);
-        self.draw_pbr.set_metal_roughness(metallic, roughness);
-        self.draw_pbr.set_transform(pose.to_mat4());
-        let _ = self.draw_pbr.draw_rounded_cube(
-            cx,
-            vec3(half_extents.x, half_extents.y, half_extents.z),
-            corner_radius,
-            XR_PBR_FACE_SUBDIVISIONS,
-            XR_PBR_CORNER_SEGMENTS,
-        );
-    }
-
-    pub fn draw_refractive_rounded_cube(
-        &mut self,
-        cx: &mut Cx2d,
-        state: &XrState,
-        env_atlas: Option<Texture>,
-        pose: Pose,
-        half_extents: Vec3f,
-        corner_radius: f32,
-        base_color: Vec4f,
-        roughness: f32,
-        spec_strength: f32,
-        env_intensity: f32,
-        focus_distance: f32,
-    ) {
-        self.prepare_refractive_pbr(cx);
-        self.draw_pbr_refractive.source_size = self.passthrough_camera_source_size;
-        self.draw_pbr_refractive.camera_pos = state.head_pose.position;
-        self.draw_pbr_refractive.camera_enabled = if self.passthrough_camera_has_frame {
-            1.0
-        } else {
-            0.0
-        };
-        self.draw_pbr_refractive.rotation_steps = self.passthrough_camera_video.rotation_steps;
-        self.draw_pbr_refractive.camera_fov_y_degrees =
-            XR_PASSTHROUGH_ENV_CAMERA_FOV_Y_DEGREES;
-        self.draw_pbr_refractive.camera_projection_scale =
-            XR_PASSTHROUGH_ENV_CAMERA_PROJECTION_SCALE;
-        self.draw_pbr_refractive.camera_exposure = XR_PASSTHROUGH_CAMERA_EXPOSURE;
-        self.draw_pbr_refractive.camera_center_offset_uv =
-            self.passthrough_camera_center_offset_uv();
-        let cube_transform = pose.to_mat4();
-        self.draw_pbr_refractive.object_center = pose.position;
-        self.draw_pbr_refractive.object_right = cube_transform
-            .transform_vec4(vec4f(1.0, 0.0, 0.0, 0.0))
-            .to_vec3f()
-            .normalize();
-        self.draw_pbr_refractive.object_up = cube_transform
-            .transform_vec4(vec4f(0.0, 1.0, 0.0, 0.0))
-            .to_vec3f()
-            .normalize();
-        self.draw_pbr_refractive.object_forward = cube_transform
-            .transform_vec4(vec4f(0.0, 0.0, 1.0, 0.0))
-            .to_vec3f()
-            .normalize();
-        self.draw_pbr_refractive.object_half_extents = half_extents;
-        self.draw_pbr_refractive.object_corner_radius = corner_radius;
-        self.draw_pbr_refractive.transmission_focus_distance = focus_distance;
-        self.draw_pbr_refractive.set_depth_write(true);
-        self.draw_pbr_refractive.set_camera_texture(
-            self.passthrough_camera_textures
-                .as_ref()
-                .map(|textures| textures.camera.clone()),
-        );
-        if let Some(env_atlas) = env_atlas {
-            self.draw_pbr_refractive.set_env_texture(None);
-            self.draw_pbr_refractive
-                .set_env_atlas_texture(Some(env_atlas));
-        } else {
-            let env_tex = self.draw_pbr_refractive.default_env_texture(cx);
-            self.draw_pbr_refractive.set_env_texture(Some(env_tex));
-            self.draw_pbr_refractive.set_env_atlas_texture(None);
-        }
-        self.draw_pbr_refractive.ambient = 0.002;
-        self.draw_pbr_refractive.spec_strength = spec_strength;
-        self.draw_pbr_refractive.env_intensity = env_intensity;
-        self.draw_pbr_refractive.light_color = vec3(0.10, 0.10, 0.10);
-        self.draw_pbr_refractive.set_base_color_factor(base_color);
-        self.draw_pbr_refractive.set_metal_roughness(0.0, roughness);
-        self.draw_pbr_refractive.set_transform(cube_transform);
-        let _ = self.draw_pbr_refractive.draw_rounded_cube(
-            cx,
-            vec3(half_extents.x, half_extents.y, half_extents.z),
-            corner_radius,
-            XR_PBR_FACE_SUBDIVISIONS,
-            XR_PBR_CORNER_SEGMENTS,
-        );
     }
 }

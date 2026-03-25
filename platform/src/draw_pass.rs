@@ -94,6 +94,8 @@ pub struct ScriptDrawPass {
     pub clear_color: Vec4f,
     #[live]
     pub dont_clear: bool,
+    #[live]
+    pub keep_camera_matrix: bool,
 }
 
 impl std::ops::Deref for ScriptDrawPass {
@@ -113,6 +115,8 @@ impl ScriptHook for ScriptDrawPass {
     ) {
         vm.host.cx_mut().passes[self.handle.draw_pass_id()].clear_color = self.clear_color;
         vm.host.cx_mut().passes[self.handle.draw_pass_id()].dont_clear = self.dont_clear;
+        vm.host.cx_mut().passes[self.handle.draw_pass_id()].keep_camera_matrix =
+            self.keep_camera_matrix;
     }
 }
 
@@ -363,6 +367,7 @@ pub struct CxDrawPass {
     pub depth_texture: Option<Texture>,
     pub clear_depth: DrawPassClearDepth,
     pub dont_clear: bool,
+    pub keep_camera_matrix: bool,
     pub depth_init: f64,
     pub clear_color: Vec4f,
     pub dpi_factor: Option<f64>,
@@ -382,6 +387,7 @@ impl Default for CxDrawPass {
         CxDrawPass {
             debug: false,
             dont_clear: false,
+            keep_camera_matrix: false,
             debug_name: String::new(),
             zbias_step: 0.001,
             pass_uniforms: DrawPassUniforms::default(),
@@ -424,6 +430,7 @@ impl CxDrawPass {
     pub fn set_ortho_matrix(&mut self, offset: Vec2d, size: Vec2d) {
         let offset = offset + self.view_shift;
         let size = size * self.view_scale;
+        let zero = Mat4f { v: [0.0; 16] };
 
         let ortho = Mat4f::ortho(
             offset.x as f32,
@@ -437,5 +444,12 @@ impl CxDrawPass {
         );
         self.pass_uniforms.camera_projection = ortho;
         self.pass_uniforms.camera_view = Mat4f::identity();
+        // Regular 2D passes don't participate in XR scene-depth clipping.
+        self.pass_uniforms.depth_projection = zero;
+        self.pass_uniforms.depth_projection_r = zero;
+        self.pass_uniforms.depth_view = zero;
+        self.pass_uniforms.depth_view_r = zero;
+        self.pass_uniforms.camera_inv = Mat4f::identity();
+        self.pass_uniforms.camera_inv_r = Mat4f::identity();
     }
 }

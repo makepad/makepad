@@ -1,0 +1,693 @@
+use crate::scene_draw::{ray_from_scene_viewport, SceneState3D};
+use crate::xr_env::XrEnv;
+use crate::xr_select::XrSelect;
+use crate::*;
+use makepad_widgets::event::XrFingerTip;
+use makepad_widgets::makepad_script::ScriptFnRef;
+use std::{cell::Cell, cmp::Ordering, collections::HashSet, rc::Rc};
+
+const DESKTOP_TOUCH_DOWN_Z: f32 = 0.0;
+const DESKTOP_TOUCH_UP_Z: f32 = 64.0;
+
+script_mod! {
+    use mod.prelude.widgets.*
+    use mod.widgets.*
+
+    mod.widgets.XrCamera = set_type_default() do #(XrCamera::script_component(vm))
+
+    mod.widgets.XrRootBase = #(XrRoot::register_widget(vm))
+    mod.widgets.XrRoot = set_type_default() do mod.widgets.XrRootBase{
+        width: Fill
+        height: Fill
+        flow: Overlay
+
+        window +: {
+            inner_size: vec2(1400, 900)
+        }
+        pass +: {
+            clear_color: #x0b1118
+            keep_camera_matrix: true
+        }
+        env: mod.widgets.XrEnv{}
+        camera: mod.widgets.XrCamera{}
+    }
+}
+
+#[derive(Script, ScriptHook, Clone)]
+pub struct XrCamera {
+    #[live(28.0)] pub fov_y: f32,
+    #[live(3.4)] pub distance: f32,
+    #[live(0.05)] pub near: f32,
+    #[live(200.0)] pub far: f32,
+    #[live(0.25)] pub distance_min: f32,
+    #[live(30.0)] pub distance_max: f32,
+    #[live(0.08)] pub wheel_zoom_step: f32,
+    #[live(vec2(0.0, 1.0))] pub depth_range: Vec2f,
+    #[live(0.0)] pub depth_forward_bias: f32,
+    #[rust(0.0)] pub orbit_yaw: f32,
+    #[rust(0.0)] pub orbit_pitch: f32,
+    #[rust] pub orbit_last_abs: Option<DVec2>,
+    #[rust] pub viewport_rect: Option<Rect>,
+}
+
+impl Default for XrCamera {
+    fn default() -> Self {
+        Self {
+            fov_y: 28.0,
+            distance: 3.4,
+            near: 0.05,
+            far: 200.0,
+            distance_min: 0.25,
+            distance_max: 30.0,
+            wheel_zoom_step: 0.08,
+            depth_range: vec2f(0.0, 1.0),
+            depth_forward_bias: 0.0,
+            orbit_yaw: 0.0,
+            orbit_pitch: 0.0,
+            orbit_last_abs: None,
+            viewport_rect: None,
+        }
+    }
+}
+
+impl XrCamera {
+    pub fn desktop_scene_state(&self, viewport_rect: Rect, time: f64) -> Option<SceneState3D> {
+        if viewport_rect.size.x <= 1.0 || viewport_rect.size.y <= 1.0 { return None; }
+
+        let aspect = (viewport_rect.size.x / viewport_rect.size.y).max(0.001) as f32;
+        let distance_min = self.distance_min.max(0.01);
+        let distance_max = self.distance_max.max(distance_min + 0.01);
+        let distance = self.distance.clamp(distance_min, distance_max);
+        let yaw = self.orbit_yaw;
+        let pitch = self.orbit_pitch.clamp(-1.45, 1.45);
+        let forward = vec3f(
+            yaw.sin() * pitch.cos(),
+            pitch.sin(),
+            -yaw.cos() * pitch.cos(),
+        )
+        .normalize();
+        let target = vec3f(0.0, -0.10, -1.30);
+        let camera_pos = target - forward * distance;
+        let view = Mat4f::look_at(camera_pos, target, vec3f(0.0, 1.0, 0.0));
+        let projection = Mat4f::perspective(
+            self.fov_y.clamp(1.0, 179.0),
+            aspect,
+            self.near.max(0.001),
+            self.far.max(self.near + 0.001),
+        );
+
+        Some(SceneState3D {
+            time,
+            camera_pos,
+            view,
+            projection,
+            clip_ndc: vec4(-1.0, -1.0, 1.0, 1.0),
+            depth_range: self.depth_range,
+            depth_forward_bias: self.depth_forward_bias,
+            use_pass_camera: true,
+            viewport_rect,
+        })
+    }
+
+    pub fn xr_scene_state(&self, state: &XrState) -> SceneState3D {
+        SceneState3D {
+            time: state.time,
+            camera_pos: state.head_pose.position,
+            view: Mat4f::identity(),
+            projection: Mat4f::identity(),
+            clip_ndc: vec4(-1.0, -1.0, 1.0, 1.0),
+            depth_range: self.depth_range,
+            depth_forward_bias: self.depth_forward_bias,
+            use_pass_camera: true,
+            viewport_rect: Rect::default(),
+        }
+    }
+
+    pub fn set_desktop_viewport_rect(&mut self, viewport_rect: Rect) {
+        self.viewport_rect = Some(viewport_rect);
+    }
+
+    fn contains_abs(&self, abs: DVec2) -> bool {
+        self.viewport_rect.is_some_and(|rect| rect.contains(abs))
+    }
+
+    pub fn handle_desktop_interaction(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::MouseDown(fe) if self.contains_abs(fe.abs) && fe.button.is_primary() => {
+                self.orbit_last_abs = Some(fe.abs);
+                cx.set_cursor(MouseCursor::Grabbing);
+            }
+            Event::MouseMove(fe) => {
+                if let Some(last_abs) = self.orbit_last_abs {
+                    let delta = fe.abs - last_abs;
+                    self.orbit_yaw -= (delta.x as f32) * 0.01;
+                    self.orbit_pitch = (self.orbit_pitch + (delta.y as f32) * 0.01).clamp(-1.45, 1.45);
+                    self.orbit_last_abs = Some(fe.abs);
+                    cx.set_cursor(MouseCursor::Grabbing);
+                    cx.redraw_all();
+                } else if self.contains_abs(fe.abs) {
+                    cx.set_cursor(MouseCursor::Grab);
+                } else {
+                    cx.set_cursor(MouseCursor::Default);
+                }
+            }
+            Event::Scroll(fs) if self.contains_abs(fs.abs) => {
+                let scroll_axis = if fs.scroll.y.abs() > f64::EPSILON { fs.scroll.y } else { fs.scroll.x };
+                if scroll_axis.abs() > f64::EPSILON {
+                    let step = self.wheel_zoom_step.max(0.001);
+                    let factor = if scroll_axis > 0.0 { 1.0 / (1.0 - step) } else { 1.0 - step };
+                    self.distance = (self.distance * factor).clamp(
+                        self.distance_min.max(0.01),
+                        self.distance_max.max(self.distance_min.max(0.01) + 0.01),
+                    );
+                    cx.redraw_all();
+                }
+            }
+            Event::MouseUp(fe) if fe.button.is_primary() => {
+                let was_dragging = self.orbit_last_abs.take().is_some();
+                if was_dragging || self.contains_abs(fe.abs) {
+                    cx.set_cursor(if self.contains_abs(fe.abs) {
+                        MouseCursor::Grab
+                    } else {
+                        MouseCursor::Default
+                    });
+                }
+            }
+            Event::MouseLeave(_) if self.orbit_last_abs.is_none() => {
+                cx.set_cursor(MouseCursor::Default);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
+pub struct XrRoot {
+    #[uid] uid: WidgetUid,
+    #[source] source: ScriptObjectRef,
+    #[walk] walk: Walk,
+    #[layout] layout: Layout,
+
+    // Window + Pass
+    #[live] window: ScriptWindowHandle,
+    #[live] pass: ScriptDrawPass,
+    #[new] depth_texture: Texture,
+    #[new] draw_list: DrawList,
+
+    // Environment (physics + env draws)
+    #[live] env: XrEnv,
+
+    // Camera
+    #[live] camera: XrCamera,
+
+    // Startup callback
+    #[live] on_startup: ScriptFnRef,
+
+    // Children (from := declarations)
+    #[rust] children: Vec<(LiveId, WidgetRef)>,
+    #[rust] child_draw_lists: Vec<DrawList>,
+
+    // State
+    #[rust] initialized: bool,
+    #[rust] started: bool,
+    #[rust] last_xr_state: Option<Rc<XrState>>,
+    #[rust] next_frame: NextFrame,
+    #[rust] desktop_ui_pointer_active: bool,
+}
+
+impl XrRoot {
+    fn ensure_initialized(&mut self, cx: &mut Cx) {
+        if self.initialized { return; }
+        self.initialized = true;
+        self.window.handle.set_pass(cx, &self.pass.handle);
+        self.pass.handle.set_pass_name(cx, "xr_root_window");
+        self.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32 {
+            size: TextureSize::Auto,
+            initial: true,
+        });
+        self.pass.handle.set_depth_texture(
+            cx,
+            &self.depth_texture,
+            DrawPassClearDepth::ClearWith(1.0),
+        );
+    }
+
+    fn set_pass_camera(&self, cx: &mut Cx, scene: &SceneState3D) {
+        let camera_inv = scene.view.invert();
+        let pass_uniforms = &mut cx.passes[self.pass.handle.draw_pass_id()].pass_uniforms;
+        pass_uniforms.camera_projection = scene.projection;
+        pass_uniforms.camera_projection_r = scene.projection;
+        pass_uniforms.camera_view = scene.view;
+        pass_uniforms.camera_view_r = scene.view;
+        pass_uniforms.depth_projection = scene.projection;
+        pass_uniforms.depth_projection_r = scene.projection;
+        pass_uniforms.depth_view = scene.view;
+        pass_uniforms.depth_view_r = scene.view;
+        pass_uniforms.camera_inv = camera_inv;
+        pass_uniforms.camera_inv_r = camera_inv;
+    }
+
+    fn desktop_scene_state(&self, time: f64) -> Option<SceneState3D> {
+        let viewport_rect = self.camera.viewport_rect?;
+        self.camera.desktop_scene_state(viewport_rect, time)
+    }
+
+    fn desktop_pick_ray(&self, abs: DVec2, time: f64) -> Option<(Vec3f, Vec3f)> {
+        let scene = self.desktop_scene_state(time)?;
+        ray_from_scene_viewport(&scene, abs)
+    }
+
+    fn desktop_xr_update_event(time: f64) -> XrUpdateEvent {
+        let state = Rc::new(XrState {
+            time,
+            ..Default::default()
+        });
+        XrUpdateEvent {
+            state: state.clone(),
+            last: state,
+        }
+    }
+
+    fn desktop_mouse_tip(ray_origin: Vec3f, ray_dir: Vec3f, touch_z: f32) -> XrFingerTip {
+        XrFingerTip {
+            index: XrHand::INDEX_TIP,
+            is_left: false,
+            pos: ray_origin,
+            ray_dir,
+            touch_z,
+            handled: Cell::new(Area::Empty),
+        }
+    }
+
+    fn dispatch_desktop_xr_local(
+        &mut self,
+        cx: &mut Cx,
+        scope: &mut Scope,
+        time: f64,
+        modifiers: KeyModifiers,
+        tip: Option<XrFingerTip>,
+    ) {
+        let mut finger_tips = SmallVec::new();
+        if let Some(tip) = tip {
+            finger_tips.push(tip);
+        }
+        let xr_event = Event::XrLocal(XrLocalEvent {
+            finger_tips,
+            update: Self::desktop_xr_update_event(time),
+            modifiers,
+            time,
+        });
+        for i in 0..self.children.len() {
+            let child = self.children[i].1.clone();
+            if child.borrow::<XrView>().is_some() {
+                child.handle_event(cx, &xr_event, scope);
+            }
+        }
+    }
+
+    fn desktop_ui_hit(&self, ray_origin: Vec3f, ray_dir: Vec3f) -> bool {
+        for i in 0..self.children.len() {
+            let child = self.children[i].1.clone();
+            let child_hit = if let Some(view) = child.borrow::<XrView>() {
+                view.hits_parent_ray(ray_origin, ray_dir)
+            } else {
+                false
+            };
+            if child_hit {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn handle_desktop_xr_pointer(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) -> bool {
+        match event {
+            Event::MouseDown(fe) if fe.button.is_primary() => {
+                let Some((ray_origin, ray_dir)) = self.desktop_pick_ray(fe.abs, fe.time) else {
+                    return false;
+                };
+                if !self.desktop_ui_hit(ray_origin, ray_dir) {
+                    return false;
+                }
+                self.desktop_ui_pointer_active = true;
+                self.dispatch_desktop_xr_local(
+                    cx,
+                    scope,
+                    fe.time,
+                    fe.modifiers,
+                    Some(Self::desktop_mouse_tip(ray_origin, ray_dir, DESKTOP_TOUCH_DOWN_Z)),
+                );
+                true
+            }
+            Event::MouseMove(fe) if self.desktop_ui_pointer_active => {
+                let tip = self
+                    .desktop_pick_ray(fe.abs, fe.time)
+                    .map(|(ray_origin, ray_dir)| {
+                        Self::desktop_mouse_tip(ray_origin, ray_dir, DESKTOP_TOUCH_DOWN_Z)
+                    });
+                self.dispatch_desktop_xr_local(cx, scope, fe.time, fe.modifiers, tip);
+                true
+            }
+            Event::MouseUp(fe) if fe.button.is_primary() && self.desktop_ui_pointer_active => {
+                let tip = self
+                    .desktop_pick_ray(fe.abs, fe.time)
+                    .map(|(ray_origin, ray_dir)| {
+                        Self::desktop_mouse_tip(ray_origin, ray_dir, DESKTOP_TOUCH_UP_Z)
+                    });
+                self.desktop_ui_pointer_active = false;
+                self.dispatch_desktop_xr_local(cx, scope, fe.time, fe.modifiers, tip);
+                true
+            }
+            Event::MouseLeave(fe) if self.desktop_ui_pointer_active => {
+                self.desktop_ui_pointer_active = false;
+                self.dispatch_desktop_xr_local(cx, scope, fe.time, fe.modifiers, None);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn child_world_sort_center(child: &WidgetRef) -> Option<Vec3f> {
+        if let Some(select) = child.borrow::<XrSelect>() {
+            return Some(select.node().pos());
+        }
+        if let Some(view) = child.borrow::<XrView>() {
+            return Some(view.node().pos());
+        }
+        if let Some(cube) = child.borrow::<Cube>() {
+            return Some(cube.node().pos());
+        }
+        if let Some(refractive_cube) = child.borrow::<RefractiveCube>() {
+            return Some(refractive_cube.node().pos());
+        }
+        if let Some(gltf) = child.borrow::<Gltf>() {
+            return Some(gltf.node().pos());
+        }
+        if let Some(tree) = child.borrow::<Tree>() {
+            return Some(tree.node().pos());
+        }
+        if let Some(node) = child.borrow::<XrNode>() {
+            return Some(node.pos());
+        }
+        None
+    }
+
+    fn draw_list_depth(scene_state: &SceneState3D, world_pos: Vec3f) -> f32 {
+        let view_pos = scene_state
+            .view
+            .transform_vec4(vec4f(world_pos.x, world_pos.y, world_pos.z, 1.0));
+        if view_pos.w.abs() > 1.0e-6 {
+            view_pos.z / view_pos.w
+        } else {
+            view_pos.z
+        }
+    }
+
+    fn apply_child_draw_list_depth_sort(
+        &mut self,
+        cx: &mut Cx3d,
+        root_draw_list_id: DrawListId,
+        scene_state: &SceneState3D,
+    ) {
+        let Some(anchors) = cx.scene_draw_call_anchors_3d() else {
+            cx.draw_lists[root_draw_list_id].draw_item_reorder = None;
+            return;
+        };
+
+        let mut anchored_items = anchors
+            .iter()
+            .filter_map(|anchor| {
+                let draw_item_id = anchor.draw_item_id?;
+                (anchor.draw_list_id == Some(root_draw_list_id)).then_some((
+                    draw_item_id,
+                    Self::draw_list_depth(scene_state, anchor.world_pos),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        if anchored_items.len() <= 1 {
+            cx.draw_lists[root_draw_list_id].draw_item_reorder = None;
+            return;
+        }
+
+        anchored_items.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        let sorted_child_ids = anchored_items
+            .iter()
+            .map(|(draw_item_id, _)| *draw_item_id)
+            .collect::<Vec<_>>();
+        let child_id_set = sorted_child_ids.iter().copied().collect::<HashSet<_>>();
+        let draw_item_count = cx.draw_lists[root_draw_list_id].draw_items.len();
+        let mut reorder = Vec::with_capacity(draw_item_count);
+        let mut next_child_index = 0usize;
+
+        for draw_item_id in 0..draw_item_count {
+            if child_id_set.contains(&draw_item_id) {
+                reorder.push(sorted_child_ids[next_child_index]);
+                next_child_index += 1;
+            } else {
+                reorder.push(draw_item_id);
+            }
+        }
+
+        cx.draw_lists[root_draw_list_id].draw_item_reorder = Some(reorder);
+    }
+
+    fn draw_3d_content(
+        &mut self,
+        cx: &mut Cx3d,
+        _scope: &mut Scope,
+        scene_override: Option<SceneState3D>,
+    ) {
+        self.draw_list.begin_always(cx);
+
+        let scene_state = if let Some(scene_state) = scene_override {
+            scene_state
+        } else if let Some(state) = self.last_xr_state.as_ref() {
+            self.camera.xr_scene_state(state)
+        } else if let Some(ss) = cx.scene_state_3d() {
+            ss
+        } else {
+            SceneState3D::default()
+        };
+
+        // Prepare env draws + get scope data
+        let mut draw_scope = {
+            let cx2d = &mut Cx2d::new(cx.cx);
+            self.env.prepare_and_draw(cx2d)
+        };
+
+        let root_draw_list_id = self.draw_list.id();
+        cx.begin_scene_3d(scene_state);
+        cx.clear_scene_draw_call_anchors_3d();
+        let mut scene_scope = Scope::with_data(&mut draw_scope);
+        for i in 0..self.children.len() {
+            let child = self.children[i].1.clone();
+            let child_center = Self::child_world_sort_center(&child);
+            let child_draw_list = &mut self.child_draw_lists[i];
+            child_draw_list.begin_always(cx);
+            let root_draw_item_id = cx.draw_lists[root_draw_list_id]
+                .draw_items
+                .len()
+                .saturating_sub(1);
+            child.draw_3d_all(cx, &mut scene_scope);
+            child_draw_list.end(cx);
+            if let Some(child_center) = child_center {
+                cx.register_last_scene_draw_call_anchor_3d(
+                    root_draw_list_id,
+                    root_draw_item_id,
+                    child_center,
+                );
+            }
+        }
+        self.apply_child_draw_list_depth_sort(cx, root_draw_list_id, &scene_state);
+        cx.end_scene_3d();
+
+        self.draw_list.end(cx);
+    }
+
+    fn handle_draw_event(&mut self, cx: &mut Cx, e: &DrawEvent, scope: &mut Scope) {
+        self.ensure_initialized(cx);
+        if cx.in_xr_mode() {
+            if e.xr_state.is_none() { return; }
+            let mut cx_draw = CxDraw::new(cx, e);
+            let cx3d = &mut Cx3d::new(&mut cx_draw);
+            self.pass.handle.set_as_xr_pass(cx3d);
+            cx3d.begin_pass(&self.pass.handle, Some(4.0));
+            self.draw_3d_content(cx3d, scope, None);
+            cx3d.end_pass(&self.pass.handle);
+        } else {
+            let mut cx_draw = CxDraw::new(cx, e);
+            let cx2d = &mut Cx2d::new(&mut cx_draw);
+            self.draw_all(cx2d, scope);
+        }
+    }
+
+    pub fn depth_mesh_visible(&self) -> bool {
+        self.env.depth_mesh_visible()
+    }
+
+    pub fn toggle_depth_mesh_visible(&mut self, cx: &mut Cx) -> bool {
+        let visible = self.env.toggle_depth_mesh_visible();
+        cx.redraw_all();
+        visible
+    }
+}
+
+impl ScriptHook for XrRoot {
+    fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        if apply.is_reload() {
+            self.children.clear();
+            self.child_draw_lists.clear();
+        }
+    }
+
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        if !apply.is_eval() {
+            if let Some(obj) = value.as_object() {
+                self.children.clear();
+                vm.vec_with(obj, |vm, vec| {
+                    for kv in vec {
+                        let Some(id) = kv.key.as_id() else { continue };
+                        if !WidgetRef::value_is_newable_widget(vm, kv.value) { continue }
+                        let child = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
+                        self.children.push((id, child.clone()));
+                        vm.cx_mut()
+                            .widget_tree_insert_child_deep(self.uid, id, child);
+                    }
+                });
+            }
+        }
+        vm.with_cx_mut(|cx| {
+            self.child_draw_lists.truncate(self.children.len());
+            while self.child_draw_lists.len() < self.children.len() {
+                self.child_draw_lists.push(DrawList::new(cx));
+            }
+            cx.widget_tree_mark_dirty(self.uid);
+        });
+    }
+}
+
+impl WidgetNode for XrRoot {
+    fn widget_uid(&self) -> WidgetUid { self.uid }
+    fn walk(&mut self, _cx: &mut Cx) -> Walk { self.walk }
+    fn area(&self) -> Area { Area::Empty }
+
+    fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        for (id, child) in &self.children {
+            visit(*id, child.clone());
+        }
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) { cx.redraw_all(); }
+}
+
+impl Widget for XrRoot {
+    fn script_call(&mut self, vm: &mut ScriptVm, method: LiveId, args: ScriptValue) -> ScriptAsyncResult {
+        if method == live_id!(depth_toggle) || method == live_id!(toggle_depth_mesh) {
+            let mut visible = self.depth_mesh_visible();
+            vm.with_cx_mut(|cx| {
+                visible = self.toggle_depth_mesh_visible(cx);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(visible));
+        }
+        if method == live_id!(depth_mesh_visible) {
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(self.depth_mesh_visible()));
+        }
+        if method == live_id!(render_scene) {
+            self.env.mark_scene_dirty();
+            for i in 0..self.children.len() {
+                let child = self.children[i].1.clone();
+                let _ = child.script_call(vm, live_id!(render), NIL);
+            }
+            vm.with_cx_mut(|cx| {
+                self.env.ensure_physics(cx, &self.children);
+            });
+            return ScriptAsyncResult::Return(NIL);
+        }
+        let _ = args;
+        ScriptAsyncResult::MethodNotFound
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::Draw(e) = event {
+            self.handle_draw_event(cx, e, scope);
+            return;
+        }
+
+        match event {
+            Event::Startup => {
+                if !self.started {
+                    self.started = true;
+                    cx.widget_to_script_call(self.uid, NIL, self.source.clone(), self.on_startup.clone(), &[]);
+                    cx.with_vm(|vm| {
+                        for i in 0..self.children.len() {
+                            let child = self.children[i].1.clone();
+                            let _ = child.script_call(vm, live_id!(render), NIL);
+                        }
+                    });
+                    self.env.ensure_physics(cx, &self.children);
+                    self.next_frame = cx.new_next_frame();
+                    cx.redraw_all();
+                }
+            }
+            Event::XrUpdate(update) => {
+                self.last_xr_state = Some(update.state.clone());
+                if update.clicked_menu() {
+                    self.env.reset_physics(cx);
+                }
+                self.env.ensure_physics(cx, &self.children);
+                self.env.step_physics(cx);
+            }
+            Event::NextFrame(_) if self.next_frame.is_event(event).is_some() => {
+                if !cx.in_xr_mode() {
+                    self.env.ensure_physics(cx, &self.children);
+                    self.env.step_physics(cx);
+                }
+                self.next_frame = cx.new_next_frame();
+            }
+            _ => {}
+        }
+
+        self.env.handle_event(cx, event);
+
+        let handled_desktop_ui = if cx.in_xr_mode() {
+            false
+        } else {
+            self.handle_desktop_xr_pointer(cx, event, scope)
+        };
+
+        for i in 0..self.children.len() {
+            let child = self.children[i].1.clone();
+            child.handle_event(cx, event, scope);
+        }
+
+        if !cx.in_xr_mode() && !handled_desktop_ui {
+            self.camera.handle_desktop_interaction(cx, event);
+        }
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+        if cx.cx.in_xr_mode() { return DrawStep::done(); }
+
+        self.ensure_initialized(cx.cx);
+        cx.begin_pass(&self.pass.handle, None);
+        let size = cx.current_pass_size();
+
+        let pass_rect = Rect { pos: dvec2(0.0, 0.0), size };
+        self.camera.set_desktop_viewport_rect(pass_rect);
+
+        if let Some(scene_state) = self.camera.desktop_scene_state(pass_rect, cx.time()) {
+            self.set_pass_camera(cx.cx, &scene_state);
+            let cx3d = &mut Cx3d::new(cx.cx);
+            self.draw_3d_content(cx3d, scope, Some(scene_state));
+        }
+
+        cx.end_pass(&self.pass.handle);
+        DrawStep::done()
+    }
+}
