@@ -248,6 +248,54 @@ script_mod! {
                     }
                 }
 
+                ico_shoot_scene := Shooter{
+                    pos: vec3(0.0, -0.16, 0.0)
+                    scale: vec3(0.62, 0.62, 0.62)
+                    projectile_emit_rate_hz: 14.0
+                    projectile_emit_speed_mps: 15.0
+                    on_render: ||{
+                        Platform{
+                            pos: vec3(0.05, -0.06, -0.12)
+                            size: vec3(1.52, 0.08, 0.52)
+                        }
+
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(1.10, 0.52, 0.06)
+                            corner_radius: 0.02
+                            roughness: 0.86
+                            metallic: 0.0
+                            color: #x1c2834
+                            pos: vec3(0.05, 0.20, -0.42)
+                        }
+
+                        for index in 0..160 {
+                            let color = if index % 6 == 0 {
+                                #xff6f59
+                            } else if index % 6 == 1 {
+                                #x46d39a
+                            } else if index % 6 == 2 {
+                                #x66a9ff
+                            } else if index % 6 == 3 {
+                                #xffc857
+                            } else if index % 6 == 4 {
+                                #xff8a4c
+                            } else {
+                                #xd58cff
+                            }
+                            IcoSphere{
+                                projectile_pool: true
+                                density: 0.75
+                                friction: 0.48
+                                restitution: 0.04
+                                radius: 0.040
+                                color: color
+                                pos: vec3(-2.4, -6.0 - index * 0.004, 0.0)
+                            }
+                        }
+                    }
+                }
+
                 helmet_scene := XrNode{
                     on_render: ||{
                         Platform{pos: vec3(0.05, -0.06, -0.10)}
@@ -338,7 +386,7 @@ script_mod! {
 
                         detail := Label{
                             width: Fill
-                            text: "Quest stress scene: 160 faceted icosahedron masses."
+                            text: "Quest scenes: 160 faceted icos, blocks, fingertip shooter, tree, refraction."
                             draw_text.color: #xb8c8d8
                         }
                     }
@@ -359,6 +407,12 @@ script_mod! {
                             width: 72
                             text: "Icos"
                             on_press: || ui.scene_select.ico_box_scene()
+                        }
+
+                        ico_shoot_scene_button := XrUiButton{
+                            width: 84
+                            text: "Shooter"
+                            on_press: || ui.scene_select.ico_shoot_scene()
                         }
 
                         block_scene_button := XrUiButton{
@@ -439,7 +493,7 @@ script_mod! {
 
                         scene_status := Label{
                             width: Fill
-                            text: "Default scene: 160 faceted icosahedra with sphere colliders."
+                            text: "Default scene: 160 faceted icosahedra with sphere colliders. Shooter mode fires pooled icos from the main index fingertip."
                             draw_text.color: #xe8f4ff
                         }
                     }

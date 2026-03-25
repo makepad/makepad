@@ -94,6 +94,10 @@ impl XrSelect {
             .cloned()
             .map(|child| (active_child, child))
     }
+
+    pub fn active_child_widget_ref(&self) -> Option<WidgetRef> {
+        self.children.get(&self.active_child).cloned()
+    }
 }
 
 impl ScriptHook for XrSelect {

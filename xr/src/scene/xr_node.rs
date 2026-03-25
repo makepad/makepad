@@ -20,6 +20,7 @@ script_mod! {
     mod.widgets.XrNodeBase = #(XrNode::register_widget(vm))
     mod.widgets.XrNode = set_type_default() do mod.widgets.XrNodeBase{
         body: XrBodyKind.Disabled
+        projectile_pool: false
         physics_size: vec3(0.0, 0.0, 0.0)
         density: 1.0
         friction: 0.8
@@ -141,6 +142,8 @@ pub struct XrNode {
     scale: Vec3f,
     #[live]
     body: XrBodyKind,
+    #[live(false)]
+    projectile_pool: bool,
     #[live(vec3(0.0, 0.0, 0.0))]
     physics_size: Vec3f,
     #[rust]
@@ -195,6 +198,10 @@ impl XrNode {
 
     pub fn body_kind(&self) -> XrBodyKind {
         self.body
+    }
+
+    pub fn projectile_pool(&self) -> bool {
+        self.projectile_pool
     }
 
     pub fn set_implicit_physics_size(&mut self, size: Vec3f) {

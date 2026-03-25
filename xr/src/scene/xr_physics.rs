@@ -66,6 +66,8 @@ pub(crate) struct RapierScene {
     multibody_joints: MultibodyJointSet,
     ccd_solver: CCDSolver,
     pub(crate) cubes: Vec<PhysicsCube>,
+    projectile_cube_indices: Vec<usize>,
+    projectile_cube_cursor: usize,
     depth_query_surface_sets: Vec<DepthQueryBodySurfaceSet>,
     depth_query_stats: DepthQueryPhysicsStats,
     pub(super) left_hand: Vec<HandColliderBody>,
@@ -342,6 +344,8 @@ impl RapierScene {
             multibody_joints: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
             cubes: Vec::new(),
+            projectile_cube_indices: Vec::new(),
+            projectile_cube_cursor: 0,
             depth_query_surface_sets: Vec::new(),
             depth_query_stats: DepthQueryPhysicsStats::default(),
             left_hand: Vec::new(),
@@ -542,6 +546,44 @@ impl RapierScene {
 
     pub(crate) fn depth_query_stats(&self) -> DepthQueryPhysicsStats {
         self.depth_query_stats
+    }
+
+    pub(crate) fn register_projectile_cube(&mut self, cube_index: usize) {
+        let Some(cube) = self.cubes.get(cube_index).copied() else {
+            return;
+        };
+        self.projectile_cube_indices.push(cube_index);
+        if let Some(body) = self.bodies.get_mut(cube.body) {
+            body.set_enabled(false);
+            body.set_linvel(RapierVector::ZERO, false);
+            body.set_angvel(RapierVector::ZERO, false);
+            body.reset_forces(false);
+            body.reset_torques(false);
+        }
+    }
+
+    pub(crate) fn respawn_body(
+        &mut self,
+        widget_uid: WidgetUid,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    ) -> Option<u64> {
+        let cube = self
+            .cubes
+            .iter()
+            .find(|cube| cube.widget_uid == widget_uid)
+            .copied()?;
+        if let Some(body) = self.bodies.get_mut(cube.body) {
+            body.set_enabled(true);
+            body.set_position(rapier_pose(pose), false);
+            body.set_linvel(rapier_vec3(linvel), true);
+            body.set_angvel(rapier_vec3(angvel), true);
+            body.reset_forces(false);
+            body.reset_torques(false);
+            body.wake_up(true);
+        }
+        cube.depth_query_surface_set.map(RapierScene::depth_query_key)
     }
 
     pub(super) fn sync_depth_query_surface_set(

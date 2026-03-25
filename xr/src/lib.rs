@@ -13,6 +13,8 @@ pub mod gltf_bridge;
 pub mod mesh_generators;
 #[path = "scene/xr_node.rs"]
 pub mod xr_node;
+#[path = "scene/xr_body_spawn.rs"]
+pub mod xr_body_spawn;
 #[path = "util/passthrough_env.rs"]
 pub mod passthrough_env;
 #[path = "scene/xr_permissions_flow.rs"]
@@ -21,6 +23,8 @@ pub mod xr_permissions_flow;
 pub mod physics_view;
 #[path = "obj/refractive_cube.rs"]
 pub mod refractive_cube;
+#[path = "obj/shooter.rs"]
+pub mod shooter;
 #[path = "scene/xr_root.rs"]
 pub mod xr_root;
 #[path = "scene/xr_select.rs"]
@@ -40,11 +44,13 @@ pub use cube::*;
 pub use gltf::*;
 pub use icosphere::*;
 pub use gltf_bridge::*;
+pub use xr_body_spawn::*;
 pub use xr_node::*;
 pub use passthrough_env::DrawPassthroughEnvFace;
 pub use xr_permissions_flow::*;
 pub use physics_view::*;
 pub use refractive_cube::*;
+pub use shooter::*;
 pub use xr_env::XrEnv;
 pub use xr_root::XrRoot;
 pub use xr_select::XrSelect;
@@ -62,6 +68,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     xr_permissions_flow::script_mod(vm);
     physics_view::script_mod(vm);
     refractive_cube::script_mod(vm);
+    shooter::script_mod(vm);
 
     passthrough_env::script_mod(vm);
     tree::script_mod(vm);
