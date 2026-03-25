@@ -2,7 +2,10 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
-    xr_node::{xr_pointer_tips_from_scope, xr_widget_world_transform, XrNode},
+    xr_node::{
+        xr_hand_influence_points_from_scope, xr_widget_world_transform, XrHandInfluencePoint,
+        XrNode, XR_HAND_INFLUENCE_POINT_COUNT,
+    },
 };
 use super::{
     mesh_generators::{stylized_leaf_mesh, tree_branch_segment_mesh},
@@ -21,11 +24,19 @@ const TREE_RADIUS_SCALE: f32 = 0.74;
 const TREE_BRANCH_SPLIT_ANGLE: f32 = 0.58;
 const TREE_BRANCH_YAW_STEP: f32 = PI * 2.0 / 3.0;
 const TREE_BRANCH_YAW_PHASE_STEP: f32 = PI / 3.0;
-const TREE_POINTER_RADIUS: f32 = 0.18;
 const TREE_BRANCH_PARENT_DRAG: f32 = 0.42;
 const TREE_BRANCH_HAND_GAIN: f32 = 0.19;
 const TREE_LEAF_HAND_GAIN: f32 = 0.34;
 const TREE_MAX_POINT_PUSH: f32 = 0.24;
+const TREE_BRANCH_SPRING_STIFFNESS: f32 = 42.0;
+const TREE_BRANCH_SPRING_DAMPING: f32 = 11.5;
+const TREE_LEAF_SPRING_STIFFNESS: f32 = 64.0;
+const TREE_LEAF_SPRING_DAMPING: f32 = 15.0;
+const TREE_SIM_DT_DEFAULT: f32 = 1.0 / 90.0;
+const TREE_SIM_DT_MIN: f32 = 1.0 / 240.0;
+const TREE_SIM_DT_MAX: f32 = 1.0 / 18.0;
+const TREE_HAND_MAX_SPEED: f32 = 2.4;
+const TREE_HAND_VELOCITY_BLEND: f32 = 0.58;
 const TREE_LEAF_BASE_SCALE: f32 = 0.056;
 const TREE_LEAF_PITCH_ANGLE: f32 = -0.34;
 const TREE_LEAF_TILT_ANGLE: f32 = 0.50;
@@ -302,6 +313,32 @@ struct LeafInstance {
     flutter: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct SpringState {
+    offset: Vec3f,
+    velocity: Vec3f,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SpringContact {
+    target_offset: Vec3f,
+    velocity_boost: Vec3f,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct LocalHandInfluence {
+    pos: Vec3f,
+    velocity: Vec3f,
+    gain_scale: f32,
+    radius_scale: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct HandInfluenceHistory {
+    pos: Option<Vec3f>,
+    velocity: Vec3f,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TreeTemplateConfig {
     branch_split_angle: f32,
@@ -353,9 +390,13 @@ pub struct CpuPythagoreanTree {
     template_config: Option<TreeTemplateConfig>,
     branch_templates: Vec<BranchTemplate>,
     leaf_templates: Vec<LeafTemplate>,
+    branch_dynamics: Vec<SpringState>,
+    leaf_dynamics: Vec<SpringState>,
     branch_runtime: Vec<BranchRuntime>,
     branch_instances: Vec<BranchInstance>,
     leaf_instances: Vec<LeafInstance>,
+    hand_influence_history: [HandInfluenceHistory; XR_HAND_INFLUENCE_POINT_COUNT],
+    last_rebuild_time: Option<f32>,
 }
 
 impl CpuPythagoreanTree {
@@ -363,6 +404,11 @@ impl CpuPythagoreanTree {
         if self.template_config != Some(config) || self.branch_templates.is_empty() {
             self.rebuild_templates(config);
             self.template_config = Some(config);
+            self.branch_dynamics.clear();
+            self.leaf_dynamics.clear();
+            self.branch_runtime.clear();
+            self.hand_influence_history = [HandInfluenceHistory::default(); XR_HAND_INFLUENCE_POINT_COUNT];
+            self.last_rebuild_time = None;
         }
         if self.branch_geometry.is_none() {
             self.branch_geometry =
@@ -377,25 +423,58 @@ impl CpuPythagoreanTree {
         &mut self,
         root_transform: Mat4f,
         time: f32,
-        pointer_tips_world: [Option<Vec3f>; 2],
+        hand_influences_world: [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT],
     ) {
         if self.branch_templates.is_empty() {
             self.rebuild_templates(self.template_config.unwrap_or_default());
         }
         self.branch_instances.clear();
         self.leaf_instances.clear();
+        self.branch_dynamics
+            .resize(self.branch_templates.len(), SpringState::default());
+        self.leaf_dynamics
+            .resize(self.leaf_templates.len(), SpringState::default());
         self.branch_runtime
             .resize(self.branch_templates.len(), BranchRuntime::default());
+        let dt = self
+            .last_rebuild_time
+            .and_then(|last| {
+                let delta = time - last;
+                (delta.is_finite() && delta > 0.0).then_some(delta.clamp(TREE_SIM_DT_MIN, TREE_SIM_DT_MAX))
+            })
+            .unwrap_or(TREE_SIM_DT_DEFAULT);
+        self.last_rebuild_time = Some(time);
 
         let root_inverse = root_transform.invert();
-        let pointer_tips = pointer_tips_world.map(|pointer_tip| {
-            pointer_tip.map(|tip_world| {
-                root_inverse
-                    .transform_vec4(vec4(tip_world.x, tip_world.y, tip_world.z, 1.0))
-                    .to_vec3f()
-            })
-        });
-        let animate = time.abs() > f32::EPSILON || pointer_tips.iter().any(|tip| tip.is_some());
+        let mut hand_influences = [None; XR_HAND_INFLUENCE_POINT_COUNT];
+        for (slot, influence) in hand_influences_world.into_iter().enumerate() {
+            let history = &mut self.hand_influence_history[slot];
+            hand_influences[slot] = influence.map(|influence| {
+                let local_pos = root_inverse
+                    .transform_vec4(influence.pos.to_vec4())
+                    .to_vec3f();
+                let raw_velocity = history
+                    .pos
+                    .map(|last_pos| Self::clamp_len((local_pos - last_pos) / dt, TREE_HAND_MAX_SPEED))
+                    .unwrap_or(vec3f(0.0, 0.0, 0.0));
+                let velocity = history.velocity * (1.0 - TREE_HAND_VELOCITY_BLEND)
+                    + raw_velocity * TREE_HAND_VELOCITY_BLEND;
+                history.pos = Some(local_pos);
+                history.velocity = velocity;
+                LocalHandInfluence {
+                    pos: local_pos,
+                    velocity,
+                    gain_scale: influence.gain_scale,
+                    radius_scale: influence.radius_scale,
+                }
+            });
+            if hand_influences[slot].is_none() {
+                history.pos = None;
+                history.velocity *= 0.45;
+            }
+        }
+        let animate =
+            time.abs() > f32::EPSILON || hand_influences.iter().any(|point| point.is_some());
         let level_den = (TREE_MAX_DEPTH.saturating_sub(1)).max(1) as f32;
 
         for (index, branch) in self.branch_templates.iter().enumerate() {
@@ -434,28 +513,54 @@ impl CpuPythagoreanTree {
                 parent_basis_z,
             );
             let nominal_tip = start + base_dir * branch.length;
-            let midpoint = start + (nominal_tip - start) * 0.55;
             let level_t = branch.level as f32 / level_den;
 
-            let mut point_push = vec3f(0.0, 0.0, 0.0);
+            let mut point_target = vec3f(0.0, 0.0, 0.0);
+            let mut point_velocity_boost = vec3f(0.0, 0.0, 0.0);
             if animate {
-                point_push = Self::branch_wind_force(branch.seed, level_t, time) + inherited_push;
-                for pointer_tip in pointer_tips.into_iter().flatten() {
-                    point_push += Self::pointer_force(
-                        nominal_tip,
+                point_target = Self::branch_wind_force(branch.seed, level_t, time) + inherited_push;
+                let branch_pointer_radius = (branch.radius * 5.6).clamp(0.032, 0.095);
+                let branch_mid_radius = (branch_pointer_radius * 0.88).clamp(0.028, branch_pointer_radius);
+                for influence in hand_influences.into_iter().flatten() {
+                    let pointer_tip = influence.pos;
+                    let closest_on_branch = Self::closest_point_on_segment(start, nominal_tip, pointer_tip);
+                    let closest_on_mid = Self::closest_point_on_segment(
+                        start + (nominal_tip - start) * 0.22,
+                        start + (nominal_tip - start) * 0.82,
                         pointer_tip,
-                        TREE_BRANCH_HAND_GAIN * (0.70 + level_t * 0.95),
-                        0.82,
                     );
-                    point_push += Self::pointer_force(
-                        midpoint,
-                        pointer_tip,
-                        TREE_BRANCH_HAND_GAIN * (0.34 + level_t * 0.38),
-                        0.56,
-                    ) * 0.38;
+                    let branch_contact = Self::contact_response(
+                        closest_on_branch,
+                        influence,
+                        TREE_BRANCH_HAND_GAIN * influence.gain_scale * (1.65 + level_t * 1.10),
+                        branch_pointer_radius * influence.radius_scale,
+                        0.92,
+                        0.76,
+                    );
+                    point_target += branch_contact.target_offset;
+                    point_velocity_boost += branch_contact.velocity_boost;
+                    let mid_contact = Self::contact_response(
+                        closest_on_mid,
+                        influence,
+                        TREE_BRANCH_HAND_GAIN * influence.gain_scale * (0.90 + level_t * 0.62),
+                        branch_mid_radius * influence.radius_scale,
+                        0.54,
+                        0.58,
+                    );
+                    point_target += mid_contact.target_offset * 0.56;
+                    point_velocity_boost += mid_contact.velocity_boost * 0.56;
                 }
+                point_velocity_boost = Self::clamp_len(point_velocity_boost, 1.05 + level_t * 0.30);
             }
-            point_push = Self::clamp_len(point_push, TREE_MAX_POINT_PUSH);
+            let point_push = Self::spring_step(
+                &mut self.branch_dynamics[index],
+                point_target,
+                point_velocity_boost,
+                dt,
+                TREE_BRANCH_SPRING_STIFFNESS * (0.90 + level_t * 0.45),
+                TREE_BRANCH_SPRING_DAMPING * (1.0 - level_t * 0.10),
+                TREE_MAX_POINT_PUSH,
+            );
 
             let target_tip = nominal_tip + point_push;
             let direction = Self::normalize_or(target_tip - start, base_dir);
@@ -488,7 +593,7 @@ impl CpuPythagoreanTree {
             });
         }
 
-        for leaf in &self.leaf_templates {
+        for (leaf_index, leaf) in self.leaf_templates.iter().enumerate() {
             let branch_runtime = self.branch_runtime[leaf.branch];
             let branch = self.branch_templates[leaf.branch];
             let level_t = branch.level as f32 / level_den;
@@ -537,22 +642,52 @@ impl CpuPythagoreanTree {
                 vec3f(0.0, 0.0, 0.0)
             };
             let origin = anchor + anchor_offset;
-            let leaf_center = origin + nominal_leaf_y * (leaf.scale * 0.78);
-
-            let mut leaf_push = vec3f(0.0, 0.0, 0.0);
+            let mut leaf_target = vec3f(0.0, 0.0, 0.0);
+            let mut leaf_velocity_boost = vec3f(0.0, 0.0, 0.0);
             if animate {
-                leaf_push = Self::leaf_wind_force(leaf.seed, level_t, time)
+                leaf_target = Self::leaf_wind_force(leaf.seed, level_t, time)
                     + branch_runtime.point_push * (1.35 + level_t * 0.2);
-                for pointer_tip in pointer_tips.into_iter().flatten() {
-                    leaf_push += Self::pointer_force(
-                        leaf_center,
-                        pointer_tip,
-                        TREE_LEAF_HAND_GAIN * (0.74 + level_t * 0.58),
-                        1.0,
+                let leaf_tip = origin + nominal_leaf_y * leaf.scale;
+                let leaf_mid = origin + nominal_leaf_y * (leaf.scale * 0.58);
+                let leaf_pointer_radius = (leaf.scale * 1.35).clamp(0.045, 0.120);
+                for influence in hand_influences.into_iter().flatten() {
+                    let pointer_tip = influence.pos;
+                    let closest_on_leaf = Self::closest_point_on_segment(origin, leaf_tip, pointer_tip);
+                    let closest_on_leaf_mid =
+                        Self::closest_point_on_segment(origin, leaf_mid, pointer_tip);
+                    let main_contact = Self::contact_response(
+                        closest_on_leaf,
+                        influence,
+                        TREE_LEAF_HAND_GAIN * influence.gain_scale * (2.45 + level_t * 1.50),
+                        leaf_pointer_radius * influence.radius_scale,
+                        1.28,
+                        0.96,
                     );
+                    leaf_target += main_contact.target_offset;
+                    leaf_velocity_boost += main_contact.velocity_boost;
+                    let mid_contact = Self::contact_response(
+                        closest_on_leaf_mid,
+                        influence,
+                        TREE_LEAF_HAND_GAIN * influence.gain_scale * (1.45 + level_t * 0.88),
+                        leaf_pointer_radius * influence.radius_scale * 0.82,
+                        0.92,
+                        0.90,
+                    );
+                    leaf_target += mid_contact.target_offset * 0.55;
+                    leaf_velocity_boost += mid_contact.velocity_boost * 0.55;
                 }
+                leaf_velocity_boost =
+                    Self::clamp_len(leaf_velocity_boost, 1.45 + level_t * 0.40);
             }
-            leaf_push = Self::clamp_len(leaf_push, TREE_MAX_POINT_PUSH * 1.35);
+            let leaf_push = Self::spring_step(
+                &mut self.leaf_dynamics[leaf_index],
+                leaf_target,
+                leaf_velocity_boost,
+                dt,
+                TREE_LEAF_SPRING_STIFFNESS * (0.95 + level_t * 0.35),
+                TREE_LEAF_SPRING_DAMPING * (1.0 - level_t * 0.08),
+                TREE_MAX_POINT_PUSH * 1.35,
+            );
 
             let leaf_y = Self::normalize_or(nominal_leaf_y + leaf_push * 1.6, nominal_leaf_y);
             let (basis_x, basis_y, basis_z) = Self::orthonormal_frame(leaf_y, leaf_z_hint);
@@ -629,7 +764,7 @@ impl CpuPythagoreanTree {
             length: stored_length,
             radius,
             level: level as u8,
-            seed: 0.0,
+            seed: Self::seed_from_index(branch_index),
         });
 
         if level + 2 >= TREE_MAX_DEPTH {
@@ -669,6 +804,15 @@ impl CpuPythagoreanTree {
             7 => 4,
             _ => 5,
         };
+        if density == 0 {
+            return;
+        }
+        let branch_radius = self
+            .branch_templates
+            .get(branch)
+            .map(|template| template.radius)
+            .unwrap_or(TREE_BASE_RADIUS * 0.25);
+        let twig_tip_radius = branch_radius * 0.84;
         let branch_depth = level as f32 / (TREE_MAX_DEPTH.saturating_sub(1)).max(1) as f32;
         for index in 0..density {
             let angle = (index as f32 / density as f32) * PI * 2.0;
@@ -680,18 +824,21 @@ impl CpuPythagoreanTree {
                     &Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), angle),
                 ),
             );
-            let spread = 0.015 + branch_depth * 0.028;
+            let leaf_scale = TREE_LEAF_BASE_SCALE * (0.94 + branch_depth * 0.18);
+            // Keep the leaf stem near the twig tip instead of using an absolute world-space spread.
+            let spread = twig_tip_radius * 0.85 + leaf_scale * 0.06;
+            let stem_sink = (twig_tip_radius * 0.75).min(leaf_scale * 0.16);
             self.leaf_templates.push(LeafTemplate {
                 branch,
                 local_offset: vec3f(
                     angle.cos() * spread,
-                    -0.018 + branch_depth * 0.018,
+                    -stem_sink,
                     angle.sin() * spread,
                 ),
                 local_rotation,
-                scale: TREE_LEAF_BASE_SCALE * (0.94 + branch_depth * 0.18),
+                scale: leaf_scale,
                 tint: 0.56,
-                seed: 0.0,
+                seed: Self::seed_from_index(self.leaf_templates.len() + branch * 17 + index * 31),
             });
         }
     }
@@ -714,21 +861,55 @@ impl CpuPythagoreanTree {
         ) * sway
     }
 
-    fn pointer_force(sample: Vec3f, pointer: Vec3f, gain: f32, vertical_scale: f32) -> Vec3f {
-        let delta = sample - pointer;
+    fn contact_response(
+        sample: Vec3f,
+        influence: LocalHandInfluence,
+        gain: f32,
+        radius: f32,
+        velocity_gain: f32,
+        vertical_scale: f32,
+    ) -> SpringContact {
+        let delta = sample - influence.pos;
         let distance = delta.length().max(0.0001);
-        if distance >= TREE_POINTER_RADIUS {
-            return vec3f(0.0, 0.0, 0.0);
+        let radius = radius.max(0.0001);
+        if distance >= radius {
+            return SpringContact::default();
         }
-        let falloff = (1.0 - distance / TREE_POINTER_RADIUS).powf(2.2);
-        let mut away = delta / distance;
-        away.y *= vertical_scale;
-        let lateral = if away.length() > 0.0001 {
-            away.normalize()
-        } else {
-            vec3f(0.0, 0.0, 1.0)
-        };
-        lateral * (falloff * gain)
+        let penetration = 1.0 - distance / radius;
+        let raw_normal = delta / distance;
+        let mut contact_normal = raw_normal;
+        contact_normal.y *= vertical_scale;
+        let contact_normal = Self::normalize_or(contact_normal, raw_normal);
+        let normal_push = contact_normal * (penetration * gain * radius * 1.85);
+        let mut carried_velocity = influence.velocity;
+        carried_velocity.y *= 0.72 + vertical_scale * 0.20;
+        SpringContact {
+            target_offset: normal_push,
+            velocity_boost: Self::clamp_len(
+                carried_velocity * (penetration * velocity_gain),
+                TREE_HAND_MAX_SPEED * velocity_gain,
+            ),
+        }
+    }
+
+    fn spring_step(
+        state: &mut SpringState,
+        target: Vec3f,
+        velocity_boost: Vec3f,
+        dt: f32,
+        stiffness: f32,
+        damping: f32,
+        max_len: f32,
+    ) -> Vec3f {
+        state.velocity += velocity_boost;
+        let accel = (target - state.offset) * stiffness - state.velocity * damping;
+        state.velocity += accel * dt;
+        state.offset += state.velocity * dt;
+        state.offset = Self::clamp_len(state.offset, max_len);
+        if state.offset.length() >= max_len - 0.0001 && state.velocity.dot(state.offset) > 0.0 {
+            state.velocity *= 0.72;
+        }
+        state.offset
     }
 
     fn clamp_len(v: Vec3f, max_len: f32) -> Vec3f {
@@ -756,6 +937,22 @@ impl CpuPythagoreanTree {
 
     fn frame_vector(basis_x: Vec3f, basis_y: Vec3f, basis_z: Vec3f, local: Vec3f) -> Vec3f {
         basis_x * local.x + basis_y * local.y + basis_z * local.z
+    }
+
+    fn seed_from_index(index: usize) -> f32 {
+        let x = (((index as f32) + 1.0) * 12.9898).sin() * 43_758.547;
+        let fract = x.fract();
+        if fract < 0.0 { fract + 1.0 } else { fract }
+    }
+
+    fn closest_point_on_segment(a: Vec3f, b: Vec3f, point: Vec3f) -> Vec3f {
+        let ab = b - a;
+        let ab_len_sq = ab.dot(ab);
+        if ab_len_sq <= 0.000001 {
+            return a;
+        }
+        let t = ((point - a).dot(ab) / ab_len_sq).clamp(0.0, 1.0);
+        a + ab * t
     }
 
     fn transform_point(transform: Mat4f, point: Vec3f) -> Vec3f {
@@ -850,12 +1047,12 @@ impl Widget for Tree {
             return DrawStep::done();
         };
         let world = xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
-        let pointer_tips = xr_pointer_tips_from_scope(scope);
+        let hand_influences = xr_hand_influence_points_from_scope(scope);
         let time = scene.time as f32;
         let template_config = self.template_config();
 
         self.cpu_tree.ensure_geometry(cx, template_config);
-        self.cpu_tree.rebuild_instances(world, time, pointer_tips);
+        self.cpu_tree.rebuild_instances(world, time, hand_influences);
         self.cpu_tree.draw(
             cx,
             &mut self.draw_branches,
