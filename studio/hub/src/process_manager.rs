@@ -965,8 +965,9 @@ impl ProcessManager {
         event_tx: Sender<HubEvent>,
     ) -> Result<BuildInfo, String> {
         let package = parse_package_name(&args).unwrap_or_else(|| "unknown".to_string());
+        let use_stdio_bridge = should_use_direct_stdio_run(&args, &env);
         #[cfg(unix)]
-        if should_use_direct_stdio_run(&args, &env) {
+        if use_stdio_bridge {
             if let Some(script) = build_direct_stdio_run_script(cwd, &args, &env) {
                 return self.start_command_run(
                     build_id,
@@ -990,7 +991,7 @@ impl ProcessManager {
             "cargo".to_string(),
             args,
             env,
-            true,
+            !use_stdio_bridge,
             studio_addr,
             event_tx,
         )

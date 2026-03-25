@@ -59,13 +59,16 @@ pub enum HttpServerRequest {
     },
 }
 
-pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHandle<()>> {
+pub fn bind_http_server(
+    http_server: HttpServer,
+) -> Option<(SocketAddr, std::thread::JoinHandle<()>)> {
     let listener = if let Ok(listener) = TcpListener::bind(http_server.listen_address) {
         listener
     } else {
         println!("Cannot bind http server port");
         return None;
     };
+    let listen_address = listener.local_addr().ok()?;
 
     let listen_thread = {
         std::thread::spawn(move || {
@@ -105,7 +108,11 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
             }
         })
     };
-    Some(listen_thread)
+    Some((listen_address, listen_thread))
+}
+
+pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHandle<()>> {
+    bind_http_server(http_server).map(|(_, thread)| thread)
 }
 
 fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpServerHeaders) {

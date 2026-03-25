@@ -1152,7 +1152,7 @@ fn start_headless_app(config: &TestConfig) -> TestResult<(TestConnection, QueryI
                 name: config.mount_name.clone(),
                 path: config.manifest_dir.clone(),
             }],
-            enable_in_process_gateway: true,
+            enable_in_process_gateway: false,
             ..Default::default()
         })
         .map_err(TestError::new)?,

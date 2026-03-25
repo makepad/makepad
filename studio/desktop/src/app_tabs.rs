@@ -966,6 +966,9 @@ impl App {
         self.data.build_to_mount.remove(&build_id);
         self.data.build_package.remove(&build_id);
         if let Some(mount) = mount_for_sync {
+            if self.data.active_mount.as_deref() == Some(mount.as_str()) {
+                self.refresh_active_mount_run_list(cx);
+            }
             self.sync_run_preview_splitter(cx, &mount);
         }
     }
@@ -983,6 +986,42 @@ impl App {
         };
         self.close_mount_run_and_log_tabs(cx, mount);
         self.set_status(cx, &format!("running {} on {}", name, mount));
+    }
+
+    pub(super) fn stop_builds(
+        &mut self,
+        cx: &mut Cx,
+        build_ids: &[QueryId],
+        mount: &str,
+        name: &str,
+    ) {
+        if self.data.active_mount.as_deref() != Some(mount) {
+            self.select_mount(cx, mount);
+        }
+        if build_ids.is_empty() {
+            return;
+        }
+        let mut sent_any = false;
+        for build_id in build_ids {
+            if self
+                .send_studio(ClientToHub::StopBuild {
+                    build_id: *build_id,
+                })
+                .is_some()
+            {
+                sent_any = true;
+            }
+        }
+        if !sent_any {
+            self.set_status(cx, "backend not connected");
+            return;
+        }
+        let build_label = if build_ids.len() == 1 {
+            "1 build".to_string()
+        } else {
+            format!("{} builds", build_ids.len())
+        };
+        self.set_status(cx, &format!("stopping {} for {} on {}", build_label, name, mount));
     }
 
     pub(super) fn handle_log_view_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -1217,12 +1256,14 @@ impl App {
             return;
         };
         self.data.run_tab_by_build.remove(&state.build_id);
-        self.data.build_to_mount.remove(&state.build_id);
         let _ = self.send_studio(ClientToHub::StopBuild {
             build_id: state.build_id,
         });
         if let Some(dock) = self.mount_workspace_dock(cx, &state.mount) {
             dock.close_tab(cx, tab_id);
+        }
+        if self.data.active_mount.as_deref() == Some(state.mount.as_str()) {
+            self.refresh_active_mount_run_list(cx);
         }
         self.sync_run_preview_splitter(cx, &state.mount);
     }

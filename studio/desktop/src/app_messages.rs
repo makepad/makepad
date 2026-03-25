@@ -290,6 +290,9 @@ impl App {
                     }
                 }
                 self.set_status(cx, &format!("build started: {}", package));
+                if self.data.active_mount.as_deref() == Some(mount.as_str()) {
+                    self.refresh_active_mount_run_list(cx);
+                }
             }
             HubToClient::BuildStopped {
                 build_id,
@@ -302,7 +305,7 @@ impl App {
                     self.data.build_to_mount.remove(&build_id);
                     return;
                 }
-                self.data.build_to_mount.remove(&build_id);
+                let mount_for_run_list = self.data.build_to_mount.remove(&build_id);
                 self.stop_profiler_query_for_build(build_id);
                 self.data.profiler_running_by_build.insert(build_id, false);
                 if let Some(tab_id) = self.data.run_tab_by_build.get(&build_id).copied() {
@@ -326,6 +329,11 @@ impl App {
                                 .clear_run_target(cx);
                             dock.redraw_tab(cx, tab_id);
                         }
+                    }
+                }
+                if let Some(mount) = mount_for_run_list {
+                    if self.data.active_mount.as_deref() == Some(mount.as_str()) {
+                        self.refresh_active_mount_run_list(cx);
                     }
                 }
             }

@@ -34,7 +34,7 @@ script_mod! {
 
     let SidebarFilterInput = TextInputFlat {
         margin: Inset {}
-        padding: Inset {left: 12.0 right: 12.0 top: 0.0 bottom: 0.0}
+        padding: Inset {left: 12.0 right: 12.0 top: 5.0 bottom: 5.0}
         draw_bg +: {
             border_radius: 4.0
 

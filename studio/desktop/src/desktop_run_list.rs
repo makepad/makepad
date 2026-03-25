@@ -1,4 +1,5 @@
 use crate::{app_data::AppData, makepad_widgets::*};
+use makepad_studio_protocol::hub_protocol::QueryId;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -25,6 +26,23 @@ script_mod! {
         }
     }
 
+    mod.widgets.RunStopIcon = View {
+        width: 14.0
+        height: 14.0
+        margin: Inset {left: 3.0 right: 3.0 top: 0.0 bottom: 0.0}
+        show_bg: true
+        visible: false
+        draw_bg +: {
+            hover: instance(0.0)
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(3.0, 3.0, 8.0, 8.0, 0.0)
+                sdf.fill(#xE38AA6.mix(#xFFD2E1, self.hover))
+                return sdf.result
+            }
+        }
+    }
+
     mod.widgets.RunListItem = View {
         width: Fill
         height: 34.0
@@ -36,11 +54,13 @@ script_mod! {
 
         draw_bg +: {
             is_even: instance(0.0)
+            is_running: instance(0.0)
             pixel: fn() {
-                return theme.color_bg_even.mix(
+                let base = theme.color_bg_even.mix(
                     theme.color_bg_odd,
                     self.is_even
                 )
+                return base.mix(#xFFFFFF, self.is_running * 0.035)
             }
         }
 
@@ -51,7 +71,8 @@ script_mod! {
                 off: AnimatorState {
                     from: {all: Forward {duration: 0.08}}
                     apply: {
-                        icon: {draw_bg: {hover: 0.0}}
+                        play_icon: {draw_bg: {hover: 0.0}}
+                        stop_icon: {draw_bg: {hover: 0.0}}
                         row_button: {draw_text: {hover: 0.0}}
                     }
                 }
@@ -59,14 +80,21 @@ script_mod! {
                     cursor: MouseCursor.Hand
                     from: {all: Snap}
                     apply: {
-                        icon: {draw_bg: {hover: 1.0}}
+                        play_icon: {draw_bg: {hover: 1.0}}
+                        stop_icon: {draw_bg: {hover: 1.0}}
                         row_button: {draw_text: {hover: 1.0}}
                     }
                 }
             }
         }
 
-        icon := mod.widgets.RunPlayIcon {}
+        icon_wrap := View {
+            width: Fit
+            height: Fit
+            flow: Overlay
+            play_icon := mod.widgets.RunPlayIcon {}
+            stop_icon := mod.widgets.RunStopIcon {}
+        }
 
         row_button := ButtonFlat {
             width: Fill
@@ -79,13 +107,39 @@ script_mod! {
                 color: #0000
                 color_hover: #0000
                 color_pressed: #0000
+                color_focus: #0000
+                color_disabled: #0000
                 border_color: #0000
+                border_color_hover: #0000
+                border_color_pressed: #0000
+                border_color_focus: #0000
+                border_color_disabled: #0000
             }
             draw_text +: {
                 color: theme.color_label_inner
                 color_hover: #xFFFFFF
                 color_pressed: #xFFFFFF
                 color_focus: #xFFFFFF
+            }
+        }
+
+        status_badge := View {
+            width: Fit
+            height: Fit
+            visible: false
+            padding: Inset {left: 7.0 right: 7.0 top: 3.0 bottom: 3.0}
+            margin: Inset {left: 8.0 right: 0.0 top: 0.0 bottom: 0.0}
+            show_bg: true
+            draw_bg +: {
+                color: #x2C3130
+                border_radius: 9.0
+            }
+            badge_text := Label {
+                width: Fit
+                text: "Running"
+                draw_text +: {
+                    color: #xA9CDB4
+                }
             }
         }
     }
@@ -138,6 +192,11 @@ pub enum DesktopRunListAction {
         mount: String,
         name: String,
     },
+    StopBuilds {
+        build_ids: Vec<QueryId>,
+        mount: String,
+        name: String,
+    },
     #[default]
     None,
 }
@@ -145,6 +204,11 @@ pub enum DesktopRunListAction {
 #[derive(Clone, Debug, PartialEq, Default)]
 enum RunListRowData {
     RunItem {
+        mount: String,
+        name: String,
+    },
+    StopBuilds {
+        build_ids: Vec<QueryId>,
         mount: String,
         name: String,
     },
@@ -186,6 +250,23 @@ impl DesktopRunList {
             self.draw_empty(cx, list, "Loading run targets...");
             return;
         };
+        let mut running_builds_by_package: std::collections::HashMap<&str, Vec<QueryId>> =
+            std::collections::HashMap::new();
+        for (build_id, mount) in &data.build_to_mount {
+            if mount != active_mount {
+                continue;
+            }
+            let Some(package) = data.build_package.get(build_id) else {
+                continue;
+            };
+            running_builds_by_package
+                .entry(package.as_str())
+                .or_default()
+                .push(*build_id);
+        }
+        for build_ids in running_builds_by_package.values_mut() {
+            build_ids.sort_by_key(|build_id| build_id.0);
+        }
 
         if entries.is_empty() {
             self.draw_empty(cx, list, "No run items available");
@@ -208,17 +289,30 @@ impl DesktopRunList {
             };
 
             let mut item = list.item(cx, item_id, id!(Item)).as_view();
+            let is_running = running_builds_by_package.contains_key(entry.name.as_str());
             script_apply_eval!(cx, item, {
                 draw_bg +: {
                     is_even: #(is_even_f)
+                    is_running: #(if is_running {1.0} else {0.0})
                 }
             });
             let button = item.button(cx, ids!(row_button));
             button.set_text(cx, &entry.name);
-            button.set_action_data(RunListRowData::RunItem {
-                mount: active_mount.to_string(),
-                name: entry.name.clone(),
-            });
+            item.view(cx, ids!(play_icon)).set_visible(cx, !is_running);
+            item.view(cx, ids!(stop_icon)).set_visible(cx, is_running);
+            item.view(cx, ids!(status_badge)).set_visible(cx, is_running);
+            if let Some(build_ids) = running_builds_by_package.get(entry.name.as_str()) {
+                button.set_action_data(RunListRowData::StopBuilds {
+                    build_ids: build_ids.clone(),
+                    mount: active_mount.to_string(),
+                    name: entry.name.clone(),
+                });
+            } else {
+                button.set_action_data(RunListRowData::RunItem {
+                    mount: active_mount.to_string(),
+                    name: entry.name.clone(),
+                });
+            }
             item.draw_all(cx, &mut Scope::empty());
         }
     }
@@ -264,15 +358,31 @@ impl Widget for DesktopRunList {
             for (_item_id, item) in run_list.items_with_actions(actions) {
                 let button = item.button(cx, ids!(row_button));
                 if let Some(modifiers) = button.clicked_modifiers(actions) {
-                    if let RunListRowData::RunItem { mount, name } = button.action_data().cast_ref()
-                    {
-                        cx.widget_action(
-                            uid,
-                            DesktopRunListAction::RunItem {
-                                mount: mount.clone(),
-                                name: name.clone(),
-                            },
-                        );
+                    match button.action_data().cast_ref() {
+                        RunListRowData::RunItem { mount, name } => {
+                            cx.widget_action(
+                                uid,
+                                DesktopRunListAction::RunItem {
+                                    mount: mount.clone(),
+                                    name: name.clone(),
+                                },
+                            );
+                        }
+                        RunListRowData::StopBuilds {
+                            build_ids,
+                            mount,
+                            name,
+                        } => {
+                            cx.widget_action(
+                                uid,
+                                DesktopRunListAction::StopBuilds {
+                                    build_ids: build_ids.clone(),
+                                    mount: mount.clone(),
+                                    name: name.clone(),
+                                },
+                            );
+                        }
+                        RunListRowData::None => {}
                     }
                     let _ = modifiers;
                 }
@@ -282,11 +392,9 @@ impl Widget for DesktopRunList {
 }
 
 impl DesktopRunListRef {
-    pub fn run_requested(&self, actions: &Actions) -> Option<(String, String)> {
+    pub fn requested_action(&self, actions: &Actions) -> Option<DesktopRunListAction> {
         if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let DesktopRunListAction::RunItem { mount, name } = item.cast() {
-                return Some((mount, name));
-            }
+            return Some(item.cast());
         }
         None
     }

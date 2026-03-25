@@ -184,11 +184,23 @@ impl MatchEvent for App {
                 {
                     self.queue_mount_file_filter(cx, &active_mount, filter);
                 }
-                if let Some((mount, name)) = workspace
+                if let Some(action) = workspace
                     .desktop_run_list(cx, ids!(run_list))
-                    .run_requested(actions)
+                    .requested_action(actions)
                 {
-                    self.run_item(cx, &mount, &name);
+                    match action {
+                        DesktopRunListAction::RunItem { mount, name } => {
+                            self.run_item(cx, &mount, &name);
+                        }
+                        DesktopRunListAction::StopBuilds {
+                            build_ids,
+                            mount,
+                            name,
+                        } => {
+                            self.stop_builds(cx, &build_ids, &mount, &name);
+                        }
+                        DesktopRunListAction::None => {}
+                    }
                 }
                 if workspace.button(cx, ids!(run_stop_all)).clicked(actions) {
                     self.request_stop_all_builds_for_mount(cx, &active_mount);

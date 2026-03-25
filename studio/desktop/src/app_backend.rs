@@ -543,6 +543,22 @@ impl App {
             return;
         };
         if let Some(workspace) = self.mount_workspace_widget(cx, &active_mount) {
+            let has_running_builds = self
+                .data
+                .build_to_mount
+                .iter()
+                .any(|(build_id, mount)| {
+                    mount == &active_mount
+                        && self
+                            .data
+                            .build_package
+                            .get(build_id)
+                            .map(String::as_str)
+                            != Some("makepad.splash")
+                });
+            workspace
+                .button(cx, ids!(run_stop_all))
+                .set_visible(cx, has_running_builds);
             workspace.widget(cx, ids!(run_list)).redraw(cx);
         }
     }
