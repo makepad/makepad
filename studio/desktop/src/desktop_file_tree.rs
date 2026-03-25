@@ -8,11 +8,14 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
+    let STUDIO_FILE_TREE_ROW_HEIGHT = 28.0
+    let STUDIO_FILE_TREE_NODE_HEIGHT = 22.0
+
     mod.widgets.DesktopFileTreeBase = #(DesktopFileTree::register_widget(vm))
 
     mod.widgets.FilteredFileItem = View {
         width: Fill
-        height: 30.0
+        height: STUDIO_FILE_TREE_ROW_HEIGHT
         flow: Right
         align: Align {x: 0.0 y: 0.5}
         padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
@@ -65,8 +68,8 @@ script_mod! {
 
     mod.widgets.FilteredFileEmpty = View {
         width: Fill
-        height: 30.0
-        padding: Inset {left: 8.0 right: 8.0 top: 6.0 bottom: 6.0}
+        height: STUDIO_FILE_TREE_ROW_HEIGHT
+        padding: Inset {left: 8.0 right: 8.0 top: 5.0 bottom: 5.0}
         show_bg: true
         draw_bg +: {
             is_even: instance(0.0)
@@ -89,7 +92,9 @@ script_mod! {
             active_page: @file_tree_page
             width: Fill
             height: Fill
-            file_tree_page := FileTree {}
+            file_tree_page := FileTree {
+                node_height: STUDIO_FILE_TREE_NODE_HEIGHT
+            }
             filter_list_page := PortalList {
                 width: Fill
                 height: Fill
@@ -138,7 +143,7 @@ pub struct DesktopFileTree {
 }
 
 impl DesktopFileTree {
-    const ROW_HEIGHT: f64 = 30.0;
+    const ROW_HEIGHT: f64 = 28.0;
 
     fn status_dot_color(status: GitStatusDotKind) -> Vec4 {
         match status {
