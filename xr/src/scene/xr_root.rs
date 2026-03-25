@@ -4,7 +4,7 @@ use crate::xr_select::{XrSelect, XrSelectAction};
 use crate::*;
 use makepad_widgets::event::XrFingerTip;
 use makepad_widgets::makepad_script::ScriptFnRef;
-use std::{cell::Cell, cmp::Ordering, collections::HashSet, rc::Rc, time::Instant};
+use std::{cell::Cell, cmp::Ordering, rc::Rc, time::Instant};
 
 const DESKTOP_TOUCH_DOWN_Z: f32 = 0.0;
 const DESKTOP_TOUCH_UP_Z: f32 = 64.0;
@@ -197,7 +197,6 @@ pub struct XrRoot {
 
     // Children (from := declarations)
     #[rust] children: Vec<(LiveId, WidgetRef)>,
-    #[rust] child_draw_lists: Vec<DrawList>,
     #[rust] permissions_widget: WidgetRef,
 
     // State
@@ -504,19 +503,12 @@ impl XrRoot {
         }
     }
 
-    fn apply_child_draw_list_depth_sort(
-        &mut self,
-        cx: &mut Cx3d,
-        root_draw_list_id: DrawListId,
-        draw_order_entries: &[(usize, f32, bool)],
-    ) {
+    fn sort_child_draw_order(draw_order_entries: &mut [(usize, f32, bool)]) {
         if draw_order_entries.len() <= 1 {
-            cx.draw_lists[root_draw_list_id].draw_item_reorder = None;
             return;
         }
 
-        let mut anchored_items = draw_order_entries.to_vec();
-        anchored_items.sort_by(|a, b| {
+        draw_order_entries.sort_by(|a, b| {
             match (a.2, b.2) {
                 (false, true) => Ordering::Less,
                 (true, false) => Ordering::Greater,
@@ -524,26 +516,6 @@ impl XrRoot {
                 (true, true) => a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal).then_with(|| a.0.cmp(&b.0)),
             }
         });
-
-        let sorted_child_ids = anchored_items
-            .iter()
-            .map(|(draw_item_id, _, _)| *draw_item_id)
-            .collect::<Vec<_>>();
-        let child_id_set = sorted_child_ids.iter().copied().collect::<HashSet<_>>();
-        let draw_item_count = cx.draw_lists[root_draw_list_id].draw_items.len();
-        let mut reorder = Vec::with_capacity(draw_item_count);
-        let mut next_child_index = 0usize;
-
-        for draw_item_id in 0..draw_item_count {
-            if child_id_set.contains(&draw_item_id) {
-                reorder.push(sorted_child_ids[next_child_index]);
-                next_child_index += 1;
-            } else {
-                reorder.push(draw_item_id);
-            }
-        }
-
-        cx.draw_lists[root_draw_list_id].draw_item_reorder = Some(reorder);
     }
 
     fn draw_3d_content(
@@ -559,7 +531,6 @@ impl XrRoot {
             Mat4f::identity()
         };
 
-        let root_draw_list_id = self.draw_list.id();
         cx.begin_scene_3d(scene_state);
         let previous_world = cx.set_scene_world_transform_3d(root_transform);
 
@@ -574,24 +545,22 @@ impl XrRoot {
             let child = self.children[i].1.clone();
             let child_center = Self::child_world_sort_center(&child)
                 .map(|center| Self::transform_point(&root_transform, center));
-            let child_draw_list = &mut self.child_draw_lists[i];
-            child_draw_list.begin_always(cx);
-            let root_draw_item_id = cx.draw_lists[root_draw_list_id]
-                .draw_items
-                .len()
-                .saturating_sub(1);
-            child.draw_3d_all(cx, &mut scene_scope);
-            child_draw_list.end(cx);
             if let Some(child_center) = child_center {
                 draw_order_entries.push((
-                    root_draw_item_id,
+                    i,
                     Self::draw_list_depth(&scene_state, child_center),
                     Self::child_is_transparent(&child),
                 ));
+            } else {
+                draw_order_entries.push((i, 0.0, false));
             }
         }
 
-        self.apply_child_draw_list_depth_sort(cx, root_draw_list_id, &draw_order_entries);
+        Self::sort_child_draw_order(&mut draw_order_entries);
+        for (index, _, _) in draw_order_entries {
+            let child = self.children[index].1.clone();
+            child.draw_3d_all(cx, &mut scene_scope);
+        }
         if let Some(previous_world) = previous_world {
             let _ = cx.set_scene_world_transform_3d(previous_world);
         }
@@ -692,7 +661,6 @@ impl ScriptHook for XrRoot {
     fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
         if apply.is_reload() {
             self.children.clear();
-            self.child_draw_lists.clear();
             self.permissions_widget = WidgetRef::empty();
         }
     }
@@ -719,13 +687,7 @@ impl ScriptHook for XrRoot {
                 });
             }
         }
-        vm.with_cx_mut(|cx| {
-            self.child_draw_lists.truncate(self.children.len());
-            while self.child_draw_lists.len() < self.children.len() {
-                self.child_draw_lists.push(DrawList::new(cx));
-            }
-            cx.widget_tree_mark_dirty(self.uid);
-        });
+        vm.cx_mut().widget_tree_mark_dirty(self.uid);
     }
 }
 

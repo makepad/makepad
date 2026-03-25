@@ -170,7 +170,7 @@ script_mod! {
                     on_render: ||{
                         Cube{
                             body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.78, 0.08, 0.58)
+                            size: vec3(0.78, 0.08, 0.92)
                             corner_radius: 0.02
                             roughness: 0.92
                             metallic: 0.0
@@ -180,7 +180,7 @@ script_mod! {
 
                         Cube{
                             body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.06, 0.60, 0.58)
+                            size: vec3(0.06, 0.60, 0.92)
                             corner_radius: 0.02
                             roughness: 0.84
                             metallic: 0.0
@@ -190,7 +190,7 @@ script_mod! {
 
                         Cube{
                             body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.06, 0.60, 0.58)
+                            size: vec3(0.06, 0.60, 0.92)
                             corner_radius: 0.02
                             roughness: 0.84
                             metallic: 0.0
@@ -205,7 +205,7 @@ script_mod! {
                             roughness: 0.84
                             metallic: 0.0
                             color: #x17202a
-                            pos: vec3(0.05, 0.20, -0.36)
+                            pos: vec3(0.05, 0.20, -0.53)
                         }
 
                         Cube{
@@ -215,11 +215,11 @@ script_mod! {
                             roughness: 0.86
                             metallic: 0.0
                             color: #x223140
-                            pos: vec3(0.05, 0.02, 0.16)
+                            pos: vec3(0.05, 0.02, 0.33)
                         }
 
                         for layer in 0..4 {
-                            for row in 0..4 {
+                            for row in 0..8 {
                                 for col in 0..5 {
                                     let color = if (col + row * 2 + layer * 3) % 6 == 0 {
                                         #xff6f59
@@ -240,7 +240,7 @@ script_mod! {
                                         restitution: 0.03
                                         radius: 0.040
                                         color: color
-                                        pos: vec3(-0.118 + col * 0.084, 0.04 + layer * 0.082, -0.268 + row * 0.084)
+                                        pos: vec3(-0.118 + col * 0.084, 0.04 + layer * 0.082, -0.436 + row * 0.084)
                                     }
                                 }
                             }
@@ -338,7 +338,7 @@ script_mod! {
 
                         detail := Label{
                             width: Fill
-                            text: "Quest stress scene: 80 faceted icosahedron masses."
+                            text: "Quest stress scene: 160 faceted icosahedron masses."
                             draw_text.color: #xb8c8d8
                         }
                     }
@@ -407,7 +407,7 @@ script_mod! {
 
                         scene_status := Label{
                             width: Fill
-                            text: "Default scene: 80 faceted icosahedra with sphere colliders."
+                            text: "Default scene: 160 faceted icosahedra with sphere colliders."
                             draw_text.color: #xe8f4ff
                         }
                     }

@@ -2,7 +2,7 @@ use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 use std::cell::RefCell;
 
 use super::{
-    xr_node::xr_widget_world_transform,
+    xr_node::{xr_env_texture_from_scope, xr_widget_world_transform},
     XrNode,
 };
 
@@ -28,26 +28,45 @@ script_mod! {
         draw_call: uniform_buffer(draw.DrawCallUniforms)
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
-        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
+        geom: vertex_buffer(geom.IcoVertex, geom.IcoGeom)
+        env_texture: texture_cube(float)
+        u_has_env_texture: uniform(float(0.0))
+        u_light_dir: uniform(vec3(-0.34, 0.88, 0.32))
+        u_fill_light_dir: uniform(vec3(0.58, 0.36, -0.73))
+        u_ambient: uniform(float(0.11))
+        u_key_strength: uniform(float(0.74))
+        u_fill_strength: uniform(float(0.24))
+        u_reflectivity: uniform(float(0.88))
+        u_env_intensity: uniform(float(1.15))
 
         v_world_clip: varying(vec4f)
+        v_world: varying(vec3f)
+        v_normal: varying(vec3f)
         v_light: varying(float)
 
+        active_camera_world_pos: fn() -> vec3f {
+            let camera_world = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0);
+            return vec3(
+                camera_world.x / max(camera_world.w, 0.00001),
+                camera_world.y / max(camera_world.w, 0.00001),
+                camera_world.z / max(camera_world.w, 0.00001)
+            )
+        }
+
+        sample_env: fn(dir: vec3f) -> vec3f {
+            if self.u_has_env_texture > 0.5 {
+                return self.env_texture.sample_as_bgra(dir).xyz
+            }
+            let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+            return mix(vec3(0.05, 0.055, 0.065), vec3(0.42, 0.48, 0.56), t)
+        }
+
         vertex: fn() {
-            let safe_scale = vec3(
-                max(abs(self.local_scale.x), 0.000001),
-                max(abs(self.local_scale.y), 0.000001),
-                max(abs(self.local_scale.z), 0.000001)
-            );
-            let local_pos = vec3(
-                self.geom.pos_nx.x * self.local_scale.x,
-                self.geom.pos_nx.y * self.local_scale.y,
-                self.geom.pos_nx.z * self.local_scale.z
-            );
+            let local_pos = vec3(self.geom.pos.x, self.geom.pos.y, self.geom.pos.z);
             let local_normal = normalize(vec3(
-                self.geom.pos_nx.w / safe_scale.x,
-                self.geom.ny_nz_uv.x / safe_scale.y,
-                self.geom.ny_nz_uv.y / safe_scale.z
+                self.geom.normal.x,
+                self.geom.normal.y,
+                self.geom.normal.z
             ));
             let model_view = self.draw_list.view_transform * self.transform;
             let world = model_view * vec4(local_pos.x, local_pos.y, local_pos.z, 1.0);
@@ -57,16 +76,26 @@ script_mod! {
                 local_normal.z,
                 0.0
             )).xyz);
-            let key = max(dot(world_normal, normalize(self.light_dir)), 0.0) * self.key_strength;
-            let fill = max(dot(world_normal, normalize(self.fill_light_dir)), 0.0) * self.fill_strength;
-            self.v_light = clamp(self.ambient + key + fill, self.ambient, 1.0);
-            self.v_world_clip = world;
+            let key = max(dot(world_normal, normalize(self.u_light_dir)), 0.0) * self.u_key_strength;
+            let fill = max(dot(world_normal, normalize(self.u_fill_light_dir)), 0.0) * self.u_fill_strength;
+            self.v_light = clamp(self.u_ambient + key + fill, self.u_ambient, 1.0);
+            self.v_world = world.xyz;
+            self.v_normal = world_normal;
+            self.v_world_clip = vec4(world.x, world.y, world.z, 1.0);
             let view_pos = self.draw_pass.camera_view * world;
             self.vertex_pos = self.draw_pass.camera_projection * view_pos;
         }
 
         pixel: fn() {
-            let lit = vec3(self.color.x, self.color.y, self.color.z) * self.v_light;
+            let normal = normalize(self.v_normal);
+            let view_dir = normalize(self.active_camera_world_pos() - self.v_world);
+            let ndotv = max(dot(normal, view_dir), 0.0);
+            let reflection_dir = normalize(normal * (2.0 * ndotv) - view_dir);
+            let reflection = self.sample_env(reflection_dir) * self.color.xyz * self.u_env_intensity;
+            let fresnel = 0.72 + 0.28 * pow(max(1.0 - ndotv, 0.0), 5.0);
+            let base = self.color.xyz * self.v_light * (1.0 - self.u_reflectivity * 0.42);
+            let reflect_mix = clamp(self.u_reflectivity * fresnel, 0.0, 1.0);
+            let lit = mix(base, reflection, reflect_mix);
             return vec4(lit.x, lit.y, lit.z, self.color.w);
         }
 
@@ -82,11 +111,8 @@ script_mod! {
         color: vec4(0.95, 0.62, 0.28, 1.0)
         draw_ico: mod.draw.DrawIcoSolid{
             backface_culling: true
-            light_dir: vec3(-0.34, 0.88, 0.32)
-            fill_light_dir: vec3(0.58, 0.36, -0.73)
-            ambient: 0.11
-            key_strength: 0.74
-            fill_strength: 0.24
+            reflectivity: 0.88
+            env_intensity: 1.15
         }
     }
 }
@@ -94,31 +120,76 @@ script_mod! {
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawIcoSolid {
+    #[rust(0.0)]
+    pub has_env_texture: f32,
+    #[rust(vec3(-0.34, 0.88, 0.32))]
+    pub light_dir: Vec3f,
+    #[rust(vec3(0.58, 0.36, -0.73))]
+    pub fill_light_dir: Vec3f,
+    #[rust(0.11)]
+    pub ambient: f32,
+    #[rust(0.74)]
+    pub key_strength: f32,
+    #[rust(0.24)]
+    pub fill_strength: f32,
+    #[rust(0.88)]
+    pub reflectivity: f32,
+    #[rust(1.15)]
+    pub env_intensity: f32,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
     pub color: Vec4f,
-    #[live(vec3(-0.34, 0.88, 0.32))]
-    pub light_dir: Vec3f,
-    #[live(vec3(0.58, 0.36, -0.73))]
-    pub fill_light_dir: Vec3f,
-    #[live(0.11)]
-    pub ambient: f32,
-    #[live(0.74)]
-    pub key_strength: f32,
-    #[live(0.24)]
-    pub fill_strength: f32,
     #[live]
     pub transform: Mat4f,
-    #[live(vec3(1.0, 1.0, 1.0))]
-    pub local_scale: Vec3f,
     #[live(1.0)]
     pub depth_clip: f32,
 }
 
 impl DrawIcoSolid {
+    fn set_env_texture(&mut self, texture: Option<Texture>) {
+        self.has_env_texture = if texture.is_some() { 1.0 } else { 0.0 };
+        self.draw_vars.texture_slots[0] = texture;
+    }
+
+    fn apply_uniforms(&mut self, cx: &mut CxDraw) {
+        let light_dir = if self.light_dir.length() > 0.000_01 {
+            self.light_dir.normalize()
+        } else {
+            vec3(0.0, 1.0, 0.0)
+        };
+        let fill_light_dir = if self.fill_light_dir.length() > 0.000_01 {
+            self.fill_light_dir.normalize()
+        } else {
+            vec3(0.0, 1.0, 0.0)
+        };
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_has_env_texture), &[self.has_env_texture]);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_light_dir),
+            &[light_dir.x, light_dir.y, light_dir.z],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_fill_light_dir),
+            &[fill_light_dir.x, fill_light_dir.y, fill_light_dir.z],
+        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_ambient), &[self.ambient]);
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_key_strength), &[self.key_strength]);
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_fill_strength), &[self.fill_strength]);
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_reflectivity), &[self.reflectivity]);
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_env_intensity), &[self.env_intensity]);
+    }
+
     fn draw(&mut self, cx: &mut CxDraw, geometry_id: GeometryId) {
         self.draw_vars.geometry_id = Some(geometry_id);
+        self.apply_uniforms(cx);
         if self.draw_vars.can_instance() {
             let new_area = cx.add_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
@@ -172,11 +243,16 @@ impl Widget for IcoSphere {
 
         let radius = self.radius.max(0.001);
         let geometry_id = shared_ico_geometry_id(cx.cx);
-        self.draw_ico.transform =
-            xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
-        self.draw_ico.local_scale = vec3(radius, radius, radius);
+        let world = xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
+        let local_scale = Mat4f::nonuniform_scaled_translation(
+            vec3(radius, radius, radius),
+            vec3(0.0, 0.0, 0.0),
+        );
+        self.draw_ico.transform = Mat4f::mul(&world, &local_scale);
         self.draw_ico.color = self.color;
         self.draw_ico.depth_clip = 1.0;
+        self.draw_ico
+            .set_env_texture(xr_env_texture_from_scope(scope));
         self.draw_ico.draw(cx, geometry_id);
 
         self.node.draw_3d(cx, scope)
@@ -241,7 +317,7 @@ fn build_unit_icosahedron_geometry() -> (Vec<f32>, Vec<u32>) {
         [9, 8, 1],
     ];
 
-    let mut vertices = Vec::with_capacity(faces.len() * 3 * 16);
+    let mut vertices = Vec::with_capacity(faces.len() * 3 * 8);
     let mut indices = Vec::with_capacity(faces.len() * 3);
 
     for face in faces {
@@ -261,19 +337,11 @@ fn build_unit_icosahedron_geometry() -> (Vec<f32>, Vec<u32>) {
                 position.x,
                 position.y,
                 position.z,
+                1.0,
                 normal.x,
                 normal.y,
                 normal.z,
                 0.0,
-                0.0,
-                1.0,
-                1.0,
-                1.0,
-                1.0,
-                1.0,
-                0.0,
-                0.0,
-                1.0,
             ]);
             indices.push(indices.len() as u32);
         }
