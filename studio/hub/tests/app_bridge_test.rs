@@ -9,7 +9,7 @@ use makepad_studio_protocol::hub_protocol::{
 };
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec, WidgetQueryResponse,
-    WidgetTreeDumpResponse,
+    WidgetSnapshot, WidgetSnapshotResponse, WidgetTreeDumpResponse,
 };
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -90,7 +90,7 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
 
     let runtime = NetworkRuntime::new(NetworkConfig::default());
     let ui_socket = LiveId::from_str("studio2.backend.ui");
-    let ui_request = HttpRequest::new(format!("ws://127.0.0.1:{port}/ui/"), HttpMethod::GET);
+    let ui_request = HttpRequest::new(format!("ws://127.0.0.1:{port}/ui"), HttpMethod::GET);
     if runtime.ws_open(ui_socket, ui_request).is_err() {
         return;
     }
@@ -199,7 +199,7 @@ fn websocket_app_bridge_widget_query_roundtrip() {
 
     let runtime = NetworkRuntime::new(NetworkConfig::default());
     let ui_socket = LiveId::from_str("studio2.backend.ui.query");
-    let ui_request = HttpRequest::new(format!("ws://127.0.0.1:{port}/ui/"), HttpMethod::GET);
+    let ui_request = HttpRequest::new(format!("ws://127.0.0.1:{port}/ui"), HttpMethod::GET);
     if runtime.ws_open(ui_socket, ui_request).is_err() {
         return;
     }
@@ -278,6 +278,134 @@ fn websocket_app_bridge_widget_query_roundtrip() {
             assert_eq!(got_build, build_id);
             assert_eq!(query, "id:math_tab");
             assert_eq!(rects, vec!["DT math_tab DockTab 10 20 30 40".to_string()]);
+        }
+        other => panic!("unexpected ui response: {:?}", other),
+    }
+
+    let _ = runtime.ws_close(app_socket);
+    let _ = runtime.ws_close(ui_socket);
+}
+
+#[test]
+fn websocket_app_bridge_widget_snapshot_roundtrip() {
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "fn main() {}\n").unwrap();
+
+    let Some(port) = find_free_port() else {
+        return;
+    };
+    let config = HubConfig {
+        listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        post_max_size: 1024 * 1024,
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        enable_in_process_gateway: false,
+    };
+    let _backend = match StudioHub::start_headless(config) {
+        Ok(v) => v,
+        Err(err) => {
+            if err.contains("failed to bind") {
+                return;
+            }
+            panic!("start backend failed: {}", err);
+        }
+    };
+
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let ui_socket = LiveId::from_str("studio2.backend.ui.snapshot");
+    let ui_request = HttpRequest::new(format!("ws://127.0.0.1:{port}/ui"), HttpMethod::GET);
+    if runtime.ws_open(ui_socket, ui_request).is_err() {
+        return;
+    }
+    let ui_opened = wait_for_event(
+        &runtime,
+        Duration::from_secs(3),
+        |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == ui_socket),
+    );
+    assert!(ui_opened.is_some(), "did not receive ui WsOpened");
+
+    let hello_bin = wait_for_ws_binary(&runtime, ui_socket, Duration::from_secs(3));
+    let hello = HubToClient::deserialize_bin(&hello_bin).expect("decode hello");
+    let client_id = match hello {
+        HubToClient::Hello { client_id } => client_id,
+        other => panic!("expected hello, got {:?}", other),
+    };
+
+    let build_id = QueryId::new(client_id, 100);
+    let app_socket = LiveId::from_str("studio2.backend.app.snapshot");
+    let app_request = HttpRequest::new(
+        format!("ws://127.0.0.1:{port}/app/{}", build_id.0),
+        HttpMethod::GET,
+    );
+    runtime
+        .ws_open(app_socket, app_request)
+        .expect("open app socket");
+    let app_opened = wait_for_event(
+        &runtime,
+        Duration::from_secs(3),
+        |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == app_socket),
+    );
+    assert!(app_opened.is_some(), "did not receive app WsOpened");
+
+    let query_id = QueryId::new(client_id, 3);
+    let ui_request = ClientToHubEnvelope {
+        query_id,
+        msg: ClientToHub::WidgetSnapshot { build_id },
+    };
+    runtime
+        .ws_send(ui_socket, WsSend::Binary(ui_request.serialize_bin()))
+        .expect("send widget snapshot request");
+
+    let app_incoming = wait_for_ws_binary(&runtime, app_socket, Duration::from_secs(3));
+    let app_msg = StudioToAppVec::deserialize_bin(&app_incoming).expect("decode app command");
+    assert_eq!(app_msg.0.len(), 1);
+    match &app_msg.0[0] {
+        StudioToApp::WidgetSnapshot(request) => {
+            assert_eq!(request.request_id, query_id.0);
+        }
+        other => panic!("unexpected app message: {:?}", other),
+    }
+
+    let widgets = vec![WidgetSnapshot {
+        id: "panel_input".to_string(),
+        widget_type: "TextInput".to_string(),
+        window_id: "panel_window".to_string(),
+        window_index: 1,
+        visible: true,
+        enabled: true,
+        x: 120,
+        y: 240,
+        width: 180,
+        height: 44,
+        text: None,
+        value: Some("hello".to_string()),
+        checked: None,
+        selected: None,
+    }];
+    let response = AppToStudioVec(vec![AppToStudio::WidgetSnapshot(
+        WidgetSnapshotResponse {
+            request_id: query_id.0,
+            widgets: widgets.clone(),
+        },
+    )]);
+    runtime
+        .ws_send(app_socket, WsSend::Binary(response.serialize_bin()))
+        .expect("send app response");
+
+    let ui_incoming = wait_for_ws_binary(&runtime, ui_socket, Duration::from_secs(3));
+    let ui_msg = HubToClient::deserialize_bin(&ui_incoming).expect("decode ui response");
+    match ui_msg {
+        HubToClient::WidgetSnapshot {
+            query_id: got_query,
+            build_id: got_build,
+            widgets: got_widgets,
+        } => {
+            assert_eq!(got_query, query_id);
+            assert_eq!(got_build, build_id);
+            assert_eq!(got_widgets, widgets);
         }
         other => panic!("unexpected ui response: {:?}", other),
     }

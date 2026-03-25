@@ -619,6 +619,10 @@ impl Button {
         self.draw_bg.end(cx);
     }
 
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Returns `true` if this button was clicked.
     ///
     /// See [`ButtonAction`] for more details.

@@ -454,6 +454,17 @@ pub enum DropDownAction {
 }
 
 impl DropDown {
+    pub fn selected_item_index(&self) -> usize {
+        self.selected_item
+    }
+
+    pub fn selected_item_label(&self) -> String {
+        self.labels
+            .get(self.selected_item)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn set_active(&mut self, cx: &mut Cx) {
         self.is_active = true;
         self.draw_bg.redraw(cx);
