@@ -88,7 +88,9 @@ const DEPTH_QUERY_TSDF_SUPPORT_RADIUS_MAX: f32 = 0.12;
 const DEPTH_QUERY_TSDF_SUPPORT_EXTENT_PADDING_SCALE: f32 = 0.22;
 const DEPTH_QUERY_TSDF_IMPACT_MIN_SPEED: f32 = 0.55;
 const DEPTH_QUERY_TSDF_IMPACT_MIN_HORIZONTAL_SPEED: f32 = 0.40;
+const DEPTH_QUERY_TSDF_IMPACT_MIN_UPWARD_SPEED: f32 = 0.55;
 const DEPTH_QUERY_TSDF_IMPACT_NORMAL_Y_MAX: f32 = 0.72;
+const DEPTH_QUERY_TSDF_IMPACT_CEILING_NORMAL_Y_MIN: f32 = 0.82;
 const DEPTH_QUERY_TSDF_IMPACT_RAY_STEP_SCALE: f32 = 0.40;
 const DEPTH_QUERY_TSDF_IMPACT_RAY_STEP_MIN: f32 = 0.02;
 const DEPTH_QUERY_TSDF_IMPACT_EXTENT_SCALE: f32 = 1.20;
@@ -3183,10 +3185,13 @@ fn evaluate_depth_grid_impact_query(
     let travel_distance = travel.length();
     let velocity_length = query.velocity.length();
     let horizontal_speed = vec2f(query.velocity.x, query.velocity.z).length();
+    let upward_speed = query.velocity.y.max(0.0);
     if velocity_length < DEPTH_QUERY_TSDF_IMPACT_MIN_SPEED && travel_distance < 0.03 {
         return None;
     }
-    if horizontal_speed < DEPTH_QUERY_TSDF_IMPACT_MIN_HORIZONTAL_SPEED {
+    if horizontal_speed < DEPTH_QUERY_TSDF_IMPACT_MIN_HORIZONTAL_SPEED
+        && upward_speed < DEPTH_QUERY_TSDF_IMPACT_MIN_UPWARD_SPEED
+    {
         return None;
     }
 
@@ -3197,10 +3202,6 @@ fn evaluate_depth_grid_impact_query(
     } else {
         return None;
     };
-    if motion_dir.y.abs() >= 0.92 {
-        return None;
-    }
-
     let max_search_distance = (travel_distance + query.radius + query.max_distance)
         .max(query.radius + volume.voxel_size_meters * 0.75);
     let step_distance = (volume.voxel_size_meters * DEPTH_QUERY_TSDF_IMPACT_RAY_STEP_SCALE)
@@ -3236,9 +3237,21 @@ fn evaluate_depth_grid_impact_query(
 
             let hit_position = query.center + motion_dir.scale(hi);
             let signed_distance = query_depth_grid_trilinear_distance(volume, hit_position)?;
-            let normal = query_depth_grid_distance_gradient(volume, hit_position)?;
-            if normal.y.abs() > DEPTH_QUERY_TSDF_IMPACT_NORMAL_Y_MAX
-                || normal.dot(motion_dir.scale(-1.0)) <= DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT
+            let mut normal = query_depth_grid_distance_gradient(volume, hit_position)?;
+            let mut opposing_dot = normal.dot(motion_dir.scale(-1.0));
+            if opposing_dot <= DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT {
+                let flipped = normal.scale(-1.0);
+                let flipped_opposing_dot = flipped.dot(motion_dir.scale(-1.0));
+                if flipped_opposing_dot > DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT {
+                    normal = flipped;
+                    opposing_dot = flipped_opposing_dot;
+                }
+            }
+            let is_lateral_impact = normal.y.abs() <= DEPTH_QUERY_TSDF_IMPACT_NORMAL_Y_MAX;
+            let is_ceiling_impact = upward_speed >= DEPTH_QUERY_TSDF_IMPACT_MIN_UPWARD_SPEED
+                && normal.y <= -DEPTH_QUERY_TSDF_IMPACT_CEILING_NORMAL_Y_MIN;
+            if !(is_lateral_impact || is_ceiling_impact)
+                || opposing_dot <= DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT
             {
                 previous_t = t;
                 t += step_distance;
@@ -3331,6 +3344,28 @@ fn query_support_plane_quad(plane: XrDepthMeshQuerySupportPlane) -> [Vec3f; 4] {
         plane.point + tangent + bitangent,
         plane.point - tangent + bitangent,
     ]
+}
+
+fn make_query_hit_from_resolved_surface(
+    query: XrDepthMeshQuery,
+    version: u64,
+    mesh_generation: u64,
+    surface: XrDepthMeshQueryResolvedSurface,
+) -> XrDepthMeshQueryHit {
+    XrDepthMeshQueryHit {
+        key: query.key,
+        version,
+        mesh_generation,
+        distance: surface.surface.distance,
+        point: surface.surface.point,
+        normal: surface.surface.normal,
+        from_planar_patch: surface.surface.from_planar_patch,
+        triangle: surface.surface.triangle,
+        patch: surface.surface.patch,
+        chunk_key: surface.surface.chunk_key,
+        collider: surface.collider,
+        additional_hits: Vec::new(),
+    }
 }
 
 fn evaluate_depth_grid_support_query(
@@ -3549,21 +3584,37 @@ fn evaluate_geometry_query(
     version: u64,
 ) -> XrDepthMeshQueryResult {
     if !volume.mesh_grid.is_empty() {
-        return evaluate_depth_grid_support_query(volume, query, version)
-            .or_else(|| {
-                evaluate_depth_grid_impact_query(volume, query).map(|impact_surface| XrDepthMeshQueryHit {
+        let impact_surface = evaluate_depth_grid_impact_query(volume, query);
+        let prefer_impact = impact_surface.as_ref().is_some_and(|impact_surface| {
+            let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = &impact_surface.collider.geometry;
+            query.velocity.y >= DEPTH_QUERY_TSDF_IMPACT_MIN_UPWARD_SPEED
+                && plane.normal.y <= -DEPTH_QUERY_TSDF_IMPACT_CEILING_NORMAL_Y_MIN
+        });
+        if prefer_impact {
+            return impact_surface
+                .map(|impact_surface| {
+                    XrDepthMeshQueryResult::Hit(make_query_hit_from_resolved_surface(
+                        query,
+                        version,
+                        volume.mesh_generation,
+                        impact_surface,
+                    ))
+                })
+                .unwrap_or(XrDepthMeshQueryResult::Miss {
                     key: query.key,
                     version,
                     mesh_generation: volume.mesh_generation,
-                    distance: impact_surface.surface.distance,
-                    point: impact_surface.surface.point,
-                    normal: impact_surface.surface.normal,
-                    from_planar_patch: impact_surface.surface.from_planar_patch,
-                    triangle: impact_surface.surface.triangle,
-                    patch: impact_surface.surface.patch,
-                    chunk_key: impact_surface.surface.chunk_key,
-                    collider: impact_surface.collider,
-                    additional_hits: Vec::new(),
+                });
+        }
+        return evaluate_depth_grid_support_query(volume, query, version)
+            .or_else(|| {
+                impact_surface.map(|impact_surface| {
+                    make_query_hit_from_resolved_surface(
+                        query,
+                        version,
+                        volume.mesh_generation,
+                        impact_surface,
+                    )
                 })
             })
             .map(XrDepthMeshQueryResult::Hit)
@@ -5601,6 +5652,56 @@ mod tests {
             }
             XrDepthMeshQueryResult::Miss { .. } => {
                 panic!("expected TSDF wall hit to produce an impact plane");
+            }
+        }
+    }
+
+    #[test]
+    fn geometry_query_from_depth_grid_returns_ceiling_impact_plane() {
+        let mut volume = DepthMeshVolume::new(1, 0.1);
+        volume.generation = 23;
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-4, -4, -4),
+            VoxelCoord::new(4, 4, 4),
+            |world| world.y - 0.18,
+        );
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 103,
+                center: vec3f(0.0, 0.06, 0.0),
+                predicted_center: vec3f(0.0, 0.16, 0.0),
+                velocity: vec3f(0.0, 0.9, 0.0),
+                radius: 0.05,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        match result {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = hit.collider.geometry;
+                assert_eq!(
+                    hit.collider.role,
+                    XrDepthMeshQueryColliderRole::Impact,
+                    "expected TSDF ceiling hit to resolve as an impact plane"
+                );
+                assert!(
+                    plane.normal.y <= -0.85,
+                    "expected mostly downward ceiling normal, got {:?}",
+                    plane.normal
+                );
+                assert!(
+                    hit.collider.restitution >= 0.3,
+                    "expected impact plane restitution, got {}",
+                    hit.collider.restitution
+                );
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected TSDF ceiling hit to produce an impact plane");
             }
         }
     }
