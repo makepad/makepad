@@ -11,7 +11,7 @@ use rapier3d::prelude::{
     Pose as RapierPose, Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
     Rotation as RapierRotation, SharedShape, Vector as RapierVector,
 };
-use std::{collections::HashMap, rc::Rc, time::Instant};
+use std::{collections::HashMap, rc::Rc};
 
 #[path = "xr_depth.rs"]
 mod xr_depth;
@@ -21,13 +21,16 @@ mod xr_hands;
 mod xr_passthrough;
 #[path = "xr_physics.rs"]
 mod xr_physics;
+#[path = "xr_physics_worker.rs"]
+mod xr_physics_worker;
 
-pub(crate) use self::xr_physics::{makepad_pose, RapierScene};
+pub(crate) use self::xr_physics::RapierScene;
 use self::{
     xr_depth::{DepthSurfaceMeshChunkHandle, RetainedDepthQueryHit},
     xr_passthrough::{
         XrPassthroughCameraChoice, XrPassthroughCameraTextures, XrPassthroughEnvCube,
     },
+    xr_physics_worker::{XrPhysicsWorker, XrPhysicsWorkerResult},
 };
 
 script_mod! {
@@ -229,13 +232,15 @@ pub struct XrEnv {
     #[live(9.81)]
     pub gravity: f32,
     #[rust]
-    scene: Option<RapierScene>,
+    physics_worker: Option<XrPhysicsWorker>,
     #[rust]
     runtime_bodies: Rc<HashMap<WidgetUid, XrRuntimeBodyState>>,
     #[rust]
     root_pose: Option<Pose>,
     #[rust(true)]
     scene_dirty: bool,
+    #[rust]
+    physics_revision: u64,
     #[rust]
     physics_compute_ms: f64,
     #[rust]
@@ -558,102 +563,55 @@ impl XrEnv {
         cubes
     }
 
-    fn clear_depth_query_state(&mut self, cx: &mut Cx) {
-        if let Some(scene) = self.scene.as_ref() {
-            let depth_mesh = cx.xr_depth_mesh();
-            for index in 0..scene.depth_query_surface_set_count() {
-                depth_mesh.clear_query(RapierScene::depth_query_key(index));
-            }
-        }
-        self.depth_query_retained_hits.clear();
+    fn ensure_physics_worker(&mut self, cx: &mut Cx) -> &mut XrPhysicsWorker {
+        self.physics_worker
+            .get_or_insert_with(|| XrPhysicsWorker::new(cx.xr_depth_mesh()))
     }
 
-    fn rebuild_physics_scene(&mut self, cx: &mut Cx, children: &[(LiveId, WidgetRef)]) {
-        self.clear_depth_query_state(cx);
+    fn apply_physics_worker_result(&mut self, result: XrPhysicsWorkerResult) -> bool {
+        if result.revision != self.physics_revision {
+            return false;
+        }
+        self.runtime_bodies = Rc::new(result.runtime_bodies);
+        if let Some(retained_hits) = result.depth_query_retained_hits {
+            self.depth_query_retained_hits = retained_hits;
+        }
+        self.physics_compute_ms = result.physics_compute_ms;
+        self.physics_depth_query_surface_count = result.physics_depth_query_surface_count;
+        self.physics_depth_query_vertex_count = result.physics_depth_query_vertex_count;
+        self.physics_depth_query_triangle_count = result.physics_depth_query_triangle_count;
+        true
+    }
+
+    fn poll_physics_worker(&mut self, cx: &mut Cx) {
+        let mut applied = false;
+        while let Some(result) = self
+            .physics_worker
+            .as_mut()
+            .and_then(|worker| worker.take_latest_result())
+        {
+            applied |= self.apply_physics_worker_result(result);
+        }
+        if applied {
+            cx.redraw_all();
+        }
+    }
+
+    fn request_physics_rebuild(&mut self, cx: &mut Cx, children: &[(LiveId, WidgetRef)]) {
         let cubes = self.collect_cubes_from_children(children);
-        let mut scene = RapierScene::new(self.gravity);
-        for cube in cubes {
-            match cube.body_kind {
-                XrBodyKind::Disabled => {}
-                XrBodyKind::Dynamic => {
-                    if cube.is_sphere {
-                        scene.spawn_dynamic_sphere(
-                            cube.uid,
-                            cube.pose,
-                            cube.half_extents
-                                .x
-                                .min(cube.half_extents.y)
-                                .min(cube.half_extents.z),
-                            cube.scale,
-                            cube.density,
-                            cube.friction,
-                            cube.restitution,
-                        );
-                    } else {
-                        scene.spawn_dynamic_box(
-                            cube.uid,
-                            cube.pose,
-                            cube.half_extents,
-                            cube.scale,
-                            cube.density,
-                            cube.friction,
-                            cube.restitution,
-                        );
-                    }
-                }
-                XrBodyKind::Fixed => {
-                    if cube.is_sphere {
-                        scene.spawn_fixed_sphere(
-                            cube.uid,
-                            cube.pose,
-                            cube.half_extents
-                                .x
-                                .min(cube.half_extents.y)
-                                .min(cube.half_extents.z),
-                            cube.scale,
-                            cube.friction,
-                            cube.restitution,
-                        );
-                    } else {
-                        scene.spawn_fixed_box(
-                            cube.uid,
-                            cube.pose,
-                            cube.half_extents,
-                            cube.scale,
-                            cube.friction,
-                            cube.restitution,
-                        );
-                    }
-                }
-            }
-        }
-        self.scene = Some(scene);
+        self.depth_query_retained_hits.clear();
+        self.physics_revision = self.physics_revision.saturating_add(1);
+        let revision = self.physics_revision;
+        let gravity = self.gravity;
+        self.ensure_physics_worker(cx)
+            .request_rebuild(revision, gravity, cubes);
         self.scene_dirty = false;
-        self.sync_runtime_bodies();
-    }
-
-    fn sync_runtime_bodies(&mut self) {
-        let runtime_bodies = Rc::make_mut(&mut self.runtime_bodies);
-        runtime_bodies.clear();
-        let Some(scene) = self.scene.as_ref() else {
-            return;
-        };
-        for cube in &scene.cubes {
-            if let Some(body) = scene.bodies.get(cube.body) {
-                runtime_bodies.insert(
-                    cube.widget_uid,
-                    XrRuntimeBodyState {
-                        pose: makepad_pose(body.position()),
-                        scale: cube.scale,
-                    },
-                );
-            }
-        }
     }
 
     pub fn ensure_physics(&mut self, cx: &mut Cx, children: &[(LiveId, WidgetRef)]) {
-        if self.scene_dirty || self.scene.is_none() {
-            self.rebuild_physics_scene(cx, children);
+        self.poll_physics_worker(cx);
+        if self.scene_dirty || self.physics_worker.is_none() {
+            self.request_physics_rebuild(cx, children);
             cx.redraw_all();
         }
     }
@@ -673,50 +631,36 @@ impl XrEnv {
 
     #[allow(dead_code)]
     fn has_dynamic_bodies(&self) -> bool {
-        self.scene
-            .as_ref()
-            .map(|scene| {
-                scene
-                    .cubes
-                    .iter()
-                    .any(|cube| matches!(cube.body_kind, XrBodyKind::Dynamic))
-            })
-            .unwrap_or(false)
+        !self.runtime_bodies.is_empty()
     }
 
     pub fn step_physics(&mut self, cx: &mut Cx) {
-        let started = Instant::now();
-        if let Some(state) = self.last_xr_state.clone() {
-            Self::sync_hands(self.scene.as_mut(), &state);
-        }
-        Self::sync_depth_query_surfaces(
-            &mut self.depth_query_retained_hits,
-            self.scene.as_mut(),
-            cx,
+        self.poll_physics_worker(cx);
+        let revision = self.physics_revision;
+        let include_retained_hits = self.depth_query_hits_visible();
+        let (left_hand, right_hand) = self
+            .last_xr_state
+            .as_deref()
+            .map(|state| (state.left_hand.clone(), state.right_hand.clone()))
+            .unwrap_or_else(|| (XrHand::default(), XrHand::default()));
+        self.ensure_physics_worker(cx).request_step(
+            revision,
+            left_hand,
+            right_hand,
+            include_retained_hits,
         );
-        if let Some(scene) = self.scene.as_mut() {
-            scene.step();
-            let stats = scene.depth_query_stats();
-            self.physics_depth_query_surface_count = stats.active_surface_count;
-            self.physics_depth_query_vertex_count = stats.vertex_count;
-            self.physics_depth_query_triangle_count = stats.triangle_count;
-        } else {
-            self.physics_depth_query_surface_count = 0;
-            self.physics_depth_query_vertex_count = 0;
-            self.physics_depth_query_triangle_count = 0;
-        }
-        self.physics_compute_ms = started.elapsed().as_secs_f64() * 1000.0;
-        self.sync_runtime_bodies();
-        cx.redraw_all();
     }
 
     pub fn reset_physics(&mut self, cx: &mut Cx) {
-        self.clear_depth_query_state(cx);
-        self.scene = None;
+        self.physics_revision = self.physics_revision.saturating_add(1);
+        if let Some(worker) = self.physics_worker.as_mut() {
+            worker.request_reset(self.physics_revision);
+        }
         self.physics_compute_ms = 0.0;
         self.physics_depth_query_surface_count = 0;
         self.physics_depth_query_vertex_count = 0;
         self.physics_depth_query_triangle_count = 0;
+        self.depth_query_retained_hits.clear();
         Rc::make_mut(&mut self.runtime_bodies).clear();
         self.scene_dirty = true;
         cx.redraw_all();
@@ -724,12 +668,12 @@ impl XrEnv {
 
     #[allow(dead_code)]
     pub(crate) fn runtime_scene_ref(&self) -> Option<&RapierScene> {
-        self.scene.as_ref()
+        None
     }
 
     #[allow(dead_code)]
     pub(crate) fn runtime_scene_mut(&mut self) -> Option<&mut RapierScene> {
-        self.scene.as_mut()
+        None
     }
 
     // --- New API for XrRoot ---
@@ -748,16 +692,8 @@ impl XrEnv {
 
             if XR_RENDER_HAND_GEOMETRY {
                 self.prepare_pbr(cx);
-                let left_colliders = self
-                    .scene
-                    .as_ref()
-                    .map(|scene| Self::collect_live_hand_colliders(scene, &scene.left_hand));
-                let right_colliders = self
-                    .scene
-                    .as_ref()
-                    .map(|scene| Self::collect_live_hand_colliders(scene, &scene.right_hand));
-                self.draw_hand(cx, &state.left_hand, left_colliders.as_deref(), true);
-                self.draw_hand(cx, &state.right_hand, right_colliders.as_deref(), false);
+                self.draw_hand(cx, &state.left_hand, None, true);
+                self.draw_hand(cx, &state.right_hand, None, false);
             }
         }
 

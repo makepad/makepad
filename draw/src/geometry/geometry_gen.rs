@@ -81,6 +81,14 @@ pub struct CubeVertex {
     pub geom_tail_pad_1: f32,
 }
 
+#[derive(Clone, Script, ScriptHook)]
+pub struct IcoVertex {
+    #[live]
+    pub pos: Vec4f,
+    #[live]
+    pub normal: Vec4f,
+}
+
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     let geom = vm.new_module(id!(geom));
     // lets make a Quad geometry here
@@ -109,6 +117,12 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         .into_geometry(vm.cx_mut())
         .into_script_handle(vm);
     set_script_value!(vm, geom.CubeGeom = cgen);
+    // Ico geometry: minimal pos/normal layout for faceted solids.
+    set_script_value_to_pod!(vm, geom.IcoVertex);
+    let igen = GeometryGen::from_triangle_ico()
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
+    set_script_value!(vm, geom.IcoGeom = igen);
     NIL
 }
 
@@ -171,6 +185,19 @@ impl GeometryGen {
                 0.0, 0.0, // u, v
                 1.0, 1.0, 1.0, 1.0, // color r, g, b, a
                 1.0, 0.0, 0.0, 1.0, // tx, ty, tz, tw
+            ]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    /// Placeholder single-triangle geometry for minimal faceted-vertex drawing.
+    pub fn from_triangle_ico() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[
+                0.0, 0.0, 0.0, 1.0, // pos xyz + pad
+                0.0, 0.0, 1.0, 0.0, // normal xyz + pad
             ]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
