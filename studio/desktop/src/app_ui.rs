@@ -38,11 +38,11 @@ script_mod! {
         draw_bg +: {
             border_radius: 4.0
 
-            color: theme.color_bg_app * 0.78
-            color_hover: theme.color_bg_app * 0.86
-            color_focus: theme.color_bg_app * 0.9
-            color_down: theme.color_bg_app * 0.82
-            color_empty: theme.color_bg_app * 0.78
+            color: theme.color_bg_app * 0.82
+            color_hover: theme.color_bg_app * 0.88
+            color_focus: theme.color_bg_app * 0.92
+            color_down: theme.color_bg_app * 0.85
+            color_empty: theme.color_bg_app * 0.82
 
             border_color: theme.color_u_hidden
             border_color_hover: theme.color_u_hidden
@@ -59,9 +59,66 @@ script_mod! {
             border_color_2_disabled: theme.color_u_hidden
         }
         draw_text +: {
-            color_empty: theme.color_label_outer_off
-            color_empty_hover: theme.color_label_outer_off
+            color_empty: theme.color_label_inner_inactive
+            color_empty_hover: theme.color_label_inner_inactive
             color_empty_focus: theme.color_label_outer
+        }
+    }
+
+    let LogToolbarFilterInput = TextInputFlat {
+        margin: Inset {}
+        padding: Inset {left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+        draw_bg +: {
+            border_radius: 4.0
+
+            color: theme.color_bg_app * 0.84
+            color_hover: theme.color_bg_app * 0.9
+            color_focus: theme.color_bg_app * 0.94
+            color_down: theme.color_bg_app * 0.87
+            color_empty: theme.color_bg_app * 0.84
+
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_focus: theme.color_u_hidden
+            border_color_down: theme.color_u_hidden
+            border_color_empty: theme.color_u_hidden
+            border_color_disabled: theme.color_u_hidden
+
+            border_color_2: theme.color_u_hidden
+            border_color_2_hover: theme.color_u_hidden
+            border_color_2_focus: theme.color_u_hidden
+            border_color_2_down: theme.color_u_hidden
+            border_color_2_empty: theme.color_u_hidden
+            border_color_2_disabled: theme.color_u_hidden
+        }
+        draw_text +: {
+            color_empty: theme.color_label_inner_inactive
+            color_empty_hover: theme.color_label_inner_inactive
+            color_empty_focus: theme.color_label_outer
+        }
+    }
+
+    let LogToolbarButton = ButtonFlatter {
+        margin: Inset {}
+        padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
+        draw_text +: {
+            color: theme.color_label_outer_off
+            color_hover: theme.color_label_outer
+            color_down: theme.color_label_outer
+            color_focus: theme.color_label_outer
+        }
+    }
+
+    let LogToolbarIconButton = ButtonFlatterIcon {
+        width: 22.0
+        height: 22.0
+        margin: Inset {}
+        icon_walk: Walk {width: 13.0 height: 13.0}
+        draw_icon +: {
+            color: theme.color_label_outer_off
+            color_hover: theme.color_label_outer
+            color_down: theme.color_label_outer
+            color_focus: theme.color_label_outer
         }
     }
 
@@ -148,16 +205,14 @@ script_mod! {
                 align: Align {x: 0.0 y: 0.5}
                 spacing: 4.0
 
-                log_filter := TextInputFlat {
+                log_filter := LogToolbarFilterInput {
                     width: 216.0
-                    margin: Inset {}
                     empty_text: "Filter"
                 }
-                clear_log_filter := ButtonFlatter {
+                clear_log_filter := LogToolbarButton {
                     width: 20.0
                     height: 20.0
                     text: "x"
-                    margin: Inset {}
                     padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
                 }
             }
@@ -169,18 +224,11 @@ script_mod! {
                 align: Align {x: 0.0 y: 0.5}
                 spacing: 8.0
 
-                clear_log := ButtonFlatter {
+                clear_log := LogToolbarButton {
                     text: "Clear"
-                    margin: Inset {}
-                    padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
                 }
-                log_open_profiler := ButtonFlatterIcon {
-                    width: 24.0
-                    height: 24.0
-                    margin: Inset {}
-                    icon_walk: Walk {width: 14.0 height: 14.0}
+                log_open_profiler := LogToolbarIconButton {
                     draw_icon +: {
-                        color: theme.color_label_outer
                         svg: crate_resource("self://resources/icons/icon_profiler.svg")
                     }
                 }
