@@ -83,6 +83,7 @@ script_mod! {
     mod.widgets.XrEnv = set_type_default() do #(XrEnv::script_component(vm)){
         draw_cube: mod.draw.DrawCube{}
         draw_depth_mesh: mod.draw.DrawDepthMeshBasic{
+            alpha_blend: false
             light_dir: vec3(0.28, 0.86, 0.42)
             ambient: 0.26
             normal_bias: 0.006

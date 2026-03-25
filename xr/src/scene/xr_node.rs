@@ -5,8 +5,9 @@ use crate::{
     widget::*,
     widget_async::{CxWidgetToScriptCallExt, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult},
     widget_tree::CxWidgetExt,
+    Cube, Gltf, IcoSphere, RefractiveCube, Tree, XrSelect, XrView,
 };
-use std::{collections::HashMap, rc::Rc};
+use std::{cmp::Ordering, collections::{HashMap, HashSet}, rc::Rc};
 
 use super::scene_draw::compose_scene_node_transform;
 
@@ -146,6 +147,8 @@ pub struct XrNode {
     children: ComponentMap<LiveId, WidgetRef>,
     #[rust]
     child_order: Vec<LiveId>,
+    #[rust]
+    child_draw_lists: Vec<DrawList>,
 }
 
 impl XrNode {
@@ -220,6 +223,104 @@ impl XrNode {
     pub fn child_count(&self) -> usize {
         self.child_order.len()
     }
+
+    fn child_world_sort_center(child: &WidgetRef) -> Option<Vec3f> {
+        if let Some(select) = child.borrow::<XrSelect>() {
+            return Some(select.node().pos());
+        }
+        if let Some(view) = child.borrow::<XrView>() {
+            return Some(view.node().pos());
+        }
+        if let Some(cube) = child.borrow::<Cube>() {
+            return Some(cube.node().pos());
+        }
+        if let Some(ico) = child.borrow::<IcoSphere>() {
+            return Some(ico.node().pos());
+        }
+        if let Some(refractive_cube) = child.borrow::<RefractiveCube>() {
+            return Some(refractive_cube.node().pos());
+        }
+        if let Some(gltf) = child.borrow::<Gltf>() {
+            return Some(gltf.node().pos());
+        }
+        if let Some(tree) = child.borrow::<Tree>() {
+            return Some(tree.node().pos());
+        }
+        if let Some(node) = child.borrow::<XrNode>() {
+            return Some(node.pos());
+        }
+        None
+    }
+
+    fn child_is_transparent(child: &WidgetRef) -> bool {
+        child.borrow::<RefractiveCube>().is_some() || child.borrow::<XrView>().is_some()
+    }
+
+    fn transform_point(transform: &Mat4f, point: Vec3f) -> Vec3f {
+        transform
+            .transform_vec4(vec4f(point.x, point.y, point.z, 1.0))
+            .to_vec3f()
+    }
+
+    fn draw_list_depth(scene_state: &SceneState3D, world_pos: Vec3f) -> f32 {
+        let view_pos = scene_state
+            .view
+            .transform_vec4(vec4f(world_pos.x, world_pos.y, world_pos.z, 1.0));
+        if view_pos.w.abs() > 1.0e-6 {
+            view_pos.z / view_pos.w
+        } else {
+            view_pos.z
+        }
+    }
+
+    fn apply_child_draw_list_sort(
+        cx: &mut Cx3d,
+        root_draw_list_id: DrawListId,
+        draw_order_entries: &[(usize, f32, bool)],
+    ) {
+        if draw_order_entries.len() <= 1 {
+            cx.draw_lists[root_draw_list_id].draw_item_reorder = None;
+            return;
+        }
+
+        let mut sorted_child_ids = draw_order_entries.to_vec();
+        sorted_child_ids.sort_by(|a, b| {
+            match (a.2, b.2) {
+                (false, true) => Ordering::Less,
+                (true, false) => Ordering::Greater,
+                (false, false) => b
+                    .1
+                    .partial_cmp(&a.1)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0)),
+                (true, true) => a
+                    .1
+                    .partial_cmp(&b.1)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0)),
+            }
+        });
+
+        let sorted_child_ids = sorted_child_ids
+            .iter()
+            .map(|(draw_item_id, _, _)| *draw_item_id)
+            .collect::<Vec<_>>();
+        let child_id_set = sorted_child_ids.iter().copied().collect::<HashSet<_>>();
+        let draw_item_count = cx.draw_lists[root_draw_list_id].draw_items.len();
+        let mut reorder = Vec::with_capacity(draw_item_count);
+        let mut next_child_index = 0usize;
+
+        for draw_item_id in 0..draw_item_count {
+            if child_id_set.contains(&draw_item_id) {
+                reorder.push(sorted_child_ids[next_child_index]);
+                next_child_index += 1;
+            } else {
+                reorder.push(draw_item_id);
+            }
+        }
+
+        cx.draw_lists[root_draw_list_id].draw_item_reorder = Some(reorder);
+    }
 }
 
 pub fn xr_widget_world_transform(
@@ -252,6 +353,7 @@ impl ScriptHook for XrNode {
     ) {
         if apply.is_reload() {
             self.child_order.clear();
+            self.child_draw_lists.clear();
         }
     }
 
@@ -313,6 +415,12 @@ impl ScriptHook for XrNode {
         }
 
         vm.cx_mut().widget_tree_mark_dirty(self.uid);
+        vm.with_cx_mut(|cx| {
+            self.child_draw_lists.truncate(self.child_order.len());
+            while self.child_draw_lists.len() < self.child_order.len() {
+                self.child_draw_lists.push(DrawList::new(cx));
+            }
+        });
     }
 }
 
@@ -417,16 +525,41 @@ impl Widget for XrNode {
             return DrawStep::done();
         }
 
+        let root_draw_list_id = match cx.get_current_draw_list_id() {
+            Some(id) => id,
+            None => return DrawStep::done(),
+        };
+        let scene_state = match cx.scene_state_3d() {
+            Some(scene_state) => scene_state,
+            None => return DrawStep::done(),
+        };
         let world_transform = xr_widget_world_transform(cx, scope, self.uid, self);
         let previous_world = cx.set_scene_world_transform_3d(world_transform);
+        let mut draw_order_entries = Vec::new();
 
         for index in 0..self.child_order.len() {
             let id = self.child_order[index];
             let Some(child) = self.children.get(&id).cloned() else {
                 continue;
             };
+            let child_draw_list = &mut self.child_draw_lists[index];
+            child_draw_list.begin_always(cx);
+            let root_draw_item_id = cx.draw_lists[root_draw_list_id]
+                .draw_items
+                .len()
+                .saturating_sub(1);
             child.draw_3d_all(cx, scope);
+            child_draw_list.end(cx);
+            if let Some(child_center) = Self::child_world_sort_center(&child) {
+                let child_center = Self::transform_point(&world_transform, child_center);
+                draw_order_entries.push((
+                    root_draw_item_id,
+                    Self::draw_list_depth(&scene_state, child_center),
+                    Self::child_is_transparent(&child),
+                ));
+            }
         }
+        Self::apply_child_draw_list_sort(cx, root_draw_list_id, &draw_order_entries);
 
         if let Some(previous_world) = previous_world {
             let _ = cx.set_scene_world_transform_3d(previous_world);

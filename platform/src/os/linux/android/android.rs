@@ -141,23 +141,13 @@ fn install_android_panic_hook() {
 }
 
 impl Cx {
-    fn current_android_xr_options(&self) -> CxOpenXrOptions {
+    pub(crate) fn current_android_xr_options(&self) -> CxOpenXrOptions {
         CxOpenXrOptions {
             buffer_scale: self.os.xr_buffer_scale_requested,
             multisamples: ANDROID_XR_MULTISAMPLES,
             remove_hands_from_depth: false,
             fixed_foveation_level: ANDROID_XR_FIXED_FOVEATION_LEVEL,
         }
-    }
-
-    #[cfg(use_vulkan)]
-    fn resize_android_xr_projection_layer(&mut self) -> Result<(), String> {
-        let options = self.current_android_xr_options();
-        let (openxr, vulkan) = (&mut self.os.openxr, &mut self.os.vulkan);
-        let vulkan = vulkan
-            .as_mut()
-            .ok_or_else(|| "Android XR projection resize failed: Vulkan backend unavailable".to_string())?;
-        openxr.resize_projection_layer(vulkan, options)
     }
 
     #[cfg(use_vulkan)]
@@ -2393,24 +2383,8 @@ impl Cx {
                 }
                 CxOsOp::XrSetRenderScale(scale) => {
                     let scale = scale.clamp(ANDROID_XR_BUFFER_SCALE_MIN, ANDROID_XR_BUFFER_SCALE_MAX);
-                    let current_scale = self.os.xr_buffer_scale_active;
                     self.os.xr_buffer_scale_requested = scale;
                     if !self.os.in_xr_mode || self.os.openxr.session.is_none() {
-                        self.os.xr_buffer_scale_active = scale;
-                        continue;
-                    }
-                    if (scale - current_scale).abs() < 0.0001 {
-                        continue;
-                    }
-                    if let Err(err) = self.resize_android_xr_projection_layer() {
-                        crate::warning!(
-                            "Android XR render scale resize failed at scale {:.2}, keeping {:.2}: {}",
-                            scale,
-                            current_scale,
-                            err
-                        );
-                        self.os.xr_buffer_scale_requested = current_scale;
-                    } else {
                         self.os.xr_buffer_scale_active = scale;
                     }
                 }

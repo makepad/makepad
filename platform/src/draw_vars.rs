@@ -87,6 +87,13 @@ impl ScriptHook for DrawVars {
                 self.options.depth_write = v != 0.0;
             }
 
+            let alpha_blend_value = vm.bx.heap.value(io_self, id!(alpha_blend).into(), NoTrap);
+            if let Some(v) = alpha_blend_value.as_bool() {
+                self.options.alpha_blend = v;
+            } else if let Some(v) = alpha_blend_value.as_f64() {
+                self.options.alpha_blend = v != 0.0;
+            }
+
             let backface_culling_value =
                 vm.bx
                     .heap
