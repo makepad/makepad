@@ -2,10 +2,12 @@ pub use makepad_widgets;
 
 use makepad_cef::BootstrapResult;
 use makepad_widgets::*;
+use std::collections::HashMap;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-const INITIAL_URL: &str = "https://www.google.com";
+const INITIAL_URL: &str = "https://makepad.nl";
+const NATIVE_BROWSER_COUNT: usize = 20;
 
 fn startup_trace(message: &str) {
     use std::io::Write;
@@ -22,41 +24,136 @@ fn startup_trace(message: &str) {
 
 script_mod! {
     use mod.prelude.widgets.*
+    use mod.widgets.*
+
+    mod.widgets.NativeBrowserListBase = #(NativeBrowserList::register_widget(vm))
+    mod.widgets.NativeBrowserList = set_type_default() do mod.widgets.NativeBrowserListBase{
+        width: Fill
+        height: Fill
+
+        list := PortalList{
+            width: Fill
+            height: Fill
+            flow: Down
+            drag_scrolling: true
+            scroll_bar: ScrollBar{}
+
+            BrowserCard := RoundedView{
+                width: Fill
+                height: 420
+                margin: Inset{top: 8 bottom: 8 left: 0 right: 0}
+                padding: Inset{top: 14 bottom: 14 left: 14 right: 14}
+                flow: Down
+                spacing: 10
+                draw_bg.color: #x101521
+                draw_bg.border_radius: 12.0
+
+                header := View{
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    spacing: 4
+
+                    title := Label{
+                        text: "Browser"
+                        draw_text.color: #xfff
+                        draw_text.text_style: theme.font_bold{font_size: 12}
+                    }
+
+                    subtitle := Label{
+                        text: ""
+                        draw_text.color: #x9fb0d7
+                        draw_text.text_style: theme.font_regular{font_size: 10}
+                    }
+                }
+
+                browser := Browser{
+                    width: Fill
+                    height: Fill
+                    backend: BrowserBackend.Native
+                    url: "https://makepad.nl"
+                }
+            }
+        }
+    }
+
+    let AppDock = Dock{
+        width: Fill
+        height: Fill
+
+        root := DockTabs{
+            tabs: [@cef_tab @native_tab]
+            selected: 0
+            closable: false
+        }
+
+        cef_tab := DockTab{
+            name: "CEF"
+            template: @PermanentTab
+            kind: @TabCEF
+        }
+
+        native_tab := DockTab{
+            name: "Native PortalList"
+            template: @PermanentTab
+            kind: @TabNative
+        }
+
+        TabCEF := View{
+            width: Fill
+            height: Fill
+
+            cef_browser := Browser{
+                width: Fill
+                height: Fill
+                backend: BrowserBackend.CEF
+                url: "https://www.google.nl"
+            }
+        }
+
+        TabNative := View{
+            width: Fill
+            height: Fill
+            padding: Inset{top: 12 bottom: 12 left: 12 right: 12}
+            flow: Down
+            spacing: 10
+
+            RoundedView{
+                width: Fill
+                height: Fit
+                flow: Down
+                spacing: 4
+                padding: Inset{top: 12 bottom: 12 left: 14 right: 14}
+                draw_bg +: {
+                    color: #x17191d
+                }
+
+                Label{
+                    text: "Native browser PortalList"
+                    draw_text.color: #xfff
+                    draw_text.text_style: theme.font_bold{font_size: 12}
+                }
+
+                Label{
+                    text: "This tab keeps 20 persistent system browsers attached to their Browser widgets while the Dock tab is active."
+                    draw_text.color: #x94a7d4
+                    draw_text.text_style.font_size: 10
+                }
+            }
+
+            native_browser_list := mod.widgets.NativeBrowserList{}
+        }
+    }
+
+    mod.gc.set_static(AppDock)
+    mod.gc.run()
 
     load_all_resources() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
-                window.inner_size: vec2(1280, 840)
+                window.inner_size: vec2(1440, 960)
                 body +: {
-                    flow: Down
-
-                    RoundedView{
-                        width: Fill
-                        height: Fit
-                        flow: Right
-                        spacing: 8
-                        padding: 10
-                        draw_bg+: {
-                            color: #x17191d
-                        }
-
-                        url_input := TextInput{
-                            width: Fill
-                            height: Fit
-                            empty_text: "Enter a URL"
-                        }
-
-                        go_button := Button{
-                            width: 90
-                            text: "Go"
-                        }
-                    }
-
-                    browser := Browser{
-                        width: Fill
-                        height: Fill
-                        url: "https://www.google.com"
-                    }
+                    dock := AppDock{}
                 }
             }
         }
@@ -69,28 +166,94 @@ pub struct App {
     ui: WidgetRef,
 }
 
-impl App {
-    fn navigate_to_input(&mut self, cx: &mut Cx, text: &str) {
-        let mut url = text.trim().to_string();
-        if url.is_empty() {
-            url = "about:blank".to_string();
-        } else if !url.contains("://") {
-            url = format!("https://{url}");
+#[derive(Script, ScriptHook, Widget)]
+pub struct NativeBrowserList {
+    #[deref]
+    view: View,
+    #[rust]
+    active: bool,
+    #[rust]
+    bindings: HashMap<WidgetUid, usize>,
+    #[rust]
+    browsers: HashMap<WidgetUid, BrowserRef>,
+}
+
+impl NativeBrowserList {
+    fn set_active_internal(&mut self, cx: &mut Cx, active: bool) {
+        if self.active == active {
+            return;
         }
-        self.ui.text_input(cx, ids!(url_input)).set_text(cx, &url);
-        self.ui.browser(cx, ids!(browser)).set_url(cx, &url);
+        self.active = active;
+        for browser in self.browsers.values() {
+            browser.set_visible(cx, active);
+        }
+        self.redraw(cx);
+    }
+
+    fn bind_item(&mut self, cx: &mut Cx, item: &WidgetRef, item_id: usize) {
+        let widget_uid = item.widget_uid();
+        let is_new_browser = !self.browsers.contains_key(&widget_uid);
+        let browser = item.browser(cx, ids!(browser));
+        browser.set_visible(cx, self.active);
+
+        if self.bindings.get(&widget_uid) != Some(&item_id) {
+            self.bindings.insert(widget_uid, item_id);
+            item.label(cx, ids!(title))
+                .set_text(cx, &format!("Native Browser {}", item_id + 1));
+            item.label(cx, ids!(subtitle)).set_text(
+                cx,
+                &format!("PortalList row {} attached to {}", item_id + 1, INITIAL_URL),
+            );
+        }
+
+        if is_new_browser {
+            browser.set_url(cx, INITIAL_URL);
+        }
+
+        self.browsers.insert(widget_uid, browser);
+    }
+}
+
+impl Widget for NativeBrowserList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = item.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, NATIVE_BROWSER_COUNT);
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let item_widget = list.item(cx, item_id, id!(BrowserCard));
+                    self.bind_item(cx, &item_widget, item_id);
+                    item_widget.draw_all_unscoped(cx);
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+impl App {
+    fn set_native_tab_active(&mut self, cx: &mut Cx, active: bool) {
+        self.ui
+            .dock(cx, ids!(dock))
+            .item(id!(native_tab))
+            .widget(cx, ids!(native_browser_list))
+            .borrow_mut::<NativeBrowserList>()
+            .map(|mut list| list.set_active_internal(cx, active));
     }
 }
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(cx, ids!(go_button)).clicked(actions) {
-            let text = self.ui.text_input(cx, ids!(url_input)).text();
-            self.navigate_to_input(cx, &text);
-        }
-
-        if let Some((text, _)) = self.ui.text_input(cx, ids!(url_input)).returned(actions) {
-            self.navigate_to_input(cx, &text);
+        for action in actions {
+            let Some(action) = action.as_widget_action() else {
+                continue;
+            };
+            if let DockAction::TabWasPressed(tab_id) = action.cast() {
+                self.set_native_tab_active(cx, tab_id == id!(native_tab));
+            }
         }
     }
 }
@@ -103,9 +266,7 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Startup = event {
-            self.ui
-                .text_input(cx, ids!(url_input))
-                .set_text(cx, INITIAL_URL);
+            self.set_native_tab_active(cx, false);
         }
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());

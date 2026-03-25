@@ -816,6 +816,7 @@ pub struct Tree {
     length_scale_rest: f32,
     #[rust]
     cpu_tree: CpuPythagoreanTree,
+    #[cast]
     #[deref]
     node: XrNode,
 }

@@ -16,7 +16,7 @@ use crate::{
             XrVulkanInstanceCreateInfoKHR,
         },
     },
-    texture::{TextureFormat, TextureId, TexturePixel, TextureUpdated},
+    texture::{TextureCategory, TextureFormat, TextureId, TexturePixel, TextureUpdated},
 };
 use ash::vk::{self, Handle};
 use std::collections::{HashMap, HashSet};
@@ -149,6 +149,7 @@ struct VulkanTextureResource {
     image: vk::Image,
     memory: vk::DeviceMemory,
     view: vk::ImageView,
+    face_views: [vk::ImageView; 6],
     width: u32,
     height: u32,
     layers: u32,
@@ -2251,6 +2252,7 @@ impl CxVulkan {
                 texture_key
             )
         })?;
+        let is_cube_target = matches!(alloc.category, TextureCategory::RenderCube);
         let target_width = alloc.width.max(1) as u32;
         let target_height = alloc.height.max(1) as u32;
         let needs_recreate = match self.textures.get(&texture_key) {
@@ -2259,8 +2261,8 @@ impl CxVulkan {
                     || resource.width != target_width
                     || resource.height != target_height
                     || resource.format != format
-                    || resource.layers != 1
-                    || resource.is_cube
+                    || resource.layers != if is_cube_target { 6 } else { 1 }
+                    || resource.is_cube != is_cube_target
             }
             None => true,
         };
@@ -2269,8 +2271,12 @@ impl CxVulkan {
             if let Some(old_resource) = self.textures.remove(&texture_key) {
                 self.destroy_texture_resource(old_resource);
             }
-            let resource =
-                self.create_color_target_resource(target_width, target_height, format)?;
+            let resource = self.create_color_target_resource(
+                target_width,
+                target_height,
+                format,
+                is_cube_target,
+            )?;
             self.textures.insert(texture_key, resource);
         }
         Ok(())
@@ -2474,6 +2480,7 @@ impl CxVulkan {
             image: vk::Image,
             format: vk::Format,
             old_layout: vk::ImageLayout,
+            layer_count: u32,
             should_clear: bool,
         }
 
@@ -2494,6 +2501,7 @@ impl CxVulkan {
             .map(|color_texture| {
                 (
                     color_texture.texture.texture_id(),
+                    color_texture.cube_face,
                     color_texture.clear_color.clone(),
                 )
             })
@@ -2509,7 +2517,7 @@ impl CxVulkan {
             DrawPassClearDepth::InitWith(depth) | DrawPassClearDepth::ClearWith(depth) => depth,
         };
 
-        for (texture_id, _) in &color_targets {
+        for (texture_id, _, _) in &color_targets {
             self.ensure_pass_color_target(cx, *texture_id, target_width, target_height)?;
         }
         if let Some(texture_id) = depth_target {
@@ -2545,7 +2553,7 @@ impl CxVulkan {
 
         let mut color_attachments = Vec::with_capacity(color_targets.len());
         let mut clear_values = Vec::with_capacity(color_targets.len() + 1);
-        for (texture_id, clear_color) in &color_targets {
+        for (texture_id, cube_face, clear_color) in &color_targets {
             let should_clear = match clear_color {
                 DrawPassClearColor::InitWith(_) => {
                     !pass_dont_clear && cx.textures[*texture_id].take_initial()
@@ -2565,10 +2573,14 @@ impl CxVulkan {
                 })?;
             color_attachments.push(ColorAttachmentState {
                 texture_id: *texture_id,
-                view: resource.view,
+                view: (*cube_face)
+                    .and_then(|face| resource.face_views.get(face as usize).copied())
+                    .filter(|view| *view != vk::ImageView::null())
+                    .unwrap_or(resource.view),
                 image: resource.image,
                 format: resource.format,
                 old_layout: resource.layout,
+                layer_count: resource.layers,
                 should_clear,
             });
             clear_values.push(vk::ClearValue {
@@ -2613,7 +2625,7 @@ impl CxVulkan {
             self.transition_image_layout(
                 attachment.image,
                 vk::ImageAspectFlags::COLOR,
-                1,
+                attachment.layer_count,
                 attachment.old_layout,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
@@ -2643,7 +2655,7 @@ impl CxVulkan {
                     .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                     .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                     .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             })
             .collect();
         let mut attachments = color_attachment_descriptions;
@@ -2794,6 +2806,17 @@ impl CxVulkan {
         )?;
         unsafe {
             self.device.cmd_end_render_pass(self.command_buffer);
+        }
+        for attachment in &color_attachments {
+            self.transition_image_layout(
+                attachment.image,
+                vk::ImageAspectFlags::COLOR,
+                attachment.layer_count,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            );
+        }
+        unsafe {
             self.device
                 .end_command_buffer(self.command_buffer)
                 .map_err(|e| format!("end_command_buffer(offscreen) failed: {e:?}"))?;
@@ -3261,11 +3284,33 @@ impl CxVulkan {
                 return Err(format!("create_image_view(texture) failed: {e:?}"));
             }
         };
+        let mut face_views = [vk::ImageView::null(); 6];
+        if is_cube {
+            for face in 0..6u32 {
+                let face_view_info = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(face)
+                            .layer_count(1),
+                    );
+                face_views[face as usize] = unsafe {
+                    self.device.create_image_view(&face_view_info, None)
+                }
+                .map_err(|e| format!("create_image_view(texture face {face}) failed: {e:?}"))?;
+            }
+        }
 
         Ok(VulkanTextureResource {
             image,
             memory,
             view,
+            face_views,
             width: width.max(1),
             height: height.max(1),
             layers: layers.max(1),
@@ -3293,6 +3338,7 @@ impl CxVulkan {
         width: u32,
         height: u32,
         format: vk::Format,
+        is_cube: bool,
     ) -> Result<VulkanTextureResource, String> {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
@@ -3303,10 +3349,15 @@ impl CxVulkan {
                 depth: 1,
             })
             .mip_levels(1)
-            .array_layers(1)
+            .array_layers(if is_cube { 6 } else { 1 })
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+            .flags(if is_cube {
+                vk::ImageCreateFlags::CUBE_COMPATIBLE
+            } else {
+                vk::ImageCreateFlags::empty()
+            })
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let image = unsafe { self.device.create_image(&image_info, None) }
@@ -3344,7 +3395,11 @@ impl CxVulkan {
         }
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(if is_cube {
+                vk::ImageViewType::CUBE
+            } else {
+                vk::ImageViewType::TYPE_2D
+            })
             .format(format)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
@@ -3352,7 +3407,7 @@ impl CxVulkan {
                     .base_mip_level(0)
                     .level_count(1)
                     .base_array_layer(0)
-                    .layer_count(1),
+                    .layer_count(if is_cube { 6 } else { 1 }),
             );
         let view = match unsafe { self.device.create_image_view(&view_info, None) } {
             Ok(view) => view,
@@ -3364,15 +3419,37 @@ impl CxVulkan {
                 return Err(format!("create_image_view(render_target) failed: {e:?}"));
             }
         };
+        let mut face_views = [vk::ImageView::null(); 6];
+        if is_cube {
+            for face in 0..6u32 {
+                let face_view_info = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(face)
+                            .layer_count(1),
+                    );
+                face_views[face as usize] = unsafe {
+                    self.device.create_image_view(&face_view_info, None)
+                }
+                .map_err(|e| format!("create_image_view(render_target face {face}) failed: {e:?}"))?;
+            }
+        }
 
         Ok(VulkanTextureResource {
             image,
             memory,
             view,
+            face_views,
             width: width.max(1),
             height: height.max(1),
-            layers: 1,
-            is_cube: false,
+            layers: if is_cube { 6 } else { 1 },
+            is_cube,
             format,
             layout: vk::ImageLayout::UNDEFINED,
             hardware_buffer: None,
@@ -3548,6 +3625,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
             layers: layers.max(1),
@@ -3658,6 +3736,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
             layers: layers.max(1),
@@ -3699,6 +3778,11 @@ impl CxVulkan {
             if let Some(conversion) = resource.ycbcr_conversion {
                 self.device
                     .destroy_sampler_ycbcr_conversion(conversion, None);
+            }
+            for face_view in resource.face_views {
+                if face_view != vk::ImageView::null() {
+                    self.device.destroy_image_view(face_view, None);
+                }
             }
             if resource.view != vk::ImageView::null() {
                 self.device.destroy_image_view(resource.view, None);
@@ -3862,6 +3946,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
             layers: 1,
@@ -4081,6 +4166,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
             layers: 1,
@@ -4353,6 +4439,7 @@ impl CxVulkan {
             image,
             memory,
             view: y_view,
+            face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
             layers: 1,
@@ -4368,6 +4455,7 @@ impl CxVulkan {
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: u_view,
+            face_views: [vk::ImageView::null(); 6],
             width: chroma_width,
             height: chroma_height,
             layers: 1,
@@ -4383,6 +4471,7 @@ impl CxVulkan {
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: v_view,
+            face_views: [vk::ImageView::null(); 6],
             width: chroma_width,
             height: chroma_height,
             layers: 1,

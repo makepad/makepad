@@ -72,7 +72,7 @@ pub mod display_context;
 #[macro_use]
 mod app_main;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
-pub use crate::cx_api::can_play_type;
+pub use crate::cx_api::{can_play_type, CxSystemBrowser, SystemBrowserId};
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
@@ -217,9 +217,11 @@ pub use {
             WindowId, WindowVisuals,
         },
         xr_depth_mesh::{
-            ChunkKey, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery, XrDepthMeshQueryHit,
-            XrDepthMeshQueryResult, XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore,
-            XrDepthPlaneKind, XrDepthPlanePatch,
+            ChunkKey, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery,
+            XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry, XrDepthMeshQueryHit,
+            XrDepthMeshQueryResolvedSurface, XrDepthMeshQueryResult,
+            XrDepthMeshQuerySupportPlane, XrDepthMeshState, XrDepthMeshStats,
+            XrDepthMeshStore, XrDepthPlaneKind, XrDepthPlanePatch,
         },
     },
     app_main::*,

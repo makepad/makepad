@@ -32,7 +32,6 @@ pub mod scroll_bars;
 pub mod view;
 pub mod view_ui;
 
-#[cfg(feature = "cef")]
 pub mod browser;
 pub mod button;
 pub mod check_box;

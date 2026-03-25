@@ -37,7 +37,7 @@ script_mod! {
     }
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct RefractiveCube {
     #[redraw]
     #[live]
@@ -56,6 +56,7 @@ pub struct RefractiveCube {
     env_intensity: f32,
     #[live(1.8)]
     focus_distance: f32,
+    #[cast]
     #[deref]
     node: XrNode,
 }
@@ -73,6 +74,18 @@ impl RefractiveCube {
         &self.node
     }
 
+}
+
+impl ScriptHook for RefractiveCube {
+    fn on_after_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        _apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        self.node.set_implicit_physics_size(self.size);
+    }
 }
 
 impl Widget for RefractiveCube {
@@ -111,9 +124,11 @@ impl Widget for RefractiveCube {
         self.draw_pbr.set_depth_write(true);
         self.draw_pbr.set_camera_texture(passthrough.camera_texture);
         if let Some(env_texture) = xr_env_texture_from_scope(scope) {
-            self.draw_pbr.set_env_texture(None);
-            self.draw_pbr.set_env_atlas_texture(Some(env_texture));
+            self.draw_pbr.set_env_face_textures(None);
+            self.draw_pbr.set_env_texture(Some(env_texture));
+            self.draw_pbr.set_env_atlas_texture(None);
         } else {
+            self.draw_pbr.set_env_face_textures(None);
             let env_tex = self.draw_pbr.default_env_texture(cx);
             self.draw_pbr.set_env_texture(Some(env_tex));
             self.draw_pbr.set_env_atlas_texture(None);

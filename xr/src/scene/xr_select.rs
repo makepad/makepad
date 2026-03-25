@@ -167,6 +167,22 @@ impl WidgetNode for XrSelect {
         self.uid
     }
 
+    fn cast_inner_any(&self, type_id: std::any::TypeId) -> Option<&dyn std::any::Any> {
+        if type_id == std::any::TypeId::of::<XrNode>() {
+            Some(&self.node)
+        } else {
+            None
+        }
+    }
+
+    fn cast_inner_any_mut(&mut self, type_id: std::any::TypeId) -> Option<&mut dyn std::any::Any> {
+        if type_id == std::any::TypeId::of::<XrNode>() {
+            Some(&mut self.node)
+        } else {
+            None
+        }
+    }
+
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }

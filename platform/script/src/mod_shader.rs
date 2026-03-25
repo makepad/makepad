@@ -307,6 +307,7 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             if let Some(io_self) = io_self.as_object() {
                 let mut output = ShaderOutput::default();
                 output.backend = ShaderBackend::Metal;
+                output.use_vulkan = false;
 
                 output.pre_collect_rust_instance_io(vm, io_self);
                 output.pre_collect_shader_io(vm, io_self);
