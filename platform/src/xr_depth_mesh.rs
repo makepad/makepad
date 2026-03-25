@@ -136,10 +136,18 @@ pub enum XrDepthMeshQueryColliderGeometry {
     HalfSpace(XrDepthMeshQuerySupportPlane),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum XrDepthMeshQueryColliderRole {
+    Support,
+    Impact,
+}
+
 #[derive(Clone, Debug)]
 pub struct XrDepthMeshQueryCollider {
     pub fingerprint: u64,
     pub geometry: XrDepthMeshQueryColliderGeometry,
+    pub role: XrDepthMeshQueryColliderRole,
+    pub restitution: f32,
 }
 
 impl XrDepthMeshQueryCollider {
