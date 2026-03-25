@@ -180,6 +180,7 @@ impl XrEnv {
         colliders
     }
 
+    #[allow(dead_code)]
     pub(super) fn collect_live_hand_colliders(
         scene: &RapierScene,
         slots: &[HandColliderBody],
@@ -317,4 +318,34 @@ impl XrEnv {
         RapierScene::sync_hand_bodies(left_hand, &left, bodies, colliders);
         RapierScene::sync_hand_bodies(right_hand, &right, bodies, colliders);
     }
+}
+
+pub(super) fn build_hand_colliders_for_physics(hand: &XrHand) -> Vec<HandCollider> {
+    XrEnv::build_hand_colliders(hand)
+}
+
+pub(super) fn sync_hands_on_scene(
+    scene: Option<&mut RapierScene>,
+    left_hand: &XrHand,
+    right_hand: &XrHand,
+) {
+    if !XR_ENABLE_HAND_PHYSICS {
+        return;
+    }
+
+    let Some(scene) = scene else {
+        return;
+    };
+
+    let left = build_hand_colliders_for_physics(left_hand);
+    let right = build_hand_colliders_for_physics(right_hand);
+    let RapierScene {
+        bodies,
+        colliders,
+        left_hand: left_slots,
+        right_hand: right_slots,
+        ..
+    } = scene;
+    RapierScene::sync_hand_bodies(left_slots, &left, bodies, colliders);
+    RapierScene::sync_hand_bodies(right_slots, &right, bodies, colliders);
 }

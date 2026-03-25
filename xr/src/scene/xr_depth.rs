@@ -2,6 +2,7 @@
 
 use super::xr_physics::{makepad_pose, RapierScene};
 use super::*;
+use makepad_widgets::makepad_platform::XrDepthMeshStore;
 use std::collections::HashSet;
 
 const XR_DEBUG_DEPTH_TRIANGLE_SHRINK: f32 = 0.90;
@@ -408,66 +409,7 @@ impl XrEnv {
         let Some(scene) = scene else {
             return;
         };
-        let depth_mesh = cx.xr_depth_mesh();
-        let mut clear_keys = Vec::new();
-        let mut query_requests = Vec::new();
-        let mut expired_retained_keys = Vec::new();
-        scene.begin_depth_query_stats_frame();
-
-        for cube_index in 0..scene.cubes.len() {
-            let cube = scene.cubes[cube_index];
-            let Some(set_index) = cube.depth_query_surface_set else {
-                continue;
-            };
-            let key = RapierScene::depth_query_key(set_index);
-            let Some(body) = scene.bodies.get(cube.body) else {
-                clear_keys.push(key);
-                continue;
-            };
-            let body_sleeping = body.is_sleeping();
-            let body_pose = makepad_pose(body.position());
-            let linvel = body.linvel();
-            let body_velocity = vec3f(linvel.x, linvel.y, linvel.z);
-
-            Self::sync_retained_depth_query_result(
-                retained_hits,
-                key,
-                depth_mesh.latest_query_result(key),
-                body_pose.position,
-                cube.query_radius,
-                &mut expired_retained_keys,
-            );
-            let mut surface_targets = std::array::from_fn(|_| None);
-            if let Some(retained) = retained_hits.get(&key) {
-                retained.fill_targets(&mut surface_targets);
-            }
-            scene.sync_depth_query_surface_set(
-                set_index,
-                &surface_targets,
-            );
-
-            if body_sleeping {
-                continue;
-            }
-            query_requests.push(Self::build_depth_query_request(
-                key,
-                body_pose,
-                body_velocity,
-                cube.query_radius,
-            ));
-        }
-
-        for key in clear_keys {
-            depth_mesh.clear_query(key);
-            retained_hits.remove(&key);
-        }
-        for key in expired_retained_keys {
-            retained_hits.remove(&key);
-        }
-
-        for query in query_requests {
-            let _ = depth_mesh.submit_query(query);
-        }
+        sync_depth_query_surfaces_with_store(retained_hits, Some(scene), &cx.xr_depth_mesh());
     }
 
     pub(super) fn sync_depth_surface_mesh(&mut self, cx: &mut Cx2d) {
@@ -565,5 +507,88 @@ impl XrEnv {
             }
         }
         self.draw_depth_mesh.normal_bias = mesh_normal_bias;
+    }
+}
+
+pub(super) fn clear_depth_query_state_for_scene(
+    depth_mesh: &XrDepthMeshStore,
+    scene: Option<&RapierScene>,
+    retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
+) {
+    if let Some(scene) = scene {
+        for index in 0..scene.depth_query_surface_set_count() {
+            depth_mesh.clear_query(RapierScene::depth_query_key(index));
+        }
+    }
+    retained_hits.clear();
+}
+
+pub(super) fn sync_depth_query_surfaces_with_store(
+    retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
+    scene: Option<&mut RapierScene>,
+    depth_mesh: &XrDepthMeshStore,
+) {
+    if !XR_ENABLE_DEPTH_QUERY_PHYSICS {
+        return;
+    }
+    let Some(scene) = scene else {
+        return;
+    };
+
+    let mut clear_keys = Vec::new();
+    let mut query_requests = Vec::new();
+    let mut expired_retained_keys = Vec::new();
+    scene.begin_depth_query_stats_frame();
+
+    for cube_index in 0..scene.cubes.len() {
+        let cube = scene.cubes[cube_index];
+        let Some(set_index) = cube.depth_query_surface_set else {
+            continue;
+        };
+        let key = RapierScene::depth_query_key(set_index);
+        let Some(body) = scene.bodies.get(cube.body) else {
+            clear_keys.push(key);
+            continue;
+        };
+        let body_sleeping = body.is_sleeping();
+        let body_pose = makepad_pose(body.position());
+        let linvel = body.linvel();
+        let body_velocity = vec3f(linvel.x, linvel.y, linvel.z);
+
+        XrEnv::sync_retained_depth_query_result(
+            retained_hits,
+            key,
+            depth_mesh.latest_query_result(key),
+            body_pose.position,
+            cube.query_radius,
+            &mut expired_retained_keys,
+        );
+        let mut surface_targets = std::array::from_fn(|_| None);
+        if let Some(retained) = retained_hits.get(&key) {
+            retained.fill_targets(&mut surface_targets);
+        }
+        scene.sync_depth_query_surface_set(set_index, &surface_targets);
+
+        if body_sleeping {
+            continue;
+        }
+        query_requests.push(XrEnv::build_depth_query_request(
+            key,
+            body_pose,
+            body_velocity,
+            cube.query_radius,
+        ));
+    }
+
+    for key in clear_keys {
+        depth_mesh.clear_query(key);
+        retained_hits.remove(&key);
+    }
+    for key in expired_retained_keys {
+        retained_hits.remove(&key);
+    }
+
+    for query in query_requests {
+        let _ = depth_mesh.submit_query(query);
     }
 }
