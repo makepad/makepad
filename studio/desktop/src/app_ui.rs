@@ -273,6 +273,16 @@ script_mod! {
         closeable: false
         spacing: theme.space_1
         icon_walk: Walk {width: Fit height: 16.0}
+        close_button +: {
+            width: 11.0
+            height: 11.0
+            margin: Inset {left: 1.0 right: 7.0 top: 0.0 bottom: 0.0}
+            draw_button +: {
+                color: #x8C8C8C
+                color_hover: #xC8C8C8
+                color_active: #xDEDEDE
+            }
+        }
         draw_text +: {
             color: theme.color_label_inner_inactive
             color_hover: theme.color_label_inner
@@ -370,13 +380,13 @@ script_mod! {
             border_color_2_active: theme.color_bg_app * 0.92
         }
         close_button +: {
-            width: 12.0
-            height: 12.0
-            margin: Inset {left: -1.0 right: 8.0 top: 0.0 bottom: 0.0}
+            width: 11.0
+            height: 11.0
+            margin: Inset {left: 1.0 right: 7.0 top: 0.0 bottom: 0.0}
             draw_button +: {
-                color: #x9A9A9A
-                color_hover: #xD0D0D0
-                color_active: #xE2E2E2
+                color: #x8C8C8C
+                color_hover: #xC8C8C8
+                color_active: #xDEDEDE
             }
         }
     }
