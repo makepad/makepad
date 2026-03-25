@@ -531,10 +531,6 @@ impl CxOpenXrSession {
             return Ok(());
         }
 
-        vulkan
-            .wait_for_openxr_idle()
-            .map_err(|err| format!("OpenXR Vulkan projection resize failed while draining XR work: {err}"))?;
-
         let Some(mut vulkan_session) = self.vulkan.take() else {
             return Err("OpenXR Vulkan projection resize failed: session data unavailable".to_string());
         };
