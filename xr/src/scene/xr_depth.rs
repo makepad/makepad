@@ -30,22 +30,36 @@ struct RetainedDepthQuerySurface {
     misses_left: u8,
 }
 
+pub(super) fn depth_query_plane_supports_body(
+    plane: XrDepthMeshQuerySupportPlane,
+    body_position: Vec3f,
+    query_radius: f32,
+    lateral_margin: f32,
+) -> bool {
+    let offset = body_position - plane.point;
+    let signed_height = offset.dot(plane.normal);
+    if signed_height < -query_radius.max(0.0005) {
+        return false;
+    }
+    if signed_height > query_radius + XR_DEPTH_QUERY_MAX_DISTANCE + lateral_margin {
+        return false;
+    }
+
+    let tangent_limit = plane.half_extent_tangent + lateral_margin;
+    let bitangent_limit = plane.half_extent_bitangent + lateral_margin;
+    offset.dot(plane.tangent).abs() <= tangent_limit
+        && offset.dot(plane.bitangent).abs() <= bitangent_limit
+}
+
 impl RetainedDepthQuerySurface {
     fn sticky_supports(&self, body_position: Vec3f, query_radius: f32) -> bool {
         let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = self.target.collider.geometry;
-        let offset = body_position - plane.point;
-        let signed_height = offset.dot(plane.normal);
-        if signed_height < -query_radius.max(0.0005) {
-            return false;
-        }
-        if signed_height > query_radius + XR_DEPTH_QUERY_MAX_DISTANCE + XR_DEPTH_QUERY_STICKY_KEEP_MARGIN {
-            return false;
-        }
-
-        let tangent_limit = plane.half_extent_tangent + XR_DEPTH_QUERY_STICKY_KEEP_MARGIN;
-        let bitangent_limit = plane.half_extent_bitangent + XR_DEPTH_QUERY_STICKY_KEEP_MARGIN;
-        offset.dot(plane.tangent).abs() <= tangent_limit
-            && offset.dot(plane.bitangent).abs() <= bitangent_limit
+        depth_query_plane_supports_body(
+            plane,
+            body_position,
+            query_radius,
+            XR_DEPTH_QUERY_STICKY_KEEP_MARGIN,
+        )
     }
 }
 
@@ -263,6 +277,36 @@ fn push_debug_depth_plane(
             center - tangent + bitangent,
         ],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn depth_query_plane_supports_body_respects_exact_quad_edge() {
+        let plane = XrDepthMeshQuerySupportPlane {
+            point: vec3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 1.0, 0.0),
+            tangent: vec3f(1.0, 0.0, 0.0),
+            bitangent: vec3f(0.0, 0.0, 1.0),
+            half_extent_tangent: 0.10,
+            half_extent_bitangent: 0.08,
+        };
+
+        assert!(depth_query_plane_supports_body(
+            plane,
+            vec3f(0.099, 0.03, 0.0),
+            0.05,
+            0.0,
+        ));
+        assert!(!depth_query_plane_supports_body(
+            plane,
+            vec3f(0.101, 0.03, 0.0),
+            0.05,
+            0.0,
+        ));
+    }
 }
 
 impl XrEnv {

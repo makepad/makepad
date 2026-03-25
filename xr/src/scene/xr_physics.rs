@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use super::xr_depth::{DepthQuerySurfaceCollider, DepthQuerySurfaceTarget};
+use super::xr_depth::{
+    depth_query_plane_supports_body, DepthQuerySurfaceCollider, DepthQuerySurfaceTarget,
+};
 use super::*;
 use rapier3d::pipeline::{ActiveHooks, PairFilterContext, PhysicsHooks};
 use rapier3d::prelude::SolverFlags;
@@ -31,6 +33,8 @@ pub(super) struct HandColliderBody {
 }
 
 struct DepthQueryBodySurfaceSet {
+    body: RigidBodyHandle,
+    query_radius: f32,
     surfaces: [DepthQuerySurfaceCollider; XR_DEPTH_QUERY_SURFACES_PER_BODY],
 }
 
@@ -179,8 +183,9 @@ impl RapierScene {
             body,
             &mut self.bodies,
         );
+        let query_radius = half_extents.length().max(0.0005);
         let depth_query_surface_set = if XR_ENABLE_DEPTH_QUERY_PHYSICS {
-            Some(self.spawn_depth_query_surface_set(widget_uid))
+            Some(self.spawn_depth_query_surface_set(widget_uid, body, query_radius))
         } else {
             None
         };
@@ -189,7 +194,7 @@ impl RapierScene {
             body,
             collider,
             half_extents,
-            query_radius: half_extents.length().max(0.0005),
+            query_radius,
             scale,
             body_kind: XrBodyKind::Dynamic,
             depth_query_surface_set,
@@ -230,7 +235,7 @@ impl RapierScene {
             &mut self.bodies,
         );
         let depth_query_surface_set = if XR_ENABLE_DEPTH_QUERY_PHYSICS {
-            Some(self.spawn_depth_query_surface_set(widget_uid))
+            Some(self.spawn_depth_query_surface_set(widget_uid, body, radius))
         } else {
             None
         };
@@ -393,11 +398,19 @@ impl RapierScene {
         }
     }
 
-    fn spawn_depth_query_surface_set(&mut self, owner_widget_uid: WidgetUid) -> usize {
+    fn spawn_depth_query_surface_set(
+        &mut self,
+        owner_widget_uid: WidgetUid,
+        body: RigidBodyHandle,
+        query_radius: f32,
+    ) -> usize {
         let surfaces = std::array::from_fn(|_| self.spawn_depth_query_surface(owner_widget_uid));
         let index = self.depth_query_surface_sets.len();
-        self.depth_query_surface_sets
-            .push(DepthQueryBodySurfaceSet { surfaces });
+        self.depth_query_surface_sets.push(DepthQueryBodySurfaceSet {
+            body,
+            query_radius,
+            surfaces,
+        });
         index
     }
 
@@ -528,6 +541,12 @@ impl RapierScene {
         let Some(surface_set) = self.depth_query_surface_sets.get_mut(set_index) else {
             return;
         };
+        let body_position = self
+            .bodies
+            .get(surface_set.body)
+            .map(|body| makepad_pose(body.position()).position)
+            .unwrap_or(vec3f(0.0, 0.0, 0.0));
+        let physics_edge_margin = (surface_set.query_radius * 0.08).clamp(0.002, 0.008);
         for (surface, target) in surface_set.surfaces.iter_mut().zip(targets.iter()) {
             let Some(target) = target else {
                 if let Some(collider) = self.colliders.get_mut(surface.collider) {
@@ -541,6 +560,12 @@ impl RapierScene {
             self.depth_query_stats.triangle_count += target.collider.triangle_count();
             if let Some(collider) = self.colliders.get_mut(surface.collider) {
                 let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = target.collider.geometry;
+                let supports_body = depth_query_plane_supports_body(
+                    plane,
+                    body_position,
+                    surface_set.query_radius,
+                    physics_edge_margin,
+                );
                 if surface.fingerprint != target.collider.fingerprint {
                     collider.set_shape(SharedShape::halfspace(rapier_vec3(plane.normal)));
                     surface.fingerprint = target.collider.fingerprint;
@@ -549,7 +574,7 @@ impl RapierScene {
                     rapier_vec3(plane.point),
                     RapierRotation::IDENTITY,
                 ));
-                collider.set_enabled(true);
+                collider.set_enabled(supports_body);
             }
         }
     }
