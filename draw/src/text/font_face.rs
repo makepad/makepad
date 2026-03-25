@@ -1,7 +1,6 @@
 use {super::loader::FontData, rustybuzz, rustybuzz::ttf_parser};
 use std::{cell::RefCell, fmt, rc::Rc};
 
-#[derive(Clone)]
 pub struct FontFace {
     parsed: Rc<ParsedFontFace>,
     variations: Vec<rustybuzz::Variation>,
@@ -19,6 +18,16 @@ struct ParsedFontFace {
     data: FontData,
     index: u32,
     face: ttf_parser::Face<'static>,
+}
+
+impl Clone for FontFace {
+    fn clone(&self) -> Self {
+        Self {
+            parsed: self.parsed.clone(),
+            variations: self.variations.clone(),
+            cached_rb_face: RefCell::new(None),
+        }
+    }
 }
 
 impl fmt::Debug for ParsedFontFace {
