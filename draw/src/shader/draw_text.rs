@@ -510,14 +510,20 @@ impl DrawText {
             0.0
         };
 
-        for row in &text.rows {
+        for (row_index, row) in text.rows.iter().enumerate() {
+            let (start_x_in_lpxs, end_x_in_lpxs) = row_span_x_bounds_in_lpxs(
+                row,
+                row_index == 0,
+                row_index + 1 == text.rows.len(),
+            );
             let rect_in_lpxs = TextRect::new(
                 Point::new(
-                    origin_in_lpxs.x + row.origin_in_lpxs.x * self.font_scale,
+                    origin_in_lpxs.x
+                        + (row.origin_in_lpxs.x + start_x_in_lpxs) * self.font_scale,
                     origin_in_lpxs.y + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale,
                 ),
                 Size::new(
-                    row.width_in_lpxs * self.font_scale,
+                    (end_x_in_lpxs - start_x_in_lpxs) * self.font_scale,
                     (row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale,
                 ),
             );
@@ -981,6 +987,23 @@ fn is_emoji_char(ch: char) -> bool {
         ch as u32,
         0x2600..=0x27BF | 0x200D | 0xFE0F | 0x1F000..=0x1FAFF | 0x1FB00..=0x1FBFF
     )
+}
+
+fn row_span_x_bounds_in_lpxs(
+    row: &LaidoutRow,
+    is_first_row: bool,
+    _is_last_row: bool,
+) -> (f32, f32) {
+    let start_x_in_lpxs = if is_first_row {
+        row.glyphs
+            .first()
+            .map(|glyph| glyph.origin_in_lpxs.x)
+            .unwrap_or(row.width_in_lpxs)
+    } else {
+        0.0
+    };
+    let end_x_in_lpxs = row.width_in_lpxs;
+    (start_x_in_lpxs, end_x_in_lpxs.max(start_x_in_lpxs))
 }
 
 impl TextStyle {
