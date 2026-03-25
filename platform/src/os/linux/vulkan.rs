@@ -282,6 +282,9 @@ pub struct CxVulkan {
     xr_render_pass_uses_fragment_density_map: bool,
     xr_depth_dummy: Option<VulkanTextureResource>,
     xr_depth_dummy_multiview: Option<VulkanTextureResource>,
+    xr_timestamp_period_ns: f64,
+    xr_gpu_timestamps_supported: bool,
+    xr_last_gpu_frame_time_ms: Option<f64>,
 }
 
 impl CxVulkan {
@@ -370,6 +373,13 @@ impl CxVulkan {
         };
 
         let props = unsafe { instance.get_physical_device_properties(physical_device) };
+        let queue_family_props =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let gpu_timestamps_supported = queue_family_props
+            .get(queue_family_index as usize)
+            .map(|props| props.timestamp_valid_bits > 0)
+            .unwrap_or(false);
+        let timestamp_period_ns = props.limits.timestamp_period as f64;
         let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
             .to_string_lossy()
             .into_owned();
@@ -561,6 +571,9 @@ impl CxVulkan {
             xr_render_pass_uses_fragment_density_map: false,
             xr_depth_dummy: None,
             xr_depth_dummy_multiview: None,
+            xr_timestamp_period_ns: timestamp_period_ns,
+            xr_gpu_timestamps_supported: gpu_timestamps_supported,
+            xr_last_gpu_frame_time_ms: None,
         };
 
         if let Err(err) = vulkan.recreate_swapchain() {
@@ -703,6 +716,13 @@ impl CxVulkan {
             };
 
         let props = unsafe { instance.get_physical_device_properties(physical_device) };
+        let queue_family_props =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let gpu_timestamps_supported = queue_family_props
+            .get(queue_family_index as usize)
+            .map(|props| props.timestamp_valid_bits > 0)
+            .unwrap_or(false);
+        let timestamp_period_ns = props.limits.timestamp_period as f64;
         let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
             .to_string_lossy()
             .into_owned();
@@ -942,6 +962,9 @@ impl CxVulkan {
             xr_render_pass_uses_fragment_density_map: false,
             xr_depth_dummy: None,
             xr_depth_dummy_multiview: None,
+            xr_timestamp_period_ns: timestamp_period_ns,
+            xr_gpu_timestamps_supported: gpu_timestamps_supported,
+            xr_last_gpu_frame_time_ms: None,
         };
 
         vulkan.try_enable_debug_messenger(&entry);
@@ -1093,6 +1116,10 @@ impl CxVulkan {
 
     pub(crate) fn supports_openxr_fixed_foveation(&self) -> bool {
         self.xr_fragment_density_map_enabled
+    }
+
+    pub(crate) fn last_openxr_gpu_frame_time_ms(&self) -> Option<f64> {
+        self.xr_last_gpu_frame_time_ms
     }
 
     fn ensure_xr_render_pass_for_format(
@@ -1942,11 +1969,24 @@ impl CxVulkan {
             .map(|image| image.multiview_view)
             .unwrap_or(self.ensure_xr_depth_dummy_multiview()?);
         let framebuffer = color_target.target.framebuffer;
+        let timestamp_query_pool = if self.xr_gpu_timestamps_supported {
+            let create_info = vk::QueryPoolCreateInfo::default()
+                .query_type(vk::QueryType::TIMESTAMP)
+                .query_count(2);
+            match unsafe { self.device.create_query_pool(&create_info, None) } {
+                Ok(pool) => Some(pool),
+                Err(err) => {
+                    crate::warning!(
+                        "OpenXR Vulkan GPU timing query pool creation failed: {err:?}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         unsafe {
-            self.device
-                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
-                .map_err(|e| format!("wait_for_fences(openxr) failed: {e:?}"))?;
             self.device
                 .reset_fences(&[self.in_flight_fence])
                 .map_err(|e| format!("reset_fences(openxr) failed: {e:?}"))?;
@@ -2001,6 +2041,14 @@ impl CxVulkan {
         ];
 
         unsafe {
+            if let Some(query_pool) = timestamp_query_pool {
+                self.device.cmd_write_timestamp(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    query_pool,
+                    0,
+                );
+            }
             self.device.cmd_begin_render_pass(
                 self.command_buffer,
                 &vk::RenderPassBeginInfo::default()
@@ -2062,6 +2110,14 @@ impl CxVulkan {
 
         unsafe {
             self.device.cmd_end_render_pass(self.command_buffer);
+            if let Some(query_pool) = timestamp_query_pool {
+                self.device.cmd_write_timestamp(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    query_pool,
+                    1,
+                );
+            }
             self.device
                 .end_command_buffer(self.command_buffer)
                 .map_err(|e| format!("end_command_buffer(openxr) failed: {e:?}"))?;
@@ -2075,6 +2131,36 @@ impl CxVulkan {
             self.device
                 .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
                 .map_err(|e| format!("wait_for_fences(openxr submit) failed: {e:?}"))?;
+        }
+
+        if let Some(query_pool) = timestamp_query_pool {
+            let mut timestamps = [0u64; 2];
+            let query_result = unsafe {
+                self.device.get_query_pool_results(
+                    query_pool,
+                    0,
+                    &mut timestamps,
+                    vk::QueryResultFlags::TYPE_64,
+                )
+            };
+            self.xr_last_gpu_frame_time_ms = match query_result {
+                Ok(()) if timestamps[1] >= timestamps[0] => {
+                    let ticks = timestamps[1] - timestamps[0];
+                    Some((ticks as f64 * self.xr_timestamp_period_ns) / 1_000_000.0)
+                }
+                Ok(()) => None,
+                Err(err) => {
+                    crate::warning!(
+                        "OpenXR Vulkan GPU timing readback failed: {err:?}"
+                    );
+                    None
+                }
+            };
+            unsafe {
+                self.device.destroy_query_pool(query_pool, None);
+            }
+        } else {
+            self.xr_last_gpu_frame_time_ms = None;
         }
 
         Ok(())

@@ -794,6 +794,27 @@ impl Widget for XrRoot {
                 self.depth_query_hits_visible(),
             ));
         }
+        if method == live_id!(set_render_scale) || method == live_id!(set_xr_render_scale) {
+            let mut scale = vm.cx().xr_render_scale().unwrap_or(1.4) as f32;
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                    scale = value as f32;
+                }
+            }
+            vm.with_cx_mut(|cx| {
+                cx.xr_set_render_scale(scale);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_f64(scale as f64));
+        }
+        if method == live_id!(render_scale) || method == live_id!(xr_render_scale) {
+            return ScriptAsyncResult::Return(
+                vm.cx()
+                    .xr_render_scale()
+                    .map(ScriptValue::from_f64)
+                    .unwrap_or(NIL),
+            );
+        }
         if method == live_id!(render_scene) {
             self.env.mark_scene_dirty();
             for i in 0..self.children.len() {

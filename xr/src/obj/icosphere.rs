@@ -1,4 +1,5 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use std::cell::RefCell;
 
 use super::{
     xr_node::xr_widget_world_transform,
@@ -6,6 +7,10 @@ use super::{
 };
 
 const ICO_SPHERE_PHYSICS_DIAMETER_SCALE: f32 = 0.88;
+
+thread_local! {
+    static ICO_GEOMETRY: RefCell<Option<Geometry>> = const { RefCell::new(None) };
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -111,16 +116,12 @@ pub struct DrawIcoSolid {
 }
 
 impl DrawIcoSolid {
-    fn draw_geometry(&mut self, cx: &mut CxDraw, geometry: &Geometry) -> Result<(), String> {
-        self.draw_vars.geometry_id = Some(geometry.geometry_id());
-        if cx.new_draw_call(&self.draw_vars).is_none() {
-            return Err("DrawIcoSolid draw call failed (shader not initialized)".to_string());
-        }
+    fn draw(&mut self, cx: &mut CxDraw, geometry_id: GeometryId) {
+        self.draw_vars.geometry_id = Some(geometry_id);
         if self.draw_vars.can_instance() {
             let new_area = cx.add_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
-        Ok(())
     }
 }
 
@@ -136,24 +137,11 @@ pub struct IcoSphere {
     #[cast]
     #[deref]
     node: XrNode,
-    #[rust]
-    mesh: Option<Geometry>,
 }
 
 impl IcoSphere {
     pub fn node(&self) -> &XrNode {
         &self.node
-    }
-
-    fn ensure_mesh_uploaded(&mut self, cx: &mut Cx3d) {
-        if self.mesh.is_some() {
-            return;
-        }
-
-        let (vertices, indices) = build_unit_icosahedron_geometry();
-        let geometry = Geometry::new(cx.cx);
-        geometry.update(cx.cx, indices, vertices);
-        self.mesh = Some(geometry);
     }
 }
 
@@ -181,18 +169,14 @@ impl Widget for IcoSphere {
             return DrawStep::done();
         }
 
-        self.ensure_mesh_uploaded(cx);
-        let Some(mesh) = self.mesh.as_ref() else {
-            return DrawStep::done();
-        };
-
         let radius = self.radius.max(0.001);
+        let geometry_id = shared_ico_geometry_id(cx.cx);
         self.draw_ico.transform =
             xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
         self.draw_ico.local_scale = vec3(radius, radius, radius);
         self.draw_ico.color = self.color;
         self.draw_ico.depth_clip = 1.0;
-        let _ = self.draw_ico.draw_geometry(cx, mesh);
+        self.draw_ico.draw(cx, geometry_id);
 
         self.node.draw_3d(cx, scope)
     }
@@ -200,6 +184,19 @@ impl Widget for IcoSphere {
     fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
         DrawStep::done()
     }
+}
+
+fn shared_ico_geometry_id(cx: &mut Cx) -> GeometryId {
+    ICO_GEOMETRY.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let geometry = slot.get_or_insert_with(|| {
+            let (vertices, indices) = build_unit_icosahedron_geometry();
+            let geometry = Geometry::new(cx);
+            geometry.update(cx, indices, vertices);
+            geometry
+        });
+        geometry.geometry_id()
+    })
 }
 
 fn build_unit_icosahedron_geometry() -> (Vec<f32>, Vec<u32>) {

@@ -4,19 +4,6 @@ use crate::{
     os::linux::vulkan::{CxVulkan, CxVulkanOpenXrFoveationImageInfo, CxVulkanOpenXrSessionData},
     xr_depth_mesh::xr_depth_mesh_store,
 };
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default)]
-struct XrSwapchainImageVulkanWithFoveationFB {
-    color: XrSwapchainImageVulkanKHR,
-    foveation: XrSwapchainImageFoveationVulkanFB,
-}
-
-impl XrSwapchainImageVulkanWithFoveationFB {
-    fn link_next(&mut self) {
-        self.color.next = &mut self.foveation as *mut _ as *mut _;
-    }
-}
 pub(super) struct CxOpenXrVulkanSession {
     _color_images: Vec<XrSwapchainImageVulkanKHR>,
     _depth_images: Vec<XrSwapchainImageVulkanKHR>,
@@ -212,6 +199,170 @@ impl CxOpenXrSession {
         update_result
     }
 
+    fn create_vulkan_projection_layer_resources(
+        xr: &LibOpenXr,
+        session: XrSession,
+        vulkan: &mut CxVulkan,
+        options: CxOpenXrOptions,
+        width: u32,
+        height: u32,
+        depth_images: &[XrSwapchainImageVulkanKHR],
+        depth_width: u32,
+        depth_height: u32,
+    ) -> Result<
+        (
+            XrSwapchain,
+            Vec<XrSwapchainImageVulkanKHR>,
+            CxVulkanOpenXrSessionData,
+        ),
+        String,
+    > {
+        let swapchain_formats = xr_array_fetch(0i64, |cap, len, buf| {
+            unsafe { (xr.xrEnumerateSwapchainFormats)(session, cap, len, buf) }
+                .to_result("xrEnumerateSwapchainFormats")
+        })?;
+        let preferred_color_format = vulkan.swapchain_format();
+        let color_format =
+            Self::pick_vulkan_color_format(&swapchain_formats, preferred_color_format)
+                .ok_or_else(|| {
+                    format!(
+                        "OpenXR Vulkan found no supported 32-bit RGBA swapchain format; preferred={preferred_color_format:?} runtime={swapchain_formats:?}"
+                    )
+                })?;
+        let color_format_raw = i64::from(color_format.as_raw());
+        if !swapchain_formats.contains(&color_format_raw) {
+            return Err(format!(
+                "OpenXR Vulkan swapchain format {:?} not supported by runtime: {:?}",
+                color_format, swapchain_formats
+            ));
+        }
+
+        let desired_fixed_foveation_level =
+            Self::desired_fixed_foveation_level(options.fixed_foveation_level);
+        let can_use_fixed_foveation = desired_fixed_foveation_level.is_some()
+            && vulkan.supports_openxr_fixed_foveation()
+            && xr.xrCreateFoveationProfileFB.is_some()
+            && xr.xrUpdateSwapchainFB.is_some()
+            && xr.xrDestroyFoveationProfileFB.is_some();
+
+        let mut swapchain_foveation_info = XrSwapchainCreateInfoFoveationFB {
+            flags: XrSwapchainCreateFoveationFlagsFB::FRAGMENT_DENSITY_MAP_BIT_FB,
+            ..Default::default()
+        };
+        let mut swap_chain_create_info = XrSwapchainCreateInfo {
+            usage_flags: XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT,
+            format: color_format_raw,
+            width,
+            height,
+            sample_count: 1,
+            face_count: 1,
+            array_size: 2,
+            mip_count: 1,
+            ..Default::default()
+        };
+        if can_use_fixed_foveation {
+            swap_chain_create_info.next = &mut swapchain_foveation_info as *mut _ as *const _;
+        }
+        let mut color_swap_chain = XrSwapchain(0);
+        unsafe { (xr.xrCreateSwapchain)(session, &swap_chain_create_info, &mut color_swap_chain) }
+            .to_result("xrCreateSwapchain")?;
+
+        let mut fixed_foveation_enabled = false;
+        if let Some(level) = desired_fixed_foveation_level {
+            if can_use_fixed_foveation {
+                if let Err(err) =
+                    Self::try_enable_fixed_foveation(xr, session, color_swap_chain, level)
+                {
+                    crate::warning!(
+                        "OpenXR Vulkan: failed to enable fixed foveation, continuing without it: {}",
+                        err
+                    );
+                } else {
+                    fixed_foveation_enabled = true;
+                }
+            } else {
+                crate::warning!(
+                    "OpenXR Vulkan: fixed foveation requested but unavailable on this runtime/device"
+                );
+            }
+        }
+
+        let mut foveation_images = Vec::new();
+        let color_images = if fixed_foveation_enabled {
+            let image_count = unsafe {
+                let mut count = 0;
+                (xr.xrEnumerateSwapchainImages)(color_swap_chain, 0, &mut count, ptr::null_mut())
+                    .to_result("xrEnumerateSwapchainImages")?;
+                count
+            };
+            let mut color_images = vec![XrSwapchainImageVulkanKHR::default(); image_count as usize];
+            let mut foveation_chain =
+                vec![XrSwapchainImageFoveationVulkanFB::default(); image_count as usize];
+            for (color, foveation) in color_images.iter_mut().zip(foveation_chain.iter_mut()) {
+                color.next = foveation as *mut _ as *mut _;
+            }
+            let mut enumerated = 0;
+            unsafe {
+                (xr.xrEnumerateSwapchainImages)(
+                    color_swap_chain,
+                    image_count,
+                    &mut enumerated,
+                    color_images.as_mut_ptr() as *mut std::ffi::c_void,
+                )
+            }
+            .to_result("xrEnumerateSwapchainImages")?;
+            foveation_images.extend(foveation_chain.iter().map(|image| {
+                CxVulkanOpenXrFoveationImageInfo {
+                    image: vk::Image::from_raw(image.image),
+                }
+            }));
+            color_images
+        } else {
+            xr_array_fetch(XrSwapchainImageVulkanKHR::default(), |cap, len, buf| {
+                unsafe {
+                    (xr.xrEnumerateSwapchainImages)(
+                        color_swap_chain,
+                        cap,
+                        len,
+                        buf as *mut std::ffi::c_void,
+                    )
+                }
+                .to_result("xrEnumerateSwapchainImages")
+            })?
+        };
+
+        let color_vk_images: Vec<vk::Image> = color_images
+            .iter()
+            .map(|image| vk::Image::from_raw(image.image))
+            .collect();
+        let depth_vk_images: Vec<vk::Image> = depth_images
+            .iter()
+            .map(|image| vk::Image::from_raw(image.image))
+            .collect();
+        let render_targets = match vulkan.create_openxr_session_data(
+            &color_vk_images,
+            &depth_vk_images,
+            color_format,
+            width,
+            height,
+            depth_width,
+            depth_height,
+            if fixed_foveation_enabled {
+                Some(&foveation_images)
+            } else {
+                None
+            },
+        ) {
+            Ok(render_targets) => render_targets,
+            Err(err) => {
+                unsafe { (xr.xrDestroySwapchain)(color_swap_chain) }.log_error("xrDestroySwapchain");
+                return Err(err);
+            }
+        };
+
+        Ok((color_swap_chain, color_images, render_targets))
+    }
+
     pub(super) fn create_session_vulkan(
         xr: &LibOpenXr,
         system_id: XrSystemId,
@@ -270,122 +421,15 @@ impl CxOpenXrSession {
         unsafe { (xr.xrCreateSession)(instance, &session_create, &mut session) }
             .to_result("xrCreateSession")?;
 
-        let (head_space, local_space, width, height) =
-            Self::describe_primary_stereo_session(xr, instance, system_id, session, options)?;
-
-        let swapchain_formats = xr_array_fetch(0i64, |cap, len, buf| {
-            unsafe { (xr.xrEnumerateSwapchainFormats)(session, cap, len, buf) }
-                .to_result("xrEnumerateSwapchainFormats")
-        })?;
-        let preferred_color_format = vulkan.swapchain_format();
-        let color_format =
-            Self::pick_vulkan_color_format(&swapchain_formats, preferred_color_format)
-                .ok_or_else(|| {
-                    format!(
-                        "OpenXR Vulkan found no supported 32-bit RGBA swapchain format; preferred={preferred_color_format:?} runtime={swapchain_formats:?}"
-                    )
-                })?;
-        let color_format_raw = i64::from(color_format.as_raw());
-        if !swapchain_formats.contains(&color_format_raw) {
-            return Err(format!(
-                "OpenXR Vulkan swapchain format {:?} not supported by runtime: {:?}",
-                color_format, swapchain_formats
-            ));
-        }
-
-        let desired_fixed_foveation_level =
-            Self::desired_fixed_foveation_level(options.fixed_foveation_level);
-        let can_use_fixed_foveation = desired_fixed_foveation_level.is_some()
-            && vulkan.supports_openxr_fixed_foveation()
-            && xr.xrCreateFoveationProfileFB.is_some()
-            && xr.xrUpdateSwapchainFB.is_some()
-            && xr.xrDestroyFoveationProfileFB.is_some();
-
-        let mut swapchain_foveation_info = XrSwapchainCreateInfoFoveationFB {
-            flags: XrSwapchainCreateFoveationFlagsFB::FRAGMENT_DENSITY_MAP_BIT_FB,
-            ..Default::default()
-        };
-        let mut swap_chain_create_info = XrSwapchainCreateInfo {
-            usage_flags: XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT,
-            format: color_format_raw,
+        let (
+            head_space,
+            local_space,
+            recommended_width,
+            recommended_height,
             width,
             height,
-            sample_count: 1,
-            face_count: 1,
-            array_size: 2,
-            mip_count: 1,
-            ..Default::default()
-        };
-        if can_use_fixed_foveation {
-            swap_chain_create_info.next = &mut swapchain_foveation_info as *mut _ as *const _;
-        }
-        let mut color_swap_chain = XrSwapchain(0);
-        unsafe { (xr.xrCreateSwapchain)(session, &swap_chain_create_info, &mut color_swap_chain) }
-            .to_result("xrCreateSwapchain")?;
-        let mut fixed_foveation_enabled = false;
-        if let Some(level) = desired_fixed_foveation_level {
-            if can_use_fixed_foveation {
-                if let Err(err) =
-                    Self::try_enable_fixed_foveation(xr, session, color_swap_chain, level)
-                {
-                    crate::warning!(
-                        "OpenXR Vulkan: failed to enable fixed foveation, continuing without it: {}",
-                        err
-                    );
-                } else {
-                    fixed_foveation_enabled = true;
-                    crate::log!(
-                        "OpenXR Vulkan: fixed foveation enabled at level {:?}",
-                        level
-                    );
-                }
-            } else {
-                crate::warning!(
-                    "OpenXR Vulkan: fixed foveation requested but unavailable on this runtime/device"
-                );
-            }
-        }
-
-        let mut foveation_images = Vec::new();
-        let color_images = if fixed_foveation_enabled {
-            let image_count = unsafe {
-                let mut count = 0;
-                (xr.xrEnumerateSwapchainImages)(color_swap_chain, 0, &mut count, ptr::null_mut())
-                    .to_result("xrEnumerateSwapchainImages")?;
-                count
-            };
-            let mut images =
-                vec![XrSwapchainImageVulkanWithFoveationFB::default(); image_count as usize];
-            for image in &mut images {
-                image.link_next();
-            }
-            let mut enumerated = 0;
-            unsafe {
-                (xr.xrEnumerateSwapchainImages)(
-                    color_swap_chain,
-                    image_count,
-                    &mut enumerated,
-                    images.as_mut_ptr() as *mut std::ffi::c_void,
-                )
-            }
-            .to_result("xrEnumerateSwapchainImages")?;
-            foveation_images.extend(images.iter().map(|image| CxVulkanOpenXrFoveationImageInfo {
-                image: vk::Image::from_raw(image.foveation.image),
-            }));
-            images.iter().map(|image| image.color).collect()
-        } else {
-            xr_array_fetch(XrSwapchainImageVulkanKHR::default(), |cap, len, buf| {
-                unsafe {
-                    (xr.xrEnumerateSwapchainImages)(
-                        color_swap_chain,
-                        cap,
-                        len,
-                        buf as *mut std::ffi::c_void,
-                    )
-                }
-                .to_result("xrEnumerateSwapchainImages")
-            })?
-        };
+        ) =
+            Self::describe_primary_stereo_session(xr, instance, system_id, session, options)?;
 
         let (passthrough, passthrough_layer, depth_provider, depth_swap_chain) =
             Self::create_passthrough_and_depth(xr, session, options)?;
@@ -416,29 +460,18 @@ impl CxOpenXrSession {
                 }
                 .to_result("xrEnumerateEnvironmentDepthSwapchainImagesMETA")
             })?;
-
-        let color_vk_images: Vec<vk::Image> = color_images
-            .iter()
-            .map(|image| vk::Image::from_raw(image.image))
-            .collect();
-        let depth_vk_images: Vec<vk::Image> = depth_images
-            .iter()
-            .map(|image| vk::Image::from_raw(image.image))
-            .collect();
-        let render_targets = vulkan.create_openxr_session_data(
-            &color_vk_images,
-            &depth_vk_images,
-            color_format,
-            width,
-            height,
-            depth_swapchain_state.width,
-            depth_swapchain_state.height,
-            if fixed_foveation_enabled {
-                Some(&foveation_images)
-            } else {
-                None
-            },
-        )?;
+        let (color_swap_chain, color_images, render_targets) =
+            Self::create_vulkan_projection_layer_resources(
+                xr,
+                session,
+                vulkan,
+                options,
+                width,
+                height,
+                &depth_images,
+                depth_swapchain_state.width,
+                depth_swapchain_state.height,
+            )?;
         unsafe { (xr.xrStartEnvironmentDepthProviderMETA)(depth_provider) }
             .to_result("xrStartEnvironmentDepthProviderMETA")?;
         let inputs = CxOpenXrInputs::new_inputs(xr, session, instance)?;
@@ -462,6 +495,8 @@ impl CxOpenXrSession {
             passthrough_layer,
             width,
             height,
+            recommended_width,
+            recommended_height,
             handle: session,
             head_space,
             local_space,
@@ -470,8 +505,61 @@ impl CxOpenXrSession {
             debug_inactive_begin_frame_logs: 0,
             depth_swap_chain_index: 0,
             frame_state: XrFrameState::default(),
+            active_display_refresh_rate_hz: None,
+            last_predicted_display_time: None,
             inputs,
         })
+    }
+
+    pub(super) fn resize_projection_layer_vulkan(
+        &mut self,
+        xr: &LibOpenXr,
+        vulkan: &mut CxVulkan,
+        options: CxOpenXrOptions,
+    ) -> Result<(), String> {
+        let new_width = ((self.recommended_width as f32) * options.buffer_scale).max(1.0) as u32;
+        let new_height =
+            ((self.recommended_height as f32) * options.buffer_scale).max(1.0) as u32;
+        if new_width == self.width && new_height == self.height {
+            return Ok(());
+        }
+
+        let Some(mut vulkan_session) = self.vulkan.take() else {
+            return Err("OpenXR Vulkan projection resize failed: session data unavailable".to_string());
+        };
+        let create_result = Self::create_vulkan_projection_layer_resources(
+            xr,
+            self.handle,
+            vulkan,
+            options,
+            new_width,
+            new_height,
+            &vulkan_session._depth_images,
+            vulkan_session.render_targets.depth_width,
+            vulkan_session.render_targets.depth_height,
+        );
+
+        match create_result {
+            Ok((new_color_swap_chain, new_color_images, new_render_targets)) => {
+                let old_color_swap_chain =
+                    std::mem::replace(&mut self.color_swap_chain, new_color_swap_chain);
+                let old_render_targets =
+                    std::mem::replace(&mut vulkan_session.render_targets, new_render_targets);
+                vulkan_session._color_images = new_color_images;
+                self.width = new_width;
+                self.height = new_height;
+                self.vulkan = Some(vulkan_session);
+
+                vulkan.destroy_openxr_session_data(old_render_targets);
+                unsafe { (xr.xrDestroySwapchain)(old_color_swap_chain) }
+                    .log_error("xrDestroySwapchain");
+                Ok(())
+            }
+            Err(err) => {
+                self.vulkan = Some(vulkan_session);
+                Err(err)
+            }
+        }
     }
 
     pub(super) fn destroy_session_vulkan(&mut self, vulkan: Option<&mut CxVulkan>) {
