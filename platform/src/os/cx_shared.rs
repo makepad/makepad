@@ -14,7 +14,7 @@ use {
     makepad_studio_protocol::{
         hub_protocol::FrameCodec, AppToStudio, EventSample, RunViewFrameData,
         RunViewFrameRequest, RunViewKeyFocusRect, ScreenshotResponse, StudioToApp,
-        WidgetQueryResponse, WidgetTreeDumpResponse,
+        WidgetQueryResponse, WidgetSnapshot, WidgetSnapshotResponse, WidgetTreeDumpResponse,
     },
     std::cell::{Cell, RefCell},
     std::collections::{HashMap, HashSet},
@@ -290,7 +290,7 @@ impl Cx {
     #[allow(dead_code)]
     pub(crate) fn send_studio_widget_tree_dump_response(&mut self, request_id: u64) {
         self.widget_tree_dump_requests.push(request_id);
-        if self.in_draw_event || self.need_redrawing() {
+        if self.in_draw_event {
             return;
         }
         self.try_send_studio_widget_tree_dump_responses();
@@ -308,6 +308,15 @@ impl Cx {
             query,
             rects,
         }));
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn send_studio_widget_snapshot_response(&mut self, request_id: u64) {
+        self.widget_snapshot_requests.push(request_id);
+        if self.in_draw_event {
+            return;
+        }
+        self.try_send_studio_widget_snapshot_responses();
     }
 
     fn studio_key_focus_rect_response(&self) -> RunViewKeyFocusRect {
@@ -362,11 +371,17 @@ impl Cx {
         false
     }
 
+    fn widget_snapshot_ready(widgets: &[WidgetSnapshot]) -> bool {
+        widgets
+            .iter()
+            .any(|widget| widget.visible && widget.width > 0 && widget.height > 0)
+    }
+
     pub(crate) fn try_send_studio_widget_tree_dump_responses(&mut self) {
         if self.widget_tree_dump_requests.is_empty() {
             return;
         }
-        if self.in_draw_event || self.need_redrawing() {
+        if self.in_draw_event {
             return;
         }
         let dump = if let Some(callback) = self.widget_tree_dump_callback {
@@ -382,6 +397,30 @@ impl Cx {
             Cx::send_studio_message(AppToStudio::WidgetTreeDump(WidgetTreeDumpResponse {
                 request_id,
                 dump: dump.clone(),
+            }));
+        }
+    }
+
+    pub(crate) fn try_send_studio_widget_snapshot_responses(&mut self) {
+        if self.widget_snapshot_requests.is_empty() {
+            return;
+        }
+        if self.in_draw_event {
+            return;
+        }
+        let widgets = if let Some(callback) = self.widget_snapshot_callback {
+            callback(self)
+        } else {
+            Vec::new()
+        };
+        if !Self::widget_snapshot_ready(&widgets) {
+            return;
+        }
+        let request_ids: Vec<u64> = self.widget_snapshot_requests.drain(..).collect();
+        for request_id in request_ids {
+            Cx::send_studio_message(AppToStudio::WidgetSnapshot(WidgetSnapshotResponse {
+                request_id,
+                widgets: widgets.clone(),
             }));
         }
     }
@@ -491,6 +530,9 @@ impl Cx {
             StudioToApp::WidgetQuery(request) => {
                 self.send_studio_widget_query_response(request.request_id, request.query);
             }
+            StudioToApp::WidgetSnapshot(request) => {
+                self.send_studio_widget_snapshot_response(request.request_id);
+            }
             StudioToApp::Kill => {
                 self.call_event_handler(&Event::Shutdown);
                 return true;
@@ -598,6 +640,7 @@ impl Cx {
 
         if Cx::has_studio_web_socket() {
             self.try_send_studio_widget_tree_dump_responses();
+            self.try_send_studio_widget_snapshot_responses();
         }
 
         // Reset widget query invalidation after all views have processed it.
@@ -688,6 +731,7 @@ impl Cx {
 
         if Cx::has_studio_web_socket() {
             self.try_send_studio_widget_tree_dump_responses();
+            self.try_send_studio_widget_snapshot_responses();
         }
     }
 

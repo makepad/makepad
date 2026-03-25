@@ -1289,9 +1289,20 @@ fn can_play_type_impl(mime: &str) -> &'static str {
     crate::os::linux::android::android_video_playback::can_play_type(mime)
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "ios", target_os = "tvos"),
+    not(headless)
+))]
 fn can_play_type_impl(mime: &str) -> &'static str {
     crate::os::apple::apple_video_playback::can_play_type(mime)
+}
+
+#[cfg(all(
+    any(target_os = "macos", target_os = "ios", target_os = "tvos"),
+    headless
+))]
+fn can_play_type_impl(_mime: &str) -> &'static str {
+    ""
 }
 
 #[cfg(target_os = "windows")]

@@ -9,3 +9,6 @@ metadata.makepad-auto-version = "EVyKRfOGV339Re5CS45PMHHxw_M="
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+
+[dev-dependencies]
+makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }

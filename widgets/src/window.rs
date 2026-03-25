@@ -397,6 +397,14 @@ impl Window {
     pub fn configure_macos_window(&mut self, cx: &mut Cx, config: MacosWindowConfig) {
         self.window.handle.configure_macos_window(cx, config);
     }
+
+    pub fn window_index(&self) -> usize {
+        self.window.handle.window_id().id()
+    }
+
+    pub fn position(&self, cx: &Cx) -> Vec2d {
+        self.window.handle.get_position(cx)
+    }
 }
 
 impl WindowRef {

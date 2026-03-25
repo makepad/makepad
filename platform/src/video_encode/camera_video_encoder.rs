@@ -44,7 +44,7 @@ impl VideoEncoder {
         self.backend.push_frame(frame);
     }
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(headless)))]
     pub fn push_apple_pixel_buffer(
         &self,
         pixel_buffer: crate::os::apple::apple_sys::CVPixelBufferRef,

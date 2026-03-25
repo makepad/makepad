@@ -120,7 +120,13 @@ impl StudioHub {
             gateway = Some(handle);
         }
 
-        let mut core = HubCore::new(event_rx, event_tx.clone(), vfs, studio_addr, studio_ext_addr);
+        let mut core = HubCore::new(
+            event_rx,
+            event_tx.clone(),
+            vfs,
+            studio_addr,
+            studio_ext_addr,
+        );
         let core_thread = std::thread::spawn(move || {
             core.run();
         });
@@ -220,9 +226,15 @@ fn start_http_gateway_with_fallback(
     }))
 }
 
-fn gateway_bind_candidates(base: SocketAddr) -> impl Iterator<Item = SocketAddr> {
+fn gateway_bind_candidates(base: SocketAddr) -> Vec<SocketAddr> {
+    if base.port() == 0 {
+        return vec![base];
+    }
+
     let ip = base.ip();
-    (base.port()..=u16::MAX).map(move |port| SocketAddr::new(ip, port))
+    (base.port()..=u16::MAX)
+        .map(|port| SocketAddr::new(ip, port))
+        .collect()
 }
 
 fn studio_local_addr_for_child(listen_address: SocketAddr) -> String {
@@ -239,9 +251,9 @@ fn studio_ext_addr_for_child(listen_address: SocketAddr) -> String {
         IpAddr::V4(ip) if ip.is_unspecified() => detect_external_ipv4()
             .map(IpAddr::V4)
             .unwrap_or(IpAddr::V4(ip)),
-        IpAddr::V6(ip) if ip.is_unspecified() => {
-            detect_external_ipv4().map(IpAddr::V4).unwrap_or(IpAddr::V6(ip))
-        }
+        IpAddr::V6(ip) if ip.is_unspecified() => detect_external_ipv4()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
         ip => ip,
     };
     format!("{}:{}", ip, listen_address.port())
@@ -273,6 +285,37 @@ mod tests {
         assert_eq!(
             studio_ext_addr_for_child(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8001)),
             "127.0.0.1:8001"
+        );
+    }
+
+    #[test]
+    fn gateway_bind_candidates_preserves_ephemeral_port_binding() {
+        assert_eq!(
+            gateway_bind_candidates(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)),
+            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]
+        );
+    }
+
+    #[test]
+    fn gateway_bind_candidates_falls_forward_from_fixed_port() {
+        let candidates =
+            gateway_bind_candidates(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8001));
+
+        assert_eq!(
+            candidates.first().copied(),
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8001))
+        );
+        assert_eq!(
+            candidates.get(1).copied(),
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8002))
+        );
+        assert_eq!(
+            candidates.get(2).copied(),
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8003))
+        );
+        assert_eq!(
+            candidates.last().copied(),
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), u16::MAX))
         );
     }
 }
