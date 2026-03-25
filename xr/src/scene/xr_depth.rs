@@ -53,6 +53,9 @@ pub(super) fn depth_query_plane_supports_body(
 
 impl RetainedDepthQuerySurface {
     fn sticky_supports(&self, body_position: Vec3f, query_radius: f32) -> bool {
+        if self.target.collider.role != XrDepthMeshQueryColliderRole::Support {
+            return false;
+        }
         let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = self.target.collider.geometry;
         depth_query_plane_supports_body(
             plane,
@@ -86,6 +89,15 @@ impl RetainedDepthQueryHit {
             true,
             &mut matched,
         );
+        for additional_hit in &hit.additional_hits {
+            self.absorb_surface(
+                DepthQuerySurfaceTarget {
+                    collider: additional_hit.collider.clone(),
+                },
+                true,
+                &mut matched,
+            );
+        }
         for (index, slot) in self.surfaces.iter_mut().enumerate() {
             if matched[index] {
                 continue;
@@ -106,9 +118,13 @@ impl RetainedDepthQueryHit {
         allow_replace: bool,
         matched: &mut [bool; XR_DEPTH_QUERY_SURFACES_PER_BODY],
     ) {
+        let misses_left = match target.collider.role {
+            XrDepthMeshQueryColliderRole::Support => XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES,
+            XrDepthMeshQueryColliderRole::Impact => 0,
+        };
         let retained_surface = RetainedDepthQuerySurface {
             target,
-            misses_left: XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES,
+            misses_left,
         };
 
         if let Some(index) = self.surfaces.iter().position(|slot| {
@@ -146,10 +162,19 @@ impl RetainedDepthQueryHit {
         }
     }
 
-    fn age_on_miss(&mut self) -> bool {
+    fn age_on_miss_with_sticky_support(
+        &mut self,
+        body_position: Vec3f,
+        query_radius: f32,
+    ) -> bool {
         let mut any_alive = false;
         for slot in &mut self.surfaces {
             if let Some(retained) = slot.as_mut() {
+                if retained.sticky_supports(body_position, query_radius) {
+                    retained.misses_left = XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES;
+                    any_alive = true;
+                    continue;
+                }
                 if retained.misses_left > 0 {
                     retained.misses_left -= 1;
                     any_alive = true;
@@ -161,19 +186,6 @@ impl RetainedDepthQueryHit {
         any_alive
     }
 
-    fn keep_sticky_support(&mut self, body_position: Vec3f, query_radius: f32) -> bool {
-        let mut kept_any = false;
-        for slot in &mut self.surfaces {
-            if let Some(retained) = slot.as_mut() {
-                if retained.sticky_supports(body_position, query_radius) {
-                    retained.misses_left = XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES;
-                    kept_any = true;
-                }
-            }
-        }
-        kept_any
-    }
-
     fn fill_targets(
         &self,
         targets: &mut [Option<DepthQuerySurfaceTarget>; XR_DEPTH_QUERY_SURFACES_PER_BODY],
@@ -182,6 +194,13 @@ impl RetainedDepthQueryHit {
         for (index, retained) in self.surfaces.iter().enumerate() {
             targets[index] = retained.as_ref().map(|retained| retained.target.clone());
         }
+    }
+
+    fn has_sticky_support(&self, body_position: Vec3f, query_radius: f32) -> bool {
+        self.surfaces.iter().any(|slot| {
+            slot.as_ref()
+                .is_some_and(|retained| retained.sticky_supports(body_position, query_radius))
+        })
     }
 
     fn retained_surfaces(&self) -> impl Iterator<Item = &RetainedDepthQuerySurface> + '_ {
@@ -409,10 +428,7 @@ impl XrEnv {
             }
             Some(XrDepthMeshQueryResult::Miss { .. }) | None => {
                 if let Some(retained) = retained_hits.get_mut(&key) {
-                    if retained.keep_sticky_support(body_position, query_radius) {
-                        return;
-                    }
-                    if !retained.age_on_miss() {
+                    if !retained.age_on_miss_with_sticky_support(body_position, query_radius) {
                         expired_retained_keys.push(key);
                     }
                 }
@@ -431,11 +447,19 @@ impl XrEnv {
         if lookahead_length > XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE && lookahead_length > 1.0e-6 {
             lookahead = lookahead.scale(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / lookahead_length);
         }
+        let horizontal_speed = vec2f(velocity.x, velocity.z).length();
+        let impact_velocity = if velocity.length() >= XR_DEPTH_QUERY_IMPACT_QUERY_SPEED_MIN
+            && horizontal_speed >= XR_DEPTH_QUERY_IMPACT_QUERY_HORIZONTAL_SPEED_MIN
+        {
+            velocity
+        } else {
+            vec3f(0.0, 0.0, 0.0)
+        };
         XrDepthMeshQuery {
             key,
             center: pose.position,
             predicted_center: pose.position + lookahead,
-            velocity,
+            velocity: impact_velocity,
             radius: query_radius.max(0.0005),
             max_distance: XR_DEPTH_QUERY_MAX_DISTANCE,
             include_planar_patches: XR_DEPTH_QUERY_INCLUDE_PLANAR_PATCHES,
@@ -599,10 +623,15 @@ pub(super) fn sync_depth_query_surfaces_with_store(
         let linvel = body.linvel();
         let body_velocity = vec3f(linvel.x, linvel.y, linvel.z);
 
+        let latest_result = if body_sleeping {
+            None
+        } else {
+            depth_mesh.latest_query_result(key)
+        };
         XrEnv::sync_retained_depth_query_result(
             retained_hits,
             key,
-            depth_mesh.latest_query_result(key),
+            latest_result,
             body_pose.position,
             cube.query_radius,
             &mut expired_retained_keys,
@@ -614,6 +643,13 @@ pub(super) fn sync_depth_query_surfaces_with_store(
         scene.sync_depth_query_surface_set(set_index, &surface_targets);
 
         if body_sleeping {
+            continue;
+        }
+        let body_speed = body_velocity.length();
+        let body_has_sticky_support = retained_hits
+            .get(&key)
+            .is_some_and(|retained| retained.has_sticky_support(body_pose.position, cube.query_radius));
+        if body_has_sticky_support && body_speed < XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN {
             continue;
         }
         query_requests.push(XrEnv::build_depth_query_request(

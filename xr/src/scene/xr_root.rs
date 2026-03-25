@@ -632,6 +632,14 @@ impl XrRoot {
         self.env.physics_compute_ms()
     }
 
+    pub fn physics_time_scale(&self) -> f32 {
+        self.env.physics_time_scale()
+    }
+
+    pub fn physics_step_dt_ms(&self) -> f64 {
+        self.env.physics_step_dt_ms()
+    }
+
     pub fn physics_depth_query_surface_count(&self) -> usize {
         self.env.physics_depth_query_surface_count()
     }
@@ -771,6 +779,24 @@ impl Widget for XrRoot {
                     .map(ScriptValue::from_f64)
                     .unwrap_or(NIL),
             );
+        }
+        if method == live_id!(set_physics_time_scale) || method == live_id!(set_sim_time_scale) {
+            let mut scale = self.physics_time_scale();
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                    scale = value as f32;
+                }
+            }
+            vm.with_cx_mut(|cx| {
+                scale = self.env.set_physics_time_scale(cx, scale);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_f64(scale as f64));
+        }
+        if method == live_id!(physics_time_scale) || method == live_id!(sim_time_scale) {
+            return ScriptAsyncResult::Return(ScriptValue::from_f64(
+                self.physics_time_scale() as f64,
+            ));
         }
         if method == live_id!(render_scene) {
             self.env.mark_scene_dirty();

@@ -4,6 +4,7 @@ use super::xr_depth::{
     depth_query_plane_supports_body, DepthQuerySurfaceCollider, DepthQuerySurfaceTarget,
 };
 use super::*;
+use rapier3d::dynamics::CoefficientCombineRule;
 use rapier3d::pipeline::{ActiveHooks, PairFilterContext, PhysicsHooks};
 use rapier3d::prelude::SolverFlags;
 
@@ -151,6 +152,14 @@ pub(super) fn capsule_pose(a: Vec3f, b: Vec3f) -> (RapierPose, RapierReal) {
 }
 
 impl RapierScene {
+    pub(crate) fn set_simulation_dt(&mut self, dt: f32) {
+        self.integration_parameters.dt = dt.max(0.0001);
+    }
+
+    pub(crate) fn simulation_dt(&self) -> f32 {
+        self.integration_parameters.dt
+    }
+
     pub(crate) fn spawn_dynamic_box(
         &mut self,
         widget_uid: WidgetUid,
@@ -385,7 +394,9 @@ impl RapierScene {
             ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
             .user_data(depth_query_surface_user_data(owner_widget_uid))
             .active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS)
-            .friction(XR_DEPTH_QUERY_FRICTION),
+            .friction(XR_DEPTH_QUERY_FRICTION)
+            .restitution(0.0)
+            .restitution_combine_rule(CoefficientCombineRule::Max),
             body,
             &mut self.bodies,
         );
@@ -546,6 +557,14 @@ impl RapierScene {
             .get(surface_set.body)
             .map(|body| makepad_pose(body.position()).position)
             .unwrap_or(vec3f(0.0, 0.0, 0.0));
+        let body_velocity = self
+            .bodies
+            .get(surface_set.body)
+            .map(|body| {
+                let linvel = body.linvel();
+                vec3f(linvel.x, linvel.y, linvel.z)
+            })
+            .unwrap_or(vec3f(0.0, 0.0, 0.0));
         let physics_edge_margin = (surface_set.query_radius * 0.08).clamp(0.002, 0.008);
         for (surface, target) in surface_set.surfaces.iter_mut().zip(targets.iter()) {
             let Some(target) = target else {
@@ -555,26 +574,39 @@ impl RapierScene {
                 surface.fingerprint = 0;
                 continue;
             };
-            self.depth_query_stats.active_surface_count += 1;
-            self.depth_query_stats.vertex_count += target.collider.vertex_count();
-            self.depth_query_stats.triangle_count += target.collider.triangle_count();
             if let Some(collider) = self.colliders.get_mut(surface.collider) {
                 let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = target.collider.geometry;
-                let supports_body = depth_query_plane_supports_body(
+                let footprint_supports_body = depth_query_plane_supports_body(
                     plane,
                     body_position,
                     surface_set.query_radius,
                     physics_edge_margin,
                 );
+                let supports_body = match target.collider.role {
+                    XrDepthMeshQueryColliderRole::Support => footprint_supports_body,
+                    XrDepthMeshQueryColliderRole::Impact => {
+                        let speed = body_velocity.length();
+                        let approach_speed = -body_velocity.dot(plane.normal);
+                        footprint_supports_body
+                            && speed >= XR_DEPTH_QUERY_IMPACT_ENABLE_SPEED_MIN
+                            && approach_speed >= XR_DEPTH_QUERY_IMPACT_ENABLE_APPROACH_SPEED_MIN
+                    }
+                };
                 if surface.fingerprint != target.collider.fingerprint {
                     collider.set_shape(SharedShape::halfspace(rapier_vec3(plane.normal)));
+                    collider.set_position_wrt_parent(RapierPose::from_parts(
+                        rapier_vec3(plane.point),
+                        RapierRotation::IDENTITY,
+                    ));
                     surface.fingerprint = target.collider.fingerprint;
                 }
-                collider.set_position_wrt_parent(RapierPose::from_parts(
-                    rapier_vec3(plane.point),
-                    RapierRotation::IDENTITY,
-                ));
+                collider.set_restitution(target.collider.restitution.max(0.0));
                 collider.set_enabled(supports_body);
+                if supports_body {
+                    self.depth_query_stats.active_surface_count += 1;
+                    self.depth_query_stats.vertex_count += target.collider.vertex_count();
+                    self.depth_query_stats.triangle_count += target.collider.triangle_count();
+                }
             }
         }
     }
