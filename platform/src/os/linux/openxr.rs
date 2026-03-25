@@ -283,6 +283,34 @@ impl Cx {
                     openxr.session.as_mut().unwrap(),
                 );
             }
+
+            #[cfg(use_vulkan)]
+            {
+                let requested_scale = self.os.xr_buffer_scale_requested;
+                let active_scale = self.os.xr_buffer_scale_active;
+                if (requested_scale - active_scale).abs() >= 0.0001 && self.os.in_xr_mode {
+                    let options = self.current_android_xr_options();
+                    let resize_result = {
+                        let (openxr, vulkan) = (&mut self.os.openxr, &mut self.os.vulkan);
+                        if let Some(vulkan) = vulkan.as_mut() {
+                            openxr.resize_projection_layer(vulkan, options)
+                        } else {
+                            Err("Android XR projection resize failed: Vulkan backend unavailable".to_string())
+                        }
+                    };
+                    if let Err(err) = resize_result {
+                        crate::warning!(
+                            "Android XR render scale resize failed at scale {:.2}, keeping {:.2}: {}",
+                            requested_scale,
+                            active_scale,
+                            err
+                        );
+                        self.os.xr_buffer_scale_requested = active_scale;
+                    } else {
+                        self.os.xr_buffer_scale_active = requested_scale;
+                    }
+                }
+            }
         }
     }
 }
@@ -936,7 +964,7 @@ impl CxOpenXrSession {
         }
 
         #[cfg(use_vulkan)]
-        session.destroy_session_vulkan(vulkan);
+        session.destroy_session_vulkan(xr, vulkan);
         // alright lets destroy some things on the session
         unsafe { (xr.xrStopEnvironmentDepthProviderMETA)(session.depth_provider) }
             .log_error("xrStopEnvironmentDepthProviderMETA");

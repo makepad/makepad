@@ -9,6 +9,12 @@ pub(super) struct CxOpenXrVulkanSession {
     _depth_images: Vec<XrSwapchainImageVulkanKHR>,
     render_targets: CxVulkanOpenXrSessionData,
     depth_mesh_pipeline: CxOpenXrDepthMeshPipeline,
+    retired_projection_layers: Vec<RetiredOpenXrVulkanProjectionLayer>,
+}
+
+struct RetiredOpenXrVulkanProjectionLayer {
+    color_swap_chain: XrSwapchain,
+    render_targets: CxVulkanOpenXrSessionData,
 }
 
 impl Cx {
@@ -487,6 +493,7 @@ impl CxOpenXrSession {
                 _depth_images: depth_images,
                 render_targets,
                 depth_mesh_pipeline: CxOpenXrDepthMeshPipeline::new(),
+                retired_projection_layers: Vec::new(),
             }),
             color_swap_chain,
             depth_swap_chain,
@@ -524,6 +531,10 @@ impl CxOpenXrSession {
             return Ok(());
         }
 
+        vulkan
+            .wait_for_openxr_idle()
+            .map_err(|err| format!("OpenXR Vulkan projection resize failed while draining XR work: {err}"))?;
+
         let Some(mut vulkan_session) = self.vulkan.take() else {
             return Err("OpenXR Vulkan projection resize failed: session data unavailable".to_string());
         };
@@ -546,13 +557,13 @@ impl CxOpenXrSession {
                 let old_render_targets =
                     std::mem::replace(&mut vulkan_session.render_targets, new_render_targets);
                 vulkan_session._color_images = new_color_images;
+                vulkan_session.retired_projection_layers.push(RetiredOpenXrVulkanProjectionLayer {
+                    color_swap_chain: old_color_swap_chain,
+                    render_targets: old_render_targets,
+                });
                 self.width = new_width;
                 self.height = new_height;
                 self.vulkan = Some(vulkan_session);
-
-                vulkan.destroy_openxr_session_data(old_render_targets);
-                unsafe { (xr.xrDestroySwapchain)(old_color_swap_chain) }
-                    .log_error("xrDestroySwapchain");
                 Ok(())
             }
             Err(err) => {
@@ -562,9 +573,14 @@ impl CxOpenXrSession {
         }
     }
 
-    pub(super) fn destroy_session_vulkan(&mut self, vulkan: Option<&mut CxVulkan>) {
-        if let Some(vulkan_session) = self.vulkan.take() {
+    pub(super) fn destroy_session_vulkan(&mut self, xr: &LibOpenXr, vulkan: Option<&mut CxVulkan>) {
+        if let Some(mut vulkan_session) = self.vulkan.take() {
             if let Some(vulkan) = vulkan {
+                for retired in vulkan_session.retired_projection_layers.drain(..) {
+                    vulkan.destroy_openxr_session_data(retired.render_targets);
+                    unsafe { (xr.xrDestroySwapchain)(retired.color_swap_chain) }
+                        .log_error("xrDestroySwapchain");
+                }
                 vulkan.destroy_openxr_session_data(vulkan_session.render_targets);
             } else {
                 crate::error!(
