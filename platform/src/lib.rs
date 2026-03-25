@@ -218,8 +218,9 @@ pub use {
         },
         xr_depth_mesh::{
             ChunkKey, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery,
-            XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry, XrDepthMeshQueryHit,
-            XrDepthMeshQueryResolvedSurface, XrDepthMeshQueryResult,
+            XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry,
+            XrDepthMeshQueryColliderRole, XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface,
+            XrDepthMeshQueryResult,
             XrDepthMeshQuerySupportPlane, XrDepthMeshState, XrDepthMeshStats,
             XrDepthMeshStore, XrDepthPlaneKind, XrDepthPlanePatch,
         },

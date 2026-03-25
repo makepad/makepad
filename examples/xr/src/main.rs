@@ -10,7 +10,7 @@ script_mod! {
     use mod.widgets.*
 
     let Block = Cube{
-        size: vec3(0.145, 0.082, 0.075)
+        size: vec3(0.160, 0.082, 0.075)
         corner_radius: 0.018
         roughness: 0.28
         metallic: 0.02
@@ -139,9 +139,9 @@ script_mod! {
                     scale: vec3(0.62, 0.62, 0.62)
                     on_render: ||{
                         Platform{pos: vec3(0.05, -0.06, -0.10)}
-                        for row in 0..8 {
+                        for row in 0..20 {
                             for col in 0..8 {
-                                let offset = if row % 2 == 0 {0.0} else {0.0725}
+                                let offset = if row % 2 == 0 {0.0} else {0.08}
                                 let color = if (row + col) % 6 == 0 {
                                     #xff5a4f
                                 } else if (row + col) % 6 == 1 {
@@ -156,7 +156,7 @@ script_mod! {
                                     #xd16dff
                                 }
                                 Block{
-                                    pos: vec3(-0.46 + col * 0.145 + offset, 0.028 + row * 0.084, -0.10)
+                                    pos: vec3(-0.46 + col * 0.16 + offset, 0.028 + row * 0.084, -0.10)
                                     color: color
                                 }
                             }
@@ -390,6 +390,38 @@ script_mod! {
                         width: Fill
                         height: Fit
                         flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+
+                        physics_scale_label := Label{
+                            width: 104
+                            text: "Physics Speed"
+                            draw_text.color: #xe8f4ff
+                        }
+
+                        physics_scale_025_button := XrUiButton{
+                            width: 58
+                            text: "0.25"
+                            on_press: || ui.root.set_physics_time_scale(0.25)
+                        }
+
+                        physics_scale_05_button := XrUiButton{
+                            width: 58
+                            text: "0.5"
+                            on_press: || ui.root.set_physics_time_scale(0.5)
+                        }
+
+                        physics_scale_10_button := XrUiButton{
+                            width: 58
+                            text: "1.0"
+                            on_press: || ui.root.set_physics_time_scale(1.0)
+                        }
+                    }
+
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
                         spacing: 12
                         align: Align{y: 0.5}
 
@@ -543,6 +575,8 @@ impl App {
             vertex_count,
             triangle_count,
             compute_ms,
+            physics_time_scale,
+            step_dt_ms,
             frame_cpu_ms,
             frame_update_cpu_ms,
             frame_draw_cpu_ms,
@@ -553,6 +587,8 @@ impl App {
                     root.physics_depth_query_vertex_count(),
                     root.physics_depth_query_triangle_count(),
                     root.physics_compute_ms(),
+                    root.physics_time_scale(),
+                    root.physics_step_dt_ms(),
                     root.frame_cpu_ms(),
                     root.frame_update_cpu_ms(),
                     root.frame_draw_cpu_ms(),
@@ -572,7 +608,17 @@ impl App {
             self.last_physics_geometry_text = geometry_text;
         }
 
-        let timing_text = format!("Physics compute: {:.2} ms", compute_ms);
+        let timing_text = if step_dt_ms > 0.0 {
+            format!(
+                "Physics compute: {:.2} ms | tick {:.2} ms ({:.0} Hz) | sim {:.2}x",
+                compute_ms,
+                step_dt_ms,
+                1000.0 / step_dt_ms,
+                physics_time_scale
+            )
+        } else {
+            format!("Physics compute: {:.2} ms | sim {:.2}x", compute_ms, physics_time_scale)
+        };
         if self.last_physics_timing_text != timing_text {
             self.ui
                 .widget(cx, ids!(physics_timing_field))

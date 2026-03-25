@@ -139,7 +139,12 @@ const XR_DEPTH_QUERY_FRICTION: f32 = 0.9;
 const XR_DEPTH_QUERY_LOOKAHEAD_SECONDS: f32 = 0.18;
 #[allow(dead_code)]
 const XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE: f32 = 0.32;
-const XR_DEPTH_QUERY_SURFACES_PER_BODY: usize = 1;
+const XR_DEPTH_QUERY_SURFACES_PER_BODY: usize = 2;
+const XR_DEPTH_QUERY_IMPACT_QUERY_SPEED_MIN: f32 = 0.80;
+const XR_DEPTH_QUERY_IMPACT_QUERY_HORIZONTAL_SPEED_MIN: f32 = 0.55;
+const XR_DEPTH_QUERY_IMPACT_ENABLE_SPEED_MIN: f32 = 0.35;
+const XR_DEPTH_QUERY_IMPACT_ENABLE_APPROACH_SPEED_MIN: f32 = 0.18;
+const XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN: f32 = 0.30;
 const XR_DEPTH_QUERY_INCLUDE_PLANAR_PATCHES: bool = false;
 #[allow(dead_code)]
 const XR_DEPTH_QUERY_STICKY_KEEP_MARGIN: f32 = 0.015;
@@ -234,6 +239,8 @@ pub struct XrEnv {
     // Physics (moved from XrScene)
     #[live(9.81)]
     pub gravity: f32,
+    #[rust(1.0)]
+    physics_time_scale: f32,
     #[rust]
     physics_worker: Option<XrPhysicsWorker>,
     #[rust]
@@ -246,6 +253,8 @@ pub struct XrEnv {
     physics_revision: u64,
     #[rust]
     physics_compute_ms: f64,
+    #[rust]
+    physics_step_dt_ms: f64,
     #[rust]
     physics_depth_query_surface_count: usize,
     #[rust]
@@ -288,6 +297,24 @@ impl XrEnv {
 
     pub(crate) fn physics_compute_ms(&self) -> f64 {
         self.physics_compute_ms
+    }
+
+    pub(crate) fn physics_time_scale(&self) -> f32 {
+        self.physics_time_scale
+    }
+
+    pub(crate) fn physics_step_dt_ms(&self) -> f64 {
+        self.physics_step_dt_ms
+    }
+
+    pub(crate) fn set_physics_time_scale(&mut self, cx: &mut Cx, scale: f32) -> f32 {
+        let scale = scale.clamp(0.1, 1.0);
+        if (self.physics_time_scale - scale).abs() <= f32::EPSILON {
+            return self.physics_time_scale;
+        }
+        self.physics_time_scale = scale;
+        cx.redraw_all();
+        self.physics_time_scale
     }
 
     pub(crate) fn physics_depth_query_surface_count(&self) -> usize {
@@ -637,6 +664,7 @@ impl XrEnv {
             self.depth_query_retained_hits = retained_hits;
         }
         self.physics_compute_ms = result.physics_compute_ms;
+        self.physics_step_dt_ms = result.physics_step_dt_ms;
         self.physics_depth_query_surface_count = result.physics_depth_query_surface_count;
         self.physics_depth_query_vertex_count = result.physics_depth_query_vertex_count;
         self.physics_depth_query_triangle_count = result.physics_depth_query_triangle_count;
@@ -697,6 +725,7 @@ impl XrEnv {
     pub fn step_physics(&mut self, cx: &mut Cx) {
         self.poll_physics_worker(cx);
         let revision = self.physics_revision;
+        let physics_time_scale = self.physics_time_scale;
         let include_retained_hits = self.depth_query_hits_visible();
         let (left_hand, right_hand) = self
             .last_xr_state
@@ -707,6 +736,7 @@ impl XrEnv {
             revision,
             left_hand,
             right_hand,
+            physics_time_scale,
             include_retained_hits,
         );
     }
@@ -717,6 +747,7 @@ impl XrEnv {
             worker.request_reset(self.physics_revision);
         }
         self.physics_compute_ms = 0.0;
+        self.physics_step_dt_ms = 0.0;
         self.physics_depth_query_surface_count = 0;
         self.physics_depth_query_vertex_count = 0;
         self.physics_depth_query_triangle_count = 0;
