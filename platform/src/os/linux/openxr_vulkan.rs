@@ -1,9 +1,22 @@
 use super::*;
 use crate::{
     os::linux::openxr_depth::CxOpenXrDepthMeshPipeline,
-    os::linux::vulkan::{CxVulkan, CxVulkanOpenXrSessionData},
+    os::linux::vulkan::{CxVulkan, CxVulkanOpenXrFoveationImageInfo, CxVulkanOpenXrSessionData},
     xr_depth_mesh::xr_depth_mesh_store,
 };
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+struct XrSwapchainImageVulkanWithFoveationFB {
+    color: XrSwapchainImageVulkanKHR,
+    foveation: XrSwapchainImageFoveationVulkanFB,
+}
+
+impl XrSwapchainImageVulkanWithFoveationFB {
+    fn link_next(&mut self) {
+        self.color.next = &mut self.foveation as *mut _ as *mut _;
+    }
+}
 pub(super) struct CxOpenXrVulkanSession {
     _color_images: Vec<XrSwapchainImageVulkanKHR>,
     _depth_images: Vec<XrSwapchainImageVulkanKHR>,
@@ -61,10 +74,11 @@ impl Cx {
             pass.pass_uniforms.depth_view_r = zero_mat;
         }
 
-        let mut vulkan =
-            self.os.vulkan.take().ok_or_else(|| {
-                "OpenXR Vulkan render failed: backend unavailable".to_string()
-            })?;
+        let mut vulkan = self
+            .os
+            .vulkan
+            .take()
+            .ok_or_else(|| "OpenXR Vulkan render failed: backend unavailable".to_string())?;
         let result = unsafe {
             vulkan.draw_openxr_view(
                 self,
@@ -80,21 +94,18 @@ impl Cx {
 
         #[cfg(target_os = "android")]
         if let Some(request) = self.take_studio_run_view_frame_request(0) {
-            let mut vulkan = self
-                .os
-                .vulkan
-                .take()
-                .ok_or_else(|| "OpenXR Vulkan frame capture failed: backend unavailable".to_string())?;
-            let result = unsafe { vulkan.read_openxr_color_image_rgba(&*render_targets, color_image_index, 0) };
+            let mut vulkan = self.os.vulkan.take().ok_or_else(|| {
+                "OpenXR Vulkan frame capture failed: backend unavailable".to_string()
+            })?;
+            let result = unsafe {
+                vulkan.read_openxr_color_image_rgba(&*render_targets, color_image_index, 0)
+            };
             self.os.vulkan = Some(vulkan);
             match result {
                 Ok(rgba) => {
-                    let session = self
-                        .os
-                        .openxr
-                        .session
-                        .as_ref()
-                        .ok_or_else(|| "OpenXR Vulkan frame capture failed: session unavailable".to_string())?;
+                    let session = self.os.openxr.session.as_ref().ok_or_else(|| {
+                        "OpenXR Vulkan frame capture failed: session unavailable".to_string()
+                    })?;
                     self.encode_studio_run_view_frame_async(
                         request,
                         session.width.max(1),
@@ -128,7 +139,8 @@ impl CxOpenXrSession {
         supported_formats: &[i64],
         preferred_format: vk::Format,
     ) -> Option<vk::Format> {
-        let is_supported = |format: vk::Format| supported_formats.contains(&i64::from(format.as_raw()));
+        let is_supported =
+            |format: vk::Format| supported_formats.contains(&i64::from(format.as_raw()));
 
         if preferred_format != vk::Format::UNDEFINED && is_supported(preferred_format) {
             return Some(preferred_format);
@@ -142,6 +154,62 @@ impl CxOpenXrSession {
         ]
         .into_iter()
         .find(|format| is_supported(*format))
+    }
+
+    fn desired_fixed_foveation_level(level: u8) -> Option<XrFoveationLevelFB> {
+        match level {
+            0 => None,
+            1 => Some(XrFoveationLevelFB::LOW),
+            2 => Some(XrFoveationLevelFB::MEDIUM),
+            _ => Some(XrFoveationLevelFB::HIGH),
+        }
+    }
+
+    fn try_enable_fixed_foveation(
+        xr: &LibOpenXr,
+        session: XrSession,
+        swapchain: XrSwapchain,
+        level: XrFoveationLevelFB,
+    ) -> Result<(), String> {
+        let create_profile = xr.xrCreateFoveationProfileFB.ok_or_else(|| {
+            "xrCreateFoveationProfileFB unavailable even though fixed foveation was requested"
+                .to_string()
+        })?;
+        let update_swapchain = xr.xrUpdateSwapchainFB.ok_or_else(|| {
+            "xrUpdateSwapchainFB unavailable even though fixed foveation was requested".to_string()
+        })?;
+        let destroy_profile = xr.xrDestroyFoveationProfileFB.ok_or_else(|| {
+            "xrDestroyFoveationProfileFB unavailable even though fixed foveation was requested"
+                .to_string()
+        })?;
+
+        let level_info = XrFoveationLevelProfileCreateInfoFB {
+            level,
+            verticalOffset: 0.0,
+            dynamic: XrFoveationDynamicFB::DISABLED,
+            ..Default::default()
+        };
+        let profile_info = XrFoveationProfileCreateInfoFB {
+            next: &level_info as *const _ as *const _,
+            ..Default::default()
+        };
+        let mut profile = XrFoveationProfileFB(0);
+        unsafe { (create_profile)(session, &profile_info, &mut profile) }
+            .to_result("xrCreateFoveationProfileFB")?;
+
+        let state = XrSwapchainStateFoveationFB {
+            profile,
+            ..Default::default()
+        };
+        let update_result = unsafe {
+            (update_swapchain)(
+                swapchain,
+                &state as *const _ as *const XrSwapchainStateBaseHeaderFB,
+            )
+        }
+        .to_result("xrUpdateSwapchainFB");
+        unsafe { (destroy_profile)(profile) }.log_error("xrDestroyFoveationProfileFB");
+        update_result
     }
 
     pub(super) fn create_session_vulkan(
@@ -225,7 +293,19 @@ impl CxOpenXrSession {
             ));
         }
 
-        let swap_chain_create_info = XrSwapchainCreateInfo {
+        let desired_fixed_foveation_level =
+            Self::desired_fixed_foveation_level(options.fixed_foveation_level);
+        let can_use_fixed_foveation = desired_fixed_foveation_level.is_some()
+            && vulkan.supports_openxr_fixed_foveation()
+            && xr.xrCreateFoveationProfileFB.is_some()
+            && xr.xrUpdateSwapchainFB.is_some()
+            && xr.xrDestroyFoveationProfileFB.is_some();
+
+        let mut swapchain_foveation_info = XrSwapchainCreateInfoFoveationFB {
+            flags: XrSwapchainCreateFoveationFlagsFB::FRAGMENT_DENSITY_MAP_BIT_FB,
+            ..Default::default()
+        };
+        let mut swap_chain_create_info = XrSwapchainCreateInfo {
             usage_flags: XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT,
             format: color_format_raw,
             width,
@@ -236,11 +316,64 @@ impl CxOpenXrSession {
             mip_count: 1,
             ..Default::default()
         };
+        if can_use_fixed_foveation {
+            swap_chain_create_info.next = &mut swapchain_foveation_info as *mut _ as *const _;
+        }
         let mut color_swap_chain = XrSwapchain(0);
         unsafe { (xr.xrCreateSwapchain)(session, &swap_chain_create_info, &mut color_swap_chain) }
             .to_result("xrCreateSwapchain")?;
+        let mut fixed_foveation_enabled = false;
+        if let Some(level) = desired_fixed_foveation_level {
+            if can_use_fixed_foveation {
+                if let Err(err) =
+                    Self::try_enable_fixed_foveation(xr, session, color_swap_chain, level)
+                {
+                    crate::warning!(
+                        "OpenXR Vulkan: failed to enable fixed foveation, continuing without it: {}",
+                        err
+                    );
+                } else {
+                    fixed_foveation_enabled = true;
+                    crate::log!(
+                        "OpenXR Vulkan: fixed foveation enabled at level {:?}",
+                        level
+                    );
+                }
+            } else {
+                crate::warning!(
+                    "OpenXR Vulkan: fixed foveation requested but unavailable on this runtime/device"
+                );
+            }
+        }
 
-        let color_images =
+        let mut foveation_images = Vec::new();
+        let color_images = if fixed_foveation_enabled {
+            let image_count = unsafe {
+                let mut count = 0;
+                (xr.xrEnumerateSwapchainImages)(color_swap_chain, 0, &mut count, ptr::null_mut())
+                    .to_result("xrEnumerateSwapchainImages")?;
+                count
+            };
+            let mut images =
+                vec![XrSwapchainImageVulkanWithFoveationFB::default(); image_count as usize];
+            for image in &mut images {
+                image.link_next();
+            }
+            let mut enumerated = 0;
+            unsafe {
+                (xr.xrEnumerateSwapchainImages)(
+                    color_swap_chain,
+                    image_count,
+                    &mut enumerated,
+                    images.as_mut_ptr() as *mut std::ffi::c_void,
+                )
+            }
+            .to_result("xrEnumerateSwapchainImages")?;
+            foveation_images.extend(images.iter().map(|image| CxVulkanOpenXrFoveationImageInfo {
+                image: vk::Image::from_raw(image.foveation.image),
+            }));
+            images.iter().map(|image| image.color).collect()
+        } else {
             xr_array_fetch(XrSwapchainImageVulkanKHR::default(), |cap, len, buf| {
                 unsafe {
                     (xr.xrEnumerateSwapchainImages)(
@@ -251,7 +384,8 @@ impl CxOpenXrSession {
                     )
                 }
                 .to_result("xrEnumerateSwapchainImages")
-            })?;
+            })?
+        };
 
         let (passthrough, passthrough_layer, depth_provider, depth_swap_chain) =
             Self::create_passthrough_and_depth(xr, session, options)?;
@@ -299,6 +433,11 @@ impl CxOpenXrSession {
             height,
             depth_swapchain_state.width,
             depth_swapchain_state.height,
+            if fixed_foveation_enabled {
+                Some(&foveation_images)
+            } else {
+                None
+            },
         )?;
         unsafe { (xr.xrStartEnvironmentDepthProviderMETA)(depth_provider) }
             .to_result("xrStartEnvironmentDepthProviderMETA")?;
