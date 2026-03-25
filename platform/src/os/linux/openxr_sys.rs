@@ -173,6 +173,9 @@ pub struct LibOpenXr {
     pub xrPassthroughStartFB: TxrPassthroughStartFB,
     pub xrPassthroughLayerResumeFB: TxrPassthroughLayerResumeFB,
     pub xrCreateFoveationProfileFB: Option<TxrCreateFoveationProfileFB>,
+    pub xrEnumerateDisplayRefreshRatesFB: Option<TxrEnumerateDisplayRefreshRatesFB>,
+    pub xrGetDisplayRefreshRateFB: Option<TxrGetDisplayRefreshRateFB>,
+    pub xrRequestDisplayRefreshRateFB: Option<TxrRequestDisplayRefreshRateFB>,
     pub xrCreateEnvironmentDepthProviderMETA: TxrCreateEnvironmentDepthProviderMETA,
     pub xrCreateEnvironmentDepthSwapchainMETA: TxrCreateEnvironmentDepthSwapchainMETA,
     pub xrGetEnvironmentDepthSwapchainStateMETA: TxrGetEnvironmentDepthSwapchainStateMETA,
@@ -206,6 +209,7 @@ pub struct LibOpenXr {
     pub xrDestroyInstance: TxrDestroyInstance,
     pub xrStringToPath: TxrStringToPath,
     pub xrCreateActionSet: TxrCreateActionSet,
+    pub xrDestroyActionSet: TxrDestroyActionSet,
     pub xrCreateAction: TxrCreateAction,
     pub xrSuggestInteractionProfileBindings: TxrSuggestInteractionProfileBindings,
     pub xrAttachSessionActionSets: TxrAttachSessionActionSets,
@@ -311,6 +315,21 @@ impl LibOpenXr {
                 instance,
                 TxrCreateFoveationProfileFB
             ),
+            xrEnumerateDisplayRefreshRatesFB: get_optional_proc_addr!(
+                gipa,
+                instance,
+                TxrEnumerateDisplayRefreshRatesFB
+            ),
+            xrGetDisplayRefreshRateFB: get_optional_proc_addr!(
+                gipa,
+                instance,
+                TxrGetDisplayRefreshRateFB
+            ),
+            xrRequestDisplayRefreshRateFB: get_optional_proc_addr!(
+                gipa,
+                instance,
+                TxrRequestDisplayRefreshRateFB
+            ),
             xrCreateEnvironmentDepthProviderMETA: get_proc_addr!(
                 gipa,
                 instance,
@@ -391,6 +410,7 @@ impl LibOpenXr {
             xrDestroyInstance: get_proc_addr!(gipa, instance, TxrDestroyInstance)?,
             xrStringToPath: get_proc_addr!(gipa, instance, TxrStringToPath)?,
             xrCreateActionSet: get_proc_addr!(gipa, instance, TxrCreateActionSet)?,
+            xrDestroyActionSet: get_proc_addr!(gipa, instance, TxrDestroyActionSet)?,
             xrCreateAction: get_proc_addr!(gipa, instance, TxrCreateAction)?,
             xrSuggestInteractionProfileBindings: get_proc_addr!(
                 gipa,
@@ -694,6 +714,23 @@ pub type TxrBeginFrame =
 pub type TxrEndFrame =
     unsafe extern "C" fn(session: XrSession, frame_end_info: *const XrFrameEndInfo) -> XrResult;
 
+pub type TxrEnumerateDisplayRefreshRatesFB = unsafe extern "C" fn(
+    session: XrSession,
+    display_refresh_rate_capacity_input: u32,
+    display_refresh_rate_count_output: *mut u32,
+    display_refresh_rates: *mut f32,
+) -> XrResult;
+
+pub type TxrGetDisplayRefreshRateFB = unsafe extern "C" fn(
+    session: XrSession,
+    display_refresh_rate: *mut f32,
+) -> XrResult;
+
+pub type TxrRequestDisplayRefreshRateFB = unsafe extern "C" fn(
+    session: XrSession,
+    display_refresh_rate: f32,
+) -> XrResult;
+
 pub type TxrLocateSpace = unsafe extern "C" fn(
     space: XrSpace,
     base_space: XrSpace,
@@ -774,6 +811,8 @@ pub type TxrCreateActionSet = unsafe extern "C" fn(
     create_info: *const XrActionSetCreateInfo,
     action_set: *mut XrActionSet,
 ) -> XrResult;
+
+pub type TxrDestroyActionSet = unsafe extern "C" fn(action_set: XrActionSet) -> XrResult;
 
 pub type TxrCreateAction = unsafe extern "C" fn(
     action_set: XrActionSet,
@@ -2479,6 +2518,16 @@ pub struct XrEventDataSessionStateChanged {
     pub session: XrSession,
     pub state: XrSessionState,
     pub time: XrTime,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrEventDataDisplayRefreshRateChangedFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub session: XrSession,
+    pub from_display_refresh_rate: f32,
+    pub to_display_refresh_rate: f32,
 }
 
 #[repr(C)]

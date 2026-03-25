@@ -582,6 +582,7 @@ impl Cx {
                 CxOsOp::XrStartPresenting => {
                     self.os.from_wasm(FromWasmXrStartPresenting {});
                 }
+                CxOsOp::XrSetRenderScale(_) => {}
                 CxOsOp::XrStopPresenting => {
                     self.os.from_wasm(FromWasmXrStopPresenting {});
                 }

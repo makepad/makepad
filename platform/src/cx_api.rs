@@ -135,6 +135,22 @@ pub trait CxOsApi {
         0.00001
     }
 
+    fn xr_render_scale(&self) -> Option<f64> {
+        None
+    }
+
+    fn xr_gpu_frame_time_ms(&self) -> Option<f64> {
+        None
+    }
+
+    fn xr_display_refresh_rate_hz(&self) -> Option<f64> {
+        None
+    }
+
+    fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
+        None
+    }
+
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -312,6 +328,7 @@ pub enum CxOsOp {
     SelectFolderDialog(FileDialog),
 
     XrStartPresenting,
+    XrSetRenderScale(f32),
     XrSetLocalAnchor(XrAnchor),
     XrAdvertiseAnchor(XrAnchor),
     XrDiscoverAnchor(u8),
@@ -394,6 +411,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::RepositionWindow(..) => write!(f, "RepositionWindow"),
 
             Self::XrStartPresenting => write!(f, "XrStartPresenting"),
+            Self::XrSetRenderScale(_) => write!(f, "XrSetRenderScale"),
             Self::XrStopPresenting => write!(f, "XrStopPresenting"),
             Self::XrAdvertiseAnchor(_) => write!(f, "XrAdvertiseAnchor"),
             Self::XrSetLocalAnchor(_) => write!(f, "XrSetLocalAnchor"),
@@ -412,6 +430,22 @@ impl Cx {
 
     pub fn xr_depth_mesh(&self) -> crate::xr_depth_mesh::XrDepthMeshStore {
         crate::xr_depth_mesh::xr_depth_mesh_store()
+    }
+
+    pub fn xr_render_scale(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_render_scale(self)
+    }
+
+    pub fn xr_gpu_frame_time_ms(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_gpu_frame_time_ms(self)
+    }
+
+    pub fn xr_display_refresh_rate_hz(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_display_refresh_rate_hz(self)
+    }
+
+    pub fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_effective_frame_rate_hz(self)
     }
 
     pub fn get_ref(&self) -> CxRef {
@@ -581,6 +615,10 @@ impl Cx {
 
     pub fn xr_start_presenting(&mut self) {
         self.platform_ops.push(CxOsOp::XrStartPresenting);
+    }
+
+    pub fn xr_set_render_scale(&mut self, scale: f32) {
+        self.platform_ops.push(CxOsOp::XrSetRenderScale(scale));
     }
 
     pub fn xr_advertise_anchor(&mut self, anchor: XrAnchor) {
