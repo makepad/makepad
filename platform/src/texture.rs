@@ -175,6 +175,10 @@ pub enum TextureFormat {
         size: TextureSize,
         initial: bool,
     },
+    RenderCubeBGRAu8 {
+        size: TextureSize,
+        initial: bool,
+    },
     RenderRGBAf16 {
         size: TextureSize,
         initial: bool,
@@ -242,6 +246,9 @@ impl std::fmt::Debug for TextureFormat {
             TextureFormat::RenderBGRAu8 { size, .. } => {
                 write!(f, "TextureFormat::RenderBGRAu8(size:{:?})", size)
             }
+            TextureFormat::RenderCubeBGRAu8 { size, .. } => {
+                write!(f, "TextureFormat::RenderCubeBGRAu8(size:{:?})", size)
+            }
             TextureFormat::RenderRGBAf16 { size, .. } => {
                 write!(f, "TextureFormat::RenderRGBAf16(size:{:?})", size)
             }
@@ -283,6 +290,7 @@ pub enum TextureCategory {
     VecMip,
     VecCube,
     Render,
+    RenderCube,
     DepthBuffer,
     Shared,
     Video,
@@ -314,6 +322,13 @@ impl PartialEq for TextureCategory {
             }
             Self::Render { .. } => {
                 if let Self::Render { .. } = other {
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::RenderCube { .. } => {
+                if let Self::RenderCube { .. } = other {
                     true
                 } else {
                     false
@@ -417,6 +432,7 @@ impl CxTexture {
         match self.format {
             TextureFormat::DepthD32 { initial, .. } => initial,
             TextureFormat::RenderBGRAu8 { initial, .. } => initial,
+            TextureFormat::RenderCubeBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
             TextureFormat::RenderRGBAf32 { initial, .. } => initial,
             TextureFormat::SharedBGRAu8 { initial, .. } => initial,
@@ -443,6 +459,7 @@ impl CxTexture {
         *match &mut self.format {
             TextureFormat::DepthD32 { initial, .. } => initial,
             TextureFormat::RenderBGRAu8 { initial, .. } => initial,
+            TextureFormat::RenderCubeBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
             TextureFormat::RenderRGBAf32 { initial, .. } => initial,
             TextureFormat::SharedBGRAu8 { initial, .. } => initial,
@@ -543,6 +560,7 @@ impl TextureFormat {
     pub fn is_render(&self) -> bool {
         match self {
             Self::RenderBGRAu8 { .. } => true,
+            Self::RenderCubeBGRAu8 { .. } => true,
             Self::RenderRGBAf16 { .. } => true,
             Self::RenderRGBAf32 { .. } => true,
             _ => false,
@@ -649,6 +667,15 @@ impl TextureFormat {
                     height,
                     pixel: TexturePixel::BGRAu8,
                     category: TextureCategory::Render,
+                })
+            }
+            Self::RenderCubeBGRAu8 { size, .. } => {
+                let (width, height) = size.width_height(width, height);
+                Some(TextureAlloc {
+                    width,
+                    height,
+                    pixel: TexturePixel::BGRAu8,
+                    category: TextureCategory::RenderCube,
                 })
             }
             Self::RenderRGBAf16 { size, .. } => {

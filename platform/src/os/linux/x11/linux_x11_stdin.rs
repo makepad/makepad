@@ -411,6 +411,7 @@ impl Cx {
                         texture: swapchain.presentable_images[stdin_window.present_index]
                             .texture
                             .clone(),
+                        cube_face: None,
                     }];
                 }
 

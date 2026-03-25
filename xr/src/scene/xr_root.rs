@@ -4,7 +4,7 @@ use crate::xr_select::{XrSelect, XrSelectAction};
 use crate::*;
 use makepad_widgets::event::XrFingerTip;
 use makepad_widgets::makepad_script::ScriptFnRef;
-use std::{cell::Cell, cmp::Ordering, collections::HashSet, rc::Rc};
+use std::{cell::Cell, cmp::Ordering, collections::HashSet, rc::Rc, time::Instant};
 
 const DESKTOP_TOUCH_DOWN_Z: f32 = 0.0;
 const DESKTOP_TOUCH_UP_Z: f32 = 64.0;
@@ -207,13 +207,26 @@ pub struct XrRoot {
     #[rust] xr_content_pose: Option<Pose>,
     #[rust] next_frame: NextFrame,
     #[rust] desktop_ui_pointer_active: bool,
+    #[rust] last_frame_update_cpu_ms: f64,
+    #[rust] last_frame_draw_cpu_ms: f64,
+    #[rust] last_frame_cpu_ms: f64,
 }
 
 impl XrRoot {
+    fn update_frame_cpu_total(&mut self) {
+        self.last_frame_cpu_ms = self.last_frame_update_cpu_ms + self.last_frame_draw_cpu_ms;
+    }
+
     fn set_depth_mesh_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
         self.env.set_depth_mesh_visible(visible);
         self.env.mark_scene_dirty();
         self.env.ensure_physics(cx, &self.children);
+        cx.redraw_all();
+        visible
+    }
+
+    fn set_depth_query_hits_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
+        self.env.set_depth_query_hits_visible(visible);
         cx.redraw_all();
         visible
     }
@@ -593,6 +606,7 @@ impl XrRoot {
     }
 
     fn handle_draw_event(&mut self, cx: &mut Cx, e: &DrawEvent, scope: &mut Scope) {
+        let started = Instant::now();
         self.ensure_initialized(cx);
         cx.passes[self.pass.handle.draw_pass_id()].keep_camera_matrix =
             if cx.in_xr_mode() || !self.permissions_ui_visible() {
@@ -626,16 +640,56 @@ impl XrRoot {
             let cx2d = &mut Cx2d::new(&mut cx_draw);
             self.draw_all(cx2d, scope);
         }
+        self.last_frame_draw_cpu_ms = started.elapsed().as_secs_f64() * 1000.0;
+        self.update_frame_cpu_total();
     }
 
     pub fn depth_mesh_visible(&self) -> bool {
         self.env.depth_mesh_visible()
     }
 
+    pub fn depth_query_hits_visible(&self) -> bool {
+        self.env.depth_query_hits_visible()
+    }
+
     pub fn toggle_depth_mesh_visible(&mut self, cx: &mut Cx) -> bool {
         let visible = self.env.toggle_depth_mesh_visible();
         cx.redraw_all();
         visible
+    }
+
+    pub fn toggle_depth_query_hits_visible(&mut self, cx: &mut Cx) -> bool {
+        let visible = self.env.toggle_depth_query_hits_visible();
+        cx.redraw_all();
+        visible
+    }
+
+    pub fn physics_compute_ms(&self) -> f64 {
+        self.env.physics_compute_ms()
+    }
+
+    pub fn physics_depth_query_surface_count(&self) -> usize {
+        self.env.physics_depth_query_surface_count()
+    }
+
+    pub fn physics_depth_query_vertex_count(&self) -> usize {
+        self.env.physics_depth_query_vertex_count()
+    }
+
+    pub fn physics_depth_query_triangle_count(&self) -> usize {
+        self.env.physics_depth_query_triangle_count()
+    }
+
+    pub fn frame_cpu_ms(&self) -> f64 {
+        self.last_frame_cpu_ms
+    }
+
+    pub fn frame_update_cpu_ms(&self) -> f64 {
+        self.last_frame_update_cpu_ms
+    }
+
+    pub fn frame_draw_cpu_ms(&self) -> f64 {
+        self.last_frame_draw_cpu_ms
     }
 }
 
@@ -717,6 +771,29 @@ impl Widget for XrRoot {
         if method == live_id!(depth_mesh_visible) {
             return ScriptAsyncResult::Return(ScriptValue::from_bool(self.depth_mesh_visible()));
         }
+        if method == live_id!(set_depth_query_hits) {
+            let mut visible = self.depth_query_hits_visible();
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                visible = vm.bx.heap.cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+            }
+            vm.with_cx_mut(|cx| {
+                visible = self.set_depth_query_hits_visible(cx, visible);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(visible));
+        }
+        if method == live_id!(toggle_depth_query_hits) {
+            let mut visible = self.depth_query_hits_visible();
+            vm.with_cx_mut(|cx| {
+                visible = self.toggle_depth_query_hits_visible(cx);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(visible));
+        }
+        if method == live_id!(depth_query_hits_visible) {
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(
+                self.depth_query_hits_visible(),
+            ));
+        }
         if method == live_id!(render_scene) {
             self.env.mark_scene_dirty();
             for i in 0..self.children.len() {
@@ -737,6 +814,10 @@ impl Widget for XrRoot {
             self.handle_draw_event(cx, e, scope);
             return;
         }
+
+        let measure_frame_cpu = matches!(event, Event::XrUpdate(_))
+            || self.next_frame.is_event(event).is_some();
+        let started = measure_frame_cpu.then(Instant::now);
 
         if !cx.in_xr_mode() {
             self.clear_xr_content_pose(cx);
@@ -816,6 +897,11 @@ impl Widget for XrRoot {
 
         if desktop_scene_interaction && !handled_desktop_xr_pointer {
             self.camera.handle_desktop_interaction(cx, event);
+        }
+
+        if let Some(started) = started {
+            self.last_frame_update_cpu_ms = started.elapsed().as_secs_f64() * 1000.0;
+            self.update_frame_cpu_total();
         }
     }
 

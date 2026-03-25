@@ -40,6 +40,7 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
         let mut visible_field = None;
         let mut action_data_field = None;
         let mut uid_field = None;
+        let mut cast_fields = Vec::new();
         let mut find_fields = Vec::new();
         let mut redraw_fields = Vec::new();
         for field in &mut fields {
@@ -69,6 +70,9 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             }
             if field.attrs.iter().any(|v| v.name == "uid") {
                 uid_field = Some(field.name.clone());
+            }
+            if field.attrs.iter().any(|v| v.name == "cast") {
+                cast_fields.push((field.name.clone(), field.ty.clone()));
             }
         }
         if uid_field.is_some() && deref_field.is_some() {
@@ -111,6 +115,30 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn action_data(&self)->Option<std::sync::Arc<dyn ActionTrait>> { self.")
                 .ident(action_data_field)
                 .add(".clone_data()}");
+        }
+
+        if !cast_fields.is_empty() {
+            tb.add("    fn cast_inner_any(&self, type_id: std::any::TypeId) -> Option<&dyn std::any::Any> {");
+            for (cast_field, cast_ty) in &cast_fields {
+                tb.add("        if type_id == std::any::TypeId::of::<")
+                    .stream(Some(cast_ty.clone()))
+                    .add(">() { return Some(&self.")
+                    .ident(cast_field)
+                    .add(" as &dyn std::any::Any); }");
+            }
+            tb.add("        None");
+            tb.add("    }");
+
+            tb.add("    fn cast_inner_any_mut(&mut self, type_id: std::any::TypeId) -> Option<&mut dyn std::any::Any> {");
+            for (cast_field, cast_ty) in &cast_fields {
+                tb.add("        if type_id == std::any::TypeId::of::<")
+                    .stream(Some(cast_ty.clone()))
+                    .add(">() { return Some(&mut self.")
+                    .ident(cast_field)
+                    .add(" as &mut dyn std::any::Any); }");
+            }
+            tb.add("        None");
+            tb.add("    }");
         }
 
         if let Some(wrap_field) = &wrap_field {

@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
-use super::xr_depth::{DepthQuerySurfaceCollider, DepthQuerySurfaceShape, DepthQuerySurfaceTarget};
+use super::xr_depth::{DepthQuerySurfaceCollider, DepthQuerySurfaceTarget};
 use super::*;
+use rapier3d::pipeline::{ActiveHooks, PairFilterContext, PhysicsHooks};
+use rapier3d::prelude::SolverFlags;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum HandCollider {
@@ -16,8 +18,10 @@ pub(crate) struct PhysicsCube {
     pub(crate) body: RigidBodyHandle,
     pub(crate) collider: ColliderHandle,
     pub(crate) half_extents: Vec3f,
+    pub(crate) query_radius: f32,
     pub(crate) scale: Vec3f,
     pub(crate) body_kind: XrBodyKind,
+    pub(crate) depth_query_surface_set: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -25,6 +29,24 @@ pub(super) struct HandColliderBody {
     pub(super) body: RigidBodyHandle,
     pub(super) collider: ColliderHandle,
 }
+
+struct DepthQueryBodySurfaceSet {
+    surfaces: [DepthQuerySurfaceCollider; XR_DEPTH_QUERY_SURFACES_PER_BODY],
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct DepthQueryPhysicsStats {
+    pub(crate) active_surface_count: usize,
+    pub(crate) vertex_count: usize,
+    pub(crate) triangle_count: usize,
+}
+
+struct RapierDepthQueryHooks;
+
+const DEPTH_QUERY_BODY_USER_DATA_TAG: u128 = 1u128 << 127;
+const DEPTH_QUERY_SURFACE_USER_DATA_TAG: u128 = 1u128 << 126;
+const DEPTH_QUERY_USER_DATA_OWNER_MASK: u128 = u64::MAX as u128;
+static RAPIER_DEPTH_QUERY_HOOKS: RapierDepthQueryHooks = RapierDepthQueryHooks;
 
 pub(crate) struct RapierScene {
     gravity: RapierVector,
@@ -39,7 +61,8 @@ pub(crate) struct RapierScene {
     multibody_joints: MultibodyJointSet,
     ccd_solver: CCDSolver,
     pub(crate) cubes: Vec<PhysicsCube>,
-    depth_query_surfaces: Vec<DepthQuerySurfaceCollider>,
+    depth_query_surface_sets: Vec<DepthQueryBodySurfaceSet>,
+    depth_query_stats: DepthQueryPhysicsStats,
     pub(super) left_hand: Vec<HandColliderBody>,
     pub(super) right_hand: Vec<HandColliderBody>,
 }
@@ -57,6 +80,44 @@ fn rapier_pose(pose: Pose) -> RapierPose {
         rapier_vec3(pose.position),
         rapier_rotation(pose.orientation),
     )
+}
+
+fn depth_query_body_user_data(widget_uid: WidgetUid) -> u128 {
+    DEPTH_QUERY_BODY_USER_DATA_TAG | widget_uid.0 as u128
+}
+
+fn depth_query_surface_user_data(widget_uid: WidgetUid) -> u128 {
+    DEPTH_QUERY_SURFACE_USER_DATA_TAG | widget_uid.0 as u128
+}
+
+fn decode_depth_query_body_owner(user_data: u128) -> Option<u64> {
+    ((user_data & DEPTH_QUERY_BODY_USER_DATA_TAG) != 0)
+        .then_some((user_data & DEPTH_QUERY_USER_DATA_OWNER_MASK) as u64)
+}
+
+fn decode_depth_query_surface_owner(user_data: u128) -> Option<u64> {
+    ((user_data & DEPTH_QUERY_SURFACE_USER_DATA_TAG) != 0)
+        .then_some((user_data & DEPTH_QUERY_USER_DATA_OWNER_MASK) as u64)
+}
+
+impl PhysicsHooks for RapierDepthQueryHooks {
+    fn filter_contact_pair(&self, context: &PairFilterContext) -> Option<SolverFlags> {
+        let collider1 = context.colliders.get(context.collider1)?;
+        let collider2 = context.colliders.get(context.collider2)?;
+        match (
+            decode_depth_query_surface_owner(collider1.user_data),
+            decode_depth_query_surface_owner(collider2.user_data),
+        ) {
+            (Some(owner1), None) => (decode_depth_query_body_owner(collider2.user_data)
+                == Some(owner1))
+            .then_some(SolverFlags::COMPUTE_IMPULSES),
+            (None, Some(owner2)) => (decode_depth_query_body_owner(collider1.user_data)
+                == Some(owner2))
+            .then_some(SolverFlags::COMPUTE_IMPULSES),
+            (Some(_), Some(_)) => None,
+            (None, None) => Some(SolverFlags::COMPUTE_IMPULSES),
+        }
+    }
 }
 
 pub(crate) fn makepad_pose(pose: &RapierPose) -> Pose {
@@ -111,19 +172,77 @@ impl RapierScene {
         }
         let collider = self.colliders.insert_with_parent(
             ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
+                .user_data(depth_query_body_user_data(widget_uid))
                 .density(density.max(0.0))
                 .friction(friction.max(0.0))
                 .restitution(restitution.max(0.0)),
             body,
             &mut self.bodies,
         );
+        let depth_query_surface_set = if XR_ENABLE_DEPTH_QUERY_PHYSICS {
+            Some(self.spawn_depth_query_surface_set(widget_uid))
+        } else {
+            None
+        };
         self.cubes.push(PhysicsCube {
             widget_uid,
             body,
             collider,
             half_extents,
+            query_radius: half_extents.length().max(0.0005),
             scale,
             body_kind: XrBodyKind::Dynamic,
+            depth_query_surface_set,
+        });
+    }
+
+    pub(crate) fn spawn_dynamic_sphere(
+        &mut self,
+        widget_uid: WidgetUid,
+        pose: Pose,
+        radius: f32,
+        scale: Vec3f,
+        density: f32,
+        friction: f32,
+        restitution: f32,
+    ) {
+        let body = self.bodies.insert(
+            RigidBodyBuilder::dynamic()
+                .pose(rapier_pose(pose))
+                .ccd_enabled(true)
+                .linear_damping(XR_BODY_LINEAR_DAMPING)
+                .angular_damping(XR_BODY_ANGULAR_DAMPING)
+                .additional_solver_iterations(XR_BODY_ADDITIONAL_SOLVER_ITERATIONS),
+        );
+        if let Some(rigid_body) = self.bodies.get_mut(body) {
+            let activation = rigid_body.activation_mut();
+            activation.angular_threshold = XR_BODY_SLEEP_ANGULAR_THRESHOLD;
+            activation.time_until_sleep = XR_BODY_SLEEP_TIME;
+        }
+        let radius = radius.max(0.0005);
+        let collider = self.colliders.insert_with_parent(
+            ColliderBuilder::ball(radius)
+                .user_data(depth_query_body_user_data(widget_uid))
+                .density(density.max(0.0))
+                .friction(friction.max(0.0))
+                .restitution(restitution.max(0.0)),
+            body,
+            &mut self.bodies,
+        );
+        let depth_query_surface_set = if XR_ENABLE_DEPTH_QUERY_PHYSICS {
+            Some(self.spawn_depth_query_surface_set(widget_uid))
+        } else {
+            None
+        };
+        self.cubes.push(PhysicsCube {
+            widget_uid,
+            body,
+            collider,
+            half_extents: vec3f(radius, radius, radius),
+            query_radius: radius,
+            scale,
+            body_kind: XrBodyKind::Dynamic,
+            depth_query_surface_set,
         });
     }
 
@@ -141,6 +260,7 @@ impl RapierScene {
             .insert(RigidBodyBuilder::fixed().pose(rapier_pose(pose)));
         let collider = self.colliders.insert_with_parent(
             ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
+                .user_data(depth_query_body_user_data(widget_uid))
                 .friction(friction.max(0.0))
                 .restitution(restitution.max(0.0)),
             body,
@@ -151,8 +271,43 @@ impl RapierScene {
             body,
             collider,
             half_extents,
+            query_radius: half_extents.length().max(0.0005),
             scale,
             body_kind: XrBodyKind::Fixed,
+            depth_query_surface_set: None,
+        });
+    }
+
+    pub(crate) fn spawn_fixed_sphere(
+        &mut self,
+        widget_uid: WidgetUid,
+        pose: Pose,
+        radius: f32,
+        scale: Vec3f,
+        friction: f32,
+        restitution: f32,
+    ) {
+        let body = self
+            .bodies
+            .insert(RigidBodyBuilder::fixed().pose(rapier_pose(pose)));
+        let radius = radius.max(0.0005);
+        let collider = self.colliders.insert_with_parent(
+            ColliderBuilder::ball(radius)
+                .user_data(depth_query_body_user_data(widget_uid))
+                .friction(friction.max(0.0))
+                .restitution(restitution.max(0.0)),
+            body,
+            &mut self.bodies,
+        );
+        self.cubes.push(PhysicsCube {
+            widget_uid,
+            body,
+            collider,
+            half_extents: vec3f(radius, radius, radius),
+            query_radius: radius,
+            scale,
+            body_kind: XrBodyKind::Fixed,
+            depth_query_surface_set: None,
         });
     }
 
@@ -173,7 +328,8 @@ impl RapierScene {
             multibody_joints: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
             cubes: Vec::new(),
-            depth_query_surfaces: Vec::new(),
+            depth_query_surface_sets: Vec::new(),
+            depth_query_stats: DepthQueryPhysicsStats::default(),
             left_hand: Vec::new(),
             right_hand: Vec::new(),
         };
@@ -186,11 +342,6 @@ impl RapierScene {
             floor,
             &mut scene.bodies,
         );
-        if XR_ENABLE_DEPTH_QUERY_PHYSICS {
-            scene.depth_query_surfaces = (0..XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE)
-                .map(|_| scene.spawn_depth_query_surface())
-                .collect();
-        }
         if XR_ENABLE_HAND_PHYSICS {
             scene.left_hand = scene.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND);
             scene.right_hand = scene.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND);
@@ -220,14 +371,15 @@ impl RapierScene {
         result
     }
 
-    fn spawn_depth_query_surface(&mut self) -> DepthQuerySurfaceCollider {
+    fn spawn_depth_query_surface(
+        &mut self,
+        owner_widget_uid: WidgetUid,
+    ) -> DepthQuerySurfaceCollider {
         let body = self.bodies.insert(RigidBodyBuilder::fixed().build());
         let collider = self.colliders.insert_with_parent(
-            ColliderBuilder::triangle(
-                RapierVector::new(0.0, -1000.0, 0.0),
-                RapierVector::new(0.0, -1000.0, 0.01),
-                RapierVector::new(0.01, -1000.0, 0.0),
-            )
+            ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
+            .user_data(depth_query_surface_user_data(owner_widget_uid))
+            .active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS)
             .friction(XR_DEPTH_QUERY_FRICTION),
             body,
             &mut self.bodies,
@@ -239,6 +391,14 @@ impl RapierScene {
             collider,
             fingerprint: 0,
         }
+    }
+
+    fn spawn_depth_query_surface_set(&mut self, owner_widget_uid: WidgetUid) -> usize {
+        let surfaces = std::array::from_fn(|_| self.spawn_depth_query_surface(owner_widget_uid));
+        let index = self.depth_query_surface_sets.len();
+        self.depth_query_surface_sets
+            .push(DepthQueryBodySurfaceSet { surfaces });
+        index
     }
 
     pub(super) fn sync_hand_bodies(
@@ -297,7 +457,7 @@ impl RapierScene {
             &mut self.impulse_joints,
             &mut self.multibody_joints,
             &mut self.ccd_solver,
-            &(),
+            &RAPIER_DEPTH_QUERY_HOOKS,
             &(),
         );
         self.settle_resting_bodies();
@@ -348,46 +508,49 @@ impl RapierScene {
         index as u64 + 1
     }
 
-    pub(super) fn sync_depth_query_surface_pool(&mut self, targets: &[DepthQuerySurfaceTarget]) {
-        for (surface, target) in self.depth_query_surfaces.iter_mut().zip(targets.iter()) {
-            if surface.fingerprint != target.fingerprint {
+    pub(super) fn depth_query_surface_set_count(&self) -> usize {
+        self.depth_query_surface_sets.len()
+    }
+
+    pub(super) fn begin_depth_query_stats_frame(&mut self) {
+        self.depth_query_stats = DepthQueryPhysicsStats::default();
+    }
+
+    pub(crate) fn depth_query_stats(&self) -> DepthQueryPhysicsStats {
+        self.depth_query_stats
+    }
+
+    pub(super) fn sync_depth_query_surface_set(
+        &mut self,
+        set_index: usize,
+        targets: &[Option<DepthQuerySurfaceTarget>; XR_DEPTH_QUERY_SURFACES_PER_BODY],
+    ) {
+        let Some(surface_set) = self.depth_query_surface_sets.get_mut(set_index) else {
+            return;
+        };
+        for (surface, target) in surface_set.surfaces.iter_mut().zip(targets.iter()) {
+            let Some(target) = target else {
                 if let Some(collider) = self.colliders.get_mut(surface.collider) {
-                    let shape = match target.shape {
-                        DepthQuerySurfaceShape::Triangle(triangle) => SharedShape::triangle(
-                            rapier_vec3(triangle[0]),
-                            rapier_vec3(triangle[1]),
-                            rapier_vec3(triangle[2]),
-                        ),
-                        DepthQuerySurfaceShape::Quad(quad) => SharedShape::trimesh(
-                            vec![
-                                rapier_vec3(quad[0]),
-                                rapier_vec3(quad[1]),
-                                rapier_vec3(quad[2]),
-                                rapier_vec3(quad[3]),
-                            ],
-                            vec![[0, 1, 2], [0, 2, 3]],
-                        )
-                        .unwrap_or_else(|_| {
-                            SharedShape::triangle(
-                                rapier_vec3(quad[0]),
-                                rapier_vec3(quad[1]),
-                                rapier_vec3(quad[2]),
-                            )
-                        }),
-                    };
-                    collider.set_shape(shape);
+                    collider.set_enabled(false);
                 }
-                surface.fingerprint = target.fingerprint;
-            }
+                surface.fingerprint = 0;
+                continue;
+            };
+            self.depth_query_stats.active_surface_count += 1;
+            self.depth_query_stats.vertex_count += target.collider.vertex_count();
+            self.depth_query_stats.triangle_count += target.collider.triangle_count();
             if let Some(collider) = self.colliders.get_mut(surface.collider) {
+                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = target.collider.geometry;
+                if surface.fingerprint != target.collider.fingerprint {
+                    collider.set_shape(SharedShape::halfspace(rapier_vec3(plane.normal)));
+                    surface.fingerprint = target.collider.fingerprint;
+                }
+                collider.set_position_wrt_parent(RapierPose::from_parts(
+                    rapier_vec3(plane.point),
+                    RapierRotation::IDENTITY,
+                ));
                 collider.set_enabled(true);
             }
-        }
-        for surface in self.depth_query_surfaces.iter_mut().skip(targets.len()) {
-            if let Some(collider) = self.colliders.get_mut(surface.collider) {
-                collider.set_enabled(false);
-            }
-            surface.fingerprint = 0;
         }
     }
 }
