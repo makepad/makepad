@@ -85,6 +85,7 @@ script_mod! {
     use mod.geom
 
     mod.draw.DrawTreeBranches = mod.std.set_type_default() do #(DrawTreeBranches::script_shader(vm)){
+        alpha_blend: false
         backface_culling: true
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -163,6 +164,7 @@ script_mod! {
     }
 
     mod.draw.DrawTreeLeaves = mod.std.set_type_default() do #(DrawTreeLeaves::script_shader(vm)){
+        alpha_blend: false
         backface_culling: false
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)

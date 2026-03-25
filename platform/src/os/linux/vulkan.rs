@@ -29,6 +29,7 @@ extern "C" {
 }
 
 const XR_FRAGMENT_DENSITY_MAP_FORMAT: vk::Format = vk::Format::R8G8_UNORM;
+const XR_MAX_FRAMES_IN_FLIGHT: u32 = 3;
 
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -87,6 +88,14 @@ struct FrameResources {
     descriptor_pools: Vec<vk::DescriptorPool>,
 }
 
+struct VulkanXrInFlightFrame {
+    frame_resources: FrameResources,
+    command_buffer: vk::CommandBuffer,
+    fence: vk::Fence,
+    timestamp_query_pool: vk::QueryPool,
+    pending_timestamp_query: bool,
+}
+
 struct VulkanPipeline {
     pipeline_write: vk::Pipeline,
     pipeline_no_write: vk::Pipeline,
@@ -127,6 +136,7 @@ struct VulkanPipelineKey {
     shader_index: usize,
     shader_variant: usize,
     render_pass: VulkanRenderPassKey,
+    alpha_blend: bool,
     backface_culling: bool,
 }
 
@@ -135,6 +145,7 @@ struct VulkanDrawPacket {
     shader_variant: usize,
     geometry_id: GeometryId,
     depth_write: bool,
+    alpha_blend: bool,
     backface_culling: bool,
     instances: Vec<f32>,
     draw_call_uniforms: Vec<f32>,
@@ -285,6 +296,8 @@ pub struct CxVulkan {
     xr_timestamp_period_ns: f64,
     xr_gpu_timestamps_supported: bool,
     xr_last_gpu_frame_time_ms: Option<f64>,
+    xr_in_flight_frames: Vec<VulkanXrInFlightFrame>,
+    xr_in_flight_index: usize,
 }
 
 impl CxVulkan {
@@ -574,6 +587,8 @@ impl CxVulkan {
             xr_timestamp_period_ns: timestamp_period_ns,
             xr_gpu_timestamps_supported: gpu_timestamps_supported,
             xr_last_gpu_frame_time_ms: None,
+            xr_in_flight_frames: Vec::new(),
+            xr_in_flight_index: 0,
         };
 
         if let Err(err) = vulkan.recreate_swapchain() {
@@ -965,7 +980,11 @@ impl CxVulkan {
             xr_timestamp_period_ns: timestamp_period_ns,
             xr_gpu_timestamps_supported: gpu_timestamps_supported,
             xr_last_gpu_frame_time_ms: None,
+            xr_in_flight_frames: Vec::new(),
+            xr_in_flight_index: 0,
         };
+
+        vulkan.xr_in_flight_frames = vulkan.create_xr_in_flight_frames(XR_MAX_FRAMES_IN_FLIGHT)?;
 
         vulkan.try_enable_debug_messenger(&entry);
 
@@ -987,6 +1006,179 @@ impl CxVulkan {
                 crate::warning!("Android Vulkan: failed to create debug messenger: {err:?}");
             }
         }
+    }
+
+    fn create_xr_timestamp_query_pool(&self) -> vk::QueryPool {
+        if !self.xr_gpu_timestamps_supported {
+            return vk::QueryPool::null();
+        }
+        let create_info = vk::QueryPoolCreateInfo::default()
+            .query_type(vk::QueryType::TIMESTAMP)
+            .query_count(2);
+        match unsafe { self.device.create_query_pool(&create_info, None) } {
+            Ok(pool) => pool,
+            Err(err) => {
+                crate::warning!(
+                    "OpenXR Vulkan GPU timing query pool creation failed: {err:?}"
+                );
+                vk::QueryPool::null()
+            }
+        }
+    }
+
+    fn create_xr_in_flight_frames(
+        &self,
+        frame_count: u32,
+    ) -> Result<Vec<VulkanXrInFlightFrame>, String> {
+        if frame_count == 0 {
+            return Ok(Vec::new());
+        }
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(frame_count);
+        let command_buffers = unsafe { self.device.allocate_command_buffers(&alloc_info) }
+            .map_err(|e| format!("allocate_command_buffers(openxr inflight) failed: {e:?}"))?;
+
+        let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        let mut frames: Vec<VulkanXrInFlightFrame> = Vec::with_capacity(command_buffers.len());
+        for &command_buffer in &command_buffers {
+            let fence = match unsafe { self.device.create_fence(&fence_info, None) } {
+                Ok(fence) => fence,
+                Err(err) => {
+                    unsafe {
+                        for frame in &frames {
+                            if frame.timestamp_query_pool != vk::QueryPool::null() {
+                                self.device
+                                    .destroy_query_pool(frame.timestamp_query_pool, None);
+                            }
+                            self.device.destroy_fence(frame.fence, None);
+                        }
+                        self.device
+                            .free_command_buffers(self.command_pool, &command_buffers);
+                    }
+                    return Err(format!(
+                        "create_fence(openxr inflight) failed: {err:?}"
+                    ));
+                }
+            };
+            frames.push(VulkanXrInFlightFrame {
+                frame_resources: FrameResources::default(),
+                command_buffer,
+                fence,
+                timestamp_query_pool: self.create_xr_timestamp_query_pool(),
+                pending_timestamp_query: false,
+            });
+        }
+        Ok(frames)
+    }
+
+    fn destroy_owned_frame_resources(
+        device: &ash::Device,
+        frame_resources: &mut FrameResources,
+    ) {
+        unsafe {
+            for pool in frame_resources.descriptor_pools.drain(..) {
+                device.destroy_descriptor_pool(pool, None);
+            }
+            for buffer in frame_resources.buffers.drain(..) {
+                device.destroy_buffer(buffer.buffer, None);
+                device.free_memory(buffer.memory, None);
+            }
+        }
+    }
+
+    fn recycle_xr_in_flight_frame(
+        &mut self,
+        frame: &mut VulkanXrInFlightFrame,
+    ) -> Result<(), String> {
+        unsafe {
+            self.device
+                .wait_for_fences(&[frame.fence], true, u64::MAX)
+                .map_err(|e| format!("wait_for_fences(openxr inflight) failed: {e:?}"))?;
+        }
+
+        if frame.pending_timestamp_query && frame.timestamp_query_pool != vk::QueryPool::null() {
+            let mut timestamps = [0u64; 2];
+            let query_result = unsafe {
+                self.device.get_query_pool_results(
+                    frame.timestamp_query_pool,
+                    0,
+                    &mut timestamps,
+                    vk::QueryResultFlags::TYPE_64,
+                )
+            };
+            self.xr_last_gpu_frame_time_ms = match query_result {
+                Ok(()) if timestamps[1] >= timestamps[0] => {
+                    let ticks = timestamps[1] - timestamps[0];
+                    Some((ticks as f64 * self.xr_timestamp_period_ns) / 1_000_000.0)
+                }
+                Ok(()) => None,
+                Err(err) => {
+                    crate::warning!("OpenXR Vulkan GPU timing readback failed: {err:?}");
+                    None
+                }
+            };
+            frame.pending_timestamp_query = false;
+        }
+
+        if frame.timestamp_query_pool != vk::QueryPool::null() {
+            unsafe {
+                self.device.destroy_query_pool(frame.timestamp_query_pool, None);
+            }
+            frame.timestamp_query_pool = self.create_xr_timestamp_query_pool();
+        }
+
+        Self::destroy_owned_frame_resources(&self.device, &mut frame.frame_resources);
+
+        unsafe {
+            self.device
+                .reset_fences(&[frame.fence])
+                .map_err(|e| format!("reset_fences(openxr inflight) failed: {e:?}"))?;
+            self.device
+                .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| format!("reset_command_buffer(openxr inflight) failed: {e:?}"))?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn wait_for_openxr_idle(&mut self) -> Result<(), String> {
+        for index in 0..self.xr_in_flight_frames.len() {
+            let mut frame = std::mem::replace(
+                &mut self.xr_in_flight_frames[index],
+                VulkanXrInFlightFrame {
+                    frame_resources: FrameResources::default(),
+                    command_buffer: vk::CommandBuffer::null(),
+                    fence: vk::Fence::null(),
+                    timestamp_query_pool: vk::QueryPool::null(),
+                    pending_timestamp_query: false,
+                },
+            );
+            let result = if frame.fence != vk::Fence::null() {
+                self.recycle_xr_in_flight_frame(&mut frame)
+            } else {
+                Ok(())
+            };
+            self.xr_in_flight_frames[index] = frame;
+            result?;
+        }
+        Ok(())
+    }
+
+    fn destroy_xr_in_flight_frames(&mut self) {
+        for mut frame in self.xr_in_flight_frames.drain(..) {
+            Self::destroy_owned_frame_resources(&self.device, &mut frame.frame_resources);
+            unsafe {
+                if frame.timestamp_query_pool != vk::QueryPool::null() {
+                    self.device.destroy_query_pool(frame.timestamp_query_pool, None);
+                }
+                if frame.fence != vk::Fence::null() {
+                    self.device.destroy_fence(frame.fence, None);
+                }
+            }
+        }
+        self.xr_in_flight_index = 0;
     }
 
     pub fn update_surface(
@@ -1535,6 +1727,9 @@ impl CxVulkan {
     }
 
     pub(crate) fn destroy_openxr_session_data(&mut self, session: CxVulkanOpenXrSessionData) {
+        if let Err(err) = self.wait_for_openxr_idle() {
+            crate::warning!("OpenXR Vulkan: failed to drain in-flight frames before destroy: {err}");
+        }
         for image in session.color_images {
             unsafe {
                 if image.target.framebuffer != vk::Framebuffer::null() {
@@ -1969,201 +2164,188 @@ impl CxVulkan {
             .map(|image| image.multiview_view)
             .unwrap_or(self.ensure_xr_depth_dummy_multiview()?);
         let framebuffer = color_target.target.framebuffer;
-        let timestamp_query_pool = if self.xr_gpu_timestamps_supported {
-            let create_info = vk::QueryPoolCreateInfo::default()
-                .query_type(vk::QueryType::TIMESTAMP)
-                .query_count(2);
-            match unsafe { self.device.create_query_pool(&create_info, None) } {
-                Ok(pool) => Some(pool),
-                Err(err) => {
-                    crate::warning!(
-                        "OpenXR Vulkan GPU timing query pool creation failed: {err:?}"
-                    );
-                    None
-                }
-            }
-        } else {
+        let mut xr_frame = if self.xr_in_flight_frames.is_empty() {
             None
-        };
-
-        unsafe {
-            self.device
-                .reset_fences(&[self.in_flight_fence])
-                .map_err(|e| format!("reset_fences(openxr) failed: {e:?}"))?;
-        }
-
-        self.destroy_frame_resources();
-        unsafe {
-            self.device
-                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
-                .map_err(|e| format!("reset_command_buffer(openxr) failed: {e:?}"))?;
-            self.device
-                .begin_command_buffer(
-                    self.command_buffer,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )
-                .map_err(|e| format!("begin_command_buffer(openxr) failed: {e:?}"))?;
-        }
-
-        self.texture_upload_count_this_frame = 0;
-        self.texture_upload_bytes_this_frame = 0;
-        self.prepare_draw_list_textures(cx, draw_list_id)?;
-
-        let clear_color = if cx.passes[draw_pass_id].color_textures.is_empty() {
-            cx.passes[draw_pass_id].clear_color
         } else {
-            match cx.passes[draw_pass_id].color_textures[0].clear_color {
-                DrawPassClearColor::InitWith(color) => color,
-                DrawPassClearColor::ClearWith(color) => color,
-            }
+            let frame_index = self.xr_in_flight_index % self.xr_in_flight_frames.len();
+            let frame = std::mem::replace(
+                &mut self.xr_in_flight_frames[frame_index],
+                VulkanXrInFlightFrame {
+                    frame_resources: FrameResources::default(),
+                    command_buffer: vk::CommandBuffer::null(),
+                    fence: vk::Fence::null(),
+                    timestamp_query_pool: vk::QueryPool::null(),
+                    pending_timestamp_query: false,
+                },
+            );
+            Some((frame_index, frame))
         };
-        let clear_depth = match cx.passes[draw_pass_id].clear_depth {
-            DrawPassClearDepth::InitWith(depth) | DrawPassClearDepth::ClearWith(depth) => depth,
-        };
-        let clear_values = [
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [clear_color.x, clear_color.y, clear_color.z, clear_color.w],
-                },
-            },
-            vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: clear_depth,
-                    stencil: 0,
-                },
-            },
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    uint32: [0, 0, 0, 0],
-                },
-            },
-        ];
 
-        unsafe {
-            if let Some(query_pool) = timestamp_query_pool {
-                self.device.cmd_write_timestamp(
-                    self.command_buffer,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    query_pool,
-                    0,
-                );
+        if let Some((frame_index, mut frame)) = xr_frame.take() {
+            let recycle_result = self.recycle_xr_in_flight_frame(&mut frame);
+            if recycle_result.is_err() {
+                self.xr_in_flight_frames[frame_index] = frame;
+                return recycle_result;
             }
-            self.device.cmd_begin_render_pass(
-                self.command_buffer,
-                &vk::RenderPassBeginInfo::default()
-                    .render_pass(self.xr_render_pass)
-                    .framebuffer(framebuffer)
-                    .render_area(vk::Rect2D {
+            std::mem::swap(&mut self.frame_resources, &mut frame.frame_resources);
+            std::mem::swap(&mut self.command_buffer, &mut frame.command_buffer);
+            std::mem::swap(&mut self.in_flight_fence, &mut frame.fence);
+            xr_frame = Some((frame_index, frame));
+        }
+
+        let timestamp_query_pool = xr_frame.as_ref().and_then(|(_, frame)| {
+            (frame.timestamp_query_pool != vk::QueryPool::null()).then_some(frame.timestamp_query_pool)
+        });
+
+        let result = (|| -> Result<(), String> {
+            unsafe {
+                self.device
+                    .begin_command_buffer(
+                        self.command_buffer,
+                        &vk::CommandBufferBeginInfo::default()
+                            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                    )
+                    .map_err(|e| format!("begin_command_buffer(openxr) failed: {e:?}"))?;
+            }
+
+            self.texture_upload_count_this_frame = 0;
+            self.texture_upload_bytes_this_frame = 0;
+            self.prepare_draw_list_textures(cx, draw_list_id)?;
+
+            let clear_color = if cx.passes[draw_pass_id].color_textures.is_empty() {
+                cx.passes[draw_pass_id].clear_color
+            } else {
+                match cx.passes[draw_pass_id].color_textures[0].clear_color {
+                    DrawPassClearColor::InitWith(color) => color,
+                    DrawPassClearColor::ClearWith(color) => color,
+                }
+            };
+            let clear_depth = match cx.passes[draw_pass_id].clear_depth {
+                DrawPassClearDepth::InitWith(depth) | DrawPassClearDepth::ClearWith(depth) => depth,
+            };
+            let clear_values = [
+                vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [clear_color.x, clear_color.y, clear_color.z, clear_color.w],
+                    },
+                },
+                vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: clear_depth,
+                        stencil: 0,
+                    },
+                },
+                vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        uint32: [0, 0, 0, 0],
+                    },
+                },
+            ];
+
+            unsafe {
+                if let Some(query_pool) = timestamp_query_pool {
+                    self.device.cmd_write_timestamp(
+                        self.command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        query_pool,
+                        0,
+                    );
+                }
+                self.device.cmd_begin_render_pass(
+                    self.command_buffer,
+                    &vk::RenderPassBeginInfo::default()
+                        .render_pass(self.xr_render_pass)
+                        .framebuffer(framebuffer)
+                        .render_area(vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: vk::Extent2D {
+                                width: session.width,
+                                height: session.height,
+                            },
+                        })
+                        .clear_values(if self.xr_render_pass_uses_fragment_density_map {
+                            &clear_values
+                        } else {
+                            &clear_values[..2]
+                        }),
+                    vk::SubpassContents::INLINE,
+                );
+                self.device.cmd_set_viewport(
+                    self.command_buffer,
+                    0,
+                    &[vk::Viewport {
+                        x: 0.0,
+                        y: session.height as f32,
+                        width: session.width as f32,
+                        height: -(session.height as f32),
+                        min_depth: 0.0,
+                        max_depth: 1.0,
+                    }],
+                );
+                self.device.cmd_set_scissor(
+                    self.command_buffer,
+                    0,
+                    &[vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: vk::Extent2D {
                             width: session.width,
                             height: session.height,
                         },
-                    })
-                    .clear_values(if self.xr_render_pass_uses_fragment_density_map {
-                        &clear_values
-                    } else {
-                        &clear_values[..2]
-                    }),
-                vk::SubpassContents::INLINE,
-            );
-            self.device.cmd_set_viewport(
-                self.command_buffer,
-                0,
-                &[vk::Viewport {
-                    x: 0.0,
-                    y: session.height as f32,
-                    width: session.width as f32,
-                    height: -(session.height as f32),
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                }],
-            );
-            self.device.cmd_set_scissor(
-                self.command_buffer,
-                0,
-                &[vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: vk::Extent2D {
-                        width: session.width,
-                        height: session.height,
-                    },
-                }],
-            );
-        }
-
-        let render_pass_key = self.main_render_pass_key();
-        let mut zbias = 0.0f32;
-        let zbias_step = cx.passes[draw_pass_id].zbias_step;
-        let mut draw_stats = VulkanDrawStats::default();
-        self.record_draw_list(
-            cx,
-            draw_pass_id,
-            draw_list_id,
-            &render_pass_key,
-            &mut zbias,
-            zbias_step,
-            &mut draw_stats,
-            xr_depth_view,
-        )?;
-
-        unsafe {
-            self.device.cmd_end_render_pass(self.command_buffer);
-            if let Some(query_pool) = timestamp_query_pool {
-                self.device.cmd_write_timestamp(
-                    self.command_buffer,
-                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                    query_pool,
-                    1,
+                    }],
                 );
             }
-            self.device
-                .end_command_buffer(self.command_buffer)
-                .map_err(|e| format!("end_command_buffer(openxr) failed: {e:?}"))?;
-            self.device
-                .queue_submit(
-                    self.queue,
-                    &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])],
-                    self.in_flight_fence,
-                )
-                .map_err(|e| format!("queue_submit(openxr) failed: {e:?}"))?;
-            self.device
-                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
-                .map_err(|e| format!("wait_for_fences(openxr submit) failed: {e:?}"))?;
-        }
 
-        if let Some(query_pool) = timestamp_query_pool {
-            let mut timestamps = [0u64; 2];
-            let query_result = unsafe {
-                self.device.get_query_pool_results(
-                    query_pool,
-                    0,
-                    &mut timestamps,
-                    vk::QueryResultFlags::TYPE_64,
-                )
-            };
-            self.xr_last_gpu_frame_time_ms = match query_result {
-                Ok(()) if timestamps[1] >= timestamps[0] => {
-                    let ticks = timestamps[1] - timestamps[0];
-                    Some((ticks as f64 * self.xr_timestamp_period_ns) / 1_000_000.0)
-                }
-                Ok(()) => None,
-                Err(err) => {
-                    crate::warning!(
-                        "OpenXR Vulkan GPU timing readback failed: {err:?}"
-                    );
-                    None
-                }
-            };
+            let render_pass_key = self.main_render_pass_key();
+            let mut zbias = 0.0f32;
+            let zbias_step = cx.passes[draw_pass_id].zbias_step;
+            let mut draw_stats = VulkanDrawStats::default();
+            self.record_draw_list(
+                cx,
+                draw_pass_id,
+                draw_list_id,
+                &render_pass_key,
+                &mut zbias,
+                zbias_step,
+                &mut draw_stats,
+                xr_depth_view,
+            )?;
+
             unsafe {
-                self.device.destroy_query_pool(query_pool, None);
+                self.device.cmd_end_render_pass(self.command_buffer);
+                if let Some(query_pool) = timestamp_query_pool {
+                    self.device.cmd_write_timestamp(
+                        self.command_buffer,
+                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                        query_pool,
+                        1,
+                    );
+                }
+                self.device
+                    .end_command_buffer(self.command_buffer)
+                    .map_err(|e| format!("end_command_buffer(openxr) failed: {e:?}"))?;
+                self.device
+                    .queue_submit(
+                        self.queue,
+                        &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])],
+                        self.in_flight_fence,
+                    )
+                    .map_err(|e| format!("queue_submit(openxr) failed: {e:?}"))?;
             }
-        } else {
-            self.xr_last_gpu_frame_time_ms = None;
+            Ok(())
+        })();
+
+        if let Some((frame_index, mut frame)) = xr_frame {
+            std::mem::swap(&mut self.frame_resources, &mut frame.frame_resources);
+            std::mem::swap(&mut self.command_buffer, &mut frame.command_buffer);
+            std::mem::swap(&mut self.in_flight_fence, &mut frame.fence);
+            if result.is_ok() {
+                frame.pending_timestamp_query = timestamp_query_pool.is_some();
+                self.xr_in_flight_index = (frame_index + 1) % self.xr_in_flight_frames.len();
+            }
+            self.xr_in_flight_frames[frame_index] = frame;
         }
 
-        Ok(())
+        result
     }
 
     pub fn draw_pass_and_present(
@@ -5186,6 +5368,7 @@ impl CxVulkan {
                     shader_variant,
                     geometry_id,
                     depth_write: draw_call.options.depth_write,
+                    alpha_blend: draw_call.options.alpha_blend,
                     backface_culling: draw_call.options.backface_culling,
                     instances,
                     draw_call_uniforms: draw_call.draw_call_uniforms.as_slice().to_vec(),
@@ -5261,6 +5444,7 @@ impl CxVulkan {
             packet.shader_index,
             packet.shader_variant,
             render_pass_key,
+            packet.alpha_blend,
             packet.backface_culling,
         )?;
         let (
@@ -5274,6 +5458,7 @@ impl CxVulkan {
                 shader_index: packet.shader_index,
                 shader_variant: packet.shader_variant,
                 render_pass: render_pass_key.clone(),
+                alpha_blend: packet.alpha_blend,
                 backface_culling: packet.backface_culling,
             };
             let pipeline = self.pipelines.get(&pipeline_key).ok_or_else(|| {
@@ -5586,12 +5771,14 @@ impl CxVulkan {
         shader_index: usize,
         shader_variant: usize,
         render_pass_key: &VulkanRenderPassKey,
+        alpha_blend: bool,
         backface_culling: bool,
     ) -> Result<(), String> {
         let pipeline_key = VulkanPipelineKey {
             shader_index,
             shader_variant,
             render_pass: render_pass_key.clone(),
+            alpha_blend,
             backface_culling,
         };
         if self.pipelines.contains_key(&pipeline_key) {
@@ -5823,7 +6010,7 @@ impl CxVulkan {
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(true)
+            .blend_enable(alpha_blend)
             .src_color_blend_factor(vk::BlendFactor::ONE)
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .color_blend_op(vk::BlendOp::ADD)
@@ -6591,15 +6778,7 @@ impl CxVulkan {
     }
 
     fn destroy_frame_resources(&mut self) {
-        unsafe {
-            for pool in self.frame_resources.descriptor_pools.drain(..) {
-                self.device.destroy_descriptor_pool(pool, None);
-            }
-            for buffer in self.frame_resources.buffers.drain(..) {
-                self.device.destroy_buffer(buffer.buffer, None);
-                self.device.free_memory(buffer.memory, None);
-            }
-        }
+        Self::destroy_owned_frame_resources(&self.device, &mut self.frame_resources);
     }
 
     fn destroy_pipelines(&mut self) {
@@ -6706,6 +6885,7 @@ impl Drop for CxVulkan {
     fn drop(&mut self) {
         self.device_wait_idle();
         self.destroy_swapchain();
+        self.destroy_xr_in_flight_frames();
         self.destroy_geometry_resources();
         self.destroy_texture_resources();
 
