@@ -1,5 +1,6 @@
 use crate::error::{IntoTestResult, TestError, TestResult};
 use crate::selector::Selector;
+use crate::studio_remote::StudioRemoteClient;
 use makepad_micro_serde::{SerBin, SerJson};
 use makepad_studio_hub::{HubConfig, HubConnection, MountConfig, StudioHub};
 use makepad_studio_protocol::hub_protocol::{ClientToHub, HubToClient, LogEntry, QueryId};
@@ -29,6 +30,8 @@ const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(250);
 const DRAG_STEPS: usize = 6;
 const PUMP_TICKS: usize = 3;
 const RECENT_LOG_LINES: usize = 200;
+const DEFAULT_STUDIO_ADDR: &str = "127.0.0.1:8001";
+const DEFAULT_STUDIO_MOUNT: &str = "makepad";
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -79,6 +82,9 @@ pub struct TestConfig {
     pub startup_timeout: Duration,
     pub action_timeout: Duration,
     pub poll_interval: Duration,
+    pub startup_pause: Duration,
+    pub action_delay: Duration,
+    pub keep_open: Duration,
 }
 
 impl TestConfig {
@@ -97,7 +103,9 @@ impl TestConfig {
             .join(sanitize_path_component(&test_name));
 
         let mut env = HashMap::new();
-        env.insert("MAKEPAD".to_string(), "headless".to_string());
+        if !visible_mode_enabled() {
+            env.insert("MAKEPAD".to_string(), "headless".to_string());
+        }
         env.insert("RUST_BACKTRACE".to_string(), "1".to_string());
         env.insert(
             "CARGO_TARGET_DIR".to_string(),
@@ -115,6 +123,9 @@ impl TestConfig {
             startup_timeout: STARTUP_TIMEOUT,
             action_timeout: ACTION_TIMEOUT,
             poll_interval: POLL_INTERVAL,
+            startup_pause: env_duration_ms("MAKEPAD_TEST_STARTUP_DELAY_MS"),
+            action_delay: env_duration_ms("MAKEPAD_TEST_ACTION_DELAY_MS"),
+            keep_open: env_duration_ms("MAKEPAD_TEST_KEEP_OPEN_MS"),
         })
     }
 
@@ -127,9 +138,30 @@ impl TestConfig {
     }
 }
 
+enum TestConnection {
+    InProcess(HubConnection),
+    Remote(StudioRemoteClient),
+}
+
+impl TestConnection {
+    fn send(&mut self, msg: ClientToHub) -> TestResult<QueryId> {
+        match self {
+            Self::InProcess(connection) => Ok(connection.send(msg)),
+            Self::Remote(connection) => connection.send(msg),
+        }
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> Option<HubToClient> {
+        match self {
+            Self::InProcess(connection) => connection.recv_timeout(timeout),
+            Self::Remote(connection) => connection.recv_timeout(timeout),
+        }
+    }
+}
+
 struct TestAppInner {
     config: TestConfig,
-    connection: HubConnection,
+    connection: TestConnection,
     build_id: QueryId,
     build_stopped: Option<Option<i32>>,
 }
@@ -164,9 +196,7 @@ impl TestApp {
         for attempt in 0..STARTUP_RETRIES {
             match Self::start_once(config.clone()) {
                 Ok(app) => return Ok(app),
-                Err(err)
-                    if attempt + 1 < STARTUP_RETRIES && startup_error_is_retryable(&err) =>
-                {
+                Err(err) if attempt + 1 < STARTUP_RETRIES && startup_error_is_retryable(&err) => {
                     last_error = Some(err);
                     thread::sleep(STARTUP_RETRY_DELAY);
                 }
@@ -178,32 +208,15 @@ impl TestApp {
     }
 
     fn start_once(config: TestConfig) -> TestResult<Self> {
-        let mut connection = StudioHub::start_in_process(HubConfig {
-            listen_address: config.listen_address,
-            mounts: vec![MountConfig {
-                name: config.mount_name.clone(),
-                path: config.manifest_dir.clone(),
-            }],
-            enable_in_process_gateway: true,
-            ..Default::default()
-        })
-        .map_err(TestError::new)?;
+        let (connection, build_id) = if visible_mode_enabled() {
+            start_visible_app(&config)?
+        } else {
+            start_headless_app(&config)?
+        };
 
-        let _query_id = connection.send(ClientToHub::Run {
-            mount: config.mount_name.clone(),
-            process: config.package_name.clone(),
-            args: Vec::new(),
-            standalone: None,
-            env: Some(config.env.clone()),
-            buildbox: None,
-        });
-
-        let build_id = wait_for_run_ready(
-            &connection,
-            &config.mount_name,
-            &config.package_name,
-            config.startup_timeout,
-        )?;
+        if config.startup_pause > Duration::ZERO {
+            thread::sleep(config.startup_pause);
+        }
 
         Ok(Self {
             inner: Rc::new(RefCell::new(TestAppInner {
@@ -231,7 +244,9 @@ impl TestApp {
     pub fn try_type_text(&self, text: impl AsRef<str>) -> TestResult<()> {
         let text = text.as_ref().to_string();
         let build_id = self.build_id();
-        self.send_no_wait(ClientToHub::TypeText { build_id, text })
+        self.send_no_wait(ClientToHub::TypeText { build_id, text })?;
+        self.pace_after_action();
+        Ok(())
     }
 
     pub fn press_return(&self) {
@@ -245,7 +260,9 @@ impl TestApp {
         self.send_no_wait(ClientToHub::Return {
             build_id,
             auto_dump: Some(false),
-        })
+        })?;
+        self.pace_after_action();
+        Ok(())
     }
 
     pub fn press_key(&self, key_code: KeyCode) {
@@ -275,7 +292,9 @@ impl TestApp {
             modifiers,
             time: now_seconds(),
         };
-        self.try_forward(vec![StudioToApp::KeyDown(event), StudioToApp::KeyUp(event)])
+        self.try_forward(vec![StudioToApp::KeyDown(event), StudioToApp::KeyUp(event)])?;
+        self.pace_after_action();
+        Ok(())
     }
 
     pub fn screenshot(&self) -> PathBuf {
@@ -334,7 +353,9 @@ impl TestApp {
         let query_id = self.send(ClientToHub::WidgetSnapshot { build_id })?;
         self.wait_for_reply(self.action_timeout(), move |msg| match msg {
             HubToClient::WidgetSnapshot {
-                query_id: id, widgets, ..
+                query_id: id,
+                widgets,
+                ..
             } if id == query_id => Some(Ok(widgets)),
             _ => None,
         })
@@ -381,7 +402,9 @@ impl TestApp {
         self.ensure_running()?;
         let (x, y) = snapshot_center(target);
         let build_id = self.build_id();
-        self.send_no_wait(ClientToHub::Click { build_id, x, y })
+        self.send_no_wait(ClientToHub::Click { build_id, x, y })?;
+        self.pace_after_action();
+        Ok(())
     }
 
     fn try_scroll_center(&self, target: &WidgetSnapshot, sx: f64, sy: f64) -> TestResult<()> {
@@ -394,7 +417,9 @@ impl TestApp {
             y,
             is_mouse: true,
             modifiers: RemoteKeyModifiers::default(),
-        })])
+        })])?;
+        self.pace_after_action();
+        Ok(())
     }
 
     fn try_drag_from(&self, target: &WidgetSnapshot, dx: f64, dy: f64) -> TestResult<()> {
@@ -424,10 +449,16 @@ impl TestApp {
             y: start_y + dy,
             modifiers: RemoteKeyModifiers::default(),
         }));
-        self.try_forward(msgs)
+        self.try_forward(msgs)?;
+        self.pace_after_action();
+        Ok(())
     }
 
-    fn query_widgets(&self, selector: &Selector, visible_only: bool) -> TestResult<Vec<WidgetSnapshot>> {
+    fn query_widgets(
+        &self,
+        selector: &Selector,
+        visible_only: bool,
+    ) -> TestResult<Vec<WidgetSnapshot>> {
         let widgets = self.try_widget_snapshot()?;
         let (primary_window_id, primary_window_index) = primary_window_scope(&widgets);
         let mut matches: Vec<_> = widgets
@@ -476,9 +507,7 @@ impl TestApp {
             let _ = writeln!(
                 &mut out,
                 "[{index}] {:?} {:?}: {}",
-                entry.source,
-                entry.level,
-                entry.message
+                entry.source, entry.level, entry.message
             );
         }
         Ok(out)
@@ -491,7 +520,7 @@ impl TestApp {
 
     fn send_unchecked(&self, msg: ClientToHub) -> TestResult<QueryId> {
         let mut inner = self.inner.borrow_mut();
-        Ok(inner.connection.send(msg))
+        inner.connection.send(msg)
     }
 
     fn send_no_wait(&self, msg: ClientToHub) -> TestResult<()> {
@@ -554,6 +583,20 @@ impl TestApp {
 
     fn artifacts_dir(&self) -> PathBuf {
         self.inner.borrow().config.artifacts_dir.clone()
+    }
+
+    fn pace_after_action(&self) {
+        let delay = self.inner.borrow().config.action_delay;
+        if delay > Duration::ZERO {
+            thread::sleep(delay);
+        }
+    }
+
+    fn pause_before_shutdown(&self) {
+        let delay = self.inner.borrow().config.keep_open;
+        if delay > Duration::ZERO {
+            thread::sleep(delay);
+        }
     }
 
     fn ensure_running(&self) -> TestResult<()> {
@@ -1057,17 +1100,20 @@ where
 
     match result {
         Ok(Ok(())) => {
+            app.pause_before_shutdown();
             app.shutdown();
             Ok(())
         }
         Ok(Err(err)) => {
             capture_failure_artifacts(&app, err.message());
+            app.pause_before_shutdown();
             app.shutdown();
             Err(err)
         }
         Err(payload) => {
             let err = TestError::from_panic_payload(payload);
             capture_failure_artifacts(&app, err.message());
+            app.pause_before_shutdown();
             app.shutdown();
             Err(err)
         }
@@ -1098,8 +1144,115 @@ pub fn run_current_package_test<F, R>(
     }
 }
 
+fn start_headless_app(config: &TestConfig) -> TestResult<(TestConnection, QueryId)> {
+    let mut connection = TestConnection::InProcess(
+        StudioHub::start_in_process(HubConfig {
+            listen_address: config.listen_address,
+            mounts: vec![MountConfig {
+                name: config.mount_name.clone(),
+                path: config.manifest_dir.clone(),
+            }],
+            enable_in_process_gateway: true,
+            ..Default::default()
+        })
+        .map_err(TestError::new)?,
+    );
+
+    let _ = connection.send(ClientToHub::Run {
+        mount: config.mount_name.clone(),
+        process: config.package_name.clone(),
+        args: Vec::new(),
+        standalone: None,
+        env: Some(config.env.clone()),
+        buildbox: None,
+    })?;
+
+    let build_id = wait_for_run_ready(
+        &connection,
+        &config.mount_name,
+        &config.package_name,
+        config.startup_timeout,
+    )?;
+
+    Ok((connection, build_id))
+}
+
+fn start_visible_app(config: &TestConfig) -> TestResult<(TestConnection, QueryId)> {
+    let studio_addr = studio_addr_from_env();
+    let mount = studio_mount_from_env();
+    let mut connection = TestConnection::Remote(StudioRemoteClient::connect(&studio_addr)?);
+
+    clear_existing_visible_builds(
+        &mut connection,
+        &mount,
+        &config.package_name,
+        config.startup_timeout,
+    )?;
+
+    let _ = connection.send(ClientToHub::Run {
+        mount: mount.clone(),
+        process: config.package_name.clone(),
+        args: Vec::new(),
+        standalone: None,
+        env: Some(config.env.clone()),
+        buildbox: None,
+    })?;
+
+    let build_id = wait_for_run_ready(
+        &connection,
+        &mount,
+        &config.package_name,
+        config.startup_timeout,
+    )?;
+
+    Ok((connection, build_id))
+}
+
+fn clear_existing_visible_builds(
+    connection: &mut TestConnection,
+    mount: &str,
+    package: &str,
+    timeout: Duration,
+) -> TestResult<()> {
+    let _ = connection.send(ClientToHub::ListBuilds)?;
+    let builds = wait_for_builds(connection, timeout)?;
+    for build in builds
+        .into_iter()
+        .filter(|build| build.mount == mount && build.package == package)
+    {
+        let _ = connection.send(ClientToHub::ClearBuild {
+            build_id: build.build_id,
+        })?;
+    }
+    Ok(())
+}
+
+fn wait_for_builds(
+    connection: &TestConnection,
+    timeout: Duration,
+) -> TestResult<Vec<makepad_studio_protocol::hub_protocol::BuildInfo>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(TestError::new("timed out waiting for studio build list"));
+        }
+        let slice = cmp::min(
+            POLL_INTERVAL,
+            deadline.saturating_duration_since(Instant::now()),
+        );
+        let Some(msg) = connection.recv_timeout(slice) else {
+            continue;
+        };
+        match msg {
+            HubToClient::Builds { builds } => return Ok(builds),
+            HubToClient::Error { message } => return Err(TestError::new(message)),
+            _ => {}
+        }
+    }
+}
+
 fn wait_for_run_ready(
-    connection: &HubConnection,
+    connection: &TestConnection,
     mount: &str,
     package: &str,
     timeout: Duration,
@@ -1267,10 +1420,7 @@ fn snapshot_sort_key(widget: &WidgetSnapshot) -> (usize, i64, i64, String, Strin
 }
 
 fn snapshot_center(widget: &WidgetSnapshot) -> (i64, i64) {
-    (
-        widget.x + widget.width / 2,
-        widget.y + widget.height / 2,
-    )
+    (widget.x + widget.width / 2, widget.y + widget.height / 2)
 }
 
 fn snapshot_center_f64(widget: &WidgetSnapshot) -> (f64, f64) {
@@ -1305,6 +1455,43 @@ fn snapshot_summary(widget: &WidgetSnapshot) -> String {
     fields.join(" ")
 }
 
+fn visible_mode_enabled() -> bool {
+    env_truthy("MAKEPAD_TEST_VISIBLE")
+}
+
+fn studio_addr_from_env() -> String {
+    std::env::var("MAKEPAD_TEST_STUDIO")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_STUDIO_ADDR.to_string())
+}
+
+fn studio_mount_from_env() -> String {
+    std::env::var("MAKEPAD_TEST_STUDIO_MOUNT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_STUDIO_MOUNT.to_string())
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn env_duration_ms(name: &str) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::ZERO)
+}
+
 fn now_seconds() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1332,12 +1519,25 @@ fn primary_shortcut_modifiers() -> KeyModifiers {
 #[cfg(test)]
 mod tests {
     use super::{
-        primary_window_scope, sanitize_path_component, snapshot_is_visible, snapshot_sort_key,
+        env_duration_ms, primary_window_scope, sanitize_path_component, snapshot_is_visible,
+        snapshot_sort_key, studio_addr_from_env, studio_mount_from_env, visible_mode_enabled,
         TestError, TestResult, WidgetMatch,
     };
     use crate::{Selector, TestConfig};
     use makepad_studio_protocol::WidgetSnapshot;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn restore_env_var(name: &str, value: Option<String>) {
+        if let Some(value) = value {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
+    }
 
     fn snapshot(id: &str) -> WidgetSnapshot {
         WidgetSnapshot {
@@ -1375,8 +1575,15 @@ mod tests {
 
     #[test]
     fn config_uses_expected_artifact_dir() {
+        let _guard = ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_visible = std::env::var("MAKEPAD_TEST_VISIBLE").ok();
+        std::env::remove_var("MAKEPAD_TEST_VISIBLE");
         let config =
             TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
+        restore_env_var("MAKEPAD_TEST_VISIBLE", old_visible);
         assert_eq!(
             config.artifacts_dir,
             PathBuf::from("/tmp/example")
@@ -1386,6 +1593,54 @@ mod tests {
                 .join("ui__test")
         );
         assert_eq!(config.env.get("MAKEPAD"), Some(&"headless".to_string()));
+    }
+
+    #[test]
+    fn visible_mode_omits_headless_env() {
+        let _guard = ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_visible = std::env::var("MAKEPAD_TEST_VISIBLE").ok();
+        std::env::set_var("MAKEPAD_TEST_VISIBLE", "1");
+        assert!(visible_mode_enabled());
+        let config =
+            TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
+        restore_env_var("MAKEPAD_TEST_VISIBLE", old_visible);
+
+        assert!(!config.env.contains_key("MAKEPAD"));
+    }
+
+    #[test]
+    fn visible_mode_uses_expected_studio_defaults() {
+        let _guard = ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_studio = std::env::var("MAKEPAD_TEST_STUDIO").ok();
+        let old_mount = std::env::var("MAKEPAD_TEST_STUDIO_MOUNT").ok();
+        std::env::remove_var("MAKEPAD_TEST_STUDIO");
+        std::env::remove_var("MAKEPAD_TEST_STUDIO_MOUNT");
+
+        assert_eq!(studio_addr_from_env(), "127.0.0.1:8001");
+        assert_eq!(studio_mount_from_env(), "makepad");
+        restore_env_var("MAKEPAD_TEST_STUDIO", old_studio);
+        restore_env_var("MAKEPAD_TEST_STUDIO_MOUNT", old_mount);
+    }
+
+    #[test]
+    fn duration_env_parses_milliseconds() {
+        let _guard = ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_value = std::env::var("MAKEPAD_TEST_ACTION_DELAY_MS").ok();
+        std::env::set_var("MAKEPAD_TEST_ACTION_DELAY_MS", "250");
+        assert_eq!(
+            env_duration_ms("MAKEPAD_TEST_ACTION_DELAY_MS"),
+            Duration::from_millis(250)
+        );
+        restore_env_var("MAKEPAD_TEST_ACTION_DELAY_MS", old_value);
     }
 
     #[test]
@@ -1417,7 +1672,10 @@ mod tests {
             },
             snapshot("primary"),
         ];
-        assert_eq!(primary_window_scope(&widgets), ("main_window".to_string(), 0));
+        assert_eq!(
+            primary_window_scope(&widgets),
+            ("main_window".to_string(), 0)
+        );
     }
 
     #[test]

@@ -63,6 +63,33 @@ The runtime is synchronous and serial-first:
 
 The in-process runner also serializes app sessions, so UI suites should be invoked with `--test-threads=1`.
 
+## Visible Studio Mode
+
+By default, `makepad_test` launches the app headlessly through an in-process hub.
+For local debugging, you can switch the same test to a visible Studio-backed run:
+
+```bash
+MAKEPAD_TEST_VISIBLE=1 cargo test -p makepad-example-counter --test ui -- --test-threads=1
+```
+
+Visible mode behavior:
+
+- reuses the same `TestApp` and `Locator` APIs
+- connects to an already running Makepad Studio instance
+- clears older builds for the same package before launching a fresh run
+- launches through Studio `Run`, so the app is visible in Studio's runview
+
+Environment variables:
+
+- `MAKEPAD_TEST_VISIBLE=1` enables visible mode
+- `MAKEPAD_TEST_STUDIO=127.0.0.1:8001` overrides the Studio address
+- `MAKEPAD_TEST_STARTUP_DELAY_MS=1000` waits after the app appears before the test starts
+- `MAKEPAD_TEST_ACTION_DELAY_MS=750` waits after each interaction so clicks and typing are visible
+- `MAKEPAD_TEST_KEEP_OPEN_MS=3000` keeps the app open briefly before shutdown
+
+For this repo, visible mode defaults to the Studio mount `makepad`. If your
+Studio session uses a different mount name, set `MAKEPAD_TEST_STUDIO_MOUNT`.
+
 ## Selectors
 
 Selectors are snapshot-based. They match structured widget state instead of only relying on geometry query strings.

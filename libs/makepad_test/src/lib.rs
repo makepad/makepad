@@ -3,6 +3,7 @@
 mod error;
 mod runtime;
 mod selector;
+mod studio_remote;
 
 pub use error::{IntoTestResult, TestError, TestResult};
 pub use makepad_studio_protocol::{

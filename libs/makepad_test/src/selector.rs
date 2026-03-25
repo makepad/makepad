@@ -150,7 +150,10 @@ impl Selector {
             }
         }
         if let Some(value) = &self.text_exact {
-            if !Self::text_fields(widget).iter().any(|field| *field == value) {
+            if !Self::text_fields(widget)
+                .iter()
+                .any(|field| *field == value)
+            {
                 return false;
             }
         }
@@ -177,8 +180,10 @@ impl Selector {
         primary_window_index: usize,
     ) -> bool {
         match &self.window {
-            WindowTarget::Primary => widget.window_index == primary_window_index
-                || (!primary_window_id.is_empty() && widget.window_id == primary_window_id),
+            WindowTarget::Primary => {
+                widget.window_index == primary_window_index
+                    || (!primary_window_id.is_empty() && widget.window_id == primary_window_id)
+            }
             WindowTarget::Any => true,
             WindowTarget::Id(value) => widget.window_id == *value,
             WindowTarget::Index(index) => widget.window_index == *index,
@@ -219,7 +224,9 @@ impl Selector {
         }
         if let Some(value) = raw.strip_prefix("text:") {
             let value = value.trim();
-            return Self::text_fields(widget).iter().any(|field| *field == value);
+            return Self::text_fields(widget)
+                .iter()
+                .any(|field| *field == value);
         }
         if let Some(value) = raw.strip_prefix("value:") {
             return widget.value.as_deref() == Some(value.trim());
@@ -288,8 +295,10 @@ mod tests {
         assert!(Selector::raw("value:hello world")
             .any_window()
             .matches(&widget, "main_window", 0));
-        assert!(Selector::raw("window:panel_window")
-            .any_window()
-            .matches(&widget, "main_window", 0));
+        assert!(Selector::raw("window:panel_window").any_window().matches(
+            &widget,
+            "main_window",
+            0
+        ));
     }
 }

@@ -34,6 +34,25 @@ Run a package-local suite with:
 cargo test -p makepad-example-text-input --test ui -- --test-threads=1
 ```
 
+Run the same test visibly inside a running Makepad Studio session with:
+
+```bash
+MAKEPAD_TEST_VISIBLE=1 cargo test -p makepad-example-counter --test ui -- --test-threads=1
+```
+
+Visible mode expects Studio to already be running at `127.0.0.1:8001`. Set
+`MAKEPAD_TEST_STUDIO=<ip:port>` to override the address.
+
+To make the run easy to watch inside Studio, add pacing:
+
+```bash
+MAKEPAD_TEST_VISIBLE=1 \
+MAKEPAD_TEST_STARTUP_DELAY_MS=1000 \
+MAKEPAD_TEST_ACTION_DELAY_MS=750 \
+MAKEPAD_TEST_KEEP_OPEN_MS=3000 \
+cargo test -p makepad-example-counter --test ui -- --test-threads=1
+```
+
 Run the curated repo UI suites serially on macOS with:
 
 ```bash
