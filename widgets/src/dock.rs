@@ -888,6 +888,44 @@ impl Dock {
         }
     }
 
+    fn splitter_position(&self, splitter_id: LiveId) -> Option<f64> {
+        self.splitters
+            .get(&splitter_id)
+            .map(|splitter| splitter.position())
+    }
+
+    fn set_splitter_align(
+        &mut self,
+        cx: &mut Cx,
+        splitter_id: LiveId,
+        align: SplitterAlign,
+        mark_dirty: bool,
+    ) -> bool {
+        let Some(DockItem::Splitter {
+            a,
+            b,
+            align: current_align,
+            ..
+        }) = self.dock_items.get_mut(&splitter_id)
+        else {
+            return false;
+        };
+
+        let a = *a;
+        let b = *b;
+        *current_align = align;
+        if let Some(splitter) = self.splitters.get_mut(&splitter_id) {
+            splitter.set_align(align);
+        }
+        self.redraw_item(cx, a);
+        self.redraw_item(cx, b);
+        self.area.redraw(cx);
+        if mark_dirty {
+            self.needs_save = true;
+        }
+        true
+    }
+
     fn unsplit_tabs(&mut self, cx: &mut Cx, tabs_id: LiveId) {
         self.needs_save = true;
         for (splitter_id, item) in self.dock_items.iter_mut() {
@@ -1737,6 +1775,23 @@ impl DockRef {
         if let Some(mut dock) = self.borrow_mut() {
             dock.redraw_tab(cx, tab_id);
         }
+    }
+
+    pub fn splitter_position(&self, splitter_id: LiveId) -> Option<f64> {
+        self.borrow()
+            .and_then(|dock| dock.splitter_position(splitter_id))
+    }
+
+    pub fn set_splitter_align(
+        &self,
+        cx: &mut Cx,
+        splitter_id: LiveId,
+        align: SplitterAlign,
+        mark_dirty: bool,
+    ) -> bool {
+        self.borrow_mut().is_some_and(|mut dock| {
+            dock.set_splitter_align(cx, splitter_id, align, mark_dirty)
+        })
     }
 
     pub fn unique_id(&self, base: u64) -> LiveId {
