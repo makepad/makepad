@@ -12,11 +12,10 @@ use {
             geom::{Point, Rect as TextRect, Size, Transform},
             layouter::{
                 BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions,
-                SelectionRect, Style,
+                Style,
             },
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
-            selection::{Cursor, Selection},
         },
         turtle::*,
         turtle::{Align, Walk},
@@ -511,22 +510,16 @@ impl DrawText {
             0.0
         };
 
-        for SelectionRect {
-            rect_in_lpxs,
-            ascender_in_lpxs,
-        } in text.selection_rects(Selection {
-            anchor: Cursor {
-                index: 0,
-                prefer_next_row: false,
-            },
-            cursor: Cursor {
-                index: text.text.len(),
-                prefer_next_row: false,
-            },
-        }) {
+        for row in &text.rows {
             let rect_in_lpxs = TextRect::new(
-                origin_in_lpxs + Size::from(rect_in_lpxs.origin) * self.font_scale,
-                rect_in_lpxs.size * self.font_scale,
+                Point::new(
+                    origin_in_lpxs.x + row.origin_in_lpxs.x * self.font_scale,
+                    origin_in_lpxs.y + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale,
+                ),
+                Size::new(
+                    row.width_in_lpxs * self.font_scale,
+                    (row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale,
+                ),
             );
             f(
                 cx,
@@ -536,7 +529,7 @@ impl DrawText {
                     rect_in_lpxs.size.width as f64,
                     rect_in_lpxs.size.height as f64,
                 ),
-                ascender_in_lpxs,
+                row.ascender_in_lpxs,
             )
         }
     }

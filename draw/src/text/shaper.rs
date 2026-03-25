@@ -6,8 +6,9 @@ use {
     },
     rustybuzz,
     rustybuzz::UnicodeBuffer,
+    fxhash::FxHashMap,
     std::{
-        collections::{HashMap, VecDeque},
+        collections::VecDeque,
         hash::{Hash, Hasher},
         mem,
         rc::Rc,
@@ -53,7 +54,7 @@ pub struct Shaper {
     reusable_unicode_buffer: UnicodeBuffer,
     cache_size: usize,
     cached_params: VecDeque<ShapeParams>,
-    cached_results: HashMap<ShapeParams, Rc<ShapedText>>,
+    cached_results: FxHashMap<ShapeParams, Rc<ShapedText>>,
 }
 
 impl Shaper {
@@ -63,7 +64,7 @@ impl Shaper {
             reusable_unicode_buffer: UnicodeBuffer::new(),
             cache_size: settings.cache_size,
             cached_params: VecDeque::with_capacity(settings.cache_size),
-            cached_results: HashMap::with_capacity(settings.cache_size),
+            cached_results: FxHashMap::with_capacity_and_hasher(settings.cache_size, Default::default()),
         }
     }
 
@@ -202,6 +203,7 @@ impl Shaper {
             .collect();
         let glyph_buffer =
             font.with_rustybuzz_face(|face| rustybuzz::shape(face, &rb_features, unicode_buffer));
+        let units_per_em = font.units_per_em();
         out_glyphs.extend(
             glyph_buffer
                 .glyph_infos()
@@ -211,9 +213,9 @@ impl Shaper {
                     font: font.clone(),
                     id: glyph_info.glyph_id as u16,
                     cluster: glyph_info.cluster as usize,
-                    advance_in_ems: glyph_position.x_advance as f32 / font.units_per_em(),
-                    offset_in_ems: glyph_position.x_offset as f32 / font.units_per_em(),
-                    y_offset_in_ems: glyph_position.y_offset as f32 / font.units_per_em(),
+                    advance_in_ems: glyph_position.x_advance as f32 / units_per_em,
+                    offset_in_ems: glyph_position.x_offset as f32 / units_per_em,
+                    y_offset_in_ems: glyph_position.y_offset as f32 / units_per_em,
                 }),
         );
 
