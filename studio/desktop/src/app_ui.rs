@@ -4,9 +4,11 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
+    let STUDIO_HEADER_HEIGHT = 36.0
+
     let PaneToolbar = RectView {
         width: Fill
-        height: 36.0
+        height: STUDIO_HEADER_HEIGHT
         flow: Right
         align: Align {x: 0.0 y: 0.5}
         padding: Inset {left: 8.0 right: 8.0 top: 0.0 bottom: 0.0}
@@ -79,29 +81,61 @@ script_mod! {
         height: Fill
         flow: Down
         PaneToolbar {
-            log_tail_toggle := Toggle {
-                text: "Tail"
-                active: true
+            View {
+                width: Fit
+                height: Fit
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                spacing: theme.space_1
+
+                log_tail_toggle := Toggle {
+                    text: "Tail"
+                    margin: Inset {}
+                    active: true
+                }
             }
             Filler {}
-            log_filter := TextInputFlat {
-                width: 200.0
-                empty_text: "Filter"
+            View {
+                width: Fit
+                height: Fit
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                spacing: 6.0
+
+                log_filter := TextInputFlat {
+                    width: 232.0
+                    margin: Inset {}
+                    empty_text: "Filter"
+                }
+                clear_log_filter := ButtonFlatter {
+                    width: 24.0
+                    height: 24.0
+                    text: "x"
+                    margin: Inset {}
+                    padding: Inset {left: 0.0 right: 0.0 top: 0.0 bottom: 0.0}
+                }
             }
-            clear_log_filter := ButtonFlatter {
-                text: "x"
-                padding: Inset {left: 4.0 right: 4.0 top: 0.0 bottom: 0.0}
-            }
-            clear_log := ButtonFlatter {
-                text: "Clear"
-            }
-            log_open_profiler := ButtonFlatterIcon {
-                width: 24.0
-                height: 24.0
-                icon_walk: Walk {width: 14.0 height: 14.0}
-                draw_icon +: {
-                    color: theme.color_label_outer
-                    svg: crate_resource("self://resources/icons/icon_profiler.svg")
+            View {
+                width: Fit
+                height: Fit
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                spacing: theme.space_1
+
+                clear_log := ButtonFlatter {
+                    text: "Clear"
+                    margin: Inset {}
+                    padding: Inset {left: 10.0 right: 10.0 top: 0.0 bottom: 0.0}
+                }
+                log_open_profiler := ButtonFlatterIcon {
+                    width: 24.0
+                    height: 24.0
+                    margin: Inset {}
+                    icon_walk: Walk {width: 14.0 height: 14.0}
+                    draw_icon +: {
+                        color: theme.color_label_outer
+                        svg: crate_resource("self://resources/icons/icon_profiler.svg")
+                    }
                 }
             }
         }
@@ -192,6 +226,24 @@ script_mod! {
         closeable: false
         spacing: theme.space_1
         icon_walk: Walk {width: Fit height: 16.0}
+        draw_text +: {
+            color: theme.color_label_inner_inactive
+            color_hover: theme.color_label_inner
+            color_active: theme.color_label_inner_active
+        }
+        draw_bg +: {
+            color: theme.color_bg_app * 0.84
+            color_hover: theme.color_bg_app * 0.96
+            color_active: theme.color_fg_app
+
+            border_color: theme.color_bg_app * 0.84
+            border_color_hover: theme.color_bg_app
+            border_color_active: theme.color_fg_app
+
+            border_color_2: theme.color_bg_app * 0.84
+            border_color_2_hover: theme.color_bg_app
+            border_color_2_active: theme.color_fg_app
+        }
     }
 
     let MountTab = IconTab {
@@ -249,11 +301,26 @@ script_mod! {
         }
     }
 
+    let StudioDock = DockFlat {
+        tab_bar +: {
+            height: STUDIO_HEADER_HEIGHT
+        }
+        splitter +: {
+            draw_bg +: {
+                color: theme.color_bg_container
+                color_hover: theme.color_bevel_outset_1_hover * 0.45
+                color_drag: theme.color_bevel_outset_1_hover * 0.7
+                border_radius: 1.5
+                splitter_pad: 1.5
+            }
+        }
+    }
+
     mod.widgets.AppUI = Window {
         window.inner_size: vec2(1400 900)
         caption_bar := SolidView {
             visible: true
-            height: 38.0
+            height: STUDIO_HEADER_HEIGHT
             flow: Right
             align: Align {x: 0.0 y: 0.5}
             draw_bg.color: theme.color_bg_app
@@ -263,7 +330,7 @@ script_mod! {
                 height: Fit
                 flow: Right
                 align: Align {x: 0.0 y: 0.5}
-                margin: Inset {left: 88.0 right: 0.0 top: 0.0 bottom: 0.0}
+                margin: Inset {left: 72.0 right: 0.0 top: 0.0 bottom: 0.0}
 
                 sidebar_toggle := CaptionSidebarToggle {}
             }
@@ -272,15 +339,24 @@ script_mod! {
                 width: Fill
                 height: Fill
                 align: Center
-                label := Label {text: "Makepad"}
+                label := Label {
+                    text: "Makepad"
+                    padding: 0.0
+                    draw_text +: {
+                        color: theme.color_label_outer
+                        text_style: theme.font_bold{
+                            font_size: theme.font_size_p + 0.5
+                        }
+                    }
+                }
             }
 
             right_caption_tools := View {
                 width: Fit
                 height: Fit
                 flow: Right
-                spacing: theme.space_2
-                margin: Inset {left: 0.0 right: 112.0 top: 0.0 bottom: 0.0}
+                spacing: theme.space_1
+                margin: Inset {left: 0.0 right: 96.0 top: 0.0 bottom: 0.0}
 
                 bottom_panel_toggle := CaptionPanelToggle {}
                 voice_wave := VoiceWave {
@@ -345,7 +421,7 @@ script_mod! {
                 }
             }
 
-            mount_dock := DockFlat {
+            mount_dock := StudioDock {
                 width: Fill
                 height: Fill
 
@@ -369,7 +445,7 @@ script_mod! {
                     width: Fill
                     height: Fill
 
-                    dock := DockFlat {
+                    dock := StudioDock {
                         width: Fill
                         height: Fill
 
