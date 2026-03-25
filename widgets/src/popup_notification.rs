@@ -100,11 +100,21 @@ impl Widget for PopupNotification {
 impl PopupNotification {
     pub fn open(&mut self, cx: &mut Cx) {
         self.opened = true;
+        // Redraw the overlay draw_list directly so the first open is visible
+        // even before the overlay view has established a reusable draw area.
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
         self.redraw(cx);
     }
 
     pub fn close(&mut self, cx: &mut Cx) {
         self.opened = false;
+        // Overlay widgets need their dedicated draw_list invalidated explicitly;
+        // a background redraw alone can leave the last frame visible too long.
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
         self.draw_bg.redraw(cx);
     }
 }

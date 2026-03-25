@@ -171,6 +171,11 @@ impl Widget for Modal {
 impl Modal {
     pub fn open(&mut self, cx: &mut Cx) {
         self.is_open = true;
+        // Redraw the overlay draw_list directly so the first open is visible
+        // even before the overlay content has refreshed its draw area.
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
         self.draw_bg.redraw(cx);
         let content = self.view.widget(cx, ids!(content));
         cx.set_key_focus(content.area());
@@ -185,6 +190,11 @@ impl Modal {
             &mut Scope::empty(),
         );
         self.is_open = false;
+        // Overlay widgets need their dedicated draw_list invalidated explicitly;
+        // a background redraw alone can leave the previous frame visible too long.
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
         self.draw_bg.redraw(cx);
         cx.revert_key_focus();
         cx.unblock_scrolling();
