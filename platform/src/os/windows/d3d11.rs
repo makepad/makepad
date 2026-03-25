@@ -51,9 +51,13 @@ use crate::{
                     D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_INSTANCE_DATA,
                     D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD,
                     D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC,
-                    D3D11_RENDER_TARGET_BLEND_DESC, D3D11_RESOURCE_MISC_FLAG,
-                    D3D11_RESOURCE_MISC_TEXTURECUBE, D3D11_SDK_VERSION, D3D11_STENCIL_OP_REPLACE,
-                    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                    D3D11_RENDER_TARGET_BLEND_DESC, D3D11_RENDER_TARGET_VIEW_DESC,
+                    D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RESOURCE_MISC_FLAG,
+                    D3D11_RESOURCE_MISC_TEXTURECUBE, D3D11_RTV_DIMENSION_TEXTURE2DARRAY,
+                    D3D11_SDK_VERSION, D3D11_SHADER_RESOURCE_VIEW_DESC,
+                    D3D11_SHADER_RESOURCE_VIEW_DESC_0, D3D11_SRV_DIMENSION_TEXTURECUBE,
+                    D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV,
+                    D3D11_TEXCUBE_SRV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
                     D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
                 Dxgi::{
@@ -447,7 +451,11 @@ impl Cx {
                 let size = pass_rect.size * dpi_factor;
                 cxtexture.update_render_target(d3d11_cx, size.x as usize, size.y as usize);
                 let is_initial = cxtexture.take_initial();
-                let render_target = cxtexture.os.render_target_view.clone();
+                let render_target = if let Some(cube_face) = color_texture.cube_face {
+                    cxtexture.os.render_target_face_views[cube_face as usize].clone()
+                } else {
+                    cxtexture.os.render_target_view.clone()
+                };
                 color_textures.push(Some(render_target.clone().unwrap()));
                 // possibly clear it
                 match color_texture.clear_color {
@@ -1069,6 +1077,7 @@ pub struct CxOsTexture {
     pub shared_handle: HANDLE,
     pub(crate) shader_resource_view: Option<ID3D11ShaderResourceView>,
     render_target_view: Option<ID3D11RenderTargetView>,
+    render_target_face_views: [Option<ID3D11RenderTargetView>; 6],
     depth_stencil_view: Option<ID3D11DepthStencilView>,
 }
 
@@ -1259,14 +1268,19 @@ impl CxTexture {
     pub fn update_render_target(&mut self, d3d11_cx: &D3d11Cx, width: usize, height: usize) {
         if self.alloc_render(width, height) {
             let alloc = self.alloc.as_ref().unwrap();
-            let misc_flags = D3D11_RESOURCE_MISC_FLAG(0);
+            let is_cube = matches!(&self.format, TextureFormat::RenderCubeBGRAu8 { .. });
+            let misc_flags = if is_cube {
+                D3D11_RESOURCE_MISC_TEXTURECUBE
+            } else {
+                D3D11_RESOURCE_MISC_FLAG(0)
+            };
             let format = texture_pixel_to_dx11_pixel(&alloc.pixel);
 
             let texture_desc = D3D11_TEXTURE2D_DESC {
                 Width: width as u32,
                 Height: height as u32,
                 MipLevels: 1,
-                ArraySize: 1,
+                ArraySize: if is_cube { 6 } else { 1 },
                 Format: format,
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
@@ -1288,22 +1302,67 @@ impl CxTexture {
             let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
             unsafe {
-                d3d11_cx
-                    .device
-                    .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
-                    .unwrap()
+                if is_cube {
+                    let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+                        Format: format,
+                        ViewDimension: D3D11_SRV_DIMENSION_TEXTURECUBE,
+                        Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                            TextureCube: D3D11_TEXCUBE_SRV {
+                                MostDetailedMip: 0,
+                                MipLevels: 1,
+                            },
+                        },
+                    };
+                    d3d11_cx.device.CreateShaderResourceView(
+                        &resource,
+                        Some(&srv_desc),
+                        Some(&mut shader_resource_view),
+                    )
+                } else {
+                    d3d11_cx
+                        .device
+                        .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
+                }
+                .unwrap()
             };
             let mut render_target_view = None;
-            unsafe {
-                d3d11_cx
-                    .device
-                    .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
-                    .unwrap()
-            };
+            let mut render_target_face_views: [Option<ID3D11RenderTargetView>; 6] =
+                Default::default();
+            if is_cube {
+                for face in 0..6u32 {
+                    let rtv_desc = D3D11_RENDER_TARGET_VIEW_DESC {
+                        Format: format,
+                        ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2DARRAY,
+                        Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 {
+                            Texture2DArray: D3D11_TEX2D_ARRAY_RTV {
+                                MipSlice: 0,
+                                FirstArraySlice: face,
+                                ArraySize: 1,
+                            },
+                        },
+                    };
+                    unsafe {
+                        d3d11_cx.device.CreateRenderTargetView(
+                            &resource,
+                            Some(&rtv_desc),
+                            Some(&mut render_target_face_views[face as usize]),
+                        )
+                    }
+                    .unwrap();
+                }
+            } else {
+                unsafe {
+                    d3d11_cx
+                        .device
+                        .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
+                        .unwrap()
+                };
+            }
 
             self.os.texture = texture;
             self.os.shader_resource_view = shader_resource_view;
             self.os.render_target_view = render_target_view;
+            self.os.render_target_face_views = render_target_face_views;
         }
     }
 
@@ -1600,6 +1659,7 @@ impl DrawVars {
 
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Hlsl;
+            output.use_vulkan = false;
 
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);

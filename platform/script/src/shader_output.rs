@@ -189,6 +189,7 @@ pub enum ShaderMode {
 pub struct ShaderOutput {
     pub mode: ShaderMode,
     pub backend: ShaderBackend,
+    pub use_vulkan: bool,
     pub io: Vec<ShaderIo>,
     pub recur_block: Vec<ScriptObject>,
     pub structs: BTreeSet<ScriptPodType>,

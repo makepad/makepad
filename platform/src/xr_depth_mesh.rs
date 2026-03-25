@@ -1,7 +1,10 @@
 use crate::makepad_math::{vec3, Vec3f};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex, OnceLock, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock, RwLock,
+    },
 };
 
 const XR_DEPTH_QUERY_MAX_PENDING: usize = 256;
@@ -107,7 +110,7 @@ pub struct XrDepthMeshQuery {
     pub include_planar_patches: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct XrDepthMeshQuerySurfaceHit {
     pub distance: f32,
     pub point: Vec3f,
@@ -116,6 +119,43 @@ pub struct XrDepthMeshQuerySurfaceHit {
     pub triangle: [Vec3f; 3],
     pub patch: [Vec3f; 4],
     pub chunk_key: ChunkKey,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct XrDepthMeshQuerySupportPlane {
+    pub point: Vec3f,
+    pub normal: Vec3f,
+    pub tangent: Vec3f,
+    pub bitangent: Vec3f,
+    pub half_extent_tangent: f32,
+    pub half_extent_bitangent: f32,
+}
+
+#[derive(Clone, Debug)]
+pub enum XrDepthMeshQueryColliderGeometry {
+    HalfSpace(XrDepthMeshQuerySupportPlane),
+}
+
+#[derive(Clone, Debug)]
+pub struct XrDepthMeshQueryCollider {
+    pub fingerprint: u64,
+    pub geometry: XrDepthMeshQueryColliderGeometry,
+}
+
+impl XrDepthMeshQueryCollider {
+    pub fn vertex_count(&self) -> usize {
+        0
+    }
+
+    pub fn triangle_count(&self) -> usize {
+        0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct XrDepthMeshQueryResolvedSurface {
+    pub surface: XrDepthMeshQuerySurfaceHit,
+    pub collider: XrDepthMeshQueryCollider,
 }
 
 #[derive(Clone, Debug)]
@@ -130,7 +170,8 @@ pub struct XrDepthMeshQueryHit {
     pub triangle: [Vec3f; 3],
     pub patch: [Vec3f; 4],
     pub chunk_key: ChunkKey,
-    pub additional_hits: Vec<XrDepthMeshQuerySurfaceHit>,
+    pub collider: XrDepthMeshQueryCollider,
+    pub additional_hits: Vec<XrDepthMeshQueryResolvedSurface>,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +218,7 @@ struct XrDepthMeshQueryState {
 pub struct XrDepthMeshStore {
     state: Arc<RwLock<XrDepthMeshState>>,
     queries: Arc<Mutex<XrDepthMeshQueryState>>,
+    mesh_enabled: Arc<AtomicBool>,
 }
 
 impl Default for XrDepthMeshStore {
@@ -184,11 +226,25 @@ impl Default for XrDepthMeshStore {
         Self {
             state: Arc::new(RwLock::new(XrDepthMeshState::default())),
             queries: Arc::new(Mutex::new(XrDepthMeshQueryState::default())),
+            mesh_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl XrDepthMeshStore {
+    pub fn set_mesh_enabled(&self, enabled: bool) {
+        let was_enabled = self.mesh_enabled.swap(enabled, Ordering::AcqRel);
+        if was_enabled && !enabled {
+            if let Ok(mut state) = self.state.write() {
+                state.latest_mesh = None;
+            }
+        }
+    }
+
+    pub fn mesh_enabled(&self) -> bool {
+        self.mesh_enabled.load(Ordering::Acquire)
+    }
+
     pub fn state(&self) -> Arc<RwLock<XrDepthMeshState>> {
         self.state.clone()
     }

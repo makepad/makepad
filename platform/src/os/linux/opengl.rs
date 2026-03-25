@@ -66,6 +66,7 @@ impl DrawVars {
 
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Glsl;
+            output.use_vulkan = cfg!(use_vulkan);
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
 
@@ -636,7 +637,10 @@ impl Cx {
                             let bind_target = match cxtexture.format {
                                 #[cfg(target_os = "android")]
                                 TextureFormat::VideoExternal => gl_sys::TEXTURE_EXTERNAL_OES,
-                                TextureFormat::VecCubeBGRAu8_32 { .. } => gl_sys::TEXTURE_CUBE_MAP,
+                                TextureFormat::VecCubeBGRAu8_32 { .. }
+                                | TextureFormat::RenderCubeBGRAu8 { .. } => {
+                                    gl_sys::TEXTURE_CUBE_MAP
+                                }
                                 _ => gl_sys::TEXTURE_2D,
                             };
                             if let Some(texture) = cxtexture.os.gl_texture {
@@ -777,6 +781,7 @@ impl Cx {
             [crate::draw_pass::CxDrawPassColorTexture {
                 clear_color: DrawPassClearColor::ClearWith(self.passes[draw_pass_id].clear_color),
                 texture: texture.clone(),
+                cube_face: None,
             }]
         });
         let color_textures = color_textures_from_fb_texture
@@ -802,15 +807,18 @@ impl Cx {
                     clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                 }
             }
-            if let Some(gl_texture) = self.textures[color_texture.texture.texture_id()]
-                .os
-                .gl_texture
+            if let Some(gl_texture) = self.textures[color_texture.texture.texture_id()].os.gl_texture
             {
                 unsafe {
+                    let attachment_target = if let Some(cube_face) = color_texture.cube_face {
+                        gl_sys::TEXTURE_CUBE_MAP_POSITIVE_X + cube_face
+                    } else {
+                        gl_sys::TEXTURE_2D
+                    };
                     (gl.glFramebufferTexture2D)(
                         gl_sys::FRAMEBUFFER,
                         gl_sys::COLOR_ATTACHMENT0 + index as u32,
-                        gl_sys::TEXTURE_2D,
+                        attachment_target,
                         gl_texture,
                         0,
                     );
@@ -2453,85 +2461,89 @@ impl CxTexture {
                     self.os.gl_texture_owned = true;
                 }
             }
-            unsafe { (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap()) };
+            let is_cube = matches!(&self.format, TextureFormat::RenderCubeBGRAu8 { .. });
+            let texture_target = if is_cube {
+                gl_sys::TEXTURE_CUBE_MAP
+            } else {
+                gl_sys::TEXTURE_2D
+            };
+            unsafe { (gl.glBindTexture)(texture_target, self.os.gl_texture.unwrap()) };
             match &alloc.pixel {
-                TexturePixel::BGRAu8 => unsafe {
+                TexturePixel::BGRAu8 | TexturePixel::RGBAf16 | TexturePixel::RGBAf32 => unsafe {
                     (gl.glTexParameteri)(
-                        gl_sys::TEXTURE_2D,
+                        texture_target,
                         gl_sys::TEXTURE_MIN_FILTER,
                         gl_sys::NEAREST as i32,
                     );
                     (gl.glTexParameteri)(
-                        gl_sys::TEXTURE_2D,
+                        texture_target,
                         gl_sys::TEXTURE_MAG_FILTER,
                         gl_sys::NEAREST as i32,
                     );
-                    (gl.glTexImage2D)(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        gl_sys::RGBA as i32,
-                        width as i32,
-                        height as i32,
-                        0,
-                        gl_sys::RGBA,
-                        gl_sys::UNSIGNED_BYTE,
-                        ptr::null(),
+                    (gl.glTexParameteri)(
+                        texture_target,
+                        gl_sys::TEXTURE_WRAP_S,
+                        gl_sys::CLAMP_TO_EDGE as i32,
                     );
+                    (gl.glTexParameteri)(
+                        texture_target,
+                        gl_sys::TEXTURE_WRAP_T,
+                        gl_sys::CLAMP_TO_EDGE as i32,
+                    );
+                    if is_cube {
+                        (gl.glTexParameteri)(
+                            texture_target,
+                            gl_sys::TEXTURE_WRAP_R,
+                            gl_sys::CLAMP_TO_EDGE as i32,
+                        );
+                    }
+                    let data_type = match &alloc.pixel {
+                        TexturePixel::BGRAu8 => gl_sys::UNSIGNED_BYTE,
+                        TexturePixel::RGBAf16 => gl_sys::HALF_FLOAT,
+                        TexturePixel::RGBAf32 => gl_sys::FLOAT,
+                        _ => unreachable!(),
+                    };
+                    if is_cube {
+                        for target in [
+                            gl_sys::TEXTURE_CUBE_MAP_POSITIVE_X,
+                            gl_sys::TEXTURE_CUBE_MAP_NEGATIVE_X,
+                            gl_sys::TEXTURE_CUBE_MAP_POSITIVE_Y,
+                            gl_sys::TEXTURE_CUBE_MAP_NEGATIVE_Y,
+                            gl_sys::TEXTURE_CUBE_MAP_POSITIVE_Z,
+                            gl_sys::TEXTURE_CUBE_MAP_NEGATIVE_Z,
+                        ] {
+                            (gl.glTexImage2D)(
+                                target,
+                                0,
+                                gl_sys::RGBA as i32,
+                                width as i32,
+                                height as i32,
+                                0,
+                                gl_sys::RGBA,
+                                data_type,
+                                ptr::null(),
+                            );
+                        }
+                    } else {
+                        (gl.glTexImage2D)(
+                            gl_sys::TEXTURE_2D,
+                            0,
+                            gl_sys::RGBA as i32,
+                            width as i32,
+                            height as i32,
+                            0,
+                            gl_sys::RGBA,
+                            data_type,
+                            ptr::null(),
+                        );
+                    }
                 },
-                TexturePixel::RGBAf16 => unsafe {
-                    (gl.glTexParameteri)(
-                        gl_sys::TEXTURE_2D,
-                        gl_sys::TEXTURE_MIN_FILTER,
-                        gl_sys::NEAREST as i32,
-                    );
-                    (gl.glTexParameteri)(
-                        gl_sys::TEXTURE_2D,
-                        gl_sys::TEXTURE_MAG_FILTER,
-                        gl_sys::NEAREST as i32,
-                    );
-                    (gl.glTexImage2D)(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        gl_sys::RGBA as i32,
-                        width as i32,
-                        height as i32,
-                        0,
-                        gl_sys::RGBA,
-                        gl_sys::HALF_FLOAT,
-                        ptr::null(),
-                    );
-                },
-                TexturePixel::RGBAf32 => unsafe {
-                    (gl.glTexParameteri)(
-                        gl_sys::TEXTURE_2D,
-                        gl_sys::TEXTURE_MIN_FILTER,
-                        gl_sys::NEAREST as i32,
-                    );
-                    (gl.glTexParameteri)(
-                        gl_sys::TEXTURE_2D,
-                        gl_sys::TEXTURE_MAG_FILTER,
-                        gl_sys::NEAREST as i32,
-                    );
-                    (gl.glTexImage2D)(
-                        gl_sys::TEXTURE_2D,
-                        0,
-                        gl_sys::RGBA as i32,
-                        width as i32,
-                        height as i32,
-                        0,
-                        gl_sys::RGBA,
-                        gl_sys::FLOAT,
-                        ptr::null(),
-                    );
-                },
-                _ => {
-                    crate::error!(
-                        "Unsupported texture pixel format for OpenGL render target allocation"
-                    );
-                }
+                _ => crate::error!(
+                    "Unsupported texture pixel format for OpenGL render target allocation"
+                ),
             }
             unsafe {
-                (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+                (gl.glBindTexture)(texture_target, 0);
             }
         }
     }

@@ -244,6 +244,22 @@ impl DrawPass {
         cxpass.color_textures.push(CxDrawPassColorTexture {
             texture: texture.clone(),
             clear_color: clear_color,
+            cube_face: None,
+        })
+    }
+
+    pub fn add_color_texture_face(
+        &self,
+        cx: &mut Cx,
+        texture: &Texture,
+        cube_face: u32,
+        clear_color: DrawPassClearColor,
+    ) {
+        let cxpass = &mut cx.passes[self.draw_pass_id()];
+        cxpass.color_textures.push(CxDrawPassColorTexture {
+            texture: texture.clone(),
+            clear_color,
+            cube_face: Some(cube_face),
         })
     }
 
@@ -258,11 +274,36 @@ impl DrawPass {
             cxpass.color_textures[0] = CxDrawPassColorTexture {
                 texture: texture.clone(),
                 clear_color: clear_color,
+                cube_face: None,
             }
         } else {
             cxpass.color_textures.push(CxDrawPassColorTexture {
                 texture: texture.clone(),
                 clear_color: clear_color,
+                cube_face: None,
+            })
+        }
+    }
+
+    pub fn set_color_texture_face(
+        &self,
+        cx: &mut Cx,
+        texture: &Texture,
+        cube_face: u32,
+        clear_color: DrawPassClearColor,
+    ) {
+        let cxpass = &mut cx.passes[self.draw_pass_id()];
+        if cxpass.color_textures.len() != 0 {
+            cxpass.color_textures[0] = CxDrawPassColorTexture {
+                texture: texture.clone(),
+                clear_color,
+                cube_face: Some(cube_face),
+            }
+        } else {
+            cxpass.color_textures.push(CxDrawPassColorTexture {
+                texture: texture.clone(),
+                clear_color,
+                cube_face: Some(cube_face),
             })
         }
     }
@@ -311,6 +352,7 @@ pub enum DrawPassClearDepth {
 pub struct CxDrawPassColorTexture {
     pub clear_color: DrawPassClearColor,
     pub texture: Texture,
+    pub cube_face: Option<u32>,
 }
 
 #[derive(Default, Clone, Script, ScriptHook)]

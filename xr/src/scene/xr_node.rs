@@ -130,6 +130,10 @@ pub struct XrNode {
     body: XrBodyKind,
     #[live(vec3(0.0, 0.0, 0.0))]
     physics_size: Vec3f,
+    #[rust]
+    implicit_physics_size: Vec3f,
+    #[rust]
+    physics_size_explicit: bool,
     #[live(1.0)]
     density: f32,
     #[live(0.8)]
@@ -180,11 +184,24 @@ impl XrNode {
         self.body
     }
 
+    pub fn set_implicit_physics_size(&mut self, size: Vec3f) {
+        self.implicit_physics_size = vec3f(size.x.max(0.0), size.y.max(0.0), size.z.max(0.0));
+    }
+
     pub fn physics_half_extents(&self) -> Vec3f {
+        let physics_size = if self.physics_size_explicit
+            || self.physics_size.x > 0.0
+            || self.physics_size.y > 0.0
+            || self.physics_size.z > 0.0
+        {
+            self.physics_size
+        } else {
+            self.implicit_physics_size
+        };
         vec3f(
-            self.physics_size.x.max(0.0) * 0.5,
-            self.physics_size.y.max(0.0) * 0.5,
-            self.physics_size.z.max(0.0) * 0.5,
+            physics_size.x.max(0.0) * 0.5,
+            physics_size.y.max(0.0) * 0.5,
+            physics_size.z.max(0.0) * 0.5,
         )
     }
 
@@ -245,6 +262,17 @@ impl ScriptHook for XrNode {
         scope: &mut Scope,
         value: ScriptValue,
     ) {
+        let physics_size_present = value.as_object().is_some_and(|obj| {
+            vm.bx.heap
+                .value_for_apply(obj.into(), id!(physics_size).into(), &Apply::Eval)
+                .is_some()
+        });
+        if physics_size_present {
+            self.physics_size_explicit = true;
+        } else if !apply.is_eval() {
+            self.physics_size_explicit = false;
+        }
+
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 self.child_order.clear();

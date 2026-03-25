@@ -7,7 +7,7 @@ script_mod! {
     use mod.draw
     use mod.geom
 
-    mod.draw.DrawPassthroughEnvAtlas = mod.std.set_type_default() do #(DrawPassthroughEnvAtlas::script_shader(vm)){
+    mod.draw.DrawPassthroughEnvFace = mod.std.set_type_default() do #(DrawPassthroughEnvFace::script_shader(vm)){
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -16,7 +16,6 @@ script_mod! {
         geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
 
         camera_texture: texture_video()
-        previous_env_texture: texture_2d(float)
         v_uv: varying(vec2f)
 
         vertex: fn() {
@@ -30,37 +29,25 @@ script_mod! {
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world);
         }
 
-        face_dir_from_atlas_uv: fn(atlas_uv: vec2f) -> vec3f {
-            let clamped = clamp(atlas_uv, vec2(0.0, 0.0), vec2(0.999999, 0.999999));
-            let scaled = clamped * vec2(3.0, 2.0);
-            let face_col = floor(scaled.x);
-            let face_row = floor(scaled.y);
-            let face_uv = fract(scaled);
+        face_dir_from_uv: fn(face_uv: vec2f) -> vec3f {
             let u = face_uv.x * 2.0 - 1.0;
             let v = face_uv.y * 2.0 - 1.0;
-
-            if face_row < 0.5 {
-                if face_col < 0.5 {
-                    return normalize(vec3(1.0, -v, -u));
-                }
-                if face_col < 1.5 {
-                    return normalize(vec3(-1.0, -v, u));
-                }
+            if self.face_index < 0.5 {
+                return normalize(vec3(1.0, -v, -u));
+            }
+            if self.face_index < 1.5 {
+                return normalize(vec3(-1.0, -v, u));
+            }
+            if self.face_index < 2.5 {
                 return normalize(vec3(u, 1.0, v));
             }
-
-            if face_col < 0.5 {
+            if self.face_index < 3.5 {
                 return normalize(vec3(u, -1.0, -v));
             }
-            if face_col < 1.5 {
+            if self.face_index < 4.5 {
                 return normalize(vec3(u, -v, 1.0));
             }
             return normalize(vec3(-u, -v, -1.0));
-        }
-
-        face_local_uv: fn(atlas_uv: vec2f) -> vec2f {
-            let clamped = clamp(atlas_uv, vec2(0.0, 0.0), vec2(0.999999, 0.999999));
-            return fract(clamped * vec2(3.0, 2.0));
         }
 
         project_camera_uv: fn(dir_world: vec3f) -> vec3f {
@@ -114,19 +101,12 @@ script_mod! {
         }
 
         pixel: fn() {
-            let atlas_uv = clamp(self.v_uv, vec2(0.0, 0.0), vec2(1.0, 1.0));
-            let previous = self.previous_env_texture.sample_as_bgra(atlas_uv).xyz;
             if self.camera_enabled <= 0.5 {
-                return vec4(previous, 1.0);
+                return vec4(0.0, 0.0, 0.0, 0.0);
             }
 
-            if self.bootstrap_mix > 0.5 {
-                let bootstrap_uv = self.face_local_uv(atlas_uv);
-                let camera = self.sample_camera_rgb(bootstrap_uv);
-                return vec4(camera, 1.0);
-            }
-
-            let dir_world = self.face_dir_from_atlas_uv(atlas_uv);
+            let face_uv = clamp(self.v_uv, vec2(0.0, 0.0), vec2(1.0, 1.0));
+            let dir_world = self.face_dir_from_uv(face_uv);
             let projection = self.project_camera_uv(dir_world);
             let sample_uv = clamp(projection.xy, vec2(0.0, 0.0), vec2(1.0, 1.0));
             let edge_margin = min(
@@ -138,12 +118,17 @@ script_mod! {
                 * step(0.0, projection.y)
                 * step(projection.x, 1.0)
                 * step(projection.y, 1.0);
-            let capture_weight = max(
+            let bootstrap = visible * clamp(self.bootstrap_mix, 0.0, 1.0);
+            let update = max(
                 0.0,
                 visible * smoothstep(0.01, 0.08, edge_margin) * clamp(self.update_strength, 0.0, 1.0)
             );
-            let camera = self.sample_camera_rgb(sample_uv);
-            return vec4(mix(previous, camera, capture_weight), 1.0);
+            let capture_weight = max(bootstrap, update);
+            if capture_weight <= 0.00001 {
+                return vec4(0.0, 0.0, 0.0, 0.0);
+            }
+            let camera = self.sample_camera_rgb(sample_uv) * capture_weight;
+            return vec4(camera.x, camera.y, camera.z, capture_weight);
         }
 
         fragment: fn() {
@@ -154,7 +139,7 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
-pub struct DrawPassthroughEnvAtlas {
+pub struct DrawPassthroughEnvFace {
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -167,6 +152,8 @@ pub struct DrawPassthroughEnvAtlas {
     pub bootstrap_mix: f32,
     #[live]
     pub update_strength: f32,
+    #[live]
+    pub face_index: f32,
     #[live]
     pub camera_fov_y_degrees: f32,
     #[live]
@@ -183,7 +170,7 @@ pub struct DrawPassthroughEnvAtlas {
     pub camera_forward: Vec3f,
 }
 
-impl DrawPassthroughEnvAtlas {
+impl DrawPassthroughEnvFace {
     pub fn draw_geometry(&mut self, cx: &mut Cx2d, geometry_id: GeometryId) {
         self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         self.draw_vars.geometry_id = Some(geometry_id);
