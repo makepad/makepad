@@ -33,6 +33,21 @@ script_mod! {
         metallic: 0.04
     }
 
+    let XrUiButton = mod.widgets.ButtonFlat{
+        draw_bg +: {
+            border_size: 0.0
+            border_radius: 0.0
+            pixel: fn() {
+                let fill = self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_down, self.down)
+                    .mix(self.color_disabled, self.disabled);
+                return Pal.premul(fill)
+            }
+        }
+    }
+
     startup() do #(App::script_component(vm)){
         ui:  XrRoot{
             window.inner_size: vec2(1400, 900)
@@ -297,17 +312,16 @@ script_mod! {
 
             control_strip := XrView{
                 pos: vec3(0.0, 0.46, -0.84)
-                logical_size: vec2(780, 268)
+                logical_size: vec2(780, 352)
                 pixel_scale: 0.00074
                 dpi_factor: 2.0
-                RoundedView{
+                SolidView{
                     width: Fill
                     height: Fill
                     flow: Down
                     padding: 16
                     spacing: 12
                     draw_bg.color: #x162331ee
-                    draw_bg.border_radius: 16.0
 
                     View{
                         width: Fill
@@ -335,37 +349,37 @@ script_mod! {
                         flow: Right
                         spacing: 8
 
-                        test_scene_button := Button{
+                        test_scene_button := XrUiButton{
                             width: 88
                             text: "XR Test"
                             on_press: || ui.scene_select.test_scene()
                         }
 
-                        ico_box_scene_button := Button{
+                        ico_box_scene_button := XrUiButton{
                             width: 72
                             text: "Icos"
                             on_press: || ui.scene_select.ico_box_scene()
                         }
 
-                        block_scene_button := Button{
+                        block_scene_button := XrUiButton{
                             width: 88
                             text: "Blocks"
                             on_press: || ui.scene_select.block_scene()
                         }
 
-                        helmet_scene_button := Button{
+                        helmet_scene_button := XrUiButton{
                             width: 88
                             text: "Helmet"
                             on_press: || ui.scene_select.helmet_scene()
                         }
 
-                        tree_scene_button := Button{
+                        tree_scene_button := XrUiButton{
                             width: 88
                             text: "Tree"
                             on_press: || ui.scene_select.tree_scene()
                         }
 
-                        refraction_scene_button := Button{
+                        refraction_scene_button := XrUiButton{
                             width: 104
                             text: "Refraction"
                             on_press: || ui.scene_select.refraction_scene()
@@ -379,13 +393,13 @@ script_mod! {
                         spacing: 12
                         align: Align{y: 0.5}
 
-                        depth_toggle_button := Button{
+                        depth_toggle_button := XrUiButton{
                             width: 132
                             text: "Toggle Env Mesh"
                             on_press: || ui.root.set_depth(!ui.root.depth_mesh_visible())
                         }
 
-                        query_hits_toggle_button := Button{
+                        query_hits_toggle_button := XrUiButton{
                             width: 148
                             text: "Toggle Query Hits"
                             on_press: || ui.root.set_depth_query_hits(!ui.root.depth_query_hits_visible())
@@ -401,28 +415,103 @@ script_mod! {
                     View{
                         width: Fill
                         height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+
+                        render_scale_label := Label{
+                            width: 104
+                            text: "Render Scale"
+                            draw_text.color: #xe8f4ff
+                        }
+
+                        scale_08_button := XrUiButton{
+                            width: 58
+                            text: "0.8x"
+                            on_press: || ui.root.set_render_scale(0.8)
+                        }
+
+                        scale_10_button := XrUiButton{
+                            width: 58
+                            text: "1.0x"
+                            on_press: || ui.root.set_render_scale(1.0)
+                        }
+
+                        scale_12_button := XrUiButton{
+                            width: 58
+                            text: "1.2x"
+                            on_press: || ui.root.set_render_scale(1.2)
+                        }
+
+                        scale_14_button := XrUiButton{
+                            width: 58
+                            text: "1.4x"
+                            on_press: || ui.root.set_render_scale(1.4)
+                        }
+
+                        scale_15_button := XrUiButton{
+                            width: 58
+                            text: "1.5x"
+                            on_press: || ui.root.set_render_scale(1.5)
+                        }
+                    }
+
+                    View{
+                        width: Fill
+                        height: Fit
                         flow: Down
                         spacing: 8
 
-                        physics_geom_field := TextInput{
+                        SolidView{
                             width: Fill
                             height: 32
-                            is_read_only: true
-                            empty_text: "Physics geometry: waiting for frame"
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            draw_bg.color: #x0d1824
+
+                            physics_geom_field := Label{
+                                width: Fill
+                                text: "Physics geometry: waiting for frame"
+                                draw_text.color: #xe8f4ff
+                            }
                         }
 
-                        physics_timing_field := TextInput{
+                        SolidView{
                             width: Fill
                             height: 32
-                            is_read_only: true
-                            empty_text: "Physics compute: waiting for frame"
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            draw_bg.color: #x0d1824
+
+                            physics_timing_field := Label{
+                                width: Fill
+                                text: "Physics compute: waiting for frame"
+                                draw_text.color: #xe8f4ff
+                            }
                         }
 
-                        frame_cpu_field := TextInput{
+                        SolidView{
                             width: Fill
                             height: 32
-                            is_read_only: true
-                            empty_text: "CPU frame: waiting for frame"
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            draw_bg.color: #x0d1824
+
+                            frame_cpu_field := Label{
+                                width: Fill
+                                text: "CPU frame: waiting for frame"
+                                draw_text.color: #xe8f4ff
+                            }
+                        }
+
+                        SolidView{
+                            width: Fill
+                            height: 32
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            draw_bg.color: #x0d1824
+
+                            xr_runtime_field := Label{
+                                width: Fill
+                                text: "XR render scale: waiting for XR session"
+                                draw_text.color: #xe8f4ff
+                            }
                         }
                     }
                 }
@@ -443,6 +532,8 @@ pub struct App {
     last_physics_timing_text: String,
     #[rust]
     last_frame_cpu_text: String,
+    #[rust]
+    last_xr_runtime_text: String,
 }
 
 impl App {
@@ -498,6 +589,43 @@ impl App {
                 .widget(cx, ids!(frame_cpu_field))
                 .set_text(cx, &frame_cpu_text);
             self.last_frame_cpu_text = frame_cpu_text;
+        }
+
+        let xr_runtime_text = match (
+            cx.xr_render_scale(),
+            cx.xr_display_refresh_rate_hz(),
+            cx.xr_effective_frame_rate_hz(),
+            cx.xr_gpu_frame_time_ms(),
+        ) {
+            (Some(scale), Some(refresh_hz), Some(effective_hz), Some(gpu_ms)) => format!(
+                "XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU {:.2} ms",
+                scale, refresh_hz, effective_hz, gpu_ms
+            ),
+            (Some(scale), Some(refresh_hz), Some(effective_hz), None) => format!(
+                "XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU waiting",
+                scale, refresh_hz, effective_hz
+            ),
+            (Some(scale), Some(refresh_hz), None, Some(gpu_ms)) => format!(
+                "XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU {:.2} ms",
+                scale, refresh_hz, gpu_ms
+            ),
+            (Some(scale), Some(refresh_hz), None, None) => format!(
+                "XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU waiting",
+                scale, refresh_hz
+            ),
+            (Some(scale), None, _, Some(gpu_ms)) => {
+                format!("XR scale: {:.2} | refresh waiting | GPU {:.2} ms", scale, gpu_ms)
+            }
+            (Some(scale), None, _, None) => {
+                format!("XR scale: {:.2} | refresh waiting | GPU waiting", scale)
+            }
+            (None, _, _, _) => "XR render scale: not active".to_string(),
+        };
+        if self.last_xr_runtime_text != xr_runtime_text {
+            self.ui
+                .widget(cx, ids!(xr_runtime_field))
+                .set_text(cx, &xr_runtime_text);
+            self.last_xr_runtime_text = xr_runtime_text;
         }
     }
 }

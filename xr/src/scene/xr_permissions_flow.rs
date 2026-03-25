@@ -5,6 +5,21 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
+    let XrPermissionButton = mod.widgets.ButtonFlat{
+        draw_bg +: {
+            border_size: 0.0
+            border_radius: 0.0
+            pixel: fn() {
+                let fill = self.color
+                    .mix(self.color_focus, self.focus)
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_down, self.down)
+                    .mix(self.color_disabled, self.disabled);
+                return Pal.premul(fill)
+            }
+        }
+    }
+
     mod.widgets.XrPermissionsFlowBase = #(XrPermissionsFlow::register_widget(vm))
     mod.widgets.XrPermissionsFlow = set_type_default() do mod.widgets.XrPermissionsFlowBase{
         width: Fill
@@ -14,27 +29,15 @@ script_mod! {
         padding: Inset{left: 40 right: 40 top: 40 bottom: 40}
         spacing: 18
         show_bg: true
-        draw_bg +: {
-            color_top: uniform(#x0b1422)
-            color_bottom: uniform(#x051018)
-            color_glow: uniform(#x1b4663)
-            pixel: fn() {
-                let uv = self.pos;
-                let base = mix(self.color_top, self.color_bottom, uv.y);
-                let glow = smoothstep(0.72, 0.0, length(uv - vec2(0.18, 0.24)));
-                return mix(base, self.color_glow, glow * 0.24);
-            }
-        }
+        draw_bg.color: #x06111a
 
-        panel := RoundedView{
+        panel := SolidView{
             width: 620
             height: Fit
             flow: Down
             spacing: 14
             padding: Inset{left: 24 right: 24 top: 22 bottom: 22}
-            show_bg: true
             draw_bg.color: #x09131cdd
-            draw_bg.border_radius: 18.0
 
             title := H1{
                 text: "Mixed Reality Permissions"
@@ -47,17 +50,17 @@ script_mod! {
                 draw_text.color: #xb8c8d8
             }
 
-            scene_access_button := Button{
+            scene_access_button := XrPermissionButton{
                 width: Fill
                 text: "Allow Scene Access"
             }
 
-            headset_camera_button := Button{
+            headset_camera_button := XrPermissionButton{
                 width: Fill
                 text: "Allow Headset Camera"
             }
 
-            enter_mr_button := Button{
+            enter_mr_button := XrPermissionButton{
                 width: Fill
                 text: "Enter Mixed Reality"
             }

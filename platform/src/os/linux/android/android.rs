@@ -88,9 +88,11 @@ use {
     std::time::Instant,
 };
 
-const ANDROID_XR_BUFFER_SCALE: f32 = 1.3;
+const ANDROID_XR_BUFFER_SCALE_MIN: f32 = 0.75;
+const ANDROID_XR_BUFFER_SCALE_DEFAULT: f32 = 1.4;
+const ANDROID_XR_BUFFER_SCALE_MAX: f32 = 1.5;
 const ANDROID_XR_MULTISAMPLES: usize = 4;
-const ANDROID_XR_FIXED_FOVEATION_LEVEL: u8 = 2;
+const ANDROID_XR_FIXED_FOVEATION_LEVEL: u8 = 3;
 
 fn android_debug_log(prio: i32, msg: &str) {
     use std::ffi::c_int;
@@ -139,6 +141,25 @@ fn install_android_panic_hook() {
 }
 
 impl Cx {
+    fn current_android_xr_options(&self) -> CxOpenXrOptions {
+        CxOpenXrOptions {
+            buffer_scale: self.os.xr_buffer_scale_requested,
+            multisamples: ANDROID_XR_MULTISAMPLES,
+            remove_hands_from_depth: false,
+            fixed_foveation_level: ANDROID_XR_FIXED_FOVEATION_LEVEL,
+        }
+    }
+
+    #[cfg(use_vulkan)]
+    fn resize_android_xr_projection_layer(&mut self) -> Result<(), String> {
+        let options = self.current_android_xr_options();
+        let (openxr, vulkan) = (&mut self.os.openxr, &mut self.os.vulkan);
+        let vulkan = vulkan
+            .as_mut()
+            .ok_or_else(|| "Android XR projection resize failed: Vulkan backend unavailable".to_string())?;
+        openxr.resize_projection_layer(vulkan, options)
+    }
+
     #[cfg(use_vulkan)]
     fn replace_xr_pending_surface(
         &mut self,
@@ -226,12 +247,7 @@ impl Cx {
         let result = self.os.openxr.create_session(
             self.os.display.as_ref().unwrap(),
             vulkan.as_mut(),
-            CxOpenXrOptions {
-                buffer_scale: ANDROID_XR_BUFFER_SCALE,
-                multisamples: ANDROID_XR_MULTISAMPLES,
-                remove_hands_from_depth: false,
-                fixed_foveation_level: ANDROID_XR_FIXED_FOVEATION_LEVEL,
-            },
+            self.current_android_xr_options(),
             &self.os_type,
         );
         self.os.vulkan = vulkan;
@@ -239,6 +255,7 @@ impl Cx {
             crate::error!("OpenXR create_xr_session failed ({reason}): {}", e);
             self.os.xr_retry_surface_after_destroy = true;
         } else {
+            self.os.xr_buffer_scale_active = self.os.xr_buffer_scale_requested;
             self.clear_xr_pending_surface();
         }
     }
@@ -432,12 +449,7 @@ impl Cx {
                     {
                         if let Err(e) = self.os.openxr.create_session(
                             self.os.display.as_ref().unwrap(),
-                            CxOpenXrOptions {
-                                buffer_scale: ANDROID_XR_BUFFER_SCALE,
-                                multisamples: ANDROID_XR_MULTISAMPLES,
-                                remove_hands_from_depth: false,
-                                fixed_foveation_level: ANDROID_XR_FIXED_FOVEATION_LEVEL,
-                            },
+                            self.current_android_xr_options(),
                             &self.os_type,
                         ) {
                             crate::error!("OpenXR create_xr_session failed: {}", e);
@@ -2346,6 +2358,14 @@ impl Cx {
                     // TODO: implement via MediaPlayer when needed
                 }
                 CxOsOp::XrStartPresenting => {
+                    self.os.xr_buffer_scale_requested = self
+                        .os
+                        .xr_buffer_scale_requested
+                        .clamp(ANDROID_XR_BUFFER_SCALE_MIN, ANDROID_XR_BUFFER_SCALE_MAX);
+                    self.os.xr_buffer_scale_active = self.os.xr_buffer_scale_requested;
+                    self.os.xr_display_refresh_rate_active_hz = None;
+                    self.os.xr_effective_frame_time_ms = None;
+                    self.os.xr_effective_frame_rate_hz = None;
                     self.os.xr_retry_surface_after_destroy = true;
                     self.os.ignore_destroy = true;
                     if !self.os.in_xr_mode {
@@ -2359,6 +2379,9 @@ impl Cx {
                 CxOsOp::XrStopPresenting => {
                     #[cfg(use_vulkan)]
                     self.clear_xr_pending_surface();
+                    self.os.xr_display_refresh_rate_active_hz = None;
+                    self.os.xr_effective_frame_time_ms = None;
+                    self.os.xr_effective_frame_rate_hz = None;
                     self.os.ignore_destroy = true;
                     if self.os.in_xr_mode {
                         self.os.in_xr_mode = false;
@@ -2366,6 +2389,29 @@ impl Cx {
                             let env = attach_jni_env();
                             android_jni::to_java_switch_activity(env);
                         }
+                    }
+                }
+                CxOsOp::XrSetRenderScale(scale) => {
+                    let scale = scale.clamp(ANDROID_XR_BUFFER_SCALE_MIN, ANDROID_XR_BUFFER_SCALE_MAX);
+                    let current_scale = self.os.xr_buffer_scale_active;
+                    self.os.xr_buffer_scale_requested = scale;
+                    if !self.os.in_xr_mode || self.os.openxr.session.is_none() {
+                        self.os.xr_buffer_scale_active = scale;
+                        continue;
+                    }
+                    if (scale - current_scale).abs() < 0.0001 {
+                        continue;
+                    }
+                    if let Err(err) = self.resize_android_xr_projection_layer() {
+                        crate::warning!(
+                            "Android XR render scale resize failed at scale {:.2}, keeping {:.2}: {}",
+                            scale,
+                            current_scale,
+                            err
+                        );
+                        self.os.xr_buffer_scale_requested = current_scale;
+                    } else {
+                        self.os.xr_buffer_scale_active = scale;
                     }
                 }
                 CxOsOp::XrAdvertiseAnchor(anchor) => {
@@ -2436,6 +2482,36 @@ impl CxOsApi for Cx {
         } else {
             0.00001
         }
+    }
+
+    fn xr_render_scale(&self) -> Option<f64> {
+        if self.os.in_xr_mode {
+            Some(self.os.xr_buffer_scale_active as f64)
+        } else {
+            None
+        }
+    }
+
+    fn xr_gpu_frame_time_ms(&self) -> Option<f64> {
+        #[cfg(use_vulkan)]
+        {
+            self.os
+                .vulkan
+                .as_ref()
+                .and_then(|vulkan| vulkan.last_openxr_gpu_frame_time_ms())
+        }
+        #[cfg(not(use_vulkan))]
+        {
+            None
+        }
+    }
+
+    fn xr_display_refresh_rate_hz(&self) -> Option<f64> {
+        self.os.xr_display_refresh_rate_active_hz.map(|value| value as f64)
+    }
+
+    fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
+        self.os.xr_effective_frame_rate_hz
     }
 }
 
@@ -2617,6 +2693,11 @@ impl Default for CxOs {
             render_thread_id: None,
             ignore_destroy: false,
             in_xr_mode: false,
+            xr_buffer_scale_active: ANDROID_XR_BUFFER_SCALE_DEFAULT,
+            xr_buffer_scale_requested: ANDROID_XR_BUFFER_SCALE_DEFAULT,
+            xr_display_refresh_rate_active_hz: None,
+            xr_effective_frame_time_ms: None,
+            xr_effective_frame_rate_hz: None,
             xr_pending_surface_window: std::ptr::null_mut(),
             xr_pending_surface_width: 0,
             xr_pending_surface_height: 0,
@@ -2669,6 +2750,11 @@ pub struct CxOs {
     pub(crate) render_thread_id: Option<u64>,
     pub(crate) ignore_destroy: bool,
     pub(crate) in_xr_mode: bool,
+    pub(crate) xr_buffer_scale_active: f32,
+    pub(crate) xr_buffer_scale_requested: f32,
+    pub(crate) xr_display_refresh_rate_active_hz: Option<f32>,
+    pub(crate) xr_effective_frame_time_ms: Option<f64>,
+    pub(crate) xr_effective_frame_rate_hz: Option<f64>,
     pub(crate) xr_pending_surface_window: *mut ndk_sys::ANativeWindow,
     pub(crate) xr_pending_surface_width: i32,
     pub(crate) xr_pending_surface_height: i32,
