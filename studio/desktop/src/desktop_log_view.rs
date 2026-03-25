@@ -147,7 +147,8 @@ script_mod! {
     mod.widgets.LogEmptyItem = View {
         cursor: MouseCursor.Default
         width: Fill
-        height: 25.0
+        height: 32.0
+        align: Align {x: 0.0 y: 0.5}
         show_bg: true
         draw_bg +: {
             color_even: uniform(theme.color_bg_even)
@@ -160,10 +161,14 @@ script_mod! {
                 )
             }
         }
-        padding: Inset {left: 8.0 right: 8.0 top: 4.0 bottom: 4.0}
+        padding: Inset {left: 14.0 right: 14.0 top: 7.0 bottom: 7.0}
         empty_label := Label {
             width: Fill
             text: ""
+            padding: 0.0
+            draw_text +: {
+                color: theme.color_label_outer_off
+            }
         }
     }
 
@@ -219,7 +224,7 @@ impl ScriptHook for DesktopLogView {
 }
 
 impl DesktopLogView {
-    const EMPTY_ROW_HEIGHT: f64 = 25.0;
+    const EMPTY_ROW_HEIGHT: f64 = 32.0;
 
     fn tab_id(&self, cx: &Cx) -> LiveId {
         let path = cx.widget_tree().path_to(self.widget_uid());
