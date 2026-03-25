@@ -305,6 +305,29 @@ impl CxOpenXr {
 
         #[cfg(use_vulkan)]
         {
+            let fixed_foveation_exts = [
+                "XR_FB_swapchain_update_state\0",
+                "XR_FB_foveation\0",
+                "XR_FB_foveation_configuration\0",
+                "XR_FB_foveation_vulkan\0",
+            ];
+            let missing_fixed_foveation_exts: Vec<&str> = fixed_foveation_exts
+                .iter()
+                .copied()
+                .filter(|name| !has_extension(name))
+                .collect();
+            if missing_fixed_foveation_exts.is_empty() {
+                exts_needed.extend_from_slice(&fixed_foveation_exts);
+            } else {
+                crate::warning!(
+                    "OpenXR fixed foveation extensions unavailable on this runtime: {:?}",
+                    missing_fixed_foveation_exts
+                );
+            }
+        }
+
+        #[cfg(use_vulkan)]
+        {
             if !has_extension("XR_KHR_vulkan_enable2\0") {
                 return Err(
                     "OpenXR Vulkan: XR_KHR_vulkan_enable2 is required on this Quest path"
@@ -860,7 +883,11 @@ impl CxOpenXrSession {
     }
 
     fn end_session(&mut self, xr: &LibOpenXr) {
-        crate::log!("OpenXR end_session handle={:?} active={}", self.handle, self.active);
+        crate::log!(
+            "OpenXR end_session handle={:?} active={}",
+            self.handle,
+            self.active
+        );
         unsafe { (xr.xrEndSession)(self.handle) }.log_error("xrEndSession");
         self.active = false;
     }
@@ -890,9 +917,7 @@ impl CxOpenXrFrame {
     fn begin_frame(xr: &LibOpenXr, session: &mut CxOpenXrSession) -> Result<CxOpenXrFrame, ()> {
         if !session.active {
             if session.debug_inactive_begin_frame_logs < 5 {
-                crate::log!(
-                    "OpenXR begin_frame skipped because session is not active yet"
-                );
+                crate::log!("OpenXR begin_frame skipped because session is not active yet");
                 session.debug_inactive_begin_frame_logs += 1;
             }
             return Err(());
@@ -1110,4 +1135,5 @@ pub struct CxOpenXrOptions {
     pub buffer_scale: f32,
     pub multisamples: usize,
     pub remove_hands_from_depth: bool,
+    pub fixed_foveation_level: u8,
 }

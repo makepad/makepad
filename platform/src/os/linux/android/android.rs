@@ -90,6 +90,7 @@ use {
 
 const ANDROID_XR_BUFFER_SCALE: f32 = 1.3;
 const ANDROID_XR_MULTISAMPLES: usize = 4;
+const ANDROID_XR_FIXED_FOVEATION_LEVEL: u8 = 2;
 
 fn android_debug_log(prio: i32, msg: &str) {
     use std::ffi::c_int;
@@ -110,7 +111,14 @@ fn android_panic_summary(info: &std::panic::PanicHookInfo<'_>) -> String {
     };
     let location = info
         .location()
-        .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
+        .map(|location| {
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
+        })
         .unwrap_or_else(|| "<unknown>".to_string());
     let thread = std::thread::current();
     let thread_name = thread.name().unwrap_or("<unnamed>");
@@ -222,6 +230,7 @@ impl Cx {
                 buffer_scale: ANDROID_XR_BUFFER_SCALE,
                 multisamples: ANDROID_XR_MULTISAMPLES,
                 remove_hands_from_depth: false,
+                fixed_foveation_level: ANDROID_XR_FIXED_FOVEATION_LEVEL,
             },
             &self.os_type,
         );
@@ -427,6 +436,7 @@ impl Cx {
                                 buffer_scale: ANDROID_XR_BUFFER_SCALE,
                                 multisamples: ANDROID_XR_MULTISAMPLES,
                                 remove_hands_from_depth: false,
+                                fixed_foveation_level: ANDROID_XR_FIXED_FOVEATION_LEVEL,
                             },
                             &self.os_type,
                         ) {
@@ -1427,7 +1437,6 @@ impl Cx {
         let activity_handle = unsafe { android_jni::fetch_activity_handle(activity) };
 
         let already_running = android_jni::from_java_messages_already_set();
-        
 
         if already_running {
             android_jni::jni_update_activity(activity_handle);
