@@ -41,6 +41,16 @@ impl Default for XrBodyKind {
     }
 }
 
+pub const XR_HAND_INFLUENCE_POINTS_PER_HAND: usize = 6;
+pub const XR_HAND_INFLUENCE_POINT_COUNT: usize = XR_HAND_INFLUENCE_POINTS_PER_HAND * 2;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct XrHandInfluencePoint {
+    pub pos: Vec3f,
+    pub gain_scale: f32,
+    pub radius_scale: f32,
+}
+
 #[derive(Clone)]
 pub struct XrRuntimeBodyState {
     pub pose: Pose,
@@ -56,7 +66,7 @@ pub struct XrDrawScopeData {
     pub camera_rotation_steps: f32,
     pub camera_center_offset_uv: Vec2f,
     pub camera_enabled: bool,
-    pub pointer_tips: [Option<Vec3f>; 2],
+    pub hand_influence_points: [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT],
 }
 
 pub fn xr_runtime_body_from_scope(
@@ -69,12 +79,14 @@ pub fn xr_runtime_body_from_scope(
         .and_then(|scope_data| scope_data.runtime_bodies.get(&uid).cloned())
 }
 
-pub fn xr_pointer_tips_from_scope(scope: &mut Scope) -> [Option<Vec3f>; 2] {
+pub fn xr_hand_influence_points_from_scope(
+    scope: &mut Scope,
+) -> [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT] {
     scope
         .data
         .get::<XrDrawScopeData>()
-        .map(|scope_data| scope_data.pointer_tips)
-        .unwrap_or([None, None])
+        .map(|scope_data| scope_data.hand_influence_points)
+        .unwrap_or([None; XR_HAND_INFLUENCE_POINT_COUNT])
 }
 
 pub fn xr_env_texture_from_scope(scope: &mut Scope) -> Option<Texture> {
