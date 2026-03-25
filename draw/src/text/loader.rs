@@ -9,7 +9,8 @@ use {
         shaper::Shaper,
     },
     crate::makepad_platform::SharedBytes,
-    std::{cell::RefCell, collections::HashMap, rc::Rc},
+    fxhash::FxHashMap,
+    std::{cell::RefCell, rc::Rc},
 };
 
 pub type FontData = SharedBytes;
@@ -18,10 +19,10 @@ pub type FontData = SharedBytes;
 pub struct Loader {
     shaper: Rc<RefCell<Shaper>>,
     rasterizer: Rc<RefCell<rasterizer::Rasterizer>>,
-    pub(crate) font_family_definitions: HashMap<FontFamilyId, FontFamilyDefinition>,
-    font_definitions: HashMap<FontId, FontDefinition>,
-    font_family_cache: HashMap<FontFamilyId, Rc<FontFamily>>,
-    font_cache: HashMap<FontId, Rc<Font>>,
+    pub(crate) font_family_definitions: FxHashMap<FontFamilyId, FontFamilyDefinition>,
+    font_definitions: FxHashMap<FontId, FontDefinition>,
+    font_family_cache: FxHashMap<FontFamilyId, Rc<FontFamily>>,
+    font_cache: FxHashMap<FontId, Rc<Font>>,
 }
 
 impl Loader {
@@ -29,10 +30,10 @@ impl Loader {
         let loader = Self {
             shaper: Rc::new(RefCell::new(Shaper::new(settings.shaper))),
             rasterizer: Rc::new(RefCell::new(Rasterizer::new(settings.rasterizer))),
-            font_family_definitions: HashMap::new(),
-            font_definitions: HashMap::new(),
-            font_family_cache: HashMap::new(),
-            font_cache: HashMap::new(),
+            font_family_definitions: FxHashMap::default(),
+            font_definitions: FxHashMap::default(),
+            font_family_cache: FxHashMap::default(),
+            font_cache: FxHashMap::default(),
         };
         //builtins::define(&mut loader);
         loader
