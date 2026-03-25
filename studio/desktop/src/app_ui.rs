@@ -236,13 +236,13 @@ script_mod! {
             color_hover: theme.color_bg_app * 0.96
             color_active: theme.color_fg_app
 
-            border_color: theme.color_bg_app * 0.84
-            border_color_hover: theme.color_bg_app
-            border_color_active: theme.color_fg_app
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_active: theme.color_bg_app * 0.92
 
-            border_color_2: theme.color_bg_app * 0.84
-            border_color_2_hover: theme.color_bg_app
-            border_color_2_active: theme.color_fg_app
+            border_color_2: theme.color_u_hidden
+            border_color_2_hover: theme.color_u_hidden
+            border_color_2_active: theme.color_bg_app * 0.92
         }
     }
 
@@ -309,6 +309,19 @@ script_mod! {
             color_hover: theme.color_label_inner
             color_active: theme.color_label_inner_active
         }
+        draw_bg +: {
+            color: theme.color_bg_app * 0.84
+            color_hover: theme.color_bg_app * 0.95
+            color_active: theme.color_fg_app
+
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_active: theme.color_bg_app * 0.92
+
+            border_color_2: theme.color_u_hidden
+            border_color_2_hover: theme.color_u_hidden
+            border_color_2_active: theme.color_bg_app * 0.92
+        }
         close_button +: {
             width: 12.0
             height: 12.0
@@ -340,6 +353,14 @@ script_mod! {
             color: theme.color_bg_app * 0.82
             color_hover: theme.color_bg_app * 0.94
             color_active: theme.color_fg_app
+
+            border_color: theme.color_u_hidden
+            border_color_hover: theme.color_u_hidden
+            border_color_active: theme.color_bg_app * 0.92
+
+            border_color_2: theme.color_u_hidden
+            border_color_2_hover: theme.color_u_hidden
+            border_color_2_active: theme.color_bg_app * 0.92
         }
     }
 
