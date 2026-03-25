@@ -111,6 +111,14 @@ const FILE_FILTER_DEBOUNCE_SECONDS: f64 = 0.14;
 const FILE_FILTER_MAX_RESULTS: usize = 600;
 
 impl App {
+    fn panel_animation_progress(time: f64, start_time: &mut Option<f64>) -> f64 {
+        let start_time = start_time.get_or_insert(time);
+        let elapsed = (time - *start_time).max(0.0);
+        let duration = 0.16;
+        let progress = (elapsed / duration).min(1.0);
+        1.0 - (1.0 - progress).powi(3)
+    }
+
     fn workspace_root_splitter_position(&mut self, cx: &mut Cx, mount: &str) -> Option<f64> {
         let dock = self.mount_workspace_dock(cx, mount)?;
         dock.splitter_position(id!(root))
@@ -140,11 +148,8 @@ impl App {
         let Some(animation) = self.sidebar_animation.as_mut() else {
             return;
         };
-        let start_time = animation.start_time.get_or_insert(time);
-        let elapsed = (time - *start_time).max(0.0);
-        let duration = 0.16;
-        let progress = (elapsed / duration).min(1.0);
-        let eased = 1.0 - (1.0 - progress).powi(3);
+        let eased = Self::panel_animation_progress(time, &mut animation.start_time);
+        let progress = eased;
         let mount = animation.mount.clone();
         let target = animation.to_width;
         let width = animation.from_width + (target - animation.from_width) * eased;
@@ -160,6 +165,62 @@ impl App {
             self.save_state(cx, 0);
         } else {
             self.sidebar_animation_next_frame = cx.new_next_frame();
+        }
+    }
+
+    fn workspace_main_splitter_height(&mut self, cx: &mut Cx, mount: &str) -> Option<f64> {
+        let dock = self.mount_workspace_dock(cx, mount)?;
+        let dock_height = dock.area().rect(cx).size.y.max(0.0);
+        let splitter_position = dock.splitter_position(id!(main_split))?;
+        Some((dock_height - splitter_position).max(0.0))
+    }
+
+    fn set_workspace_main_splitter_height(
+        &mut self,
+        cx: &mut Cx,
+        mount: &str,
+        height: f64,
+    ) -> bool {
+        let Some(dock) = self.mount_workspace_dock(cx, mount) else {
+            return false;
+        };
+        dock.set_splitter_align(cx, id!(main_split), SplitterAlign::FromB(height.max(0.0)), false)
+    }
+
+    fn start_bottom_panel_animation(&mut self, cx: &mut Cx, mount: &str, to_height: f64) {
+        let from_height = self
+            .workspace_main_splitter_height(cx, mount)
+            .unwrap_or(to_height);
+        self.bottom_panel_animation = Some(BottomPanelAnimation {
+            mount: mount.to_string(),
+            from_height,
+            to_height: to_height.max(0.0),
+            start_time: None,
+        });
+        self.bottom_panel_animation_next_frame = cx.new_next_frame();
+    }
+
+    pub(super) fn step_bottom_panel_animation(&mut self, cx: &mut Cx, time: f64) {
+        let Some(animation) = self.bottom_panel_animation.as_mut() else {
+            return;
+        };
+        let eased = Self::panel_animation_progress(time, &mut animation.start_time);
+        let progress = eased;
+        let mount = animation.mount.clone();
+        let target = animation.to_height;
+        let height = animation.from_height + (target - animation.from_height) * eased;
+
+        if !self.set_workspace_main_splitter_height(cx, &mount, height) {
+            self.bottom_panel_animation = None;
+            return;
+        }
+
+        if progress >= 1.0 {
+            self.bottom_panel_animation = None;
+            self.set_workspace_main_splitter_height(cx, &mount, target);
+            self.save_state(cx, 0);
+        } else {
+            self.bottom_panel_animation_next_frame = cx.new_next_frame();
         }
     }
 
@@ -808,6 +869,31 @@ impl App {
             } else {
                 dock.select_tab(cx, id!(terminal_first));
             }
+            dock.select_tab(cx, id!(bottom_terminal_tab));
+        }
+    }
+
+    pub(super) fn select_bottom_terminal_panel(&mut self, cx: &mut Cx, mount: &str) {
+        let Some(dock) = self.mount_workspace_dock(cx, mount) else {
+            return;
+        };
+        dock.select_tab(cx, id!(bottom_terminal_tab));
+    }
+
+    pub(super) fn toggle_bottom_panel(&mut self, cx: &mut Cx, mount: &str) {
+        let Some(current_height) = self.workspace_main_splitter_height(cx, mount) else {
+            return;
+        };
+        let restore_height = self
+            .mount_state(mount)
+            .and_then(|state| state.bottom_panel_restore_height)
+            .unwrap_or(220.0);
+
+        if current_height <= 1.0 {
+            self.start_bottom_panel_animation(cx, mount, restore_height);
+        } else {
+            self.mount_state_mut(mount).bottom_panel_restore_height = Some(current_height);
+            self.start_bottom_panel_animation(cx, mount, 0.0);
         }
     }
 

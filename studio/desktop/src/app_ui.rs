@@ -139,6 +139,16 @@ script_mod! {
         }
     }
 
+    let TerminalShellPane = View {
+        width: Fill
+        height: Fill
+        terminal_tabs := DockTabs {
+            tabs: [@terminal_first @terminal_add]
+            selected: 0
+            closable: true
+        }
+    }
+
     let CaptionSidebarToggle = ButtonFlatterIcon {
         width: 38.0
         height: 30.0
@@ -152,6 +162,22 @@ script_mod! {
         draw_icon +: {
             color: #xD6D6D6
             svg: crate_resource("self://resources/icons/icon_sidebar_toggle.svg")
+        }
+    }
+
+    let CaptionPanelToggle = ButtonFlatterIcon {
+        width: 38.0
+        height: 30.0
+        icon_walk: Walk {width: 17.0 height: 17.0}
+        draw_bg +: {
+            color: #x4C4C4C
+            color_hover: #x5C5C5C
+            color_down: #x3F3F3F
+            border_radius: 5.0
+        }
+        draw_icon +: {
+            color: #xD6D6D6
+            svg: crate_resource("self://resources/icons/icon_panel_toggle.svg")
         }
     }
 
@@ -228,15 +254,9 @@ script_mod! {
         caption_bar := SolidView {
             visible: true
             height: 38.0
-            flow: Overlay
+            flow: Right
+            align: Align {x: 0.0 y: 0.5}
             draw_bg.color: theme.color_bg_app
-
-            caption_label := View {
-                width: Fill
-                height: Fill
-                align: Center
-                label := Label {text: "Makepad"}
-            }
 
             left_controls := View {
                 width: Fit
@@ -248,11 +268,25 @@ script_mod! {
                 sidebar_toggle := CaptionSidebarToggle {}
             }
 
-            voice_wave := VoiceWave {
+            caption_label := View {
+                width: Fill
+                height: Fill
+                align: Center
+                label := Label {text: "Makepad"}
+            }
+
+            right_caption_tools := View {
                 width: Fit
                 height: Fit
-                align: Align {x: 1.0 y: 0.5}
+                flow: Right
+                spacing: theme.space_2
                 margin: Inset {left: 0.0 right: 112.0 top: 0.0 bottom: 0.0}
+
+                bottom_panel_toggle := CaptionPanelToggle {}
+                voice_wave := VoiceWave {
+                    width: Fit
+                    height: Fit
+                }
             }
 
             windows_buttons := View {
@@ -260,7 +294,7 @@ script_mod! {
                 width: Fit
                 height: Fit
                 flow: Right
-                align: Align {x: 1.0 y: 0.5}
+                align: Align {x: 0.0 y: 0.5}
                 min := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMin width: 46 height: 29}
                 max := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMax width: 46 height: 29}
                 close := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsClose width: 46 height: 29}
@@ -270,7 +304,7 @@ script_mod! {
                 visible: false
                 width: Fit
                 height: Fit
-                align: Align {x: 1.0 y: 0.5}
+                align: Align {x: 0.0 y: 0.5}
                 margin: Inset {left: 0.0 right: 8.0 top: 0.0 bottom: 0.0}
                 fullscreen := DesktopButton {draw_bg.button_type: DesktopButtonType.Fullscreen width: 50 height: 36}
             }
@@ -362,7 +396,7 @@ script_mod! {
                             axis: SplitterAxis.Vertical
                             align: SplitterAlign.FromB(220.0)
                             a: @editor_split
-                            b: @bottom_split
+                            b: @bottom_panel_tabs
                         }
 
                         editor_split := DockSplitter {
@@ -372,11 +406,10 @@ script_mod! {
                             b: @run_tabs
                         }
 
-                        bottom_split := DockSplitter {
-                            axis: SplitterAxis.Horizontal
-                            align: SplitterAlign.Weighted(0.5)
-                            a: @log_tabs
-                            b: @terminal_tabs
+                        bottom_panel_tabs := DockTabs {
+                            tabs: [@log_first @bottom_terminal_tab]
+                            selected: 0
+                            closable: false
                         }
 
                         tree_tabs := DockTabs {
@@ -393,18 +426,6 @@ script_mod! {
 
                         run_tabs := DockTabs {
                             tabs: [@run_first]
-                            selected: 0
-                            closable: true
-                        }
-
-                        log_tabs := DockTabs {
-                            tabs: [@log_first]
-                            selected: 0
-                            closable: true
-                        }
-
-                        terminal_tabs := DockTabs {
-                            tabs: [@terminal_first @terminal_add]
                             selected: 0
                             closable: true
                         }
@@ -451,6 +472,12 @@ script_mod! {
                             kind: @TerminalAddPane
                         }
 
+                        bottom_terminal_tab := DockTab {
+                            name: "Terminal"
+                            template: @TerminalTab
+                            kind: @TerminalShellPane
+                        }
+
                         FileTreePane := FileTreePane {}
                         RunListPane := RunListPane {}
                         CodeEditorPane := CodeEditorPane {}
@@ -461,6 +488,7 @@ script_mod! {
                         LogPane := LogPane {}
                         ProfilerPane := ProfilerPane {}
                         TerminalFirstPane := TerminalFirstPane {}
+                        TerminalShellPane := TerminalShellPane {}
                         TerminalPane := TerminalPane {}
                         TerminalAddPane := View {}
                     }

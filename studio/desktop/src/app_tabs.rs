@@ -1138,7 +1138,10 @@ impl App {
     }
 
     pub(super) fn start_workspace_tab_drag(&mut self, cx: &mut Cx, tab_id: LiveId) {
-        if self.data.tab_to_mount.contains_key(&tab_id) || tab_id == id!(terminal_add) {
+        if self.data.tab_to_mount.contains_key(&tab_id)
+            || tab_id == id!(terminal_add)
+            || tab_id == id!(bottom_terminal_tab)
+        {
             return;
         }
         let Some(active_mount) = self.data.active_mount.clone() else {
