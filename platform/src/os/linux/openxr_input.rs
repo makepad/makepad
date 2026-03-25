@@ -925,5 +925,6 @@ impl CxOpenXrInputs {
         self.right_controller.destroy(xr);
         self.left_hand.destroy(xr);
         self.right_hand.destroy(xr);
+        unsafe { (xr.xrDestroyActionSet)(self.action_set) }.log_error("xrDestroyActionSet");
     }
 }
