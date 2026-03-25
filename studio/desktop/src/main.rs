@@ -135,6 +135,9 @@ impl MatchEvent for App {
         self.set_current_file_label(cx, None);
         self.start_backend(cx);
         self.load_state(cx, 0);
+        for mount in self.data.mounts.keys().cloned().collect::<Vec<_>>() {
+            self.sync_run_preview_splitter(cx, &mount);
+        }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
