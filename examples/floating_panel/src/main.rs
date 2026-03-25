@@ -136,7 +136,7 @@ script_mod! {
             panel_window := Window{
                 show_caption_bar: false
                 window.title: "Inspector Panel"
-                window.inner_size: vec2(340, 380)
+                window.inner_size: vec2(340, 520)
                 window.position: vec2(930, 120)
                 body +: {
                     View{
@@ -198,6 +198,27 @@ script_mod! {
                                 draw_text.color: #x94a9c8
                                 draw_text.text_style.font_size: 11
                             }
+                            drag_target := RoundedView{
+                                width: Fill
+                                height: 72
+                                flow: Down
+                                spacing: 6
+                                padding: 12
+                                cursor: MouseCursor.Hand
+                                draw_bg.color: #x243041
+                                draw_bg.border_radius: 14.0
+                                Label{
+                                    text: "Drag target"
+                                    draw_text.color: #xffffff
+                                    draw_text.text_style: theme.font_bold{font_size: 13}
+                                }
+                                drag_value := Label{
+                                    width: Fill
+                                    text: "Drag delta: 0, 0"
+                                    draw_text.color: #xa8b9d3
+                                    draw_text.text_style.font_size: 11
+                                }
+                            }
                         }
                     }
                 }
@@ -216,6 +237,8 @@ pub struct App {
     panel_window_id: Option<WindowId>,
     #[rust]
     panel_pings: usize,
+    #[rust]
+    drag_origin: Option<DVec2>,
 }
 
 impl App {
@@ -272,6 +295,7 @@ impl MatchEvent for App {
             };
             self.set_status(cx, &message);
         }
+
     }
 }
 
@@ -297,6 +321,35 @@ impl AppMain for App {
                     dq.response.set(WindowDragQueryResponse::Caption);
                     cx.set_cursor(MouseCursor::Default);
                 }
+            }
+        }
+
+        let drag_area = self.ui.widget(cx, ids!(drag_target)).area();
+        if drag_area.is_valid(cx) {
+            let drag_rect = drag_area.rect(cx);
+            match event {
+                Event::MouseDown(mouse) if Some(mouse.window_id) == self.panel_window_id => {
+                    if drag_rect.contains(mouse.abs) {
+                        self.drag_origin = Some(mouse.abs);
+                    }
+                }
+                Event::MouseMove(mouse) if Some(mouse.window_id) == self.panel_window_id => {
+                    if let Some(origin) = self.drag_origin {
+                        let delta = mouse.abs - origin;
+                        let message = format!("Drag delta: {:.0}, {:.0}", delta.x, delta.y);
+                        self.ui.label(cx, ids!(drag_value)).set_text(cx, &message);
+                        self.set_status(cx, &message);
+                    }
+                }
+                Event::MouseUp(mouse) if Some(mouse.window_id) == self.panel_window_id => {
+                    if let Some(origin) = self.drag_origin.take() {
+                        let delta = mouse.abs - origin;
+                        let message = format!("Drag delta: {:.0}, {:.0}", delta.x, delta.y);
+                        self.ui.label(cx, ids!(drag_value)).set_text(cx, &message);
+                        self.set_status(cx, &message);
+                    }
+                }
+                _ => {}
             }
         }
 

@@ -149,7 +149,7 @@ pub trait VideoFrameDecoder: Send {
 pub trait MediaVideoEncoder: Send + Sync {
     fn push_frame(&self, frame: CameraFrameRef<'_>);
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(headless)))]
     fn push_apple_pixel_buffer(
         &self,
         _pixel_buffer: crate::os::apple::apple_sys::CVPixelBufferRef,

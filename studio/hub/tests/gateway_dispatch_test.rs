@@ -87,7 +87,7 @@ fn websocket_ui_hello_and_load_file_tree_roundtrip() {
 
     let runtime = NetworkRuntime::new(NetworkConfig::default());
     let socket_id = LiveId::from_str("studio2.backend.gateway.test");
-    let request = HttpRequest::new(format!("ws://127.0.0.1:{port}/ui/"), HttpMethod::GET);
+    let request = HttpRequest::new(format!("ws://127.0.0.1:{port}/ui"), HttpMethod::GET);
     if runtime.ws_open(socket_id, request).is_err() {
         return;
     }
