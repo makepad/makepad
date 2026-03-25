@@ -142,6 +142,7 @@ const XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE: f32 = 0.32;
 const XR_DEPTH_QUERY_SURFACES_PER_BODY: usize = 2;
 const XR_DEPTH_QUERY_IMPACT_QUERY_SPEED_MIN: f32 = 0.80;
 const XR_DEPTH_QUERY_IMPACT_QUERY_HORIZONTAL_SPEED_MIN: f32 = 0.55;
+const XR_DEPTH_QUERY_IMPACT_QUERY_UPWARD_SPEED_MIN: f32 = 0.55;
 const XR_DEPTH_QUERY_IMPACT_ENABLE_SPEED_MIN: f32 = 0.35;
 const XR_DEPTH_QUERY_IMPACT_ENABLE_APPROACH_SPEED_MIN: f32 = 0.18;
 const XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN: f32 = 0.30;
@@ -175,6 +176,7 @@ const XR_PBR_HAND_SPHERE_SUBDIVISIONS: usize = 8;
 struct CollectedXrCube {
     uid: WidgetUid,
     body_kind: XrBodyKind,
+    projectile_pool: bool,
     pose: Pose,
     scale: Vec3f,
     half_extents: Vec3f,
@@ -601,7 +603,13 @@ impl XrEnv {
         }
         let Some(node) = widget.cast_inner::<XrNode>() else {
             widget.children(&mut |_, child| {
-                Self::collect_cubes_from_widget(&child, parent_pos, parent_ori, parent_scale, cubes)
+                Self::collect_cubes_from_widget(
+                    &child,
+                    parent_pos,
+                    parent_ori,
+                    parent_scale,
+                    cubes,
+                )
             });
             return;
         };
@@ -617,6 +625,7 @@ impl XrEnv {
             cubes.push(CollectedXrCube {
                 uid: widget.widget_uid(),
                 body_kind: node.body_kind(),
+                projectile_pool: node.projectile_pool(),
                 pose: Pose::new(ori, pos),
                 scale,
                 half_extents: vec3f(half.x * scale.x, half.y * scale.y, half.z * scale.z),
@@ -629,7 +638,13 @@ impl XrEnv {
 
         drop(node);
         widget.children(&mut |_, child| {
-            Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes)
+            Self::collect_cubes_from_widget(
+                &child,
+                pos,
+                ori,
+                scale,
+                cubes,
+            )
         });
     }
 
@@ -645,7 +660,13 @@ impl XrEnv {
         };
         let root_scale = vec3f(1.0, 1.0, 1.0);
         for (_, child) in children {
-            Self::collect_cubes_from_widget(child, root_pos, root_ori, root_scale, &mut cubes);
+            Self::collect_cubes_from_widget(
+                child,
+                root_pos,
+                root_ori,
+                root_scale,
+                &mut cubes,
+            );
         }
         cubes
     }
@@ -685,7 +706,11 @@ impl XrEnv {
         }
     }
 
-    fn request_physics_rebuild(&mut self, cx: &mut Cx, children: &[(LiveId, WidgetRef)]) {
+    fn request_physics_rebuild(
+        &mut self,
+        cx: &mut Cx,
+        children: &[(LiveId, WidgetRef)],
+    ) {
         let cubes = self.collect_cubes_from_children(children);
         self.depth_query_retained_hits.clear();
         self.physics_revision = self.physics_revision.saturating_add(1);
@@ -696,12 +721,26 @@ impl XrEnv {
         self.scene_dirty = false;
     }
 
-    pub fn ensure_physics(&mut self, cx: &mut Cx, children: &[(LiveId, WidgetRef)]) {
+    pub fn ensure_physics(
+        &mut self,
+        cx: &mut Cx,
+        children: &[(LiveId, WidgetRef)],
+    ) {
         self.poll_physics_worker(cx);
         if self.scene_dirty || self.physics_worker.is_none() {
             self.request_physics_rebuild(cx, children);
             cx.redraw_all();
         }
+    }
+
+    pub fn spawn_body(&mut self, cx: &mut Cx, spawn: XrBodySpawn) {
+        self.poll_physics_worker(cx);
+        if self.scene_dirty || self.physics_worker.is_none() {
+            return;
+        }
+        let revision = self.physics_revision;
+        self.ensure_physics_worker(cx)
+            .request_body_spawn(revision, spawn);
     }
 
     pub fn mark_scene_dirty(&mut self) {

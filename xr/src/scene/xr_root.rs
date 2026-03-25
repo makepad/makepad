@@ -865,6 +865,19 @@ impl Widget for XrRoot {
         }
 
         if let Event::Actions(actions) = event {
+            for action in actions {
+                let Some(widget_action) = action.as_widget_action() else {
+                    continue;
+                };
+                let Some(body_spawn) = widget_action.action.downcast_ref::<XrBodySpawn>() else {
+                    continue;
+                };
+                crate::log!(
+                    "XrRoot: forwarding body spawn uid {}",
+                    body_spawn.widget_uid.0
+                );
+                self.env.spawn_body(cx, *body_spawn);
+            }
             if actions.iter().any(|action| {
                 action
                     .as_widget_action()
