@@ -1,4 +1,7 @@
-use crate::xr_node::{XrBodyKind, XrDrawScopeData, XrNode, XrRuntimeBodyState};
+use crate::xr_node::{
+    XrBodyKind, XrDrawScopeData, XrHandInfluencePoint, XrNode, XrRuntimeBodyState,
+    XR_HAND_INFLUENCE_POINT_COUNT, XR_HAND_INFLUENCE_POINTS_PER_HAND,
+};
 use crate::*;
 use makepad_widgets::makepad_platform::{
     event::{CameraPreviewMode, VideoSource, VideoYuvMetadata},
@@ -394,27 +397,84 @@ impl XrEnv {
             .draw_sphere(cx, radius, XR_PBR_HAND_SPHERE_SUBDIVISIONS);
     }
 
-    fn pointer_tip_world(hand: &XrHand) -> Option<Vec3f> {
-        if !hand.in_view() || !hand.tip_active(XrHand::INDEX_TIP) {
+    fn hand_influence_tip_world(hand: &XrHand, tip: usize) -> Option<Vec3f> {
+        if !hand.in_view() || !hand.tip_active(tip) {
             return None;
         }
-        let tip_len = hand.tips[XrHand::INDEX_TIP].max(0.0);
+        Some(match tip {
+            XrHand::THUMB_TIP => hand.tip_pos_thumb(),
+            XrHand::INDEX_TIP => hand.tip_pos_index(),
+            XrHand::MIDDLE_TIP => hand.tip_pos_middle(),
+            XrHand::RING_TIP => hand.tip_pos_ring(),
+            XrHand::LITTLE_TIP => hand.tip_pos_little(),
+            _ => hand.tip_pos_index(),
+        })
+    }
+
+    fn hand_influence_point(
+        pos: Vec3f,
+        gain_scale: f32,
+        radius_scale: f32,
+    ) -> XrHandInfluencePoint {
+        XrHandInfluencePoint {
+            pos,
+            gain_scale,
+            radius_scale,
+        }
+    }
+
+    fn palm_world(hand: &XrHand) -> Option<Vec3f> {
+        if !hand.in_view() {
+            return None;
+        }
+        let center = hand.joints[XrHand::CENTER].position;
+        let wrist = hand.joints[XrHand::WRIST].position;
+        let thumb = hand.joints[XrHand::THUMB_BASE].position;
+        let index = hand.joints[XrHand::INDEX_BASE].position;
+        let middle = hand.joints[XrHand::MIDDLE_BASE].position;
+        let ring = hand.joints[XrHand::RING_BASE].position;
+        let little = hand.joints[XrHand::LITTLE_BASE].position;
         Some(
-            hand.joints[XrHand::INDEX_KNUCKLE3]
-                .to_mat4()
-                .transform_vec4(vec4(0.0, 0.0, -tip_len, 1.0))
-                .to_vec3f(),
+            center * 0.28
+                + wrist * 0.10
+                + thumb * 0.12
+                + index * 0.13
+                + middle * 0.18
+                + ring * 0.11
+                + little * 0.08,
         )
     }
 
-    fn draw_scope_pointer_tips(state: Option<&XrState>) -> [Option<Vec3f>; 2] {
+    fn write_hand_influence_points(
+        hand: &XrHand,
+        target: &mut [Option<XrHandInfluencePoint>],
+    ) {
+        debug_assert_eq!(target.len(), XR_HAND_INFLUENCE_POINTS_PER_HAND);
+        target[0] = Self::hand_influence_tip_world(hand, XrHand::THUMB_TIP)
+            .map(|pos| Self::hand_influence_point(pos, 0.72, 0.92));
+        target[1] = Self::hand_influence_tip_world(hand, XrHand::INDEX_TIP)
+            .map(|pos| Self::hand_influence_point(pos, 1.00, 1.00));
+        target[2] = Self::hand_influence_tip_world(hand, XrHand::MIDDLE_TIP)
+            .map(|pos| Self::hand_influence_point(pos, 0.96, 1.00));
+        target[3] = Self::hand_influence_tip_world(hand, XrHand::RING_TIP)
+            .map(|pos| Self::hand_influence_point(pos, 0.82, 0.94));
+        target[4] = Self::hand_influence_tip_world(hand, XrHand::LITTLE_TIP)
+            .map(|pos| Self::hand_influence_point(pos, 0.68, 0.88));
+        target[5] = Self::palm_world(hand)
+            .map(|pos| Self::hand_influence_point(pos, 1.30, 2.40));
+    }
+
+    fn draw_scope_hand_influence_points(
+        state: Option<&XrState>,
+    ) -> [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT] {
+        let mut points = [None; XR_HAND_INFLUENCE_POINT_COUNT];
         let Some(state) = state else {
-            return [None, None];
+            return points;
         };
-        [
-            Self::pointer_tip_world(&state.left_hand),
-            Self::pointer_tip_world(&state.right_hand),
-        ]
+        let (left_points, right_points) = points.split_at_mut(XR_HAND_INFLUENCE_POINTS_PER_HAND);
+        Self::write_hand_influence_points(&state.left_hand, left_points);
+        Self::write_hand_influence_points(&state.right_hand, right_points);
+        points
     }
 
     pub(crate) fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
@@ -716,7 +776,7 @@ impl XrEnv {
             camera_rotation_steps: self.passthrough_camera_video.rotation_steps,
             camera_center_offset_uv: self.passthrough_camera_center_offset_uv(),
             camera_enabled: self.passthrough_camera_has_frame && state.is_some(),
-            pointer_tips: Self::draw_scope_pointer_tips(state.as_deref()),
+            hand_influence_points: Self::draw_scope_hand_influence_points(state.as_deref()),
         }
     }
 }
