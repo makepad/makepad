@@ -581,52 +581,39 @@ impl Cx {
     }
 
     pub(crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
-        for draw_shader_id in self
-            .draw_shaders
-            .compile_set
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
-
-            let hlsl = match &cx_shader.mapping.code {
-                CxDrawShaderCode::Combined { code } => code.clone(),
-                CxDrawShaderCode::Separate { .. } => {
-                    crate::error!("D3D11 does not support separate vertex/fragment sources");
-                    continue;
+        if self.draw_shaders.compile_set.is_empty() {
+            return;
+        }
+        let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
+        let cache_dir = shader_cache_dir();
+        for draw_shader_id in compile_set {
+            let shp = {
+                let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
+                if cx_shader.mapping.flags.debug_code {
+                    if let CxDrawShaderCode::Combined { code } = &cx_shader.mapping.code {
+                        crate::log!("{}", code);
+                    }
+                }
+                match &cx_shader.mapping.code {
+                    CxDrawShaderCode::Separate { .. } => {
+                        crate::error!("D3D11 does not support separate vertex/fragment sources");
+                        None
+                    }
+                    CxDrawShaderCode::Combined { code } => CxOsDrawShader::new(
+                        d3d11_cx,
+                        code,
+                        cache_dir,
+                        &cx_shader.mapping,
+                        &cx_shader.mapping.uniform_buffer_bindings,
+                    ),
                 }
             };
-
-            if cx_shader.mapping.flags.debug_code {
-                crate::log!("{}", hlsl);
-            }
-
-            // Get the uniform buffer bindings from the mapping
-            let bindings = cx_shader.mapping.uniform_buffer_bindings.clone();
-
-            // Check if we already have an os_shader with the same source
-            let mut found_os_shader_id = None;
-            for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                if ds.hlsl == hlsl {
-                    found_os_shader_id = Some(index);
-                    break;
-                }
-            }
-
-            let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
-            if let Some(os_shader_id) = found_os_shader_id {
-                cx_shader.os_shader_id = Some(os_shader_id);
-            } else {
-                if let Some(shp) =
-                    CxOsDrawShader::new(d3d11_cx, hlsl, &cx_shader.mapping, &bindings)
-                {
-                    cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
-                    self.draw_shaders.os_shaders.push(shp);
-                }
+            if let Some(shp) = shp {
+                let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
+                cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                self.draw_shaders.os_shaders.push(shp);
             }
         }
-        self.draw_shaders.compile_set.clear();
     }
 
     pub fn share_texture_for_presentable_image(&mut self, texture: &Texture) -> u64 {
@@ -1815,9 +1802,28 @@ impl DrawVars {
     }
 }
 
+fn shader_cache_dir() -> Option<&'static std::path::Path> {
+    use std::sync::OnceLock;
+    use windows::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
+    };
+
+    static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let path_ptr = unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None) }.ok()?;
+        let path_str = unsafe { path_ptr.to_string().ok() };
+        unsafe { CoTaskMemFree(Some(path_ptr.as_ptr() as _)) };
+        let path = std::path::PathBuf::from(path_str?)
+            .join("makepad")
+            .join("d3d11_shader_cache");
+        std::fs::create_dir_all(&path).ok()?;
+        Some(path)
+    }).as_deref()
+}
+
 #[derive(Clone)]
 pub struct CxOsDrawShader {
-    pub hlsl: String,
     pub const_table_uniforms: D3d11Buffer,
     pub live_uniforms: D3d11Buffer,
     pub scope_uniforms: D3d11Buffer,
@@ -1838,7 +1844,8 @@ pub struct CxOsDrawShader {
 impl CxOsDrawShader {
     fn new(
         d3d11_cx: &D3d11Cx,
-        hlsl: String,
+        hlsl: &str,
+        cache_dir: Option<&std::path::Path>,
         mapping: &CxDrawShaderMapping,
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
@@ -1884,15 +1891,6 @@ impl CxOsDrawShader {
                 hash = hash.wrapping_mul(0x100000001b3);
             }
             hash
-        }
-
-        fn shader_cache_dir() -> Option<std::path::PathBuf> {
-            let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
-            let path = std::path::PathBuf::from(local_app_data)
-                .join("makepad")
-                .join("d3d11_shader_cache");
-            std::fs::create_dir_all(&path).ok()?;
-            Some(path)
         }
 
         fn get_shader_bytes(
@@ -1973,28 +1971,26 @@ impl CxOsDrawShader {
             std::char::from_u32(index as u32 + 65).unwrap_or('?')
         }
 
-        let cache_key = hlsl_cache_key(&hlsl);
-        let cache_dir = shader_cache_dir();
-        let cache_dir_ref = cache_dir.as_deref();
+        let cache_key = hlsl_cache_key(hlsl);
 
-        let vs_bytes = match get_shader_bytes(cache_dir_ref, cache_key, "_vs", "vs_5_0\0", "vertex_main\0", &hlsl) {
+        let vs_bytes = match get_shader_bytes(cache_dir, cache_key, "_vs", "vs_5_0\0", "vertex_main\0", hlsl) {
             Err(msg) => {
                 println!(
                     "Cannot compile vertexshader\n{}\n{}",
                     msg,
-                    split_source(&hlsl)
+                    split_source(hlsl)
                 );
                 std::process::exit(1);
             }
             Ok(bytes) => bytes,
         };
 
-        let ps_bytes = match get_shader_bytes(cache_dir_ref, cache_key, "_ps", "ps_5_0\0", "pixel_main\0", &hlsl) {
+        let ps_bytes = match get_shader_bytes(cache_dir, cache_key, "_ps", "ps_5_0\0", "pixel_main\0", hlsl) {
             Err(msg) => {
                 println!(
                     "Cannot compile pixelshader\n{}\n{}",
                     msg,
-                    split_source(&hlsl)
+                    split_source(hlsl)
                 );
                 std::process::exit(1);
             }
@@ -2140,7 +2136,7 @@ impl CxOsDrawShader {
                 println!("  {}", item);
             }
             if std::env::var("MAKEPAD_D3D11_DUMP_HLSL").is_ok() {
-                println!("HLSL source\n{}", split_source(&hlsl));
+                println!("HLSL source\n{}", split_source(hlsl));
             } else {
                 println!("Set MAKEPAD_D3D11_DUMP_HLSL=1 to dump full HLSL source.");
             }
@@ -2174,7 +2170,6 @@ impl CxOsDrawShader {
         let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u32);
 
         Some(Self {
-            hlsl,
             const_table_uniforms,
             live_uniforms,
             scope_uniforms,
