@@ -46,19 +46,27 @@ Run the curated repo UI suite on macOS (splash example only):
 tools/run_ui_tests.sh
 ```
 
-### Optional: Rust-only tests with `#[makepad_test]`
+### Optional: Rust-only tests (no Splash file)
 
-You can write UI steps in Rust instead of Splash (useful for small harnesses or downstream crates):
+Use a normal `#[test]` and `run_current_package_test` with `env!`/`module_path!()` — same behavior the removed `#[makepad_test]` macro used to generate:
 
 ```rust,ignore
-use makepad_test::{makepad_test, Selector, TestApp};
+use makepad_test::{run_current_package_test, Selector, TestApp};
 
-#[makepad_test]
-fn fill_and_submit(app: TestApp) {
-    app.locator(Selector::id("input_singleline"))
-        .wait_visible()
-        .fill("hello")
-        .wait_value("hello");
+#[test]
+fn fill_and_submit() {
+    run_current_package_test(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_MANIFEST_DIR"),
+        module_path!(),
+        "fill_and_submit",
+        |app: TestApp| {
+            app.locator(Selector::id("input_singleline"))
+                .wait_visible()
+                .fill("hello")
+                .wait_value("hello");
+        },
+    );
 }
 ```
 
@@ -88,7 +96,7 @@ cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ## Surface Area
 
 - `run_splash_suite(...)` for Splash-authored suites (recommended for new work)
-- `#[makepad_test]` for Rust-authored current-package UI tests
+- `run_current_package_test(...)` for Rust-authored current-package UI tests (wrap in `#[test]` yourself)
 - `TestApp` for app-scoped input, waits, logs, screenshots, and raw protocol forwarding
 - `Selector` for structured snapshot matching
 - `Locator` for strict single-widget interaction and assertions

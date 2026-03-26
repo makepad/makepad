@@ -50,6 +50,10 @@ examples/splash/
 
 That keeps the normal `cargo test` workflow intact while moving test authoring into Splash.
 
+### Rust-only tests (no `#[makepad_test]` macro)
+
+The proc-macro attribute was removed from this crate. For UI steps written in Rust, use a normal `#[test]` and call `run_current_package_test` with `env!("CARGO_PKG_NAME")`, `env!("CARGO_MANIFEST_DIR")`, `module_path!()`, and the test function name string — see [README.md](./README.md).
+
 ## Suite Behavior
 
 `run_splash_suite(...)`:
