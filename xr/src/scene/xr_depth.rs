@@ -448,8 +448,10 @@ impl XrEnv {
             lookahead = lookahead.scale(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / lookahead_length);
         }
         let horizontal_speed = vec2f(velocity.x, velocity.z).length();
+        let upward_speed = velocity.y.max(0.0);
         let impact_velocity = if velocity.length() >= XR_DEPTH_QUERY_IMPACT_QUERY_SPEED_MIN
-            && horizontal_speed >= XR_DEPTH_QUERY_IMPACT_QUERY_HORIZONTAL_SPEED_MIN
+            && (horizontal_speed >= XR_DEPTH_QUERY_IMPACT_QUERY_HORIZONTAL_SPEED_MIN
+                || upward_speed >= XR_DEPTH_QUERY_IMPACT_QUERY_UPWARD_SPEED_MIN)
         {
             velocity
         } else {
@@ -618,6 +620,11 @@ pub(super) fn sync_depth_query_surfaces_with_store(
             clear_keys.push(key);
             continue;
         };
+        if !body.is_enabled() {
+            scene.sync_depth_query_surface_set(set_index, &std::array::from_fn(|_| None));
+            clear_keys.push(key);
+            continue;
+        }
         let body_sleeping = body.is_sleeping();
         let body_pose = makepad_pose(body.position());
         let linvel = body.linvel();
