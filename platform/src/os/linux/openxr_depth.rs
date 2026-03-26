@@ -77,6 +77,7 @@ const DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM: usize = 5;
 const DEPTH_QUERY_TSDF_SUPPORT_MAX_SAMPLES: usize =
     DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM * DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM;
 const DEPTH_QUERY_TSDF_SUPPORT_MIN_SAMPLES: usize = 4;
+const DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT: usize = 5;
 const DEPTH_QUERY_TSDF_SUPPORT_NORMAL_Y_MIN: f32 = 0.60;
 const DEPTH_QUERY_TSDF_SUPPORT_RADIUS_SCALE: f32 = 1.15;
 const DEPTH_QUERY_TSDF_SUPPORT_RADIUS_MIN: f32 = 0.04;
@@ -3422,22 +3423,31 @@ fn evaluate_depth_grid_support_query(
 ) -> Option<XrDepthMeshQueryHit> {
     const GRID_LAST: f32 = (DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM - 1) as f32;
 
-    let search_center = query.center;
-    let travel_distance = (query.predicted_center - query.center).length();
+    let trajectory_samples = query_trajectory_samples(query);
+    let (trajectory_bounds_min, trajectory_bounds_max, travel_distance) =
+        query_trajectory_bounds_and_length(&trajectory_samples);
     let support_radius = query_tsdf_support_radius(query.radius);
     let tsd_distance_meters = depth_tsd_distance_meters(volume.voxel_size_meters);
-    let top_y = query.center.y.max(query.predicted_center.y)
-        + query.radius
-        + volume.voxel_size_meters;
-    let bottom_y = query.center.y.min(query.predicted_center.y)
+    let top_y = trajectory_bounds_max.y + query.radius + volume.voxel_size_meters;
+    let bottom_y = trajectory_bounds_min.y
         - (query.radius + query.max_distance + travel_distance + tsd_distance_meters);
-    let center_support_y = query_depth_grid_first_support_height(
-        volume,
-        search_center.x,
-        search_center.z,
-        top_y,
-        bottom_y,
-    )?;
+    let (_, search_sample, center_support_y) = trajectory_samples
+        .iter()
+        .filter_map(|sample| {
+            let support_y = query_depth_grid_first_support_height(
+                volume,
+                sample.point.x,
+                sample.point.z,
+                top_y,
+                bottom_y,
+            )?;
+            let support_point = vec3f(sample.point.x, support_y, sample.point.z);
+            let score = (sample.point - support_point).length()
+                - sample.progress * (query.radius + volume.voxel_size_meters) * 0.35;
+            Some((score, *sample, support_y))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))?;
+    let search_center = search_sample.point;
 
     let mut samples = [None; DEPTH_QUERY_TSDF_SUPPORT_MAX_SAMPLES];
     let mut sample_count = 0usize;
@@ -3599,7 +3609,7 @@ fn evaluate_depth_grid_support_query(
     let support_point =
         center_support_point - normal.scale(normal.dot(center_support_point) - plane_offset);
     let support_surface = make_query_halfspace_surface(
-        (support_point - query.center).length(),
+        (support_point - search_center).length(),
         XrDepthMeshQuerySupportPlane {
             point: support_point,
             ..plane
@@ -3673,27 +3683,12 @@ fn evaluate_geometry_query(
             });
     }
 
-    let travel = query.predicted_center - query.center;
-    let travel_distance = travel.length();
-    let motion_dir = if travel_distance > 1.0e-4 {
-        travel.scale(1.0 / travel_distance)
-    } else {
-        vec3f(0.0, 0.0, 0.0)
-    };
+    let trajectory_samples = query_trajectory_samples(query);
+    let (sweep_bounds_min, sweep_bounds_max, travel_distance) =
+        query_trajectory_bounds_and_length(&trajectory_samples);
     let max_search_distance = (query.radius + query.max_distance + travel_distance).max(0.0);
     let max_search_distance_sq = max_search_distance * max_search_distance;
-    let sweep_bounds_min = vec3f(
-        query.center.x.min(query.predicted_center.x),
-        query.center.y.min(query.predicted_center.y),
-        query.center.z.min(query.predicted_center.z),
-    );
-    let sweep_bounds_max = vec3f(
-        query.center.x.max(query.predicted_center.x),
-        query.center.y.max(query.predicted_center.y),
-        query.center.z.max(query.predicted_center.z),
-    );
     let mut best_hits = [None; DEPTH_QUERY_MAX_SURFACES_PER_QUERY];
-    let mid_point = query.center + travel.scale(0.5);
     let sweep_radius = query.radius + query.max_distance;
     let sweep_radius_sq = sweep_radius * sweep_radius;
 
@@ -3716,24 +3711,20 @@ fn evaluate_geometry_query(
                 continue;
             }
 
-            let mut best_sample_progress = 0.0;
             let mut best_sample_score = f32::INFINITY;
             let mut best_closest = vec3f(0.0, 0.0, 0.0);
             let mut best_distance_sq = f32::INFINITY;
+            let mut best_facing_point = query.center;
 
-            for (sample_point, progress) in [
-                (query.center, 0.0f32),
-                (mid_point, 0.5f32),
-                (query.predicted_center, 1.0f32),
-            ] {
+            for sample in &trajectory_samples {
+                let sample_point = sample.point;
                 let closest = closest_point_on_plane_patch(sample_point, patch);
                 let delta = closest - sample_point;
                 let distance_sq = delta.dot(delta);
                 if distance_sq > max_search_distance_sq {
                     continue;
                 }
-                let lateral_sq =
-                    point_segment_distance_sq(closest, query.center, query.predicted_center);
+                let lateral_sq = point_polyline_distance_sq(closest, &trajectory_samples);
                 if lateral_sq > sweep_radius_sq {
                     continue;
                 }
@@ -3741,29 +3732,33 @@ fn evaluate_geometry_query(
                 let distance = distance_sq.sqrt();
                 let mut score = distance;
                 if travel_distance > 1.0e-4 {
-                    let forward = (closest - query.center).dot(motion_dir);
-                    if forward < -query.radius || forward > travel_distance + query.radius {
-                        continue;
-                    }
-
+                    let motion = if sample.velocity.length() > 1.0e-4 {
+                        sample.velocity.normalize()
+                    } else {
+                        let fallback = query.predicted_center - query.center;
+                        if fallback.length() > 1.0e-4 {
+                            fallback.normalize()
+                        } else {
+                            vec3f(0.0, 0.0, 0.0)
+                        }
+                    };
                     let mut candidate_normal = patch.normal;
                     if candidate_normal.dot(sample_point - closest) < 0.0 {
                         candidate_normal = candidate_normal.scale(-1.0);
                     }
-                    let opposing = candidate_normal.dot(-motion_dir);
+                    let opposing = candidate_normal.dot(-motion);
                     if opposing <= DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT {
                         continue;
                     }
-                    score -= progress * travel_distance * 0.35;
-                    score -= forward.clamp(0.0, travel_distance) * 0.15;
+                    score -= sample.progress * travel_distance * 0.35;
                     score -= opposing * 0.08;
                     score += lateral_sq.sqrt() * 0.2;
                 }
                 if score < best_sample_score {
                     best_sample_score = score;
-                    best_sample_progress = progress;
                     best_closest = closest;
                     best_distance_sq = distance_sq;
+                    best_facing_point = sample_point;
                 }
             }
 
@@ -3772,8 +3767,7 @@ fn evaluate_geometry_query(
             }
 
             let mut normal = patch.normal;
-            let facing_point = query.center + travel.scale(best_sample_progress);
-            if normal.dot(facing_point - best_closest) < 0.0 {
+            if normal.dot(best_facing_point - best_closest) < 0.0 {
                 normal = normal.scale(-1.0);
             }
 
@@ -3814,53 +3808,53 @@ fn evaluate_geometry_query(
             if raw_normal.length() <= 1.0e-6 {
                 continue;
             }
-            let mut best_sample_progress = 0.0;
             let mut best_sample_score = f32::INFINITY;
             let mut best_closest = vec3f(0.0, 0.0, 0.0);
             let mut best_distance_sq = f32::INFINITY;
+            let mut best_facing_point = query.center;
 
-            for (sample_point, progress) in [
-                (query.center, 0.0f32),
-                (mid_point, 0.5f32),
-                (query.predicted_center, 1.0f32),
-            ] {
+            for sample in &trajectory_samples {
+                let sample_point = sample.point;
                 let closest = closest_point_on_triangle(sample_point, a, b, c);
                 let delta = closest - sample_point;
                 let distance_sq = delta.dot(delta);
                 if distance_sq > max_search_distance_sq {
                     continue;
                 }
-                let lateral_sq =
-                    point_segment_distance_sq(closest, query.center, query.predicted_center);
+                let lateral_sq = point_polyline_distance_sq(closest, &trajectory_samples);
                 if lateral_sq > sweep_radius_sq {
                     continue;
                 }
                 let distance = distance_sq.sqrt();
                 let mut score = distance;
                 if travel_distance > 1.0e-4 {
-                    let forward = (closest - query.center).dot(motion_dir);
-                    if forward < -query.radius || forward > travel_distance + query.radius {
-                        continue;
-                    }
-
+                    let motion = if sample.velocity.length() > 1.0e-4 {
+                        sample.velocity.normalize()
+                    } else {
+                        let fallback = query.predicted_center - query.center;
+                        if fallback.length() > 1.0e-4 {
+                            fallback.normalize()
+                        } else {
+                            vec3f(0.0, 0.0, 0.0)
+                        }
+                    };
                     let mut candidate_normal = raw_normal.normalize();
                     if candidate_normal.dot(sample_point - closest) < 0.0 {
                         candidate_normal = candidate_normal.scale(-1.0);
                     }
-                    let opposing = candidate_normal.dot(-motion_dir);
+                    let opposing = candidate_normal.dot(-motion);
                     if opposing <= DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT {
                         continue;
                     }
-                    score -= progress * travel_distance * 0.35;
-                    score -= forward.clamp(0.0, travel_distance) * 0.15;
+                    score -= sample.progress * travel_distance * 0.35;
                     score -= opposing * 0.08;
                     score += lateral_sq.sqrt() * 0.2;
                 }
                 if score < best_sample_score {
                     best_sample_score = score;
-                    best_sample_progress = progress;
                     best_closest = closest;
                     best_distance_sq = distance_sq;
+                    best_facing_point = sample_point;
                 }
             }
 
@@ -3873,8 +3867,7 @@ fn evaluate_geometry_query(
                 continue;
             }
             let mut hit_triangle = [a, b, c];
-            let facing_point = query.center + travel.scale(best_sample_progress);
-            if normal.dot(facing_point - best_closest) < 0.0 {
+            if normal.dot(best_facing_point - best_closest) < 0.0 {
                 normal = normal.scale(-1.0);
                 hit_triangle.swap(1, 2);
             }
@@ -4172,6 +4165,103 @@ fn point_segment_distance_sq(point: Vec3f, start: Vec3f, end: Vec3f) -> f32 {
     let closest = start + segment.scale(t);
     let delta = point - closest;
     delta.dot(delta)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct QueryTrajectorySample {
+    progress: f32,
+    point: Vec3f,
+    velocity: Vec3f,
+}
+
+fn query_trajectory_time_seconds(query: XrDepthMeshQuery) -> Option<f32> {
+    let horizontal_displacement = vec2f(
+        query.predicted_center.x - query.center.x,
+        query.predicted_center.z - query.center.z,
+    );
+    let horizontal_velocity = vec2f(query.velocity.x, query.velocity.z);
+    let horizontal_speed_sq =
+        horizontal_velocity.x * horizontal_velocity.x + horizontal_velocity.y * horizontal_velocity.y;
+    if horizontal_speed_sq <= 1.0e-6 {
+        return None;
+    }
+    let dt = (horizontal_displacement.x * horizontal_velocity.x
+        + horizontal_displacement.y * horizontal_velocity.y)
+        / horizontal_speed_sq;
+    (dt.is_finite() && dt > 1.0e-4).then_some(dt)
+}
+
+fn query_trajectory_sample(query: XrDepthMeshQuery, progress: f32) -> QueryTrajectorySample {
+    let progress = progress.clamp(0.0, 1.0);
+    if let Some(total_time) = query_trajectory_time_seconds(query) {
+        let t = total_time * progress;
+        let dy = query.predicted_center.y - query.center.y;
+        let accel_y = 2.0 * (dy - query.velocity.y * total_time) / (total_time * total_time);
+        return QueryTrajectorySample {
+            progress,
+            point: vec3f(
+                query.center.x + query.velocity.x * t,
+                query.center.y + query.velocity.y * t + 0.5 * accel_y * t * t,
+                query.center.z + query.velocity.z * t,
+            ),
+            velocity: vec3f(
+                query.velocity.x,
+                query.velocity.y + accel_y * t,
+                query.velocity.z,
+            ),
+        };
+    }
+
+    let travel = query.predicted_center - query.center;
+    QueryTrajectorySample {
+        progress,
+        point: query.center + travel.scale(progress),
+        velocity: if query.velocity.length() > 1.0e-4 {
+            query.velocity
+        } else {
+            travel
+        },
+    }
+}
+
+fn query_trajectory_samples(
+    query: XrDepthMeshQuery,
+) -> [QueryTrajectorySample; DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT] {
+    std::array::from_fn(|index| {
+        let progress = if DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT <= 1 {
+            0.0
+        } else {
+            index as f32 / (DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT - 1) as f32
+        };
+        query_trajectory_sample(query, progress)
+    })
+}
+
+fn query_trajectory_bounds_and_length(
+    samples: &[QueryTrajectorySample; DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT],
+) -> (Vec3f, Vec3f, f32) {
+    let mut min = samples[0].point;
+    let mut max = samples[0].point;
+    let mut length = 0.0;
+    for window in samples.windows(2) {
+        let a = window[0].point;
+        let b = window[1].point;
+        min = Vec3f::min_componentwise(min, b);
+        max = Vec3f::max_componentwise(max, b);
+        length += (b - a).length();
+    }
+    (min, max, length)
+}
+
+fn point_polyline_distance_sq(
+    point: Vec3f,
+    samples: &[QueryTrajectorySample; DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT],
+) -> f32 {
+    let mut best = f32::INFINITY;
+    for window in samples.windows(2) {
+        best = best.min(point_segment_distance_sq(point, window[0].point, window[1].point));
+    }
+    best
 }
 
 fn closest_point_on_triangle(point: Vec3f, a: Vec3f, b: Vec3f, c: Vec3f) -> Vec3f {
@@ -5851,6 +5941,53 @@ mod tests {
             matches!(outside_result, XrDepthMeshQueryResult::Miss { .. }),
             "expected support to clear once the center leaves the tabletop footprint"
         );
+    }
+
+    #[test]
+    fn geometry_query_from_depth_grid_tracks_grazing_ballistic_support_into_table() {
+        let mut volume = DepthMeshVolume::new(1, 0.05);
+        volume.generation = 26;
+        let table_center = vec3f(0.10, -0.05, 0.0);
+        let table_half_extents = vec3f(0.10, 0.05, 0.20);
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-6, -5, -6),
+            VoxelCoord::new(6, 5, 6),
+            |world| box_signed_distance(world, table_center, table_half_extents),
+        );
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 106,
+                center: vec3f(-0.07, 0.08, 0.0),
+                predicted_center: vec3f(0.10, 0.02, 0.0),
+                velocity: vec3f(1.20, 0.0, 0.0),
+                radius: 0.05,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        match result {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = hit.collider.geometry;
+                assert!(
+                    plane.normal.y >= 0.90,
+                    "expected grazing ballistic support to resolve to an upright tabletop plane, got {:?}",
+                    plane.normal
+                );
+                assert!(
+                    plane.point.x >= -0.02 && plane.point.x <= 0.22,
+                    "expected support point to land on the future tabletop footprint, got {:?}",
+                    plane.point
+                );
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected grazing ballistic path to resolve future tabletop support");
+            }
+        }
     }
 
     #[test]
