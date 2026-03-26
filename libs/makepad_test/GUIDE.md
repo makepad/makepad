@@ -4,16 +4,19 @@ This guide covers how to write, run, and debug UI tests with `makepad_test`.
 
 ## Authoring Model
 
-Tests live beside the package they exercise, usually under `tests/`. Splash is the source of truth for the suite, and Rust is just the `cargo test` host stub.
+Tests live beside the package they exercise, usually under `tests/`. Splash is the source of truth for the suite; Rust is only the `cargo test` host stub.
+
+Reference layout ([examples/splash](../../examples/splash)):
 
 ```text
 examples/splash/
 ├── Cargo.toml
-├── tests/ui.splash
-└── tests/ui.rs
+├── src/main.rs
+├── tests/ui.rs
+└── tests/ui.splash
 ```
 
-The Rust stub matches the splash example:
+Rust host (`tests/ui.rs`) loads the Splash suite:
 
 ```rust
 use makepad_test::run_splash_suite;
@@ -32,16 +35,6 @@ fn splash_suite() {
 }
 ```
 
-The Splash file registers the suite:
-
-```text
-examples/splash/
-├── Cargo.toml
-├── src/main.rs
-├── tests/ui.rs
-└── tests/ui.splash
-```
-
 `run_splash_suite(...)` is current-package oriented by default:
 
 - `env!("CARGO_MANIFEST_DIR")` provides the package root
@@ -50,9 +43,9 @@ examples/splash/
 
 That keeps the normal `cargo test` workflow intact while moving test authoring into Splash.
 
-### Rust-only tests (no `#[makepad_test]` macro)
+### Rust-only tests (no Splash file)
 
-The proc-macro attribute was removed from this crate. For UI steps written in Rust, use a normal `#[test]` and call `run_current_package_test` with `env!("CARGO_PKG_NAME")`, `env!("CARGO_MANIFEST_DIR")`, `module_path!()`, and the test function name string — see [README.md](./README.md).
+Use `run_current_package_test` from a normal `#[test]` — see **Optional: Rust-only tests** in [README.md](./README.md) for a full example.
 
 ## Suite Behavior
 
@@ -113,7 +106,9 @@ Studio session uses a different mount name, set `MAKEPAD_TEST_STUDIO_MOUNT`.
 
 ## Selectors
 
-Selectors are snapshot-based. They match structured widget state instead of only relying on geometry query strings.
+Matching is snapshot-based: selectors describe structured widget state, not only geometry.
+
+### `Selector` in Rust (`TestApp` / `Locator`)
 
 Constructors:
 
@@ -131,7 +126,7 @@ Builder filters:
 - `.window_index(1)`
 - `.any_window()`
 
-Selectors default to the primary window. That keeps single-window tests terse while still allowing explicit multi-window targeting.
+By default, selectors target the primary window; use `.window` / `.window_index` / `.any_window` for multi-window cases.
 
 ## Splash API
 
@@ -165,11 +160,9 @@ Available host methods include:
 - `test.snapshot`, `test.snapshots`, `test.widget_dump`, `test.screenshot`
 - `test.logs`, `test.wait_log`
 
-## Selectors
+### Selector objects in Splash
 
-Selectors are passed as Splash objects and matched against structured widget state.
-
-Supported fields:
+Splash passes selector objects into helpers like `test.click` and `test.wait_text`. Supported fields:
 
 - `id`
 - `widget_type`

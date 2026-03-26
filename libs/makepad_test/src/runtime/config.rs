@@ -23,8 +23,9 @@ pub(super) enum TestLaunch {
     SplashRunItem(SplashLaunchTarget),
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WidgetMatch {
+pub(super) struct WidgetMatch {
     pub raw: String,
     pub id: String,
     pub widget_type: String,

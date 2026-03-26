@@ -52,7 +52,7 @@ fn env_duration_ms(name: &str) -> Duration {
 
 mod config;
 
-pub use config::{TestConfig, WidgetMatch};
+pub use config::TestConfig;
 pub(crate) use config::sanitize_path_component;
 use config::{SplashLaunchTarget, TestLaunch, POLL_INTERVAL};
 
@@ -1661,8 +1661,9 @@ mod tests {
     use super::{
         env_duration_ms, primary_window_scope, sanitize_path_component, snapshot_is_visible,
         snapshot_sort_key, studio_addr_from_env, studio_mount_from_env, visible_mode_enabled,
-        TestError, TestResult, WidgetMatch,
+        TestError, TestResult,
     };
+    use super::config::WidgetMatch;
     use crate::{Selector, TestConfig};
     use makepad_studio_protocol::WidgetSnapshot;
     use std::path::PathBuf;

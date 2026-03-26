@@ -48,7 +48,7 @@ tools/run_ui_tests.sh
 
 ### Optional: Rust-only tests (no Splash file)
 
-Use a normal `#[test]` and `run_current_package_test` with `env!`/`module_path!()` — same behavior the removed `#[makepad_test]` macro used to generate:
+Use a normal `#[test]` and `run_current_package_test` with `env!`/`module_path!()` and your test function name:
 
 ```rust,ignore
 use makepad_test::{run_current_package_test, Selector, TestApp};
@@ -155,4 +155,4 @@ The runtime captures:
 
 ## Guide
 
-For the full authoring model, runtime behavior, and troubleshooting notes, see [GUIDE.md](./GUIDE.md).
+For Splash `test.*` API, Rust vs Splash selectors, runtime behavior, and troubleshooting, see [GUIDE.md](./GUIDE.md).
