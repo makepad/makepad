@@ -51,6 +51,24 @@ pub(super) fn depth_query_plane_supports_body(
         && offset.dot(plane.bitangent).abs() <= bitangent_limit
 }
 
+fn depth_query_plane_edge_slack(
+    plane: XrDepthMeshQuerySupportPlane,
+    body_position: Vec3f,
+) -> f32 {
+    let offset = body_position - plane.point;
+    let tangent_slack = plane.half_extent_tangent - offset.dot(plane.tangent).abs();
+    let bitangent_slack = plane.half_extent_bitangent - offset.dot(plane.bitangent).abs();
+    tangent_slack.min(bitangent_slack)
+}
+
+fn depth_query_support_refresh_edge_margin(query_radius: f32) -> f32 {
+    (query_radius * XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_SCALE)
+        .clamp(
+            XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_MIN,
+            XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_MAX,
+        )
+}
+
 impl RetainedDepthQuerySurface {
     fn sticky_supports(&self, body_position: Vec3f, query_radius: f32) -> bool {
         if self.target.collider.role != XrDepthMeshQueryColliderRole::Support {
@@ -63,6 +81,20 @@ impl RetainedDepthQuerySurface {
             query_radius,
             XR_DEPTH_QUERY_STICKY_KEEP_MARGIN,
         )
+    }
+
+    fn safely_supports(
+        &self,
+        body_position: Vec3f,
+        query_radius: f32,
+        edge_margin: f32,
+    ) -> bool {
+        if self.target.collider.role != XrDepthMeshQueryColliderRole::Support {
+            return false;
+        }
+        let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = self.target.collider.geometry;
+        depth_query_plane_supports_body(plane, body_position, query_radius, 0.0)
+            && depth_query_plane_edge_slack(plane, body_position) > edge_margin
     }
 }
 
@@ -196,10 +228,18 @@ impl RetainedDepthQueryHit {
         }
     }
 
-    fn has_sticky_support(&self, body_position: Vec3f, query_radius: f32) -> bool {
+    fn can_skip_refresh(
+        &self,
+        body_position: Vec3f,
+        predicted_body_position: Vec3f,
+        query_radius: f32,
+    ) -> bool {
+        let edge_margin = depth_query_support_refresh_edge_margin(query_radius);
         self.surfaces.iter().any(|slot| {
-            slot.as_ref()
-                .is_some_and(|retained| retained.sticky_supports(body_position, query_radius))
+            slot.as_ref().is_some_and(|retained| {
+                retained.safely_supports(body_position, query_radius, edge_margin)
+                    && retained.safely_supports(predicted_body_position, query_radius, edge_margin)
+            })
         })
     }
 
@@ -326,6 +366,44 @@ mod tests {
             0.0,
         ));
     }
+
+    #[test]
+    fn retained_support_refresh_requeries_before_body_reaches_quad_edge() {
+        let plane = XrDepthMeshQuerySupportPlane {
+            point: vec3f(0.0, 0.0, 0.0),
+            normal: vec3f(0.0, 1.0, 0.0),
+            tangent: vec3f(1.0, 0.0, 0.0),
+            bitangent: vec3f(0.0, 0.0, 1.0),
+            half_extent_tangent: 0.10,
+            half_extent_bitangent: 0.10,
+        };
+        let retained = RetainedDepthQueryHit {
+            surfaces: std::array::from_fn(|index| {
+                (index == 0).then_some(RetainedDepthQuerySurface {
+                    target: DepthQuerySurfaceTarget {
+                        collider: XrDepthMeshQueryCollider {
+                            fingerprint: 1,
+                            geometry: XrDepthMeshQueryColliderGeometry::HalfSpace(plane),
+                            role: XrDepthMeshQueryColliderRole::Support,
+                            restitution: 0.0,
+                        },
+                    },
+                    misses_left: XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES,
+                })
+            }),
+        };
+
+        assert!(retained.can_skip_refresh(
+            vec3f(0.00, 0.03, 0.0),
+            vec3f(0.02, 0.03, 0.0),
+            0.05,
+        ));
+        assert!(!retained.can_skip_refresh(
+            vec3f(0.06, 0.03, 0.0),
+            vec3f(0.09, 0.03, 0.0),
+            0.05,
+        ));
+    }
 }
 
 impl XrEnv {
@@ -440,28 +518,22 @@ impl XrEnv {
         key: u64,
         pose: Pose,
         velocity: Vec3f,
+        gravity: Vec3f,
         query_radius: f32,
     ) -> XrDepthMeshQuery {
-        let mut lookahead = velocity.scale(XR_DEPTH_QUERY_LOOKAHEAD_SECONDS);
-        let lookahead_length = lookahead.length();
-        if lookahead_length > XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE && lookahead_length > 1.0e-6 {
-            lookahead = lookahead.scale(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / lookahead_length);
-        }
-        let horizontal_speed = vec2f(velocity.x, velocity.z).length();
-        let upward_speed = velocity.y.max(0.0);
-        let impact_velocity = if velocity.length() >= XR_DEPTH_QUERY_IMPACT_QUERY_SPEED_MIN
-            && (horizontal_speed >= XR_DEPTH_QUERY_IMPACT_QUERY_HORIZONTAL_SPEED_MIN
-                || upward_speed >= XR_DEPTH_QUERY_IMPACT_QUERY_UPWARD_SPEED_MIN)
-        {
-            velocity
+        let speed = velocity.length();
+        let lookahead_seconds = if speed > 1.0e-6 {
+            XR_DEPTH_QUERY_LOOKAHEAD_SECONDS.min(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / speed)
         } else {
-            vec3f(0.0, 0.0, 0.0)
+            XR_DEPTH_QUERY_LOOKAHEAD_SECONDS
         };
+        let lookahead = velocity.scale(lookahead_seconds)
+            + gravity.scale(0.5 * lookahead_seconds * lookahead_seconds);
         XrDepthMeshQuery {
             key,
             center: pose.position,
             predicted_center: pose.position + lookahead,
-            velocity: impact_velocity,
+            velocity,
             radius: query_radius.max(0.0005),
             max_distance: XR_DEPTH_QUERY_MAX_DISTANCE,
             include_planar_patches: XR_DEPTH_QUERY_INCLUDE_PLANAR_PATCHES,
@@ -629,6 +701,7 @@ pub(super) fn sync_depth_query_surfaces_with_store(
         let body_pose = makepad_pose(body.position());
         let linvel = body.linvel();
         let body_velocity = vec3f(linvel.x, linvel.y, linvel.z);
+        let gravity = scene.gravity_vector();
 
         let latest_result = if body_sleeping {
             None
@@ -652,19 +725,25 @@ pub(super) fn sync_depth_query_surfaces_with_store(
         if body_sleeping {
             continue;
         }
-        let body_speed = body_velocity.length();
-        let body_has_sticky_support = retained_hits
-            .get(&key)
-            .is_some_and(|retained| retained.has_sticky_support(body_pose.position, cube.query_radius));
-        if body_has_sticky_support && body_speed < XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN {
-            continue;
-        }
-        query_requests.push(XrEnv::build_depth_query_request(
+        let query_request = XrEnv::build_depth_query_request(
             key,
             body_pose,
             body_velocity,
+            gravity,
             cube.query_radius,
-        ));
+        );
+        let body_speed = body_velocity.length();
+        let can_skip_refresh = retained_hits.get(&key).is_some_and(|retained| {
+            retained.can_skip_refresh(
+                body_pose.position,
+                query_request.predicted_center,
+                cube.query_radius,
+            )
+        });
+        if can_skip_refresh && body_speed < XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN {
+            continue;
+        }
+        query_requests.push(query_request);
     }
 
     for key in clear_keys {

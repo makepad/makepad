@@ -221,6 +221,7 @@ script_mod! {
                         for layer in 0..4 {
                             for row in 0..8 {
                                 for col in 0..5 {
+                                    let diffuse = #xa0a4aa
                                     let color = if (col + row * 2 + layer * 3) % 6 == 0 {
                                         #xff6f59
                                     } else if (col + row * 2 + layer * 3) % 6 == 1 {
@@ -239,6 +240,7 @@ script_mod! {
                                         friction: 0.48
                                         restitution: 0.03
                                         radius: 0.040
+                                        diffuse: diffuse
                                         color: color
                                         pos: vec3(-0.118 + col * 0.084, 0.04 + layer * 0.082, -0.436 + row * 0.084)
                                     }
@@ -270,6 +272,7 @@ script_mod! {
                         }
 
                         for index in 0..160 {
+                            let diffuse = #xa0a4aa
                             let color = if index % 6 == 0 {
                                 #xff6f59
                             } else if index % 6 == 1 {
@@ -289,6 +292,7 @@ script_mod! {
                                 friction: 0.48
                                 restitution: 0.04
                                 radius: 0.080
+                                diffuse: diffuse
                                 color: color
                                 pos: vec3(-2.4, -6.0 - index * 0.004, 0.0)
                             }
@@ -361,8 +365,9 @@ script_mod! {
             control_strip := XrView{
                 visible: false
                 show_in_non_xr: true
-                logical_size: vec2(780, 396)
-                pixel_scale: 0.000185
+                wrist_left: true
+                logical_size: vec2(920, 468)
+                pixel_scale: 0.000215
                 dpi_factor: 2.0
                 SolidView{
                     width: Fill
@@ -634,7 +639,7 @@ script_mod! {
                 visible: false
                 mode: mod.widgets.XrViewMode.StuckToWrist
                 wrist_left: true
-                logical_size: vec2(84, 52)
+                logical_size: vec2(112, 104)
                 pixel_scale: 0.00030
                 dpi_factor: 1.6
                 depth_scale: 120.0
@@ -642,15 +647,25 @@ script_mod! {
                     width: Fill
                     height: Fill
                     flow: Down
-                    padding: 4
+                    padding: 6
+                    spacing: 4
                     draw_bg.color: #x0f1b27ee
-                    draw_bg.border_radius: 12.0
+                    draw_bg.border_radius: 18.0
 
-                    wrist_ui_button := XrUiButton{
+                    wrist_menu_button := XrUiButton{
                         width: Fill
-                        height: 32
-                        text: "UI"
-                        on_press: || ui.control_strip.toggle_visible_in_front_of_face()
+                        height: 40
+                        text: "Menu"
+                        draw_bg.border_radius: 12.0
+                        on_press: || ui.control_strip.toggle_visible_next_to_wrist()
+                    }
+
+                    wrist_reset_button := XrUiButton{
+                        width: Fill
+                        height: 40
+                        text: "Reset"
+                        draw_bg.border_radius: 12.0
+                        on_press: || ui.root.reset_physics()
                     }
                 }
             }
@@ -686,22 +701,21 @@ impl App {
             frame_cpu_ms,
             frame_update_cpu_ms,
             frame_draw_cpu_ms,
-        ) =
-            if let Some(root) = self.ui.borrow::<XrRoot>() {
-                (
-                    root.physics_depth_query_surface_count(),
-                    root.physics_depth_query_vertex_count(),
-                    root.physics_depth_query_triangle_count(),
-                    root.physics_compute_ms(),
-                    root.physics_time_scale(),
-                    root.physics_step_dt_ms(),
-                    root.frame_cpu_ms(),
-                    root.frame_update_cpu_ms(),
-                    root.frame_draw_cpu_ms(),
-                )
-            } else {
-                return;
-            };
+        ) = if let Some(root) = self.ui.borrow::<XrRoot>() {
+            (
+                root.physics_depth_query_surface_count(),
+                root.physics_depth_query_vertex_count(),
+                root.physics_depth_query_triangle_count(),
+                root.physics_compute_ms(),
+                root.physics_time_scale(),
+                root.physics_step_dt_ms(),
+                root.frame_cpu_ms(),
+                root.frame_update_cpu_ms(),
+                root.frame_draw_cpu_ms(),
+            )
+        } else {
+            return;
+        };
 
         let geometry_text = format!(
             "Physics geometry: {} planes, {} vertices, {} triangles",
@@ -723,7 +737,10 @@ impl App {
                 physics_time_scale
             )
         } else {
-            format!("Physics compute: {:.2} ms | sim {:.2}x", compute_ms, physics_time_scale)
+            format!(
+                "Physics compute: {:.2} ms | sim {:.2}x",
+                compute_ms, physics_time_scale
+            )
         };
         if self.last_physics_timing_text != timing_text {
             self.ui
