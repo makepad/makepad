@@ -95,6 +95,7 @@ pub enum ClientToHub {
 
     // === Build Control ===
     ListBuilds,
+    ListBuildsIncludingSplash,
     RunItem {
         mount: String,
         name: String,

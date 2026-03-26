@@ -4,54 +4,65 @@ This guide covers how to write, run, and debug UI tests with `makepad_test`.
 
 ## Authoring Model
 
-Tests live beside the package they exercise, usually under `tests/`.
+Tests live beside the package they exercise, usually under `tests/`. Splash is the source of truth for the suite, and Rust is just the `cargo test` host stub.
 
 ```text
-examples/text_input/
+examples/splash/
 ├── Cargo.toml
-├── src/main.rs
+├── tests/ui.splash
 └── tests/ui.rs
 ```
 
-`#[makepad_test]` is current-package oriented by default:
-
-- `env!("CARGO_MANIFEST_DIR")` provides the mount root
-- `env!("CARGO_PKG_NAME")` provides the package to run
-
-That keeps the normal Rust workflow intact: add a dev-dependency, write `tests/*.rs`, and run `cargo test -p <package>`.
-
-## Macro Behavior
-
-`#[makepad_test]` expands to a normal `#[test]` wrapper that:
-
-1. starts `StudioHub::start_in_process`
-2. mounts the current package directory
-3. runs the current package headlessly
-4. waits for `BuildStarted` and `AppStarted`
-5. passes a `TestApp` into your test body
-6. captures failure artifacts on returned errors or panics
-
-Supported signatures:
+The Rust stub is intentionally small:
 
 ```rust
-#[makepad_test]
-fn smoke(app: TestApp) {
-    // ...
-}
+use makepad_test::run_splash_suite;
 
-#[makepad_test]
-fn smoke(app: TestApp) -> Result<(), TestError> {
-    // ...
-    Ok(())
+#[test]
+fn splash_suite() {
+    run_splash_suite(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_MANIFEST_DIR"),
+        module_path!(),
+        "tests/ui.splash",
+    )
+    .unwrap();
 }
 ```
 
-Unsupported:
+The Splash file registers the suite:
 
-- async tests
-- methods with `self`
-- generic test functions
-- macro arguments
+```text
+examples/splash/
+├── Cargo.toml
+├── src/main.rs
+├── tests/ui.rs
+└── tests/ui.splash
+```
+
+`run_splash_suite(...)` is current-package oriented by default:
+
+- `env!("CARGO_MANIFEST_DIR")` provides the package root
+- `env!("CARGO_PKG_NAME")` provides the package to run
+- `tests/ui.splash` registers the cases and suite config with `mod.test`
+
+That keeps the normal `cargo test` workflow intact while moving test authoring into Splash.
+
+## Suite Behavior
+
+`run_splash_suite(...)`:
+
+1. loads `tests/ui.splash`
+2. installs `mod.test`
+3. collects `test.configure(...)` and `test.case(...)`
+4. starts a fresh app session per registered case
+5. executes each case in order
+6. captures failure artifacts on returned errors or panics
+
+Splash suites can either:
+
+- launch the current package, or
+- launch visible/headless Splash run items via `test.configure({ launch: "splash_run_item", ... })`
 
 ## Runtime Defaults
 
@@ -112,55 +123,53 @@ Builder filters:
 
 Selectors default to the primary window. That keeps single-window tests terse while still allowing explicit multi-window targeting.
 
-## Locators
+## Splash API
 
-`Locator` methods require exactly one visible match for interaction. That strictness is intentional: it keeps tests from silently clicking the wrong widget.
+Suites import `mod.test` and register cases by side effect:
 
-Common actions:
+```text
+use mod.test
 
-```rust
-app.locator(Selector::id("panel_input"))
-    .wait_visible()
-    .fill("hello")
-    .wait_value("hello")
-    .press_key(KeyCode::Enter);
+test.configure({
+    launch: "splash_run_item"
+    visible_run_item: "makepad-example-splash"
+    headless_run_item: "makepad-example-splash-headless-test"
+})
+
+test.case("smoke", || {
+    test.click({id: "submit"})
+    test.wait_text({id: "status"}, "Saved")
+})
 ```
 
-Available interaction helpers:
+Available host methods include:
 
-- `click`
-- `type_text`
-- `fill`
-- `clear`
-- `press_key`
-- `press_key_with_modifiers`
-- `scroll`
-- `drag_by`
+- `test.configure`
+- `test.case`
+- `test.fail`
+- `test.click`, `test.fill`, `test.clear`, `test.type_text`
+- `test.press_return`, `test.press_key`, `test.scroll`, `test.drag`
+- `test.wait_visible`, `test.wait_hidden`, `test.wait_count`
+- `test.wait_text`, `test.wait_value`, `test.wait_checked`, `test.wait_enabled`
+- `test.expect_text`, `test.expect_value`, `test.expect_checked`, `test.expect_enabled`
+- `test.snapshot`, `test.snapshots`, `test.widget_dump`, `test.screenshot`
+- `test.logs`, `test.wait_log`
 
-Available waits and assertions:
+## Selectors
 
-- `wait_visible`
-- `wait_hidden`
-- `wait_count`
-- `wait_text` / `assert_text`
-- `wait_value` / `assert_value`
-- `wait_checked` / `assert_checked`
-- `wait_enabled` / `assert_enabled`
+Selectors are passed as Splash objects and matched against structured widget state.
 
-Inspection helpers:
+Supported fields:
 
-- `snapshot()`
-- `count()`
-- `widget_snapshot()`
-- `widget_dump()`
-- `screenshot()`
-- `wait_for_log_contains(...)`
-
-Lower-level escape hatch:
-
-```rust
-app.forward(vec![/* StudioToApp messages */]);
-```
+- `id`
+- `widget_type`
+- `raw`
+- `text_exact`
+- `text_contains`
+- `nth`
+- `window`
+- `window_index`
+- `any_window`
 
 ## Structured Widget State
 
@@ -236,7 +245,7 @@ This keeps the test surface aligned with how Studio itself talks to Makepad apps
 
 ## Troubleshooting
 
-If a test times out or fails to resolve a widget:
+If a Splash case times out or fails to resolve a widget:
 
 1. inspect `target/makepad_test/.../logs.txt`
 2. inspect `widget-snapshot.json` for text/value/checked/selected state

@@ -233,7 +233,6 @@ script_mod! {
             }
             press_reset_button := ButtonFlat{
                 text: "Reset"
-                on_click: || ui.press_status.set_text("Last press: none")
             }
             press_status := Label{
                 text: "Last press: none"
@@ -596,6 +595,7 @@ script_mod! {
             slide_left_btn := Button{text: "Toggle Left Panel"}
             slide_top_btn := Button{text: "Toggle Top Panel"}
             slide_right_btn := Button{text: "Toggle Right Panel"}
+            slide_status := Label{text: "Slide status: Left closed" draw_text.color: #8fd draw_text.text_style.font_size: 10}
 
             // Content area placeholder
             View{
@@ -961,11 +961,12 @@ script_mod! {
     let TabMedia = SolidView{
         width: Fill height: Fill
         draw_bg.color: #333
-        ScrollYView{
+        media_scroll := ScrollYView{
             width: Fill height: Fill flow: Down padding: 15 spacing: 12
 
             Label{text: "App Icon - Drop Shadow + Advanced Gradients" draw_text.color: #fff draw_text.text_style.font_size: 13}
             Label{text: "SVG filter support: feDropShadow, linear/radial gradients with opacity stops" draw_text.color: #888 draw_text.text_style.font_size: 9}
+            media_scroll_status := Label{text: "Media scroll: 0" draw_text.color: #8fd draw_text.text_style.font_size: 10}
             Svg{
                 width: 300 height: 300
                 animating: false
@@ -1438,14 +1439,14 @@ script_mod! {
         // Left panel - Selection test first, then input widgets
         left_tabs := DockTabs{
             tabs: [@scrollbar_test_tab, @selection_test_tab, @toggles_tab, @sliders_tab, @text_tab, @dropdowns_tab]
-            selected: 1
+            selected: 2
             closable: false
         }
 
         // Center panel - content widgets
         center_tabs := DockTabs{
             tabs: [@bigtext_tab, @math_tab, @vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
-            selected: 3
+            selected: 5
             closable: true
         }
 
@@ -1627,6 +1628,11 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(icon_button)).clicked(actions) {
             log!("Icon button clicked!");
         }
+        if self.ui.button(cx, ids!(press_reset_button)).clicked(actions) {
+            self.ui
+                .label(cx, ids!(press_status))
+                .set_text(cx, "Last press: none");
+        }
 
         // Tooltip demo - show tooltips on button click
         if self
@@ -1797,6 +1803,12 @@ impl MatchEvent for App {
         // SlidePanel tests
         if self.ui.button(cx, ids!(slide_left_btn)).clicked(actions) {
             self.ui.slide_panel(cx, ids!(left_panel)).toggle(cx);
+            let status = if self.ui.slide_panel(cx, ids!(left_panel)).is_open(cx) {
+                "Slide status: Left open"
+            } else {
+                "Slide status: Left closed"
+            };
+            self.ui.label(cx, ids!(slide_status)).set_text(cx, status);
         }
         if self.ui.button(cx, ids!(slide_top_btn)).clicked(actions) {
             self.ui.slide_panel(cx, ids!(top_panel)).toggle(cx);
@@ -1810,6 +1822,9 @@ impl MatchEvent for App {
             .clicked(actions)
         {
             self.ui.slide_panel(cx, ids!(left_panel)).close(cx);
+            self.ui
+                .label(cx, ids!(slide_status))
+                .set_text(cx, "Slide status: Left closed");
         }
         if self
             .ui
@@ -1837,6 +1852,12 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if matches!(event, Event::Scroll(_)) {
+            let scroll_y = self.ui.view(cx, ids!(media_scroll)).scroll_pos().y.round() as i64;
+            self.ui
+                .label(cx, ids!(media_scroll_status))
+                .set_text(cx, &format!("Media scroll: {scroll_y}"));
+        }
     }
 }
 

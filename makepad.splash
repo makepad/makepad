@@ -7,6 +7,31 @@ let RunItem = {
     in_studio: true
 }
 
+let RunStudioTest = RunItem{
+    run: ""
+    target_dir: ""
+    on_run: fn(id){
+        hub.run(
+            {"STUDIO": hub.studio_local(id), "CARGO_TARGET_DIR": self.target_dir},
+            "cargo",
+            ["run" "-p" self.run "--release" "--message-format=json" "--" "--message-format=json" "--stdin-loop"],
+        )
+    }
+}
+
+let RunHeadlessTest = RunItem{
+    run: ""
+    target_dir: ""
+    in_studio: false
+    on_run: fn(id){
+        hub.run(
+            {"STUDIO": hub.studio_local(id), "MAKEPAD": "headless", "CARGO_TARGET_DIR": self.target_dir},
+            "cargo",
+            ["run" "-p" self.run "--release" "--message-format=json" "--" "--message-format=json" "--stdin-loop"],
+        )
+    }
+}
+
 let RunQuest = RunItem{
     on_run: fn(id){
         hub.run(
@@ -80,9 +105,11 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-charts"}
     RunAndroid{name: "makepad-example-pdf"}
     RunStudioRelease{name: "makepad-example-map"}
+    RunStudioTest{name: "makepad-example-splash", package_name: "makepad-example-splash", run: "makepad-example-splash", target_dir: "examples/splash/target/splash_native"}
+    RunHeadlessTest{name: "makepad-example-splash-headless-test", package_name: "makepad-example-splash", run: "makepad-example-splash", target_dir: "examples/splash/target/splash_native"}
     RunStudioRelease{name: "makepad-example-todo"}
     RunStudio{name: "makepad-studio"} 
     RunStudioExt{name: "makepad-studio-ext"} 
     RunStudioRelease{name: "makepad-example-xr"}
-    RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
+    RunQuest{name: "makepad-example-xr-quest", package_name: "makepad-example-xr", run:"makepad-example-xr"}
 ])

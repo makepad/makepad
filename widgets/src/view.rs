@@ -443,6 +443,14 @@ impl ViewRef {
         }
     }
 
+    pub fn scroll_pos(&self) -> Vec2d {
+        if let Some(inner) = self.borrow() {
+            inner.scroll_pos()
+        } else {
+            Vec2d::default()
+        }
+    }
+
     pub fn area(&self) -> Area {
         if let Some(inner) = self.borrow_mut() {
             inner.area
@@ -1057,6 +1065,14 @@ impl View {
             scroll_bars.set_scroll_pos(cx, v);
         } else {
             self.layout.scroll = v;
+        }
+    }
+
+    pub fn scroll_pos(&self) -> Vec2d {
+        if let Some(scroll_bars) = &self.scroll_bars_obj {
+            scroll_bars.get_scroll_pos()
+        } else {
+            self.layout.scroll
         }
     }
 

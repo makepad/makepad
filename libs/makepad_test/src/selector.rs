@@ -19,6 +19,19 @@ pub struct Selector {
     window: WindowTarget,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SelectorOptions {
+    pub id: Option<String>,
+    pub widget_type: Option<String>,
+    pub raw: Option<String>,
+    pub text_exact: Option<String>,
+    pub text_contains: Option<String>,
+    pub nth: Option<usize>,
+    pub window: Option<String>,
+    pub window_index: Option<usize>,
+    pub any_window: bool,
+}
+
 impl Selector {
     pub fn all() -> Self {
         Self {
@@ -78,6 +91,28 @@ impl Selector {
     pub fn any_window(mut self) -> Self {
         self.window = WindowTarget::Any;
         self
+    }
+
+    pub(crate) fn from_options(options: SelectorOptions) -> Self {
+        let window = if options.any_window {
+            WindowTarget::Any
+        } else if let Some(window) = options.window {
+            WindowTarget::Id(window)
+        } else if let Some(index) = options.window_index {
+            WindowTarget::Index(index)
+        } else {
+            WindowTarget::Primary
+        };
+
+        Self {
+            id: options.id,
+            widget_type: options.widget_type,
+            raw: options.raw,
+            text_exact: options.text_exact,
+            text_contains: options.text_contains,
+            nth: options.nth,
+            window,
+        }
     }
 
     pub fn as_query(&self) -> String {

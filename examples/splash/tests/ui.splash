@@ -1,0 +1,54 @@
+use mod.std.assert
+use mod.test
+
+test.configure({
+    launch: "splash_run_item"
+    visible_run_item: "makepad-example-splash"
+    headless_run_item: "makepad-example-splash-headless-test"
+})
+
+test.case("splash_buttons_press_hook_smoke", || {
+    let buttons_tab = {id: "buttons_tab" text_exact: "Buttons"}
+    test.wait_visible(buttons_tab)
+    test.click(buttons_tab)
+    test.wait_checked(buttons_tab, true)
+    test.wait_text({id: "press_status"}, "Last press: none")
+    test.click({id: "press_demo_button"})
+    test.wait_text({id: "press_status"}, "Last press: Run on_press")
+})
+
+test.case("splash_modal_and_slide_panel_smoke", || {
+    let modal_tab = {id: "modal_tab" text_exact: "Modal"}
+    let slidepanel_tab = {id: "slidepanel_tab" text_exact: "SlidePanel"}
+
+    test.wait_visible(modal_tab)
+    test.click(modal_tab)
+    test.wait_checked(modal_tab, true)
+    test.click({id: "open_modal_btn"})
+    test.wait_text({id: "modal_status"}, "Modal status: Basic Modal Open")
+    test.click({id: "close_modal_btn"})
+    test.wait_text({id: "modal_status"}, "Modal status: Closed via button")
+
+    test.wait_visible(slidepanel_tab)
+    test.click(slidepanel_tab)
+    test.wait_checked(slidepanel_tab, true)
+    test.click({id: "slide_left_btn"})
+    test.wait_text({id: "slide_status"}, "Slide status: Left open")
+    test.click({id: "close_left_panel_btn"})
+    test.wait_text({id: "slide_status"}, "Slide status: Left closed")
+})
+
+test.case("splash_toggle_radio_and_dropdown_smoke", || {
+    let toggles_tab = {id: "toggles_tab" text_exact: "Toggles"}
+
+    test.wait_visible(toggles_tab)
+    test.click(toggles_tab)
+    test.wait_checked(toggles_tab, true)
+    test.click({id: "checkbox"})
+    test.wait_checked({id: "checkbox"}, true)
+    test.click({id: "toggle"})
+    test.wait_checked({id: "toggle"}, true)
+    test.click({id: "radio2"})
+    test.wait_checked({id: "radio2"}, true)
+    test.wait_text({id: "smoke_dropdown"}, "Option A")
+})

@@ -1,6 +1,6 @@
 # makepad_test
 
-`makepad_test` provides Rust-native UI regression tests for Makepad apps. Tests live next to the package they exercise, run through normal `cargo test`, and drive the app through the existing Studio protocol in headless mode.
+`makepad_test` provides UI regression tests for Makepad apps. Rust stays as the host bridge for `cargo test` and the Studio protocol; Splash is the test language for suite authoring.
 
 ## Quick Start
 
@@ -11,7 +11,7 @@ Add this to the package under test:
 makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }
 ```
 
-Create an integration test:
+Create a Rust-hosted test:
 
 ```rust,ignore
 use makepad_test::{makepad_test, Selector, TestApp};
@@ -59,9 +59,26 @@ Run the curated repo UI suites serially on macOS with:
 tools/run_ui_tests.sh
 ```
 
+Create a Splash suite and run it from one Rust stub:
+
+```rust,ignore
+use makepad_test::run_splash_suite;
+
+#[test]
+fn splash_suite() {
+    run_splash_suite(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_MANIFEST_DIR"),
+        module_path!(),
+        "tests/ui.splash",
+    ).unwrap();
+}
+```
+
 ## Surface Area
 
 - `#[makepad_test]` for current-package UI tests
+- `run_splash_suite(...)` for Splash-authored suites
 - `TestApp` for app-scoped input, waits, logs, screenshots, and raw protocol forwarding
 - `Selector` for structured snapshot matching
 - `Locator` for strict single-widget interaction and assertions

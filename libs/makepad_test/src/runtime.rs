@@ -10,7 +10,7 @@ use makepad_studio_protocol::{
 };
 use std::cell::RefCell;
 use std::cmp;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -32,8 +32,23 @@ const PUMP_TICKS: usize = 3;
 const RECENT_LOG_LINES: usize = 200;
 const DEFAULT_STUDIO_ADDR: &str = "127.0.0.1:8001";
 const DEFAULT_STUDIO_MOUNT: &str = "makepad";
+const SPLASH_RUNNABLE: &str = "makepad.splash";
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[derive(Clone, Debug)]
+struct SplashLaunchTarget {
+    root_package: String,
+    visible_run_item: String,
+    headless_run_item: String,
+    child_package: String,
+}
+
+#[derive(Clone, Debug)]
+enum TestLaunch {
+    CurrentPackage,
+    SplashRunItem(SplashLaunchTarget),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WidgetMatch {
@@ -75,6 +90,7 @@ pub struct TestConfig {
     pub package_name: String,
     pub mount_name: String,
     pub manifest_dir: PathBuf,
+    pub mount_root: PathBuf,
     pub test_name: String,
     pub artifacts_dir: PathBuf,
     pub listen_address: SocketAddr,
@@ -85,15 +101,19 @@ pub struct TestConfig {
     pub startup_pause: Duration,
     pub action_delay: Duration,
     pub keep_open: Duration,
+    launch: TestLaunch,
 }
 
 impl TestConfig {
-    pub fn new(
+    fn new_for_launch(
         manifest_dir: impl Into<PathBuf>,
+        mount_root: impl Into<PathBuf>,
         package_name: impl Into<String>,
         test_name: impl Into<String>,
+        launch: TestLaunch,
     ) -> TestResult<Self> {
         let manifest_dir = manifest_dir.into();
+        let mount_root = mount_root.into();
         let package_name = package_name.into();
         let test_name = test_name.into();
         let artifacts_dir = manifest_dir
@@ -116,6 +136,7 @@ impl TestConfig {
             mount_name: package_name.clone(),
             package_name,
             manifest_dir,
+            mount_root,
             test_name,
             artifacts_dir,
             listen_address: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
@@ -126,7 +147,23 @@ impl TestConfig {
             startup_pause: env_duration_ms("MAKEPAD_TEST_STARTUP_DELAY_MS"),
             action_delay: env_duration_ms("MAKEPAD_TEST_ACTION_DELAY_MS"),
             keep_open: env_duration_ms("MAKEPAD_TEST_KEEP_OPEN_MS"),
+            launch,
         })
+    }
+
+    pub fn new(
+        manifest_dir: impl Into<PathBuf>,
+        package_name: impl Into<String>,
+        test_name: impl Into<String>,
+    ) -> TestResult<Self> {
+        let manifest_dir = manifest_dir.into();
+        Self::new_for_launch(
+            manifest_dir.clone(),
+            manifest_dir,
+            package_name,
+            test_name,
+            TestLaunch::CurrentPackage,
+        )
     }
 
     pub fn current_package(
@@ -135,6 +172,31 @@ impl TestConfig {
         test_name: impl Into<String>,
     ) -> TestResult<Self> {
         Self::new(manifest_dir, package_name, test_name)
+    }
+
+    pub fn splash_run_item(
+        mount_root: impl Into<PathBuf>,
+        manifest_dir: impl Into<PathBuf>,
+        package_name: impl Into<String>,
+        test_name: impl Into<String>,
+        visible_run_item: impl Into<String>,
+        headless_run_item: impl Into<String>,
+    ) -> TestResult<Self> {
+        let manifest_dir = manifest_dir.into();
+        let mount_root = mount_root.into();
+        let package_name = package_name.into();
+        Self::new_for_launch(
+            manifest_dir,
+            mount_root,
+            package_name.clone(),
+            test_name,
+            TestLaunch::SplashRunItem(SplashLaunchTarget {
+                root_package: SPLASH_RUNNABLE.to_string(),
+                visible_run_item: visible_run_item.into(),
+                headless_run_item: headless_run_item.into(),
+                child_package: package_name,
+            }),
+        )
     }
 }
 
@@ -159,10 +221,17 @@ impl TestConnection {
     }
 }
 
+struct StartedApp {
+    connection: TestConnection,
+    app_build_id: QueryId,
+    cleanup_build_ids: Vec<QueryId>,
+}
+
 struct TestAppInner {
     config: TestConfig,
     connection: TestConnection,
-    build_id: QueryId,
+    app_build_id: QueryId,
+    cleanup_build_ids: Vec<QueryId>,
     build_stopped: Option<Option<i32>>,
 }
 
@@ -173,7 +242,7 @@ impl TestAppInner {
             exit_code,
         } = msg
         {
-            if *build_id == self.build_id {
+            if *build_id == self.app_build_id {
                 self.build_stopped = Some(*exit_code);
             }
         }
@@ -208,7 +277,7 @@ impl TestApp {
     }
 
     fn start_once(config: TestConfig) -> TestResult<Self> {
-        let (connection, build_id) = if visible_mode_enabled() {
+        let started = if visible_mode_enabled() {
             start_visible_app(&config)?
         } else {
             start_headless_app(&config)?
@@ -221,8 +290,9 @@ impl TestApp {
         Ok(Self {
             inner: Rc::new(RefCell::new(TestAppInner {
                 config,
-                connection,
-                build_id,
+                connection: started.connection,
+                app_build_id: started.app_build_id,
+                cleanup_build_ids: started.cleanup_build_ids,
                 build_stopped: None,
             })),
         })
@@ -370,7 +440,7 @@ impl TestApp {
     pub fn try_wait_for_log_contains(&self, needle: &str) -> TestResult<()> {
         let deadline = Instant::now() + self.action_timeout();
         while Instant::now() < deadline {
-            let entries = self.query_logs_once(Some(needle.to_string()))?;
+            let entries = self.try_query_logs(Some(needle.to_string()))?;
             if entries
                 .iter()
                 .any(|(_, entry)| entry.message.contains(needle))
@@ -409,15 +479,24 @@ impl TestApp {
 
     fn try_scroll_center(&self, target: &WidgetSnapshot, sx: f64, sy: f64) -> TestResult<()> {
         let (x, y) = snapshot_center_f64(target);
-        self.try_forward(vec![StudioToApp::Scroll(RemoteScroll {
-            time: now_seconds(),
-            sx,
-            sy,
-            x,
-            y,
-            is_mouse: true,
-            modifiers: RemoteKeyModifiers::default(),
-        })])?;
+        let now = now_seconds();
+        self.try_forward(vec![
+            StudioToApp::MouseMove(RemoteMouseMove {
+                time: now,
+                x,
+                y,
+                modifiers: RemoteKeyModifiers::default(),
+            }),
+            StudioToApp::Scroll(RemoteScroll {
+                time: now + 0.01,
+                sx,
+                sy,
+                x,
+                y,
+                is_mouse: true,
+                modifiers: RemoteKeyModifiers::default(),
+            }),
+        ])?;
         self.pace_after_action();
         Ok(())
     }
@@ -454,7 +533,7 @@ impl TestApp {
         Ok(())
     }
 
-    fn query_widgets(
+    pub(crate) fn try_query_widgets(
         &self,
         selector: &Selector,
         visible_only: bool,
@@ -475,7 +554,10 @@ impl TestApp {
         Ok(matches)
     }
 
-    fn query_logs_once(&self, pattern: Option<String>) -> TestResult<Vec<(usize, LogEntry)>> {
+    pub(crate) fn try_query_logs(
+        &self,
+        pattern: Option<String>,
+    ) -> TestResult<Vec<(usize, LogEntry)>> {
         let query_id = self.send_unchecked(ClientToHub::QueryLogs {
             build_id: Some(self.build_id()),
             level: None,
@@ -497,7 +579,7 @@ impl TestApp {
     }
 
     fn collect_logs_text(&self) -> TestResult<String> {
-        let mut entries = self.query_logs_once(None)?;
+        let mut entries = self.try_query_logs(None)?;
         if entries.len() > RECENT_LOG_LINES {
             let split = entries.len() - RECENT_LOG_LINES;
             entries = entries.split_off(split);
@@ -570,7 +652,7 @@ impl TestApp {
     }
 
     fn build_id(&self) -> QueryId {
-        self.inner.borrow().build_id
+        self.inner.borrow().app_build_id
     }
 
     fn action_timeout(&self) -> Duration {
@@ -581,7 +663,7 @@ impl TestApp {
         self.inner.borrow().config.poll_interval
     }
 
-    fn artifacts_dir(&self) -> PathBuf {
+    pub(crate) fn artifacts_dir(&self) -> PathBuf {
         self.inner.borrow().config.artifacts_dir.clone()
     }
 
@@ -605,11 +687,11 @@ impl TestApp {
             return Err(match exit_code {
                 Some(code) => TestError::new(format!(
                     "app build {} exited unexpectedly with code {code}",
-                    inner.build_id.0
+                    inner.app_build_id.0
                 )),
                 None => TestError::new(format!(
                     "app build {} exited unexpectedly",
-                    inner.build_id.0
+                    inner.app_build_id.0
                 )),
             });
         }
@@ -618,38 +700,46 @@ impl TestApp {
 
     fn shutdown(&self) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        {
-            let mut inner = self.inner.borrow_mut();
-            if inner.build_stopped.is_some() {
-                return;
-            }
-            let build_id = inner.build_id;
-            let _ = inner.connection.send(ClientToHub::ClearBuild { build_id });
-        }
-
-        loop {
+        let cleanup_build_ids = self.inner.borrow().cleanup_build_ids.clone();
+        for build_id in cleanup_build_ids {
             if Instant::now() >= deadline {
                 return;
             }
             {
-                let inner = self.inner.borrow();
-                if inner.build_stopped.is_some() {
-                    return;
+                let mut inner = self.inner.borrow_mut();
+                if build_id == inner.app_build_id && inner.build_stopped.is_some() {
+                    continue;
+                }
+                let _ = inner.connection.send(ClientToHub::ClearBuild { build_id });
+            }
+            loop {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let slice = cmp::min(
+                    POLL_INTERVAL,
+                    deadline.saturating_duration_since(Instant::now()),
+                );
+                let msg = {
+                    let inner = self.inner.borrow();
+                    inner.connection.recv_timeout(slice)
+                };
+                let Some(msg) = msg else {
+                    continue;
+                };
+                let stopped = matches!(
+                    msg,
+                    HubToClient::BuildStopped {
+                        build_id: stopped_id,
+                        ..
+                    } if stopped_id == build_id
+                );
+                let mut inner = self.inner.borrow_mut();
+                inner.observe_message(&msg);
+                if stopped {
+                    break;
                 }
             }
-            let slice = cmp::min(
-                POLL_INTERVAL,
-                deadline.saturating_duration_since(Instant::now()),
-            );
-            let msg = {
-                let inner = self.inner.borrow();
-                inner.connection.recv_timeout(slice)
-            };
-            let Some(msg) = msg else {
-                continue;
-            };
-            let mut inner = self.inner.borrow_mut();
-            inner.observe_message(&msg);
         }
     }
 }
@@ -671,7 +761,7 @@ impl Locator {
         let query = self.selector.describe();
         let deadline = Instant::now() + self.app.action_timeout();
         while Instant::now() < deadline {
-            if !self.app.query_widgets(&self.selector, true)?.is_empty() {
+            if !self.app.try_query_widgets(&self.selector, true)?.is_empty() {
                 return Ok(());
             }
             thread::sleep(self.app.poll_interval());
@@ -692,7 +782,7 @@ impl Locator {
         let query = self.selector.describe();
         let deadline = Instant::now() + self.app.action_timeout();
         while Instant::now() < deadline {
-            if self.app.query_widgets(&self.selector, true)?.is_empty() {
+            if self.app.try_query_widgets(&self.selector, true)?.is_empty() {
                 return Ok(());
             }
             thread::sleep(self.app.poll_interval());
@@ -713,7 +803,7 @@ impl Locator {
         let query = self.selector.describe();
         let deadline = Instant::now() + self.app.action_timeout();
         while Instant::now() < deadline {
-            let count = self.app.query_widgets(&self.selector, true)?.len();
+            let count = self.app.try_query_widgets(&self.selector, true)?.len();
             if count == expected {
                 return Ok(());
             }
@@ -983,7 +1073,7 @@ impl Locator {
     }
 
     pub fn try_count(&self) -> TestResult<usize> {
-        Ok(self.app.query_widgets(&self.selector, true)?.len())
+        Ok(self.app.try_query_widgets(&self.selector, true)?.len())
     }
 
     fn wait_for_state<F>(&self, field_name: &str, expected: &str, accessor: F) -> TestResult<()>
@@ -1067,7 +1157,7 @@ impl Locator {
 
     fn resolve_unique_visible(&self) -> TestResult<WidgetSnapshot> {
         let query = self.selector.describe();
-        let matches = self.app.query_widgets(&self.selector, true)?;
+        let matches = self.app.try_query_widgets(&self.selector, true)?;
         match matches.as_slice() {
             [] => Err(TestError::new(format!(
                 "selector `{query}` matched no visible widgets"
@@ -1144,13 +1234,13 @@ pub fn run_current_package_test<F, R>(
     }
 }
 
-fn start_headless_app(config: &TestConfig) -> TestResult<(TestConnection, QueryId)> {
+fn start_headless_app(config: &TestConfig) -> TestResult<StartedApp> {
     let mut connection = TestConnection::InProcess(
         StudioHub::start_in_process(HubConfig {
             listen_address: config.listen_address,
             mounts: vec![MountConfig {
                 name: config.mount_name.clone(),
-                path: config.manifest_dir.clone(),
+                path: config.mount_root.clone(),
             }],
             enable_in_process_gateway: true,
             ..Default::default()
@@ -1158,73 +1248,140 @@ fn start_headless_app(config: &TestConfig) -> TestResult<(TestConnection, QueryI
         .map_err(TestError::new)?,
     );
 
-    let _ = connection.send(ClientToHub::Run {
-        mount: config.mount_name.clone(),
-        process: config.package_name.clone(),
-        args: Vec::new(),
-        standalone: None,
-        env: Some(config.env.clone()),
-        buildbox: None,
-    })?;
+    match &config.launch {
+        TestLaunch::CurrentPackage => {
+            let _ = connection.send(ClientToHub::Run {
+                mount: config.mount_name.clone(),
+                process: config.package_name.clone(),
+                args: Vec::new(),
+                standalone: None,
+                env: Some(config.env.clone()),
+                buildbox: None,
+            })?;
 
-    let build_id = wait_for_run_ready(
-        &connection,
-        &config.mount_name,
-        &config.package_name,
-        config.startup_timeout,
-    )?;
+            let app_build_id = wait_for_run_ready(
+                &connection,
+                &config.mount_name,
+                &config.package_name,
+                config.startup_timeout,
+                &HashSet::new(),
+            )?;
 
-    Ok((connection, build_id))
+            Ok(StartedApp {
+                connection,
+                app_build_id,
+                cleanup_build_ids: vec![app_build_id],
+            })
+        }
+        TestLaunch::SplashRunItem(target) => {
+            let root_build_id =
+                start_splash_root(&mut connection, &config.mount_name, target, config.startup_timeout)?;
+            let app_build_id = start_splash_child(
+                &mut connection,
+                &config.mount_name,
+                &target.headless_run_item,
+                &target.child_package,
+                config.startup_timeout,
+            )?;
+            Ok(StartedApp {
+                connection,
+                app_build_id,
+                cleanup_build_ids: vec![app_build_id, root_build_id],
+            })
+        }
+    }
 }
 
-fn start_visible_app(config: &TestConfig) -> TestResult<(TestConnection, QueryId)> {
+fn start_visible_app(config: &TestConfig) -> TestResult<StartedApp> {
     let studio_addr = studio_addr_from_env();
     let mount = studio_mount_from_env();
     let mut connection = TestConnection::Remote(StudioRemoteClient::connect(&studio_addr)?);
 
-    clear_existing_visible_builds(
-        &mut connection,
-        &mount,
-        &config.package_name,
-        config.startup_timeout,
-    )?;
+    match &config.launch {
+        TestLaunch::CurrentPackage => {
+            let cleared_builds = clear_existing_visible_builds(
+                &mut connection,
+                &mount,
+                &[config.package_name.as_str()],
+                config.startup_timeout,
+                false,
+            )?;
 
-    let _ = connection.send(ClientToHub::Run {
-        mount: mount.clone(),
-        process: config.package_name.clone(),
-        args: Vec::new(),
-        standalone: None,
-        env: Some(config.env.clone()),
-        buildbox: None,
-    })?;
+            let _ = connection.send(ClientToHub::Run {
+                mount: mount.clone(),
+                process: config.package_name.clone(),
+                args: Vec::new(),
+                standalone: None,
+                env: Some(config.env.clone()),
+                buildbox: None,
+            })?;
 
-    let build_id = wait_for_run_ready(
-        &connection,
-        &mount,
-        &config.package_name,
-        config.startup_timeout,
-    )?;
+            let app_build_id = wait_for_run_ready(
+                &connection,
+                &mount,
+                &config.package_name,
+                config.startup_timeout,
+                &cleared_builds,
+            )?;
 
-    Ok((connection, build_id))
+            Ok(StartedApp {
+                connection,
+                app_build_id,
+                cleanup_build_ids: vec![app_build_id],
+            })
+        }
+        TestLaunch::SplashRunItem(target) => {
+            let cleared_builds = clear_existing_visible_builds(
+                &mut connection,
+                &mount,
+                &[target.root_package.as_str(), target.child_package.as_str()],
+                config.startup_timeout,
+                true,
+            )?;
+            let root_build_id =
+                start_splash_root(&mut connection, &mount, target, config.startup_timeout)?;
+            let app_build_id = start_splash_child_with_ignored_stops(
+                &mut connection,
+                &mount,
+                &target.visible_run_item,
+                &target.child_package,
+                config.startup_timeout,
+                &cleared_builds,
+            )?;
+
+            Ok(StartedApp {
+                connection,
+                app_build_id,
+                cleanup_build_ids: vec![app_build_id, root_build_id],
+            })
+        }
+    }
 }
 
 fn clear_existing_visible_builds(
     connection: &mut TestConnection,
     mount: &str,
-    package: &str,
+    packages: &[&str],
     timeout: Duration,
-) -> TestResult<()> {
-    let _ = connection.send(ClientToHub::ListBuilds)?;
+    include_splash: bool,
+) -> TestResult<HashSet<QueryId>> {
+    let _ = connection.send(if include_splash {
+        ClientToHub::ListBuildsIncludingSplash
+    } else {
+        ClientToHub::ListBuilds
+    })?;
     let builds = wait_for_builds(connection, timeout)?;
+    let mut cleared_build_ids = HashSet::new();
     for build in builds
         .into_iter()
-        .filter(|build| build.mount == mount && build.package == package)
+        .filter(|build| build.mount == mount && packages.iter().any(|package| build.package == *package))
     {
+        cleared_build_ids.insert(build.build_id);
         let _ = connection.send(ClientToHub::ClearBuild {
             build_id: build.build_id,
         })?;
     }
-    Ok(())
+    Ok(cleared_build_ids)
 }
 
 fn wait_for_builds(
@@ -1251,11 +1408,154 @@ fn wait_for_builds(
     }
 }
 
+fn start_splash_root(
+    connection: &mut TestConnection,
+    mount: &str,
+    target: &SplashLaunchTarget,
+    timeout: Duration,
+) -> TestResult<QueryId> {
+    test_debug(format!(
+        "starting splash root `{}` on mount `{mount}`",
+        target.root_package
+    ));
+    let _ = connection.send(ClientToHub::Run {
+        mount: mount.to_string(),
+        process: target.root_package.clone(),
+        args: Vec::new(),
+        standalone: None,
+        env: None,
+        buildbox: None,
+    })?;
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: mount.to_string(),
+        primary: Some(false),
+    })?;
+    wait_for_splash_root_ready(
+        connection,
+        mount,
+        &target.root_package,
+        active_run_item_name(target),
+        timeout,
+    )
+}
+
+fn start_splash_child(
+    connection: &mut TestConnection,
+    mount: &str,
+    run_item_name: &str,
+    child_package: &str,
+    timeout: Duration,
+) -> TestResult<QueryId> {
+    start_splash_child_with_ignored_stops(
+        connection,
+        mount,
+        run_item_name,
+        child_package,
+        timeout,
+        &HashSet::new(),
+    )
+}
+
+fn start_splash_child_with_ignored_stops(
+    connection: &mut TestConnection,
+    mount: &str,
+    run_item_name: &str,
+    child_package: &str,
+    timeout: Duration,
+    ignored_stops: &HashSet<QueryId>,
+) -> TestResult<QueryId> {
+    test_debug(format!(
+        "invoking splash run item `{run_item_name}` on mount `{mount}`"
+    ));
+    let _ = connection.send(ClientToHub::RunItem {
+        mount: mount.to_string(),
+        name: run_item_name.to_string(),
+    })?;
+    wait_for_run_ready(connection, mount, child_package, timeout, ignored_stops)
+}
+
+fn active_run_item_name(target: &SplashLaunchTarget) -> &str {
+    if visible_mode_enabled() {
+        &target.visible_run_item
+    } else {
+        &target.headless_run_item
+    }
+}
+
+fn wait_for_splash_root_ready(
+    connection: &TestConnection,
+    mount: &str,
+    root_package: &str,
+    run_item_name: &str,
+    timeout: Duration,
+    ) -> TestResult<QueryId> {
+    let deadline = Instant::now() + timeout;
+    let mut root_build_id = None;
+    let mut run_item_ready = false;
+    loop {
+        if let Some(build_id) = root_build_id {
+            if run_item_ready {
+                return Ok(build_id);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(TestError::new(format!(
+                "timed out waiting for splash root `{root_package}` to publish `{run_item_name}`"
+            )));
+        }
+        let slice = cmp::min(
+            POLL_INTERVAL,
+            deadline.saturating_duration_since(Instant::now()),
+        );
+        let Some(msg) = connection.recv_timeout(slice) else {
+            continue;
+        };
+        match msg {
+            HubToClient::BuildStarted {
+                build_id,
+                mount: msg_mount,
+                package: msg_package,
+            } if msg_mount == mount && msg_package == root_package => {
+                test_debug(format!(
+                    "splash root build started: mount=`{msg_mount}` package=`{msg_package}` build_id={:?}",
+                    build_id
+                ));
+                root_build_id = Some(build_id);
+            }
+            HubToClient::RunItems { mount: msg_mount, items }
+                if msg_mount == mount
+                    && items.iter().any(|item| item.name == run_item_name) =>
+            {
+                test_debug(format!(
+                    "splash root published run item `{run_item_name}` on mount `{msg_mount}`"
+                ));
+                run_item_ready = true;
+            }
+            HubToClient::BuildStopped { build_id, exit_code }
+                if root_build_id.is_some_and(|root_id| root_id == build_id) =>
+            {
+                let detail = match exit_code {
+                    Some(code) => format!(
+                        "splash root build {build_id:?} exited with code {code} before publishing run items"
+                    ),
+                    None => format!(
+                        "splash root build {build_id:?} exited before publishing run items"
+                    ),
+                };
+                return Err(TestError::new(detail));
+            }
+            HubToClient::Error { message } => return Err(TestError::new(message)),
+            _ => {}
+        }
+    }
+}
+
 fn wait_for_run_ready(
     connection: &TestConnection,
     mount: &str,
     package: &str,
     timeout: Duration,
+    ignored_stops: &HashSet<QueryId>,
 ) -> TestResult<QueryId> {
     let deadline = Instant::now() + timeout;
     let mut build_started = None;
@@ -1285,12 +1585,17 @@ fn wait_for_run_ready(
                 mount: msg_mount,
                 package: msg_package,
             } if msg_mount == mount && msg_package == package => {
+                test_debug(format!(
+                    "child build started: mount=`{msg_mount}` package=`{msg_package}` build_id={:?}",
+                    build_id
+                ));
                 build_started = Some(build_id);
                 if app_started == Some(build_id) {
                     return Ok(build_id);
                 }
             }
             HubToClient::AppStarted { build_id } => {
+                test_debug(format!("child app started: build_id={:?}", build_id));
                 app_started = Some(build_id);
                 if build_started == Some(build_id) {
                     return Ok(build_id);
@@ -1299,7 +1604,7 @@ fn wait_for_run_ready(
             HubToClient::BuildStopped {
                 build_id,
                 exit_code,
-            } => {
+            } if !ignored_stops.contains(&build_id) => {
                 let detail = match exit_code {
                     Some(code) => {
                         format!("build {build_id:?} exited with code {code} before startup")
@@ -1378,7 +1683,7 @@ fn startup_error_is_retryable(err: &TestError) -> bool {
     err.message().contains("before startup")
 }
 
-fn sanitize_path_component(value: &str) -> String {
+pub(crate) fn sanitize_path_component(value: &str) -> String {
     let mut sanitized = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
@@ -1492,6 +1797,16 @@ fn env_duration_ms(name: &str) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
+fn test_debug_enabled() -> bool {
+    std::env::var_os("MAKEPAD_TEST_DEBUG").is_some()
+}
+
+fn test_debug(message: impl AsRef<str>) {
+    if test_debug_enabled() {
+        eprintln!("makepad_test debug: {}", message.as_ref());
+    }
+}
+
 fn now_seconds() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1592,7 +1907,40 @@ mod tests {
                 .join("makepad-example")
                 .join("ui__test")
         );
+        assert_eq!(config.mount_root, PathBuf::from("/tmp/example"));
         assert_eq!(config.env.get("MAKEPAD"), Some(&"headless".to_string()));
+    }
+
+    #[test]
+    fn splash_run_item_config_uses_repo_mount_and_package_artifacts() {
+        let _guard = ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_visible = std::env::var("MAKEPAD_TEST_VISIBLE").ok();
+        std::env::remove_var("MAKEPAD_TEST_VISIBLE");
+        let config = TestConfig::splash_run_item(
+            "/tmp/repo",
+            "/tmp/repo/examples/splash",
+            "makepad-example-splash",
+            "ui::test",
+            "makepad-example-splash",
+            "makepad-example-splash-headless-test",
+        )
+        .unwrap();
+        restore_env_var("MAKEPAD_TEST_VISIBLE", old_visible);
+
+        assert_eq!(config.mount_root, PathBuf::from("/tmp/repo"));
+        assert_eq!(config.manifest_dir, PathBuf::from("/tmp/repo/examples/splash"));
+        assert_eq!(config.package_name, "makepad-example-splash");
+        assert_eq!(
+            config.artifacts_dir,
+            PathBuf::from("/tmp/repo/examples/splash")
+                .join("target")
+                .join("makepad_test")
+                .join("makepad-example-splash")
+                .join("ui__test")
+        );
     }
 
     #[test]

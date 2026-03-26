@@ -1,7 +1,7 @@
 use crate::dispatch::HubEvent;
 use makepad_micro_serde::SerBin;
 use makepad_script_std::makepad_network::{
-    start_http_server, HttpServer, HttpServerRequest, HttpServerResponse, ToUISender,
+    start_http_server_with_addr, HttpServer, HttpServerRequest, HttpServerResponse, ToUISender,
 };
 use makepad_studio_protocol::hub_protocol::{HubToClient, QueryId};
 use std::collections::HashMap;
@@ -33,12 +33,14 @@ pub fn start_http_gateway(
     event_tx: Sender<HubEvent>,
 ) -> Result<GatewayHandle, String> {
     let (request_tx, request_rx) = mpsc::channel::<HttpServerRequest>();
-    let http_thread = start_http_server(HttpServer {
+    let started = start_http_server_with_addr(HttpServer {
         listen_address,
         request: request_tx,
         post_max_size,
     })
     .ok_or_else(|| format!("failed to bind http server at {}", listen_address))?;
+    let listen_address = started.listen_address;
+    let http_thread = started.thread;
 
     let request_thread = std::thread::spawn(move || {
         let mut socket_roles = HashMap::<u64, SocketRole>::new();

@@ -3,6 +3,7 @@
 mod error;
 mod runtime;
 mod selector;
+mod splash;
 mod studio_remote;
 
 pub use error::{IntoTestResult, TestError, TestResult};
@@ -12,6 +13,7 @@ pub use makepad_studio_protocol::{
 pub use makepad_test_macros::makepad_test;
 pub use runtime::{run_with_config, Locator, TestApp, TestConfig, WidgetMatch};
 pub use selector::Selector;
+pub use splash::run_splash_suite;
 
 #[doc(hidden)]
 pub mod __private {

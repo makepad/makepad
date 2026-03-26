@@ -1907,6 +1907,111 @@ fn run_item_reports_script_error_in_hub_run_args() {
 }
 
 #[test]
+fn hidden_run_items_remain_callable() {
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.std\nuse mod.hub\nlet RunItem = {on_run:nil name:\"\" in_studio:true}\nlet Visible = RunItem{name:\"visible\" on_run:fn(){}}\nlet Hidden = RunItem{name:\"hidden-headless\" in_studio:false on_run:fn(){std.println(\"hidden callable\")}}\nhub.set_run_items([Visible Hidden])\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::Run {
+        mount: "repo".to_string(),
+        process: "makepad.splash".to_string(),
+        args: Vec::new(),
+        standalone: None,
+        env: None,
+        buildbox: None,
+    });
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(false),
+    });
+    let run_items = wait_for_message(
+        &connection,
+        Duration::from_secs(5),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.len() == 2),
+    )
+    .expect("did not receive RunItems");
+    match run_items {
+        HubToClient::RunItems { items, .. } => {
+            assert!(items.iter().any(|item| item.name == "visible" && item.in_studio));
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.name == "hidden-headless" && !item.in_studio)
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::ListBuildsIncludingSplash);
+    let builds = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(msg, HubToClient::Builds { .. })
+    })
+    .expect("did not receive splash-inclusive Builds");
+    let splash_build_id = match builds {
+        HubToClient::Builds { builds } => builds
+            .into_iter()
+            .find(|build| build.package == "makepad.splash")
+            .map(|build| build.build_id)
+            .expect("missing splash root build"),
+        _ => unreachable!(),
+    };
+
+    let _ = connection.send(ClientToHub::RunItem {
+        mount: "repo".to_string(),
+        name: "hidden-headless".to_string(),
+    });
+    let _ = drain_messages(&connection, Duration::from_millis(250));
+
+    let query_id = connection.send(ClientToHub::QueryLogs {
+        build_id: Some(splash_build_id),
+        level: None,
+        source: None,
+        file: None,
+        pattern: Some("hidden callable".to_string()),
+        is_regex: None,
+        since_index: None,
+        live: Some(false),
+    });
+    let log_results = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(
+            msg,
+            HubToClient::QueryLogResults {
+                query_id: id, ..
+            } if *id == query_id
+        )
+    })
+    .expect("did not receive hidden child QueryLogResults");
+
+    match log_results {
+        HubToClient::QueryLogResults { entries, done, .. } => {
+            assert!(done);
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.1.message.contains("hidden callable"))
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::StopBuild {
+        build_id: splash_build_id,
+    });
+}
+
+#[test]
 fn splash_runnable_prints_hello() {
     let dir = makepad_studio_hub::test_support::tempdir().unwrap();
     fs::write(
@@ -1988,6 +2093,146 @@ fn splash_runnable_prints_hello() {
         }
         _ => unreachable!(),
     }
+}
+
+#[test]
+fn run_item_package_name_overrides_child_build_package() {
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.hub\nlet RunItem = {on_run:nil name:\"\" package_name:\"\" in_studio:true}\nlet Hidden = RunItem{name:\"hidden-headless\" package_name:\"real-child-package\" in_studio:false on_run:fn(){hub.run({}, \"cargo\", [\"--version\"])}}\nhub.set_run_items([Hidden])\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::Run {
+        mount: "repo".to_string(),
+        process: "makepad.splash".to_string(),
+        args: Vec::new(),
+        standalone: None,
+        env: None,
+        buildbox: None,
+    });
+    let _ = connection.send(ClientToHub::ObserveMount {
+        mount: "repo".to_string(),
+        primary: Some(false),
+    });
+    let _ = wait_for_message(
+        &connection,
+        Duration::from_secs(5),
+        |msg| matches!(msg, HubToClient::RunItems { mount, items } if mount == "repo" && items.len() == 1 && items[0].name == "hidden-headless"),
+    )
+    .expect("did not receive hidden run item");
+
+    let _ = connection.send(ClientToHub::RunItem {
+        mount: "repo".to_string(),
+        name: "hidden-headless".to_string(),
+    });
+
+    let started = wait_for_message(&connection, Duration::from_secs(5), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStarted { mount, package, .. }
+                if mount == "repo" && package == "real-child-package"
+        )
+    })
+    .expect("did not receive child BuildStarted with package override");
+    let build_id = match started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let stopped = wait_for_message(&connection, Duration::from_secs(5), |msg| {
+        matches!(
+            msg,
+            HubToClient::BuildStopped {
+                build_id: id,
+                exit_code: Some(0),
+            } if *id == build_id
+        )
+    });
+    assert!(stopped.is_some(), "did not receive successful child BuildStopped");
+}
+
+#[test]
+fn list_builds_including_splash_reports_root_build() {
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
+    fs::write(
+        dir.path().join("makepad.splash"),
+        "use mod.hub\nhub.set_run_items([{name:\"hello\" in_studio:true on_run:fn(){}}])\n",
+    )
+    .unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let _ = connection.send(ClientToHub::Run {
+        mount: "repo".to_string(),
+        process: "makepad.splash".to_string(),
+        args: Vec::new(),
+        standalone: None,
+        env: None,
+        buildbox: None,
+    });
+
+    let started = wait_for_message(
+        &connection,
+        Duration::from_secs(3),
+        |msg| matches!(msg, HubToClient::BuildStarted { mount, package, .. } if mount == "repo" && package == "makepad.splash"),
+    )
+    .expect("did not receive BuildStarted");
+    let build_id = match started {
+        HubToClient::BuildStarted { build_id, .. } => build_id,
+        _ => unreachable!(),
+    };
+
+    let _ = connection.send(ClientToHub::ListBuilds);
+    let builds = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(msg, HubToClient::Builds { .. })
+    })
+    .expect("did not receive default Builds");
+    match builds {
+        HubToClient::Builds { builds } => {
+            assert!(
+                builds.iter().all(|build| build.package != "makepad.splash"),
+                "default build list should filter splash: {:?}",
+                builds
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::ListBuildsIncludingSplash);
+    let builds = wait_for_message(&connection, Duration::from_secs(3), |msg| {
+        matches!(msg, HubToClient::Builds { .. })
+    })
+    .expect("did not receive splash-inclusive Builds");
+    match builds {
+        HubToClient::Builds { builds } => {
+            assert!(
+                builds
+                    .iter()
+                    .any(|build| build.build_id == build_id && build.package == "makepad.splash")
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    let _ = connection.send(ClientToHub::StopBuild { build_id });
 }
 
 #[test]

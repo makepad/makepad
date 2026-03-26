@@ -20,7 +20,7 @@ use makepad_script_std::makepad_network::ToUISender;
 use makepad_studio_protocol::hub_protocol as backend_proto;
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, EventSample, GCSample, GPUSample, KeyCode, KeyEvent, KeyModifiers,
-    LogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseUp, ScreenshotRequest,
+    LogLevel, MouseButton, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp, ScreenshotRequest,
     StudioToApp, StudioToAppVec, TextInputEvent, WidgetQueryRequest, WidgetSnapshotRequest,
     WidgetTreeDumpRequest,
 };
@@ -951,6 +951,14 @@ impl HubCore {
                     },
                 );
             }
+            ClientToHub::ListBuildsIncludingSplash => {
+                self.send_ui_reply(
+                    client_id,
+                    HubToClient::Builds {
+                        builds: self.list_all_builds(),
+                    },
+                );
+            }
             ClientToHub::RunItem { mount, name } => {
                 let build_id = self.alloc_build_id();
                 if let Err(err) = self
@@ -1263,6 +1271,12 @@ impl HubCore {
                 }
             }
             ClientToHub::Click { build_id, x, y } => {
+                let mouse_move = RemoteMouseMove {
+                    x: x as f64,
+                    y: y as f64,
+                    time: 0.0,
+                    modifiers: RemoteKeyModifiers::default(),
+                };
                 let mouse_down = RemoteMouseDown {
                     button_raw_bits: MouseButton::PRIMARY.bits(),
                     x: x as f64,
@@ -1280,6 +1294,7 @@ impl HubCore {
                 if let Err(err) = self.send_app_msgs(
                     build_id,
                     vec![
+                        StudioToApp::MouseMove(mouse_move),
                         StudioToApp::MouseDown(mouse_down),
                         StudioToApp::MouseUp(mouse_up),
                     ],
@@ -4539,6 +4554,9 @@ mod tests {
             .expect("click payload to app");
         let StudioToAppVec(app_msgs) =
             StudioToAppVec::deserialize_bin(&sent_to_app).expect("decode app payload");
+        assert!(app_msgs
+            .iter()
+            .any(|msg| matches!(msg, StudioToApp::MouseMove(_))));
         assert!(app_msgs
             .iter()
             .any(|msg| matches!(msg, StudioToApp::MouseDown(_))));

@@ -12,7 +12,8 @@ pub mod web_socket_parser;
 pub use makepad_error_log;
 pub use crate::backend::{EventSink, NetworkBackend, UnsupportedBackend};
 pub use crate::http_server::{
-    start_http_server, HttpServer, HttpServerRequest, HttpServerResponse,
+    start_http_server, start_http_server_with_addr, HttpServer, HttpServerRequest,
+    HttpServerResponse, StartedHttpServer,
 };
 pub use crate::runtime::{NetworkConfig, NetworkRuntime};
 pub use crate::socket_stream::SocketStream;

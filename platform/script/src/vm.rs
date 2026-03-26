@@ -173,7 +173,7 @@ impl<'a> ScriptVm<'a> {
     /// Use this when a stack (mes, scopes, loops, calls) is unexpectedly empty,
     /// indicating corrupted bytecode (e.g. from incomplete streaming input).
     /// Sets trap.on to Return(err) so run_core exits cleanly.
-    pub(crate) fn bail(&mut self, msg: &str) {
+    pub fn bail(&mut self, msg: &str) {
         let err = script_err_unexpected!(self.bx.threads.cur_ref().trap, "{}", msg);
         self.bx
             .threads
