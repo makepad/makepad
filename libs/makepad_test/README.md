@@ -2,7 +2,7 @@
 
 `makepad_test` provides UI regression tests for Makepad apps. Rust stays as the host bridge for `cargo test` and the Studio protocol; Splash is the test language for suite authoring.
 
-## Quick Start
+## Quick Start (Splash suite)
 
 Add this to the package under test:
 
@@ -11,7 +11,40 @@ Add this to the package under test:
 makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }
 ```
 
-Create a Rust-hosted test:
+Author the suite in Splash (`tests/ui.splash`) and use a small Rust host (`tests/ui.rs`). In this repo, [examples/splash](../../examples/splash) is the reference layout.
+
+```rust,ignore
+use makepad_test::run_splash_suite;
+
+const SUITE_PATH: &str = "tests/ui.splash";
+
+#[test]
+fn splash_suite() {
+    run_splash_suite(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_MANIFEST_DIR"),
+        module_path!(),
+        SUITE_PATH,
+    )
+    .unwrap();
+}
+```
+
+Run that package’s UI integration test:
+
+```bash
+cargo test -p makepad-example-splash --test ui -- --test-threads=1
+```
+
+Run the curated repo UI suite on macOS (splash example only):
+
+```bash
+tools/run_ui_tests.sh
+```
+
+### Optional: Rust-only tests with `#[makepad_test]`
+
+You can write UI steps in Rust instead of Splash (useful for small harnesses or downstream crates):
 
 ```rust,ignore
 use makepad_test::{makepad_test, Selector, TestApp};
@@ -22,22 +55,17 @@ fn fill_and_submit(app: TestApp) {
         .wait_visible()
         .fill("hello")
         .wait_value("hello");
-    app.press_return();
-    app.locator(Selector::id("status_label"))
-        .wait_text("Returned from singleline: \"hello\"");
 }
 ```
 
-Run a package-local suite with:
+Failure-artifact capture for `run_with_config` is covered by `cargo test -p makepad-test --test artifact_capture`.
+
+### Visible Studio mode
+
+Run the same test visibly inside a running Makepad Studio session:
 
 ```bash
-cargo test -p makepad-example-text-input --test ui -- --test-threads=1
-```
-
-Run the same test visibly inside a running Makepad Studio session with:
-
-```bash
-MAKEPAD_TEST_VISIBLE=1 cargo test -p makepad-example-counter --test ui -- --test-threads=1
+MAKEPAD_TEST_VISIBLE=1 cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
 Visible mode expects Studio to already be running at `127.0.0.1:8001`. Set
@@ -50,35 +78,13 @@ MAKEPAD_TEST_VISIBLE=1 \
 MAKEPAD_TEST_STARTUP_DELAY_MS=1000 \
 MAKEPAD_TEST_ACTION_DELAY_MS=750 \
 MAKEPAD_TEST_KEEP_OPEN_MS=3000 \
-cargo test -p makepad-example-counter --test ui -- --test-threads=1
-```
-
-Run the curated repo UI suites serially on macOS with:
-
-```bash
-tools/run_ui_tests.sh
-```
-
-Create a Splash suite and run it from one Rust stub:
-
-```rust,ignore
-use makepad_test::run_splash_suite;
-
-#[test]
-fn splash_suite() {
-    run_splash_suite(
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_MANIFEST_DIR"),
-        module_path!(),
-        "tests/ui.splash",
-    ).unwrap();
-}
+cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
 ## Surface Area
 
-- `#[makepad_test]` for current-package UI tests
-- `run_splash_suite(...)` for Splash-authored suites
+- `run_splash_suite(...)` for Splash-authored suites (recommended for new work)
+- `#[makepad_test]` for Rust-authored current-package UI tests
 - `TestApp` for app-scoped input, waits, logs, screenshots, and raw protocol forwarding
 - `Selector` for structured snapshot matching
 - `Locator` for strict single-widget interaction and assertions
@@ -129,7 +135,7 @@ The runtime captures:
 ## Current Constraints
 
 - synchronous API only
-- current-package targeting only
+- default launch runs the **current Cargo package** under test; Splash suites may instead use `test.configure({ launch: "splash_run_item", ... })` to drive headless/visible Studio run items when the app is registered that way (see the splash example)
 - milestone-1 repo suite is validated on macOS first
 - no visual diffing or trace viewer yet
 

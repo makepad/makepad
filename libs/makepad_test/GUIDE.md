@@ -13,10 +13,12 @@ examples/splash/
 └── tests/ui.rs
 ```
 
-The Rust stub is intentionally small:
+The Rust stub matches the splash example:
 
 ```rust
 use makepad_test::run_splash_suite;
+
+const SUITE_PATH: &str = "tests/ui.splash";
 
 #[test]
 fn splash_suite() {
@@ -24,7 +26,7 @@ fn splash_suite() {
         env!("CARGO_PKG_NAME"),
         env!("CARGO_MANIFEST_DIR"),
         module_path!(),
-        "tests/ui.splash",
+        SUITE_PATH,
     )
     .unwrap();
 }
@@ -80,7 +82,7 @@ By default, `makepad_test` launches the app headlessly through an in-process hub
 For local debugging, you can switch the same test to a visible Studio-backed run:
 
 ```bash
-MAKEPAD_TEST_VISIBLE=1 cargo test -p makepad-example-counter --test ui -- --test-threads=1
+MAKEPAD_TEST_VISIBLE=1 cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
 Visible mode behavior:
@@ -208,10 +210,16 @@ If a capture step fails, the runtime writes a `*-error.txt` file instead of sile
 
 ## Running Tests
 
-Package-local:
+Package-local (splash example in this repo):
 
 ```bash
-cargo test -p makepad-example-text-input --test ui -- --test-threads=1
+cargo test -p makepad-example-splash --test ui -- --test-threads=1
+```
+
+Harness-level artifact capture (runs against a small example app path inside the `makepad-test` crate):
+
+```bash
+cargo test -p makepad-test --test artifact_capture -- --test-threads=1
 ```
 
 Curated repo suite on macOS:
@@ -220,15 +228,7 @@ Curated repo suite on macOS:
 tools/run_ui_tests.sh
 ```
 
-That runner executes:
-
-- `makepad-example-text-input`
-- `makepad-example-counter`
-- `makepad-example-todo`
-- `makepad-example-floating-panel`
-- `makepad-example-splash`
-
-and prints the artifact directory for each package.
+That runner executes `makepad-example-splash` and prints the artifact directory.
 
 ## Headless Transport
 
@@ -255,14 +255,14 @@ If a Splash case times out or fails to resolve a widget:
 If you need hub-level transport diagnostics:
 
 ```bash
-MAKEPAD_STUDIO_HUB_DEBUG=1 cargo test -p makepad-example-text-input --test ui -- --test-threads=1
+MAKEPAD_STUDIO_HUB_DEBUG=1 cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
 Screenshot capture is intentionally given a longer timeout than normal widget-state queries because PNG encoding and transport cost more than structured snapshot requests.
 
 ## Current Limitations
 
-- current-package execution only
+- default execution targets the **current Cargo package**; optional `splash_run_item` configuration routes through Studio run items instead
 - synchronous API only
 - no visual diffing or trace viewer yet
 - some complex widgets still need more structured state over time

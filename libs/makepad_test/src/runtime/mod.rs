@@ -10,10 +10,9 @@ use makepad_studio_protocol::{
 };
 use std::cell::RefCell;
 use std::cmp;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::fs;
-use std::net::{Ipv4Addr, SocketAddr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -21,10 +20,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(600);
-const ACTION_TIMEOUT: Duration = Duration::from_secs(10);
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(20);
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STARTUP_RETRIES: usize = 2;
 const STARTUP_RETRY_DELAY: Duration = Duration::from_millis(250);
 const DRAG_STEPS: usize = 6;
@@ -32,173 +28,35 @@ const PUMP_TICKS: usize = 3;
 const RECENT_LOG_LINES: usize = 200;
 const DEFAULT_STUDIO_ADDR: &str = "127.0.0.1:8001";
 const DEFAULT_STUDIO_MOUNT: &str = "makepad";
-const SPLASH_RUNNABLE: &str = "makepad.splash";
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn visible_mode_enabled() -> bool {
+    env_truthy("MAKEPAD_TEST_VISIBLE")
+}
+
+fn env_duration_ms(name: &str) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::ZERO)
+}
+
+mod config;
+
+pub use config::{TestConfig, WidgetMatch};
+pub(crate) use config::sanitize_path_component;
+use config::{SplashLaunchTarget, TestLaunch, POLL_INTERVAL};
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-
-#[derive(Clone, Debug)]
-struct SplashLaunchTarget {
-    root_package: String,
-    visible_run_item: String,
-    headless_run_item: String,
-    child_package: String,
-}
-
-#[derive(Clone, Debug)]
-enum TestLaunch {
-    CurrentPackage,
-    SplashRunItem(SplashLaunchTarget),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WidgetMatch {
-    pub raw: String,
-    pub id: String,
-    pub widget_type: String,
-    pub x: i64,
-    pub y: i64,
-    pub width: i64,
-    pub height: i64,
-}
-
-impl WidgetMatch {
-    #[allow(dead_code)]
-    fn parse(line: &str) -> Option<Self> {
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() != 7 {
-            return None;
-        }
-        Some(Self {
-            raw: line.to_string(),
-            id: tokens[1].to_string(),
-            widget_type: tokens[2].to_string(),
-            x: tokens[3].parse().ok()?,
-            y: tokens[4].parse().ok()?,
-            width: tokens[5].parse().ok()?,
-            height: tokens[6].parse().ok()?,
-        })
-    }
-
-    #[allow(dead_code)]
-    fn center(&self) -> (i64, i64) {
-        (self.x + self.width / 2, self.y + self.height / 2)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct TestConfig {
-    pub package_name: String,
-    pub mount_name: String,
-    pub manifest_dir: PathBuf,
-    pub mount_root: PathBuf,
-    pub test_name: String,
-    pub artifacts_dir: PathBuf,
-    pub listen_address: SocketAddr,
-    pub env: HashMap<String, String>,
-    pub startup_timeout: Duration,
-    pub action_timeout: Duration,
-    pub poll_interval: Duration,
-    pub startup_pause: Duration,
-    pub action_delay: Duration,
-    pub keep_open: Duration,
-    launch: TestLaunch,
-}
-
-impl TestConfig {
-    fn new_for_launch(
-        manifest_dir: impl Into<PathBuf>,
-        mount_root: impl Into<PathBuf>,
-        package_name: impl Into<String>,
-        test_name: impl Into<String>,
-        launch: TestLaunch,
-    ) -> TestResult<Self> {
-        let manifest_dir = manifest_dir.into();
-        let mount_root = mount_root.into();
-        let package_name = package_name.into();
-        let test_name = test_name.into();
-        let artifacts_dir = manifest_dir
-            .join("target")
-            .join("makepad_test")
-            .join(sanitize_path_component(&package_name))
-            .join(sanitize_path_component(&test_name));
-
-        let mut env = HashMap::new();
-        if !visible_mode_enabled() {
-            env.insert("MAKEPAD".to_string(), "headless".to_string());
-        }
-        env.insert("RUST_BACKTRACE".to_string(), "1".to_string());
-        env.insert(
-            "CARGO_TARGET_DIR".to_string(),
-            manifest_dir.join("target").to_string_lossy().to_string(),
-        );
-
-        Ok(Self {
-            mount_name: package_name.clone(),
-            package_name,
-            manifest_dir,
-            mount_root,
-            test_name,
-            artifacts_dir,
-            listen_address: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-            env,
-            startup_timeout: STARTUP_TIMEOUT,
-            action_timeout: ACTION_TIMEOUT,
-            poll_interval: POLL_INTERVAL,
-            startup_pause: env_duration_ms("MAKEPAD_TEST_STARTUP_DELAY_MS"),
-            action_delay: env_duration_ms("MAKEPAD_TEST_ACTION_DELAY_MS"),
-            keep_open: env_duration_ms("MAKEPAD_TEST_KEEP_OPEN_MS"),
-            launch,
-        })
-    }
-
-    pub fn new(
-        manifest_dir: impl Into<PathBuf>,
-        package_name: impl Into<String>,
-        test_name: impl Into<String>,
-    ) -> TestResult<Self> {
-        let manifest_dir = manifest_dir.into();
-        Self::new_for_launch(
-            manifest_dir.clone(),
-            manifest_dir,
-            package_name,
-            test_name,
-            TestLaunch::CurrentPackage,
-        )
-    }
-
-    pub fn current_package(
-        manifest_dir: impl Into<PathBuf>,
-        package_name: impl Into<String>,
-        test_name: impl Into<String>,
-    ) -> TestResult<Self> {
-        Self::new(manifest_dir, package_name, test_name)
-    }
-
-    pub fn splash_run_item(
-        mount_root: impl Into<PathBuf>,
-        manifest_dir: impl Into<PathBuf>,
-        package_name: impl Into<String>,
-        test_name: impl Into<String>,
-        visible_run_item: impl Into<String>,
-        headless_run_item: impl Into<String>,
-    ) -> TestResult<Self> {
-        let manifest_dir = manifest_dir.into();
-        let mount_root = mount_root.into();
-        let package_name = package_name.into();
-        Self::new_for_launch(
-            manifest_dir,
-            mount_root,
-            package_name.clone(),
-            test_name,
-            TestLaunch::SplashRunItem(SplashLaunchTarget {
-                root_package: SPLASH_RUNNABLE.to_string(),
-                visible_run_item: visible_run_item.into(),
-                headless_run_item: headless_run_item.into(),
-                child_package: package_name,
-            }),
-        )
-    }
-}
 
 enum TestConnection {
     InProcess(HubConnection),
@@ -1683,18 +1541,6 @@ fn startup_error_is_retryable(err: &TestError) -> bool {
     err.message().contains("before startup")
 }
 
-pub(crate) fn sanitize_path_component(value: &str) -> String {
-    let mut sanitized = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => sanitized.push(ch),
-            ':' | '/' | '\\' | ' ' => sanitized.push('_'),
-            _ => sanitized.push('_'),
-        }
-    }
-    sanitized.trim_matches('_').to_string()
-}
-
 fn selector_resolution_error(message: &str) -> bool {
     message.contains("matched no visible widgets") || message.contains("matched multiple widgets")
 }
@@ -1760,10 +1606,6 @@ fn snapshot_summary(widget: &WidgetSnapshot) -> String {
     fields.join(" ")
 }
 
-fn visible_mode_enabled() -> bool {
-    env_truthy("MAKEPAD_TEST_VISIBLE")
-}
-
 fn studio_addr_from_env() -> String {
     std::env::var("MAKEPAD_TEST_STUDIO")
         .ok()
@@ -1778,23 +1620,6 @@ fn studio_mount_from_env() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_STUDIO_MOUNT.to_string())
-}
-
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
-fn env_duration_ms(name: &str) -> Duration {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::ZERO)
 }
 
 fn test_debug_enabled() -> bool {
