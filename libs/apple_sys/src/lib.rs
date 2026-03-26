@@ -674,6 +674,28 @@ unsafe impl Encode for NSRect {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Debug, Clone)]
+pub struct UIEdgeInsets {
+    pub top: f64,
+    pub left: f64,
+    pub bottom: f64,
+    pub right: f64,
+}
+
+unsafe impl Encode for UIEdgeInsets {
+    fn encode() -> Encoding {
+        let encoding = format!(
+            "{{UIEdgeInsets={}{}{}{}}}",
+            f64::encode().as_str(),
+            f64::encode().as_str(),
+            f64::encode().as_str(),
+            f64::encode().as_str()
+        );
+        unsafe { Encoding::from_str(&encoding) }
+    }
+}
+
 pub const NSURLSessionResponseAllow: u64 = 1;
 
 #[repr(u64)] // NSUInteger

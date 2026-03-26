@@ -308,7 +308,18 @@ impl Window {
         self.main_draw_list.begin_always(cx);
 
         let size = cx.current_pass_size();
-        cx.begin_root_turtle(size, Layout::flow_down());
+
+        // Apply safe area insets as root padding so content doesn't overlap
+        // with notch/Dynamic Island, home indicator, or rounded screen corners.
+        let insets = cx.display_context.safe_area_insets;
+        let mut layout = Layout::flow_down();
+        layout.padding = Inset {
+            left: insets.left,
+            top: insets.top,
+            right: insets.right,
+            bottom: insets.bottom,
+        };
+        cx.begin_root_turtle(size, layout);
 
         self.overlay.begin(cx);
 
@@ -538,6 +549,7 @@ impl Widget for Window {
 
                     // Update the display context if the screen size has changed
                     cx.display_context.screen_size = ev.new_geom.inner_size;
+                    cx.display_context.safe_area_insets = ev.new_geom.safe_area_insets;
                     cx.display_context.updated_on_event_id = cx.event_id();
 
                     cx.widget_action(uid, WindowAction::WindowGeomChange(ev.clone()));
