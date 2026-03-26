@@ -279,6 +279,7 @@ pub struct XrFingerTip {
 #[derive(Clone, Debug)]
 pub struct XrLocalEvent {
     pub finger_tips: SmallVec<[XrFingerTip; 10]>,
+    pub space_transform: Mat4f,
     pub update: XrUpdateEvent,
     pub modifiers: KeyModifiers,
     pub time: f64,
@@ -462,6 +463,7 @@ impl XrLocalEvent {
 
         XrLocalEvent {
             finger_tips,
+            space_transform: *mat,
             modifiers: Default::default(),
             time: e.state.time,
             update: e.clone(),

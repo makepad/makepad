@@ -255,18 +255,8 @@ fn physics_worker_loop(
                         body_spawn.spawn.linvel,
                         body_spawn.spawn.angvel,
                     ) {
-                        crate::log!(
-                            "XrPhysicsWorker: applied body spawn uid {} query_key {}",
-                            body_spawn.spawn.widget_uid.0,
-                            query_key
-                        );
                         depth_mesh.clear_query(query_key);
                         retained_hits.remove(&query_key);
-                    } else {
-                        crate::log!(
-                            "XrPhysicsWorker: failed body spawn uid {}",
-                            body_spawn.spawn.widget_uid.0
-                        );
                     }
                     applied_spawn = true;
                 }

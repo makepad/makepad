@@ -746,10 +746,12 @@ impl Cx {
             };
 
             if let Some(sub_list_id) = kind_tag {
+                let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
+                let mut child_zbias = 0.0f32;
                 self.headless_render_view(
                     draw_pass_id,
                     sub_list_id,
-                    zbias,
+                    if child_resets_zbias { &mut child_zbias } else { zbias },
                     zbias_step,
                     render_threads,
                     parallel_min_tris,
