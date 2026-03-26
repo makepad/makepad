@@ -1123,6 +1123,15 @@ pub struct MTLViewport {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct MTLScissorRect {
+    pub x: u64,
+    pub y: u64,
+    pub width: u64,
+    pub height: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct CGSize {
     pub width: f64,
     pub height: f64,

@@ -813,6 +813,28 @@ impl Cx {
             }]
         };
 
+        // Set a scissor rect to clip rendering to the safe content area,
+        // preventing stray geometry (e.g., SVG tessellation artifacts) from
+        // rendering in the system-reserved safe area inset zones.
+        // The safe area background is filled by the pass's clear color.
+        let insets = &self.display_context.safe_area_insets;
+        if insets.top > 0.0 || insets.bottom > 0.0 || insets.left > 0.0 || insets.right > 0.0 {
+            let scissor_x = (insets.left * dpi_factor) as u64;
+            let scissor_y = (insets.top * dpi_factor) as u64;
+            let scissor_w = ((pass_rect.size.x - insets.left - insets.right) * dpi_factor) as u64;
+            let scissor_h = ((pass_rect.size.y - insets.top - insets.bottom) * dpi_factor) as u64;
+            if scissor_w > 0 && scissor_h > 0 {
+                let () = unsafe {
+                    msg_send![encoder, setScissorRect: MTLScissorRect {
+                        x: scissor_x,
+                        y: scissor_y,
+                        width: scissor_w,
+                        height: scissor_h,
+                    }]
+                };
+            }
+        }
+
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
 
