@@ -1,7 +1,7 @@
 use crate::xr_node::{xr_widget_world_transform, XrNode};
 use crate::*;
 use makepad_widgets::event::XrFingerTip;
-use std::cell::Cell;
+use std::{cell::Cell, rc::Rc};
 
 script_mod! {
     use mod.pod.*
@@ -28,8 +28,14 @@ script_mod! {
         }
     }
 
+    let XrViewMode = set_type_default() do #(XrViewMode::script_api(vm))
+    mod.widgets.XrViewMode = XrViewMode
+
     mod.widgets.XrViewBase = #(XrView::register_widget(vm))
     mod.widgets.XrView = set_type_default() do mod.widgets.XrViewBase{
+        mode: XrViewMode.World
+        wrist_left: true
+        show_in_non_xr: false
         pixel_scale: 0.0004
         dpi_factor: 3.0
         logical_size: vec2(320, 400)
@@ -62,6 +68,19 @@ struct XrPanelRayHit {
     touch_z: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]
+pub enum XrViewMode {
+    #[pick]
+    World,
+    StuckToWrist,
+}
+
+impl Default for XrViewMode {
+    fn default() -> Self {
+        Self::World
+    }
+}
+
 #[derive(Script, WidgetRef, WidgetRegister)]
 pub struct XrView {
     #[uid] uid: WidgetUid,
@@ -72,6 +91,9 @@ pub struct XrView {
 
     // 3D placement
     #[deref] node: XrNode,
+    #[live] mode: XrViewMode,
+    #[live(true)] wrist_left: bool,
+    #[live(false)] show_in_non_xr: bool,
 
     // Panel rendering
     #[live(vec2(320.0, 400.0))] logical_size: Vec2d,
@@ -84,16 +106,195 @@ pub struct XrView {
     // 2D children
     #[rust] child_widgets: Vec<(LiveId, WidgetRef)>,
     #[rust] finger_cursor: Option<XrFingerCursor>,
+    #[rust] last_xr_state: Option<Rc<XrState>>,
+    #[rust] world_pose_override: Option<Pose>,
 }
 
 impl XrView {
     const XR_CURSOR_HOVER_FRONT: f32 = 96.0;
-    const XR_CURSOR_HOVER_BACK: f32 = -48.0;
     const XR_CURSOR_SIZE_NEAR: f64 = 30.0;
     const XR_CURSOR_SIZE_FAR: f64 = 16.0;
+    const FACE_PANEL_DISTANCE: f32 = 0.46;
+    const FACE_PANEL_VERTICAL_OFFSET: f32 = -0.10;
+    const WRIST_PANEL_SURFACE_OFFSET: f32 = 0.038;
+    const WRIST_PANEL_ALONG_HAND_OFFSET: f32 = -0.010;
+    const WRIST_PANEL_FACE_CULL_DOT: f32 = 0.0;
 
     pub(crate) fn node(&self) -> &XrNode {
         &self.node
+    }
+
+    fn scaled_pose_matrix(&self, pose: Pose) -> Mat4f {
+        Mat4f::mul(
+            &pose.to_mat4(),
+            &Mat4f::nonuniform_scaled_translation(
+                vec3(self.node.scale().x, self.node.scale().y, self.node.scale().z),
+                vec3(0.0, 0.0, 0.0),
+            ),
+        )
+    }
+
+    fn direct_world_transform(&self) -> Mat4f {
+        self.world_pose_override
+            .map(|pose| self.scaled_pose_matrix(pose))
+            .unwrap_or_else(|| self.node.local_transform())
+    }
+
+    fn event_space_transform(&self, event_space_world: &Mat4f) -> Mat4f {
+        if let Some(pose) = self.world_pose_override {
+            Mat4f::mul(&event_space_world.invert(), &self.scaled_pose_matrix(pose))
+        } else {
+            self.node.local_transform()
+        }
+    }
+
+    fn resolved_world_transform(&self, cx: &mut Cx3d, scope: &mut Scope) -> Mat4f {
+        if let Some(runtime_body) = xr_runtime_body_from_scope(scope, self.uid) {
+            Mat4f::mul(
+                &runtime_body.pose.to_mat4(),
+                &Mat4f::nonuniform_scaled_translation(
+                    vec3(runtime_body.scale.x, runtime_body.scale.y, runtime_body.scale.z),
+                    vec3(0.0, 0.0, 0.0),
+                ),
+            )
+        } else if let Some(pose) = self.world_pose_override {
+            self.scaled_pose_matrix(pose)
+        } else {
+            xr_widget_world_transform(cx, scope, self.uid, &self.node)
+        }
+    }
+
+    fn xr_flat_forward(orientation: Quat) -> Vec3f {
+        let mut forward = orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        forward.y = 0.0;
+        if forward.length() <= 1.0e-6 {
+            vec3f(0.0, 0.0, -1.0)
+        } else {
+            forward.normalize()
+        }
+    }
+
+    fn front_of_face_pose(state: &XrState) -> Pose {
+        let forward = Self::xr_flat_forward(state.head_pose.orientation);
+        Pose {
+            position: state.head_pose.position
+                + forward.scale(Self::FACE_PANEL_DISTANCE)
+                + vec3f(0.0, Self::FACE_PANEL_VERTICAL_OFFSET, 0.0),
+            orientation: Quat::look_rotation(forward.scale(-1.0), vec3f(0.0, 1.0, 0.0)),
+        }
+    }
+
+    fn look_rotation_with_up(forward: Vec3f, preferred_up: Vec3f) -> Quat {
+        let forward = if forward.length() > 1.0e-6 {
+            forward.normalize()
+        } else {
+            vec3f(0.0, 0.0, -1.0)
+        };
+        let mut up = preferred_up - forward.scale(preferred_up.dot(forward));
+        if up.length() <= 1.0e-6 {
+            up = vec3f(0.0, 1.0, 0.0) - forward.scale(forward.y);
+        }
+        if up.length() <= 1.0e-6 {
+            up = vec3f(1.0, 0.0, 0.0);
+        } else {
+            up = up.normalize();
+        }
+        Quat::look_rotation(forward, up)
+    }
+
+    fn wrist_view_pose(&self, state: &XrState) -> Option<(Pose, bool)> {
+        let hand = if self.wrist_left {
+            &state.left_hand
+        } else {
+            &state.right_hand
+        };
+        if !hand.in_view() {
+            return None;
+        }
+
+        let wrist_pose = hand.joints[XrHand::WRIST];
+        let wrist = wrist_pose.position;
+        let along_hand = hand.joints[XrHand::CENTER].position - wrist;
+        if along_hand.length() <= 1.0e-5 {
+            return None;
+        }
+
+        let across_hand = if self.wrist_left {
+            hand.joints[XrHand::INDEX_BASE].position - hand.joints[XrHand::LITTLE_BASE].position
+        } else {
+            hand.joints[XrHand::LITTLE_BASE].position - hand.joints[XrHand::INDEX_BASE].position
+        };
+        if across_hand.length() <= 1.0e-5 {
+            return None;
+        }
+
+        let along_hand = along_hand.normalize();
+        let palm_side = Vec3f::cross(across_hand.normalize(), along_hand);
+        if palm_side.length() <= 1.0e-5 {
+            return None;
+        }
+        let palm_side = palm_side.normalize();
+
+        let mut wrist_surface_dir = wrist_pose.orientation.rotate_vec3(&vec3f(0.0, 1.0, 0.0));
+        if wrist_surface_dir.dot(palm_side) < 0.0 {
+            wrist_surface_dir = wrist_surface_dir.scale(-1.0);
+        }
+        wrist_surface_dir = wrist_surface_dir.normalize();
+
+        let mut wrist_up = wrist_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        if wrist_up.dot(along_hand) < 0.0 {
+            wrist_up = wrist_up.scale(-1.0);
+        }
+        wrist_up = wrist_up.normalize();
+
+        let wrist_surface_dir = wrist_surface_dir.scale(-1.0);
+
+        let position = wrist
+            + wrist_surface_dir.scale(Self::WRIST_PANEL_SURFACE_OFFSET)
+            + wrist_up.scale(Self::WRIST_PANEL_ALONG_HAND_OFFSET);
+        let pose = Pose::new(
+            Self::look_rotation_with_up(wrist_surface_dir, wrist_up),
+            position,
+        );
+        let to_head = state.head_pose.position - position;
+        let visible = to_head.length() > 1.0e-5
+            && wrist_surface_dir.dot(to_head.normalize()) >= Self::WRIST_PANEL_FACE_CULL_DOT;
+        Some((pose, visible))
+    }
+
+    fn sync_mode_pose_from_state(&mut self, cx: &mut Cx, state: &XrState) {
+        if self.mode != XrViewMode::StuckToWrist {
+            return;
+        }
+        let (world_pose_override, visible) = if let Some((pose, visible)) = self.wrist_view_pose(state) {
+            (Some(pose), visible)
+        } else {
+            (self.world_pose_override, false)
+        };
+        self.world_pose_override = world_pose_override;
+        if !visible {
+            self.finger_cursor = None;
+        }
+        self.node.set_visible(cx, visible);
+    }
+
+    fn sync_non_xr_visibility(&mut self, cx: &mut Cx) {
+        if !self.show_in_non_xr {
+            return;
+        }
+        if self.mode == XrViewMode::StuckToWrist {
+            self.world_pose_override = None;
+        }
+        self.node.set_visible(cx, true);
+    }
+
+    fn move_in_front_of_face_now(&mut self, cx: &mut Cx) -> bool {
+        let Some(state) = self.last_xr_state.as_deref() else {
+            return false;
+        };
+        self.world_pose_override = Some(Self::front_of_face_pose(state));
+        self.redraw(cx);
+        true
     }
 
     fn panel_matrix(&self, world_transform: Mat4f) -> Mat4f {
@@ -169,7 +370,7 @@ impl XrView {
         if !self.node.visible() {
             return false;
         }
-        let hit_mat = self.hit_matrix(self.node.local_transform());
+        let hit_mat = self.hit_matrix(self.direct_world_transform());
         Self::panel_ray_hit(&hit_mat, ray_origin, ray_dir, 0.0)
             .is_some_and(|hit| self.contains_local(hit.projected))
     }
@@ -178,17 +379,17 @@ impl XrView {
         if !self.contains_local(hit.projected) {
             return None;
         }
-        if hit.cursor_depth > Self::XR_CURSOR_HOVER_FRONT || hit.cursor_depth < Self::XR_CURSOR_HOVER_BACK {
+        let distance = hit.cursor_depth.abs();
+        if distance > Self::XR_CURSOR_HOVER_FRONT {
             return None;
         }
-        let distance = hit.cursor_depth.abs().min(Self::XR_CURSOR_HOVER_FRONT);
-        let proximity = 1.0 - (distance / Self::XR_CURSOR_HOVER_FRONT);
+        let proximity = 1.0 - (distance.min(Self::XR_CURSOR_HOVER_FRONT) / Self::XR_CURSOR_HOVER_FRONT);
         let size =
             Self::XR_CURSOR_SIZE_FAR + (Self::XR_CURSOR_SIZE_NEAR - Self::XR_CURSOR_SIZE_FAR) * proximity as f64;
         Some(XrFingerCursor {
             pos: dvec2(hit.projected.x as f64, hit.projected.y as f64),
             size,
-            depth: hit.cursor_depth,
+            depth: distance,
             is_left,
         })
     }
@@ -251,12 +452,72 @@ impl WidgetNode for XrView {
 }
 
 impl Widget for XrView {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(set_visible) {
+            let mut visible = self.node.visible();
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                visible = vm.bx.heap.cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+            }
+            vm.with_cx_mut(|cx| {
+                self.node.set_visible(cx, visible);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(visible));
+        }
+        if method == live_id!(toggle_visible) {
+            let visible = !self.node.visible();
+            vm.with_cx_mut(|cx| {
+                self.node.set_visible(cx, visible);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(visible));
+        }
+        if method == live_id!(visible) {
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(self.node.visible()));
+        }
+        if method == live_id!(move_in_front_of_face) {
+            let moved = vm.with_cx_mut(|cx| self.move_in_front_of_face_now(cx));
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(moved));
+        }
+        if method == live_id!(show_in_front_of_face) {
+            let moved = vm.with_cx_mut(|cx| {
+                let moved = self.move_in_front_of_face_now(cx);
+                self.node.set_visible(cx, true);
+                moved
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(moved));
+        }
+        if method == live_id!(toggle_visible_in_front_of_face) {
+            let visible = vm.with_cx_mut(|cx| {
+                let visible = !self.node.visible();
+                if visible {
+                    let _ = self.move_in_front_of_face_now(cx);
+                }
+                self.node.set_visible(cx, visible);
+                visible
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(visible));
+        }
+        let _ = args;
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::XrUpdate(update) = event {
+            self.last_xr_state = Some(update.state.clone());
+            self.sync_mode_pose_from_state(cx, &update.state);
+        } else if !cx.in_xr_mode() {
+            self.sync_non_xr_visibility(cx);
+        }
         if !self.node.visible() && event.requires_visibility() { return; }
 
         // Forward XrLocal events — transform finger tips to panel-local 2D coords
         if let Event::XrLocal(xr_event) = event {
-            let world_transform = self.node.local_transform();
+            let world_transform = self.event_space_transform(&xr_event.space_transform);
             let hit_mat = self.hit_matrix(world_transform);
             let mut local_tips = SmallVec::new();
             let mut finger_cursor = None;
@@ -292,12 +553,13 @@ impl Widget for XrView {
                             finger_cursor = Some(candidate);
                         }
                     }
+                    let touch_depth = hit.touch_z.abs();
                     local_tips.push(XrFingerTip {
                         index: tip.index,
                         is_left: tip.is_left,
-                        pos: vec3f(hit.projected.x, hit.projected.y, hit.touch_z),
+                        pos: vec3f(hit.projected.x, hit.projected.y, touch_depth),
                         ray_dir: vec3f(0.0, 0.0, -1.0),
-                        touch_z: hit.touch_z,
+                        touch_z: touch_depth,
                         handled: Cell::new(Area::Empty),
                     });
                 }
@@ -305,6 +567,7 @@ impl Widget for XrView {
             self.finger_cursor = finger_cursor;
             let local_event = XrLocalEvent {
                 finger_tips: local_tips,
+                space_transform: Mat4f::identity(),
                 update: xr_event.update.clone(),
                 modifiers: xr_event.modifiers,
                 time: xr_event.time,
@@ -336,7 +599,7 @@ impl Widget for XrView {
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
         if !self.node.visible() { return DrawStep::done(); }
 
-        let world_transform = xr_widget_world_transform(cx, scope, self.uid, &self.node);
+        let world_transform = self.resolved_world_transform(cx, scope);
         let matrix = self.panel_matrix(world_transform);
 
         // Draw 2D children into a DrawList2d with the panel transform
@@ -344,6 +607,7 @@ impl Widget for XrView {
         let previous_dpi = cx2d.current_dpi_factor();
         cx2d.set_current_pass_dpi_factor(self.dpi_factor.max(1.0));
 
+        self.draw_list.set_reset_zbias(cx2d.cx, true);
         self.draw_list.begin_always(cx2d);
         self.draw_list.set_view_transform(cx2d, &matrix);
         let size = dvec2(self.logical_size.x.max(1.0), self.logical_size.y.max(1.0));

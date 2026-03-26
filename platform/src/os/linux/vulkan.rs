@@ -5267,12 +5267,14 @@ impl CxVulkan {
                 .kind
                 .sub_list()
             {
+                let child_resets_zbias = cx.draw_lists[sub_list_id].reset_zbias;
+                let mut child_zbias = 0.0f32;
                 self.record_draw_list(
                     cx,
                     draw_pass_id,
                     sub_list_id,
                     render_pass_key,
-                    zbias,
+                    if child_resets_zbias { &mut child_zbias } else { zbias },
                     zbias_step,
                     draw_stats,
                     xr_depth_view,

@@ -176,10 +176,12 @@ impl Cx {
                 .kind
                 .sub_list()
             {
+                let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
+                let mut child_zbias = 0.0f32;
                 self.render_view(
                     draw_pass_id,
                     sub_list_id,
-                    zbias,
+                    if child_resets_zbias { &mut child_zbias } else { zbias },
                     zbias_step,
                     encoder,
                     metal_cx,

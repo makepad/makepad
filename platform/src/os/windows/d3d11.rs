@@ -125,7 +125,15 @@ impl Cx {
                 .kind
                 .sub_list()
             {
-                self.render_view(pass_id, sub_list_id, zbias, zbias_step, d3d11_cx);
+                let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
+                let mut child_zbias = 0.0f32;
+                self.render_view(
+                    pass_id,
+                    sub_list_id,
+                    if child_resets_zbias { &mut child_zbias } else { zbias },
+                    zbias_step,
+                    d3d11_cx,
+                );
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];

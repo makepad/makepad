@@ -2,12 +2,13 @@ use crate::makepad_math::{vec3, Vec3f};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex, OnceLock, RwLock,
     },
 };
 
 const XR_DEPTH_QUERY_MAX_PENDING: usize = 256;
+pub const XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ChunkKey {
@@ -227,6 +228,7 @@ pub struct XrDepthMeshStore {
     state: Arc<RwLock<XrDepthMeshState>>,
     queries: Arc<Mutex<XrDepthMeshQueryState>>,
     mesh_enabled: Arc<AtomicBool>,
+    voxel_size_meters_bits: Arc<AtomicU32>,
 }
 
 impl Default for XrDepthMeshStore {
@@ -235,11 +237,29 @@ impl Default for XrDepthMeshStore {
             state: Arc::new(RwLock::new(XrDepthMeshState::default())),
             queries: Arc::new(Mutex::new(XrDepthMeshQueryState::default())),
             mesh_enabled: Arc::new(AtomicBool::new(false)),
+            voxel_size_meters_bits: Arc::new(AtomicU32::new(
+                XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS.to_bits(),
+            )),
         }
     }
 }
 
 impl XrDepthMeshStore {
+    pub fn set_voxel_size_meters(&self, voxel_size_meters: f32) -> f32 {
+        let voxel_size_meters = voxel_size_meters.clamp(0.03, 0.10);
+        let previous = self
+            .voxel_size_meters_bits
+            .swap(voxel_size_meters.to_bits(), Ordering::AcqRel);
+        if previous != voxel_size_meters.to_bits() {
+            self.clear();
+        }
+        voxel_size_meters
+    }
+
+    pub fn voxel_size_meters(&self) -> f32 {
+        f32::from_bits(self.voxel_size_meters_bits.load(Ordering::Acquire))
+    }
+
     pub fn set_mesh_enabled(&self, enabled: bool) {
         let was_enabled = self.mesh_enabled.swap(enabled, Ordering::AcqRel);
         if was_enabled && !enabled {
