@@ -399,15 +399,15 @@ impl CxOpenXr {
             }
         }
 
-        let display_refresh_rate_ext = "XR_FB_display_refresh_rate\0";
-        if has_extension(display_refresh_rate_ext) {
-            exts_needed.push(display_refresh_rate_ext);
-        } else {
-            crate::warning!("OpenXR display refresh rate extension unavailable on this runtime");
-        }
-
         #[cfg(use_vulkan)]
         {
+            let display_refresh_rate_ext = "XR_FB_display_refresh_rate\0";
+            if has_extension(display_refresh_rate_ext) {
+                exts_needed.push(display_refresh_rate_ext);
+            } else {
+                crate::warning!("OpenXR display refresh rate extension unavailable on this runtime");
+            }
+
             if !has_extension("XR_KHR_vulkan_enable2\0") {
                 return Err(
                     "OpenXR Vulkan: XR_KHR_vulkan_enable2 is required on this Quest path"
