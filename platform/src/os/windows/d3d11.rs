@@ -602,7 +602,7 @@ impl Cx {
                     CxDrawShaderCode::Combined { code } => CxOsDrawShader::new(
                         d3d11_cx,
                         code,
-                        cache_dir.as_deref(),
+                        cache_dir,
                         &cx_shader.mapping,
                         &cx_shader.mapping.uniform_buffer_bindings,
                     ),
@@ -1802,13 +1802,24 @@ impl DrawVars {
     }
 }
 
-fn shader_cache_dir() -> Option<std::path::PathBuf> {
-    let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
-    let path = std::path::PathBuf::from(local_app_data)
-        .join("makepad")
-        .join("d3d11_shader_cache");
-    std::fs::create_dir_all(&path).ok()?;
-    Some(path)
+fn shader_cache_dir() -> Option<&'static std::path::Path> {
+    use std::sync::OnceLock;
+    use windows::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
+    };
+
+    static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let path_ptr = unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None) }.ok()?;
+        let path_str = unsafe { path_ptr.to_string().ok() };
+        unsafe { CoTaskMemFree(Some(path_ptr.as_ptr() as _)) };
+        let path = std::path::PathBuf::from(path_str?)
+            .join("makepad")
+            .join("d3d11_shader_cache");
+        std::fs::create_dir_all(&path).ok()?;
+        Some(path)
+    }).as_deref()
 }
 
 #[derive(Clone)]
