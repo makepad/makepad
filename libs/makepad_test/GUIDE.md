@@ -220,6 +220,12 @@ Package-local (splash example in this repo):
 cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
+Per-case progress: `run_splash_suite` writes lines like `[makepad_test] splash case 1/3: …` and `… ok (12.34s)` to **stderr** for each `test.case`, plus **`splash: app ready`** (time before any case — hub, Cargo build, launch), **`splash suite: N cases ran`** (Splash bodies only), and **`splash: total`** (startup + cases + teardown). The number **`cargo test` prints at the end** (`finished in XXs`) is close to **`splash: total`** and is **not** the same as summing per-case lines — startup and teardown happen outside the case loop. Cargo hides this for passing tests unless you pass **`--show-output`** (show all test output) or **`--nocapture`** (do not capture stdout/stderr):
+
+```bash
+cargo test -p makepad-example-splash --test ui -- --test-threads=1 --show-output
+```
+
 Harness-level artifact capture (runs against a small example app path inside the `makepad-test` crate):
 
 ```bash

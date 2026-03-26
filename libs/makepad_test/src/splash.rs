@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SplashLaunch {
@@ -284,12 +284,57 @@ pub fn run_splash_suite(
         format!("{module_path}::splash_suite")
     };
     let config = runner.test_config(package_name, &suite_test_name)?;
-    run_with_config(config, |app| -> TestResult<()> {
-        for case_name in &case_names {
-            runner.run_case(case_name, app.clone())?;
+    let wall = Instant::now();
+    let result = run_with_config(config, |app| -> TestResult<()> {
+        eprintln!(
+            "[makepad_test] splash: app ready after {:.2}s (hub + build + launch; not part of case timings below)",
+            wall.elapsed().as_secs_f64()
+        );
+        let session_start = Instant::now();
+        let total = case_names.len();
+        for (index, case_name) in case_names.iter().enumerate() {
+            eprintln!(
+                "[makepad_test] splash case {}/{}: {} …",
+                index + 1,
+                total,
+                case_name
+            );
+            let case_start = Instant::now();
+            match runner.run_case(case_name, app.clone()) {
+                Ok(()) => {
+                    eprintln!(
+                        "[makepad_test] splash case {}/{}: {} ok ({:.2}s)",
+                        index + 1,
+                        total,
+                        case_name,
+                        case_start.elapsed().as_secs_f64()
+                    );
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[makepad_test] splash case {}/{}: {} FAILED after {:.2}s — {}",
+                        index + 1,
+                        total,
+                        case_name,
+                        case_start.elapsed().as_secs_f64(),
+                        err.message()
+                    );
+                    return Err(err);
+                }
+            }
         }
+        eprintln!(
+            "[makepad_test] splash suite: {} cases ran in {:.2}s (Splash `test.case` bodies only)",
+            total,
+            session_start.elapsed().as_secs_f64()
+        );
         Ok(())
-    })
+    });
+    eprintln!(
+        "[makepad_test] splash: total {:.2}s (startup + case bodies + teardown — explains cargo test wall time vs case sum)",
+        wall.elapsed().as_secs_f64()
+    );
+    result
 }
 
 fn install_test_script_module(vm: &mut ScriptVm) {

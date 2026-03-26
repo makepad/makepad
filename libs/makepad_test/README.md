@@ -36,6 +36,8 @@ Run that package’s UI integration test:
 cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
+Add `--show-output` to print per-case `[makepad_test] splash case …` lines (timings and summary) from `run_splash_suite`.
+
 One `cargo test` harness starts **one** app session for the whole Splash file: every `test.case` runs in order in the same process (fast). Failure artifacts go under a suite-level name (`splash_suite` or `{module_path}::splash_suite`); see [GUIDE.md](./GUIDE.md).
 
 Run the curated repo UI suite on macOS (splash example only):
