@@ -230,6 +230,12 @@ impl XrRoot {
         visible
     }
 
+    fn set_depth_voxel_size(&mut self, cx: &mut Cx, voxel_size_meters: f32) -> f32 {
+        let voxel_size_meters = cx.xr_depth_mesh().set_voxel_size_meters(voxel_size_meters);
+        self.env.reset_physics(cx);
+        voxel_size_meters
+    }
+
     fn permissions_ui_visible(&self) -> bool {
         self.permissions_widget
             .borrow::<XrPermissionsFlow>()
@@ -313,6 +319,7 @@ impl XrRoot {
         }
         let xr_event = Event::XrLocal(XrLocalEvent {
             finger_tips,
+            space_transform: Mat4f::identity(),
             update: Self::desktop_xr_update_event(time),
             modifiers,
             time,
@@ -759,6 +766,24 @@ impl Widget for XrRoot {
                 self.depth_query_hits_visible(),
             ));
         }
+        if method == live_id!(set_depth_voxel_size) || method == live_id!(set_depth_resolution) {
+            let mut voxel_size_meters = vm.cx().xr_depth_mesh().voxel_size_meters();
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                    voxel_size_meters = value as f32;
+                }
+            }
+            vm.with_cx_mut(|cx| {
+                voxel_size_meters = self.set_depth_voxel_size(cx, voxel_size_meters);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_f64(voxel_size_meters as f64));
+        }
+        if method == live_id!(depth_voxel_size) || method == live_id!(depth_resolution) {
+            return ScriptAsyncResult::Return(ScriptValue::from_f64(
+                vm.cx().xr_depth_mesh().voxel_size_meters() as f64,
+            ));
+        }
         if method == live_id!(set_render_scale) || method == live_id!(set_xr_render_scale) {
             let mut scale = vm.cx().xr_render_scale().unwrap_or(1.4) as f32;
             if let Some(args_obj) = args.as_object() {
@@ -872,10 +897,6 @@ impl Widget for XrRoot {
                 let Some(body_spawn) = widget_action.action.downcast_ref::<XrBodySpawn>() else {
                     continue;
                 };
-                crate::log!(
-                    "XrRoot: forwarding body spawn uid {}",
-                    body_spawn.widget_uid.0
-                );
                 self.env.spawn_body(cx, *body_spawn);
             }
             if actions.iter().any(|action| {
