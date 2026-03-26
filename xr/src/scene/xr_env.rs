@@ -241,7 +241,7 @@ pub struct XrEnv {
     // Physics (moved from XrScene)
     #[live(9.81)]
     pub gravity: f32,
-    #[rust(1.0)]
+    #[rust(0.25)]
     physics_time_scale: f32,
     #[rust]
     physics_worker: Option<XrPhysicsWorker>,

@@ -158,6 +158,8 @@ pub struct XrNode {
     restitution: f32,
     #[rust]
     script_async: ScriptAsyncCalls,
+    #[new]
+    draw_list: DrawList,
     #[rust]
     children: ComponentMap<LiveId, WidgetRef>,
     #[rust]
@@ -514,6 +516,8 @@ impl Widget for XrNode {
             None => return DrawStep::done(),
         };
         let world_transform = xr_widget_world_transform(cx, scope, self.uid, self);
+        self.draw_list.set_reset_zbias(cx.cx, true);
+        self.draw_list.begin_always(cx);
         let previous_world = cx.set_scene_world_transform_3d(world_transform);
         let mut draw_order_entries = Vec::new();
 
@@ -546,6 +550,7 @@ impl Widget for XrNode {
         if let Some(previous_world) = previous_world {
             let _ = cx.set_scene_world_transform_3d(previous_world);
         }
+        self.draw_list.end(cx);
 
         DrawStep::done()
     }
