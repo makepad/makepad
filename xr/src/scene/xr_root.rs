@@ -38,17 +38,28 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Clone)]
 pub struct XrCamera {
-    #[live(28.0)] pub fov_y: f32,
-    #[live(3.4)] pub distance: f32,
-    #[live(0.05)] pub near: f32,
-    #[live(200.0)] pub far: f32,
-    #[live(0.25)] pub distance_min: f32,
-    #[live(30.0)] pub distance_max: f32,
-    #[live(0.08)] pub wheel_zoom_step: f32,
-    #[rust(0.0)] pub orbit_yaw: f32,
-    #[rust(0.0)] pub orbit_pitch: f32,
-    #[rust] pub orbit_last_abs: Option<DVec2>,
-    #[rust] pub viewport_rect: Option<Rect>,
+    #[live(28.0)]
+    pub fov_y: f32,
+    #[live(3.4)]
+    pub distance: f32,
+    #[live(0.05)]
+    pub near: f32,
+    #[live(200.0)]
+    pub far: f32,
+    #[live(0.25)]
+    pub distance_min: f32,
+    #[live(30.0)]
+    pub distance_max: f32,
+    #[live(0.08)]
+    pub wheel_zoom_step: f32,
+    #[rust(0.0)]
+    pub orbit_yaw: f32,
+    #[rust(0.0)]
+    pub orbit_pitch: f32,
+    #[rust]
+    pub orbit_last_abs: Option<DVec2>,
+    #[rust]
+    pub viewport_rect: Option<Rect>,
 }
 
 impl Default for XrCamera {
@@ -71,7 +82,9 @@ impl Default for XrCamera {
 
 impl XrCamera {
     pub fn desktop_scene_state(&self, viewport_rect: Rect, time: f64) -> Option<SceneState3D> {
-        if viewport_rect.size.x <= 1.0 || viewport_rect.size.y <= 1.0 { return None; }
+        if viewport_rect.size.x <= 1.0 || viewport_rect.size.y <= 1.0 {
+            return None;
+        }
 
         let aspect = (viewport_rect.size.x / viewport_rect.size.y).max(0.001) as f32;
         let distance_min = self.distance_min.max(0.01);
@@ -132,7 +145,8 @@ impl XrCamera {
                 if let Some(last_abs) = self.orbit_last_abs {
                     let delta = fe.abs - last_abs;
                     self.orbit_yaw -= (delta.x as f32) * 0.01;
-                    self.orbit_pitch = (self.orbit_pitch + (delta.y as f32) * 0.01).clamp(-1.45, 1.45);
+                    self.orbit_pitch =
+                        (self.orbit_pitch + (delta.y as f32) * 0.01).clamp(-1.45, 1.45);
                     self.orbit_last_abs = Some(fe.abs);
                     cx.set_cursor(MouseCursor::Grabbing);
                     cx.redraw_all();
@@ -143,10 +157,18 @@ impl XrCamera {
                 }
             }
             Event::Scroll(fs) if self.contains_abs(fs.abs) => {
-                let scroll_axis = if fs.scroll.y.abs() > f64::EPSILON { fs.scroll.y } else { fs.scroll.x };
+                let scroll_axis = if fs.scroll.y.abs() > f64::EPSILON {
+                    fs.scroll.y
+                } else {
+                    fs.scroll.x
+                };
                 if scroll_axis.abs() > f64::EPSILON {
                     let step = self.wheel_zoom_step.max(0.001);
-                    let factor = if scroll_axis > 0.0 { 1.0 / (1.0 - step) } else { 1.0 - step };
+                    let factor = if scroll_axis > 0.0 {
+                        1.0 / (1.0 - step)
+                    } else {
+                        1.0 - step
+                    };
                     self.distance = (self.distance * factor).clamp(
                         self.distance_min.max(0.01),
                         self.distance_max.max(self.distance_min.max(0.01) + 0.01),
@@ -174,41 +196,64 @@ impl XrCamera {
 
 #[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct XrRoot {
-    #[uid] uid: WidgetUid,
-    #[source] source: ScriptObjectRef,
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
 
     // Window + Pass
-    #[live] window: ScriptWindowHandle,
-    #[live] pass: ScriptDrawPass,
-    #[new] depth_texture: Texture,
-    #[new] draw_list: DrawList,
-    #[new] permissions_draw_list: DrawList2d,
+    #[live]
+    window: ScriptWindowHandle,
+    #[live]
+    pass: ScriptDrawPass,
+    #[new]
+    depth_texture: Texture,
+    #[new]
+    draw_list: DrawList,
+    #[new]
+    permissions_draw_list: DrawList2d,
 
     // Environment (physics + env draws)
-    #[live] env: XrEnv,
+    #[live]
+    env: XrEnv,
 
     // Camera
-    #[live] camera: XrCamera,
+    #[live]
+    camera: XrCamera,
 
     // Startup callback
-    #[live] on_startup: ScriptFnRef,
+    #[live]
+    on_startup: ScriptFnRef,
 
     // Children (from := declarations)
-    #[rust] children: Vec<(LiveId, WidgetRef)>,
-    #[rust] permissions_widget: WidgetRef,
+    #[rust]
+    children: Vec<(LiveId, WidgetRef)>,
+    #[rust]
+    permissions_widget: WidgetRef,
 
     // State
-    #[rust] initialized: bool,
-    #[rust] started: bool,
-    #[rust] last_xr_state: Option<Rc<XrState>>,
-    #[rust] xr_content_pose: Option<Pose>,
-    #[rust] next_frame: NextFrame,
-    #[rust] desktop_ui_pointer_active: bool,
-    #[rust] last_frame_update_cpu_ms: f64,
-    #[rust] last_frame_draw_cpu_ms: f64,
-    #[rust] last_frame_cpu_ms: f64,
+    #[rust]
+    initialized: bool,
+    #[rust]
+    started: bool,
+    #[rust]
+    last_xr_state: Option<Rc<XrState>>,
+    #[rust]
+    xr_content_pose: Option<Pose>,
+    #[rust]
+    next_frame: NextFrame,
+    #[rust]
+    desktop_ui_pointer_active: bool,
+    #[rust]
+    last_frame_update_cpu_ms: f64,
+    #[rust]
+    last_frame_draw_cpu_ms: f64,
+    #[rust]
+    last_frame_cpu_ms: f64,
 }
 
 impl XrRoot {
@@ -243,14 +288,19 @@ impl XrRoot {
     }
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
-        if self.initialized { return; }
+        if self.initialized {
+            return;
+        }
         self.initialized = true;
         self.window.handle.set_pass(cx, &self.pass.handle);
         self.pass.handle.set_pass_name(cx, "xr_root_window");
-        self.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32 {
-            size: TextureSize::Auto,
-            initial: true,
-        });
+        self.depth_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::DepthD32 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
         self.pass.handle.set_depth_texture(
             cx,
             &self.depth_texture,
@@ -298,6 +348,8 @@ impl XrRoot {
         XrFingerTip {
             index: XrHand::INDEX_TIP,
             is_left: false,
+            active: true,
+            interactive: true,
             pos: ray_origin,
             ray_dir,
             touch_z,
@@ -320,6 +372,7 @@ impl XrRoot {
         let xr_event = Event::XrLocal(XrLocalEvent {
             finger_tips,
             space_transform: Mat4f::identity(),
+            digit_namespace: 0,
             update: Self::desktop_xr_update_event(time),
             modifiers,
             time,
@@ -400,26 +453,6 @@ impl XrRoot {
         }
     }
 
-    fn dispatch_xr_local_to_views(
-        &mut self,
-        cx: &mut Cx,
-        scope: &mut Scope,
-        update: &XrUpdateEvent,
-    ) {
-        let xr_local = XrLocalEvent::from_update_event(
-            update,
-            &self.xr_content_transform(Some(&update.state)),
-        );
-        let event = Event::XrLocal(xr_local.clone());
-        for i in 0..self.children.len() {
-            let child = self.children[i].1.clone();
-            if child.borrow::<XrView>().is_some() {
-                child.handle_event(cx, &event, scope);
-            }
-        }
-        xr_local.process_end(cx);
-    }
-
     fn handle_desktop_xr_pointer(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) -> bool {
         match event {
             Event::MouseDown(fe) if fe.button.is_primary() => {
@@ -435,7 +468,11 @@ impl XrRoot {
                     scope,
                     fe.time,
                     fe.modifiers,
-                    Some(Self::desktop_mouse_tip(ray_origin, ray_dir, DESKTOP_TOUCH_DOWN_Z)),
+                    Some(Self::desktop_mouse_tip(
+                        ray_origin,
+                        ray_dir,
+                        DESKTOP_TOUCH_DOWN_Z,
+                    )),
                 );
                 true
             }
@@ -500,9 +537,10 @@ impl XrRoot {
     }
 
     fn draw_list_depth(scene_state: &SceneState3D, world_pos: Vec3f) -> f32 {
-        let view_pos = scene_state
-            .view
-            .transform_vec4(vec4f(world_pos.x, world_pos.y, world_pos.z, 1.0));
+        let view_pos =
+            scene_state
+                .view
+                .transform_vec4(vec4f(world_pos.x, world_pos.y, world_pos.z, 1.0));
         if view_pos.w.abs() > 1.0e-6 {
             view_pos.z / view_pos.w
         } else {
@@ -515,22 +553,23 @@ impl XrRoot {
             return;
         }
 
-        draw_order_entries.sort_by(|a, b| {
-            match (a.2, b.2) {
-                (false, true) => Ordering::Less,
-                (true, false) => Ordering::Greater,
-                (false, false) => b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal).then_with(|| a.0.cmp(&b.0)),
-                (true, true) => a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal).then_with(|| a.0.cmp(&b.0)),
+        draw_order_entries.sort_by(|a, b| match (a.2, b.2) {
+            (false, true) => Ordering::Less,
+            (true, false) => Ordering::Greater,
+            (false, false) => {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            }
+            (true, true) => {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
             }
         });
     }
 
-    fn draw_3d_content(
-        &mut self,
-        cx: &mut Cx3d,
-        _scope: &mut Scope,
-        scene_state: SceneState3D,
-    ) {
+    fn draw_3d_content(&mut self, cx: &mut Cx3d, _scope: &mut Scope, scene_state: SceneState3D) {
         self.draw_list.begin_always(cx);
         let root_transform = if cx.cx.in_xr_mode() {
             self.xr_content_transform(self.last_xr_state.as_deref())
@@ -587,7 +626,7 @@ impl XrRoot {
             };
         self.pass.handle.set_window_clear_color(
             cx,
-            if cx.in_xr_mode() { 
+            if cx.in_xr_mode() {
                 vec4(0.0, 0.0, 0.0, 0.0)
             } else {
                 self.pass.clear_color
@@ -673,14 +712,26 @@ impl XrRoot {
 }
 
 impl ScriptHook for XrRoot {
-    fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+    fn on_before_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
         if apply.is_reload() {
             self.children.clear();
             self.permissions_widget = WidgetRef::empty();
         }
     }
 
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) {
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 self.children.clear();
@@ -688,7 +739,9 @@ impl ScriptHook for XrRoot {
                 vm.vec_with(obj, |vm, vec| {
                     for kv in vec {
                         let Some(id) = kv.key.as_id() else { continue };
-                        if !WidgetRef::value_is_newable_widget(vm, kv.value) { continue }
+                        if !WidgetRef::value_is_newable_widget(vm, kv.value) {
+                            continue;
+                        }
                         let child = WidgetRef::script_from_value_scoped(vm, scope, kv.value);
                         if id == live_id!(xr_permissions)
                             || child.borrow::<XrPermissionsFlow>().is_some()
@@ -707,9 +760,15 @@ impl ScriptHook for XrRoot {
 }
 
 impl WidgetNode for XrRoot {
-    fn widget_uid(&self) -> WidgetUid { self.uid }
-    fn walk(&mut self, _cx: &mut Cx) -> Walk { self.walk }
-    fn area(&self) -> Area { Area::Empty }
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+    fn area(&self) -> Area {
+        Area::Empty
+    }
 
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         for (id, child) in &self.children {
@@ -717,16 +776,26 @@ impl WidgetNode for XrRoot {
         }
     }
 
-    fn redraw(&mut self, cx: &mut Cx) { cx.redraw_all(); }
+    fn redraw(&mut self, cx: &mut Cx) {
+        cx.redraw_all();
+    }
 }
 
 impl Widget for XrRoot {
-    fn script_call(&mut self, vm: &mut ScriptVm, method: LiveId, args: ScriptValue) -> ScriptAsyncResult {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
         if method == live_id!(set_depth) || method == live_id!(set_depth_mesh) {
             let mut visible = self.depth_mesh_visible();
             if let Some(args_obj) = args.as_object() {
                 let trap = vm.bx.threads.cur().trap.pass();
-                visible = vm.bx.heap.cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                visible = vm
+                    .bx
+                    .heap
+                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
             }
             vm.with_cx_mut(|cx| {
                 visible = self.set_depth_mesh_visible(cx, visible);
@@ -747,7 +816,10 @@ impl Widget for XrRoot {
             let mut visible = self.depth_query_hits_visible();
             if let Some(args_obj) = args.as_object() {
                 let trap = vm.bx.threads.cur().trap.pass();
-                visible = vm.bx.heap.cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                visible = vm
+                    .bx
+                    .heap
+                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
             }
             vm.with_cx_mut(|cx| {
                 visible = self.set_depth_query_hits_visible(cx, visible);
@@ -805,6 +877,12 @@ impl Widget for XrRoot {
                     .unwrap_or(NIL),
             );
         }
+        if method == live_id!(reset_physics) || method == live_id!(reset_scene_physics) {
+            vm.with_cx_mut(|cx| {
+                self.env.reset_physics(cx);
+            });
+            return ScriptAsyncResult::Return(NIL);
+        }
         if method == live_id!(set_physics_time_scale) || method == live_id!(set_sim_time_scale) {
             let mut scale = self.physics_time_scale();
             if let Some(args_obj) = args.as_object() {
@@ -820,7 +898,7 @@ impl Widget for XrRoot {
         }
         if method == live_id!(physics_time_scale) || method == live_id!(sim_time_scale) {
             return ScriptAsyncResult::Return(ScriptValue::from_f64(
-                self.physics_time_scale() as f64,
+                self.physics_time_scale() as f64
             ));
         }
         if method == live_id!(render_scene) {
@@ -844,8 +922,8 @@ impl Widget for XrRoot {
             return;
         }
 
-        let measure_frame_cpu = matches!(event, Event::XrUpdate(_))
-            || self.next_frame.is_event(event).is_some();
+        let measure_frame_cpu =
+            matches!(event, Event::XrUpdate(_)) || self.next_frame.is_event(event).is_some();
         let started = measure_frame_cpu.then(Instant::now);
 
         if !cx.in_xr_mode() {
@@ -858,7 +936,13 @@ impl Widget for XrRoot {
             Event::Startup => {
                 if !self.started {
                     self.started = true;
-                    cx.widget_to_script_call(self.uid, NIL, self.source.clone(), self.on_startup.clone(), &[]);
+                    cx.widget_to_script_call(
+                        self.uid,
+                        NIL,
+                        self.source.clone(),
+                        self.on_startup.clone(),
+                        &[],
+                    );
                     cx.with_vm(|vm| {
                         for i in 0..self.children.len() {
                             let child = self.children[i].1.clone();
@@ -900,14 +984,12 @@ impl Widget for XrRoot {
                 self.env.spawn_body(cx, *body_spawn);
             }
             if actions.iter().any(|action| {
-                action
-                    .as_widget_action()
-                    .is_some_and(|action| {
-                        matches!(
-                            action.cast::<XrSelectAction>(),
-                            XrSelectAction::ActiveChildChanged(_)
-                        )
-                    })
+                action.as_widget_action().is_some_and(|action| {
+                    matches!(
+                        action.cast::<XrSelectAction>(),
+                        XrSelectAction::ActiveChildChanged(_)
+                    )
+                })
             }) {
                 self.env.mark_scene_dirty();
                 self.env.ensure_physics(cx, &self.children);
@@ -921,15 +1003,30 @@ impl Widget for XrRoot {
             self.desktop_ui_pointer_active = false;
             false
         };
+        let swallow_desktop_pointer_event = desktop_scene_interaction
+            && handled_desktop_xr_pointer
+            && matches!(
+                event,
+                Event::MouseDown(_)
+                    | Event::MouseMove(_)
+                    | Event::MouseUp(_)
+                    | Event::MouseLeave(_)
+            );
 
-        for i in 0..self.children.len() {
-            let child = self.children[i].1.clone();
-            child.handle_event(cx, event, scope);
-        }
-
-        if cx.in_xr_mode() {
-            if let Event::XrUpdate(update) = event {
-                self.dispatch_xr_local_to_views(cx, scope, update);
+        if swallow_desktop_pointer_event {
+        } else if let Event::XrUpdate(update) = event {
+            let mut event_scope_data = crate::xr_view::XrViewEventScopeData {
+                content_transform: self.xr_content_transform(Some(&update.state)),
+            };
+            let mut event_scope = Scope::with_data(&mut event_scope_data);
+            for i in 0..self.children.len() {
+                let child = self.children[i].1.clone();
+                child.handle_event(cx, event, &mut event_scope);
+            }
+        } else {
+            for i in 0..self.children.len() {
+                let child = self.children[i].1.clone();
+                child.handle_event(cx, event, scope);
             }
         }
 
@@ -944,7 +1041,9 @@ impl Widget for XrRoot {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        if cx.cx.in_xr_mode() { return DrawStep::done(); }
+        if cx.cx.in_xr_mode() {
+            return DrawStep::done();
+        }
 
         self.ensure_initialized(cx.cx);
         cx.begin_pass(&self.pass.handle, None);
@@ -953,14 +1052,18 @@ impl Widget for XrRoot {
         if self.permissions_ui_visible() {
             self.permissions_draw_list.begin_always(cx);
             cx.begin_root_turtle(size, Layout::flow_down());
-            self.permissions_widget.draw_walk_all(cx, scope, Walk::fill());
+            self.permissions_widget
+                .draw_walk_all(cx, scope, Walk::fill());
             cx.end_pass_sized_turtle();
             self.permissions_draw_list.end(cx);
             cx.end_pass(&self.pass.handle);
             return DrawStep::done();
         }
 
-        let pass_rect = Rect { pos: dvec2(0.0, 0.0), size };
+        let pass_rect = Rect {
+            pos: dvec2(0.0, 0.0),
+            size,
+        };
         self.camera.set_desktop_viewport_rect(pass_rect);
 
         if let Some(scene_state) = self.camera.desktop_scene_state(pass_rect, cx.time()) {
