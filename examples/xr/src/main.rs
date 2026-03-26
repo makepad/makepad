@@ -36,7 +36,7 @@ script_mod! {
     let XrUiButton = mod.widgets.ButtonFlat{
         draw_bg +: {
             border_size: 0.0
-            border_radius: 0.0
+            border_radius: 10.0
             pixel: fn() {
                 let fill = self.color
                     .mix(self.color_focus, self.focus)
@@ -221,6 +221,7 @@ script_mod! {
                         for layer in 0..4 {
                             for row in 0..8 {
                                 for col in 0..5 {
+                                    let diffuse = #xa0a4aa
                                     let color = if (col + row * 2 + layer * 3) % 6 == 0 {
                                         #xff6f59
                                     } else if (col + row * 2 + layer * 3) % 6 == 1 {
@@ -239,6 +240,7 @@ script_mod! {
                                         friction: 0.48
                                         restitution: 0.03
                                         radius: 0.040
+                                        diffuse: diffuse
                                         color: color
                                         pos: vec3(-0.118 + col * 0.084, 0.04 + layer * 0.082, -0.436 + row * 0.084)
                                     }
@@ -270,6 +272,7 @@ script_mod! {
                         }
 
                         for index in 0..160 {
+                            let diffuse = #xa0a4aa
                             let color = if index % 6 == 0 {
                                 #xff6f59
                             } else if index % 6 == 1 {
@@ -288,7 +291,8 @@ script_mod! {
                                 density: 0.75
                                 friction: 0.48
                                 restitution: 0.04
-                                radius: 0.040
+                                radius: 0.080
+                                diffuse: diffuse
                                 color: color
                                 pos: vec3(-2.4, -6.0 - index * 0.004, 0.0)
                             }
@@ -359,9 +363,11 @@ script_mod! {
             }
 
             control_strip := XrView{
-                pos: vec3(0.0, 0.46, -0.84)
-                logical_size: vec2(780, 352)
-                pixel_scale: 0.00074
+                visible: false
+                show_in_non_xr: true
+                wrist_left: true
+                logical_size: vec2(920, 468)
+                pixel_scale: 0.000215
                 dpi_factor: 2.0
                 SolidView{
                     width: Fill
@@ -505,6 +511,32 @@ script_mod! {
                         spacing: 8
                         align: Align{y: 0.5}
 
+                        depth_resolution_label := Label{
+                            width: 104
+                            text: "Depth Voxel"
+                            draw_text.color: #xe8f4ff
+                        }
+
+                        depth_resolution_5_button := XrUiButton{
+                            width: 64
+                            text: "5 cm"
+                            on_press: || ui.root.set_depth_voxel_size(0.05)
+                        }
+
+                        depth_resolution_10_button := XrUiButton{
+                            width: 72
+                            text: "10 cm"
+                            on_press: || ui.root.set_depth_voxel_size(0.10)
+                        }
+                    }
+
+                    View{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+
                         render_scale_label := Label{
                             width: 104
                             text: "Render Scale"
@@ -603,6 +635,41 @@ script_mod! {
                 }
             }
 
+            wrist_toggle := XrView{
+                visible: false
+                mode: mod.widgets.XrViewMode.StuckToWrist
+                wrist_left: true
+                logical_size: vec2(112, 104)
+                pixel_scale: 0.00030
+                dpi_factor: 1.6
+                depth_scale: 120.0
+                SolidView{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    padding: 6
+                    spacing: 4
+                    draw_bg.color: #x0f1b27ee
+                    draw_bg.border_radius: 18.0
+
+                    wrist_menu_button := XrUiButton{
+                        width: Fill
+                        height: 40
+                        text: "Menu"
+                        draw_bg.border_radius: 12.0
+                        on_press: || ui.control_strip.toggle_visible_next_to_wrist()
+                    }
+
+                    wrist_reset_button := XrUiButton{
+                        width: Fill
+                        height: 40
+                        text: "Reset"
+                        draw_bg.border_radius: 12.0
+                        on_press: || ui.root.reset_physics()
+                    }
+                }
+            }
+
             xr_permissions := mod.widgets.XrPermissionsFlow{}
         }
     }
@@ -634,22 +701,21 @@ impl App {
             frame_cpu_ms,
             frame_update_cpu_ms,
             frame_draw_cpu_ms,
-        ) =
-            if let Some(root) = self.ui.borrow::<XrRoot>() {
-                (
-                    root.physics_depth_query_surface_count(),
-                    root.physics_depth_query_vertex_count(),
-                    root.physics_depth_query_triangle_count(),
-                    root.physics_compute_ms(),
-                    root.physics_time_scale(),
-                    root.physics_step_dt_ms(),
-                    root.frame_cpu_ms(),
-                    root.frame_update_cpu_ms(),
-                    root.frame_draw_cpu_ms(),
-                )
-            } else {
-                return;
-            };
+        ) = if let Some(root) = self.ui.borrow::<XrRoot>() {
+            (
+                root.physics_depth_query_surface_count(),
+                root.physics_depth_query_vertex_count(),
+                root.physics_depth_query_triangle_count(),
+                root.physics_compute_ms(),
+                root.physics_time_scale(),
+                root.physics_step_dt_ms(),
+                root.frame_cpu_ms(),
+                root.frame_update_cpu_ms(),
+                root.frame_draw_cpu_ms(),
+            )
+        } else {
+            return;
+        };
 
         let geometry_text = format!(
             "Physics geometry: {} planes, {} vertices, {} triangles",
@@ -671,7 +737,10 @@ impl App {
                 physics_time_scale
             )
         } else {
-            format!("Physics compute: {:.2} ms | sim {:.2}x", compute_ms, physics_time_scale)
+            format!(
+                "Physics compute: {:.2} ms | sim {:.2}x",
+                compute_ms, physics_time_scale
+            )
         };
         if self.last_physics_timing_text != timing_text {
             self.ui
@@ -698,28 +767,52 @@ impl App {
             cx.xr_gpu_frame_time_ms(),
         ) {
             (Some(scale), Some(refresh_hz), Some(effective_hz), Some(gpu_ms)) => format!(
-                "XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU {:.2} ms",
-                scale, refresh_hz, effective_hz, gpu_ms
+                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU {:.2} ms",
+                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                scale,
+                refresh_hz,
+                effective_hz,
+                gpu_ms
             ),
             (Some(scale), Some(refresh_hz), Some(effective_hz), None) => format!(
-                "XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU waiting",
-                scale, refresh_hz, effective_hz
+                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU waiting",
+                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                scale,
+                refresh_hz,
+                effective_hz
             ),
             (Some(scale), Some(refresh_hz), None, Some(gpu_ms)) => format!(
-                "XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU {:.2} ms",
-                scale, refresh_hz, gpu_ms
+                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU {:.2} ms",
+                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                scale,
+                refresh_hz,
+                gpu_ms
             ),
             (Some(scale), Some(refresh_hz), None, None) => format!(
-                "XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU waiting",
-                scale, refresh_hz
+                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU waiting",
+                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                scale,
+                refresh_hz
             ),
             (Some(scale), None, _, Some(gpu_ms)) => {
-                format!("XR scale: {:.2} | refresh waiting | GPU {:.2} ms", scale, gpu_ms)
+                format!(
+                    "Depth: {:.0} cm | XR scale: {:.2} | refresh waiting | GPU {:.2} ms",
+                    cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                    scale,
+                    gpu_ms
+                )
             }
             (Some(scale), None, _, None) => {
-                format!("XR scale: {:.2} | refresh waiting | GPU waiting", scale)
+                format!(
+                    "Depth: {:.0} cm | XR scale: {:.2} | refresh waiting | GPU waiting",
+                    cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                    scale
+                )
             }
-            (None, _, _, _) => "XR render scale: not active".to_string(),
+            (None, _, _, _) => format!(
+                "Depth: {:.0} cm | XR render scale: not active",
+                cx.xr_depth_mesh().voxel_size_meters() * 100.0
+            ),
         };
         if self.last_xr_runtime_text != xr_runtime_text {
             self.ui

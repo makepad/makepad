@@ -11,7 +11,7 @@ use crate::{
         XrDepthMeshQueryColliderRole, XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface,
         XrDepthMeshQueryResult,
         XrDepthMeshQuerySupportPlane, XrDepthMeshQuerySurfaceHit, XrDepthMeshStore,
-        XrDepthPlaneKind, XrDepthPlanePatch,
+        XrDepthPlaneKind, XrDepthPlanePatch, XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS,
     },
 };
 use std::{
@@ -28,7 +28,7 @@ use std::{
 const DEPTH_VOXEL_EYE_INDEX: usize = 0;
 const DEPTH_VOXEL_SAMPLE_STEP: u32 = 1;
 const DEPTH_IMAGE_EDGE_MARGIN_PIXELS: usize = 32;
-const DEPTH_VOXEL_SIZE_METERS: f32 = 0.10;
+const DEPTH_VOXEL_SIZE_METERS: f32 = XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS;
 const DEPTH_VOXEL_MIN_DISTANCE_METERS: f32 = 0.08;
 const DEPTH_VOXEL_MAX_DISTANCE_METERS: f32 = 6.0;
 const DEPTH_TSD_MIN_UPDATE_DISTANCE_METERS: f32 = 0.5;
@@ -38,12 +38,8 @@ const DEPTH_TSD_UPDATE_TRANSLATION_TRIGGER_METERS: f32 = 0.04;
 const DEPTH_TSD_UPDATE_ROTATION_TRIGGER_DOT: f32 = 0.999;
 const DEPTH_VOXEL_MIN_DEPTH_VALUE: f32 = 1.0 / 65535.0;
 const DEPTH_VOXEL_MAX_DEPTH_VALUE: f32 = 0.9995;
-const DEPTH_TSD_DISTANCE_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 2.0;
 const DEPTH_TSD_MIN_NORMAL_DOT: f32 = 0.3;
 const DEPTH_TSD_APPLY_DELTA_EPSILON: f32 = 0.01;
-const DEPTH_TSD_REFRESH_CLEARANCE_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 1.5;
-const DEPTH_NORMAL_NEIGHBOR_MAX_DISTANCE_DELTA_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 2.5;
-const DEPTH_CARVE_NEIGHBOR_MAX_DISTANCE_DELTA_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 1.5;
 const DEPTH_TSD_MAX_CONFIDENCE: u8 = 32;
 const DEPTH_TSD_MIN_MESH_CONFIDENCE: u8 = 3;
 const DEPTH_TSD_RECENT_MESH_CONFIDENCE: u8 = 1;
@@ -81,6 +77,7 @@ const DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM: usize = 5;
 const DEPTH_QUERY_TSDF_SUPPORT_MAX_SAMPLES: usize =
     DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM * DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM;
 const DEPTH_QUERY_TSDF_SUPPORT_MIN_SAMPLES: usize = 4;
+const DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT: usize = 5;
 const DEPTH_QUERY_TSDF_SUPPORT_NORMAL_Y_MIN: f32 = 0.60;
 const DEPTH_QUERY_TSDF_SUPPORT_RADIUS_SCALE: f32 = 1.15;
 const DEPTH_QUERY_TSDF_SUPPORT_RADIUS_MIN: f32 = 0.04;
@@ -99,7 +96,6 @@ const DEPTH_QUERY_TSDF_IMPACT_EXTENT_MAX: f32 = 0.16;
 const DEPTH_QUERY_TSDF_IMPACT_RESTITUTION: f32 = 0.38;
 const DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN: f32 = 0.82;
 const DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX: f32 = 0.35;
-const DEPTH_PLANE_VERTEX_LINK_METERS: f32 = DEPTH_VOXEL_SIZE_METERS * 0.75;
 const DEPTH_PLANE_SIMPLIFY_REGION_NORMAL_DOT: f32 = 0.95;
 const DEPTH_PLANE_SIMPLIFY_REGION_DISTANCE_METERS: f32 = 0.10;
 const DEPTH_PLANE_SIMPLIFY_MIN_AREA_METERS2: f32 = 0.12;
@@ -115,6 +111,26 @@ const DEPTH_MESH_PLANAR_SIMPLIFY_MIN_AREA_METERS2: f32 = 0.45;
 const DEPTH_MESH_PLANAR_SIMPLIFY_MIN_RECT_AREA_METERS2: f32 = 0.12;
 const DEPTH_MESH_PLANAR_SIMPLIFY_MAX_RECTS_PER_REGION: usize = 24;
 const DEPTH_ENABLE_REDUCED_PLANAR_PATCHES: bool = false;
+
+const fn depth_tsd_distance_meters(voxel_size_meters: f32) -> f32 {
+    voxel_size_meters * 2.0
+}
+
+const fn depth_tsd_refresh_clearance_meters(voxel_size_meters: f32) -> f32 {
+    voxel_size_meters * 1.5
+}
+
+const fn depth_normal_neighbor_max_distance_delta_meters(voxel_size_meters: f32) -> f32 {
+    voxel_size_meters * 2.5
+}
+
+const fn depth_carve_neighbor_max_distance_delta_meters(voxel_size_meters: f32) -> f32 {
+    voxel_size_meters * 1.5
+}
+
+const fn depth_plane_vertex_link_meters(voxel_size_meters: f32) -> f32 {
+    voxel_size_meters * 0.75
+}
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct VoxelCoord {
@@ -725,6 +741,7 @@ pub(super) struct CxOpenXrDepthMeshJob {
     width: u32,
     height: u32,
     sample_step: u32,
+    voxel_size_meters: f32,
     camera_world: Vec3f,
     depth_proj: Mat4f,
     inv_depth_proj: Mat4f,
@@ -739,6 +756,7 @@ struct CxOpenXrPreparedDepthMeshJob {
     width: u32,
     height: u32,
     sample_step: u32,
+    voxel_size_meters: f32,
     camera_world: Vec3f,
     depth_proj: Mat4f,
     inv_depth_proj: Mat4f,
@@ -871,6 +889,7 @@ impl CxOpenXrDepthMeshPipeline {
 
         let generation = self.next_generation;
         self.next_generation += 1;
+        let voxel_size_meters = self.store.voxel_size_meters();
 
         let job_result: Result<CxOpenXrDepthMeshJob, String> = (|| {
             let depth = vulkan.read_openxr_depth_image(
@@ -884,6 +903,7 @@ impl CxOpenXrDepthMeshPipeline {
                 width,
                 height,
                 sample_step: DEPTH_VOXEL_SAMPLE_STEP,
+                voxel_size_meters,
                 camera_world,
                 depth_proj: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_proj_mat,
                 inv_depth_proj: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_proj_mat.invert(),
@@ -946,6 +966,10 @@ fn depth_preprocess_worker(
 ) {
     let mut worker_state = DepthPreprocessWorkerState::default();
     while let Ok(job) = receiver.recv() {
+        if (job.voxel_size_meters - store.voxel_size_meters()).abs() > f32::EPSILON {
+            busy.store(false, Ordering::Release);
+            continue;
+        }
         let result = preprocess_depth_mesh(job, &mut worker_state);
         busy.store(false, Ordering::Release);
         match result {
@@ -964,13 +988,21 @@ fn depth_preprocess_worker(
 
 fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: XrDepthMeshStore) {
     let mut worker_state = DepthMesherWorkerState::default();
-    let mut volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, DEPTH_VOXEL_SIZE_METERS);
+    let mut volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, store.voxel_size_meters());
     loop {
+        let configured_voxel_size = store.voxel_size_meters();
+        if (volume.voxel_size_meters - configured_voxel_size).abs() > f32::EPSILON {
+            volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, configured_voxel_size);
+        }
         let mut applied_update = false;
         match receiver.recv_timeout(Duration::from_millis(DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS)) {
             Ok(mut job) => {
                 while let Ok(newer) = receiver.try_recv() {
                     job = newer;
+                }
+                let configured_voxel_size = store.voxel_size_meters();
+                if (job.voxel_size_meters - configured_voxel_size).abs() > f32::EPSILON {
+                    continue;
                 }
                 apply_preprocessed_depth_mesh(job, &mut volume);
                 applied_update = true;
@@ -1012,11 +1044,13 @@ fn preprocess_depth_mesh(
 ) -> Result<CxOpenXrPreparedDepthMeshJob, String> {
     rebuild_sampled_depth_grid(&job, worker_state);
 
+    let voxel_size_meters = job.voxel_size_meters;
+    let tsd_distance_meters = depth_tsd_distance_meters(voxel_size_meters);
     let mut frame_tsd_accum = HashMap::<VoxelCoord, FrameTsdSampleAccum>::new();
     let mut observed_world_min = vec3f(f32::INFINITY, f32::INFINITY, f32::INFINITY);
     let mut observed_world_max = vec3f(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
     let sample_step = job.sample_step.max(1) as usize;
-    let ray_step = (DEPTH_VOXEL_SIZE_METERS * 0.5).max(0.02);
+    let ray_step = (voxel_size_meters * 0.5).max(0.02);
 
     for y in (0..worker_state.depth_height).step_by(sample_step) {
         for x in (0..worker_state.depth_width).step_by(sample_step) {
@@ -1054,18 +1088,18 @@ fn preprocess_depth_mesh(
             observed_world_min = Vec3f::min_componentwise(observed_world_min, sample.world);
             observed_world_max = Vec3f::max_componentwise(observed_world_max, sample.world);
 
-            let start_distance = (surface_distance - DEPTH_TSD_DISTANCE_METERS)
+            let start_distance = (surface_distance - tsd_distance_meters)
                 .max(DEPTH_TSD_MIN_UPDATE_DISTANCE_METERS);
             let end_distance =
-                (surface_distance + DEPTH_TSD_DISTANCE_METERS).min(DEPTH_VOXEL_MAX_DISTANCE_METERS);
+                (surface_distance + tsd_distance_meters).min(DEPTH_VOXEL_MAX_DISTANCE_METERS);
             let mut last_coord = None;
             let mut distance = start_distance;
             while distance <= end_distance {
                 let sample_world = job.camera_world + ray_dir.scale(distance);
                 let coord = VoxelCoord::new(
-                    (sample_world.x / DEPTH_VOXEL_SIZE_METERS).floor() as i32,
-                    (sample_world.y / DEPTH_VOXEL_SIZE_METERS).floor() as i32,
-                    (sample_world.z / DEPTH_VOXEL_SIZE_METERS).floor() as i32,
+                    (sample_world.x / voxel_size_meters).floor() as i32,
+                    (sample_world.y / voxel_size_meters).floor() as i32,
+                    (sample_world.z / voxel_size_meters).floor() as i32,
                 );
                 if last_coord == Some(coord) {
                     distance += ray_step;
@@ -1074,9 +1108,9 @@ fn preprocess_depth_mesh(
                 last_coord = Some(coord);
 
                 let voxel_world = vec3f(
-                    (coord.x as f32 + 0.5) * DEPTH_VOXEL_SIZE_METERS,
-                    (coord.y as f32 + 0.5) * DEPTH_VOXEL_SIZE_METERS,
-                    (coord.z as f32 + 0.5) * DEPTH_VOXEL_SIZE_METERS,
+                    (coord.x as f32 + 0.5) * voxel_size_meters,
+                    (coord.y as f32 + 0.5) * voxel_size_meters,
+                    (coord.z as f32 + 0.5) * voxel_size_meters,
                 );
                 if point_inside_player_exclusion(job.camera_world, voxel_world) {
                     distance += ray_step;
@@ -1088,7 +1122,7 @@ fn preprocess_depth_mesh(
                     distance += ray_step;
                     continue;
                 }
-                let normalized = ((surface_distance - voxel_distance) / DEPTH_TSD_DISTANCE_METERS)
+                let normalized = ((surface_distance - voxel_distance) / tsd_distance_meters)
                     .clamp(-1.0, 1.0);
                 frame_tsd_accum
                     .entry(coord)
@@ -1118,9 +1152,9 @@ fn preprocess_depth_mesh(
         && observed_world_max.z.is_finite()
     {
         let padding = vec3f(
-            DEPTH_TSD_DISTANCE_METERS,
-            DEPTH_TSD_DISTANCE_METERS,
-            DEPTH_TSD_DISTANCE_METERS,
+            tsd_distance_meters,
+            tsd_distance_meters,
+            tsd_distance_meters,
         );
         (observed_world_min - padding, observed_world_max + padding)
     } else {
@@ -1133,6 +1167,7 @@ fn preprocess_depth_mesh(
         width: job.width,
         height: job.height,
         sample_step: job.sample_step,
+        voxel_size_meters,
         camera_world: job.camera_world,
         depth_proj: job.depth_proj,
         inv_depth_proj: job.inv_depth_proj,
@@ -1165,6 +1200,8 @@ fn rebuild_sampled_depth_grid(
     job: &CxOpenXrDepthMeshJob,
     worker_state: &mut DepthPreprocessWorkerState,
 ) {
+    let normal_neighbor_max_distance_delta_meters =
+        depth_normal_neighbor_max_distance_delta_meters(job.voxel_size_meters);
     let width = job.width as usize;
     let height = job.height as usize;
     worker_state.depth_width = width;
@@ -1219,9 +1256,9 @@ fn rebuild_sampled_depth_grid(
             }
             let ray_distance = worker_state.sampled_depth[index].ray_distance;
             if (sample_x.ray_distance - ray_distance).abs()
-                > DEPTH_NORMAL_NEIGHBOR_MAX_DISTANCE_DELTA_METERS
+                > normal_neighbor_max_distance_delta_meters
                 || (sample_y.ray_distance - ray_distance).abs()
-                    > DEPTH_NORMAL_NEIGHBOR_MAX_DISTANCE_DELTA_METERS
+                    > normal_neighbor_max_distance_delta_meters
             {
                 continue;
             }
@@ -1402,6 +1439,8 @@ fn depth_pixel_is_reliable_for_carve(
     pixel_y: usize,
     observed_distance: f32,
 ) -> bool {
+    let carve_neighbor_max_distance_delta_meters =
+        depth_carve_neighbor_max_distance_delta_meters(job.voxel_size_meters);
     let width = job.width as usize;
     let height = job.height as usize;
     if !depth_pixel_inside_margin(width, height, pixel_x, pixel_y) {
@@ -1430,7 +1469,7 @@ fn depth_pixel_is_reliable_for_carve(
         };
         let neighbor_distance = neighbor_view.to_vec3f().length();
         if (neighbor_distance - observed_distance).abs()
-            <= DEPTH_CARVE_NEIGHBOR_MAX_DISTANCE_DELTA_METERS
+            <= carve_neighbor_max_distance_delta_meters
         {
             agreeing_neighbors = agreeing_neighbors.saturating_add(1);
         }
@@ -1466,6 +1505,9 @@ fn refresh_visible_free_space(
     volume: &mut DepthMeshVolume,
     job: &CxOpenXrPreparedDepthMeshJob,
 ) -> usize {
+    let tsd_distance_meters = depth_tsd_distance_meters(job.voxel_size_meters);
+    let tsd_refresh_clearance_meters =
+        depth_tsd_refresh_clearance_meters(job.voxel_size_meters);
     let min_coord = volume.mesh_grid.world_to_voxel_coord(job.visible_world_min);
     let max_coord = volume.mesh_grid.world_to_voxel_coord(job.visible_world_max);
     let mut changed = 0;
@@ -1513,14 +1555,14 @@ fn refresh_visible_free_space(
                     continue;
                 }
                 let clearance = observed_distance - voxel_distance;
-                if !observed_distance.is_finite() || clearance < DEPTH_TSD_REFRESH_CLEARANCE_METERS
+                if !observed_distance.is_finite() || clearance < tsd_refresh_clearance_meters
                 {
                     continue;
                 }
                 let confidence = volume.mesh_grid.confidence(coord);
                 if confidence >= DEPTH_TSD_STABLE_CONFIDENCE
                     && previous <= 0.25
-                    && clearance < DEPTH_TSD_DISTANCE_METERS
+                    && clearance < tsd_distance_meters
                 {
                     continue;
                 }
@@ -1909,7 +1951,10 @@ fn rebuild_reduced_planar_patches(volume: &mut DepthMeshVolume) -> bool {
     true
 }
 
-fn simplify_plane_regions(triangles: Vec<ExtractedPlaneTriangle>) -> Vec<SimplifiedPlaneRegion> {
+fn simplify_plane_regions(
+    triangles: Vec<ExtractedPlaneTriangle>,
+    voxel_size_meters: f32,
+) -> Vec<SimplifiedPlaneRegion> {
     if triangles.is_empty() {
         return Vec::new();
     }
@@ -1918,7 +1963,7 @@ fn simplify_plane_regions(triangles: Vec<ExtractedPlaneTriangle>) -> Vec<Simplif
     for (index, triangle) in triangles.iter().enumerate() {
         for &vertex in &triangle.vertices {
             vertex_links
-                .entry(quantize_plane_vertex(vertex))
+                .entry(quantize_plane_vertex(vertex, voxel_size_meters))
                 .or_default()
                 .push(index);
         }
@@ -1969,7 +2014,9 @@ fn simplify_plane_regions(triangles: Vec<ExtractedPlaneTriangle>) -> Vec<Simplif
             area_sum += triangle.area.max(0.001);
 
             for &vertex in &triangle.vertices {
-                if let Some(neighbors) = vertex_links.get(&quantize_plane_vertex(vertex)) {
+                if let Some(neighbors) =
+                    vertex_links.get(&quantize_plane_vertex(vertex, voxel_size_meters))
+                {
                     for &neighbor_index in neighbors {
                         if !visited[neighbor_index] {
                             queue.push_back(neighbor_index);
@@ -2321,8 +2368,8 @@ fn fit_vertical_plane_patch(
     })
 }
 
-fn quantize_plane_vertex(vertex: Vec3f) -> ExtractedPlaneVertexKey {
-    let inv = 1.0 / DEPTH_PLANE_VERTEX_LINK_METERS.max(1.0e-5);
+fn quantize_plane_vertex(vertex: Vec3f, voxel_size_meters: f32) -> ExtractedPlaneVertexKey {
+    let inv = 1.0 / depth_plane_vertex_link_meters(voxel_size_meters).max(1.0e-5);
     ExtractedPlaneVertexKey {
         x: (vertex.x * inv).round() as i32,
         y: (vertex.y * inv).round() as i32,
@@ -3096,6 +3143,7 @@ fn query_grid_bilinear_distance_at_y(
 
 fn query_depth_grid_trilinear_distance(volume: &DepthMeshVolume, point: Vec3f) -> Option<f32> {
     let voxel_size = volume.voxel_size_meters;
+    let tsd_distance_meters = depth_tsd_distance_meters(voxel_size);
     let grid_x = point.x / voxel_size - 0.5;
     let grid_y = point.y / voxel_size - 0.5;
     let grid_z = point.z / voxel_size - 0.5;
@@ -3110,7 +3158,7 @@ fn query_depth_grid_trilinear_distance(volume: &DepthMeshVolume, point: Vec3f) -
         volume
             .mesh_grid
             .normalized_distance(VoxelCoord::new(x, y, z))
-            .map(|distance| distance * DEPTH_TSD_DISTANCE_METERS)
+            .map(|distance| distance * tsd_distance_meters)
     };
 
     let s000 = sample(x0, y0, z0)?;
@@ -3375,21 +3423,31 @@ fn evaluate_depth_grid_support_query(
 ) -> Option<XrDepthMeshQueryHit> {
     const GRID_LAST: f32 = (DEPTH_QUERY_TSDF_SUPPORT_GRID_DIM - 1) as f32;
 
-    let search_center = query.center;
-    let travel_distance = (query.predicted_center - query.center).length();
+    let trajectory_samples = query_trajectory_samples(query);
+    let (trajectory_bounds_min, trajectory_bounds_max, travel_distance) =
+        query_trajectory_bounds_and_length(&trajectory_samples);
     let support_radius = query_tsdf_support_radius(query.radius);
-    let top_y = query.center.y.max(query.predicted_center.y)
-        + query.radius
-        + volume.voxel_size_meters;
-    let bottom_y = query.center.y.min(query.predicted_center.y)
-        - (query.radius + query.max_distance + travel_distance + DEPTH_TSD_DISTANCE_METERS);
-    let center_support_y = query_depth_grid_first_support_height(
-        volume,
-        search_center.x,
-        search_center.z,
-        top_y,
-        bottom_y,
-    )?;
+    let tsd_distance_meters = depth_tsd_distance_meters(volume.voxel_size_meters);
+    let top_y = trajectory_bounds_max.y + query.radius + volume.voxel_size_meters;
+    let bottom_y = trajectory_bounds_min.y
+        - (query.radius + query.max_distance + travel_distance + tsd_distance_meters);
+    let (_, search_sample, center_support_y) = trajectory_samples
+        .iter()
+        .filter_map(|sample| {
+            let support_y = query_depth_grid_first_support_height(
+                volume,
+                sample.point.x,
+                sample.point.z,
+                top_y,
+                bottom_y,
+            )?;
+            let support_point = vec3f(sample.point.x, support_y, sample.point.z);
+            let score = (sample.point - support_point).length()
+                - sample.progress * (query.radius + volume.voxel_size_meters) * 0.35;
+            Some((score, *sample, support_y))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))?;
+    let search_center = search_sample.point;
 
     let mut samples = [None; DEPTH_QUERY_TSDF_SUPPORT_MAX_SAMPLES];
     let mut sample_count = 0usize;
@@ -3551,7 +3609,7 @@ fn evaluate_depth_grid_support_query(
     let support_point =
         center_support_point - normal.scale(normal.dot(center_support_point) - plane_offset);
     let support_surface = make_query_halfspace_surface(
-        (support_point - query.center).length(),
+        (support_point - search_center).length(),
         XrDepthMeshQuerySupportPlane {
             point: support_point,
             ..plane
@@ -3625,27 +3683,12 @@ fn evaluate_geometry_query(
             });
     }
 
-    let travel = query.predicted_center - query.center;
-    let travel_distance = travel.length();
-    let motion_dir = if travel_distance > 1.0e-4 {
-        travel.scale(1.0 / travel_distance)
-    } else {
-        vec3f(0.0, 0.0, 0.0)
-    };
+    let trajectory_samples = query_trajectory_samples(query);
+    let (sweep_bounds_min, sweep_bounds_max, travel_distance) =
+        query_trajectory_bounds_and_length(&trajectory_samples);
     let max_search_distance = (query.radius + query.max_distance + travel_distance).max(0.0);
     let max_search_distance_sq = max_search_distance * max_search_distance;
-    let sweep_bounds_min = vec3f(
-        query.center.x.min(query.predicted_center.x),
-        query.center.y.min(query.predicted_center.y),
-        query.center.z.min(query.predicted_center.z),
-    );
-    let sweep_bounds_max = vec3f(
-        query.center.x.max(query.predicted_center.x),
-        query.center.y.max(query.predicted_center.y),
-        query.center.z.max(query.predicted_center.z),
-    );
     let mut best_hits = [None; DEPTH_QUERY_MAX_SURFACES_PER_QUERY];
-    let mid_point = query.center + travel.scale(0.5);
     let sweep_radius = query.radius + query.max_distance;
     let sweep_radius_sq = sweep_radius * sweep_radius;
 
@@ -3668,24 +3711,20 @@ fn evaluate_geometry_query(
                 continue;
             }
 
-            let mut best_sample_progress = 0.0;
             let mut best_sample_score = f32::INFINITY;
             let mut best_closest = vec3f(0.0, 0.0, 0.0);
             let mut best_distance_sq = f32::INFINITY;
+            let mut best_facing_point = query.center;
 
-            for (sample_point, progress) in [
-                (query.center, 0.0f32),
-                (mid_point, 0.5f32),
-                (query.predicted_center, 1.0f32),
-            ] {
+            for sample in &trajectory_samples {
+                let sample_point = sample.point;
                 let closest = closest_point_on_plane_patch(sample_point, patch);
                 let delta = closest - sample_point;
                 let distance_sq = delta.dot(delta);
                 if distance_sq > max_search_distance_sq {
                     continue;
                 }
-                let lateral_sq =
-                    point_segment_distance_sq(closest, query.center, query.predicted_center);
+                let lateral_sq = point_polyline_distance_sq(closest, &trajectory_samples);
                 if lateral_sq > sweep_radius_sq {
                     continue;
                 }
@@ -3693,29 +3732,33 @@ fn evaluate_geometry_query(
                 let distance = distance_sq.sqrt();
                 let mut score = distance;
                 if travel_distance > 1.0e-4 {
-                    let forward = (closest - query.center).dot(motion_dir);
-                    if forward < -query.radius || forward > travel_distance + query.radius {
-                        continue;
-                    }
-
+                    let motion = if sample.velocity.length() > 1.0e-4 {
+                        sample.velocity.normalize()
+                    } else {
+                        let fallback = query.predicted_center - query.center;
+                        if fallback.length() > 1.0e-4 {
+                            fallback.normalize()
+                        } else {
+                            vec3f(0.0, 0.0, 0.0)
+                        }
+                    };
                     let mut candidate_normal = patch.normal;
                     if candidate_normal.dot(sample_point - closest) < 0.0 {
                         candidate_normal = candidate_normal.scale(-1.0);
                     }
-                    let opposing = candidate_normal.dot(-motion_dir);
+                    let opposing = candidate_normal.dot(-motion);
                     if opposing <= DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT {
                         continue;
                     }
-                    score -= progress * travel_distance * 0.35;
-                    score -= forward.clamp(0.0, travel_distance) * 0.15;
+                    score -= sample.progress * travel_distance * 0.35;
                     score -= opposing * 0.08;
                     score += lateral_sq.sqrt() * 0.2;
                 }
                 if score < best_sample_score {
                     best_sample_score = score;
-                    best_sample_progress = progress;
                     best_closest = closest;
                     best_distance_sq = distance_sq;
+                    best_facing_point = sample_point;
                 }
             }
 
@@ -3724,8 +3767,7 @@ fn evaluate_geometry_query(
             }
 
             let mut normal = patch.normal;
-            let facing_point = query.center + travel.scale(best_sample_progress);
-            if normal.dot(facing_point - best_closest) < 0.0 {
+            if normal.dot(best_facing_point - best_closest) < 0.0 {
                 normal = normal.scale(-1.0);
             }
 
@@ -3766,53 +3808,53 @@ fn evaluate_geometry_query(
             if raw_normal.length() <= 1.0e-6 {
                 continue;
             }
-            let mut best_sample_progress = 0.0;
             let mut best_sample_score = f32::INFINITY;
             let mut best_closest = vec3f(0.0, 0.0, 0.0);
             let mut best_distance_sq = f32::INFINITY;
+            let mut best_facing_point = query.center;
 
-            for (sample_point, progress) in [
-                (query.center, 0.0f32),
-                (mid_point, 0.5f32),
-                (query.predicted_center, 1.0f32),
-            ] {
+            for sample in &trajectory_samples {
+                let sample_point = sample.point;
                 let closest = closest_point_on_triangle(sample_point, a, b, c);
                 let delta = closest - sample_point;
                 let distance_sq = delta.dot(delta);
                 if distance_sq > max_search_distance_sq {
                     continue;
                 }
-                let lateral_sq =
-                    point_segment_distance_sq(closest, query.center, query.predicted_center);
+                let lateral_sq = point_polyline_distance_sq(closest, &trajectory_samples);
                 if lateral_sq > sweep_radius_sq {
                     continue;
                 }
                 let distance = distance_sq.sqrt();
                 let mut score = distance;
                 if travel_distance > 1.0e-4 {
-                    let forward = (closest - query.center).dot(motion_dir);
-                    if forward < -query.radius || forward > travel_distance + query.radius {
-                        continue;
-                    }
-
+                    let motion = if sample.velocity.length() > 1.0e-4 {
+                        sample.velocity.normalize()
+                    } else {
+                        let fallback = query.predicted_center - query.center;
+                        if fallback.length() > 1.0e-4 {
+                            fallback.normalize()
+                        } else {
+                            vec3f(0.0, 0.0, 0.0)
+                        }
+                    };
                     let mut candidate_normal = raw_normal.normalize();
                     if candidate_normal.dot(sample_point - closest) < 0.0 {
                         candidate_normal = candidate_normal.scale(-1.0);
                     }
-                    let opposing = candidate_normal.dot(-motion_dir);
+                    let opposing = candidate_normal.dot(-motion);
                     if opposing <= DEPTH_QUERY_MIN_OPPOSING_NORMAL_DOT {
                         continue;
                     }
-                    score -= progress * travel_distance * 0.35;
-                    score -= forward.clamp(0.0, travel_distance) * 0.15;
+                    score -= sample.progress * travel_distance * 0.35;
                     score -= opposing * 0.08;
                     score += lateral_sq.sqrt() * 0.2;
                 }
                 if score < best_sample_score {
                     best_sample_score = score;
-                    best_sample_progress = progress;
                     best_closest = closest;
                     best_distance_sq = distance_sq;
+                    best_facing_point = sample_point;
                 }
             }
 
@@ -3825,8 +3867,7 @@ fn evaluate_geometry_query(
                 continue;
             }
             let mut hit_triangle = [a, b, c];
-            let facing_point = query.center + travel.scale(best_sample_progress);
-            if normal.dot(facing_point - best_closest) < 0.0 {
+            if normal.dot(best_facing_point - best_closest) < 0.0 {
                 normal = normal.scale(-1.0);
                 hit_triangle.swap(1, 2);
             }
@@ -4126,6 +4167,103 @@ fn point_segment_distance_sq(point: Vec3f, start: Vec3f, end: Vec3f) -> f32 {
     delta.dot(delta)
 }
 
+#[derive(Clone, Copy, Debug)]
+struct QueryTrajectorySample {
+    progress: f32,
+    point: Vec3f,
+    velocity: Vec3f,
+}
+
+fn query_trajectory_time_seconds(query: XrDepthMeshQuery) -> Option<f32> {
+    let horizontal_displacement = vec2f(
+        query.predicted_center.x - query.center.x,
+        query.predicted_center.z - query.center.z,
+    );
+    let horizontal_velocity = vec2f(query.velocity.x, query.velocity.z);
+    let horizontal_speed_sq =
+        horizontal_velocity.x * horizontal_velocity.x + horizontal_velocity.y * horizontal_velocity.y;
+    if horizontal_speed_sq <= 1.0e-6 {
+        return None;
+    }
+    let dt = (horizontal_displacement.x * horizontal_velocity.x
+        + horizontal_displacement.y * horizontal_velocity.y)
+        / horizontal_speed_sq;
+    (dt.is_finite() && dt > 1.0e-4).then_some(dt)
+}
+
+fn query_trajectory_sample(query: XrDepthMeshQuery, progress: f32) -> QueryTrajectorySample {
+    let progress = progress.clamp(0.0, 1.0);
+    if let Some(total_time) = query_trajectory_time_seconds(query) {
+        let t = total_time * progress;
+        let dy = query.predicted_center.y - query.center.y;
+        let accel_y = 2.0 * (dy - query.velocity.y * total_time) / (total_time * total_time);
+        return QueryTrajectorySample {
+            progress,
+            point: vec3f(
+                query.center.x + query.velocity.x * t,
+                query.center.y + query.velocity.y * t + 0.5 * accel_y * t * t,
+                query.center.z + query.velocity.z * t,
+            ),
+            velocity: vec3f(
+                query.velocity.x,
+                query.velocity.y + accel_y * t,
+                query.velocity.z,
+            ),
+        };
+    }
+
+    let travel = query.predicted_center - query.center;
+    QueryTrajectorySample {
+        progress,
+        point: query.center + travel.scale(progress),
+        velocity: if query.velocity.length() > 1.0e-4 {
+            query.velocity
+        } else {
+            travel
+        },
+    }
+}
+
+fn query_trajectory_samples(
+    query: XrDepthMeshQuery,
+) -> [QueryTrajectorySample; DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT] {
+    std::array::from_fn(|index| {
+        let progress = if DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT <= 1 {
+            0.0
+        } else {
+            index as f32 / (DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT - 1) as f32
+        };
+        query_trajectory_sample(query, progress)
+    })
+}
+
+fn query_trajectory_bounds_and_length(
+    samples: &[QueryTrajectorySample; DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT],
+) -> (Vec3f, Vec3f, f32) {
+    let mut min = samples[0].point;
+    let mut max = samples[0].point;
+    let mut length = 0.0;
+    for window in samples.windows(2) {
+        let a = window[0].point;
+        let b = window[1].point;
+        min = Vec3f::min_componentwise(min, b);
+        max = Vec3f::max_componentwise(max, b);
+        length += (b - a).length();
+    }
+    (min, max, length)
+}
+
+fn point_polyline_distance_sq(
+    point: Vec3f,
+    samples: &[QueryTrajectorySample; DEPTH_QUERY_TRAJECTORY_SAMPLE_COUNT],
+) -> f32 {
+    let mut best = f32::INFINITY;
+    for window in samples.windows(2) {
+        best = best.min(point_segment_distance_sq(point, window[0].point, window[1].point));
+    }
+    best
+}
+
 fn closest_point_on_triangle(point: Vec3f, a: Vec3f, b: Vec3f, c: Vec3f) -> Vec3f {
     let ab = b - a;
     let ac = c - a;
@@ -4182,8 +4320,10 @@ fn simplify_surface_mesh_planar_regions(mesh: SurfaceMesh32) -> ReducedSurfaceMe
             planar_patches: Vec::new(),
         };
     }
-    let regions =
-        simplify_plane_regions(collect_classified_plane_triangles_from_surface_mesh(&mesh));
+    let regions = simplify_plane_regions(
+        collect_classified_plane_triangles_from_surface_mesh(&mesh),
+        DEPTH_VOXEL_SIZE_METERS,
+    );
     if regions.is_empty() {
         return ReducedSurfaceMesh {
             mesh,
@@ -4972,13 +5112,13 @@ mod tests {
         max_coord: VoxelCoord,
         signed_distance: impl Fn(Vec3f) -> f32,
     ) {
+        let tsd_distance_meters = depth_tsd_distance_meters(volume.voxel_size_meters);
         for z in min_coord.z..=max_coord.z {
             for y in min_coord.y..=max_coord.y {
                 for x in min_coord.x..=max_coord.x {
                     let coord = VoxelCoord::new(x, y, z);
                     let world = volume.mesh_grid.voxel_center_world(coord);
-                    let normalized =
-                        (signed_distance(world) / DEPTH_TSD_DISTANCE_METERS).clamp(-1.0, 1.0);
+                    let normalized = (signed_distance(world) / tsd_distance_meters).clamp(-1.0, 1.0);
                     volume.mesh_grid.overwrite_normalized_distance(
                         coord,
                         normalized,
@@ -5801,6 +5941,53 @@ mod tests {
             matches!(outside_result, XrDepthMeshQueryResult::Miss { .. }),
             "expected support to clear once the center leaves the tabletop footprint"
         );
+    }
+
+    #[test]
+    fn geometry_query_from_depth_grid_tracks_grazing_ballistic_support_into_table() {
+        let mut volume = DepthMeshVolume::new(1, 0.05);
+        volume.generation = 26;
+        let table_center = vec3f(0.10, -0.05, 0.0);
+        let table_half_extents = vec3f(0.10, 0.05, 0.20);
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-6, -5, -6),
+            VoxelCoord::new(6, 5, 6),
+            |world| box_signed_distance(world, table_center, table_half_extents),
+        );
+
+        let result = evaluate_geometry_query(
+            &volume,
+            XrDepthMeshQuery {
+                key: 106,
+                center: vec3f(-0.07, 0.08, 0.0),
+                predicted_center: vec3f(0.10, 0.02, 0.0),
+                velocity: vec3f(1.20, 0.0, 0.0),
+                radius: 0.05,
+                max_distance: 0.12,
+                include_planar_patches: false,
+            },
+            1,
+        );
+
+        match result {
+            XrDepthMeshQueryResult::Hit(hit) => {
+                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = hit.collider.geometry;
+                assert!(
+                    plane.normal.y >= 0.90,
+                    "expected grazing ballistic support to resolve to an upright tabletop plane, got {:?}",
+                    plane.normal
+                );
+                assert!(
+                    plane.point.x >= -0.02 && plane.point.x <= 0.22,
+                    "expected support point to land on the future tabletop footprint, got {:?}",
+                    plane.point
+                );
+            }
+            XrDepthMeshQueryResult::Miss { .. } => {
+                panic!("expected grazing ballistic path to resolve future tabletop support");
+            }
+        }
     }
 
     #[test]

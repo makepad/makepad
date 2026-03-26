@@ -33,7 +33,14 @@ impl Cx {
             if let Some(sub_list_id) =
                 self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
             {
-                self.render_view(draw_pass_id, sub_list_id, zbias, zbias_step);
+                let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
+                let mut child_zbias = 0.0f32;
+                self.render_view(
+                    draw_pass_id,
+                    sub_list_id,
+                    if child_resets_zbias { &mut child_zbias } else { zbias },
+                    zbias_step,
+                );
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);

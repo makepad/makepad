@@ -37,10 +37,6 @@ pub struct Shooter {
     projectile_cursor: usize,
     #[rust]
     projectile_next_emit_at: Option<f64>,
-    #[rust]
-    debug_emitter_active: bool,
-    #[rust]
-    debug_pool_available: Option<bool>,
     #[cast]
     #[deref]
     node: XrNode,
@@ -73,15 +69,6 @@ impl Shooter {
         self.projectile_pool_uids.clear();
         self.node
             .children(&mut |_, child| Self::collect_projectile_pool(&child, &mut self.projectile_pool_uids));
-        let pool_available = !self.projectile_pool_uids.is_empty();
-        if self.debug_pool_available != Some(pool_available) {
-            self.debug_pool_available = Some(pool_available);
-            crate::log!(
-                "Shooter: projectile pool {} (count {})",
-                if pool_available { "ready" } else { "missing" },
-                self.projectile_pool_uids.len()
-            );
-        }
         if self.projectile_pool_uids.is_empty() {
             self.projectile_cursor = 0;
         } else {
@@ -107,7 +94,6 @@ impl Shooter {
         }
         let len = self.projectile_pool_uids.len();
         if len == 0 {
-            crate::log!("Shooter: no projectile widget available in pool");
             return None;
         }
         let widget_uid = self.projectile_pool_uids[self.projectile_cursor % len];
@@ -200,14 +186,6 @@ impl Shooter {
             return;
         }
         let emitter_pose = Self::main_projectile_emitter_pose(update);
-        let emitter_active = emitter_pose.is_some();
-        if self.debug_emitter_active != emitter_active {
-            self.debug_emitter_active = emitter_active;
-            crate::log!(
-                "Shooter: emitter {}",
-                if emitter_active { "active" } else { "inactive" }
-            );
-        }
         let Some((tip_position, direction)) = emitter_pose else {
             self.projectile_next_emit_at = None;
             return;
@@ -234,17 +212,6 @@ impl Shooter {
                     linvel: direction * emitter.speed_mps,
                     angvel: vec3f(0.0, 0.0, 0.0),
                 },
-            );
-            crate::log!(
-                "Shooter: emit projectile uid {} from ({:.3}, {:.3}, {:.3}) dir ({:.3}, {:.3}, {:.3}) speed {:.2}",
-                widget_uid.0,
-                tip_position.x,
-                tip_position.y,
-                tip_position.z,
-                direction.x,
-                direction.y,
-                direction.z,
-                emitter.speed_mps
             );
             cx.redraw_all();
             next_emit_at += interval;

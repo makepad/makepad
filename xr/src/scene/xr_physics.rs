@@ -154,6 +154,10 @@ pub(super) fn capsule_pose(a: Vec3f, b: Vec3f) -> (RapierPose, RapierReal) {
 }
 
 impl RapierScene {
+    pub(crate) fn gravity_vector(&self) -> Vec3f {
+        vec3f(self.gravity.x, self.gravity.y, self.gravity.z)
+    }
+
     pub(crate) fn set_simulation_dt(&mut self, dt: f32) {
         self.integration_parameters.dt = dt.max(0.0001);
     }
