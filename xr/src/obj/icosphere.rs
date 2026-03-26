@@ -92,11 +92,12 @@ script_mod! {
             let ndotv = max(dot(normal, view_dir), 0.0);
             let reflection_dir = normalize(normal * (2.0 * ndotv) - view_dir);
             let reflection = self.sample_env(reflection_dir) * self.color.xyz * self.u_env_intensity;
-            let fresnel = 0.72 + 0.28 * pow(max(1.0 - ndotv, 0.0), 5.0);
-            let base = self.color.xyz * self.v_light * (1.0 - self.u_reflectivity * 0.42);
+            let fresnel = 0.44 + 0.56 * pow(max(1.0 - ndotv, 0.0), 5.0);
+            let base = self.diffuse.xyz * self.v_light;
+            let accent = self.color.xyz * self.v_light * (0.10 + 0.08 * self.u_reflectivity);
             let reflect_mix = clamp(self.u_reflectivity * fresnel, 0.0, 1.0);
-            let lit = mix(base, reflection, reflect_mix);
-            return vec4(lit.x, lit.y, lit.z, self.color.w);
+            let lit = (base + accent) * (1.0 - reflect_mix * 0.45) + reflection * reflect_mix;
+            return vec4(lit.x, lit.y, lit.z, self.diffuse.w * self.color.w);
         }
 
         fragment: fn() {
@@ -108,11 +109,15 @@ script_mod! {
     mod.widgets.IcoSphere = set_type_default() do mod.widgets.IcoSphereBase{
         body: mod.widgets.XrBodyKind.Dynamic
         radius: 0.037
+        diffuse: vec4(0.63, 0.65, 0.69, 1.0)
         color: vec4(0.95, 0.62, 0.28, 1.0)
         draw_ico: mod.draw.DrawIcoSolid{
             backface_culling: true
-            reflectivity: 0.88
-            env_intensity: 1.15
+            ambient: 0.16
+            key_strength: 0.78
+            fill_strength: 0.30
+            reflectivity: 0.90
+            env_intensity: 1.25
         }
     }
 }
@@ -138,6 +143,8 @@ pub struct DrawIcoSolid {
     pub env_intensity: f32,
     #[deref]
     pub draw_vars: DrawVars,
+    #[live]
+    pub diffuse: Vec4f,
     #[live]
     pub color: Vec4f,
     #[live]
@@ -204,6 +211,8 @@ pub struct IcoSphere {
     draw_ico: DrawIcoSolid,
     #[live(0.037)]
     radius: f32,
+    #[live(vec4(0.63, 0.65, 0.69, 1.0))]
+    diffuse: Vec4f,
     #[live(vec4(0.95, 0.62, 0.28, 1.0))]
     color: Vec4f,
     #[cast]
@@ -249,6 +258,7 @@ impl Widget for IcoSphere {
             vec3(0.0, 0.0, 0.0),
         );
         self.draw_ico.transform = Mat4f::mul(&world, &local_scale);
+        self.draw_ico.diffuse = self.diffuse;
         self.draw_ico.color = self.color;
         self.draw_ico.depth_clip = 1.0;
         self.draw_ico

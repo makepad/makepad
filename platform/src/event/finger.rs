@@ -272,6 +272,7 @@ pub struct CxFingers {
     captures: Vec<CxDigitCapture>,
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
+    xr_poke_locks: Vec<DigitId>,
     sweep_lock: Option<Area>,
     /// * If `Some`, scrolling is currently blocked *except* within the contained area.
     /// * If `None`, scrolling is not blocked anywhere.
@@ -415,6 +416,20 @@ impl CxFingers {
         while let Some(index) = self.hovers.iter_mut().position(|v| v.digit_id == digit_id) {
             self.hovers.remove(index);
         }
+    }
+
+    pub(crate) fn xr_poke_is_locked(&self, digit_id: DigitId) -> bool {
+        self.xr_poke_locks.contains(&digit_id)
+    }
+
+    pub(crate) fn xr_poke_lock(&mut self, digit_id: DigitId) {
+        if !self.xr_poke_locks.contains(&digit_id) {
+            self.xr_poke_locks.push(digit_id);
+        }
+    }
+
+    pub(crate) fn xr_poke_unlock(&mut self, digit_id: DigitId) {
+        self.xr_poke_locks.retain(|id| *id != digit_id);
     }
 
     pub(crate) fn tap_count(&self) -> u32 {
