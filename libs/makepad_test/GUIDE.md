@@ -57,9 +57,13 @@ That keeps the normal `cargo test` workflow intact while moving test authoring i
 1. loads `tests/ui.splash`
 2. installs `mod.test`
 3. collects `test.configure(...)` and `test.case(...)`
-4. starts a fresh app session per registered case
+4. starts **one** app + hub session for the entire suite (all `test.case` bodies run in order against the same process)
 5. executes each case in order
 6. captures failure artifacts on returned errors or panics
+
+**Shared process:** Cases are not isolated by default — they share one running app. If a case leaves modals, navigation, or global state in a bad state, later cases can fail. Prefer returning to a known screen at the start of each case, or split into separate suite files if you need a hard process boundary. A future opt-out (e.g. per-case isolation) could be added if needed.
+
+**Artifact directory:** Failure artifacts use a suite-level test name, not per-case names: `splash_suite` when `module_path!()` is empty, or `{module_path}::splash_suite` (sanitized for paths under `target/makepad_test/.../`). Error messages still include the failing `test.case` name.
 
 Splash suites can either:
 

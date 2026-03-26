@@ -277,16 +277,19 @@ pub fn run_splash_suite(
             resolve_suite_path(Path::new(manifest_dir), Path::new(suite_path)).display()
         )));
     }
-    for case_name in case_names {
-        let full_test_name = if module_path.is_empty() {
-            case_name.clone()
-        } else {
-            format!("{module_path}::{case_name}")
-        };
-        let config = runner.test_config(package_name, &full_test_name)?;
-        run_with_config(config, |app| runner.run_case(&case_name, app))?;
-    }
-    Ok(())
+
+    let suite_test_name = if module_path.is_empty() {
+        "splash_suite".to_string()
+    } else {
+        format!("{module_path}::splash_suite")
+    };
+    let config = runner.test_config(package_name, &suite_test_name)?;
+    run_with_config(config, |app| -> TestResult<()> {
+        for case_name in &case_names {
+            runner.run_case(case_name, app.clone())?;
+        }
+        Ok(())
+    })
 }
 
 fn install_test_script_module(vm: &mut ScriptVm) {

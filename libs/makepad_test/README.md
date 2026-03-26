@@ -36,6 +36,8 @@ Run that package’s UI integration test:
 cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
+One `cargo test` harness starts **one** app session for the whole Splash file: every `test.case` runs in order in the same process (fast). Failure artifacts go under a suite-level name (`splash_suite` or `{module_path}::splash_suite`); see [GUIDE.md](./GUIDE.md).
+
 Run the curated repo UI suite on macOS (splash example only):
 
 ```bash
@@ -123,6 +125,8 @@ Failed tests write artifacts under:
 ```text
 target/makepad_test/<package>/<test>/
 ```
+
+For `run_splash_suite`, `<test>` is the suite id (`splash_suite` or `your_module::splash_suite`), not individual case names.
 
 The runtime captures:
 
