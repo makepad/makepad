@@ -16,13 +16,15 @@ const XR_DEPTH_ALIGN_MIN_WALL_SAMPLES: usize = 4;
 const XR_DEPTH_ALIGN_MIN_WALL_FEATURES: usize = 2;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES: usize = 6;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE: f32 = 0.12;
-const XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_WALL_FEATURES: usize = 3;
+const XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_WALL_FEATURES: usize = 2;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_WALL_FEATURE_CONFIDENCE: f32 = 0.18;
+const XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE: f32 = 0.10;
 const XR_DEPTH_ALIGN_TRANSLATION_VOTE_STEP_METERS: f32 = 0.08;
 const XR_DEPTH_ALIGN_WALL_FEATURE_NORMAL_DOT_MIN: f32 = 0.94;
 const XR_DEPTH_ALIGN_WALL_FEATURE_PLANE_RESIDUAL_MAX_METERS: f32 = 0.18;
 const XR_DEPTH_ALIGN_WALL_FEATURE_HEIGHT_OVERLAP_MIN: f32 = 0.30;
 const XR_DEPTH_ALIGN_WALL_FEATURE_PAIR_ANGLE_MIN_RADIANS: f32 = 0.28;
+const XR_DEPTH_ALIGN_VERTICAL_DESCRIPTOR_MIN_OVERLAP: f32 = 0.18;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, SerBin, DeBin)]
 pub struct XrDepthAlignWallFeature {
@@ -131,12 +133,48 @@ pub struct XrDepthAlignSample {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, SerBin, DeBin)]
+pub struct XrDepthAlignVerticalDescriptor {
+    pub origin_x: f32,
+    pub origin_z: f32,
+    pub cell_size_meters: f32,
+    pub size: u16,
+    pub vertical_surface_masks: Vec<u8>,
+    pub clutter_surface_masks: Vec<u8>,
+    pub free_space_masks: Vec<u8>,
+    pub height_u8: Vec<u8>,
+}
+
+impl XrDepthAlignVerticalDescriptor {
+    pub fn cell_count(&self) -> usize {
+        self.size as usize * self.size as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+            || self.vertical_surface_masks.len() != self.cell_count()
+            || self.clutter_surface_masks.len() != self.cell_count()
+            || self.free_space_masks.len() != self.cell_count()
+            || self.height_u8.len() != self.cell_count()
+            || self
+                .vertical_surface_masks
+                .iter()
+                .zip(self.clutter_surface_masks.iter())
+                .zip(self.free_space_masks.iter())
+                .zip(self.height_u8.iter())
+                .all(|(((vertical, clutter), free), height)| {
+                    *vertical == 0 && *clutter == 0 && *free == 0 && *height == 0
+                })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, SerBin, DeBin)]
 pub struct XrDepthAlignDescriptor {
     pub voxel_size_meters: f32,
     pub floor_y: f32,
     pub wall_normal_histogram: Vec<f32>,
     pub wall_features: Vec<XrDepthAlignWallFeature>,
     pub samples: Vec<XrDepthAlignSample>,
+    pub vertical_descriptor: Option<XrDepthAlignVerticalDescriptor>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SerBin, DeBin)]
@@ -153,6 +191,7 @@ pub struct XrDepthAlignSolution {
     pub yaw_radians: f32,
     pub translation: Vec3f,
     pub confidence: f32,
+    pub symmetry_confidence: f32,
     pub residual_meters: f32,
     pub matched_samples: usize,
 }
@@ -171,6 +210,10 @@ impl XrDepthAlignSolution {
             .transform_vec4(vec4f(point.x, point.y, point.z, 1.0))
             .to_vec3f()
     }
+
+    pub fn ranking_confidence(&self) -> f32 {
+        (self.confidence * (0.30 + 0.70 * self.symmetry_confidence.clamp(0.0, 1.0))).clamp(0.0, 1.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -187,6 +230,8 @@ pub struct XrDepthAlignSolveDiagnostic {
     pub used_wall_features: bool,
     pub local_wall_features: usize,
     pub remote_wall_features: usize,
+    pub local_vertical_descriptor: bool,
+    pub remote_vertical_descriptor: bool,
     pub local_floor_samples: usize,
     pub local_wall_samples: usize,
     pub remote_floor_samples: usize,
@@ -202,6 +247,10 @@ impl XrDepthAlignSolveDiagnostic {
             if self.used_wall_features {
                 solution.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_WALL_FEATURES
                     && solution.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_WALL_FEATURE_CONFIDENCE
+                    && (!self.local_vertical_descriptor
+                        || !self.remote_vertical_descriptor
+                        || solution.symmetry_confidence
+                            > XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE)
             } else {
                 solution.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES
                     && solution.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE
@@ -236,6 +285,7 @@ pub fn xr_depth_align_loopback_preview_solution() -> XrDepthAlignSolution {
         yaw_radians: 0.58,
         translation: vec3(-0.82, 0.0, 0.67),
         confidence: 1.0,
+        symmetry_confidence: 1.0,
         residual_meters: 0.0,
         matched_samples: 0,
     }
@@ -310,6 +360,10 @@ pub fn xr_depth_align_transform_descriptor(
         .transform_vec4(vec4f(0.0, descriptor.floor_y, 0.0, 1.0))
         .to_vec3f()
         .y;
+    descriptor.vertical_descriptor = descriptor
+        .vertical_descriptor
+        .as_ref()
+        .and_then(|vertical| transform_vertical_descriptor(vertical, transform));
     descriptor.wall_normal_histogram = if descriptor.wall_features.is_empty() {
         xr_depth_align_build_wall_normal_histogram(
             &descriptor.samples,
@@ -324,18 +378,148 @@ pub fn xr_depth_align_transform_descriptor(
     descriptor
 }
 
+fn transform_vertical_descriptor(
+    descriptor: &XrDepthAlignVerticalDescriptor,
+    transform: &Mat4f,
+) -> Option<XrDepthAlignVerticalDescriptor> {
+    let size = descriptor.size as usize;
+    if size == 0
+        || descriptor.vertical_surface_masks.len() != size * size
+        || descriptor.clutter_surface_masks.len() != size * size
+        || descriptor.free_space_masks.len() != size * size
+        || descriptor.height_u8.len() != size * size
+    {
+        return None;
+    }
+    let max = descriptor.origin_x + descriptor.cell_size_meters * size as f32;
+    let max_z = descriptor.origin_z + descriptor.cell_size_meters * size as f32;
+    let corners = [
+        vec3(descriptor.origin_x, 0.0, descriptor.origin_z),
+        vec3(max, 0.0, descriptor.origin_z),
+        vec3(max, 0.0, max_z),
+        vec3(descriptor.origin_x, 0.0, max_z),
+    ];
+    let mut min_x = f32::INFINITY;
+    let mut min_z = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+    for corner in corners {
+        let transformed = transform
+            .transform_vec4(vec4f(corner.x, corner.y, corner.z, 1.0))
+            .to_vec3f();
+        min_x = min_x.min(transformed.x);
+        max_x = max_x.max(transformed.x);
+        min_z = min_z.min(transformed.z);
+        max_z = max_z.max(transformed.z);
+    }
+    if !min_x.is_finite() || !min_z.is_finite() || !max_x.is_finite() || !max_z.is_finite() {
+        return None;
+    }
+    let extent = (max_x - min_x)
+        .max(max_z - min_z)
+        .max(descriptor.cell_size_meters);
+    let origin_x = (min_x + max_x) * 0.5 - extent * 0.5;
+    let origin_z = (min_z + max_z) * 0.5 - extent * 0.5;
+    let cell_size = extent / size as f32;
+    let mut transformed = XrDepthAlignVerticalDescriptor {
+        origin_x,
+        origin_z,
+        cell_size_meters: cell_size,
+        size: descriptor.size,
+        vertical_surface_masks: vec![0; size * size],
+        clutter_surface_masks: vec![0; size * size],
+        free_space_masks: vec![0; size * size],
+        height_u8: vec![0; size * size],
+    };
+    for z in 0..size {
+        for x in 0..size {
+            let index = x + z * size;
+            let active = descriptor.vertical_surface_masks[index] != 0
+                || descriptor.clutter_surface_masks[index] != 0
+                || descriptor.free_space_masks[index] != 0
+                || descriptor.height_u8[index] != 0;
+            if !active {
+                continue;
+            }
+            let point = vec3(
+                descriptor.origin_x + (x as f32 + 0.5) * descriptor.cell_size_meters,
+                0.0,
+                descriptor.origin_z + (z as f32 + 0.5) * descriptor.cell_size_meters,
+            );
+            let mapped = transform
+                .transform_vec4(vec4f(point.x, point.y, point.z, 1.0))
+                .to_vec3f();
+            let tx = ((mapped.x - origin_x) / cell_size).floor() as isize;
+            let tz = ((mapped.z - origin_z) / cell_size).floor() as isize;
+            if tx < 0 || tz < 0 || tx >= size as isize || tz >= size as isize {
+                continue;
+            }
+            let target_index = tx as usize + tz as usize * size;
+            transformed.vertical_surface_masks[target_index] |=
+                descriptor.vertical_surface_masks[index];
+            transformed.clutter_surface_masks[target_index] |=
+                descriptor.clutter_surface_masks[index];
+            transformed.free_space_masks[target_index] |= descriptor.free_space_masks[index];
+            transformed.height_u8[target_index] =
+                transformed.height_u8[target_index].max(descriptor.height_u8[index]);
+        }
+    }
+    Some(transformed)
+}
+
 pub fn xr_depth_align_test_markers(descriptor: &XrDepthAlignDescriptor) -> Option<[Vec3f; 2]> {
     let wall_samples = descriptor_samples_of_kind(descriptor, XrDepthAlignSampleKind::Wall);
-    let samples = if wall_samples.len() >= 2 {
-        wall_samples
-    } else {
-        descriptor
-            .samples
-            .iter()
-            .filter(|sample| sample.kind != XrDepthAlignSampleKind::Unknown)
-            .collect::<Vec<_>>()
-    };
     let mut best = None::<(f32, f32, Vec3f, Vec3f)>;
+    if wall_samples.len() >= 2 {
+        for (index, first) in wall_samples.iter().enumerate() {
+            for second in wall_samples.iter().skip(index + 1) {
+                let distance = (second.point - first.point).length();
+                if distance < 0.18 {
+                    continue;
+                }
+                let weight = first.weight + second.weight;
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_distance, best_weight, _, _)| {
+                        distance > *best_distance + 1.0e-4
+                            || ((distance - *best_distance).abs() <= 1.0e-4
+                                && weight > *best_weight)
+                    })
+                {
+                    best = Some((distance, weight, first.point, second.point));
+                }
+            }
+        }
+    } else {
+        let wall_features = descriptor_wall_features(descriptor);
+        for (index, first) in wall_features.iter().enumerate() {
+            for second in wall_features.iter().skip(index + 1) {
+                let distance = (second.center - first.center).length();
+                if distance < 0.18 {
+                    continue;
+                }
+                let weight = first.area + second.area;
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_distance, best_weight, _, _)| {
+                        distance > *best_distance + 1.0e-4
+                            || ((distance - *best_distance).abs() <= 1.0e-4
+                                && weight > *best_weight)
+                    })
+                {
+                    best = Some((distance, weight, first.center, second.center));
+                }
+            }
+        }
+    }
+    if best.is_some() {
+        return best.map(|(_, _, first, second)| [first, second]);
+    }
+    let samples = descriptor
+        .samples
+        .iter()
+        .filter(|sample| sample.kind != XrDepthAlignSampleKind::Unknown)
+        .collect::<Vec<_>>();
     for (index, first) in samples.iter().enumerate() {
         for second in samples.iter().skip(index + 1) {
             let distance = (second.point - first.point).length();
@@ -374,9 +558,13 @@ pub fn xr_depth_align_analyze_remote_to_local(
     let local_wall_samples = descriptor_samples_of_kind(local, XrDepthAlignSampleKind::Wall);
     let remote_floor_samples = descriptor_samples_of_kind(remote, XrDepthAlignSampleKind::Floor);
     let remote_wall_samples = descriptor_samples_of_kind(remote, XrDepthAlignSampleKind::Wall);
+    let local_vertical_descriptor = local.vertical_descriptor.as_ref();
+    let remote_vertical_descriptor = remote.vertical_descriptor.as_ref();
     let mut diagnostic = XrDepthAlignSolveDiagnostic {
         local_wall_features: local_wall_features.len(),
         remote_wall_features: remote_wall_features.len(),
+        local_vertical_descriptor: local_vertical_descriptor.is_some(),
+        remote_vertical_descriptor: remote_vertical_descriptor.is_some(),
         local_floor_samples: local_floor_samples.len(),
         local_wall_samples: local_wall_samples.len(),
         remote_floor_samples: remote_floor_samples.len(),
@@ -414,8 +602,8 @@ pub fn xr_depth_align_analyze_remote_to_local(
                 let candidate = score_wall_feature_alignment(
                     &local_wall_features,
                     &remote_wall_features,
-                    &local_wall_samples,
-                    &remote_wall_samples,
+                    local_vertical_descriptor,
+                    remote_vertical_descriptor,
                     refined_yaw,
                     refined_translation,
                 );
@@ -976,8 +1164,8 @@ fn refine_wall_feature_alignment(
 fn score_wall_feature_alignment(
     local_walls: &[&XrDepthAlignWallFeature],
     remote_walls: &[&XrDepthAlignWallFeature],
-    local_wall_samples: &[&XrDepthAlignSample],
-    remote_wall_samples: &[&XrDepthAlignSample],
+    local_vertical_descriptor: Option<&XrDepthAlignVerticalDescriptor>,
+    remote_vertical_descriptor: Option<&XrDepthAlignVerticalDescriptor>,
     yaw: f32,
     translation: Vec3f,
 ) -> XrDepthAlignSolution {
@@ -1023,28 +1211,29 @@ fn score_wall_feature_alignment(
     } else {
         0.0
     };
-    let mut confidence = (coverage.sqrt()
+    let wall_confidence = (coverage.sqrt()
         * mean_alignment.powf(1.4).clamp(0.0, 1.0)
         * (0.25 + 0.75 * overlap_quality)
         * (0.70 + 0.30 * corner_consistency)
         * residual_confidence.max(0.05))
     .clamp(0.0, 1.0);
+    let mut symmetry_confidence = 1.0;
     let mut blended_residual = residual_meters;
-    if !local_wall_samples.is_empty() && !remote_wall_samples.is_empty() {
-        let sample_solution =
-            score_alignment_solution(local_wall_samples, remote_wall_samples, yaw, translation);
-        let sample_support = match sample_solution.matched_samples {
-            matches if matches >= 3 => 0.35 + 0.65 * sample_solution.confidence,
-            2 => 0.28 + 0.72 * sample_solution.confidence,
-            1 => 0.55,
-            _ => 0.22,
-        };
-        confidence = (confidence * sample_support.clamp(0.0, 1.0)).clamp(0.0, 1.0);
-        if sample_solution.residual_meters.is_finite() {
+    if let (Some(local_vertical_descriptor), Some(remote_vertical_descriptor)) =
+        (local_vertical_descriptor, remote_vertical_descriptor)
+    {
+        let (vertical_support, vertical_residual) = score_vertical_descriptor_alignment(
+            local_vertical_descriptor,
+            remote_vertical_descriptor,
+            yaw,
+            translation,
+        );
+        symmetry_confidence = vertical_support;
+        if vertical_residual.is_finite() {
             blended_residual = if blended_residual.is_finite() {
-                blended_residual * 0.78 + sample_solution.residual_meters * 0.22
+                blended_residual * 0.72 + vertical_residual * 0.28
             } else {
-                sample_solution.residual_meters
+                vertical_residual
             };
         }
     }
@@ -1052,9 +1241,195 @@ fn score_wall_feature_alignment(
     XrDepthAlignSolution {
         yaw_radians: wrap_angle(yaw),
         translation,
-        confidence,
+        confidence: wall_confidence,
+        symmetry_confidence,
         residual_meters: blended_residual,
         matched_samples: matches.len(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct VerticalDescriptorCell {
+    vertical_mask: u8,
+    clutter_mask: u8,
+    free_mask: u8,
+    height_u8: u8,
+}
+
+fn vertical_descriptor_cell_xy(
+    descriptor: &XrDepthAlignVerticalDescriptor,
+    x: isize,
+    z: isize,
+) -> Option<VerticalDescriptorCell> {
+    let size = descriptor.size as usize;
+    if size == 0
+        || descriptor.vertical_surface_masks.len() != size * size
+        || descriptor.clutter_surface_masks.len() != size * size
+        || descriptor.free_space_masks.len() != size * size
+        || descriptor.height_u8.len() != size * size
+    {
+        return None;
+    }
+    if x < 0 || z < 0 || x >= size as isize || z >= size as isize {
+        return None;
+    }
+    let index = x as usize + z as usize * size;
+    Some(VerticalDescriptorCell {
+        vertical_mask: descriptor.vertical_surface_masks[index],
+        clutter_mask: descriptor.clutter_surface_masks[index],
+        free_mask: descriptor.free_space_masks[index],
+        height_u8: descriptor.height_u8[index],
+    })
+}
+
+fn vertical_descriptor_cell_center(
+    descriptor: &XrDepthAlignVerticalDescriptor,
+    index: usize,
+) -> Vec3f {
+    let size = descriptor.size as usize;
+    let x = index % size;
+    let z = index / size;
+    vec3(
+        descriptor.origin_x + (x as f32 + 0.5) * descriptor.cell_size_meters,
+        0.0,
+        descriptor.origin_z + (z as f32 + 0.5) * descriptor.cell_size_meters,
+    )
+}
+
+fn vertical_descriptor_match_score(
+    source: VerticalDescriptorCell,
+    target: VerticalDescriptorCell,
+) -> f32 {
+    let vertical_support = (source.vertical_mask & target.vertical_mask).count_ones() as f32 * 1.75;
+    let clutter_support = (source.clutter_mask & target.clutter_mask).count_ones() as f32 * 0.78;
+    let free_support = (source.free_mask & target.free_mask).count_ones() as f32 * 0.08;
+    let occupied_free_conflict = ((source.vertical_mask | source.clutter_mask) & target.free_mask)
+        .count_ones() as f32
+        * 0.18;
+    let free_occupied_conflict = (source.free_mask & (target.vertical_mask | target.clutter_mask))
+        .count_ones() as f32
+        * 0.10;
+    vertical_support + clutter_support + free_support
+        - occupied_free_conflict
+        - free_occupied_conflict
+}
+
+fn best_vertical_descriptor_cell(
+    descriptor: &XrDepthAlignVerticalDescriptor,
+    point: Vec3f,
+    source: VerticalDescriptorCell,
+) -> Option<VerticalDescriptorCell> {
+    let base_x = ((point.x - descriptor.origin_x) / descriptor.cell_size_meters).floor() as isize;
+    let base_z = ((point.z - descriptor.origin_z) / descriptor.cell_size_meters).floor() as isize;
+    let mut best = None;
+    let mut best_score = f32::NEG_INFINITY;
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let Some(target) = vertical_descriptor_cell_xy(descriptor, base_x + dx, base_z + dz)
+            else {
+                continue;
+            };
+            let score = vertical_descriptor_match_score(source, target);
+            if score > best_score {
+                best_score = score;
+                best = Some(target);
+            }
+        }
+    }
+    best
+}
+
+fn score_vertical_descriptor_direction(
+    source: &XrDepthAlignVerticalDescriptor,
+    target: &XrDepthAlignVerticalDescriptor,
+    yaw: f32,
+    translation: Vec3f,
+) -> Option<(f32, f32)> {
+    if source.is_empty() || target.is_empty() {
+        return None;
+    }
+    let mut support_score = 0.0;
+    let mut support_max = 0.0;
+    let mut conflict_score = 0.0;
+    let mut height_error = 0.0;
+    let mut height_weight = 0.0;
+    let mut active_cells = 0usize;
+    let mut overlapped_cells = 0usize;
+    let cell_count = source.cell_count();
+    for index in 0..cell_count {
+        let source_cell = VerticalDescriptorCell {
+            vertical_mask: source.vertical_surface_masks[index],
+            clutter_mask: source.clutter_surface_masks[index],
+            free_mask: source.free_space_masks[index],
+            height_u8: source.height_u8[index],
+        };
+        if source_cell.vertical_mask == 0
+            && source_cell.clutter_mask == 0
+            && source_cell.free_mask == 0
+            && source_cell.height_u8 == 0
+        {
+            continue;
+        }
+        active_cells += 1;
+        let mapped = rotate_y(yaw, vertical_descriptor_cell_center(source, index)) + translation;
+        let Some(target_cell) = best_vertical_descriptor_cell(target, mapped, source_cell) else {
+            continue;
+        };
+        overlapped_cells += 1;
+        let source_vertical = source_cell.vertical_mask.count_ones() as f32;
+        let source_clutter = source_cell.clutter_mask.count_ones() as f32;
+        let source_free = source_cell.free_mask.count_ones() as f32;
+        support_score += vertical_descriptor_match_score(source_cell, target_cell).max(0.0);
+        support_max += source_vertical * 1.75 + source_clutter * 0.78 + source_free * 0.08;
+        conflict_score += ((source_cell.vertical_mask | source_cell.clutter_mask)
+            & target_cell.free_mask)
+            .count_ones() as f32
+            * 0.06;
+        conflict_score += (source_cell.free_mask
+            & (target_cell.vertical_mask | target_cell.clutter_mask))
+            .count_ones() as f32
+            * 0.03;
+        if source_cell.height_u8 > 0 && target_cell.height_u8 > 0 {
+            height_error +=
+                (source_cell.height_u8 as f32 - target_cell.height_u8 as f32).abs() / 255.0;
+            height_weight += 1.0;
+        }
+    }
+    let overlap_ratio = overlapped_cells as f32 / active_cells.max(1) as f32;
+    if overlap_ratio < XR_DEPTH_ALIGN_VERTICAL_DESCRIPTOR_MIN_OVERLAP || support_max <= 0.0 {
+        return None;
+    }
+    let score = ((support_score - conflict_score).max(0.0) / support_max).clamp(0.0, 1.0);
+    let height_penalty = if height_weight > 0.0 {
+        1.0 - (height_error / height_weight).clamp(0.0, 1.0)
+    } else {
+        0.75
+    };
+    let support =
+        (score * (0.65 + 0.35 * overlap_ratio) * (0.70 + 0.30 * height_penalty)).clamp(0.0, 1.0);
+    let residual = ((1.0 - support).max(0.0) * 0.30).clamp(0.0, 0.30);
+    Some((support, residual))
+}
+
+fn score_vertical_descriptor_alignment(
+    local: &XrDepthAlignVerticalDescriptor,
+    remote: &XrDepthAlignVerticalDescriptor,
+    yaw: f32,
+    translation: Vec3f,
+) -> (f32, f32) {
+    let forward = score_vertical_descriptor_direction(remote, local, yaw, translation);
+    let inverse_translation = rotate_y(-yaw, translation.scale(-1.0));
+    let backward = score_vertical_descriptor_direction(local, remote, -yaw, inverse_translation);
+    match (forward, backward) {
+        (
+            Some((forward_support, forward_residual)),
+            Some((backward_support, backward_residual)),
+        ) => (
+            (forward_support + backward_support) * 0.5,
+            (forward_residual + backward_residual) * 0.5,
+        ),
+        (Some(result), None) | (None, Some(result)) => result,
+        (None, None) => (0.0, f32::INFINITY),
     }
 }
 
@@ -1456,6 +1831,7 @@ fn score_alignment_solution(
         yaw_radians: wrap_angle(yaw),
         translation,
         confidence,
+        symmetry_confidence: 1.0,
         residual_meters,
         matched_samples,
     }
@@ -1553,9 +1929,21 @@ fn alignment_solution_better(
     current: &XrDepthAlignSolution,
 ) -> bool {
     candidate
-        .confidence
-        .partial_cmp(&current.confidence)
+        .ranking_confidence()
+        .partial_cmp(&current.ranking_confidence())
         .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            candidate
+                .symmetry_confidence
+                .partial_cmp(&current.symmetry_confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| {
+            candidate
+                .confidence
+                .partial_cmp(&current.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .then_with(|| candidate.matched_samples.cmp(&current.matched_samples))
         .then_with(|| {
             current
@@ -2096,6 +2484,7 @@ mod tests {
             ),
             wall_features,
             samples,
+            vertical_descriptor: None,
         }
     }
 
@@ -2121,6 +2510,81 @@ mod tests {
             ),
             wall_features,
             samples,
+            vertical_descriptor: None,
+        }
+    }
+
+    fn make_vertical_descriptor(
+        cells: &[(usize, usize, u8, u8, u8, u8)],
+    ) -> XrDepthAlignVerticalDescriptor {
+        let size = 16usize;
+        let mut descriptor = XrDepthAlignVerticalDescriptor {
+            origin_x: -1.6,
+            origin_z: -1.6,
+            cell_size_meters: 0.2,
+            size: size as u16,
+            vertical_surface_masks: vec![0; size * size],
+            clutter_surface_masks: vec![0; size * size],
+            free_space_masks: vec![0; size * size],
+            height_u8: vec![0; size * size],
+        };
+        for &(x, z, vertical, clutter, free, height) in cells {
+            let index = x + z * size;
+            descriptor.vertical_surface_masks[index] = vertical;
+            descriptor.clutter_surface_masks[index] = clutter;
+            descriptor.free_space_masks[index] = free;
+            descriptor.height_u8[index] = height;
+        }
+        descriptor
+    }
+
+    fn make_box_room_descriptor_with_vertical_asymmetry() -> XrDepthAlignDescriptor {
+        let mut descriptor = make_box_room_descriptor_with_patch_asymmetry();
+        descriptor.samples.clear();
+        descriptor.vertical_descriptor = Some(make_vertical_descriptor(&[
+            (3, 3, 0b0011_1100, 0, 0b0000_0011, 176),
+            (4, 3, 0b0011_1110, 0, 0b0000_0111, 182),
+            (5, 3, 0b0011_1000, 0, 0b0000_0111, 170),
+            (4, 4, 0b0111_1000, 0, 0b0000_0011, 188),
+            (5, 4, 0b0011_1000, 0, 0b0000_0001, 166),
+            (11, 8, 0, 0b0000_1110, 0b1110_0000, 98),
+            (12, 8, 0, 0b0001_1110, 0b1110_0000, 110),
+            (11, 9, 0, 0b0001_1110, 0b1111_0000, 114),
+            (12, 9, 0, 0b0000_1110, 0b1111_0000, 106),
+            (9, 11, 0b0111_0000, 0, 0b0000_0011, 208),
+            (10, 11, 0b0111_1000, 0, 0b0000_0011, 216),
+            (10, 12, 0b0011_0000, 0b0000_0011, 0b0000_0111, 154),
+            (7, 12, 0, 0b0001_1110, 0b1111_0000, 120),
+            (7, 13, 0, 0b0001_1110, 0b1111_1000, 124),
+            (8, 13, 0b0001_1000, 0b0000_0110, 0b1110_0000, 138),
+        ]));
+        descriptor
+    }
+
+    fn make_vertical_only_descriptor() -> XrDepthAlignDescriptor {
+        XrDepthAlignDescriptor {
+            voxel_size_meters: 0.05,
+            floor_y: 0.0,
+            wall_normal_histogram: Vec::new(),
+            wall_features: Vec::new(),
+            samples: Vec::new(),
+            vertical_descriptor: Some(make_vertical_descriptor(&[
+                (2, 2, 0b0011_1100, 0, 0b0000_0011, 164),
+                (3, 2, 0b0011_1110, 0, 0b0000_0111, 172),
+                (4, 2, 0b0011_1000, 0, 0b0000_0111, 168),
+                (3, 3, 0b0111_1000, 0, 0b0000_0011, 188),
+                (4, 3, 0b0011_1000, 0b0000_0010, 0b0000_0001, 176),
+                (10, 5, 0, 0b0000_1110, 0b1110_0000, 98),
+                (11, 5, 0, 0b0001_1110, 0b1110_0000, 108),
+                (10, 6, 0, 0b0001_1110, 0b1111_0000, 114),
+                (11, 6, 0, 0b0000_1110, 0b1111_0000, 106),
+                (9, 10, 0b0111_0000, 0, 0b0000_0011, 208),
+                (10, 10, 0b0111_1000, 0, 0b0000_0011, 216),
+                (10, 11, 0b0011_0000, 0b0000_0011, 0b0000_0111, 154),
+                (6, 11, 0, 0b0001_1110, 0b1111_0000, 120),
+                (6, 12, 0, 0b0001_1110, 0b1111_1000, 124),
+                (7, 12, 0b0001_1000, 0b0000_0110, 0b1110_0000, 138),
+            ])),
         }
     }
 
@@ -2269,23 +2733,21 @@ mod tests {
     }
 
     #[test]
-    fn wall_solver_uses_patch_asymmetry_to_break_box_room_flip() {
-        let local = make_box_room_descriptor_with_patch_asymmetry();
-        let expected_yaw = 0.37;
-        let expected_translation = vec3(-0.62, 0.0, 0.48);
+    fn wall_solver_uses_vertical_descriptor_to_break_box_room_flip() {
+        let local = make_box_room_descriptor_with_vertical_asymmetry();
+        let expected_yaw = -0.41;
+        let expected_translation = vec3(0.58, 0.0, -0.44);
         let remote_to_local = Pose::new(
             Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), expected_yaw),
             expected_translation,
         )
         .to_mat4();
         let local_to_remote = remote_to_local.invert();
-        let mut remote = xr_depth_align_transform_descriptor(&local, &local_to_remote);
-        remote.wall_normal_histogram =
-            xr_depth_align_build_wall_feature_normal_histogram(&remote.wall_features, 48);
+        let remote = xr_depth_align_transform_descriptor(&local, &local_to_remote);
 
         let diagnostic = xr_depth_align_analyze_remote_to_local(&local, &remote);
         let solution = diagnostic.accepted_solution().unwrap_or_else(|| {
-            panic!("room-box solver should accept the patch-supported pose: {diagnostic:?}")
+            panic!("vertical descriptor should make the correct box-room pose win: {diagnostic:?}")
         });
         assert!(
             angle_error(solution.yaw_radians, expected_yaw) < 0.08,
@@ -2298,17 +2760,21 @@ mod tests {
 
         let local_walls = descriptor_wall_features(&local);
         let remote_walls = descriptor_wall_features(&remote);
-        let local_samples = descriptor_samples_of_kind(&local, XrDepthAlignSampleKind::Wall);
-        let remote_samples = descriptor_samples_of_kind(&remote, XrDepthAlignSampleKind::Wall);
         let correct = score_wall_feature_alignment(
             &local_walls,
             &remote_walls,
-            &local_samples,
-            &remote_samples,
+            local.vertical_descriptor.as_ref(),
+            remote.vertical_descriptor.as_ref(),
             expected_yaw,
             expected_translation,
         );
         let flipped_yaw = wrap_angle(expected_yaw + std::f32::consts::PI);
+        let (correct_support, correct_vertical_residual) = score_vertical_descriptor_alignment(
+            local.vertical_descriptor.as_ref().unwrap(),
+            remote.vertical_descriptor.as_ref().unwrap(),
+            expected_yaw,
+            expected_translation,
+        );
         let flipped =
             candidate_wall_feature_translations(&local_walls, &remote_walls, 0.0, flipped_yaw)
                 .into_iter()
@@ -2316,21 +2782,178 @@ mod tests {
                     score_wall_feature_alignment(
                         &local_walls,
                         &remote_walls,
-                        &local_samples,
-                        &remote_samples,
+                        local.vertical_descriptor.as_ref(),
+                        remote.vertical_descriptor.as_ref(),
                         flipped_yaw,
                         translation,
                     )
                 })
                 .max_by(|left, right| {
-                    left.confidence
-                        .total_cmp(&right.confidence)
+                    left.ranking_confidence()
+                        .total_cmp(&right.ranking_confidence())
                         .then_with(|| left.matched_samples.cmp(&right.matched_samples))
                 })
                 .expect("expected flipped box-room hypothesis");
+        let (flipped_support, flipped_vertical_residual) = score_vertical_descriptor_alignment(
+            local.vertical_descriptor.as_ref().unwrap(),
+            remote.vertical_descriptor.as_ref().unwrap(),
+            flipped.yaw_radians,
+            flipped.translation,
+        );
         assert!(
-            correct.confidence > flipped.confidence + 0.06,
-            "patch asymmetry should make the correct box-room pose rank above the flipped one: correct={correct:?} flipped={flipped:?}"
+            correct_support > flipped_support + 0.05,
+            "vertical descriptor should favor the correct pose: correct_support={correct_support:.3} flipped_support={flipped_support:.3} correct_vertical_residual={correct_vertical_residual:.3} flipped_vertical_residual={flipped_vertical_residual:.3}"
+        );
+        assert!(
+            correct.ranking_confidence() > flipped.ranking_confidence() + 0.05,
+            "vertical descriptor should make the correct box-room pose rank above the flipped one: correct={correct:?} flipped={flipped:?}"
+        );
+    }
+
+    #[test]
+    fn vertical_descriptor_scores_true_pose_above_shifted_pose() {
+        let local = make_vertical_only_descriptor();
+        let expected_yaw = 0.37;
+        let expected_translation = vec3(-0.52, 0.0, 0.41);
+        let remote_to_local = Pose::new(
+            Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), expected_yaw),
+            expected_translation,
+        )
+        .to_mat4();
+        let local_to_remote = remote_to_local.invert();
+        let remote = xr_depth_align_transform_descriptor(&local, &local_to_remote);
+
+        let (correct_support, correct_residual) = score_vertical_descriptor_alignment(
+            local.vertical_descriptor.as_ref().unwrap(),
+            remote.vertical_descriptor.as_ref().unwrap(),
+            expected_yaw,
+            expected_translation,
+        );
+        let shifted_translation = expected_translation + vec3(0.55, 0.0, -0.35);
+        let (shifted_support, shifted_residual) = score_vertical_descriptor_alignment(
+            local.vertical_descriptor.as_ref().unwrap(),
+            remote.vertical_descriptor.as_ref().unwrap(),
+            expected_yaw,
+            shifted_translation,
+        );
+
+        assert!(
+            correct_support > 0.50,
+            "{correct_support} {correct_residual}"
+        );
+        assert!(correct_residual.is_finite(), "{correct_residual}");
+        assert!(
+            correct_support > shifted_support + 0.18,
+            "correct_support={correct_support} shifted_support={shifted_support} correct_residual={correct_residual} shifted_residual={shifted_residual}"
+        );
+    }
+
+    #[test]
+    fn vertical_descriptor_scores_true_pose_above_flipped_pose() {
+        let local = make_vertical_only_descriptor();
+        let expected_yaw = -0.29;
+        let expected_translation = vec3(0.44, 0.0, -0.57);
+        let remote_to_local = Pose::new(
+            Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), expected_yaw),
+            expected_translation,
+        )
+        .to_mat4();
+        let local_to_remote = remote_to_local.invert();
+        let remote = xr_depth_align_transform_descriptor(&local, &local_to_remote);
+
+        let (correct_support, correct_residual) = score_vertical_descriptor_alignment(
+            local.vertical_descriptor.as_ref().unwrap(),
+            remote.vertical_descriptor.as_ref().unwrap(),
+            expected_yaw,
+            expected_translation,
+        );
+        let flipped_yaw = wrap_angle(expected_yaw + std::f32::consts::PI);
+        let flipped_translation = vec3(-expected_translation.x, 0.0, -expected_translation.z);
+        let (flipped_support, flipped_residual) = score_vertical_descriptor_alignment(
+            local.vertical_descriptor.as_ref().unwrap(),
+            remote.vertical_descriptor.as_ref().unwrap(),
+            flipped_yaw,
+            flipped_translation,
+        );
+
+        assert!(
+            correct_support > 0.50,
+            "{correct_support} {correct_residual}"
+        );
+        assert!(
+            correct_support > flipped_support + 0.18,
+            "correct_support={correct_support} flipped_support={flipped_support} correct_residual={correct_residual} flipped_residual={flipped_residual}"
+        );
+    }
+
+    #[test]
+    fn vertical_descriptor_reports_zero_support_when_overlap_is_missing() {
+        let local = make_vertical_only_descriptor();
+        let expected_yaw = 0.24;
+        let expected_translation = vec3(-0.38, 0.0, 0.46);
+        let remote_to_local = Pose::new(
+            Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), expected_yaw),
+            expected_translation,
+        )
+        .to_mat4();
+        let local_to_remote = remote_to_local.invert();
+        let remote = xr_depth_align_transform_descriptor(&local, &local_to_remote);
+
+        let (support, residual) = score_vertical_descriptor_alignment(
+            local.vertical_descriptor.as_ref().unwrap(),
+            remote.vertical_descriptor.as_ref().unwrap(),
+            wrap_angle(expected_yaw + std::f32::consts::PI),
+            expected_translation + vec3(4.0, 0.0, -4.0),
+        );
+
+        assert!(support <= 0.001, "{support} {residual}");
+        assert!(!residual.is_finite(), "{support} {residual}");
+    }
+
+    #[test]
+    fn vertical_descriptor_tolerates_extra_unmatched_clutter() {
+        let local = make_vertical_only_descriptor();
+        let expected_yaw = -0.33;
+        let expected_translation = vec3(0.42, 0.0, -0.36);
+        let remote_to_local = Pose::new(
+            Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), expected_yaw),
+            expected_translation,
+        )
+        .to_mat4();
+        let local_to_remote = remote_to_local.invert();
+        let mut remote = xr_depth_align_transform_descriptor(&local, &local_to_remote);
+
+        let descriptor = remote.vertical_descriptor.as_mut().unwrap();
+        let size = descriptor.size as usize;
+        let blob_cells = [(14usize, 4usize), (15, 4), (14, 5), (15, 5)];
+        for (x, z) in blob_cells {
+            let index = x + z * size;
+            descriptor.clutter_surface_masks[index] |= 0b0001_1110;
+            descriptor.height_u8[index] = descriptor.height_u8[index].max(132);
+        }
+
+        let (correct_support, correct_residual) = score_vertical_descriptor_alignment(
+            local.vertical_descriptor.as_ref().unwrap(),
+            remote.vertical_descriptor.as_ref().unwrap(),
+            expected_yaw,
+            expected_translation,
+        );
+        let flipped_yaw = wrap_angle(expected_yaw + std::f32::consts::PI);
+        let flipped_translation = vec3(-expected_translation.x, 0.0, -expected_translation.z);
+        let (flipped_support, flipped_residual) = score_vertical_descriptor_alignment(
+            local.vertical_descriptor.as_ref().unwrap(),
+            remote.vertical_descriptor.as_ref().unwrap(),
+            flipped_yaw,
+            flipped_translation,
+        );
+
+        assert!(
+            correct_support > 0.22,
+            "{correct_support} {correct_residual}"
+        );
+        assert!(
+            correct_support > flipped_support + 0.10,
+            "correct_support={correct_support} flipped_support={flipped_support} correct_residual={correct_residual} flipped_residual={flipped_residual}"
         );
     }
 }
