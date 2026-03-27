@@ -1,4 +1,5 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
+pub mod capture;
 pub mod gl_render_bridge;
 pub mod os;
 
@@ -65,6 +66,7 @@ mod media_plugin;
 mod playback_session;
 mod video_session;
 
+pub mod single_instance;
 pub mod ui_runner;
 
 pub mod display_context;
@@ -72,7 +74,8 @@ pub mod display_context;
 #[macro_use]
 mod app_main;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
-pub use crate::cx_api::{can_play_type, CxSystemBrowser, SystemBrowserId};
+pub use crate::cx_api::can_play_type;
+pub use crate::single_instance::SingleInstanceResult;
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
@@ -100,6 +103,7 @@ pub use {
         },
         area::{Area, InstanceArea, RectArea},
         audio::*,
+        capture::{CaptureResult, CaptureSource},
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType},
@@ -184,8 +188,8 @@ pub use {
         media_host::{MediaControlBridge, MediaEventBridge, MediaTextureBridge, MediaTextureInfo},
         media_plugin::{
             media_plugin, media_video_capabilities, merge_video_capabilities,
-            register_media_plugin, FrameDecoderCodec, FrameDecoderConfig, MediaPlaybackSession,
-            MediaPlugin, MediaVideoEncoder, MseAudioTrackInfo, MseDecodedAudioFrame,
+            register_media_plugin, FrameDecoderCodec, FrameDecoderConfig, MediaPlugin,
+            MediaPlaybackSession, MediaVideoEncoder, MseAudioTrackInfo, MseDecodedAudioFrame,
             MseDecodedFrame, MseEngineOutput, MseInitMetadata, MsePlaybackEngine,
             MseVideoTrackInfo, PlaybackPrepared, VideoFrameDecoder,
         },
@@ -217,12 +221,9 @@ pub use {
             WindowId, WindowVisuals,
         },
         xr_depth_mesh::{
-            ChunkKey, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery,
-            XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry,
-            XrDepthMeshQueryColliderRole, XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface,
-            XrDepthMeshQueryResult,
-            XrDepthMeshQuerySupportPlane, XrDepthMeshState, XrDepthMeshStats,
-            XrDepthMeshStore, XrDepthPlaneKind, XrDepthPlanePatch,
+            ChunkKey, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery, XrDepthMeshQueryHit,
+            XrDepthMeshQueryResult, XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore,
+            XrDepthPlaneKind, XrDepthPlanePatch,
         },
     },
     app_main::*,

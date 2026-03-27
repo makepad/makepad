@@ -67,7 +67,21 @@ impl WaylandCx {
             cx: cx.clone(),
             qhandle: None,
         }));
-        let conn = Connection::connect_to_env().unwrap();
+        let conn = match Connection::connect_to_env() {
+            Ok(conn) => conn,
+            Err(err) => {
+                eprintln!("makepad: Wayland backend selected but connection failed: {}", err);
+                eprintln!(
+                    "makepad: WAYLAND_DISPLAY={}",
+                    std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "<unset>".to_string())
+                );
+                eprintln!(
+                    "makepad: XDG_RUNTIME_DIR={}",
+                    std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "<unset>".to_string())
+                );
+                std::process::exit(1);
+            }
+        };
         let display = conn.display();
 
         let display_ptr = conn.backend().display_ptr();
@@ -223,6 +237,7 @@ impl WaylandCx {
                 if let Some(index) = state.windows.iter().position(|w| w.window_id == window_id) {
                     state.windows.remove(index);
                     if state.windows.len() == 0 {
+                        crate::os::unix_single_instance::cleanup();
                         cx.call_event_handler(&Event::Shutdown);
                         return EventFlow::Exit;
                     }
@@ -339,6 +354,11 @@ impl WaylandCx {
                         cx.handle_media_signals();
                         cx.handle_script_signals();
                         cx.call_event_handler(&Event::Signal);
+                        crate::single_instance::enqueue_initial_app_open_if_enabled();
+                        let items = crate::single_instance::drain_app_open_items();
+                        if !items.is_empty() {
+                            cx.call_event_handler(&Event::AppOpen(items));
+                        }
                     }
                     if SignalToUI::check_and_clear_action_signal() {
                         cx.handle_action_receiver();

@@ -759,9 +759,24 @@ public class MakepadActivity
 
         float refreshRate = getDeviceRefreshRate();
         MakepadNative.initChoreographer(refreshRate, sdkVersion);
+
+        Intent launchIntent = getIntent();
+        if (launchIntent != null && launchIntent.getData() != null) {
+            MakepadNative.onAppOpen(launchIntent.getData().toString());
+        }
+
         logLifecycle("onCreate complete");
         //% MAIN_ACTIVITY_ON_CREATE
         
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent.getData() != null) {
+            MakepadNative.onAppOpen(intent.getData().toString());
+        }
     }
 
     @Override

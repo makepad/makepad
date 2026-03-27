@@ -157,6 +157,18 @@ impl CxOsApi for Cx {
     fn open_url(&mut self, _url: &str, _in_place: OpenUrlInPlace) {
         crate::error!("open_url not implemented on this platform");
     }
+
+    fn enable_single_instance(app_id: &str, items: &[&str]) -> crate::single_instance::SingleInstanceResult {
+        crate::os::unix_single_instance::enable(app_id, items)
+    }
+
+    fn enable_single_instance_with_build(
+        app_id: &str,
+        build_id: &str,
+        items: &[&str],
+    ) -> crate::single_instance::SingleInstanceResult {
+        crate::os::unix_single_instance::enable_with_build(app_id, build_id, items)
+    }
 }
 
 // Unified CxOs that can handle both X11 and Wayland

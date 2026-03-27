@@ -88,11 +88,8 @@ use {
     std::time::Instant,
 };
 
-const ANDROID_XR_BUFFER_SCALE_MIN: f32 = 0.75;
-const ANDROID_XR_BUFFER_SCALE_DEFAULT: f32 = 1.4;
-const ANDROID_XR_BUFFER_SCALE_MAX: f32 = 1.5;
+const ANDROID_XR_BUFFER_SCALE: f32 = 1.3;
 const ANDROID_XR_MULTISAMPLES: usize = 4;
-const ANDROID_XR_FIXED_FOVEATION_LEVEL: u8 = 3;
 
 fn android_debug_log(prio: i32, msg: &str) {
     use std::ffi::c_int;
@@ -113,14 +110,7 @@ fn android_panic_summary(info: &std::panic::PanicHookInfo<'_>) -> String {
     };
     let location = info
         .location()
-        .map(|location| {
-            format!(
-                "{}:{}:{}",
-                location.file(),
-                location.line(),
-                location.column()
-            )
-        })
+        .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
         .unwrap_or_else(|| "<unknown>".to_string());
     let thread = std::thread::current();
     let thread_name = thread.name().unwrap_or("<unnamed>");
@@ -141,15 +131,6 @@ fn install_android_panic_hook() {
 }
 
 impl Cx {
-    pub(crate) fn current_android_xr_options(&self) -> CxOpenXrOptions {
-        CxOpenXrOptions {
-            buffer_scale: self.os.xr_buffer_scale_requested,
-            multisamples: ANDROID_XR_MULTISAMPLES,
-            remove_hands_from_depth: false,
-            fixed_foveation_level: ANDROID_XR_FIXED_FOVEATION_LEVEL,
-        }
-    }
-
     #[cfg(use_vulkan)]
     fn replace_xr_pending_surface(
         &mut self,
@@ -212,6 +193,7 @@ impl Cx {
         let height_u32 = height.max(1) as u32;
 
         if let Some(mut old_vulkan) = self.os.vulkan.take() {
+            crate::log!("Android XR dropping previous Vulkan backend before XR session init");
             old_vulkan.suspend_surface();
             drop(old_vulkan);
         }
@@ -222,6 +204,7 @@ impl Cx {
             .create_vulkan_backend(window, width_u32, height_u32)
         {
             Ok(vulkan) => {
+                crate::log!("Android XR created OpenXR-compatible Vulkan backend ({reason})");
                 self.os.vulkan = Some(vulkan);
             }
             Err(err) => {
@@ -237,7 +220,11 @@ impl Cx {
         let result = self.os.openxr.create_session(
             self.os.display.as_ref().unwrap(),
             vulkan.as_mut(),
-            self.current_android_xr_options(),
+            CxOpenXrOptions {
+                buffer_scale: ANDROID_XR_BUFFER_SCALE,
+                multisamples: ANDROID_XR_MULTISAMPLES,
+                remove_hands_from_depth: false,
+            },
             &self.os_type,
         );
         self.os.vulkan = vulkan;
@@ -245,7 +232,7 @@ impl Cx {
             crate::error!("OpenXR create_xr_session failed ({reason}): {}", e);
             self.os.xr_retry_surface_after_destroy = true;
         } else {
-            self.os.xr_buffer_scale_active = self.os.xr_buffer_scale_requested;
+            crate::log!("Android XR create_session succeeded (Vulkan, {reason})");
             self.clear_xr_pending_surface();
         }
     }
@@ -256,6 +243,12 @@ impl Cx {
     /// It handles all incoming messages, processes other events, and manages drawing operations.
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         self.gpu_info.performance = GpuPerformance::Tier1;
+        crate::log!(
+            "Android main_loop start in_xr_mode={} has_openxr_session={}",
+            self.os.in_xr_mode,
+            self.os.openxr.session.is_some()
+        );
+
         self.call_event_handler(&Event::Startup);
         self.redraw_all();
 
@@ -279,6 +272,9 @@ impl Cx {
                     if self.os.in_xr_mode && self.os.openxr.session.is_none() {
                         if !self.os.openxr.logged_waiting_for_session {
                             self.os.openxr.logged_waiting_for_session = true;
+                            crate::log!(
+                                "Android XR waiting for OpenXR session before window draw"
+                            );
                         }
                         continue;
                     }
@@ -320,10 +316,18 @@ impl Cx {
     pub(crate) fn handle_message(&mut self, msg: FromJavaMessage) {
         match msg {
             FromJavaMessage::SwitchedActivity(activity_handle, activity_thread_id) => {
+                crate::log!(
+                    "Android SwitchedActivity handle={:?} activity_thread_id={} in_xr_mode={}",
+                    activity_handle as usize,
+                    activity_thread_id,
+                    self.os.in_xr_mode
+                );
                 self.os.activity_thread_id = Some(activity_thread_id);
                 if self.os.in_xr_mode {
                     if let Err(e) = self.os.openxr.create_instance(activity_handle) {
                         crate::error!("OpenXR init failed: {}", e);
+                    } else {
+                        crate::log!("Android SwitchedActivity create_instance succeeded");
                     }
                 }
             }
@@ -337,9 +341,16 @@ impl Cx {
             }
             FromJavaMessage::SurfaceCreated { window } => {
                 #[cfg(use_vulkan)]
-                let _has_vulkan = self.os.vulkan.is_some();
+                let has_vulkan = self.os.vulkan.is_some();
                 #[cfg(not(use_vulkan))]
                 let has_vulkan = false;
+                crate::log!(
+                    "Android SurfaceCreated window={:?} in_xr_mode={} has_openxr_session={} has_vulkan={}",
+                    window,
+                    self.os.in_xr_mode,
+                    self.os.openxr.session.is_some(),
+                    has_vulkan
+                );
                 #[cfg(not(use_vulkan))]
                 if !self.os.in_xr_mode {
                     unsafe {
@@ -369,6 +380,11 @@ impl Cx {
                 }
             }
             FromJavaMessage::SurfaceDestroyed => {
+                crate::log!(
+                    "Android SurfaceDestroyed in_xr_mode={} has_openxr_session={}",
+                    self.os.in_xr_mode,
+                    self.os.openxr.session.is_some()
+                );
                 #[cfg(not(use_vulkan))]
                 unsafe {
                     self.os.display.as_mut().unwrap().destroy_surface();
@@ -384,12 +400,8 @@ impl Cx {
                             }
                         }
                     }
-                    let keep_xr_backend_alive =
-                        self.os.in_xr_mode && self.os.openxr.session.is_some();
-                    if !keep_xr_backend_alive {
-                        if let Some(vulkan) = self.os.vulkan.as_mut() {
-                            vulkan.suspend_surface();
-                        }
+                    if let Some(vulkan) = self.os.vulkan.as_mut() {
+                        vulkan.suspend_surface();
                     }
                     if self.os.in_xr_mode
                         && self.os.openxr.session.is_none()
@@ -417,9 +429,19 @@ impl Cx {
                 height,
             } => {
                 #[cfg(use_vulkan)]
-                let _has_vulkan = self.os.vulkan.is_some();
+                let has_vulkan = self.os.vulkan.is_some();
                 #[cfg(not(use_vulkan))]
                 let has_vulkan = false;
+                crate::log!(
+                    "Android SurfaceChanged window={:?} size={}x{} in_xr_mode={} has_libxr={} has_openxr_session={} has_vulkan={}",
+                    window,
+                    width,
+                    height,
+                    self.os.in_xr_mode,
+                    self.os.openxr.libxr.is_some(),
+                    self.os.openxr.session.is_some(),
+                    has_vulkan
+                );
                 #[cfg(use_vulkan)]
                 if self.os.in_xr_mode {
                     self.replace_xr_pending_surface(window, width, height);
@@ -439,10 +461,16 @@ impl Cx {
                     {
                         if let Err(e) = self.os.openxr.create_session(
                             self.os.display.as_ref().unwrap(),
-                            self.current_android_xr_options(),
+                            CxOpenXrOptions {
+                                buffer_scale: ANDROID_XR_BUFFER_SCALE,
+                                multisamples: ANDROID_XR_MULTISAMPLES,
+                                remove_hands_from_depth: false,
+                            },
                             &self.os_type,
                         ) {
                             crate::error!("OpenXR create_xr_session failed: {}", e);
+                        } else {
+                            crate::log!("Android XR create_session succeeded (GLES)");
                         }
                     }
                 }
@@ -1057,6 +1085,9 @@ impl Cx {
                 let e = Event::ImeAction(ImeActionEvent { action });
                 self.call_event_handler(&e);
             }
+            FromJavaMessage::AppOpen { item } => {
+                self.call_event_handler(&Event::AppOpen(vec![item]));
+            }
             FromJavaMessage::Init(_) => {}
         }
     }
@@ -1067,6 +1098,30 @@ impl Cx {
             || !self.new_next_frames.is_empty()
             || self.demo_time_repaint
         {
+            if self.os.debug_window_draw_count < 8 {
+                #[cfg(use_vulkan)]
+                let has_vulkan = self.os.vulkan.is_some();
+                #[cfg(not(use_vulkan))]
+                let has_vulkan = false;
+                let window = &self.windows[CxWindowPool::id_zero()];
+                crate::log!(
+                    "Android handle_drawing[{}] in_xr_mode={} has_openxr_session={} any_passes_dirty={} need_redrawing={} next_frames={} has_vulkan={} window_created={} main_pass={:?} window_size={}x{} display_size={}x{}",
+                    self.os.debug_window_draw_count,
+                    self.os.in_xr_mode,
+                    self.os.openxr.session.is_some(),
+                    self.any_passes_dirty(),
+                    self.need_redrawing(),
+                    self.new_next_frames.len(),
+                    has_vulkan,
+                    window.is_created,
+                    window.main_pass_id,
+                    window.window_geom.inner_size.x,
+                    window.window_geom.inner_size.y,
+                    self.os.display_size.x,
+                    self.os.display_size.y
+                );
+                self.os.debug_window_draw_count += 1;
+            }
             let time_now = self.os.timers.time_now();
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(time_now);
@@ -1439,6 +1494,12 @@ impl Cx {
         let activity_handle = unsafe { android_jni::fetch_activity_handle(activity) };
 
         let already_running = android_jni::from_java_messages_already_set();
+        crate::log!(
+            "Android entry activity_handle={:?} activity_thread_id={} already_running={}",
+            activity_handle as usize,
+            activity_thread_id,
+            already_running
+        );
 
         if already_running {
             android_jni::jni_update_activity(activity_handle);
@@ -1751,6 +1812,24 @@ impl Cx {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
+        if self.os.debug_repaint_count < 8 {
+            let window_passes = passes_todo
+                .iter()
+                .filter(|draw_pass_id| {
+                    matches!(self.passes[**draw_pass_id].parent, CxDrawPassParent::Window(_))
+                })
+                .count();
+            crate::log!(
+                "Android handle_repaint[{}] passes_todo={} window_passes={} offscreen_passes={} in_xr_mode={} has_openxr_session={}",
+                self.os.debug_repaint_count,
+                passes_todo.len(),
+                window_passes,
+                passes_todo.len().saturating_sub(window_passes),
+                self.os.in_xr_mode,
+                self.os.openxr.session.is_some()
+            );
+            self.os.debug_repaint_count += 1;
+        }
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
             self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
@@ -2010,12 +2089,22 @@ impl Cx {
                     permission,
                     request_id,
                 } => {
+                    crate::log!(
+                        "Android CheckPermission permission={:?} request_id={}",
+                        permission,
+                        request_id
+                    );
                     self.handle_permission_check(permission, request_id);
                 }
                 CxOsOp::RequestPermission {
                     permission,
                     request_id,
                 } => {
+                    crate::log!(
+                        "Android RequestPermission permission={:?} request_id={}",
+                        permission,
+                        request_id
+                    );
                     self.handle_permission_request(permission, request_id);
                 }
                 CxOsOp::HttpRequest {
@@ -2348,18 +2437,16 @@ impl Cx {
                     // TODO: implement via MediaPlayer when needed
                 }
                 CxOsOp::XrStartPresenting => {
-                    self.os.xr_buffer_scale_requested = self
-                        .os
-                        .xr_buffer_scale_requested
-                        .clamp(ANDROID_XR_BUFFER_SCALE_MIN, ANDROID_XR_BUFFER_SCALE_MAX);
-                    self.os.xr_buffer_scale_active = self.os.xr_buffer_scale_requested;
-                    self.os.xr_display_refresh_rate_active_hz = None;
-                    self.os.xr_effective_frame_time_ms = None;
-                    self.os.xr_effective_frame_rate_hz = None;
+                    crate::log!(
+                        "Android XrStartPresenting in_xr_mode={} ignore_destroy={}",
+                        self.os.in_xr_mode,
+                        self.os.ignore_destroy
+                    );
                     self.os.xr_retry_surface_after_destroy = true;
                     self.os.ignore_destroy = true;
                     if !self.os.in_xr_mode {
                         self.os.in_xr_mode = true;
+                        crate::log!("Android switching activity into XR mode");
                         unsafe {
                             let env = attach_jni_env();
                             android_jni::to_java_switch_activity(env);
@@ -2367,25 +2454,21 @@ impl Cx {
                     }
                 }
                 CxOsOp::XrStopPresenting => {
+                    crate::log!(
+                        "Android XrStopPresenting in_xr_mode={} ignore_destroy={}",
+                        self.os.in_xr_mode,
+                        self.os.ignore_destroy
+                    );
                     #[cfg(use_vulkan)]
                     self.clear_xr_pending_surface();
-                    self.os.xr_display_refresh_rate_active_hz = None;
-                    self.os.xr_effective_frame_time_ms = None;
-                    self.os.xr_effective_frame_rate_hz = None;
                     self.os.ignore_destroy = true;
                     if self.os.in_xr_mode {
                         self.os.in_xr_mode = false;
+                        crate::log!("Android switching activity out of XR mode");
                         unsafe {
                             let env = attach_jni_env();
                             android_jni::to_java_switch_activity(env);
                         }
-                    }
-                }
-                CxOsOp::XrSetRenderScale(scale) => {
-                    let scale = scale.clamp(ANDROID_XR_BUFFER_SCALE_MIN, ANDROID_XR_BUFFER_SCALE_MAX);
-                    self.os.xr_buffer_scale_requested = scale;
-                    if !self.os.in_xr_mode || self.os.openxr.session.is_none() {
-                        self.os.xr_buffer_scale_active = scale;
                     }
                 }
                 CxOsOp::XrAdvertiseAnchor(anchor) => {
@@ -2456,36 +2539,6 @@ impl CxOsApi for Cx {
         } else {
             0.00001
         }
-    }
-
-    fn xr_render_scale(&self) -> Option<f64> {
-        if self.os.in_xr_mode {
-            Some(self.os.xr_buffer_scale_active as f64)
-        } else {
-            None
-        }
-    }
-
-    fn xr_gpu_frame_time_ms(&self) -> Option<f64> {
-        #[cfg(use_vulkan)]
-        {
-            self.os
-                .vulkan
-                .as_ref()
-                .and_then(|vulkan| vulkan.last_openxr_gpu_frame_time_ms())
-        }
-        #[cfg(not(use_vulkan))]
-        {
-            None
-        }
-    }
-
-    fn xr_display_refresh_rate_hz(&self) -> Option<f64> {
-        self.os.xr_display_refresh_rate_active_hz.map(|value| value as f64)
-    }
-
-    fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
-        self.os.xr_effective_frame_rate_hz
     }
 }
 
@@ -2580,6 +2633,13 @@ impl Cx {
         request_id: i32,
     ) {
         let status = self.check_android_permission_status(permission);
+        crate::log!(
+            "Android permission check result permission={:?} request_id={} status={:?}",
+            permission,
+            request_id,
+            status
+        );
+
         self.call_event_handler(&Event::PermissionResult(
             crate::permission::PermissionResult {
                 permission,
@@ -2595,6 +2655,12 @@ impl Cx {
         request_id: i32,
     ) {
         let status = self.check_android_permission_status(permission);
+        crate::log!(
+            "Android permission request entry permission={:?} request_id={} status_before_request={:?}",
+            permission,
+            request_id,
+            status
+        );
         match status {
             crate::permission::PermissionStatus::Granted => {
                 self.call_event_handler(&Event::PermissionResult(
@@ -2667,15 +2733,12 @@ impl Default for CxOs {
             render_thread_id: None,
             ignore_destroy: false,
             in_xr_mode: false,
-            xr_buffer_scale_active: ANDROID_XR_BUFFER_SCALE_DEFAULT,
-            xr_buffer_scale_requested: ANDROID_XR_BUFFER_SCALE_DEFAULT,
-            xr_display_refresh_rate_active_hz: None,
-            xr_effective_frame_time_ms: None,
-            xr_effective_frame_rate_hz: None,
             xr_pending_surface_window: std::ptr::null_mut(),
             xr_pending_surface_width: 0,
             xr_pending_surface_height: 0,
             xr_retry_surface_after_destroy: false,
+            debug_window_draw_count: 0,
+            debug_repaint_count: 0,
         }
     }
 }
@@ -2724,15 +2787,12 @@ pub struct CxOs {
     pub(crate) render_thread_id: Option<u64>,
     pub(crate) ignore_destroy: bool,
     pub(crate) in_xr_mode: bool,
-    pub(crate) xr_buffer_scale_active: f32,
-    pub(crate) xr_buffer_scale_requested: f32,
-    pub(crate) xr_display_refresh_rate_active_hz: Option<f32>,
-    pub(crate) xr_effective_frame_time_ms: Option<f64>,
-    pub(crate) xr_effective_frame_rate_hz: Option<f64>,
     pub(crate) xr_pending_surface_window: *mut ndk_sys::ANativeWindow,
     pub(crate) xr_pending_surface_width: i32,
     pub(crate) xr_pending_surface_height: i32,
     pub(crate) xr_retry_surface_after_destroy: bool,
+    pub(crate) debug_window_draw_count: u32,
+    pub(crate) debug_repaint_count: u32,
 }
 
 impl CxOs {

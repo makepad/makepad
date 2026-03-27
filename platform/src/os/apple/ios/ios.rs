@@ -20,7 +20,6 @@ use {
             apple::{
                 apple_sys::*,
                 apple_video_player::AppleUnifiedVideoPlayer,
-                apple_webview::IosSystemBrowser,
                 apple_yuv_metal::AppleYuvMetal,
                 ios::{
                     ios_app::{self, init_ios_app_global, with_ios_app, IosApp},
@@ -534,6 +533,10 @@ impl Cx {
                         self.handle_media_signals();
                         self.handle_script_signals();
                         self.call_event_handler(&Event::Signal);
+                        let items = crate::single_instance::drain_app_open_items();
+                        if !items.is_empty() {
+                            self.call_event_handler(&Event::AppOpen(items));
+                        }
                     }
                     if SignalToUI::check_and_clear_action_signal() {
                         self.handle_action_receiver();
@@ -938,56 +941,6 @@ impl Cx {
                 }
                 CxOsOp::DetachCameraNativePreview { video_id } => {
                     IosApp::detach_camera_preview(video_id.0);
-                }
-                CxOsOp::SpawnSystemBrowser { browser_id, url } => {
-                    self.os
-                        .system_browsers
-                        .entry(browser_id)
-                        .or_insert_with(|| IosSystemBrowser::new(&url))
-                        .set_url(&url, false);
-                }
-                CxOsOp::UpdateSystemBrowser {
-                    browser_id,
-                    area,
-                    visible,
-                } => {
-                    let rect = area.clipped_rect(self);
-                    with_ios_app(|app| {
-                        let Some(mtk_view) = app.mtk_view else {
-                            return;
-                        };
-                        let host_view: ObjcId = unsafe { msg_send![mtk_view, superview] };
-                        if host_view == nil {
-                            return;
-                        }
-                        if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
-                            browser.update(host_view, rect, visible);
-                        }
-                    });
-                }
-                CxOsOp::DetachSystemBrowser { browser_id } => {
-                    if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
-                        browser.detach();
-                    }
-                }
-                CxOsOp::SetSystemBrowserUrl {
-                    browser_id,
-                    url,
-                    replace,
-                } => {
-                    if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
-                        browser.set_url(&url, replace);
-                    }
-                }
-                CxOsOp::SystemBrowserHistoryGo { browser_id, delta } => {
-                    if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
-                        browser.history_go(delta);
-                    }
-                }
-                CxOsOp::CloseSystemBrowser { browser_id } => {
-                    if let Some(mut browser) = self.os.system_browsers.remove(&browser_id) {
-                        browser.cleanup();
-                    }
                 }
                 CxOsOp::PrepareVideoPlayback(
                     video_id,
@@ -1522,7 +1475,6 @@ pub struct CxOs {
     pub(crate) video_players: HashMap<LiveId, AppleUnifiedVideoPlayer>,
     pub(crate) camera_players: HashMap<LiveId, IosCameraPlayer>,
     pub(crate) native_camera_previews: HashMap<LiveId, IosNativeCameraPreview>,
-    pub(crate) system_browsers: HashMap<LiveId, IosSystemBrowser>,
 }
 
 pub struct PermissionResultChannel {
