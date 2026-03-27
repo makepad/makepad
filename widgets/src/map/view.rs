@@ -244,12 +244,16 @@ impl DrawMapVector {
     ) {
         self.map_scale = map_scale;
         self.map_offset = map_offset;
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(map_scale), &[map_scale.x, map_scale.y]);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(map_offset), &[map_offset.x, map_offset.y]);
+        self.draw_super.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(map_scale),
+            &[map_scale.x, map_scale.y],
+        );
+        self.draw_super.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(map_offset),
+            &[map_offset.x, map_offset.y],
+        );
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
         if self.draw_super.draw_vars.can_instance() {

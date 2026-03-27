@@ -218,12 +218,8 @@ unsafe fn get_intent_string_extra(
     activity: jni_sys::jobject,
     key: &str,
 ) -> Option<String> {
-    let intent = ndk_utils::call_object_method!(
-        env,
-        activity,
-        "getIntent",
-        "()Landroid/content/Intent;"
-    );
+    let intent =
+        ndk_utils::call_object_method!(env, activity, "getIntent", "()Landroid/content/Intent;");
     if intent.is_null() {
         return None;
     }

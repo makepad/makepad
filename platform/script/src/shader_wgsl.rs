@@ -752,13 +752,13 @@ fn build_draw_shader_wgsl(
     writeln!(out, "    if (clip < 0.5) {{").ok();
     writeln!(out, "        return color;").ok();
     writeln!(out, "    }}").ok();
-    writeln!(out, "    let depth_projection = mp_draw_pass_depth_projection();").ok();
-    writeln!(out, "    let depth_view = mp_draw_pass_depth_view();").ok();
     writeln!(
         out,
-        "    if (abs(depth_view[3].w - 1.0) > 0.5) {{"
+        "    let depth_projection = mp_draw_pass_depth_projection();"
     )
     .ok();
+    writeln!(out, "    let depth_view = mp_draw_pass_depth_view();").ok();
+    writeln!(out, "    if (abs(depth_view[3].w - 1.0) > 0.5) {{").ok();
     writeln!(out, "        return color;").ok();
     writeln!(out, "    }}").ok();
     writeln!(

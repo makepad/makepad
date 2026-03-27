@@ -1,6 +1,6 @@
 use crate::{
     app_data::AppData,
-    makepad_code_editor::{CodeEditor, CodeSession, text::Position},
+    makepad_code_editor::{text::Position, CodeEditor, CodeSession},
     makepad_widgets::*,
 };
 

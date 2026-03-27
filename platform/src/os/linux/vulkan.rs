@@ -1018,9 +1018,7 @@ impl CxVulkan {
         match unsafe { self.device.create_query_pool(&create_info, None) } {
             Ok(pool) => pool,
             Err(err) => {
-                crate::warning!(
-                    "OpenXR Vulkan GPU timing query pool creation failed: {err:?}"
-                );
+                crate::warning!("OpenXR Vulkan GPU timing query pool creation failed: {err:?}");
                 vk::QueryPool::null()
             }
         }
@@ -1057,9 +1055,7 @@ impl CxVulkan {
                         self.device
                             .free_command_buffers(self.command_pool, &command_buffers);
                     }
-                    return Err(format!(
-                        "create_fence(openxr inflight) failed: {err:?}"
-                    ));
+                    return Err(format!("create_fence(openxr inflight) failed: {err:?}"));
                 }
             };
             frames.push(VulkanXrInFlightFrame {
@@ -1073,10 +1069,7 @@ impl CxVulkan {
         Ok(frames)
     }
 
-    fn destroy_owned_frame_resources(
-        device: &ash::Device,
-        frame_resources: &mut FrameResources,
-    ) {
+    fn destroy_owned_frame_resources(device: &ash::Device, frame_resources: &mut FrameResources) {
         unsafe {
             for pool in frame_resources.descriptor_pools.drain(..) {
                 device.destroy_descriptor_pool(pool, None);
@@ -1124,7 +1117,8 @@ impl CxVulkan {
 
         if frame.timestamp_query_pool != vk::QueryPool::null() {
             unsafe {
-                self.device.destroy_query_pool(frame.timestamp_query_pool, None);
+                self.device
+                    .destroy_query_pool(frame.timestamp_query_pool, None);
             }
             frame.timestamp_query_pool = self.create_xr_timestamp_query_pool();
         }
@@ -1171,7 +1165,8 @@ impl CxVulkan {
             Self::destroy_owned_frame_resources(&self.device, &mut frame.frame_resources);
             unsafe {
                 if frame.timestamp_query_pool != vk::QueryPool::null() {
-                    self.device.destroy_query_pool(frame.timestamp_query_pool, None);
+                    self.device
+                        .destroy_query_pool(frame.timestamp_query_pool, None);
                 }
                 if frame.fence != vk::Fence::null() {
                     self.device.destroy_fence(frame.fence, None);
@@ -1728,7 +1723,9 @@ impl CxVulkan {
 
     pub(crate) fn destroy_openxr_session_data(&mut self, session: CxVulkanOpenXrSessionData) {
         if let Err(err) = self.wait_for_openxr_idle() {
-            crate::warning!("OpenXR Vulkan: failed to drain in-flight frames before destroy: {err}");
+            crate::warning!(
+                "OpenXR Vulkan: failed to drain in-flight frames before destroy: {err}"
+            );
         }
         for image in session.color_images {
             unsafe {
@@ -2194,7 +2191,8 @@ impl CxVulkan {
         }
 
         let timestamp_query_pool = xr_frame.as_ref().and_then(|(_, frame)| {
-            (frame.timestamp_query_pool != vk::QueryPool::null()).then_some(frame.timestamp_query_pool)
+            (frame.timestamp_query_pool != vk::QueryPool::null())
+                .then_some(frame.timestamp_query_pool)
         });
 
         let result = (|| -> Result<(), String> {
@@ -5274,7 +5272,11 @@ impl CxVulkan {
                     draw_pass_id,
                     sub_list_id,
                     render_pass_key,
-                    if child_resets_zbias { &mut child_zbias } else { zbias },
+                    if child_resets_zbias {
+                        &mut child_zbias
+                    } else {
+                        zbias
+                    },
                     zbias_step,
                     draw_stats,
                     xr_depth_view,

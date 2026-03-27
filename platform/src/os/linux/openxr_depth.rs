@@ -6,12 +6,17 @@ use crate::{
     },
     thread::SignalToUI,
     xr_depth_mesh::{
-        empty_bounds, xr_depth_mesh_store, ChunkKey, XrDepthMesh, XrDepthMeshChunk,
+        empty_bounds, xr_depth_align_build_wall_feature_normal_histogram,
+        xr_depth_align_build_wall_normal_histogram, xr_depth_align_loopback_preview_solution,
+        xr_depth_align_solve_remote_to_local, xr_depth_align_test_markers,
+        xr_depth_align_transform_descriptor, xr_depth_mesh_store, ChunkKey, XrDepthAlignDebug,
+        XrDepthAlignDescriptor, XrDepthAlignPreview, XrDepthAlignSample, XrDepthAlignSampleKind,
+        XrDepthAlignSolution, XrDepthAlignWallFeature, XrDepthMesh, XrDepthMeshChunk,
         XrDepthMeshQuery, XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry,
         XrDepthMeshQueryColliderRole, XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface,
-        XrDepthMeshQueryResult,
-        XrDepthMeshQuerySupportPlane, XrDepthMeshQuerySurfaceHit, XrDepthMeshStore,
-        XrDepthPlaneKind, XrDepthPlanePatch, XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS,
+        XrDepthMeshQueryResult, XrDepthMeshQuerySupportPlane, XrDepthMeshQuerySurfaceHit,
+        XrDepthMeshStore, XrDepthPlaneKind, XrDepthPlanePatch,
+        XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS,
     },
 };
 use std::{
@@ -54,6 +59,7 @@ const DEPTH_PLAYER_EXCLUDE_TOP_METERS: f32 = 0.12;
 const DEPTH_PLAYER_EXCLUDE_BOTTOM_METERS: f32 = 1.30;
 const DEPTH_MESH_UPDATE_DISTANCE_METERS: f32 = 4.0;
 const DEPTH_SURFACE_MESH_CHUNKS_PER_TICK: usize = 1;
+const DEPTH_PLANE_SCAN_CHUNKS_PER_TICK: usize = 1;
 const DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS: u64 = 8;
 const DEPTH_QUERY_BATCH_PER_TICK: usize = 24;
 const DEPTH_QUERY_MAX_SURFACES_PER_QUERY: usize = 1;
@@ -96,6 +102,35 @@ const DEPTH_QUERY_TSDF_IMPACT_EXTENT_MAX: f32 = 0.16;
 const DEPTH_QUERY_TSDF_IMPACT_RESTITUTION: f32 = 0.38;
 const DEPTH_PLANE_HORIZONTAL_NORMAL_Y_MIN: f32 = 0.82;
 const DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX: f32 = 0.35;
+const DEPTH_PLANE_SCAN_NEAR_SURFACE_BAND_SCALE: f32 = 1.25;
+const DEPTH_PLANE_SCAN_NEAR_SURFACE_BAND_MIN: f32 = 0.04;
+const DEPTH_PLANE_SCAN_MIN_CONFIDENCE: u8 = 6;
+const DEPTH_PLANE_SCAN_VERTICAL_DISTANCE_BIN_METERS: f32 = 0.08;
+const DEPTH_PLANE_SCAN_VERTICAL_NORMAL_QUANTUM: f32 = 0.14;
+const DEPTH_PLANE_SCAN_MAX_RECTS_PER_GROUP: usize = 8;
+const DEPTH_PLANE_SCAN_MERGE_NORMAL_DOT: f32 = 0.97;
+const DEPTH_PLANE_SCAN_MERGE_DISTANCE_METERS: f32 = 0.10;
+const DEPTH_PLANE_SCAN_MERGE_GAP_METERS: f32 = 0.16;
+const DEPTH_PLANE_SCAN_VERTICAL_MIN_AREA_METERS2: f32 = 0.25;
+const DEPTH_PLANE_SCAN_VERTICAL_MIN_DIM_METERS: f32 = 0.50;
+const DEPTH_PLANE_STABLE_TRACK_MATCH_NORMAL_DOT: f32 = 0.97;
+const DEPTH_PLANE_STABLE_TRACK_MATCH_DISTANCE_METERS: f32 = 0.14;
+const DEPTH_PLANE_STABLE_TRACK_MATCH_ALONG_GAP_METERS: f32 = 0.40;
+const DEPTH_PLANE_STABLE_TRACK_MATCH_HEIGHT_GAP_METERS: f32 = 0.35;
+const DEPTH_PLANE_STABLE_TRACK_MISSING_UPDATES_MAX: u8 = 8;
+const DEPTH_PLANE_STABLE_TRACK_MIN_SEEN_COUNT: u8 = 2;
+const DEPTH_PLANE_STABLE_TRACK_SMOOTH_ALPHA: f32 = 0.16;
+const DEPTH_ROOM_WALL_AXIS_ASSIGN_DOT_MIN: f32 = 0.90;
+const DEPTH_ROOM_WALL_ORTHOGONAL_DOT_MAX: f32 = 0.45;
+const DEPTH_ROOM_WALL_GROUP_DISTANCE_METERS: f32 = 0.22;
+const DEPTH_ROOM_WALL_TRACK_MATCH_NORMAL_DOT: f32 = 0.96;
+const DEPTH_ROOM_WALL_TRACK_MATCH_DISTANCE_METERS: f32 = 0.28;
+const DEPTH_ROOM_WALL_TRACK_MISSING_UPDATES_MAX: u8 = u8::MAX;
+const DEPTH_ROOM_WALL_TRACK_SMOOTH_ALPHA: f32 = 0.12;
+const DEPTH_ROOM_WALL_TRACK_EXPAND_ALPHA: f32 = 0.30;
+const DEPTH_ROOM_WALL_TRACK_SHRINK_ALPHA: f32 = 0.08;
+const DEPTH_ROOM_WALL_HEIGHT_METERS: f32 = 2.0;
+const DEPTH_ROOM_WALL_MAX_TRACKS: usize = 4;
 const DEPTH_PLANE_SIMPLIFY_REGION_NORMAL_DOT: f32 = 0.95;
 const DEPTH_PLANE_SIMPLIFY_REGION_DISTANCE_METERS: f32 = 0.10;
 const DEPTH_PLANE_SIMPLIFY_MIN_AREA_METERS2: f32 = 0.12;
@@ -110,7 +145,22 @@ const DEPTH_PLANE_SUPPORT_OCCUPIED_WEIGHT: u8 = 2;
 const DEPTH_MESH_PLANAR_SIMPLIFY_MIN_AREA_METERS2: f32 = 0.45;
 const DEPTH_MESH_PLANAR_SIMPLIFY_MIN_RECT_AREA_METERS2: f32 = 0.12;
 const DEPTH_MESH_PLANAR_SIMPLIFY_MAX_RECTS_PER_REGION: usize = 24;
-const DEPTH_ENABLE_REDUCED_PLANAR_PATCHES: bool = false;
+const DEPTH_ENABLE_REDUCED_PLANAR_PATCHES: bool = true;
+const DEPTH_ALIGN_WALL_SAMPLE_GRID_METERS: f32 = 0.24;
+const DEPTH_ALIGN_WALL_HISTOGRAM_BINS: usize = 48;
+const DEPTH_ALIGN_MAX_WALL_FEATURES: usize = 24;
+const DEPTH_ALIGN_MAX_WALL_SAMPLES: usize = 96;
+const DEPTH_ALIGN_MIN_WALL_SAMPLES: usize = 6;
+const DEPTH_ALIGN_DESCRIPTOR_UPDATE_INTERVAL_MILLIS: u64 = 250;
+const DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MIN: f32 = 0.16;
+const DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MAX: f32 = 0.36;
+const DEPTH_ALIGN_PREVIEW_MARKER_LERP: f32 = 0.24;
+const DEPTH_ALIGN_PREVIEW_BIG_JUMP_TRANSLATION_METERS: f32 = 0.16;
+const DEPTH_ALIGN_PREVIEW_BIG_JUMP_YAW_RADIANS: f32 = 0.14;
+const DEPTH_ALIGN_PREVIEW_JUMP_MATCH_TRANSLATION_METERS: f32 = 0.08;
+const DEPTH_ALIGN_PREVIEW_JUMP_MATCH_YAW_RADIANS: f32 = 0.08;
+const DEPTH_ALIGN_PREVIEW_BIG_JUMP_CONFIRM_UPDATES: u8 = 2;
+const DEPTH_ALIGN_PREVIEW_HOLD_MISSING_UPDATES: u8 = 2;
 
 const fn depth_tsd_distance_meters(voxel_size_meters: f32) -> f32 {
     voxel_size_meters * 2.0
@@ -641,8 +691,75 @@ struct DepthMeshVolume {
     mesh_triangle_count: usize,
     plane_generation: u64,
     plane_patches: Vec<XrDepthPlanePatch>,
+    stable_wall_tracks: Vec<StableWallPatchTrack>,
+    room_wall_tracks: Vec<StableRoomWallTrack>,
+    plane_scan_chunks: HashMap<ChunkKey, ScannedPlaneChunk>,
+    alignment_descriptor: Option<XrDepthAlignDescriptor>,
+    alignment_debug: XrDepthAlignDebug,
+    alignment_preview: XrDepthAlignPreview,
+    alignment_preview_temporal: AlignmentPreviewTemporalState,
     pending_mesh_dirty_chunks: HashSet<ChunkKey>,
     pending_mesh_chunk_queue: VecDeque<ChunkKey>,
+    pending_plane_scan_dirty_chunks: HashSet<ChunkKey>,
+    pending_plane_scan_chunk_queue: VecDeque<ChunkKey>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ScannedPlaneChunk {
+    patches: Vec<XrDepthPlanePatch>,
+    near_surface_voxel_count: u32,
+    floor_candidate_count: u32,
+    wall_candidate_count: u32,
+}
+
+#[derive(Clone, Debug)]
+struct StableWallPatchTrack {
+    patch: XrDepthPlanePatch,
+    seen_count: u8,
+    missing_updates: u8,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RoomWallCandidate {
+    normal: Vec3f,
+    plane_distance: f32,
+    observed_along_min: f32,
+    observed_along_max: f32,
+    support_area: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RoomWallAccumulator {
+    normal: Vec3f,
+    weight_sum: f32,
+    plane_distance_sum: f32,
+    observed_along_min: f32,
+    observed_along_max: f32,
+    support_area: f32,
+}
+
+impl Default for RoomWallAccumulator {
+    fn default() -> Self {
+        Self {
+            normal: Vec3f::default(),
+            weight_sum: 0.0,
+            plane_distance_sum: 0.0,
+            observed_along_min: f32::INFINITY,
+            observed_along_max: f32::NEG_INFINITY,
+            support_area: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StableRoomWallTrack {
+    normal: Vec3f,
+    plane_distance: f32,
+    observed_along_min: f32,
+    observed_along_max: f32,
+    support_area: f32,
+    seen_count: u8,
+    missing_updates: u8,
 }
 
 impl DepthMeshVolume {
@@ -673,12 +790,21 @@ impl DepthMeshVolume {
             mesh_triangle_count: 0,
             plane_generation: 0,
             plane_patches: Vec::new(),
+            stable_wall_tracks: Vec::new(),
+            room_wall_tracks: Vec::new(),
+            plane_scan_chunks: HashMap::new(),
+            alignment_descriptor: None,
+            alignment_debug: XrDepthAlignDebug::default(),
+            alignment_preview: XrDepthAlignPreview::default(),
+            alignment_preview_temporal: AlignmentPreviewTemporalState::default(),
             pending_mesh_dirty_chunks: HashSet::new(),
             pending_mesh_chunk_queue: VecDeque::new(),
+            pending_plane_scan_dirty_chunks: HashSet::new(),
+            pending_plane_scan_chunk_queue: VecDeque::new(),
         }
     }
 
-    fn reset_mesh_state(&mut self) {
+    fn reset_render_mesh_state(&mut self) {
         self.mesh_chunks.clear();
         self.mesh_generation = self.mesh_generation.saturating_add(1);
         self.update_sequence = self.update_sequence.saturating_add(1);
@@ -686,12 +812,58 @@ impl DepthMeshVolume {
         self.removed_chunk_keys.clear();
         self.mesh_vertex_count = 0;
         self.mesh_triangle_count = 0;
-        if !self.plane_patches.is_empty() {
-            self.plane_patches.clear();
-            self.plane_generation = self.plane_generation.saturating_add(1);
-        }
         self.pending_mesh_dirty_chunks.clear();
         self.pending_mesh_chunk_queue.clear();
+    }
+
+    fn reset_plane_scan_state(&mut self) -> bool {
+        let had_plane_scan = !self.plane_scan_chunks.is_empty()
+            || !self.plane_patches.is_empty()
+            || !self.stable_wall_tracks.is_empty()
+            || !self.room_wall_tracks.is_empty()
+            || !self.pending_plane_scan_dirty_chunks.is_empty()
+            || !self.pending_plane_scan_chunk_queue.is_empty();
+        if !had_plane_scan {
+            return false;
+        }
+        self.plane_scan_chunks.clear();
+        self.plane_patches.clear();
+        self.stable_wall_tracks.clear();
+        self.room_wall_tracks.clear();
+        self.pending_plane_scan_dirty_chunks.clear();
+        self.pending_plane_scan_chunk_queue.clear();
+        self.plane_generation = self.plane_generation.saturating_add(1);
+        self.update_sequence = self.update_sequence.saturating_add(1);
+        true
+    }
+
+    fn clear_alignment_descriptor(&mut self) -> bool {
+        if self.alignment_descriptor.is_none()
+            && self.alignment_debug == XrDepthAlignDebug::default()
+        {
+            return false;
+        }
+        self.alignment_descriptor = None;
+        self.alignment_debug = XrDepthAlignDebug::default();
+        self.update_sequence = self.update_sequence.saturating_add(1);
+        true
+    }
+
+    fn clear_alignment_preview(&mut self) -> bool {
+        if self.alignment_preview == XrDepthAlignPreview::default()
+            && self
+                .alignment_preview_temporal
+                .pending_jump_solution
+                .is_none()
+            && self.alignment_preview_temporal.pending_jump_updates == 0
+            && self.alignment_preview_temporal.missing_solution_updates == 0
+        {
+            return false;
+        }
+        self.alignment_preview = XrDepthAlignPreview::default();
+        self.alignment_preview_temporal = AlignmentPreviewTemporalState::default();
+        self.update_sequence = self.update_sequence.saturating_add(1);
+        true
     }
 
     fn update_bounds(&mut self) {
@@ -716,6 +888,10 @@ impl DepthMeshVolume {
             bounds_min: self.bounds_min,
             bounds_max: self.bounds_max,
             mesh_chunks: self.mesh_chunks.clone(),
+            plane_patches: self.plane_patches.clone(),
+            alignment_descriptor: self.alignment_descriptor.clone(),
+            alignment_debug: self.alignment_debug,
+            alignment_preview: self.alignment_preview.clone(),
             dirty_chunk_keys: self.dirty_chunk_keys.clone(),
             removed_chunk_keys: self.removed_chunk_keys.clone(),
             mesh_generation: self.mesh_generation,
@@ -736,6 +912,7 @@ impl DepthMeshVolume {
 }
 
 pub(super) struct CxOpenXrDepthMeshJob {
+    reset_generation: u64,
     generation: u64,
     eye_index: usize,
     width: u32,
@@ -751,6 +928,7 @@ pub(super) struct CxOpenXrDepthMeshJob {
 }
 
 struct CxOpenXrPreparedDepthMeshJob {
+    reset_generation: u64,
     generation: u64,
     eye_index: usize,
     width: u32,
@@ -778,6 +956,7 @@ pub(super) struct CxOpenXrDepthMeshPipeline {
     busy: Arc<AtomicBool>,
     store: XrDepthMeshStore,
     next_generation: u64,
+    last_reset_generation: u64,
     last_submit_at: Option<Instant>,
     last_camera_world: Option<Vec3f>,
     last_camera_forward: Option<Vec3f>,
@@ -803,6 +982,7 @@ impl CxOpenXrDepthMeshPipeline {
             busy,
             store,
             next_generation: 1,
+            last_reset_generation: 0,
             last_submit_at: None,
             last_camera_world: None,
             last_camera_forward: None,
@@ -818,6 +998,13 @@ impl CxOpenXrDepthMeshPipeline {
     ) -> Result<(), String> {
         self.store.record_seen();
         let now = Instant::now();
+        let reset_generation = self.store.reset_generation();
+        if self.last_reset_generation != reset_generation {
+            self.last_reset_generation = reset_generation;
+            self.last_submit_at = None;
+            self.last_camera_world = None;
+            self.last_camera_forward = None;
+        }
         let pose_result = (|| {
             let width = render_targets.depth_width;
             let height = render_targets.depth_height;
@@ -898,6 +1085,7 @@ impl CxOpenXrDepthMeshPipeline {
                 DEPTH_VOXEL_EYE_INDEX,
             )?;
             Ok(CxOpenXrDepthMeshJob {
+                reset_generation,
                 generation,
                 eye_index: DEPTH_VOXEL_EYE_INDEX,
                 width,
@@ -966,6 +1154,10 @@ fn depth_preprocess_worker(
 ) {
     let mut worker_state = DepthPreprocessWorkerState::default();
     while let Ok(job) = receiver.recv() {
+        if job.reset_generation != store.reset_generation() {
+            busy.store(false, Ordering::Release);
+            continue;
+        }
         if (job.voxel_size_meters - store.voxel_size_meters()).abs() > f32::EPSILON {
             busy.store(false, Ordering::Release);
             continue;
@@ -989,16 +1181,28 @@ fn depth_preprocess_worker(
 fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: XrDepthMeshStore) {
     let mut worker_state = DepthMesherWorkerState::default();
     let mut volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, store.voxel_size_meters());
+    let mut next_alignment_descriptor_update_at = Instant::now();
+    let mut applied_reset_generation = store.reset_generation();
     loop {
         let configured_voxel_size = store.voxel_size_meters();
         if (volume.voxel_size_meters - configured_voxel_size).abs() > f32::EPSILON {
             volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, configured_voxel_size);
+            next_alignment_descriptor_update_at = Instant::now();
+        }
+        let requested_reset_generation = store.reset_generation();
+        if applied_reset_generation != requested_reset_generation {
+            applied_reset_generation = requested_reset_generation;
+            volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, configured_voxel_size);
+            next_alignment_descriptor_update_at = Instant::now();
         }
         let mut applied_update = false;
         match receiver.recv_timeout(Duration::from_millis(DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS)) {
             Ok(mut job) => {
                 while let Ok(newer) = receiver.try_recv() {
                     job = newer;
+                }
+                if job.reset_generation != store.reset_generation() {
+                    continue;
                 }
                 let configured_voxel_size = store.voxel_size_meters();
                 if (job.voxel_size_meters - configured_voxel_size).abs() > f32::EPSILON {
@@ -1012,26 +1216,77 @@ fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: 
         }
 
         let query_changed = process_geometry_queries(&volume, &store, DEPTH_QUERY_BATCH_PER_TICK);
+        let queries_pending = store.has_pending_queries();
         let mesh_enabled = store.mesh_enabled();
-        let (mesh_changed, plane_changed) = if mesh_enabled {
-            let mesh_changed = process_incremental_surface_mesh(
+        let plane_scan_enabled = store.plane_scan_enabled();
+        let surface_analysis_enabled = store.surface_analysis_enabled();
+        let alignment_preview_enabled = store.alignment_preview_enabled();
+        let now = Instant::now();
+        let mesh_changed = if mesh_enabled {
+            process_incremental_surface_mesh(
                 &mut volume,
                 &mut worker_state,
                 DEPTH_SURFACE_MESH_CHUNKS_PER_TICK,
-            );
-            let plane_changed = update_reduced_planar_patches(&mut volume, mesh_changed);
-            (mesh_changed, plane_changed)
+            )
         } else if !volume.mesh_chunks.is_empty()
-            || !volume.plane_patches.is_empty()
             || !volume.pending_mesh_dirty_chunks.is_empty()
             || !volume.pending_mesh_chunk_queue.is_empty()
         {
-            volume.reset_mesh_state();
-            (true, false)
+            volume.reset_render_mesh_state();
+            true
         } else {
-            (false, false)
+            false
         };
-        if applied_update || mesh_changed || plane_changed || query_changed {
+        let plane_changed = if plane_scan_enabled {
+            process_incremental_tsdf_plane_scan(&mut volume, DEPTH_PLANE_SCAN_CHUNKS_PER_TICK)
+        } else if volume.reset_plane_scan_state() {
+            true
+        } else if mesh_enabled {
+            update_reduced_planar_patches(&mut volume, mesh_changed)
+        } else if !volume.plane_patches.is_empty() || !volume.room_wall_tracks.is_empty() {
+            volume.plane_patches.clear();
+            volume.room_wall_tracks.clear();
+            volume.plane_generation = volume.plane_generation.saturating_add(1);
+            volume.update_sequence = volume.update_sequence.saturating_add(1);
+            true
+        } else {
+            false
+        };
+        let alignment_changed = if surface_analysis_enabled {
+            if plane_changed
+                || (!applied_update
+                    && !queries_pending
+                    && now >= next_alignment_descriptor_update_at)
+            {
+                next_alignment_descriptor_update_at =
+                    now + Duration::from_millis(DEPTH_ALIGN_DESCRIPTOR_UPDATE_INTERVAL_MILLIS);
+                update_tsdf_alignment_descriptor(&mut volume)
+            } else {
+                false
+            }
+        } else {
+            next_alignment_descriptor_update_at = now;
+            volume.clear_alignment_descriptor()
+        };
+        let preview_changed = if alignment_preview_enabled && surface_analysis_enabled {
+            if alignment_changed
+                || (volume.alignment_descriptor.is_some()
+                    && volume.alignment_preview == XrDepthAlignPreview::default())
+            {
+                update_alignment_preview(&mut volume)
+            } else {
+                false
+            }
+        } else {
+            volume.clear_alignment_preview()
+        };
+        if (mesh_enabled && applied_update)
+            || mesh_changed
+            || plane_changed
+            || alignment_changed
+            || preview_changed
+            || query_changed
+        {
             store.publish(volume.snapshot());
             SignalToUI::set_ui_signal();
         }
@@ -1088,8 +1343,8 @@ fn preprocess_depth_mesh(
             observed_world_min = Vec3f::min_componentwise(observed_world_min, sample.world);
             observed_world_max = Vec3f::max_componentwise(observed_world_max, sample.world);
 
-            let start_distance = (surface_distance - tsd_distance_meters)
-                .max(DEPTH_TSD_MIN_UPDATE_DISTANCE_METERS);
+            let start_distance =
+                (surface_distance - tsd_distance_meters).max(DEPTH_TSD_MIN_UPDATE_DISTANCE_METERS);
             let end_distance =
                 (surface_distance + tsd_distance_meters).min(DEPTH_VOXEL_MAX_DISTANCE_METERS);
             let mut last_coord = None;
@@ -1122,8 +1377,8 @@ fn preprocess_depth_mesh(
                     distance += ray_step;
                     continue;
                 }
-                let normalized = ((surface_distance - voxel_distance) / tsd_distance_meters)
-                    .clamp(-1.0, 1.0);
+                let normalized =
+                    ((surface_distance - voxel_distance) / tsd_distance_meters).clamp(-1.0, 1.0);
                 frame_tsd_accum
                     .entry(coord)
                     .and_modify(|current| {
@@ -1162,6 +1417,7 @@ fn preprocess_depth_mesh(
     };
 
     Ok(CxOpenXrPreparedDepthMeshJob {
+        reset_generation: job.reset_generation,
         generation: job.generation,
         eye_index: job.eye_index,
         width: job.width,
@@ -1194,6 +1450,577 @@ fn apply_preprocessed_depth_mesh(job: CxOpenXrPreparedDepthMeshJob, volume: &mut
     }
     volume.update_bounds();
     enqueue_visible_mesh_chunks(volume, job.visible_world_min, job.visible_world_max);
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct AlignmentCandidateSample {
+    kind: XrDepthAlignSampleKind,
+    point: Vec3f,
+    normal: Vec3f,
+    weight: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+struct AlignmentWallKey {
+    x: i32,
+    y: i32,
+    z: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AlignmentPreviewTemporalState {
+    pending_jump_solution: Option<XrDepthAlignSolution>,
+    pending_jump_updates: u8,
+    missing_solution_updates: u8,
+}
+
+fn update_tsdf_alignment_descriptor(volume: &mut DepthMeshVolume) -> bool {
+    let (next_descriptor, next_debug) = build_tsdf_alignment_descriptor(volume);
+    if volume.alignment_descriptor == next_descriptor && volume.alignment_debug == next_debug {
+        return false;
+    }
+    volume.alignment_descriptor = next_descriptor;
+    volume.alignment_debug = next_debug;
+    volume.update_sequence = volume.update_sequence.saturating_add(1);
+    true
+}
+
+fn update_alignment_preview(volume: &mut DepthMeshVolume) -> bool {
+    let next_preview = volume
+        .alignment_descriptor
+        .as_ref()
+        .map(build_alignment_preview)
+        .unwrap_or_default();
+    let next_preview = stabilize_alignment_preview(
+        &volume.alignment_preview,
+        next_preview,
+        &mut volume.alignment_preview_temporal,
+    );
+    if volume.alignment_preview == next_preview {
+        return false;
+    }
+    volume.alignment_preview = next_preview;
+    volume.update_sequence = volume.update_sequence.saturating_add(1);
+    true
+}
+
+fn build_alignment_preview(local: &XrDepthAlignDescriptor) -> XrDepthAlignPreview {
+    let (local_floor_sample_count, local_wall_sample_count) = descriptor_sample_counts(local);
+    let mut preview = XrDepthAlignPreview {
+        local_markers: xr_depth_align_test_markers(local),
+        local_sample_count: local.samples.len(),
+        local_floor_sample_count,
+        local_wall_sample_count,
+        ..XrDepthAlignPreview::default()
+    };
+
+    let remote = build_loopback_preview_remote_descriptor(local);
+    let (remote_floor_sample_count, remote_wall_sample_count) = descriptor_sample_counts(&remote);
+    preview.remote_sample_count = remote.samples.len();
+    preview.remote_floor_sample_count = remote_floor_sample_count;
+    preview.remote_wall_sample_count = remote_wall_sample_count;
+
+    let remote_markers = xr_depth_align_test_markers(&remote);
+    let solution = xr_depth_align_solve_remote_to_local(local, &remote);
+    if let (Some(local_markers), Some(remote_markers), Some(solution)) =
+        (preview.local_markers, remote_markers, solution)
+    {
+        let mapped_remote = [
+            solution.map_point(remote_markers[0]),
+            solution.map_point(remote_markers[1]),
+        ];
+        let (remote_markers_local, _) = best_marker_assignment(local_markers, mapped_remote);
+        preview.remote_markers_local = Some(remote_markers_local);
+        preview.solution = Some(solution);
+    }
+
+    preview
+}
+
+fn stabilize_alignment_preview(
+    previous: &XrDepthAlignPreview,
+    mut next: XrDepthAlignPreview,
+    temporal: &mut AlignmentPreviewTemporalState,
+) -> XrDepthAlignPreview {
+    next.local_markers = smooth_marker_pair(
+        previous.local_markers,
+        next.local_markers,
+        DEPTH_ALIGN_PREVIEW_MARKER_LERP,
+        false,
+    );
+
+    let mut hold_previous_remote = false;
+    let mut remote_alpha = DEPTH_ALIGN_PREVIEW_MARKER_LERP;
+
+    match (previous.solution, next.solution) {
+        (Some(previous_solution), Some(next_solution)) => {
+            temporal.missing_solution_updates = 0;
+            let position_jump =
+                (next_solution.translation - previous_solution.translation).length();
+            let yaw_jump =
+                wrap_preview_angle(next_solution.yaw_radians - previous_solution.yaw_radians).abs();
+            let big_jump = position_jump > DEPTH_ALIGN_PREVIEW_BIG_JUMP_TRANSLATION_METERS
+                || yaw_jump > DEPTH_ALIGN_PREVIEW_BIG_JUMP_YAW_RADIANS;
+            let should_gate_jump = big_jump
+                && previous_solution.confidence >= 0.20
+                && previous_solution.matched_samples >= 6;
+
+            if should_gate_jump {
+                if temporal
+                    .pending_jump_solution
+                    .is_some_and(|pending| preview_solution_near(&pending, &next_solution))
+                {
+                    temporal.pending_jump_updates = temporal
+                        .pending_jump_updates
+                        .saturating_add(1)
+                        .min(DEPTH_ALIGN_PREVIEW_BIG_JUMP_CONFIRM_UPDATES);
+                } else {
+                    temporal.pending_jump_solution = Some(next_solution);
+                    temporal.pending_jump_updates = 1;
+                }
+
+                if temporal.pending_jump_updates < DEPTH_ALIGN_PREVIEW_BIG_JUMP_CONFIRM_UPDATES {
+                    next.solution = Some(previous_solution);
+                    hold_previous_remote = true;
+                } else {
+                    temporal.pending_jump_solution = None;
+                    temporal.pending_jump_updates = 0;
+                    let alpha = solution_lerp_alpha(&next_solution);
+                    next.solution = Some(lerp_alignment_solution(
+                        previous_solution,
+                        next_solution,
+                        alpha,
+                    ));
+                    remote_alpha = alpha.max(DEPTH_ALIGN_PREVIEW_MARKER_LERP);
+                }
+            } else {
+                temporal.pending_jump_solution = None;
+                temporal.pending_jump_updates = 0;
+                let alpha = solution_lerp_alpha(&next_solution);
+                next.solution = Some(lerp_alignment_solution(
+                    previous_solution,
+                    next_solution,
+                    alpha,
+                ));
+                remote_alpha = alpha.max(DEPTH_ALIGN_PREVIEW_MARKER_LERP);
+            }
+        }
+        (Some(previous_solution), None) => {
+            temporal.pending_jump_solution = None;
+            temporal.pending_jump_updates = 0;
+            if temporal.missing_solution_updates < DEPTH_ALIGN_PREVIEW_HOLD_MISSING_UPDATES {
+                temporal.missing_solution_updates =
+                    temporal.missing_solution_updates.saturating_add(1);
+                next.solution = Some(XrDepthAlignSolution {
+                    confidence: previous_solution.confidence * 0.94,
+                    ..previous_solution
+                });
+                hold_previous_remote = true;
+            } else {
+                temporal.missing_solution_updates = 0;
+            }
+        }
+        (None, Some(_)) => {
+            temporal.pending_jump_solution = None;
+            temporal.pending_jump_updates = 0;
+            temporal.missing_solution_updates = 0;
+        }
+        (None, None) => {
+            temporal.pending_jump_solution = None;
+            temporal.pending_jump_updates = 0;
+            temporal.missing_solution_updates = 0;
+        }
+    }
+
+    next.remote_markers_local = smooth_marker_pair(
+        previous.remote_markers_local,
+        if hold_previous_remote {
+            None
+        } else {
+            next.remote_markers_local
+        },
+        remote_alpha,
+        hold_previous_remote,
+    );
+    next
+}
+
+fn solution_lerp_alpha(solution: &XrDepthAlignSolution) -> f32 {
+    let confidence = solution.confidence.clamp(0.0, 1.0);
+    let residual = if solution.residual_meters.is_finite() {
+        (1.0_f32 - solution.residual_meters / 0.28_f32).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let matched = (solution.matched_samples as f32 / 16.0).clamp(0.0, 1.0);
+    let quality = (confidence * 0.60 + residual * 0.20 + matched * 0.20).clamp(0.0, 1.0);
+    DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MIN
+        + (DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MAX - DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MIN) * quality
+}
+
+fn lerp_alignment_solution(
+    previous: XrDepthAlignSolution,
+    next: XrDepthAlignSolution,
+    alpha: f32,
+) -> XrDepthAlignSolution {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let yaw_delta = wrap_preview_angle(next.yaw_radians - previous.yaw_radians);
+    XrDepthAlignSolution {
+        yaw_radians: wrap_preview_angle(previous.yaw_radians + yaw_delta * alpha),
+        translation: previous.translation + (next.translation - previous.translation) * alpha,
+        confidence: previous.confidence + (next.confidence - previous.confidence) * alpha,
+        residual_meters: if previous.residual_meters.is_finite() && next.residual_meters.is_finite()
+        {
+            previous.residual_meters + (next.residual_meters - previous.residual_meters) * alpha
+        } else {
+            next.residual_meters
+        },
+        matched_samples: previous.matched_samples.max(next.matched_samples),
+    }
+}
+
+fn preview_solution_near(previous: &XrDepthAlignSolution, next: &XrDepthAlignSolution) -> bool {
+    (next.translation - previous.translation).length()
+        <= DEPTH_ALIGN_PREVIEW_JUMP_MATCH_TRANSLATION_METERS
+        && wrap_preview_angle(next.yaw_radians - previous.yaw_radians).abs()
+            <= DEPTH_ALIGN_PREVIEW_JUMP_MATCH_YAW_RADIANS
+}
+
+fn smooth_marker_pair(
+    previous: Option<[Vec3f; 2]>,
+    next: Option<[Vec3f; 2]>,
+    alpha: f32,
+    hold_previous: bool,
+) -> Option<[Vec3f; 2]> {
+    match (previous, next) {
+        (Some(previous), Some(next)) => {
+            let (next, _) = best_marker_assignment(previous, next);
+            Some([
+                previous[0] + (next[0] - previous[0]) * alpha.clamp(0.0, 1.0),
+                previous[1] + (next[1] - previous[1]) * alpha.clamp(0.0, 1.0),
+            ])
+        }
+        (Some(previous), None) if hold_previous => Some(previous),
+        (_, next) => next,
+    }
+}
+
+fn wrap_preview_angle(mut angle: f32) -> f32 {
+    while angle <= -std::f32::consts::PI {
+        angle += std::f32::consts::TAU;
+    }
+    while angle > std::f32::consts::PI {
+        angle -= std::f32::consts::TAU;
+    }
+    angle
+}
+
+fn build_loopback_preview_remote_descriptor(
+    local: &XrDepthAlignDescriptor,
+) -> XrDepthAlignDescriptor {
+    let local_to_remote = loopback_preview_remote_to_local_transform().invert();
+    let mut remote = xr_depth_align_transform_descriptor(local, &local_to_remote);
+    let quant_step = local.voxel_size_meters.max(0.03) * 0.65;
+    let mut degraded = Vec::new();
+    for (index, mut sample) in remote.samples.into_iter().enumerate() {
+        let keep = match sample.kind {
+            XrDepthAlignSampleKind::Floor => true,
+            XrDepthAlignSampleKind::Wall => index % 4 != 1,
+            XrDepthAlignSampleKind::Unknown => false,
+        };
+        if !keep {
+            continue;
+        }
+        match sample.kind {
+            XrDepthAlignSampleKind::Floor => {
+                sample.point.x += ((index % 5) as f32 - 2.0) * quant_step * 0.18;
+                sample.point.z += (((index * 3) % 7) as f32 - 3.0) * quant_step * 0.12;
+                sample.point.x = quantize_metric(sample.point.x, quant_step);
+                sample.point.z = quantize_metric(sample.point.z, quant_step);
+            }
+            XrDepthAlignSampleKind::Wall => {
+                let tangent = wall_tangent(sample.normal);
+                let vertical = vec3f(0.0, 1.0, 0.0);
+                let tangent_jitter = ((index % 5) as f32 - 2.0) * quant_step * 0.15;
+                let vertical_jitter = (((index * 3) % 7) as f32 - 3.0) * quant_step * 0.10;
+                sample.point += tangent * tangent_jitter + vertical * vertical_jitter;
+                sample.point.x = quantize_metric(sample.point.x, quant_step);
+                sample.point.y = quantize_metric(sample.point.y, quant_step);
+                sample.point.z = quantize_metric(sample.point.z, quant_step);
+            }
+            XrDepthAlignSampleKind::Unknown => {}
+        }
+        sample.weight = (sample.weight * (0.84 + 0.04 * (index % 4) as f32)).clamp(0.1, 1.0);
+        degraded.push(sample);
+    }
+    remote.samples = degraded;
+    remote.wall_normal_histogram = if remote.wall_features.is_empty() {
+        Vec::new()
+    } else {
+        xr_depth_align_build_wall_feature_normal_histogram(
+            &remote.wall_features,
+            local.wall_normal_histogram.len(),
+        )
+    };
+    remote
+}
+
+fn loopback_preview_remote_to_local_transform() -> Mat4f {
+    xr_depth_align_loopback_preview_solution().remote_to_local_transform()
+}
+
+fn descriptor_sample_counts(descriptor: &XrDepthAlignDescriptor) -> (usize, usize) {
+    let mut floor_count = 0usize;
+    let mut wall_count = 0usize;
+    for sample in &descriptor.samples {
+        match sample.kind {
+            XrDepthAlignSampleKind::Floor => floor_count += 1,
+            XrDepthAlignSampleKind::Wall => wall_count += 1,
+            XrDepthAlignSampleKind::Unknown => {}
+        }
+    }
+    (floor_count, wall_count)
+}
+
+fn best_marker_assignment(local: [Vec3f; 2], remote: [Vec3f; 2]) -> ([Vec3f; 2], f32) {
+    let direct = (remote[0] - local[0]).length() + (remote[1] - local[1]).length();
+    let swapped = (remote[1] - local[0]).length() + (remote[0] - local[1]).length();
+    if swapped < direct {
+        ([remote[1], remote[0]], swapped * 50.0)
+    } else {
+        (remote, direct * 50.0)
+    }
+}
+
+fn wall_tangent(normal: Vec3f) -> Vec3f {
+    let tangent = vec3f(-normal.z, 0.0, normal.x);
+    if tangent.length() > 1.0e-5 {
+        tangent.normalize()
+    } else {
+        vec3f(1.0, 0.0, 0.0)
+    }
+}
+
+fn build_tsdf_alignment_descriptor(
+    volume: &DepthMeshVolume,
+) -> (Option<XrDepthAlignDescriptor>, XrDepthAlignDebug) {
+    let mut debug = XrDepthAlignDebug::default();
+    for chunk in volume.plane_scan_chunks.values() {
+        debug.near_surface_voxel_count = debug
+            .near_surface_voxel_count
+            .saturating_add(chunk.near_surface_voxel_count);
+        debug.floor_candidate_count = debug
+            .floor_candidate_count
+            .saturating_add(chunk.floor_candidate_count);
+        debug.wall_candidate_count = debug
+            .wall_candidate_count
+            .saturating_add(chunk.wall_candidate_count);
+    }
+    let wall_patches = visible_stable_wall_patches(&volume.stable_wall_tracks);
+    let wall_features = visible_room_wall_features(&volume.room_wall_tracks);
+    if wall_patches.is_empty() && wall_features.is_empty() {
+        return (None, debug);
+    }
+
+    if wall_patches.is_empty() {
+        debug.wall_candidate_count = debug.wall_candidate_count.max(wall_features.len() as u32);
+    }
+
+    let mut wall_samples = HashMap::<AlignmentWallKey, AlignmentCandidateSample>::new();
+    for patch in &wall_patches {
+        append_wall_patch_alignment_samples(&mut wall_samples, patch);
+    }
+
+    let mut samples = wall_samples
+        .into_values()
+        .map(quantized_align_sample)
+        .collect::<Vec<_>>();
+    samples.sort_by(|a, b| b.weight.total_cmp(&a.weight));
+    if samples.len() > DEPTH_ALIGN_MAX_WALL_SAMPLES {
+        samples.truncate(DEPTH_ALIGN_MAX_WALL_SAMPLES);
+    }
+    debug.wall_sample_count = samples.len() as u32;
+    if wall_features.is_empty() && debug.wall_sample_count < DEPTH_ALIGN_MIN_WALL_SAMPLES as u32 {
+        return (None, debug);
+    }
+
+    let wall_histogram = if wall_features.is_empty() {
+        xr_depth_align_build_wall_normal_histogram(&samples, DEPTH_ALIGN_WALL_HISTOGRAM_BINS)
+    } else {
+        xr_depth_align_build_wall_feature_normal_histogram(
+            &wall_features,
+            DEPTH_ALIGN_WALL_HISTOGRAM_BINS,
+        )
+    };
+
+    (
+        Some(XrDepthAlignDescriptor {
+            voxel_size_meters: volume.voxel_size_meters,
+            floor_y: 0.0,
+            wall_normal_histogram: wall_histogram,
+            wall_features,
+            samples,
+        }),
+        debug,
+    )
+}
+
+fn append_wall_patch_alignment_samples(
+    wall_samples: &mut HashMap<AlignmentWallKey, AlignmentCandidateSample>,
+    patch: &XrDepthPlanePatch,
+) {
+    for_each_plane_patch_grid_sample(
+        patch,
+        DEPTH_ALIGN_WALL_SAMPLE_GRID_METERS,
+        |point, edge_bias| {
+            let key = AlignmentWallKey {
+                x: quantize_f32(point.x, DEPTH_ALIGN_WALL_SAMPLE_GRID_METERS),
+                y: quantize_f32(point.y, DEPTH_ALIGN_WALL_SAMPLE_GRID_METERS),
+                z: quantize_f32(point.z, DEPTH_ALIGN_WALL_SAMPLE_GRID_METERS),
+            };
+            upsert_alignment_candidate(
+                wall_samples,
+                key,
+                AlignmentCandidateSample {
+                    kind: XrDepthAlignSampleKind::Wall,
+                    point,
+                    normal: patch.normal,
+                    weight: plane_patch_alignment_sample_weight(
+                        patch,
+                        DEPTH_ALIGN_WALL_SAMPLE_GRID_METERS,
+                        edge_bias,
+                    ),
+                },
+            );
+        },
+    );
+}
+
+fn for_each_plane_patch_grid_sample<F>(patch: &XrDepthPlanePatch, step: f32, mut visitor: F)
+where
+    F: FnMut(Vec3f, f32),
+{
+    let plane_distance = patch.center.dot(patch.normal);
+    let min_u = patch.center.dot(patch.tangent) - patch.half_extent_tangent;
+    let max_u = patch.center.dot(patch.tangent) + patch.half_extent_tangent;
+    let min_v = patch.center.dot(patch.bitangent) - patch.half_extent_bitangent;
+    let max_v = patch.center.dot(patch.bitangent) + patch.half_extent_bitangent;
+    let min_u_cell = (min_u / step.max(f32::EPSILON)).ceil() as i32;
+    let max_u_cell = (max_u / step.max(f32::EPSILON)).floor() as i32;
+    let min_v_cell = (min_v / step.max(f32::EPSILON)).ceil() as i32;
+    let max_v_cell = (max_v / step.max(f32::EPSILON)).floor() as i32;
+    let mut emitted = false;
+
+    for u_cell in min_u_cell..=max_u_cell {
+        for v_cell in min_v_cell..=max_v_cell {
+            let u = u_cell as f32 * step;
+            let v = v_cell as f32 * step;
+            let edge_distance = (u - min_u).min(max_u - u).min(v - min_v).min(max_v - v);
+            let edge_bias = 1.0 - (edge_distance / step.max(0.001)).clamp(0.0, 1.0);
+            visitor(
+                patch.normal.scale(plane_distance)
+                    + patch.tangent.scale(u)
+                    + patch.bitangent.scale(v),
+                edge_bias,
+            );
+            emitted = true;
+        }
+    }
+
+    if !emitted {
+        visitor(patch.center, 1.0);
+    }
+}
+
+fn plane_patch_alignment_sample_weight(
+    patch: &XrDepthPlanePatch,
+    step: f32,
+    edge_bias: f32,
+) -> f32 {
+    let base = (patch.area / step.max(0.01)).sqrt().clamp(0.25, 6.0);
+    base * (1.0 + edge_bias * 0.65)
+}
+
+fn upsert_alignment_candidate<K: Eq + std::hash::Hash>(
+    map: &mut HashMap<K, AlignmentCandidateSample>,
+    key: K,
+    candidate: AlignmentCandidateSample,
+) {
+    match map.get_mut(&key) {
+        Some(existing) if existing.weight >= candidate.weight => {}
+        Some(existing) => *existing = candidate,
+        None => {
+            map.insert(key, candidate);
+        }
+    }
+}
+
+fn quantized_align_sample(sample: AlignmentCandidateSample) -> XrDepthAlignSample {
+    let quantized_normal = vec3f(
+        quantize_metric(sample.normal.x, 0.001),
+        quantize_metric(sample.normal.y, 0.001),
+        quantize_metric(sample.normal.z, 0.001),
+    );
+    XrDepthAlignSample {
+        kind: sample.kind,
+        point: vec3f(
+            quantize_metric(sample.point.x, 0.01),
+            quantize_metric(sample.point.y, 0.01),
+            quantize_metric(sample.point.z, 0.01),
+        ),
+        normal: if quantized_normal.length() > 1.0e-5 {
+            quantized_normal.normalize()
+        } else {
+            sample.normal
+        },
+        weight: quantize_metric(sample.weight, 0.01).max(0.01),
+    }
+}
+
+fn query_depth_grid_normal_at_coord(volume: &DepthMeshVolume, coord: VoxelCoord) -> Option<Vec3f> {
+    let center = volume.mesh_grid.normalized_distance(coord)?;
+    let step = volume
+        .voxel_size_meters
+        .max(DEPTH_QUERY_TSDF_IMPACT_RAY_STEP_MIN);
+    let dx = finite_difference_axis(
+        center,
+        volume
+            .mesh_grid
+            .normalized_distance(coord + VoxelCoord::new(1, 0, 0)),
+        volume
+            .mesh_grid
+            .normalized_distance(coord - VoxelCoord::new(1, 0, 0)),
+        step,
+    )?;
+    let dy = finite_difference_axis(
+        center,
+        volume
+            .mesh_grid
+            .normalized_distance(coord + VoxelCoord::new(0, 1, 0)),
+        volume
+            .mesh_grid
+            .normalized_distance(coord - VoxelCoord::new(0, 1, 0)),
+        step,
+    )?;
+    let dz = finite_difference_axis(
+        center,
+        volume
+            .mesh_grid
+            .normalized_distance(coord + VoxelCoord::new(0, 0, 1)),
+        volume
+            .mesh_grid
+            .normalized_distance(coord - VoxelCoord::new(0, 0, 1)),
+        step,
+    )?;
+    let gradient = vec3f(dx, dy, dz);
+    (gradient.length() > 1.0e-5).then_some(gradient.normalize())
+}
+
+fn quantize_metric(value: f32, step: f32) -> f32 {
+    if step <= 0.0 {
+        return value;
+    }
+    (value / step).round() * step
 }
 
 fn rebuild_sampled_depth_grid(
@@ -1468,8 +2295,7 @@ fn depth_pixel_is_reliable_for_carve(
             continue;
         };
         let neighbor_distance = neighbor_view.to_vec3f().length();
-        if (neighbor_distance - observed_distance).abs()
-            <= carve_neighbor_max_distance_delta_meters
+        if (neighbor_distance - observed_distance).abs() <= carve_neighbor_max_distance_delta_meters
         {
             agreeing_neighbors = agreeing_neighbors.saturating_add(1);
         }
@@ -1506,8 +2332,7 @@ fn refresh_visible_free_space(
     job: &CxOpenXrPreparedDepthMeshJob,
 ) -> usize {
     let tsd_distance_meters = depth_tsd_distance_meters(job.voxel_size_meters);
-    let tsd_refresh_clearance_meters =
-        depth_tsd_refresh_clearance_meters(job.voxel_size_meters);
+    let tsd_refresh_clearance_meters = depth_tsd_refresh_clearance_meters(job.voxel_size_meters);
     let min_coord = volume.mesh_grid.world_to_voxel_coord(job.visible_world_min);
     let max_coord = volume.mesh_grid.world_to_voxel_coord(job.visible_world_max);
     let mut changed = 0;
@@ -1555,8 +2380,7 @@ fn refresh_visible_free_space(
                     continue;
                 }
                 let clearance = observed_distance - voxel_distance;
-                if !observed_distance.is_finite() || clearance < tsd_refresh_clearance_meters
-                {
+                if !observed_distance.is_finite() || clearance < tsd_refresh_clearance_meters {
                     continue;
                 }
                 let confidence = volume.mesh_grid.confidence(coord);
@@ -1650,6 +2474,9 @@ fn mark_mesh_chunk_dirty(volume: &mut DepthMeshVolume, voxel: VoxelCoord) {
                 if volume.pending_mesh_dirty_chunks.insert(key) {
                     volume.pending_mesh_chunk_queue.push_back(key);
                 }
+                if volume.pending_plane_scan_dirty_chunks.insert(key) {
+                    volume.pending_plane_scan_chunk_queue.push_back(key);
+                }
             }
         }
     }
@@ -1729,7 +2556,7 @@ fn process_incremental_surface_mesh(
 ) -> bool {
     if volume.mesh_grid.is_empty() {
         if !volume.mesh_chunks.is_empty() {
-            volume.reset_mesh_state();
+            volume.reset_render_mesh_state();
             return true;
         }
         return false;
@@ -1912,6 +2739,48 @@ struct PlaneSupportComponent {
     max_v: i32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TsdfPlaneScanGroup {
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct TsdfPlaneScanBinKey {
+    group: TsdfPlaneScanGroup,
+    plane_bin: i32,
+    normal_x_bin: i32,
+    normal_z_bin: i32,
+}
+
+#[derive(Clone, Debug)]
+struct TsdfPlaneScanBin {
+    normal_sum: Vec3f,
+    point_sum: Vec3f,
+    point_weight_sum: f32,
+    support_mask: PlaneSupportMask,
+    support_sample_count: usize,
+    support_samples: Vec<TsdfPlaneSupportSample>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TsdfPlaneSupportSample {
+    point: Vec3f,
+    cell: PlaneSupportCellKey,
+}
+
+impl Default for TsdfPlaneScanBin {
+    fn default() -> Self {
+        Self {
+            normal_sum: Vec3f::default(),
+            point_sum: Vec3f::default(),
+            point_weight_sum: 0.0,
+            support_mask: PlaneSupportMask::default(),
+            support_sample_count: 0,
+            support_samples: Vec::new(),
+        }
+    }
+}
+
 fn rebuild_reduced_planar_patches(volume: &mut DepthMeshVolume) -> bool {
     let mut plane_patches = volume
         .mesh_chunks
@@ -1949,6 +2818,1224 @@ fn rebuild_reduced_planar_patches(volume: &mut DepthMeshVolume) -> bool {
     volume.plane_generation = next_generation;
     volume.update_sequence = volume.update_sequence.saturating_add(1);
     true
+}
+
+fn plane_patch_matches(left: &XrDepthPlanePatch, right: &XrDepthPlanePatch) -> bool {
+    left.kind == right.kind
+        && (left.center - right.center).length() <= 1.0e-4
+        && left.normal.dot(right.normal) >= 0.999
+        && left.tangent.dot(right.tangent) >= 0.999
+        && left.bitangent.dot(right.bitangent) >= 0.999
+        && (left.half_extent_tangent - right.half_extent_tangent).abs() <= 1.0e-4
+        && (left.half_extent_bitangent - right.half_extent_bitangent).abs() <= 1.0e-4
+}
+
+fn scanned_plane_chunk_matches(left: &ScannedPlaneChunk, right: &ScannedPlaneChunk) -> bool {
+    left.near_surface_voxel_count == right.near_surface_voxel_count
+        && left.floor_candidate_count == right.floor_candidate_count
+        && left.wall_candidate_count == right.wall_candidate_count
+        && left.patches.len() == right.patches.len()
+        && left
+            .patches
+            .iter()
+            .zip(right.patches.iter())
+            .all(|(left, right)| plane_patch_matches(left, right))
+}
+
+fn lerp_metric(from: f32, to: f32, alpha: f32) -> f32 {
+    from + (to - from) * alpha.clamp(0.0, 1.0)
+}
+
+fn stable_wall_patch_tracking_score(
+    track: &XrDepthPlanePatch,
+    candidate: &XrDepthPlanePatch,
+) -> Option<f32> {
+    let aligned_normal = align_direction(track.normal, candidate.normal);
+    let normal_dot = track.normal.dot(aligned_normal);
+    if normal_dot < DEPTH_PLANE_STABLE_TRACK_MATCH_NORMAL_DOT {
+        return None;
+    }
+
+    let track_plane_distance = track.center.dot(track.normal);
+    let candidate_plane_distance = candidate.center.dot(track.normal);
+    let plane_delta = (track_plane_distance - candidate_plane_distance).abs();
+    if plane_delta > DEPTH_PLANE_STABLE_TRACK_MATCH_DISTANCE_METERS {
+        return None;
+    }
+
+    let (track_min_t, track_max_t, track_min_b, track_max_b) =
+        plane_patch_projected_extents(track, track.tangent, track.bitangent);
+    let (cand_min_t, cand_max_t, cand_min_b, cand_max_b) =
+        project_patch_extents_to_basis(candidate, track.tangent, track.bitangent);
+    let height_gap = interval_gap(track_min_t, track_max_t, cand_min_t, cand_max_t);
+    let along_gap = interval_gap(track_min_b, track_max_b, cand_min_b, cand_max_b);
+    if height_gap > DEPTH_PLANE_STABLE_TRACK_MATCH_HEIGHT_GAP_METERS
+        || along_gap > DEPTH_PLANE_STABLE_TRACK_MATCH_ALONG_GAP_METERS
+    {
+        return None;
+    }
+
+    let area_ratio =
+        (track.area.min(candidate.area) / track.area.max(candidate.area).max(0.05)).clamp(0.0, 1.0);
+    let gap_score =
+        (1.0 - along_gap / DEPTH_PLANE_STABLE_TRACK_MATCH_ALONG_GAP_METERS).clamp(0.0, 1.0);
+    let height_score =
+        (1.0 - height_gap / DEPTH_PLANE_STABLE_TRACK_MATCH_HEIGHT_GAP_METERS).clamp(0.0, 1.0);
+    Some(
+        normal_dot.powf(2.0)
+            * (-plane_delta / 0.05).exp()
+            * (0.35 + 0.65 * area_ratio)
+            * (0.30 + 0.70 * gap_score)
+            * (0.35 + 0.65 * height_score),
+    )
+}
+
+fn smooth_stable_wall_patch(
+    current: &XrDepthPlanePatch,
+    measurement: &XrDepthPlanePatch,
+) -> XrDepthPlanePatch {
+    let alpha = DEPTH_PLANE_STABLE_TRACK_SMOOTH_ALPHA;
+    let aligned_normal = align_direction(current.normal, measurement.normal);
+    let blended_normal = current.normal.scale(1.0 - alpha) + aligned_normal.scale(alpha);
+    let normal = if blended_normal.length() > 1.0e-5 {
+        blended_normal.normalize()
+    } else {
+        current.normal
+    };
+    let tangent = vec3f(0.0, 1.0, 0.0);
+    let bitangent = Vec3f::cross(normal, tangent).normalize();
+    let bitangent = if bitangent.length() > 1.0e-5 {
+        bitangent
+    } else {
+        current.bitangent
+    };
+
+    let (cur_min_t, cur_max_t, cur_min_b, cur_max_b) =
+        project_patch_extents_to_basis(current, tangent, bitangent);
+    let (meas_min_t, meas_max_t, meas_min_b, meas_max_b) =
+        project_patch_extents_to_basis(measurement, tangent, bitangent);
+    let min_t = lerp_metric(cur_min_t, meas_min_t, alpha);
+    let max_t = lerp_metric(cur_max_t, meas_max_t, alpha);
+    let min_b = lerp_metric(cur_min_b, meas_min_b, alpha);
+    let max_b = lerp_metric(cur_max_b, meas_max_b, alpha);
+    let plane_distance = lerp_metric(
+        current.center.dot(normal),
+        measurement.center.dot(normal),
+        alpha,
+    );
+    let center_t = (min_t + max_t) * 0.5;
+    let center_b = (min_b + max_b) * 0.5;
+    let half_extent_tangent = ((max_t - min_t) * 0.5).max(0.0);
+    let half_extent_bitangent = ((max_b - min_b) * 0.5).max(0.0);
+    XrDepthPlanePatch {
+        generation: current.generation,
+        kind: XrDepthPlaneKind::Wall,
+        center: normal.scale(plane_distance) + tangent.scale(center_t) + bitangent.scale(center_b),
+        normal,
+        tangent,
+        bitangent,
+        half_extent_tangent,
+        half_extent_bitangent,
+        area: (half_extent_tangent * 2.0) * (half_extent_bitangent * 2.0),
+        support_triangles: current.support_triangles.max(measurement.support_triangles),
+    }
+}
+
+fn stabilize_wall_scan_patches(
+    tracks: &mut Vec<StableWallPatchTrack>,
+    patches: Vec<XrDepthPlanePatch>,
+) -> Vec<XrDepthPlanePatch> {
+    let mut candidate_pairs = Vec::<(f32, usize, usize)>::new();
+    for (track_index, track) in tracks.iter().enumerate() {
+        for (patch_index, patch) in patches.iter().enumerate() {
+            if let Some(score) = stable_wall_patch_tracking_score(&track.patch, patch) {
+                candidate_pairs.push((score, track_index, patch_index));
+            }
+        }
+    }
+    candidate_pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+    let mut matched_tracks = vec![false; tracks.len()];
+    let mut matched_patches = vec![false; patches.len()];
+    let mut next_tracks = Vec::<StableWallPatchTrack>::with_capacity(tracks.len() + patches.len());
+
+    for (_, track_index, patch_index) in candidate_pairs {
+        if matched_tracks[track_index] || matched_patches[patch_index] {
+            continue;
+        }
+        matched_tracks[track_index] = true;
+        matched_patches[patch_index] = true;
+        let track = &tracks[track_index];
+        next_tracks.push(StableWallPatchTrack {
+            patch: smooth_stable_wall_patch(&track.patch, &patches[patch_index]),
+            seen_count: track.seen_count.saturating_add(1),
+            missing_updates: 0,
+        });
+    }
+
+    for (track_index, track) in tracks.iter().enumerate() {
+        if matched_tracks[track_index] {
+            continue;
+        }
+        if track.missing_updates < DEPTH_PLANE_STABLE_TRACK_MISSING_UPDATES_MAX {
+            let mut track = track.clone();
+            track.missing_updates = track.missing_updates.saturating_add(1);
+            next_tracks.push(track);
+        }
+    }
+
+    for (patch_index, patch) in patches.into_iter().enumerate() {
+        if matched_patches[patch_index] {
+            continue;
+        }
+        next_tracks.push(StableWallPatchTrack {
+            patch,
+            seen_count: 1,
+            missing_updates: 0,
+        });
+    }
+
+    next_tracks.sort_by(|a, b| b.patch.area.total_cmp(&a.patch.area));
+    if next_tracks.len() > DEPTH_PLANE_MAX_PATCHES * 2 {
+        next_tracks.truncate(DEPTH_PLANE_MAX_PATCHES * 2);
+    }
+
+    let mut visible = next_tracks
+        .iter()
+        .filter(|track| {
+            track.seen_count >= DEPTH_PLANE_STABLE_TRACK_MIN_SEEN_COUNT
+                || track.missing_updates == 0
+        })
+        .map(|track| track.patch.clone())
+        .collect::<Vec<_>>();
+    visible.sort_by(|a, b| b.area.total_cmp(&a.area));
+    if visible.len() > DEPTH_PLANE_MAX_PATCHES {
+        visible.truncate(DEPTH_PLANE_MAX_PATCHES);
+    }
+
+    *tracks = next_tracks;
+    visible
+}
+
+fn visible_stable_wall_patches(tracks: &[StableWallPatchTrack]) -> Vec<XrDepthPlanePatch> {
+    let mut visible = tracks
+        .iter()
+        .filter(|track| {
+            track.seen_count >= DEPTH_PLANE_STABLE_TRACK_MIN_SEEN_COUNT
+                || track.missing_updates == 0
+        })
+        .map(|track| track.patch.clone())
+        .collect::<Vec<_>>();
+    visible.sort_by(|a, b| b.area.total_cmp(&a.area));
+    if visible.len() > DEPTH_PLANE_MAX_PATCHES * 2 {
+        visible.truncate(DEPTH_PLANE_MAX_PATCHES * 2);
+    }
+    visible
+}
+
+fn canonicalize_room_axis(axis: Vec3f) -> Option<Vec3f> {
+    let axis = vec3f(axis.x, 0.0, axis.z);
+    let axis = if axis.length() > 1.0e-5 {
+        axis.normalize()
+    } else {
+        return None;
+    };
+    if axis.x < -1.0e-5 || (axis.x.abs() <= 1.0e-5 && axis.z < 0.0) {
+        Some(axis.scale(-1.0))
+    } else {
+        Some(axis)
+    }
+}
+
+fn orthogonal_room_axis(axis: Vec3f) -> Vec3f {
+    vec3f(-axis.z, 0.0, axis.x).normalize()
+}
+
+fn refine_room_wall_axis(
+    patches: &[XrDepthPlanePatch],
+    seed_axis: Vec3f,
+    threshold_dot: f32,
+) -> Vec3f {
+    let mut axis_sum = Vec3f::default();
+    let mut found = false;
+    for patch in patches {
+        let Some(axis) = canonicalize_room_axis(patch.normal) else {
+            continue;
+        };
+        if axis.dot(seed_axis).abs() < threshold_dot {
+            continue;
+        }
+        let aligned_axis = if axis.dot(seed_axis) < 0.0 {
+            axis.scale(-1.0)
+        } else {
+            axis
+        };
+        axis_sum += aligned_axis.scale(patch.area.max(0.05));
+        found = true;
+    }
+    if found && axis_sum.length() > 1.0e-5 {
+        canonicalize_room_axis(axis_sum).unwrap_or(seed_axis)
+    } else {
+        seed_axis
+    }
+}
+
+fn infer_room_wall_axes(patches: &[XrDepthPlanePatch]) -> Option<[Vec3f; 2]> {
+    let primary_seed = patches
+        .iter()
+        .filter_map(|patch| canonicalize_room_axis(patch.normal).map(|axis| (patch.area, axis)))
+        .max_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, axis)| axis)?;
+    let primary = refine_room_wall_axis(patches, primary_seed, 0.82);
+    let secondary_seed = patches
+        .iter()
+        .filter_map(|patch| {
+            let axis = canonicalize_room_axis(patch.normal)?;
+            (axis.dot(primary).abs() <= DEPTH_ROOM_WALL_ORTHOGONAL_DOT_MAX)
+                .then_some((patch.area, axis))
+        })
+        .max_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, axis)| axis)
+        .unwrap_or_else(|| orthogonal_room_axis(primary));
+    let mut secondary = refine_room_wall_axis(patches, secondary_seed, 0.82);
+    if secondary.dot(primary).abs() > DEPTH_ROOM_WALL_ORTHOGONAL_DOT_MAX {
+        secondary = orthogonal_room_axis(primary);
+    }
+    Some([primary, secondary])
+}
+
+fn accumulate_room_wall_patch(
+    accumulator: &mut RoomWallAccumulator,
+    wall_normal: Vec3f,
+    patch: &XrDepthPlanePatch,
+) {
+    let weight = patch.area.max(0.05);
+    if accumulator.weight_sum <= 0.0 {
+        accumulator.normal = wall_normal;
+    }
+    let along_axis = vec3f(-wall_normal.z, 0.0, wall_normal.x).normalize();
+    let (_, _, along_min, along_max) =
+        project_patch_extents_to_basis(patch, vec3f(0.0, 1.0, 0.0), along_axis);
+    accumulator.weight_sum += weight;
+    accumulator.plane_distance_sum += patch.center.dot(wall_normal) * weight;
+    accumulator.support_area += patch.area.max(0.0);
+    accumulator.observed_along_min = accumulator.observed_along_min.min(along_min);
+    accumulator.observed_along_max = accumulator.observed_along_max.max(along_max);
+}
+
+fn build_room_wall_candidates(patches: &[XrDepthPlanePatch]) -> Vec<RoomWallCandidate> {
+    let Some(room_axes) = infer_room_wall_axes(patches) else {
+        return Vec::new();
+    };
+    let mut slot_groups = [
+        Vec::<RoomWallAccumulator>::new(),
+        Vec::<RoomWallAccumulator>::new(),
+        Vec::<RoomWallAccumulator>::new(),
+        Vec::<RoomWallAccumulator>::new(),
+    ];
+    for patch in patches {
+        let Some(axis) = canonicalize_room_axis(patch.normal) else {
+            continue;
+        };
+        let primary_dot = axis.dot(room_axes[0]).abs();
+        let secondary_dot = axis.dot(room_axes[1]).abs();
+        let (axis_index, best_dot) = if primary_dot >= secondary_dot {
+            (0usize, primary_dot)
+        } else {
+            (1usize, secondary_dot)
+        };
+        if best_dot < DEPTH_ROOM_WALL_AXIS_ASSIGN_DOT_MIN {
+            continue;
+        }
+        let axis = room_axes[axis_index];
+        let axis_projection = patch.center.dot(axis);
+        let normal_projection = patch.normal.dot(axis);
+        let side_sign = if axis_projection.abs() >= 0.12 {
+            if axis_projection >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            }
+        } else if normal_projection >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let wall_normal = axis.scale(side_sign);
+        let slot_index = axis_index * 2 + if side_sign >= 0.0 { 1 } else { 0 };
+        let plane_distance = patch.center.dot(wall_normal);
+        let mut best_group = None::<(usize, f32)>;
+        for (group_index, group) in slot_groups[slot_index].iter().enumerate() {
+            if group.weight_sum <= 0.0 {
+                continue;
+            }
+            let group_distance = group.plane_distance_sum / group.weight_sum.max(1.0e-5);
+            let delta = (group_distance - plane_distance).abs();
+            if delta > DEPTH_ROOM_WALL_GROUP_DISTANCE_METERS {
+                continue;
+            }
+            if best_group.is_none_or(|(_, best_delta)| delta < best_delta) {
+                best_group = Some((group_index, delta));
+            }
+        }
+        if let Some((group_index, _)) = best_group {
+            accumulate_room_wall_patch(
+                &mut slot_groups[slot_index][group_index],
+                wall_normal,
+                patch,
+            );
+        } else {
+            let mut group = RoomWallAccumulator::default();
+            accumulate_room_wall_patch(&mut group, wall_normal, patch);
+            slot_groups[slot_index].push(group);
+        }
+    }
+
+    let mut candidates = Vec::<RoomWallCandidate>::new();
+    for groups in slot_groups {
+        let Some(accumulator) = groups
+            .into_iter()
+            .max_by(|left, right| left.support_area.total_cmp(&right.support_area))
+        else {
+            continue;
+        };
+        if accumulator.weight_sum <= 0.0
+            || !accumulator.observed_along_min.is_finite()
+            || !accumulator.observed_along_max.is_finite()
+        {
+            continue;
+        }
+        candidates.push(RoomWallCandidate {
+            normal: accumulator.normal,
+            plane_distance: accumulator.plane_distance_sum / accumulator.weight_sum.max(1.0e-5),
+            observed_along_min: accumulator.observed_along_min,
+            observed_along_max: accumulator.observed_along_max,
+            support_area: accumulator.support_area.max(0.0),
+        });
+    }
+    candidates.sort_by(|left, right| right.support_area.total_cmp(&left.support_area));
+    candidates
+}
+
+fn room_wall_track_score(
+    track: &StableRoomWallTrack,
+    candidate: &RoomWallCandidate,
+) -> Option<f32> {
+    let normal_dot = track.normal.dot(candidate.normal);
+    if normal_dot < DEPTH_ROOM_WALL_TRACK_MATCH_NORMAL_DOT {
+        return None;
+    }
+    let plane_delta = (track.plane_distance - candidate.plane_distance).abs();
+    if plane_delta > DEPTH_ROOM_WALL_TRACK_MATCH_DISTANCE_METERS {
+        return None;
+    }
+    let current_span = (track.observed_along_max - track.observed_along_min).max(0.05);
+    let candidate_span = (candidate.observed_along_max - candidate.observed_along_min).max(0.05);
+    let span_ratio =
+        (current_span.min(candidate_span) / current_span.max(candidate_span)).clamp(0.0, 1.0);
+    Some(
+        normal_dot.powf(2.0)
+            * (-plane_delta / 0.08).exp()
+            * (0.35 + 0.65 * span_ratio)
+            * (0.30
+                + 0.70
+                    * (track.support_area.min(candidate.support_area)
+                        / track.support_area.max(candidate.support_area).max(0.05))
+                    .clamp(0.0, 1.0)),
+    )
+}
+
+fn smooth_room_wall_extent_bound(current: f32, measurement: f32, expands_when_lower: bool) -> f32 {
+    let expands = if expands_when_lower {
+        measurement < current
+    } else {
+        measurement > current
+    };
+    let alpha = if expands {
+        DEPTH_ROOM_WALL_TRACK_EXPAND_ALPHA
+    } else {
+        DEPTH_ROOM_WALL_TRACK_SHRINK_ALPHA
+    };
+    lerp_metric(current, measurement, alpha)
+}
+
+fn smooth_room_wall_track(
+    current: &StableRoomWallTrack,
+    measurement: &RoomWallCandidate,
+) -> StableRoomWallTrack {
+    let alpha = DEPTH_ROOM_WALL_TRACK_SMOOTH_ALPHA;
+    let aligned_normal = align_direction(current.normal, measurement.normal);
+    let blended_normal = current.normal.scale(1.0 - alpha) + aligned_normal.scale(alpha);
+    let normal = if blended_normal.length() > 1.0e-5 {
+        blended_normal.normalize()
+    } else {
+        current.normal
+    };
+    StableRoomWallTrack {
+        normal,
+        plane_distance: lerp_metric(current.plane_distance, measurement.plane_distance, alpha),
+        observed_along_min: smooth_room_wall_extent_bound(
+            current.observed_along_min,
+            measurement.observed_along_min,
+            true,
+        ),
+        observed_along_max: smooth_room_wall_extent_bound(
+            current.observed_along_max,
+            measurement.observed_along_max,
+            false,
+        ),
+        support_area: lerp_metric(current.support_area, measurement.support_area, alpha).max(0.05),
+        seen_count: current.seen_count.saturating_add(1),
+        missing_updates: 0,
+    }
+}
+
+fn stabilize_room_wall_candidates(
+    tracks: &mut Vec<StableRoomWallTrack>,
+    candidates: Vec<RoomWallCandidate>,
+) {
+    let mut candidate_pairs = Vec::<(f32, usize, usize)>::new();
+    for (track_index, track) in tracks.iter().enumerate() {
+        for (candidate_index, candidate) in candidates.iter().enumerate() {
+            if let Some(score) = room_wall_track_score(track, candidate) {
+                candidate_pairs.push((score, track_index, candidate_index));
+            }
+        }
+    }
+    candidate_pairs.sort_by(|left, right| right.0.total_cmp(&left.0));
+
+    let mut matched_tracks = vec![false; tracks.len()];
+    let mut matched_candidates = vec![false; candidates.len()];
+    let mut next_tracks =
+        Vec::<StableRoomWallTrack>::with_capacity(tracks.len() + candidates.len());
+
+    for (_, track_index, candidate_index) in candidate_pairs {
+        if matched_tracks[track_index] || matched_candidates[candidate_index] {
+            continue;
+        }
+        matched_tracks[track_index] = true;
+        matched_candidates[candidate_index] = true;
+        next_tracks.push(smooth_room_wall_track(
+            &tracks[track_index],
+            &candidates[candidate_index],
+        ));
+    }
+
+    for (track_index, track) in tracks.iter().enumerate() {
+        if matched_tracks[track_index] {
+            continue;
+        }
+        if track.missing_updates < DEPTH_ROOM_WALL_TRACK_MISSING_UPDATES_MAX {
+            let mut track = track.clone();
+            track.missing_updates = track.missing_updates.saturating_add(1);
+            next_tracks.push(track);
+        }
+    }
+
+    for (candidate_index, candidate) in candidates.into_iter().enumerate() {
+        if matched_candidates[candidate_index] {
+            continue;
+        }
+        if tracks.len() >= DEPTH_ROOM_WALL_MAX_TRACKS {
+            continue;
+        }
+        next_tracks.push(StableRoomWallTrack {
+            normal: candidate.normal,
+            plane_distance: candidate.plane_distance,
+            observed_along_min: candidate.observed_along_min,
+            observed_along_max: candidate.observed_along_max,
+            support_area: candidate.support_area.max(0.05),
+            seen_count: 1,
+            missing_updates: 0,
+        });
+    }
+
+    next_tracks.sort_by(|left, right| {
+        right
+            .seen_count
+            .cmp(&left.seen_count)
+            .then_with(|| left.missing_updates.cmp(&right.missing_updates))
+            .then_with(|| right.support_area.total_cmp(&left.support_area))
+    });
+    if next_tracks.len() > DEPTH_ROOM_WALL_MAX_TRACKS {
+        next_tracks.truncate(DEPTH_ROOM_WALL_MAX_TRACKS);
+    }
+
+    *tracks = next_tracks;
+}
+
+fn visible_room_wall_candidates(tracks: &[StableRoomWallTrack]) -> Vec<RoomWallCandidate> {
+    let mut visible = tracks
+        .iter()
+        .map(|track| RoomWallCandidate {
+            normal: track.normal,
+            plane_distance: track.plane_distance,
+            observed_along_min: track.observed_along_min,
+            observed_along_max: track.observed_along_max,
+            support_area: track.support_area,
+        })
+        .collect::<Vec<_>>();
+    visible.sort_by(|left, right| right.support_area.total_cmp(&left.support_area));
+    if visible.len() > DEPTH_ROOM_WALL_MAX_TRACKS {
+        visible.truncate(DEPTH_ROOM_WALL_MAX_TRACKS);
+    }
+    visible
+}
+
+fn room_wall_feature_from_candidate(
+    candidate: &RoomWallCandidate,
+    all_walls: &[RoomWallCandidate],
+    wall_index: usize,
+) -> Option<XrDepthAlignWallFeature> {
+    let normal = if candidate.normal.length() > 1.0e-5 {
+        candidate.normal.normalize()
+    } else {
+        return None;
+    };
+    let along_axis = vec3f(-normal.z, 0.0, normal.x);
+    let along_axis = if along_axis.length() > 1.0e-5 {
+        along_axis.normalize()
+    } else {
+        return None;
+    };
+    let mut along_min = candidate.observed_along_min;
+    let mut along_max = candidate.observed_along_max;
+    let mut intersection_min = f32::INFINITY;
+    let mut intersection_max = f32::NEG_INFINITY;
+    let mut intersection_count = 0usize;
+    for (other_index, other) in all_walls.iter().enumerate() {
+        if other_index == wall_index {
+            continue;
+        }
+        if other.normal.dot(normal).abs() > DEPTH_ROOM_WALL_ORTHOGONAL_DOT_MAX {
+            continue;
+        }
+        let coordinate = other.normal.dot(along_axis) * other.plane_distance;
+        if !coordinate.is_finite() {
+            continue;
+        }
+        intersection_min = intersection_min.min(coordinate);
+        intersection_max = intersection_max.max(coordinate);
+        intersection_count += 1;
+    }
+    if intersection_count >= 2 {
+        along_min = intersection_min;
+        along_max = intersection_max;
+    } else if intersection_count == 1 {
+        along_min = along_min.min(intersection_min);
+        along_max = along_max.max(intersection_max);
+    }
+    if !along_min.is_finite() || !along_max.is_finite() {
+        return None;
+    }
+    let half_extent_along = ((along_max - along_min) * 0.5).max(0.25);
+    let along_center = (along_min + along_max) * 0.5;
+    Some(XrDepthAlignWallFeature {
+        center: normal.scale(candidate.plane_distance)
+            + along_axis.scale(along_center)
+            + vec3f(0.0, DEPTH_ROOM_WALL_HEIGHT_METERS * 0.5, 0.0),
+        normal,
+        along_axis,
+        plane_distance: candidate.plane_distance,
+        half_extent_along,
+        min_y: 0.0,
+        max_y: DEPTH_ROOM_WALL_HEIGHT_METERS,
+        area: candidate.support_area.max(0.25),
+    })
+}
+
+fn visible_room_wall_features(tracks: &[StableRoomWallTrack]) -> Vec<XrDepthAlignWallFeature> {
+    let walls = visible_room_wall_candidates(tracks);
+    let mut features = Vec::<XrDepthAlignWallFeature>::new();
+    for (index, wall) in walls.iter().enumerate() {
+        if let Some(feature) = room_wall_feature_from_candidate(wall, &walls, index) {
+            features.push(feature);
+        }
+    }
+    features.sort_by(|left, right| right.area.total_cmp(&left.area));
+    if features.len() > DEPTH_ALIGN_MAX_WALL_FEATURES {
+        features.truncate(DEPTH_ALIGN_MAX_WALL_FEATURES);
+    }
+    features
+}
+
+fn process_incremental_tsdf_plane_scan(volume: &mut DepthMeshVolume, max_scan_jobs: usize) -> bool {
+    if volume.mesh_grid.is_empty() {
+        return volume.reset_plane_scan_state();
+    }
+    if volume.plane_scan_chunks.is_empty() && volume.pending_plane_scan_chunk_queue.is_empty() {
+        enqueue_all_plane_scan_chunks(volume);
+    }
+
+    let mut chunks_changed = false;
+    for _ in 0..max_scan_jobs {
+        let Some(chunk_key) = volume.pending_plane_scan_chunk_queue.pop_front() else {
+            break;
+        };
+        volume.pending_plane_scan_dirty_chunks.remove(&chunk_key);
+        let next_chunk = scan_tsdf_plane_chunk(volume, chunk_key);
+        match (volume.plane_scan_chunks.get(&chunk_key), next_chunk) {
+            (Some(current), Some(next)) if scanned_plane_chunk_matches(current, &next) => {}
+            (_, Some(next)) => {
+                volume.plane_scan_chunks.insert(chunk_key, next);
+                chunks_changed = true;
+            }
+            (Some(_), None) => {
+                volume.plane_scan_chunks.remove(&chunk_key);
+                chunks_changed = true;
+            }
+            (None, None) => {}
+        }
+    }
+
+    if chunks_changed {
+        rebuild_tsdf_plane_scan_patches(volume)
+    } else {
+        false
+    }
+}
+
+fn enqueue_all_plane_scan_chunks(volume: &mut DepthMeshVolume) {
+    let mesh_edge = volume.mesh_config.mesh_chunk_edge_voxels().max(1);
+    let grid_edge = volume.mesh_grid.chunk_edge.max(1);
+    let mut keys = HashSet::<ChunkKey>::new();
+    for key in volume.mesh_grid.chunks.keys() {
+        let min_voxel = VoxelCoord::new(key.x * grid_edge, key.y * grid_edge, key.z * grid_edge);
+        let max_voxel = VoxelCoord::new(
+            min_voxel.x + grid_edge - 1,
+            min_voxel.y + grid_edge - 1,
+            min_voxel.z + grid_edge - 1,
+        );
+        let min_chunk = VoxelCoord::new(
+            min_voxel.x.div_euclid(mesh_edge),
+            min_voxel.y.div_euclid(mesh_edge),
+            min_voxel.z.div_euclid(mesh_edge),
+        );
+        let max_chunk = VoxelCoord::new(
+            max_voxel.x.div_euclid(mesh_edge),
+            max_voxel.y.div_euclid(mesh_edge),
+            max_voxel.z.div_euclid(mesh_edge),
+        );
+        for z in min_chunk.z..=max_chunk.z {
+            for y in min_chunk.y..=max_chunk.y {
+                for x in min_chunk.x..=max_chunk.x {
+                    keys.insert(ChunkKey::new(x, y, z));
+                }
+            }
+        }
+    }
+    let mut keys = keys.into_iter().collect::<Vec<_>>();
+    keys.sort_by_key(|key| (key.x, key.y, key.z));
+    for key in keys {
+        if volume.pending_plane_scan_dirty_chunks.insert(key) {
+            volume.pending_plane_scan_chunk_queue.push_back(key);
+        }
+    }
+}
+
+fn rebuild_tsdf_plane_scan_patches(volume: &mut DepthMeshVolume) -> bool {
+    let mut plane_patches = volume
+        .plane_scan_chunks
+        .values()
+        .flat_map(|chunk| chunk.patches.iter().cloned())
+        .collect::<Vec<_>>();
+    plane_patches = merge_tsdf_plane_patches(plane_patches);
+    classify_plane_patch_kinds(&mut plane_patches);
+    plane_patches.retain(|patch| patch.kind == XrDepthPlaneKind::Wall);
+    plane_patches.sort_by(|a, b| {
+        b.area
+            .partial_cmp(&a.area)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    plane_patches.truncate(DEPTH_PLANE_MAX_PATCHES);
+    plane_patches = stabilize_wall_scan_patches(&mut volume.stable_wall_tracks, plane_patches);
+    stabilize_room_wall_candidates(
+        &mut volume.room_wall_tracks,
+        build_room_wall_candidates(&plane_patches),
+    );
+    let changed = plane_patches.len() != volume.plane_patches.len()
+        || plane_patches
+            .iter()
+            .zip(volume.plane_patches.iter())
+            .any(|(next, current)| !plane_patch_matches(next, current));
+    if !changed {
+        return false;
+    }
+
+    let next_generation = volume.plane_generation.saturating_add(1);
+    for patch in &mut plane_patches {
+        patch.generation = next_generation;
+    }
+    volume.plane_patches = plane_patches;
+    volume.plane_generation = next_generation;
+    volume.update_sequence = volume.update_sequence.saturating_add(1);
+    true
+}
+
+fn merge_tsdf_plane_patches(mut patches: Vec<XrDepthPlanePatch>) -> Vec<XrDepthPlanePatch> {
+    patches.sort_by(|a, b| {
+        b.area
+            .partial_cmp(&a.area)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut merged = Vec::<XrDepthPlanePatch>::new();
+    'outer: for patch in patches {
+        for existing in &mut merged {
+            if let Some(next) = try_merge_tsdf_plane_patches(existing, &patch) {
+                *existing = next;
+                continue 'outer;
+            }
+        }
+        merged.push(patch);
+    }
+    merged
+}
+
+fn try_merge_tsdf_plane_patches(
+    left: &XrDepthPlanePatch,
+    right: &XrDepthPlanePatch,
+) -> Option<XrDepthPlanePatch> {
+    let aligned_normal = align_direction(left.normal, right.normal);
+    if left.normal.dot(aligned_normal) < DEPTH_PLANE_SCAN_MERGE_NORMAL_DOT {
+        return None;
+    }
+
+    let left_distance = left.center.dot(left.normal);
+    let right_distance = right.center.dot(left.normal);
+    if (left_distance - right_distance).abs() > DEPTH_PLANE_SCAN_MERGE_DISTANCE_METERS {
+        return None;
+    }
+
+    let (left_min_u, left_max_u, left_min_v, left_max_v) =
+        plane_patch_projected_extents(left, left.tangent, left.bitangent);
+    let (right_min_u, right_max_u, right_min_v, right_max_v) =
+        project_patch_extents_to_basis(right, left.tangent, left.bitangent);
+    let gap_u = interval_gap(left_min_u, left_max_u, right_min_u, right_max_u);
+    let gap_v = interval_gap(left_min_v, left_max_v, right_min_v, right_max_v);
+    if gap_u > DEPTH_PLANE_SCAN_MERGE_GAP_METERS || gap_v > DEPTH_PLANE_SCAN_MERGE_GAP_METERS {
+        return None;
+    }
+    if gap_u > 0.0 && gap_v > 0.0 {
+        return None;
+    }
+
+    let min_u = left_min_u.min(right_min_u);
+    let max_u = left_max_u.max(right_max_u);
+    let min_v = left_min_v.min(right_min_v);
+    let max_v = left_max_v.max(right_max_v);
+    let width = max_u - min_u;
+    let height = max_v - min_v;
+    if width < DEPTH_PLANE_SCAN_VERTICAL_MIN_DIM_METERS
+        || height < DEPTH_PLANE_SCAN_VERTICAL_MIN_DIM_METERS
+        || width * height < DEPTH_PLANE_SCAN_VERTICAL_MIN_AREA_METERS2
+    {
+        return None;
+    }
+
+    let plane_distance = (left_distance * left.area.max(0.001)
+        + right_distance * right.area.max(0.001))
+        / (left.area.max(0.001) + right.area.max(0.001));
+    let center_u = (min_u + max_u) * 0.5;
+    let center_v = (min_v + max_v) * 0.5;
+    Some(XrDepthPlanePatch {
+        generation: 0,
+        kind: classify_planar_patch_kind_from_normal(left.normal),
+        center: left.normal.scale(plane_distance)
+            + left.tangent.scale(center_u)
+            + left.bitangent.scale(center_v),
+        normal: left.normal,
+        tangent: left.tangent,
+        bitangent: left.bitangent,
+        half_extent_tangent: width * 0.5,
+        half_extent_bitangent: height * 0.5,
+        area: width * height,
+        support_triangles: left.support_triangles + right.support_triangles,
+    })
+}
+
+fn plane_patch_projected_extents(
+    patch: &XrDepthPlanePatch,
+    tangent: Vec3f,
+    bitangent: Vec3f,
+) -> (f32, f32, f32, f32) {
+    let corners = plane_patch_corners(patch);
+    let mut min_u = f32::INFINITY;
+    let mut max_u = f32::NEG_INFINITY;
+    let mut min_v = f32::INFINITY;
+    let mut max_v = f32::NEG_INFINITY;
+    for corner in corners {
+        let u = corner.dot(tangent);
+        let v = corner.dot(bitangent);
+        min_u = min_u.min(u);
+        max_u = max_u.max(u);
+        min_v = min_v.min(v);
+        max_v = max_v.max(v);
+    }
+    (min_u, max_u, min_v, max_v)
+}
+
+fn project_patch_extents_to_basis(
+    patch: &XrDepthPlanePatch,
+    tangent: Vec3f,
+    bitangent: Vec3f,
+) -> (f32, f32, f32, f32) {
+    plane_patch_projected_extents(patch, tangent, bitangent)
+}
+
+fn interval_gap(left_min: f32, left_max: f32, right_min: f32, right_max: f32) -> f32 {
+    if left_max < right_min {
+        right_min - left_max
+    } else if right_max < left_min {
+        left_min - right_max
+    } else {
+        0.0
+    }
+}
+
+fn scan_tsdf_plane_chunk(
+    volume: &DepthMeshVolume,
+    chunk_key: ChunkKey,
+) -> Option<ScannedPlaneChunk> {
+    let near_surface_band = (volume.voxel_size_meters * DEPTH_PLANE_SCAN_NEAR_SURFACE_BAND_SCALE)
+        .max(DEPTH_PLANE_SCAN_NEAR_SURFACE_BAND_MIN);
+    let tsd_distance_meters = depth_tsd_distance_meters(volume.voxel_size_meters);
+    let edge = volume.mesh_config.mesh_chunk_edge_voxels().max(1);
+    let origin = VoxelCoord::new(chunk_key.x * edge, chunk_key.y * edge, chunk_key.z * edge);
+    let mut bins = HashMap::<TsdfPlaneScanBinKey, TsdfPlaneScanBin>::new();
+    let mut near_surface_voxel_count = 0u32;
+    let floor_candidate_count = 0u32;
+    let mut wall_candidate_count = 0u32;
+
+    for local_z in 0..edge {
+        for local_y in 0..edge {
+            for local_x in 0..edge {
+                let coord = origin + VoxelCoord::new(local_x, local_y, local_z);
+                if volume.mesh_grid.confidence(coord) < DEPTH_PLANE_SCAN_MIN_CONFIDENCE {
+                    continue;
+                }
+                let Some(distance) = volume.mesh_grid.normalized_distance(coord) else {
+                    continue;
+                };
+                let signed_distance = distance * tsd_distance_meters;
+                if signed_distance.abs() > near_surface_band {
+                    continue;
+                }
+                let Some(surface_normal) = query_depth_grid_normal_at_coord(volume, coord) else {
+                    continue;
+                };
+                near_surface_voxel_count = near_surface_voxel_count.saturating_add(1);
+                let point = volume.mesh_grid.voxel_center_world(coord)
+                    - surface_normal.scale(signed_distance);
+                let Some((key, plane_normal, tangent, bitangent)) =
+                    tsdf_plane_scan_key(point, surface_normal)
+                else {
+                    continue;
+                };
+                wall_candidate_count = wall_candidate_count.saturating_add(1);
+                let bin = bins.entry(key).or_default();
+                let aligned_normal = align_direction(plane_normal, surface_normal);
+                let weight = volume.mesh_grid.confidence(coord) as f32;
+                bin.normal_sum += aligned_normal.scale(weight);
+                bin.point_sum += point.scale(weight);
+                bin.point_weight_sum += weight;
+                bin.support_sample_count += 1;
+                let support_u = point.dot(tangent);
+                let support_v = point.dot(bitangent);
+                let cell = stamp_plane_support_sample(&mut bin.support_mask, support_u, support_v);
+                bin.support_samples
+                    .push(TsdfPlaneSupportSample { point, cell });
+            }
+        }
+    }
+
+    if near_surface_voxel_count == 0 {
+        return None;
+    }
+
+    let mut patches = Vec::new();
+    for (key, bin) in bins {
+        patches.extend(emit_tsdf_plane_scan_bin_patches(key, &bin));
+    }
+    patches.sort_by(|a, b| {
+        b.area
+            .partial_cmp(&a.area)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Some(ScannedPlaneChunk {
+        patches,
+        near_surface_voxel_count,
+        floor_candidate_count,
+        wall_candidate_count,
+    })
+}
+
+fn tsdf_plane_scan_key(
+    point: Vec3f,
+    normal: Vec3f,
+) -> Option<(TsdfPlaneScanBinKey, Vec3f, Vec3f, Vec3f)> {
+    let canonical_normal = canonicalize_vertical_plane_normal(normal)?;
+    if canonical_normal.y.abs() > DEPTH_PLANE_VERTICAL_NORMAL_Y_MAX {
+        return None;
+    }
+    let tangent = vec3f(0.0, 1.0, 0.0);
+    let bitangent = Vec3f::cross(canonical_normal, tangent).normalize();
+    if bitangent.length() <= 1.0e-5 {
+        return None;
+    }
+    let key = TsdfPlaneScanBinKey {
+        group: TsdfPlaneScanGroup::Vertical,
+        plane_bin: quantize_f32(
+            point.dot(canonical_normal),
+            DEPTH_PLANE_SCAN_VERTICAL_DISTANCE_BIN_METERS,
+        ),
+        normal_x_bin: quantize_f32(canonical_normal.x, DEPTH_PLANE_SCAN_VERTICAL_NORMAL_QUANTUM),
+        normal_z_bin: quantize_f32(canonical_normal.z, DEPTH_PLANE_SCAN_VERTICAL_NORMAL_QUANTUM),
+    };
+    Some((key, canonical_normal, tangent, bitangent))
+}
+
+fn canonicalize_vertical_plane_normal(normal: Vec3f) -> Option<Vec3f> {
+    let mut canonical = vec3f(normal.x, 0.0, normal.z);
+    if canonical.length() <= 1.0e-5 {
+        return None;
+    }
+    canonical = canonical.normalize();
+    if canonical.x < 0.0 || (canonical.x.abs() <= 1.0e-5 && canonical.z < 0.0) {
+        canonical = canonical.scale(-1.0);
+    }
+    Some(canonical)
+}
+
+fn stamp_plane_support_sample(mask: &mut PlaneSupportMask, u: f32, v: f32) -> PlaneSupportCellKey {
+    let center = quantize_plane_support_cell(u, v);
+    for du in -1..=1 {
+        for dv in -1..=1 {
+            let add = if du == 0 && dv == 0 {
+                DEPTH_PLANE_SUPPORT_MAX_WEIGHT
+            } else if du == 0 || dv == 0 {
+                DEPTH_PLANE_SUPPORT_OCCUPIED_WEIGHT
+            } else {
+                1
+            };
+            let key = PlaneSupportCellKey {
+                u: center.u + du,
+                v: center.v + dv,
+            };
+            let weight = mask.cells.entry(key).or_insert(0);
+            *weight = weight
+                .saturating_add(add)
+                .min(DEPTH_PLANE_SUPPORT_MAX_WEIGHT);
+        }
+    }
+    center
+}
+
+fn emit_tsdf_plane_scan_bin_patches(
+    key: TsdfPlaneScanBinKey,
+    bin: &TsdfPlaneScanBin,
+) -> Vec<XrDepthPlanePatch> {
+    let Some((seed_normal, _tangent, _bitangent, _plane_distance)) =
+        resolve_tsdf_plane_scan_bin_frame(key, bin)
+    else {
+        return Vec::new();
+    };
+    let mut patches = Vec::new();
+    for mut component in decompose_support_mask_components(&bin.support_mask) {
+        let mut emitted_rects = 0usize;
+        loop {
+            if emitted_rects >= DEPTH_PLANE_SCAN_MAX_RECTS_PER_GROUP {
+                break;
+            }
+            let Some((min_u, max_u, min_v, max_v)) = largest_supported_rectangle(&component) else {
+                break;
+            };
+            let width = (max_u - min_u + 1) as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
+            let height = (max_v - min_v + 1) as f32 * DEPTH_PLANE_SUPPORT_CELL_METERS;
+            if width * height < DEPTH_PLANE_SCAN_VERTICAL_MIN_AREA_METERS2
+                || width < DEPTH_PLANE_SCAN_VERTICAL_MIN_DIM_METERS
+                || height < DEPTH_PLANE_SCAN_VERTICAL_MIN_DIM_METERS
+            {
+                break;
+            }
+            if let Some(patch) = fit_vertical_wall_patch_from_support_samples(
+                &bin.support_samples,
+                min_u,
+                max_u,
+                min_v,
+                max_v,
+                seed_normal,
+            ) {
+                patches.push(patch);
+            }
+            emitted_rects += 1;
+            remove_rect_from_support_component(&mut component, min_u, max_u, min_v, max_v);
+            if component.cells.is_empty() {
+                break;
+            }
+        }
+    }
+    patches
+}
+
+fn resolve_tsdf_plane_scan_bin_frame(
+    key: TsdfPlaneScanBinKey,
+    bin: &TsdfPlaneScanBin,
+) -> Option<(Vec3f, Vec3f, Vec3f, f32)> {
+    let reference_normal = vec3f(
+        key.normal_x_bin as f32 * DEPTH_PLANE_SCAN_VERTICAL_NORMAL_QUANTUM,
+        0.0,
+        key.normal_z_bin as f32 * DEPTH_PLANE_SCAN_VERTICAL_NORMAL_QUANTUM,
+    );
+    let reference_normal = if reference_normal.length() > 1.0e-5 {
+        reference_normal.normalize()
+    } else {
+        vec3f(1.0, 0.0, 0.0)
+    };
+    let normal = if bin.normal_sum.length() > 1.0e-5 {
+        align_direction(reference_normal, bin.normal_sum.normalize())
+    } else {
+        reference_normal
+    };
+    let tangent = vec3f(0.0, 1.0, 0.0);
+    let bitangent = Vec3f::cross(normal, tangent).normalize();
+    if bitangent.length() <= 1.0e-5 {
+        return None;
+    }
+    let plane_distance = if bin.point_weight_sum > 0.0 {
+        bin.point_sum
+            .scale(bin.point_weight_sum.recip())
+            .dot(normal)
+    } else {
+        key.plane_bin as f32 * DEPTH_PLANE_SCAN_VERTICAL_DISTANCE_BIN_METERS
+    };
+    Some((normal, tangent, bitangent, plane_distance))
+}
+
+fn fit_vertical_wall_patch_from_support_samples(
+    support_samples: &[TsdfPlaneSupportSample],
+    min_u_cell: i32,
+    max_u_cell: i32,
+    min_v_cell: i32,
+    max_v_cell: i32,
+    seed_normal: Vec3f,
+) -> Option<XrDepthPlanePatch> {
+    let mut points = Vec::<Vec3f>::new();
+    for sample in support_samples {
+        if sample.cell.u < min_u_cell
+            || sample.cell.u > max_u_cell
+            || sample.cell.v < min_v_cell
+            || sample.cell.v > max_v_cell
+        {
+            continue;
+        }
+        points.push(sample.point);
+    }
+    if points.len() < 4 {
+        return None;
+    }
+
+    let tangent = vec3f(0.0, 1.0, 0.0);
+    let mut centroid = Vec3f::default();
+    for point in &points {
+        centroid += *point;
+    }
+    centroid = centroid.scale((points.len() as f32).recip());
+
+    let mut cov_xx = 0.0;
+    let mut cov_xz = 0.0;
+    let mut cov_zz = 0.0;
+    for point in &points {
+        let dx = point.x - centroid.x;
+        let dz = point.z - centroid.z;
+        cov_xx += dx * dx;
+        cov_xz += dx * dz;
+        cov_zz += dz * dz;
+    }
+
+    let angle = 0.5 * (2.0 * cov_xz).atan2(cov_xx - cov_zz);
+    let mut bitangent = vec3f(angle.cos(), 0.0, angle.sin());
+    if bitangent.length() <= 1.0e-5 {
+        bitangent = Vec3f::cross(seed_normal, tangent).normalize();
+    } else {
+        bitangent = bitangent.normalize();
+    }
+    if bitangent.length() <= 1.0e-5 {
+        return None;
+    }
+
+    let mut normal = Vec3f::cross(tangent, bitangent).normalize();
+    if normal.length() <= 1.0e-5 {
+        return None;
+    }
+    normal = align_direction(seed_normal, normal);
+    bitangent = Vec3f::cross(normal, tangent).normalize();
+    if bitangent.length() <= 1.0e-5 {
+        return None;
+    }
+
+    let plane_distance =
+        points.iter().map(|point| normal.dot(*point)).sum::<f32>() / points.len() as f32;
+    let mean_plane_residual = points
+        .iter()
+        .map(|point| (normal.dot(*point) - plane_distance).abs())
+        .sum::<f32>()
+        / points.len() as f32;
+    if mean_plane_residual > DEPTH_PLANE_SCAN_VERTICAL_DISTANCE_BIN_METERS {
+        return None;
+    }
+
+    let extent_padding = DEPTH_PLANE_SUPPORT_CELL_METERS * 0.5;
+    let mut min_tangent = f32::INFINITY;
+    let mut max_tangent = f32::NEG_INFINITY;
+    let mut min_bitangent = f32::INFINITY;
+    let mut max_bitangent = f32::NEG_INFINITY;
+    for point in &points {
+        let tangent_coord = point.dot(tangent);
+        let bitangent_coord = point.dot(bitangent);
+        min_tangent = min_tangent.min(tangent_coord);
+        max_tangent = max_tangent.max(tangent_coord);
+        min_bitangent = min_bitangent.min(bitangent_coord);
+        max_bitangent = max_bitangent.max(bitangent_coord);
+    }
+    if !min_tangent.is_finite()
+        || !max_tangent.is_finite()
+        || !min_bitangent.is_finite()
+        || !max_bitangent.is_finite()
+    {
+        return None;
+    }
+
+    min_tangent -= extent_padding;
+    max_tangent += extent_padding;
+    min_bitangent -= extent_padding;
+    max_bitangent += extent_padding;
+    let height = max_tangent - min_tangent;
+    let width = max_bitangent - min_bitangent;
+    if width < DEPTH_PLANE_SCAN_VERTICAL_MIN_DIM_METERS
+        || height < DEPTH_PLANE_SCAN_VERTICAL_MIN_DIM_METERS
+        || width * height < DEPTH_PLANE_SCAN_VERTICAL_MIN_AREA_METERS2
+    {
+        return None;
+    }
+
+    let center_tangent = (min_tangent + max_tangent) * 0.5;
+    let center_bitangent = (min_bitangent + max_bitangent) * 0.5;
+    Some(XrDepthPlanePatch {
+        generation: 0,
+        kind: XrDepthPlaneKind::Wall,
+        center: normal.scale(plane_distance)
+            + tangent.scale(center_tangent)
+            + bitangent.scale(center_bitangent),
+        normal,
+        tangent,
+        bitangent,
+        half_extent_tangent: height * 0.5,
+        half_extent_bitangent: width * 0.5,
+        area: width * height,
+        support_triangles: points.len(),
+    })
 }
 
 fn simplify_plane_regions(
@@ -2915,19 +5002,22 @@ fn build_query_surface_halfspace_from_patch(
     };
     let debug_half_extent = query_support_plane_radius(query_radius);
     XrDepthMeshQuerySupportPlane {
-        point: closest_point_on_plane_patch(surface.point, &XrDepthPlanePatch {
-            generation: 0,
-            kind: XrDepthPlaneKind::Unknown,
-            center: (surface.patch[0] + surface.patch[1] + surface.patch[2] + surface.patch[3])
-                .scale(0.25),
-            normal: surface.normal,
-            tangent,
-            bitangent,
-            half_extent_tangent: (surface.patch[1] - surface.patch[0]).length() * 0.5,
-            half_extent_bitangent: (surface.patch[3] - surface.patch[0]).length() * 0.5,
-            area: 0.0,
-            support_triangles: 0,
-        }),
+        point: closest_point_on_plane_patch(
+            surface.point,
+            &XrDepthPlanePatch {
+                generation: 0,
+                kind: XrDepthPlaneKind::Unknown,
+                center: (surface.patch[0] + surface.patch[1] + surface.patch[2] + surface.patch[3])
+                    .scale(0.25),
+                normal: surface.normal,
+                tangent,
+                bitangent,
+                half_extent_tangent: (surface.patch[1] - surface.patch[0]).length() * 0.5,
+                half_extent_bitangent: (surface.patch[3] - surface.patch[0]).length() * 0.5,
+                area: 0.0,
+                support_triangles: 0,
+            },
+        ),
         normal: surface.normal,
         tangent,
         bitangent,
@@ -2952,25 +5042,30 @@ fn build_query_surface_halfspace_from_triangles(
     let mut sum_zy = 0.0;
     let mut sum_y = 0.0;
 
-    visit_support_plane_triangles(volume, surface, query_radius, |triangle, normal, area, _centroid| {
-        weighted_normal = weighted_normal + normal.scale(area);
-        let vertex_weight = area * (1.0 / 3.0);
-        for vertex in triangle {
-            let local = vertex - surface.point;
-            let x = local.x;
-            let z = local.z;
-            let y = local.y;
-            sum_w += vertex_weight;
-            sum_xx += vertex_weight * x * x;
-            sum_xz += vertex_weight * x * z;
-            sum_x += vertex_weight * x;
-            sum_zz += vertex_weight * z * z;
-            sum_z += vertex_weight * z;
-            sum_xy += vertex_weight * x * y;
-            sum_zy += vertex_weight * z * y;
-            sum_y += vertex_weight * y;
-        }
-    });
+    visit_support_plane_triangles(
+        volume,
+        surface,
+        query_radius,
+        |triangle, normal, area, _centroid| {
+            weighted_normal = weighted_normal + normal.scale(area);
+            let vertex_weight = area * (1.0 / 3.0);
+            for vertex in triangle {
+                let local = vertex - surface.point;
+                let x = local.x;
+                let z = local.z;
+                let y = local.y;
+                sum_w += vertex_weight;
+                sum_xx += vertex_weight * x * x;
+                sum_xz += vertex_weight * x * z;
+                sum_x += vertex_weight * x;
+                sum_zz += vertex_weight * z * z;
+                sum_z += vertex_weight * z;
+                sum_xy += vertex_weight * x * y;
+                sum_zy += vertex_weight * z * y;
+                sum_y += vertex_weight * y;
+            }
+        },
+    );
 
     let avg_normal = if weighted_normal.length() > 1.0e-6 {
         weighted_normal.normalize()
@@ -3007,18 +5102,23 @@ fn build_query_surface_halfspace_from_triangles(
     let mut min_v = f32::INFINITY;
     let mut max_v = -f32::INFINITY;
 
-    visit_support_plane_triangles(volume, surface, query_radius, |triangle, _normal, _area, _centroid| {
-        for vertex in triangle {
-            max_plane_offset = max_plane_offset.max(normal.dot(vertex));
-            let offset = vertex - surface.point;
-            let u = offset.dot(tangent);
-            let v = offset.dot(bitangent);
-            min_u = min_u.min(u);
-            max_u = max_u.max(u);
-            min_v = min_v.min(v);
-            max_v = max_v.max(v);
-        }
-    });
+    visit_support_plane_triangles(
+        volume,
+        surface,
+        query_radius,
+        |triangle, _normal, _area, _centroid| {
+            for vertex in triangle {
+                max_plane_offset = max_plane_offset.max(normal.dot(vertex));
+                let offset = vertex - surface.point;
+                let u = offset.dot(tangent);
+                let v = offset.dot(bitangent);
+                min_u = min_u.min(u);
+                max_u = max_u.max(u);
+                min_v = min_v.min(v);
+                max_v = max_v.max(v);
+            }
+        },
+    );
     let point = surface.point - normal.scale(normal.dot(surface.point) - max_plane_offset);
 
     let half_extent_tangent = if min_u.is_finite() && max_u.is_finite() {
@@ -3195,7 +5295,9 @@ fn finite_difference_axis(
 
 fn query_depth_grid_distance_gradient(volume: &DepthMeshVolume, point: Vec3f) -> Option<Vec3f> {
     let center = query_depth_grid_trilinear_distance(volume, point)?;
-    let step = volume.voxel_size_meters.max(DEPTH_QUERY_TSDF_IMPACT_RAY_STEP_MIN);
+    let step = volume
+        .voxel_size_meters
+        .max(DEPTH_QUERY_TSDF_IMPACT_RAY_STEP_MIN);
     let dx = finite_difference_axis(
         center,
         query_depth_grid_trilinear_distance(volume, point + vec3f(step, 0.0, 0.0)),
@@ -3273,7 +5375,8 @@ fn evaluate_depth_grid_impact_query(
             for _ in 0..5 {
                 let mid = (lo + hi) * 0.5;
                 let mid_position = query.center + motion_dir.scale(mid);
-                if let Some(mid_distance) = query_depth_grid_trilinear_distance(volume, mid_position)
+                if let Some(mid_distance) =
+                    query_depth_grid_trilinear_distance(volume, mid_position)
                 {
                     if mid_distance <= hit_threshold {
                         hi = mid;
@@ -3585,14 +5688,12 @@ fn evaluate_depth_grid_support_query(
         .max(volume.voxel_size_meters * 0.35)
         .min(debug_half_extent_max);
     let half_extent_tangent = if min_u.is_finite() && max_u.is_finite() {
-        ((max_u - min_u) * 0.5 + extent_padding)
-            .clamp(debug_half_extent_min, debug_half_extent_max)
+        ((max_u - min_u) * 0.5 + extent_padding).clamp(debug_half_extent_min, debug_half_extent_max)
     } else {
         debug_half_extent_min
     };
     let half_extent_bitangent = if min_v.is_finite() && max_v.is_finite() {
-        ((max_v - min_v) * 0.5 + extent_padding)
-            .clamp(debug_half_extent_min, debug_half_extent_max)
+        ((max_v - min_v) * 0.5 + extent_padding).clamp(debug_half_extent_min, debug_half_extent_max)
     } else {
         debug_half_extent_min
     };
@@ -3644,7 +5745,8 @@ fn evaluate_geometry_query(
     if !volume.mesh_grid.is_empty() {
         let impact_surface = evaluate_depth_grid_impact_query(volume, query);
         let prefer_impact = impact_surface.as_ref().is_some_and(|impact_surface| {
-            let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = &impact_surface.collider.geometry;
+            let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) =
+                &impact_surface.collider.geometry;
             query.velocity.y >= DEPTH_QUERY_TSDF_IMPACT_MIN_UPWARD_SPEED
                 && plane.normal.y <= -DEPTH_QUERY_TSDF_IMPACT_CEILING_NORMAL_Y_MIN
         });
@@ -4180,8 +6282,8 @@ fn query_trajectory_time_seconds(query: XrDepthMeshQuery) -> Option<f32> {
         query.predicted_center.z - query.center.z,
     );
     let horizontal_velocity = vec2f(query.velocity.x, query.velocity.z);
-    let horizontal_speed_sq =
-        horizontal_velocity.x * horizontal_velocity.x + horizontal_velocity.y * horizontal_velocity.y;
+    let horizontal_speed_sq = horizontal_velocity.x * horizontal_velocity.x
+        + horizontal_velocity.y * horizontal_velocity.y;
     if horizontal_speed_sq <= 1.0e-6 {
         return None;
     }
@@ -4259,7 +6361,11 @@ fn point_polyline_distance_sq(
 ) -> f32 {
     let mut best = f32::INFINITY;
     for window in samples.windows(2) {
-        best = best.min(point_segment_distance_sq(point, window[0].point, window[1].point));
+        best = best.min(point_segment_distance_sq(
+            point,
+            window[0].point,
+            window[1].point,
+        ));
     }
     best
 }
@@ -5010,8 +7116,8 @@ mod tests {
         let mut bounds_min = triangles[0][0];
         let mut bounds_max = triangles[0][0];
         for triangle in triangles {
-            let normal = Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
-                .normalize();
+            let normal =
+                Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]).normalize();
             let base = vertices.len() as u32;
             vertices.extend_from_slice(triangle);
             normals.extend_from_slice(&[normal; 3]);
@@ -5052,8 +7158,7 @@ mod tests {
             for x in 0..grid {
                 let px = -half + x as f32 * step;
                 let pz = -half + z as f32 * step;
-                let radial =
-                    ((px / half).powi(2) + (pz / half).powi(2)).clamp(0.0, 1.0);
+                let radial = ((px / half).powi(2) + (pz / half).powi(2)).clamp(0.0, 1.0);
                 let py = bulge * (1.0 - radial);
                 points[z * grid + x] = vec3f(px, py, pz);
             }
@@ -5118,7 +7223,8 @@ mod tests {
                 for x in min_coord.x..=max_coord.x {
                     let coord = VoxelCoord::new(x, y, z);
                     let world = volume.mesh_grid.voxel_center_world(coord);
-                    let normalized = (signed_distance(world) / tsd_distance_meters).clamp(-1.0, 1.0);
+                    let normalized =
+                        (signed_distance(world) / tsd_distance_meters).clamp(-1.0, 1.0);
                     volume.mesh_grid.overwrite_normalized_distance(
                         coord,
                         normalized,
@@ -5130,9 +7236,82 @@ mod tests {
         volume.update_bounds();
     }
 
+    fn room_signed_distance(
+        point: Vec3f,
+        half_width_x: f32,
+        half_width_z: f32,
+        floor_y: f32,
+        ceiling_y: f32,
+    ) -> f32 {
+        (point.y - floor_y)
+            .min(ceiling_y - point.y)
+            .min(point.x + half_width_x)
+            .min(half_width_x - point.x)
+            .min(point.z + half_width_z)
+            .min(half_width_z - point.z)
+    }
+
+    fn scan_full_tsdf_plane_set(volume: &mut DepthMeshVolume) {
+        enqueue_all_plane_scan_chunks(volume);
+        let mut guard = 0usize;
+        while !volume.pending_plane_scan_chunk_queue.is_empty() {
+            process_incremental_tsdf_plane_scan(volume, 32);
+            guard += 1;
+            assert!(
+                guard <= 1024,
+                "plane scan did not drain pending queue, pending={}",
+                volume.pending_plane_scan_chunk_queue.len()
+            );
+        }
+    }
+
+    fn describe_plane_patches(patches: &[XrDepthPlanePatch]) -> String {
+        patches
+            .iter()
+            .map(|patch| {
+                format!(
+                    "{:?} center=({:.2},{:.2},{:.2}) normal=({:.2},{:.2},{:.2}) ext=({:.2},{:.2}) area={:.2}",
+                    patch.kind,
+                    patch.center.x,
+                    patch.center.y,
+                    patch.center.z,
+                    patch.normal.x,
+                    patch.normal.y,
+                    patch.normal.z,
+                    patch.half_extent_tangent * 2.0,
+                    patch.half_extent_bitangent * 2.0,
+                    patch.area,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    fn make_wall_plane_patch(
+        center: Vec3f,
+        normal: Vec3f,
+        half_height: f32,
+        half_width: f32,
+    ) -> XrDepthPlanePatch {
+        let normal = vec3f(normal.x, 0.0, normal.z).normalize();
+        let tangent = vec3f(0.0, 1.0, 0.0);
+        let bitangent = Vec3f::cross(normal, tangent).normalize();
+        XrDepthPlanePatch {
+            generation: 1,
+            kind: XrDepthPlaneKind::Wall,
+            center,
+            normal,
+            tangent,
+            bitangent,
+            half_extent_tangent: half_height,
+            half_extent_bitangent: half_width,
+            area: (half_height * 2.0) * (half_width * 2.0),
+            support_triangles: 8,
+        }
+    }
+
     fn bulged_plane_height(world_x: f32, world_z: f32, radius: f32, bulge: f32) -> f32 {
-        let radial =
-            ((world_x / radius).powi(2) + (world_z / radius).powi(2)).clamp(0.0, 1.0);
+        let radial = ((world_x / radius).powi(2) + (world_z / radius).powi(2)).clamp(0.0, 1.0);
         bulge * (1.0 - radial)
     }
 
@@ -5644,9 +7823,13 @@ mod tests {
     fn geometry_query_stabilizes_bulged_support_plane() {
         let mut volume = DepthMeshVolume::new(1, 0.1);
         volume.mesh_generation = 15;
-        volume
-            .mesh_chunks
-            .push(make_bulged_plane_chunk_with_key(ChunkKey::new(0, 0, 0), 5, 0.40, 0.012, 3));
+        volume.mesh_chunks.push(make_bulged_plane_chunk_with_key(
+            ChunkKey::new(0, 0, 0),
+            5,
+            0.40,
+            0.012,
+            3,
+        ));
 
         let query = XrDepthMeshQuery {
             key: 16,
@@ -5684,8 +7867,7 @@ mod tests {
                     query.radius,
                     |triangle, _normal, _area, _centroid| {
                         for vertex in triangle {
-                            max_outside =
-                                max_outside.max(plane.normal.dot(vertex - plane.point));
+                            max_outside = max_outside.max(plane.normal.dot(vertex - plane.point));
                         }
                     },
                 );
@@ -5744,6 +7926,278 @@ mod tests {
                 panic!("expected TSDF support hit");
             }
         }
+    }
+
+    #[test]
+    fn tsdf_alignment_descriptor_extracts_wall_samples_without_meshing() {
+        let mut volume = DepthMeshVolume::new(1, 0.05);
+        volume.generation = 27;
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-18, -6, -18),
+            VoxelCoord::new(18, 28, 18),
+            |world| world.y.min(0.55 - world.x),
+        );
+        scan_full_tsdf_plane_set(&mut volume);
+
+        let (descriptor, debug) = build_tsdf_alignment_descriptor(&volume);
+        let descriptor = descriptor.unwrap_or_else(|| {
+            panic!(
+                "expected TSDF-native alignment descriptor, debug={debug:?}, chunks={}",
+                volume.mesh_grid.chunks.len()
+            )
+        });
+
+        assert!(
+            volume.mesh_chunks.is_empty(),
+            "TSDF descriptor test should not depend on render-mesh chunks"
+        );
+        assert!(
+            !volume.plane_patches.is_empty(),
+            "expected plane scan to populate plane patches"
+        );
+        assert!(
+            descriptor
+                .samples
+                .iter()
+                .any(|sample| sample.kind == XrDepthAlignSampleKind::Wall),
+            "expected wall samples in TSDF descriptor"
+        );
+        assert!(
+            debug.wall_sample_count >= DEPTH_ALIGN_MIN_WALL_SAMPLES as u32,
+            "expected enough wall samples, got {}",
+            debug.wall_sample_count
+        );
+        assert!(
+            descriptor.floor_y.abs() <= 0.001,
+            "expected wall-only descriptor floor_y to stay at 0, got {}",
+            descriptor.floor_y
+        );
+        assert!(
+            descriptor
+                .wall_normal_histogram
+                .iter()
+                .copied()
+                .sum::<f32>()
+                > 0.0,
+            "expected non-empty wall histogram from TSDF descriptor"
+        );
+    }
+
+    #[test]
+    fn tsdf_plane_scan_detects_box_room_walls() {
+        let mut volume = DepthMeshVolume::new(1, 0.05);
+        volume.generation = 31;
+        let room_half_x = 1.40;
+        let room_half_z = 1.10;
+        let floor_y = 0.0;
+        let ceiling_y = 2.40;
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-34, -8, -30),
+            VoxelCoord::new(34, 56, 30),
+            |world| room_signed_distance(world, room_half_x, room_half_z, floor_y, ceiling_y),
+        );
+
+        scan_full_tsdf_plane_set(&mut volume);
+        let patches = &volume.plane_patches;
+        assert!(
+            !patches.is_empty(),
+            "expected room plane scan to emit patches"
+        );
+
+        let wall_patches = patches
+            .iter()
+            .filter(|patch| patch.kind == XrDepthPlaneKind::Wall)
+            .collect::<Vec<_>>();
+        assert!(
+            wall_patches.len() >= 3,
+            "expected several wall patches, got {} from {}",
+            wall_patches.len(),
+            describe_plane_patches(patches)
+        );
+        assert!(
+            wall_patches.len() == patches.len(),
+            "expected wall-only plane scan output, got {}",
+            describe_plane_patches(patches)
+        );
+        assert!(
+            wall_patches
+                .iter()
+                .any(|patch| (patch.center.x.abs() - room_half_x).abs() <= 0.14),
+            "expected wall near x bounds, got {}",
+            describe_plane_patches(patches)
+        );
+        assert!(
+            wall_patches
+                .iter()
+                .any(|patch| (patch.center.z.abs() - room_half_z).abs() <= 0.14),
+            "expected wall near z bounds, got {}",
+            describe_plane_patches(patches)
+        );
+        assert!(
+            patches.iter().all(|patch| {
+                patch.center.x.abs() <= room_half_x + 0.25
+                    && patch.center.z.abs() <= room_half_z + 0.25
+                    && patch.center.y >= floor_y - 0.25
+                    && patch.center.y <= ceiling_y + 0.25
+            }),
+            "expected all room patches inside expanded room bounds, got {}",
+            describe_plane_patches(patches)
+        );
+    }
+
+    #[test]
+    fn wall_track_stability_retains_wall_through_brief_miss() {
+        let mut tracks = Vec::new();
+        let wall =
+            make_wall_plane_patch(vec3f(1.20, 1.10, -0.35), vec3f(1.0, 0.0, 0.0), 0.55, 0.45);
+
+        let first = stabilize_wall_scan_patches(&mut tracks, vec![wall.clone()]);
+        assert_eq!(first.len(), 1, "new wall should appear immediately");
+
+        let second = stabilize_wall_scan_patches(&mut tracks, vec![wall.clone()]);
+        assert_eq!(second.len(), 1, "wall should remain after confirmation");
+
+        let missing = stabilize_wall_scan_patches(&mut tracks, Vec::new());
+        assert_eq!(
+            missing.len(),
+            1,
+            "stable wall should persist across a brief missing update"
+        );
+        assert!(
+            (missing[0].center - wall.center).length() < 0.02,
+            "missing update should not move the stable wall too far: {:?}",
+            missing[0]
+        );
+    }
+
+    #[test]
+    fn wall_track_stability_damps_plane_distance_jitter() {
+        let mut tracks = Vec::new();
+        let base =
+            make_wall_plane_patch(vec3f(1.00, 1.00, -0.20), vec3f(1.0, 0.0, 0.0), 0.60, 0.40);
+        let jittered =
+            make_wall_plane_patch(vec3f(1.10, 1.02, -0.12), vec3f(1.0, 0.0, 0.0), 0.58, 0.44);
+
+        let _ = stabilize_wall_scan_patches(&mut tracks, vec![base.clone()]);
+        let stabilized = stabilize_wall_scan_patches(&mut tracks, vec![jittered.clone()]);
+        assert_eq!(stabilized.len(), 1);
+
+        let stable_distance = stabilized[0].center.dot(stabilized[0].normal);
+        let base_distance = base.center.dot(base.normal);
+        let jittered_distance = jittered.center.dot(jittered.normal);
+        assert!(
+            stable_distance > base_distance && stable_distance < jittered_distance,
+            "stable wall should move toward jittered measurement without fully snapping: stable={stable_distance} base={base_distance} jittered={jittered_distance}"
+        );
+        assert!(
+            (stable_distance - base_distance) < (jittered_distance - base_distance),
+            "stable wall should damp depth jitter"
+        );
+    }
+
+    #[test]
+    fn room_wall_candidates_pick_dominant_plane_group_per_side() {
+        let east_major_a =
+            make_wall_plane_patch(vec3f(1.20, 1.00, -0.85), vec3f(1.0, 0.0, 0.0), 0.60, 0.28);
+        let east_major_b =
+            make_wall_plane_patch(vec3f(1.22, 1.04, 0.15), vec3f(1.0, 0.0, 0.0), 0.58, 0.34);
+        let east_alcove =
+            make_wall_plane_patch(vec3f(1.48, 0.98, 0.95), vec3f(1.0, 0.0, 0.0), 0.54, 0.18);
+        let west =
+            make_wall_plane_patch(vec3f(-1.05, 1.02, -0.10), vec3f(-1.0, 0.0, 0.0), 0.62, 0.44);
+        let north =
+            make_wall_plane_patch(vec3f(0.10, 1.01, 1.32), vec3f(0.0, 0.0, 1.0), 0.60, 0.42);
+        let south =
+            make_wall_plane_patch(vec3f(-0.18, 0.99, -0.92), vec3f(0.0, 0.0, -1.0), 0.58, 0.40);
+
+        let candidates = build_room_wall_candidates(&[
+            east_major_a,
+            east_major_b,
+            east_alcove,
+            west,
+            north,
+            south,
+        ]);
+        let east = candidates
+            .iter()
+            .find(|candidate| candidate.normal.x > 0.9)
+            .copied()
+            .expect("expected positive-x room wall candidate");
+        assert!(
+            (east.plane_distance - 1.21).abs() <= 0.08,
+            "dominant east wall should stay on the major wall plane, got {east:?}"
+        );
+        assert!(
+            (east.plane_distance - 1.48).abs() > 0.14,
+            "alcove plane should not become the exported room wall, got {east:?}"
+        );
+    }
+
+    #[test]
+    fn room_wall_features_form_box_from_stable_tracks() {
+        let mut room_tracks = Vec::new();
+        let patches = vec![
+            make_wall_plane_patch(vec3f(1.18, 1.00, -0.82), vec3f(1.0, 0.0, 0.0), 0.62, 0.30),
+            make_wall_plane_patch(vec3f(1.19, 1.02, 0.28), vec3f(1.0, 0.0, 0.0), 0.58, 0.38),
+            make_wall_plane_patch(vec3f(-1.08, 1.01, -0.06), vec3f(-1.0, 0.0, 0.0), 0.60, 0.42),
+            make_wall_plane_patch(vec3f(0.06, 0.99, 1.36), vec3f(0.0, 0.0, 1.0), 0.58, 0.46),
+            make_wall_plane_patch(vec3f(-0.12, 1.03, -0.94), vec3f(0.0, 0.0, -1.0), 0.60, 0.44),
+        ];
+
+        for _ in 0..2 {
+            stabilize_room_wall_candidates(&mut room_tracks, build_room_wall_candidates(&patches));
+        }
+        let features = visible_room_wall_features(&room_tracks);
+        assert_eq!(
+            features.len(),
+            4,
+            "expected four inferred room walls from the patch box, got {features:?}"
+        );
+        let east = features
+            .iter()
+            .find(|feature| feature.normal.x > 0.9)
+            .expect("expected positive-x inferred wall");
+        assert!(
+            east.half_extent_along >= 1.00,
+            "orthogonal wall intersections should expand east wall span, got {east:?}"
+        );
+        assert!(
+            east.min_y.abs() <= 1.0e-4
+                && (east.max_y - DEPTH_ROOM_WALL_HEIGHT_METERS).abs() <= 1.0e-4,
+            "room walls should use fixed height for debug and matching, got {east:?}"
+        );
+        assert!(
+            (east.center.y - DEPTH_ROOM_WALL_HEIGHT_METERS * 0.5).abs() <= 1.0e-4,
+            "room wall center should sit halfway up the fixed wall height, got {east:?}"
+        );
+    }
+
+    #[test]
+    fn room_wall_tracks_remain_visible_when_patch_updates_pause() {
+        let mut room_tracks = Vec::new();
+        let patches = vec![
+            make_wall_plane_patch(vec3f(1.18, 1.00, -0.82), vec3f(1.0, 0.0, 0.0), 0.62, 0.30),
+            make_wall_plane_patch(vec3f(1.19, 1.02, 0.28), vec3f(1.0, 0.0, 0.0), 0.58, 0.38),
+            make_wall_plane_patch(vec3f(-1.08, 1.01, -0.06), vec3f(-1.0, 0.0, 0.0), 0.60, 0.42),
+            make_wall_plane_patch(vec3f(0.06, 0.99, 1.36), vec3f(0.0, 0.0, 1.0), 0.58, 0.46),
+            make_wall_plane_patch(vec3f(-0.12, 1.03, -0.94), vec3f(0.0, 0.0, -1.0), 0.60, 0.44),
+        ];
+
+        for _ in 0..2 {
+            stabilize_room_wall_candidates(&mut room_tracks, build_room_wall_candidates(&patches));
+        }
+        for _ in 0..24 {
+            stabilize_room_wall_candidates(&mut room_tracks, Vec::new());
+        }
+
+        let features = visible_room_wall_features(&room_tracks);
+        assert_eq!(
+            features.len(),
+            4,
+            "room walls should persist even when fresh patch evidence is briefly missing, got {features:?}"
+        );
     }
 
     #[test]
@@ -6016,7 +8470,10 @@ mod tests {
         );
 
         assert!(
-            matches!(result, XrDepthMeshQueryResult::Hit(_) | XrDepthMeshQueryResult::Miss { .. }),
+            matches!(
+                result,
+                XrDepthMeshQueryResult::Hit(_) | XrDepthMeshQueryResult::Miss { .. }
+            ),
             "small-radius TSDF query should complete without panicking"
         );
     }

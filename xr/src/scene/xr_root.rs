@@ -584,6 +584,8 @@ impl XrRoot {
             let cx2d = &mut Cx2d::new(cx.cx);
             self.env.prepare_and_draw(cx2d)
         };
+        draw_scope.tracking_from_content = root_transform;
+        draw_scope.content_from_tracking = root_transform.invert();
 
         let mut scene_scope = Scope::with_data(&mut draw_scope);
         let mut draw_order_entries = Vec::new();

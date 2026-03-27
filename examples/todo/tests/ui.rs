@@ -18,15 +18,12 @@ fn todo_add_toggle_delete_and_disambiguate_duplicates(app: TestApp) {
 
     app.locator(Selector::all().text_exact("Write tests"))
         .wait_count(2);
-    app.locator(Selector::widget_type("CheckBox"))
-        .wait_count(3);
+    app.locator(Selector::widget_type("CheckBox")).wait_count(3);
     app.locator(Selector::widget_type("CheckBox").nth(1))
         .click()
         .wait_checked(true);
-    app.locator(Selector::all().text_exact("x").nth(2))
-        .click();
+    app.locator(Selector::all().text_exact("x").nth(2)).click();
     app.locator(Selector::all().text_exact("Write tests"))
         .wait_count(1);
-    app.locator(Selector::widget_type("CheckBox"))
-        .wait_count(2);
+    app.locator(Selector::widget_type("CheckBox")).wait_count(2);
 }

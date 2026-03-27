@@ -519,11 +519,9 @@ impl XrLocalEvent {
     }
 
     fn tip_for_digit(&self, digit_id: DigitId) -> Option<&XrFingerTip> {
-        self.finger_tips
-            .iter()
-            .find(|tip| {
-                Self::fingertip_digit_id(self.digit_namespace, tip.is_left, tip.index) == digit_id
-            })
+        self.finger_tips.iter().find(|tip| {
+            Self::fingertip_digit_id(self.digit_namespace, tip.is_left, tip.index) == digit_id
+        })
     }
 
     fn collect_hand_tips(

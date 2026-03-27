@@ -172,14 +172,7 @@ impl CxOpenXrSession {
         unsafe { (xr.xrCreateSession)(instance, &session_create, &mut session) }
             .to_result("xrCreateSession")?;
 
-        let (
-            head_space,
-            local_space,
-            recommended_width,
-            recommended_height,
-            width,
-            height,
-        ) =
+        let (head_space, local_space, recommended_width, recommended_height, width, height) =
             Self::describe_primary_stereo_session(xr, instance, system_id, session, options)?;
 
         let swap_chain_create_info = XrSwapchainCreateInfo {

@@ -1789,9 +1789,8 @@ impl DockRef {
         align: SplitterAlign,
         mark_dirty: bool,
     ) -> bool {
-        self.borrow_mut().is_some_and(|mut dock| {
-            dock.set_splitter_align(cx, splitter_id, align, mark_dirty)
-        })
+        self.borrow_mut()
+            .is_some_and(|mut dock| dock.set_splitter_align(cx, splitter_id, align, mark_dirty))
     }
 
     pub fn unique_id(&self, base: u64) -> LiveId {

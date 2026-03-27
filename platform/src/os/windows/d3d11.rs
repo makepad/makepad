@@ -45,27 +45,26 @@ use crate::{
                     D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH,
                     D3D11_CLEAR_STENCIL, D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_ALWAYS,
                     D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_FLAG,
-                    D3D11_CULL_BACK, D3D11_CULL_NONE, D3D11_DEPTH_STENCILOP_DESC, D3D11_DEPTH_STENCIL_DESC,
-                    D3D11_DEPTH_STENCIL_VIEW_DESC, D3D11_DEPTH_WRITE_MASK_ALL,
-                    D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID,
-                    D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_INSTANCE_DATA,
-                    D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD,
-                    D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC,
-                    D3D11_RENDER_TARGET_BLEND_DESC, D3D11_RENDER_TARGET_VIEW_DESC,
-                    D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RESOURCE_MISC_FLAG,
-                    D3D11_RESOURCE_MISC_TEXTURECUBE, D3D11_RTV_DIMENSION_TEXTURE2DARRAY,
-                    D3D11_SDK_VERSION, D3D11_SHADER_RESOURCE_VIEW_DESC,
-                    D3D11_SHADER_RESOURCE_VIEW_DESC_0, D3D11_SRV_DIMENSION_TEXTURECUBE,
-                    D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV,
-                    D3D11_TEXCUBE_SRV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-                    D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
+                    D3D11_CULL_BACK, D3D11_CULL_NONE, D3D11_DEPTH_STENCILOP_DESC,
+                    D3D11_DEPTH_STENCIL_DESC, D3D11_DEPTH_STENCIL_VIEW_DESC,
+                    D3D11_DEPTH_WRITE_MASK_ALL, D3D11_DEPTH_WRITE_MASK_ZERO,
+                    D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID, D3D11_INPUT_ELEMENT_DESC,
+                    D3D11_INPUT_PER_INSTANCE_DATA, D3D11_INPUT_PER_VERTEX_DATA,
+                    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_QUERY_DESC,
+                    D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
+                    D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
+                    D3D11_RESOURCE_MISC_FLAG, D3D11_RESOURCE_MISC_TEXTURECUBE,
+                    D3D11_RTV_DIMENSION_TEXTURE2DARRAY, D3D11_SDK_VERSION,
+                    D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0,
+                    D3D11_SRV_DIMENSION_TEXTURECUBE, D3D11_STENCIL_OP_REPLACE,
+                    D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV, D3D11_TEXCUBE_SRV,
+                    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
                 Dxgi::{
                     Common::{
                         DXGI_ALPHA_MODE_IGNORE,
                         DXGI_FORMAT,
                         DXGI_FORMAT_B8G8R8A8_UNORM,
-                        DXGI_FORMAT_R8G8B8A8_UNORM,
                         //DXGI_FORMAT_D32_FLOAT_S8X 24_UINT,
                         DXGI_FORMAT_D32_FLOAT,
                         DXGI_FORMAT_R16_FLOAT,
@@ -81,6 +80,7 @@ use crate::{
                         DXGI_FORMAT_R32_FLOAT,
                         DXGI_FORMAT_R32_SINT,
                         DXGI_FORMAT_R32_UINT,
+                        DXGI_FORMAT_R8G8B8A8_UNORM,
                         DXGI_FORMAT_R8G8_UNORM,
                         DXGI_FORMAT_R8_UNORM,
                         DXGI_SAMPLE_DESC,
@@ -130,7 +130,11 @@ impl Cx {
                 self.render_view(
                     pass_id,
                     sub_list_id,
-                    if child_resets_zbias { &mut child_zbias } else { zbias },
+                    if child_resets_zbias {
+                        &mut child_zbias
+                    } else {
+                        zbias
+                    },
                     zbias_step,
                     d3d11_cx,
                 );
@@ -1314,9 +1318,11 @@ impl CxTexture {
                         Some(&mut shader_resource_view),
                     )
                 } else {
-                    d3d11_cx
-                        .device
-                        .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
+                    d3d11_cx.device.CreateShaderResourceView(
+                        &resource,
+                        None,
+                        Some(&mut shader_resource_view),
+                    )
                 }
                 .unwrap()
             };
@@ -1814,12 +1820,13 @@ fn shader_cache_dir() -> Option<&'static std::path::Path> {
     use std::sync::OnceLock;
     use windows::Win32::{
         System::Com::CoTaskMemFree,
-        UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
+        UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT},
     };
 
     static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {
-        let path_ptr = unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None) }.ok()?;
+        let path_ptr =
+            unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None) }.ok()?;
         let path_str = unsafe { path_ptr.to_string().ok() };
         unsafe { CoTaskMemFree(Some(path_ptr.as_ptr() as _)) };
         let path = std::path::PathBuf::from(path_str?)
@@ -1827,7 +1834,8 @@ fn shader_cache_dir() -> Option<&'static std::path::Path> {
             .join("d3d11_shader_cache");
         std::fs::create_dir_all(&path).ok()?;
         Some(path)
-    }).as_deref()
+    })
+    .as_deref()
 }
 
 #[derive(Clone)]
@@ -1981,7 +1989,14 @@ impl CxOsDrawShader {
 
         let cache_key = hlsl_cache_key(hlsl);
 
-        let vs_bytes = match get_shader_bytes(cache_dir, cache_key, "_vs", "vs_5_0\0", "vertex_main\0", hlsl) {
+        let vs_bytes = match get_shader_bytes(
+            cache_dir,
+            cache_key,
+            "_vs",
+            "vs_5_0\0",
+            "vertex_main\0",
+            hlsl,
+        ) {
             Err(msg) => {
                 println!(
                     "Cannot compile vertexshader\n{}\n{}",
@@ -1993,7 +2008,14 @@ impl CxOsDrawShader {
             Ok(bytes) => bytes,
         };
 
-        let ps_bytes = match get_shader_bytes(cache_dir, cache_key, "_ps", "ps_5_0\0", "pixel_main\0", hlsl) {
+        let ps_bytes = match get_shader_bytes(
+            cache_dir,
+            cache_key,
+            "_ps",
+            "ps_5_0\0",
+            "pixel_main\0",
+            hlsl,
+        ) {
             Err(msg) => {
                 println!(
                     "Cannot compile pixelshader\n{}\n{}",
@@ -2009,11 +2031,7 @@ impl CxOsDrawShader {
         unsafe {
             d3d11_cx
                 .device
-                .CreateVertexShader(
-                    &vs_bytes,
-                    None,
-                    Some(&mut vs),
-                )
+                .CreateVertexShader(&vs_bytes, None, Some(&mut vs))
                 .unwrap()
         };
 
@@ -2021,11 +2039,7 @@ impl CxOsDrawShader {
         unsafe {
             d3d11_cx
                 .device
-                .CreatePixelShader(
-                    &ps_bytes,
-                    None,
-                    Some(&mut ps),
-                )
+                .CreatePixelShader(&ps_bytes, None, Some(&mut ps))
                 .unwrap()
         };
 
@@ -2131,11 +2145,9 @@ impl CxOsDrawShader {
 
         let mut input_layout = None;
         let input_layout_res = unsafe {
-            d3d11_cx.device.CreateInputLayout(
-                &layout_desc,
-                &vs_bytes,
-                Some(&mut input_layout),
-            )
+            d3d11_cx
+                .device
+                .CreateInputLayout(&layout_desc, &vs_bytes, Some(&mut input_layout))
         };
         if let Err(err) = input_layout_res {
             println!("Cannot create input layout: {:?}", err);

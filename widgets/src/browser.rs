@@ -561,13 +561,7 @@ impl Browser {
     }
 
     #[cfg(feature = "cef")]
-    fn ensure_browser(
-        &mut self,
-        _cx: &mut Cx2d,
-        width: usize,
-        height: usize,
-        scale_factor: f32,
-    ) {
+    fn ensure_browser(&mut self, _cx: &mut Cx2d, width: usize, height: usize, scale_factor: f32) {
         if self.cef_browser.is_none() && self.init_error.is_none() {
             match makepad_cef::Browser::new(self.url.as_ref(), width, height, scale_factor) {
                 Ok(browser) => {
@@ -650,10 +644,12 @@ impl Browser {
         self.last_url.clear();
         match self.active_backend {
             ActiveBrowserBackend::Native if self.system_browser_spawned => {
-                cx.system_browser(self.system_browser_id()).set_url(url, false);
+                cx.system_browser(self.system_browser_id())
+                    .set_url(url, false);
             }
             ActiveBrowserBackend::Native => {}
-            ActiveBrowserBackend::CEF => {
+            ActiveBrowserBackend::CEF =>
+            {
                 #[cfg(feature = "cef")]
                 if let Some(browser) = &mut self.cef_browser {
                     if let Err(err) = browser.set_url(url) {
@@ -874,7 +870,10 @@ impl Widget for Browser {
                     }
                 }
                 Hit::TextInput(text_event) => {
-                    let ime_pos = self.browser_rect(cx).map(|rect| rect.pos).unwrap_or_default();
+                    let ime_pos = self
+                        .browser_rect(cx)
+                        .map(|rect| rect.pos)
+                        .unwrap_or_default();
                     self.update_ime_spot(cx, ime_pos);
                     if text_event.was_paste {
                         self.suppress_next_paste_shortcut = true;

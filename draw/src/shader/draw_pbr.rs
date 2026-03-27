@@ -1,7 +1,6 @@
 use crate::{
-    cx_2d::Cx2d, cx_draw::CxDraw, draw_list_2d::ManyInstances,
-    geometry::geometry_gen::GeometryGen, image_cache::ImageBuffer, makepad_platform::*,
-    turtle::*,
+    cx_2d::Cx2d, cx_draw::CxDraw, draw_list_2d::ManyInstances, geometry::geometry_gen::GeometryGen,
+    image_cache::ImageBuffer, makepad_platform::*, turtle::*,
 };
 use makepad_math::DecodedPrimitive;
 use std::{collections::HashMap, f32::consts::PI, path::Path};
