@@ -111,6 +111,18 @@ pub trait CxOsApi {
         false
     }
 
+    fn enable_single_instance(_app_id: &str, _items: &[&str]) -> crate::single_instance::SingleInstanceResult {
+        crate::single_instance::SingleInstanceResult::Primary
+    }
+
+    fn enable_single_instance_with_build(
+        _app_id: &str,
+        _build_id: &str,
+        _items: &[&str],
+    ) -> crate::single_instance::SingleInstanceResult {
+        crate::single_instance::SingleInstanceResult::Primary
+    }
+
     fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace);
 
     fn browser_update_url(&mut self, _url: &str, _replace: bool) {}
@@ -420,6 +432,31 @@ impl std::fmt::Debug for CxOsOp {
     }
 }
 impl Cx {
+    /// Enable single-instance mode. Must be called before `Cx::new()`.
+    /// Returns `Secondary` if another instance is running (caller should exit).
+    /// On mobile platforms this is a no-op that returns `Primary`.
+    pub fn enable_single_instance(
+        app_id: &str,
+        items: &[&str],
+    ) -> crate::single_instance::SingleInstanceResult {
+        <Self as CxOsApi>::enable_single_instance(app_id, items)
+    }
+
+    pub fn enable_single_instance_with_build(
+        app_id: &str,
+        build_id: &str,
+        items: &[&str],
+    ) -> crate::single_instance::SingleInstanceResult {
+        <Self as CxOsApi>::enable_single_instance_with_build(app_id, build_id, items)
+    }
+
+    pub fn enable_initial_app_open(items: &[&str]) {
+        crate::single_instance::set_initial_app_open_enabled(true);
+        crate::single_instance::set_initial_app_open_items(
+            items.iter().map(|item| item.to_string()).collect(),
+        );
+    }
+
     pub fn in_draw_event(&self) -> bool {
         self.in_draw_event
     }

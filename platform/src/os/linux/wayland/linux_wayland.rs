@@ -223,6 +223,7 @@ impl WaylandCx {
                 if let Some(index) = state.windows.iter().position(|w| w.window_id == window_id) {
                     state.windows.remove(index);
                     if state.windows.len() == 0 {
+                        crate::os::unix_single_instance::cleanup();
                         cx.call_event_handler(&Event::Shutdown);
                         return EventFlow::Exit;
                     }
@@ -339,6 +340,11 @@ impl WaylandCx {
                         cx.handle_media_signals();
                         cx.handle_script_signals();
                         cx.call_event_handler(&Event::Signal);
+                        crate::single_instance::enqueue_initial_app_open_if_enabled();
+                        let items = crate::single_instance::drain_app_open_items();
+                        if !items.is_empty() {
+                            cx.call_event_handler(&Event::AppOpen(items));
+                        }
                     }
                     if SignalToUI::check_and_clear_action_signal() {
                         cx.handle_action_receiver();
