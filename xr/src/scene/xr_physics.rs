@@ -52,6 +52,7 @@ const DEPTH_QUERY_BODY_USER_DATA_TAG: u128 = 1u128 << 127;
 const DEPTH_QUERY_SURFACE_USER_DATA_TAG: u128 = 1u128 << 126;
 const DEPTH_QUERY_USER_DATA_OWNER_MASK: u128 = u64::MAX as u128;
 static RAPIER_DEPTH_QUERY_HOOKS: RapierDepthQueryHooks = RapierDepthQueryHooks;
+const XR_ENABLE_SYNTHETIC_GROUND_PLANE: bool = false;
 
 pub(crate) struct RapierScene {
     gravity: RapierVector,
@@ -356,14 +357,16 @@ impl RapierScene {
             right_hand: Vec::new(),
         };
 
-        // Invisible floor at XR ground level (y=0).
-        let floor = scene.bodies.insert(RigidBodyBuilder::fixed().build());
-        scene.colliders.insert_with_parent(
-            ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
-                .friction(0.9),
-            floor,
-            &mut scene.bodies,
-        );
+        if XR_ENABLE_SYNTHETIC_GROUND_PLANE {
+            // Prefer depth-derived floor support in XR; keep this only as an opt-in fallback.
+            let floor = scene.bodies.insert(RigidBodyBuilder::fixed().build());
+            scene.colliders.insert_with_parent(
+                ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
+                    .friction(0.9),
+                floor,
+                &mut scene.bodies,
+            );
+        }
         if XR_ENABLE_HAND_PHYSICS {
             scene.left_hand = scene.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND);
             scene.right_hand = scene.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND);
@@ -400,11 +403,11 @@ impl RapierScene {
         let body = self.bodies.insert(RigidBodyBuilder::fixed().build());
         let collider = self.colliders.insert_with_parent(
             ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
-            .user_data(depth_query_surface_user_data(owner_widget_uid))
-            .active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS)
-            .friction(XR_DEPTH_QUERY_FRICTION)
-            .restitution(0.0)
-            .restitution_combine_rule(CoefficientCombineRule::Max),
+                .user_data(depth_query_surface_user_data(owner_widget_uid))
+                .active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS)
+                .friction(XR_DEPTH_QUERY_FRICTION)
+                .restitution(0.0)
+                .restitution_combine_rule(CoefficientCombineRule::Max),
             body,
             &mut self.bodies,
         );
@@ -425,11 +428,12 @@ impl RapierScene {
     ) -> usize {
         let surfaces = std::array::from_fn(|_| self.spawn_depth_query_surface(owner_widget_uid));
         let index = self.depth_query_surface_sets.len();
-        self.depth_query_surface_sets.push(DepthQueryBodySurfaceSet {
-            body,
-            query_radius,
-            surfaces,
-        });
+        self.depth_query_surface_sets
+            .push(DepthQueryBodySurfaceSet {
+                body,
+                query_radius,
+                surfaces,
+            });
         index
     }
 
@@ -587,7 +591,8 @@ impl RapierScene {
             body.reset_torques(false);
             body.wake_up(true);
         }
-        cube.depth_query_surface_set.map(RapierScene::depth_query_key)
+        cube.depth_query_surface_set
+            .map(RapierScene::depth_query_key)
     }
 
     pub(super) fn sync_depth_query_surface_set(

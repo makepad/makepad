@@ -112,8 +112,8 @@ impl DrawVars {
             output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
 
             #[cfg(use_vulkan)]
-            let mut compiled_vulkan_shader: [Option<CxVulkanShaderBinary>; NUM_SHADER_VARIANTS] =
-                std::array::from_fn(|_| None);
+            let mut compiled_vulkan_shader: [Option<CxVulkanShaderBinary>;
+                NUM_SHADER_VARIANTS] = std::array::from_fn(|_| None);
 
             #[cfg(use_vulkan)]
             {
@@ -309,7 +309,11 @@ impl Cx {
                 self.render_view(
                     draw_pass_id,
                     sub_list_id,
-                    if child_resets_zbias { &mut child_zbias } else { zbias },
+                    if child_resets_zbias {
+                        &mut child_zbias
+                    } else {
+                        zbias
+                    },
                     zbias_step,
                 );
             } else {
@@ -814,7 +818,9 @@ impl Cx {
                     clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                 }
             }
-            if let Some(gl_texture) = self.textures[color_texture.texture.texture_id()].os.gl_texture
+            if let Some(gl_texture) = self.textures[color_texture.texture.texture_id()]
+                .os
+                .gl_texture
             {
                 unsafe {
                     let attachment_target = if let Some(cube_face) = color_texture.cube_face {
@@ -1240,12 +1246,7 @@ impl GlShader {
                         vertex_len
                     );
                 }
-                (gl.glShaderSource)(
-                    vs,
-                    1,
-                    vertex_ptrs.as_ptr(),
-                    vertex_lengths.as_ptr(),
-                );
+                (gl.glShaderSource)(vs, 1, vertex_ptrs.as_ptr(), vertex_lengths.as_ptr());
                 #[cfg(target_os = "android")]
                 if matches!(os_type, OsType::Android(_)) {
                     crate::log!(
@@ -1771,6 +1772,7 @@ impl CxOsDrawShader {
 
         //#extension GL_OVR_multiview2 : require
         // layout(num_views=2) in;
+        #[cfg(not(all(target_os = "android", not(use_vulkan))))]
         let depth_clip = "
             uniform sampler2DArray xr_depth_texture;
             vec4 depth_clip(vec4 world, vec4 color, float clip){

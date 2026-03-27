@@ -3,7 +3,13 @@ pub use crate::makepad_error_log::*;
 use makepad_studio_protocol::{AppToStudio, StudioLogItem};
 
 #[cfg(target_os = "android")]
-fn android_logcat_write(file_name: &str, line_start: u32, column_start: u32, message: &str, level: LogLevel) {
+fn android_logcat_write(
+    file_name: &str,
+    line_start: u32,
+    column_start: u32,
+    message: &str,
+    level: LogLevel,
+) {
     use std::ffi::c_int;
     extern "C" {
         pub fn __android_log_write(prio: c_int, tag: *const u8, text: *const u8) -> c_int;

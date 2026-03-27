@@ -158,7 +158,11 @@ impl MatchEvent for App {
             }
         }
 
-        if self.ui.button(cx, ids!(bottom_panel_toggle)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(bottom_panel_toggle))
+            .clicked(actions)
+        {
             if let Some(active_mount) = self.data.active_mount.clone() {
                 self.toggle_bottom_panel(cx, &active_mount);
             }
@@ -350,7 +354,11 @@ impl AppMain for App {
             if self.sidebar_animation_next_frame.is_event(event).is_some() {
                 self.step_sidebar_animation(cx, ne.time);
             }
-            if self.bottom_panel_animation_next_frame.is_event(event).is_some() {
+            if self
+                .bottom_panel_animation_next_frame
+                .is_event(event)
+                .is_some()
+            {
                 self.step_bottom_panel_animation(cx, ne.time);
             }
         }
@@ -359,7 +367,11 @@ impl AppMain for App {
             let main_window = self.ui.window(cx, ids!(main_window));
             if Some(dq.window_id) == main_window.window_id() {
                 let sidebar_rect = self.ui.button(cx, ids!(sidebar_toggle)).area().rect(cx);
-                let panel_rect = self.ui.button(cx, ids!(bottom_panel_toggle)).area().rect(cx);
+                let panel_rect = self
+                    .ui
+                    .button(cx, ids!(bottom_panel_toggle))
+                    .area()
+                    .rect(cx);
                 if sidebar_rect.contains(dq.abs) || panel_rect.contains(dq.abs) {
                     dq.response.set(WindowDragQueryResponse::Client);
                     cx.set_cursor(MouseCursor::Default);

@@ -4,9 +4,9 @@ use {
         slice::SliceExt,
         substr::Substr,
     },
+    fxhash::FxHashMap,
     rustybuzz,
     rustybuzz::UnicodeBuffer,
-    fxhash::FxHashMap,
     std::{
         collections::VecDeque,
         hash::{Hash, Hasher},
@@ -64,7 +64,10 @@ impl Shaper {
             reusable_unicode_buffer: UnicodeBuffer::new(),
             cache_size: settings.cache_size,
             cached_params: VecDeque::with_capacity(settings.cache_size),
-            cached_results: FxHashMap::with_capacity_and_hasher(settings.cache_size, Default::default()),
+            cached_results: FxHashMap::with_capacity_and_hasher(
+                settings.cache_size,
+                Default::default(),
+            ),
         }
     }
 

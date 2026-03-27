@@ -900,7 +900,6 @@ impl App {
                             if cc.channel == 0 && (48..=55).contains(&cc.param) {
                                 state.dial_top[(cc.param - 48) as usize] = value;
                             }
-
                         }
                         MidiEvent::Note(note) => {
                             mirror.set_note(

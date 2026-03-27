@@ -60,10 +60,7 @@ pub(crate) fn consume_studio_socket_response(
             crate::warning!("studio websocket closed");
             Some(Vec::new())
         }
-        NetworkResponse::WsError {
-            socket_id,
-            message,
-        } if socket_id.0 == STUDIO_SOCKET_ID => {
+        NetworkResponse::WsError { socket_id, message } if socket_id.0 == STUDIO_SOCKET_ID => {
             STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
             crate::error!("studio websocket error: {}", message);
             Some(Vec::new())

@@ -11,8 +11,7 @@ use {
             fonts::Fonts,
             geom::{Point, Rect as TextRect, Size, Transform},
             layouter::{
-                BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions,
-                Style,
+                BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, Style,
             },
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
@@ -471,7 +470,9 @@ impl DrawText {
         // Account for temp_y_shift in the allocated height so that shifted
         // glyphs (e.g., from top_drop) don't get clipped by their container.
         let shift_extra_height = if self.temp_y_shift != 0.0 {
-            let fs = text.rows.first()
+            let fs = text
+                .rows
+                .first()
                 .and_then(|r| r.glyphs.first())
                 .map(|g| g.font_size_in_lpxs)
                 .unwrap_or(0.0);
@@ -511,16 +512,13 @@ impl DrawText {
         };
 
         for (row_index, row) in text.rows.iter().enumerate() {
-            let (start_x_in_lpxs, end_x_in_lpxs) = row_span_x_bounds_in_lpxs(
-                row,
-                row_index == 0,
-                row_index + 1 == text.rows.len(),
-            );
+            let (start_x_in_lpxs, end_x_in_lpxs) =
+                row_span_x_bounds_in_lpxs(row, row_index == 0, row_index + 1 == text.rows.len());
             let rect_in_lpxs = TextRect::new(
                 Point::new(
-                    origin_in_lpxs.x
-                        + (row.origin_in_lpxs.x + start_x_in_lpxs) * self.font_scale,
-                    origin_in_lpxs.y + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale,
+                    origin_in_lpxs.x + (row.origin_in_lpxs.x + start_x_in_lpxs) * self.font_scale,
+                    origin_in_lpxs.y
+                        + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale,
                 ),
                 Size::new(
                     (end_x_in_lpxs - start_x_in_lpxs) * self.font_scale,

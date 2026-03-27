@@ -1,3 +1,7 @@
+use super::{
+    mesh_generators::{stylized_leaf_mesh, tree_branch_segment_mesh},
+    scene_draw::scene_state_from_cx,
+};
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -6,10 +10,6 @@ use crate::{
         xr_hand_influence_points_from_scope, xr_widget_world_transform, XrHandInfluencePoint,
         XrNode, XR_HAND_INFLUENCE_POINT_COUNT,
     },
-};
-use super::{
-    mesh_generators::{stylized_leaf_mesh, tree_branch_segment_mesh},
-    scene_draw::scene_state_from_cx,
 };
 use std::f32::consts::PI;
 
@@ -407,7 +407,8 @@ impl CpuPythagoreanTree {
             self.branch_dynamics.clear();
             self.leaf_dynamics.clear();
             self.branch_runtime.clear();
-            self.hand_influence_history = [HandInfluenceHistory::default(); XR_HAND_INFLUENCE_POINT_COUNT];
+            self.hand_influence_history =
+                [HandInfluenceHistory::default(); XR_HAND_INFLUENCE_POINT_COUNT];
             self.last_rebuild_time = None;
         }
         if self.branch_geometry.is_none() {
@@ -440,7 +441,8 @@ impl CpuPythagoreanTree {
             .last_rebuild_time
             .and_then(|last| {
                 let delta = time - last;
-                (delta.is_finite() && delta > 0.0).then_some(delta.clamp(TREE_SIM_DT_MIN, TREE_SIM_DT_MAX))
+                (delta.is_finite() && delta > 0.0)
+                    .then_some(delta.clamp(TREE_SIM_DT_MIN, TREE_SIM_DT_MAX))
             })
             .unwrap_or(TREE_SIM_DT_DEFAULT);
         self.last_rebuild_time = Some(time);
@@ -455,7 +457,9 @@ impl CpuPythagoreanTree {
                     .to_vec3f();
                 let raw_velocity = history
                     .pos
-                    .map(|last_pos| Self::clamp_len((local_pos - last_pos) / dt, TREE_HAND_MAX_SPEED))
+                    .map(|last_pos| {
+                        Self::clamp_len((local_pos - last_pos) / dt, TREE_HAND_MAX_SPEED)
+                    })
                     .unwrap_or(vec3f(0.0, 0.0, 0.0));
                 let velocity = history.velocity * (1.0 - TREE_HAND_VELOCITY_BLEND)
                     + raw_velocity * TREE_HAND_VELOCITY_BLEND;
@@ -498,12 +502,8 @@ impl CpuPythagoreanTree {
                     )
                 };
 
-            let local_dir = branch
-                .local_rotation
-                .rotate_vec3(&vec3f(0.0, 1.0, 0.0));
-            let local_z = branch
-                .local_rotation
-                .rotate_vec3(&vec3f(0.0, 0.0, 1.0));
+            let local_dir = branch.local_rotation.rotate_vec3(&vec3f(0.0, 1.0, 0.0));
+            let local_z = branch.local_rotation.rotate_vec3(&vec3f(0.0, 0.0, 1.0));
             let base_dir = Self::normalize_or(
                 Self::frame_vector(parent_basis_x, parent_basis_y, parent_basis_z, local_dir),
                 parent_basis_y,
@@ -520,10 +520,12 @@ impl CpuPythagoreanTree {
             if animate {
                 point_target = Self::branch_wind_force(branch.seed, level_t, time) + inherited_push;
                 let branch_pointer_radius = (branch.radius * 5.6).clamp(0.032, 0.095);
-                let branch_mid_radius = (branch_pointer_radius * 0.88).clamp(0.028, branch_pointer_radius);
+                let branch_mid_radius =
+                    (branch_pointer_radius * 0.88).clamp(0.028, branch_pointer_radius);
                 for influence in hand_influences.into_iter().flatten() {
                     let pointer_tip = influence.pos;
-                    let closest_on_branch = Self::closest_point_on_segment(start, nominal_tip, pointer_tip);
+                    let closest_on_branch =
+                        Self::closest_point_on_segment(start, nominal_tip, pointer_tip);
                     let closest_on_mid = Self::closest_point_on_segment(
                         start + (nominal_tip - start) * 0.22,
                         start + (nominal_tip - start) * 0.82,
@@ -605,12 +607,8 @@ impl CpuPythagoreanTree {
                     branch_runtime.basis_z,
                     leaf.local_offset,
                 );
-            let local_leaf_y = leaf
-                .local_rotation
-                .rotate_vec3(&vec3f(0.0, 1.0, 0.0));
-            let local_leaf_z = leaf
-                .local_rotation
-                .rotate_vec3(&vec3f(0.0, 0.0, 1.0));
+            let local_leaf_y = leaf.local_rotation.rotate_vec3(&vec3f(0.0, 1.0, 0.0));
+            let local_leaf_z = leaf.local_rotation.rotate_vec3(&vec3f(0.0, 0.0, 1.0));
             let nominal_leaf_y = Self::normalize_or(
                 Self::frame_vector(
                     branch_runtime.basis_x,
@@ -652,7 +650,8 @@ impl CpuPythagoreanTree {
                 let leaf_pointer_radius = (leaf.scale * 1.35).clamp(0.045, 0.120);
                 for influence in hand_influences.into_iter().flatten() {
                     let pointer_tip = influence.pos;
-                    let closest_on_leaf = Self::closest_point_on_segment(origin, leaf_tip, pointer_tip);
+                    let closest_on_leaf =
+                        Self::closest_point_on_segment(origin, leaf_tip, pointer_tip);
                     let closest_on_leaf_mid =
                         Self::closest_point_on_segment(origin, leaf_mid, pointer_tip);
                     let main_contact = Self::contact_response(
@@ -676,8 +675,7 @@ impl CpuPythagoreanTree {
                     leaf_target += mid_contact.target_offset * 0.55;
                     leaf_velocity_boost += mid_contact.velocity_boost * 0.55;
                 }
-                leaf_velocity_boost =
-                    Self::clamp_len(leaf_velocity_boost, 1.45 + level_t * 0.40);
+                leaf_velocity_boost = Self::clamp_len(leaf_velocity_boost, 1.45 + level_t * 0.40);
             }
             let leaf_push = Self::spring_step(
                 &mut self.leaf_dynamics[leaf_index],
@@ -731,7 +729,12 @@ impl CpuPythagoreanTree {
             camera_pos,
             &self.branch_instances,
         );
-        draw_leaves.draw_instances(cx, leaf_geometry.geometry_id(), camera_pos, &self.leaf_instances);
+        draw_leaves.draw_instances(
+            cx,
+            leaf_geometry.geometry_id(),
+            camera_pos,
+            &self.leaf_instances,
+        );
     }
 
     fn rebuild_templates(&mut self, config: TreeTemplateConfig) {
@@ -830,11 +833,7 @@ impl CpuPythagoreanTree {
             let stem_sink = (twig_tip_radius * 0.75).min(leaf_scale * 0.16);
             self.leaf_templates.push(LeafTemplate {
                 branch,
-                local_offset: vec3f(
-                    angle.cos() * spread,
-                    -stem_sink,
-                    angle.sin() * spread,
-                ),
+                local_offset: vec3f(angle.cos() * spread, -stem_sink, angle.sin() * spread),
                 local_rotation,
                 scale: leaf_scale,
                 tint: 0.56,
@@ -942,7 +941,11 @@ impl CpuPythagoreanTree {
     fn seed_from_index(index: usize) -> f32 {
         let x = (((index as f32) + 1.0) * 12.9898).sin() * 43_758.547;
         let fract = x.fract();
-        if fract < 0.0 { fract + 1.0 } else { fract }
+        if fract < 0.0 {
+            fract + 1.0
+        } else {
+            fract
+        }
     }
 
     fn closest_point_on_segment(a: Vec3f, b: Vec3f, point: Vec3f) -> Vec3f {
@@ -1052,7 +1055,8 @@ impl Widget for Tree {
         let template_config = self.template_config();
 
         self.cpu_tree.ensure_geometry(cx, template_config);
-        self.cpu_tree.rebuild_instances(world, time, hand_influences);
+        self.cpu_tree
+            .rebuild_instances(world, time, hand_influences);
         self.cpu_tree.draw(
             cx,
             &mut self.draw_branches,
@@ -1111,7 +1115,11 @@ impl DrawTreeBranches {
         self.draw_vars.set_uniform(
             cx.cx,
             live_id!(u_tree_bark_dark),
-            &[TREE_BRANCH_BARK_DARK.x, TREE_BRANCH_BARK_DARK.y, TREE_BRANCH_BARK_DARK.z],
+            &[
+                TREE_BRANCH_BARK_DARK.x,
+                TREE_BRANCH_BARK_DARK.y,
+                TREE_BRANCH_BARK_DARK.z,
+            ],
         );
         self.draw_vars.set_uniform(
             cx.cx,
@@ -1197,7 +1205,11 @@ impl DrawTreeLeaves {
         self.draw_vars.set_uniform(
             cx.cx,
             live_id!(u_tree_light_color),
-            &[TREE_LEAF_LIGHT_COLOR.x, TREE_LEAF_LIGHT_COLOR.y, TREE_LEAF_LIGHT_COLOR.z],
+            &[
+                TREE_LEAF_LIGHT_COLOR.x,
+                TREE_LEAF_LIGHT_COLOR.y,
+                TREE_LEAF_LIGHT_COLOR.z,
+            ],
         );
         self.draw_vars.set_uniform(
             cx.cx,

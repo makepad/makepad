@@ -9,7 +9,6 @@ pub mod ui_signal;
 pub mod utils;
 pub mod web_socket_parser;
 
-pub use makepad_error_log;
 pub use crate::backend::{EventSink, NetworkBackend, UnsupportedBackend};
 pub use crate::http_server::{
     start_http_server, HttpServer, HttpServerRequest, HttpServerResponse,
@@ -30,6 +29,7 @@ pub use crate::web_socket_parser::{
     WebSocketMessageFormat, WebSocketMessageHeader, WebSocketParser,
     SERVER_WEB_SOCKET_PING_MESSAGE, SERVER_WEB_SOCKET_PONG_MESSAGE,
 };
+pub use makepad_error_log;
 
 #[cfg(target_os = "android")]
 pub use crate::backend::{

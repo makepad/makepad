@@ -7,7 +7,10 @@ use super::{
     xr_physics::{makepad_pose, RapierScene},
     CollectedXrCube,
 };
-use crate::{xr_node::{XrBodyKind, XrRuntimeBodyState}, *};
+use crate::{
+    xr_node::{XrBodyKind, XrRuntimeBodyState},
+    *,
+};
 use makepad_widgets::makepad_platform::{event::XrHand, XrDepthMeshStore};
 use std::{
     collections::HashMap,
@@ -21,13 +24,8 @@ const XR_WORKER_SIMULATION_DT_DEFAULT: f32 = 1.0 / 120.0;
 const XR_WORKER_SIMULATION_DT_MIN: f32 = 1.0 / 480.0;
 const XR_WORKER_SIMULATION_DT_MAX: f32 = 1.0 / 45.0;
 const XR_WORKER_SIMULATION_DT_SMOOTHING: f32 = 0.35;
-const XR_WORKER_SIMULATION_DT_LADDER: [f32; 5] = [
-    1.0 / 120.0,
-    1.0 / 90.0,
-    1.0 / 72.0,
-    1.0 / 60.0,
-    1.0 / 45.0,
-];
+const XR_WORKER_SIMULATION_DT_LADDER: [f32; 5] =
+    [1.0 / 120.0, 1.0 / 90.0, 1.0 / 72.0, 1.0 / 60.0, 1.0 / 45.0];
 const XR_PHYSICS_WORKER_MAX_PENDING_BODY_SPAWNS: usize = 8;
 
 #[derive(Clone)]
@@ -59,7 +57,8 @@ struct PhysicsWorkerMailbox {
     pending_reset_revision: Option<u64>,
     pending_rebuild: Option<PhysicsWorkerRebuild>,
     pending_step: Option<PhysicsWorkerStep>,
-    pending_body_spawns: SmallVec<[PhysicsWorkerBodySpawn; XR_PHYSICS_WORKER_MAX_PENDING_BODY_SPAWNS]>,
+    pending_body_spawns:
+        SmallVec<[PhysicsWorkerBodySpawn; XR_PHYSICS_WORKER_MAX_PENDING_BODY_SPAWNS]>,
 }
 
 pub(super) struct XrPhysicsWorkerResult {
@@ -141,7 +140,9 @@ impl XrPhysicsWorker {
         let (lock, wake) = &*self.mailbox;
         if let Ok(mut mailbox) = lock.lock() {
             if mailbox.pending_body_spawns.len() < XR_PHYSICS_WORKER_MAX_PENDING_BODY_SPAWNS {
-                mailbox.pending_body_spawns.push(PhysicsWorkerBodySpawn { revision, spawn });
+                mailbox
+                    .pending_body_spawns
+                    .push(PhysicsWorkerBodySpawn { revision, spawn });
                 mailbox.version = mailbox.version.saturating_add(1);
                 wake.notify_one();
             }
@@ -161,7 +162,10 @@ impl XrPhysicsWorker {
     }
 
     pub(super) fn take_latest_result(&mut self) -> Option<XrPhysicsWorkerResult> {
-        self.latest_result.lock().ok().and_then(|mut result| result.take())
+        self.latest_result
+            .lock()
+            .ok()
+            .and_then(|mut result| result.take())
     }
 }
 
@@ -267,14 +271,15 @@ fn physics_worker_loop(
         if let Some(step) = pending_step {
             if step.revision == revision {
                 let started = Instant::now();
-                adaptive_step_dt = choose_worker_simulation_dt(
-                    last_step_started_at,
-                    started,
-                    adaptive_step_dt,
-                );
+                adaptive_step_dt =
+                    choose_worker_simulation_dt(last_step_started_at, started, adaptive_step_dt);
                 last_step_started_at = Some(started);
                 sync_hands_on_scene(scene.as_mut(), &step.left_hand, &step.right_hand);
-                sync_depth_query_surfaces_with_store(&mut retained_hits, scene.as_mut(), &depth_mesh);
+                sync_depth_query_surfaces_with_store(
+                    &mut retained_hits,
+                    scene.as_mut(),
+                    &depth_mesh,
+                );
                 let (
                     runtime_bodies,
                     physics_step_dt_ms,
@@ -284,9 +289,7 @@ fn physics_worker_loop(
                 ) = if let Some(scene) = scene.as_mut() {
                     let simulation_dt = (adaptive_step_dt * step.time_scale.clamp(0.1, 1.0))
                         .clamp(XR_WORKER_SIMULATION_DT_MIN, XR_WORKER_SIMULATION_DT_MAX);
-                    scene.set_simulation_dt(
-                        simulation_dt,
-                    );
+                    scene.set_simulation_dt(simulation_dt);
                     scene.step();
                     let stats = scene.depth_query_stats();
                     snapshot_runtime_bodies(scene, &mut runtime_bodies_scratch);
@@ -301,10 +304,7 @@ fn physics_worker_loop(
                     (HashMap::new(), 0.0, 0, 0, 0)
                 };
                 if step.include_retained_hits {
-                    snapshot_retained_hits(
-                        &retained_hits,
-                        &mut retained_hits_snapshot_scratch,
-                    );
+                    snapshot_retained_hits(&retained_hits, &mut retained_hits_snapshot_scratch);
                 } else {
                     retained_hits_snapshot_scratch.clear();
                 }
@@ -380,8 +380,7 @@ fn choose_worker_simulation_dt(
         .map(|last| (started - last).as_secs_f32())
         .unwrap_or(XR_WORKER_SIMULATION_DT_DEFAULT)
         .clamp(XR_WORKER_SIMULATION_DT_DEFAULT, XR_WORKER_SIMULATION_DT_MAX);
-    let smoothed_dt =
-        previous_dt + (measured_dt - previous_dt) * XR_WORKER_SIMULATION_DT_SMOOTHING;
+    let smoothed_dt = previous_dt + (measured_dt - previous_dt) * XR_WORKER_SIMULATION_DT_SMOOTHING;
     XR_WORKER_SIMULATION_DT_LADDER
         .into_iter()
         .find(|candidate| *candidate >= smoothed_dt)

@@ -1,9 +1,7 @@
 use crate::{ffi, BootstrapResult, Error, Frame, Result, TEXT_INPUT_MODE_NONE};
 use libloading::Library;
 use makepad_objc_sys::declare::ClassDecl;
-use makepad_objc_sys::runtime::{
-    self, Class, ObjcId, Object, Protocol, Sel, BOOL, NO, YES,
-};
+use makepad_objc_sys::runtime::{self, Class, ObjcId, Object, Protocol, Sel, BOOL, NO, YES};
 use makepad_objc_sys::{class, msg_send, sel, sel_impl};
 use std::env;
 use std::ffi::{c_char, c_void, CString};
@@ -270,9 +268,7 @@ fn runtime() -> Result<&'static Runtime> {
         let library = unsafe {
             libloading::os::unix::Library::open(
                 Some(&paths.framework_bin),
-                libloading::os::unix::RTLD_LAZY
-                    | libloading::os::unix::RTLD_LOCAL
-                    | RTLD_FIRST,
+                libloading::os::unix::RTLD_LAZY | libloading::os::unix::RTLD_LOCAL | RTLD_FIRST,
             )
             .map(Library::from)
         }
@@ -379,7 +375,9 @@ fn ensure_cef_application_patch() -> Result<()> {
             let app_class = ensure_cef_application_class()?;
             let ns_app: ObjcId = msg_send![app_class, sharedApplication];
             if ns_app.is_null() {
-                return Err(Error::new("MakepadCefApplication sharedApplication returned null"));
+                return Err(Error::new(
+                    "MakepadCefApplication sharedApplication returned null",
+                ));
             }
 
             let actual_class = runtime::object_getClass(ns_app as *const Object) as *mut Class;
@@ -453,9 +451,7 @@ fn external_pump() -> Result<&'static ExternalPump> {
         let pump_class = ensure_external_pump_class()?;
         let handler: ObjcId = msg_send![pump_class, new];
         if handler.is_null() {
-            return Err(Error::new(
-                "MakepadCefMessagePumpTarget new returned null",
-            ));
+            return Err(Error::new("MakepadCefMessagePumpTarget new returned null"));
         }
         let owner_thread: ObjcId = msg_send![class!(NSThread), mainThread];
         if owner_thread.is_null() {
@@ -469,9 +465,7 @@ fn external_pump() -> Result<&'static ExternalPump> {
             reentrancy_detected: AtomicBool::new(false),
         })
     });
-    result
-        .as_ref()
-        .map_err(|err| Error::new(err.to_string()))
+    result.as_ref().map_err(|err| Error::new(err.to_string()))
 }
 
 impl ExternalPump {
@@ -690,8 +684,12 @@ fn ensure_initialized() -> Result<()> {
     let current_exe = env::current_exe()
         .map_err(|err| Error::new(format!("failed to resolve current executable: {err}")))?;
     let current_exe = current_exe.canonicalize().unwrap_or(current_exe);
-    let synthetic_bundle = ensure_synthetic_app_bundle(&distribution_runtime_paths(), &current_exe)?;
-    let helper_executable = synthetic_bundle.helper_executable.to_string_lossy().to_string();
+    let synthetic_bundle =
+        ensure_synthetic_app_bundle(&distribution_runtime_paths(), &current_exe)?;
+    let helper_executable = synthetic_bundle
+        .helper_executable
+        .to_string_lossy()
+        .to_string();
     let log_file = synthetic_bundle.log_file.to_string_lossy().to_string();
     let root_cache_path = temp_root_cache_path()?;
 
@@ -942,11 +940,7 @@ fn main_bundle_info_plist(executable_name: &str, bundle_name: &str, bundle_id: &
     )
 }
 
-fn helper_bundle_info_plist(
-    executable_name: &str,
-    bundle_name: &str,
-    bundle_id: &str,
-) -> String {
+fn helper_bundle_info_plist(executable_name: &str, bundle_name: &str, bundle_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -991,7 +985,10 @@ fn helper_bundle_info_plist(
     )
 }
 
-fn ensure_framework_bundle_layout(source_framework_dir: &PathBuf, framework_dir: &PathBuf) -> Result<()> {
+fn ensure_framework_bundle_layout(
+    source_framework_dir: &PathBuf,
+    framework_dir: &PathBuf,
+) -> Result<()> {
     match std::fs::symlink_metadata(framework_dir) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             std::fs::remove_file(framework_dir).map_err(|err| {
@@ -1234,8 +1231,7 @@ impl SharedBrowserState {
     }
 
     fn set_editable_focus(&self, editable_focus: bool) {
-        self.editable_focus
-            .store(editable_focus, Ordering::Release);
+        self.editable_focus.store(editable_focus, Ordering::Release);
     }
 }
 
@@ -1352,7 +1348,9 @@ unsafe extern "system" fn app_release(self_: *mut ffi::cef_base_ref_counted_t) -
     if (*app).ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
         if !(*app).browser_process_handler.is_null() {
             release_ref_counted(
-                &mut (*(*app).browser_process_handler).cef_browser_process_handler.base as *mut _,
+                &mut (*(*app).browser_process_handler)
+                    .cef_browser_process_handler
+                    .base as *mut _,
             );
         }
         drop(Box::from_raw(app));
@@ -1649,9 +1647,7 @@ impl BrowserProcessHandler {
                 on_context_initialized: None,
                 on_before_child_process_launch: None,
                 on_already_running_app_relaunch: None,
-                on_schedule_message_pump_work: Some(
-                    browser_process_on_schedule_message_pump_work,
-                ),
+                on_schedule_message_pump_work: Some(browser_process_on_schedule_message_pump_work),
                 get_default_client: None,
                 get_default_request_context_handler: None,
             },
@@ -1685,14 +1681,13 @@ impl AppHandler {
 }
 
 impl Browser {
-    fn with_host<T>(
-        &self,
-        f: impl FnOnce(*mut ffi::cef_browser_host_t) -> Result<T>,
-    ) -> Result<T> {
+    fn with_host<T>(&self, f: impl FnOnce(*mut ffi::cef_browser_host_t) -> Result<T>) -> Result<T> {
         unsafe {
             let host = (*self.browser)
                 .get_host
-                .ok_or_else(|| Error::new("cef_browser_t::get_host missing"))?(self.browser);
+                .ok_or_else(|| Error::new("cef_browser_t::get_host missing"))?(
+                self.browser
+            );
             if host.is_null() {
                 return Err(Error::new("cef_browser_t::get_host returned null"));
             }
@@ -1702,14 +1697,13 @@ impl Browser {
         }
     }
 
-    fn with_main_frame<T>(
-        &self,
-        f: impl FnOnce(*mut ffi::cef_frame_t) -> Result<T>,
-    ) -> Result<T> {
+    fn with_main_frame<T>(&self, f: impl FnOnce(*mut ffi::cef_frame_t) -> Result<T>) -> Result<T> {
         unsafe {
             let frame = (*self.browser)
                 .get_main_frame
-                .ok_or_else(|| Error::new("cef_browser_t::get_main_frame missing"))?(self.browser);
+                .ok_or_else(|| Error::new("cef_browser_t::get_main_frame missing"))?(
+                self.browser
+            );
             if frame.is_null() {
                 return Err(Error::new("cef_browser_t::get_main_frame returned null"));
             }
@@ -1793,10 +1787,7 @@ impl Browser {
         let height = height.max(1);
         let scale_factor = scale_factor.max(0.1);
         let scale_changed = (self.scale_factor - scale_factor).abs() >= f32::EPSILON;
-        if self.width == width
-            && self.height == height
-            && !scale_changed
-        {
+        if self.width == width && self.height == height && !scale_changed {
             return Ok(());
         }
         self.width = width;
@@ -1829,7 +1820,9 @@ impl Browser {
         self.with_main_frame(|frame| unsafe {
             (*frame)
                 .load_url
-                .ok_or_else(|| Error::new("cef_frame_t::load_url missing"))?(frame, &url.value);
+                .ok_or_else(|| Error::new("cef_frame_t::load_url missing"))?(
+                frame, &url.value
+            );
             Ok(())
         })
     }
@@ -1903,10 +1896,7 @@ impl Browser {
             (*host)
                 .send_mouse_wheel_event
                 .ok_or_else(|| Error::new("cef_browser_host_t::send_mouse_wheel_event missing"))?(
-                host,
-                &event,
-                delta_x,
-                delta_y,
+                host, &event, delta_x, delta_y,
             );
             Ok(())
         })
@@ -1937,8 +1927,7 @@ impl Browser {
             (*host)
                 .send_key_event
                 .ok_or_else(|| Error::new("cef_browser_host_t::send_key_event missing"))?(
-                host,
-                &event,
+                host, &event,
             );
             Ok(())
         })

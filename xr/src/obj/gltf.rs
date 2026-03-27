@@ -3,9 +3,7 @@ use std::{path::PathBuf, rc::Rc};
 
 use super::{
     gltf_bridge::GltfRenderer,
-    scene_draw::{
-        apply_scene_to_draw_pbr, compose_scene_node_transform, scene_state_from_cx,
-    },
+    scene_draw::{apply_scene_to_draw_pbr, compose_scene_node_transform, scene_state_from_cx},
     xr_node::xr_widget_world_transform,
     XrNode,
 };
@@ -204,11 +202,7 @@ impl Widget for Gltf {
         self.ensure_env_loaded(cx);
         self.ensure_renderer_loaded(cx);
         if let Some(renderer) = self.renderer.as_mut() {
-            let _ = renderer.draw_with_transform(
-                &mut self.draw_pbr,
-                cx,
-                world,
-            );
+            let _ = renderer.draw_with_transform(&mut self.draw_pbr, cx, world);
         }
 
         self.node.draw_3d(cx, scope)

@@ -751,7 +751,11 @@ impl Cx {
                 self.headless_render_view(
                     draw_pass_id,
                     sub_list_id,
-                    if child_resets_zbias { &mut child_zbias } else { zbias },
+                    if child_resets_zbias {
+                        &mut child_zbias
+                    } else {
+                        zbias
+                    },
                     zbias_step,
                     render_threads,
                     parallel_min_tris,

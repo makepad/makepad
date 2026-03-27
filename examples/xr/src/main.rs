@@ -361,6 +361,7 @@ script_mod! {
                     }
                 }
             }
+            xr_people_debug := XrPeopleDebug{}
 
             control_strip := XrView{
                 visible: false
@@ -586,6 +587,58 @@ script_mod! {
                             padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
                             draw_bg.color: #x0d1824
 
+                            peer_sync_status_field := Label{
+                                width: Fill
+                                text: "Peers: off"
+                                draw_text.color: #xe8f4ff
+                            }
+                        }
+
+                        SolidView{
+                            width: Fill
+                            height: 32
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            draw_bg.color: #x0d1824
+
+                            network_status_field := Label{
+                                width: Fill
+                                text: "Network: off"
+                                draw_text.color: #x9ec8e8
+                            }
+                        }
+
+                        SolidView{
+                            width: Fill
+                            height: 32
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            draw_bg.color: #x0d1824
+
+                            alignment_debug_field := Label{
+                                width: Fill
+                                text: "AlignDbg: off"
+                                draw_text.color: #xffd29a
+                            }
+                        }
+
+                        SolidView{
+                            width: Fill
+                            height: 32
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            draw_bg.color: #x0d1824
+
+                            plane_scan_field := Label{
+                                width: Fill
+                                text: "PlaneScan: off"
+                                draw_text.color: #x9af7c4
+                            }
+                        }
+
+                        SolidView{
+                            width: Fill
+                            height: 32
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            draw_bg.color: #x0d1824
+
                             physics_geom_field := Label{
                                 width: Fill
                                 text: "Physics geometry: waiting for frame"
@@ -680,6 +733,8 @@ pub struct App {
     #[live]
     ui: WidgetRef,
     #[rust]
+    network_started: bool,
+    #[rust]
     last_physics_geometry_text: String,
     #[rust]
     last_physics_timing_text: String,
@@ -687,9 +742,31 @@ pub struct App {
     last_frame_cpu_text: String,
     #[rust]
     last_xr_runtime_text: String,
+    #[rust]
+    last_peer_sync_status_text: String,
+    #[rust]
+    last_network_status_text: String,
+    #[rust]
+    last_alignment_debug_text: String,
+    #[rust]
+    last_plane_scan_text: String,
 }
 
 impl App {
+    fn ensure_network_started(&mut self, cx: &mut Cx) {
+        if self.network_started {
+            return;
+        }
+        if let Some(mut people_debug) = self
+            .ui
+            .widget(cx, ids!(xr_people_debug))
+            .borrow_mut::<XrPeopleDebug>()
+        {
+            people_debug.set_enabled(cx, true);
+            self.network_started = true;
+        }
+    }
+
     fn refresh_debug_fields(&mut self, cx: &mut Cx) {
         let (
             surface_count,
@@ -716,6 +793,55 @@ impl App {
         } else {
             return;
         };
+        let peer_sync_status_text = self
+            .ui
+            .widget(cx, ids!(xr_people_debug))
+            .borrow::<XrPeopleDebug>()
+            .map(|people_debug| people_debug.status_text().to_string())
+            .unwrap_or_else(|| "Peers: unavailable".to_string());
+        let network_status_text = self
+            .ui
+            .widget(cx, ids!(xr_people_debug))
+            .borrow::<XrPeopleDebug>()
+            .map(|people_debug| people_debug.network_status_text().to_string())
+            .unwrap_or_else(|| "Network: unavailable".to_string());
+        let alignment_debug_text = self
+            .ui
+            .widget(cx, ids!(xr_people_debug))
+            .borrow::<XrPeopleDebug>()
+            .map(|people_debug| people_debug.alignment_debug_text().to_string())
+            .unwrap_or_else(|| "AlignDbg: unavailable".to_string());
+        let plane_scan_text = self
+            .ui
+            .widget(cx, ids!(xr_people_debug))
+            .borrow::<XrPeopleDebug>()
+            .map(|people_debug| people_debug.plane_scan_text().to_string())
+            .unwrap_or_else(|| "PlaneScan: unavailable".to_string());
+
+        if self.last_peer_sync_status_text != peer_sync_status_text {
+            self.ui
+                .widget(cx, ids!(peer_sync_status_field))
+                .set_text(cx, &peer_sync_status_text);
+            self.last_peer_sync_status_text = peer_sync_status_text;
+        }
+        if self.last_network_status_text != network_status_text {
+            self.ui
+                .widget(cx, ids!(network_status_field))
+                .set_text(cx, &network_status_text);
+            self.last_network_status_text = network_status_text;
+        }
+        if self.last_alignment_debug_text != alignment_debug_text {
+            self.ui
+                .widget(cx, ids!(alignment_debug_field))
+                .set_text(cx, &alignment_debug_text);
+            self.last_alignment_debug_text = alignment_debug_text;
+        }
+        if self.last_plane_scan_text != plane_scan_text {
+            self.ui
+                .widget(cx, ids!(plane_scan_field))
+                .set_text(cx, &plane_scan_text);
+            self.last_plane_scan_text = plane_scan_text;
+        }
 
         let geometry_text = format!(
             "Physics geometry: {} planes, {} vertices, {} triangles",
@@ -832,6 +958,9 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if matches!(event, Event::Startup) {
+            self.ensure_network_started(cx);
+        }
         self.refresh_debug_fields(cx);
     }
 }

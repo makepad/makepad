@@ -361,7 +361,8 @@ impl CxOpenXrSession {
         ) {
             Ok(render_targets) => render_targets,
             Err(err) => {
-                unsafe { (xr.xrDestroySwapchain)(color_swap_chain) }.log_error("xrDestroySwapchain");
+                unsafe { (xr.xrDestroySwapchain)(color_swap_chain) }
+                    .log_error("xrDestroySwapchain");
                 return Err(err);
             }
         };
@@ -427,14 +428,7 @@ impl CxOpenXrSession {
         unsafe { (xr.xrCreateSession)(instance, &session_create, &mut session) }
             .to_result("xrCreateSession")?;
 
-        let (
-            head_space,
-            local_space,
-            recommended_width,
-            recommended_height,
-            width,
-            height,
-        ) =
+        let (head_space, local_space, recommended_width, recommended_height, width, height) =
             Self::describe_primary_stereo_session(xr, instance, system_id, session, options)?;
 
         let (passthrough, passthrough_layer, depth_provider, depth_swap_chain) =
@@ -525,14 +519,15 @@ impl CxOpenXrSession {
         options: CxOpenXrOptions,
     ) -> Result<(), String> {
         let new_width = ((self.recommended_width as f32) * options.buffer_scale).max(1.0) as u32;
-        let new_height =
-            ((self.recommended_height as f32) * options.buffer_scale).max(1.0) as u32;
+        let new_height = ((self.recommended_height as f32) * options.buffer_scale).max(1.0) as u32;
         if new_width == self.width && new_height == self.height {
             return Ok(());
         }
 
         let Some(mut vulkan_session) = self.vulkan.take() else {
-            return Err("OpenXR Vulkan projection resize failed: session data unavailable".to_string());
+            return Err(
+                "OpenXR Vulkan projection resize failed: session data unavailable".to_string(),
+            );
         };
         let create_result = Self::create_vulkan_projection_layer_resources(
             xr,
@@ -553,10 +548,12 @@ impl CxOpenXrSession {
                 let old_render_targets =
                     std::mem::replace(&mut vulkan_session.render_targets, new_render_targets);
                 vulkan_session._color_images = new_color_images;
-                vulkan_session.retired_projection_layers.push(RetiredOpenXrVulkanProjectionLayer {
-                    color_swap_chain: old_color_swap_chain,
-                    render_targets: old_render_targets,
-                });
+                vulkan_session
+                    .retired_projection_layers
+                    .push(RetiredOpenXrVulkanProjectionLayer {
+                        color_swap_chain: old_color_swap_chain,
+                        render_targets: old_render_targets,
+                    });
                 self.width = new_width;
                 self.height = new_height;
                 self.vulkan = Some(vulkan_session);

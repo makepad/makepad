@@ -235,12 +235,11 @@ impl ScriptHook for IcoSphere {
         _value: ScriptValue,
     ) {
         let diameter = self.radius.max(0.0) * 2.0;
-        self.node
-            .set_implicit_physics_size(vec3f(
-                diameter * ICO_SPHERE_PHYSICS_DIAMETER_SCALE,
-                diameter * ICO_SPHERE_PHYSICS_DIAMETER_SCALE,
-                diameter * ICO_SPHERE_PHYSICS_DIAMETER_SCALE,
-            ));
+        self.node.set_implicit_physics_size(vec3f(
+            diameter * ICO_SPHERE_PHYSICS_DIAMETER_SCALE,
+            diameter * ICO_SPHERE_PHYSICS_DIAMETER_SCALE,
+            diameter * ICO_SPHERE_PHYSICS_DIAMETER_SCALE,
+        ));
     }
 }
 
@@ -253,10 +252,8 @@ impl Widget for IcoSphere {
         let radius = self.radius.max(0.001);
         let geometry_id = shared_ico_geometry_id(cx.cx);
         let world = xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
-        let local_scale = Mat4f::nonuniform_scaled_translation(
-            vec3(radius, radius, radius),
-            vec3(0.0, 0.0, 0.0),
-        );
+        let local_scale =
+            Mat4f::nonuniform_scaled_translation(vec3(radius, radius, radius), vec3(0.0, 0.0, 0.0));
         self.draw_ico.transform = Mat4f::mul(&world, &local_scale);
         self.draw_ico.diffuse = self.diffuse;
         self.draw_ico.color = self.color;
@@ -344,14 +341,7 @@ fn build_unit_icosahedron_geometry() -> (Vec<f32>, Vec<u32>) {
         let face_vertices = [p0, p1, p2];
         for position in face_vertices {
             vertices.extend_from_slice(&[
-                position.x,
-                position.y,
-                position.z,
-                1.0,
-                normal.x,
-                normal.y,
-                normal.z,
-                0.0,
+                position.x, position.y, position.z, 1.0, normal.x, normal.y, normal.z, 0.0,
             ]);
             indices.push(indices.len() as u32);
         }

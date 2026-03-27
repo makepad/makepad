@@ -2167,20 +2167,20 @@ mod tests {
         // Scale(2): diag(2,2,2,1)
         let scale = Mat4f {
             v: [
-                2.0, 0.0, 0.0, 0.0,  // column 0
-                0.0, 2.0, 0.0, 0.0,  // column 1
-                0.0, 0.0, 2.0, 0.0,  // column 2
-                0.0, 0.0, 0.0, 1.0,  // column 3
+                2.0, 0.0, 0.0, 0.0, // column 0
+                0.0, 2.0, 0.0, 0.0, // column 1
+                0.0, 0.0, 2.0, 0.0, // column 2
+                0.0, 0.0, 0.0, 1.0, // column 3
             ],
         };
 
         // Translate(5,7,0): identity with tx=5, ty=7 in column 3
         let translate = Mat4f {
             v: [
-                1.0, 0.0, 0.0, 0.0,  // column 0
-                0.0, 1.0, 0.0, 0.0,  // column 1
-                0.0, 0.0, 1.0, 0.0,  // column 2
-                5.0, 7.0, 0.0, 1.0,  // column 3
+                1.0, 0.0, 0.0, 0.0, // column 0
+                0.0, 1.0, 0.0, 0.0, // column 1
+                0.0, 0.0, 1.0, 0.0, // column 2
+                5.0, 7.0, 0.0, 1.0, // column 3
             ],
         };
 
@@ -2213,9 +2213,17 @@ mod tests {
         //   Scale*(1,1,0,1) = (2,2,0,1)
         //   Translate*(2,2,0,1) = (7,9,0,1)
 
-        let p = Vec4f { x: 1.0, y: 1.0, z: 0.0, w: 1.0 };
+        let p = Vec4f {
+            x: 1.0,
+            y: 1.0,
+            z: 0.0,
+            w: 1.0,
+        };
         let out = result.transform_vec4(p);
-        eprintln!("transform_vec4 result: ({}, {}, {}, {})", out.x, out.y, out.z, out.w);
+        eprintln!(
+            "transform_vec4 result: ({}, {}, {}, {})",
+            out.x, out.y, out.z, out.w
+        );
 
         if out.x == 12.0 && out.y == 16.0 {
             eprintln!("Confirmed: mul(a,b) = a*b, transform_vec4 is standard M*v");

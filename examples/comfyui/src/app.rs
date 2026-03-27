@@ -131,6 +131,19 @@ script_mod! {
         promise.await()
     }
 
+    fn openai_stream_delta_content(chunk){
+        let line = ("" + chunk).trim()
+        if line == "" return nil
+
+        line = ok{line.strip_prefix("data: ")}
+        if line == nil || line == "[DONE]" return nil
+
+        let payload = ok{line.parse_json()}
+        if payload == nil return nil
+
+        ok{payload.choices[0].delta.content}
+    }
+
     fn openai_completion(messages){
         let promise = std.promise()
         let req = net.HttpRequest{
@@ -142,15 +155,18 @@ script_mod! {
                 max_tokens: 1000
                 stream: true
                 messages
+                chat_template_kwargs:{
+                    enable_thinking:false
+                }
             }.to_json()
         }
         net.http_request(req) do net.HttpEvents{
             let total = ""
             on_stream:fn(res){
                 for split in res.body.to_string().split("\n\n"){
-                    let o = split.parse_json()
-                    ok{
-                        total += o.data.choices[0].delta.content
+                    let delta = openai_stream_delta_content(split)
+                    if delta != nil{
+                        total += delta
                         set_last_prompt(total)
                     }
                 }
@@ -381,11 +397,11 @@ script_mod! {
         if messages.len() > 40 messages.clear()
         if clear_prompt || messages.len() == 0{
             messages.clear()
-            messages.push({content:system_text role:"user"})
+            messages.push({content:system_text role:"system"})
             messages.push({content:user_text role:"user"})
         }
         else{
-            messages[0] = {content:system_text role:"user"}
+            messages[0] = {content:system_text role:"system"}
             messages.push({content:user_text role:"user"})
         }
 

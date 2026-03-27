@@ -31,6 +31,7 @@ use {
     std::sync::mpsc,
 };
 
+#[cfg(use_vulkan)]
 const OPENXR_DEPTH_MESH_READBACK_ENABLED: bool = true;
 
 impl Cx {
@@ -109,7 +110,8 @@ impl Cx {
                 }
                 XrStructureType::EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB => {
                     let event = &unsafe {
-                        *(&event_buffer as *const _ as *const XrEventDataDisplayRefreshRateChangedFB)
+                        *(&event_buffer as *const _
+                            as *const XrEventDataDisplayRefreshRateChangedFB)
                     };
                     if let Some(session) = &mut openxr.session {
                         if event.to_display_refresh_rate.is_finite()
@@ -126,6 +128,15 @@ impl Cx {
                             );
                         }
                     }
+                }
+                XrStructureType::EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING => {
+                    let reset_generation =
+                        crate::xr_depth_mesh::xr_depth_mesh_store().request_reset();
+                    redraw_requested = true;
+                    crate::log!(
+                        "OpenXR reference space changed, resetting depth mesh pipeline generation={}",
+                        reset_generation
+                    );
                 }
                 _ => {
                     if let Some(session) = &mut openxr.session {
@@ -218,14 +229,17 @@ impl Cx {
                     .map(|v| v.swapchain_index as usize)
                     .unwrap_or(0);
                 session.frame_state = frame.frame_state;
-                let effective_frame_time_ms = session.last_predicted_display_time.and_then(|last| {
-                    let delta_nanos =
-                        frame.frame_state.predicted_display_time.as_nanos() - last.as_nanos();
-                    (delta_nanos > 0).then_some(delta_nanos as f64 / 1_000_000.0)
-                });
-                session.last_predicted_display_time = Some(frame.frame_state.predicted_display_time);
+                let effective_frame_time_ms =
+                    session.last_predicted_display_time.and_then(|last| {
+                        let delta_nanos =
+                            frame.frame_state.predicted_display_time.as_nanos() - last.as_nanos();
+                        (delta_nanos > 0).then_some(delta_nanos as f64 / 1_000_000.0)
+                    });
+                session.last_predicted_display_time =
+                    Some(frame.frame_state.predicted_display_time);
                 let active_refresh_rate_hz = session.active_display_refresh_rate_hz.or_else(|| {
-                    let predicted_period_nanos = frame.frame_state.predicted_display_period.as_nanos();
+                    let predicted_period_nanos =
+                        frame.frame_state.predicted_display_period.as_nanos();
                     if predicted_period_nanos > 0 {
                         Some((1_000_000_000.0 / predicted_period_nanos as f64) as f32)
                     } else {
@@ -262,13 +276,19 @@ impl Cx {
 
             #[cfg(use_vulkan)]
             if OPENXR_DEPTH_MESH_READBACK_ENABLED {
-                if let Some(depth_image_index) = frame.depth_image.map(|v| v.swapchain_index as usize) {
+                if let Some(depth_image_index) =
+                    frame.depth_image.map(|v| v.swapchain_index as usize)
+                {
                     let (openxr, vulkan) = (&mut self.os.openxr, &mut self.os.vulkan);
-                    if let (Some(session), Some(vulkan)) = (openxr.session.as_mut(), vulkan.as_mut()) {
+                    if let (Some(session), Some(vulkan)) =
+                        (openxr.session.as_mut(), vulkan.as_mut())
+                    {
                         if let Some(vulkan_session) = session.vulkan.as_mut() {
-                            if let Err(err) =
-                                vulkan_session.submit_depth_mesh_job(vulkan, &frame, depth_image_index)
-                            {
+                            if let Err(err) = vulkan_session.submit_depth_mesh_job(
+                                vulkan,
+                                &frame,
+                                depth_image_index,
+                            ) {
                                 crate::warning!("OpenXR depth mesh update failed: {err}");
                             }
                         }
@@ -295,7 +315,10 @@ impl Cx {
                         if let Some(vulkan) = vulkan.as_mut() {
                             openxr.resize_projection_layer(vulkan, options)
                         } else {
-                            Err("Android XR projection resize failed: Vulkan backend unavailable".to_string())
+                            Err(
+                                "Android XR projection resize failed: Vulkan backend unavailable"
+                                    .to_string(),
+                            )
                         }
                     };
                     if let Err(err) = resize_result {
@@ -405,7 +428,9 @@ impl CxOpenXr {
             if has_extension(display_refresh_rate_ext) {
                 exts_needed.push(display_refresh_rate_ext);
             } else {
-                crate::warning!("OpenXR display refresh rate extension unavailable on this runtime");
+                crate::warning!(
+                    "OpenXR display refresh rate extension unavailable on this runtime"
+                );
             }
 
             if !has_extension("XR_KHR_vulkan_enable2\0") {
@@ -445,7 +470,9 @@ impl CxOpenXr {
             if has_extension(display_refresh_rate_ext) {
                 exts_needed.push(display_refresh_rate_ext);
             } else {
-                crate::warning!("OpenXR display refresh rate extension unavailable on this runtime");
+                crate::warning!(
+                    "OpenXR display refresh rate extension unavailable on this runtime"
+                );
             }
         }
 
@@ -615,9 +642,9 @@ impl CxOpenXr {
     ) -> Result<(), String> {
         if let Some(session) = self.session.take() {
             session.destroy_session(
-                self.libxr
-                    .as_ref()
-                    .ok_or_else(|| "OpenXR destroy_session failed: libxr unavailable".to_string())?,
+                self.libxr.as_ref().ok_or_else(|| {
+                    "OpenXR destroy_session failed: libxr unavailable".to_string()
+                })?,
                 libgl,
                 #[cfg(use_vulkan)]
                 vulkan,

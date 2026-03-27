@@ -184,7 +184,12 @@ impl App {
         let Some(dock) = self.mount_workspace_dock(cx, mount) else {
             return false;
         };
-        dock.set_splitter_align(cx, id!(main_split), SplitterAlign::FromB(height.max(0.0)), false)
+        dock.set_splitter_align(
+            cx,
+            id!(main_split),
+            SplitterAlign::FromB(height.max(0.0)),
+            false,
+        )
     }
 
     fn start_bottom_panel_animation(&mut self, cx: &mut Cx, mount: &str, to_height: f64) {

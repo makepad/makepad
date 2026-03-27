@@ -89,7 +89,9 @@ pub struct cef_command_line_t {
     pub base: cef_base_ref_counted_t,
     pub is_valid: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> c_int>,
     pub is_read_only: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> c_int>,
-    pub copy: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> *mut cef_command_line_t>,
+    pub copy: Option<
+        unsafe extern "system" fn(self_: *mut cef_command_line_t) -> *mut cef_command_line_t,
+    >,
     pub init_from_argv: Option<
         unsafe extern "system" fn(
             self_: *mut cef_command_line_t,
@@ -104,23 +106,14 @@ pub struct cef_command_line_t {
         ),
     >,
     pub reset: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t)>,
-    pub get_argv: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_command_line_t,
-            argv: cef_string_list_t,
-        ),
-    >,
-    pub get_command_line_string: Option<
-        unsafe extern "system" fn(self_: *mut cef_command_line_t) -> cef_string_userfree_t,
-    >,
-    pub get_program: Option<
-        unsafe extern "system" fn(self_: *mut cef_command_line_t) -> cef_string_userfree_t,
-    >,
+    pub get_argv:
+        Option<unsafe extern "system" fn(self_: *mut cef_command_line_t, argv: cef_string_list_t)>,
+    pub get_command_line_string:
+        Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> cef_string_userfree_t>,
+    pub get_program:
+        Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> cef_string_userfree_t>,
     pub set_program: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_command_line_t,
-            program: *const cef_string_t,
-        ),
+        unsafe extern "system" fn(self_: *mut cef_command_line_t, program: *const cef_string_t),
     >,
     pub has_switches: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> c_int>,
     pub has_switch: Option<
@@ -136,16 +129,10 @@ pub struct cef_command_line_t {
         ) -> cef_string_userfree_t,
     >,
     pub get_switches: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_command_line_t,
-            switches: cef_string_map_t,
-        ),
+        unsafe extern "system" fn(self_: *mut cef_command_line_t, switches: cef_string_map_t),
     >,
     pub append_switch: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_command_line_t,
-            name: *const cef_string_t,
-        ),
+        unsafe extern "system" fn(self_: *mut cef_command_line_t, name: *const cef_string_t),
     >,
     pub append_switch_with_value: Option<
         unsafe extern "system" fn(
@@ -156,22 +143,13 @@ pub struct cef_command_line_t {
     >,
     pub has_arguments: Option<unsafe extern "system" fn(self_: *mut cef_command_line_t) -> c_int>,
     pub get_arguments: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_command_line_t,
-            arguments: cef_string_list_t,
-        ),
+        unsafe extern "system" fn(self_: *mut cef_command_line_t, arguments: cef_string_list_t),
     >,
     pub append_argument: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_command_line_t,
-            argument: *const cef_string_t,
-        ),
+        unsafe extern "system" fn(self_: *mut cef_command_line_t, argument: *const cef_string_t),
     >,
     pub prepend_wrapper: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_command_line_t,
-            wrapper: *const cef_string_t,
-        ),
+        unsafe extern "system" fn(self_: *mut cef_command_line_t, wrapper: *const cef_string_t),
     >,
 }
 
@@ -550,13 +528,10 @@ pub struct cef_browser_process_handler_t {
             current_directory: *const cef_string_t,
         ) -> c_int,
     >,
-    pub on_schedule_message_pump_work: Option<
-        unsafe extern "system" fn(self_: *mut cef_browser_process_handler_t, delay_ms: i64),
-    >,
+    pub on_schedule_message_pump_work:
+        Option<unsafe extern "system" fn(self_: *mut cef_browser_process_handler_t, delay_ms: i64)>,
     pub get_default_client: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_browser_process_handler_t,
-        ) -> *mut cef_client_t,
+        unsafe extern "system" fn(self_: *mut cef_browser_process_handler_t) -> *mut cef_client_t,
     >,
     pub get_default_request_context_handler: Option<
         unsafe extern "system" fn(
@@ -576,25 +551,16 @@ pub struct cef_app_t {
         ),
     >,
     pub on_register_custom_schemes: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_app_t,
-            registrar: *mut cef_scheme_registrar_t,
-        ),
+        unsafe extern "system" fn(self_: *mut cef_app_t, registrar: *mut cef_scheme_registrar_t),
     >,
     pub get_resource_bundle_handler: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_app_t,
-        ) -> *mut cef_resource_bundle_handler_t,
+        unsafe extern "system" fn(self_: *mut cef_app_t) -> *mut cef_resource_bundle_handler_t,
     >,
     pub get_browser_process_handler: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_app_t,
-        ) -> *mut cef_browser_process_handler_t,
+        unsafe extern "system" fn(self_: *mut cef_app_t) -> *mut cef_browser_process_handler_t,
     >,
     pub get_render_process_handler: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_app_t,
-        ) -> *mut cef_render_process_handler_t,
+        unsafe extern "system" fn(self_: *mut cef_app_t) -> *mut cef_render_process_handler_t,
     >,
 }
 
@@ -683,17 +649,11 @@ pub struct cef_browser_host_t {
     pub notify_screen_info_changed:
         Option<unsafe extern "system" fn(self_: *mut cef_browser_host_t)>,
     pub invalidate: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_browser_host_t,
-            type_: cef_paint_element_type_t,
-        ),
+        unsafe extern "system" fn(self_: *mut cef_browser_host_t, type_: cef_paint_element_type_t),
     >,
     pub send_external_begin_frame: cef_unused_callback_t,
     pub send_key_event: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_browser_host_t,
-            event: *const cef_key_event_t,
-        ),
+        unsafe extern "system" fn(self_: *mut cef_browser_host_t, event: *const cef_key_event_t),
     >,
     pub send_mouse_click_event: Option<
         unsafe extern "system" fn(
@@ -720,13 +680,9 @@ pub struct cef_browser_host_t {
         ),
     >,
     pub send_touch_event: Option<
-        unsafe extern "system" fn(
-            self_: *mut cef_browser_host_t,
-            event: *const cef_touch_event_t,
-        ),
+        unsafe extern "system" fn(self_: *mut cef_browser_host_t, event: *const cef_touch_event_t),
     >,
-    pub send_capture_lost_event:
-        Option<unsafe extern "system" fn(self_: *mut cef_browser_host_t)>,
+    pub send_capture_lost_event: Option<unsafe extern "system" fn(self_: *mut cef_browser_host_t)>,
     pub notify_move_or_resize_started: cef_unused_callback_t,
     pub get_windowless_frame_rate: cef_unused_callback_t,
     pub set_windowless_frame_rate: cef_unused_callback_t,
@@ -748,8 +704,7 @@ pub struct cef_browser_host_t {
             relative_cursor_pos: c_int,
         ),
     >,
-    pub ime_finish_composing_text: Option<
-        unsafe extern "system" fn(self_: *mut cef_browser_host_t, keep_selection: c_int),
-    >,
+    pub ime_finish_composing_text:
+        Option<unsafe extern "system" fn(self_: *mut cef_browser_host_t, keep_selection: c_int)>,
     pub ime_cancel_composition: Option<unsafe extern "system" fn(self_: *mut cef_browser_host_t)>,
 }
