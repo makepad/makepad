@@ -202,6 +202,7 @@ pub enum AppToStudio {
     WidgetTreeDump(WidgetTreeDumpResponse),
     WidgetQuery(WidgetQueryResponse),
     WidgetSnapshot(WidgetSnapshotResponse),
+    WidgetResponse(WidgetResponse),
     TweakHits(TweakHitsResponse),
     BeforeStartup,
     CreateWindow {
@@ -307,6 +308,21 @@ pub struct WidgetSnapshotResponse {
 }
 
 #[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
+pub struct WidgetControl {
+    pub request_id: u64,
+    pub id: String,
+    pub op: String,
+    pub arg: String,
+}
+
+#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
+pub struct WidgetResponse {
+    pub request_id: u64,
+    pub ok: bool,
+    pub out: String,
+}
+
+#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
 pub struct TweakHitsResponse {
     pub window_id: usize,
     pub dpi_factor: f64,
@@ -335,6 +351,7 @@ pub enum StudioToApp {
     WidgetTreeDump(WidgetTreeDumpRequest),
     WidgetQuery(WidgetQueryRequest),
     WidgetSnapshot(WidgetSnapshotRequest),
+    WidgetControl(WidgetControl),
     KeepAlive,
     LiveChange {
         file_name: String,

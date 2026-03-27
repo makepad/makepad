@@ -4,7 +4,7 @@ use {
         animator::*,
         makepad_derive_widget::*,
         makepad_draw::*,
-        makepad_script::ScriptFnRef,
+        makepad_script::{ScriptFnRef, ScriptObjectRef},
         scroll_bars::ScrollBars,
         widget::*,
         widget_async::{
@@ -123,6 +123,15 @@ pub struct View {
 
     #[live]
     on_render: ScriptFnRef,
+
+    #[live(true)]
+    show_child_controls: bool,
+
+    #[live]
+    on_control: ScriptObjectRef,
+
+    #[rust]
+    control_names: String,
 
     #[rust]
     script_async: ScriptAsyncCalls,
@@ -252,6 +261,27 @@ impl ScriptHook for View {
                     vm,
                     self.scroll_bars.as_object().into(),
                 )));
+            }
+        }
+
+        // Cache on_control handler names for controls() advertisement
+        self.control_names.clear();
+        if !self.on_control.is_zero() {
+            let obj = self.on_control.as_object();
+            let map = vm.bx.heap.map_ref(obj);
+            let mut first = true;
+            for (key, map_val) in map.iter() {
+                if map_val.value.as_object().is_some() {
+                    if let Some(id) = key.as_id() {
+                        if !first { self.control_names.push(','); }
+                        first = false;
+                        id.as_string(|s| {
+                            if let Some(s) = s {
+                                self.control_names.push_str(s);
+                            }
+                        });
+                    }
+                }
             }
         }
 
@@ -813,6 +843,36 @@ impl Widget for View {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj {
             scroll_bars.handle_scroll_event(cx, event, scope, &mut Vec::new());
         }
+    }
+
+    fn controls(&self) -> (String, bool) {
+        (self.control_names.clone(), self.show_child_controls)
+    }
+
+    fn control(&mut self, cx: &mut Cx, op: &str, arg: &str) -> String {
+        if self.on_control.is_zero() {
+            return String::new();
+        }
+        let on_control_obj = self.on_control.as_object();
+        let op_key = ScriptValue::from_id(LiveId::from_str_with_lut(op).unwrap_or(LiveId(0)));
+        cx.with_vm(|vm| {
+            let map = vm.bx.heap.map_ref(on_control_obj);
+            let handler = map.get(&op_key).map(|v| v.value);
+            if let Some(handler) = handler {
+                if handler.as_object().is_some() {
+                    let arg_val = vm.bx.heap.new_string_from_str(arg);
+                    let result = vm.call(handler, &[ScriptValue::from(arg_val)]);
+                    vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(result, out);
+                        out.to_string()
+                    })
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        })
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
