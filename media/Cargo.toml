@@ -1,0 +1,25 @@
+[package]
+name = "makepad-media"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+dav1d = []
+svt-av1 = []
+avif = ["dep:mp4parse"]
+opus = ["dep:opus2"]
+
+[dependencies]
+makepad-platform = { path = "../platform" }
+mp4parse = { version = "0.17", optional = true }
+opus2 = { version = "0.3.3", default-features = false, features = ["bundled", "static"], optional = true }
+symphonia-core = "0.5.5"
+symphonia-codec-aac = "0.5.5"
+
+[build-dependencies]
+cc = "1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+makepad-jni-sys = "0.4.0"
+makepad-android-state = "0.1.0"

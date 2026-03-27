@@ -63,7 +63,7 @@ public class H264Encoder {
 
             mCodec = MediaCodec.createByCodecName(info.getName());
             MediaFormat format = MediaFormat.createVideoFormat("video/avc", width, height);
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
+            format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar);
             format.setInteger(MediaFormat.KEY_BIT_RATE, Math.max(32_000, bitrate));
             format.setInteger(MediaFormat.KEY_FRAME_RATE, Math.max(1, fps));
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, Math.max(1, keyintSeconds));

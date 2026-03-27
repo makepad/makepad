@@ -692,7 +692,9 @@ impl WindowsVideoPlayer {
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
-    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(
+        &mut self,
+    ) -> Option<Result<crate::media_plugin::PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
@@ -732,14 +734,14 @@ impl WindowsVideoPlayer {
                 vec![]
             };
             let audio_tracks = vec!["audio".to_string()];
-            Some(Ok(PlaybackPrepared::new(
-                w,
-                h,
+            Some(Ok(crate::media_plugin::PlaybackPrepared {
+                width: w,
+                height: h,
                 duration_ms,
                 is_seekable,
                 video_tracks,
                 audio_tracks,
-            )))
+            }))
         }
     }
 

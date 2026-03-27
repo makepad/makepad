@@ -187,6 +187,10 @@ impl CxMediaApi for Cx {
                 crate::error!("windows video cpu-frame source is not implemented");
                 Err(VideoEncodeError::UnsupportedSource)
             }
+            VideoEncodeSource::Dummy { .. } => {
+                crate::error!("windows dummy video source is not implemented");
+                Err(VideoEncodeError::UnsupportedSource)
+            }
         }
     }
 

@@ -411,10 +411,13 @@ extern "C" {
         userdata: *mut c_void,
     );
     pub fn pa_context_get_state(c: *const pa_context) -> pa_context_state_t;
+    pub fn pa_context_errno(c: *const pa_context) -> c_int;
 
     pub fn pa_context_disconnect(c: *mut pa_context);
 
     pub fn pa_context_unref(c: *mut pa_context);
+
+    pub fn pa_strerror(error: c_int) -> *const std::os::raw::c_char;
 
     pub fn pa_context_get_sink_info_list(
         c: *mut pa_context,
