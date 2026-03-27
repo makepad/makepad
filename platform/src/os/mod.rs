@@ -14,6 +14,9 @@ pub mod cx_shared;
 
 pub mod shared_framebuf;
 
+#[cfg(all(not(headless), unix, not(target_os = "android"), not(target_os = "ios"), not(target_os = "tvos")))]
+pub mod unix_single_instance;
+
 #[cfg(headless)]
 pub mod headless;
 

@@ -201,6 +201,13 @@ pub enum Event {
     Drop(DropEvent),
     DragEnd,
 
+    /// One or more items opened by a second instance or by the OS.
+    ///
+    /// On desktop, this is delivered when a second process forwards its arguments
+    /// to the running primary instance via `Cx::enable_single_instance`. On mobile,
+    /// it is delivered when the OS routes a URL/intent to the app.
+    AppOpen(Vec<String>),
+
     /// Application-defined event sent via the studio/debug control protocol.
     /// Respond with `Cx::send_studio_message(AppToStudio::Custom(..))`.
     Custom(String),
@@ -322,6 +329,7 @@ impl Event {
             58 => "ImeAction",
             60 => "Custom",
             61 => "PopupDismissed",
+            66 => "AppOpen",
             62 => "SelectionHandleDrag",
             _ => panic!(),
         }
@@ -404,6 +412,7 @@ impl Event {
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_) => 55,
 
+            Self::AppOpen(_) => 66,
             Self::XrLocal(_) => 57,
             Self::Custom(_) => 60,
         }
