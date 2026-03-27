@@ -174,7 +174,9 @@ fn derive_script_impl_inner(
         }
 
         if let Some(field_name) = &ui_root_field {
-            tb.add("self.").ident(field_name).add(".register_as_ui_root(vm);");
+            tb.add("self.")
+                .ident(field_name)
+                .add(".register_as_ui_root(vm);");
         }
 
         for field in &fields {

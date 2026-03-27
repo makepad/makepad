@@ -393,8 +393,7 @@ impl XrView {
         } else {
             menu_right = menu_right.normalize();
         }
-        let position = menu_pose.position
-            + menu_right.scale(Self::ARM_PANEL_MENU_SIDE_OFFSET)
+        let position = menu_pose.position + menu_right.scale(Self::ARM_PANEL_MENU_SIDE_OFFSET)
             - menu_to_head.scale(Self::ARM_PANEL_MENU_BACK_OFFSET);
         let forward = state.head_pose.position - position;
         Some(Pose::new(

@@ -8,8 +8,8 @@ use makepad_studio_protocol::hub_protocol::{
     ClientId, ClientToHub, ClientToHubEnvelope, HubToClient, QueryId,
 };
 use makepad_studio_protocol::{
-    AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec, WidgetQueryResponse,
-    WidgetSnapshot, WidgetSnapshotResponse, WidgetTreeDumpResponse,
+    AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec, WidgetQueryResponse, WidgetSnapshot,
+    WidgetSnapshotResponse, WidgetTreeDumpResponse,
 };
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -385,12 +385,10 @@ fn websocket_app_bridge_widget_snapshot_roundtrip() {
         checked: None,
         selected: None,
     }];
-    let response = AppToStudioVec(vec![AppToStudio::WidgetSnapshot(
-        WidgetSnapshotResponse {
-            request_id: query_id.0,
-            widgets: widgets.clone(),
-        },
-    )]);
+    let response = AppToStudioVec(vec![AppToStudio::WidgetSnapshot(WidgetSnapshotResponse {
+        request_id: query_id.0,
+        widgets: widgets.clone(),
+    })]);
     runtime
         .ws_send(app_socket, WsSend::Binary(response.serialize_bin()))
         .expect("send app response");

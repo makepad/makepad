@@ -1680,7 +1680,11 @@ impl MatchEvent for App {
         {
             log!("Radio button selected: {}", index);
         }
-        if let Some(index) = self.ui.drop_down(cx, ids!(smoke_dropdown)).selected(actions) {
+        if let Some(index) = self
+            .ui
+            .drop_down(cx, ids!(smoke_dropdown))
+            .selected(actions)
+        {
             log!("Quick select changed: {}", index);
         }
 

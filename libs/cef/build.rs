@@ -56,7 +56,12 @@ fn build_macos_helper(manifest_dir: &Path, dist_dir: &Path, include_dir: &Path) 
         .arg("-o")
         .arg(&helper_binary)
         .status()
-        .unwrap_or_else(|err| panic!("failed to execute clang for {}: {err}", helper_source.display()));
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to execute clang for {}: {err}",
+                helper_source.display()
+            )
+        });
     if !status.success() {
         panic!("clang failed to build {}", helper_binary.display());
     }

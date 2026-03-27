@@ -2,8 +2,8 @@ pub use makepad_widgets;
 
 use makepad_cef::BootstrapResult;
 use makepad_widgets::*;
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 const INITIAL_URL: &str = "https://makepad.nl";

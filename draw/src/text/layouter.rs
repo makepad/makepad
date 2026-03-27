@@ -13,6 +13,7 @@ use {
         shaper::{self, ShapedText},
         substr::Substr,
     },
+    fxhash::FxHashMap,
     std::{
         borrow::Borrow,
         cell::RefCell,
@@ -22,7 +23,6 @@ use {
         mem,
         rc::Rc,
     },
-    fxhash::FxHashMap,
     unicode_segmentation::UnicodeSegmentation,
 };
 
@@ -43,7 +43,10 @@ impl Layouter {
             loader: Loader::new(settings.loader),
             cache_size: settings.cache_size,
             cached_params: VecDeque::with_capacity(settings.cache_size),
-            cached_results: FxHashMap::with_capacity_and_hasher(settings.cache_size, Default::default()),
+            cached_results: FxHashMap::with_capacity_and_hasher(
+                settings.cache_size,
+                Default::default(),
+            ),
         }
     }
 
