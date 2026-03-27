@@ -146,8 +146,6 @@ impl Cx {
         zbias_step: f32,
         encoder: ObjcId,
         metal_cx: &MetalCx,
-        dpi_factor: f64,
-        pass_size: (f64, f64),
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
@@ -187,8 +185,6 @@ impl Cx {
                     zbias_step,
                     encoder,
                     metal_cx,
-                    dpi_factor,
-                    pass_size,
                 );
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
@@ -500,30 +496,6 @@ impl Cx {
                     );
                 }
 
-                // For draw calls with custom tessellated geometry (DrawSvg/DrawVector),
-                // apply a scissor rect to clip the safe area inset zones. The sweep-line
-                // tessellator produces extreme-aspect-ratio triangles that span hundreds
-                // of SVG units, causing GPU rasterization artifacts where fragments appear
-                // at unexpected screen positions. Standard quad geometry (<=6 indices) is
-                // naturally bounded by its rect and doesn't need this.
-                let insets = &self.display_context.safe_area_insets;
-                let has_safe_insets = insets.top > 0.0 || insets.bottom > 0.0
-                    || insets.left > 0.0 || insets.right > 0.0;
-                let is_custom_geometry = geometry.indices.len() > 6;
-                if has_safe_insets && is_custom_geometry {
-                    let sx = (insets.left * dpi_factor) as u64;
-                    let sy = (insets.top * dpi_factor) as u64;
-                    let sw = ((pass_size.0 - insets.left - insets.right) * dpi_factor) as u64;
-                    let s_h = ((pass_size.1 - insets.top - insets.bottom) * dpi_factor) as u64;
-                    if sw > 0 && s_h > 0 {
-                        let () = unsafe {
-                            msg_send![encoder, setScissorRect: MTLScissorRect {
-                                x: sx, y: sy, width: sw, height: s_h,
-                            }]
-                        };
-                    }
-                }
-
                 self.os.draw_calls_done += 1;
                 self.os.instances_done = self.os.instances_done.saturating_add(instances);
                 self.os.vertices_done = self
@@ -544,17 +516,6 @@ impl Cx {
                     };
                 } else {
                     crate::error!("Drawing error: index_buffer None")
-                }
-
-                // Reset scissor to full screen after custom geometry draw calls
-                if has_safe_insets && is_custom_geometry {
-                    let () = unsafe {
-                        msg_send![encoder, setScissorRect: MTLScissorRect {
-                            x: 0, y: 0,
-                            width: (pass_size.0 * dpi_factor) as u64,
-                            height: (pass_size.1 * dpi_factor) as u64,
-                        }]
-                    };
                 }
             }
         }
@@ -862,8 +823,6 @@ impl Cx {
             zbias_step,
             encoder,
             &metal_cx,
-            dpi_factor,
-            (pass_rect.size.x, pass_rect.size.y),
         );
         let gpu_counters = GpuSampleCounters {
             draw_calls: self.os.draw_calls_done as u64,
