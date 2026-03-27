@@ -1,6 +1,9 @@
 use {
     self::super::{
-        super::select_timer::SelectTimers, x11_sys, xlib_event::XlibEvent, xlib_window::*,
+        super::{select_timer::SelectTimers, wake_pipe::LinuxWakePipe},
+        x11_sys,
+        xlib_event::XlibEvent,
+        xlib_window::*,
     },
     crate::{cursor::MouseCursor, event::*, makepad_math::Vec2d, os::cx_native::EventFlow},
     std::{
@@ -32,7 +35,7 @@ pub struct XlibApp {
     pub clipboard: String,
     pub primary_selection: String,
     pub display_fd: c_int,
-    //pub signal_fds: [c_int; 2],
+    wake_pipe: LinuxWakePipe,
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
 
     pub timers: SelectTimers,
@@ -56,6 +59,14 @@ impl XlibApp {
     pub fn new(event_callback: Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow>) -> XlibApp {
         unsafe {
             let display = x11_sys::XOpenDisplay(ptr::null());
+            if display.is_null() {
+                eprintln!("makepad: X11 backend selected but XOpenDisplay failed");
+                eprintln!(
+                    "makepad: DISPLAY={}",
+                    std::env::var("DISPLAY").unwrap_or_else(|_| "<unset>".to_string())
+                );
+                std::process::exit(1);
+            }
             let display_fd = x11_sys::XConnectionNumber(display);
             x11_sys::setlocale(x11_sys::LC_CTYPE, b"\0".as_ptr() as *const c_char);
             x11_sys::XSetLocaleModifiers(b"\0".as_ptr() as *const c_char);
@@ -65,8 +76,8 @@ impl XlibApp {
                 x11_sys::XSetLocaleModifiers(ptr::null());
                 xim = x11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
             }
-            //let mut signal_fds = [0, 0];
-            //libc_sys::pipe(signal_fds.as_mut_ptr());
+            let mut wake_pipe = LinuxWakePipe::new().expect("failed to create Linux wake pipe");
+            wake_pipe.install_signal_waker();
             x11_sys::XrmInitialize();
             XlibApp {
                 event_loop_running: true,
@@ -75,7 +86,7 @@ impl XlibApp {
                 xim,
                 display,
                 display_fd,
-                //signal_fds,
+                wake_pipe,
                 clipboard: String::new(),
                 primary_selection: String::new(),
                 last_scroll_time: 0.0,
@@ -727,8 +738,19 @@ impl XlibApp {
                                 time: Some(time),
                             }));
                         }
-                        self.timers.select(self.display_fd);
-                        self.event_flow = EventFlow::Poll;
+                        let select_result = self
+                            .timers
+                            .select(self.display_fd, Some(self.wake_pipe.read_fd()));
+                        if select_result.wake_fd_ready {
+                            self.wake_pipe.drain();
+                            self.do_callback(XlibEvent::Wake);
+                        }
+                        if let EventFlow::Exit = self.event_flow {
+                            continue;
+                        }
+                        if select_result.main_fd_ready || select_result.timed_out {
+                            self.event_flow = EventFlow::Poll;
+                        }
                     }
                     EventFlow::Poll => {
                         let time = self.time_now();
@@ -758,6 +780,7 @@ impl XlibApp {
 
     pub fn terminate_event_loop(&mut self) {
         self.event_loop_running = false;
+        self.wake_pipe.uninstall_signal_waker();
         if !self.xim.is_null() {
             unsafe { x11_sys::XCloseIM(self.xim) };
             self.xim = ptr::null_mut();

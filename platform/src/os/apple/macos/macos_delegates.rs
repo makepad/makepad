@@ -30,6 +30,10 @@ pub fn define_macos_timer_delegate() -> *const Class {
         MacosApp::send_paint_event();
     }
 
+    extern "C" fn received_wake(_this: &Object, _: Sel, _obj: ObjcId) {
+        MacosApp::send_wake_event();
+    }
+
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("TimerDelegate", superclass).unwrap();
 
@@ -42,6 +46,10 @@ pub fn define_macos_timer_delegate() -> *const Class {
         decl.add_method(
             sel!(receivedLiveResize:),
             received_live_resize as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(receivedWake:),
+            received_wake as extern "C" fn(&Object, Sel, ObjcId),
         );
     }
 

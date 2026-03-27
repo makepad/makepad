@@ -428,6 +428,10 @@ pub fn define_ios_timer_delegate() -> *const Class {
         IosApp::send_timer_received(nstimer);
     }
 
+    extern "C" fn received_wake(_this: &Object, _: Sel, _obj: ObjcId) {
+        IosApp::send_wake_event();
+    }
+
     extern "C" fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
         IosApp::send_paint_event();
     }
@@ -440,6 +444,10 @@ pub fn define_ios_timer_delegate() -> *const Class {
         decl.add_method(
             sel!(receivedTimer:),
             received_timer as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(receivedWake:),
+            received_wake as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
             sel!(receivedLiveResize:),
@@ -506,6 +514,7 @@ pub fn define_textfield_delegate() -> *const Class {
                     duration,
                 })
             });
+            IosApp::request_wake();
         }
     }
 
@@ -514,6 +523,7 @@ pub fn define_textfield_delegate() -> *const Class {
             try_with_ios_app(|app| {
                 app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidHide { time })
             });
+            IosApp::request_wake();
         }
     }
 
@@ -531,6 +541,7 @@ pub fn define_textfield_delegate() -> *const Class {
                     duration,
                 })
             });
+            IosApp::request_wake();
         }
     }
 
@@ -542,6 +553,7 @@ pub fn define_textfield_delegate() -> *const Class {
             try_with_ios_app(|app| {
                 app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidShow { time, height })
             });
+            IosApp::request_wake();
         }
     }
     extern "C" fn input_mode_did_change(_: &Object, _: Sel, _notif: ObjcId) {

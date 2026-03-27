@@ -8,7 +8,6 @@ use {
         texture::{CxTexturePool, TextureId},
         video_decode::software_video::PlaybackSessionHandle,
         video_decode::yuv::{YuvColorMatrix, YuvPlaneData},
-        PlaybackPrepared,
     },
 };
 
@@ -104,7 +103,9 @@ impl AppleUnifiedVideoPlayer {
         ));
     }
 
-    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(
+        &mut self,
+    ) -> Option<Result<crate::media_plugin::PlaybackPrepared, String>> {
         match &mut self.mode {
             ApplePlayerMode::Native(player) => match player.check_prepared() {
                 Some(Err(err)) => {

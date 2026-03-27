@@ -20,10 +20,6 @@ use {
     },
     makepad_objc_sys::{class, msg_send, sel, sel_impl},
     makepad_studio_protocol::{AppToStudio, GPUSample},
-    makepad_zune_png::{
-        makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions},
-        PngEncoder,
-    },
     std::collections::HashMap,
     std::fmt::Write,
     std::sync::atomic::{AtomicUsize, Ordering},
@@ -64,33 +60,6 @@ impl GpuSampleCounters {
 static METAL_GPU_TIMELINE_SYNC: Mutex<Option<MetalGpuTimelineSync>> = Mutex::new(None);
 static METAL_GPU_FRAME_RANGES: Mutex<Option<HashMap<u64, (f64, f64)>>> = Mutex::new(None);
 static METAL_GPU_FRAME_COUNTERS: Mutex<Option<HashMap<u64, GpuSampleCounters>>> = Mutex::new(None);
-
-fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    let expected = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|px| px.checked_mul(4))
-        .ok_or_else(|| "metal screenshot size overflow".to_string())?;
-    if rgba.len() != expected {
-        return Err(format!(
-            "metal screenshot expected {} RGBA bytes, got {}",
-            expected,
-            rgba.len()
-        ));
-    }
-
-    let options = EncoderOptions::default()
-        .set_width(width as usize)
-        .set_height(height as usize)
-        .set_depth(BitDepth::Eight)
-        .set_colorspace(ColorSpace::RGBA);
-
-    let mut encoder = PngEncoder::new(rgba, options);
-    let mut out = Vec::new();
-    encoder
-        .encode(&mut out)
-        .map_err(|err| format!("metal screenshot png encode failed: {err:?}"))?;
-    Ok(out)
-}
 
 fn map_metal_gpu_times_to_app_timeline(
     raw_start: f64,
@@ -149,6 +118,7 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
+        self.update_draw_list_projective_transform(draw_pass_id, draw_list_id);
         let debug_dump_count = self.draw_lists[draw_list_id].debug_dump_count;
         let debug_dump = debug_dump_count > 0;
         if self.draw_lists[draw_list_id].debug_dump {
@@ -176,12 +146,10 @@ impl Cx {
                 .kind
                 .sub_list()
             {
-                let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
-                let mut child_zbias = 0.0f32;
                 self.render_view(
                     draw_pass_id,
                     sub_list_id,
-                    if child_resets_zbias { &mut child_zbias } else { zbias },
+                    zbias,
                     zbias_step,
                     encoder,
                     metal_cx,
@@ -368,10 +336,11 @@ impl Cx {
                             .saturating_add((draw_list_uniforms.len() * 4 * 2) as u64);
                     }
                     if let Some(id) = shp.dyn_uniform_buffer_id {
-                        let () = msg_send![encoder, setVertexBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
-                        let () = msg_send![encoder, setFragmentBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.dyn_uniforms.len() * 4) as u64 atIndex: id];
+                        let dyn_len = sh.mapping.dyn_uniforms.total_slots;
+                        let () = msg_send![encoder, setVertexBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (dyn_len * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setFragmentBytes: draw_call.dyn_uniforms.as_ptr() as *const std::ffi::c_void length: (dyn_len * 4) as u64 atIndex: id];
                         uniform_bytes_uploaded = uniform_bytes_uploaded
-                            .saturating_add((draw_call.dyn_uniforms.len() * 4 * 2) as u64);
+                            .saturating_add((dyn_len * 4 * 2) as u64);
                     }
                     for (slot, id) in shp.custom_uniform_buffer_ids.iter().enumerate() {
                         let Some(uniform_buffer) = draw_call.uniform_buffer_slots[slot].as_ref()
@@ -686,10 +655,6 @@ impl Cx {
                             setTexture: texture.as_id()
                         ]
                     };
-                    if let Some(cube_face) = color_texture.cube_face {
-                        let () = unsafe { msg_send![color_attachment, setSlice: cube_face as u64] };
-                    }
-                    let () = unsafe { msg_send![color_attachment, setLevel: 0u64] };
                 } else {
                     crate::error!("draw_pass_to_texture invalid render target");
                 }
@@ -858,17 +823,16 @@ impl Cx {
                 let drawable: ObjcId = unsafe { msg_send![view, currentDrawable] };
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
                 let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
-                let screenshot = self.build_screenshot_struct(
+                let captures = self.build_capture_infos(
                     metal_cx,
                     command_buffer,
-                    0,
                     pass_width as usize,
                     pass_height as usize,
-                    first_texture,
+                    Some(first_texture),
                     None,
                 );
                 self.commit_command_buffer(
-                    screenshot,
+                    captures,
                     None,
                     gpu_frame_group_key,
                     true,
@@ -877,8 +841,16 @@ impl Cx {
                 );
             }
             DrawPassMode::Texture => {
-                self.commit_command_buffer(
+                let captures = self.build_capture_infos(
+                    metal_cx,
+                    command_buffer,
+                    pass_width as usize,
+                    pass_height as usize,
                     None,
+                    None,
+                );
+                self.commit_command_buffer(
+                    captures,
                     None,
                     gpu_frame_group_key,
                     false,
@@ -887,8 +859,16 @@ impl Cx {
                 );
             }
             DrawPassMode::StdinTexture => {
-                self.commit_command_buffer(
+                let captures = self.build_capture_infos(
+                    metal_cx,
+                    command_buffer,
+                    pass_width as usize,
+                    pass_height as usize,
                     None,
+                    None,
+                );
+                self.commit_command_buffer(
+                    captures,
                     None,
                     gpu_frame_group_key,
                     false,
@@ -896,24 +876,23 @@ impl Cx {
                     command_buffer,
                 );
             }
-            DrawPassMode::StdinMain(stdin_frame, kind_id) => {
+            DrawPassMode::StdinMain(stdin_frame, _kind_id) => {
                 let main_texture = &self.passes[draw_pass_id].color_textures[0];
                 let tex = &self.textures[main_texture.texture.texture_id()];
-                let screenshot = if let Some(texture) = &tex.os.texture {
-                    self.build_screenshot_struct(
+                let captures = if let Some(texture) = &tex.os.texture {
+                    self.build_capture_infos(
                         metal_cx,
                         command_buffer,
-                        kind_id,
                         pass_width as usize,
                         pass_height as usize,
-                        texture.as_id(),
+                        Some(texture.as_id()),
                         tex.alloc.clone(),
                     )
                 } else {
-                    None
+                    Vec::new()
                 };
                 self.commit_command_buffer(
-                    screenshot,
+                    captures,
                     Some(stdin_frame),
                     gpu_frame_group_key,
                     true,
@@ -924,17 +903,16 @@ impl Cx {
             DrawPassMode::Drawable(drawable) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
                 let () = unsafe { msg_send![command_buffer, presentDrawable: drawable] };
-                let screenshot = self.build_screenshot_struct(
+                let captures = self.build_capture_infos(
                     metal_cx,
                     command_buffer,
-                    0,
                     pass_width as usize,
                     pass_height as usize,
-                    first_texture,
+                    Some(first_texture),
                     None,
                 );
                 self.commit_command_buffer(
-                    screenshot,
+                    captures,
                     None,
                     gpu_frame_group_key,
                     true,
@@ -944,17 +922,16 @@ impl Cx {
             }
             DrawPassMode::Resizing(drawable) => {
                 let first_texture: ObjcId = unsafe { msg_send![drawable, texture] };
-                let screenshot = self.build_screenshot_struct(
+                let captures = self.build_capture_infos(
                     metal_cx,
                     command_buffer,
-                    0,
                     pass_width as usize,
                     pass_height as usize,
-                    first_texture,
+                    Some(first_texture),
                     None,
                 );
                 self.commit_command_buffer(
-                    screenshot,
+                    captures,
                     None,
                     gpu_frame_group_key,
                     true,
@@ -968,33 +945,49 @@ impl Cx {
         let () = unsafe { msg_send![pool, release] };
     }
 
-    fn build_screenshot_struct(
+    fn build_capture_infos(
         &mut self,
         metal_cx: &MetalCx,
         command_buffer: ObjcId,
-        kind_id: usize,
         width: usize,
         height: usize,
-        in_texture: ObjcId,
-        alloc: Option<TextureAlloc>,
-    ) -> Option<ScreenshotInfo> {
-        let request_ids = self.take_studio_screenshot_request_ids(kind_id as u32);
-        let (tex_width, tex_height) = if let Some(alloc) = alloc {
-            (alloc.width, alloc.height)
-        } else {
-            (width, height)
-        };
-        if !request_ids.is_empty() {
+        framebuffer_texture: Option<ObjcId>,
+        framebuffer_alloc: Option<TextureAlloc>,
+    ) -> Vec<CaptureInfo> {
+        let mut infos = Vec::new();
+        let capture_requests = self.take_capture_requests();
+        for request in capture_requests {
+            let (in_texture, tex_width, tex_height) = match request.source {
+                crate::capture::CaptureSource::Framebuffer => {
+                    let Some(in_texture) = framebuffer_texture else { continue };
+                    let (tex_width, tex_height) = if let Some(alloc) = framebuffer_alloc.clone() {
+                        (alloc.width, alloc.height)
+                    } else {
+                        (width, height)
+                    };
+                    (in_texture, tex_width, tex_height)
+                }
+                crate::capture::CaptureSource::CachedView { draw_pass_id } => {
+                    let Some(color_texture) = self.passes[draw_pass_id].color_textures.first() else { continue };
+                    let texture_id = color_texture.texture.texture_id();
+                    let cxtexture = &self.textures[texture_id];
+                    let Some(texture) = cxtexture.os.texture.as_ref() else { continue };
+                    let Some(alloc) = cxtexture.alloc.clone() else { continue };
+                    let dpi = self.passes[draw_pass_id].dpi_factor.unwrap_or(1.0);
+                    let Some(pass_rect) = self.get_pass_rect(draw_pass_id, dpi) else { continue };
+                    let tex_width = ((pass_rect.size.x * dpi).round().max(1.0) as usize).min(alloc.width);
+                    let tex_height = ((pass_rect.size.y * dpi).round().max(1.0) as usize).min(alloc.height);
+                    (texture.as_id(), tex_width, tex_height)
+                }
+            };
+
             let descriptor = RcObjcId::from_owned(
                 NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
             );
-            let _: () =
-                unsafe { msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2] };
+            let _: () = unsafe { msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
-            let _: () =
-                unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared] };
-            let _: () =
-                unsafe { msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead] };
+            let _: () = unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Shared] };
+            let _: () = unsafe { msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setWidth: tex_width as u64] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setHeight: tex_height as u64] };
             let _: () = unsafe {
@@ -1008,69 +1001,65 @@ impl Cx {
                 let () = msg_send![blit_encoder, synchronizeTexture: texture slice:0 level:0];
                 let () = msg_send![blit_encoder, endEncoding];
             };
-            return Some(ScreenshotInfo {
-                request_ids,
-                width: width as _,
-                height: height as _,
-                texture: texture,
+            infos.push(CaptureInfo {
+                request_id: request.request_id,
+                width: tex_width,
+                height: tex_height,
+                texture,
             });
         }
-        None
+        infos
     }
 
     fn commit_command_buffer(
         &self,
-        screenshot_info: Option<ScreenshotInfo>,
+        capture_infos: Vec<CaptureInfo>,
         stdin_frame: Option<PresentableDraw>,
         gpu_frame_group_key: Option<u64>,
         flush_gpu_frame_group: bool,
         gpu_counters: GpuSampleCounters,
         command_buffer: ObjcId,
     ) {
-        let screenshot_info = Mutex::new(screenshot_info);
+        let capture_infos = Mutex::new(capture_infos);
         //let present_index = Arc::clone(&self.os.present_index);
         //Self::stdin_send_draw_complete(&present_index);
         let start_time = self.os.start_time.unwrap();
+        let self_ref = self.self_ref.clone();
         let () = unsafe {
             msg_send![
                 command_buffer,
                 addCompletedHandler: &objc_block!(move | command_buffer: ObjcId | {
-                    // alright lets grab a texture if need be
-                    if let Some(sf) = &*screenshot_info.lock().unwrap(){
-                        let mut bgra = vec![0u8; sf.width * sf.height * 4];
-                        let region = MTLRegion {
-                            origin: MTLOrigin {x: 0, y: 0, z: 0},
-                            size: MTLSize {width: sf.width as u64, height: sf.height as u64, depth: 1}
-                        };
-                        let _:() = unsafe{msg_send![
-                            sf.texture,
-                            getBytes: bgra.as_mut_ptr()
-                            bytesPerRow: sf.width *4
-                            bytesPerImage: sf.width * sf.height * 4
-                            fromRegion: region
-                            mipmapLevel: 0
-                            slice: 0
-                        ]};
-                        let () = msg_send![sf.texture, release];
-
-                        // Metal readback for BGRA8 textures returns BGRA bytes. Convert to RGBA
-                        // before PNG encoding so AppToStudio::Screenshot always transports PNG bytes.
-                        for px in bgra.chunks_exact_mut(4) {
-                            px.swap(0, 2);
-                        }
-                        let png = match encode_png_rgba(sf.width as u32, sf.height as u32, &bgra) {
-                            Ok(png) => png,
-                            Err(err) => {
-                                crate::error!("{}", err);
-                                Vec::new()
+                    if let Some(cx_rc) = self_ref.clone() {
+                        let mut captures = capture_infos.lock().unwrap();
+                        for capture in captures.drain(..) {
+                            let mut bgra = vec![0u8; capture.width * capture.height * 4];
+                            let region = MTLRegion {
+                                origin: MTLOrigin {x: 0, y: 0, z: 0},
+                                size: MTLSize {width: capture.width as u64, height: capture.height as u64, depth: 1}
+                            };
+                            let _:() = unsafe{msg_send![
+                                capture.texture,
+                                getBytes: bgra.as_mut_ptr()
+                                bytesPerRow: capture.width *4
+                                bytesPerImage: capture.width * capture.height * 4
+                                fromRegion: region
+                                mipmapLevel: 0
+                                slice: 0
+                            ]};
+                            let () = msg_send![capture.texture, release];
+                            for px in bgra.chunks_exact_mut(4) {
+                                px.swap(0, 2);
                             }
-                        };
-                        Cx::send_studio_screenshot_response(
-                            sf.request_ids.clone(),
-                            sf.width as _,
-                            sf.height as _,
-                            png,
-                        );
+                            if let Ok(mut cx) = cx_rc.try_borrow_mut() {
+                                cx.push_capture_result(crate::capture::CaptureResult {
+                                    request_id: capture.request_id,
+                                    width: capture.width as u32,
+                                    height: capture.height as u32,
+                                    rgba: bgra,
+                                });
+                                cx.flush_studio_screenshot_results();
+                            }
+                        }
                     }
 
                     let raw_start: f64 = unsafe { msg_send![command_buffer, GPUStartTime] };
@@ -1292,10 +1281,10 @@ impl Cx {
 }
 
 #[derive(Clone)]
-struct ScreenshotInfo {
+struct CaptureInfo {
     width: usize,
     height: usize,
-    request_ids: Vec<u64>,
+    request_id: u64,
     texture: ObjcId,
 }
 
@@ -1436,7 +1425,6 @@ impl DrawVars {
             // Not in function cache, need to compile
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Metal;
-            output.use_vulkan = false;
 
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
@@ -2311,26 +2299,16 @@ impl CxTexture {
             let descriptor = RcObjcId::from_owned(
                 NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
             );
-            let is_cube = matches!(&self.format, TextureFormat::RenderCubeBGRAu8 { .. });
 
-            let _: () = unsafe {
-                msg_send![
-                    descriptor.as_id(),
-                    setTextureType: if is_cube {
-                        MTLTextureType::Cube
-                    } else {
-                        MTLTextureType::D2
-                    }
-                ]
-            };
+            let _: () =
+                unsafe { msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setWidth: alloc.width as u64] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setHeight: alloc.height as u64] };
             let _: () = unsafe { msg_send![descriptor.as_id(), setDepth: 1u64] };
             let _: () =
                 unsafe { msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private] };
-            let _: () = unsafe {
-                msg_send![descriptor.as_id(), setUsage: (MTLTextureUsage::RenderTarget as u64 | MTLTextureUsage::ShaderRead as u64)]
-            };
+            let _: () =
+                unsafe { msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget] };
             let _: () = unsafe {
                 msg_send![descriptor.as_id(),setPixelFormat: texture_pixel_to_mtl_pixel(&alloc.pixel)]
             };

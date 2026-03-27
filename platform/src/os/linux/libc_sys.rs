@@ -96,6 +96,12 @@ pub unsafe fn FD_SET(fd: c_int, set: *mut fd_set) -> () {
     return;
 }
 
+pub unsafe fn FD_ISSET(fd: c_int, set: *const fd_set) -> bool {
+    let fd = fd as usize;
+    let size = mem::size_of_val(&(*set).fds_bits[0]) * 8;
+    ((*set).fds_bits[fd / size] & (1 << (fd % size))) != 0
+}
+
 pub unsafe fn FD_ZERO(set: *mut fd_set) -> () {
     for slot in (*set).fds_bits.iter_mut() {
         *slot = 0;

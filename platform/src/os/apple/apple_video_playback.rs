@@ -5,7 +5,6 @@ use {
         makepad_live_id::LiveId,
         os::apple::apple_sys::*,
         texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel},
-        PlaybackPrepared,
     },
     std::{ffi::c_void, ptr::NonNull},
 };
@@ -207,7 +206,9 @@ impl AppleVideoPlayer {
 
     /// Check if the player item has become ready to play or has failed.
     /// Returns `Ok(...)` with metadata when ready, `Err(msg)` on failure, `None` if still loading.
-    pub fn check_prepared(&mut self) -> Option<Result<PlaybackPrepared, String>> {
+    pub fn check_prepared(
+        &mut self,
+    ) -> Option<Result<crate::media_plugin::PlaybackPrepared, String>> {
         if self.prepare_notified {
             return None;
         }
@@ -272,14 +273,14 @@ impl AppleVideoPlayer {
                     vec![]
                 };
 
-                return Some(Ok(PlaybackPrepared::new(
+                return Some(Ok(crate::media_plugin::PlaybackPrepared {
                     width,
                     height,
                     duration_ms,
                     is_seekable,
                     video_tracks,
                     audio_tracks,
-                )));
+                }));
             }
 
             // AVPlayerItemStatusFailed = 2

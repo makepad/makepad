@@ -50,12 +50,51 @@ pub fn wayland_event_loop(cx: Rc<RefCell<Cx>>) {
     WaylandCx::event_loop_impl(cx);
 }
 
+const INTERNAL_MEDIA_POLL_TIMER_ID: u64 = 0;
+const INTERNAL_MEDIA_POLL_INTERVAL: f64 = 0.008;
+
 pub(crate) struct WaylandCx {
     cx: Rc<RefCell<Cx>>,
     qhandle: Option<wayland_client::QueueHandle<WaylandState>>,
 }
 
 impl WaylandCx {
+    fn sync_internal_media_poll_timer(cx: &Cx, state: &mut WaylandState) {
+        let wants_timer = !cx.os.video_players.is_empty();
+        let has_timer = state.timers.has_timer(INTERNAL_MEDIA_POLL_TIMER_ID);
+        if wants_timer && !has_timer {
+            state.start_timer(INTERNAL_MEDIA_POLL_TIMER_ID, INTERNAL_MEDIA_POLL_INTERVAL, true);
+        } else if !wants_timer && has_timer {
+            state.stop_timer(INTERNAL_MEDIA_POLL_TIMER_ID);
+        }
+    }
+
+    fn should_poll_after_callback(cx: &Cx) -> bool {
+        !cx.platform_ops.is_empty()
+            || cx.any_passes_dirty()
+            || cx.need_redrawing()
+            || !cx.new_next_frames.is_empty()
+    }
+
+    fn handle_wake_event(cx: &mut Cx) {
+        if SignalToUI::check_and_clear_ui_signal() {
+            cx.handle_media_signals();
+            cx.handle_script_signals();
+            cx.call_event_handler(&Event::Signal);
+            crate::single_instance::enqueue_initial_app_open_if_enabled();
+            let items = crate::single_instance::drain_app_open_items();
+            if !items.is_empty() {
+                cx.call_event_handler(&Event::AppOpen(items));
+            }
+        }
+        if SignalToUI::check_and_clear_action_signal() {
+            cx.handle_action_receiver();
+        }
+        cx.poll_control_channel();
+        cx.handle_actions();
+        cx.handle_networking_events();
+    }
+
     pub fn event_loop_impl(cx: Rc<RefCell<Cx>>) {
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::LinuxWindow(LinuxWindowParams {
@@ -128,7 +167,6 @@ impl WaylandCx {
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
 
-        app.start_timer(0, 0.008, true);
         app.event_loop();
     }
 
@@ -150,6 +188,7 @@ impl WaylandCx {
 
         match event {
             XlibEvent::Paint
+            | XlibEvent::Wake
             | XlibEvent::Timer(_)
             | XlibEvent::MouseMove(_)
             | XlibEvent::WindowDragQuery(_)
@@ -264,9 +303,12 @@ impl WaylandCx {
                         cx.opengl_compile_shaders();
                     }
                 }
-                // ok here we send out to all our childprocesses
-
                 self.handle_repaint(state);
+            }
+            XlibEvent::Wake => {
+                let mut cx = self.cx.borrow_mut();
+                Self::handle_wake_event(&mut cx);
+                cx.run_live_edit_if_needed("linux-wayland");
             }
             XlibEvent::MouseMove(e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -349,25 +391,7 @@ impl WaylandCx {
             }
             XlibEvent::Timer(e) => {
                 let mut cx = self.cx.borrow_mut();
-                if e.timer_id == 0 {
-                    if SignalToUI::check_and_clear_ui_signal() {
-                        cx.handle_media_signals();
-                        cx.handle_script_signals();
-                        cx.call_event_handler(&Event::Signal);
-                        crate::single_instance::enqueue_initial_app_open_if_enabled();
-                        let items = crate::single_instance::drain_app_open_items();
-                        if !items.is_empty() {
-                            cx.call_event_handler(&Event::AppOpen(items));
-                        }
-                    }
-                    if SignalToUI::check_and_clear_action_signal() {
-                        cx.handle_action_receiver();
-                    }
-                    cx.poll_control_channel();
-                    cx.handle_actions();
-                    cx.handle_networking_events();
-
-                    // Poll video players on the timer tick (every ~8ms).
+                if e.timer_id == INTERNAL_MEDIA_POLL_TIMER_ID {
                     if !cx.os.video_players.is_empty() {
                         cx.os.opengl_cx.as_ref().unwrap().make_current();
                         let gl: *const crate::os::linux::gl_sys::LibGl =
@@ -456,11 +480,21 @@ impl WaylandCx {
                     cx.call_event_handler(&Event::Timer(e))
                 }
 
+                Self::sync_internal_media_poll_timer(&cx, state);
                 cx.run_live_edit_if_needed("linux-wayland");
-                return EventFlow::Wait;
+                return if Self::should_poll_after_callback(&cx) {
+                    EventFlow::Poll
+                } else {
+                    EventFlow::Wait
+                };
             }
         }
-        return EventFlow::Poll;
+        let cx = self.cx.borrow();
+        if Self::should_poll_after_callback(&cx) {
+            EventFlow::Poll
+        } else {
+            EventFlow::Wait
+        }
     }
 
     fn app_event_callback(&mut self, wayland_app: &mut WaylandApp, event: XlibEvent) -> EventFlow {
@@ -1009,6 +1043,7 @@ impl WaylandCx {
                 }
             }
         }
+        Self::sync_internal_media_poll_timer(&cx, state);
         ret
     }
 

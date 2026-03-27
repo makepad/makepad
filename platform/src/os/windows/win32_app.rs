@@ -19,7 +19,10 @@ use {
             core::PCWSTR,
             //core::IntoParam,
             Win32::{
-                Foundation::{COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HWND, S_OK},
+                Foundation::{
+                    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HWND, LPARAM, S_OK,
+                    WPARAM,
+                },
                 Graphics::Gdi::{
                     CreateSolidBrush, GetDC, GetDeviceCaps, MonitorFromWindow, HMONITOR,
                     LOGPIXELSX, MONITOR_DEFAULTTONEAREST,
@@ -32,7 +35,7 @@ use {
                         DROPEFFECT_MOVE,
                     },
                     Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
-                    Threading::ExitProcess,
+                    Threading::{ExitProcess, GetCurrentThreadId},
                 },
                 UI::{
                     HiDpi::{
@@ -42,15 +45,17 @@ use {
                     },
                     WindowsAndMessaging::{
                         DispatchMessageW, GetMessageW, IsGUIThread, IsProcessDPIAware, KillTimer,
-                        LoadCursorW, LoadIconW, PeekMessageW, RegisterClassExW, SetCursor,
-                        SetTimer, ShowCursor, TranslateMessage, CS_HREDRAW, CS_OWNDC, CS_VREDRAW,
-                        HICON, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO,
-                        IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
-                        IDI_WINLOGO, PM_REMOVE, WM_QUIT, WNDCLASSEXW,
+                        LoadCursorW, LoadIconW, PeekMessageW, PostThreadMessageW,
+                        RegisterClassExW, SetCursor, SetTimer, ShowCursor, TranslateMessage,
+                        CS_HREDRAW, CS_OWNDC, CS_VREDRAW, HICON, IDC_ARROW, IDC_CROSS, IDC_HAND,
+                        IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
+                        IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, MSG, PM_NOREMOVE, PM_REMOVE,
+                        WM_APP, WM_QUIT, WNDCLASSEXW,
                     },
                 },
             },
         },
+        thread::{SignalToUI, WakeHookHandle},
     },
     std::{
         cell::{Cell, RefCell},
@@ -61,6 +66,7 @@ use {
 };
 pub const FALSE: BOOL = BOOL(0);
 pub const TRUE: BOOL = BOOL(1);
+const WM_MAKEPAD_SIGNAL: u32 = WM_APP + 1;
 
 thread_local! {
     pub static WIN32_APP: RefCell<Option<Win32App>> = RefCell::new(None);
@@ -93,7 +99,8 @@ pub struct Win32App {
     pub all_windows: Vec<HWND>,
     pub time: Win32Time,
     pub timers: Vec<Win32Timer>,
-    pub was_signal_poll: bool,
+    pub wake_thread_id: u32,
+    pub wake_hook: Option<WakeHookHandle>,
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
     pub current_cursor: Option<MouseCursor>,
@@ -115,9 +122,6 @@ pub enum Win32Timer {
         win32_id: usize,
     },
     DragDrop {
-        win32_id: usize,
-    },
-    SignalPoll {
         win32_id: usize,
     },
 }
@@ -150,6 +154,31 @@ impl Win32Time {
 }
 
 impl Win32App {
+    fn install_signal_waker(&mut self) {
+        self.uninstall_signal_waker();
+        let wake_thread_id = self.wake_thread_id;
+        self.wake_hook = Some(SignalToUI::set_wake_hook(move || {
+            unsafe {
+                let _ = PostThreadMessageW(wake_thread_id, WM_MAKEPAD_SIGNAL, WPARAM(0), LPARAM(0));
+            }
+        }));
+    }
+
+    fn uninstall_signal_waker(&mut self) {
+        if let Some(wake_hook) = self.wake_hook.take() {
+            SignalToUI::clear_wake_hook(wake_hook);
+        }
+    }
+
+    fn process_message(msg: &MSG) -> bool {
+        if msg.message == WM_MAKEPAD_SIGNAL {
+            Win32App::do_callback(Win32Event::Signal);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn new(event_callback: Box<dyn FnMut(Win32Event) -> EventFlow>) -> Win32App {
         let window_class_name = encode_wide("MakepadWindow\0");
         let (hicon_big, hicon_small) = Self::create_default_icons();
@@ -165,28 +194,33 @@ impl Win32App {
             ..Default::default()
         };
 
-        unsafe {
+        let wake_thread_id = unsafe {
             RegisterClassExW(&class);
             let _ = IsGUIThread(true);
+            let mut msg = MSG::default();
+            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
 
             // initialize COM using OleInitialize to allow Drag&Drop and other shell features
             OleInitialize(None).unwrap();
-        }
+            GetCurrentThreadId()
+        };
 
-        let win32_app = Win32App {
+        let mut win32_app = Win32App {
             start_dragging_items: None,
             window_class_name,
-            was_signal_poll: false,
             time: Win32Time::new(),
             event_callback: Some(event_callback),
             event_flow: EventFlow::Poll,
             all_windows: Vec::new(),
             timers: Vec::new(),
+            wake_thread_id,
+            wake_hook: None,
             dpi_functions: DpiFunctions::new(),
             current_cursor: None,
             currently_clicked_window_id: None,
             is_dragging_internal: Cell::new(false),
         };
+        win32_app.install_signal_waker();
         win32_app.dpi_functions.become_dpi_aware();
 
         win32_app
@@ -269,15 +303,12 @@ impl Win32App {
                         let ret = GetMessageW(msg.as_mut_ptr(), None, 0, 0);
                         let msg = msg.assume_init();
                         if ret == FALSE {
-                            // Only happens if the message is `WM_QUIT`.
                             debug_assert_eq!(msg.message, WM_QUIT);
                             with_win32_app(|app| app.event_flow = EventFlow::Exit);
-                        } else {
+                        } else if !Self::process_message(&msg) {
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
-                            if !with_win32_app(|app| app.was_signal_poll()) {
-                                Win32App::do_callback(Win32Event::Paint);
-                            }
+                            Win32App::do_callback(Win32Event::Paint);
                         }
                     }
                     EventFlow::Poll => {
@@ -286,7 +317,7 @@ impl Win32App {
                         let msg = msg.assume_init();
                         if ret == FALSE {
                             Win32App::do_callback(Win32Event::Paint)
-                        } else {
+                        } else if !Self::process_message(&msg) {
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                         }
@@ -304,6 +335,7 @@ impl Win32App {
             let event_flow = callback(event);
             with_win32_app(|app| app.event_flow = event_flow);
             if let EventFlow::Exit = event_flow {
+                with_win32_app(|app| app.uninstall_signal_waker());
                 unsafe {
                     ExitProcess(0);
                 }
@@ -347,12 +379,6 @@ impl Win32App {
                                 break;
                             }
                         }
-                        Win32Timer::SignalPoll { win32_id, .. } => {
-                            if win32_id == in_win32_id {
-                                hit_timer = Some(app.timers[slot].clone());
-                                break;
-                            }
-                        }
                         _ => (),
                     }
                 }
@@ -375,21 +401,8 @@ impl Win32App {
                 Win32Timer::DragDrop { .. } => {
                     Win32App::do_callback(Win32Event::Paint);
                 }
-                Win32Timer::SignalPoll { .. } => {
-                    Win32App::do_callback(Win32Event::Signal);
-                    with_win32_app(|app| app.was_signal_poll = true);
-                }
                 _ => (),
             }
-        }
-    }
-
-    pub fn was_signal_poll(&mut self) -> bool {
-        if self.was_signal_poll {
-            self.was_signal_poll = false;
-            true
-        } else {
-            false
         }
     }
 
@@ -409,16 +422,12 @@ impl Win32App {
         let slot = self.get_free_timer_slot();
         let win32_id =
             unsafe { SetTimer(None, 0, (interval * 1000.0) as u32, Some(Self::timer_proc)) };
-        if timer_id == 0 {
-            self.timers[slot] = Win32Timer::SignalPoll { win32_id: win32_id };
-        } else {
-            self.timers[slot] = Win32Timer::Timer {
-                timer_id: timer_id,
-                win32_id: win32_id,
-                interval: interval,
-                repeats: repeats,
-            };
-        }
+        self.timers[slot] = Win32Timer::Timer {
+            timer_id: timer_id,
+            win32_id: win32_id,
+            interval: interval,
+            repeats: repeats,
+        };
     }
 
     pub fn stop_timer(&mut self, which_timer_id: u64) {
@@ -505,12 +514,6 @@ impl Win32App {
                 }
             })
         }
-    }
-
-    pub fn start_signal_poll(&mut self) {
-        let slot = self.get_free_timer_slot();
-        let win32_id = unsafe { SetTimer(None, 0, 8 as u32, Some(Self::timer_proc)) };
-        self.timers[slot] = Win32Timer::SignalPoll { win32_id: win32_id };
     }
 
     pub fn stop_resize(&mut self) {
