@@ -64,11 +64,8 @@ impl Cx {
                 cx.win32_event_callback(event, &mut d3d11_cx, &mut d3d11_windows)
             }
         }));
-        // the signal poll timer
-        with_win32_app(|app| app.start_timer(0, 0.008, true));
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
-        with_win32_app(|app| app.start_signal_poll());
         Win32App::event_loop();
     }
 

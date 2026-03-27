@@ -15,6 +15,7 @@ pub enum IosEvent {
     WindowLostFocus(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     Paint,
+    Wake,
     VirtualKeyboard(VirtualKeyboardEvent),
     MouseDown(MouseDownEvent),
     MouseUp(MouseUpEvent),

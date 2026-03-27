@@ -11,10 +11,16 @@ pub struct SelectTimer {
 }
 
 pub struct SelectTimers {
-    //pub signal_fds: [c_int; 2],
     pub timers: VecDeque<SelectTimer>,
     pub time_start: Instant,
     pub select_time: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SelectResult {
+    pub main_fd_ready: bool,
+    pub wake_fd_ready: bool,
+    pub timed_out: bool,
 }
 
 impl SelectTimers {
@@ -26,27 +32,27 @@ impl SelectTimers {
         }
     }
 
-    pub fn select(&mut self, fd: c_int) {
+    pub fn has_timer(&self, id: u64) -> bool {
+        self.timers.iter().any(|timer| timer.id == id)
+    }
+
+    pub fn select(&mut self, main_fd: c_int, wake_fd: Option<c_int>) -> SelectResult {
         let mut fds = mem::MaybeUninit::uninit();
         unsafe {
             libc_sys::FD_ZERO(fds.as_mut_ptr());
-            libc_sys::FD_SET(0, fds.as_mut_ptr());
-            libc_sys::FD_SET(fd, fds.as_mut_ptr());
+            libc_sys::FD_SET(main_fd, fds.as_mut_ptr());
+            if let Some(wake_fd) = wake_fd {
+                libc_sys::FD_SET(wake_fd, fds.as_mut_ptr());
+            }
         }
-        //libc_sys::FD_SET(self.signal_fds[0], fds.as_mut_ptr());
-        // If there are any timers, we set the timeout for select to the `delta_timeout`
-        // of the first timer that should be fired. Otherwise, we set the timeout to
-        // None, so that select will block indefinitely.
         let mut timeout = self.timers.front().map(|timer| libc_sys::timeval {
-            // `tv_sec` is in seconds, so take the integer part of `delta_timeout`
             tv_sec: timer.delta_timeout.trunc() as libc_sys::time_t,
-            // `tv_usec` is in microseconds, so take the fractional part of
-            // `delta_timeout` 1000000.0.
             tv_usec: (timer.delta_timeout.fract() * 1000_000.0) as libc_sys::time_t,
         });
-        let _nfds = unsafe {
+        let nfds = wake_fd.map_or(main_fd, |wake_fd| main_fd.max(wake_fd)) + 1;
+        let result = unsafe {
             libc_sys::select(
-                fd + 1,
+                nfds,
                 fds.as_mut_ptr(),
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -56,6 +62,20 @@ impl SelectTimers {
                     .unwrap_or(ptr::null_mut()),
             )
         };
+
+        if result <= 0 {
+            return SelectResult {
+                timed_out: result == 0,
+                ..Default::default()
+            };
+        }
+
+        let fds = unsafe { fds.assume_init() };
+        SelectResult {
+            main_fd_ready: unsafe { libc_sys::FD_ISSET(main_fd, &fds) },
+            wake_fd_ready: wake_fd.is_some_and(|wake_fd| unsafe { libc_sys::FD_ISSET(wake_fd, &fds) }),
+            timed_out: false,
+        }
     }
 
     pub fn time_now(&self) -> f64 {
@@ -68,11 +88,7 @@ impl SelectTimers {
         let last_select_time = self.select_time;
         self.select_time = self.time_now();
         let mut select_time_used = self.select_time - last_select_time;
-        //println!("{}", self.timers.len());
         while let Some(timer) = self.timers.front_mut() {
-            // If the amount of time that elapsed is less than `delta_timeout` for the
-            // next timer, then no more timers need to be fired.
-            //  println!("TIMER COMPARE {} {}", select_time_used, timer.delta_timeout);
             if select_time_used < timer.delta_timeout {
                 timer.delta_timeout -= select_time_used;
                 break;
@@ -81,9 +97,7 @@ impl SelectTimers {
             let timer = *self.timers.front().unwrap();
             select_time_used -= timer.delta_timeout;
 
-            // Stop the timer to remove it from the list.
-            self.stop_timer(timer.id);
-            // If the timer is repeating, simply start it again.
+            self.remove_timer_at(0, false);
             if timer.repeats {
                 self.start_timer(timer.id, timer.timeout, timer.repeats);
             }
@@ -145,18 +159,20 @@ impl SelectTimers {
     }
 
     pub fn stop_timer(&mut self, id: u64) {
-        //println!("STOPPING TIMER {:?}", id);
-
-        // Since we are stopping an existing timer, our first step is to find where in the list this
-        // timer should be removed.
         let index = if let Some(index) = self.timers.iter().position(|timer| timer.id == id) {
             index
         } else {
             return;
         };
+        self.remove_timer_at(index, true);
+    }
 
-        // Remove the timer from the list.
-        // The timer being removed is always the first one in the queue, so it can just be removed directly.
-        self.timers.remove(index);
+    fn remove_timer_at(&mut self, index: usize, transfer_delta_to_successor: bool) {
+        let removed = self.timers.remove(index).unwrap();
+        if transfer_delta_to_successor {
+            if let Some(next_timer) = self.timers.get_mut(index) {
+                next_timer.delta_timeout += removed.delta_timeout;
+            }
+        }
     }
 }

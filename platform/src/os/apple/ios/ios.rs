@@ -480,76 +480,80 @@ impl Cx {
         }
     }
 
+    fn should_poll_after_callback(&self, paint_dirty: bool) -> bool {
+        !self.platform_ops.is_empty()
+            || self.any_passes_dirty()
+            || self.need_redrawing()
+            || !self.new_next_frames.is_empty()
+            || paint_dirty
+            || self.demo_time_repaint
+            || !self.os.video_players.is_empty()
+            || !self.os.camera_players.is_empty()
+    }
+
+    fn handle_wake_event(&mut self) {
+        if let Some(vk) = with_ios_app(|app| app.virtual_keyboard_event.take()) {
+            self.call_event_handler(&Event::VirtualKeyboard(vk));
+        }
+
+        let queued_events = with_ios_app(|app| std::mem::take(&mut app.queued_text_events));
+        let time = with_ios_app(|app| app.time_now());
+        for queued_event in queued_events {
+            match queued_event {
+                ios_app::IosTextInputEvent::TextInput(input, replace_last) => {
+                    self.call_event_handler(&Event::TextInput(TextInputEvent {
+                        input,
+                        replace_last,
+                        was_paste: false,
+                        ..Default::default()
+                    }));
+                }
+                ios_app::IosTextInputEvent::RangeReplace(start, end, text) => {
+                    self.call_event_handler(&Event::TextRangeReplace(TextRangeReplaceEvent {
+                        start,
+                        end,
+                        text,
+                    }));
+                }
+                ios_app::IosTextInputEvent::KeyEvent(key_code) => {
+                    self.call_event_handler(&Event::KeyDown(KeyEvent {
+                        key_code,
+                        is_repeat: false,
+                        modifiers: Default::default(),
+                        time,
+                    }));
+                    self.call_event_handler(&Event::KeyUp(KeyEvent {
+                        key_code,
+                        is_repeat: false,
+                        modifiers: Default::default(),
+                        time,
+                    }));
+                }
+            }
+        }
+
+        if SignalToUI::check_and_clear_ui_signal() {
+            self.handle_media_signals();
+            self.handle_script_signals();
+            self.call_event_handler(&Event::Signal);
+            let items = crate::single_instance::drain_app_open_items();
+            if !items.is_empty() {
+                self.call_event_handler(&Event::AppOpen(items));
+            }
+        }
+        if SignalToUI::check_and_clear_action_signal() {
+            self.handle_action_receiver();
+        }
+
+        self.run_live_edit_if_needed("ios");
+        self.handle_networking_events();
+        self.handle_permission_events();
+    }
+
     fn ios_event_callback(&mut self, event: IosEvent, metal_cx: &mut MetalCx) -> EventFlow {
         self.handle_platform_ops(metal_cx);
 
-        // send a mouse up when dragging starts
-
         let mut paint_dirty = false;
-        match &event {
-            IosEvent::KeyDown(_) | IosEvent::KeyUp(_) | IosEvent::TextInput(_) => {}
-            IosEvent::Timer(te) => {
-                if te.timer_id == 0 {
-                    let vk = with_ios_app(|app| app.virtual_keyboard_event.take());
-                    if let Some(vk) = vk {
-                        self.call_event_handler(&Event::VirtualKeyboard(vk));
-                    }
-                    // Drain iOS text events as one batch to avoid re-entrancy from UITextInput callbacks.
-                    let queued_events =
-                        with_ios_app(|app| std::mem::take(&mut app.queued_text_events));
-                    let time = with_ios_app(|app| app.time_now());
-                    for queued_event in queued_events {
-                        match queued_event {
-                            ios_app::IosTextInputEvent::TextInput(input, replace_last) => {
-                                self.call_event_handler(&Event::TextInput(TextInputEvent {
-                                    input,
-                                    replace_last,
-                                    was_paste: false,
-                                    ..Default::default()
-                                }));
-                            }
-                            ios_app::IosTextInputEvent::RangeReplace(start, end, text) => {
-                                self.call_event_handler(&Event::TextRangeReplace(
-                                    TextRangeReplaceEvent { start, end, text },
-                                ));
-                            }
-                            ios_app::IosTextInputEvent::KeyEvent(key_code) => {
-                                self.call_event_handler(&Event::KeyDown(KeyEvent {
-                                    key_code,
-                                    is_repeat: false,
-                                    modifiers: Default::default(),
-                                    time,
-                                }));
-                                self.call_event_handler(&Event::KeyUp(KeyEvent {
-                                    key_code,
-                                    is_repeat: false,
-                                    modifiers: Default::default(),
-                                    time,
-                                }));
-                            }
-                        }
-                    }
-                    // check signals
-                    if SignalToUI::check_and_clear_ui_signal() {
-                        self.handle_media_signals();
-                        self.handle_script_signals();
-                        self.call_event_handler(&Event::Signal);
-                        let items = crate::single_instance::drain_app_open_items();
-                        if !items.is_empty() {
-                            self.call_event_handler(&Event::AppOpen(items));
-                        }
-                    }
-                    if SignalToUI::check_and_clear_action_signal() {
-                        self.handle_action_receiver();
-                    }
-
-                    self.run_live_edit_if_needed("ios");
-                    self.handle_networking_events();
-                    self.handle_permission_events();
-                }
-            }
-            _ => (),
-        }
 
         //self.process_desktop_pre_event(&mut event);
         match event {
@@ -557,7 +561,6 @@ impl Cx {
                 self.call_event_handler(&Event::VirtualKeyboard(vk));
             }
             IosEvent::Init => {
-                with_ios_app(|app| app.start_timer(0, 0.008, true));
                 self.start_studio_websocket_delayed();
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
@@ -577,6 +580,9 @@ impl Cx {
                 window.window_geom = re.new_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(re));
                 self.redraw_all();
+            }
+            IosEvent::Wake => {
+                self.handle_wake_event();
             }
             IosEvent::Paint => {
                 // Poll video players for new frames and preparation status
@@ -797,14 +803,7 @@ impl Cx {
             }
         }
 
-        if self.any_passes_dirty()
-            || self.need_redrawing()
-            || self.new_next_frames.len() != 0
-            || paint_dirty
-            || self.demo_time_repaint
-            || !self.os.video_players.is_empty()
-            || !self.os.camera_players.is_empty()
-        {
+        if self.should_poll_after_callback(paint_dirty) {
             EventFlow::Poll
         } else {
             EventFlow::Wait
@@ -1360,6 +1359,7 @@ impl Cx {
                 };
 
                 let _ = sender.send(permission_result);
+                SignalToUI::set_ui_signal();
             });
 
             let () = msg_send![av_audio_session, requestRecordPermission: &completion_handler];
@@ -1384,6 +1384,7 @@ impl Cx {
                     },
                 };
                 let _ = sender.send(permission_result);
+                SignalToUI::set_ui_signal();
             });
             let () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType: AVMediaTypeVideo completionHandler: &completion_handler];
         }

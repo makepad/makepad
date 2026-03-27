@@ -1,7 +1,7 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{channel, Receiver, RecvError, SendError, Sender, TryRecvError},
-    Arc,
+    Arc, Mutex,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -9,14 +9,50 @@ pub struct SignalToUI(Arc<AtomicBool>);
 
 static UI_SIGNAL: AtomicBool = AtomicBool::new(false);
 static ACTION_SIGNAL: AtomicBool = AtomicBool::new(false);
+static NEXT_WAKE_HOOK_ID: AtomicU64 = AtomicU64::new(1);
+static WAKE_HOOK: Mutex<Option<(u64, Arc<dyn Fn() + Send + Sync + 'static>)>> = Mutex::new(None);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WakeHookHandle(u64);
+
+fn notify_wake_hook() {
+    let wake_hook = WAKE_HOOK
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|(_, wake_hook)| Arc::clone(wake_hook));
+    if let Some(wake_hook) = wake_hook {
+        wake_hook();
+    }
+}
 
 impl SignalToUI {
+    pub fn set_wake_hook(wake_hook: impl Fn() + Send + Sync + 'static) -> WakeHookHandle {
+        let id = NEXT_WAKE_HOOK_ID.fetch_add(1, Ordering::Relaxed);
+        *WAKE_HOOK.lock().unwrap() = Some((id, Arc::new(wake_hook)));
+        WakeHookHandle(id)
+    }
+
+    pub fn clear_wake_hook(handle: WakeHookHandle) {
+        let mut wake_hook = WAKE_HOOK.lock().unwrap();
+        if wake_hook
+            .as_ref()
+            .is_some_and(|(id, _)| *id == handle.0)
+        {
+            *wake_hook = None;
+        }
+    }
+
     pub fn set_ui_signal() {
-        UI_SIGNAL.store(true, Ordering::SeqCst)
+        if !UI_SIGNAL.swap(true, Ordering::SeqCst) {
+            notify_wake_hook();
+        }
     }
 
     pub fn set_action_signal() {
-        ACTION_SIGNAL.store(true, Ordering::SeqCst)
+        if !ACTION_SIGNAL.swap(true, Ordering::SeqCst) {
+            notify_wake_hook();
+        }
     }
 
     pub fn check_and_clear_ui_signal() -> bool {

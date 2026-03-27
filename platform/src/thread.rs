@@ -8,6 +8,7 @@ use {
 
 pub use makepad_network::{
     FromUIReceiver, FromUISender, SignalFromUI, SignalToUI, ToUIReceiver, ToUISender,
+    WakeHookHandle,
 };
 
 pub struct RevThreadPool {

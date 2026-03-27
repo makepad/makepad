@@ -22,6 +22,7 @@ pub use crate::types::{
 };
 pub use crate::ui_signal::{
     FromUIReceiver, FromUISender, SignalFromUI, SignalToUI, ToUIReceiver, ToUISender,
+    WakeHookHandle,
 };
 pub use crate::utils::HttpServerHeaders;
 pub use crate::web_socket_parser::{

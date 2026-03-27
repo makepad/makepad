@@ -8,6 +8,7 @@ use {
             cx_native::EventFlow,
             ios::{ios_delegates::*, ios_event::*, ios_text_input::*},
         },
+        thread::{SignalToUI, WakeHookHandle},
         window::CxWindowPool,
     },
     std::{
@@ -138,6 +139,7 @@ pub struct IosApp {
     /// to be processed atomically before SyncImeState can interfere
     pub queued_text_events: Vec<IosTextInputEvent>,
     pub timer_delegate_instance: ObjcId,
+    wake_hook: Option<WakeHookHandle>,
     timers: Vec<IosTimer>,
     touches: Vec<TouchPoint>,
     pub last_window_geom: WindowGeom,
@@ -192,6 +194,7 @@ impl IosApp {
                 ime_position: None,
                 time_start: Instant::now(),
                 timer_delegate_instance: msg_send![get_ios_class_global().timer_delegate, new],
+                wake_hook: None,
                 timers: Vec::new(),
                 event_flow: EventFlow::Poll,
                 event_callback: Some(event_callback),
@@ -213,6 +216,7 @@ impl IosApp {
     }
 
     pub fn did_finish_launching_with_options(&mut self) {
+        self.install_signal_waker();
         unsafe {
             let main_screen: ObjcId = msg_send![class!(UIScreen), mainScreen];
             let screen_rect: NSRect = msg_send![main_screen, bounds];
@@ -758,17 +762,47 @@ impl IosApp {
         let cb = with_ios_app(|app| app.event_callback.take());
         if let Some(mut callback) = cb {
             let event_flow = callback(event);
-            let mtk_view = with_ios_app(|app| app.mtk_view.unwrap());
+            let mtk_view = with_ios_app(|app| app.mtk_view);
             with_ios_app(|app| app.event_flow = event_flow);
 
-            if let EventFlow::Wait = event_flow {
-                let () = unsafe { msg_send![mtk_view, setPaused: YES] };
-            } else {
-                let () = unsafe { msg_send![mtk_view, setPaused: NO] };
+            if let Some(mtk_view) = mtk_view {
+                if let EventFlow::Wait = event_flow {
+                    let () = unsafe { msg_send![mtk_view, setPaused: YES] };
+                } else {
+                    let () = unsafe { msg_send![mtk_view, setPaused: NO] };
+                }
             }
 
             with_ios_app(|app| app.event_callback = Some(callback));
         }
+    }
+
+    pub fn install_signal_waker(&mut self) {
+        self.uninstall_signal_waker();
+        self.wake_hook = Some(SignalToUI::set_wake_hook(IosApp::request_wake));
+    }
+
+    pub fn uninstall_signal_waker(&mut self) {
+        if let Some(wake_hook) = self.wake_hook.take() {
+            SignalToUI::clear_wake_hook(wake_hook);
+        }
+    }
+
+    pub fn request_wake() {
+        let _ = IOS_APP.try_with(|app| {
+            if let Ok(app_ref) = app.try_borrow() {
+                if let Some(app) = app_ref.as_ref() {
+                    unsafe {
+                        let () = msg_send![
+                            app.timer_delegate_instance,
+                            performSelectorOnMainThread: sel!(receivedWake:)
+                            withObject: nil
+                            waitUntilDone: NO
+                        ];
+                    }
+                }
+            }
+        });
     }
 
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
@@ -812,9 +846,7 @@ impl IosApp {
     }
 
     pub fn send_text_input(input: String, replace_last: bool) {
-        // Queue text input - will be processed on next timer tick
-        // Using a Vec queue allows batching multiple events (e.g., autocorrect + space)
-        // This avoids re-entrancy issues from UITextInput delegate callbacks
+        // Queue text input and flush it through a deferred wake to avoid UITextInput re-entrancy.
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
@@ -823,12 +855,11 @@ impl IosApp {
                 }
             }
         });
+        Self::request_wake();
     }
 
     pub fn send_text_range_replace(start: usize, end: usize, text: String) {
-        // Queue range replacement for iOS autocorrect
-        // Using a Vec queue allows batching with subsequent insertText calls
-        // This avoids re-entrancy issues from UITextInput delegate callbacks
+        // Queue range replacement and flush it through a deferred wake to avoid UITextInput re-entrancy.
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
@@ -837,11 +868,10 @@ impl IosApp {
                 }
             }
         });
+        Self::request_wake();
     }
 
     pub fn send_backspace() {
-        // Queue backspace key event
-        // This avoids re-entrancy issues from UITextInput delegate callbacks
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
@@ -850,10 +880,10 @@ impl IosApp {
                 }
             }
         });
+        Self::request_wake();
     }
 
     pub fn send_return_key() {
-        // Queue Return key event
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
@@ -862,6 +892,7 @@ impl IosApp {
                 }
             }
         });
+        Self::request_wake();
     }
 
     pub fn send_timer_received(nstimer: ObjcId) {
@@ -886,6 +917,10 @@ impl IosApp {
         IosApp::do_callback(IosEvent::Paint);
     }
 
+    pub fn send_wake_event() {
+        IosApp::do_callback(IosEvent::Wake);
+    }
+
     pub fn set_fullscreen(&mut self, fullscreen: bool) {
         if let Some(vc) = self.view_controller {
             unsafe {
@@ -897,6 +932,13 @@ impl IosApp {
             }
         }
     }
+}
+
+impl Drop for IosApp {
+    fn drop(&mut self) {
+        self.uninstall_signal_waker();
+    }
+}
 
     pub fn copy_to_clipboard(&self, content: &str) {
         unsafe {

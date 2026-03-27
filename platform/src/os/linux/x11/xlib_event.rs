@@ -15,6 +15,7 @@ pub enum XlibEvent {
     WindowClosed(WindowClosedEvent),
     PopupDismissed(PopupDismissedEvent),
     Paint,
+    Wake,
 
     MouseDown(MouseDownEvent),
     MouseUp(MouseUpEvent),

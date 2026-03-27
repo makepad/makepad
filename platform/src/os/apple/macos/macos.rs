@@ -334,8 +334,8 @@ impl Drop for MacosNativeCameraPreview {
     }
 }
 
-const KEEP_ALIVE_COUNT: usize = 5;
-const TIMER0_DOWNSHIFT_IDLE_SECS: f64 = 0.2;
+const INTERNAL_MEDIA_POLL_TIMER_ID: u64 = 0;
+const INTERNAL_MEDIA_POLL_INTERVAL: f64 = 0.008;
 
 impl Cx {
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
@@ -374,10 +374,7 @@ impl Cx {
 
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
-        // Start timer if there's initial work after startup
-        if cx.borrow().need_redrawing() {
-            cx.borrow_mut().ensure_timer0_started();
-        }
+        cx.borrow_mut().enqueue_paint_if_needed();
         MacosApp::event_loop();
     }
 
@@ -459,20 +456,120 @@ impl Cx {
         }
     }
 
-    fn ensure_timer0_started(&mut self) {
-        if !self.os.timer0_armed {
-            with_macos_app(|app| app.stop_timer(0));
-            with_macos_app(|app| app.start_timer(0, 0.008, true));
-            self.os.timer0_armed = true;
-            self.os.timer0_idle_since = None;
+    fn sync_internal_media_poll_timer(&mut self) {
+        let wants_timer = !self.os.video_players.is_empty();
+        let has_timer = with_macos_app(|app| app.has_timer(INTERNAL_MEDIA_POLL_TIMER_ID));
+        if wants_timer && !has_timer {
+            with_macos_app(|app| app.start_timer(
+                INTERNAL_MEDIA_POLL_TIMER_ID,
+                INTERNAL_MEDIA_POLL_INTERVAL,
+                true,
+            ));
+        } else if !wants_timer && has_timer {
+            with_macos_app(|app| app.stop_timer(INTERNAL_MEDIA_POLL_TIMER_ID));
         }
     }
 
-    fn ensure_timer0_stopped(&mut self) {
-        if self.os.timer0_armed {
-            with_macos_app(|app| app.stop_timer(0));
-            with_macos_app(|app| app.start_timer(0, 0.2, true));
-            self.os.timer0_armed = false;
+    fn should_schedule_local_work(&self) -> bool {
+        !self.platform_ops.is_empty()
+            || self.any_passes_dirty()
+            || self.need_redrawing()
+            || !self.new_next_frames.is_empty()
+            || !self.screenshot_requests.is_empty()
+            || self.demo_time_repaint
+    }
+
+    fn enqueue_paint_if_needed(&mut self) {
+        self.sync_internal_media_poll_timer();
+        if self.should_schedule_local_work() {
+            MacosApp::send_paint_event();
+        }
+    }
+
+    fn handle_wake_event(&mut self) {
+        if SignalToUI::check_and_clear_ui_signal() {
+            self.handle_media_signals();
+            self.handle_script_signals();
+            self.call_event_handler(&Event::Signal);
+            crate::single_instance::enqueue_initial_app_open_if_enabled();
+            let items = crate::single_instance::drain_app_open_items();
+            if !items.is_empty() {
+                self.call_event_handler(&Event::AppOpen(items));
+            }
+        }
+        if SignalToUI::check_and_clear_action_signal() {
+            self.handle_action_receiver();
+        }
+        self.poll_control_channel();
+        self.handle_actions();
+        self.run_live_edit_if_needed("macos");
+        self.handle_networking_events();
+        self.handle_gamepad_events();
+    }
+
+    fn poll_media_players(&mut self) {
+        if self.os.video_players.is_empty() {
+            return;
+        }
+
+        let mut video_events = Vec::new();
+        for (_video_id, player) in self.os.video_players.iter_mut() {
+            match player.check_prepared() {
+                Some(Ok(PlaybackPrepared {
+                    width,
+                    height,
+                    duration_ms: duration,
+                    is_seekable,
+                    video_tracks,
+                    audio_tracks,
+                })) => {
+                    video_events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
+                        video_id: player.video_id,
+                        video_width: width,
+                        video_height: height,
+                        duration,
+                        is_seekable,
+                        video_tracks,
+                        audio_tracks,
+                    }));
+                    let seekable = player.seekable_ranges();
+                    if !seekable.is_empty() {
+                        video_events.push(Event::VideoSeekableRanges(VideoSeekableRangesEvent {
+                            video_id: player.video_id,
+                            ranges: seekable,
+                        }));
+                    }
+                    let buffered = player.buffered_ranges();
+                    if !buffered.is_empty() {
+                        video_events.push(Event::VideoBufferedRanges(VideoBufferedRangesEvent {
+                            video_id: player.video_id,
+                            ranges: buffered,
+                        }));
+                    }
+                }
+                Some(Err(err)) => {
+                    video_events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
+                        video_id: player.video_id,
+                        error: err,
+                    }));
+                }
+                None => {}
+            }
+            if player.poll_frame(&mut self.textures) {
+                video_events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                    video_id: player.video_id,
+                    current_position_ms: player.current_position_ms(),
+                    yuv: crate::event::video_playback::VideoYuvMetadata {
+                        enabled: player.is_software_mode(),
+                        matrix: player.yuv_matrix(),
+                        biplanar: player.yuv_biplanar() > 0.5,
+                        rotation_steps: 0.0,
+                    },
+                }));
+            }
+        }
+        for event in video_events {
+            self.call_event_handler(&event);
         }
     }
 
@@ -487,91 +584,19 @@ impl Cx {
             self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit;
         }
-        // send a mouse up when dragging starts
         match &event {
-            MacosEvent::MouseDown(_)
-            | MacosEvent::MouseMove(_)
-            | MacosEvent::MouseUp(_)
-            | MacosEvent::Scroll(_)
-            | MacosEvent::KeyDown(_)
-            | MacosEvent::KeyUp(_)
-            | MacosEvent::TextInput(_) => {
-                self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
-                self.os.timer0_idle_since = None;
-                self.ensure_timer0_started();
+            MacosEvent::Wake => {
+                self.handle_wake_event();
+                self.enqueue_paint_if_needed();
+                return EventFlow::Wait;
             }
-            MacosEvent::Timer(te) => {
-                if te.timer_id == 0 {
-                    let mut needs_timer = false;
-
-                    if self.screenshot_requests.len() > 0 {
-                        self.repaint_windows();
-                        needs_timer = true;
-                    }
-                    if self.os.keep_alive_counter > 0 {
-                        self.os.keep_alive_counter -= 1;
-                        needs_timer = true;
-                    }
-
-                    // check signals
-                    if SignalToUI::check_and_clear_ui_signal() {
-                        self.handle_media_signals();
-                        self.handle_script_signals();
-                        self.call_event_handler(&Event::Signal);
-                        crate::single_instance::enqueue_initial_app_open_if_enabled();
-                        let items = crate::single_instance::drain_app_open_items();
-                        if !items.is_empty() {
-                            self.call_event_handler(&Event::AppOpen(items));
-                        }
-                        needs_timer = true;
-                    }
-
-                    if SignalToUI::check_and_clear_action_signal() {
-                        self.handle_action_receiver();
-                        needs_timer = true;
-                    }
-                    self.poll_control_channel();
-                    self.handle_actions();
-
-                    if self.any_passes_dirty()
-                        || self.need_redrawing()
-                        || !self.new_next_frames.is_empty()
-                        || self.demo_time_repaint
-                        || !self.os.video_players.is_empty()
-                    {
-                        needs_timer = true;
-                    }
-
-                    if needs_timer {
-                        self.os.timer0_idle_since = None;
-                        self.ensure_timer0_started();
-                    } else {
-                        let now = with_macos_app(|app| app.time_now());
-                        if let Some(idle_since) = self.os.timer0_idle_since {
-                            if now - idle_since >= TIMER0_DOWNSHIFT_IDLE_SECS {
-                                self.ensure_timer0_stopped();
-                            }
-                        } else {
-                            self.os.timer0_idle_since = Some(now);
-                        }
-                    }
-                    self.run_live_edit_if_needed("macos");
-                    self.handle_networking_events();
-                    self.handle_gamepad_events();
-                    self.cocoa_event_callback(MacosEvent::Paint, metal_cx, metal_windows);
-
-                    // Run garbage collection if needed - safe moment after paint, before waiting
-                    self.with_vm(|vm| {
-                        if vm.heap().needs_gc() {
-                            vm.gc();
-                        }
-                    });
-
-                    // block till the next timer
-                    return EventFlow::Wait;
-                }
+            MacosEvent::Timer(te) if te.timer_id == INTERNAL_MEDIA_POLL_TIMER_ID => {
+                self.poll_media_players();
+                self.run_live_edit_if_needed("macos");
+                self.enqueue_paint_if_needed();
+                return EventFlow::Wait;
             }
-            _ => (),
+            _ => {}
         }
         //self.process_desktop_pre_event(&mut event);
         match event {
@@ -641,106 +666,23 @@ impl Cx {
                 }
             }
             MacosEvent::Paint => {
-                // Poll video players for new frames and preparation status
-                let has_video_players = !self.os.video_players.is_empty();
-                if has_video_players {
-                    let mut video_events = Vec::new();
-                    for (_video_id, player) in self.os.video_players.iter_mut() {
-                        match player.check_prepared() {
-                            Some(Ok(PlaybackPrepared {
-                                width,
-                                height,
-                                duration_ms: duration,
-                                is_seekable,
-                                video_tracks,
-                                audio_tracks,
-                            })) => {
-                                video_events.push(Event::VideoPlaybackPrepared(
-                                    VideoPlaybackPreparedEvent {
-                                        video_id: player.video_id,
-                                        video_width: width,
-                                        video_height: height,
-                                        duration,
-                                        is_seekable,
-                                        video_tracks,
-                                        audio_tracks,
-                                    },
-                                ));
-                                let seekable = player.seekable_ranges();
-                                if !seekable.is_empty() {
-                                    video_events.push(Event::VideoSeekableRanges(
-                                        VideoSeekableRangesEvent {
-                                            video_id: player.video_id,
-                                            ranges: seekable,
-                                        },
-                                    ));
-                                }
-                                let buffered = player.buffered_ranges();
-                                if !buffered.is_empty() {
-                                    video_events.push(Event::VideoBufferedRanges(
-                                        VideoBufferedRangesEvent {
-                                            video_id: player.video_id,
-                                            ranges: buffered,
-                                        },
-                                    ));
-                                }
-                            }
-                            Some(Err(err)) => {
-                                video_events.push(Event::VideoDecodingError(
-                                    VideoDecodingErrorEvent {
-                                        video_id: player.video_id,
-                                        error: err,
-                                    },
-                                ));
-                            }
-                            None => {}
-                        }
-                        if player.poll_frame(&mut self.textures) {
-                            video_events.push(Event::VideoTextureUpdated(
-                                VideoTextureUpdatedEvent {
-                                    video_id: player.video_id,
-                                    current_position_ms: player.current_position_ms(),
-                                    yuv: crate::event::video_playback::VideoYuvMetadata {
-                                        enabled: player.is_software_mode(),
-                                        matrix: player.yuv_matrix(),
-                                        biplanar: player.yuv_biplanar() > 0.5,
-                                        rotation_steps: 0.0,
-                                    },
-                                },
-                            ));
-                        }
-                    }
-                    for event in video_events {
-                        self.call_event_handler(&event);
-                    }
-                }
-
-                let has_next_frames = self.new_next_frames.len() != 0;
+                let has_next_frames = !self.new_next_frames.is_empty();
                 let time_now = with_macos_app(|app| app.time_now());
                 if has_next_frames {
                     self.call_next_frame_event(time_now);
                 }
-                let needs_redrawing = self.need_redrawing();
-                if needs_redrawing {
+                if self.need_redrawing() {
                     self.call_draw_event(time_now);
                     self.mtl_compile_shaders(&metal_cx);
                 }
-                let has_dirty_passes = self.any_passes_dirty();
-                // Start timer if we have work
-                if has_next_frames
-                    || needs_redrawing
-                    || has_dirty_passes
-                    || self.screenshot_requests.len() > 0
-                    || self.os.keep_alive_counter > 0
-                    || self.demo_time_repaint
-                    || has_video_players
-                {
-                    self.os.timer0_idle_since = None;
-                    self.ensure_timer0_started();
-                }
 
-                // ok here we send out to all our childprocesses
                 self.handle_repaint(metal_windows, metal_cx);
+
+                self.with_vm(|vm| {
+                    if vm.heap().needs_gc() {
+                        vm.gc();
+                    }
+                });
             }
             MacosEvent::MouseDown(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
@@ -810,6 +752,7 @@ impl Cx {
             MacosEvent::Timer(e) => {
                 self.handle_script_timer(&e);
                 self.call_event_handler(&Event::Timer(e));
+                self.enqueue_paint_if_needed();
                 return EventFlow::Wait;
             }
             MacosEvent::MacosMenuCommand(e) => self.call_event_handler(&Event::MacosMenuCommand(e)),
@@ -821,21 +764,8 @@ impl Cx {
             }
         }
 
-        // Determine the event flow based on whether we have work to do
-        if self.any_passes_dirty()
-            || self.need_redrawing()
-            || self.new_next_frames.len() != 0
-            || self.os.keep_alive_counter > 0
-            || self.screenshot_requests.len() > 0
-            || self.demo_time_repaint
-            || self.os.timer0_armed
-        {
-            // We have work to do or timer is running
-            EventFlow::Poll
-        } else {
-            // No work pending and timer is stopped - we can wait
-            EventFlow::Wait
-        }
+        self.enqueue_paint_if_needed();
+        EventFlow::Wait
     }
 
     fn dpi_override_scale(&self, pos: &mut Vec2d, window_id: WindowId) {
@@ -1300,8 +1230,6 @@ impl Cx {
                         tex_u,
                         tex_v,
                     }));
-                    // Keep timer alive so we can poll for video frames
-                    self.ensure_timer0_started();
                 }
                 CxOsOp::BeginVideoPlayback(video_id) => {
                     if self.os.native_camera_previews.contains_key(&video_id) {
@@ -1396,13 +1324,13 @@ impl Cx {
                         should_loop,
                     );
                     self.os.video_players.insert(video_id, player);
-                    self.ensure_timer0_started();
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
             }
         }
+        self.sync_internal_media_poll_timer();
         EventFlow::Poll
     }
 
@@ -1644,12 +1572,6 @@ impl CxOsApi for Cx {
 
 #[derive(Default)]
 pub struct CxOs {
-    /// For how long to keep the timer alive when the app is idle
-    pub(crate) keep_alive_counter: usize,
-    /// Indicates wether the main timer is armed
-    pub(crate) timer0_armed: bool,
-    /// Start time of the current idle stretch while timer0 is armed.
-    pub(crate) timer0_idle_since: Option<f64>,
     pub(crate) media: CxAppleMedia,
     pub(crate) bytes_written: usize,
     pub(crate) draw_calls_done: usize,
