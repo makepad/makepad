@@ -3,15 +3,29 @@ use std::{
     io::{self, Read},
     path::Path,
     rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 
+/// Shared immutable byte storage.
+///
+/// Backing forms are intentionally mixed:
+/// - `Owned(Rc<Vec<u8>>)` for small in-process owned buffers and older call sites
+/// - `Arc(Arc<[u8]>)` for cheap cross-thread shared immutable payloads
+/// - `Mapped(Rc<MappedBytes>)` for file-backed immutable data
+///
+/// This crate keeps both owned forms on purpose. Callers that need shared
+/// immutable payloads across renderer/layout boundaries should prefer
+/// `Arc<[u8]>`.
 #[derive(Clone)]
 pub enum SharedBytes {
     Owned(Rc<Vec<u8>>),
+    Arc(Arc<[u8]>),
     Mapped(Rc<MappedBytes>),
 }
 
@@ -21,6 +35,11 @@ impl SharedBytes {
         Self::Owned(data)
     }
 
+    pub fn from_arc(data: Arc<[u8]>) -> Self {
+        OWNED_LOADS.fetch_add(1, Ordering::Relaxed);
+        Self::Arc(data)
+    }
+
     pub fn from_vec(data: Vec<u8>) -> Self {
         Self::from_owned(Rc::new(data))
     }
@@ -28,6 +47,7 @@ impl SharedBytes {
     pub fn as_slice(&self) -> &[u8] {
         match self {
             SharedBytes::Owned(data) => data.as_slice(),
+            SharedBytes::Arc(data) => data.as_ref(),
             SharedBytes::Mapped(data) => data.as_slice(),
         }
     }
@@ -108,6 +128,10 @@ impl fmt::Debug for SharedBytes {
         match self {
             SharedBytes::Owned(data) => f
                 .debug_struct("SharedBytes::Owned")
+                .field("len", &data.len())
+                .finish(),
+            SharedBytes::Arc(data) => f
+                .debug_struct("SharedBytes::Arc")
                 .field("len", &data.len())
                 .finish(),
             SharedBytes::Mapped(data) => f

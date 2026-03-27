@@ -23,6 +23,7 @@ workspace.members = [
     "examples/camera",
     "examples/windows_blur",
     "examples/floating_panel",
+    "examples/glyph_placement",
     "examples/xr",
 #    "examples/matrix",
     "libs/gltf",

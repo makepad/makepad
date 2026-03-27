@@ -54,6 +54,11 @@ script_mod! {
             return self.draw_list.camera_projection * (self.draw_list.camera_view * (self.world ))
         }
 
+        projective_vertex: fn(screen_h) {
+            self.world = self.draw_list.projective_transform * screen_h;
+            return self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
+        }
+
         vertex: fn() {
             self.vertex_pos = self.clip_and_transform_vertex(self.rect_pos, self.rect_size)
         }

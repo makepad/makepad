@@ -1,6 +1,7 @@
 use std::ffi::{c_void, CString};
 
 use crate::{
+    capture::CaptureSource,
     egl_sys::{self, LibEgl},
     gl_sys::{self, LibGl},
     Cx, DrawPassClearColor, DrawPassClearDepth, DrawPassId,
@@ -233,6 +234,100 @@ impl OpenglCx {
 }
 
 impl Cx {
+    fn capture_gl_framebuffer_rgba(&self, width: u32, height: u32) -> Vec<u8> {
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        unsafe {
+            let gl = self.os.gl();
+            (gl.glReadPixels)(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                gl_sys::RGBA,
+                gl_sys::UNSIGNED_BYTE,
+                pixels.as_mut_ptr() as *mut _,
+            );
+        }
+        let stride = (width * 4) as usize;
+        for y in 0..(height as usize / 2) {
+            let top = y * stride;
+            let bot = ((height as usize) - 1 - y) * stride;
+            for x in 0..stride {
+                pixels.swap(top + x, bot + x);
+            }
+        }
+        pixels
+    }
+
+    fn capture_gl_texture_rgba(
+        &self,
+        texture_id: crate::TextureId,
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        let cxtexture = &self.textures[texture_id];
+        let alloc = cxtexture.alloc.as_ref()?;
+        if alloc.width == 0 || alloc.height == 0 {
+            return None;
+        }
+        let texture = cxtexture.os.gl_texture?;
+        let mut framebuffer = 0;
+        let mut pixels = vec![0u8; alloc.width * alloc.height * 4];
+        unsafe {
+            let gl = self.os.gl();
+            (gl.glGenFramebuffers)(1, &mut framebuffer);
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, framebuffer);
+            (gl.glFramebufferTexture2D)(
+                gl_sys::FRAMEBUFFER,
+                gl_sys::COLOR_ATTACHMENT0,
+                gl_sys::TEXTURE_2D,
+                texture,
+                0,
+            );
+            (gl.glReadPixels)(
+                0,
+                0,
+                alloc.width as i32,
+                alloc.height as i32,
+                gl_sys::RGBA,
+                gl_sys::UNSIGNED_BYTE,
+                pixels.as_mut_ptr() as *mut _,
+            );
+            let read_err = (gl.glGetError)();
+            (gl.glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
+            (gl.glDeleteFramebuffers)(1, &framebuffer);
+            if read_err != gl_sys::NO_ERROR {
+                return None;
+            }
+        }
+        let width = alloc.width as u32;
+        let height = alloc.height as u32;
+        Some((width, height, pixels))
+    }
+
+    fn capture_gl_cached_view_rgba(
+        &self,
+        draw_pass_id: DrawPassId,
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        let pass = &self.passes[draw_pass_id];
+        let color_texture = pass.color_textures.first()?.texture.texture_id();
+        let dpi = pass.dpi_factor.unwrap_or(1.0);
+        let pass_rect = self.get_pass_rect(draw_pass_id, dpi)?;
+        let crop_width = (pass_rect.size.x * dpi).round().max(1.0) as u32;
+        let crop_height = (pass_rect.size.y * dpi).round().max(1.0) as u32;
+        let (full_width, full_height, rgba) = self.capture_gl_texture_rgba(color_texture)?;
+        let crop_width = crop_width.min(full_width);
+        let crop_height = crop_height.min(full_height);
+
+        let mut cropped = vec![0u8; (crop_width * crop_height * 4) as usize];
+        for row in 0..crop_height as usize {
+            let src_off = (row * full_width as usize) * 4;
+            let dst_off = (row * crop_width as usize) * 4;
+            let count = crop_width as usize * 4;
+            cropped[dst_off..dst_off + count]
+                .copy_from_slice(&rgba[src_off..src_off + count]);
+        }
+        Some((crop_width, crop_height, cropped))
+    }
+
     pub fn draw_pass_to_window(
         &mut self,
         draw_pass_id: DrawPassId,
@@ -264,7 +359,7 @@ impl Cx {
             (gl.glViewport)(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
 
-        self.setup_render_pass(draw_pass_id);
+        self.setup_render_pass(draw_pass_id, false);
 
         self.passes[draw_pass_id].paint_dirty = false;
 
@@ -354,43 +449,40 @@ impl Cx {
                     pixels.swap(top + x, bot + x);
                 }
             }
-            if let Ok(png) = Self::encode_rgba_as_png(w, h, &pixels) {
+            if let Ok(png) = crate::os::cx_shared::encode_png_rgba(w, h, &pixels) {
                 let _ = std::fs::write(path, png);
             }
         }
 
-        // Studio screenshot readback: read framebuffer pixels before swap.
-        let request_ids = self.take_studio_screenshot_request_ids(0);
-        if !request_ids.is_empty() {
-            let w = pix_width.floor() as u32;
-            let h = pix_height.floor() as u32;
-            let mut pixels = vec![0u8; (w * h * 4) as usize];
-            unsafe {
-                let gl = self.os.gl();
-                (gl.glReadPixels)(
-                    0,
-                    0,
-                    w as i32,
-                    h as i32,
-                    gl_sys::RGBA,
-                    gl_sys::UNSIGNED_BYTE,
-                    pixels.as_mut_ptr() as *mut _,
-                );
-            }
-            // OpenGL reads bottom-up; flip rows for top-down PNG.
-            let stride = (w * 4) as usize;
-            for y in 0..(h as usize / 2) {
-                let top = y * stride;
-                let bot = ((h as usize) - 1 - y) * stride;
-                for x in 0..stride {
-                    pixels.swap(top + x, bot + x);
+        let capture_requests = self.take_capture_requests();
+        for request in capture_requests {
+            match request.source {
+                CaptureSource::Framebuffer => {
+                    let width = pix_width.floor() as u32;
+                    let height = pix_height.floor() as u32;
+                    let rgba = self.capture_gl_framebuffer_rgba(width, height);
+                    self.push_capture_result(crate::capture::CaptureResult {
+                        request_id: request.request_id,
+                        width,
+                        height,
+                        rgba,
+                    });
+                }
+                CaptureSource::CachedView { draw_pass_id } => {
+                    if let Some((width, height, rgba)) =
+                        self.capture_gl_cached_view_rgba(draw_pass_id)
+                    {
+                        self.push_capture_result(crate::capture::CaptureResult {
+                            request_id: request.request_id,
+                            width,
+                            height,
+                            rgba,
+                        });
+                    }
                 }
             }
-            // Encode as PNG.
-            if let Ok(png) = Self::encode_rgba_as_png(w, h, &pixels) {
-                Self::send_studio_screenshot_response(request_ids, w, h, png);
-            }
         }
+        self.flush_studio_screenshot_results();
 
         #[cfg(target_os = "android")]
         if let Some(request) = self.take_studio_run_view_frame_request(0) {

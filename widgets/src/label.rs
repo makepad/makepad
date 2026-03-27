@@ -307,6 +307,17 @@ impl Widget for Label {
         self.text.as_ref().to_string()
     }
 
+    fn controls(&self) -> (String, bool) {
+        ("get".into(), true)
+    }
+
+    fn control(&mut self, _cx: &mut Cx, op: &str, _arg: &str) -> String {
+        match op {
+            "get" => self.text.as_ref().to_string(),
+            _ => String::new(),
+        }
+    }
+
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);

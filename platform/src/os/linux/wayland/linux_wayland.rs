@@ -67,7 +67,21 @@ impl WaylandCx {
             cx: cx.clone(),
             qhandle: None,
         }));
-        let conn = Connection::connect_to_env().unwrap();
+        let conn = match Connection::connect_to_env() {
+            Ok(conn) => conn,
+            Err(err) => {
+                eprintln!("makepad: Wayland backend selected but connection failed: {}", err);
+                eprintln!(
+                    "makepad: WAYLAND_DISPLAY={}",
+                    std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "<unset>".to_string())
+                );
+                eprintln!(
+                    "makepad: XDG_RUNTIME_DIR={}",
+                    std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "<unset>".to_string())
+                );
+                std::process::exit(1);
+            }
+        };
         let display = conn.display();
 
         let display_ptr = conn.backend().display_ptr();

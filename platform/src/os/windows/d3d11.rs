@@ -106,6 +106,7 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
+        self.update_draw_list_projective_transform(pass_id, draw_list_id);
 
         {
             let draw_list = &mut self.draw_lists[draw_list_id];

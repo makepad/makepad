@@ -12,7 +12,7 @@ use {
         event::{Event, TextureHandleReadyEvent},
         geometry::Geometry,
         makepad_live_id::*,
-        makepad_math::{Vec2d, Vec4f},
+        makepad_math::{Mat4f, Vec2d, Vec4f},
         makepad_script::{
             apply::Apply,
             shader::{
@@ -287,6 +287,8 @@ impl Cx {
         //self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4f::identity();
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
+
+        self.update_draw_list_projective_transform(draw_pass_id, draw_list_id);
 
         let draw_list = &mut self.draw_lists[draw_list_id];
         draw_list
@@ -727,7 +729,11 @@ impl Cx {
         }
     }
 
-    pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId) -> Option<(Vec2d, f64)> {
+    pub fn setup_render_pass(
+        &mut self,
+        draw_pass_id: DrawPassId,
+        to_texture: bool,
+    ) -> Option<(Vec2d, f64)> {
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
         let pass = &mut self.passes[draw_pass_id];
@@ -738,7 +744,21 @@ impl Cx {
             return None;
         }
 
-        if !pass.keep_camera_matrix {
+        if to_texture {
+            let offset = pass_rect.pos + pass.view_shift;
+            let size = pass_rect.size * pass.view_scale;
+            pass.pass_uniforms.camera_projection = Mat4f::ortho(
+                offset.x as f32,
+                (offset.x + size.x) as f32,
+                (offset.y + size.y) as f32,
+                offset.y as f32,
+                100.0,
+                -100.0,
+                1.0,
+                1.0,
+            );
+            pass.pass_uniforms.camera_view = Mat4f::identity();
+        } else if !pass.keep_camera_matrix {
             pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
         }
         pass.set_dpi_factor(dpi_factor);
@@ -757,7 +777,7 @@ impl Cx {
     ) {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        let (pass_size, dpi_factor) = if let Some(pz) = self.setup_render_pass(draw_pass_id) {
+        let (pass_size, dpi_factor) = if let Some(pz) = self.setup_render_pass(draw_pass_id, true) {
             pz
         } else {
             return;

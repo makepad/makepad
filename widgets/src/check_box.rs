@@ -559,6 +559,34 @@ impl Widget for CheckBox {
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
     }
+
+    fn controls(&self) -> (String, bool) {
+        ("get,set,toggle".into(), true)
+    }
+
+    fn control(&mut self, cx: &mut Cx, op: &str, _arg: &str) -> String {
+        match op {
+            "get" => if self.animator_in_state(cx, ids!(active.on)) { "true".into() } else { "false".into() },
+            "set" => {
+                let target = _arg.trim() == "true";
+                let current = self.animator_in_state(cx, ids!(active.on));
+                if target != current {
+                    self.set_active(cx, target);
+                    let uid = self.widget_uid();
+                    cx.widget_action_with_data(&self.action_data, uid, CheckBoxAction::Change(target));
+                }
+                String::new()
+            }
+            "toggle" => {
+                let current = self.animator_in_state(cx, ids!(active.on));
+                self.set_active(cx, !current);
+                let uid = self.widget_uid();
+                cx.widget_action_with_data(&self.action_data, uid, CheckBoxAction::Change(!current));
+                String::new()
+            }
+            _ => String::new(),
+        }
+    }
 }
 
 impl CheckBoxRef {

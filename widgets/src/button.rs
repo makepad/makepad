@@ -608,6 +608,26 @@ impl Widget for Button {
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
     }
+
+    fn controls(&self) -> (String, bool) {
+        ("press".into(), true)
+    }
+
+    fn control(&mut self, cx: &mut Cx, op: &str, _arg: &str) -> String {
+        match op {
+            "press" => {
+                let uid = self.widget_uid();
+                cx.widget_action_with_data(
+                    &self.action_data,
+                    uid,
+                    ButtonAction::Clicked(KeyModifiers::default()),
+                );
+                self.redraw(cx);
+                String::new()
+            }
+            _ => String::new(),
+        }
+    }
 }
 
 impl Button {

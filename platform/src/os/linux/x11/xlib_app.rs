@@ -56,6 +56,14 @@ impl XlibApp {
     pub fn new(event_callback: Box<dyn FnMut(&mut XlibApp, XlibEvent) -> EventFlow>) -> XlibApp {
         unsafe {
             let display = x11_sys::XOpenDisplay(ptr::null());
+            if display.is_null() {
+                eprintln!("makepad: X11 backend selected but XOpenDisplay failed");
+                eprintln!(
+                    "makepad: DISPLAY={}",
+                    std::env::var("DISPLAY").unwrap_or_else(|_| "<unset>".to_string())
+                );
+                std::process::exit(1);
+            }
             let display_fd = x11_sys::XConnectionNumber(display);
             x11_sys::setlocale(x11_sys::LC_CTYPE, b"\0".as_ptr() as *const c_char);
             x11_sys::XSetLocaleModifiers(b"\0".as_ptr() as *const c_char);

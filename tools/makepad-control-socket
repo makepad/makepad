@@ -1,0 +1,59 @@
+#!/usr/bin/env -S uv --quiet run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Launch a Makepad app with stdin/stdout control, relay via Unix socket.
+
+Creates a Unix domain socket so makepad-ui-cli (or any JSON-line client)
+can connect. JSON lines from socket clients are forwarded to the app's
+stdin; JSON lines from the app's stdout are broadcast to all connected
+clients.
+
+Usage:
+    makepad-control-socket --socket /tmp/app.sock -- cargo run -p my-app
+
+The app must support Makepad's stdin/stdout control mode.
+"""
+
+import argparse
+import os
+import shlex
+import sys
+import tempfile
+
+# Add tools directory to path for makepad_control import.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import makepad_control as mc
+
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="makepad-control-socket",
+        description="Launch a Makepad app and relay control over a Unix socket.")
+    p.add_argument("--socket", "-s", default=None,
+                   help="Unix socket path (default: auto-generated in /tmp)")
+    p.add_argument("--env", "-e", action="append", default=[],
+                   help="Extra env var as KEY=VALUE (repeatable)")
+    p.add_argument("cmd", nargs="+",
+                   help="Command to launch (the Makepad app)")
+    args = p.parse_args()
+
+    socket_path = args.socket or os.path.join(
+        tempfile.gettempdir(), f"makepad-control-{os.getpid()}.sock")
+
+    env = {}
+    for item in args.env:
+        if "=" in item:
+            k, v = item.split("=", 1)
+            env[k] = v
+
+    print(f"MAKEPAD_SOCKET={socket_path}")
+    sys.stdout.flush()
+
+    rc = mc.run_relay(args.cmd, socket_path, env=env)
+    raise SystemExit(rc)
+
+
+if __name__ == "__main__":
+    main()

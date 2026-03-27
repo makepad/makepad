@@ -1,6 +1,7 @@
 use {
     crate::{
         area::Area,
+        capture::{CaptureResult, CaptureSource},
         cx::Cx,
         cx_api::CxOsApi,
         draw_pass::{CxDrawPassParent, DrawPassId},
@@ -14,12 +15,46 @@ use {
     makepad_studio_protocol::{
         hub_protocol::FrameCodec, AppToStudio, EventSample, RunViewFrameData,
         RunViewFrameRequest, RunViewKeyFocusRect, ScreenshotResponse, StudioToApp,
-        WidgetQueryResponse, WidgetSnapshot, WidgetSnapshotResponse, WidgetTreeDumpResponse,
+        WidgetQueryResponse, WidgetResponse, WidgetSnapshot, WidgetSnapshotResponse,
+        WidgetTreeDumpResponse,
     },
     std::cell::{Cell, RefCell},
     std::collections::{HashMap, HashSet},
     std::rc::Rc,
 };
+
+pub(crate) fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    use makepad_zune_png::{
+        makepad_zune_core::{
+            bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions,
+        },
+        PngEncoder,
+    };
+
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "rgba size overflow while encoding png".to_string())?;
+    if rgba.len() != expected {
+        return Err(format!(
+            "encode_png_rgba: expected {} bytes, got {}",
+            expected,
+            rgba.len()
+        ));
+    }
+
+    let options = EncoderOptions::default()
+        .set_width(width as usize)
+        .set_height(height as usize)
+        .set_depth(BitDepth::Eight)
+        .set_colorspace(ColorSpace::RGBA);
+    let mut encoder = PngEncoder::new(rgba, options);
+    let mut out = Vec::new();
+    encoder
+        .encode(&mut out)
+        .map_err(|err| format!("png encode failed: {err:?}"))?;
+    Ok(out)
+}
 
 impl Cx {
     #[allow(dead_code)]
@@ -145,18 +180,24 @@ impl Cx {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
-        let mut request_ids = Vec::new();
-        self.screenshot_requests.retain(|request| {
-            if request.kind_id == kind_id {
-                request_ids.push(request.request_id);
-                false
-            } else {
-                true
-            }
-        });
-        request_ids
+    pub fn request_capture(&mut self, source: CaptureSource) -> u64 {
+        let request_id = self.next_capture_id;
+        self.next_capture_id = self.next_capture_id.saturating_add(1);
+        self.capture_requests.push(crate::capture::CaptureRequest { request_id, source });
+        self.redraw_all();
+        request_id
+    }
+
+    pub fn drain_capture_results(&mut self) -> Vec<CaptureResult> {
+        self.capture_results.drain(..).collect()
+    }
+
+    pub(crate) fn take_capture_requests(&mut self) -> Vec<crate::capture::CaptureRequest> {
+        self.capture_requests.drain(..).collect()
+    }
+
+    pub(crate) fn push_capture_result(&mut self, result: CaptureResult) {
+        self.capture_results.push(result);
     }
 
     #[allow(dead_code)]
@@ -215,7 +256,7 @@ impl Cx {
         self.spawn_thread(move || {
             let result = Cx::prepare_studio_run_view_rgba(&request, width, height, rgba)
                 .and_then(|(width, height, rgba)| {
-                    Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {
+                    encode_png_rgba(width, height, &rgba).map(|png| RunViewFrameData {
                         window_id: request.window_id,
                         frame_id: request.frame_id,
                         width,
@@ -287,10 +328,42 @@ impl Cx {
         }
     }
 
+    pub(crate) fn flush_studio_screenshot_results(&mut self) {
+        if self.screenshot_requests.is_empty() || self.capture_results.is_empty() {
+            return;
+        }
+
+        let mut pending = std::mem::take(&mut self.capture_results);
+        let mut remaining = Vec::new();
+
+        for result in pending.drain(..) {
+            let Some(idx) = self
+                .screenshot_requests
+                .iter()
+                .position(|request| request.capture_request_id == result.request_id)
+            else {
+                remaining.push(result);
+                continue;
+            };
+
+            let request = self.screenshot_requests.remove(idx);
+            if let Ok(png) = encode_png_rgba(result.width, result.height, &result.rgba) {
+                Self::send_studio_screenshot_response(
+                    vec![request.studio_request_id],
+                    result.width,
+                    result.height,
+                    png,
+                );
+            }
+        }
+
+        self.capture_results = remaining;
+    }
+
     #[allow(dead_code)]
     pub(crate) fn send_studio_widget_tree_dump_response(&mut self, request_id: u64) {
         self.widget_tree_dump_requests.push(request_id);
-        if self.in_draw_event {
+        if self.in_draw_event || self.need_redrawing() {
             return;
         }
         self.try_send_studio_widget_tree_dump_responses();
@@ -381,7 +454,7 @@ impl Cx {
         if self.widget_tree_dump_requests.is_empty() {
             return;
         }
-        if self.in_draw_event {
+        if self.in_draw_event || self.need_redrawing() {
             return;
         }
         let dump = if let Some(callback) = self.widget_tree_dump_callback {
@@ -518,8 +591,14 @@ impl Cx {
                 }
             }
             StudioToApp::Screenshot(request) => {
-                self.screenshot_requests.push(request);
-                self.redraw_all();
+                // Studio screenshots capture the full composed app window. Subview and
+                // webview screenshots must use cached-view capture instead.
+                let capture_request_id = self.request_capture(CaptureSource::Framebuffer);
+                self.screenshot_requests
+                    .push(crate::cx::PendingStudioScreenshot {
+                        studio_request_id: request.request_id,
+                        capture_request_id,
+                    });
             }
             StudioToApp::RunViewFrameRequest(request) => {
                 self.queue_studio_run_view_frame_request(request);
@@ -532,6 +611,29 @@ impl Cx {
             }
             StudioToApp::WidgetSnapshot(request) => {
                 self.send_studio_widget_snapshot_response(request.request_id);
+            }
+            StudioToApp::WidgetControl(req) => {
+                let result = if let Some(callback) = self.widget_control_callback {
+                    callback(self, &req.id, &req.op, &req.arg)
+                } else {
+                    None
+                };
+                match result {
+                    Some(out) => {
+                        Cx::send_studio_message(AppToStudio::WidgetResponse(WidgetResponse {
+                            request_id: req.request_id,
+                            ok: true,
+                            out,
+                        }));
+                    }
+                    None => {
+                        Cx::send_studio_message(AppToStudio::WidgetResponse(WidgetResponse {
+                            request_id: req.request_id,
+                            ok: false,
+                            out: String::new(),
+                        }));
+                    }
+                }
             }
             StudioToApp::Kill => {
                 self.call_event_handler(&Event::Shutdown);
@@ -584,29 +686,6 @@ impl Cx {
             self.call_event_handler(&Event::LiveEdit);
             self.redraw_all();
         }
-    }
-
-    // Same logic as headless::raster::encode_png_rgba which is behind
-    // cfg(headless) and unavailable to the windowed backend.
-    #[allow(dead_code)]
-    pub fn encode_rgba_as_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-        use makepad_zune_png::{
-            makepad_zune_core::{
-                bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions,
-            },
-            PngEncoder,
-        };
-        let options = EncoderOptions::default()
-            .set_width(width as usize)
-            .set_height(height as usize)
-            .set_depth(BitDepth::Eight)
-            .set_colorspace(ColorSpace::RGBA);
-        let mut encoder = PngEncoder::new(rgba, options);
-        let mut out = Vec::new();
-        encoder
-            .encode(&mut out)
-            .map_err(|err| format!("png encode failed: {err:?}"))?;
-        Ok(out)
     }
 
     // event handler wrappers
@@ -746,5 +825,62 @@ impl Cx {
             time: time,
             frame: self.repaint_id,
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{capture::CaptureResult, makepad_math::dvec2, window::CxWindowPool};
+    use makepad_studio_protocol::{ScreenshotRequest, StudioToApp};
+
+    fn test_cx() -> Cx {
+        Cx::new(Box::new(|_, _| {}))
+    }
+
+    #[test]
+    fn studio_screenshot_request_uses_internal_capture_id() {
+        let mut cx = test_cx();
+        cx.dispatch_studio_msg(
+            StudioToApp::Screenshot(ScreenshotRequest {
+                request_id: 77,
+                kind_id: 0,
+            }),
+            CxWindowPool::id_zero(),
+            dvec2(0.0, 0.0),
+        );
+
+        assert_eq!(cx.screenshot_requests.len(), 1);
+        assert_eq!(cx.capture_requests.len(), 1);
+        assert_eq!(cx.screenshot_requests[0].studio_request_id, 77);
+        assert_eq!(
+            cx.screenshot_requests[0].capture_request_id,
+            cx.capture_requests[0].request_id
+        );
+    }
+
+    #[test]
+    fn flush_studio_screenshot_results_matches_on_capture_id() {
+        let mut cx = test_cx();
+        cx.dispatch_studio_msg(
+            StudioToApp::Screenshot(ScreenshotRequest {
+                request_id: 91,
+                kind_id: 0,
+            }),
+            CxWindowPool::id_zero(),
+            dvec2(0.0, 0.0),
+        );
+
+        let capture_request_id = cx.capture_requests[0].request_id;
+        cx.capture_results.push(CaptureResult {
+            request_id: capture_request_id,
+            width: 1,
+            height: 1,
+            rgba: vec![1, 2, 3, 4],
+        });
+        cx.flush_studio_screenshot_results();
+
+        assert!(cx.screenshot_requests.is_empty());
+        assert!(cx.capture_results.is_empty());
     }
 }
