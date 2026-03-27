@@ -1,10 +1,10 @@
-use crate::makepad_widgets::makepad_micro_serde::SerBin;
-use crate::makepad_widgets::makepad_platform::shared_framebuf::{
-    shared_swapchain_from_host_swapchain, HostSwapchain,
-};
 use crate::makepad_widgets::image_cache::{
     load_image_from_cache, load_image_from_data_async, process_async_image_load, AsyncImageLoad,
     AsyncLoadResult,
+};
+use crate::makepad_widgets::makepad_micro_serde::SerBin;
+use crate::makepad_widgets::makepad_platform::shared_framebuf::{
+    shared_swapchain_from_host_swapchain, HostSwapchain,
 };
 use crate::makepad_widgets::*;
 use makepad_studio_protocol::hub_protocol::{FrameCodec, QueryId, RunViewInputVizKind};
@@ -401,18 +401,17 @@ impl DesktopRunView {
         Some(StudioToApp::RunViewFrameRequest(RunViewFrameRequest {
             window_id: target.window_id,
             frame_id,
-            width: (self.last_rect.size.x * self.last_dpi_factor).ceil().max(1.0) as u32,
-            height: (self.last_rect.size.y * self.last_dpi_factor).ceil().max(1.0) as u32,
+            width: (self.last_rect.size.x * self.last_dpi_factor)
+                .ceil()
+                .max(1.0) as u32,
+            height: (self.last_rect.size.y * self.last_dpi_factor)
+                .ceil()
+                .max(1.0) as u32,
             dpi_factor: self.last_dpi_factor,
         }))
     }
 
-    fn set_remote_frame(
-        &mut self,
-        cx: &mut Cx,
-        build_id: QueryId,
-        frame: RunViewFrameData,
-    ) {
+    fn set_remote_frame(&mut self, cx: &mut Cx, build_id: QueryId, frame: RunViewFrameData) {
         let Some(target) = self.current_target else {
             return;
         };
@@ -482,10 +481,8 @@ impl DesktopRunView {
             let Some(AsyncImageLoad { image_path, result }) = action.downcast_ref() else {
                 continue;
             };
-            let Some((pending_path, pending_frame_id, pending_width, pending_height)) = self
-                .remote_pending_decode
-                .as_ref()
-                .map(|pending| {
+            let Some((pending_path, pending_frame_id, pending_width, pending_height)) =
+                self.remote_pending_decode.as_ref().map(|pending| {
                     (
                         pending.path.clone(),
                         pending.frame_id,
@@ -1043,8 +1040,12 @@ impl Widget for DesktopRunView {
                             5.0f32 + 17.0f32 * t,
                             0.45f32 * (1.0f32 - t),
                         ),
-                        RunViewInputVizKind::TypeText => ([1.00, 0.78, 0.24, 1.0], 0.0, 0.0, 0.0, 0.0),
-                        RunViewInputVizKind::Return => ([0.36, 0.90, 0.50, 1.0], 0.0, 0.0, 0.0, 0.0),
+                        RunViewInputVizKind::TypeText => {
+                            ([1.00, 0.78, 0.24, 1.0], 0.0, 0.0, 0.0, 0.0)
+                        }
+                        RunViewInputVizKind::Return => {
+                            ([0.36, 0.90, 0.50, 1.0], 0.0, 0.0, 0.0, 0.0)
+                        }
                     };
                     (
                         color,
@@ -1085,9 +1086,11 @@ impl Widget for DesktopRunView {
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(shape_kind), &[shape_kind]);
-                self.draw_ai_viz
-                    .draw_vars
-                    .set_dyn_instance(cx, id!(corner_radius), &[corner_radius]);
+                self.draw_ai_viz.draw_vars.set_dyn_instance(
+                    cx,
+                    id!(corner_radius),
+                    &[corner_radius],
+                );
                 self.draw_ai_viz
                     .draw_vars
                     .set_dyn_instance(cx, id!(stroke_width), &[stroke_width]);

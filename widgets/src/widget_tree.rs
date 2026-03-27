@@ -1952,9 +1952,12 @@ impl WidgetTree {
 
             let is_button = widget.borrow::<Button>().is_some();
             let button_enabled = widget.borrow::<Button>().map(|button| button.enabled());
-            let check_box_active = widget.borrow::<CheckBox>().map(|check_box| check_box.active(cx));
-            let radio_active =
-                widget.borrow::<RadioButton>().map(|radio_button| radio_button.active(cx));
+            let check_box_active = widget
+                .borrow::<CheckBox>()
+                .map(|check_box| check_box.active(cx));
+            let radio_active = widget
+                .borrow::<RadioButton>()
+                .map(|radio_button| radio_button.active(cx));
             let dropdown_selected = widget
                 .borrow::<DropDown>()
                 .map(|drop_down| drop_down.selected_item_label());
@@ -1966,7 +1969,10 @@ impl WidgetTree {
                 value = Some(widget.text());
             } else {
                 let widget_text = widget.text();
-                if is_button || check_box_active.is_some() || radio_active.is_some() || !widget_text.is_empty()
+                if is_button
+                    || check_box_active.is_some()
+                    || radio_active.is_some()
+                    || !widget_text.is_empty()
                 {
                     text = Some(widget_text);
                 }
@@ -2087,11 +2093,7 @@ impl WidgetTree {
                         text: Some(tab.title.clone()),
                         value: None,
                         checked: Some(tab.is_active),
-                        selected: if tab.is_active {
-                            Some(tab.title)
-                        } else {
-                            None
-                        },
+                        selected: if tab.is_active { Some(tab.title) } else { None },
                     });
                 }
             }

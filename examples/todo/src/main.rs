@@ -229,7 +229,8 @@ impl Widget for TodoList {
                         item.check_box(cx, ids!(check)).set_active(cx, todo.done);
                         item.label(cx, ids!(label)).set_text(cx, &todo.text);
                         item.label(cx, ids!(tag.tag_label)).set_text(cx, &todo.tag);
-                        item.view(cx, ids!(tag)).set_visible(cx, !todo.tag.is_empty());
+                        item.view(cx, ids!(tag))
+                            .set_visible(cx, !todo.tag.is_empty());
                         item.draw_all_unscoped(cx);
                     }
                 }

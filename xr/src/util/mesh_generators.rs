@@ -22,22 +22,8 @@ impl PbrMeshGenerator {
     ) -> u32 {
         let index = (self.vertices.len() / 16) as u32;
         self.vertices.extend_from_slice(&[
-            position.x,
-            position.y,
-            position.z,
-            normal.x,
-            normal.y,
-            normal.z,
-            uv.x,
-            uv.y,
-            color.x,
-            color.y,
-            color.z,
-            color.w,
-            tangent.x,
-            tangent.y,
-            tangent.z,
-            tangent.w,
+            position.x, position.y, position.z, normal.x, normal.y, normal.z, uv.x, uv.y, color.x,
+            color.y, color.z, color.w, tangent.x, tangent.y, tangent.z, tangent.w,
         ]);
         index
     }

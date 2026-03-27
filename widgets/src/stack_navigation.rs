@@ -298,9 +298,9 @@ impl StackNavigationViewRef {
             // Force-reset the animator by cutting to show (offset=0) first,
             // then cutting to hide, then playing show. This ensures the animator
             // always sees a state change regardless of its current state.
-            inner.animator_cut(cx, ids!(slide.show));  // force to show state
-            inner.animator_cut(cx, ids!(slide.hide));  // then to hide state
-            inner.offset = root_width;                 // set actual start offset
+            inner.animator_cut(cx, ids!(slide.show)); // force to show state
+            inner.animator_cut(cx, ids!(slide.hide)); // then to hide state
+            inner.offset = root_width; // set actual start offset
             inner.animator_play(cx, ids!(slide.show)); // now animate hide -> show
             inner.redraw(cx);
         }

@@ -9,11 +9,7 @@ impl App {
         let Some(dock) = self.mount_workspace_dock(cx, mount) else {
             return;
         };
-        let has_runs = self
-            .data
-            .run_tab_state
-            .values()
-            .any(|s| s.mount == mount);
+        let has_runs = self.data.run_tab_state.values().any(|s| s.mount == mount);
         let Some(items) = dock.clone_state() else {
             return;
         };
@@ -31,12 +27,7 @@ impl App {
             self.data
                 .run_panel_split_restore
                 .insert(mount.to_string(), current);
-            dock.set_splitter_align(
-                cx,
-                id!(editor_split),
-                SplitterAlign::Weighted(1.0),
-                false,
-            );
+            dock.set_splitter_align(cx, id!(editor_split), SplitterAlign::Weighted(1.0), false);
             return;
         }
         if has_runs && collapsed {
@@ -746,9 +737,7 @@ impl App {
     pub(super) fn log_jump_position(session: &CodeSession, line: usize, column: usize) -> Position {
         let text = session.document().as_text();
         let lines = text.as_lines();
-        let line_index = line
-            .saturating_sub(1)
-            .min(lines.len().saturating_sub(1));
+        let line_index = line.saturating_sub(1).min(lines.len().saturating_sub(1));
         let byte_index = lines
             .get(line_index)
             .map(|line_text| {

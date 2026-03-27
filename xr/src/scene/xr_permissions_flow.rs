@@ -205,8 +205,10 @@ impl XrPermissionsFlow {
     }
 
     fn refresh_ui(&mut self, cx: &mut Cx) {
-        self.label(cx, ids!(detail_label)).set_text(cx, self.detail_text());
-        self.label(cx, ids!(status_label)).set_text(cx, self.status_text());
+        self.label(cx, ids!(detail_label))
+            .set_text(cx, self.detail_text());
+        self.label(cx, ids!(status_label))
+            .set_text(cx, self.status_text());
         let scene_access_button = self.button(cx, ids!(scene_access_button));
         scene_access_button.set_enabled(
             cx,
@@ -272,7 +274,8 @@ impl XrPermissionsFlow {
         {
             return;
         }
-        self.pending_headset_camera_request = Some(cx.request_permission(Permission::HeadsetCamera));
+        self.pending_headset_camera_request =
+            Some(cx.request_permission(Permission::HeadsetCamera));
         crate::log!(
             "XrPermissionsFlow request_headset_camera request_id={:?}",
             self.pending_headset_camera_request
@@ -313,7 +316,10 @@ impl Widget for XrPermissionsFlow {
             if self.button(cx, ids!(scene_access_button)).clicked(actions) {
                 self.request_scene_access(cx);
             }
-            if self.button(cx, ids!(headset_camera_button)).clicked(actions) {
+            if self
+                .button(cx, ids!(headset_camera_button))
+                .clicked(actions)
+            {
                 self.request_headset_camera(cx);
             }
             if self.button(cx, ids!(enter_mr_button)).clicked(actions)
@@ -347,7 +353,7 @@ impl Widget for XrPermissionsFlow {
                     cx.xr_start_presenting();
                 }
             }
-            Event::PermissionResult(result) if result.permission == Permission::SceneAccess => { 
+            Event::PermissionResult(result) if result.permission == Permission::SceneAccess => {
                 if self.pending_scene_access_check == Some(result.request_id) {
                     self.pending_scene_access_check = None;
                 } else if self.pending_scene_access_request == Some(result.request_id) {

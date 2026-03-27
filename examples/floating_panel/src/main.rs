@@ -295,7 +295,6 @@ impl MatchEvent for App {
             };
             self.set_status(cx, &message);
         }
-
     }
 }
 

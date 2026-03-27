@@ -67,8 +67,9 @@ impl Shooter {
 
     fn refresh_projectile_pool(&mut self) {
         self.projectile_pool_uids.clear();
-        self.node
-            .children(&mut |_, child| Self::collect_projectile_pool(&child, &mut self.projectile_pool_uids));
+        self.node.children(&mut |_, child| {
+            Self::collect_projectile_pool(&child, &mut self.projectile_pool_uids)
+        });
         if self.projectile_pool_uids.is_empty() {
             self.projectile_cursor = 0;
         } else {
@@ -85,7 +86,8 @@ impl Shooter {
                 projectile_pool_uids.push(widget.widget_uid());
             }
         }
-        widget.children(&mut |_, child| Self::collect_projectile_pool(&child, projectile_pool_uids));
+        widget
+            .children(&mut |_, child| Self::collect_projectile_pool(&child, projectile_pool_uids));
     }
 
     fn next_projectile_widget_uid(&mut self) -> Option<WidgetUid> {

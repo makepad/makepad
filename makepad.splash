@@ -9,12 +9,12 @@ let RunItem = {
 
 let RunQuest = RunItem{
     on_run: fn(id){
-        hub.run(
+        hub.run( 
             {"STUDIO": hub.studio_ext(id), "MAKEPAD": "vulkan"},
             "cargo", 
             [
                 "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"
-                "android" "--variant=quest" "--no-icon" "--small-fonts" "run" "-p" self.run "--release" "--message-format=json"
+                "android" "--variant=quest" "--devices=all" "--no-icon" "--small-fonts" "run" "-p" self.run "--release"  "--message-format=json"
             ],
         )
     }

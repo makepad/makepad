@@ -73,7 +73,6 @@ impl RefractiveCube {
     pub fn node(&self) -> &XrNode {
         &self.node
     }
-
 }
 
 impl ScriptHook for RefractiveCube {

@@ -1,6 +1,6 @@
 use crate::xr_node::{
     XrBodyKind, XrDrawScopeData, XrHandInfluencePoint, XrNode, XrRuntimeBodyState,
-    XR_HAND_INFLUENCE_POINT_COUNT, XR_HAND_INFLUENCE_POINTS_PER_HAND,
+    XR_HAND_INFLUENCE_POINTS_PER_HAND, XR_HAND_INFLUENCE_POINT_COUNT,
 };
 use crate::*;
 use makepad_widgets::makepad_platform::{
@@ -474,10 +474,7 @@ impl XrEnv {
         )
     }
 
-    fn write_hand_influence_points(
-        hand: &XrHand,
-        target: &mut [Option<XrHandInfluencePoint>],
-    ) {
+    fn write_hand_influence_points(hand: &XrHand, target: &mut [Option<XrHandInfluencePoint>]) {
         debug_assert_eq!(target.len(), XR_HAND_INFLUENCE_POINTS_PER_HAND);
         target[0] = Self::hand_influence_tip_world(hand, XrHand::THUMB_TIP)
             .map(|pos| Self::hand_influence_point(pos, 0.72, 0.92));
@@ -489,8 +486,7 @@ impl XrEnv {
             .map(|pos| Self::hand_influence_point(pos, 0.82, 0.94));
         target[4] = Self::hand_influence_tip_world(hand, XrHand::LITTLE_TIP)
             .map(|pos| Self::hand_influence_point(pos, 0.68, 0.88));
-        target[5] = Self::palm_world(hand)
-            .map(|pos| Self::hand_influence_point(pos, 1.30, 2.40));
+        target[5] = Self::palm_world(hand).map(|pos| Self::hand_influence_point(pos, 1.30, 2.40));
     }
 
     fn draw_scope_hand_influence_points(
@@ -603,13 +599,7 @@ impl XrEnv {
         }
         let Some(node) = widget.cast_inner::<XrNode>() else {
             widget.children(&mut |_, child| {
-                Self::collect_cubes_from_widget(
-                    &child,
-                    parent_pos,
-                    parent_ori,
-                    parent_scale,
-                    cubes,
-                )
+                Self::collect_cubes_from_widget(&child, parent_pos, parent_ori, parent_scale, cubes)
             });
             return;
         };
@@ -638,13 +628,7 @@ impl XrEnv {
 
         drop(node);
         widget.children(&mut |_, child| {
-            Self::collect_cubes_from_widget(
-                &child,
-                pos,
-                ori,
-                scale,
-                cubes,
-            )
+            Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes)
         });
     }
 
@@ -660,13 +644,7 @@ impl XrEnv {
         };
         let root_scale = vec3f(1.0, 1.0, 1.0);
         for (_, child) in children {
-            Self::collect_cubes_from_widget(
-                child,
-                root_pos,
-                root_ori,
-                root_scale,
-                &mut cubes,
-            );
+            Self::collect_cubes_from_widget(child, root_pos, root_ori, root_scale, &mut cubes);
         }
         cubes
     }
@@ -706,11 +684,7 @@ impl XrEnv {
         }
     }
 
-    fn request_physics_rebuild(
-        &mut self,
-        cx: &mut Cx,
-        children: &[(LiveId, WidgetRef)],
-    ) {
+    fn request_physics_rebuild(&mut self, cx: &mut Cx, children: &[(LiveId, WidgetRef)]) {
         let cubes = self.collect_cubes_from_children(children);
         self.depth_query_retained_hits.clear();
         self.physics_revision = self.physics_revision.saturating_add(1);
@@ -721,11 +695,7 @@ impl XrEnv {
         self.scene_dirty = false;
     }
 
-    pub fn ensure_physics(
-        &mut self,
-        cx: &mut Cx,
-        children: &[(LiveId, WidgetRef)],
-    ) {
+    pub fn ensure_physics(&mut self, cx: &mut Cx, children: &[(LiveId, WidgetRef)]) {
         self.poll_physics_worker(cx);
         if self.scene_dirty || self.physics_worker.is_none() {
             self.request_physics_rebuild(cx, children);
@@ -809,7 +779,9 @@ impl XrEnv {
     // --- New API for XrRoot ---
 
     pub fn prepare_and_draw(&mut self, cx: &mut Cx2d) -> XrDrawScopeData {
-        cx.cx.xr_depth_mesh().set_mesh_enabled(self.depth_mesh_visible());
+        cx.cx
+            .xr_depth_mesh()
+            .set_mesh_enabled(self.depth_mesh_visible());
         let state = self.last_xr_state.clone();
         if let Some(state) = state.as_deref() {
             if self.depth_debug_enabled() {
@@ -837,6 +809,8 @@ impl XrEnv {
 
         XrDrawScopeData {
             runtime_bodies: self.runtime_bodies.clone(),
+            tracking_from_content: Mat4f::identity(),
+            content_from_tracking: Mat4f::identity(),
             env_texture,
             camera_texture: self
                 .passthrough_camera_textures

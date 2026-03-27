@@ -339,7 +339,7 @@ impl Cx {
                 #[cfg(use_vulkan)]
                 let _has_vulkan = self.os.vulkan.is_some();
                 #[cfg(not(use_vulkan))]
-                let has_vulkan = false;
+                let _has_vulkan = false;
                 #[cfg(not(use_vulkan))]
                 if !self.os.in_xr_mode {
                     unsafe {
@@ -419,7 +419,7 @@ impl Cx {
                 #[cfg(use_vulkan)]
                 let _has_vulkan = self.os.vulkan.is_some();
                 #[cfg(not(use_vulkan))]
-                let has_vulkan = false;
+                let _has_vulkan = false;
                 #[cfg(use_vulkan)]
                 if self.os.in_xr_mode {
                     self.replace_xr_pending_surface(window, width, height);
@@ -2382,7 +2382,8 @@ impl Cx {
                     }
                 }
                 CxOsOp::XrSetRenderScale(scale) => {
-                    let scale = scale.clamp(ANDROID_XR_BUFFER_SCALE_MIN, ANDROID_XR_BUFFER_SCALE_MAX);
+                    let scale =
+                        scale.clamp(ANDROID_XR_BUFFER_SCALE_MIN, ANDROID_XR_BUFFER_SCALE_MAX);
                     self.os.xr_buffer_scale_requested = scale;
                     if !self.os.in_xr_mode || self.os.openxr.session.is_none() {
                         self.os.xr_buffer_scale_active = scale;
@@ -2481,7 +2482,9 @@ impl CxOsApi for Cx {
     }
 
     fn xr_display_refresh_rate_hz(&self) -> Option<f64> {
-        self.os.xr_display_refresh_rate_active_hz.map(|value| value as f64)
+        self.os
+            .xr_display_refresh_rate_active_hz
+            .map(|value| value as f64)
     }
 
     fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
@@ -2672,8 +2675,11 @@ impl Default for CxOs {
             xr_display_refresh_rate_active_hz: None,
             xr_effective_frame_time_ms: None,
             xr_effective_frame_rate_hz: None,
+            #[cfg(use_vulkan)]
             xr_pending_surface_window: std::ptr::null_mut(),
+            #[cfg(use_vulkan)]
             xr_pending_surface_width: 0,
+            #[cfg(use_vulkan)]
             xr_pending_surface_height: 0,
             xr_retry_surface_after_destroy: false,
         }
@@ -2729,8 +2735,11 @@ pub struct CxOs {
     pub(crate) xr_display_refresh_rate_active_hz: Option<f32>,
     pub(crate) xr_effective_frame_time_ms: Option<f64>,
     pub(crate) xr_effective_frame_rate_hz: Option<f64>,
+    #[cfg(use_vulkan)]
     pub(crate) xr_pending_surface_window: *mut ndk_sys::ANativeWindow,
+    #[cfg(use_vulkan)]
     pub(crate) xr_pending_surface_width: i32,
+    #[cfg(use_vulkan)]
     pub(crate) xr_pending_surface_height: i32,
     pub(crate) xr_retry_surface_after_destroy: bool,
 }

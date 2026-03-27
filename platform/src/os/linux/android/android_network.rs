@@ -1,11 +1,10 @@
 use super::android_jni;
 use crate::makepad_live_id::LiveId;
 use crate::makepad_network::{
-    plain_web_socket::PlainWebSocket,
-    AndroidSocketStream, AndroidSocketStreamFactory, EventSink, HttpError, HttpRequest,
-    HttpResponse, NetworkBackend, NetworkError, NetworkResponse, ServerWebSocketMessage,
-    ServerWebSocketMessageFormat, ServerWebSocketMessageHeader, WebSocketMessage,
-    WebSocketParser, WebSocketTransport, WsMessage, WsSend,
+    plain_web_socket::PlainWebSocket, AndroidSocketStream, AndroidSocketStreamFactory, EventSink,
+    HttpError, HttpRequest, HttpResponse, NetworkBackend, NetworkError, NetworkResponse,
+    ServerWebSocketMessage, ServerWebSocketMessageFormat, ServerWebSocketMessageHeader,
+    WebSocketMessage, WebSocketParser, WebSocketTransport, WsMessage, WsSend,
 };
 use std::collections::HashMap;
 use std::io;

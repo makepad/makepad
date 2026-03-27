@@ -1165,10 +1165,7 @@ impl Widget for ViewSplat {
             return DrawStep::done();
         };
         let _ = apply_scene_to_draw_pbr(&mut self.draw_splat.draw_super, cx);
-        let node_matrix = Mat4f::mul(
-            &scene_node_world_transform_from_cx(cx),
-            &self.node_matrix(),
-        );
+        let node_matrix = Mat4f::mul(&scene_node_world_transform_from_cx(cx), &self.node_matrix());
 
         self.ensure_env_loaded(cx);
         self.ensure_scene_loaded(cx);

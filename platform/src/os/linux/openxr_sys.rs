@@ -721,15 +721,11 @@ pub type TxrEnumerateDisplayRefreshRatesFB = unsafe extern "C" fn(
     display_refresh_rates: *mut f32,
 ) -> XrResult;
 
-pub type TxrGetDisplayRefreshRateFB = unsafe extern "C" fn(
-    session: XrSession,
-    display_refresh_rate: *mut f32,
-) -> XrResult;
+pub type TxrGetDisplayRefreshRateFB =
+    unsafe extern "C" fn(session: XrSession, display_refresh_rate: *mut f32) -> XrResult;
 
-pub type TxrRequestDisplayRefreshRateFB = unsafe extern "C" fn(
-    session: XrSession,
-    display_refresh_rate: f32,
-) -> XrResult;
+pub type TxrRequestDisplayRefreshRateFB =
+    unsafe extern "C" fn(session: XrSession, display_refresh_rate: f32) -> XrResult;
 
 pub type TxrLocateSpace = unsafe extern "C" fn(
     space: XrSpace,
