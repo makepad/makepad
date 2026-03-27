@@ -201,7 +201,7 @@ pub enum AppToStudio {
     RunViewKeyFocusRect(RunViewKeyFocusRect),
     WidgetTreeDump(WidgetTreeDumpResponse),
     WidgetQuery(WidgetQueryResponse),
-    WidgetSnapshot(WidgetSnapshotResponse),
+    WidgetResponse(WidgetResponse),
     TweakHits(TweakHitsResponse),
     BeforeStartup,
     CreateWindow {
@@ -277,33 +277,19 @@ pub struct WidgetQueryResponse {
     pub rects: Vec<String>,
 }
 
-#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone, PartialEq, Eq)]
-pub struct WidgetSnapshot {
+#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
+pub struct WidgetControl {
+    pub request_id: u64,
     pub id: String,
-    pub widget_type: String,
-    pub window_id: String,
-    pub window_index: usize,
-    pub visible: bool,
-    pub enabled: bool,
-    pub x: i64,
-    pub y: i64,
-    pub width: i64,
-    pub height: i64,
-    pub text: Option<String>,
-    pub value: Option<String>,
-    pub checked: Option<bool>,
-    pub selected: Option<String>,
+    pub op: String,
+    pub arg: String,
 }
 
 #[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
-pub struct WidgetSnapshotRequest {
+pub struct WidgetResponse {
     pub request_id: u64,
-}
-
-#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
-pub struct WidgetSnapshotResponse {
-    pub request_id: u64,
-    pub widgets: Vec<WidgetSnapshot>,
+    pub ok: bool,
+    pub out: String,
 }
 
 #[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
@@ -334,7 +320,7 @@ pub enum StudioToApp {
     RunViewFrameRequest(RunViewFrameRequest),
     WidgetTreeDump(WidgetTreeDumpRequest),
     WidgetQuery(WidgetQueryRequest),
-    WidgetSnapshot(WidgetSnapshotRequest),
+    WidgetControl(WidgetControl),
     KeepAlive,
     LiveChange {
         file_name: String,

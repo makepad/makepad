@@ -1,5 +1,4 @@
 use crate::shared_framebuf::PresentableDraw;
-use crate::studio::WidgetSnapshot;
 use makepad_error_log::LogLevel;
 use makepad_live_id::LiveId;
 use makepad_micro_serde::*;
@@ -148,9 +147,6 @@ pub enum ClientToHub {
     WidgetQuery {
         build_id: QueryId,
         query: String,
-    },
-    WidgetSnapshot {
-        build_id: QueryId,
     },
     RunViewInput {
         build_id: QueryId,
@@ -335,11 +331,6 @@ pub enum HubToClient {
         build_id: QueryId,
         query: String,
         rects: Vec<String>,
-    },
-    WidgetSnapshot {
-        query_id: QueryId,
-        build_id: QueryId,
-        widgets: Vec<WidgetSnapshot>,
     },
 
     // === RunView ===

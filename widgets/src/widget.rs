@@ -3,7 +3,7 @@ use {
     crate::makepad_draw::*,
     crate::widget_async::{ScriptAsyncId, ScriptAsyncResult},
     crate::widget_tree::{set_ui_root, CxWidgetExt},
-    std::any::{Any, TypeId},
+    std::any::TypeId,
     std::cell::RefCell,
     std::collections::BTreeMap,
     std::fmt,
@@ -163,12 +163,6 @@ pub trait WidgetNode: ScriptApply {
     fn action_data(&self) -> Option<Arc<dyn ActionTrait>> {
         None
     }
-    fn cast_inner_any(&self, _type_id: TypeId) -> Option<&dyn Any> {
-        None
-    }
-    fn cast_inner_any_mut(&mut self, _type_id: TypeId) -> Option<&mut dyn Any> {
-        None
-    }
 
     fn set_visible(&mut self, _cx: &mut Cx, _visible: bool) {}
     fn visible(&self) -> bool {
@@ -320,6 +314,13 @@ pub trait Widget: WidgetNode {
         cx.has_key_focus(self.area())
     }
 
+    fn controls(&self) -> (String, bool) { (String::new(), true) }
+
+    fn control(&mut self, cx: &mut Cx, op: &str, arg: &str) -> String {
+        let _ = (cx, op, arg);
+        String::new()
+    }
+
     fn set_disabled(&mut self, _cx: &mut Cx, _disabled: bool) {}
 
     fn disabled(&self, _cx: &Cx) -> bool {
@@ -408,14 +409,6 @@ impl dyn Widget {
         } else {
             None
         }
-    }
-    pub fn cast_inner<T: 'static>(&self) -> Option<&T> {
-        self.cast_inner_any(TypeId::of::<T>())
-            .and_then(|inner| inner.downcast_ref::<T>())
-    }
-    pub fn cast_inner_mut<T: 'static>(&mut self) -> Option<&mut T> {
-        self.cast_inner_any_mut(TypeId::of::<T>())
-            .and_then(|inner| inner.downcast_mut::<T>())
     }
 }
 
@@ -794,13 +787,6 @@ impl WidgetRef {
         let _ = self.try_children(visit);
     }
 
-    pub fn register_as_ui_root(&self, vm: &mut ScriptVm) {
-        if self.is_empty() {
-            return;
-        }
-        vm.with_cx_mut(|cx| set_ui_root(cx, self));
-    }
-
     pub fn try_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         let Ok(inner) = self.0.try_borrow() else {
             return false;
@@ -1118,6 +1104,22 @@ impl WidgetRef {
         }
     }
 
+    pub fn controls(&self) -> (String, bool) {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            inner.widget.controls()
+        } else {
+            (String::new(), true)
+        }
+    }
+
+    pub fn control(&self, cx: &mut Cx, op: &str, arg: &str) -> String {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.control(cx, op, arg)
+        } else {
+            String::new()
+        }
+    }
+
     pub fn set_disabled(&self, cx: &mut Cx, disabled: bool) {
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             return inner.widget.set_disabled(cx, disabled);
@@ -1171,38 +1173,10 @@ impl WidgetRef {
         }
     }
 
-    pub fn cast_inner_mut<T: 'static>(&self) -> Option<std::cell::RefMut<'_, T>> {
-        if let Ok(ret) = std::cell::RefMut::filter_map(self.0.borrow_mut(), |inner| {
-            if let Some(inner) = inner.as_mut() {
-                inner.widget.cast_inner_mut::<T>()
-            } else {
-                None
-            }
-        }) {
-            Some(ret)
-        } else {
-            None
-        }
-    }
-
     pub fn borrow<T: 'static + Widget>(&self) -> Option<std::cell::Ref<'_, T>> {
         if let Ok(ret) = std::cell::Ref::filter_map(self.0.borrow(), |inner| {
             if let Some(inner) = inner.as_ref() {
                 inner.widget.downcast_ref::<T>()
-            } else {
-                None
-            }
-        }) {
-            Some(ret)
-        } else {
-            None
-        }
-    }
-
-    pub fn cast_inner<T: 'static>(&self) -> Option<std::cell::Ref<'_, T>> {
-        if let Ok(ret) = std::cell::Ref::filter_map(self.0.borrow(), |inner| {
-            if let Some(inner) = inner.as_ref() {
-                inner.widget.cast_inner::<T>()
             } else {
                 None
             }
@@ -1802,94 +1776,4 @@ macro_rules! register_widget {
                 ($crate::ComponentInfo { name }, Box::new(Factory())),
             );
     }};
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct InnerWidget {
-        uid: WidgetUid,
-        value: i32,
-    }
-
-    impl ScriptApply for InnerWidget {}
-
-    impl WidgetNode for InnerWidget {
-        fn widget_uid(&self) -> WidgetUid {
-            self.uid
-        }
-
-        fn walk(&mut self, _cx: &mut Cx) -> Walk {
-            Walk::default()
-        }
-
-        fn area(&self) -> Area {
-            Area::Empty
-        }
-
-        fn redraw(&mut self, _cx: &mut Cx) {}
-    }
-
-    impl Widget for InnerWidget {}
-
-    struct OuterWidget {
-        uid: WidgetUid,
-        inner: InnerWidget,
-    }
-
-    impl ScriptApply for OuterWidget {}
-
-    impl WidgetNode for OuterWidget {
-        fn widget_uid(&self) -> WidgetUid {
-            self.uid
-        }
-
-        fn cast_inner_any(&self, type_id: TypeId) -> Option<&dyn Any> {
-            if type_id == TypeId::of::<InnerWidget>() {
-                Some(&self.inner)
-            } else {
-                None
-            }
-        }
-
-        fn cast_inner_any_mut(&mut self, type_id: TypeId) -> Option<&mut dyn Any> {
-            if type_id == TypeId::of::<InnerWidget>() {
-                Some(&mut self.inner)
-            } else {
-                None
-            }
-        }
-
-        fn walk(&mut self, _cx: &mut Cx) -> Walk {
-            Walk::default()
-        }
-
-        fn area(&self) -> Area {
-            Area::Empty
-        }
-
-        fn redraw(&mut self, _cx: &mut Cx) {}
-    }
-
-    impl Widget for OuterWidget {}
-
-    #[test]
-    fn widget_ref_cast_inner_projects_without_changing_borrow() {
-        let widget = WidgetRef::new_with_inner(Box::new(OuterWidget {
-            uid: WidgetUid(1),
-            inner: InnerWidget {
-                uid: WidgetUid(2),
-                value: 7,
-            },
-        }));
-
-        assert!(widget.borrow::<OuterWidget>().is_some());
-        assert!(widget.borrow::<InnerWidget>().is_none());
-        assert_eq!(widget.cast_inner::<InnerWidget>().unwrap().value, 7);
-
-        widget.cast_inner_mut::<InnerWidget>().unwrap().value = 11;
-
-        assert_eq!(widget.cast_inner::<InnerWidget>().unwrap().value, 11);
-    }
 }

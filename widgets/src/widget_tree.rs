@@ -1,15 +1,8 @@
 use {
-    crate::button::Button,
-    crate::check_box::CheckBox,
     crate::dock::Dock,
-    crate::drop_down::DropDown,
     crate::makepad_draw::{cx_2d::Cx2d, cx_3d::Cx3d, *},
-    crate::makepad_platform::studio::WidgetSnapshot,
-    crate::radio_button::RadioButton,
-    crate::text_input::TextInput,
     crate::widget::{WidgetRef, WidgetRegistry, WidgetUid, WidgetWeakRef},
     crate::widget_async::update_global_ui_handle,
-    crate::window::Window,
     std::any::TypeId,
     std::cell::RefCell,
     std::collections::{HashMap, HashSet},
@@ -23,32 +16,6 @@ unsafe impl Send for WidgetTree {}
 unsafe impl Sync for WidgetTree {}
 
 const NONE: u32 = u32::MAX;
-
-fn allow_duplicate_sibling_names(name: LiveId) -> bool {
-    name == LiveId(0)
-}
-
-fn live_id_token(id: LiveId) -> String {
-    if id == LiveId(0) {
-        return "-".to_string();
-    }
-    id.as_string(|name| {
-        if let Some(name) = name {
-            name.to_string()
-        } else {
-            format!("{:x}", id.0)
-        }
-    })
-}
-
-fn widget_type_names(cx: &Cx) -> HashMap<TypeId, LiveId> {
-    let mut widget_type_names = HashMap::new();
-    let widget_registry = cx.components.get::<WidgetRegistry>();
-    for (type_id, (info, _)) in widget_registry.map.iter() {
-        widget_type_names.insert(*type_id, info.name);
-    }
-    widget_type_names
-}
 
 // ============================================================================
 // WidgetTree: persistent graph + dense query index
@@ -319,16 +286,14 @@ impl WidgetTree {
                 .get(&parent_uid)
                 .map(|p| p.children.len())
                 .unwrap_or(0);
-            if !allow_duplicate_sibling_names(name) {
-                for i in 0..num_children {
-                    let existing_uid = inner.graph.get(&parent_uid).unwrap().children[i];
-                    if existing_uid == uid {
-                        continue;
-                    }
-                    if let Some(existing_node) = inner.graph.get(&existing_uid) {
-                        if existing_node.name == name {
-                            replaced_same_name.push(existing_uid);
-                        }
+            for i in 0..num_children {
+                let existing_uid = inner.graph.get(&parent_uid).unwrap().children[i];
+                if existing_uid == uid {
+                    continue;
+                }
+                if let Some(existing_node) = inner.graph.get(&existing_uid) {
+                    if existing_node.name == name {
+                        replaced_same_name.push(existing_uid);
                     }
                 }
             }
@@ -484,16 +449,14 @@ impl WidgetTree {
             .get(&parent_uid)
             .map(|p| p.children.len())
             .unwrap_or(0);
-        if !allow_duplicate_sibling_names(name) {
-            for i in 0..num_children {
-                let existing_uid = inner.graph.get(&parent_uid).unwrap().children[i];
-                if existing_uid == child_uid {
-                    continue;
-                }
-                if let Some(existing_node) = inner.graph.get(&existing_uid) {
-                    if existing_node.name == name {
-                        replaced_same_name.push(existing_uid);
-                    }
+        for i in 0..num_children {
+            let existing_uid = inner.graph.get(&parent_uid).unwrap().children[i];
+            if existing_uid == child_uid {
+                continue;
+            }
+            if let Some(existing_node) = inner.graph.get(&existing_uid) {
+                if existing_node.name == name {
+                    replaced_same_name.push(existing_uid);
                 }
             }
         }
@@ -1748,7 +1711,6 @@ impl WidgetTree {
     }
 
     pub fn root_uid(&self) -> WidgetUid {
-        self.sync_dirty();
         self.inner.borrow().root_uid
     }
 
@@ -1880,227 +1842,7 @@ impl WidgetTree {
         rects
     }
 
-    pub fn snapshot(&self, cx: &Cx) -> Vec<WidgetSnapshot> {
-        self.sync_dirty();
-        let inner = self.inner.borrow();
-        let widget_type_names = widget_type_names(cx);
-
-        #[derive(Clone)]
-        struct WindowContext {
-            id: String,
-            index: usize,
-            position: Vec2d,
-        }
-
-        let mut window_contexts = HashMap::<usize, WindowContext>::new();
-        for (index, node) in inner.nodes.iter().enumerate() {
-            let Some(widget) = node.widget.upgrade() else {
-                continue;
-            };
-            let Some(context) = widget.borrow::<Window>().map(|window| WindowContext {
-                id: live_id_token(inner.names[index]),
-                index: window.window_index(),
-                position: window.position(cx),
-            }) else {
-                continue;
-            };
-            window_contexts.insert(index, context);
-        }
-
-        let resolve_window_context = |node_index: usize| -> Option<WindowContext> {
-            let mut current = Some(node_index as u32);
-            while let Some(index) = current {
-                if let Some(context) = window_contexts.get(&(index as usize)) {
-                    return Some(context.clone());
-                }
-                let parent = inner.nodes[index as usize].parent;
-                current = if parent == NONE { None } else { Some(parent) };
-            }
-            None
-        };
-
-        let mut widgets = Vec::new();
-        for (index, node) in inner.nodes.iter().enumerate() {
-            let Some(widget) = node.widget.upgrade() else {
-                continue;
-            };
-            let id = live_id_token(inner.names[index]);
-            let widget_type = widget
-                .widget_type_id()
-                .and_then(|type_id| widget_type_names.get(&type_id).copied())
-                .map(live_id_token)
-                .unwrap_or_else(|| "-".to_string());
-            let window_context = resolve_window_context(index);
-            let (mut x, mut y, width, height) = {
-                let area = widget.area();
-                if area.is_valid(cx) {
-                    let rect = area.rect(cx);
-                    (
-                        rect.pos.x.round() as i64,
-                        rect.pos.y.round() as i64,
-                        rect.size.x.round() as i64,
-                        rect.size.y.round() as i64,
-                    )
-                } else {
-                    (0, 0, 0, 0)
-                }
-            };
-            if let Some(context) = &window_context {
-                x += context.position.x.round() as i64;
-                y += context.position.y.round() as i64;
-            }
-
-            let is_button = widget.borrow::<Button>().is_some();
-            let button_enabled = widget.borrow::<Button>().map(|button| button.enabled());
-            let check_box_active = widget.borrow::<CheckBox>().map(|check_box| check_box.active(cx));
-            let radio_active =
-                widget.borrow::<RadioButton>().map(|radio_button| radio_button.active(cx));
-            let dropdown_selected = widget
-                .borrow::<DropDown>()
-                .map(|drop_down| drop_down.selected_item_label());
-            let is_text_input = widget.borrow::<TextInput>().is_some();
-
-            let mut text = None;
-            let mut value = None;
-            if is_text_input {
-                value = Some(widget.text());
-            } else {
-                let widget_text = widget.text();
-                if is_button || check_box_active.is_some() || radio_active.is_some() || !widget_text.is_empty()
-                {
-                    text = Some(widget_text);
-                }
-            }
-            if let Some(selected) = dropdown_selected.clone() {
-                text = Some(selected.clone());
-                widgets.push(WidgetSnapshot {
-                    id,
-                    widget_type,
-                    window_id: window_context
-                        .as_ref()
-                        .map(|context| context.id.clone())
-                        .unwrap_or_default(),
-                    window_index: window_context
-                        .as_ref()
-                        .map(|context| context.index)
-                        .unwrap_or_default(),
-                    visible: widget.visible(),
-                    enabled: button_enabled.unwrap_or_else(|| !widget.disabled(cx)),
-                    x,
-                    y,
-                    width,
-                    height,
-                    text,
-                    value,
-                    checked: check_box_active.or(radio_active),
-                    selected: Some(selected),
-                });
-            } else {
-                widgets.push(WidgetSnapshot {
-                    id,
-                    widget_type,
-                    window_id: window_context
-                        .as_ref()
-                        .map(|context| context.id.clone())
-                        .unwrap_or_default(),
-                    window_index: window_context
-                        .as_ref()
-                        .map(|context| context.index)
-                        .unwrap_or_default(),
-                    visible: widget.visible(),
-                    enabled: button_enabled.unwrap_or_else(|| !widget.disabled(cx)),
-                    x,
-                    y,
-                    width,
-                    height,
-                    text,
-                    value,
-                    checked: check_box_active.or(radio_active),
-                    selected: None,
-                });
-            }
-
-            let dock_dump = widget.borrow::<Dock>().map(|dock| dock.compact_dump(cx));
-            if let Some(dock_dump) = dock_dump {
-                let window_id = window_context
-                    .as_ref()
-                    .map(|context| context.id.clone())
-                    .unwrap_or_default();
-                let window_index = window_context
-                    .as_ref()
-                    .map(|context| context.index)
-                    .unwrap_or_default();
-                let offset_x = window_context
-                    .as_ref()
-                    .map(|context| context.position.x.round() as i64)
-                    .unwrap_or_default();
-                let offset_y = window_context
-                    .as_ref()
-                    .map(|context| context.position.y.round() as i64)
-                    .unwrap_or_default();
-
-                for tabs in dock_dump.tabs {
-                    let width = tabs.rect.size.x.round() as i64;
-                    let height = tabs.rect.size.y.round() as i64;
-                    if width <= 0 || height <= 0 {
-                        continue;
-                    }
-                    widgets.push(WidgetSnapshot {
-                        id: live_id_token(tabs.tabs_id),
-                        widget_type: "DockTabs".to_string(),
-                        window_id: window_id.clone(),
-                        window_index,
-                        visible: true,
-                        enabled: true,
-                        x: tabs.rect.pos.x.round() as i64 + offset_x,
-                        y: tabs.rect.pos.y.round() as i64 + offset_y,
-                        width,
-                        height,
-                        text: None,
-                        value: None,
-                        checked: None,
-                        selected: Some(
-                            tabs.selected_tab_id
-                                .map(live_id_token)
-                                .unwrap_or_else(|| "-".to_string()),
-                        ),
-                    });
-                }
-
-                for tab in dock_dump.tab_headers {
-                    let width = tab.rect.size.x.round() as i64;
-                    let height = tab.rect.size.y.round() as i64;
-                    if width <= 0 || height <= 0 {
-                        continue;
-                    }
-                    widgets.push(WidgetSnapshot {
-                        id: live_id_token(tab.tab_id),
-                        widget_type: "DockTab".to_string(),
-                        window_id: window_id.clone(),
-                        window_index,
-                        visible: true,
-                        enabled: true,
-                        x: tab.rect.pos.x.round() as i64 + offset_x,
-                        y: tab.rect.pos.y.round() as i64 + offset_y,
-                        width,
-                        height,
-                        text: Some(tab.title.clone()),
-                        value: None,
-                        checked: Some(tab.is_active),
-                        selected: if tab.is_active {
-                            Some(tab.title)
-                        } else {
-                            None
-                        },
-                    });
-                }
-            }
-        }
-
-        widgets
-    }
-
-    pub fn compact_dump(&self, cx: &Cx) -> String {
+    pub fn compact_dump(&self, cx: &mut Cx) -> String {
         self.sync_dirty();
         let inner = self.inner.borrow();
 
@@ -2158,6 +1900,7 @@ impl WidgetTree {
             y: i64,
             w: i64,
             h: i64,
+            ctl: String,
         }
 
         #[derive(Clone)]
@@ -2188,6 +1931,7 @@ impl WidgetTree {
         let mut dump_nodes = Vec::new();
         let mut dock_tabs_rows = Vec::<DockTabsRow>::new();
         let mut dock_tab_rows = Vec::<DockTabRow>::new();
+        let mut suppress_set = HashSet::new();
         for (index, node) in inner.nodes.iter().enumerate() {
             let Some(widget) = node.widget.upgrade() else {
                 continue;
@@ -2207,6 +1951,10 @@ impl WidgetTree {
                 if w > 0 && h > 0 {
                     let id_token = live_id_token(id);
                     let ty_token = live_id_token(ty);
+                    let (ctl, show_children) = widget.controls();
+                    if !show_children {
+                        suppress_set.insert(index);
+                    }
                     dump_nodes.push(DumpNode {
                         index,
                         parent: node.parent,
@@ -2216,6 +1964,7 @@ impl WidgetTree {
                         y,
                         w,
                         h,
+                        ctl,
                     });
                 }
             }
@@ -2268,6 +2017,20 @@ impl WidgetTree {
             }
         }
 
+        for node in &mut dump_nodes {
+            if node.ctl.is_empty() {
+                continue;
+            }
+            let mut parent = node.parent;
+            while parent != NONE {
+                if suppress_set.contains(&(parent as usize)) {
+                    node.ctl.clear();
+                    break;
+                }
+                parent = inner.nodes[parent as usize].parent;
+            }
+        }
+
         let mut old_to_new = HashMap::<usize, usize>::new();
         for (new_index, node) in dump_nodes.iter().enumerate() {
             old_to_new.insert(node.index, new_index);
@@ -2285,11 +2048,19 @@ impl WidgetTree {
                 }
                 parent = inner.nodes[parent as usize].parent;
             }
-            let _ = writeln!(
-                &mut out,
-                "{} {} {} {} {} {} {} {}",
-                new_index, parent_index, node.id, node.ty, node.x, node.y, node.w, node.h
-            );
+            if node.ctl.is_empty() {
+                let _ = writeln!(
+                    &mut out,
+                    "{} {} {} {} {} {} {} {}",
+                    new_index, parent_index, node.id, node.ty, node.x, node.y, node.w, node.h
+                );
+            } else {
+                let _ = writeln!(
+                    &mut out,
+                    "{} {} {} {} {} {} {} {} {}",
+                    new_index, parent_index, node.id, node.ty, node.x, node.y, node.w, node.h, node.ctl
+                );
+            }
         }
         if !dock_tabs_rows.is_empty() || !dock_tab_rows.is_empty() {
             let _ = writeln!(
@@ -2371,16 +2142,30 @@ fn get_or_init_state(cx: &mut Cx) -> &mut WidgetTreeState {
     WidgetTreeState::get_or_init(cx)
 }
 
-fn compact_widget_tree_dump_callback(cx: &Cx) -> String {
-    cx.widget_tree().compact_dump(cx)
+fn compact_widget_tree_dump_callback(cx: &mut Cx) -> String {
+    let tree_ptr = cx.widget_tree() as *const WidgetTree;
+    let tree = unsafe { &*tree_ptr };
+    tree.compact_dump(cx)
 }
 
 fn widget_query_callback(cx: &Cx, query: &str) -> Vec<String> {
     cx.widget_tree().query_rects(cx, query)
 }
 
-fn widget_snapshot_callback(cx: &Cx) -> Vec<WidgetSnapshot> {
-    cx.widget_tree().snapshot(cx)
+fn widget_control_callback(cx: &mut Cx, id: &str, op: &str, arg: &str) -> Option<String> {
+    use makepad_live_id::LiveId;
+    let live_id = LiveId::from_str_with_lut(id).unwrap_or(LiveId(0));
+    if live_id == LiveId(0) {
+        return None;
+    }
+    let tree_ptr = cx.widget_tree() as *const WidgetTree;
+    let tree = unsafe { &*tree_ptr };
+    let root_uid = tree.root_uid();
+    let widget = tree.find_within(root_uid, &[live_id]);
+    if widget.is_empty() {
+        return None;
+    }
+    Some(widget.control(cx, op, arg))
 }
 
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
@@ -2388,7 +2173,7 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     state.tree.set_root_widget(ui.clone());
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
     cx.widget_query_callback = Some(widget_query_callback);
-    cx.widget_snapshot_callback = Some(widget_snapshot_callback);
+    cx.widget_control_callback = Some(widget_control_callback);
     let root_uid = ui.widget_uid();
     update_global_ui_handle(cx, root_uid);
 }

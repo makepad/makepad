@@ -1,0 +1,381 @@
+#!/usr/bin/env -S uv --quiet run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Drive any Makepad app via the control socket.
+
+Connects to a Unix domain socket created by makepad-control-socket.
+Sends StudioToApp JSON lines, reads AppToStudio JSON lines.
+
+All coordinates are in Makepad window space (0,0 = top-left of window).
+"""
+
+import argparse, json, os, subprocess, sys, time
+
+# Add tools directory to path for makepad_control import.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import makepad_control as mc
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+last_pos = [0.0, 0.0]
+dump_origin = None  # (ox, oy, dpi)
+latest_dump = None
+
+
+def translate_coords(x, y):
+    if dump_origin is None:
+        return (float(x), float(y))
+    ox, oy, dpi = dump_origin
+    dpi = max(dpi, 1.0)
+    return ((x + ox) / dpi, (y + oy) / dpi)
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_click(args, conn):
+    x, y = float(args.x), float(args.y)
+    tx, ty = translate_coords(x, y)
+    last_pos[0], last_pos[1] = x, y
+    bits = mc.BUTTON_BITS.get(getattr(args, "button", "left") or "left", 1)
+    now = time.time()
+    conn.send(mc.mkv("MouseMove", {"time": now, "x": tx, "y": ty, "modifiers": mc.MODS}))
+    mc.tick(conn)
+    conn.send(mc.mkv("MouseDown", {"button_raw_bits": bits, "x": tx, "y": ty,
+                                    "time": now, "modifiers": mc.MODS}))
+    mc.tick(conn)
+    conn.send(mc.mkv("MouseUp", {"time": now + 0.01, "button_raw_bits": bits,
+                                   "x": tx, "y": ty, "modifiers": mc.MODS}))
+    mc.tick(conn)
+
+
+def cmd_type(args, conn):
+    text = " ".join(args.text)
+    conn.send(mc.mkv("TextInput", {"input": text, "replace_last": False, "was_paste": False}))
+    mc.tick(conn)
+
+
+def cmd_key(args, conn):
+    name = args.name
+    code = mc.keycode_index(name)
+    now = time.time()
+    kd = {"key_code": code, "is_repeat": False, "modifiers": mc.MODS, "time": now}
+    conn.send(mc.mkv("KeyDown", kd))
+    mc.tick(conn)
+    char = name if len(name) == 1 else {"space": " "}.get(name.lower())
+    if char:
+        conn.send(mc.mkv("TextInput", {"input": char, "replace_last": False, "was_paste": False}))
+        mc.tick(conn)
+    conn.send(mc.mkv("KeyUp", kd))
+    mc.tick(conn)
+
+
+def cmd_mousedown(args, conn):
+    x, y = float(args.x), float(args.y)
+    tx, ty = translate_coords(x, y)
+    last_pos[0], last_pos[1] = x, y
+    bits = mc.BUTTON_BITS.get(getattr(args, "button", "left") or "left", 1)
+    conn.send(mc.mkv("MouseDown", {"button_raw_bits": bits, "x": tx, "y": ty,
+                                    "time": 0.0, "modifiers": mc.MODS}))
+    mc.tick(conn)
+
+
+def cmd_mouseup(args, conn):
+    x = float(args.x) if args.x is not None else last_pos[0]
+    y = float(args.y) if args.y is not None else last_pos[1]
+    tx, ty = translate_coords(x, y)
+    last_pos[0], last_pos[1] = x, y
+    bits = mc.BUTTON_BITS.get(getattr(args, "button", "left") or "left", 1)
+    conn.send(mc.mkv("MouseUp", {"time": 0.0, "button_raw_bits": bits,
+                                   "x": tx, "y": ty, "modifiers": mc.MODS}))
+    mc.tick(conn)
+
+
+def cmd_mousemove(args, conn):
+    x, y = float(args.x), float(args.y)
+    tx, ty = translate_coords(x, y)
+    last_pos[0], last_pos[1] = x, y
+    conn.send(mc.mkv("MouseMove", {"time": 0.0, "x": tx, "y": ty, "modifiers": mc.MODS}))
+    mc.tick(conn)
+
+
+def cmd_touch(args, conn):
+    state_map = {"start": "Start", "down": "Start", "stop": "Stop",
+                 "up": "Stop", "move": "Move", "stable": "Stable"}
+    state_name = state_map.get(args.phase.lower())
+    if not state_name:
+        sys.exit(f"error: unknown touch phase: {args.phase}")
+    conn.send(mc.mkv("TouchUpdate", {"touches": [
+        {"uid": args.id, "state": state_name,
+         "x": float(args.x), "y": float(args.y), "time": time.time(),
+         "rotation_angle": 0.0, "force": 1.0,
+         "radius_x": 0.0, "radius_y": 0.0}],
+        "modifiers": mc.MODS}))
+    mc.tick(conn)
+
+
+def cmd_screenshot(args, conn):
+    req_id = int(time.monotonic() * 1000) & 0xFFFFFFFF
+    conn.send(mc.mkv("Screenshot", {"request_id": req_id, "kind_id": 0}))
+    mc.tick(conn)
+
+    resp = conn.recv(match_fn=lambda m: isinstance(m, dict) and "Screenshot" in m,
+                     timeout=30)
+    if not resp or "Screenshot" not in resp:
+        print(json.dumps(resp or {"error": "timeout"}))
+        sys.exit(1)
+
+    sdata = resp["Screenshot"]
+    if isinstance(sdata, list):
+        sdata = sdata[0]
+    png_bytes = bytes(sdata["png"])
+    with open(args.path, "wb") as f:
+        f.write(png_bytes)
+
+    try:
+        subprocess.run(["magick", args.path, args.path], check=True,
+                       capture_output=True, timeout=10)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+    info = {k: v for k, v in sdata.items() if k != "png"}
+    info["path"] = args.path
+    print(json.dumps({"Screenshot": info}))
+
+
+def cmd_sleep(args, conn):
+    time.sleep(args.ms / 1000.0)
+
+
+def cmd_builds(args, conn):
+    print("connected [active]")
+
+
+def cmd_dump(args, conn):
+    global latest_dump, dump_origin
+    req_id = int(time.monotonic() * 1000) & 0xFFFFFFFF
+    conn.send(mc.mkv("WidgetTreeDump", {"request_id": req_id}))
+    mc.tick(conn)
+
+    resp = conn.recv(
+        match_fn=lambda m: isinstance(m, dict) and "WidgetTreeDump" in m,
+        timeout=30)
+    if not resp or "WidgetTreeDump" not in resp:
+        print(json.dumps(resp or {"error": "timeout"}))
+        sys.exit(1)
+
+    dump = resp["WidgetTreeDump"][0]["dump"] if isinstance(resp["WidgetTreeDump"], list) else resp["WidgetTreeDump"]["dump"]
+    latest_dump = dump
+    origin = mc.parse_dump_origin(dump)
+    if origin:
+        dump_origin = origin
+    print(dump)
+
+
+def cmd_query(args, conn):
+    global latest_dump, dump_origin
+    req_id = int(time.monotonic() * 1000) & 0xFFFFFFFF
+    conn.send(mc.mkv("WidgetTreeDump", {"request_id": req_id}))
+    mc.tick(conn)
+
+    resp = conn.recv(
+        match_fn=lambda m: isinstance(m, dict) and "WidgetTreeDump" in m,
+        timeout=30)
+    if not resp or "WidgetTreeDump" not in resp:
+        print(json.dumps(resp or {"error": "timeout"}))
+        sys.exit(1)
+
+    dump = resp["WidgetTreeDump"][0]["dump"] if isinstance(resp["WidgetTreeDump"], list) else resp["WidgetTreeDump"]["dump"]
+    latest_dump = dump
+    origin = mc.parse_dump_origin(dump)
+    if origin:
+        dump_origin = origin
+
+    for line in mc.query_widget_dump(dump, args.query):
+        print(line)
+
+
+def cmd_control(args, conn):
+    req_id = int(time.monotonic() * 1000) & 0xFFFFFFFF
+    op = args.op if args.op else ""
+    arg = " ".join(args.arg) if args.arg else ""
+    conn.send(mc.mkv("WidgetControl", {"request_id": req_id, "id": args.id,
+                                        "op": op, "arg": arg}))
+    mc.tick(conn)
+    resp = conn.recv(
+        match_fn=lambda m: isinstance(m, dict) and "WidgetResponse" in m,
+        timeout=10)
+    if not resp or "WidgetResponse" not in resp:
+        print(json.dumps(resp or {"error": "timeout"}))
+        sys.exit(1)
+    data = resp["WidgetResponse"]
+    if isinstance(data, list):
+        data = data[0]
+    print(json.dumps(data))
+
+
+def cmd_send(args, conn):
+    msg = json.loads(args.json)
+    conn.send(msg)
+    mc.tick(conn)
+    resp = conn.recv(timeout=5)
+    if resp:
+        print(json.dumps(resp))
+
+
+def cmd_pipe(args, conn):
+    """Read commands from stdin, one per line. Space-separated."""
+    dispatch = {
+        "click": lambda parts: cmd_click(
+            argparse.Namespace(x=parts[0], y=parts[1],
+                               button=parts[2] if len(parts) > 2 else "left"), conn),
+        "type": lambda parts: cmd_type(
+            argparse.Namespace(text=parts), conn),
+        "key": lambda parts: cmd_key(
+            argparse.Namespace(name=parts[0]), conn),
+        "mousedown": lambda parts: cmd_mousedown(
+            argparse.Namespace(x=parts[0], y=parts[1],
+                               button=parts[2] if len(parts) > 2 else "left"), conn),
+        "mouseup": lambda parts: cmd_mouseup(
+            argparse.Namespace(x=parts[0] if parts else None,
+                               y=parts[1] if len(parts) > 1 else None,
+                               button=parts[2] if len(parts) > 2 else "left"), conn),
+        "mousemove": lambda parts: cmd_mousemove(
+            argparse.Namespace(x=parts[0], y=parts[1]), conn),
+        "touch": lambda parts: cmd_touch(
+            argparse.Namespace(id=int(parts[0]), phase=parts[1],
+                               x=parts[2], y=parts[3]), conn),
+        "screenshot": lambda parts: cmd_screenshot(
+            argparse.Namespace(path=parts[0]), conn),
+        "sleep": lambda parts: cmd_sleep(
+            argparse.Namespace(ms=int(parts[0])), conn),
+        "dump": lambda parts: cmd_dump(
+            argparse.Namespace(), conn),
+        "query": lambda parts: cmd_query(
+            argparse.Namespace(query=" ".join(parts)), conn),
+        "control": lambda parts: cmd_control(
+            argparse.Namespace(id=parts[0], op=parts[1] if len(parts) > 1 else "",
+                               arg=parts[2:] if len(parts) > 2 else []), conn),
+        "send": lambda parts: cmd_send(
+            argparse.Namespace(json=" ".join(parts)), conn),
+    }
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            cmd_name, cmd_args = parts[0], parts[1:]
+            fn = dispatch.get(cmd_name)
+            if fn:
+                fn(cmd_args)
+                time.sleep(0.02)
+            else:
+                print(f"error: unknown command: {cmd_name}", file=sys.stderr)
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="makepad-ui-cli",
+        description="Drive a Makepad app via the control socket. "
+        "All coordinates are in Makepad window space.")
+    p.add_argument("--socket", "-s", default=None,
+                   help="Path to Unix control socket (or set MAKEPAD_SOCKET)")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("click", help="Click at window coordinates")
+    s.add_argument("x", type=float)
+    s.add_argument("y", type=float)
+    s.add_argument("--button", "-b", default="left", choices=["left", "right", "middle"])
+    s.set_defaults(func=cmd_click)
+
+    s = sub.add_parser("type", help="Type text")
+    s.add_argument("text", nargs="+")
+    s.set_defaults(func=cmd_type)
+
+    s = sub.add_parser("key", help="Press key (enter, tab, escape, a-z, ...)")
+    s.add_argument("name")
+    s.set_defaults(func=cmd_key)
+
+    s = sub.add_parser("mousedown", help="Mouse button down at window coordinates")
+    s.add_argument("x", type=float)
+    s.add_argument("y", type=float)
+    s.add_argument("--button", "-b", default="left", choices=["left", "right", "middle"])
+    s.set_defaults(func=cmd_mousedown)
+
+    s = sub.add_parser("mouseup", help="Mouse button up")
+    s.add_argument("x", type=float, nargs="?", default=None)
+    s.add_argument("y", type=float, nargs="?", default=None)
+    s.add_argument("--button", "-b", default="left", choices=["left", "right", "middle"])
+    s.set_defaults(func=cmd_mouseup)
+
+    s = sub.add_parser("mousemove", help="Move mouse to window coordinates")
+    s.add_argument("x", type=float)
+    s.add_argument("y", type=float)
+    s.set_defaults(func=cmd_mousemove)
+
+    s = sub.add_parser("touch", help="Touch event at window coordinates")
+    s.add_argument("id", type=int)
+    s.add_argument("phase", choices=["start", "down", "stop", "up", "move", "stable"])
+    s.add_argument("x", type=float)
+    s.add_argument("y", type=float)
+    s.set_defaults(func=cmd_touch)
+
+    s = sub.add_parser("screenshot", help="Take screenshot of full window")
+    s.add_argument("path")
+    s.set_defaults(func=cmd_screenshot)
+
+    s = sub.add_parser("sleep", help="Wait milliseconds")
+    s.add_argument("ms", type=int)
+    s.set_defaults(func=cmd_sleep)
+
+    s = sub.add_parser("builds", help="Show connection status")
+    s.set_defaults(func=cmd_builds)
+
+    s = sub.add_parser("dump", help="Widget tree dump")
+    s.set_defaults(func=cmd_dump)
+
+    s = sub.add_parser("query", help="Query widget tree (id:name, type:name, or substring)")
+    s.add_argument("query")
+    s.set_defaults(func=cmd_query)
+
+    s = sub.add_parser("control", help="Control a widget by id")
+    s.add_argument("id", help="Widget id from dump")
+    s.add_argument("op", nargs="?", default="", help="Control operation (empty = list ops)")
+    s.add_argument("arg", nargs="*", help="Operation argument")
+    s.set_defaults(func=cmd_control)
+
+    s = sub.add_parser("send", help="Send raw JSON")
+    s.add_argument("json")
+    s.set_defaults(func=cmd_send)
+
+    s = sub.add_parser("pipe", help="Read commands from stdin")
+    s.set_defaults(func=cmd_pipe)
+
+    return p
+
+
+def main():
+    p = build_parser()
+    args = p.parse_args()
+    path = getattr(args, "socket", None) or os.environ.get("MAKEPAD_SOCKET")
+    if not path:
+        sys.exit("error: no socket path. Use --socket or set MAKEPAD_SOCKET.")
+    conn = mc.connect(path)
+    args.func(args, conn)
+    conn.close()
+
+
+if __name__ == "__main__":
+    main()

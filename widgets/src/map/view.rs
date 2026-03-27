@@ -63,16 +63,10 @@ script_mod! {
                 self.v_param4 = self.geom.param4;
             }
 
-            let shifted = transformed + self.draw_list.view_shift;
-            self.v_world = shifted;
+            self.v_world = transformed;
 
             let cr = self.geom.clip_radius * max(self.map_scale.x, self.map_scale.y);
-            let clip = vec4(
-                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
-                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
-                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
-                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
-            )
+            let clip = self.draw_clip
 
             if transformed.x + cr < clip.x || transformed.y + cr < clip.y
                 || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
@@ -81,8 +75,8 @@ script_mod! {
             }
 
             let world = self.draw_list.view_transform * vec4(
-                shifted.x
-                shifted.y
+                transformed.x
+                transformed.y
                 self.draw_depth + self.draw_call.zbias + self.geom.zbias
                 1.
             );

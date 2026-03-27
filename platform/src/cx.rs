@@ -13,6 +13,7 @@ use {
         draw_shader::CxDrawShaders,
         event::{CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger},
         geometry::CxGeometryPool,
+        capture::{CaptureRequest, CaptureResult},
         gpu_info::GpuInfo,
         os::CxOs,
         performance_stats::PerformanceStats,
@@ -28,9 +29,7 @@ use {
     },
     makepad_network::NetworkRuntime,
     makepad_script::*,
-    makepad_studio_protocol::{
-        RunViewFrameData, RunViewFrameRequest, ScreenshotRequest, WidgetSnapshot,
-    },
+    makepad_studio_protocol::{RunViewFrameData, RunViewFrameRequest},
     std::{
         any::{Any, TypeId},
         cell::RefCell,
@@ -52,6 +51,11 @@ pub(crate) struct PendingCameraPlayback {
     pub texture_id: crate::texture::TextureId,
     pub autoplay: bool,
     pub should_loop: bool,
+}
+
+pub(crate) struct PendingStudioScreenshot {
+    pub studio_request_id: u64,
+    pub capture_request_id: u64,
 }
 
 pub struct Cx {
@@ -135,7 +139,10 @@ pub struct Cx {
 
     pub performance_stats: PerformanceStats,
     #[allow(unused)]
-    pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
+    pub(crate) screenshot_requests: Vec<PendingStudioScreenshot>,
+    pub(crate) capture_requests: Vec<CaptureRequest>,
+    pub(crate) capture_results: Vec<CaptureResult>,
+    pub(crate) next_capture_id: u64,
     #[allow(dead_code)]
     pub(crate) run_view_frame_requests: Vec<RunViewFrameRequest>,
     #[allow(dead_code)]
@@ -143,7 +150,6 @@ pub struct Cx {
     #[allow(dead_code)]
     pub(crate) run_view_frame_encode_in_flight: bool,
     pub(crate) widget_tree_dump_requests: Vec<u64>,
-    pub(crate) widget_snapshot_requests: Vec<u64>,
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches
     /// on the next event loop cycle. This ensures all views process the cache clear
@@ -154,9 +160,9 @@ pub struct Cx {
     pub widget_query_invalidation_event: Option<u64>,
 
     pub widget_tree_ptr: *mut (),
-    pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
+    pub widget_tree_dump_callback: Option<fn(&mut Cx) -> String>,
     pub widget_query_callback: Option<fn(&Cx, &str) -> Vec<String>>,
-    pub widget_snapshot_callback: Option<fn(&Cx) -> Vec<WidgetSnapshot>>,
+    pub widget_control_callback: Option<fn(&mut Cx, &str, &str, &str) -> Option<String>>,
 
     pub net: Arc<NetworkRuntime>,
 }
@@ -402,9 +408,13 @@ impl Cx {
             new_next_frames: Default::default(),
 
             screenshot_requests: Default::default(),
+            capture_requests: Default::default(),
+            capture_results: Default::default(),
+            next_capture_id: 1,
             run_view_frame_requests: Default::default(),
             run_view_frame_results: Default::default(),
             run_view_frame_encode_in_flight: false,
+            widget_tree_dump_requests: Default::default(),
 
             dependencies: Default::default(),
 
@@ -432,13 +442,11 @@ impl Cx {
 
             display_context: Default::default(),
 
-            widget_tree_dump_requests: Default::default(),
-            widget_snapshot_requests: Default::default(),
             widget_query_invalidation_event: None,
             widget_tree_ptr: std::ptr::null_mut(),
             widget_tree_dump_callback: None,
             widget_query_callback: None,
-            widget_snapshot_callback: None,
+            widget_control_callback: None,
             net,
 
             script_data: CxScriptData {

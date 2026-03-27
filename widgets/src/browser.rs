@@ -3,32 +3,12 @@ use crate::{image::DrawImage, makepad_derive_widget::*, makepad_draw::*, widget:
 script_mod! {
     use mod.prelude.widgets_internal.*
 
-    mod.widgets.BrowserBackend = #(BrowserBackend::script_api(vm))
-    mod.widgets.splat(mod.widgets.BrowserBackend)
-
     mod.widgets.BrowserBase = #(Browser::register_widget(vm))
 
     mod.widgets.Browser = set_type_default() do mod.widgets.BrowserBase{
         width: Fill
         height: Fill
     }
-}
-
-#[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BrowserBackend {
-    #[pick]
-    Native,
-    CEF,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[allow(dead_code)]
-enum ActiveBrowserBackend {
-    #[default]
-    None,
-    Native,
-    CEF,
-    Unsupported,
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -42,8 +22,6 @@ pub struct Browser {
     #[redraw]
     #[live]
     draw_bg: DrawImage,
-    #[live(BrowserBackend::Native)]
-    backend: BrowserBackend,
     #[live]
     url: ArcStringMut,
     #[visible]
@@ -51,9 +29,8 @@ pub struct Browser {
     visible: bool,
     #[rust]
     texture: Option<Texture>,
-    #[cfg(feature = "cef")]
     #[rust]
-    cef_browser: Option<makepad_cef::Browser>,
+    browser: Option<makepad_cef::Browser>,
     #[rust]
     pump_timer: Timer,
     #[rust]
@@ -61,13 +38,7 @@ pub struct Browser {
     #[rust]
     last_url: String,
     #[rust]
-    active_backend: ActiveBrowserBackend,
-    #[rust]
-    system_browser_spawned: bool,
-    #[cfg(feature = "cef")]
-    #[rust]
     pressed_buttons: MouseButton,
-    #[cfg(feature = "cef")]
     #[rust]
     suppress_next_paste_shortcut: bool,
 }
@@ -75,101 +46,10 @@ pub struct Browser {
 impl Browser {
     const PUMP_INTERVAL: f64 = 1.0 / 60.0;
 
-    fn system_browser_id(&self) -> SystemBrowserId {
-        SystemBrowserId(LiveId(self.uid.0))
-    }
-
-    fn resolved_backend(&self) -> ActiveBrowserBackend {
-        match self.backend {
-            BrowserBackend::Native => {
-                #[cfg(any(target_os = "macos", target_os = "ios"))]
-                {
-                    return ActiveBrowserBackend::Native;
-                }
-                #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-                {
-                    return ActiveBrowserBackend::Unsupported;
-                }
-            }
-            BrowserBackend::CEF => {
-                #[cfg(feature = "cef")]
-                {
-                    return ActiveBrowserBackend::CEF;
-                }
-                #[cfg(not(feature = "cef"))]
-                {
-                    return ActiveBrowserBackend::Unsupported;
-                }
-            }
-        }
-    }
-
-    fn unsupported_backend_message(&self) -> &'static str {
-        match self.backend {
-            BrowserBackend::Native => {
-                "Native browser backend is currently only implemented on macOS and iOS"
-            }
-            BrowserBackend::CEF => "CEF browser backend requires the `cef` feature",
-        }
-    }
-
-    fn sync_backend_transition(&mut self, cx: &mut Cx, desired_backend: ActiveBrowserBackend) {
-        if self.active_backend == desired_backend {
-            return;
-        }
-
-        match self.active_backend {
-            ActiveBrowserBackend::Native => {
-                if self.system_browser_spawned {
-                    cx.system_browser(self.system_browser_id()).close();
-                    self.system_browser_spawned = false;
-                }
-            }
-            ActiveBrowserBackend::CEF => {
-                self.texture = None;
-                #[cfg(feature = "cef")]
-                {
-                    self.cef_browser = None;
-                }
-            }
-            ActiveBrowserBackend::None | ActiveBrowserBackend::Unsupported => {}
-        }
-
-        self.active_backend = desired_backend;
-        if desired_backend != ActiveBrowserBackend::Unsupported {
-            self.init_error = None;
-        }
-    }
-
-    fn sync_system_browser(&mut self, cx: &mut Cx) {
-        let browser_id = self.system_browser_id();
-        if !self.system_browser_spawned {
-            cx.system_browser(browser_id).spawn(self.url.as_ref());
-            self.system_browser_spawned = true;
-            self.last_url.clear();
-            self.last_url.push_str(self.url.as_ref());
-        }
-
-        let url = self.url.as_ref();
-        if self.last_url != url {
-            cx.system_browser(browser_id).set_url(url, false);
-            self.last_url.clear();
-            self.last_url.push_str(url);
-        }
-
-        let area = self.browser_area();
-        if self.visible && area.is_valid(cx) {
-            cx.system_browser(browser_id).update(area, true);
-        } else if self.system_browser_spawned {
-            cx.system_browser(browser_id).detach();
-        }
-    }
-
     fn browser_area(&self) -> Area {
         self.draw_bg.area()
     }
 
-    #[cfg(feature = "cef")]
     fn browser_rect(&self, cx: &mut Cx) -> Option<Rect> {
         let area = self.browser_area();
         if area.is_valid(cx) {
@@ -179,7 +59,6 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
     fn dpi_factor(&self, cx: &mut Cx) -> f64 {
         let area = self.browser_area();
         if area.is_valid(cx) {
@@ -189,7 +68,6 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
     fn cef_position(&self, cx: &mut Cx, abs: Vec2d) -> Option<(i32, i32)> {
         let rect = self.browser_rect(cx)?;
         let dpi = self.dpi_factor(cx);
@@ -200,7 +78,6 @@ impl Browser {
         ))
     }
 
-    #[cfg(feature = "cef")]
     fn cef_modifiers(modifiers: KeyModifiers, pressed_buttons: MouseButton) -> u32 {
         let mut out = makepad_cef::EVENTFLAG_NONE;
         if modifiers.shift {
@@ -227,7 +104,6 @@ impl Browser {
         out
     }
 
-    #[cfg(feature = "cef")]
     fn cef_mouse_button(button: Option<MouseButton>) -> i32 {
         match button {
             Some(button) if button.is_secondary() => makepad_cef::MOUSE_BUTTON_RIGHT,
@@ -236,7 +112,6 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
     fn windows_key_code(key_code: KeyCode) -> i32 {
         match key_code {
             KeyCode::Escape => 0x1B,
@@ -344,7 +219,6 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
     fn key_char(key_code: KeyCode, shift: bool) -> Option<char> {
         match key_code {
             KeyCode::Backspace => Some('\u{8}'),
@@ -419,7 +293,6 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
     fn sends_char_on_keydown(key_code: KeyCode) -> bool {
         matches!(
             key_code,
@@ -427,7 +300,6 @@ impl Browser {
         )
     }
 
-    #[cfg(feature = "cef")]
     fn char_event_data(text: &str) -> Option<(i32, u16)> {
         let mut chars = text.chars();
         let ch = chars.next()?;
@@ -447,7 +319,6 @@ impl Browser {
         Some((windows_key_code, unit))
     }
 
-    #[cfg(feature = "cef")]
     fn key_event_modifiers(key_event: &KeyEvent) -> u32 {
         let mut modifiers = Self::cef_modifiers(key_event.modifiers, MouseButton::empty());
         if key_event.is_repeat {
@@ -478,7 +349,6 @@ impl Browser {
         modifiers
     }
 
-    #[cfg(feature = "cef")]
     fn send_mouse_move_internal(
         &mut self,
         cx: &mut Cx,
@@ -490,14 +360,13 @@ impl Browser {
             return;
         };
         let cef_modifiers = Self::cef_modifiers(modifiers, self.pressed_buttons);
-        if let Some(browser) = &mut self.cef_browser {
+        if let Some(browser) = &mut self.browser {
             if let Err(err) = browser.send_mouse_move(x, y, cef_modifiers, mouse_leave) {
                 log!("Browser mouse move failed: {err}");
             }
         }
     }
 
-    #[cfg(feature = "cef")]
     fn send_mouse_click_internal(
         &mut self,
         cx: &mut Cx,
@@ -512,7 +381,7 @@ impl Browser {
         };
         let cef_modifiers = Self::cef_modifiers(modifiers, self.pressed_buttons);
         let cef_button = Self::cef_mouse_button(button);
-        if let Some(browser) = &mut self.cef_browser {
+        if let Some(browser) = &mut self.browser {
             if let Err(err) = browser.send_mouse_click(
                 x,
                 y,
@@ -526,7 +395,6 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
     fn send_mouse_wheel_internal(
         &mut self,
         cx: &mut Cx,
@@ -539,7 +407,7 @@ impl Browser {
         };
         let cef_modifiers = Self::cef_modifiers(modifiers, self.pressed_buttons)
             | makepad_cef::EVENTFLAG_PRECISION_SCROLLING_DELTA;
-        if let Some(browser) = &mut self.cef_browser {
+        if let Some(browser) = &mut self.browser {
             if let Err(err) = browser.send_mouse_wheel(
                 x,
                 y,
@@ -552,7 +420,6 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
     fn update_ime_spot(&self, cx: &mut Cx, pos: Vec2d) {
         let area = self.browser_area();
         if area.is_valid(cx) {
@@ -560,7 +427,6 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
     fn ensure_browser(
         &mut self,
         _cx: &mut Cx2d,
@@ -568,11 +434,11 @@ impl Browser {
         height: usize,
         scale_factor: f32,
     ) {
-        if self.cef_browser.is_none() && self.init_error.is_none() {
+        if self.browser.is_none() && self.init_error.is_none() {
             match makepad_cef::Browser::new(self.url.as_ref(), width, height, scale_factor) {
                 Ok(browser) => {
                     self.last_url = self.url.as_ref().to_string();
-                    self.cef_browser = Some(browser);
+                    self.browser = Some(browser);
                 }
                 Err(err) => {
                     let message = err.to_string();
@@ -582,23 +448,23 @@ impl Browser {
             }
         }
 
-        if let Some(browser) = &mut self.cef_browser {
+        if let Some(browser) = &mut self.browser {
             if let Err(err) = browser.resize(width, height, scale_factor) {
                 let message = err.to_string();
                 log!("Browser widget resize failed: {message}");
                 self.init_error = Some(message);
-                self.cef_browser = None;
+                self.browser = None;
             }
         }
 
-        if let Some(browser) = &mut self.cef_browser {
+        if let Some(browser) = &mut self.browser {
             let url = self.url.as_ref();
             if self.last_url != url {
                 if let Err(err) = browser.set_url(url) {
                     let message = err.to_string();
                     log!("Browser widget navigation failed: {message}");
                     self.init_error = Some(message);
-                    self.cef_browser = None;
+                    self.browser = None;
                 } else {
                     self.last_url.clear();
                     self.last_url.push_str(url);
@@ -607,11 +473,10 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
     fn pump_browser(&mut self, cx: &mut Cx) {
         makepad_cef::do_message_loop_work();
         let mut latest_frame = None;
-        if let Some(browser) = &mut self.cef_browser {
+        if let Some(browser) = &mut self.browser {
             while let Some(frame) = browser.take_frame() {
                 latest_frame = Some(frame);
             }
@@ -622,7 +487,6 @@ impl Browser {
         }
     }
 
-    #[cfg(feature = "cef")]
     fn apply_frame(&mut self, cx: &mut Cx, frame: makepad_cef::Frame) {
         match &self.texture {
             Some(texture)
@@ -648,34 +512,13 @@ impl Browser {
     fn set_url_internal(&mut self, cx: &mut Cx, url: &str) {
         self.url.set(url);
         self.last_url.clear();
-        match self.active_backend {
-            ActiveBrowserBackend::Native if self.system_browser_spawned => {
-                cx.system_browser(self.system_browser_id()).set_url(url, false);
+        if let Some(browser) = &mut self.browser {
+            if let Err(err) = browser.set_url(url) {
+                let message = err.to_string();
+                log!("Browser widget navigation failed: {message}");
+                self.init_error = Some(message);
+                self.browser = None;
             }
-            ActiveBrowserBackend::Native => {}
-            ActiveBrowserBackend::CEF => {
-                #[cfg(feature = "cef")]
-                if let Some(browser) = &mut self.cef_browser {
-                    if let Err(err) = browser.set_url(url) {
-                        let message = err.to_string();
-                        log!("Browser widget navigation failed: {message}");
-                        self.init_error = Some(message);
-                        self.cef_browser = None;
-                    }
-                }
-            }
-            ActiveBrowserBackend::None | ActiveBrowserBackend::Unsupported => {}
-        }
-        self.redraw(cx);
-    }
-
-    fn set_visible_internal(&mut self, cx: &mut Cx, visible: bool) {
-        if self.visible == visible {
-            return;
-        }
-        self.visible = visible;
-        if !visible && self.system_browser_spawned {
-            cx.system_browser(self.system_browser_id()).detach();
         }
         self.redraw(cx);
     }
@@ -687,165 +530,82 @@ impl Widget for Browser {
             self.pump_timer = cx.start_interval(Self::PUMP_INTERVAL);
         }
 
-        let desired_backend = self.resolved_backend();
-        self.sync_backend_transition(cx, desired_backend);
-
-        if matches!(event, Event::Shutdown) {
-            if self.system_browser_spawned {
-                cx.system_browser(self.system_browser_id()).close();
-                self.system_browser_spawned = false;
-            }
-            #[cfg(feature = "cef")]
-            {
-                self.cef_browser = None;
-            }
-            return;
-        }
-
-        if desired_backend == ActiveBrowserBackend::Unsupported {
-            if self.init_error.is_none() {
-                let message = self.unsupported_backend_message().to_string();
-                log!("{message}");
-                self.init_error = Some(message);
-            }
-            return;
-        }
-
         if self.pump_timer.is_event(event).is_some() {
-            #[cfg(feature = "cef")]
-            if desired_backend == ActiveBrowserBackend::CEF {
-                self.pump_browser(cx);
-            }
+            self.pump_browser(cx);
         }
 
-        if !self.visible {
-            if desired_backend == ActiveBrowserBackend::Native && self.system_browser_spawned {
-                cx.system_browser(self.system_browser_id()).detach();
-            }
-            return;
-        }
-
-        #[cfg(feature = "cef")]
-        if desired_backend == ActiveBrowserBackend::CEF {
-            match event.hits_with_capture_overload(cx, self.browser_area(), true) {
-                Hit::KeyFocus(_) => {
-                    if let Some(browser) = &mut self.cef_browser {
-                        if let Err(err) = browser.set_focus(true) {
-                            log!("Browser focus failed: {err}");
-                        }
-                    }
-                    if let Some(rect) = self.browser_rect(cx) {
-                        self.update_ime_spot(cx, rect.pos);
+        match event.hits_with_capture_overload(cx, self.browser_area(), true) {
+            Hit::KeyFocus(_) => {
+                if let Some(browser) = &mut self.browser {
+                    if let Err(err) = browser.set_focus(true) {
+                        log!("Browser focus failed: {err}");
                     }
                 }
-                Hit::KeyFocusLost(_) => {
-                    if let Some(browser) = &mut self.cef_browser {
-                        if let Err(err) = browser.set_focus(false) {
-                            log!("Browser blur failed: {err}");
-                        }
+                if let Some(rect) = self.browser_rect(cx) {
+                    self.update_ime_spot(cx, rect.pos);
+                }
+            }
+            Hit::KeyFocusLost(_) => {
+                if let Some(browser) = &mut self.browser {
+                    if let Err(err) = browser.set_focus(false) {
+                        log!("Browser blur failed: {err}");
                     }
-                    cx.hide_text_ime();
+                }
+                cx.hide_text_ime();
+                self.suppress_next_paste_shortcut = false;
+            }
+            Hit::FingerDown(fe) => {
+                let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
+                self.pressed_buttons.insert(button);
+                cx.set_key_focus(self.browser_area());
+                if let Some(browser) = &mut self.browser {
+                    if let Err(err) = browser.set_focus(true) {
+                        log!("Browser focus on pointer down failed: {err}");
+                    }
+                }
+                self.update_ime_spot(cx, fe.abs);
+                self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
+                self.send_mouse_click_internal(
+                    cx,
+                    fe.abs,
+                    fe.modifiers,
+                    Some(button),
+                    false,
+                    fe.tap_count as i32,
+                );
+            }
+            Hit::FingerMove(fe) => {
+                self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
+            }
+            Hit::FingerUp(fe) => {
+                let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
+                self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
+                self.send_mouse_click_internal(
+                    cx,
+                    fe.abs,
+                    fe.modifiers,
+                    Some(button),
+                    true,
+                    fe.tap_count as i32,
+                );
+                self.pressed_buttons.remove(button);
+            }
+            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
+                self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
+            }
+            Hit::FingerHoverOut(fe) => {
+                self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, true);
+            }
+            Hit::FingerScroll(fe) => {
+                self.send_mouse_wheel_internal(cx, fe.abs, fe.modifiers, fe.scroll);
+            }
+            Hit::KeyDown(key_event) => {
+                if self.suppress_next_paste_shortcut
+                    && key_event.key_code == KeyCode::KeyV
+                    && key_event.modifiers.is_primary()
+                {
                     self.suppress_next_paste_shortcut = false;
-                }
-                Hit::FingerDown(fe) => {
-                    let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
-                    self.pressed_buttons.insert(button);
-                    cx.set_key_focus(self.browser_area());
-                    if let Some(browser) = &mut self.cef_browser {
-                        if let Err(err) = browser.set_focus(true) {
-                            log!("Browser focus on pointer down failed: {err}");
-                        }
-                    }
-                    self.update_ime_spot(cx, fe.abs);
-                    self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
-                    self.send_mouse_click_internal(
-                        cx,
-                        fe.abs,
-                        fe.modifiers,
-                        Some(button),
-                        false,
-                        fe.tap_count as i32,
-                    );
-                }
-                Hit::FingerMove(fe) => {
-                    self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
-                }
-                Hit::FingerUp(fe) => {
-                    let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
-                    self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
-                    self.send_mouse_click_internal(
-                        cx,
-                        fe.abs,
-                        fe.modifiers,
-                        Some(button),
-                        true,
-                        fe.tap_count as i32,
-                    );
-                    self.pressed_buttons.remove(button);
-                }
-                Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
-                    self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
-                }
-                Hit::FingerHoverOut(fe) => {
-                    self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, true);
-                }
-                Hit::FingerScroll(fe) => {
-                    self.send_mouse_wheel_internal(cx, fe.abs, fe.modifiers, fe.scroll);
-                }
-                Hit::KeyDown(key_event) => {
-                    if self.suppress_next_paste_shortcut
-                        && key_event.key_code == KeyCode::KeyV
-                        && key_event.modifiers.is_primary()
-                    {
-                        self.suppress_next_paste_shortcut = false;
-                    } else {
-                        let modifiers = Self::key_event_modifiers(&key_event);
-                        let windows_key_code = Self::windows_key_code(key_event.key_code);
-                        let character = if key_event.modifiers.control
-                            || key_event.modifiers.alt
-                            || key_event.modifiers.logo
-                        {
-                            0
-                        } else {
-                            Self::key_char(key_event.key_code, key_event.modifiers.shift)
-                                .map(|ch| ch as u16)
-                                .unwrap_or(0)
-                        };
-
-                        if let Some(browser) = &mut self.cef_browser {
-                            if let Err(err) = browser.send_key_event(
-                                makepad_cef::KEY_EVENT_KEYDOWN,
-                                modifiers,
-                                windows_key_code,
-                                windows_key_code,
-                                character,
-                                character,
-                                false,
-                            ) {
-                                log!("Browser key down failed: {err}");
-                            }
-                            if character != 0
-                                && !key_event.modifiers.control
-                                && !key_event.modifiers.alt
-                                && !key_event.modifiers.logo
-                                && Self::sends_char_on_keydown(key_event.key_code)
-                            {
-                                if let Err(err) = browser.send_key_event(
-                                    makepad_cef::KEY_EVENT_CHAR,
-                                    modifiers,
-                                    windows_key_code,
-                                    windows_key_code,
-                                    character,
-                                    character,
-                                    false,
-                                ) {
-                                    log!("Browser key char failed: {err}");
-                                }
-                            }
-                        }
-                    }
-                }
-                Hit::KeyUp(key_event) => {
+                } else {
                     let modifiers = Self::key_event_modifiers(&key_event);
                     let windows_key_code = Self::windows_key_code(key_event.key_code);
                     let character = if key_event.modifiers.control
@@ -859,9 +619,9 @@ impl Widget for Browser {
                             .unwrap_or(0)
                     };
 
-                    if let Some(browser) = &mut self.cef_browser {
+                    if let Some(browser) = &mut self.browser {
                         if let Err(err) = browser.send_key_event(
-                            makepad_cef::KEY_EVENT_KEYUP,
+                            makepad_cef::KEY_EVENT_KEYDOWN,
                             modifiers,
                             windows_key_code,
                             windows_key_code,
@@ -869,29 +629,13 @@ impl Widget for Browser {
                             character,
                             false,
                         ) {
-                            log!("Browser key up failed: {err}");
+                            log!("Browser key down failed: {err}");
                         }
-                    }
-                }
-                Hit::TextInput(text_event) => {
-                    let ime_pos = self.browser_rect(cx).map(|rect| rect.pos).unwrap_or_default();
-                    self.update_ime_spot(cx, ime_pos);
-                    if text_event.was_paste {
-                        self.suppress_next_paste_shortcut = true;
-                    }
-
-                    if let Some(browser) = &mut self.cef_browser {
-                        let modifiers =
-                            Self::cef_modifiers(cx.keyboard.modifiers(), MouseButton::empty());
-                        if text_event.was_paste
-                            || text_event.replace_last
-                            || Self::char_event_data(&text_event.input).is_none()
-                        {
-                            if let Err(err) = browser.ime_commit_text(&text_event.input) {
-                                log!("Browser text commit failed: {err}");
-                            }
-                        } else if let Some((windows_key_code, character)) =
-                            Self::char_event_data(&text_event.input)
+                        if character != 0
+                            && !key_event.modifiers.control
+                            && !key_event.modifiers.alt
+                            && !key_event.modifiers.logo
+                            && Self::sends_char_on_keydown(key_event.key_code)
                         {
                             if let Err(err) = browser.send_key_event(
                                 makepad_cef::KEY_EVENT_CHAR,
@@ -902,72 +646,99 @@ impl Widget for Browser {
                                 character,
                                 false,
                             ) {
-                                log!("Browser char input failed: {err}");
+                                log!("Browser key char failed: {err}");
                             }
                         }
                     }
                 }
-                _ => {}
             }
+            Hit::KeyUp(key_event) => {
+                let modifiers = Self::key_event_modifiers(&key_event);
+                let windows_key_code = Self::windows_key_code(key_event.key_code);
+                let character = if key_event.modifiers.control
+                    || key_event.modifiers.alt
+                    || key_event.modifiers.logo
+                {
+                    0
+                } else {
+                    Self::key_char(key_event.key_code, key_event.modifiers.shift)
+                        .map(|ch| ch as u16)
+                        .unwrap_or(0)
+                };
+
+                if let Some(browser) = &mut self.browser {
+                    if let Err(err) = browser.send_key_event(
+                        makepad_cef::KEY_EVENT_KEYUP,
+                        modifiers,
+                        windows_key_code,
+                        windows_key_code,
+                        character,
+                        character,
+                        false,
+                    ) {
+                        log!("Browser key up failed: {err}");
+                    }
+                }
+            }
+            Hit::TextInput(text_event) => {
+                let ime_pos = self.browser_rect(cx).map(|rect| rect.pos).unwrap_or_default();
+                self.update_ime_spot(cx, ime_pos);
+                if text_event.was_paste {
+                    self.suppress_next_paste_shortcut = true;
+                }
+
+                if let Some(browser) = &mut self.browser {
+                    let modifiers =
+                        Self::cef_modifiers(cx.keyboard.modifiers(), MouseButton::empty());
+                    if text_event.was_paste
+                        || text_event.replace_last
+                        || Self::char_event_data(&text_event.input).is_none()
+                    {
+                        if let Err(err) = browser.ime_commit_text(&text_event.input) {
+                            log!("Browser text commit failed: {err}");
+                        }
+                    } else if let Some((windows_key_code, character)) =
+                        Self::char_event_data(&text_event.input)
+                    {
+                        if let Err(err) = browser.send_key_event(
+                            makepad_cef::KEY_EVENT_CHAR,
+                            modifiers,
+                            windows_key_code,
+                            windows_key_code,
+                            character,
+                            character,
+                            false,
+                        ) {
+                            log!("Browser char input failed: {err}");
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        let desired_backend = self.resolved_backend();
-        self.sync_backend_transition(cx, desired_backend);
-
         if !self.visible {
-            if desired_backend == ActiveBrowserBackend::Native && self.system_browser_spawned {
-                cx.system_browser(self.system_browser_id()).detach();
-            }
             return DrawStep::done();
         }
 
-        if desired_backend == ActiveBrowserBackend::Unsupported {
-            if self.init_error.is_none() {
-                let message = self.unsupported_backend_message().to_string();
-                log!("{message}");
-                self.init_error = Some(message);
-            }
+        let rect = cx.peek_walk_turtle(walk);
+        let dpi = cx.current_dpi_factor() as f32;
+        let width = (rect.size.x.max(1.0) * dpi as f64).round().max(1.0) as usize;
+        let height = (rect.size.y.max(1.0) * dpi as f64).round().max(1.0) as usize;
+
+        self.ensure_browser(cx, width, height, dpi);
+
+        if let Some(texture) = &self.texture {
+            self.draw_bg.draw_vars.set_texture(0, texture);
+        } else {
             self.draw_bg.draw_vars.empty_texture(0);
-            self.draw_bg.draw_walk(cx, walk);
-            return DrawStep::done();
         }
 
-        match desired_backend {
-            ActiveBrowserBackend::Native => {
-                self.draw_bg.draw_vars.empty_texture(0);
-                self.draw_bg.draw_walk(cx, walk);
-                self.sync_system_browser(cx);
-                DrawStep::done()
-            }
-            ActiveBrowserBackend::CEF => {
-                #[cfg(feature = "cef")]
-                {
-                    let rect = cx.peek_walk_turtle(walk);
-                    let dpi = cx.current_dpi_factor() as f32;
-                    let width = (rect.size.x.max(1.0) * dpi as f64).round().max(1.0) as usize;
-                    let height = (rect.size.y.max(1.0) * dpi as f64).round().max(1.0) as usize;
-
-                    self.ensure_browser(cx, width, height, dpi);
-
-                    if let Some(texture) = &self.texture {
-                        self.draw_bg.draw_vars.set_texture(0, texture);
-                    } else {
-                        self.draw_bg.draw_vars.empty_texture(0);
-                    }
-
-                    self.draw_bg.draw_walk(cx, walk);
-                    cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
-                    DrawStep::done()
-                }
-                #[cfg(not(feature = "cef"))]
-                {
-                    DrawStep::done()
-                }
-            }
-            ActiveBrowserBackend::None | ActiveBrowserBackend::Unsupported => DrawStep::done(),
-        }
+        self.draw_bg.draw_walk(cx, walk);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
+        DrawStep::done()
     }
 }
 
@@ -975,12 +746,6 @@ impl BrowserRef {
     pub fn set_url(&self, cx: &mut Cx, url: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_url_internal(cx, url);
-        }
-    }
-
-    pub fn set_visible(&self, cx: &mut Cx, visible: bool) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.set_visible_internal(cx, visible);
         }
     }
 }

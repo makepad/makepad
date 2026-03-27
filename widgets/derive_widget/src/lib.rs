@@ -25,7 +25,6 @@ pub fn derive_widget(input: TokenStream) -> TokenStream {
         visible,
         action_data,
         uid,
-        cast,
     )
 )]
 pub fn derive_widget(input: TokenStream) -> TokenStream {
