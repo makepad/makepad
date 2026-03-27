@@ -38,7 +38,7 @@ cargo test -p makepad-example-splash --test ui -- --test-threads=1
 
 Add `--show-output` to print per-case `[makepad_test] splash case …` lines (timings and summary) from `run_splash_suite`.
 
-One `cargo test` harness starts **one** app session for the whole Splash file: every `test.case` runs in order in the same process (fast). Failure artifacts go under a suite-level name (`splash_suite` or `{module_path}::splash_suite`); see [GUIDE.md](./GUIDE.md).
+Splash suites now run in **per-case isolated mode by default**. Each `test.case` gets a fresh app session unless the suite opts into `test.configure({ session_mode: "shared" })`. Artifacts live under a suite root with per-case directories; see [GUIDE.md](./GUIDE.md).
 
 Run the curated repo UI suite on macOS (splash example only):
 
@@ -46,7 +46,7 @@ Run the curated repo UI suite on macOS (splash example only):
 tools/run_ui_tests.sh
 ```
 
-### Optional: Rust-only tests (no Splash file)
+### Optional: Rust-only tests (compatibility only)
 
 Use a normal `#[test]` and `run_current_package_test` with `env!`/`module_path!()` and your test function name:
 
@@ -96,7 +96,8 @@ cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ## Surface Area
 
 - `run_splash_suite(...)` for Splash-authored suites (recommended for new work)
-- `run_current_package_test(...)` for Rust-authored current-package UI tests (wrap in `#[test]` yourself)
+- `run_splash_recorder(...)` for visible-mode draft Splash case generation
+- `run_current_package_test(...)` for Rust-authored current-package UI tests (compatibility path only)
 - `TestApp` for app-scoped input, waits, logs, screenshots, and raw protocol forwarding
 - `Selector` for structured snapshot matching
 - `Locator` for strict single-widget interaction and assertions
@@ -130,13 +131,13 @@ Inspection helpers:
 
 ## Failure Artifacts
 
-Failed tests write artifacts under:
+Suites write artifacts under:
 
 ```text
-target/makepad_test/<package>/<test>/
+target/makepad_test/<package>/<suite>/
 ```
 
-For `run_splash_suite`, `<test>` is the suite id (`splash_suite` or `your_module::splash_suite`), not individual case names.
+Per-case artifacts live under `cases/<case>/` inside that suite directory. Each suite also writes `suite-report.json` and `index.html`.
 
 The runtime captures:
 
@@ -145,13 +146,17 @@ The runtime captures:
 - `widget-snapshot.json`
 - `widget-tree.txt` or `widget-tree-error.txt`
 - `failure-screenshot.png` or `failure-screenshot-error.txt`
+- `case-report.json`
+- `suite-report.json`
+- `index.html`
 
 ## Current Constraints
 
 - synchronous API only
 - default launch runs the **current Cargo package** under test; Splash suites may instead use `test.configure({ launch: "splash_run_item", ... })` to drive headless/visible Studio run items when the app is registered that way (see the splash example)
+- recorder output is artifact-based draft Splash, not a Studio-integrated UI yet
 - milestone-1 repo suite is validated on macOS first
-- no visual diffing or trace viewer yet
+- no visual diffing yet
 
 ## Guide
 

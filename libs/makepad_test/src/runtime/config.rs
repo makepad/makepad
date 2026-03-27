@@ -171,6 +171,11 @@ impl TestConfig {
             }),
         )
     }
+
+    pub fn with_artifacts_dir(mut self, artifacts_dir: impl Into<PathBuf>) -> Self {
+        self.artifacts_dir = artifacts_dir.into();
+        self
+    }
 }
 
 pub(crate) fn sanitize_path_component(value: &str) -> String {

@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 
 mod error;
+mod recorder;
+mod report;
 mod runtime;
 mod selector;
 mod splash;
@@ -12,6 +14,9 @@ pub use makepad_studio_protocol::{
 };
 pub use runtime::{
     run_current_package_test, run_with_config, Locator, TestApp, TestConfig,
+};
+pub use recorder::{
+    run_splash_recorder, SplashRecorderOptions, SplashRecorderOutput, SplashRecorderSession,
 };
 pub use selector::Selector;
 pub use splash::run_splash_suite;

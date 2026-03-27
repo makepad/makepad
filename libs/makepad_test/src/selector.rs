@@ -165,6 +165,26 @@ impl Selector {
         self.nth
     }
 
+    pub(crate) fn id_value(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    pub(crate) fn widget_type_value(&self) -> Option<&str> {
+        self.widget_type.as_deref()
+    }
+
+    pub(crate) fn raw_query(&self) -> Option<&str> {
+        self.raw.as_deref()
+    }
+
+    pub(crate) fn text_exact_value(&self) -> Option<&str> {
+        self.text_exact.as_deref()
+    }
+
+    pub(crate) fn text_contains_value(&self) -> Option<&str> {
+        self.text_contains.as_deref()
+    }
+
     pub(crate) fn matches(
         &self,
         widget: &WidgetSnapshot,

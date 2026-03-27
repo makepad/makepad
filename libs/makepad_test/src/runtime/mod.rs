@@ -437,9 +437,17 @@ impl TestApp {
     }
 
     fn collect_logs_text(&self) -> TestResult<String> {
-        let mut entries = self.try_query_logs(None)?;
-        if entries.len() > RECENT_LOG_LINES {
-            let split = entries.len() - RECENT_LOG_LINES;
+        self.try_collect_logs_excerpt(None, RECENT_LOG_LINES)
+    }
+
+    pub(crate) fn try_collect_logs_excerpt(
+        &self,
+        pattern: Option<&str>,
+        max_lines: usize,
+    ) -> TestResult<String> {
+        let mut entries = self.try_query_logs(pattern.map(ToString::to_string))?;
+        if entries.len() > max_lines {
+            let split = entries.len() - max_lines;
             entries = entries.split_off(split);
         }
         let mut out = String::new();
@@ -451,6 +459,13 @@ impl TestApp {
             );
         }
         Ok(out)
+    }
+
+    pub(crate) fn try_copy_screenshot_to(&self, output_path: &std::path::Path) -> TestResult<()> {
+        let path = self.try_screenshot()?;
+        fs::copy(&path, output_path)
+            .map(|_| ())
+            .map_err(|err| TestError::new(format!("failed to copy screenshot: {err}")))
     }
 
     fn send(&self, msg: ClientToHub) -> TestResult<QueryId> {
@@ -1271,7 +1286,7 @@ fn start_splash_root(
     mount: &str,
     target: &SplashLaunchTarget,
     timeout: Duration,
-) -> TestResult<QueryId> {
+    ) -> TestResult<QueryId> {
     test_debug(format!(
         "starting splash root `{}` on mount `{mount}`",
         target.root_package
@@ -1346,7 +1361,7 @@ fn wait_for_splash_root_ready(
     root_package: &str,
     run_item_name: &str,
     timeout: Duration,
-    ) -> TestResult<QueryId> {
+) -> TestResult<QueryId> {
     let deadline = Instant::now() + timeout;
     let mut root_build_id = None;
     let mut run_item_ready = false;
@@ -1479,6 +1494,14 @@ fn wait_for_run_ready(
 
 fn capture_failure_artifacts(app: &TestApp, failure_message: &str) {
     let artifact_dir = app.artifacts_dir();
+    capture_failure_artifacts_to(app, &artifact_dir, failure_message);
+}
+
+pub(crate) fn capture_failure_artifacts_to(
+    app: &TestApp,
+    artifact_dir: &std::path::Path,
+    failure_message: &str,
+) {
     let _ = fs::create_dir_all(&artifact_dir);
     let _ = fs::write(artifact_dir.join("failure.txt"), failure_message);
 

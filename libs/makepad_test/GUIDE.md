@@ -54,13 +54,17 @@ Use `run_current_package_test` from a normal `#[test]` — see **Optional: Rust-
 1. loads `tests/ui.splash`
 2. installs `mod.test`
 3. collects `test.configure(...)` and `test.case(...)`
-4. starts **one** app + hub session for the entire suite (all `test.case` bodies run in order against the same process)
+4. starts a fresh app + hub session for each case by default
 5. executes each case in order
-6. captures failure artifacts on returned errors or panics
+6. writes per-case reports plus a suite summary
+7. captures failure artifacts on returned errors or panics
 
-**Shared process:** Cases are not isolated by default — they share one running app. If a case leaves modals, navigation, or global state in a bad state, later cases can fail. Prefer returning to a known screen at the start of each case, or split into separate suite files if you need a hard process boundary. A future opt-out (e.g. per-case isolation) could be added if needed.
+**Session mode:** Cases are isolated by default. Opt into a shared process only when you need it:
 
-**Artifact directory:** Failure artifacts use a suite-level test name, not per-case names: `splash_suite` when `module_path!()` is empty, or `{module_path}::splash_suite` (sanitized for paths under `target/makepad_test/.../`). Error messages still include the failing `test.case` name.
+- `test.configure({ session_mode: "isolated" })` or omit the field for the default
+- `test.configure({ session_mode: "shared" })` to keep one app session for the whole suite
+
+**Artifact directory:** Splash suites write to `target/makepad_test/<package>/<suite>/`, where `<suite>` is `splash_suite` when `module_path!()` is empty, or `{module_path}::splash_suite` (sanitized for paths). Each case gets `cases/<case>/...`.
 
 Splash suites can either:
 
@@ -73,7 +77,7 @@ The runtime is synchronous and serial-first:
 
 - action timeout: `10s`
 - poll interval: `50ms`
-- artifacts: `target/makepad_test/<package>/<test>/`
+- artifacts: `target/makepad_test/<package>/<suite>/`
 
 The in-process runner also serializes app sessions, so UI suites should be invoked with `--test-threads=1`.
 
@@ -137,6 +141,7 @@ use mod.test
 
 test.configure({
     launch: "splash_run_item"
+    session_mode: "isolated"
     visible_run_item: "makepad-example-splash"
     headless_run_item: "makepad-example-splash-headless-test"
 })
@@ -159,6 +164,16 @@ Available host methods include:
 - `test.expect_text`, `test.expect_value`, `test.expect_checked`, `test.expect_enabled`
 - `test.snapshot`, `test.snapshots`, `test.widget_dump`, `test.screenshot`
 - `test.logs`, `test.wait_log`
+
+### Recorder API
+
+For visible-mode draft generation, `run_splash_recorder(...)` starts a visible app session and writes:
+
+- `generated-case.splash`
+- `recording-trace.json`
+- `recording-report.html`
+
+The recorder is host-driven in v1: it records the actions executed through `SplashRecorderSession` and emits draft Splash code plus artifacts.
 
 ### Selector objects in Splash
 
@@ -193,14 +208,17 @@ That is enough to cover common labels, buttons, text inputs, checkboxes/toggles,
 
 ## Failure Artifacts
 
-Failed tests write to:
+Suites write to:
 
 ```text
-target/makepad_test/<package>/<test>/
+target/makepad_test/<package>/<suite>/
 ```
 
 Typical contents:
 
+- `suite-report.json`
+- `index.html`
+- `cases/<case>/case-report.json`
 - `failure.txt`
 - `logs.txt`
 - `widget-snapshot.json`
@@ -271,7 +289,8 @@ Screenshot capture is intentionally given a longer timeout than normal widget-st
 
 - default execution targets the **current Cargo package**; optional `splash_run_item` configuration routes through Studio run items instead
 - synchronous API only
-- no visual diffing or trace viewer yet
+- recorder output is artifact-based, not a Studio-integrated recorder UI
+- no visual diffing yet
 - some complex widgets still need more structured state over time
 
-Milestone 1 is intentionally scoped around reliable Rust-local UI regression coverage first, with cross-platform expansion and richer tooling following after the harness stabilizes.
+Rust-authored tests still work through `run_current_package_test(...)`, but the roadmap is Splash-first now.

@@ -1,4 +1,7 @@
-use crate::runtime::{run_with_config, sanitize_path_component};
+use crate::report::{
+    write_case_report, write_suite_outputs, CaseReport, StepEvidence, SuiteReport, TraceStep,
+};
+use crate::runtime::{capture_failure_artifacts_to, run_with_config, sanitize_path_component};
 use crate::selector::SelectorOptions;
 use crate::{Selector, TestApp, TestConfig, TestError, TestResult};
 use makepad_script_std::makepad_network::{NetworkConfig, NetworkRuntime};
@@ -21,9 +24,17 @@ enum SplashLaunch {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SessionMode {
+    #[default]
+    Isolated,
+    Shared,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct SplashSuiteOptions {
     launch: Option<SplashLaunch>,
+    session_mode: SessionMode,
     startup_timeout: Option<Duration>,
     action_timeout: Option<Duration>,
     poll_interval: Option<Duration>,
@@ -44,6 +55,7 @@ struct SplashSuiteHost {
     cases: HashMap<String, SplashCase>,
     current_app: Option<TestApp>,
     last_error_message: Option<String>,
+    current_case: Option<RunningCase>,
 }
 
 impl SplashSuiteHost {
@@ -54,6 +66,7 @@ impl SplashSuiteHost {
             cases: HashMap::new(),
             current_app: None,
             last_error_message: None,
+            current_case: None,
         }
     }
 
@@ -105,6 +118,178 @@ impl SplashSuiteHost {
     fn take_last_error_message(&mut self) -> Option<String> {
         self.last_error_message.take()
     }
+
+    fn begin_case(&mut self, name: &str, artifact_dir: PathBuf, started_at_ms: u64) {
+        self.current_case = Some(RunningCase {
+            name: name.to_string(),
+            artifact_dir,
+            started_at_ms,
+            start_instant: Instant::now(),
+            steps: Vec::new(),
+            next_step_index: 1,
+        });
+    }
+
+    fn finish_case(&mut self, status: &str, failure_message: Option<String>) -> CaseReport {
+        let case = self.current_case.take().unwrap_or_else(|| RunningCase {
+            name: "unknown".to_string(),
+            artifact_dir: PathBuf::new(),
+            started_at_ms: 0,
+            start_instant: Instant::now(),
+            steps: Vec::new(),
+            next_step_index: 1,
+        });
+        CaseReport {
+            case_name: case.name,
+            status: status.to_string(),
+            started_at_ms: case.started_at_ms,
+            finished_at_ms: case.started_at_ms + duration_ms(case.start_instant.elapsed()),
+            duration_ms: duration_ms(case.start_instant.elapsed()),
+            artifact_dir: case.artifact_dir.to_string_lossy().to_string(),
+            failure_message,
+            generated_case_path: None,
+            steps: case.steps,
+        }
+    }
+
+    fn begin_step(
+        &mut self,
+        app: &TestApp,
+        kind: &str,
+        detail: String,
+        selector: Option<&Selector>,
+    ) -> PendingTraceStep {
+        let case = self
+            .current_case
+            .as_mut()
+            .expect("begin_step called without an active Splash case");
+        let index = case.next_step_index;
+        case.next_step_index += 1;
+        PendingTraceStep {
+            index,
+            kind: kind.to_string(),
+            detail,
+            started_at_ms: duration_ms(case.start_instant.elapsed()),
+            started_at: Instant::now(),
+            evidence: StepEvidence {
+                selector_query: selector.map(Selector::describe),
+                before_widgets: selector
+                    .and_then(|selector| app.try_query_widgets(selector, false).ok()),
+                after_widgets: None,
+                screenshot_path: None,
+                log_excerpt: None,
+                widget_dump_excerpt: None,
+            },
+        }
+    }
+
+    fn finish_step<T>(
+        &mut self,
+        app: &TestApp,
+        selector: Option<&Selector>,
+        pending: PendingTraceStep,
+        result: TestResult<T>,
+        extra_evidence: StepEvidence,
+    ) -> TestResult<T> {
+        let case = self
+            .current_case
+            .as_mut()
+            .expect("finish_step called without an active Splash case");
+        let PendingTraceStep {
+            index,
+            kind,
+            detail,
+            started_at_ms,
+            started_at,
+            mut evidence,
+        } = pending;
+        evidence = merge_evidence(evidence, extra_evidence);
+        if selector.is_some() && evidence.after_widgets.is_none() {
+            evidence.after_widgets =
+                selector.and_then(|selector| app.try_query_widgets(selector, false).ok());
+        }
+        let finished_at_ms = duration_ms(case.start_instant.elapsed());
+        let step = match result {
+            Ok(value) => {
+                case.steps.push(TraceStep {
+                    index,
+                    kind,
+                    detail,
+                    started_at_ms,
+                    finished_at_ms,
+                    duration_ms: duration_ms(started_at.elapsed()),
+                    status: "passed".to_string(),
+                    error_message: None,
+                    evidence,
+                });
+                return Ok(value);
+            }
+            Err(err) => {
+                if evidence.log_excerpt.is_none() {
+                    evidence.log_excerpt = app.try_collect_logs_excerpt(None, 40).ok();
+                }
+                if evidence.widget_dump_excerpt.is_none() {
+                    evidence.widget_dump_excerpt = app
+                        .try_widget_dump()
+                        .ok()
+                        .map(|dump| truncate_text(&dump, 2000));
+                }
+                if evidence.screenshot_path.is_none() {
+                    let steps_dir = case.artifact_dir.join("steps");
+                    let _ = fs::create_dir_all(&steps_dir);
+                    let screenshot_path = steps_dir.join(format!(
+                        "{:03}-{}.png",
+                        index,
+                        sanitize_path_component(&kind)
+                    ));
+                    if app.try_copy_screenshot_to(&screenshot_path).is_ok() {
+                        evidence.screenshot_path =
+                            Some(screenshot_path.to_string_lossy().to_string());
+                    }
+                }
+                TraceStep {
+                    index,
+                    kind,
+                    detail,
+                    started_at_ms,
+                    finished_at_ms,
+                    duration_ms: duration_ms(started_at.elapsed()),
+                    status: "failed".to_string(),
+                    error_message: Some(err.message().to_string()),
+                    evidence,
+                }
+            }
+        };
+        let error = step
+            .error_message
+            .clone()
+            .unwrap_or_else(|| "step failed".to_string());
+        case.steps.push(step);
+        Err(TestError::new(error))
+    }
+}
+
+struct RunningCase {
+    name: String,
+    artifact_dir: PathBuf,
+    started_at_ms: u64,
+    start_instant: Instant,
+    steps: Vec<TraceStep>,
+    next_step_index: usize,
+}
+
+struct PendingTraceStep {
+    index: usize,
+    kind: String,
+    detail: String,
+    started_at_ms: u64,
+    started_at: Instant,
+    evidence: StepEvidence,
+}
+
+struct CaseRunOutcome {
+    report: CaseReport,
+    error: Option<TestError>,
 }
 
 pub struct SplashSuiteRunner {
@@ -115,7 +300,10 @@ pub struct SplashSuiteRunner {
 }
 
 impl SplashSuiteRunner {
-    pub fn load(manifest_dir: impl Into<PathBuf>, suite_path: impl AsRef<Path>) -> TestResult<Self> {
+    pub fn load(
+        manifest_dir: impl Into<PathBuf>,
+        suite_path: impl AsRef<Path>,
+    ) -> TestResult<Self> {
         let manifest_dir = manifest_dir.into();
         let suite_path = resolve_suite_path(&manifest_dir, suite_path.as_ref());
         let source = fs::read_to_string(&suite_path).map_err(|err| {
@@ -178,11 +366,7 @@ impl SplashSuiteRunner {
         })
     }
 
-    pub fn test_config(
-        &self,
-        package_name: &str,
-        test_name: &str,
-    ) -> TestResult<TestConfig> {
+    pub fn test_config(&self, package_name: &str, test_name: &str) -> TestResult<TestConfig> {
         let options = self.host.options.clone().unwrap_or_default();
         let launch = options.launch.unwrap_or(SplashLaunch::CurrentPackage);
 
@@ -228,9 +412,36 @@ impl SplashSuiteRunner {
         Ok(config)
     }
 
-    pub fn run_case(&mut self, case_name: &str, app: TestApp) -> TestResult<()> {
-        let case = self.host.case(case_name)?;
+    fn run_case_with_report(
+        &mut self,
+        case_name: &str,
+        app: TestApp,
+        artifact_dir: PathBuf,
+        suite_started_at_ms: u64,
+    ) -> CaseRunOutcome {
+        let case = match self.host.case(case_name) {
+            Ok(case) => case,
+            Err(err) => {
+                let report = CaseReport {
+                    case_name: case_name.to_string(),
+                    status: "failed".to_string(),
+                    started_at_ms: suite_started_at_ms,
+                    finished_at_ms: suite_started_at_ms,
+                    duration_ms: 0,
+                    artifact_dir: artifact_dir.to_string_lossy().to_string(),
+                    failure_message: Some(err.message().to_string()),
+                    generated_case_path: None,
+                    steps: Vec::new(),
+                };
+                return CaseRunOutcome {
+                    report,
+                    error: Some(err),
+                };
+            }
+        };
         self.host.clear_last_error_message();
+        self.host
+            .begin_case(&case.name, artifact_dir, suite_started_at_ms);
         self.host.current_app = Some(app);
         let result = with_vm_and_async(&mut self.host, &mut self.std, &mut self.script_vm, |vm| {
             vm.call(case.function.clone().into(), &[])
@@ -243,12 +454,23 @@ impl SplashSuiteRunner {
                     script_value_to_string(vm, result)
                 })
             });
-            return Err(TestError::new(format!(
+            let error = TestError::new(format!(
                 "Splash test case `{}` failed: {}",
                 case.name, message
-            )));
+            ));
+            let report = self
+                .host
+                .finish_case("failed", Some(error.message().to_string()));
+            return CaseRunOutcome {
+                report,
+                error: Some(error),
+            };
         }
-        Ok(())
+        let report = self.host.finish_case("passed", None);
+        CaseRunOutcome {
+            report,
+            error: None,
+        }
     }
 
     #[cfg(test)]
@@ -260,6 +482,14 @@ impl SplashSuiteRunner {
         let mut names: Vec<_> = self.host.cases.keys().cloned().collect();
         names.sort();
         names
+    }
+
+    fn session_mode(&self) -> SessionMode {
+        self.host
+            .options
+            .as_ref()
+            .map(|options| options.session_mode)
+            .unwrap_or_default()
     }
 }
 
@@ -283,16 +513,159 @@ pub fn run_splash_suite(
     } else {
         format!("{module_path}::splash_suite")
     };
-    let config = runner.test_config(package_name, &suite_test_name)?;
+    let suite_dir = splash_suite_dir(manifest_dir, package_name, &suite_test_name);
+    if suite_dir.exists() {
+        let _ = fs::remove_dir_all(&suite_dir);
+    }
+    fs::create_dir_all(suite_dir.join("cases"))?;
+    let session_mode = runner.session_mode();
+    let session_mode_name = match session_mode {
+        SessionMode::Isolated => "isolated",
+        SessionMode::Shared => "shared",
+    };
     let wall = Instant::now();
-    let result = run_with_config(config, |app| -> TestResult<()> {
+    let suite_start = Instant::now();
+    let mut case_reports = Vec::new();
+    let mut suite_failure = None;
+    let result = match session_mode {
+        SessionMode::Isolated => run_isolated_splash_suite(
+            &mut runner,
+            package_name,
+            &suite_test_name,
+            &suite_dir,
+            &case_names,
+            &mut case_reports,
+            &mut suite_failure,
+            wall,
+        ),
+        SessionMode::Shared => run_shared_splash_suite(
+            &mut runner,
+            package_name,
+            &suite_test_name,
+            &suite_dir,
+            &case_names,
+            &mut case_reports,
+            &mut suite_failure,
+            wall,
+        ),
+    };
+    let suite_report = SuiteReport {
+        suite_id: sanitize_path_component(&suite_test_name),
+        session_mode: session_mode_name.to_string(),
+        started_at_ms: 0,
+        finished_at_ms: duration_ms(suite_start.elapsed()),
+        duration_ms: duration_ms(suite_start.elapsed()),
+        status: if suite_failure.is_some() {
+            "failed".to_string()
+        } else {
+            "passed".to_string()
+        },
+        failure_message: suite_failure.clone(),
+        generated_case_path: None,
+        cases: case_reports,
+    };
+    write_suite_outputs(&suite_dir, &suite_report)?;
+    eprintln!(
+        "[makepad_test] splash: total {:.2}s (startup + case bodies + teardown — explains cargo test wall time vs case sum)",
+        wall.elapsed().as_secs_f64()
+    );
+    result
+}
+
+fn run_isolated_splash_suite(
+    runner: &mut SplashSuiteRunner,
+    package_name: &str,
+    suite_test_name: &str,
+    suite_dir: &Path,
+    case_names: &[String],
+    case_reports: &mut Vec<CaseReport>,
+    suite_failure: &mut Option<String>,
+    wall: Instant,
+) -> TestResult<()> {
+    let total = case_names.len();
+    for (index, case_name) in case_names.iter().enumerate() {
+        let case_dir = suite_dir
+            .join("cases")
+            .join(sanitize_path_component(case_name));
+        let config = runner
+            .test_config(package_name, suite_test_name)?
+            .with_artifacts_dir(case_dir.clone());
+        eprintln!(
+            "[makepad_test] splash case {}/{}: {} …",
+            index + 1,
+            total,
+            case_name
+        );
+        let case_start = Instant::now();
+        let suite_started_at_ms = duration_ms(wall.elapsed());
+        let mut outcome = None;
+        let result = run_with_config(config, |app| {
+            outcome = Some(runner.run_case_with_report(
+                case_name,
+                app,
+                case_dir.clone(),
+                suite_started_at_ms,
+            ));
+            if let Some(err) = outcome.as_ref().and_then(|outcome| outcome.error.clone()) {
+                Err(err)
+            } else {
+                Ok(())
+            }
+        });
+        let outcome = outcome.expect("Splash isolated case outcome was not recorded");
+        write_case_report(&case_dir, &outcome.report)?;
+        case_reports.push(outcome.report);
+        match result {
+            Ok(()) => {
+                eprintln!(
+                    "[makepad_test] splash case {}/{}: {} ok ({:.2}s)",
+                    index + 1,
+                    total,
+                    case_name,
+                    case_start.elapsed().as_secs_f64()
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "[makepad_test] splash case {}/{}: {} FAILED after {:.2}s — {}",
+                    index + 1,
+                    total,
+                    case_name,
+                    case_start.elapsed().as_secs_f64(),
+                    err.message()
+                );
+                *suite_failure = Some(err.message().to_string());
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_shared_splash_suite(
+    runner: &mut SplashSuiteRunner,
+    package_name: &str,
+    suite_test_name: &str,
+    suite_dir: &Path,
+    case_names: &[String],
+    case_reports: &mut Vec<CaseReport>,
+    suite_failure: &mut Option<String>,
+    wall: Instant,
+) -> TestResult<()> {
+    let config = runner
+        .test_config(package_name, suite_test_name)?
+        .with_artifacts_dir(suite_dir.to_path_buf());
+    run_with_config(config, |app| -> TestResult<()> {
         eprintln!(
             "[makepad_test] splash: app ready after {:.2}s (hub + build + launch; not part of case timings below)",
             wall.elapsed().as_secs_f64()
         );
-        let session_start = Instant::now();
         let total = case_names.len();
+        let session_start = Instant::now();
         for (index, case_name) in case_names.iter().enumerate() {
+            let case_dir = suite_dir
+                .join("cases")
+                .join(sanitize_path_component(case_name));
             eprintln!(
                 "[makepad_test] splash case {}/{}: {} …",
                 index + 1,
@@ -300,28 +673,36 @@ pub fn run_splash_suite(
                 case_name
             );
             let case_start = Instant::now();
-            match runner.run_case(case_name, app.clone()) {
-                Ok(()) => {
-                    eprintln!(
-                        "[makepad_test] splash case {}/{}: {} ok ({:.2}s)",
-                        index + 1,
-                        total,
-                        case_name,
-                        case_start.elapsed().as_secs_f64()
-                    );
-                }
-                Err(err) => {
-                    eprintln!(
-                        "[makepad_test] splash case {}/{}: {} FAILED after {:.2}s — {}",
-                        index + 1,
-                        total,
-                        case_name,
-                        case_start.elapsed().as_secs_f64(),
-                        err.message()
-                    );
-                    return Err(err);
-                }
+            let outcome = runner.run_case_with_report(
+                case_name,
+                app.clone(),
+                case_dir.clone(),
+                duration_ms(wall.elapsed()),
+            );
+            if let Some(err) = outcome.error.clone() {
+                capture_failure_artifacts_to(&app, &case_dir, err.message());
             }
+            write_case_report(&case_dir, &outcome.report)?;
+            case_reports.push(outcome.report);
+            if let Some(err) = outcome.error {
+                eprintln!(
+                    "[makepad_test] splash case {}/{}: {} FAILED after {:.2}s — {}",
+                    index + 1,
+                    total,
+                    case_name,
+                    case_start.elapsed().as_secs_f64(),
+                    err.message()
+                );
+                *suite_failure = Some(err.message().to_string());
+                return Err(err);
+            }
+            eprintln!(
+                "[makepad_test] splash case {}/{}: {} ok ({:.2}s)",
+                index + 1,
+                total,
+                case_name,
+                case_start.elapsed().as_secs_f64()
+            );
         }
         eprintln!(
             "[makepad_test] splash suite: {} cases ran in {:.2}s (Splash `test.case` bodies only)",
@@ -329,12 +710,115 @@ pub fn run_splash_suite(
             session_start.elapsed().as_secs_f64()
         );
         Ok(())
-    });
-    eprintln!(
-        "[makepad_test] splash: total {:.2}s (startup + case bodies + teardown — explains cargo test wall time vs case sum)",
-        wall.elapsed().as_secs_f64()
-    );
-    result
+    })
+}
+
+fn splash_suite_dir(manifest_dir: &str, package_name: &str, suite_test_name: &str) -> PathBuf {
+    Path::new(manifest_dir)
+        .join("target")
+        .join("makepad_test")
+        .join(sanitize_path_component(package_name))
+        .join(sanitize_path_component(suite_test_name))
+}
+
+fn require_current_app(vm: &mut ScriptVm, method: &str) -> TestResult<TestApp> {
+    current_app(vm).ok_or_else(|| {
+        TestError::new(format!(
+            "{method} can only be used while a Splash test case is running"
+        ))
+    })
+}
+
+fn trace_call<T, F, G>(
+    vm: &mut ScriptVm,
+    method: &str,
+    kind: &str,
+    detail: String,
+    selector: Option<Selector>,
+    call: F,
+    extra_evidence: G,
+) -> TestResult<T>
+where
+    F: FnOnce(TestApp) -> TestResult<T>,
+    G: FnOnce(&TestApp, &T) -> StepEvidence,
+{
+    let app = require_current_app(vm, method)?;
+    let pending = {
+        let host = vm.host.downcast_mut::<SplashSuiteHost>().unwrap();
+        host.begin_step(&app, kind, detail, selector.as_ref())
+    };
+    let result = call(app.clone());
+    let success_evidence = result
+        .as_ref()
+        .ok()
+        .map(|value| extra_evidence(&app, value))
+        .unwrap_or_default();
+    let host = vm.host.downcast_mut::<SplashSuiteHost>().unwrap();
+    host.finish_step(&app, selector.as_ref(), pending, result, success_evidence)
+}
+
+fn trace_action<F>(
+    vm: &mut ScriptVm,
+    method: &str,
+    kind: &str,
+    detail: String,
+    selector: Option<Selector>,
+    call: F,
+) -> ScriptValue
+where
+    F: FnOnce(TestApp) -> TestResult<()>,
+{
+    match trace_call(vm, method, kind, detail, selector, call, |_app, _value| {
+        StepEvidence::default()
+    }) {
+        Ok(()) => NIL,
+        Err(err) => host_script_error(vm, err.message()),
+    }
+}
+
+fn merge_evidence(mut base: StepEvidence, extra: StepEvidence) -> StepEvidence {
+    if extra.selector_query.is_some() {
+        base.selector_query = extra.selector_query;
+    }
+    if extra.before_widgets.is_some() {
+        base.before_widgets = extra.before_widgets;
+    }
+    if extra.after_widgets.is_some() {
+        base.after_widgets = extra.after_widgets;
+    }
+    if extra.screenshot_path.is_some() {
+        base.screenshot_path = extra.screenshot_path;
+    }
+    if extra.log_excerpt.is_some() {
+        base.log_excerpt = extra.log_excerpt;
+    }
+    if extra.widget_dump_excerpt.is_some() {
+        base.widget_dump_excerpt = extra.widget_dump_excerpt;
+    }
+    base
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis() as u64
+}
+
+fn truncate_text(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+    let truncated: String = input.chars().take(max_chars).collect();
+    format!("{truncated}\n…")
+}
+
+fn format_logs(logs: &[(usize, LogEntry)]) -> String {
+    let mut out = String::new();
+    for (index, entry) in logs {
+        out.push_str(&format!(
+            "[{index}] {:?} {:?}: {}\n",
+            entry.source, entry.level, entry.message
+        ));
+    }
+    out
 }
 
 fn install_test_script_module(vm: &mut ScriptVm) {
@@ -363,13 +847,19 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(case),
         script_args_def!(name = NIL, body = NIL),
         |vm, args| {
-            let name = match script_value_to_checked_string(vm, script_value!(vm, args.name), "test.case name")
-            {
+            let name = match script_value_to_checked_string(
+                vm,
+                script_value!(vm, args.name),
+                "test.case name",
+            ) {
                 Ok(name) => name,
                 Err(err) => return err,
             };
             if name.trim().is_empty() {
-                return script_err_unexpected!(vm.trap(), "test.case requires a non-empty case name");
+                return script_err_unexpected!(
+                    vm.trap(),
+                    "test.case requires a non-empty case name"
+                );
             }
             let body = script_value!(vm, args.body);
             let Some(function) = body.as_object() else {
@@ -393,7 +883,14 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         |vm, args| {
             let message = script_value!(vm, args.message);
             let message = script_value_to_string(vm, message);
-            host_script_error(vm, message)
+            trace_action(
+                vm,
+                "test.fail",
+                "fail",
+                message.clone(),
+                None,
+                move |_app| Err(TestError::new(message)),
+            )
         },
     );
 
@@ -402,17 +899,21 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(click),
         script_args_def!(selector = NIL),
         |vm, args| {
-            let selector = match parse_selector(vm, script_value!(vm, args.selector), "test.click selector") {
-                Ok(selector) => selector,
-                Err(err) => return err,
-            };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.click");
-            };
-            if let Err(err) = app.locator(selector).try_click() {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let selector =
+                match parse_selector(vm, script_value!(vm, args.selector), "test.click selector") {
+                    Ok(selector) => selector,
+                    Err(err) => return err,
+                };
+            let detail = selector.describe();
+            let call_selector = selector.clone();
+            trace_action(
+                vm,
+                "test.click",
+                "click",
+                detail,
+                Some(selector),
+                move |app| app.locator(call_selector).try_click(),
+            )
         },
     );
 
@@ -421,21 +922,29 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(fill),
         script_args_def!(selector = NIL, text = NIL),
         |vm, args| {
-            let selector = match parse_selector(vm, script_value!(vm, args.selector), "test.fill selector") {
-                Ok(selector) => selector,
-                Err(err) => return err,
-            };
-            let text = match script_value_to_checked_string(vm, script_value!(vm, args.text), "test.fill text") {
+            let selector =
+                match parse_selector(vm, script_value!(vm, args.selector), "test.fill selector") {
+                    Ok(selector) => selector,
+                    Err(err) => return err,
+                };
+            let text = match script_value_to_checked_string(
+                vm,
+                script_value!(vm, args.text),
+                "test.fill text",
+            ) {
                 Ok(text) => text,
                 Err(err) => return err,
             };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.fill");
-            };
-            if let Err(err) = app.locator(selector).try_fill(text) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let detail = format!("{} {:?}", selector.describe(), text);
+            let call_selector = selector.clone();
+            trace_action(
+                vm,
+                "test.fill",
+                "fill",
+                detail,
+                Some(selector),
+                move |app| app.locator(call_selector).try_fill(text),
+            )
         },
     );
 
@@ -444,17 +953,21 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(clear),
         script_args_def!(selector = NIL),
         |vm, args| {
-            let selector = match parse_selector(vm, script_value!(vm, args.selector), "test.clear selector") {
-                Ok(selector) => selector,
-                Err(err) => return err,
-            };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.clear");
-            };
-            if let Err(err) = app.locator(selector).try_clear() {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let selector =
+                match parse_selector(vm, script_value!(vm, args.selector), "test.clear selector") {
+                    Ok(selector) => selector,
+                    Err(err) => return err,
+                };
+            let detail = selector.describe();
+            let call_selector = selector.clone();
+            trace_action(
+                vm,
+                "test.clear",
+                "clear",
+                detail,
+                Some(selector),
+                move |app| app.locator(call_selector).try_clear(),
+            )
         },
     );
 
@@ -471,13 +984,15 @@ fn install_test_script_module(vm: &mut ScriptVm) {
                 Ok(text) => text,
                 Err(err) => return err,
             };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.type_text");
-            };
-            if let Err(err) = app.try_type_text(text) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let detail = format!("{text:?}");
+            trace_action(
+                vm,
+                "test.type_text",
+                "type_text",
+                detail,
+                None,
+                move |app| app.try_type_text(text),
+            )
         },
     );
 
@@ -486,13 +1001,14 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(press_return),
         script_args_def!(),
         |vm, _args| {
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.press_return");
-            };
-            if let Err(err) = app.try_press_return() {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            trace_action(
+                vm,
+                "test.press_return",
+                "press_return",
+                String::new(),
+                None,
+                |app| app.try_press_return(),
+            )
         },
     );
 
@@ -506,13 +1022,15 @@ fn install_test_script_module(vm: &mut ScriptVm) {
                     Ok(value) => value,
                     Err(err) => return err,
                 };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.press_key");
-            };
-            if let Err(err) = app.try_press_key_with_modifiers(key_code, modifiers) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let detail = format!("{:?} {:?}", key_code, modifiers);
+            trace_action(
+                vm,
+                "test.press_key",
+                "press_key",
+                detail,
+                None,
+                move |app| app.try_press_key_with_modifiers(key_code, modifiers),
+            )
         },
     );
 
@@ -521,7 +1039,11 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(scroll),
         script_args_def!(selector = NIL, sx = 0.0, sy = 0.0),
         |vm, args| {
-            let selector = match parse_selector(vm, script_value!(vm, args.selector), "test.scroll selector") {
+            let selector = match parse_selector(
+                vm,
+                script_value!(vm, args.selector),
+                "test.scroll selector",
+            ) {
                 Ok(selector) => selector,
                 Err(err) => return err,
             };
@@ -533,13 +1055,16 @@ fn install_test_script_module(vm: &mut ScriptVm) {
                 Ok(value) => value,
                 Err(err) => return err,
             };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.scroll");
-            };
-            if let Err(err) = app.locator(selector).try_scroll(sx, sy) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let detail = format!("{} ({sx}, {sy})", selector.describe());
+            let call_selector = selector.clone();
+            trace_action(
+                vm,
+                "test.scroll",
+                "scroll",
+                detail,
+                Some(selector),
+                move |app| app.locator(call_selector).try_scroll(sx, sy),
+            )
         },
     );
 
@@ -548,10 +1073,11 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(drag),
         script_args_def!(selector = NIL, dx = 0.0, dy = 0.0),
         |vm, args| {
-            let selector = match parse_selector(vm, script_value!(vm, args.selector), "test.drag selector") {
-                Ok(selector) => selector,
-                Err(err) => return err,
-            };
+            let selector =
+                match parse_selector(vm, script_value!(vm, args.selector), "test.drag selector") {
+                    Ok(selector) => selector,
+                    Err(err) => return err,
+                };
             let dx = match parse_f64(vm, script_value!(vm, args.dx), "test.drag dx") {
                 Ok(value) => value,
                 Err(err) => return err,
@@ -560,40 +1086,31 @@ fn install_test_script_module(vm: &mut ScriptVm) {
                 Ok(value) => value,
                 Err(err) => return err,
             };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.drag");
-            };
-            if let Err(err) = app.locator(selector).try_drag_by(dx, dy) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let detail = format!("{} ({dx}, {dy})", selector.describe());
+            let call_selector = selector.clone();
+            trace_action(
+                vm,
+                "test.drag",
+                "drag",
+                detail,
+                Some(selector),
+                move |app| app.locator(call_selector).try_drag_by(dx, dy),
+            )
         },
     );
 
-    install_visibility_method(
-        vm,
-        test,
-        id_lut!(wait_visible),
-        |app, selector| app.locator(selector).try_wait_visible(),
-    );
-    install_visibility_method(
-        vm,
-        test,
-        id_lut!(wait_hidden),
-        |app, selector| app.locator(selector).try_wait_hidden(),
-    );
-    install_string_method(
-        vm,
-        test,
-        id_lut!(wait_text),
-        |app, selector, expected| app.locator(selector).try_wait_text(expected),
-    );
-    install_string_method(
-        vm,
-        test,
-        id_lut!(wait_value),
-        |app, selector, expected| app.locator(selector).try_wait_value(expected),
-    );
+    install_visibility_method(vm, test, id_lut!(wait_visible), |app, selector| {
+        app.locator(selector).try_wait_visible()
+    });
+    install_visibility_method(vm, test, id_lut!(wait_hidden), |app, selector| {
+        app.locator(selector).try_wait_hidden()
+    });
+    install_string_method(vm, test, id_lut!(wait_text), |app, selector, expected| {
+        app.locator(selector).try_wait_text(expected)
+    });
+    install_string_method(vm, test, id_lut!(wait_value), |app, selector, expected| {
+        app.locator(selector).try_wait_value(expected)
+    });
     install_bool_method(
         vm,
         test,
@@ -606,12 +1123,9 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(wait_enabled),
         |app, selector, expected| app.locator(selector).try_wait_enabled(expected),
     );
-    install_expect_method(
-        vm,
-        test,
-        id_lut!(expect_text),
-        |app, selector, expected| app.locator(selector).try_assert_text(expected),
-    );
+    install_expect_method(vm, test, id_lut!(expect_text), |app, selector, expected| {
+        app.locator(selector).try_assert_text(expected)
+    });
     install_expect_method(
         vm,
         test,
@@ -636,21 +1150,29 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(wait_count),
         script_args_def!(selector = NIL, count = 0.0),
         |vm, args| {
-            let selector = match parse_selector(vm, script_value!(vm, args.selector), "test.wait_count selector") {
+            let selector = match parse_selector(
+                vm,
+                script_value!(vm, args.selector),
+                "test.wait_count selector",
+            ) {
                 Ok(selector) => selector,
                 Err(err) => return err,
             };
-            let count = match parse_usize(vm, script_value!(vm, args.count), "test.wait_count count") {
-                Ok(value) => value,
-                Err(err) => return err,
-            };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.wait_count");
-            };
-            if let Err(err) = app.locator(selector).try_wait_count(count) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let count =
+                match parse_usize(vm, script_value!(vm, args.count), "test.wait_count count") {
+                    Ok(value) => value,
+                    Err(err) => return err,
+                };
+            let detail = format!("{} count={count}", selector.describe());
+            let call_selector = selector.clone();
+            trace_action(
+                vm,
+                "test.wait_count",
+                "wait_count",
+                detail,
+                Some(selector),
+                move |app| app.locator(call_selector).try_wait_count(count),
+            )
         },
     );
 
@@ -659,14 +1181,28 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(snapshot),
         script_args_def!(selector = NIL),
         |vm, args| {
-            let selector = match parse_selector(vm, script_value!(vm, args.selector), "test.snapshot selector") {
+            let selector = match parse_selector(
+                vm,
+                script_value!(vm, args.selector),
+                "test.snapshot selector",
+            ) {
                 Ok(selector) => selector,
                 Err(err) => return err,
             };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.snapshot");
-            };
-            match app.locator(selector).try_snapshot() {
+            let detail = selector.describe();
+            let call_selector = selector.clone();
+            match trace_call(
+                vm,
+                "test.snapshot",
+                "snapshot",
+                detail,
+                Some(selector),
+                move |app| app.locator(call_selector).try_snapshot(),
+                |_app, snapshot| StepEvidence {
+                    after_widgets: Some(vec![snapshot.clone()]),
+                    ..StepEvidence::default()
+                },
+            ) {
                 Ok(snapshot) => widget_snapshot_to_value(vm, &snapshot),
                 Err(err) => host_script_error(vm, err.message()),
             }
@@ -679,25 +1215,43 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         script_args_def!(selector = NIL),
         |vm, args| {
             let selector_value = script_value!(vm, args.selector);
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.snapshots");
-            };
-            let widgets = if selector_value.is_nil() {
-                match app.try_widget_snapshot() {
-                    Ok(widgets) => widgets,
-                    Err(err) => return host_script_error(vm, err.message()),
-                }
+            let result = if selector_value.is_nil() {
+                trace_call(
+                    vm,
+                    "test.snapshots",
+                    "snapshots",
+                    "all widgets".to_string(),
+                    None,
+                    |app| app.try_widget_snapshot(),
+                    |_app, widgets| StepEvidence {
+                        after_widgets: Some(widgets.clone()),
+                        ..StepEvidence::default()
+                    },
+                )
             } else {
                 let selector = match parse_selector(vm, selector_value, "test.snapshots selector") {
                     Ok(selector) => selector,
                     Err(err) => return err,
                 };
-                match app.try_query_widgets(&selector, false) {
-                    Ok(widgets) => widgets,
-                    Err(err) => return host_script_error(vm, err.message()),
-                }
+                let detail = selector.describe();
+                let call_selector = selector.clone();
+                trace_call(
+                    vm,
+                    "test.snapshots",
+                    "snapshots",
+                    detail,
+                    Some(selector),
+                    move |app| app.try_query_widgets(&call_selector, false),
+                    |_app, widgets| StepEvidence {
+                        after_widgets: Some(widgets.clone()),
+                        ..StepEvidence::default()
+                    },
+                )
             };
-            widgets_to_value(vm, &widgets)
+            match result {
+                Ok(widgets) => widgets_to_value(vm, &widgets),
+                Err(err) => host_script_error(vm, err.message()),
+            }
         },
     );
 
@@ -705,14 +1259,20 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         test,
         id_lut!(widget_dump),
         script_args_def!(),
-        |vm, _args| {
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.widget_dump");
-            };
-            match app.try_widget_dump() {
-                Ok(dump) => vm.new_string_with(|_vm, out| out.push_str(&dump)),
-                Err(err) => host_script_error(vm, err.message()),
-            }
+        |vm, _args| match trace_call(
+            vm,
+            "test.widget_dump",
+            "widget_dump",
+            String::new(),
+            None,
+            |app| app.try_widget_dump(),
+            |_app, dump| StepEvidence {
+                widget_dump_excerpt: Some(truncate_text(dump, 2000)),
+                ..StepEvidence::default()
+            },
+        ) {
+            Ok(dump) => vm.new_string_with(|_vm, out| out.push_str(&dump)),
+            Err(err) => host_script_error(vm, err.message()),
         },
     );
 
@@ -722,36 +1282,50 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         script_args_def!(name = NIL),
         |vm, args| {
             let name_value = script_value!(vm, args.name);
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.screenshot");
-            };
-            let screenshot_path = match app.try_screenshot() {
-                Ok(path) => path,
-                Err(err) => return host_script_error(vm, err.message()),
-            };
-            let output_path = if name_value.is_nil() {
-                screenshot_path
+            let screenshot_name = if name_value.is_nil() {
+                None
             } else {
-                let name = match script_value_to_checked_string(vm, name_value, "test.screenshot name") {
-                    Ok(name) => name,
+                match script_value_to_checked_string(vm, name_value, "test.screenshot name") {
+                    Ok(name) => Some(name),
                     Err(err) => return err,
-                };
-                let output_path = app
-                    .artifacts_dir()
-                    .join(format!("{}.png", sanitize_path_component(&name)));
-                if let Err(err) = fs::copy(&screenshot_path, &output_path) {
-                    return host_script_error(
-                        vm,
-                        format!(
-                            "failed to copy screenshot to {}: {}",
-                            output_path.display(),
-                            err
-                        ),
-                    );
                 }
-                output_path
             };
-            vm.new_string_with(|_vm, out| out.push_str(&output_path.to_string_lossy()))
+            let detail = screenshot_name
+                .clone()
+                .unwrap_or_else(|| "screenshot".to_string());
+            match trace_call(
+                vm,
+                "test.screenshot",
+                "screenshot",
+                detail,
+                None,
+                move |app| {
+                    let screenshot_path = app.try_screenshot()?;
+                    let output_path = if let Some(name) = screenshot_name {
+                        let output_path = app
+                            .artifacts_dir()
+                            .join(format!("{}.png", sanitize_path_component(&name)));
+                        fs::copy(&screenshot_path, &output_path).map_err(|err| {
+                            TestError::new(format!(
+                                "failed to copy screenshot to {}: {}",
+                                output_path.display(),
+                                err
+                            ))
+                        })?;
+                        output_path
+                    } else {
+                        screenshot_path
+                    };
+                    Ok(output_path)
+                },
+                |_app, path| StepEvidence {
+                    screenshot_path: Some(path.to_string_lossy().to_string()),
+                    ..StepEvidence::default()
+                },
+            ) {
+                Ok(path) => vm.new_string_with(|_vm, out| out.push_str(&path.to_string_lossy())),
+                Err(err) => host_script_error(vm, err.message()),
+            }
         },
     );
 
@@ -763,16 +1337,28 @@ fn install_test_script_module(vm: &mut ScriptVm) {
             let pattern = if script_value!(vm, args.pattern).is_nil() {
                 None
             } else {
-                match script_value_to_checked_string(vm, script_value!(vm, args.pattern), "test.logs pattern")
-                {
+                match script_value_to_checked_string(
+                    vm,
+                    script_value!(vm, args.pattern),
+                    "test.logs pattern",
+                ) {
                     Ok(pattern) => Some(pattern),
                     Err(err) => return err,
                 }
             };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.logs");
-            };
-            let logs = match app.try_query_logs(pattern) {
+            let detail = pattern.clone().unwrap_or_else(|| "all logs".to_string());
+            let logs = match trace_call(
+                vm,
+                "test.logs",
+                "logs",
+                detail,
+                None,
+                move |app| app.try_query_logs(pattern),
+                |_app, logs| StepEvidence {
+                    log_excerpt: Some(format_logs(logs)),
+                    ..StepEvidence::default()
+                },
+            ) {
                 Ok(logs) => logs,
                 Err(err) => return host_script_error(vm, err.message()),
             };
@@ -785,19 +1371,22 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(wait_log),
         script_args_def!(pattern = NIL),
         |vm, args| {
-            let pattern =
-                match script_value_to_checked_string(vm, script_value!(vm, args.pattern), "test.wait_log pattern")
-                {
-                    Ok(pattern) => pattern,
-                    Err(err) => return err,
-                };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test.wait_log");
+            let pattern = match script_value_to_checked_string(
+                vm,
+                script_value!(vm, args.pattern),
+                "test.wait_log pattern",
+            ) {
+                Ok(pattern) => pattern,
+                Err(err) => return err,
             };
-            if let Err(err) = app.try_wait_for_log_contains(&pattern) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            trace_action(
+                vm,
+                "test.wait_log",
+                "wait_log",
+                pattern.clone(),
+                None,
+                move |app| app.try_wait_for_log_contains(&pattern),
+            )
         },
     );
 }
@@ -811,18 +1400,20 @@ where
         method,
         script_args_def!(selector = NIL),
         move |vm, args| {
-            let selector =
-                match parse_selector(vm, script_value!(vm, args.selector), "selector") {
-                    Ok(selector) => selector,
-                    Err(err) => return err,
-                };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test wait/assert");
+            let selector = match parse_selector(vm, script_value!(vm, args.selector), "selector") {
+                Ok(selector) => selector,
+                Err(err) => return err,
             };
-            if let Err(err) = f(app, selector) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let detail = selector.describe();
+            let call_selector = selector.clone();
+            trace_action(
+                vm,
+                "test wait/assert",
+                "selector_wait",
+                detail,
+                Some(selector),
+                |app| f(app, call_selector.clone()),
+            )
         },
     );
 }
@@ -836,11 +1427,10 @@ where
         method,
         script_args_def!(selector = NIL, expected = NIL),
         move |vm, args| {
-            let selector =
-                match parse_selector(vm, script_value!(vm, args.selector), "selector") {
-                    Ok(selector) => selector,
-                    Err(err) => return err,
-                };
+            let selector = match parse_selector(vm, script_value!(vm, args.selector), "selector") {
+                Ok(selector) => selector,
+                Err(err) => return err,
+            };
             let expected = match script_value_to_checked_string(
                 vm,
                 script_value!(vm, args.expected),
@@ -849,13 +1439,16 @@ where
                 Ok(expected) => expected,
                 Err(err) => return err,
             };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test string assert");
-            };
-            if let Err(err) = f(app, selector, expected) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let detail = format!("{} {:?}", selector.describe(), expected);
+            let call_selector = selector.clone();
+            trace_action(
+                vm,
+                "test string assert",
+                "string_assert",
+                detail,
+                Some(selector),
+                |app| f(app, call_selector.clone(), expected.clone()),
+            )
         },
     );
 }
@@ -869,23 +1462,23 @@ where
         method,
         script_args_def!(selector = NIL, expected = NIL),
         move |vm, args| {
-            let selector =
-                match parse_selector(vm, script_value!(vm, args.selector), "selector") {
-                    Ok(selector) => selector,
-                    Err(err) => return err,
-                };
-            let expected = match script_value_to_checked_string(vm, script_value!(vm, args.expected), "expected")
-            {
+            let selector = match parse_selector(vm, script_value!(vm, args.selector), "selector") {
+                Ok(selector) => selector,
+                Err(err) => return err,
+            };
+            let expected = match script_value_to_checked_string(
+                vm,
+                script_value!(vm, args.expected),
+                "expected",
+            ) {
                 Ok(expected) => expected,
                 Err(err) => return err,
             };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test assert");
-            };
-            if let Err(err) = f(app, selector, expected) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let detail = format!("{} {:?}", selector.describe(), expected);
+            let call_selector = selector.clone();
+            trace_action(vm, "test assert", "expect", detail, Some(selector), |app| {
+                f(app, call_selector.clone(), expected.clone())
+            })
         },
     );
 }
@@ -899,22 +1492,24 @@ where
         method,
         script_args_def!(selector = NIL, expected = NIL),
         move |vm, args| {
-            let selector =
-                match parse_selector(vm, script_value!(vm, args.selector), "selector") {
-                    Ok(selector) => selector,
-                    Err(err) => return err,
-                };
+            let selector = match parse_selector(vm, script_value!(vm, args.selector), "selector") {
+                Ok(selector) => selector,
+                Err(err) => return err,
+            };
             let expected = match parse_bool(vm, script_value!(vm, args.expected), "expected") {
                 Ok(expected) => expected,
                 Err(err) => return err,
             };
-            let Some(app) = current_app(vm) else {
-                return missing_app_error(vm, "test bool assert");
-            };
-            if let Err(err) = f(app, selector, expected) {
-                return host_script_error(vm, err.message());
-            }
-            NIL
+            let detail = format!("{} {expected}", selector.describe());
+            let call_selector = selector.clone();
+            trace_action(
+                vm,
+                "test bool assert",
+                "bool_assert",
+                detail,
+                Some(selector),
+                |app| f(app, call_selector.clone(), expected),
+            )
         },
     );
 }
@@ -925,13 +1520,6 @@ fn current_app(vm: &mut ScriptVm) -> Option<TestApp> {
         .unwrap()
         .current_app
         .clone()
-}
-
-fn missing_app_error(vm: &mut ScriptVm, method: &str) -> ScriptValue {
-    host_script_error(
-        vm,
-        format!("{method} can only be used while a Splash test case is running"),
-    )
 }
 
 fn host_script_error(vm: &mut ScriptVm, message: impl Into<String>) -> ScriptValue {
@@ -959,6 +1547,19 @@ fn parse_suite_options(vm: &mut ScriptVm, value: ScriptValue) -> Result<SplashSu
         id!(visible_run_item),
         "test.configure visible_run_item",
     )?;
+    let session_mode = match optional_string_field(vm, object, id!(session_mode), "test.configure session_mode")?
+        .as_deref()
+        .unwrap_or("isolated")
+    {
+        "isolated" => SessionMode::Isolated,
+        "shared" => SessionMode::Shared,
+        other => {
+            return Err(host_script_error(
+                vm,
+                format!("unknown test.configure session_mode `{}`", other),
+            ))
+        }
+    };
     let headless_run_item = optional_string_field(
         vm,
         object,
@@ -1004,6 +1605,7 @@ fn parse_suite_options(vm: &mut ScriptVm, value: ScriptValue) -> Result<SplashSu
 
     Ok(SplashSuiteOptions {
         launch,
+        session_mode,
         startup_timeout: optional_duration_field(
             vm,
             object,
@@ -1478,7 +2080,7 @@ fn script_value_to_checked_string(
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_splash_mount_root, SplashSuiteRunner, SplashLaunch};
+    use super::{discover_splash_mount_root, SessionMode, SplashLaunch, SplashSuiteRunner};
     use crate::TestConfig;
     use std::fs;
     use std::path::PathBuf;
@@ -1539,6 +2141,43 @@ mod tests {
             })
         );
         assert_eq!(options.action_timeout, Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn defaults_to_isolated_session_mode() {
+        let runner = SplashSuiteRunner::load_from_source(
+            PathBuf::from("/tmp/example"),
+            PathBuf::from("/tmp/example/tests/ui.splash"),
+            "use mod.test\ntest.case(\"smoke\", || {})\n".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(runner.session_mode(), SessionMode::Isolated);
+    }
+
+    #[test]
+    fn parses_shared_session_mode() {
+        let runner = SplashSuiteRunner::load_from_source(
+            PathBuf::from("/tmp/example"),
+            PathBuf::from("/tmp/example/tests/ui.splash"),
+            "use mod.test\ntest.configure({session_mode:\"shared\"})\ntest.case(\"smoke\", || {})\n".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(runner.session_mode(), SessionMode::Shared);
+    }
+
+    #[test]
+    fn rejects_invalid_session_mode() {
+        let err = SplashSuiteRunner::load_from_source(
+            PathBuf::from("/tmp/example"),
+            PathBuf::from("/tmp/example/tests/ui.splash"),
+            "use mod.test\ntest.configure({session_mode:\"broken\"})\n".to_string(),
+        )
+        .err()
+        .unwrap();
+
+        assert!(err.message().contains("session_mode"));
     }
 
     #[test]
