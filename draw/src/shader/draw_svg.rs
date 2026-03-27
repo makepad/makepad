@@ -104,19 +104,13 @@ script_mod! {
                 self.v_param3 = self.geom.param3;
                 self.v_param4 = self.geom.param4;
             }
-            let shifted = transformed + self.draw_list.view_shift;
-            self.v_world = shifted;
+            self.v_world = transformed;
 
-            // Early clip rejection in final draw space.
+            // Early clip rejection in local draw-list space.
             let cr = self.geom.clip_radius * max(abs(self.svg_scale.x), abs(self.svg_scale.y));
             let is_shadow = self.geom.stroke_mult < -0.5;
             if cr > 0.0 && !is_shadow {
-                let clip = vec4(
-                    max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
-                    max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
-                    min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
-                    min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
-                );
+                let clip = self.draw_clip;
                 if transformed.x + cr < clip.x || transformed.y + cr < clip.y
                     || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
                     self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
@@ -125,8 +119,8 @@ script_mod! {
             }
 
             let world = self.draw_list.view_transform * vec4(
-                shifted.x
-                shifted.y
+                transformed.x
+                transformed.y
                 self.draw_depth + self.draw_call.zbias + self.geom.zbias
                 1.
             );

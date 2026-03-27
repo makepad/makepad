@@ -1,6 +1,6 @@
 use {
     super::{
-        font_face::FontFace,
+        font_face::{CanonicalVariations, FontFace, ParsedFontInstance},
         geom::{Point, Rect},
         glyph_outline,
         glyph_outline::GlyphOutline,
@@ -9,8 +9,6 @@ use {
         loader::FontData,
         rasterizer::{RasterizedGlyph, Rasterizer},
     },
-    fxhash::FxHashMap,
-    rustybuzz,
     rustybuzz::ttf_parser,
     std::{
         cell::RefCell,
@@ -39,11 +37,8 @@ pub struct Font {
     id: FontId,
     rasterizer: Rc<RefCell<Rasterizer>>,
     face: FontFace,
-    units_per_em: f32,
-    ascender_in_ems: f32,
-    descender_in_ems: f32,
-    line_gap_in_ems: f32,
-    cached_glyph_outlines: RefCell<FxHashMap<GlyphId, Option<GlyphOutline>>>,
+    ascender_fudge_in_ems: f32,
+    descender_fudge_in_ems: f32,
 }
 
 impl Font {
@@ -54,25 +49,12 @@ impl Font {
         ascender_fudge_in_ems: f32,
         descender_fudge_in_ems: f32,
     ) -> Self {
-        let (units_per_em, ascender_in_ems, descender_in_ems, line_gap_in_ems) = face
-            .with_ttf_parser_face(|face| {
-                let units_per_em = face.units_per_em() as f32;
-                (
-                    units_per_em,
-                    face.ascender() as f32 / units_per_em + ascender_fudge_in_ems,
-                    face.descender() as f32 / units_per_em + descender_fudge_in_ems,
-                    face.line_gap() as f32 / units_per_em,
-                )
-            });
         Self {
             id,
             rasterizer,
             face,
-            units_per_em,
-            ascender_in_ems,
-            descender_in_ems,
-            line_gap_in_ems,
-            cached_glyph_outlines: RefCell::new(FxHashMap::default()),
+            ascender_fudge_in_ems,
+            descender_fudge_in_ems,
         }
     }
 
@@ -84,49 +66,46 @@ impl Font {
         self.face.data()
     }
 
-    pub(super) fn with_ttf_parser_face<R>(&self, f: impl FnOnce(&ttf_parser::Face<'_>) -> R) -> R {
-        self.face.with_ttf_parser_face(f)
+    pub fn parsed_instance(&self) -> &Rc<ParsedFontInstance> {
+        self.face.instance()
     }
 
-    pub(super) fn with_rustybuzz_face<R>(&self, f: impl FnOnce(&rustybuzz::Face<'_>) -> R) -> R {
-        self.face.with_rustybuzz_face(f)
+    pub fn variations(&self) -> &CanonicalVariations {
+        self.parsed_instance().variations()
+    }
+
+    pub(super) fn ttf_parser_face(&self) -> &ttf_parser::Face<'_> {
+        self.parsed_instance().ttf_parser_face()
+    }
+
+    pub(super) fn rustybuzz_face(&self) -> &rustybuzz::Face<'_> {
+        self.parsed_instance().rustybuzz_face()
     }
 
     pub fn units_per_em(&self) -> f32 {
-        self.units_per_em
+        self.parsed_instance().units_per_em()
     }
 
     pub fn ascender_in_ems(&self) -> f32 {
-        self.ascender_in_ems
+        self.parsed_instance().ascender_in_ems() + self.ascender_fudge_in_ems
     }
 
     pub fn descender_in_ems(&self) -> f32 {
-        self.descender_in_ems
+        self.parsed_instance().descender_in_ems() + self.descender_fudge_in_ems
     }
 
     pub fn line_gap_in_ems(&self) -> f32 {
-        self.line_gap_in_ems
+        self.parsed_instance().line_gap_in_ems()
     }
 
     pub fn glyph_outline(&self, glyph_id: GlyphId) -> Option<GlyphOutline> {
-        if let Some(outline) = self.cached_glyph_outlines.borrow().get(&glyph_id) {
-            return outline.clone();
-        }
-
-        let units_per_em = self.units_per_em;
-        let outline = self.with_ttf_parser_face(|face| {
-            let glyph_id = ttf_parser::GlyphId(glyph_id);
-            let mut builder = glyph_outline::Builder::new();
-            let bounds = face.outline_glyph(glyph_id, &mut builder)?;
-            let min = Point::new(bounds.x_min as f32, bounds.y_min as f32);
-            let max = Point::new(bounds.x_max as f32, bounds.y_max as f32);
-            Some(builder.finish(Rect::new(min, max - min), units_per_em))
-        });
-
-        self.cached_glyph_outlines
-            .borrow_mut()
-            .insert(glyph_id, outline.clone());
-        outline
+        let face = self.ttf_parser_face();
+        let glyph_id = ttf_parser::GlyphId(glyph_id);
+        let mut builder = glyph_outline::Builder::new();
+        let bounds = face.outline_glyph(glyph_id, &mut builder)?;
+        let min = Point::new(bounds.x_min as f32, bounds.y_min as f32);
+        let max = Point::new(bounds.x_max as f32, bounds.y_max as f32);
+        Some(builder.finish(Rect::new(min, max - min), self.units_per_em()))
     }
 
     pub fn glyph_outline_bounds_in_ems(
@@ -134,21 +113,27 @@ impl Font {
         glyph_id: GlyphId,
         out_outline: &mut Option<GlyphOutline>,
     ) -> Option<Rect<f32>> {
-        // Check the outline cache first — it stores the full outline,
-        // from which we can derive bounds.
-        if let Some(cached) = self.cached_glyph_outlines.borrow().get(&glyph_id) {
-            *out_outline = cached.clone();
-            return cached.as_ref().map(|o| o.bounds_in_ems());
+        if let Some(bounds_in_ems) = self
+            .parsed_instance()
+            .cached_glyph_outline_bounds_in_ems(glyph_id)
+        {
+            return bounds_in_ems;
         }
-
-        // Not cached yet — compute via glyph_outline() which will populate the cache.
         if let Some(outline) = self.glyph_outline(glyph_id) {
             let bounds_in_ems = outline.bounds_in_ems();
             *out_outline = Some(outline);
+            self.parsed_instance()
+                .cache_glyph_outline_bounds_in_ems(glyph_id, Some(bounds_in_ems));
             Some(bounds_in_ems)
         } else {
+            self.parsed_instance()
+                .cache_glyph_outline_bounds_in_ems(glyph_id, None);
             None
         }
+    }
+
+    pub fn glyph_id_for_char(&self, ch: char) -> Option<GlyphId> {
+        self.rustybuzz_face().glyph_index(ch).map(|glyph_id| glyph_id.0)
     }
 
     pub fn with_glyph_raster_image<R>(
@@ -157,12 +142,12 @@ impl Font {
         dpxs_per_em: f32,
         f: impl FnOnce(GlyphRasterImage<'_>) -> R,
     ) -> Option<R> {
-        self.with_ttf_parser_face(|face| {
-            let glyph_id = ttf_parser::GlyphId(glyph_id);
-            let image = face.glyph_raster_image(glyph_id, dpxs_per_em as u16)?;
-            let raster = GlyphRasterImage::from_raster_glyph_image(image)?;
-            Some(f(raster))
-        })
+        let glyph_id = ttf_parser::GlyphId(glyph_id);
+        let image = self
+            .ttf_parser_face()
+            .glyph_raster_image(glyph_id, dpxs_per_em as u16)?;
+        let raster = GlyphRasterImage::from_raster_glyph_image(image)?;
+        Some(f(raster))
     }
 
     pub fn rasterize_glyph(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {

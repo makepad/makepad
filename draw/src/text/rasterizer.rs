@@ -9,7 +9,7 @@ use super::{
     sdfer,
     sdfer::Sdfer,
 };
-use fxhash::{FxHashMap, FxHashSet};
+use std::collections::{HashMap, HashSet};
 //use std::{fs::File, io::BufWriter, path::Path, slice};
 
 #[derive(Debug)]
@@ -21,10 +21,10 @@ pub struct Rasterizer {
     outline_rasterization_mode: OutlineRasterizationMode,
     atlas: ColorAtlas,
     allocator: MultiPlaneAllocator,
-    cached_slots: FxHashMap<GlyphImageKey, AtlasSlot>,
-    outline_msdf_ready: FxHashSet<GlyphImageKey>,
-    outline_msdf_pending: FxHashSet<GlyphImageKey>,
-    outline_msdf_failed: FxHashSet<GlyphImageKey>,
+    cached_slots: HashMap<GlyphImageKey, AtlasSlot>,
+    outline_msdf_ready: HashSet<GlyphImageKey>,
+    outline_msdf_pending: HashSet<GlyphImageKey>,
+    outline_msdf_failed: HashSet<GlyphImageKey>,
     queued_msdf_jobs: Vec<QueuedMsdfJob>,
     atlas_epoch: u64,
 }
@@ -40,10 +40,10 @@ impl Rasterizer {
             outline_rasterization_mode: settings.outline_rasterization_mode,
             atlas: ColorAtlas::new(atlas_size),
             allocator: MultiPlaneAllocator::new(atlas_size),
-            cached_slots: FxHashMap::default(),
-            outline_msdf_ready: FxHashSet::default(),
-            outline_msdf_pending: FxHashSet::default(),
-            outline_msdf_failed: FxHashSet::default(),
+            cached_slots: HashMap::new(),
+            outline_msdf_ready: HashSet::new(),
+            outline_msdf_pending: HashSet::new(),
+            outline_msdf_failed: HashSet::new(),
             queued_msdf_jobs: Vec::new(),
             atlas_epoch: 0,
         }
@@ -107,9 +107,11 @@ impl Rasterizer {
             for y in 0..job.key.size.height {
                 for x in 0..job.key.size.width {
                     let point = Point::new(x, y);
-                    let old = dst[point];
                     let msdf = job.pixels[y * job.key.size.width + x];
-                    // Keep alpha as seeded SDF coverage for stable visual parity while RGB carries MSDF.
+                    let old = dst[point];
+                    // MSDF jobs upgrade a slot that was initially seeded with SDF.
+                    // Keep alpha from the seeded SDF coverage so grayscale and MSDF
+                    // paths stay visually stable while RGB carries the MSDF data.
                     dst[point] = Bgra::new(msdf.b(), msdf.g(), msdf.r(), old.a());
                 }
             }
@@ -143,6 +145,40 @@ impl Rasterizer {
 
     fn get_cached_slot(&self, key: &GlyphImageKey) -> Option<AtlasSlot> {
         self.cached_slots.get(key).copied()
+    }
+
+    fn outline_sdf_key(
+        &self,
+        font: &Font,
+        glyph_id: GlyphId,
+        bounds_in_ems: Rect<f32>,
+        dpxs_per_em: f32,
+    ) -> GlyphImageKey {
+        let atlas_image_padding = self.sdfer.settings().padding;
+        let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
+        GlyphImageKey {
+            font_id: font.id(),
+            glyph_id,
+            size: atlas_image_size + Size::from(atlas_image_padding) * 2,
+            kind: GlyphImageKind::OutlineSdf,
+        }
+    }
+
+    fn outline_msdf_key(
+        &self,
+        font: &Font,
+        glyph_id: GlyphId,
+        bounds_in_ems: Rect<f32>,
+        dpxs_per_em: f32,
+    ) -> GlyphImageKey {
+        let atlas_image_padding = self.msdfer.settings().padding;
+        let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
+        GlyphImageKey {
+            font_id: font.id(),
+            glyph_id,
+            size: atlas_image_size + Size::from(atlas_image_padding) * 2,
+            kind: GlyphImageKind::OutlineMsdf,
+        }
     }
 
     fn allocate_sdf_slot(&mut self, key: GlyphImageKey) -> Option<(AtlasSlot, bool)> {
@@ -258,21 +294,15 @@ impl Rasterizer {
             self.msdfer.settings().padding
         );
         dpxs_per_em = dpxs_per_em.max(self.msdf_resolution.min_dpxs_per_em);
-        let mut outline = None;
-        let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
-        let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
+        let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut None)?;
+        let key = self.outline_sdf_key(font, glyph_id, bounds_in_ems, dpxs_per_em);
         let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
         let atlas_image_padding = self.sdfer.settings().padding;
-        let key = GlyphImageKey {
-            font_id: font.id(),
-            glyph_id,
-            size: atlas_image_size + Size::from(atlas_image_padding) * 2,
-            kind: GlyphImageKind::OutlineSdf,
-        };
         let (slot, allocated) = self.allocate_sdf_slot(key.clone())?;
         let atlas_image_bounds = if !allocated {
             slot.rect
         } else {
+            let outline = font.glyph_outline(glyph_id)?;
             let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
             {
                 let mut coverage = Image::new(atlas_image_size);
@@ -315,26 +345,13 @@ impl Rasterizer {
         glyph_id: GlyphId,
         dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
-        // Always keep small text on SDF, even if an MSDF slot already exists.
         if dpxs_per_em <= self.msdf_resolution.min_request_dpxs_per_em {
             return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
         }
-        let mut outline = None;
-        let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut outline)?;
-        let outline = outline.unwrap_or_else(|| font.glyph_outline(glyph_id).unwrap());
-        let complexity = estimate_outline_complexity(&outline);
-        if !is_msdf_complexity_acceptable(self.msdf_complexity, complexity) {
-            return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
-        }
         let dpxs_per_em = dpxs_per_em.max(self.msdf_resolution.min_dpxs_per_em);
-        let atlas_image_size = glyph_outline_image_size(bounds_in_ems.size, dpxs_per_em);
+        let bounds_in_ems = font.glyph_outline_bounds_in_ems(glyph_id, &mut None)?;
         let atlas_image_padding = self.msdfer.settings().padding;
-        let key = GlyphImageKey {
-            font_id: font.id(),
-            glyph_id,
-            size: atlas_image_size + Size::from(atlas_image_padding) * 2,
-            kind: GlyphImageKind::OutlineMsdf,
-        };
+        let key = self.outline_msdf_key(font, glyph_id, bounds_in_ems, dpxs_per_em);
         if self.outline_msdf_failed.contains(&key) {
             return self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em);
         }
@@ -355,6 +372,11 @@ impl Rasterizer {
 
         let sdf_glyph = self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em)?;
         if self.outline_msdf_ready.contains(&key) || self.outline_msdf_pending.contains(&key) {
+            return Some(sdf_glyph);
+        }
+        let outline = font.glyph_outline(glyph_id)?;
+        let complexity = estimate_outline_complexity(&outline);
+        if !is_msdf_complexity_acceptable(self.msdf_complexity, complexity) {
             return Some(sdf_glyph);
         }
         let (slot, allocated) = match self.allocate_shared_slot(key.clone()) {
@@ -422,6 +444,13 @@ struct AtlasSlot {
 }
 
 #[derive(Clone, Copy, Debug)]
+// Logical atlas plane selector.
+//
+// The text atlas is stored in BGRA memory (`Bgra`) for upload efficiency, but
+// text code addresses channels as logical R/G/B/A planes. `set()` and `get()`
+// are the translation layer between logical plane identity and BGRA storage.
+// Callers must treat plane indices as logical RGBA selectors, not raw byte
+// offsets or sampler return ordering details.
 enum AtlasPlane {
     R,
     G,

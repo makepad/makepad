@@ -2,10 +2,10 @@
 
 use super::xr_physics::{makepad_pose, RapierScene};
 use super::*;
-use makepad_widgets::makepad_platform::XrDepthMeshStore;
-use std::collections::HashSet;
-
-const XR_DEBUG_DEPTH_TRIANGLE_SHRINK: f32 = 0.90;
+use std::{
+    collections::{hash_map::DefaultHasher, HashSet},
+    hash::{Hash, Hasher},
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct DepthSurfaceMeshChunkHandle {
@@ -19,396 +19,188 @@ pub(super) struct DepthQuerySurfaceCollider {
     pub(super) fingerprint: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
+pub(super) enum DepthQuerySurfaceShape {
+    Triangle([Vec3f; 3]),
+    Quad([Vec3f; 4]),
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct DepthQuerySurfaceTarget {
-    pub(super) collider: XrDepthMeshQueryCollider,
+    pub(super) shape: DepthQuerySurfaceShape,
+    pub(super) fingerprint: u64,
 }
 
-#[derive(Clone)]
-struct RetainedDepthQuerySurface {
-    target: DepthQuerySurfaceTarget,
-    misses_left: u8,
-}
-
-pub(super) fn depth_query_plane_supports_body(
-    plane: XrDepthMeshQuerySupportPlane,
-    body_position: Vec3f,
-    query_radius: f32,
-    lateral_margin: f32,
-) -> bool {
-    let offset = body_position - plane.point;
-    let signed_height = offset.dot(plane.normal);
-    if signed_height < -query_radius.max(0.0005) {
-        return false;
-    }
-    if signed_height > query_radius + XR_DEPTH_QUERY_MAX_DISTANCE + lateral_margin {
-        return false;
-    }
-
-    let tangent_limit = plane.half_extent_tangent + lateral_margin;
-    let bitangent_limit = plane.half_extent_bitangent + lateral_margin;
-    offset.dot(plane.tangent).abs() <= tangent_limit
-        && offset.dot(plane.bitangent).abs() <= bitangent_limit
-}
-
-fn depth_query_plane_edge_slack(
-    plane: XrDepthMeshQuerySupportPlane,
-    body_position: Vec3f,
-) -> f32 {
-    let offset = body_position - plane.point;
-    let tangent_slack = plane.half_extent_tangent - offset.dot(plane.tangent).abs();
-    let bitangent_slack = plane.half_extent_bitangent - offset.dot(plane.bitangent).abs();
-    tangent_slack.min(bitangent_slack)
-}
-
-fn depth_query_support_refresh_edge_margin(query_radius: f32) -> f32 {
-    (query_radius * XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_SCALE)
-        .clamp(
-            XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_MIN,
-            XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_MAX,
-        )
-}
-
-impl RetainedDepthQuerySurface {
-    fn sticky_supports(&self, body_position: Vec3f, query_radius: f32) -> bool {
-        if self.target.collider.role != XrDepthMeshQueryColliderRole::Support {
-            return false;
-        }
-        let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = self.target.collider.geometry;
-        depth_query_plane_supports_body(
-            plane,
-            body_position,
-            query_radius,
-            XR_DEPTH_QUERY_STICKY_KEEP_MARGIN,
-        )
-    }
-
-    fn safely_supports(
-        &self,
-        body_position: Vec3f,
-        query_radius: f32,
-        edge_margin: f32,
-    ) -> bool {
-        if self.target.collider.role != XrDepthMeshQueryColliderRole::Support {
-            return false;
-        }
-        let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = self.target.collider.geometry;
-        depth_query_plane_supports_body(plane, body_position, query_radius, 0.0)
-            && depth_query_plane_edge_slack(plane, body_position) > edge_margin
-    }
+#[derive(Clone, Copy)]
+struct DepthQuerySurfaceCandidate {
+    key: u64,
+    distance: f32,
+    shape: DepthQuerySurfaceShape,
+    fingerprint: u64,
 }
 
 #[derive(Clone)]
 pub(super) struct RetainedDepthQueryHit {
-    surfaces: [Option<RetainedDepthQuerySurface>; XR_DEPTH_QUERY_SURFACES_PER_BODY],
+    hit: XrDepthMeshQueryHit,
+    misses_left: u8,
 }
 
 impl RetainedDepthQueryHit {
-    fn new(hit: &XrDepthMeshQueryHit) -> Self {
-        let mut retained = Self {
-            surfaces: std::array::from_fn(|_| None),
-        };
-        retained.refresh_from_hit(hit);
-        retained
-    }
-
-    fn refresh_from_hit(&mut self, hit: &XrDepthMeshQueryHit) {
-        let mut matched = [false; XR_DEPTH_QUERY_SURFACES_PER_BODY];
-        self.absorb_surface(
-            DepthQuerySurfaceTarget {
-                collider: hit.collider.clone(),
-            },
-            true,
-            &mut matched,
-        );
-        for additional_hit in &hit.additional_hits {
-            self.absorb_surface(
-                DepthQuerySurfaceTarget {
-                    collider: additional_hit.collider.clone(),
-                },
-                true,
-                &mut matched,
-            );
-        }
-        for (index, slot) in self.surfaces.iter_mut().enumerate() {
-            if matched[index] {
-                continue;
-            }
-            if let Some(retained) = slot.as_mut() {
-                if retained.misses_left > 0 {
-                    retained.misses_left -= 1;
-                } else {
-                    *slot = None;
-                }
-            }
+    fn new(hit: XrDepthMeshQueryHit) -> Self {
+        Self {
+            hit,
+            misses_left: XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES,
         }
     }
 
-    fn absorb_surface(
-        &mut self,
-        target: DepthQuerySurfaceTarget,
-        allow_replace: bool,
-        matched: &mut [bool; XR_DEPTH_QUERY_SURFACES_PER_BODY],
-    ) {
-        let misses_left = match target.collider.role {
-            XrDepthMeshQueryColliderRole::Support => XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES,
-            XrDepthMeshQueryColliderRole::Impact => 0,
-        };
-        let retained_surface = RetainedDepthQuerySurface {
-            target,
-            misses_left,
-        };
-
-        if let Some(index) = self.surfaces.iter().position(|slot| {
-            slot.as_ref().is_some_and(|existing| {
-                existing.target.collider.fingerprint == retained_surface.target.collider.fingerprint
-            })
-        }) {
-            self.surfaces[index] = Some(retained_surface);
-            matched[index] = true;
-            return;
+    fn reuse_result(&mut self) -> Option<XrDepthMeshQueryResult> {
+        if self.misses_left == 0 {
+            return None;
         }
-
-        if let Some(index) = self.surfaces.iter().position(Option::is_none) {
-            self.surfaces[index] = Some(retained_surface);
-            matched[index] = true;
-            return;
-        }
-
-        if !allow_replace {
-            return;
-        }
-
-        if let Some((index, _)) = self
-            .surfaces
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !matched[*index])
-            .filter_map(|(index, slot)| {
-                slot.as_ref().map(|retained| (index, retained.misses_left))
-            })
-            .min_by_key(|(_, misses_left)| *misses_left)
-        {
-            self.surfaces[index] = Some(retained_surface);
-            matched[index] = true;
-        }
-    }
-
-    fn age_on_miss_with_sticky_support(
-        &mut self,
-        body_position: Vec3f,
-        query_radius: f32,
-    ) -> bool {
-        let mut any_alive = false;
-        for slot in &mut self.surfaces {
-            if let Some(retained) = slot.as_mut() {
-                if retained.sticky_supports(body_position, query_radius) {
-                    retained.misses_left = XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES;
-                    any_alive = true;
-                    continue;
-                }
-                if retained.misses_left > 0 {
-                    retained.misses_left -= 1;
-                    any_alive = true;
-                } else {
-                    *slot = None;
-                }
-            }
-        }
-        any_alive
-    }
-
-    fn fill_targets(
-        &self,
-        targets: &mut [Option<DepthQuerySurfaceTarget>; XR_DEPTH_QUERY_SURFACES_PER_BODY],
-    ) {
-        *targets = std::array::from_fn(|_| None);
-        for (index, retained) in self.surfaces.iter().enumerate() {
-            targets[index] = retained.as_ref().map(|retained| retained.target.clone());
-        }
-    }
-
-    fn can_skip_refresh(
-        &self,
-        body_position: Vec3f,
-        predicted_body_position: Vec3f,
-        query_radius: f32,
-    ) -> bool {
-        let edge_margin = depth_query_support_refresh_edge_margin(query_radius);
-        self.surfaces.iter().any(|slot| {
-            slot.as_ref().is_some_and(|retained| {
-                retained.safely_supports(body_position, query_radius, edge_margin)
-                    && retained.safely_supports(predicted_body_position, query_radius, edge_margin)
-            })
-        })
-    }
-
-    fn retained_surfaces(&self) -> impl Iterator<Item = &RetainedDepthQuerySurface> + '_ {
-        self.surfaces.iter().filter_map(Option::as_ref)
+        self.misses_left -= 1;
+        Some(XrDepthMeshQueryResult::Hit(self.hit.clone()))
     }
 }
 
-fn pack_depth_mesh_debug_triangles(chunk: &XrDepthMeshChunk) -> (Vec<u32>, Vec<f32>) {
-    const FLOATS_PER_VERTEX: usize = 16;
-    let triangle_count = chunk.indices.len() / 3;
-    let mut indices = Vec::with_capacity(chunk.indices.len());
-    let mut vertices = Vec::with_capacity(triangle_count * 3 * FLOATS_PER_VERTEX);
-
-    for triangle in chunk.indices.chunks_exact(3) {
-        let a = chunk.vertices[triangle[0] as usize];
-        let b = chunk.vertices[triangle[1] as usize];
-        let c = chunk.vertices[triangle[2] as usize];
-        let centroid = (a + b + c).scale(1.0 / 3.0);
-        let raw_normal = Vec3f::cross(b - a, c - a);
-        let normal = if raw_normal.length() > 1.0e-6 {
-            raw_normal.normalize()
-        } else {
-            vec3f(0.0, 1.0, 0.0)
-        };
-        let base = (vertices.len() / FLOATS_PER_VERTEX) as u32;
-        for position in [a, b, c] {
-            let shrunken = centroid + (position - centroid).scale(XR_DEBUG_DEPTH_TRIANGLE_SHRINK);
-            vertices.extend_from_slice(&[
-                shrunken.x, shrunken.y, shrunken.z, normal.x, normal.y, normal.z, 0.0, 0.0, 1.0,
-                1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0,
-            ]);
-        }
-        indices.extend_from_slice(&[base, base + 1, base + 2]);
-    }
-
-    (indices, vertices)
+fn quantize_depth_query_value(value: f32) -> i32 {
+    (value / XR_DEPTH_QUERY_FINGERPRINT_QUANTIZATION_METERS).round() as i32
 }
 
-fn push_debug_depth_vertex(vertices: &mut Vec<f32>, position: Vec3f, normal: Vec3f) {
-    vertices.extend_from_slice(&[
-        position.x, position.y, position.z, normal.x, normal.y, normal.z, 0.0, 0.0, 1.0, 1.0, 1.0,
-        1.0, 1.0, 0.0, 0.0, 1.0,
-    ]);
-}
-
-fn push_debug_depth_triangle(
-    indices: &mut Vec<u32>,
-    vertices: &mut Vec<f32>,
-    triangle: [Vec3f; 3],
-) {
-    let base = (vertices.len() / 16) as u32;
-    let raw_normal = Vec3f::cross(triangle[1] - triangle[0], triangle[2] - triangle[0]);
-    let normal = if raw_normal.length() > 1.0e-6 {
-        raw_normal.normalize()
-    } else {
-        vec3f(0.0, 1.0, 0.0)
-    };
-    for position in triangle {
-        push_debug_depth_vertex(vertices, position, normal);
-    }
-    indices.extend_from_slice(&[base, base + 1, base + 2]);
-}
-
-fn push_debug_depth_quad(indices: &mut Vec<u32>, vertices: &mut Vec<f32>, quad: [Vec3f; 4]) {
-    let base = (vertices.len() / 16) as u32;
-    let raw_normal = Vec3f::cross(quad[1] - quad[0], quad[2] - quad[0]);
-    let normal = if raw_normal.length() > 1.0e-6 {
-        raw_normal.normalize()
-    } else {
-        vec3f(0.0, 1.0, 0.0)
-    };
-    for position in quad {
-        push_debug_depth_vertex(vertices, position, normal);
-    }
-    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-}
-
-fn push_debug_depth_plane(
-    indices: &mut Vec<u32>,
-    vertices: &mut Vec<f32>,
-    plane: XrDepthMeshQuerySupportPlane,
-) {
-    let center = plane.point;
-    let tangent = plane.tangent.scale(plane.half_extent_tangent);
-    let bitangent = plane.bitangent.scale(plane.half_extent_bitangent);
-    push_debug_depth_quad(
-        indices,
-        vertices,
+fn depth_query_triangle_fingerprint(triangle: [Vec3f; 3]) -> u64 {
+    let mut vertices = triangle.map(|vertex| {
         [
-            center - tangent - bitangent,
-            center + tangent - bitangent,
-            center + tangent + bitangent,
-            center - tangent + bitangent,
-        ],
-    );
+            quantize_depth_query_value(vertex.x),
+            quantize_depth_query_value(vertex.y),
+            quantize_depth_query_value(vertex.z),
+        ]
+    });
+    vertices.sort_unstable();
+    let mut hasher = DefaultHasher::new();
+    vertices.hash(&mut hasher);
+    hasher.finish()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn depth_query_quad_fingerprint(quad: [Vec3f; 4]) -> u64 {
+    let mut vertices = quad.map(|vertex| {
+        [
+            quantize_depth_query_value(vertex.x),
+            quantize_depth_query_value(vertex.y),
+            quantize_depth_query_value(vertex.z),
+        ]
+    });
+    vertices.sort_unstable();
+    let mut hasher = DefaultHasher::new();
+    vertices.hash(&mut hasher);
+    hasher.finish()
+}
 
-    #[test]
-    fn depth_query_plane_supports_body_respects_exact_quad_edge() {
-        let plane = XrDepthMeshQuerySupportPlane {
-            point: vec3f(0.0, 0.0, 0.0),
-            normal: vec3f(0.0, 1.0, 0.0),
-            tangent: vec3f(1.0, 0.0, 0.0),
-            bitangent: vec3f(0.0, 0.0, 1.0),
-            half_extent_tangent: 0.10,
-            half_extent_bitangent: 0.08,
-        };
+fn depth_query_patch_is_degenerate(patch: [Vec3f; 4]) -> bool {
+    let epsilon = 1.0e-4;
+    (patch[1] - patch[0]).length() <= epsilon
+        && (patch[2] - patch[0]).length() <= epsilon
+        && (patch[3] - patch[0]).length() <= epsilon
+}
 
-        assert!(depth_query_plane_supports_body(
-            plane,
-            vec3f(0.099, 0.03, 0.0),
-            0.05,
-            0.0,
-        ));
-        assert!(!depth_query_plane_supports_body(
-            plane,
-            vec3f(0.101, 0.03, 0.0),
-            0.05,
-            0.0,
-        ));
+fn depth_query_surface_candidate(
+    key: u64,
+    distance: f32,
+    from_planar_patch: bool,
+    triangle: [Vec3f; 3],
+    patch: [Vec3f; 4],
+) -> DepthQuerySurfaceCandidate {
+    let (shape, fingerprint) = if from_planar_patch && !depth_query_patch_is_degenerate(patch) {
+        (
+            DepthQuerySurfaceShape::Quad(patch),
+            depth_query_quad_fingerprint(patch),
+        )
+    } else {
+        (
+            DepthQuerySurfaceShape::Triangle(triangle),
+            depth_query_triangle_fingerprint(triangle),
+        )
+    };
+    DepthQuerySurfaceCandidate {
+        key,
+        distance,
+        shape,
+        fingerprint,
     }
+}
 
-    #[test]
-    fn retained_support_refresh_requeries_before_body_reaches_quad_edge() {
-        let plane = XrDepthMeshQuerySupportPlane {
-            point: vec3f(0.0, 0.0, 0.0),
-            normal: vec3f(0.0, 1.0, 0.0),
-            tangent: vec3f(1.0, 0.0, 0.0),
-            bitangent: vec3f(0.0, 0.0, 1.0),
-            half_extent_tangent: 0.10,
-            half_extent_bitangent: 0.10,
-        };
-        let retained = RetainedDepthQueryHit {
-            surfaces: std::array::from_fn(|index| {
-                (index == 0).then_some(RetainedDepthQuerySurface {
-                    target: DepthQuerySurfaceTarget {
-                        collider: XrDepthMeshQueryCollider {
-                            fingerprint: 1,
-                            geometry: XrDepthMeshQueryColliderGeometry::HalfSpace(plane),
-                            role: XrDepthMeshQueryColliderRole::Support,
-                            restitution: 0.0,
-                        },
-                    },
-                    misses_left: XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES,
-                })
-            }),
-        };
+fn extend_depth_query_surface_candidates(
+    candidates: &mut Vec<DepthQuerySurfaceCandidate>,
+    hit: &XrDepthMeshQueryHit,
+) {
+    candidates.push(depth_query_surface_candidate(
+        hit.key,
+        hit.distance,
+        hit.from_planar_patch,
+        hit.triangle,
+        hit.patch,
+    ));
+    candidates.extend(hit.additional_hits.iter().map(|extra| {
+        depth_query_surface_candidate(
+            hit.key,
+            extra.distance,
+            extra.from_planar_patch,
+            extra.triangle,
+            extra.patch,
+        )
+    }));
+}
 
-        assert!(retained.can_skip_refresh(
-            vec3f(0.00, 0.03, 0.0),
-            vec3f(0.02, 0.03, 0.0),
-            0.05,
-        ));
-        assert!(!retained.can_skip_refresh(
-            vec3f(0.06, 0.03, 0.0),
-            vec3f(0.09, 0.03, 0.0),
-            0.05,
-        ));
+fn build_depth_query_surface_targets(
+    results: &[XrDepthMeshQueryResult],
+) -> Vec<DepthQuerySurfaceTarget> {
+    let mut hits = Vec::new();
+    for result in results {
+        if let XrDepthMeshQueryResult::Hit(hit) = result {
+            extend_depth_query_surface_candidates(&mut hits, hit);
+        }
     }
+    hits.sort_by(|a, b| {
+        matches!(b.shape, DepthQuerySurfaceShape::Quad(_))
+            .cmp(&matches!(a.shape, DepthQuerySurfaceShape::Quad(_)))
+            .then_with(|| {
+                a.distance
+                    .partial_cmp(&b.distance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.key.cmp(&b.key))
+    });
+
+    let mut seen = HashSet::new();
+    let mut targets = Vec::with_capacity(XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE);
+    for hit in hits {
+        if !seen.insert(hit.fingerprint) {
+            continue;
+        }
+        targets.push(DepthQuerySurfaceTarget {
+            shape: hit.shape,
+            fingerprint: hit.fingerprint,
+        });
+        if targets.len() >= XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE {
+            break;
+        }
+    }
+    targets
+}
+
+fn pack_depth_mesh_vertices(chunk: &XrDepthMeshChunk) -> Vec<f32> {
+    const FLOATS_PER_VERTEX: usize = 16;
+    let mut vertices = Vec::with_capacity(chunk.vertices.len() * FLOATS_PER_VERTEX);
+    for (position, normal) in chunk.vertices.iter().zip(chunk.normals.iter()) {
+        vertices.extend_from_slice(&[
+            position.x, position.y, position.z, normal.x, normal.y, normal.z, 0.0, 0.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, 0.0, 0.0, 1.0,
+        ]);
+    }
+    vertices
 }
 
 impl XrEnv {
     pub(super) fn depth_debug_enabled(&self) -> bool {
-        self.depth_mesh_visible() || self.depth_query_hits_visible()
+        self.depth_mesh
     }
 
     pub(super) fn clear_depth_surface_mesh(&mut self) {
@@ -416,44 +208,6 @@ impl XrEnv {
         self.depth_surface_mesh_update_sequence = 0;
         self.depth_surface_mesh_chunks.clear();
         self.depth_surface_mesh_upload_count = 0;
-    }
-
-    fn upsert_depth_query_hit_geometry(
-        slot: &mut Option<Geometry>,
-        cx: &mut Cx2d,
-        indices: Vec<u32>,
-        vertices: Vec<f32>,
-    ) -> Option<GeometryId> {
-        if indices.is_empty() {
-            return None;
-        }
-        let geometry = slot.get_or_insert_with(|| Geometry::new(cx.cx.cx));
-        geometry.update(cx.cx.cx, indices, vertices);
-        Some(geometry.geometry_id())
-    }
-
-    fn build_depth_query_hit_geometry(&mut self, cx: &mut Cx2d) -> Option<GeometryId> {
-        let mut quad_indices = Vec::new();
-        let mut quad_vertices = Vec::new();
-
-        let mut push_surface = |retained: &RetainedDepthQuerySurface| {
-            let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) =
-                retained.target.collider.geometry;
-            push_debug_depth_plane(&mut quad_indices, &mut quad_vertices, plane);
-        };
-
-        for retained in self.depth_query_retained_hits.values() {
-            for surface in retained.retained_surfaces() {
-                push_surface(surface);
-            }
-        }
-
-        Self::upsert_depth_query_hit_geometry(
-            &mut self.depth_query_hit_geometry,
-            cx,
-            quad_indices,
-            quad_vertices,
-        )
     }
 
     fn upsert_depth_surface_mesh_chunk(&mut self, cx: &mut Cx2d, chunk: &XrDepthMeshChunk) {
@@ -467,16 +221,16 @@ impl XrEnv {
             return;
         }
 
-        let (indices, vertices) = pack_depth_mesh_debug_triangles(chunk);
+        let vertices = pack_depth_mesh_vertices(chunk);
         if let Some((geometry, handle)) = self.depth_surface_mesh_chunks.get_mut(&key) {
-            geometry.update(cx.cx.cx, indices, vertices);
+            geometry.update(cx.cx.cx, chunk.indices.clone(), vertices);
             *handle = DepthSurfaceMeshChunkHandle {
                 geometry_id: geometry.geometry_id(),
                 fingerprint: chunk.fingerprint,
             };
         } else {
             let geometry = Geometry::new(cx.cx.cx);
-            geometry.update(cx.cx.cx, indices, vertices);
+            geometry.update(cx.cx.cx, chunk.indices.clone(), vertices);
             let handle = DepthSurfaceMeshChunkHandle {
                 geometry_id: geometry.geometry_id(),
                 fingerprint: chunk.fingerprint,
@@ -488,29 +242,26 @@ impl XrEnv {
         }
     }
 
-    fn sync_retained_depth_query_result(
+    fn resolve_depth_query_result(
         retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
         key: u64,
         latest_result: Option<XrDepthMeshQueryResult>,
-        body_position: Vec3f,
-        query_radius: f32,
         expired_retained_keys: &mut Vec<u64>,
-    ) {
+    ) -> Option<XrDepthMeshQueryResult> {
         match latest_result {
             Some(XrDepthMeshQueryResult::Hit(hit)) => {
-                if let Some(retained) = retained_hits.get_mut(&key) {
-                    retained.refresh_from_hit(&hit);
-                } else {
-                    retained_hits.insert(key, RetainedDepthQueryHit::new(&hit));
-                }
+                retained_hits.insert(key, RetainedDepthQueryHit::new(hit.clone()));
+                Some(XrDepthMeshQueryResult::Hit(hit))
             }
-            Some(XrDepthMeshQueryResult::Miss { .. }) | None => {
-                if let Some(retained) = retained_hits.get_mut(&key) {
-                    if !retained.age_on_miss_with_sticky_support(body_position, query_radius) {
+            Some(XrDepthMeshQueryResult::Miss { .. }) | None => retained_hits
+                .get_mut(&key)
+                .and_then(|retained| retained.reuse_result())
+                .or_else(|| {
+                    if retained_hits.contains_key(&key) {
                         expired_retained_keys.push(key);
                     }
-                }
-            }
+                    None
+                }),
         }
     }
 
@@ -518,30 +269,26 @@ impl XrEnv {
         key: u64,
         pose: Pose,
         velocity: Vec3f,
-        gravity: Vec3f,
-        query_radius: f32,
+        half_extents: Vec3f,
     ) -> XrDepthMeshQuery {
-        let speed = velocity.length();
-        let lookahead_seconds = if speed > 1.0e-6 {
-            XR_DEPTH_QUERY_LOOKAHEAD_SECONDS.min(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / speed)
-        } else {
-            XR_DEPTH_QUERY_LOOKAHEAD_SECONDS
-        };
-        let lookahead = velocity.scale(lookahead_seconds)
-            + gravity.scale(0.5 * lookahead_seconds * lookahead_seconds);
+        let mut lookahead = velocity.scale(XR_DEPTH_QUERY_LOOKAHEAD_SECONDS);
+        let lookahead_length = lookahead.length();
+        if lookahead_length > XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE && lookahead_length > 1.0e-6 {
+            lookahead = lookahead.scale(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / lookahead_length);
+        }
         XrDepthMeshQuery {
             key,
             center: pose.position,
             predicted_center: pose.position + lookahead,
             velocity,
-            radius: query_radius.max(0.0005),
+            radius: half_extents.length(),
             max_distance: XR_DEPTH_QUERY_MAX_DISTANCE,
-            include_planar_patches: XR_DEPTH_QUERY_INCLUDE_PLANAR_PATCHES,
+            include_planar_patches: false,
         }
     }
 
     pub(super) fn sync_depth_query_surfaces(
-        retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
+        &mut self,
         scene: Option<&mut RapierScene>,
         cx: &mut Cx,
     ) {
@@ -551,11 +298,62 @@ impl XrEnv {
         let Some(scene) = scene else {
             return;
         };
-        sync_depth_query_surfaces_with_store(retained_hits, Some(scene), &cx.xr_depth_mesh());
+        let depth_mesh = cx.xr_depth_mesh();
+        let mut clear_keys = Vec::new();
+        let mut query_requests = Vec::new();
+        let mut query_results = Vec::new();
+        let mut expired_retained_keys = Vec::new();
+        let retained_hits = &mut self.depth_query_retained_hits;
+
+        for (index, cube) in scene.cubes.iter().enumerate() {
+            let key = RapierScene::depth_query_key(index);
+            let Some(body) = scene.bodies.get(cube.body) else {
+                clear_keys.push(key);
+                continue;
+            };
+
+            if let Some(result) = Self::resolve_depth_query_result(
+                retained_hits,
+                key,
+                depth_mesh.latest_query_result(key),
+                &mut expired_retained_keys,
+            ) {
+                query_results.push(result);
+            }
+
+            if body.is_sleeping() {
+                continue;
+            }
+
+            let pose = makepad_pose(body.position());
+            let linvel = body.linvel();
+            let velocity = vec3f(linvel.x, linvel.y, linvel.z);
+            query_requests.push(Self::build_depth_query_request(
+                key,
+                pose,
+                velocity,
+                cube.half_extents,
+            ));
+        }
+
+        for key in clear_keys {
+            depth_mesh.clear_query(key);
+            retained_hits.remove(&key);
+        }
+        for key in expired_retained_keys {
+            retained_hits.remove(&key);
+        }
+
+        for query in query_requests {
+            let _ = depth_mesh.submit_query(query);
+        }
+
+        let targets = build_depth_query_surface_targets(&query_results);
+        scene.sync_depth_query_surface_pool(&targets);
     }
 
     pub(super) fn sync_depth_surface_mesh(&mut self, cx: &mut Cx2d) {
-        if !self.depth_mesh_visible() {
+        if !self.depth_debug_enabled() {
             return;
         }
 
@@ -614,147 +412,21 @@ impl XrEnv {
     }
 
     pub(super) fn draw_depth_surface_mesh(&mut self, cx: &mut Cx2d) {
-        let show_mesh = self.depth_mesh_visible();
-        let show_query_hits = self.depth_query_hits_visible();
-        if !show_mesh && !show_query_hits {
+        if !self.depth_debug_enabled() {
             return;
         }
-        let query_hits = if show_query_hits {
-            self.build_depth_query_hit_geometry(cx)
-        } else {
-            None
-        };
-        if (!show_mesh || self.depth_surface_mesh_chunks.is_empty()) && query_hits.is_none() {
+        if self.depth_surface_mesh_chunks.is_empty() {
             return;
         }
         self.draw_depth_mesh.base_color = vec4(0.76, 0.88, 0.98, 1.0);
-        if show_mesh && !self.depth_surface_mesh_chunks.is_empty() {
-            let mut chunk_handles: Vec<_> = self
-                .depth_surface_mesh_chunks
-                .iter()
-                .map(|(key, chunk)| (*key, chunk.1.geometry_id))
-                .collect();
-            chunk_handles.sort_by_key(|(key, _)| *key);
-            for (_, geometry_id) in chunk_handles {
-                self.draw_depth_mesh.draw_geometry(cx, geometry_id);
-            }
+        let mut chunk_handles: Vec<_> = self
+            .depth_surface_mesh_chunks
+            .iter()
+            .map(|(key, chunk)| (*key, chunk.1.geometry_id))
+            .collect();
+        chunk_handles.sort_by_key(|(key, _)| *key);
+        for (_, geometry_id) in chunk_handles {
+            self.draw_depth_mesh.draw_geometry(cx, geometry_id);
         }
-
-        let mesh_normal_bias = self.draw_depth_mesh.normal_bias;
-        self.draw_depth_mesh.normal_bias = mesh_normal_bias + 0.004;
-        if show_query_hits {
-            if let Some(geometry_id) = query_hits {
-                self.draw_depth_mesh.base_color = vec4(1.0, 0.42, 0.08, 1.0);
-                self.draw_depth_mesh.draw_geometry(cx, geometry_id);
-            }
-        }
-        self.draw_depth_mesh.normal_bias = mesh_normal_bias;
-    }
-}
-
-pub(super) fn clear_depth_query_state_for_scene(
-    depth_mesh: &XrDepthMeshStore,
-    scene: Option<&RapierScene>,
-    retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
-) {
-    if let Some(scene) = scene {
-        for index in 0..scene.depth_query_surface_set_count() {
-            depth_mesh.clear_query(RapierScene::depth_query_key(index));
-        }
-    }
-    retained_hits.clear();
-}
-
-pub(super) fn sync_depth_query_surfaces_with_store(
-    retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
-    scene: Option<&mut RapierScene>,
-    depth_mesh: &XrDepthMeshStore,
-) {
-    if !XR_ENABLE_DEPTH_QUERY_PHYSICS {
-        return;
-    }
-    let Some(scene) = scene else {
-        return;
-    };
-
-    let mut clear_keys = Vec::new();
-    let mut query_requests = Vec::new();
-    let mut expired_retained_keys = Vec::new();
-    scene.begin_depth_query_stats_frame();
-
-    for cube_index in 0..scene.cubes.len() {
-        let cube = scene.cubes[cube_index];
-        let Some(set_index) = cube.depth_query_surface_set else {
-            continue;
-        };
-        let key = RapierScene::depth_query_key(set_index);
-        let Some(body) = scene.bodies.get(cube.body) else {
-            clear_keys.push(key);
-            continue;
-        };
-        if !body.is_enabled() {
-            scene.sync_depth_query_surface_set(set_index, &std::array::from_fn(|_| None));
-            clear_keys.push(key);
-            continue;
-        }
-        let body_sleeping = body.is_sleeping();
-        let body_pose = makepad_pose(body.position());
-        let linvel = body.linvel();
-        let body_velocity = vec3f(linvel.x, linvel.y, linvel.z);
-        let gravity = scene.gravity_vector();
-
-        let latest_result = if body_sleeping {
-            None
-        } else {
-            depth_mesh.latest_query_result(key)
-        };
-        XrEnv::sync_retained_depth_query_result(
-            retained_hits,
-            key,
-            latest_result,
-            body_pose.position,
-            cube.query_radius,
-            &mut expired_retained_keys,
-        );
-        let mut surface_targets = std::array::from_fn(|_| None);
-        if let Some(retained) = retained_hits.get(&key) {
-            retained.fill_targets(&mut surface_targets);
-        }
-        scene.sync_depth_query_surface_set(set_index, &surface_targets);
-
-        if body_sleeping {
-            continue;
-        }
-        let query_request = XrEnv::build_depth_query_request(
-            key,
-            body_pose,
-            body_velocity,
-            gravity,
-            cube.query_radius,
-        );
-        let body_speed = body_velocity.length();
-        let can_skip_refresh = retained_hits.get(&key).is_some_and(|retained| {
-            retained.can_skip_refresh(
-                body_pose.position,
-                query_request.predicted_center,
-                cube.query_radius,
-            )
-        });
-        if can_skip_refresh && body_speed < XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN {
-            continue;
-        }
-        query_requests.push(query_request);
-    }
-
-    for key in clear_keys {
-        depth_mesh.clear_query(key);
-        retained_hits.remove(&key);
-    }
-    for key in expired_retained_keys {
-        retained_hits.remove(&key);
-    }
-
-    for query in query_requests {
-        let _ = depth_mesh.submit_query(query);
     }
 }

@@ -59,26 +59,6 @@ macro_rules! get_proc_addr {
     };
 }
 
-macro_rules! get_optional_proc_addr {
-    ($get_addr:expr, $inst:expr, $ty:ident) => {
-        unsafe {
-            let mut f: *mut c_void = 0 as *mut _;
-            let _ = $get_addr(
-                $inst,
-                CStr::from_bytes_with_nul(&concat!(stringify!($ty), "\0").as_bytes()[1..])
-                    .unwrap()
-                    .as_ptr(),
-                &mut f as *mut _ as _,
-            );
-            if f.is_null() {
-                None
-            } else {
-                Some(std::mem::transmute_copy::<_, $ty>(&f))
-            }
-        }
-    };
-}
-
 macro_rules! bitmask {
     ($name:ident) => {
         impl $name {
@@ -172,10 +152,6 @@ pub struct LibOpenXr {
     pub xrCreatePassthroughLayerFB: TxrCreatePassthroughLayerFB,
     pub xrPassthroughStartFB: TxrPassthroughStartFB,
     pub xrPassthroughLayerResumeFB: TxrPassthroughLayerResumeFB,
-    pub xrCreateFoveationProfileFB: Option<TxrCreateFoveationProfileFB>,
-    pub xrEnumerateDisplayRefreshRatesFB: Option<TxrEnumerateDisplayRefreshRatesFB>,
-    pub xrGetDisplayRefreshRateFB: Option<TxrGetDisplayRefreshRateFB>,
-    pub xrRequestDisplayRefreshRateFB: Option<TxrRequestDisplayRefreshRateFB>,
     pub xrCreateEnvironmentDepthProviderMETA: TxrCreateEnvironmentDepthProviderMETA,
     pub xrCreateEnvironmentDepthSwapchainMETA: TxrCreateEnvironmentDepthSwapchainMETA,
     pub xrGetEnvironmentDepthSwapchainStateMETA: TxrGetEnvironmentDepthSwapchainStateMETA,
@@ -195,13 +171,11 @@ pub struct LibOpenXr {
     pub xrWaitSwapchainImage: TxrWaitSwapchainImage,
     pub xrAcquireEnvironmentDepthImageMETA: TxrAcquireEnvironmentDepthImageMETA,
     pub xrReleaseSwapchainImage: TxrReleaseSwapchainImage,
-    pub xrUpdateSwapchainFB: Option<TxrUpdateSwapchainFB>,
     pub xrEndSession: TxrEndSession,
     pub xrStopEnvironmentDepthProviderMETA: TxrStopEnvironmentDepthProviderMETA,
     pub xrDestroyEnvironmentDepthProviderMETA: TxrDestroyEnvironmentDepthProviderMETA,
     pub xrPassthroughPauseFB: TxrPassthroughPauseFB,
     pub xrDestroyPassthroughFB: TxrDestroyPassthroughFB,
-    pub xrDestroyFoveationProfileFB: Option<TxrDestroyFoveationProfileFB>,
     pub xrDestroySwapchain: TxrDestroySwapchain,
     pub xrDestroyEnvironmentDepthSwapchainMETA: TxrDestroyEnvironmentDepthSwapchainMETA,
     pub xrDestroySpace: TxrDestroySpace,
@@ -209,7 +183,6 @@ pub struct LibOpenXr {
     pub xrDestroyInstance: TxrDestroyInstance,
     pub xrStringToPath: TxrStringToPath,
     pub xrCreateActionSet: TxrCreateActionSet,
-    pub xrDestroyActionSet: TxrDestroyActionSet,
     pub xrCreateAction: TxrCreateAction,
     pub xrSuggestInteractionProfileBindings: TxrSuggestInteractionProfileBindings,
     pub xrAttachSessionActionSets: TxrAttachSessionActionSets,
@@ -310,26 +283,6 @@ impl LibOpenXr {
                 instance,
                 TxrPassthroughLayerResumeFB
             )?,
-            xrCreateFoveationProfileFB: get_optional_proc_addr!(
-                gipa,
-                instance,
-                TxrCreateFoveationProfileFB
-            ),
-            xrEnumerateDisplayRefreshRatesFB: get_optional_proc_addr!(
-                gipa,
-                instance,
-                TxrEnumerateDisplayRefreshRatesFB
-            ),
-            xrGetDisplayRefreshRateFB: get_optional_proc_addr!(
-                gipa,
-                instance,
-                TxrGetDisplayRefreshRateFB
-            ),
-            xrRequestDisplayRefreshRateFB: get_optional_proc_addr!(
-                gipa,
-                instance,
-                TxrRequestDisplayRefreshRateFB
-            ),
             xrCreateEnvironmentDepthProviderMETA: get_proc_addr!(
                 gipa,
                 instance,
@@ -380,7 +333,6 @@ impl LibOpenXr {
                 TxrAcquireEnvironmentDepthImageMETA
             )?,
             xrReleaseSwapchainImage: get_proc_addr!(gipa, instance, TxrReleaseSwapchainImage)?,
-            xrUpdateSwapchainFB: get_optional_proc_addr!(gipa, instance, TxrUpdateSwapchainFB),
             xrEndSession: get_proc_addr!(gipa, instance, TxrEndSession)?,
             xrStopEnvironmentDepthProviderMETA: get_proc_addr!(
                 gipa,
@@ -394,11 +346,6 @@ impl LibOpenXr {
             )?,
             xrPassthroughPauseFB: get_proc_addr!(gipa, instance, TxrPassthroughPauseFB)?,
             xrDestroyPassthroughFB: get_proc_addr!(gipa, instance, TxrDestroyPassthroughFB)?,
-            xrDestroyFoveationProfileFB: get_optional_proc_addr!(
-                gipa,
-                instance,
-                TxrDestroyFoveationProfileFB
-            ),
             xrDestroySwapchain: get_proc_addr!(gipa, instance, TxrDestroySwapchain)?,
             xrDestroyEnvironmentDepthSwapchainMETA: get_proc_addr!(
                 gipa,
@@ -410,7 +357,6 @@ impl LibOpenXr {
             xrDestroyInstance: get_proc_addr!(gipa, instance, TxrDestroyInstance)?,
             xrStringToPath: get_proc_addr!(gipa, instance, TxrStringToPath)?,
             xrCreateActionSet: get_proc_addr!(gipa, instance, TxrCreateActionSet)?,
-            xrDestroyActionSet: get_proc_addr!(gipa, instance, TxrDestroyActionSet)?,
             xrCreateAction: get_proc_addr!(gipa, instance, TxrCreateAction)?,
             xrSuggestInteractionProfileBindings: get_proc_addr!(
                 gipa,
@@ -640,12 +586,6 @@ pub type TxrCreatePassthroughFB = unsafe extern "C" fn(
     out_passthrough: *mut XrPassthroughFB,
 ) -> XrResult;
 
-pub type TxrCreateFoveationProfileFB = unsafe extern "C" fn(
-    session: XrSession,
-    create_info: *const XrFoveationProfileCreateInfoFB,
-    profile: *mut XrFoveationProfileFB,
-) -> XrResult;
-
 pub type TxrCreatePassthroughLayerFB = unsafe extern "C" fn(
     session: XrSession,
     create_info: *const XrPassthroughLayerCreateInfoFB,
@@ -714,23 +654,6 @@ pub type TxrBeginFrame =
 pub type TxrEndFrame =
     unsafe extern "C" fn(session: XrSession, frame_end_info: *const XrFrameEndInfo) -> XrResult;
 
-pub type TxrEnumerateDisplayRefreshRatesFB = unsafe extern "C" fn(
-    session: XrSession,
-    display_refresh_rate_capacity_input: u32,
-    display_refresh_rate_count_output: *mut u32,
-    display_refresh_rates: *mut f32,
-) -> XrResult;
-
-pub type TxrGetDisplayRefreshRateFB = unsafe extern "C" fn(
-    session: XrSession,
-    display_refresh_rate: *mut f32,
-) -> XrResult;
-
-pub type TxrRequestDisplayRefreshRateFB = unsafe extern "C" fn(
-    session: XrSession,
-    display_refresh_rate: f32,
-) -> XrResult;
-
 pub type TxrLocateSpace = unsafe extern "C" fn(
     space: XrSpace,
     base_space: XrSpace,
@@ -769,11 +692,6 @@ pub type TxrReleaseSwapchainImage = unsafe extern "C" fn(
     release_info: *const XrSwapchainImageReleaseInfo,
 ) -> XrResult;
 
-pub type TxrUpdateSwapchainFB = unsafe extern "C" fn(
-    swapchain: XrSwapchain,
-    state: *const XrSwapchainStateBaseHeaderFB,
-) -> XrResult;
-
 pub type TxrEndSession = unsafe extern "C" fn(session: XrSession) -> XrResult;
 
 pub type TxrStopEnvironmentDepthProviderMETA =
@@ -785,9 +703,6 @@ pub type TxrDestroyEnvironmentDepthProviderMETA =
 pub type TxrPassthroughPauseFB = unsafe extern "C" fn(passthrough: XrPassthroughFB) -> XrResult;
 
 pub type TxrDestroyPassthroughFB = unsafe extern "C" fn(passthrough: XrPassthroughFB) -> XrResult;
-
-pub type TxrDestroyFoveationProfileFB =
-    unsafe extern "C" fn(profile: XrFoveationProfileFB) -> XrResult;
 
 pub type TxrDestroySwapchain = unsafe extern "C" fn(swapchain: XrSwapchain) -> XrResult;
 
@@ -811,8 +726,6 @@ pub type TxrCreateActionSet = unsafe extern "C" fn(
     create_info: *const XrActionSetCreateInfo,
     action_set: *mut XrActionSet,
 ) -> XrResult;
-
-pub type TxrDestroyActionSet = unsafe extern "C" fn(action_set: XrActionSet) -> XrResult;
 
 pub type TxrCreateAction = unsafe extern "C" fn(
     action_set: XrActionSet,
@@ -1066,10 +979,6 @@ pub struct XrPassthroughFB(pub u64);
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrPassthroughLayerFB(pub u64);
-
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct XrFoveationProfileFB(pub u64);
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -2220,13 +2129,6 @@ impl Default for XrCompositionLayerPassthroughFB {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-pub struct XrSwapchainStateBaseHeaderFB {
-    pub ty: XrStructureType,
-    pub next: *const c_void,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
 pub struct XrSwapchainImageReleaseInfo {
     pub ty: XrStructureType,
     pub next: *const c_void,
@@ -2522,16 +2424,6 @@ pub struct XrEventDataSessionStateChanged {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-pub struct XrEventDataDisplayRefreshRateChangedFB {
-    pub ty: XrStructureType,
-    pub next: *const c_void,
-    pub session: XrSession,
-    pub from_display_refresh_rate: f32,
-    pub to_display_refresh_rate: f32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
 pub struct XrEventDataBuffer {
     pub ty: XrStructureType,
     pub next: *const c_void,
@@ -2630,82 +2522,6 @@ impl Default for XrPassthroughCreateInfoFB {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-pub struct XrFoveationProfileCreateInfoFB {
-    pub ty: XrStructureType,
-    pub next: *const c_void,
-}
-
-impl Default for XrFoveationProfileCreateInfoFB {
-    fn default() -> Self {
-        Self {
-            ty: XrStructureType::FOVEATION_PROFILE_CREATE_INFO_FB,
-            next: 0 as *const _,
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct XrSwapchainCreateInfoFoveationFB {
-    pub ty: XrStructureType,
-    pub next: *const c_void,
-    pub flags: XrSwapchainCreateFoveationFlagsFB,
-}
-
-impl Default for XrSwapchainCreateInfoFoveationFB {
-    fn default() -> Self {
-        Self {
-            ty: XrStructureType::SWAPCHAIN_CREATE_INFO_FOVEATION_FB,
-            next: 0 as *const _,
-            flags: XrSwapchainCreateFoveationFlagsFB(0),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct XrSwapchainStateFoveationFB {
-    pub ty: XrStructureType,
-    pub next: *const c_void,
-    pub flags: XrSwapchainStateFoveationFlagsFB,
-    pub profile: XrFoveationProfileFB,
-}
-
-impl Default for XrSwapchainStateFoveationFB {
-    fn default() -> Self {
-        Self {
-            ty: XrStructureType::SWAPCHAIN_STATE_FOVEATION_FB,
-            next: 0 as *const _,
-            flags: XrSwapchainStateFoveationFlagsFB(0),
-            profile: XrFoveationProfileFB(0),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct XrFoveationLevelProfileCreateInfoFB {
-    pub ty: XrStructureType,
-    pub next: *const c_void,
-    pub level: XrFoveationLevelFB,
-    pub verticalOffset: f32,
-    pub dynamic: XrFoveationDynamicFB,
-}
-
-impl Default for XrFoveationLevelProfileCreateInfoFB {
-    fn default() -> Self {
-        Self {
-            ty: XrStructureType::FOVEATION_LEVEL_PROFILE_CREATE_INFO_FB,
-            next: 0 as *const _,
-            level: XrFoveationLevelFB::NONE,
-            verticalOffset: 0.0,
-            dynamic: XrFoveationDynamicFB::DISABLED,
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
 pub struct XrSwapchainImageOpenGLESKHR {
     pub ty: XrStructureType,
     pub next: *mut c_void,
@@ -2736,28 +2552,6 @@ impl Default for XrSwapchainImageVulkanKHR {
             ty: XrStructureType::SWAPCHAIN_IMAGE_VULKAN_KHR,
             next: 0 as *mut _,
             image: 0,
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct XrSwapchainImageFoveationVulkanFB {
-    pub ty: XrStructureType,
-    pub next: *mut c_void,
-    pub image: VkImage,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Default for XrSwapchainImageFoveationVulkanFB {
-    fn default() -> Self {
-        Self {
-            ty: XrStructureType::SWAPCHAIN_IMAGE_FOVEATION_VULKAN_FB,
-            next: 0 as *mut _,
-            image: 0,
-            width: 0,
-            height: 0,
         }
     }
 }
@@ -3367,21 +3161,6 @@ impl XrSwapchainCreateFlags {
     pub const PROTECTED_CONTENT: XrSwapchainCreateFlags = Self(1 << 0u64);
     pub const STATIC_IMAGE: XrSwapchainCreateFlags = Self(1 << 1u64);
 }
-bitmask!(XrSwapchainCreateFlags);
-
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct XrSwapchainCreateFoveationFlagsFB(pub u64);
-impl XrSwapchainCreateFoveationFlagsFB {
-    pub const SCALED_BIN_BIT_FB: Self = Self(0x00000001);
-    pub const FRAGMENT_DENSITY_MAP_BIT_FB: Self = Self(0x00000002);
-}
-bitmask!(XrSwapchainCreateFoveationFlagsFB);
-
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct XrSwapchainStateFoveationFlagsFB(pub u64);
-bitmask!(XrSwapchainStateFoveationFlagsFB);
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -3798,55 +3577,6 @@ impl fmt::Debug for XrViewConfigurationType {
         }
     }
 }
-
-#[repr(transparent)]
-#[derive(Copy, Clone, Eq, PartialEq)]
-pub struct XrFoveationLevelFB(i32);
-impl XrFoveationLevelFB {
-    pub const NONE: Self = Self(0);
-    pub const LOW: Self = Self(1);
-    pub const MEDIUM: Self = Self(2);
-    pub const HIGH: Self = Self(3);
-}
-impl fmt::Debug for XrFoveationLevelFB {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        let name = match *self {
-            Self::NONE => Some("NONE"),
-            Self::LOW => Some("LOW"),
-            Self::MEDIUM => Some("MEDIUM"),
-            Self::HIGH => Some("HIGH"),
-            _ => None,
-        };
-        if let Some(name) = name {
-            write!(fmt, "{}", name)
-        } else {
-            write!(fmt, "unknown XrFoveationLevelFB {}", self.0)
-        }
-    }
-}
-
-#[repr(transparent)]
-#[derive(Copy, Clone, Eq, PartialEq)]
-pub struct XrFoveationDynamicFB(i32);
-impl XrFoveationDynamicFB {
-    pub const DISABLED: Self = Self(0);
-    pub const LEVEL_ENABLED: Self = Self(1);
-}
-impl fmt::Debug for XrFoveationDynamicFB {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        let name = match *self {
-            Self::DISABLED => Some("DISABLED"),
-            Self::LEVEL_ENABLED => Some("LEVEL_ENABLED"),
-            _ => None,
-        };
-        if let Some(name) = name {
-            write!(fmt, "{}", name)
-        } else {
-            write!(fmt, "unknown XrFoveationDynamicFB {}", self.0)
-        }
-    }
-}
-
 impl fmt::Debug for XrFormFactor {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         let name = match *self {

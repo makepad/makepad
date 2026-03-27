@@ -272,7 +272,6 @@ pub struct CxFingers {
     captures: Vec<CxDigitCapture>,
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
-    xr_poke_locks: Vec<DigitId>,
     sweep_lock: Option<Area>,
     /// * If `Some`, scrolling is currently blocked *except* within the contained area.
     /// * If `None`, scrolling is not blocked anywhere.
@@ -416,20 +415,6 @@ impl CxFingers {
         while let Some(index) = self.hovers.iter_mut().position(|v| v.digit_id == digit_id) {
             self.hovers.remove(index);
         }
-    }
-
-    pub(crate) fn xr_poke_is_locked(&self, digit_id: DigitId) -> bool {
-        self.xr_poke_locks.contains(&digit_id)
-    }
-
-    pub(crate) fn xr_poke_lock(&mut self, digit_id: DigitId) {
-        if !self.xr_poke_locks.contains(&digit_id) {
-            self.xr_poke_locks.push(digit_id);
-        }
-    }
-
-    pub(crate) fn xr_poke_unlock(&mut self, digit_id: DigitId) {
-        self.xr_poke_locks.retain(|id| *id != digit_id);
     }
 
     pub(crate) fn tap_count(&self) -> u32 {
@@ -790,6 +775,16 @@ impl HitOptions {
     }
 }
 
+fn hit_test_area<F>(cx: &Cx, area: Area, abs: Vec2d, margin: &Option<Inset>, hit_test: &F) -> (Rect, bool)
+where
+    F: Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
+{
+    let rect = area.clipped_rect(cx);
+    let local_rect = area.local_clipped_rect(cx);
+    let local_abs = area.abs_to_local(cx, abs);
+    (rect, hit_test(local_abs, &local_rect, margin))
+}
+
 impl Event {
     pub fn unhandle(&self, cx: &mut Cx, area: &Area) {
         match self {
@@ -919,8 +914,8 @@ impl Event {
                 }
                 let digit_id = live_id!(mouse).into();
 
-                let rect = area.clipped_rect(&cx);
-                if hit_test(e.abs, &rect, &options.margin) {
+                let (rect, is_over) = hit_test_area(&*cx, area, e.abs, &options.margin, &hit_test);
+                if is_over {
                     let device = DigitDevice::Mouse {
                         button: MouseButton::PRIMARY,
                     };
@@ -969,7 +964,6 @@ impl Event {
                                 continue;
                             }
 
-                            let rect = area.clipped_rect(&cx);
                             // Add touch radius to the margin to account for finger size
                             let margin_with_radius = if t.radius.x > 0.0 || t.radius.y > 0.0 {
                                 let base_margin = options.margin.unwrap_or_default();
@@ -982,7 +976,9 @@ impl Event {
                             } else {
                                 options.margin
                             };
-                            if !hit_test(t.abs, &rect, &margin_with_radius) {
+                            let (rect, is_over) =
+                                hit_test_area(&*cx, area, t.abs, &margin_with_radius, &hit_test);
+                            if !is_over {
                                 continue;
                             }
 
@@ -1009,6 +1005,8 @@ impl Event {
                         TouchState::Stop => {
                             let tap_count = cx.fingers.tap_count();
                             let rect = area.clipped_rect(&cx);
+                            let local_rect = area.local_clipped_rect(&cx);
+                            let local_abs = area.abs_to_local(&cx, t.abs);
                             if let Some(capture) = cx.fingers.find_area_capture(area) {
                                 // Check if finger is over the widget using touch radius if available
                                 let rect_check = if t.radius.x > 0.0 || t.radius.y > 0.0 {
@@ -1018,9 +1016,9 @@ impl Event {
                                         right: t.radius.x,
                                         bottom: t.radius.y,
                                     };
-                                    Inset::rect_contains_with_inset(t.abs, &rect, &Some(margin))
+                                    Inset::rect_contains_with_inset(local_abs, &local_rect, &Some(margin))
                                 } else {
-                                    rect.contains(t.abs)
+                                    local_rect.contains(local_abs)
                                 };
 
                                 // Layout shift fallback: also treat as "over" if finger didn't move
@@ -1051,14 +1049,13 @@ impl Event {
                         TouchState::Move => {
                             let tap_count = cx.fingers.tap_count();
                             //let hover_last = cx.fingers.get_hover_area(digit_id);
-                            let rect = area.clipped_rect(&cx);
+                            let (rect, is_over) =
+                                hit_test_area(&*cx, area, t.abs, &options.margin, &hit_test);
 
                             //let handled_area = t.handled.get();
                             if !options.sweep_area.is_empty() {
                                 if let Some(capture) = cx.fingers.find_digit_capture(digit_id) {
-                                    if capture.switch_capture.is_none()
-                                        && hit_test(t.abs, &rect, &options.margin)
-                                    {
+                                    if capture.switch_capture.is_none() && is_over {
                                         if t.handled.get().is_empty() {
                                             t.handled.set(area);
                                             if capture.area == area {
@@ -1126,7 +1123,7 @@ impl Event {
                                     time: e.time,
                                     abs_start: capture.abs_start,
                                     rect,
-                                    is_over: hit_test(t.abs, &rect, &options.margin),
+                                    is_over,
                                 });
                             }
                         }
@@ -1144,16 +1141,14 @@ impl Event {
 
                 let tap_count = cx.fingers.tap_count();
                 let hover_last = cx.fingers.find_hover_area(digit_id);
-                let rect = area.clipped_rect(&cx);
+                let (rect, is_over) = hit_test_area(&*cx, area, e.abs, &options.margin, &hit_test);
 
                 if let Some((button, _window_id)) = cx.fingers.first_mouse_button {
                     let device = DigitDevice::Mouse { button };
                     //let handled_area = e.handled.get();
                     if !options.sweep_area.is_empty() {
                         if let Some(capture) = cx.fingers.find_digit_capture(digit_id) {
-                            if capture.switch_capture.is_none()
-                                && hit_test(e.abs, &rect, &options.margin)
-                            {
+                            if capture.switch_capture.is_none() && is_over {
                                 if e.handled.get().is_empty() {
                                     e.handled.set(area);
                                     if capture.area == area {
@@ -1221,7 +1216,7 @@ impl Event {
                             time: e.time,
                             abs_start: capture.abs_start,
                             rect,
-                            is_over: hit_test(e.abs, &rect, &options.margin),
+                            is_over,
                         });
                         cx.fingers.new_hover_area(digit_id, area);
                         return event;
@@ -1244,9 +1239,7 @@ impl Event {
                     };
 
                     if hover_last == area {
-                        if (handled_area.is_empty() || handled_area == area)
-                            && hit_test(e.abs, &rect, &options.margin)
-                        {
+                        if (handled_area.is_empty() || handled_area == area) && is_over {
                             e.handled.set(area);
                             cx.fingers.new_hover_area(digit_id, area);
                             return Hit::FingerHoverOver(fhe);
@@ -1254,9 +1247,7 @@ impl Event {
                             return Hit::FingerHoverOut(fhe);
                         }
                     } else {
-                        if (handled_area.is_empty() || handled_area == area)
-                            && hit_test(e.abs, &rect, &options.margin)
-                        {
+                        if (handled_area.is_empty() || handled_area == area) && is_over {
                             //let any_captured = cx.fingers.get_digit_for_captured_area(area);
                             cx.fingers.new_hover_area(digit_id, area);
                             e.handled.set(area);
@@ -1299,8 +1290,8 @@ impl Event {
                     return Hit::Nothing;
                 }
 
-                let rect = area.clipped_rect(&cx);
-                if !hit_test(e.abs, &rect, &options.margin) {
+                let (rect, is_over) = hit_test_area(&*cx, area, e.abs, &options.margin, &hit_test);
+                if !is_over {
                     return Hit::Nothing;
                 }
 
@@ -1338,10 +1329,9 @@ impl Event {
 
                 let device = DigitDevice::Mouse { button: e.button };
                 let tap_count = cx.fingers.tap_count();
-                let rect = area.clipped_rect(&cx);
+                let (rect, is_over) = hit_test_area(&*cx, area, e.abs, &options.margin, &hit_test);
 
                 if let Some(capture) = cx.fingers.find_area_capture(area) {
-                    let is_over = hit_test(e.abs, &rect, &options.margin);
                     let event = Hit::FingerUp(FingerUpEvent {
                         abs_start: capture.abs_start,
                         rect,

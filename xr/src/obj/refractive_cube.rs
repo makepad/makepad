@@ -1,7 +1,7 @@
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 use super::{
-    scene_draw::{apply_scene_to_draw_pbr, scene_state_from_cx},
+    scene_draw::{apply_scene_to_draw_cube, apply_scene_to_draw_pbr, scene_state_from_cx},
     xr_node::{
         xr_env_texture_from_scope, xr_passthrough_from_scope, xr_widget_world_transform, XrNode,
     },
@@ -26,6 +26,9 @@ script_mod! {
         env_intensity: 1.2
         spec_strength: 0.6
         focus_distance: 1.8
+        preview_cube +: {
+            light_dir: vec3(0.35, 0.8, 0.45)
+        }
         draw_pbr +: {
             light_dir: vec3(0.35, 0.8, 0.45)
             light_color: vec3(1.0, 1.0, 1.0)
@@ -37,8 +40,11 @@ script_mod! {
     }
 }
 
-#[derive(Script, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct RefractiveCube {
+    #[redraw]
+    #[live]
+    preview_cube: DrawCube,
     #[redraw]
     #[live]
     draw_pbr: DrawPbrRefractive,
@@ -56,7 +62,6 @@ pub struct RefractiveCube {
     env_intensity: f32,
     #[live(1.8)]
     focus_distance: f32,
-    #[cast]
     #[deref]
     node: XrNode,
 }
@@ -76,25 +81,24 @@ impl RefractiveCube {
 
 }
 
-impl ScriptHook for RefractiveCube {
-    fn on_after_apply(
-        &mut self,
-        _vm: &mut ScriptVm,
-        _apply: &Apply,
-        _scope: &mut Scope,
-        _value: ScriptValue,
-    ) {
-        self.node.set_implicit_physics_size(self.size);
-    }
-}
-
 impl Widget for RefractiveCube {
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        if scene_state_from_cx(cx).is_none() {
+        let Some(scene) = scene_state_from_cx(cx) else {
             return DrawStep::done();
-        }
+        };
         let world = xr_widget_world_transform(cx, scope, self.widget_uid(), &self.node);
         let half_extents = self.half_extents();
+
+        if !scene.use_pass_camera {
+            let _ = apply_scene_to_draw_cube(&mut self.preview_cube, cx);
+            self.preview_cube.transform = world;
+            self.preview_cube.cube_pos = vec3(0.0, 0.0, 0.0);
+            self.preview_cube.cube_size = self.size;
+            self.preview_cube.color = self.color;
+            self.preview_cube.depth_clip = 1.0;
+            self.preview_cube.draw(cx);
+            return self.node.draw_3d(cx, scope);
+        }
 
         let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr.draw_super, cx);
         let passthrough = xr_passthrough_from_scope(scope);
@@ -124,11 +128,9 @@ impl Widget for RefractiveCube {
         self.draw_pbr.set_depth_write(true);
         self.draw_pbr.set_camera_texture(passthrough.camera_texture);
         if let Some(env_texture) = xr_env_texture_from_scope(scope) {
-            self.draw_pbr.set_env_face_textures(None);
-            self.draw_pbr.set_env_texture(Some(env_texture));
-            self.draw_pbr.set_env_atlas_texture(None);
+            self.draw_pbr.set_env_texture(None);
+            self.draw_pbr.set_env_atlas_texture(Some(env_texture));
         } else {
-            self.draw_pbr.set_env_face_textures(None);
             let env_tex = self.draw_pbr.default_env_texture(cx);
             self.draw_pbr.set_env_texture(Some(env_tex));
             self.draw_pbr.set_env_atlas_texture(None);

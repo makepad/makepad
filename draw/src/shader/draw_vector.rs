@@ -44,19 +44,13 @@ script_mod! {
             self.v_param3 = self.geom.param3;
             self.v_param4 = self.geom.param4;
             self.v_param5 = self.geom.param5;
-            let shifted = pos + self.draw_list.view_shift;
-            self.v_world = shifted;
+            self.v_world = pos;
 
             // Early clip rejection in local space.
             let cr = self.geom.clip_radius;
             let is_shadow = self.geom.stroke_mult < -0.5;
             if cr > 0.0 && !is_shadow {
-                let clip = vec4(
-                    max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
-                    max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
-                    min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
-                    min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
-                );
+                let clip = self.draw_clip;
                 if pos.x + cr < clip.x || pos.y + cr < clip.y
                     || pos.x - cr > clip.z || pos.y - cr > clip.w {
                     self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
@@ -65,8 +59,8 @@ script_mod! {
             }
 
             let world = self.draw_list.view_transform * vec4(
-                shifted.x
-                shifted.y
+                pos.x
+                pos.y
                 self.draw_depth + self.draw_call.zbias + self.geom.zbias
                 1.
             );
@@ -208,16 +202,10 @@ script_mod! {
         // --- Core pixel shader (usually don't override this) ---
 
         pixel: fn(){
-            // Clip against merged draw_clip + view_clip (in local space)
-            let local = self.v_world - self.draw_list.view_shift;
-            let clip = vec4(
-                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
-                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
-                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
-                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
-            );
-            if local.x < clip.x || local.y < clip.y
-                || local.x > clip.z || local.y > clip.w {
+            // Clip against merged local item clip + local draw-list clip.
+            let clip = self.draw_clip;
+            if self.v_world.x < clip.x || self.v_world.y < clip.y
+                || self.v_world.x > clip.z || self.v_world.y > clip.w {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
             // geometry shadow mode: stroke_mult == -2.0
@@ -237,7 +225,7 @@ script_mod! {
                 let shadow_corner = self.v_param4;
                 let shadow_blur = self.v_param5;
                 // Shadow params are authored in local space; align with clip/local coords.
-                let p = local - shadow_center;
+                let p = self.v_world - shadow_center;
                 let alpha = self.shadow_rounded_rect(p, shadow_half, shadow_corner, shadow_blur);
                 return self.v_color * alpha
             }

@@ -145,6 +145,10 @@ impl Fonts {
         self.layouter.get_or_layout(params)
     }
 
+    // MSDF work is asynchronous. Dispatch jobs first, then apply any
+    // completions that arrived before this frame's upload so the current frame
+    // uses the freshest atlas contents instead of showing a transient seeded-SDF
+    // fallback for one extra frame.
     pub fn prepare_textures(&mut self, cx: &mut Cx) -> bool {
         assert!(!self.needs_prepare_atlases);
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
@@ -153,11 +157,11 @@ impl Fonts {
             return false;
         }
         drop(rasterizer);
+        self.dispatch_msdf_jobs();
         let completed = self.apply_completed_msdf_jobs();
         if completed > 0 {
             cx.redraw_all();
         }
-        self.dispatch_msdf_jobs();
         self.prepare_atlas_texture(cx);
         self.needs_prepare_atlases = true;
         true

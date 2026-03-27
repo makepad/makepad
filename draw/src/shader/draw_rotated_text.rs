@@ -34,12 +34,7 @@ script_mod! {
 
             let half_extent = self.rect_size * self.label_scale * 0.5
             let cr = length(half_extent) + 2.0
-            let clip = vec4(
-                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
-                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
-                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
-                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
-            )
+            let clip = self.draw_clip
 
             if rotated.x + cr < clip.x || rotated.y + cr < clip.y
                 || rotated.x - cr > clip.z || rotated.y - cr > clip.w {
@@ -47,10 +42,9 @@ script_mod! {
                 return
             }
 
-            let shifted = rotated + self.draw_list.view_shift
             self.world = self.draw_list.view_transform * vec4(
-                shifted.x,
-                shifted.y,
+                rotated.x,
+                rotated.y,
                 self.glyph_depth + self.draw_call.zbias,
                 1.
             )
@@ -58,12 +52,7 @@ script_mod! {
         }
 
         pixel: fn() {
-            let clip = vec4(
-                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
-                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
-                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
-                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
-            )
+            let clip = self.draw_clip
             if self.rotated_pos.x < clip.x || self.rotated_pos.y < clip.y
                 || self.rotated_pos.x > clip.z || self.rotated_pos.y > clip.w {
                 discard()

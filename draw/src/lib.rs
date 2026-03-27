@@ -36,6 +36,7 @@ pub use crate::{
     scene_3d::{SceneDrawCallAnchor, SceneScope3D, SceneState3D},
     shader::{
         draw_cube::DrawCube, draw_glyph::DrawGlyph, draw_pbr::DrawPbr,
+        draw_projective_quad::{DrawPlane3d, DrawProjectiveQuad},
         draw_pbr::DrawPbrMaterialState, draw_pbr::DrawPbrRefractive,
         draw_pbr::DrawPbrTextureSet, draw_quad::DrawColor,
         draw_quad::DrawQuad, draw_rotated_text::DrawRotatedText,
@@ -66,6 +67,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::draw_text_3d::script_mod(vm);
     crate::shader::draw_vector::script_mod(vm);
     crate::shader::draw_pbr::script_mod(vm);
+    crate::shader::draw_projective_quad::script_mod(vm);
     crate::shader::draw_svg::script_mod(vm);
     crate::shader::draw_svg_glyph::script_mod(vm);
     NIL

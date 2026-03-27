@@ -16,7 +16,7 @@ script_mod! {
     }
 }
 
-#[derive(Script, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct Cube {
     #[redraw]
     #[live]
@@ -33,7 +33,6 @@ pub struct Cube {
     corner_radius: f32,
     #[live(3u32)]
     corner_segments: u32,
-    #[cast]
     #[deref]
     node: XrNode,
 }
@@ -49,18 +48,6 @@ impl Cube {
 
     pub fn node(&self) -> &XrNode {
         &self.node
-    }
-}
-
-impl ScriptHook for Cube {
-    fn on_after_apply(
-        &mut self,
-        _vm: &mut ScriptVm,
-        _apply: &Apply,
-        _scope: &mut Scope,
-        _value: ScriptValue,
-    ) {
-        self.node.set_implicit_physics_size(self.size);
     }
 }
 

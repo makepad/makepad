@@ -8,7 +8,7 @@ use crate::{
     geometry::GeometryId,
     id_pool::*,
     makepad_error_log::*,
-    makepad_live_id::LiveId,
+    makepad_live_id::{live_id, LiveId},
     makepad_math::*,
     makepad_script::*,
     os::{CxOsDrawCall, CxOsDrawList},
@@ -25,14 +25,6 @@ pub struct DrawList(PoolId);
 impl DrawList {
     pub fn new(cx: &mut Cx) -> Self {
         cx.draw_lists.alloc()
-    }
-
-    pub fn set_reset_zbias(&self, cx: &mut Cx, reset_zbias: bool) {
-        cx.draw_lists[self.id()].reset_zbias = reset_zbias;
-    }
-
-    pub fn reset_zbias(&self, cx: &Cx) -> bool {
-        cx.draw_lists[self.id()].reset_zbias
     }
 }
 
@@ -483,34 +475,84 @@ impl CxDrawCall {
 #[derive(Clone, Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawListUniforms {
+    /// Draw-list-wide transform applied after local item placement and local clipping.
+    ///
+    /// Ordinary 2D items are positioned by their own `rect_pos` / `rect_size` and clipped in
+    /// local coordinates first. `view_transform` is the only draw-list-wide spatial transform.
     #[live]
     pub view_transform: Mat4f,
-    #[live]
-    pub view_clip: Vec4f,
-    #[live]
-    pub view_shift: Vec2f,
-    #[live]
-    pub pad1: f32,
-    #[live]
-    pub pad2: f32,
 }
 
 impl Default for DrawListUniforms {
     fn default() -> Self {
         Self {
             view_transform: Mat4f::identity(),
-            view_clip: vec4(-100000.0, -100000.0, 100000.0, 100000.0),
-            view_shift: vec2(0.0, 0.0),
-            pad1: 0.0,
-            pad2: 0.0,
         }
     }
+}
+
+fn projective_depth_anchor(base_z: f32) -> Mat4f {
+    Mat4f {
+        v: [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, base_z, 1.0,
+        ],
+    }
+}
+
+fn projective_anchor_from_clip(clip_from_local: Mat4f) -> Mat4f {
+    let plane = vec4(
+        clip_from_local.v[2],
+        clip_from_local.v[6],
+        clip_from_local.v[10],
+        clip_from_local.v[14],
+    );
+
+    if plane.z.abs() > 1e-6 {
+        let inv_z = 1.0 / plane.z;
+        return Mat4f {
+            v: [
+                1.0,
+                0.0,
+                -plane.x * inv_z,
+                0.0,
+                0.0,
+                1.0,
+                -plane.y * inv_z,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                -plane.w * inv_z,
+                1.0,
+            ],
+        };
+    }
+
+    let inverse = clip_from_local.invert();
+    let local = inverse.transform_vec4(vec4f(0.0, 0.0, 0.0, 1.0));
+    if local.w.abs() > 1e-6 {
+        return projective_depth_anchor(local.z / local.w);
+    }
+
+    projective_depth_anchor(0.0)
 }
 
 impl DrawListUniforms {
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>()] {
         unsafe { std::mem::transmute(self) }
     }
+}
+
+fn projective_transform_for_view(view_transform: Mat4f, pass_view_projection: Mat4f) -> Mat4f {
+    let clip_from_local = Mat4f::mul(&pass_view_projection, &view_transform);
+    let anchor = projective_anchor_from_clip(clip_from_local);
+    Mat4f::mul(&view_transform, &anchor)
 }
 
 #[derive(Default)]
@@ -566,7 +608,6 @@ pub struct CxDrawList {
     pub debug_id: LiveId,
     pub debug_dump: bool,
     pub debug_dump_count: u32,
-    pub reset_zbias: bool,
 
     pub codeflow_parent_id: Option<DrawListId>, // the id of the parent we nest in, codeflow wise
 
@@ -577,7 +618,7 @@ pub struct CxDrawList {
     pub draw_item_reorder: Option<Vec<usize>>,
 
     pub draw_list_uniforms: DrawListUniforms,
-    pub draw_list_has_clip: bool,
+    pub projective_transform: Mat4f,
 
     pub os: CxOsDrawList,
     pub rect_areas: Vec<CxRectArea>,
@@ -857,7 +898,6 @@ impl CxDrawList {
     pub fn clear_draw_items(&mut self, redraw_id: u64) {
         self.redraw_id = redraw_id;
         self.draw_items.clear();
-        self.draw_item_reorder = None;
         self.rect_areas.clear();
         self.find_appendable_draw_shader_check.clear();
     }
@@ -945,4 +985,56 @@ impl CxDrawList {
     pub fn get_view_transform(&self) -> Mat4f {
         self.draw_list_uniforms.view_transform
     }*/
+}
+
+impl Cx {
+    pub(crate) fn update_draw_list_projective_transform(
+        &mut self,
+        draw_pass_id: DrawPassId,
+        draw_list_id: DrawListId,
+    ) {
+        let pass_view_projection = {
+            let pass_uniforms = &self.passes[draw_pass_id].pass_uniforms;
+            Mat4f::mul(&pass_uniforms.camera_projection, &pass_uniforms.camera_view)
+        };
+        let view_transform = self.draw_lists[draw_list_id].draw_list_uniforms.view_transform;
+        self.draw_lists[draw_list_id].projective_transform =
+            projective_transform_for_view(view_transform, pass_view_projection);
+        let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
+        for order_index in 0..draw_order_len {
+            let Some(draw_item_id) = self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index) else {
+                continue;
+            };
+            self.update_draw_call_projective_uniform(draw_list_id, draw_item_id);
+        }
+    }
+
+    fn update_draw_call_projective_uniform(
+        &mut self,
+        draw_list_id: DrawListId,
+        draw_item_id: usize,
+    ) {
+        let projective_transform = self.draw_lists[draw_list_id].projective_transform;
+        let draw_list = &mut self.draw_lists[draw_list_id];
+        let draw_item = &mut draw_list.draw_items[draw_item_id];
+        let Some(draw_call) = draw_item.kind.draw_call_mut() else {
+            return;
+        };
+        let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
+        let Some(input) = sh
+            .mapping
+            .dyn_uniforms
+            .inputs
+            .iter()
+            .find(|input| input.id == live_id!(u_projective_transform))
+        else {
+            return;
+        };
+        let end = input.offset + projective_transform.v.len();
+        if end > draw_call.dyn_uniforms.len() {
+            return;
+        }
+        draw_call.dyn_uniforms[input.offset..end].copy_from_slice(&projective_transform.v);
+        draw_call.uniforms_dirty = true;
+    }
 }

@@ -31,7 +31,7 @@ use crate::{
             Foundation::{HANDLE, HMODULE, S_FALSE},
             Graphics::{
                 Direct3D::{
-                    Fxc::D3DCompile, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                    Fxc::D3DCompile, ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
                     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
                 },
                 Direct3D11::{
@@ -51,13 +51,9 @@ use crate::{
                     D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_INSTANCE_DATA,
                     D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD,
                     D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_RASTERIZER_DESC,
-                    D3D11_RENDER_TARGET_BLEND_DESC, D3D11_RENDER_TARGET_VIEW_DESC,
-                    D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RESOURCE_MISC_FLAG,
-                    D3D11_RESOURCE_MISC_TEXTURECUBE, D3D11_RTV_DIMENSION_TEXTURE2DARRAY,
-                    D3D11_SDK_VERSION, D3D11_SHADER_RESOURCE_VIEW_DESC,
-                    D3D11_SHADER_RESOURCE_VIEW_DESC_0, D3D11_SRV_DIMENSION_TEXTURECUBE,
-                    D3D11_STENCIL_OP_REPLACE, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_ARRAY_RTV,
-                    D3D11_TEXCUBE_SRV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                    D3D11_RENDER_TARGET_BLEND_DESC, D3D11_RESOURCE_MISC_FLAG,
+                    D3D11_RESOURCE_MISC_TEXTURECUBE, D3D11_SDK_VERSION, D3D11_STENCIL_OP_REPLACE,
+                    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
                     D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
                 },
                 Dxgi::{
@@ -106,6 +102,7 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
+        self.update_draw_list_projective_transform(pass_id, draw_list_id);
 
         {
             let draw_list = &mut self.draw_lists[draw_list_id];
@@ -125,15 +122,7 @@ impl Cx {
                 .kind
                 .sub_list()
             {
-                let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
-                let mut child_zbias = 0.0f32;
-                self.render_view(
-                    pass_id,
-                    sub_list_id,
-                    if child_resets_zbias { &mut child_zbias } else { zbias },
-                    zbias_step,
-                    d3d11_cx,
-                );
+                self.render_view(pass_id, sub_list_id, zbias, zbias_step, d3d11_cx);
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
@@ -182,7 +171,7 @@ impl Cx {
                     draw_item
                         .os
                         .user_uniforms
-                        .update_with_f32_constant_data(d3d11_cx, &mut draw_call.dyn_uniforms);
+                        .update_with_f32_constant_data(d3d11_cx, &draw_call.dyn_uniforms[..sh.mapping.dyn_uniforms.total_slots]);
                 }
 
                 let instances = (draw_item.instances.as_ref().unwrap().len()
@@ -459,11 +448,7 @@ impl Cx {
                 let size = pass_rect.size * dpi_factor;
                 cxtexture.update_render_target(d3d11_cx, size.x as usize, size.y as usize);
                 let is_initial = cxtexture.take_initial();
-                let render_target = if let Some(cube_face) = color_texture.cube_face {
-                    cxtexture.os.render_target_face_views[cube_face as usize].clone()
-                } else {
-                    cxtexture.os.render_target_view.clone()
-                };
+                let render_target = cxtexture.os.render_target_view.clone();
                 color_textures.push(Some(render_target.clone().unwrap()));
                 // possibly clear it
                 match color_texture.clear_color {
@@ -589,39 +574,52 @@ impl Cx {
     }
 
     pub(crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
-        if self.draw_shaders.compile_set.is_empty() {
-            return;
-        }
-        let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
-        let cache_dir = shader_cache_dir();
-        for draw_shader_id in compile_set {
-            let shp = {
-                let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
-                if cx_shader.mapping.flags.debug_code {
-                    if let CxDrawShaderCode::Combined { code } = &cx_shader.mapping.code {
-                        crate::log!("{}", code);
-                    }
-                }
-                match &cx_shader.mapping.code {
-                    CxDrawShaderCode::Separate { .. } => {
-                        crate::error!("D3D11 does not support separate vertex/fragment sources");
-                        None
-                    }
-                    CxDrawShaderCode::Combined { code } => CxOsDrawShader::new(
-                        d3d11_cx,
-                        code,
-                        cache_dir,
-                        &cx_shader.mapping,
-                        &cx_shader.mapping.uniform_buffer_bindings,
-                    ),
+        for draw_shader_id in self
+            .draw_shaders
+            .compile_set
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
+
+            let hlsl = match &cx_shader.mapping.code {
+                CxDrawShaderCode::Combined { code } => code.clone(),
+                CxDrawShaderCode::Separate { .. } => {
+                    crate::error!("D3D11 does not support separate vertex/fragment sources");
+                    continue;
                 }
             };
-            if let Some(shp) = shp {
-                let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
-                cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
-                self.draw_shaders.os_shaders.push(shp);
+
+            if cx_shader.mapping.flags.debug_code {
+                crate::log!("{}", hlsl);
+            }
+
+            // Get the uniform buffer bindings from the mapping
+            let bindings = cx_shader.mapping.uniform_buffer_bindings.clone();
+
+            // Check if we already have an os_shader with the same source
+            let mut found_os_shader_id = None;
+            for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
+                if ds.hlsl == hlsl {
+                    found_os_shader_id = Some(index);
+                    break;
+                }
+            }
+
+            let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
+            if let Some(os_shader_id) = found_os_shader_id {
+                cx_shader.os_shader_id = Some(os_shader_id);
+            } else {
+                if let Some(shp) =
+                    CxOsDrawShader::new(d3d11_cx, hlsl, &cx_shader.mapping, &bindings)
+                {
+                    cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                    self.draw_shaders.os_shaders.push(shp);
+                }
             }
         }
+        self.draw_shaders.compile_set.clear();
     }
 
     pub fn share_texture_for_presentable_image(&mut self, texture: &Texture) -> u64 {
@@ -1072,7 +1070,6 @@ pub struct CxOsTexture {
     pub shared_handle: HANDLE,
     pub(crate) shader_resource_view: Option<ID3D11ShaderResourceView>,
     render_target_view: Option<ID3D11RenderTargetView>,
-    render_target_face_views: [Option<ID3D11RenderTargetView>; 6],
     depth_stencil_view: Option<ID3D11DepthStencilView>,
 }
 
@@ -1263,19 +1260,14 @@ impl CxTexture {
     pub fn update_render_target(&mut self, d3d11_cx: &D3d11Cx, width: usize, height: usize) {
         if self.alloc_render(width, height) {
             let alloc = self.alloc.as_ref().unwrap();
-            let is_cube = matches!(&self.format, TextureFormat::RenderCubeBGRAu8 { .. });
-            let misc_flags = if is_cube {
-                D3D11_RESOURCE_MISC_TEXTURECUBE
-            } else {
-                D3D11_RESOURCE_MISC_FLAG(0)
-            };
+            let misc_flags = D3D11_RESOURCE_MISC_FLAG(0);
             let format = texture_pixel_to_dx11_pixel(&alloc.pixel);
 
             let texture_desc = D3D11_TEXTURE2D_DESC {
                 Width: width as u32,
                 Height: height as u32,
                 MipLevels: 1,
-                ArraySize: if is_cube { 6 } else { 1 },
+                ArraySize: 1,
                 Format: format,
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
@@ -1297,67 +1289,22 @@ impl CxTexture {
             let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
             let mut shader_resource_view = None;
             unsafe {
-                if is_cube {
-                    let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
-                        Format: format,
-                        ViewDimension: D3D11_SRV_DIMENSION_TEXTURECUBE,
-                        Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
-                            TextureCube: D3D11_TEXCUBE_SRV {
-                                MostDetailedMip: 0,
-                                MipLevels: 1,
-                            },
-                        },
-                    };
-                    d3d11_cx.device.CreateShaderResourceView(
-                        &resource,
-                        Some(&srv_desc),
-                        Some(&mut shader_resource_view),
-                    )
-                } else {
-                    d3d11_cx
-                        .device
-                        .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
-                }
-                .unwrap()
+                d3d11_cx
+                    .device
+                    .CreateShaderResourceView(&resource, None, Some(&mut shader_resource_view))
+                    .unwrap()
             };
             let mut render_target_view = None;
-            let mut render_target_face_views: [Option<ID3D11RenderTargetView>; 6] =
-                Default::default();
-            if is_cube {
-                for face in 0..6u32 {
-                    let rtv_desc = D3D11_RENDER_TARGET_VIEW_DESC {
-                        Format: format,
-                        ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2DARRAY,
-                        Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 {
-                            Texture2DArray: D3D11_TEX2D_ARRAY_RTV {
-                                MipSlice: 0,
-                                FirstArraySlice: face,
-                                ArraySize: 1,
-                            },
-                        },
-                    };
-                    unsafe {
-                        d3d11_cx.device.CreateRenderTargetView(
-                            &resource,
-                            Some(&rtv_desc),
-                            Some(&mut render_target_face_views[face as usize]),
-                        )
-                    }
-                    .unwrap();
-                }
-            } else {
-                unsafe {
-                    d3d11_cx
-                        .device
-                        .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
-                        .unwrap()
-                };
-            }
+            unsafe {
+                d3d11_cx
+                    .device
+                    .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
+                    .unwrap()
+            };
 
             self.os.texture = texture;
             self.os.shader_resource_view = shader_resource_view;
             self.os.render_target_view = render_target_view;
-            self.os.render_target_face_views = render_target_face_views;
         }
     }
 
@@ -1654,7 +1601,6 @@ impl DrawVars {
 
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Hlsl;
-            output.use_vulkan = false;
 
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
@@ -1810,35 +1756,16 @@ impl DrawVars {
     }
 }
 
-fn shader_cache_dir() -> Option<&'static std::path::Path> {
-    use std::sync::OnceLock;
-    use windows::Win32::{
-        System::Com::CoTaskMemFree,
-        UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
-    };
-
-    static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let path_ptr = unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None) }.ok()?;
-        let path_str = unsafe { path_ptr.to_string().ok() };
-        unsafe { CoTaskMemFree(Some(path_ptr.as_ptr() as _)) };
-        let path = std::path::PathBuf::from(path_str?)
-            .join("makepad")
-            .join("d3d11_shader_cache");
-        std::fs::create_dir_all(&path).ok()?;
-        Some(path)
-    }).as_deref()
-}
-
 #[derive(Clone)]
 pub struct CxOsDrawShader {
+    pub hlsl: String,
     pub const_table_uniforms: D3d11Buffer,
     pub live_uniforms: D3d11Buffer,
     pub scope_uniforms: D3d11Buffer,
     pub pixel_shader: ID3D11PixelShader,
     pub vertex_shader: ID3D11VertexShader,
-    pub pixel_shader_blob: Vec<u8>,
-    pub vertex_shader_blob: Vec<u8>,
+    pub pixel_shader_blob: ID3DBlob,
+    pub vertex_shader_blob: ID3DBlob,
     pub input_layout: ID3D11InputLayout,
     // Dynamic buffer indices looked up from shader output
     pub draw_call_uniform_buffer_id: Option<u32>,
@@ -1852,12 +1779,11 @@ pub struct CxOsDrawShader {
 impl CxOsDrawShader {
     fn new(
         d3d11_cx: &D3d11Cx,
-        hlsl: &str,
-        cache_dir: Option<&std::path::Path>,
+        hlsl: String,
         mapping: &CxDrawShaderMapping,
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
-        fn compile_shader(target: &str, entry: &str, shader: &str) -> Result<Vec<u8>, String> {
+        fn compile_shader(target: &str, entry: &str, shader: &str) -> Result<ID3DBlob, String> {
             const D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY: u32 = 1 << 12;
             unsafe {
                 let shader_bytes = shader.as_bytes();
@@ -1878,10 +1804,7 @@ impl CxOsDrawShader {
                 )
                 .is_ok()
                 {
-                    let blob = blob.unwrap();
-                    let ptr = blob.GetBufferPointer() as *const u8;
-                    let len = blob.GetBufferSize();
-                    return Ok(std::slice::from_raw_parts(ptr, len).to_vec());
+                    return Ok(blob.unwrap());
                 };
                 let error = errors.unwrap();
                 let pointer = error.GetBufferPointer();
@@ -1889,36 +1812,6 @@ impl CxOsDrawShader {
                 let slice = std::slice::from_raw_parts(pointer as *const u8, size as usize);
                 return Err(String::from_utf8_lossy(slice).into_owned());
             }
-        }
-
-        fn hlsl_cache_key(hlsl: &str) -> u64 {
-            // FNV-1a 64-bit hash — stable across Rust versions
-            let mut hash: u64 = 0xcbf29ce484222325;
-            for byte in hlsl.bytes() {
-                hash ^= byte as u64;
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
-            hash
-        }
-
-        fn get_shader_bytes(
-            cache_dir: Option<&std::path::Path>,
-            cache_key: u64,
-            suffix: &str,
-            target: &str,
-            entry: &str,
-            hlsl: &str,
-        ) -> Result<Vec<u8>, String> {
-            if let Some(dir) = cache_dir {
-                let path = dir.join(format!("{:016x}{}.dxbc", cache_key, suffix));
-                if let Ok(bytes) = std::fs::read(&path) {
-                    return Ok(bytes);
-                }
-                let bytes = compile_shader(target, entry, hlsl)?;
-                let _ = std::fs::write(&path, &bytes);
-                return Ok(bytes);
-            }
-            compile_shader(target, entry, hlsl)
         }
         fn split_source(src: &str) -> String {
             let mut r = String::new();
@@ -1979,30 +1872,28 @@ impl CxOsDrawShader {
             std::char::from_u32(index as u32 + 65).unwrap_or('?')
         }
 
-        let cache_key = hlsl_cache_key(hlsl);
-
-        let vs_bytes = match get_shader_bytes(cache_dir, cache_key, "_vs", "vs_5_0\0", "vertex_main\0", hlsl) {
+        let vs_blob = match compile_shader("vs_5_0\0", "vertex_main\0", &hlsl) {
             Err(msg) => {
                 println!(
                     "Cannot compile vertexshader\n{}\n{}",
                     msg,
-                    split_source(hlsl)
+                    split_source(&hlsl)
                 );
                 std::process::exit(1);
             }
-            Ok(bytes) => bytes,
+            Ok(blob) => blob,
         };
 
-        let ps_bytes = match get_shader_bytes(cache_dir, cache_key, "_ps", "ps_5_0\0", "pixel_main\0", hlsl) {
+        let ps_blob = match compile_shader("ps_5_0\0", "pixel_main\0", &hlsl) {
             Err(msg) => {
                 println!(
                     "Cannot compile pixelshader\n{}\n{}",
                     msg,
-                    split_source(hlsl)
+                    split_source(&hlsl)
                 );
                 std::process::exit(1);
             }
-            Ok(bytes) => bytes,
+            Ok(blob) => blob,
         };
 
         let mut vs = None;
@@ -2010,7 +1901,10 @@ impl CxOsDrawShader {
             d3d11_cx
                 .device
                 .CreateVertexShader(
-                    &vs_bytes,
+                    std::slice::from_raw_parts(
+                        vs_blob.GetBufferPointer() as *const u8,
+                        vs_blob.GetBufferSize() as usize,
+                    ),
                     None,
                     Some(&mut vs),
                 )
@@ -2022,7 +1916,10 @@ impl CxOsDrawShader {
             d3d11_cx
                 .device
                 .CreatePixelShader(
-                    &ps_bytes,
+                    std::slice::from_raw_parts(
+                        ps_blob.GetBufferPointer() as *const u8,
+                        ps_blob.GetBufferSize() as usize,
+                    ),
                     None,
                     Some(&mut ps),
                 )
@@ -2133,7 +2030,10 @@ impl CxOsDrawShader {
         let input_layout_res = unsafe {
             d3d11_cx.device.CreateInputLayout(
                 &layout_desc,
-                &vs_bytes,
+                std::slice::from_raw_parts(
+                    vs_blob.GetBufferPointer() as *const u8,
+                    vs_blob.GetBufferSize() as usize,
+                ),
                 Some(&mut input_layout),
             )
         };
@@ -2144,7 +2044,7 @@ impl CxOsDrawShader {
                 println!("  {}", item);
             }
             if std::env::var("MAKEPAD_D3D11_DUMP_HLSL").is_ok() {
-                println!("HLSL source\n{}", split_source(hlsl));
+                println!("HLSL source\n{}", split_source(&hlsl));
             } else {
                 println!("Set MAKEPAD_D3D11_DUMP_HLSL=1 to dump full HLSL source.");
             }
@@ -2178,13 +2078,14 @@ impl CxOsDrawShader {
         let scope_uniform_buffer_id = bindings.scope_uniform_buffer_index.map(|i| i as u32);
 
         Some(Self {
+            hlsl,
             const_table_uniforms,
             live_uniforms,
             scope_uniforms,
             pixel_shader: ps.unwrap(),
             vertex_shader: vs.unwrap(),
-            pixel_shader_blob: ps_bytes,
-            vertex_shader_blob: vs_bytes,
+            pixel_shader_blob: ps_blob,
+            vertex_shader_blob: vs_blob,
             input_layout: input_layout.unwrap(),
             draw_call_uniform_buffer_id,
             pass_uniform_buffer_id,

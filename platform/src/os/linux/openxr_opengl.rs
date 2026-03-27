@@ -172,14 +172,7 @@ impl CxOpenXrSession {
         unsafe { (xr.xrCreateSession)(instance, &session_create, &mut session) }
             .to_result("xrCreateSession")?;
 
-        let (
-            head_space,
-            local_space,
-            recommended_width,
-            recommended_height,
-            width,
-            height,
-        ) =
+        let (head_space, local_space, width, height) =
             Self::describe_primary_stereo_session(xr, instance, system_id, session, options)?;
 
         let swap_chain_create_info = XrSwapchainCreateInfo {
@@ -336,18 +329,16 @@ impl CxOpenXrSession {
             passthrough_layer,
             width,
             height,
-            recommended_width,
-            recommended_height,
             handle: session,
             head_space,
             local_space,
             active: false,
             anchor: CxOpenXrAnchor::default(),
             debug_inactive_begin_frame_logs: 0,
+            debug_begin_frame_count: 0,
+            debug_end_frame_count: 0,
             depth_swap_chain_index: 0,
             frame_state: XrFrameState::default(),
-            active_display_refresh_rate_hz: None,
-            last_predicted_display_time: None,
             inputs,
         })
     }

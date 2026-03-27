@@ -5,9 +5,8 @@ use crate::{
     widget::*,
     widget_async::{CxWidgetToScriptCallExt, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult},
     widget_tree::CxWidgetExt,
-    Cube, Gltf, IcoSphere, RefractiveCube, Tree, XrSelect, XrView,
 };
-use std::{cmp::Ordering, collections::HashMap, rc::Rc};
+use std::{collections::HashMap, rc::Rc};
 
 use super::scene_draw::compose_scene_node_transform;
 
@@ -20,7 +19,6 @@ script_mod! {
     mod.widgets.XrNodeBase = #(XrNode::register_widget(vm))
     mod.widgets.XrNode = set_type_default() do mod.widgets.XrNodeBase{
         body: XrBodyKind.Disabled
-        projectile_pool: false
         physics_size: vec3(0.0, 0.0, 0.0)
         density: 1.0
         friction: 0.8
@@ -42,16 +40,6 @@ impl Default for XrBodyKind {
     }
 }
 
-pub const XR_HAND_INFLUENCE_POINTS_PER_HAND: usize = 6;
-pub const XR_HAND_INFLUENCE_POINT_COUNT: usize = XR_HAND_INFLUENCE_POINTS_PER_HAND * 2;
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct XrHandInfluencePoint {
-    pub pos: Vec3f,
-    pub gain_scale: f32,
-    pub radius_scale: f32,
-}
-
 #[derive(Clone)]
 pub struct XrRuntimeBodyState {
     pub pose: Pose,
@@ -67,7 +55,7 @@ pub struct XrDrawScopeData {
     pub camera_rotation_steps: f32,
     pub camera_center_offset_uv: Vec2f,
     pub camera_enabled: bool,
-    pub hand_influence_points: [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT],
+    pub pointer_tips: [Option<Vec3f>; 2],
 }
 
 pub fn xr_runtime_body_from_scope(
@@ -80,14 +68,12 @@ pub fn xr_runtime_body_from_scope(
         .and_then(|scope_data| scope_data.runtime_bodies.get(&uid).cloned())
 }
 
-pub fn xr_hand_influence_points_from_scope(
-    scope: &mut Scope,
-) -> [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT] {
+pub fn xr_pointer_tips_from_scope(scope: &mut Scope) -> [Option<Vec3f>; 2] {
     scope
         .data
         .get::<XrDrawScopeData>()
-        .map(|scope_data| scope_data.hand_influence_points)
-        .unwrap_or([None; XR_HAND_INFLUENCE_POINT_COUNT])
+        .map(|scope_data| scope_data.pointer_tips)
+        .unwrap_or([None, None])
 }
 
 pub fn xr_env_texture_from_scope(scope: &mut Scope) -> Option<Texture> {
@@ -142,14 +128,8 @@ pub struct XrNode {
     scale: Vec3f,
     #[live]
     body: XrBodyKind,
-    #[live(false)]
-    projectile_pool: bool,
     #[live(vec3(0.0, 0.0, 0.0))]
     physics_size: Vec3f,
-    #[rust]
-    implicit_physics_size: Vec3f,
-    #[rust]
-    physics_size_explicit: bool,
     #[live(1.0)]
     density: f32,
     #[live(0.8)]
@@ -158,8 +138,6 @@ pub struct XrNode {
     restitution: f32,
     #[rust]
     script_async: ScriptAsyncCalls,
-    #[new]
-    draw_list: DrawList,
     #[rust]
     children: ComponentMap<LiveId, WidgetRef>,
     #[rust]
@@ -202,28 +180,11 @@ impl XrNode {
         self.body
     }
 
-    pub fn projectile_pool(&self) -> bool {
-        self.projectile_pool
-    }
-
-    pub fn set_implicit_physics_size(&mut self, size: Vec3f) {
-        self.implicit_physics_size = vec3f(size.x.max(0.0), size.y.max(0.0), size.z.max(0.0));
-    }
-
     pub fn physics_half_extents(&self) -> Vec3f {
-        let physics_size = if self.physics_size_explicit
-            || self.physics_size.x > 0.0
-            || self.physics_size.y > 0.0
-            || self.physics_size.z > 0.0
-        {
-            self.physics_size
-        } else {
-            self.implicit_physics_size
-        };
         vec3f(
-            physics_size.x.max(0.0) * 0.5,
-            physics_size.y.max(0.0) * 0.5,
-            physics_size.z.max(0.0) * 0.5,
+            self.physics_size.x.max(0.0) * 0.5,
+            self.physics_size.y.max(0.0) * 0.5,
+            self.physics_size.z.max(0.0) * 0.5,
         )
     }
 
@@ -241,78 +202,6 @@ impl XrNode {
 
     pub fn child_count(&self) -> usize {
         self.child_order.len()
-    }
-
-    fn child_world_sort_center(child: &WidgetRef) -> Option<Vec3f> {
-        if let Some(select) = child.borrow::<XrSelect>() {
-            return Some(select.node().pos());
-        }
-        if let Some(view) = child.borrow::<XrView>() {
-            return Some(view.node().pos());
-        }
-        if let Some(cube) = child.borrow::<Cube>() {
-            return Some(cube.node().pos());
-        }
-        if let Some(ico) = child.borrow::<IcoSphere>() {
-            return Some(ico.node().pos());
-        }
-        if let Some(refractive_cube) = child.borrow::<RefractiveCube>() {
-            return Some(refractive_cube.node().pos());
-        }
-        if let Some(gltf) = child.borrow::<Gltf>() {
-            return Some(gltf.node().pos());
-        }
-        if let Some(tree) = child.borrow::<Tree>() {
-            return Some(tree.node().pos());
-        }
-        if let Some(node) = child.borrow::<XrNode>() {
-            return Some(node.pos());
-        }
-        None
-    }
-
-    fn child_is_transparent(child: &WidgetRef) -> bool {
-        child.borrow::<RefractiveCube>().is_some() || child.borrow::<XrView>().is_some()
-    }
-
-    fn transform_point(transform: &Mat4f, point: Vec3f) -> Vec3f {
-        transform
-            .transform_vec4(vec4f(point.x, point.y, point.z, 1.0))
-            .to_vec3f()
-    }
-
-    fn draw_list_depth(scene_state: &SceneState3D, world_pos: Vec3f) -> f32 {
-        let view_pos = scene_state
-            .view
-            .transform_vec4(vec4f(world_pos.x, world_pos.y, world_pos.z, 1.0));
-        if view_pos.w.abs() > 1.0e-6 {
-            view_pos.z / view_pos.w
-        } else {
-            view_pos.z
-        }
-    }
-
-    fn sort_child_draw_order(draw_order_entries: &mut [(usize, f32, bool)]) {
-        if draw_order_entries.len() <= 1 {
-            return;
-        }
-
-        draw_order_entries.sort_by(|a, b| {
-            match (a.2, b.2) {
-                (false, true) => Ordering::Less,
-                (true, false) => Ordering::Greater,
-                (false, false) => b
-                    .1
-                    .partial_cmp(&a.1)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0)),
-                (true, true) => a
-                    .1
-                    .partial_cmp(&b.1)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0)),
-            }
-        });
     }
 }
 
@@ -356,17 +245,6 @@ impl ScriptHook for XrNode {
         scope: &mut Scope,
         value: ScriptValue,
     ) {
-        let physics_size_present = value.as_object().is_some_and(|obj| {
-            vm.bx.heap
-                .value_for_apply(obj.into(), id!(physics_size).into(), &Apply::Eval)
-                .is_some()
-        });
-        if physics_size_present {
-            self.physics_size_explicit = true;
-        } else if !apply.is_eval() {
-            self.physics_size_explicit = false;
-        }
-
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 self.child_order.clear();
@@ -511,35 +389,10 @@ impl Widget for XrNode {
             return DrawStep::done();
         }
 
-        let scene_state = match cx.scene_state_3d() {
-            Some(scene_state) => scene_state,
-            None => return DrawStep::done(),
-        };
         let world_transform = xr_widget_world_transform(cx, scope, self.uid, self);
-        self.draw_list.set_reset_zbias(cx.cx, true);
-        self.draw_list.begin_always(cx);
         let previous_world = cx.set_scene_world_transform_3d(world_transform);
-        let mut draw_order_entries = Vec::new();
 
         for index in 0..self.child_order.len() {
-            let id = self.child_order[index];
-            let Some(child) = self.children.get(&id).cloned() else {
-                continue;
-            };
-            if let Some(child_center) = Self::child_world_sort_center(&child) {
-                let child_center = Self::transform_point(&world_transform, child_center);
-                draw_order_entries.push((
-                    index,
-                    Self::draw_list_depth(&scene_state, child_center),
-                    Self::child_is_transparent(&child),
-                ));
-            } else {
-                draw_order_entries.push((index, 0.0, false));
-            }
-        }
-        Self::sort_child_draw_order(&mut draw_order_entries);
-
-        for (index, _, _) in draw_order_entries {
             let id = self.child_order[index];
             let Some(child) = self.children.get(&id).cloned() else {
                 continue;
@@ -550,7 +403,6 @@ impl Widget for XrNode {
         if let Some(previous_world) = previous_world {
             let _ = cx.set_scene_world_transform_3d(previous_world);
         }
-        self.draw_list.end(cx);
 
         DrawStep::done()
     }

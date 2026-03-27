@@ -445,7 +445,6 @@ impl GltfRenderer {
                 emissive: emissive_texture,
                 env: env_texture,
                 env_atlas: env_atlas_texture,
-                env_faces: None,
             },
         });
     }

@@ -13,13 +13,22 @@ use {
 
 pub trait DrawListExt {
     fn draw_list_id(&self) -> DrawListId;
+    /// Sets the one draw-list-wide transform for this draw list and all child draw lists.
     fn set_view_transform(&self, cx: &mut Cx, mat: &Mat4f);
+    /// Sets the one draw-list-wide transform for this draw list only.
     fn set_view_transform_self_only(&self, cx: &mut Cx, mat: &Mat4f);
     fn begin_always(&mut self, cx: &mut CxDraw);
     fn begin_maybe(&mut self, cx: &mut CxDraw, will_redraw: bool) -> Redrawing;
     fn end(&mut self, cx: &mut CxDraw);
     fn get_view_transform(&self, cx: &Cx) -> Mat4f;
+    /// Maps a point from draw-list output space back through `view_transform` into local
+    /// draw-list coordinates. This is a matrix helper only. It does not apply item rect offsets,
+    /// item clips, or pass shift/scale.
     fn map_point_to_local(&self, cx: &Cx, world: DVec2) -> DVec2;
+    /// Maps a point from local draw-list coordinates through `view_transform`.
+    ///
+    /// This is the inverse of `map_point_to_local()` for invertible `view_transform` matrices.
+    /// It does not apply item rect offsets, item clips, or pass shift/scale.
     fn map_point_from_local(&self, cx: &Cx, local: DVec2) -> DVec2;
     fn debug_parent_draw_list_id(&self, cx: &Cx) -> Option<DrawListId>;
     fn debug_child_draw_list_ids(&self, cx: &Cx) -> Vec<DrawListId>;
@@ -563,5 +572,23 @@ mod tests {
         let world = parent.map_point_from_local(&cx, dvec2(1.0, 1.0));
         let expected = mat.transform_vec4(vec4f(1.0, 1.0, 0.0, 1.0));
         assert_eq!(world, dvec2(expected.x as f64, expected.y as f64));
+    }
+
+    #[test]
+    fn nested_draw_list_keeps_own_transform_under_parent() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawList2d::new(&mut cx);
+        let child = DrawList2d::new(&mut cx);
+
+        cx.draw_lists[parent.id()].append_sub_list(cx.redraw_id, child.id());
+        cx.draw_lists[child.id()].codeflow_parent_id = Some(parent.id());
+
+        let parent_mat = translation(100.0, 200.0);
+        let child_mat = translation(10.0, 20.0);
+        parent.set_view_transform_self_only(&mut cx, &parent_mat);
+        child.set_view_transform_self_only(&mut cx, &child_mat);
+
+        assert_eq!(parent.map_point_from_local(&cx, dvec2(1.0, 2.0)), dvec2(101.0, 202.0));
+        assert_eq!(child.map_point_from_local(&cx, dvec2(1.0, 2.0)), dvec2(11.0, 22.0));
     }
 }

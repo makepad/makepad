@@ -1,4 +1,6 @@
 pub mod draw_cube;
+pub mod draw_projective_quad;
+pub mod draw_plane;
 pub mod draw_glyph;
 pub mod draw_pbr;
 pub mod draw_quad;

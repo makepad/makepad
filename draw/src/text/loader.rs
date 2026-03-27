@@ -1,7 +1,10 @@
 use {
     super::{
         font::{Font, FontId},
-        font_face::FontFace,
+        font_face::{
+            CanonicalVariations, FontFace, ParsedFontInstance, ParsedFontInstanceKey,
+            ParsedFontSource,
+        },
         font_family::{FontFamily, FontFamilyId},
         rasterizer,
         rasterizer::Rasterizer,
@@ -9,8 +12,7 @@ use {
         shaper::Shaper,
     },
     crate::makepad_platform::SharedBytes,
-    fxhash::FxHashMap,
-    std::{cell::RefCell, rc::Rc},
+    std::{cell::RefCell, collections::HashMap, rc::Rc},
 };
 
 pub type FontData = SharedBytes;
@@ -19,10 +21,12 @@ pub type FontData = SharedBytes;
 pub struct Loader {
     shaper: Rc<RefCell<Shaper>>,
     rasterizer: Rc<RefCell<rasterizer::Rasterizer>>,
-    pub(crate) font_family_definitions: FxHashMap<FontFamilyId, FontFamilyDefinition>,
-    font_definitions: FxHashMap<FontId, FontDefinition>,
-    font_family_cache: FxHashMap<FontFamilyId, Rc<FontFamily>>,
-    font_cache: FxHashMap<FontId, Rc<Font>>,
+    pub(crate) font_family_definitions: HashMap<FontFamilyId, FontFamilyDefinition>,
+    font_definitions: HashMap<FontId, FontDefinition>,
+    font_source_cache: HashMap<ParsedFontSourceKey, Rc<ParsedFontSource>>,
+    font_instance_cache: HashMap<ParsedFontInstanceKey, Rc<ParsedFontInstance>>,
+    font_family_cache: HashMap<FontFamilyId, Rc<FontFamily>>,
+    font_cache: HashMap<FontId, Rc<Font>>,
 }
 
 impl Loader {
@@ -30,10 +34,12 @@ impl Loader {
         let loader = Self {
             shaper: Rc::new(RefCell::new(Shaper::new(settings.shaper))),
             rasterizer: Rc::new(RefCell::new(Rasterizer::new(settings.rasterizer))),
-            font_family_definitions: FxHashMap::default(),
-            font_definitions: FxHashMap::default(),
-            font_family_cache: FxHashMap::default(),
-            font_cache: FxHashMap::default(),
+            font_family_definitions: HashMap::new(),
+            font_definitions: HashMap::new(),
+            font_source_cache: HashMap::new(),
+            font_instance_cache: HashMap::new(),
+            font_family_cache: HashMap::new(),
+            font_cache: HashMap::new(),
         };
         //builtins::define(&mut loader);
         loader
@@ -70,7 +76,6 @@ impl Loader {
         id: FontFamilyId,
         definition: FontFamilyDefinition,
     ) {
-        // Skip cache eviction if the definition is unchanged.
         if let Some(existing) = self.font_family_definitions.get(&id) {
             if *existing == definition {
                 return;
@@ -138,11 +143,11 @@ impl Loader {
             .font_definitions
             .remove(&id)
             .expect("font is not defined");
-        let mut face = FontFace::from_data_and_index(definition.data, definition.index)
-            .expect("failed to load font from definition");
-        if !definition.variations.is_empty() {
-            face.set_variations(&definition.variations);
-        }
+        let source = self
+            .get_or_load_font_source(definition.data.clone(), definition.index)
+            .expect("failed to load font source from definition");
+        let instance = self.get_or_load_font_instance(source.clone(), definition.variations);
+        let face = FontFace::new((*source).clone(), instance);
         Font::new(
             id,
             self.rasterizer.clone(),
@@ -150,6 +155,39 @@ impl Loader {
             definition.ascender_fudge_in_ems,
             definition.descender_fudge_in_ems,
         )
+    }
+
+    fn get_or_load_font_source(
+        &mut self,
+        data: FontData,
+        index: u32,
+    ) -> Option<Rc<ParsedFontSource>> {
+        let key = ParsedFontSourceKey {
+            data_ptr: data.as_slice().as_ptr() as usize,
+            index,
+        };
+        if !self.font_source_cache.contains_key(&key) {
+            let source = ParsedFontSource::from_data_and_index(data, index)?;
+            self.font_source_cache.insert(key, Rc::new(source));
+        }
+        self.font_source_cache.get(&key).cloned()
+    }
+
+    fn get_or_load_font_instance(
+        &mut self,
+        source: Rc<ParsedFontSource>,
+        variations: CanonicalVariations,
+    ) -> Rc<ParsedFontInstance> {
+        let key = ParsedFontInstanceKey {
+            source: (*source).clone(),
+            variations: variations.clone(),
+        };
+        if !self.font_instance_cache.contains_key(&key) {
+            let instance = ParsedFontInstance::from_source_and_variations((*source).clone(), variations);
+            self.font_instance_cache
+                .insert(key.clone(), Rc::new(instance));
+        }
+        self.font_instance_cache.get(&key).unwrap().clone()
     }
 }
 
@@ -171,13 +209,18 @@ pub struct FontDefinition {
     pub index: u32,
     pub ascender_fudge_in_ems: f32,
     pub descender_fudge_in_ems: f32,
-    /// Font variation axis settings as (tag_u32, value) pairs.
-    pub variations: Vec<(u32, f32)>,
+    pub variations: CanonicalVariations,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ParsedFontSourceKey {
+    data_ptr: usize,
+    index: u32,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FontDefinition, Loader};
+    use super::{CanonicalVariations, FontDefinition, Loader};
     use crate::{
         makepad_platform::SharedBytes,
         text::{font::FontId, layouter},
@@ -202,7 +245,7 @@ mod tests {
                 index: 0,
                 ascender_fudge_in_ems: -0.1,
                 descender_fudge_in_ems: 0.0,
-                variations: Vec::new(),
+                variations: CanonicalVariations::default(),
             },
         );
 

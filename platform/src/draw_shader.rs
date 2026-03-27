@@ -27,7 +27,6 @@ pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
     pub debug_id: Option<LiveId>,
     pub depth_write: bool,
-    pub alpha_blend: bool,
     pub backface_culling: bool,
 }
 
@@ -37,7 +36,6 @@ impl Default for CxDrawShaderOptions {
             draw_call_group: LiveId(0),
             debug_id: None,
             depth_write: true,
-            alpha_blend: true,
             backface_culling: false,
         }
     }
@@ -151,6 +149,7 @@ pub struct DrawShaderInputs {
     pub inputs: Vec<DrawShaderInput>,
     pub packing_method: DrawShaderInputPacking,
     pub total_slots: usize,
+    lookup: LiveIdMap<LiveId, usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -215,6 +214,7 @@ impl DrawShaderInputs {
             inputs: Vec::new(),
             packing_method,
             total_slots: 0,
+            lookup: LiveIdMap::default(),
         }
     }
 
@@ -231,6 +231,7 @@ impl DrawShaderInputs {
                     slots,
                     attr_format,
                 });
+                self.lookup.insert(id, self.inputs.len() - 1);
                 self.total_slots += slots;
                 if needs_int_align && (self.total_slots & 3) != 0 {
                     self.total_slots += 4 - (self.total_slots & 3);
@@ -243,6 +244,7 @@ impl DrawShaderInputs {
                     slots,
                     attr_format,
                 });
+                self.lookup.insert(id, self.inputs.len() - 1);
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsGLSL140 => {
@@ -265,6 +267,7 @@ impl DrawShaderInputs {
                     slots,
                     attr_format,
                 });
+                self.lookup.insert(id, self.inputs.len() - 1);
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsHLSL => {
@@ -281,6 +284,7 @@ impl DrawShaderInputs {
                     slots,
                     attr_format,
                 });
+                self.lookup.insert(id, self.inputs.len() - 1);
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsMetal => {
@@ -304,9 +308,14 @@ impl DrawShaderInputs {
                     slots,
                     attr_format,
                 });
+                self.lookup.insert(id, self.inputs.len() - 1);
                 self.total_slots += aligned_slots;
             }
         }
+    }
+
+    pub fn find(&self, id: LiveId) -> Option<&DrawShaderInput> {
+        self.lookup.get(&id).map(|&idx| &self.inputs[idx])
     }
 
     pub fn finalize(&mut self) {

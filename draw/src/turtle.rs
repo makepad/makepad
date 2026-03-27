@@ -1286,9 +1286,19 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     }
 
     /// Starts a root turtle.
-    pub fn begin_root_turtle(&mut self, size: Vec2d, layout: Layout) {
+    /// Starts a root turtle at a given origin with the given size.
+    ///
+    /// The clip region is set to `(origin, origin + size)`. Items drawn with
+    /// `draw_rel` use coordinates relative to `origin`. A `view_transform` set
+    /// on the enclosing DrawList carries only the transform itself and does not
+    /// need to encode the widget offset, because `draw_clip` and item positions
+    /// share the same coordinate basis.
+    ///
+    /// All other `begin_root_turtle*` variants delegate here with `origin =
+    /// (0, 0)`.
+    pub fn begin_page_root_turtle(&mut self, origin: Vec2d, size: Vec2d, layout: Layout) {
         self.align_list
-            .push(AlignEntry::BeginClip(dvec2(0.0, 0.0), size));
+            .push(AlignEntry::BeginClip(origin, origin + size));
 
         let turtle = Turtle {
             walk: Walk::fixed(size.x, size.y),
@@ -1299,11 +1309,11 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             deferred_fills: Vec::new(),
             resolved_fills: Vec::new(),
             pos: Vec2d {
-                x: layout.padding.left,
-                y: layout.padding.top,
+                x: origin.x + layout.padding.left,
+                y: origin.y + layout.padding.top,
             },
             wrap_spacing: 0.0,
-            origin: dvec2(0.0, 0.0),
+            origin,
             width: size.x,
             height: size.y,
             used_width: layout.padding.left,
@@ -1316,10 +1326,23 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         self.turtles.push(turtle);
     }
 
+    /// Starts a root turtle at `(0, 0)`.
+    ///
+    /// Ordinary widget placement still happens in local rect and clip coordinates. Any draw-list
+    /// transform is carried separately by `view_transform`.
+    pub fn begin_root_turtle(&mut self, size: Vec2d, layout: Layout) {
+        self.begin_page_root_turtle(dvec2(0.0, 0.0), size, layout);
+    }
+
     /// Starts a root turtle with clipping disabled.
+    ///
+    /// This changes only the local root clip. It is not a draw-list translation API.
     pub fn begin_unclipped_root_turtle(&mut self, size: Vec2d, layout: Layout) {
         self.begin_root_turtle(size, layout);
-        *self.align_list.last_mut().unwrap() = AlignEntry::Unset;
+        *self.align_list.last_mut().unwrap() = AlignEntry::BeginClip(
+            dvec2(-1_000_000_000.0, -1_000_000_000.0),
+            dvec2(1_000_000_000.0, 1_000_000_000.0),
+        );
     }
 
     /// Starts a root turtle for the current pass.
@@ -1346,6 +1369,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     /// The nested turtle's rectangle is that of the parent turtle's walk. Since the width/height
     /// of this walk may be `Size::Fit`, the width/height of this rectangle may not be known until
     /// the nested turtle is finished.
+    ///
+    /// Nested turtle placement stays in the same local rect/clip space as other widget layout.
+    /// Draw-list transforms are applied later by `view_transform`.
     pub fn begin_turtle(&mut self, walk: Walk, layout: Layout) {
         self.begin_turtle_with_guard(walk, layout, Area::Empty)
     }

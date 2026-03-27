@@ -136,8 +136,10 @@ impl<'a> CxDraw<'a> {
                     self.get_delegated_dpi_factor(pass.draw_pass_id())
                 }
                 CxDrawPassParent::DrawPass(pass_id) => {
-                    self.passes[pass.draw_pass_id()].pass_rect =
-                        self.passes[pass_id].pass_rect.clone();
+                    if self.passes[pass.draw_pass_id()].pass_rect.is_none() {
+                        self.passes[pass.draw_pass_id()].pass_rect =
+                            self.passes[pass_id].pass_rect.clone();
+                    }
                     self.get_delegated_dpi_factor(pass_id)
                 }
                 _ => 1.0,
@@ -210,4 +212,55 @@ impl<'a> CxDraw<'a> {
             *sweep_lock = Area::Empty
         }
     }*/
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::makepad_platform::DrawEvent;
+
+    #[test]
+    fn child_pass_preserves_explicit_size() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawPass::new(&mut cx);
+        let child = DrawPass::new(&mut cx);
+        parent.set_size(&mut cx, dvec2(200.0, 150.0));
+        child.set_size(&mut cx, dvec2(50.0, 40.0));
+
+        let draw_event = DrawEvent::default();
+        let mut draw = CxDraw::new(&mut cx, &draw_event);
+        draw.begin_pass(&parent, None);
+        draw.make_child_pass(&child);
+        draw.begin_pass(&child, None);
+
+        assert_eq!(
+            draw.cx.get_pass_rect(child.draw_pass_id(), 1.0).unwrap().size,
+            dvec2(50.0, 40.0)
+        );
+
+        draw.end_pass(&child);
+        draw.end_pass(&parent);
+    }
+
+    #[test]
+    fn child_pass_without_explicit_rect_inherits_parent_rect() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawPass::new(&mut cx);
+        let child = DrawPass::new(&mut cx);
+        parent.set_size(&mut cx, dvec2(200.0, 150.0));
+
+        let draw_event = DrawEvent::default();
+        let mut draw = CxDraw::new(&mut cx, &draw_event);
+        draw.begin_pass(&parent, None);
+        draw.make_child_pass(&child);
+        draw.begin_pass(&child, None);
+
+        assert_eq!(
+            draw.cx.get_pass_rect(child.draw_pass_id(), 1.0).unwrap().size,
+            dvec2(200.0, 150.0)
+        );
+
+        draw.end_pass(&child);
+        draw.end_pass(&parent);
+    }
 }

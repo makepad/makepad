@@ -170,7 +170,7 @@ impl ShaderOutput {
                 writeln!(
                     out,
                     "uniform {} tex_{};",
-                    self.glsl_sampler_type(tex_type),
+                    Self::glsl_sampler_type(tex_type),
                     tex_name
                 )
                 .ok();
@@ -773,7 +773,7 @@ impl ShaderOutput {
         }
     }
 
-    fn glsl_sampler_type(&self, tex_type: TextureType) -> &'static str {
+    fn glsl_sampler_type(tex_type: TextureType) -> &'static str {
         match tex_type {
             TextureType::Texture1d => "sampler2D",
             TextureType::Texture1dArray => "sampler2DArray",
@@ -786,7 +786,7 @@ impl ShaderOutput {
             TextureType::TextureDepth => "sampler2D",
             TextureType::TextureDepthArray => "sampler2DArray",
             TextureType::TextureVideo => {
-                if cfg!(target_os = "android") && !self.use_vulkan {
+                if cfg!(target_os = "android") && !cfg!(use_vulkan) {
                     "samplerExternalOES"
                 } else {
                     "sampler2D"

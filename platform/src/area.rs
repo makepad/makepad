@@ -171,12 +171,60 @@ impl Area {
         };
     }
 
-    // returns the final screen rect
-    pub fn clipped_rect(&self, cx: &Cx) -> Rect {
+    fn draw_list_transform(cx: &Cx, draw_list_id: DrawListId) -> Mat4f {
+        cx.draw_lists[draw_list_id].draw_list_uniforms.view_transform
+    }
+
+    fn transform_point(mat: &Mat4f, point: Vec2d) -> Vec2d {
+        let transformed = mat.transform_vec4(vec4f(point.x as f32, point.y as f32, 0.0, 1.0));
+        if transformed.w.abs() > 1e-6 {
+            dvec2(
+                (transformed.x / transformed.w) as f64,
+                (transformed.y / transformed.w) as f64,
+            )
+        } else {
+            dvec2(transformed.x as f64, transformed.y as f64)
+        }
+    }
+
+    fn transform_rect_aabb(mat: &Mat4f, rect: Rect) -> Rect {
+        let corners = [
+            rect.pos,
+            dvec2(rect.pos.x + rect.size.x, rect.pos.y),
+            dvec2(rect.pos.x, rect.pos.y + rect.size.y),
+            dvec2(rect.pos.x + rect.size.x, rect.pos.y + rect.size.y),
+        ];
+        let mut min = dvec2(f64::INFINITY, f64::INFINITY);
+        let mut max = dvec2(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for corner in corners {
+            let point = Self::transform_point(mat, corner);
+            min.x = min.x.min(point.x);
+            min.y = min.y.min(point.y);
+            max.x = max.x.max(point.x);
+            max.y = max.y.max(point.y);
+        }
+        Rect {
+            pos: min,
+            size: dvec2((max.x - min.x).max(0.0), (max.y - min.y).max(0.0)),
+        }
+    }
+
+    fn draw_list_id_unchecked(&self) -> Option<DrawListId> {
+        match self {
+            Area::Instance(inst) => Some(inst.draw_list_id),
+            Area::Rect(rect) => Some(rect.draw_list_id),
+            Area::Empty => None,
+        }
+    }
+
+    /// Returns the area rect after local item clip and local draw-list clip.
+    ///
+    /// This stays in draw-list local coordinates and matches the pre-transform clip model used by
+    /// ordinary 2D shaders.
+    pub fn local_clipped_rect(&self, cx: &Cx) -> Rect {
         return match self {
             Area::Instance(inst) => {
                 if inst.instance_count == 0 {
-                    //panic!();
                     error!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return Rect::default();
                 }
@@ -192,82 +240,55 @@ impl Area {
                     return Rect::default();
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
-                // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     let pos = dvec2(
-                        buf[inst.instance_offset + rect_pos + 0] as f64,
+                        buf[inst.instance_offset + rect_pos] as f64,
                         buf[inst.instance_offset + rect_pos + 1] as f64,
                     );
                     if let Some(rect_size) = sh.mapping.rect_size {
                         let size = dvec2(
-                            buf[inst.instance_offset + rect_size + 0] as f64,
+                            buf[inst.instance_offset + rect_size] as f64,
                             buf[inst.instance_offset + rect_size + 1] as f64,
                         );
+                        let mut rect = Rect { pos, size };
                         if let Some(draw_clip) = sh.mapping.draw_clip {
                             let p1 = dvec2(
-                                buf[inst.instance_offset + draw_clip + 0] as f64,
+                                buf[inst.instance_offset + draw_clip] as f64,
                                 buf[inst.instance_offset + draw_clip + 1] as f64,
                             );
                             let p2 = dvec2(
                                 buf[inst.instance_offset + draw_clip + 2] as f64,
                                 buf[inst.instance_offset + draw_clip + 3] as f64,
                             );
-                            if draw_list.draw_list_has_clip {
-                                let p3 = dvec2(
-                                    draw_list.draw_list_uniforms.view_clip.x as f64,
-                                    draw_list.draw_list_uniforms.view_clip.y as f64,
-                                );
-                                let p4 = dvec2(
-                                    draw_list.draw_list_uniforms.view_clip.z as f64,
-                                    draw_list.draw_list_uniforms.view_clip.w as f64,
-                                );
-                                let shift = dvec2(
-                                    draw_list.draw_list_uniforms.view_shift.x as f64,
-                                    draw_list.draw_list_uniforms.view_shift.y as f64,
-                                );
-                                return Rect { pos, size }
-                                    .clip((p1, p2))
-                                    .translate(shift)
-                                    .clip((p3, p4));
-                            } else {
-                                return Rect { pos, size }.clip((p1, p2));
-                            }
+                            rect = rect.clip((p1, p2));
                         }
+                        return rect;
                     }
                 }
                 Rect::default()
             }
             Area::Rect(ra) => {
-                // we need to clip this drawlist too
                 let draw_list = &cx.draw_lists[ra.draw_list_id];
                 let rect_area = &draw_list.rect_areas[ra.rect_id];
-                if draw_list.draw_list_has_clip {
-                    let p3 = dvec2(
-                        draw_list.draw_list_uniforms.view_clip.x as f64,
-                        draw_list.draw_list_uniforms.view_clip.y as f64,
-                    );
-                    let p4 = dvec2(
-                        draw_list.draw_list_uniforms.view_clip.z as f64,
-                        draw_list.draw_list_uniforms.view_clip.w as f64,
-                    );
-                    let shift = dvec2(
-                        draw_list.draw_list_uniforms.view_shift.x as f64,
-                        draw_list.draw_list_uniforms.view_shift.y as f64,
-                    );
-                    return rect_area
-                        .rect
-                        .clip(rect_area.draw_clip)
-                        .translate(shift)
-                        .clip((p3, p4));
-                } else {
-                    return rect_area.rect.clip(rect_area.draw_clip);
-                }
+                rect_area.rect.clip(rect_area.draw_clip)
             }
             _ => Rect::default(),
         };
     }
 
+    /// Returns an axis-aligned approximation of the visible area after local clipping and
+    /// `view_transform`.
+    pub fn clipped_rect(&self, cx: &Cx) -> Rect {
+        let Some(draw_list_id) = self.draw_list_id_unchecked() else {
+            return Rect::default();
+        };
+        let local = self.local_clipped_rect(cx);
+        Self::transform_rect_aabb(&Self::draw_list_transform(cx, draw_list_id), local)
+    }
+
+    /// Returns the stored item rect in draw-list local coordinates without clipping or
+    /// draw-list-wide transforms.
     pub fn rect(&self, cx: &Cx) -> Rect {
         return match self {
             Area::Instance(inst) => {
@@ -316,42 +337,24 @@ impl Area {
         };
     }
 
-    pub fn abs_to_rel(&self, cx: &Cx, abs: Vec2d) -> Vec2d {
-        return match self {
-            Area::Instance(inst) => {
-                if inst.instance_count == 0 {
-                    error!("abs_to_rel_scroll called on instance_count ==0 area pointer, use mark/sweep correctly!");
-                    return abs;
-                }
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    return abs;
-                }
-                let draw_item = &draw_list.draw_items[inst.draw_item_id];
-                let draw_call = draw_item.draw_call().unwrap();
-                let sh = &cx.draw_shaders[draw_call.draw_shader_id.index];
-                // ok now we have to patch x/y/w/h into it
-                if let Some(rect_pos) = sh.mapping.rect_pos {
-                    let buf = draw_item.instances.as_ref().unwrap();
-                    let x = buf[inst.instance_offset + rect_pos + 0] as f64;
-                    let y = buf[inst.instance_offset + rect_pos + 1] as f64;
-                    return Vec2d {
-                        x: abs.x - x,
-                        y: abs.y - y,
-                    };
-                }
-                abs
-            }
-            Area::Rect(ra) => {
-                let draw_list = &cx.draw_lists[ra.draw_list_id];
-                let rect_area = &draw_list.rect_areas[ra.rect_id];
-                Vec2d {
-                    x: abs.x - rect_area.rect.pos.x,
-                    y: abs.y - rect_area.rect.pos.y,
-                }
-            }
-            _ => abs,
+    /// Maps an absolute point back into draw-list local coordinates through the inverse
+    /// `view_transform`.
+    pub fn abs_to_local(&self, cx: &Cx, abs: Vec2d) -> Vec2d {
+        let Some(draw_list_id) = self.draw_list_id_unchecked() else {
+            return abs;
         };
+        let inverse = Self::draw_list_transform(cx, draw_list_id).invert();
+        Self::transform_point(&inverse, abs)
+    }
+
+    /// Converts an absolute point to item-relative coordinates.
+    pub fn abs_to_rel(&self, cx: &Cx, abs: Vec2d) -> Vec2d {
+        let local = self.abs_to_local(cx, abs);
+        let rect = self.rect(cx);
+        Vec2d {
+            x: local.x - rect.pos.x,
+            y: local.y - rect.pos.y,
+        }
     }
 
     pub fn set_rect(&self, cx: &mut Cx, rect: &Rect) {
@@ -513,4 +516,57 @@ impl Area {
         }
         None
     }*/
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Area, RectArea};
+    use crate::{cx::Cx, draw_list::CxRectArea, makepad_math::*};
+
+    fn setup_rect_area(
+        cx: &mut Cx,
+        rect: Rect,
+        draw_clip: (Vec2d, Vec2d),
+        view_transform: Mat4f,
+    ) -> Area {
+        let draw_list = cx.draw_lists.alloc();
+        let draw_list_id = draw_list.id();
+        cx.draw_lists[draw_list_id].redraw_id = cx.redraw_id;
+        cx.draw_lists[draw_list_id].draw_list_uniforms.view_transform = view_transform;
+        cx.draw_lists[draw_list_id].rect_areas.push(CxRectArea { rect, draw_clip });
+        Area::Rect(RectArea {
+            draw_list_id,
+            rect_id: 0,
+            redraw_id: cx.redraw_id,
+        })
+    }
+
+    #[test]
+    fn rect_helpers_split_local_and_transformed_semantics() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let area = setup_rect_area(
+            &mut cx,
+            rect(0.0, 0.0, 50.0, 50.0),
+            (dvec2(5.0, 5.0), dvec2(30.0, 25.0)),
+            Mat4f::translation(vec3(10.0, 20.0, 0.0)),
+        );
+
+        assert_eq!(area.rect(&cx), rect(0.0, 0.0, 50.0, 50.0));
+        assert_eq!(area.local_clipped_rect(&cx), rect(5.0, 5.0, 25.0, 20.0));
+        assert_eq!(area.clipped_rect(&cx), rect(15.0, 25.0, 25.0, 20.0));
+    }
+
+    #[test]
+    fn abs_to_local_and_rel_follow_view_transform() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let area = setup_rect_area(
+            &mut cx,
+            rect(4.0, 6.0, 20.0, 10.0),
+            (dvec2(-1000.0, -1000.0), dvec2(1000.0, 1000.0)),
+            Mat4f::translation(vec3(10.0, 20.0, 0.0)),
+        );
+
+        assert_eq!(area.abs_to_local(&cx, dvec2(17.0, 29.0)), dvec2(7.0, 9.0));
+        assert_eq!(area.abs_to_rel(&cx, dvec2(17.0, 29.0)), dvec2(3.0, 3.0));
+    }
 }

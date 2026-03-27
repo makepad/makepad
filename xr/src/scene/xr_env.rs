@@ -1,7 +1,8 @@
-use crate::xr_node::{
-    XrBodyKind, XrDrawScopeData, XrHandInfluencePoint, XrNode, XrRuntimeBodyState,
-    XR_HAND_INFLUENCE_POINT_COUNT, XR_HAND_INFLUENCE_POINTS_PER_HAND,
-};
+use crate::cube::Cube;
+use crate::gltf::Gltf;
+use crate::refractive_cube::RefractiveCube;
+use crate::tree::Tree;
+use crate::xr_node::{XrBodyKind, XrNode, XrRuntimeBodyState, XrDrawScopeData};
 use crate::*;
 use makepad_widgets::makepad_platform::{
     event::{CameraPreviewMode, VideoSource, VideoYuvMetadata},
@@ -24,16 +25,13 @@ mod xr_hands;
 mod xr_passthrough;
 #[path = "xr_physics.rs"]
 mod xr_physics;
-#[path = "xr_physics_worker.rs"]
-mod xr_physics_worker;
 
-pub(crate) use self::xr_physics::RapierScene;
+pub(crate) use self::xr_physics::{makepad_pose, RapierScene};
 use self::{
     xr_depth::{DepthSurfaceMeshChunkHandle, RetainedDepthQueryHit},
     xr_passthrough::{
-        XrPassthroughCameraChoice, XrPassthroughCameraTextures, XrPassthroughEnvCube,
+        XrPassthroughCameraChoice, XrPassthroughCameraTextures, XrPassthroughEnvAtlas,
     },
-    xr_physics_worker::{XrPhysicsWorker, XrPhysicsWorkerResult},
 };
 
 script_mod! {
@@ -89,7 +87,6 @@ script_mod! {
     mod.widgets.XrEnv = set_type_default() do #(XrEnv::script_component(vm)){
         draw_cube: mod.draw.DrawCube{}
         draw_depth_mesh: mod.draw.DrawDepthMeshBasic{
-            alpha_blend: false
             light_dir: vec3(0.28, 0.86, 0.42)
             ambient: 0.26
             normal_bias: 0.006
@@ -103,13 +100,12 @@ script_mod! {
             spec_strength: 1.0
             env_intensity: 1.25
         }
-        draw_passthrough_env_face: mod.draw.DrawPassthroughEnvFace{
+        draw_passthrough_env_atlas: mod.draw.DrawPassthroughEnvAtlas{
             source_size: vec2(1280.0, 960.0)
             camera_enabled: 0.0
             rotation_steps: 0.0
-            update_strength: 0.92
-            face_index: 0.0
             bootstrap_mix: 1.0
+            update_strength: 0.92
             camera_fov_y_degrees: 92.0
             camera_projection_scale: 1.12
             camera_center_offset_uv: vec2(0.0, 0.0)
@@ -127,7 +123,8 @@ const XR_RENDER_HAND_GEOMETRY: bool = false;
 const XR_PASSTHROUGH_QUAD_DISTANCE: f32 = 0.78;
 const XR_PASSTHROUGH_QUAD_WORLD_OFFSET_Y: f32 = -0.145;
 const XR_PASSTHROUGH_QUAD_WORLD_OFFSET_X: f32 = 0.0;
-const XR_PASSTHROUGH_ENV_FACE_SIZE: usize = 512;
+const XR_PASSTHROUGH_ENV_ATLAS_WIDTH: usize = 2048;
+const XR_PASSTHROUGH_ENV_ATLAS_HEIGHT: usize = 1024;
 const XR_PASSTHROUGH_ENV_CAMERA_FOV_Y_DEGREES: f32 = 92.0;
 const XR_PASSTHROUGH_ENV_CAMERA_PROJECTION_SCALE: f32 = 0.6825;
 const XR_PASSTHROUGH_CAMERA_EXPOSURE: f32 = 0.68;
@@ -139,20 +136,11 @@ const XR_DEPTH_QUERY_FRICTION: f32 = 0.9;
 const XR_DEPTH_QUERY_LOOKAHEAD_SECONDS: f32 = 0.18;
 #[allow(dead_code)]
 const XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE: f32 = 0.32;
-const XR_DEPTH_QUERY_SURFACES_PER_BODY: usize = 2;
-const XR_DEPTH_QUERY_IMPACT_ENABLE_SPEED_MIN: f32 = 0.35;
-const XR_DEPTH_QUERY_IMPACT_ENABLE_APPROACH_SPEED_MIN: f32 = 0.18;
-const XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN: f32 = 0.30;
-const XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_SCALE: f32 = 0.45;
-const XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_MIN: f32 = 0.012;
-const XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_MAX: f32 = 0.04;
-const XR_DEPTH_QUERY_INCLUDE_PLANAR_PATCHES: bool = false;
-#[allow(dead_code)]
-const XR_DEPTH_QUERY_STICKY_KEEP_MARGIN: f32 = 0.015;
+const XR_DEPTH_QUERY_SHARED_SURFACE_POOL_SIZE: usize = 48;
 #[allow(dead_code)]
 const XR_DEPTH_QUERY_FINGERPRINT_QUANTIZATION_METERS: f32 = 0.01;
 #[allow(dead_code)]
-const XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES: u8 = 3;
+const XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES: u8 = 6;
 const XR_HAND_COLLIDER_SLOTS_PER_HAND: usize = 25;
 const XR_HAND_COLLIDER_FRICTION: f32 = 0.8;
 const XR_HAND_PLATE_HALF_WIDTH: f32 = 0.045;
@@ -176,11 +164,9 @@ const XR_PBR_HAND_SPHERE_SUBDIVISIONS: usize = 8;
 struct CollectedXrCube {
     uid: WidgetUid,
     body_kind: XrBodyKind,
-    projectile_pool: bool,
     pose: Pose,
     scale: Vec3f,
     half_extents: Vec3f,
-    is_sphere: bool,
     density: f32,
     friction: f32,
     restitution: f32,
@@ -195,11 +181,9 @@ pub struct XrEnv {
     #[live]
     draw_depth_mesh: DrawDepthMeshBasic,
     #[live]
-    draw_passthrough_env_face: DrawPassthroughEnvFace,
+    draw_passthrough_env_atlas: DrawPassthroughEnvAtlas,
     #[live(false)]
     depth_mesh: bool,
-    #[live(false)]
-    depth_query_hits: bool,
     #[live(false)]
     env_cube: bool,
     #[rust]
@@ -210,8 +194,6 @@ pub struct XrEnv {
     depth_surface_mesh_update_sequence: u64,
     #[rust]
     depth_surface_mesh_chunks: HashMap<(i32, i32, i32), (Geometry, DepthSurfaceMeshChunkHandle)>,
-    #[rust]
-    depth_query_hit_geometry: Option<Geometry>,
     #[rust]
     depth_surface_mesh_upload_count: usize,
     #[allow(dead_code)]
@@ -234,35 +216,19 @@ pub struct XrEnv {
     #[rust]
     passthrough_camera_has_frame: bool,
     #[rust]
-    passthrough_env_face_quad: Option<Geometry>,
+    passthrough_env_atlas_quad: Option<Geometry>,
     #[rust]
-    passthrough_env_cube: Option<XrPassthroughEnvCube>,
+    passthrough_env_atlas: Option<XrPassthroughEnvAtlas>,
 
     // Physics (moved from XrScene)
     #[live(9.81)]
     pub gravity: f32,
-    #[rust(0.25)]
-    physics_time_scale: f32,
     #[rust]
-    physics_worker: Option<XrPhysicsWorker>,
+    scene: Option<RapierScene>,
     #[rust]
     runtime_bodies: Rc<HashMap<WidgetUid, XrRuntimeBodyState>>,
-    #[rust]
-    root_pose: Option<Pose>,
     #[rust(true)]
     scene_dirty: bool,
-    #[rust]
-    physics_revision: u64,
-    #[rust]
-    physics_compute_ms: f64,
-    #[rust]
-    physics_step_dt_ms: f64,
-    #[rust]
-    physics_depth_query_surface_count: usize,
-    #[rust]
-    physics_depth_query_vertex_count: usize,
-    #[rust]
-    physics_depth_query_triangle_count: usize,
     #[allow(dead_code)]
     #[rust]
     next_frame: NextFrame,
@@ -273,62 +239,14 @@ impl XrEnv {
         self.depth_mesh
     }
 
-    pub(crate) fn depth_query_hits_visible(&self) -> bool {
-        self.depth_query_hits
-    }
-
     #[allow(dead_code)]
     pub(crate) fn set_depth_mesh_visible(&mut self, visible: bool) {
         self.depth_mesh = visible;
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn set_depth_query_hits_visible(&mut self, visible: bool) {
-        self.depth_query_hits = visible;
-    }
-
     pub(crate) fn toggle_depth_mesh_visible(&mut self) -> bool {
         self.depth_mesh = !self.depth_mesh;
         self.depth_mesh
-    }
-
-    pub(crate) fn toggle_depth_query_hits_visible(&mut self) -> bool {
-        self.depth_query_hits = !self.depth_query_hits;
-        self.depth_query_hits
-    }
-
-    pub(crate) fn physics_compute_ms(&self) -> f64 {
-        self.physics_compute_ms
-    }
-
-    pub(crate) fn physics_time_scale(&self) -> f32 {
-        self.physics_time_scale
-    }
-
-    pub(crate) fn physics_step_dt_ms(&self) -> f64 {
-        self.physics_step_dt_ms
-    }
-
-    pub(crate) fn set_physics_time_scale(&mut self, cx: &mut Cx, scale: f32) -> f32 {
-        let scale = scale.clamp(0.1, 1.0);
-        if (self.physics_time_scale - scale).abs() <= f32::EPSILON {
-            return self.physics_time_scale;
-        }
-        self.physics_time_scale = scale;
-        cx.redraw_all();
-        self.physics_time_scale
-    }
-
-    pub(crate) fn physics_depth_query_surface_count(&self) -> usize {
-        self.physics_depth_query_surface_count
-    }
-
-    pub(crate) fn physics_depth_query_vertex_count(&self) -> usize {
-        self.physics_depth_query_vertex_count
-    }
-
-    pub(crate) fn physics_depth_query_triangle_count(&self) -> usize {
-        self.physics_depth_query_triangle_count
     }
 
     fn passthrough_video_id() -> LiveId {
@@ -343,6 +261,7 @@ impl XrEnv {
         color: Vec4f,
         depth_clip: f32,
     ) {
+        self.draw_cube.set_use_pass_camera(true);
         self.draw_cube.transform = pose.to_mat4();
         self.draw_cube.cube_pos = vec3(0.0, 0.0, 0.0);
         self.draw_cube.cube_size = size;
@@ -357,6 +276,7 @@ impl XrEnv {
 
     fn prepare_draw_pbr_common(draw_pbr: &mut DrawPbr, cx: &mut Cx2d) {
         draw_pbr.begin();
+        draw_pbr.set_use_pass_camera(true);
         draw_pbr.set_depth_clip(1.0);
         draw_pbr.set_base_color_texture(None);
         draw_pbr.set_metal_roughness_texture(None);
@@ -426,84 +346,27 @@ impl XrEnv {
             .draw_sphere(cx, radius, XR_PBR_HAND_SPHERE_SUBDIVISIONS);
     }
 
-    fn hand_influence_tip_world(hand: &XrHand, tip: usize) -> Option<Vec3f> {
-        if !hand.in_view() || !hand.tip_active(tip) {
+    fn pointer_tip_world(hand: &XrHand) -> Option<Vec3f> {
+        if !hand.in_view() || !hand.tip_active(XrHand::INDEX_TIP) {
             return None;
         }
-        Some(match tip {
-            XrHand::THUMB_TIP => hand.tip_pos_thumb(),
-            XrHand::INDEX_TIP => hand.tip_pos_index(),
-            XrHand::MIDDLE_TIP => hand.tip_pos_middle(),
-            XrHand::RING_TIP => hand.tip_pos_ring(),
-            XrHand::LITTLE_TIP => hand.tip_pos_little(),
-            _ => hand.tip_pos_index(),
-        })
-    }
-
-    fn hand_influence_point(
-        pos: Vec3f,
-        gain_scale: f32,
-        radius_scale: f32,
-    ) -> XrHandInfluencePoint {
-        XrHandInfluencePoint {
-            pos,
-            gain_scale,
-            radius_scale,
-        }
-    }
-
-    fn palm_world(hand: &XrHand) -> Option<Vec3f> {
-        if !hand.in_view() {
-            return None;
-        }
-        let center = hand.joints[XrHand::CENTER].position;
-        let wrist = hand.joints[XrHand::WRIST].position;
-        let thumb = hand.joints[XrHand::THUMB_BASE].position;
-        let index = hand.joints[XrHand::INDEX_BASE].position;
-        let middle = hand.joints[XrHand::MIDDLE_BASE].position;
-        let ring = hand.joints[XrHand::RING_BASE].position;
-        let little = hand.joints[XrHand::LITTLE_BASE].position;
+        let tip_len = hand.tips[XrHand::INDEX_TIP].max(0.0);
         Some(
-            center * 0.28
-                + wrist * 0.10
-                + thumb * 0.12
-                + index * 0.13
-                + middle * 0.18
-                + ring * 0.11
-                + little * 0.08,
+            hand.joints[XrHand::INDEX_KNUCKLE3]
+                .to_mat4()
+                .transform_vec4(vec4(0.0, 0.0, -tip_len, 1.0))
+                .to_vec3f(),
         )
     }
 
-    fn write_hand_influence_points(
-        hand: &XrHand,
-        target: &mut [Option<XrHandInfluencePoint>],
-    ) {
-        debug_assert_eq!(target.len(), XR_HAND_INFLUENCE_POINTS_PER_HAND);
-        target[0] = Self::hand_influence_tip_world(hand, XrHand::THUMB_TIP)
-            .map(|pos| Self::hand_influence_point(pos, 0.72, 0.92));
-        target[1] = Self::hand_influence_tip_world(hand, XrHand::INDEX_TIP)
-            .map(|pos| Self::hand_influence_point(pos, 1.00, 1.00));
-        target[2] = Self::hand_influence_tip_world(hand, XrHand::MIDDLE_TIP)
-            .map(|pos| Self::hand_influence_point(pos, 0.96, 1.00));
-        target[3] = Self::hand_influence_tip_world(hand, XrHand::RING_TIP)
-            .map(|pos| Self::hand_influence_point(pos, 0.82, 0.94));
-        target[4] = Self::hand_influence_tip_world(hand, XrHand::LITTLE_TIP)
-            .map(|pos| Self::hand_influence_point(pos, 0.68, 0.88));
-        target[5] = Self::palm_world(hand)
-            .map(|pos| Self::hand_influence_point(pos, 1.30, 2.40));
-    }
-
-    fn draw_scope_hand_influence_points(
-        state: Option<&XrState>,
-    ) -> [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT] {
-        let mut points = [None; XR_HAND_INFLUENCE_POINT_COUNT];
+    fn draw_scope_pointer_tips(state: Option<&XrState>) -> [Option<Vec3f>; 2] {
         let Some(state) = state else {
-            return points;
+            return [None, None];
         };
-        let (left_points, right_points) = points.split_at_mut(XR_HAND_INFLUENCE_POINTS_PER_HAND);
-        Self::write_hand_influence_points(&state.left_hand, left_points);
-        Self::write_hand_influence_points(&state.right_hand, right_points);
-        points
+        [
+            Self::pointer_tip_world(&state.left_hand),
+            Self::pointer_tip_world(&state.right_hand),
+        ]
     }
 
     pub(crate) fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
@@ -598,199 +461,183 @@ impl XrEnv {
         parent_scale: Vec3f,
         cubes: &mut Vec<CollectedXrCube>,
     ) {
-        if !widget.visible() {
-            return;
-        }
-        let Some(node) = widget.cast_inner::<XrNode>() else {
-            widget.children(&mut |_, child| {
-                Self::collect_cubes_from_widget(
-                    &child,
-                    parent_pos,
-                    parent_ori,
-                    parent_scale,
-                    cubes,
-                )
-            });
-            return;
-        };
-
-        let is_sphere = widget.borrow::<IcoSphere>().is_some();
-        let (pos, ori, scale) =
-            Self::transform_with_node(parent_pos, parent_ori, parent_scale, &node);
-        let half = node.physics_half_extents();
-        let should_push = node.body_kind() != XrBodyKind::Disabled
-            && (half.x > 0.0 || half.y > 0.0 || half.z > 0.0);
-
-        if should_push {
+        if let Some(cube) = widget.borrow::<Cube>() {
+            let node = cube.node();
+            let (pos, ori, scale) = Self::transform_with_node(parent_pos, parent_ori, parent_scale, node);
+            let half = cube.half_extents();
             cubes.push(CollectedXrCube {
-                uid: widget.widget_uid(),
+                uid: cube.widget_uid(),
                 body_kind: node.body_kind(),
-                projectile_pool: node.projectile_pool(),
                 pose: Pose::new(ori, pos),
                 scale,
                 half_extents: vec3f(half.x * scale.x, half.y * scale.y, half.z * scale.z),
-                is_sphere,
                 density: node.density(),
                 friction: node.friction(),
                 restitution: node.restitution(),
             });
+            let (pos, ori, scale) = (pos, ori, scale);
+            drop(cube);
+            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes));
+            return;
         }
-
-        drop(node);
-        widget.children(&mut |_, child| {
-            Self::collect_cubes_from_widget(
-                &child,
-                pos,
-                ori,
+        if let Some(cube) = widget.borrow::<RefractiveCube>() {
+            let node = cube.node();
+            let (pos, ori, scale) = Self::transform_with_node(parent_pos, parent_ori, parent_scale, node);
+            let half = cube.half_extents();
+            cubes.push(CollectedXrCube {
+                uid: cube.widget_uid(),
+                body_kind: node.body_kind(),
+                pose: Pose::new(ori, pos),
                 scale,
-                cubes,
-            )
-        });
+                half_extents: vec3f(half.x * scale.x, half.y * scale.y, half.z * scale.z),
+                density: node.density(),
+                friction: node.friction(),
+                restitution: node.restitution(),
+            });
+            let (pos, ori, scale) = (pos, ori, scale);
+            drop(cube);
+            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes));
+            return;
+        }
+        if let Some(gltf) = widget.borrow::<Gltf>() {
+            let node = gltf.node();
+            let (pos, ori, scale) = Self::transform_with_node(parent_pos, parent_ori, parent_scale, node);
+            let half = node.physics_half_extents();
+            if node.body_kind() != XrBodyKind::Disabled && (half.x > 0.0 || half.y > 0.0 || half.z > 0.0) {
+                cubes.push(CollectedXrCube {
+                    uid: gltf.widget_uid(),
+                    body_kind: node.body_kind(),
+                    pose: Pose::new(ori, pos),
+                    scale,
+                    half_extents: vec3f(half.x * scale.x, half.y * scale.y, half.z * scale.z),
+                    density: node.density(),
+                    friction: node.friction(),
+                    restitution: node.restitution(),
+                });
+            }
+            drop(gltf);
+            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes));
+            return;
+        }
+        if let Some(tree) = widget.borrow::<Tree>() {
+            let node = tree.node();
+            let (pos, ori, scale) = Self::transform_with_node(parent_pos, parent_ori, parent_scale, node);
+            let half = node.physics_half_extents();
+            if node.body_kind() != XrBodyKind::Disabled && (half.x > 0.0 || half.y > 0.0 || half.z > 0.0) {
+                cubes.push(CollectedXrCube {
+                    uid: tree.widget_uid(),
+                    body_kind: node.body_kind(),
+                    pose: Pose::new(ori, pos),
+                    scale,
+                    half_extents: vec3f(half.x * scale.x, half.y * scale.y, half.z * scale.z),
+                    density: node.density(),
+                    friction: node.friction(),
+                    restitution: node.restitution(),
+                });
+            }
+            drop(tree);
+            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes));
+            return;
+        }
+        if let Some(node) = widget.borrow::<XrNode>() {
+            let (pos, ori, scale) = Self::transform_with_node(parent_pos, parent_ori, parent_scale, &node);
+            let half = node.physics_half_extents();
+            if node.body_kind() != XrBodyKind::Disabled && (half.x > 0.0 || half.y > 0.0 || half.z > 0.0) {
+                cubes.push(CollectedXrCube {
+                    uid: node.widget_uid(),
+                    body_kind: node.body_kind(),
+                    pose: Pose::new(ori, pos),
+                    scale,
+                    half_extents: vec3f(half.x * scale.x, half.y * scale.y, half.z * scale.z),
+                    density: node.density(),
+                    friction: node.friction(),
+                    restitution: node.restitution(),
+                });
+            }
+            drop(node);
+            widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes));
+            return;
+        }
+        widget.children(&mut |_, child| Self::collect_cubes_from_widget(&child, parent_pos, parent_ori, parent_scale, cubes));
     }
 
-    fn collect_cubes_from_children(
-        &self,
-        children: &[(LiveId, WidgetRef)],
-    ) -> Vec<CollectedXrCube> {
+    fn collect_cubes_from_children(&self, children: &[(LiveId, WidgetRef)]) -> Vec<CollectedXrCube> {
         let mut cubes = Vec::new();
-        let (root_pos, root_ori) = if let Some(root_pose) = self.root_pose {
-            (root_pose.position, root_pose.orientation)
-        } else {
-            (vec3f(0.0, 0.0, 0.0), Quat::default())
-        };
+        let root_pos = vec3f(0.0, 0.0, 0.0);
+        let root_ori = Quat::default();
         let root_scale = vec3f(1.0, 1.0, 1.0);
         for (_, child) in children {
-            Self::collect_cubes_from_widget(
-                child,
-                root_pos,
-                root_ori,
-                root_scale,
-                &mut cubes,
-            );
+            Self::collect_cubes_from_widget(child, root_pos, root_ori, root_scale, &mut cubes);
         }
         cubes
     }
 
-    fn ensure_physics_worker(&mut self, cx: &mut Cx) -> &mut XrPhysicsWorker {
-        self.physics_worker
-            .get_or_insert_with(|| XrPhysicsWorker::new(cx.xr_depth_mesh()))
-    }
-
-    fn apply_physics_worker_result(&mut self, result: XrPhysicsWorkerResult) -> bool {
-        if result.revision != self.physics_revision {
-            return false;
-        }
-        self.runtime_bodies = Rc::new(result.runtime_bodies);
-        if let Some(retained_hits) = result.depth_query_retained_hits {
-            self.depth_query_retained_hits = retained_hits;
-        }
-        self.physics_compute_ms = result.physics_compute_ms;
-        self.physics_step_dt_ms = result.physics_step_dt_ms;
-        self.physics_depth_query_surface_count = result.physics_depth_query_surface_count;
-        self.physics_depth_query_vertex_count = result.physics_depth_query_vertex_count;
-        self.physics_depth_query_triangle_count = result.physics_depth_query_triangle_count;
-        true
-    }
-
-    fn poll_physics_worker(&mut self, cx: &mut Cx) {
-        let mut applied = false;
-        while let Some(result) = self
-            .physics_worker
-            .as_mut()
-            .and_then(|worker| worker.take_latest_result())
-        {
-            applied |= self.apply_physics_worker_result(result);
-        }
-        if applied {
-            cx.redraw_all();
-        }
-    }
-
-    fn request_physics_rebuild(
-        &mut self,
-        cx: &mut Cx,
-        children: &[(LiveId, WidgetRef)],
-    ) {
+    fn rebuild_physics_scene(&mut self, children: &[(LiveId, WidgetRef)]) {
         let cubes = self.collect_cubes_from_children(children);
-        self.depth_query_retained_hits.clear();
-        self.physics_revision = self.physics_revision.saturating_add(1);
-        let revision = self.physics_revision;
-        let gravity = self.gravity;
-        self.ensure_physics_worker(cx)
-            .request_rebuild(revision, gravity, cubes);
+        let mut scene = RapierScene::new(self.gravity);
+        for cube in cubes {
+            match cube.body_kind {
+                XrBodyKind::Disabled => {}
+                XrBodyKind::Dynamic => scene.spawn_dynamic_box(
+                    cube.uid, cube.pose, cube.half_extents, cube.scale,
+                    cube.density, cube.friction, cube.restitution,
+                ),
+                XrBodyKind::Fixed => scene.spawn_fixed_box(
+                    cube.uid, cube.pose, cube.half_extents, cube.scale,
+                    cube.friction, cube.restitution,
+                ),
+            }
+        }
+        self.scene = Some(scene);
         self.scene_dirty = false;
+        self.sync_runtime_bodies();
     }
 
-    pub fn ensure_physics(
-        &mut self,
-        cx: &mut Cx,
-        children: &[(LiveId, WidgetRef)],
-    ) {
-        self.poll_physics_worker(cx);
-        if self.scene_dirty || self.physics_worker.is_none() {
-            self.request_physics_rebuild(cx, children);
+    fn sync_runtime_bodies(&mut self) {
+        let runtime_bodies = Rc::make_mut(&mut self.runtime_bodies);
+        runtime_bodies.clear();
+        let Some(scene) = self.scene.as_ref() else { return };
+        for cube in &scene.cubes {
+            if let Some(body) = scene.bodies.get(cube.body) {
+                runtime_bodies.insert(
+                    cube.widget_uid,
+                    XrRuntimeBodyState {
+                        pose: makepad_pose(body.position()),
+                        scale: cube.scale,
+                    },
+                );
+            }
+        }
+    }
+
+    pub fn ensure_physics(&mut self, cx: &mut Cx, children: &[(LiveId, WidgetRef)]) {
+        if self.scene_dirty || self.scene.is_none() {
+            self.rebuild_physics_scene(children);
             cx.redraw_all();
         }
-    }
-
-    pub fn spawn_body(&mut self, cx: &mut Cx, spawn: XrBodySpawn) {
-        self.poll_physics_worker(cx);
-        if self.scene_dirty || self.physics_worker.is_none() {
-            return;
-        }
-        let revision = self.physics_revision;
-        self.ensure_physics_worker(cx)
-            .request_body_spawn(revision, spawn);
     }
 
     pub fn mark_scene_dirty(&mut self) {
         self.scene_dirty = true;
     }
 
-    pub fn set_root_pose(&mut self, cx: &mut Cx, pose: Option<Pose>) {
-        if self.root_pose == pose {
-            return;
-        }
-        self.root_pose = pose;
-        self.scene_dirty = true;
-        cx.redraw_all();
-    }
-
     #[allow(dead_code)]
     fn has_dynamic_bodies(&self) -> bool {
-        !self.runtime_bodies.is_empty()
+        self.scene.as_ref().map(|scene| {
+            scene.cubes.iter().any(|cube| matches!(cube.body_kind, XrBodyKind::Dynamic))
+        }).unwrap_or(false)
     }
 
     pub fn step_physics(&mut self, cx: &mut Cx) {
-        self.poll_physics_worker(cx);
-        let revision = self.physics_revision;
-        let physics_time_scale = self.physics_time_scale;
-        let include_retained_hits = self.depth_query_hits_visible();
-        let (left_hand, right_hand) = self
-            .last_xr_state
-            .as_deref()
-            .map(|state| (state.left_hand.clone(), state.right_hand.clone()))
-            .unwrap_or_else(|| (XrHand::default(), XrHand::default()));
-        self.ensure_physics_worker(cx).request_step(
-            revision,
-            left_hand,
-            right_hand,
-            physics_time_scale,
-            include_retained_hits,
-        );
+        if let Some(scene) = self.scene.as_mut() {
+            scene.step();
+        }
+        self.sync_runtime_bodies();
+        cx.redraw_all();
     }
 
     pub fn reset_physics(&mut self, cx: &mut Cx) {
-        self.physics_revision = self.physics_revision.saturating_add(1);
-        if let Some(worker) = self.physics_worker.as_mut() {
-            worker.request_reset(self.physics_revision);
-        }
-        self.physics_compute_ms = 0.0;
-        self.physics_step_dt_ms = 0.0;
-        self.physics_depth_query_surface_count = 0;
-        self.physics_depth_query_vertex_count = 0;
-        self.physics_depth_query_triangle_count = 0;
-        self.depth_query_retained_hits.clear();
+        self.scene = None;
         Rc::make_mut(&mut self.runtime_bodies).clear();
         self.scene_dirty = true;
         cx.redraw_all();
@@ -798,39 +645,38 @@ impl XrEnv {
 
     #[allow(dead_code)]
     pub(crate) fn runtime_scene_ref(&self) -> Option<&RapierScene> {
-        None
+        self.scene.as_ref()
     }
 
     #[allow(dead_code)]
     pub(crate) fn runtime_scene_mut(&mut self) -> Option<&mut RapierScene> {
-        None
+        self.scene.as_mut()
     }
 
     // --- New API for XrRoot ---
 
     pub fn prepare_and_draw(&mut self, cx: &mut Cx2d) -> XrDrawScopeData {
-        cx.cx.xr_depth_mesh().set_mesh_enabled(self.depth_mesh_visible());
         let state = self.last_xr_state.clone();
         if let Some(state) = state.as_deref() {
             if self.depth_debug_enabled() {
                 self.prepare_depth_mesh(cx);
-                if self.depth_mesh_visible() {
-                    self.sync_depth_surface_mesh(cx);
-                }
+                self.sync_depth_surface_mesh(cx);
                 self.draw_depth_surface_mesh(cx);
             }
 
             if XR_RENDER_HAND_GEOMETRY {
                 self.prepare_pbr(cx);
-                self.draw_hand(cx, &state.left_hand, None, true);
-                self.draw_hand(cx, &state.right_hand, None, false);
+                let left_colliders = self.scene.as_ref()
+                    .map(|scene| Self::collect_live_hand_colliders(scene, &scene.left_hand));
+                let right_colliders = self.scene.as_ref()
+                    .map(|scene| Self::collect_live_hand_colliders(scene, &scene.right_hand));
+                self.draw_hand(cx, &state.left_hand, left_colliders.as_deref(), true);
+                self.draw_hand(cx, &state.right_hand, right_colliders.as_deref(), false);
             }
         }
 
         let env_texture = if self.env_cube {
-            state
-                .as_deref()
-                .and_then(|state| self.render_passthrough_env_cube(cx, state))
+            state.as_deref().and_then(|state| self.render_passthrough_env_atlas(cx, state))
         } else {
             None
         };
@@ -838,15 +684,13 @@ impl XrEnv {
         XrDrawScopeData {
             runtime_bodies: self.runtime_bodies.clone(),
             env_texture,
-            camera_texture: self
-                .passthrough_camera_textures
-                .as_ref()
+            camera_texture: self.passthrough_camera_textures.as_ref()
                 .map(|textures| textures.camera.clone()),
             camera_source_size: self.passthrough_camera_source_size,
             camera_rotation_steps: self.passthrough_camera_video.rotation_steps,
             camera_center_offset_uv: self.passthrough_camera_center_offset_uv(),
             camera_enabled: self.passthrough_camera_has_frame && state.is_some(),
-            hand_influence_points: Self::draw_scope_hand_influence_points(state.as_deref()),
+            pointer_tips: Self::draw_scope_pointer_tips(state.as_deref()),
         }
     }
 }

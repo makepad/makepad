@@ -4,16 +4,16 @@ use std::ffi::c_void;
     target_os = "linux",
     target_os = "android",
     target_os = "windows",
-    all(target_os = "macos", not(headless)),
-    all(target_os = "ios", not(headless))
+    target_os = "macos",
+    target_os = "ios"
 ))]
 use crate::cx::Cx;
 #[cfg(any(
     target_os = "linux",
     target_os = "android",
     target_os = "windows",
-    all(target_os = "macos", not(headless)),
-    all(target_os = "ios", not(headless))
+    target_os = "macos",
+    target_os = "ios"
 ))]
 use crate::texture::Texture;
 
@@ -43,9 +43,9 @@ pub struct GlRenderBridge {
     pub(crate) inner: crate::os::linux::opengl::EglRenderBridge,
     #[cfg(target_os = "windows")]
     pub(crate) inner: crate::os::windows::angle::AngleRenderBridge,
-    #[cfg(all(target_os = "macos", not(headless)))]
+    #[cfg(target_os = "macos")]
     pub(crate) inner: crate::os::apple::metal::CglRenderBridge,
-    #[cfg(all(target_os = "ios", not(headless)))]
+    #[cfg(target_os = "ios")]
     pub(crate) inner: crate::os::apple::metal::EaglRenderBridge,
 }
 
@@ -53,8 +53,8 @@ pub struct GlRenderBridge {
     target_os = "linux",
     target_os = "android",
     target_os = "windows",
-    all(target_os = "macos", not(headless)),
-    all(target_os = "ios", not(headless))
+    target_os = "macos",
+    target_os = "ios"
 ))]
 impl GlRenderBridge {
     /// Make this GL context current on the calling thread.
@@ -77,8 +77,8 @@ impl GlRenderBridge {
     target_os = "linux",
     target_os = "android",
     target_os = "windows",
-    all(target_os = "macos", not(headless)),
-    all(target_os = "ios", not(headless))
+    target_os = "macos",
+    target_os = "ios"
 )))]
 impl GlRenderBridge {
     pub fn make_current(&self) {}
@@ -109,7 +109,7 @@ impl GlRenderBridge {
 }
 
 // CGL platform accessors (macOS)
-#[cfg(all(target_os = "macos", not(headless)))]
+#[cfg(target_os = "macos")]
 impl GlRenderBridge {
     pub fn cgl_pixel_format(&self) -> *mut c_void {
         self.inner.cgl_pixel_format()
@@ -251,7 +251,7 @@ impl Cx {
 }
 
 // Cx methods: macOS
-#[cfg(all(target_os = "macos", not(headless)))]
+#[cfg(target_os = "macos")]
 impl Cx {
     /// Create a GL rendering bridge with a standalone CGL context (GL 3.2 Core).
     pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {
@@ -313,7 +313,7 @@ impl Cx {
 }
 
 // EAGL platform accessors (iOS)
-#[cfg(all(target_os = "ios", not(headless)))]
+#[cfg(target_os = "ios")]
 impl GlRenderBridge {
     pub fn eagl_context(&self) -> *mut c_void {
         self.inner.eagl_context as *mut c_void
@@ -325,7 +325,7 @@ impl GlRenderBridge {
 }
 
 // Cx methods: iOS
-#[cfg(all(target_os = "ios", not(headless)))]
+#[cfg(target_os = "ios")]
 impl Cx {
     /// Create a GL rendering bridge with a standalone EAGL context (GLES 3.0).
     pub fn create_gl_render_bridge(&mut self) -> GlRenderBridge {

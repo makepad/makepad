@@ -4,9 +4,16 @@ use std::any::TypeId;
 use std::fmt;
 use std::fmt::Debug;
 
-use std::sync::{mpsc::Sender, Mutex};
+use std::sync::{mpsc::Sender, Mutex, Once};
 
 pub(crate) static ACTION_SENDER_GLOBAL: Mutex<Option<Sender<ActionSend>>> = Mutex::new(None);
+
+fn log_dropped_post_action_once(reason: &str) {
+    static LOG_ONCE: Once = Once::new();
+    LOG_ONCE.call_once(|| {
+        eprintln!("[makepad-platform] dropped post_action: {reason}");
+    });
+}
 
 pub trait ActionTrait: 'static {
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -113,14 +120,16 @@ impl Cx {
     ///
     /// This will produce a bare action, *not* a widget action,
     /// so you cannot use `as_widget_action()` when handling this action.
-    pub fn post_action(action: impl ActionTrait + Send) {
-        ACTION_SENDER_GLOBAL
-            .lock()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .send(Box::new(action))
-            .unwrap();
+    pub fn post_action<T: ActionTrait + Send>(action: T) {
+        let sender = ACTION_SENDER_GLOBAL.lock().unwrap().as_ref().cloned();
+        let Some(sender) = sender else {
+            log_dropped_post_action_once("action sender unavailable");
+            return;
+        };
+        if sender.send(Box::new(action)).is_err() {
+            log_dropped_post_action_once("UI receiver closed");
+            return;
+        }
         SignalToUI::set_action_signal();
     }
 

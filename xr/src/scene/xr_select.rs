@@ -9,13 +9,6 @@ script_mod! {
     mod.widgets.XrSelect = mod.widgets.XrSelectBase{}
 }
 
-#[derive(Clone, Debug, Default)]
-pub enum XrSelectAction {
-    ActiveChildChanged(LiveId),
-    #[default]
-    None,
-}
-
 #[derive(Script, WidgetRef, WidgetRegister)]
 pub struct XrSelect {
     #[uid]
@@ -79,7 +72,6 @@ impl XrSelect {
             self.active_child = child_id;
             self.sync_child_visibility(cx);
             cx.with_vm(|vm| self.render_child(vm, child_id));
-            cx.widget_action(self.uid, XrSelectAction::ActiveChildChanged(child_id));
             self.redraw(cx);
         } else {
             child.set_visible(cx, true);
@@ -93,10 +85,6 @@ impl XrSelect {
             .get(&active_child)
             .cloned()
             .map(|child| (active_child, child))
-    }
-
-    pub fn active_child_widget_ref(&self) -> Option<WidgetRef> {
-        self.children.get(&self.active_child).cloned()
     }
 }
 
@@ -169,22 +157,6 @@ impl ScriptHook for XrSelect {
 impl WidgetNode for XrSelect {
     fn widget_uid(&self) -> WidgetUid {
         self.uid
-    }
-
-    fn cast_inner_any(&self, type_id: std::any::TypeId) -> Option<&dyn std::any::Any> {
-        if type_id == std::any::TypeId::of::<XrNode>() {
-            Some(&self.node)
-        } else {
-            None
-        }
-    }
-
-    fn cast_inner_any_mut(&mut self, type_id: std::any::TypeId) -> Option<&mut dyn std::any::Any> {
-        if type_id == std::any::TypeId::of::<XrNode>() {
-            Some(&mut self.node)
-        } else {
-            None
-        }
     }
 
     fn walk(&mut self, _cx: &mut Cx) -> Walk {

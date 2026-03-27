@@ -16,13 +16,12 @@ use {
     std::{
         borrow::Borrow,
         cell::RefCell,
-        collections::VecDeque,
+        collections::{HashMap, VecDeque},
         env,
         hash::{Hash, Hasher},
         mem,
         rc::Rc,
     },
-    fxhash::FxHashMap,
     unicode_segmentation::UnicodeSegmentation,
 };
 
@@ -34,7 +33,7 @@ pub struct Layouter {
     pub(crate) loader: Loader,
     cache_size: usize,
     cached_params: VecDeque<OwnedLayoutParams>,
-    cached_results: FxHashMap<OwnedLayoutParams, Rc<LaidoutText>>,
+    cached_results: HashMap<OwnedLayoutParams, Rc<LaidoutText>>,
 }
 
 impl Layouter {
@@ -43,7 +42,7 @@ impl Layouter {
             loader: Loader::new(settings.loader),
             cache_size: settings.cache_size,
             cached_params: VecDeque::with_capacity(settings.cache_size),
-            cached_results: FxHashMap::with_capacity_and_hasher(settings.cache_size, Default::default()),
+            cached_results: HashMap::with_capacity(settings.cache_size),
         }
     }
 

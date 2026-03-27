@@ -732,6 +732,7 @@ impl Cx {
         let only_shader = std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok();
         let debug_text = std::env::var("MAKEPAD_HEADLESS_DEBUG_TEXT").is_ok();
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
+        self.update_draw_list_projective_transform(draw_pass_id, draw_list_id);
 
         for order_index in 0..draw_order_len {
             let Some(draw_item_id) =
@@ -746,12 +747,10 @@ impl Cx {
             };
 
             if let Some(sub_list_id) = kind_tag {
-                let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
-                let mut child_zbias = 0.0f32;
                 self.headless_render_view(
                     draw_pass_id,
                     sub_list_id,
-                    if child_resets_zbias { &mut child_zbias } else { zbias },
+                    zbias,
                     zbias_step,
                     render_threads,
                     parallel_min_tris,

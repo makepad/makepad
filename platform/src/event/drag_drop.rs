@@ -113,9 +113,11 @@ impl Event {
         match self {
             Event::Drag(event) => {
                 let rect = area.clipped_rect(cx);
+                let local_rect = area.local_clipped_rect(cx);
+                let local_abs = area.abs_to_local(cx, event.abs);
                 if area == cx.drag_drop.drag_area {
                     if !*event.handled.lock().unwrap()
-                        && Inset::rect_contains_with_inset(event.abs, &rect, &options.margin)
+                        && Inset::rect_contains_with_inset(local_abs, &local_rect, &options.margin)
                     {
                         //log!("drag_hist_with_options: Drag, in drag area, event handled and rect ({:?}) contains ({},{}) with margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                         cx.drag_drop.next_drag_area = area;
@@ -141,7 +143,7 @@ impl Event {
                     }
                 } else {
                     if !*event.handled.lock().unwrap()
-                        && Inset::rect_contains_with_inset(event.abs, &rect, &options.margin)
+                        && Inset::rect_contains_with_inset(local_abs, &local_rect, &options.margin)
                     {
                         //log!("drag_hits_with_options: Drag, not in drag_area, event not handled and rect ({:?}) contains ({},{}) with margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                         cx.drag_drop.next_drag_area = area;
@@ -162,8 +164,10 @@ impl Event {
             }
             Event::Drop(event) => {
                 let rect = area.clipped_rect(cx);
+                let local_rect = area.local_clipped_rect(cx);
+                let local_abs = area.abs_to_local(cx, event.abs);
                 if !*event.handled.lock().unwrap()
-                    && Inset::rect_contains_with_inset(event.abs, &rect, &options.margin)
+                    && Inset::rect_contains_with_inset(local_abs, &local_rect, &options.margin)
                 {
                     //log!("drag_hits_with_options: Drop, event not handled and rect {:?} contains ({},{}) in margin {:?}",rect,event.abs.x,event.abs.y,options.margin);
                     cx.drag_drop.next_drag_area = Area::default();

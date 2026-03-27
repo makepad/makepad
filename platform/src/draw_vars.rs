@@ -87,13 +87,6 @@ impl ScriptHook for DrawVars {
                 self.options.depth_write = v != 0.0;
             }
 
-            let alpha_blend_value = vm.bx.heap.value(io_self, id!(alpha_blend).into(), NoTrap);
-            if let Some(v) = alpha_blend_value.as_bool() {
-                self.options.alpha_blend = v;
-            } else if let Some(v) = alpha_blend_value.as_f64() {
-                self.options.alpha_blend = v != 0.0;
-            }
-
             let backface_culling_value =
                 vm.bx
                     .heap
@@ -276,18 +269,16 @@ impl DrawVars {
                 let stride = sh.mapping.instances.total_slots;
                 let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
 
-                for input in &sh.mapping.instances.inputs {
-                    if input.id == live_id!(rect_pos) {
-                        for j in 0..repeat {
-                            instances[input.offset + 0 + j * stride] = rect.pos.x as f32;
-                            instances[input.offset + 1 + j * stride] = rect.pos.y as f32;
-                        }
+                if let Some(input) = sh.mapping.instances.find(live_id!(rect_pos)) {
+                    for j in 0..repeat {
+                        instances[input.offset + 0 + j * stride] = rect.pos.x as f32;
+                        instances[input.offset + 1 + j * stride] = rect.pos.y as f32;
                     }
-                    if input.id == live_id!(rect_size) {
-                        for j in 0..repeat {
-                            instances[input.offset + 0 + j * stride] = rect.size.x as f32;
-                            instances[input.offset + 1 + j * stride] = rect.size.y as f32;
-                        }
+                }
+                if let Some(input) = sh.mapping.instances.find(live_id!(rect_size)) {
+                    for j in 0..repeat {
+                        instances[input.offset + 0 + j * stride] = rect.size.x as f32;
+                        instances[input.offset + 1 + j * stride] = rect.size.y as f32;
                     }
                 }
                 draw_call.instance_dirty = true;
@@ -308,12 +299,10 @@ impl DrawVars {
                 let stride = sh.mapping.instances.total_slots;
                 let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
                 let slice = self.as_slice();
-                for input in &sh.mapping.instances.inputs {
-                    if input.id == id[0] {
-                        for j in 0..repeat {
-                            for k in 0..input.slots {
-                                instances[input.offset + k + j * stride] = slice[input.offset + k];
-                            }
+                if let Some(input) = sh.mapping.instances.find(id[0]) {
+                    for j in 0..repeat {
+                        for k in 0..input.slots {
+                            instances[input.offset + k + j * stride] = slice[input.offset + k];
                         }
                     }
                 }
@@ -326,15 +315,10 @@ impl DrawVars {
     pub fn get_instance(&self, cx: &mut Cx, inst: LiveId, value: &mut [f32]) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let sh = &cx.draw_shaders[draw_shader_id.index];
-            let self_slice = self.as_slice();
-            for input in &sh.mapping.instances.inputs {
-                let offset = input.offset;
-                let slots = input.slots;
-                if input.id == inst {
-                    for i in 0..value.len().min(slots) {
-                        value[i] = self_slice[offset + i]
-                    }
-                }
+            if let Some(input) = sh.mapping.instances.find(inst) {
+                let self_slice = self.as_slice();
+                let n = value.len().min(input.slots);
+                value[..n].copy_from_slice(&self_slice[input.offset..input.offset + n]);
             }
         }
     }
@@ -389,30 +373,12 @@ impl DrawVars {
     pub fn set_dyn_instance(&mut self, cx: &Cx, instance: LiveId, value: &[f32]) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let sh = &cx.draw_shaders[draw_shader_id.index];
-            for input in &sh.mapping.dyn_instances.inputs {
+            if let Some(input) = sh.mapping.dyn_instances.find(instance) {
                 let offset = (self.dyn_instances.len() - sh.mapping.dyn_instances.total_slots)
                     + input.offset;
-                let slots = input.slots;
-                if input.id == instance {
-                    for i in 0..value.len().min(slots) {
-                        self.dyn_instances[offset + i] = value[i];
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn get_uniform(&self, cx: &mut Cx, uniform: LiveId, value: &mut [f32]) {
-        if let Some(draw_shader_id) = self.draw_shader_id {
-            let sh = &cx.draw_shaders[draw_shader_id.index];
-            for input in &sh.mapping.dyn_uniforms.inputs {
-                let offset = input.offset;
-                let slots = input.slots;
-                if input.id == uniform {
-                    for i in 0..value.len().min(slots) {
-                        value[i] = self.dyn_uniforms[offset + i];
-                    }
-                }
+                let n = value.len().min(input.slots);
+                self.dyn_instances[offset..offset + n]
+                    .copy_from_slice(&value[..n]);
             }
         }
     }
@@ -420,14 +386,10 @@ impl DrawVars {
     pub fn set_uniform(&mut self, cx: &Cx, uniform: LiveId, value: &[f32]) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let sh = &cx.draw_shaders[draw_shader_id.index];
-            for input in &sh.mapping.dyn_uniforms.inputs {
-                let offset = input.offset;
-                let slots = input.slots;
-                if input.id == uniform {
-                    for i in 0..value.len().min(slots) {
-                        self.dyn_uniforms[offset + i] = value[i]
-                    }
-                }
+            if let Some(input) = sh.mapping.dyn_uniforms.find(uniform) {
+                let n = value.len().min(input.slots);
+                self.dyn_uniforms[input.offset..input.offset + n]
+                    .copy_from_slice(&value[..n]);
             }
         }
     }
@@ -439,7 +401,7 @@ impl DrawVars {
             let sh = &cx.draw_shaders[draw_shader_id.index];
 
             // Find the uniform input
-            if let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) {
+            if let Some(input) = sh.mapping.dyn_uniforms.find(id) {
                 let slots = input.slots.min(value.len());
 
                 // Update local dyn_uniforms
@@ -930,7 +892,6 @@ impl DrawVars {
 
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Glsl;
-            output.use_vulkan = false;
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
 

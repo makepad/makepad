@@ -20,7 +20,6 @@ pub struct DrawPbrTextureSet {
     pub emissive: Option<Texture>,
     pub env: Option<Texture>,
     pub env_atlas: Option<Texture>,
-    pub env_faces: Option<[Texture; 6]>,
 }
 
 #[derive(Clone, Debug)]
@@ -95,12 +94,21 @@ script_mod! {
         emissive_texture: texture_2d(float)
         env_texture: texture_cube(float)
         env_atlas_texture: texture_2d(float)
-        env_pos_x_texture: texture_2d(float)
-        env_neg_x_texture: texture_2d(float)
-        env_pos_y_texture: texture_2d(float)
-        env_neg_y_texture: texture_2d(float)
-        env_pos_z_texture: texture_2d(float)
-        env_neg_z_texture: texture_2d(float)
+        view_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
+        projection_matrix: uniform(mat4x4f(
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ))
+        clip_ndc: uniform(vec4(-1.0, -1.0, 1.0, 1.0))
+        depth_range: uniform(vec2(0.0, 1.0))
+        depth_forward_bias: uniform(float(0.0))
         u_base_color_factor: uniform(vec4(1.0, 1.0, 1.0, 1.0))
         u_metallic_factor: uniform(float(1.0))
         u_roughness_factor: uniform(float(1.0))
@@ -114,7 +122,6 @@ script_mod! {
         u_has_emissive_texture: uniform(float(0.0))
         u_has_env_texture: uniform(float(0.0))
         u_has_env_atlas_texture: uniform(float(0.0))
-        u_has_env_face_textures: uniform(float(0.0))
         u_enable_occlusion: uniform(float(0.0))
         u_enable_emissive: uniform(float(0.0))
         u_enable_direct_light: uniform(float(0.0))
@@ -127,6 +134,8 @@ script_mod! {
         u_ambient: uniform(float(0.15))
         u_spec_strength: uniform(float(0.9))
         u_env_intensity: uniform(float(1.8))
+        u_camera_pos: uniform(vec3(0.0, 0.0, 5.0))
+        use_pass_camera: uniform(float(0.0))
 
         v_world_clip: varying(vec4f)
         v_world: varying(vec3f)
@@ -140,13 +149,42 @@ script_mod! {
             return vec3(0.0, 0.0, 0.0)
         }
 
+        view_with_camera: fn(world: vec4) {
+            if self.use_pass_camera > 0.5 {
+                return self.draw_pass.camera_view * world
+            }
+            return self.view_matrix * world
+        }
+
+        transform_with_camera: fn(view_pos: vec4) {
+            let clip = if self.use_pass_camera > 0.5 {
+                self.draw_pass.camera_projection * view_pos
+            } else {
+                self.projection_matrix * view_pos
+            };
+            if self.use_pass_camera > 0.5 {
+                return clip
+            }
+            let inv_w = 1.0 / max(abs(clip.w), 0.00001);
+            let ndc = vec2(clip.x * inv_w, clip.y * inv_w);
+            let clip_min = vec2(self.clip_ndc.x, self.clip_ndc.y);
+            let clip_max = vec2(self.clip_ndc.z, self.clip_ndc.w);
+            let clip_scale = (clip_max - clip_min) * 0.5;
+            let clip_center = (clip_max + clip_min) * 0.5;
+            let remapped_ndc = ndc * clip_scale + clip_center;
+            return vec4(remapped_ndc.x * clip.w, remapped_ndc.y * clip.w, clip.z, clip.w)
+        }
+
         active_camera_world_pos: fn() -> vec3f {
-            let camera_world = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0);
-            return vec3(
-                camera_world.x / max(camera_world.w, 0.00001),
-                camera_world.y / max(camera_world.w, 0.00001),
-                camera_world.z / max(camera_world.w, 0.00001)
-            )
+            if self.use_pass_camera > 0.5 {
+                let camera_world = self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0);
+                return vec3(
+                    camera_world.x / max(camera_world.w, 0.00001),
+                    camera_world.y / max(camera_world.w, 0.00001),
+                    camera_world.z / max(camera_world.w, 0.00001)
+                )
+            }
+            return self.u_camera_pos
         }
 
         world_with_model_matrix: fn(local_pos: vec4) {
@@ -204,9 +242,9 @@ script_mod! {
 
             let world = vec4(model_pos.x, model_pos.y, model_pos.z, 1.0);
             self.v_world_clip = world;
-            let view_pos = self.draw_pass.camera_view * world;
+            let view_pos = self.view_with_camera(world);
             self.v_view_pos = vec3(view_pos.x, view_pos.y, view_pos.z);
-            self.vertex_pos = self.draw_pass.camera_projection * view_pos;
+            self.vertex_pos = self.transform_with_camera(view_pos);
         }
 
         pow5: fn(x: float) {
@@ -315,41 +353,10 @@ script_mod! {
             return self.env_atlas_texture.sample_as_bgra(uv).xyz
         }
 
-        sample_env_faces: fn(dir: vec3f) -> vec3f {
-            let ad = abs(dir);
-            let axis = max(ad.x, max(ad.y, ad.z));
-            let safe_axis = max(axis, 0.00001);
-
-            if ad.x >= ad.y && ad.x >= ad.z {
-                if dir.x >= 0.0 {
-                    let uv = vec2(-dir.z / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
-                    return self.env_pos_x_texture.sample_as_bgra(uv).xyz
-                }
-                let uv = vec2(dir.z / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
-                return self.env_neg_x_texture.sample_as_bgra(uv).xyz
-            } else if ad.y >= ad.z {
-                if dir.y >= 0.0 {
-                    let uv = vec2(dir.x / safe_axis, dir.z / safe_axis) * 0.5 + vec2(0.5, 0.5);
-                    return self.env_pos_y_texture.sample_as_bgra(uv).xyz
-                }
-                let uv = vec2(dir.x / safe_axis, -dir.z / safe_axis) * 0.5 + vec2(0.5, 0.5);
-                return self.env_neg_y_texture.sample_as_bgra(uv).xyz
-            }
-            if dir.z >= 0.0 {
-                let uv = vec2(dir.x / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
-                return self.env_pos_z_texture.sample_as_bgra(uv).xyz
-            }
-            let uv = vec2(-dir.x / safe_axis, -dir.y / safe_axis) * 0.5 + vec2(0.5, 0.5);
-            return self.env_neg_z_texture.sample_as_bgra(uv).xyz
-        }
-
         get_env_specular: fn(refl_dir: vec3) {
             let env_t_spec = clamp(refl_dir.y * 0.5 + 0.5, 0.0, 1.0);
             let env_low = vec3(0.03, 0.035, 0.045);
             let env_high = vec3(0.36, 0.43, 0.5);
-            if self.u_has_env_face_textures > 0.5 {
-                return self.sample_env_faces(refl_dir)
-            }
             if self.u_has_env_texture > 0.5 {
                 return self.env_texture.sample_as_bgra(refl_dir).xyz
             }
@@ -363,9 +370,6 @@ script_mod! {
             let env_t_diff = clamp(normal_dir.y * 0.5 + 0.5, 0.0, 1.0);
             let env_low = vec3(0.03, 0.035, 0.045);
             let env_high = vec3(0.36, 0.43, 0.5);
-            if self.u_has_env_face_textures > 0.5 {
-                return self.sample_env_faces(normal_dir)
-            }
             if self.u_has_env_texture > 0.5 {
                 return self.env_texture.sample_as_bgra(normal_dir).xyz
             }
@@ -880,6 +884,17 @@ pub struct DrawPbr {
     pub transform_stack: Vec<Mat4f>,
     #[rust(vec4(1.0, 1.0, 1.0, 1.0))]
     pub cur_color: Vec4f,
+    #[rust(Mat4f::identity())]
+    pub view_matrix: Mat4f,
+    #[rust(Mat4f::identity())]
+    pub projection_matrix: Mat4f,
+    #[rust(vec4(-1.0, -1.0, 1.0, 1.0))]
+    pub clip_ndc: Vec4f,
+    #[rust(vec2(0.0, 1.0))]
+    pub depth_range: Vec2f,
+    /// Positive values move the 3D content forward in depth (towards 0.0).
+    #[rust(0.0)]
+    pub depth_forward_bias: f32,
     #[rust(vec4(1.0, 1.0, 1.0, 1.0))]
     pub base_color_factor: Vec4f,
     #[rust(1.0)]
@@ -906,8 +921,6 @@ pub struct DrawPbr {
     pub has_env_texture: f32,
     #[rust(0.0)]
     pub has_env_atlas_texture: f32,
-    #[rust(0.0)]
-    pub has_env_face_textures: f32,
     #[rust(vec3(0.3, 0.7, 1.0))]
     pub light_dir: Vec3f,
     #[rust(vec3(1.0, 1.0, 1.0))]
@@ -920,6 +933,10 @@ pub struct DrawPbr {
     pub spec_strength: f32,
     #[rust(1.8)]
     pub env_intensity: f32,
+    #[rust(vec3(0.0, 0.0, 5.0))]
+    pub camera_pos: Vec3f,
+    #[rust(0.0)]
+    pub use_pass_camera: f32,
     #[rust(0.0)]
     pub pad1: f32,
     #[deref]
@@ -979,7 +996,7 @@ pub struct DrawPbrRefractive {
 
 impl DrawPbrRefractive {
     pub fn set_camera_texture(&mut self, texture: Option<Texture>) {
-        self.draw_super.draw_vars.texture_slots[13] = texture;
+        self.draw_super.draw_vars.texture_slots[7] = texture;
     }
 }
 
@@ -1071,7 +1088,6 @@ impl DrawPbr {
         self.set_emissive_texture(None);
         self.set_env_texture(None);
         self.set_env_atlas_texture(None);
-        self.set_env_face_textures(None);
     }
 
     pub fn set_transform(&mut self, transform: Mat4f) {
@@ -1162,6 +1178,11 @@ impl DrawPbr {
         self.fill(vec4(r, g, b, a));
     }
 
+    pub fn set_view_projection(&mut self, view: Mat4f, projection: Mat4f) {
+        self.view_matrix = view;
+        self.projection_matrix = projection;
+    }
+
     pub fn set_color(&mut self, color: Vec4f) {
         self.cur_color = color;
     }
@@ -1230,17 +1251,19 @@ impl DrawPbr {
         self.draw_vars.texture_slots[6] = texture;
     }
 
-    pub fn set_env_face_textures(&mut self, textures: Option<&[Texture; 6]>) {
-        self.has_env_face_textures = if textures.is_some() { 1.0 } else { 0.0 };
-        if let Some(textures) = textures {
-            for (index, texture) in textures.iter().enumerate() {
-                self.draw_vars.texture_slots[7 + index] = Some(texture.clone());
-            }
-        } else {
-            for slot in 7..13 {
-                self.draw_vars.texture_slots[slot] = None;
-            }
-        }
+    pub fn set_clip_ndc(&mut self, clip_ndc: Vec4f) {
+        self.clip_ndc = clip_ndc;
+    }
+
+    pub fn set_depth_range(&mut self, min_depth: f32, max_depth: f32) {
+        self.depth_range = vec2(
+            min_depth.min(max_depth).clamp(0.0, 1.0),
+            max_depth.max(min_depth).clamp(0.0, 1.0),
+        );
+    }
+
+    pub fn set_depth_forward_bias(&mut self, bias: f32) {
+        self.depth_forward_bias = bias.clamp(0.0, 1.0);
     }
 
     pub fn set_depth_write(&mut self, depth_write: bool) {
@@ -1249,6 +1272,16 @@ impl DrawPbr {
 
     pub fn set_depth_clip(&mut self, depth_clip: f32) {
         self.depth_clip = depth_clip;
+    }
+
+    pub fn set_use_pass_camera(&mut self, use_pass_camera: bool) {
+        self.use_pass_camera = if use_pass_camera { 1.0 } else { 0.0 };
+    }
+
+    pub fn set_camera_state(&mut self, view: Mat4f, projection: Mat4f, camera_pos: Vec3f) {
+        self.view_matrix = view;
+        self.projection_matrix = projection;
+        self.camera_pos = camera_pos;
     }
 
     pub fn apply_material_state(&mut self, material: &DrawPbrMaterialState) {
@@ -1264,10 +1297,36 @@ impl DrawPbr {
         self.set_emissive_texture(material.textures.emissive.clone());
         self.set_env_texture(material.textures.env.clone());
         self.set_env_atlas_texture(material.textures.env_atlas.clone());
-        self.set_env_face_textures(material.textures.env_faces.as_ref());
     }
 
     fn apply_draw_uniforms(&mut self, cx: &mut CxDraw) {
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(view_matrix), &self.view_matrix.v);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(projection_matrix),
+            &self.projection_matrix.v,
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(clip_ndc),
+            &[
+                self.clip_ndc.x,
+                self.clip_ndc.y,
+                self.clip_ndc.z,
+                self.clip_ndc.w,
+            ],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(depth_range),
+            &[self.depth_range.x, self.depth_range.y],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(depth_forward_bias),
+            &[self.depth_forward_bias],
+        );
         self.draw_vars.set_uniform(
             cx.cx,
             live_id!(u_base_color_factor),
@@ -1333,11 +1392,6 @@ impl DrawPbr {
             live_id!(u_has_env_atlas_texture),
             &[self.has_env_atlas_texture],
         );
-        self.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(u_has_env_face_textures),
-            &[self.has_env_face_textures],
-        );
         let enable_occlusion = self.occlusion_enabled();
         let enable_emissive = self.emissive_enabled();
         let enable_direct_light = self.direct_light_enabled();
@@ -1389,6 +1443,13 @@ impl DrawPbr {
             .set_uniform(cx.cx, live_id!(u_spec_strength), &[self.spec_strength]);
         self.draw_vars
             .set_uniform(cx.cx, live_id!(u_env_intensity), &[self.env_intensity]);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_camera_pos),
+            &[self.camera_pos.x, self.camera_pos.y, self.camera_pos.z],
+        );
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(use_pass_camera), &[self.use_pass_camera]);
     }
 
     pub fn add_decoded_primitive(&mut self, primitive: &DecodedPrimitive) -> Result<(), String> {

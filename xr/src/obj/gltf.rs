@@ -41,7 +41,6 @@ pub struct Gltf {
     mesh_rotation: Vec3f,
     #[live(vec3(1.0, 1.0, 1.0))]
     mesh_scale: Vec3f,
-    #[cast]
     #[deref]
     node: XrNode,
 

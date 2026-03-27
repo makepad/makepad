@@ -20,9 +20,7 @@ impl Cx {
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
-        self.draw_lists[draw_list_id]
-            .draw_list_uniforms
-            .view_transform = Mat4f::identity();
+        self.update_draw_list_projective_transform(draw_pass_id, draw_list_id);
 
         for order_index in 0..draw_order_len {
             let Some(draw_item_id) =
@@ -33,14 +31,7 @@ impl Cx {
             if let Some(sub_list_id) =
                 self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
             {
-                let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
-                let mut child_zbias = 0.0f32;
-                self.render_view(
-                    draw_pass_id,
-                    sub_list_id,
-                    if child_resets_zbias { &mut child_zbias } else { zbias },
-                    zbias_step,
-                );
+                self.render_view(draw_pass_id, sub_list_id, zbias, zbias_step);
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
@@ -261,7 +252,7 @@ impl Cx {
                     pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
                     draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
                     draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),
-                    user_uniforms: WasmPtrF32::new(draw_call.dyn_uniforms.as_slice()),
+                    user_uniforms: WasmPtrF32::new(&draw_call.dyn_uniforms[..sh.mapping.dyn_uniforms.total_slots]),
                     live_uniforms: WasmPtrF32::new(&sh.mapping.scope_uniforms_buf),
                     const_table: WasmPtrF32::new(&[]),
                     textures,
