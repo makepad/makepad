@@ -75,7 +75,6 @@ impl Cx {
                             pass.color_textures = vec![CxDrawPassColorTexture {
                                 clear_color: DrawPassClearColor::ClearWith(pass.clear_color),
                                 texture: texture.clone(),
-                                cube_face: None,
                             }];
 
                             let kind_id = window.kind_id;

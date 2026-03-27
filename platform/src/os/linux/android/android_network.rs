@@ -1,11 +1,10 @@
 use super::android_jni;
 use crate::makepad_live_id::LiveId;
 use crate::makepad_network::{
-    plain_web_socket::PlainWebSocket,
     AndroidSocketStream, AndroidSocketStreamFactory, EventSink, HttpError, HttpRequest,
     HttpResponse, NetworkBackend, NetworkError, NetworkResponse, ServerWebSocketMessage,
-    ServerWebSocketMessageFormat, ServerWebSocketMessageHeader, WebSocketMessage,
-    WebSocketParser, WebSocketTransport, WsMessage, WsSend,
+    ServerWebSocketMessageFormat, ServerWebSocketMessageHeader, WebSocketMessage, WebSocketParser,
+    WsMessage, WsSend,
 };
 use std::collections::HashMap;
 use std::io;
@@ -26,19 +25,14 @@ struct HttpState {
 }
 
 struct PendingWs {
-    internal_socket_id: Option<LiveId>,
+    internal_socket_id: LiveId,
     sink: EventSink,
-    socket: AndroidSocket,
+    socket: AndroidWebSocket,
 }
 
 struct AndroidWebSocket {
     _sender_ref: Arc<Box<(u64, Sender<WebSocketMessage>)>>,
     java_socket_id: LiveId,
-}
-
-enum AndroidSocket {
-    Plain(PlainWebSocket),
-    Platform(AndroidWebSocket),
 }
 
 fn io_other(msg: impl Into<String>) -> io::Error {
@@ -224,22 +218,6 @@ impl AndroidWebSocket {
             android_jni::to_java_websocket_send_message(self.java_socket_id, frame);
         }
         Ok(())
-    }
-}
-
-impl AndroidSocket {
-    fn close(&mut self) {
-        match self {
-            AndroidSocket::Plain(socket) => socket.close(),
-            AndroidSocket::Platform(socket) => socket.close(),
-        }
-    }
-
-    fn send_message(&mut self, message: WebSocketMessage) -> Result<(), ()> {
-        match self {
-            AndroidSocket::Plain(socket) => socket.send_message(message),
-            AndroidSocket::Platform(socket) => socket.send_message(message),
-        }
     }
 }
 
@@ -448,39 +426,22 @@ impl NetworkBackend for AndroidNetworkShimBackend {
         request: HttpRequest,
         sink: EventSink,
     ) -> Result<(), NetworkError> {
-        let use_plain = matches!(request.websocket_transport, WebSocketTransport::PlainTcp);
+        let internal_socket_id = self.next_internal_id();
 
         let (sender, receiver) = std::sync::mpsc::channel::<WebSocketMessage>();
-        let (internal_socket_id, socket) = if use_plain {
-            (
-                None,
-                AndroidSocket::Plain(PlainWebSocket::open(socket_id, request, sender)),
-            )
-        } else {
-            let internal_socket_id = self.next_internal_id();
-            (
-                Some(internal_socket_id),
-                AndroidSocket::Platform(AndroidWebSocket::open(
-                    internal_socket_id,
-                    request,
-                    sender,
-                )),
-            )
-        };
+        let socket = AndroidWebSocket::open(internal_socket_id, request, sender);
 
         {
             let mut state = self
                 .ws
                 .lock()
                 .map_err(|_| NetworkError::backend("android shim websocket lock poisoned"))?;
-            if let Some(internal_socket_id) = internal_socket_id {
-                state
-                    .internal_to_public
-                    .insert(internal_socket_id, socket_id);
-                state
-                    .parsers
-                    .insert(internal_socket_id, WebSocketParser::new());
-            }
+            state
+                .internal_to_public
+                .insert(internal_socket_id, socket_id);
+            state
+                .parsers
+                .insert(internal_socket_id, WebSocketParser::new());
             state.by_public.insert(
                 socket_id,
                 PendingWs {
@@ -545,13 +506,11 @@ impl NetworkBackend for AndroidNetworkShimBackend {
             let Some(pending) = state.by_public.remove(&socket_id) else {
                 return Ok(());
             };
-            if let Some(internal_socket_id) = pending.internal_socket_id {
-                state.internal_to_public.remove(&internal_socket_id);
-                state.parsers.remove(&internal_socket_id);
-            }
+            state.internal_to_public.remove(&pending.internal_socket_id);
+            state.parsers.remove(&pending.internal_socket_id);
             Some(pending)
         };
-        if let Some(mut pending) = removed {
+        if let Some(pending) = removed {
             pending.socket.close();
             let _ = pending.sink.emit(NetworkResponse::WsClosed { socket_id });
         }
