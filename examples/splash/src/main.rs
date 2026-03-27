@@ -204,35 +204,42 @@ script_mod! {
         draw_bg.color: #333
         flow: Overlay
 
-        ScrollYView{
-            width: Fill height: Fill flow: Down padding: 15 spacing: 12
+        View{
+            width: Fill height: Fill
+            flow: Down
+            padding: 15
+            spacing: 12
 
-            Label{text: "Button Variants" draw_text.color: #fff draw_text.text_style.font_size: 13}
-
-            View{width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}}
-            button := Button{text: "Standard"}
-            flat_button := ButtonFlat{text: "Flat"}
-            flatter_button := ButtonFlatter{text: "Flatter"}
-
-            icon_button := Button{
-                text: "With Icon"
-                icon_walk: Walk{width: 16 height: 16}
-                draw_icon.color: #fff
-                draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_file.svg")
+            Label{text: "Test Navigation" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            View{
+                width: Fill height: Fit flow: Right spacing: 10
+                open_text_tab_btn := ButtonFlat{text: "Open Text"}
+                open_sliders_tab_btn := ButtonFlat{text: "Open Sliders"}
+                open_dropdowns_tab_btn := ButtonFlat{text: "Open Selects"}
+            }
+            View{
+                width: Fill height: Fit flow: Right spacing: 10
+                open_folds_tab_btn := ButtonFlat{text: "Open Folds"}
+                open_expandable_tab_btn := ButtonFlat{text: "Open Expandable"}
+                open_slides_tab_btn := ButtonFlat{text: "Open Slides"}
+                open_filetree_tab_btn := ButtonFlat{text: "Open FileTree"}
+            }
+            nav_status := Label{
+                text: "Navigation: idle"
+                draw_text.color: #8fd
+                draw_text.text_style.font_size: 10
             }
 
             Hr{}
 
             Label{text: "Press Hook Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            Label{text: "on_press fires on pointer down and can call widget methods directly" draw_text.color: #888 draw_text.text_style.font_size: 10}
-
-            View{width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}}
-            press_demo_button := Button{
-                text: "Run on_press"
-                on_press: || ui.press_status.set_text("Last press: Run on_press")
-            }
-            press_reset_button := ButtonFlat{
-                text: "Reset"
+            View{
+                width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}
+                press_demo_button := Button{
+                    text: "Run on_press"
+                    on_press: || ui.press_status.set_text("Last press: Run on_press")
+                }
+                press_reset_button := ButtonFlat{text: "Reset"}
             }
             press_status := Label{
                 text: "Last press: none"
@@ -242,43 +249,62 @@ script_mod! {
 
             Hr{}
 
-            Label{text: "Bare Icons (with optional rotation)" draw_text.color: #888 draw_text.text_style.font_size: 10}
-            View{width: Fill height: Fit flow: Right spacing: 15}
-            Icon{
-                draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_file.svg")
-                draw_icon.color: #0ff
-                icon_walk: Walk{width: 32 height: 32}
+            Label{text: "Tooltip + Popup Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            View{
+                width: Fill height: Fit flow: Right spacing: 10
+                normal_tooltip_button := Button{text: "Show Normal Tooltip"}
+                callout_tooltip_button := Button{text: "Show Callout Tooltip"}
+                show_popup_btn := Button{text: "Show Notification"}
+                hide_popup_btn := ButtonFlat{text: "Hide Notification"}
             }
-            Icon{
-                draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_select.svg")
-                draw_icon.color: #f80
-                icon_walk: Walk{width: 32 height: 32}
-            }
-            IconRotated {
-                draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_select.svg")
-                // draw_icon.svg: crate_resource("self:resources/app_icon.svg")
-                draw_icon.color: #f80
-                draw_icon.rotation_angle: 99.0
-                icon_walk: Walk{width: 32 height: 32}
+            overlay_status := Label{
+                text: "Overlay status: idle"
+                draw_text.color: #8fd
+                draw_text.text_style.font_size: 10
             }
 
             Hr{}
 
-            Label{text: "Tooltip Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            Label{text: "Click button to show tooltip, click elsewhere to hide" draw_text.color: #888 draw_text.text_style.font_size: 10}
+            ScrollYView{
+                width: Fill height: Fill flow: Down spacing: 12
 
-            View{width: Fill height: Fit flow: Right spacing: 10}
-            normal_tooltip_button := Button{text: "Show Normal Tooltip"}
-            callout_tooltip_button := Button{text: "Show Callout Tooltip"}
+                Label{text: "Button Variants" draw_text.color: #fff draw_text.text_style.font_size: 13}
+                View{
+                    width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5}
+                    button := Button{text: "Standard"}
+                    flat_button := ButtonFlat{text: "Flat"}
+                    flatter_button := ButtonFlatter{text: "Flatter"}
+                    icon_button := Button{
+                        text: "With Icon"
+                        icon_walk: Walk{width: 16 height: 16}
+                        draw_icon.color: #fff
+                        draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_file.svg")
+                    }
+                }
 
-            Hr{}
+                Hr{}
 
-            Label{text: "Popup Notification Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
-            Label{text: "Click to show/hide notification popup" draw_text.color: #888 draw_text.text_style.font_size: 10}
-
-            View{width: Fill height: Fit flow: Right spacing: 10}
-            show_popup_btn := Button{text: "Show Notification"}
-            hide_popup_btn := ButtonFlat{text: "Hide Notification"}
+                Label{text: "Bare Icons (with optional rotation)" draw_text.color: #888 draw_text.text_style.font_size: 10}
+                View{
+                    width: Fill height: Fit flow: Right spacing: 15
+                    Icon{
+                        draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_file.svg")
+                        draw_icon.color: #0ff
+                        icon_walk: Walk{width: 32 height: 32}
+                    }
+                    Icon{
+                        draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_select.svg")
+                        draw_icon.color: #f80
+                        icon_walk: Walk{width: 32 height: 32}
+                    }
+                    IconRotated {
+                        draw_icon.svg: crate_resource("self:../../widgets/resources/icons/icon_select.svg")
+                        draw_icon.color: #f80
+                        draw_icon.rotation_angle: 99.0
+                        icon_walk: Walk{width: 32 height: 32}
+                    }
+                }
+            }
         }
 
         // Tooltip overlay
@@ -339,6 +365,11 @@ script_mod! {
 
             Label{text: "Quick Select" draw_text.color: #fff draw_text.text_style.font_size: 13}
             smoke_dropdown := DropDown{labels: ["Option A" "Option B" "Option C"]}
+            smoke_dropdown_status := Label{
+                text: "Quick select: Option A"
+                draw_text.color: #8fd
+                draw_text.text_style.font_size: 10
+            }
         }
     }
 
@@ -352,6 +383,11 @@ script_mod! {
             Label{text: "Sliders" draw_text.color: #fff draw_text.text_style.font_size: 13}
 
             slider := Slider{width: Fill text: "Volume" min: 0.0 max: 100.0 default: 50.0}
+            slider_status := Label{
+                text: "Slider status: 50"
+                draw_text.color: #8fd
+                draw_text.text_style.font_size: 10
+            }
             Slider{width: Fill text: "Brightness" min: 0.0 max: 100.0 default: 75.0}
             Slider{width: Fill text: "Contrast" min: -50.0 max: 50.0 default: 0.0}
             Slider{width: Fill text: "Saturation" min: 0.0 max: 200.0 default: 100.0}
@@ -400,6 +436,11 @@ script_mod! {
 
             Label{text: "Dropdown" draw_text.color: #fff draw_text.text_style.font_size: 13}
             dropdown := DropDown{labels: ["Option A" "Option B" "Option C" "Option D"]}
+            dropdown_status := Label{
+                text: "Dropdown status: Option A"
+                draw_text.color: #8fd
+                draw_text.text_style.font_size: 10
+            }
 
             Hr{}
 
@@ -481,6 +522,11 @@ script_mod! {
                 CheckBox{text: "Option 1"}
                 CheckBox{text: "Option 2"}
                 CheckBox{text: "Option 3"}
+                expandable_status := Label{
+                    text: "Expandable status: reset"
+                    draw_text.color: #8fd
+                    draw_text.text_style.font_size: 10
+                }
 
                 View{height: Fill}
 
@@ -497,19 +543,25 @@ script_mod! {
             width: Fill height: Fill flow: Down padding: 15 spacing: 10
 
             Label{text: "Fold Headers" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            fold_status := Label{
+                text: "Fold status: Settings closed"
+                draw_text.color: #8fd
+                draw_text.text_style.font_size: 10
+            }
+            toggle_settings_fold_btn := ButtonFlat{text: "Toggle Settings Fold"}
 
-            FoldHeader{
+            settings_fold := FoldHeader{
                 header: View{
                     width: Fill height: Fit flow: Right align: Align{y: 0.5}
                     padding: Inset{top: 5 bottom: 5} spacing: 8
-                    FoldButton{}
+                    settings_fold_button := FoldButton{}
                     Label{text: "Settings" draw_text.color: #fff draw_text.text_style.font_size: 11}
                 }
                 body: View{
                     width: Fill height: Fit flow: Down
                     padding: Inset{left: 23 top: 5 bottom: 10} spacing: 8
                     CheckBox{text: "Enable notifications"}
-                    CheckBox{text: "Auto-save"}
+                    settings_auto_save := CheckBox{text: "Auto-save"}
                     Toggle{text: "Dark theme"}
                 }
             }
@@ -517,13 +569,13 @@ script_mod! {
                 header: View{
                     width: Fill height: Fit flow: Right align: Align{y: 0.5}
                     padding: Inset{top: 5 bottom: 5} spacing: 8
-                    FoldButton{}
+                    recent_fold_button := FoldButton{}
                     Label{text: "Recent Files" draw_text.color: #fff draw_text.text_style.font_size: 11}
                 }
                 body: View{
                     width: Fill height: Fit flow: Down
                     padding: Inset{left: 23 top: 5 bottom: 10} spacing: 5
-                    Label{text: "document.txt" draw_text.color: #8af}
+                    recent_document := Label{text: "document.txt" draw_text.color: #8af}
                     Label{text: "project.rs" draw_text.color: #8af}
                     Label{text: "config.toml" draw_text.color: #8af}
                 }
@@ -570,7 +622,7 @@ script_mod! {
         //Label{text: "Displays file system hierarchy" draw_text.color: #888 draw_text.text_style.font_size: 10}
         View{
             new_batch: true
-            FileTreeDemo{
+            file_tree_demo := FileTreeDemo{
                 width: Fill height: Fill
             }
         }
@@ -681,6 +733,11 @@ script_mod! {
 
         Label{text: "SlidesView Demo" draw_text.color: #fff draw_text.text_style.font_size: 13}
         Label{text: "Use arrow keys (left/right) to navigate slides" draw_text.color: #888 draw_text.text_style.font_size: 10}
+        slides_status := Label{
+            text: "Slides status: 0 - Welcome to Makepad"
+            draw_text.color: #8fd
+            draw_text.text_style.font_size: 10
+        }
 
         slides := SlidesView{
             width: Fill height: Fill
@@ -1601,6 +1658,13 @@ pub struct App {
     ui: WidgetRef,
 }
 
+impl App {
+    fn select_demo_tab(&self, cx: &mut Cx, tab_id: LiveId) {
+        self.ui.dock(cx, ids!(dock)).select_tab(cx, tab_id);
+        self.ui.redraw(cx);
+    }
+}
+
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         // Load a test image into the Image widget
@@ -1628,10 +1692,57 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(icon_button)).clicked(actions) {
             log!("Icon button clicked!");
         }
+        if self.ui.button(cx, ids!(press_demo_button)).clicked(actions) {
+            self.ui
+                .label(cx, ids!(press_status))
+                .set_text(cx, "Last press: Run on_press");
+        }
         if self.ui.button(cx, ids!(press_reset_button)).clicked(actions) {
             self.ui
                 .label(cx, ids!(press_status))
                 .set_text(cx, "Last press: none");
+        }
+        if self.ui.button(cx, ids!(open_text_tab_btn)).clicked(actions) {
+            self.select_demo_tab(cx, live_id!(text_tab));
+            self.ui
+                .label(cx, ids!(nav_status))
+                .set_text(cx, "Navigation: Text");
+        }
+        if self.ui.button(cx, ids!(open_sliders_tab_btn)).clicked(actions) {
+            self.select_demo_tab(cx, live_id!(sliders_tab));
+            self.ui
+                .label(cx, ids!(nav_status))
+                .set_text(cx, "Navigation: Sliders");
+        }
+        if self.ui.button(cx, ids!(open_dropdowns_tab_btn)).clicked(actions) {
+            self.select_demo_tab(cx, live_id!(dropdowns_tab));
+            self.ui
+                .label(cx, ids!(nav_status))
+                .set_text(cx, "Navigation: Selects");
+        }
+        if self.ui.button(cx, ids!(open_folds_tab_btn)).clicked(actions) {
+            self.select_demo_tab(cx, live_id!(folds_tab));
+            self.ui
+                .label(cx, ids!(nav_status))
+                .set_text(cx, "Navigation: Folds");
+        }
+        if self.ui.button(cx, ids!(open_expandable_tab_btn)).clicked(actions) {
+            self.select_demo_tab(cx, live_id!(expandable_tab));
+            self.ui
+                .label(cx, ids!(nav_status))
+                .set_text(cx, "Navigation: Expandable");
+        }
+        if self.ui.button(cx, ids!(open_slides_tab_btn)).clicked(actions) {
+            self.select_demo_tab(cx, live_id!(slides_tab));
+            self.ui
+                .label(cx, ids!(nav_status))
+                .set_text(cx, "Navigation: Slides");
+        }
+        if self.ui.button(cx, ids!(open_filetree_tab_btn)).clicked(actions) {
+            self.select_demo_tab(cx, live_id!(filetree_tab));
+            self.ui
+                .label(cx, ids!(nav_status))
+                .set_text(cx, "Navigation: FileTree");
         }
 
         // Tooltip demo - show tooltips on button click
@@ -1646,6 +1757,9 @@ impl MatchEvent for App {
                 dvec2(350.0, 280.0),
                 "This is the tooltip 1 button. Click it to perform the primary action.",
             );
+            self.ui
+                .label(cx, ids!(overlay_status))
+                .set_text(cx, "Overlay status: Normal tooltip shown");
         }
         let callout_tooltip_button = self.ui.button(cx, ids!(callout_tooltip_button));
         if callout_tooltip_button.clicked(actions) {
@@ -1661,16 +1775,25 @@ impl MatchEvent for App {
                     ..Default::default()
                 }
             );
+            self.ui
+                .label(cx, ids!(overlay_status))
+                .set_text(cx, "Overlay status: Callout tooltip shown");
         }
 
         // Popup notification demo
         if self.ui.button(cx, ids!(show_popup_btn)).clicked(actions) {
             log!("Showing popup notification");
             self.ui.popup_notification(cx, ids!(popup_notif)).open(cx);
+            self.ui
+                .label(cx, ids!(overlay_status))
+                .set_text(cx, "Overlay status: Popup shown");
         }
         if self.ui.button(cx, ids!(hide_popup_btn)).clicked(actions) {
             log!("Hiding popup notification");
             self.ui.popup_notification(cx, ids!(popup_notif)).close(cx);
+            self.ui
+                .label(cx, ids!(overlay_status))
+                .set_text(cx, "Overlay status: Popup hidden");
         }
 
         if let Some(value) = self.ui.check_box(cx, ids!(checkbox)).changed(actions) {
@@ -1689,11 +1812,29 @@ impl MatchEvent for App {
         if let Some(index) = self.ui.drop_down(cx, ids!(smoke_dropdown)).selected(actions) {
             log!("Quick select changed: {}", index);
         }
+        if let Some(label) = self.ui.drop_down(cx, ids!(smoke_dropdown)).changed_label(actions) {
+            self.ui
+                .label(cx, ids!(smoke_dropdown_status))
+                .set_text(cx, &format!("Quick select: {label}"));
+        }
+        if let Some(value) = self.ui.slider(cx, ids!(slider)).slided(actions) {
+            self.ui
+                .label(cx, ids!(slider_status))
+                .set_text(cx, &format!("Slider status: {:.0}", value.round()));
+        }
+        if let Some(label) = self.ui.drop_down(cx, ids!(dropdown)).changed_label(actions) {
+            self.ui
+                .label(cx, ids!(dropdown_status))
+                .set_text(cx, &format!("Dropdown status: {label}"));
+        }
 
         // ExpandablePanel test
         if self.ui.button(cx, ids!(reset_btn)).clicked(actions) {
             log!("Resetting expandable panel");
             self.ui.expandable_panel(cx, ids!(expandable)).reset(cx);
+            self.ui
+                .label(cx, ids!(expandable_status))
+                .set_text(cx, "Expandable status: reset");
         }
 
         if let Some(offset) = self
@@ -1702,6 +1843,50 @@ impl MatchEvent for App {
             .scrolled_at(actions)
         {
             log!("ExpandablePanel scrolled to: {}", offset);
+            self.ui
+                .label(cx, ids!(expandable_status))
+                .set_text(cx, "Expandable status: moved");
+        }
+
+        if self
+            .ui
+            .button(cx, ids!(toggle_settings_fold_btn))
+            .clicked(actions)
+        {
+            let settings_fold = self.ui.fold_header(cx, ids!(settings_fold));
+            let is_open = !settings_fold.is_open(cx);
+            settings_fold.set_is_open(cx, is_open, Animate::No);
+            self.ui.label(cx, ids!(fold_status)).set_text(
+                cx,
+                if is_open {
+                    "Fold status: Settings open"
+                } else {
+                    "Fold status: Settings closed"
+                },
+            );
+        }
+        if self.ui.fold_button(cx, ids!(settings_fold_button)).opening(actions) {
+            self.ui
+                .label(cx, ids!(fold_status))
+                .set_text(cx, "Fold status: Settings open");
+        }
+        if self.ui.fold_button(cx, ids!(settings_fold_button)).closing(actions) {
+            self.ui
+                .label(cx, ids!(fold_status))
+                .set_text(cx, "Fold status: Settings closed");
+        }
+        if let Some(index) = self.ui.slides_view(cx, ids!(slides)).flipped(actions) {
+            let title = match index {
+                0 => "Welcome to Makepad",
+                1 => "Chapter 1: Getting Started",
+                2 => "Features",
+                3 => "Chapter 2: Advanced Topics",
+                4 => "Thank You!",
+                _ => "Unknown",
+            };
+            self.ui
+                .label(cx, ids!(slides_status))
+                .set_text(cx, &format!("Slides status: {index} - {title}"));
         }
 
         // Modal tests

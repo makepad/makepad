@@ -1,5 +1,5 @@
 use crate::report::{
-    write_case_report, write_suite_outputs, CaseReport, StepEvidence, SuiteReport, TraceStep,
+    write_case_outputs, write_suite_outputs, CaseReport, StepEvidence, SuiteReport, TraceStep,
 };
 use crate::runtime::{capture_failure_artifacts_to, run_with_config, sanitize_path_component};
 use crate::selector::SelectorOptions;
@@ -88,13 +88,8 @@ impl SplashSuiteHost {
                 self.suite_path.display()
             )));
         }
-        self.cases.insert(
-            name.clone(),
-            SplashCase {
-                name,
-                function,
-            },
-        );
+        self.cases
+            .insert(name.clone(), SplashCase { name, function });
         Ok(())
     }
 
@@ -147,6 +142,7 @@ impl SplashSuiteHost {
             duration_ms: duration_ms(case.start_instant.elapsed()),
             artifact_dir: case.artifact_dir.to_string_lossy().to_string(),
             failure_message,
+            session_apng_path: None,
             generated_case_path: None,
             steps: case.steps,
         }
@@ -208,6 +204,9 @@ impl SplashSuiteHost {
             evidence.after_widgets =
                 selector.and_then(|selector| app.try_query_widgets(selector, false).ok());
         }
+        if evidence.screenshot_path.is_none() {
+            capture_step_screenshot(app, &case.artifact_dir, index, &kind, &mut evidence);
+        }
         let finished_at_ms = duration_ms(case.start_instant.elapsed());
         let step = match result {
             Ok(value) => {
@@ -233,19 +232,6 @@ impl SplashSuiteHost {
                         .try_widget_dump()
                         .ok()
                         .map(|dump| truncate_text(&dump, 2000));
-                }
-                if evidence.screenshot_path.is_none() {
-                    let steps_dir = case.artifact_dir.join("steps");
-                    let _ = fs::create_dir_all(&steps_dir);
-                    let screenshot_path = steps_dir.join(format!(
-                        "{:03}-{}.png",
-                        index,
-                        sanitize_path_component(&kind)
-                    ));
-                    if app.try_copy_screenshot_to(&screenshot_path).is_ok() {
-                        evidence.screenshot_path =
-                            Some(screenshot_path.to_string_lossy().to_string());
-                    }
                 }
                 TraceStep {
                     index,
@@ -430,6 +416,7 @@ impl SplashSuiteRunner {
                     duration_ms: 0,
                     artifact_dir: artifact_dir.to_string_lossy().to_string(),
                     failure_message: Some(err.message().to_string()),
+                    session_apng_path: None,
                     generated_case_path: None,
                     steps: Vec::new(),
                 };
@@ -612,8 +599,8 @@ fn run_isolated_splash_suite(
                 Ok(())
             }
         });
-        let outcome = outcome.expect("Splash isolated case outcome was not recorded");
-        write_case_report(&case_dir, &outcome.report)?;
+        let mut outcome = outcome.expect("Splash isolated case outcome was not recorded");
+        write_case_outputs(&case_dir, &mut outcome.report)?;
         case_reports.push(outcome.report);
         match result {
             Ok(()) => {
@@ -673,7 +660,7 @@ fn run_shared_splash_suite(
                 case_name
             );
             let case_start = Instant::now();
-            let outcome = runner.run_case_with_report(
+            let mut outcome = runner.run_case_with_report(
                 case_name,
                 app.clone(),
                 case_dir.clone(),
@@ -682,7 +669,7 @@ fn run_shared_splash_suite(
             if let Some(err) = outcome.error.clone() {
                 capture_failure_artifacts_to(&app, &case_dir, err.message());
             }
-            write_case_report(&case_dir, &outcome.report)?;
+            write_case_outputs(&case_dir, &mut outcome.report)?;
             case_reports.push(outcome.report);
             if let Some(err) = outcome.error {
                 eprintln!(
@@ -773,6 +760,25 @@ where
     }) {
         Ok(()) => NIL,
         Err(err) => host_script_error(vm, err.message()),
+    }
+}
+
+fn capture_step_screenshot(
+    app: &TestApp,
+    artifact_dir: &Path,
+    index: usize,
+    kind: &str,
+    evidence: &mut StepEvidence,
+) {
+    let steps_dir = artifact_dir.join("steps");
+    let _ = fs::create_dir_all(&steps_dir);
+    let screenshot_path = steps_dir.join(format!(
+        "{:03}-{}.png",
+        index,
+        sanitize_path_component(kind)
+    ));
+    if app.try_copy_screenshot_to(&screenshot_path).is_ok() {
+        evidence.screenshot_path = Some(screenshot_path.to_string_lossy().to_string());
     }
 }
 
@@ -1532,7 +1538,10 @@ fn host_script_error(vm: &mut ScriptVm, message: impl Into<String>) -> ScriptVal
     NIL
 }
 
-fn parse_suite_options(vm: &mut ScriptVm, value: ScriptValue) -> Result<SplashSuiteOptions, ScriptValue> {
+fn parse_suite_options(
+    vm: &mut ScriptVm,
+    value: ScriptValue,
+) -> Result<SplashSuiteOptions, ScriptValue> {
     let Some(object) = value.as_object() else {
         return Err(script_err_type_mismatch!(
             vm.trap(),
@@ -1547,19 +1556,20 @@ fn parse_suite_options(vm: &mut ScriptVm, value: ScriptValue) -> Result<SplashSu
         id!(visible_run_item),
         "test.configure visible_run_item",
     )?;
-    let session_mode = match optional_string_field(vm, object, id!(session_mode), "test.configure session_mode")?
-        .as_deref()
-        .unwrap_or("isolated")
-    {
-        "isolated" => SessionMode::Isolated,
-        "shared" => SessionMode::Shared,
-        other => {
-            return Err(host_script_error(
-                vm,
-                format!("unknown test.configure session_mode `{}`", other),
-            ))
-        }
-    };
+    let session_mode =
+        match optional_string_field(vm, object, id!(session_mode), "test.configure session_mode")?
+            .as_deref()
+            .unwrap_or("isolated")
+        {
+            "isolated" => SessionMode::Isolated,
+            "shared" => SessionMode::Shared,
+            other => {
+                return Err(host_script_error(
+                    vm,
+                    format!("unknown test.configure session_mode `{}`", other),
+                ))
+            }
+        };
     let headless_run_item = optional_string_field(
         vm,
         object,
@@ -1645,7 +1655,11 @@ fn parse_suite_options(vm: &mut ScriptVm, value: ScriptValue) -> Result<SplashSu
     })
 }
 
-fn parse_selector(vm: &mut ScriptVm, value: ScriptValue, what: &str) -> Result<Selector, ScriptValue> {
+fn parse_selector(
+    vm: &mut ScriptVm,
+    value: ScriptValue,
+    what: &str,
+) -> Result<Selector, ScriptValue> {
     if value.is_string_like() {
         return Ok(Selector::raw(script_value_to_string(vm, value)));
     }
@@ -1659,9 +1673,19 @@ fn parse_selector(vm: &mut ScriptVm, value: ScriptValue, what: &str) -> Result<S
 
     let options = SelectorOptions {
         id: optional_string_field(vm, object, id!(id), &format!("{what}.id"))?,
-        widget_type: optional_string_field(vm, object, id!(widget_type), &format!("{what}.widget_type"))?,
+        widget_type: optional_string_field(
+            vm,
+            object,
+            id!(widget_type),
+            &format!("{what}.widget_type"),
+        )?,
         raw: optional_string_field(vm, object, id!(raw), &format!("{what}.raw"))?,
-        text_exact: optional_string_field(vm, object, id!(text_exact), &format!("{what}.text_exact"))?,
+        text_exact: optional_string_field(
+            vm,
+            object,
+            id!(text_exact),
+            &format!("{what}.text_exact"),
+        )?,
         text_contains: optional_string_field(
             vm,
             object,
@@ -1676,8 +1700,13 @@ fn parse_selector(vm: &mut ScriptVm, value: ScriptValue, what: &str) -> Result<S
             id!(window_index),
             &format!("{what}.window_index"),
         )?,
-        any_window: optional_bool_field(vm, object, id!(any_window), &format!("{what}.any_window"))?
-            .unwrap_or(false),
+        any_window: optional_bool_field(
+            vm,
+            object,
+            id!(any_window),
+            &format!("{what}.any_window"),
+        )?
+        .unwrap_or(false),
     };
 
     if options.any_window && (options.window.is_some() || options.window_index.is_some()) {
@@ -1723,7 +1752,8 @@ fn parse_key_press(
         script_err_unexpected!(vm.trap(), "{} has unknown key `{}`", what, key_name)
     })?;
     let modifiers = KeyModifiers {
-        shift: optional_bool_field(vm, object, id!(shift), &format!("{what}.shift"))?.unwrap_or(false),
+        shift: optional_bool_field(vm, object, id!(shift), &format!("{what}.shift"))?
+            .unwrap_or(false),
         control: optional_bool_field(vm, object, id!(control), &format!("{what}.control"))?
             .unwrap_or(false),
         alt: optional_bool_field(vm, object, id!(alt), &format!("{what}.alt"))?.unwrap_or(false),
@@ -1736,7 +1766,12 @@ fn parse_key_code_name(name: &str) -> Option<KeyCode> {
     let normalized: String = name
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(|ch| ch.to_ascii_lowercase().to_string().chars().collect::<Vec<_>>())
+        .flat_map(|ch| {
+            ch.to_ascii_lowercase()
+                .to_string()
+                .chars()
+                .collect::<Vec<_>>()
+        })
         .collect();
     if normalized.len() == 1 {
         let ch = normalized.chars().next()?;
@@ -1846,9 +1881,9 @@ fn parse_bool(vm: &mut ScriptVm, value: ScriptValue, what: &str) -> Result<bool,
 }
 
 fn parse_f64(vm: &mut ScriptVm, value: ScriptValue, what: &str) -> Result<f64, ScriptValue> {
-    value.as_number().ok_or_else(|| {
-        script_err_type_mismatch!(vm.trap(), "{} expects a number", what)
-    })
+    value
+        .as_number()
+        .ok_or_else(|| script_err_type_mismatch!(vm.trap(), "{} expects a number", what))
 }
 
 fn parse_usize(vm: &mut ScriptVm, value: ScriptValue, what: &str) -> Result<usize, ScriptValue> {
@@ -1928,17 +1963,23 @@ fn widget_snapshot_to_value(vm: &mut ScriptVm, widget: &WidgetSnapshot) -> Scrip
     set_string_field(vm, object, id!(id), &widget.id);
     set_string_field(vm, object, id!(widget_type), &widget.widget_type);
     set_string_field(vm, object, id!(window_id), &widget.window_id);
-    vm.bx
-        .heap
-        .set_value_def(object, id!(window_index).into(), (widget.window_index as f64).into());
+    vm.bx.heap.set_value_def(
+        object,
+        id!(window_index).into(),
+        (widget.window_index as f64).into(),
+    );
     vm.bx
         .heap
         .set_value_def(object, id!(visible).into(), widget.visible.into());
     vm.bx
         .heap
         .set_value_def(object, id!(enabled).into(), widget.enabled.into());
-    vm.bx.heap.set_value_def(object, id!(x).into(), (widget.x as f64).into());
-    vm.bx.heap.set_value_def(object, id!(y).into(), (widget.y as f64).into());
+    vm.bx
+        .heap
+        .set_value_def(object, id!(x).into(), (widget.x as f64).into());
+    vm.bx
+        .heap
+        .set_value_def(object, id!(y).into(), (widget.y as f64).into());
     vm.bx
         .heap
         .set_value_def(object, id!(width).into(), (widget.width as f64).into());
@@ -1989,7 +2030,9 @@ fn logs_to_value(vm: &mut ScriptVm, logs: &[(usize, LogEntry)]) -> ScriptValue {
         set_string_field(vm, object, id!(message), &entry.message);
         set_optional_string_field(vm, object, id!(file_name), entry.file_name.as_deref());
         if let Some(line) = entry.line {
-            vm.bx.heap.set_value_def(object, id!(line).into(), (line as f64).into());
+            vm.bx
+                .heap
+                .set_value_def(object, id!(line).into(), (line as f64).into());
         } else {
             vm.bx.heap.set_value_def(object, id!(line).into(), NIL);
         }
@@ -2195,12 +2238,9 @@ mod tests {
 
     #[test]
     fn selector_config_shapes_artifact_dir_by_case_name() {
-        let config = TestConfig::current_package(
-            "/tmp/example",
-            "makepad-example",
-            "ui::splash_case_name",
-        )
-        .unwrap();
+        let config =
+            TestConfig::current_package("/tmp/example", "makepad-example", "ui::splash_case_name")
+                .unwrap();
         assert_eq!(
             config.artifacts_dir,
             PathBuf::from("/tmp/example")
@@ -2231,11 +2271,7 @@ mod tests {
         .unwrap();
 
         let runner = SplashSuiteRunner::load(manifest_dir.clone(), "tests/ui.splash").unwrap();
-        let err = runner
-            .host
-            .case("missing")
-            .err()
-            .unwrap();
+        let err = runner.host.case("missing").err().unwrap();
 
         assert!(err.message().contains("was not registered"));
     }

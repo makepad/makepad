@@ -52,3 +52,85 @@ test.case("splash_toggle_radio_and_dropdown_smoke", || {
     test.wait_checked({id: "radio2"}, true)
     test.wait_text({id: "smoke_dropdown"}, "Option A")
 })
+
+test.case("text_input_smoke", || {
+    test.wait_visible({id: "open_text_tab_btn"})
+    test.click({id: "open_text_tab_btn"})
+    test.wait_text({id: "nav_status"}, "Navigation: Text")
+    test.wait_visible({id: "username"})
+    test.fill({id: "username"}, "alice")
+    test.wait_value({id: "username"}, "alice")
+    test.fill({id: "password"}, "hunter2")
+    test.wait_value({id: "password"}, "hunter2")
+})
+
+test.case("dropdown_selection_smoke", || {
+    test.wait_visible({id: "open_dropdowns_tab_btn"})
+    test.click({id: "open_dropdowns_tab_btn"})
+    test.wait_text({id: "nav_status"}, "Navigation: Selects")
+    test.wait_visible({id: "dropdown"})
+    test.wait_text({id: "dropdown_status"}, "Dropdown status: Option A")
+    test.click({id: "dropdown"})
+    test.press_key("ArrowDown")
+    test.wait_text({id: "dropdown_status"}, "Dropdown status: Option B")
+})
+
+test.case("slider_value_smoke", || {
+    test.wait_visible({id: "open_sliders_tab_btn"})
+    test.click({id: "open_sliders_tab_btn"})
+    test.wait_text({id: "nav_status"}, "Navigation: Sliders")
+    test.wait_visible({id: "slider"})
+    test.wait_text({id: "slider_status"}, "Slider status: 50")
+    test.drag({id: "slider"}, 10000, 0)
+    test.wait_text({id: "slider_status"}, "Slider status: 100")
+})
+
+test.case("tooltip_popup_smoke", || {
+    let buttons_tab = {id: "buttons_tab" text_exact: "Buttons"}
+
+    test.wait_visible(buttons_tab)
+    test.click(buttons_tab)
+    test.wait_checked(buttons_tab, true)
+    test.wait_text({id: "overlay_status"}, "Overlay status: idle")
+    test.click({id: "normal_tooltip_button"})
+    test.wait_text({id: "overlay_status"}, "Overlay status: Normal tooltip shown")
+    test.click({id: "callout_tooltip_button"})
+    test.wait_text({id: "overlay_status"}, "Overlay status: Callout tooltip shown")
+    test.click({id: "show_popup_btn"})
+    test.wait_text({id: "overlay_status"}, "Overlay status: Popup shown")
+    test.click({id: "hide_popup_btn"})
+    test.wait_text({id: "overlay_status"}, "Overlay status: Popup hidden")
+})
+
+test.case("fold_header_smoke", || {
+    test.wait_visible({id: "open_folds_tab_btn"})
+    test.click({id: "open_folds_tab_btn"})
+    test.wait_text({id: "nav_status"}, "Navigation: Folds")
+    test.wait_visible({id: "settings_fold_button"})
+    test.wait_text({id: "fold_status"}, "Fold status: Settings closed")
+})
+
+test.case("expandable_panel_smoke", || {
+    test.wait_visible({id: "open_expandable_tab_btn"})
+    test.click({id: "open_expandable_tab_btn"})
+    test.wait_text({id: "nav_status"}, "Navigation: Expandable")
+    test.wait_visible({id: "reset_btn"})
+    test.click({id: "reset_btn"})
+    test.wait_text({id: "expandable_status"}, "Expandable status: reset")
+    test.drag({id: "expandable"}, 0, -180)
+    test.wait_text({id: "expandable_status"}, "Expandable status: moved")
+})
+
+test.case("slides_navigation_smoke", || {
+    test.wait_visible({id: "open_slides_tab_btn"})
+    test.click({id: "open_slides_tab_btn"})
+    test.wait_text({id: "nav_status"}, "Navigation: Slides")
+    test.wait_visible({id: "slides"})
+    test.wait_text({id: "slides_status"}, "Slides status: 0 - Welcome to Makepad")
+})
+
+test.case("file_tree_smoke", || {
+    test.wait_visible({id: "open_filetree_tab_btn"})
+    test.click({id: "open_filetree_tab_btn"})
+    test.wait_text({id: "nav_status"}, "Navigation: FileTree")
+})

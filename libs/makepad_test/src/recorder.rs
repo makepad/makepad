@@ -238,6 +238,7 @@ impl SplashRecorderSession {
             duration_ms: 0,
             artifact_dir: self.artifact_dir.to_string_lossy().to_string(),
             failure_message: None,
+            session_apng_path: None,
             generated_case_path: Some(generated_case_path.to_string_lossy().to_string()),
             steps,
         };
