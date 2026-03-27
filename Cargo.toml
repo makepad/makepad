@@ -69,7 +69,15 @@ workspace.members = [
     "libs/git",
     "libs/fast_inflate",
     "xr",
-    "libs/cef",
+    "libs/cef", 
+"experiments/comp-3d-compositor", 
+"experiments/composite-lab", 
+"experiments/composite-lab-3d", 
+"experiments/browser-primitive-lab", 
+"experiments/browser-clip-lab", 
+"experiments/browser-task-lab", 
+"experiments/browser-text-lab", 
+"experiments/browser-cache-lab", 
 ]
 
 workspace.exclude = [

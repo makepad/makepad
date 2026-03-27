@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head><style>
+body { margin: 0; background: white; }
+.container {
+  position: absolute;
+  left: 100px; top: 100px;
+  width: 200px; height: 150px;
+  background: orange; border: 3px solid #E65100;
+  transform: rotate(15deg);
+}
+.child {
+  position: relative;
+  left: 20px; top: 20px;
+  width: 80px; height: 60px;
+  background: purple;
+}
+/* Reference markers - no transform */
+.marker-origin {
+  position: absolute;
+  left: 100px; top: 100px;
+  width: 6px; height: 6px;
+  background: red;
+  z-index: 10;
+}
+.marker-center {
+  position: absolute;
+  left: 200px; top: 175px;
+  width: 6px; height: 6px;
+  background: blue;
+  z-index: 10;
+}
+</style></head>
+<body>
+<!-- Red dot = where top-left of box is in flow (100,100) -->
+<div class="marker-origin"></div>
+<!-- Blue dot = transform-origin center of box (200,175) -->
+<div class="marker-center"></div>
+<div class="container">
+  <div class="child"></div>
+</div>
+</body>
+</html>

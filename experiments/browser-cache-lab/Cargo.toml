@@ -1,0 +1,10 @@
+[package]
+name = "browser-cache-lab"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-compositor = { path = "../../compositor" }
+makepad-zune-png = { path = "../../libs/zune/zune-png" }
+ttf-parser = { path = "../../libs/ttf-parser" }

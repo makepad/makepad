@@ -1,0 +1,8 @@
+[package]
+name = "composite-lab"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-compositor = { path = "../../compositor" }
