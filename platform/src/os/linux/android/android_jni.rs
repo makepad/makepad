@@ -156,6 +156,9 @@ pub enum FromJavaMessage {
     ImeEditorAction {
         action_code: i32,
     },
+    AppOpen {
+        item: String,
+    },
 }
 unsafe impl Send for FromJavaMessage {}
 
@@ -424,6 +427,16 @@ unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onBackPressed(
 ) {
     // crate::log!("Java_dev_makepad_android_MakepadNative_onBackPressed");
     send_from_java_message(FromJavaMessage::BackPressed);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAppOpen(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    item: jni_sys::jstring,
+) {
+    let item = jstring_to_string(env, item);
+    send_from_java_message(FromJavaMessage::AppOpen { item });
 }
 
 #[no_mangle]

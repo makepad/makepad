@@ -64,6 +64,8 @@ pub mod v4l2_sys;
 
 #[cfg(not(target_os = "android"))]
 pub mod select_timer;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod wake_pipe;
 
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod pulse_audio;

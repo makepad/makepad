@@ -30,6 +30,10 @@ pub fn define_macos_timer_delegate() -> *const Class {
         MacosApp::send_paint_event();
     }
 
+    extern "C" fn received_wake(_this: &Object, _: Sel, _obj: ObjcId) {
+        MacosApp::send_wake_event();
+    }
+
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("TimerDelegate", superclass).unwrap();
 
@@ -43,14 +47,68 @@ pub fn define_macos_timer_delegate() -> *const Class {
             sel!(receivedLiveResize:),
             received_live_resize as extern "C" fn(&Object, Sel, ObjcId),
         );
+        decl.add_method(
+            sel!(receivedWake:),
+            received_wake as extern "C" fn(&Object, Sel, ObjcId),
+        );
     }
 
     return decl.register();
 }
 
 pub fn define_app_delegate() -> *const Class {
+    // Apple Event constants for GetURL
+    const K_INTERNET_EVENT_CLASS: u32 = 0x4755524C; // 'GURL'
+    const K_AE_GET_URL: u32 = 0x4755524C; // 'GURL'
+    const KEY_DIRECT_OBJECT: u32 = 0x2D2D2D2D; // '----'
+
+    extern "C" fn application_will_finish_launching(
+        this: &Object, _: Sel, _notification: ObjcId,
+    ) {
+        unsafe {
+            let event_manager: ObjcId = msg_send![
+                class!(NSAppleEventManager), sharedAppleEventManager
+            ];
+            let _: () = msg_send![
+                event_manager,
+                setEventHandler: this
+                andSelector: sel!(handleGetURLEvent:withReplyEvent:)
+                forEventClass: K_INTERNET_EVENT_CLASS
+                andEventID: K_AE_GET_URL
+            ];
+        }
+    }
+
+    extern "C" fn handle_get_url_event(
+        _: &Object, _: Sel, event: ObjcId, _reply: ObjcId,
+    ) {
+        unsafe {
+            let direct_object: ObjcId = msg_send![event,
+                paramDescriptorForKeyword: KEY_DIRECT_OBJECT];
+            if direct_object != nil {
+                let nsstring: ObjcId = msg_send![direct_object, stringValue];
+                if nsstring != nil {
+                    let s = nsstring_to_string(nsstring);
+                    crate::single_instance::push_app_open_item(s);
+                    crate::thread::SignalToUI::set_ui_signal();
+                }
+            }
+        }
+    }
+
     let superclass = class!(NSObject);
-    let decl = ClassDecl::new("NSAppDelegate", superclass).unwrap();
+    let mut decl = ClassDecl::new("NSAppDelegate", superclass).unwrap();
+
+    unsafe {
+        decl.add_method(
+            sel!(applicationWillFinishLaunching:),
+            application_will_finish_launching as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(handleGetURLEvent:withReplyEvent:),
+            handle_get_url_event as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+    }
 
     return decl.register();
 }

@@ -5,6 +5,7 @@ use crate::{
         apple::apple_sys::*,
         apple::ios_app::IosApp,
         apple::ios_app::{with_ios_app, IOS_APP},
+        apple::apple_util::{nsstring_to_string, str_to_nsstring},
     },
 };
 use std::ffi::c_void;
@@ -72,9 +73,36 @@ pub fn define_ios_app_delegate() -> *const Class {
         _: &Object,
         _: Sel,
         _: ObjcId,
-        _: ObjcId,
+        options: ObjcId,
     ) -> BOOL {
+        unsafe {
+            if options != nil {
+                let key = str_to_nsstring("UIApplicationLaunchOptionsURLKey");
+                let url: ObjcId = msg_send![options, objectForKey: key];
+                if url != nil {
+                    let abs_string: ObjcId = msg_send![url, absoluteString];
+                    if abs_string != nil {
+                        let s = nsstring_to_string(abs_string);
+                        crate::single_instance::push_app_open_item(s);
+                    }
+                }
+            }
+        }
         with_ios_app(|app| app.did_finish_launching_with_options());
+        YES
+    }
+
+    extern "C" fn application_open_url(
+        _: &Object, _: Sel, _app: ObjcId, url: ObjcId, _options: ObjcId,
+    ) -> BOOL {
+        unsafe {
+            let abs_string: ObjcId = msg_send![url, absoluteString];
+            if abs_string != nil {
+                let s = nsstring_to_string(abs_string);
+                crate::single_instance::push_app_open_item(s);
+                crate::thread::SignalToUI::set_ui_signal();
+            }
+        }
         YES
     }
 
@@ -83,6 +111,10 @@ pub fn define_ios_app_delegate() -> *const Class {
             sel!(application: didFinishLaunchingWithOptions:),
             did_finish_launching_with_options
                 as extern "C" fn(&Object, Sel, ObjcId, ObjcId) -> BOOL,
+        );
+        decl.add_method(
+            sel!(application:openURL:options:),
+            application_open_url as extern "C" fn(&Object, Sel, ObjcId, ObjcId, ObjcId) -> BOOL,
         );
     }
 
@@ -396,6 +428,10 @@ pub fn define_ios_timer_delegate() -> *const Class {
         IosApp::send_timer_received(nstimer);
     }
 
+    extern "C" fn received_wake(_this: &Object, _: Sel, _obj: ObjcId) {
+        IosApp::send_wake_event();
+    }
+
     extern "C" fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
         IosApp::send_paint_event();
     }
@@ -408,6 +444,10 @@ pub fn define_ios_timer_delegate() -> *const Class {
         decl.add_method(
             sel!(receivedTimer:),
             received_timer as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(receivedWake:),
+            received_wake as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
             sel!(receivedLiveResize:),
@@ -474,6 +514,7 @@ pub fn define_textfield_delegate() -> *const Class {
                     duration,
                 })
             });
+            IosApp::request_wake();
         }
     }
 
@@ -482,6 +523,7 @@ pub fn define_textfield_delegate() -> *const Class {
             try_with_ios_app(|app| {
                 app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidHide { time })
             });
+            IosApp::request_wake();
         }
     }
 
@@ -499,6 +541,7 @@ pub fn define_textfield_delegate() -> *const Class {
                     duration,
                 })
             });
+            IosApp::request_wake();
         }
     }
 
@@ -510,6 +553,7 @@ pub fn define_textfield_delegate() -> *const Class {
             try_with_ios_app(|app| {
                 app.queue_virtual_keyboard_event(VirtualKeyboardEvent::DidShow { time, height })
             });
+            IosApp::request_wake();
         }
     }
     extern "C" fn input_mode_did_change(_: &Object, _: Sel, _notif: ObjcId) {

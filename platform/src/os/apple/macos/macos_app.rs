@@ -22,6 +22,7 @@ use {
             cx_native::EventFlow,
             macos::{macos_delegates::*, macos_event::*, macos_window::MacosWindow},
         },
+        thread::{SignalToUI, WakeHookHandle},
     },
     std::{cell::RefCell, collections::HashMap, os::raw::c_void, rc::Rc, time::Instant},
 };
@@ -37,6 +38,9 @@ pub static mut MACOS_CLASSES: *const MacosClasses = 0 as *const _;
 thread_local! {
     pub static MACOS_APP: RefCell<Option<MacosApp>> = RefCell::new(None);
 }
+
+const APP_EVENT_SUBTYPE_PAINT: i16 = 1;
+const APP_EVENT_SUBTYPE_WAKE: i16 = 2;
 
 pub fn with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> R {
     MACOS_APP.with_borrow_mut(|app| f(app.as_mut().unwrap()))
@@ -107,6 +111,8 @@ pub struct MacosApp {
     startup_focus_hack_ran: bool,
     event_callback: Option<Box<dyn FnMut(MacosEvent) -> EventFlow>>,
     event_flow: EventFlow,
+    wake_hook_handle: Option<WakeHookHandle>,
+    paint_event_pending: bool,
 
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
@@ -123,18 +129,33 @@ impl MacosApp {
             let () = msg_send![ns_app, setDelegate: app_delegate_instance];
             let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
 
-            // Construct the bits that are shared between windows
+            let timer_delegate_instance: ObjcId =
+                msg_send![get_macos_class_global().timer_delegate, new];
+            let wake_delegate = timer_delegate_instance;
+            let wake_hook_handle = SignalToUI::set_wake_hook(move || {
+                let (): () = unsafe {
+                    msg_send![
+                        wake_delegate,
+                        performSelectorOnMainThread: sel!(receivedWake:)
+                        withObject: nil
+                        waitUntilDone: NO
+                    ]
+                };
+            });
+
             MacosApp {
                 startup_focus_hack_ran: false,
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: Instant::now(),
-                timer_delegate_instance: msg_send![get_macos_class_global().timer_delegate, new],
+                timer_delegate_instance,
                 menu_delegate_instance: msg_send![get_macos_class_global().menu_delegate, new],
                 //app_delegate_instance,
                 //signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
-                event_flow: EventFlow::Poll,
+                event_flow: EventFlow::Wait,
+                wake_hook_handle: Some(wake_hook_handle),
+                paint_event_pending: false,
                 last_key_mod: KeyModifiers {
                     ..Default::default()
                 },
@@ -356,7 +377,18 @@ impl MacosApp {
         }
 
         match ev_type {
-            NSEventType::NSApplicationDefined => { // event loop unblocker
+            NSEventType::NSApplicationDefined => {
+                let subtype: i16 = msg_send![ns_event, subtype];
+                match subtype {
+                    APP_EVENT_SUBTYPE_PAINT => {
+                        with_macos_app(|app| app.paint_event_pending = false);
+                        MacosApp::do_callback(MacosEvent::Paint);
+                    }
+                    APP_EVENT_SUBTYPE_WAKE => {
+                        MacosApp::do_callback(MacosEvent::Wake);
+                    }
+                    _ => {}
+                }
             }
             NSEventType::NSKeyUp => {
                 if let Some(key_code) = get_event_keycode(ns_event) {
@@ -633,6 +665,7 @@ impl MacosApp {
             let event_flow = callback(event);
             with_macos_app(|app| app.event_flow = event_flow);
             if let EventFlow::Exit = event_flow {
+                with_macos_app(|app| app.uninstall_signal_waker());
                 unsafe {
                     let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
                     let () = msg_send![ns_app, terminate: nil];
@@ -690,6 +723,55 @@ impl MacosApp {
         }
     }
 
+    pub fn has_timer(&self, timer_id: u64) -> bool {
+        self.timers.iter().any(|timer| timer.timer_id == timer_id)
+    }
+
+    pub fn uninstall_signal_waker(&mut self) {
+        if let Some(wake_hook_handle) = self.wake_hook_handle.take() {
+            SignalToUI::clear_wake_hook(wake_hook_handle);
+        }
+    }
+
+    fn post_app_event(subtype: i16) {
+        unsafe {
+            let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+            let nsevent: ObjcId = msg_send![
+                class!(NSEvent),
+                otherEventWithType: NSEventType::NSApplicationDefined
+                location: NSPoint {x: 0., y: 0.}
+                modifierFlags: 0u64
+                timestamp: 0f64
+                windowNumber: 1u64
+                context: nil
+                subtype: subtype
+                data1: 0u64
+                data2: 0u64
+            ];
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let () = msg_send![ns_app, postEvent: nsevent atStart: 0];
+            let () = msg_send![pool, release];
+        }
+    }
+
+    pub fn send_wake_event() {
+        Self::post_app_event(APP_EVENT_SUBTYPE_WAKE);
+    }
+
+    pub fn send_paint_event() {
+        let should_post = with_macos_app(|app| {
+            if app.paint_event_pending {
+                false
+            } else {
+                app.paint_event_pending = true;
+                true
+            }
+        });
+        if should_post {
+            Self::post_app_event(APP_EVENT_SUBTYPE_PAINT);
+        }
+    }
+
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
@@ -740,25 +822,6 @@ impl MacosApp {
                     time: Some(time),
                     timer_id: timer_id,
                 }));
-                // break the eventloop if its in blocked mode
-                unsafe {
-                    let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-                    let nsevent: ObjcId = msg_send![
-                        class!(NSEvent),
-                        otherEventWithType: NSEventType::NSApplicationDefined
-                        location: NSPoint {x: 0., y: 0.}
-                        modifierFlags: 0u64
-                        timestamp: 0f64
-                        windowNumber: 1u64
-                        context: nil
-                        subtype: 0i16
-                        data1: 0u64
-                        data2: 0u64
-                    ];
-                    let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-                    let () = msg_send![ns_app, postEvent: nsevent atStart: 0];
-                    let () = msg_send![pool, release];
-                }
                 return;
             }
         }
@@ -781,11 +844,7 @@ impl MacosApp {
 
     pub fn send_command_event(command: LiveId) {
         MacosApp::do_callback(MacosEvent::MacosMenuCommand(command));
-        MacosApp::do_callback(MacosEvent::Paint);
-    }
-
-    pub fn send_paint_event() {
-        MacosApp::do_callback(MacosEvent::Paint);
+        MacosApp::send_paint_event();
     }
     /*
     #[cfg(target_os = "macos")]

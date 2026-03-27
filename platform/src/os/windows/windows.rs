@@ -64,11 +64,8 @@ impl Cx {
                 cx.win32_event_callback(event, &mut d3d11_cx, &mut d3d11_windows)
             }
         }));
-        // the signal poll timer
-        with_win32_app(|app| app.start_timer(0, 0.008, true));
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
-        with_win32_app(|app| app.start_signal_poll());
         Win32App::event_loop();
     }
 
@@ -326,6 +323,11 @@ impl Cx {
                     self.handle_media_signals();
                     self.handle_script_signals();
                     self.call_event_handler(&Event::Signal);
+                    crate::single_instance::enqueue_initial_app_open_if_enabled();
+                    let items = crate::single_instance::drain_app_open_items();
+                    if !items.is_empty() {
+                        self.call_event_handler(&Event::AppOpen(items));
+                    }
                 }
                 if SignalToUI::check_and_clear_action_signal() {
                     self.handle_action_receiver();
@@ -826,6 +828,10 @@ impl CxOsApi for Cx {
 
     fn open_url(&mut self, _url: &str, _in_place: OpenUrlInPlace) {
         crate::error!("open_url not implemented on this platform");
+    }
+
+    fn enable_single_instance(app_id: &str, items: &[&str]) -> crate::single_instance::SingleInstanceResult {
+        crate::os::windows::single_instance::enable(app_id, items)
     }
 }
 

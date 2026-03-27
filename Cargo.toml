@@ -20,6 +20,7 @@ workspace.members = [
     "examples/text_selection",
     "examples/counter",
     "examples/browser",
+    "examples/single_instance_test",
     "examples/camera",
     "examples/windows_blur",
     "examples/floating_panel",
