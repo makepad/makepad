@@ -19,7 +19,7 @@ use {
     },
     napi_derive_ohos::napi,
     napi_ohos::{sys::*, Env, JsObject, NapiRaw},
-    std::{ffi::CString, os::raw::c_void, ptr::null_mut, rc::Rc, sync::mpsc, time::Instant},
+    std::{ffi::CString, os::raw::c_void, ptr::null_mut, sync::mpsc, time::Instant},
 };
 
 #[napi(js_name = "onCreate")]
@@ -353,7 +353,6 @@ impl Cx {
         std::thread::spawn(move || {
             let mut cx = startup();
             assert!(cx.wait_init(&from_ohos_rx));
-            cx.ohos_load_dependencies();
 
             let window = cx.wait_surface_created(&from_ohos_rx);
 
@@ -415,23 +414,6 @@ impl Cx {
             cx.main_loop(from_ohos_rx);
             //TODO, destroy surface
         });
-    }
-
-    pub fn ohos_load_dependencies(&mut self) {
-        for (path, dep) in &mut self.dependencies {
-            let mut buffer = Vec::<u8>::new();
-            if let Ok(_) = self
-                .os
-                .raw_file
-                .as_mut()
-                .unwrap()
-                .read_to_end(path, &mut buffer)
-            {
-                dep.data = Some(Ok(Rc::new(buffer)));
-            } else {
-                dep.data = Some(Err("read_to_end failed".to_string()));
-            }
-        }
     }
 
     pub fn draw_pass_to_fullscreen(&mut self, draw_pass_id: DrawPassId) {
@@ -594,7 +576,6 @@ impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
         self.live_expand();
-        self.live_scan_dependencies();
     }
 
     fn spawn_thread<F>(&mut self, f: F)

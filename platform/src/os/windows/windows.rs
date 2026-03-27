@@ -806,7 +806,6 @@ impl CxOsApi for Cx {
         //    self.start_disk_live_file_watcher(100);
         //}
         //self.live_scan_dependencies();
-        self.native_load_dependencies();
 
         self.os.windows_game_input = Some(WindowsGameInput::init());
     }

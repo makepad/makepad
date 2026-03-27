@@ -138,7 +138,6 @@ impl CxOsApi for Cx {
         if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
             self.package_root = Some(item.to_string());
         }
-        self.native_load_dependencies();
     }
 
     fn spawn_thread<F>(&mut self, f: F)

@@ -547,16 +547,6 @@ pub enum AsyncLoad {
 }
 
 impl ImageRef {
-    /// Loads the image at the given `image_path` resource into this `ImageRef`.
-    pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.lazy_create_image_cache(cx);
-            inner.load_image_dep_by_path(cx, image_path, 0)
-        } else {
-            Ok(()) // preserving existing behavior of silent failures.
-        }
-    }
-
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
     pub fn load_image_file_by_path(
         &self,

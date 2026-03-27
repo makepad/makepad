@@ -1467,11 +1467,6 @@ impl CxOsApi for Cx {
         {
             self.package_root = Some("makepad".to_string());
         }
-
-        #[cfg(apple_sim)]
-        self.native_load_dependencies();
-        #[cfg(not(apple_sim))]
-        self.apple_bundle_load_dependencies();
     }
 
     fn spawn_thread<F>(&mut self, f: F)

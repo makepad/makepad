@@ -803,21 +803,4 @@ pub trait ImageCacheImpl {
             std::fs::read(image_path).map_err(|_| ImageError::PathNotFound(image_path.into()))?;
         self.load_image_file_by_path_and_data(cx, &data, id, image_path)
     }
-
-    fn load_image_dep_by_path(
-        &mut self,
-        cx: &mut Cx,
-        image_path: &str,
-        id: usize,
-    ) -> Result<(), ImageError> {
-        let p_image_path = Path::new(image_path);
-        if let Some(texture) = load_image_from_cache(cx, p_image_path) {
-            self.set_texture(Some(texture), id);
-            return Ok(());
-        }
-        match cx.take_dependency(image_path) {
-            Ok(data) => self.load_image_file_by_path_and_data(cx, &data, id, p_image_path),
-            Err(_) => Err(ImageError::PathNotFound(image_path.into())),
-        }
-    }
 }

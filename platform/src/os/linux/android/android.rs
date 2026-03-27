@@ -1682,18 +1682,6 @@ impl Cx {
      }
     */
 
-    pub fn android_load_dependencies(&mut self) {
-        for (path, dep) in &mut self.dependencies {
-            if let Some(data) = unsafe { to_java_load_asset(path) } {
-                dep.data = Some(Ok(Rc::new(data)))
-            } else {
-                let message = format!("cannot load dependency {}", path);
-                crate::error!("Android asset failed: {}", message);
-                dep.data = Some(Err(message));
-            }
-        }
-    }
-
     pub fn draw_pass_to_fullscreen(&mut self, draw_pass_id: DrawPassId) {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 

@@ -381,8 +381,6 @@ impl CxOsApi for Cx {
         if !Self::has_studio_web_socket() {
             self.start_disk_live_file_watcher(100);
         }
-        self.live_scan_dependencies();
-        self.native_load_dependencies();
     }
 
     fn spawn_thread<F>(&mut self, f: F)
