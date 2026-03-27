@@ -613,6 +613,32 @@ script_mod! {
                             padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
                             draw_bg.color: #x0d1824
 
+                            peer_scene_field := Label{
+                                width: Fill
+                                text: "PeerScene: off"
+                                draw_text.color: #xffd29a
+                            }
+                        }
+
+                        SolidView{
+                            width: Fill
+                            height: 32
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            draw_bg.color: #x0d1824
+
+                            alignment_state_field := Label{
+                                width: Fill
+                                text: "AlignState: off"
+                                draw_text.color: #xfff1ab
+                            }
+                        }
+
+                        SolidView{
+                            width: Fill
+                            height: 32
+                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            draw_bg.color: #x0d1824
+
                             alignment_debug_field := Label{
                                 width: Fill
                                 text: "AlignDbg: off"
@@ -747,6 +773,10 @@ pub struct App {
     #[rust]
     last_network_status_text: String,
     #[rust]
+    last_peer_scene_text: String,
+    #[rust]
+    last_alignment_state_text: String,
+    #[rust]
     last_alignment_debug_text: String,
     #[rust]
     last_plane_scan_text: String,
@@ -811,6 +841,18 @@ impl App {
             .borrow::<XrPeopleDebug>()
             .map(|people_debug| people_debug.alignment_debug_text().to_string())
             .unwrap_or_else(|| "AlignDbg: unavailable".to_string());
+        let alignment_state_text = self
+            .ui
+            .widget(cx, ids!(xr_people_debug))
+            .borrow::<XrPeopleDebug>()
+            .map(|people_debug| people_debug.alignment_state_text().to_string())
+            .unwrap_or_else(|| "AlignState: unavailable".to_string());
+        let peer_scene_text = self
+            .ui
+            .widget(cx, ids!(xr_people_debug))
+            .borrow::<XrPeopleDebug>()
+            .map(|people_debug| people_debug.peer_scene_text().to_string())
+            .unwrap_or_else(|| "PeerScene: unavailable".to_string());
         let plane_scan_text = self
             .ui
             .widget(cx, ids!(xr_people_debug))
@@ -835,6 +877,18 @@ impl App {
                 .widget(cx, ids!(alignment_debug_field))
                 .set_text(cx, &alignment_debug_text);
             self.last_alignment_debug_text = alignment_debug_text;
+        }
+        if self.last_alignment_state_text != alignment_state_text {
+            self.ui
+                .widget(cx, ids!(alignment_state_field))
+                .set_text(cx, &alignment_state_text);
+            self.last_alignment_state_text = alignment_state_text;
+        }
+        if self.last_peer_scene_text != peer_scene_text {
+            self.ui
+                .widget(cx, ids!(peer_scene_field))
+                .set_text(cx, &peer_scene_text);
+            self.last_peer_scene_text = peer_scene_text;
         }
         if self.last_plane_scan_text != plane_scan_text {
             self.ui

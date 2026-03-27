@@ -1,6 +1,8 @@
 use crate::*;
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
 #[cfg(test)]
+use makepad_widgets::makepad_platform::XrDepthAlignVerticalDescriptor;
+#[cfg(test)]
 use makepad_widgets::makepad_platform::XrDepthAlignWallFeature;
 use std::{
     collections::HashMap,
@@ -1360,28 +1362,6 @@ mod tests {
         wrap_angle(a - b).abs()
     }
 
-    fn nearest_wall_distance(samples: &[XrDepthAlignSample], point: Vec3f) -> Option<f32> {
-        samples
-            .iter()
-            .filter(|sample| sample.kind == XrDepthAlignSampleKind::Wall)
-            .map(|sample| (sample.point - point).length())
-            .min_by(|left, right| left.total_cmp(right))
-    }
-
-    fn make_align_sample(
-        kind: XrDepthAlignSampleKind,
-        point: Vec3f,
-        normal: Vec3f,
-        weight: f32,
-    ) -> XrDepthAlignSample {
-        XrDepthAlignSample {
-            kind,
-            point,
-            normal: normal.normalize(),
-            weight,
-        }
-    }
-
     fn make_wall_feature(
         center: Vec3f,
         normal: Vec3f,
@@ -1401,34 +1381,6 @@ mod tests {
             max_y,
             area: (half_extent_along * 2.0) * (max_y - min_y).max(0.0),
         }
-    }
-
-    fn make_wall_samples_from_feature(
-        feature: &XrDepthAlignWallFeature,
-        weight: f32,
-    ) -> [XrDepthAlignSample; 2] {
-        [
-            make_align_sample(
-                XrDepthAlignSampleKind::Wall,
-                vec3f(
-                    feature.center.x - feature.along_axis.x * feature.half_extent_along * 0.55,
-                    feature.min_y + 0.18,
-                    feature.center.z - feature.along_axis.z * feature.half_extent_along * 0.55,
-                ),
-                feature.normal,
-                weight,
-            ),
-            make_align_sample(
-                XrDepthAlignSampleKind::Wall,
-                vec3f(
-                    feature.center.x + feature.along_axis.x * feature.half_extent_along * 0.55,
-                    feature.max_y - 0.18,
-                    feature.center.z + feature.along_axis.z * feature.half_extent_along * 0.55,
-                ),
-                feature.normal,
-                weight * 0.96,
-            ),
-        ]
     }
 
     fn make_descriptor_frame() -> XrNetAlignmentDescriptorFrame {
@@ -1462,13 +1414,44 @@ mod tests {
                 1.24,
             ),
         ];
-        let mut samples = Vec::new();
-        for (index, feature) in wall_features.iter().enumerate() {
-            samples.extend(make_wall_samples_from_feature(
-                feature,
-                0.92 - index as f32 * 0.04,
-            ));
-        }
+        let vertical_descriptor = XrDepthAlignVerticalDescriptor {
+            origin_x: -2.0,
+            origin_z: -2.8,
+            cell_size_meters: 0.25,
+            size: 20,
+            vertical_surface_masks: {
+                let mut cells = vec![0u8; 20 * 20];
+                cells[4 + 6 * 20] = 0b0011_1100;
+                cells[5 + 6 * 20] = 0b0011_1000;
+                cells[13 + 11 * 20] = 0b0111_0000;
+                cells[11 + 14 * 20] = 0b0011_0000;
+                cells
+            },
+            clutter_surface_masks: {
+                let mut cells = vec![0u8; 20 * 20];
+                cells[8 + 10 * 20] = 0b0001_1110;
+                cells[6 + 12 * 20] = 0b0000_1110;
+                cells[12 + 7 * 20] = 0b0011_1000;
+                cells
+            },
+            free_space_masks: {
+                let mut cells = vec![0u8; 20 * 20];
+                cells[5 + 5 * 20] = 0b0000_0111;
+                cells[8 + 9 * 20] = 0b1110_0000;
+                cells[10 + 13 * 20] = 0b1111_0000;
+                cells[14 + 8 * 20] = 0b0000_1111;
+                cells
+            },
+            height_u8: {
+                let mut cells = vec![0u8; 20 * 20];
+                cells[4 + 6 * 20] = 185;
+                cells[5 + 6 * 20] = 176;
+                cells[8 + 10 * 20] = 118;
+                cells[13 + 11 * 20] = 212;
+                cells[11 + 14 * 20] = 144;
+                cells
+            },
+        };
         XrNetAlignmentDescriptorFrame {
             seq: 0,
             sent_at: 1.0,
@@ -1477,7 +1460,8 @@ mod tests {
                 floor_y: 0.0,
                 wall_normal_histogram: build_wall_feature_histogram(&wall_features, 48),
                 wall_features,
-                samples,
+                samples: Vec::new(),
+                vertical_descriptor: Some(vertical_descriptor),
             },
         }
     }
@@ -1665,15 +1649,11 @@ mod tests {
             XrNetIncoming::AlignmentDescriptor { frame, .. } => frame,
             _ => unreachable!(),
         };
-        assert_eq!(
-            received.descriptor.samples.len(),
-            descriptor.descriptor.samples.len()
-        );
-        assert!((received.descriptor.floor_y - descriptor.descriptor.floor_y).abs() < 0.001);
+        assert_eq!(received.descriptor, descriptor.descriptor);
     }
 
     #[test]
-    fn descriptor_solver_recovers_yaw_and_position_from_wall_samples() {
+    fn descriptor_solver_recovers_yaw_and_position_from_walls_and_vertical_descriptor() {
         let local = make_descriptor_frame();
         let ground_truth_remote_to_local = Pose::new(
             Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), 0.58),
@@ -1681,65 +1661,13 @@ mod tests {
         )
         .to_mat4();
         let local_to_remote = ground_truth_remote_to_local.invert();
-        let mut remote = local.transformed(&local_to_remote);
-        remote.descriptor.samples = remote
-            .descriptor
-            .samples
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, mut sample)| {
-                let keep = match sample.kind {
-                    XrDepthAlignSampleKind::Wall => index % 5 != 2,
-                    XrDepthAlignSampleKind::Floor | XrDepthAlignSampleKind::Unknown => false,
-                };
-                if !keep {
-                    return None;
-                }
-                match sample.kind {
-                    XrDepthAlignSampleKind::Wall => {
-                        sample.point += vec3f(
-                            ((index % 4) as f32 - 1.5) * 0.012,
-                            (((index * 3) % 5) as f32 - 2.0) * 0.020,
-                            (((index * 5) % 7) as f32 - 3.0) * 0.012,
-                        );
-                    }
-                    XrDepthAlignSampleKind::Floor | XrDepthAlignSampleKind::Unknown => {}
-                }
-                sample.weight =
-                    (sample.weight * (0.84 + 0.03 * (index % 4) as f32)).clamp(0.1, 1.0);
-                Some(sample)
-            })
-            .collect();
-        remote.descriptor.wall_normal_histogram =
-            build_wall_feature_histogram(&remote.descriptor.wall_features, 48);
+        let remote = local.transformed(&local_to_remote);
 
         let solution = XrNetAlignmentDescriptorFrame::solve_remote_to_local(&local, &remote)
             .expect("descriptor solver should find a transform");
 
         assert!(angle_error(solution.yaw_radians, 0.58) < 0.08);
         assert!((solution.translation - vec3f(-0.82, 0.0, 0.67)).length() < 0.12);
-        let mapped_error = remote
-            .descriptor
-            .samples
-            .iter()
-            .filter(|sample| sample.kind == XrDepthAlignSampleKind::Wall)
-            .map(|sample| {
-                let mapped = solution.map_point(sample.point);
-                nearest_wall_distance(&local.descriptor.samples, mapped)
-                    .expect("local descriptor should have wall samples")
-            })
-            .sum::<f32>()
-            / remote
-                .descriptor
-                .samples
-                .iter()
-                .filter(|sample| sample.kind == XrDepthAlignSampleKind::Wall)
-                .count()
-                .max(1) as f32;
-        assert!(
-            mapped_error < 0.10,
-            "solution={solution:?} mapped_error={mapped_error}"
-        );
         assert!(solution.confidence > 0.15);
         assert!(solution.matched_samples >= 2);
     }
