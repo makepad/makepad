@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title></title>
+  <style>
+    :root {
+      --bg: #0b1118;
+      --text: #ffffff;
+      --muted: #95a8c0;
+      --card: #f4f7fb;
+      --line: #8fa3b8;
+      --line-dark: #223244;
+      --border: #c5d0db;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .page {
+      min-height: 100vh;
+      padding: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .row {
+      display: flex;
+      justify-content: center;
+      gap: 40px;
+      perspective: none;
+    }
+
+    .col {
+      width: 320px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 18px;
+    }
+
+    .plane-wrap {
+      width: 320px;
+      height: 240px;
+      perspective: 960px;
+      perspective-origin: center center;
+    }
+
+    .plane-wrap.plane-z {
+      perspective: none;
+    }
+
+    .plane {
+      width: 320px;
+      height: 240px;
+      background: var(--card);
+      border: 1px solid rgba(0, 0, 0, 0.06);
+      transform-origin: 50% 50%;
+      backface-visibility: hidden;
+      overflow: hidden;
+      box-shadow: none;
+    }
+
+    .plane-x .plane { transform: rotateX(35deg); }
+    .plane-y .plane { transform: rotateY(-40deg); }
+    .plane-z .plane { transform: rotateZ(15deg); }
+
+    .accent {
+      height: 10px;
+      width: 100%;
+    }
+
+    .accent.blue { background: #4f8cff; }
+    .accent.green { background: #45b97a; }
+    .accent.orange { background: #e48a3a; }
+
+    .content {
+      padding: 20px 22px 18px;
+    }
+
+    .title-line,
+    .text-line,
+    .button-line,
+    .input-line,
+    .checkbox-line,
+    .tiny-box {
+      background: var(--line);
+    }
+
+    .title-line {
+      height: 8px;
+      margin-bottom: 10px;
+    }
+
+    .title-line.short { width: 96px; }
+    .title-line.med { width: 126px; }
+    .title-line.long { width: 150px; }
+
+    .text-line {
+      height: 6px;
+      opacity: 0.85;
+      margin-top: 10px;
+    }
+
+    .text-line.w1 { width: 126px; }
+    .text-line.w2 { width: 96px; }
+    .text-line.w3 { width: 228px; }
+    .text-line.w4 { width: 258px; }
+    .text-line.w5 { width: 152px; }
+    .text-line.w6 { width: 208px; }
+    .text-line.w7 { width: 176px; }
+
+    .input {
+      margin-top: 26px;
+      height: 40px;
+      border: 1px solid var(--border);
+      background: #fff;
+      display: flex;
+      align-items: center;
+      padding: 0 14px;
+    }
+
+    .input-line {
+      height: 6px;
+      width: 148px;
+    }
+
+    .button-row {
+      margin-top: 20px;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .button {
+      height: 40px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 22px;
+      min-width: 100px;
+    }
+
+    .button.primary.blue { background: #4f8cff; }
+    .button.primary.green { background: #45b97a; }
+    .button.primary.orange { background: #e48a3a; }
+    .button.secondary {
+      background: #eef2f7;
+      border: 1px solid var(--border);
+    }
+
+    .button-line {
+      height: 6px;
+      background: #fff;
+      width: 72px;
+    }
+
+    .button.secondary .button-line {
+      background: #64788d;
+      width: 34px;
+    }
+
+    .checkbox {
+      margin-top: 24px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .tiny-box {
+      width: 22px;
+      height: 22px;
+      border: 3px solid var(--line-dark);
+      background: #45b97a;
+    }
+
+    .checkbox-line {
+      height: 7px;
+      width: 170px;
+      background: #405568;
+    }
+
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="row">
+      <div class="col">
+        <div class="plane-wrap plane-x">
+          <div class="plane">
+            <div class="accent blue"></div>
+            <div class="content">
+              <div class="title-line short"></div>
+              <div class="title-line med"></div>
+              <div class="input"><div class="input-line"></div></div>
+              <div class="text-line w3"></div>
+              <div class="text-line w4"></div>
+              <div class="text-line w5" style="background: var(--line-dark);"></div>
+              <div class="button-row">
+                <div class="button primary blue"><div class="button-line"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="plane-wrap plane-y">
+          <div class="plane">
+            <div class="accent green"></div>
+            <div class="content">
+              <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px;">
+                <div class="tiny-box"></div>
+                <div>
+                  <div class="title-line med"></div>
+                  <div class="title-line long"></div>
+                </div>
+                <div class="button secondary"><div class="button-line"></div></div>
+              </div>
+              <div class="input"><div class="input-line" style="width:170px;"></div></div>
+              <div class="text-line w6"></div>
+              <div class="text-line w7"></div>
+              <div class="text-line w5" style="background: var(--line-dark);"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="plane-wrap plane-z">
+          <div class="plane">
+            <div class="accent orange"></div>
+            <div class="content">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+                <div style="width:100px;height:40px;border:1px solid var(--border);background:#eef2f7;"></div>
+                <div class="button primary orange"><div class="button-line"></div></div>
+              </div>
+              <div class="text-line w3"></div>
+              <div class="input" style="margin-top:18px;"><div class="input-line" style="width:180px;"></div></div>
+              <div class="text-line w4"></div>
+              <div class="text-line w6"></div>
+              <div class="text-line w5" style="background: var(--line-dark);"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

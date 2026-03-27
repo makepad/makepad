@@ -1,0 +1,15 @@
+[package]
+name = "makepad-browser-scene"
+version = "0.1.0"
+edition = "2021"
+description = "Retained browser scene API and renderer for Makepad"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[lib]
+doctest = false
+
+[dependencies]
+makepad-widgets = { path = "../widgets", version = "2.0.0" }
+makepad-compositor = { path = "../compositor", version = "0.1.0" }

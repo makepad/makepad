@@ -1,0 +1,8 @@
+[package]
+name = "makepad-browser-scene-example-basic-rects"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-widgets = { path = "../../../widgets", version = "2.0.0" }
+makepad-browser-scene = { path = "../..", version = "0.1.0" }
