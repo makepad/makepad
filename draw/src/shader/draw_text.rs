@@ -12,10 +12,12 @@ use {
             geom::{Point, Rect as TextRect, Size, Transform},
             layouter::{
                 BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions,
-                Style,
+                SelectionRect, Style,
             },
+            font_face::CanonicalVariations,
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
+            selection::{Cursor, Selection},
         },
         turtle::*,
         turtle::{Align, Walk},
@@ -86,10 +88,14 @@ script_mod! {
                 self.glyph_depth + self.draw_call.zbias,
                 1.
             )
-            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * (self.world))
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
         }
 
         sdf: fn(scale, p, color) {
+            // `atlas_plane` is a logical RGBA plane selector produced by the
+            // text rasterizer. The atlas backing store is BGRA in memory, but
+            // shader sampling here follows the logical plane contract, not raw
+            // storage byte order.
             let sampled = self.grayscale_texture.sample_as_bgra(p);
             let s = if self.atlas_plane < 0.5 {
                 sampled.r
@@ -118,7 +124,9 @@ script_mod! {
 
         msdf: fn(scale, p, color) {
             let s = self.msdf_texture.sample_as_bgra(p);
-            // Use alpha as the coverage source to keep parity with SDF while RGB stores MSDF.
+            // Current atlas contract preserves seeded SDF coverage in alpha while
+            // RGB carries MSDF channels. Sampling alpha here keeps parity with
+            // the CPU-side atlas composition logic.
             let dist = s.a;
             let safe_scale = max(scale, 0.0001);
             let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
@@ -128,7 +136,6 @@ script_mod! {
                 1.0,
             );
             let bias = (0.5 - luma) * self.sdf_luma_bias;
-            // Avoid lifting near-zero background alpha into visible gray quads on light text.
             if a > self.sdf_luma_bias * 0.5 {
                 a = clamp(a - bias, 0.0, 1.0);
             }
@@ -249,6 +256,13 @@ pub struct PreparedTextRun {
 }
 
 impl DrawText {
+    /// Draw laid out text with `pos` interpreted in the current draw-list's
+    /// local coordinate space.
+    ///
+    /// `abs` here means the caller provides the text origin directly instead of
+    /// going through turtle placement. It does not mean final screen-space
+    /// placement. The shader still applies draw-list `view_transform` and pass
+    /// projection after these local coordinates are submitted.
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2d, text: &str) {
         let text = self.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
         self.draw_text(cx, Point::new(pos.x as f32, pos.y as f32), &text);
@@ -268,6 +282,14 @@ impl DrawText {
         }
     }
 
+    /// Draw rasterized glyphs with each supplied point interpreted as the
+    /// glyph origin in the current draw-list's local space.
+    ///
+    /// This path applies `temp_y_shift` before emitting quads. Use it for the
+    /// ordinary DrawText behavior that wants DrawText's placement adjustment.
+    ///
+    /// `abs` does not mean screen-space. Outer placement still comes from the
+    /// active draw-list `view_transform` and pass projection.
     pub fn draw_rasterized_glyphs_abs(
         &mut self,
         cx: &mut Cx2d,
@@ -282,9 +304,10 @@ impl DrawText {
             self.glyph_depth = self.draw_depth;
             self.color = color;
             for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
-                self.draw_rasterized_glyph(
+                self.emit_rasterized_glyph_abs(
                     *origin_in_lpxs,
                     *font_size_in_lpxs,
+                    self.temp_y_shift * *font_size_in_lpxs,
                     None,
                     *rasterized_glyph,
                     &mut instances.instances,
@@ -301,9 +324,10 @@ impl DrawText {
         self.glyph_depth = self.draw_depth;
         self.color = color;
         for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
-            self.draw_rasterized_glyph(
+            self.emit_rasterized_glyph_abs(
                 *origin_in_lpxs,
                 *font_size_in_lpxs,
+                self.temp_y_shift * *font_size_in_lpxs,
                 None,
                 *rasterized_glyph,
                 &mut instances.instances,
@@ -313,6 +337,63 @@ impl DrawText {
         self.finish_many_instances(cx, instances);
     }
 
+    /// Draw rasterized glyphs with each supplied point interpreted as the
+    /// exact glyph origin / baseline anchor in the current draw-list's local
+    /// space.
+    ///
+    /// This path applies no extra `temp_y_shift`. Callers that already resolved
+    /// the final glyph anchor should use this API.
+    ///
+    /// `abs` still means direct local submission, not screen-space placement.
+    /// Outer placement remains the job of draw-list and pass transforms.
+    pub fn draw_rasterized_glyphs_exact_abs(
+        &mut self,
+        cx: &mut Cx2d,
+        glyphs: &[(Point<f32>, f32, RasterizedGlyph)],
+        color: Vec4f,
+    ) {
+        if glyphs.is_empty() {
+            return;
+        }
+        self.update_draw_vars(cx);
+        if let Some(mut instances) = self.many_instances.take() {
+            self.glyph_depth = self.draw_depth;
+            self.color = color;
+            for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
+                self.emit_rasterized_glyph_abs(
+                    *origin_in_lpxs,
+                    *font_size_in_lpxs,
+                    0.0,
+                    None,
+                    *rasterized_glyph,
+                    &mut instances.instances,
+                );
+            }
+            self.many_instances = Some(instances);
+            return;
+        }
+
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return;
+        };
+
+        self.glyph_depth = self.draw_depth;
+        self.color = color;
+        for (origin_in_lpxs, font_size_in_lpxs, rasterized_glyph) in glyphs {
+            self.emit_rasterized_glyph_abs(
+                *origin_in_lpxs,
+                *font_size_in_lpxs,
+                0.0,
+                None,
+                *rasterized_glyph,
+                &mut instances.instances,
+            );
+        }
+
+        self.finish_many_instances(cx, instances);
+    }
+
+    /// Single-glyph convenience wrapper for `draw_rasterized_glyphs_abs()`.
     pub fn draw_rasterized_glyph_abs(
         &mut self,
         cx: &mut Cx2d,
@@ -324,6 +405,58 @@ impl DrawText {
         self.draw_rasterized_glyphs_abs(
             cx,
             &[(origin_in_lpxs, font_size_in_lpxs, rasterized_glyph)],
+            color,
+        );
+    }
+
+    /// Single-glyph convenience wrapper for
+    /// `draw_rasterized_glyphs_exact_abs()`.
+    pub fn draw_rasterized_glyph_exact_abs(
+        &mut self,
+        cx: &mut Cx2d,
+        origin_in_lpxs: Point<f32>,
+        font_size_in_lpxs: f32,
+        rasterized_glyph: RasterizedGlyph,
+        color: Vec4f,
+    ) {
+        self.draw_rasterized_glyphs_exact_abs(
+            cx,
+            &[(origin_in_lpxs, font_size_in_lpxs, rasterized_glyph)],
+            color,
+        );
+    }
+
+    /// Emits one exact-positioned glyph into an already configured batch.
+    ///
+    /// This keeps the current texture bindings and skips `update_draw_vars()`.
+    /// Browser retained text uses this after its prepare phase selected the
+    /// explicit atlas page texture for the current batch.
+    pub fn draw_rasterized_glyph_exact_prepared_abs(
+        &mut self,
+        cx: &mut Cx2d,
+        origin_in_lpxs: Point<f32>,
+        font_size_in_lpxs: f32,
+        rasterized_glyph: RasterizedGlyph,
+        color: Vec4f,
+    ) {
+        if let Some(mut instances) = self.many_instances.take() {
+            self.color = color;
+            self.emit_rasterized_glyph_abs(
+                origin_in_lpxs,
+                font_size_in_lpxs,
+                0.0,
+                None,
+                rasterized_glyph,
+                &mut instances.instances,
+            );
+            self.many_instances = Some(instances);
+            return;
+        }
+        self.draw_rasterized_glyph_exact_abs(
+            cx,
+            origin_in_lpxs,
+            font_size_in_lpxs,
+            rasterized_glyph,
             color,
         );
     }
@@ -510,22 +643,22 @@ impl DrawText {
             0.0
         };
 
-        for (row_index, row) in text.rows.iter().enumerate() {
-            let (start_x_in_lpxs, end_x_in_lpxs) = row_span_x_bounds_in_lpxs(
-                row,
-                row_index == 0,
-                row_index + 1 == text.rows.len(),
-            );
+        for SelectionRect {
+            rect_in_lpxs,
+            ascender_in_lpxs,
+        } in text.selection_rects(Selection {
+            anchor: Cursor {
+                index: 0,
+                prefer_next_row: false,
+            },
+            cursor: Cursor {
+                index: text.text.len(),
+                prefer_next_row: false,
+            },
+        }) {
             let rect_in_lpxs = TextRect::new(
-                Point::new(
-                    origin_in_lpxs.x
-                        + (row.origin_in_lpxs.x + start_x_in_lpxs) * self.font_scale,
-                    origin_in_lpxs.y + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale,
-                ),
-                Size::new(
-                    (end_x_in_lpxs - start_x_in_lpxs) * self.font_scale,
-                    (row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale,
-                ),
+                origin_in_lpxs + Size::from(rect_in_lpxs.origin) * self.font_scale,
+                rect_in_lpxs.size * self.font_scale,
             );
             f(
                 cx,
@@ -535,7 +668,7 @@ impl DrawText {
                     rect_in_lpxs.size.width as f64,
                     rect_in_lpxs.size.height as f64,
                 ),
-                row.ascender_in_lpxs,
+                ascender_in_lpxs,
             )
         }
     }
@@ -628,6 +761,16 @@ impl DrawText {
         self.draw_vars.texture_slots[2] = Some(fonts.msdf_texture().clone());
     }
 
+    pub fn set_atlas_texture(&mut self, cx: &mut Cx2d, kind: AtlasKind, texture: &Texture) {
+        self.update_draw_vars(cx);
+        let slot = match kind {
+            AtlasKind::Grayscale => 0,
+            AtlasKind::Color => 1,
+            AtlasKind::Msdf => 2,
+        };
+        self.draw_vars.texture_slots[slot] = Some(texture.clone());
+    }
+
     fn draw_row(
         &mut self,
         cx: &mut Cx2d,
@@ -692,12 +835,13 @@ impl DrawText {
         use crate::text::geom::Point;
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         if let Some(rasterized_glyph) = glyph.rasterize(font_size_in_dpxs) {
-            self.draw_rasterized_glyph(
+            self.emit_rasterized_glyph_abs(
                 Point::new(
                     origin_in_lpxs.x + glyph.offset_in_lpxs() * self.font_scale,
                     origin_in_lpxs.y,
                 ),
                 glyph.font_size_in_lpxs,
+                self.temp_y_shift * glyph.font_size_in_lpxs,
                 glyph.color,
                 rasterized_glyph,
                 output,
@@ -705,10 +849,11 @@ impl DrawText {
         }
     }
 
-    fn draw_rasterized_glyph(
+    fn emit_rasterized_glyph_abs(
         &mut self,
         origin_in_lpxs: Point<f32>,
         font_size_in_lpxs: f32,
+        placement_adjust_y_in_lpxs: f32,
         color: Option<Color>,
         glyph: RasterizedGlyph,
         output: &mut Vec<f32>,
@@ -750,7 +895,7 @@ impl DrawText {
         );
 
         self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y)
-            + vec2(0.0, self.temp_y_shift * font_size_in_lpxs);
+            + vec2(0.0, placement_adjust_y_in_lpxs);
         self.rect_size = vec2(bounds_in_lpxs.size.width, bounds_in_lpxs.size.height);
         if let Some(color) = color {
             self.color = vec4(
@@ -770,6 +915,7 @@ impl DrawText {
         self.glyph_depth += 0.000001;
         self.char_index += 1.0;
     }
+
 
     /// Resets the character index counter to 0. Call this before drawing text
     /// when you want to track character positions for animation effects.
@@ -860,7 +1006,7 @@ impl FontFamily {
                             index: 0,
                             ascender_fudge_in_ems: member.asc,
                             descender_fudge_in_ems: member.desc,
-                            variations: Vec::new(),
+                            variations: CanonicalVariations::default(),
                         },
                     );
                 }
@@ -987,23 +1133,6 @@ fn is_emoji_char(ch: char) -> bool {
         ch as u32,
         0x2600..=0x27BF | 0x200D | 0xFE0F | 0x1F000..=0x1FAFF | 0x1FB00..=0x1FBFF
     )
-}
-
-fn row_span_x_bounds_in_lpxs(
-    row: &LaidoutRow,
-    is_first_row: bool,
-    _is_last_row: bool,
-) -> (f32, f32) {
-    let start_x_in_lpxs = if is_first_row {
-        row.glyphs
-            .first()
-            .map(|glyph| glyph.origin_in_lpxs.x)
-            .unwrap_or(row.width_in_lpxs)
-    } else {
-        0.0
-    };
-    let end_x_in_lpxs = row.width_in_lpxs;
-    (start_x_in_lpxs, end_x_in_lpxs.max(start_x_in_lpxs))
 }
 
 impl TextStyle {

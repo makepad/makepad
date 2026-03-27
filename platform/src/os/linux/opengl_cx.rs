@@ -300,15 +300,32 @@ impl Cx {
         }
         let width = alloc.width as u32;
         let height = alloc.height as u32;
-        let stride = (width * 4) as usize;
-        for y in 0..(height as usize / 2) {
-            let top = y * stride;
-            let bot = ((height as usize) - 1 - y) * stride;
-            for x in 0..stride {
-                pixels.swap(top + x, bot + x);
-            }
-        }
         Some((width, height, pixels))
+    }
+
+    fn capture_gl_cached_view_rgba(
+        &self,
+        draw_pass_id: DrawPassId,
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        let pass = &self.passes[draw_pass_id];
+        let color_texture = pass.color_textures.first()?.texture.texture_id();
+        let dpi = pass.dpi_factor.unwrap_or(1.0);
+        let pass_rect = self.get_pass_rect(draw_pass_id, dpi)?;
+        let crop_width = (pass_rect.size.x * dpi).round().max(1.0) as u32;
+        let crop_height = (pass_rect.size.y * dpi).round().max(1.0) as u32;
+        let (full_width, full_height, rgba) = self.capture_gl_texture_rgba(color_texture)?;
+        let crop_width = crop_width.min(full_width);
+        let crop_height = crop_height.min(full_height);
+
+        let mut cropped = vec![0u8; (crop_width * crop_height * 4) as usize];
+        for row in 0..crop_height as usize {
+            let src_off = (row * full_width as usize) * 4;
+            let dst_off = (row * crop_width as usize) * 4;
+            let count = crop_width as usize * 4;
+            cropped[dst_off..dst_off + count]
+                .copy_from_slice(&rgba[src_off..src_off + count]);
+        }
+        Some((crop_width, crop_height, cropped))
     }
 
     pub fn draw_pass_to_window(
@@ -342,7 +359,7 @@ impl Cx {
             (gl.glViewport)(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
 
-        self.setup_render_pass(draw_pass_id);
+        self.setup_render_pass(draw_pass_id, false);
 
         self.passes[draw_pass_id].paint_dirty = false;
 

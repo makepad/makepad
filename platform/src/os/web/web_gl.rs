@@ -23,6 +23,7 @@ impl Cx {
         self.draw_lists[draw_list_id]
             .draw_list_uniforms
             .view_transform = Mat4f::identity();
+        self.update_draw_list_projective_transform(draw_pass_id, draw_list_id);
 
         for order_index in 0..draw_order_len {
             let Some(draw_item_id) =

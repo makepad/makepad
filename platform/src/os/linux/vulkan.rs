@@ -5254,6 +5254,7 @@ impl CxVulkan {
         xr_depth_view: vk::ImageView,
     ) -> Result<(), String> {
         let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
+        cx.update_draw_list_projective_transform(draw_pass_id, draw_list_id);
         for order_index in 0..draw_order_len {
             let Some(draw_item_id) =
                 cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)

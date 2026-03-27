@@ -486,6 +486,8 @@ pub struct DrawListUniforms {
     #[live]
     pub view_transform: Mat4f,
     #[live]
+    pub projective_transform: Mat4f,
+    #[live]
     pub view_clip: Vec4f,
     #[live]
     pub view_shift: Vec2f,
@@ -499,6 +501,7 @@ impl Default for DrawListUniforms {
     fn default() -> Self {
         Self {
             view_transform: Mat4f::identity(),
+            projective_transform: Mat4f::identity(),
             view_clip: vec4(-100000.0, -100000.0, 100000.0, 100000.0),
             view_shift: vec2(0.0, 0.0),
             pad1: 0.0,
@@ -507,9 +510,67 @@ impl Default for DrawListUniforms {
     }
 }
 
+fn projective_depth_anchor(base_z: f32) -> Mat4f {
+    Mat4f {
+        v: [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, base_z, 1.0,
+        ],
+    }
+}
+
+fn projective_anchor_from_clip(clip_from_local: Mat4f) -> Mat4f {
+    let plane = vec4(
+        clip_from_local.v[2],
+        clip_from_local.v[6],
+        clip_from_local.v[10],
+        clip_from_local.v[14],
+    );
+
+    if plane.z.abs() > 1e-6 {
+        let inv_z = 1.0 / plane.z;
+        return Mat4f {
+            v: [
+                1.0,
+                0.0,
+                -plane.x * inv_z,
+                0.0,
+                0.0,
+                1.0,
+                -plane.y * inv_z,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                -plane.w * inv_z,
+                1.0,
+            ],
+        };
+    }
+
+    let inverse = clip_from_local.invert();
+    let local = inverse.transform_vec4(vec4f(0.0, 0.0, 0.0, 1.0));
+    if local.w.abs() > 1e-6 {
+        return projective_depth_anchor(local.z / local.w);
+    }
+
+    projective_depth_anchor(0.0)
+}
+
 impl DrawListUniforms {
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>()] {
         unsafe { std::mem::transmute(self) }
+    }
+
+    pub fn update_projective_transform(&mut self, pass_view_projection: Mat4f) {
+        let clip_from_local = Mat4f::mul(&pass_view_projection, &self.view_transform);
+        let anchor = projective_anchor_from_clip(clip_from_local);
+        self.projective_transform = Mat4f::mul(&self.view_transform, &anchor);
     }
 }
 
@@ -945,4 +1006,20 @@ impl CxDrawList {
     pub fn get_view_transform(&self) -> Mat4f {
         self.draw_list_uniforms.view_transform
     }*/
+}
+
+impl Cx {
+    pub(crate) fn update_draw_list_projective_transform(
+        &mut self,
+        draw_pass_id: DrawPassId,
+        draw_list_id: DrawListId,
+    ) {
+        let pass_view_projection = {
+            let pass_uniforms = &self.passes[draw_pass_id].pass_uniforms;
+            Mat4f::mul(&pass_uniforms.camera_projection, &pass_uniforms.camera_view)
+        };
+        self.draw_lists[draw_list_id]
+            .draw_list_uniforms
+            .update_projective_transform(pass_view_projection);
+    }
 }
