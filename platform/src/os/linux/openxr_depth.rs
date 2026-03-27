@@ -7,11 +7,11 @@ use crate::{
     thread::SignalToUI,
     xr_depth_mesh::{
         empty_bounds, xr_depth_align_build_wall_feature_normal_histogram,
-        xr_depth_align_build_wall_normal_histogram, xr_depth_align_loopback_preview_solution,
-        xr_depth_align_solve_remote_to_local, xr_depth_align_test_markers,
-        xr_depth_align_transform_descriptor, xr_depth_mesh_store, ChunkKey, XrDepthAlignDebug,
-        XrDepthAlignDescriptor, XrDepthAlignPreview, XrDepthAlignSample, XrDepthAlignSampleKind,
-        XrDepthAlignSolution, XrDepthAlignWallFeature, XrDepthMesh, XrDepthMeshChunk,
+        xr_depth_align_loopback_preview_solution, xr_depth_align_solve_remote_to_local,
+        xr_depth_align_test_markers, xr_depth_align_transform_descriptor, xr_depth_mesh_store,
+        ChunkKey, XrDepthAlignDebug, XrDepthAlignDescriptor, XrDepthAlignPreview,
+        XrDepthAlignSample, XrDepthAlignSampleKind, XrDepthAlignSolution,
+        XrDepthAlignVerticalDescriptor, XrDepthAlignWallFeature, XrDepthMesh, XrDepthMeshChunk,
         XrDepthMeshQuery, XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry,
         XrDepthMeshQueryColliderRole, XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface,
         XrDepthMeshQueryResult, XrDepthMeshQuerySupportPlane, XrDepthMeshQuerySurfaceHit,
@@ -150,7 +150,19 @@ const DEPTH_ALIGN_WALL_SAMPLE_GRID_METERS: f32 = 0.24;
 const DEPTH_ALIGN_WALL_HISTOGRAM_BINS: usize = 48;
 const DEPTH_ALIGN_MAX_WALL_FEATURES: usize = 24;
 const DEPTH_ALIGN_MAX_WALL_SAMPLES: usize = 96;
-const DEPTH_ALIGN_MIN_WALL_SAMPLES: usize = 6;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE: usize = 64;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SLICES: usize = 8;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_BOUNDS_PADDING_METERS: f32 = 0.45;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_MAX_EXTENT_METERS: f32 = 7.0;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_NORMALIZED_BAND: f32 = 0.26;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_NORMALIZED_MIN: f32 = 0.60;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_MIN_CONFIDENCE: u8 = 2;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_Y_MIN: f32 = 0.10;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_Y_MAX: f32 = 2.00;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_Y_MIN: f32 = 0.20;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_Y_MAX: f32 = 2.00;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_CLUTTER_Y_MAX: f32 = 1.45;
+const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_VERTICAL_NORMAL_Y_MAX: f32 = 0.45;
 const DEPTH_ALIGN_DESCRIPTOR_UPDATE_INTERVAL_MILLIS: u64 = 250;
 const DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MIN: f32 = 0.16;
 const DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MAX: f32 = 0.36;
@@ -1613,6 +1625,7 @@ fn stabilize_alignment_preview(
                     temporal.missing_solution_updates.saturating_add(1);
                 next.solution = Some(XrDepthAlignSolution {
                     confidence: previous_solution.confidence * 0.94,
+                    symmetry_confidence: previous_solution.symmetry_confidence,
                     ..previous_solution
                 });
                 hold_previous_remote = true;
@@ -1669,6 +1682,8 @@ fn lerp_alignment_solution(
         yaw_radians: wrap_preview_angle(previous.yaw_radians + yaw_delta * alpha),
         translation: previous.translation + (next.translation - previous.translation) * alpha,
         confidence: previous.confidence + (next.confidence - previous.confidence) * alpha,
+        symmetry_confidence: previous.symmetry_confidence
+            + (next.symmetry_confidence - previous.symmetry_confidence) * alpha,
         residual_meters: if previous.residual_meters.is_finite() && next.residual_meters.is_finite()
         {
             previous.residual_meters + (next.residual_meters - previous.residual_meters) * alpha
@@ -1801,6 +1816,142 @@ fn wall_tangent(normal: Vec3f) -> Vec3f {
     }
 }
 
+fn vertical_descriptor_bin(y: f32, min_y: f32, max_y: f32) -> Option<u8> {
+    if !y.is_finite() || y < min_y || y > max_y {
+        return None;
+    }
+    let normalized = ((y - min_y) / (max_y - min_y).max(1.0e-5)).clamp(0.0, 0.999_99);
+    Some((normalized * DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SLICES as f32).floor() as u8)
+}
+
+fn vertical_descriptor_height_u8(y: f32) -> u8 {
+    let normalized = ((y - DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_Y_MIN)
+        / (DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_Y_MAX
+            - DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_Y_MIN)
+            .max(1.0e-5))
+    .clamp(0.0, 1.0);
+    (normalized * 255.0).round() as u8
+}
+
+fn tsdf_surface_gradient(volume: &DepthMeshVolume, coord: VoxelCoord) -> Option<Vec3f> {
+    let sample_axis = |dx: i32, dy: i32, dz: i32| -> Option<f32> {
+        volume
+            .mesh_grid
+            .normalized_distance(VoxelCoord::new(coord.x + dx, coord.y + dy, coord.z + dz))
+            .filter(|value| value.is_finite())
+    };
+    let x_plus = sample_axis(1, 0, 0)?;
+    let x_minus = sample_axis(-1, 0, 0)?;
+    let y_plus = sample_axis(0, 1, 0)?;
+    let y_minus = sample_axis(0, -1, 0)?;
+    let z_plus = sample_axis(0, 0, 1)?;
+    let z_minus = sample_axis(0, 0, -1)?;
+    let gradient = vec3f(x_plus - x_minus, y_plus - y_minus, z_plus - z_minus);
+    (gradient.length() > 1.0e-5).then_some(gradient.normalize())
+}
+
+fn build_tsdf_vertical_descriptor(
+    volume: &DepthMeshVolume,
+) -> Option<XrDepthAlignVerticalDescriptor> {
+    let (bounds_min, bounds_max) = volume.mesh_grid.world_bounds(1)?;
+    let mut extent = (bounds_max.x - bounds_min.x)
+        .max(bounds_max.z - bounds_min.z)
+        .max(volume.voxel_size_meters * DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as f32);
+    extent = (extent + DEPTH_ALIGN_VERTICAL_DESCRIPTOR_BOUNDS_PADDING_METERS * 2.0)
+        .min(DEPTH_ALIGN_VERTICAL_DESCRIPTOR_MAX_EXTENT_METERS);
+    let center_x = (bounds_min.x + bounds_max.x) * 0.5;
+    let center_z = (bounds_min.z + bounds_max.z) * 0.5;
+    let origin_x = center_x - extent * 0.5;
+    let origin_z = center_z - extent * 0.5;
+    let cell_size = extent / DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as f32;
+    let cell_count = DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE * DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE;
+    let mut descriptor = XrDepthAlignVerticalDescriptor {
+        origin_x,
+        origin_z,
+        cell_size_meters: cell_size,
+        size: DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as u16,
+        vertical_surface_masks: vec![0; cell_count],
+        clutter_surface_masks: vec![0; cell_count],
+        free_space_masks: vec![0; cell_count],
+        height_u8: vec![0; cell_count],
+    };
+
+    for (chunk_key, chunk) in &volume.mesh_grid.chunks {
+        if chunk.live_count == 0 {
+            continue;
+        }
+        let edge = volume.mesh_grid.chunk_edge as usize;
+        for local_z in 0..edge {
+            for local_y in 0..edge {
+                for local_x in 0..edge {
+                    let id = local_x + local_y * edge + local_z * edge * edge;
+                    if chunk.valid[id] == 0
+                        || chunk.confidence[id] < DEPTH_ALIGN_VERTICAL_DESCRIPTOR_MIN_CONFIDENCE
+                    {
+                        continue;
+                    }
+                    let coord = VoxelCoord::new(
+                        chunk_key.x * volume.mesh_grid.chunk_edge + local_x as i32,
+                        chunk_key.y * volume.mesh_grid.chunk_edge + local_y as i32,
+                        chunk_key.z * volume.mesh_grid.chunk_edge + local_z as i32,
+                    );
+                    let world = volume.mesh_grid.voxel_center_world(coord);
+                    let grid_x = ((world.x - origin_x) / cell_size).floor() as isize;
+                    let grid_z = ((world.z - origin_z) / cell_size).floor() as isize;
+                    if grid_x < 0
+                        || grid_z < 0
+                        || grid_x >= DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as isize
+                        || grid_z >= DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as isize
+                    {
+                        continue;
+                    }
+                    let index =
+                        grid_x as usize + grid_z as usize * DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE;
+                    let normalized_distance = chunk.values[id];
+
+                    if normalized_distance >= DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_NORMALIZED_MIN {
+                        if let Some(bin) = vertical_descriptor_bin(
+                            world.y,
+                            DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_Y_MIN,
+                            DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_Y_MAX,
+                        ) {
+                            descriptor.free_space_masks[index] |= 1u8 << bin;
+                        }
+                    }
+
+                    if world.y < DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_Y_MIN
+                        || world.y > DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_Y_MAX
+                        || normalized_distance.abs()
+                            > DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_NORMALIZED_BAND
+                    {
+                        continue;
+                    }
+                    let Some(bin) = vertical_descriptor_bin(
+                        world.y,
+                        DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_Y_MIN,
+                        DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SURFACE_Y_MAX,
+                    ) else {
+                        continue;
+                    };
+                    descriptor.height_u8[index] =
+                        descriptor.height_u8[index].max(vertical_descriptor_height_u8(world.y));
+                    let Some(normal) = tsdf_surface_gradient(volume, coord) else {
+                        descriptor.clutter_surface_masks[index] |= 1u8 << bin;
+                        continue;
+                    };
+                    if normal.y.abs() <= DEPTH_ALIGN_VERTICAL_DESCRIPTOR_VERTICAL_NORMAL_Y_MAX {
+                        descriptor.vertical_surface_masks[index] |= 1u8 << bin;
+                    } else if world.y <= DEPTH_ALIGN_VERTICAL_DESCRIPTOR_CLUTTER_Y_MAX {
+                        descriptor.clutter_surface_masks[index] |= 1u8 << bin;
+                    }
+                }
+            }
+        }
+    }
+
+    (!descriptor.is_empty()).then_some(descriptor)
+}
+
 fn build_tsdf_alignment_descriptor(
     volume: &DepthMeshVolume,
 ) -> (Option<XrDepthAlignDescriptor>, XrDepthAlignDebug) {
@@ -1818,12 +1969,9 @@ fn build_tsdf_alignment_descriptor(
     }
     let wall_patches = visible_stable_wall_patches(&volume.stable_wall_tracks);
     let wall_features = visible_room_wall_features(&volume.room_wall_tracks);
+    let vertical_descriptor = build_tsdf_vertical_descriptor(volume);
     if wall_patches.is_empty() && wall_features.is_empty() {
         return (None, debug);
-    }
-
-    if wall_patches.is_empty() {
-        debug.wall_candidate_count = debug.wall_candidate_count.max(wall_features.len() as u32);
     }
 
     let mut wall_samples = HashMap::<AlignmentWallKey, AlignmentCandidateSample>::new();
@@ -1840,18 +1988,14 @@ fn build_tsdf_alignment_descriptor(
         samples.truncate(DEPTH_ALIGN_MAX_WALL_SAMPLES);
     }
     debug.wall_sample_count = samples.len() as u32;
-    if wall_features.is_empty() && debug.wall_sample_count < DEPTH_ALIGN_MIN_WALL_SAMPLES as u32 {
+    if wall_features.is_empty() {
         return (None, debug);
     }
-
-    let wall_histogram = if wall_features.is_empty() {
-        xr_depth_align_build_wall_normal_histogram(&samples, DEPTH_ALIGN_WALL_HISTOGRAM_BINS)
-    } else {
-        xr_depth_align_build_wall_feature_normal_histogram(
-            &wall_features,
-            DEPTH_ALIGN_WALL_HISTOGRAM_BINS,
-        )
-    };
+    debug.wall_candidate_count = debug.wall_candidate_count.max(wall_features.len() as u32);
+    let wall_histogram = xr_depth_align_build_wall_feature_normal_histogram(
+        &wall_features,
+        DEPTH_ALIGN_WALL_HISTOGRAM_BINS,
+    );
 
     (
         Some(XrDepthAlignDescriptor {
@@ -1859,7 +2003,8 @@ fn build_tsdf_alignment_descriptor(
             floor_y: 0.0,
             wall_normal_histogram: wall_histogram,
             wall_features,
-            samples,
+            samples: Vec::new(),
+            vertical_descriptor,
         }),
         debug,
     )
@@ -7929,7 +8074,7 @@ mod tests {
     }
 
     #[test]
-    fn tsdf_alignment_descriptor_extracts_wall_samples_without_meshing() {
+    fn tsdf_alignment_descriptor_extracts_room_walls_and_vertical_descriptor_without_meshing() {
         let mut volume = DepthMeshVolume::new(1, 0.05);
         volume.generation = 27;
         fill_volume_signed_distance_field(
@@ -7957,16 +8102,12 @@ mod tests {
             "expected plane scan to populate plane patches"
         );
         assert!(
-            descriptor
-                .samples
-                .iter()
-                .any(|sample| sample.kind == XrDepthAlignSampleKind::Wall),
-            "expected wall samples in TSDF descriptor"
+            descriptor.samples.is_empty(),
+            "raw wall patch samples should stay local and not be published in the network descriptor"
         );
         assert!(
-            debug.wall_sample_count >= DEPTH_ALIGN_MIN_WALL_SAMPLES as u32,
-            "expected enough wall samples, got {}",
-            debug.wall_sample_count
+            !descriptor.wall_features.is_empty(),
+            "expected inferred room-wall features in TSDF descriptor"
         );
         assert!(
             descriptor.floor_y.abs() <= 0.001,
@@ -7981,6 +8122,14 @@ mod tests {
                 .sum::<f32>()
                 > 0.0,
             "expected non-empty wall histogram from TSDF descriptor"
+        );
+        assert!(
+            descriptor.vertical_descriptor.is_some(),
+            "expected compact TSDF vertical descriptor for symmetry resolution"
+        );
+        assert!(
+            debug.wall_sample_count > 0,
+            "expected local wall patches to still contribute to room-wall building"
         );
     }
 
