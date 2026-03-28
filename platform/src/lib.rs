@@ -73,7 +73,7 @@ pub mod display_context;
 mod app_main;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
 pub use crate::cx_api::{can_play_type, CxSystemBrowser, SystemBrowserId};
-pub use crate::xr_depth_mesh::{XrDepthAlignSlicePreview, XrDepthAlignSliceSegment};
+pub use crate::xr_depth_mesh::{XrDepthAlignHeightMap, XrDepthAlignSlicePreview};
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
@@ -218,20 +218,18 @@ pub use {
             WindowId, WindowVisuals,
         },
         xr_depth_mesh::{
-            xr_depth_align_analyze_remote_to_local,
-            xr_depth_align_build_wall_feature_normal_histogram,
-            xr_depth_align_build_wall_normal_histogram, xr_depth_align_loopback_preview_solution,
-            xr_depth_align_rescore_remote_to_local, xr_depth_align_solution_is_accepted,
-            xr_depth_align_solve_remote_to_local, xr_depth_align_test_markers,
-            xr_depth_align_transform_descriptor, ChunkKey, XrDepthAlignDebug,
-            XrDepthAlignDescriptor, XrDepthAlignPreview, XrDepthAlignSample,
+            xr_depth_align_analyze_remote_to_local, xr_depth_align_build_wall_normal_histogram,
+            xr_depth_align_loopback_preview_solution, xr_depth_align_rescore_remote_to_local,
+            xr_depth_align_solution_is_accepted, xr_depth_align_solve_remote_to_local,
+            xr_depth_align_test_markers, xr_depth_align_transform_descriptor, ChunkKey,
+            XrDepthAlignDebug, XrDepthAlignDescriptor, XrDepthAlignPreview, XrDepthAlignSample,
             XrDepthAlignSampleKind, XrDepthAlignSolution, XrDepthAlignSolveDiagnostic,
             XrDepthAlignSolveOutcome, XrDepthAlignState, XrDepthAlignVerticalDescriptor,
-            XrDepthAlignWallFeature, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery,
-            XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry,
-            XrDepthMeshQueryColliderRole, XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface,
-            XrDepthMeshQueryResult, XrDepthMeshQuerySupportPlane, XrDepthMeshState,
-            XrDepthMeshStats, XrDepthMeshStore, XrDepthPlaneKind, XrDepthPlanePatch,
+            XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery, XrDepthMeshQueryCollider,
+            XrDepthMeshQueryColliderGeometry, XrDepthMeshQueryColliderRole, XrDepthMeshQueryHit,
+            XrDepthMeshQueryResolvedSurface, XrDepthMeshQueryResult, XrDepthMeshQuerySupportPlane,
+            XrDepthMeshState, XrDepthMeshStats, XrDepthMeshStore, XrDepthPlaneKind,
+            XrDepthPlanePatch,
         },
     },
     app_main::*,
