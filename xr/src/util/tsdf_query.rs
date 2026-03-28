@@ -666,7 +666,6 @@ fn evaluate_tsdf_impact_query(
     let travel = query.predicted_center - query.center;
     let travel_distance = travel.length();
     let velocity_length = query.velocity.length();
-    let horizontal_speed = vec2f(query.velocity.x, query.velocity.z).length();
     let upward_speed = query.velocity.y.max(0.0);
 
     let motion_dir = if velocity_length > 1.0e-4 {

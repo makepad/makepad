@@ -61,7 +61,7 @@ impl AlignTest {
             return self.enabled;
         }
         self.enabled = enabled;
-        cx.xr_depth_mesh().set_surface_analysis_enabled(enabled);
+        cx.xr_tsdf().set_surface_analysis_enabled(enabled);
         self.last_mesh_generation = 0;
         self.last_mesh_update_sequence = 0;
         self.last_solution = None;
@@ -81,7 +81,7 @@ impl AlignTest {
             return;
         }
 
-        let Some(snapshot) = cx.xr_depth_mesh().latest_tsdf_snapshot() else {
+        let Some(snapshot) = cx.xr_tsdf().latest_tsdf_snapshot() else {
             self.last_solution = None;
             self.local_markers = None;
             self.remote_markers_local = None;

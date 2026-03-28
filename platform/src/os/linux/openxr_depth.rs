@@ -1,14 +1,13 @@
 use crate::{
-    makepad_math::{vec2f, vec3f, vec4f, Mat4f, Vec2f, Vec3f, Vec4f},
+    makepad_math::{vec2f, vec3f, vec4f, Mat4f, Vec3f, Vec4f},
     os::linux::{
         openxr::CxOpenXrFrame,
         vulkan::{CxVulkan, CxVulkanOpenXrSessionData},
     },
     thread::SignalToUI,
-    xr_depth_mesh::{
-        empty_bounds, xr_depth_mesh_store, ChunkKey, SparseTsdGridReadSnapshot, SparseTsdReadChunk,
-        TsdfPublishedSnapshot, XrDepthAlignHeightMap, XrDepthAlignSample, XrDepthAlignSampleKind,
-        XrDepthAlignSlicePreview, XrDepthMeshChunk, XrDepthMeshStore, XrDepthPlanePatch,
+    xr_tsdf::{
+        empty_bounds, xr_tsdf_store, ChunkKey, SparseTsdGridReadSnapshot, SparseTsdReadChunk,
+        TsdfPublishedSnapshot, XrDepthAlignHeightMap, XrTsdfStore,
     },
 };
 use std::{
@@ -62,17 +61,12 @@ const DEPTH_MESH_UPDATE_DISTANCE_METERS: f32 = 4.0;
 const DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS: u64 = 8;
 const DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS: u64 = 1000;
 const DEPTH_PROJECTED_HEIGHT_REFRESH_INTERVAL_MILLIS: u64 = 33;
-const DEPTH_ALIGN_MAX_WALL_SAMPLES: usize = 96;
 const DEPTH_ALIGN_HEIGHT_MAP_BOUNDS_PADDING_METERS: f32 = 0.45;
 const DEPTH_ALIGN_VECTOR_SLICE_TOP_Y_METERS: f32 = 2.00;
 const DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS: f32 = 0.50;
 const DEPTH_ALIGN_VECTOR_SLICE_MIN_PROJECT_Y_METERS: f32 = 0.00;
-const DEPTH_ALIGN_VECTOR_SLICE_MIN_HORIZONTAL_NORMAL: f32 = 0.55;
 const DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS: f32 =
     DEPTH_PLAYER_EXCLUDE_RADIUS_METERS + 0.12;
-const DEPTH_ALIGN_VECTOR_SLICE_MIN_SEGMENT_METERS: f32 = 0.05;
-const DEPTH_ALIGN_VECTOR_SLICE_SAMPLES_PER_CELL: f32 = 1.35;
-const DEPTH_ALIGN_VECTOR_SLICE_MAX_SAMPLES_PER_SEGMENT: usize = 3;
 const DEPTH_ALIGN_PROJECTED_HEIGHT_SAMPLES_PER_TICK: usize = 512;
 const DEPTH_ALIGN_PROJECTED_HEIGHT_MAX_SAMPLES_PER_SLICE: usize =
     DEPTH_ALIGN_PROJECTED_HEIGHT_SAMPLES_PER_TICK * 8;
@@ -197,7 +191,7 @@ fn pending_depth_candidate_should_replace(
 fn enqueue_pending_depth_candidate(
     pending_depth_candidate: &mut Option<PendingDepthCandidate>,
     candidate: PendingDepthCandidate,
-    store: &XrDepthMeshStore,
+    store: &XrTsdfStore,
 ) {
     match pending_depth_candidate {
         Some(pending) if pending_depth_candidate_should_replace(pending, &candidate) => {
@@ -765,13 +759,9 @@ struct DepthMeshVolume {
     bounds_max: Vec3f,
     mesh_grid: SparseTsdGrid,
     dirty_tsdf_chunk_keys: HashSet<VoxelCoord>,
-    mesh_chunks: Vec<XrDepthMeshChunk>,
     update_sequence: u64,
     dirty_chunk_keys: Vec<ChunkKey>,
     removed_chunk_keys: Vec<ChunkKey>,
-    mesh_vertex_count: usize,
-    mesh_triangle_count: usize,
-    plane_patches: Vec<XrDepthPlanePatch>,
     latest_camera_world: Option<Vec3f>,
     latest_camera_forward: Option<Vec3f>,
     projected_height_field: Option<ProjectedHeightField>,
@@ -839,13 +829,9 @@ impl DepthMeshVolume {
             bounds_max: vec3f(0.0, 0.0, 0.0),
             mesh_grid: SparseTsdGrid::new(voxel_size_meters, DEPTH_TSD_CHUNK_EDGE_VOXELS),
             dirty_tsdf_chunk_keys: HashSet::new(),
-            mesh_chunks: Vec::new(),
             update_sequence: 0,
             dirty_chunk_keys: Vec::new(),
             removed_chunk_keys: Vec::new(),
-            mesh_vertex_count: 0,
-            mesh_triangle_count: 0,
-            plane_patches: Vec::new(),
             latest_camera_world: None,
             latest_camera_forward: None,
             projected_height_field: None,
@@ -904,14 +890,10 @@ impl DepthMeshVolume {
     }
 
     fn discard_obsolete_surface_state(&mut self) {
-        self.mesh_chunks.clear();
         self.dirty_chunk_keys.clear();
         self.removed_chunk_keys.clear();
-        self.mesh_vertex_count = 0;
-        self.mesh_triangle_count = 0;
         self.pending_mesh_dirty_chunks.clear();
         self.pending_mesh_chunk_queue.clear();
-        self.plane_patches.clear();
         self.pending_plane_scan_dirty_chunks.clear();
         self.pending_plane_scan_chunk_queue.clear();
     }
@@ -961,7 +943,7 @@ struct FrameTsdSample {
 
 pub(super) struct CxOpenXrDepthMeshPipeline {
     mailbox: SharedLatestDepthJobMailbox,
-    store: XrDepthMeshStore,
+    store: XrTsdfStore,
     next_generation: u64,
     last_reset_generation: u64,
     last_depth_readback_at: Option<Instant>,
@@ -969,7 +951,7 @@ pub(super) struct CxOpenXrDepthMeshPipeline {
 
 impl CxOpenXrDepthMeshPipeline {
     pub fn new() -> Self {
-        let store = xr_depth_mesh_store();
+        let store = xr_tsdf_store();
         let mailbox = Arc::new((Mutex::new(LatestDepthJobMailbox::default()), Condvar::new()));
         std::thread::spawn({
             let mailbox = mailbox.clone();
@@ -1124,7 +1106,7 @@ struct DepthPreprocessWorkerState {
 
 fn depth_preprocess_tsdf_writer_worker(
     mailbox: SharedLatestDepthJobMailbox,
-    store: XrDepthMeshStore,
+    store: XrTsdfStore,
 ) {
     let mut preprocess_state = DepthPreprocessWorkerState::default();
     let mut volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, store.voxel_size_meters());
@@ -1528,7 +1510,7 @@ fn apply_preprocessed_depth_mesh(
 }
 
 fn update_published_height_map(volume: &mut DepthMeshVolume) -> bool {
-    let (_, next_height_map, _) = build_tsdf_vector_slice_preview_and_samples(volume);
+    let next_height_map = build_projected_height_map(volume);
     if volume.published_height_map == next_height_map {
         return false;
     }
@@ -2007,12 +1989,6 @@ fn vector_slice_cell_inside_player_cutout(
     dx * dx + dz * dz <= expanded_radius * expanded_radius
 }
 
-fn vector_slice_flatten_forward(forward: Vec3f) -> Option<Vec2f> {
-    let flat = vec2f(forward.x, forward.z);
-    let length = flat.length();
-    (length > 1.0e-5).then_some(flat * length.recip())
-}
-
 fn query_depth_grid_projected_column_height(
     volume: &DepthMeshVolume,
     sample_x: f32,
@@ -2068,220 +2044,16 @@ fn query_depth_grid_projected_column_height(
     }
 }
 
-fn vector_slice_sample_nearest(
-    values: &[f32],
-    size_x: usize,
-    size_z: usize,
-    x: isize,
-    z: isize,
-) -> f32 {
-    let x = x.clamp(0, size_x.saturating_sub(1) as isize) as usize;
-    let z = z.clamp(0, size_z.saturating_sub(1) as isize) as usize;
-    values[x + z * size_x]
-}
-
-fn vector_slice_sample_gradient(
-    values: &[f32],
-    size_x: usize,
-    size_z: usize,
-    x: usize,
-    z: usize,
-    cell_size: f32,
-) -> Vec3f {
-    let x = x as isize;
-    let z = z as isize;
-    let dx = vector_slice_sample_nearest(values, size_x, size_z, x + 1, z)
-        - vector_slice_sample_nearest(values, size_x, size_z, x - 1, z);
-    let dz = vector_slice_sample_nearest(values, size_x, size_z, x, z + 1)
-        - vector_slice_sample_nearest(values, size_x, size_z, x, z - 1);
-    let gradient = vec3f(dx / cell_size.max(1.0e-5), 0.0, dz / cell_size.max(1.0e-5));
-    let horizontal_length = gradient.length();
-    if horizontal_length < DEPTH_ALIGN_VECTOR_SLICE_MIN_HORIZONTAL_NORMAL {
-        vec3f(0.0, 0.0, 0.0)
-    } else {
-        gradient * (1.0 / horizontal_length)
-    }
-}
-
 fn encode_projected_height_u16(height: f32, bottom_y: f32, top_y: f32) -> u16 {
     let span = (top_y - bottom_y).max(1.0e-5);
     let normalized = ((height - bottom_y) / span).clamp(0.0, 1.0);
     1 + (normalized * 65534.0).round() as u16
 }
 
-fn marching_squares_segment_edges(mask: u8) -> &'static [(u8, u8)] {
-    match mask {
-        0 | 15 => &[],
-        1 => &[(3, 0)],
-        2 => &[(0, 1)],
-        3 => &[(3, 1)],
-        4 => &[(1, 2)],
-        5 => &[(3, 2), (0, 1)],
-        6 => &[(0, 2)],
-        7 => &[(3, 2)],
-        8 => &[(2, 3)],
-        9 => &[(0, 2)],
-        10 => &[(0, 1), (2, 3)],
-        11 => &[(1, 2)],
-        12 => &[(1, 3)],
-        13 => &[(0, 1)],
-        14 => &[(3, 0)],
-        _ => &[],
-    }
-}
-
-fn marching_squares_edge_point(
-    origin_x: f32,
-    origin_z: f32,
-    cell_size: f32,
-    slice_y: f32,
-    x: usize,
-    z: usize,
-    edge: u8,
-    values: [f32; 4],
-) -> Vec3f {
-    let corners = [
-        vector_slice_corner_world(origin_x, origin_z, cell_size, slice_y, x, z),
-        vector_slice_corner_world(origin_x, origin_z, cell_size, slice_y, x + 1, z),
-        vector_slice_corner_world(origin_x, origin_z, cell_size, slice_y, x + 1, z + 1),
-        vector_slice_corner_world(origin_x, origin_z, cell_size, slice_y, x, z + 1),
-    ];
-    let (a_idx, b_idx) = match edge {
-        0 => (0, 1),
-        1 => (1, 2),
-        2 => (3, 2),
-        3 => (0, 3),
-        _ => (0, 1),
-    };
-    let a = corners[a_idx];
-    let b = corners[b_idx];
-    let va = values[a_idx];
-    let vb = values[b_idx];
-    let t = if (vb - va).abs() > 1.0e-5 {
-        (-va / (vb - va)).clamp(0.0, 1.0)
-    } else {
-        0.5
-    };
-    vec3f(a.x + (b.x - a.x) * t, slice_y, a.z + (b.z - a.z) * t)
-}
-
-fn append_projected_height_iso_samples(
-    samples: &mut Vec<XrDepthAlignSample>,
-    contour_height: f32,
-    origin_x: f32,
-    origin_z: f32,
-    cell_size: f32,
-    size_x: usize,
-    size_z: usize,
-    sample_size_x: usize,
-    heights: &[f32],
-    valid: &[u8],
-    player_cutout_center: Option<Vec3f>,
-    x: usize,
-    z: usize,
-) {
-    let corner_indices = [
-        x + z * sample_size_x,
-        x + 1 + z * sample_size_x,
-        x + 1 + (z + 1) * sample_size_x,
-        x + (z + 1) * sample_size_x,
-    ];
-    if !corner_indices.iter().all(|index| valid[*index] != 0) {
-        return;
-    }
-    let values = [
-        heights[corner_indices[0]] - contour_height,
-        heights[corner_indices[1]] - contour_height,
-        heights[corner_indices[2]] - contour_height,
-        heights[corner_indices[3]] - contour_height,
-    ];
-    let mask = values.iter().enumerate().fold(0u8, |mask, (bit, value)| {
-        mask | (((*value >= 0.0) as u8) << bit)
-    });
-    if mask == 0 || mask == 15 {
-        return;
-    }
-    for &(edge_a, edge_b) in marching_squares_segment_edges(mask) {
-        let start = marching_squares_edge_point(
-            origin_x,
-            origin_z,
-            cell_size,
-            contour_height,
-            x,
-            z,
-            edge_a,
-            values,
-        );
-        let end = marching_squares_edge_point(
-            origin_x,
-            origin_z,
-            cell_size,
-            contour_height,
-            x,
-            z,
-            edge_b,
-            values,
-        );
-        let delta = end - start;
-        let length = delta.length();
-        if length < DEPTH_ALIGN_VECTOR_SLICE_MIN_SEGMENT_METERS {
-            continue;
-        }
-        let tangent = delta.normalize();
-        let sample_count = (((length / cell_size.max(1.0e-5))
-            * DEPTH_ALIGN_VECTOR_SLICE_SAMPLES_PER_CELL)
-            .ceil() as usize)
-            .clamp(1, DEPTH_ALIGN_VECTOR_SLICE_MAX_SAMPLES_PER_SEGMENT);
-        for sample_index in 0..sample_count {
-            let t = (sample_index as f32 + 0.5) / sample_count as f32;
-            let point = start + delta * t;
-            if player_cutout_center.is_some_and(|camera_world| {
-                vector_slice_point_inside_player_cutout(camera_world, point)
-            }) {
-                continue;
-            }
-            let sample_x = ((point.x - origin_x) / cell_size)
-                .round()
-                .clamp(0.0, size_x as f32) as usize;
-            let sample_z = ((point.z - origin_z) / cell_size)
-                .round()
-                .clamp(0.0, size_z as f32) as usize;
-            let gradient = vector_slice_sample_gradient(
-                heights,
-                size_x + 1,
-                size_z + 1,
-                sample_x,
-                sample_z,
-                cell_size,
-            );
-            let normal = if gradient.length() > 1.0e-5 {
-                gradient
-            } else {
-                vec3f(-tangent.z, 0.0, tangent.x)
-            };
-            let weight = (length / sample_count as f32).max(cell_size * 0.35);
-            samples.push(XrDepthAlignSample {
-                kind: XrDepthAlignSampleKind::Wall,
-                point: vec3f(point.x, contour_height, point.z),
-                normal,
-                weight,
-            });
-        }
-    }
-}
-
-fn build_tsdf_vector_slice_preview_and_samples(
-    volume: &mut DepthMeshVolume,
-) -> (
-    Option<XrDepthAlignSlicePreview>,
-    Option<XrDepthAlignHeightMap>,
-    Vec<XrDepthAlignSample>,
-) {
+fn build_projected_height_map(volume: &mut DepthMeshVolume) -> Option<XrDepthAlignHeightMap> {
     sync_projected_height_field_layout(volume);
     sync_projected_height_field_player_cutout(volume);
-    let Some(field) = volume.projected_height_field.as_ref() else {
-        return (None, None, Vec::new());
-    };
+    let field = volume.projected_height_field.as_ref()?;
     let origin_x = field.layout.origin_x;
     let origin_z = field.layout.origin_z;
     let cell_size = field.layout.cell_size_meters;
@@ -2291,9 +2063,6 @@ fn build_tsdf_vector_slice_preview_and_samples(
     let heights = &field.heights_meters;
     let valid = &field.valid;
     let player_cutout_center = field.player_cutout_center;
-    let player_cutout_forward = volume
-        .latest_camera_forward
-        .and_then(vector_slice_flatten_forward);
     let mut height_map = XrDepthAlignHeightMap {
         origin_x,
         origin_z,
@@ -2306,13 +2075,6 @@ fn build_tsdf_vector_slice_preview_and_samples(
         player_cutout_radius_meters: DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS,
         height_u16: vec![0; size_x * size_z],
     };
-    let mut slice_preview = XrDepthAlignSlicePreview {
-        height_map: height_map.clone(),
-        cutout_center: player_cutout_center.map(|center| vec2f(center.x, center.z)),
-        cutout_forward: player_cutout_forward,
-        cutout_radius_meters: DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS,
-    };
-    let mut samples = Vec::<XrDepthAlignSample>::new();
     for z in 0..size_z {
         for x in 0..size_x {
             if player_cutout_center.is_some_and(|camera_world| {
@@ -2353,33 +2115,7 @@ fn build_tsdf_vector_slice_preview_and_samples(
             }
         }
     }
-    slice_preview.height_map = height_map.clone();
-
-    for z in 0..size_z {
-        for x in 0..size_x {
-            append_projected_height_iso_samples(
-                &mut samples,
-                DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS,
-                origin_x,
-                origin_z,
-                cell_size,
-                size_x,
-                size_z,
-                sample_size_x,
-                heights,
-                valid,
-                player_cutout_center,
-                x,
-                z,
-            );
-        }
-    }
-
-    samples.sort_by(|a, b| b.weight.total_cmp(&a.weight));
-    if samples.len() > DEPTH_ALIGN_MAX_WALL_SAMPLES {
-        samples.truncate(DEPTH_ALIGN_MAX_WALL_SAMPLES);
-    }
-    (Some(slice_preview), Some(height_map), samples)
+    Some(height_map)
 }
 
 fn rebuild_sampled_depth_grid(
