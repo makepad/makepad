@@ -26,6 +26,16 @@ const DEPTH_VOXEL_MIN_DISTANCE_METERS: f32 = 0.08;
 const DEPTH_VOXEL_MAX_DISTANCE_METERS: f32 = 6.0;
 const DEPTH_TSD_MIN_UPDATE_DISTANCE_METERS: f32 = 0.5;
 const DEPTH_TSD_TARGET_INTEGRATION_INTERVAL_MILLIS: u64 = 1000;
+const DEPTH_TSD_SUBMIT_SAMPLE_GRID_X: usize = 6;
+const DEPTH_TSD_SUBMIT_SAMPLE_GRID_Y: usize = 4;
+const DEPTH_TSD_SUBMIT_SAMPLE_NDC_MARGIN: f32 = 0.82;
+const DEPTH_TSD_SUBMIT_FRONTIER_HORIZON_METERS: f32 = 3.0;
+const DEPTH_TSD_SUBMIT_FRONTIER_SURFACE_ABS_DISTANCE: f32 = 0.4;
+const DEPTH_TSD_SUBMIT_MEDIUM_NOVELTY_SCORE: f32 = 3.0;
+const DEPTH_TSD_SUBMIT_STRONG_NOVELTY_SCORE: f32 = 7.0;
+const DEPTH_TSD_SUBMIT_MEDIUM_INTERVAL_MILLIS: u64 = 500;
+const DEPTH_TSD_SUBMIT_STRONG_INTERVAL_MILLIS: u64 = 250;
+const DEPTH_TSD_SUBMIT_VERTICAL_BOUNDS_PADDING_METERS: f32 = 1.25;
 const DEPTH_TSD_NOVELTY_SAMPLE_GRID_X: usize = 16;
 const DEPTH_TSD_NOVELTY_SAMPLE_GRID_Y: usize = 12;
 const DEPTH_TSD_NOVELTY_BOUNDS_PADDING_VOXELS: i32 = 2;
@@ -127,6 +137,13 @@ struct DepthFrameNovelty {
     valid_samples: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct SubmitDepthFrameNovelty {
+    score: f32,
+    valid_rays: usize,
+    force_readback: bool,
+}
+
 struct PendingDepthCandidate {
     job: CxOpenXrDepthMeshJob,
     novelty: DepthFrameNovelty,
@@ -194,6 +211,207 @@ fn enqueue_pending_depth_candidate(
             *pending_depth_candidate = Some(candidate);
         }
     }
+}
+
+fn point_inside_bounds_xz(point: Vec3f, min: Vec3f, max: Vec3f) -> bool {
+    point.x >= min.x && point.x <= max.x && point.z >= min.z && point.z <= max.z
+}
+
+fn ray_aabb_exit_distance(origin: Vec3f, direction: Vec3f, min: Vec3f, max: Vec3f) -> Option<f32> {
+    let mut t_min = f32::NEG_INFINITY;
+    let mut t_max = f32::INFINITY;
+    for (origin_axis, direction_axis, min_axis, max_axis) in [
+        (origin.x, direction.x, min.x, max.x),
+        (origin.y, direction.y, min.y, max.y),
+        (origin.z, direction.z, min.z, max.z),
+    ] {
+        if direction_axis.abs() <= 1.0e-6 {
+            if origin_axis < min_axis || origin_axis > max_axis {
+                return None;
+            }
+            continue;
+        }
+        let inv_direction = 1.0 / direction_axis;
+        let t0 = (min_axis - origin_axis) * inv_direction;
+        let t1 = (max_axis - origin_axis) * inv_direction;
+        t_min = t_min.max(t0.min(t1));
+        t_max = t_max.min(t0.max(t1));
+        if t_max < t_min {
+            return None;
+        }
+    }
+    (t_max.is_finite() && t_max >= 0.0).then_some(t_max.max(0.0))
+}
+
+fn depth_ndc_to_view_with_inv_proj(
+    inv_depth_proj: Mat4f,
+    ndc_x: f32,
+    ndc_y: f32,
+    ndc_z: f32,
+) -> Option<Vec3f> {
+    let view = inv_depth_proj.transform_vec4(vec4f(ndc_x, ndc_y, ndc_z, 1.0));
+    if !view.w.is_finite() || view.w.abs() < 1.0e-6 {
+        return None;
+    }
+    let inv_w = 1.0 / view.w;
+    let point = vec3f(view.x * inv_w, view.y * inv_w, view.z * inv_w);
+    (point.x.is_finite() && point.y.is_finite() && point.z.is_finite()).then_some(point)
+}
+
+fn depth_ndc_to_world_ray(
+    inv_depth_proj: Mat4f,
+    world_from_depth_view: Mat4f,
+    ndc_x: f32,
+    ndc_y: f32,
+) -> Option<Vec3f> {
+    let view = depth_ndc_to_view_with_inv_proj(inv_depth_proj, ndc_x, ndc_y, 1.0)?;
+    let view_direction = view.normalize();
+    if view_direction.length() <= 1.0e-4 {
+        return None;
+    }
+    let world_direction = world_from_depth_view.transform_vec4(vec4f(
+        view_direction.x,
+        view_direction.y,
+        view_direction.z,
+        0.0,
+    ));
+    let direction = vec3f(world_direction.x, world_direction.y, world_direction.z).normalize();
+    (direction.length() > 1.0e-4).then_some(direction)
+}
+
+fn score_submit_depth_frame_novelty(
+    grid: &SparseTsdGridReadSnapshot,
+    camera_world: Vec3f,
+    inv_depth_proj: Mat4f,
+    world_from_depth_view: Mat4f,
+) -> SubmitDepthFrameNovelty {
+    let Some((mut bounds_min, mut bounds_max)) =
+        grid.world_bounds(DEPTH_TSD_NOVELTY_BOUNDS_PADDING_VOXELS)
+    else {
+        return SubmitDepthFrameNovelty {
+            force_readback: true,
+            ..Default::default()
+        };
+    };
+    bounds_min.y -= DEPTH_TSD_SUBMIT_VERTICAL_BOUNDS_PADDING_METERS;
+    bounds_max.y += DEPTH_TSD_SUBMIT_VERTICAL_BOUNDS_PADDING_METERS;
+    if !point_inside_bounds_xz(camera_world, bounds_min, bounds_max) {
+        return SubmitDepthFrameNovelty {
+            force_readback: true,
+            ..Default::default()
+        };
+    }
+
+    let mut novelty = SubmitDepthFrameNovelty::default();
+    let lookahead_distance = (grid.voxel_size * 2.0).max(0.1);
+    for y in 0..DEPTH_TSD_SUBMIT_SAMPLE_GRID_Y {
+        let y_t = if DEPTH_TSD_SUBMIT_SAMPLE_GRID_Y == 1 {
+            0.5
+        } else {
+            y as f32 / (DEPTH_TSD_SUBMIT_SAMPLE_GRID_Y - 1) as f32
+        };
+        let ndc_y =
+            -DEPTH_TSD_SUBMIT_SAMPLE_NDC_MARGIN + y_t * DEPTH_TSD_SUBMIT_SAMPLE_NDC_MARGIN * 2.0;
+        for x in 0..DEPTH_TSD_SUBMIT_SAMPLE_GRID_X {
+            let x_t = if DEPTH_TSD_SUBMIT_SAMPLE_GRID_X == 1 {
+                0.5
+            } else {
+                x as f32 / (DEPTH_TSD_SUBMIT_SAMPLE_GRID_X - 1) as f32
+            };
+            let ndc_x = -DEPTH_TSD_SUBMIT_SAMPLE_NDC_MARGIN
+                + x_t * DEPTH_TSD_SUBMIT_SAMPLE_NDC_MARGIN * 2.0;
+            let Some(ray_direction) =
+                depth_ndc_to_world_ray(inv_depth_proj, world_from_depth_view, ndc_x, ndc_y)
+            else {
+                continue;
+            };
+            novelty.valid_rays += 1;
+            let Some(exit_distance) =
+                ray_aabb_exit_distance(camera_world, ray_direction, bounds_min, bounds_max)
+            else {
+                continue;
+            };
+            if exit_distance > DEPTH_TSD_SUBMIT_FRONTIER_HORIZON_METERS {
+                continue;
+            }
+            let boundary_distance = (exit_distance - grid.voxel_size).max(0.0);
+            let boundary_world = camera_world + ray_direction.scale(boundary_distance);
+            let (boundary_x, boundary_y, boundary_z) = grid.world_to_voxel_xyz(boundary_world);
+            let boundary_distance_value =
+                grid.normalized_distance_xyz(boundary_x, boundary_y, boundary_z);
+            let boundary_confidence = grid.confidence_xyz(boundary_x, boundary_y, boundary_z);
+            let known_frontier_surface = boundary_distance_value.is_some_and(|distance| {
+                boundary_confidence >= DEPTH_TSD_STABLE_CONFIDENCE
+                    && distance.abs() <= DEPTH_TSD_SUBMIT_FRONTIER_SURFACE_ABS_DISTANCE
+            });
+            if known_frontier_surface {
+                continue;
+            }
+            novelty.score +=
+                1.0 - (exit_distance / DEPTH_TSD_SUBMIT_FRONTIER_HORIZON_METERS).clamp(0.0, 1.0);
+            if boundary_distance_value.is_none() {
+                novelty.score += 0.75;
+            } else {
+                let confidence_gap = DEPTH_TSD_STABLE_CONFIDENCE.saturating_sub(boundary_confidence)
+                    as f32
+                    / DEPTH_TSD_STABLE_CONFIDENCE as f32;
+                novelty.score += 0.35 * confidence_gap;
+            }
+            let beyond_frontier_world =
+                camera_world + ray_direction.scale(exit_distance + lookahead_distance);
+            let (beyond_x, beyond_y, beyond_z) = grid.world_to_voxel_xyz(beyond_frontier_world);
+            if grid
+                .normalized_distance_xyz(beyond_x, beyond_y, beyond_z)
+                .is_none()
+            {
+                novelty.score += 0.5;
+            }
+        }
+    }
+    novelty
+}
+
+fn submit_depth_readback_min_interval_millis(novelty: SubmitDepthFrameNovelty) -> u64 {
+    if novelty.force_readback {
+        DEPTH_TSD_SUBMIT_STRONG_INTERVAL_MILLIS
+    } else if novelty.score >= DEPTH_TSD_SUBMIT_STRONG_NOVELTY_SCORE {
+        DEPTH_TSD_SUBMIT_STRONG_INTERVAL_MILLIS
+    } else if novelty.score >= DEPTH_TSD_SUBMIT_MEDIUM_NOVELTY_SCORE {
+        DEPTH_TSD_SUBMIT_MEDIUM_INTERVAL_MILLIS
+    } else {
+        DEPTH_TSD_TARGET_INTEGRATION_INTERVAL_MILLIS
+    }
+}
+
+fn submit_should_readback_depth_frame(
+    snapshot: Option<&TsdfPublishedSnapshot>,
+    camera_world: Vec3f,
+    inv_depth_proj: Mat4f,
+    world_from_depth_view: Mat4f,
+    now: Instant,
+    last_depth_readback_at: Option<Instant>,
+) -> bool {
+    let Some(snapshot) = snapshot else {
+        return last_depth_readback_at.is_none_or(|last| {
+            now.duration_since(last)
+                >= Duration::from_millis(DEPTH_TSD_SUBMIT_STRONG_INTERVAL_MILLIS)
+        });
+    };
+    if snapshot.grid.is_empty() {
+        return last_depth_readback_at.is_none_or(|last| {
+            now.duration_since(last)
+                >= Duration::from_millis(DEPTH_TSD_SUBMIT_STRONG_INTERVAL_MILLIS)
+        });
+    }
+    let novelty = score_submit_depth_frame_novelty(
+        &snapshot.grid,
+        camera_world,
+        inv_depth_proj,
+        world_from_depth_view,
+    );
+    let min_interval_millis = submit_depth_readback_min_interval_millis(novelty);
+    last_depth_readback_at
+        .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(min_interval_millis))
 }
 
 fn tsd_chunk_key_and_local_id(coord: VoxelCoord) -> (VoxelCoord, u16) {
@@ -383,24 +601,6 @@ impl SparseTsdGrid {
             .unwrap_or(0)
     }
 
-    pub fn accumulate_normalized_distance(
-        &mut self,
-        coord: VoxelCoord,
-        value: f32,
-        generation: u64,
-    ) -> SparseTsdWriteResult {
-        let (chunk_key, local_id) = self.chunk_key_and_id(coord);
-        let chunk = self
-            .chunks
-            .entry(chunk_key)
-            .or_insert_with(|| SparseTsdChunk::new(self.chunk_volume));
-        let result = chunk.accumulate(local_id, value, generation);
-        if result.became_live {
-            self.active_value_count += 1;
-        }
-        result
-    }
-
     pub fn overwrite_normalized_distance(
         &mut self,
         coord: VoxelCoord,
@@ -524,14 +724,8 @@ impl SparseTsdReadChunk {
 }
 
 impl SparseTsdGridReadSnapshot {
-    pub fn is_empty(&self) -> bool {
-        self.active_value_count == 0
-    }
-
     pub fn normalized_distance(&self, coord: VoxelCoord) -> Option<f32> {
-        let (chunk_key, local_id) = self.chunk_key_and_id(coord);
-        let chunk = self.chunks.get(&chunk_key)?;
-        chunk.value(local_id)
+        self.normalized_distance_xyz(coord.x, coord.y, coord.z)
     }
 
     pub fn meshing_distance(&self, coord: VoxelCoord, current_generation: u64) -> Option<f32> {
@@ -541,50 +735,20 @@ impl SparseTsdGridReadSnapshot {
     }
 
     pub fn confidence(&self, coord: VoxelCoord) -> u8 {
-        let (chunk_key, local_id) = self.chunk_key_and_id(coord);
-        self.chunks
-            .get(&chunk_key)
-            .map(|chunk| chunk.confidence(local_id))
-            .unwrap_or(0)
+        self.confidence_xyz(coord.x, coord.y, coord.z)
     }
 
     pub fn world_to_voxel_coord(&self, point: Vec3f) -> VoxelCoord {
-        VoxelCoord::new(
-            (point.x / self.voxel_size).floor() as i32,
-            (point.y / self.voxel_size).floor() as i32,
-            (point.z / self.voxel_size).floor() as i32,
-        )
+        let (x, y, z) = self.world_to_voxel_xyz(point);
+        VoxelCoord::new(x, y, z)
     }
 
     pub fn voxel_center_world(&self, coord: VoxelCoord) -> Vec3f {
-        vec3f(
-            (coord.x as f32 + 0.5) * self.voxel_size,
-            (coord.y as f32 + 0.5) * self.voxel_size,
-            (coord.z as f32 + 0.5) * self.voxel_size,
-        )
-    }
-
-    pub fn world_bounds(&self, padding_voxels: i32) -> Option<(Vec3f, Vec3f)> {
-        let (min, max) = self.active_bounds?;
-        let padding = padding_voxels as f32 * self.voxel_size;
-        Some((
-            vec3f(min.x - padding, min.y - padding, min.z - padding),
-            vec3f(max.x + padding, max.y + padding, max.z + padding),
-        ))
+        self.voxel_center_world_xyz(coord.x, coord.y, coord.z)
     }
 
     pub fn chunk_key_and_id(&self, coord: VoxelCoord) -> (ChunkKey, usize) {
-        let chunk_coord = VoxelCoord::new(
-            coord.x.div_euclid(self.chunk_edge),
-            coord.y.div_euclid(self.chunk_edge),
-            coord.z.div_euclid(self.chunk_edge),
-        );
-        let lx = coord.x.rem_euclid(self.chunk_edge) as usize;
-        let ly = coord.y.rem_euclid(self.chunk_edge) as usize;
-        let lz = coord.z.rem_euclid(self.chunk_edge) as usize;
-        let edge = self.chunk_edge as usize;
-        let id = lx + ly * edge + lz * edge * edge;
-        (voxel_coord_to_chunk_key(chunk_coord), id)
+        self.chunk_key_and_local_index_xyz(coord.x, coord.y, coord.z)
     }
 }
 
@@ -800,6 +964,7 @@ pub(super) struct CxOpenXrDepthMeshPipeline {
     store: XrDepthMeshStore,
     next_generation: u64,
     last_reset_generation: u64,
+    last_depth_readback_at: Option<Instant>,
 }
 
 impl CxOpenXrDepthMeshPipeline {
@@ -816,6 +981,7 @@ impl CxOpenXrDepthMeshPipeline {
             store,
             next_generation: 1,
             last_reset_generation: 0,
+            last_depth_readback_at: None,
         }
     }
 
@@ -830,6 +996,7 @@ impl CxOpenXrDepthMeshPipeline {
         let reset_generation = self.store.reset_generation();
         if self.last_reset_generation != reset_generation {
             self.last_reset_generation = reset_generation;
+            self.last_depth_readback_at = None;
         }
         let pose_result = (|| {
             let width = render_targets.depth_width;
@@ -837,6 +1004,8 @@ impl CxOpenXrDepthMeshPipeline {
             if width == 0 || height == 0 {
                 return Err("OpenXR depth readback dimensions are zero".to_string());
             }
+            let depth_proj = frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_proj_mat;
+            let inv_depth_proj = depth_proj.invert();
             let world_from_depth_view = frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_view_mat.invert();
             let camera_world = world_from_depth_view.transform_vec4(vec4f(0.0, 0.0, 0.0, 1.0));
             if !camera_world.w.is_finite() || camera_world.w.abs() < 1.0e-6 {
@@ -853,20 +1022,42 @@ impl CxOpenXrDepthMeshPipeline {
             Ok((
                 width,
                 height,
+                depth_proj,
+                inv_depth_proj,
                 world_from_depth_view,
                 camera_world,
                 camera_forward,
             ))
         })();
 
-        let (width, height, world_from_depth_view, camera_world, camera_forward) = match pose_result
-        {
+        let (
+            width,
+            height,
+            depth_proj,
+            inv_depth_proj,
+            world_from_depth_view,
+            camera_world,
+            camera_forward,
+        ) = match pose_result {
             Ok(parts) => parts,
             Err(err) => {
                 self.store.set_error(err.clone());
                 return Err(err);
             }
         };
+
+        let now = Instant::now();
+        if !submit_should_readback_depth_frame(
+            self.store.latest_tsdf_snapshot().as_deref(),
+            camera_world,
+            inv_depth_proj,
+            world_from_depth_view,
+            now,
+            self.last_depth_readback_at,
+        ) {
+            self.store.record_drop();
+            return Ok(());
+        }
 
         let generation = self.next_generation;
         self.next_generation += 1;
@@ -888,8 +1079,8 @@ impl CxOpenXrDepthMeshPipeline {
                 voxel_size_meters,
                 camera_world,
                 camera_forward,
-                depth_proj: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_proj_mat,
-                inv_depth_proj: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_proj_mat.invert(),
+                depth_proj,
+                inv_depth_proj,
                 depth_view_from_world: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_view_mat,
                 world_from_depth_view,
                 depth,
@@ -907,6 +1098,7 @@ impl CxOpenXrDepthMeshPipeline {
         if replace_latest_depth_job(&self.mailbox, job) {
             self.store.record_drop();
         }
+        self.last_depth_readback_at = Some(now);
 
         Ok(())
     }

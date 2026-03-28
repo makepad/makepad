@@ -1,5 +1,5 @@
 use crate::{
-    makepad_math::{vec2f, vec3, vec4f, Mat4f, Pose, Quat, Vec2f, Vec3f},
+    makepad_math::{vec2f, vec3, vec3f, vec4f, Mat4f, Pose, Quat, Vec2f, Vec3f},
     makepad_micro_serde::*,
 };
 use std::{
@@ -243,8 +243,63 @@ pub struct SparseTsdGridReadSnapshot {
 }
 
 impl SparseTsdGridReadSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.active_value_count == 0
+    }
+
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    pub fn world_bounds(&self, padding_voxels: i32) -> Option<(Vec3f, Vec3f)> {
+        let (min, max) = self.active_bounds?;
+        let padding = padding_voxels as f32 * self.voxel_size;
+        Some((
+            vec3f(min.x - padding, min.y - padding, min.z - padding),
+            vec3f(max.x + padding, max.y + padding, max.z + padding),
+        ))
+    }
+
+    pub fn world_to_voxel_xyz(&self, point: Vec3f) -> (i32, i32, i32) {
+        (
+            (point.x / self.voxel_size).floor() as i32,
+            (point.y / self.voxel_size).floor() as i32,
+            (point.z / self.voxel_size).floor() as i32,
+        )
+    }
+
+    pub fn voxel_center_world_xyz(&self, x: i32, y: i32, z: i32) -> Vec3f {
+        vec3f(
+            (x as f32 + 0.5) * self.voxel_size,
+            (y as f32 + 0.5) * self.voxel_size,
+            (z as f32 + 0.5) * self.voxel_size,
+        )
+    }
+
+    pub fn chunk_key_and_local_index_xyz(&self, x: i32, y: i32, z: i32) -> (ChunkKey, usize) {
+        let chunk_x = x.div_euclid(self.chunk_edge);
+        let chunk_y = y.div_euclid(self.chunk_edge);
+        let chunk_z = z.div_euclid(self.chunk_edge);
+        let lx = x.rem_euclid(self.chunk_edge) as usize;
+        let ly = y.rem_euclid(self.chunk_edge) as usize;
+        let lz = z.rem_euclid(self.chunk_edge) as usize;
+        let edge = self.chunk_edge as usize;
+        let local_id = lx + ly * edge + lz * edge * edge;
+        (ChunkKey::new(chunk_x, chunk_y, chunk_z), local_id)
+    }
+
+    pub fn normalized_distance_xyz(&self, x: i32, y: i32, z: i32) -> Option<f32> {
+        let (chunk_key, local_id) = self.chunk_key_and_local_index_xyz(x, y, z);
+        let chunk = self.chunks.get(&chunk_key)?;
+        chunk.value(local_id)
+    }
+
+    pub fn confidence_xyz(&self, x: i32, y: i32, z: i32) -> u8 {
+        let (chunk_key, local_id) = self.chunk_key_and_local_index_xyz(x, y, z);
+        self.chunks
+            .get(&chunk_key)
+            .map(|chunk| chunk.confidence(local_id))
+            .unwrap_or(0)
     }
 
     pub fn heap_bytes(&self) -> u64 {
