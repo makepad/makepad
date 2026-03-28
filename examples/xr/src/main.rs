@@ -1,7 +1,7 @@
 use makepad_widgets;
 
 use makepad_widgets::makepad_draw::DrawVector;
-use makepad_widgets::makepad_platform::XrDepthAlignSlicePreview;
+use makepad_widgets::makepad_platform::{TextureFormat, TextureUpdated, XrDepthAlignSlicePreview};
 use makepad_widgets::*;
 use makepad_xr::*;
 
@@ -47,6 +47,33 @@ script_mod! {
                     .mix(self.color_disabled, self.disabled);
                 return Pal.premul(fill)
             }
+        }
+    }
+
+    let DrawHeightMap = set_type_default() do #(DrawHeightMap::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        height_texture: texture_2d(float)
+        wall_band_start: 0.72
+
+        pixel: fn() {
+            let sample = self.height_texture.sample(self.pos).x
+            if sample <= 0.00001 {
+                return #0000
+            }
+            let wall_mix = clamp(
+                (sample - self.wall_band_start) / max(1.0 - self.wall_band_start, 0.0001),
+                0.0,
+                1.0
+            )
+            let lifted = pow(sample, mix(1.28, 0.72, wall_mix))
+            let base = mix(
+                vec3(0.05, 0.13, 0.19),
+                vec3(0.16, 0.60, 0.66),
+                clamp(lifted * 1.35, 0.0, 1.0)
+            )
+            let bright = mix(base, vec3(0.98, 0.92, 0.74), clamp(pow(lifted, 1.7), 0.0, 1.0))
+            let color = mix(bright, vec3(1.0, 0.66, 0.22), wall_mix * 0.82)
+            return Pal.premul(vec4(color, 0.96))
         }
     }
 
@@ -669,19 +696,6 @@ script_mod! {
                                 padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
                                 draw_bg.color: #x0d1824
 
-                                plane_scan_field := Label{
-                                    width: Fill
-                                    text: "PlaneScan: off"
-                                    draw_text.color: #x9af7c4
-                                }
-                            }
-
-                            SolidView{
-                                width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                                draw_bg.color: #x0d1824
-
                                 physics_geom_field := Label{
                                     width: Fill
                                     text: "Physics geometry: waiting for frame"
@@ -789,6 +803,15 @@ script_mod! {
     }
 }
 
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawHeightMap {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    wall_band_start: f32,
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct AlignmentSlicePreview {
     #[uid]
@@ -800,19 +823,20 @@ pub struct AlignmentSlicePreview {
     draw_bg: DrawQuad,
     #[redraw]
     #[live]
+    draw_map: DrawHeightMap,
+    #[redraw]
+    #[live]
     draw_vector: DrawVector,
     #[rust]
     area: Area,
+    #[rust]
+    height_texture: Option<Texture>,
 }
 
 impl AlignmentSlicePreview {
     const PAD: f32 = 14.0;
     const GRID_DIVISIONS: usize = 4;
     const CUTOUT_STEPS: usize = 40;
-
-    fn lerp(a: f32, b: f32, t: f32) -> f32 {
-        a + (b - a) * t
-    }
 
     fn preview_square(rect: Rect) -> (f32, f32, f32) {
         let rect_x = rect.pos.x as f32;
@@ -826,11 +850,7 @@ impl AlignmentSlicePreview {
     }
 
     fn preview_extent(preview: &XrDepthAlignSlicePreview) -> f32 {
-        preview.cell_size_meters * preview.size.max(1) as f32
-    }
-
-    fn preview_height_span(preview: &XrDepthAlignSlicePreview) -> f32 {
-        (preview.top_y_meters - preview.bottom_y_meters).max(0.1)
+        preview.height_map.cell_size_meters * preview.height_map.size.max(1) as f32
     }
 
     fn map_preview_point(
@@ -840,64 +860,10 @@ impl AlignmentSlicePreview {
         inner: f32,
         point: Vec2f,
     ) -> (f32, f32) {
-        let point = if let (Some(center), Some(forward)) = (preview.cutout_center, preview.cutout_forward)
-        {
-            let delta = point - center;
-            let right = vec2f(forward.y, -forward.x);
-            let local_x = delta.x * right.x + delta.y * right.y;
-            let local_z = delta.x * forward.x + delta.y * forward.y;
-            center + vec2f(local_x, local_z)
-        } else {
-            point
-        };
         let extent = Self::preview_extent(preview).max(1.0e-5);
-        let nx = ((point.x - preview.origin_x) / extent).clamp(0.0, 1.0);
-        let nz = ((point.y - preview.origin_z) / extent).clamp(0.0, 1.0);
+        let nx = ((point.x - preview.height_map.origin_x) / extent).clamp(0.0, 1.0);
+        let nz = ((point.y - preview.height_map.origin_z) / extent).clamp(0.0, 1.0);
         (ox + nx * inner, oy + inner - nz * inner)
-    }
-
-    fn height_fill_color(preview: &XrDepthAlignSlicePreview, height: f32) -> (f32, f32, f32, f32) {
-        let t = ((height - preview.bottom_y_meters) / Self::preview_height_span(preview))
-            .clamp(0.0, 1.0);
-        if t <= 0.55 {
-            let local_t = t / 0.55;
-            (
-                Self::lerp(0.05, 0.12, local_t),
-                Self::lerp(0.14, 0.52, local_t),
-                Self::lerp(0.21, 0.56, local_t),
-                Self::lerp(0.16, 0.28, local_t),
-            )
-        } else {
-            let local_t = (t - 0.55) / 0.45;
-            (
-                Self::lerp(0.12, 0.78, local_t),
-                Self::lerp(0.52, 0.74, local_t),
-                Self::lerp(0.56, 0.26, local_t),
-                Self::lerp(0.28, 0.36, local_t),
-            )
-        }
-    }
-
-    fn contour_style(
-        preview: &XrDepthAlignSlicePreview,
-        height: f32,
-        active: bool,
-    ) -> ((f32, f32, f32, f32), f32) {
-        if active {
-            ((0.21, 0.85, 1.0, 0.98), 2.4)
-        } else {
-            let t = ((height - preview.bottom_y_meters) / Self::preview_height_span(preview))
-                .clamp(0.0, 1.0);
-            (
-                (
-                    Self::lerp(0.22, 0.92, t),
-                    Self::lerp(0.72, 0.58, t),
-                    Self::lerp(0.88, 0.18, t),
-                    Self::lerp(0.28, 0.58, t),
-                ),
-                1.15,
-            )
-        }
     }
 
     fn draw_grid(&mut self, ox: f32, oy: f32, inner: f32) {
@@ -918,42 +884,57 @@ impl AlignmentSlicePreview {
         self.draw_vector.stroke(1.5);
     }
 
-    fn draw_height_cells(
-        &mut self,
-        preview: &XrDepthAlignSlicePreview,
-        ox: f32,
-        oy: f32,
-        inner: f32,
-    ) {
-        let size = preview.size as usize;
-        if size == 0
-            || preview.cell_heights_meters.len() != size * size
-            || preview.cell_valid.len() != size * size
-        {
+    fn preview_height_to_u8(value: u16) -> u8 {
+        if value == 0 {
+            0
+        } else {
+            let normalized = (value - 1) as f32 / 65534.0;
+            1 + (normalized * 254.0).round() as u8
+        }
+    }
+
+    fn ensure_height_texture(&mut self, cx: &mut Cx, preview: &XrDepthAlignSlicePreview) {
+        let size = preview.height_map.size as usize;
+        if size == 0 || preview.height_map.height_u16.len() != size * size {
+            self.height_texture = None;
             return;
         }
-        for z in 0..size {
-            for x in 0..size {
-                let index = x + z * size;
-                if preview.cell_valid[index] == 0 {
-                    continue;
-                }
-                let x0 = preview.origin_x + x as f32 * preview.cell_size_meters;
-                let z0 = preview.origin_z + z as f32 * preview.cell_size_meters;
-                let x1 = x0 + preview.cell_size_meters;
-                let z1 = z0 + preview.cell_size_meters;
-                let (sx0, sy0) = Self::map_preview_point(preview, ox, oy, inner, vec2f(x0, z0));
-                let (sx1, sy1) = Self::map_preview_point(preview, ox, oy, inner, vec2f(x1, z1));
-                let rx = sx0.min(sx1);
-                let ry = sy0.min(sy1);
-                let rw = (sx1 - sx0).abs().max(1.0);
-                let rh = (sy1 - sy0).abs().max(1.0);
-                let (r, g, b, a) =
-                    Self::height_fill_color(preview, preview.cell_heights_meters[index]);
-                self.draw_vector.set_color(r, g, b, a);
-                self.draw_vector.rect(rx, ry, rw, rh);
-                self.draw_vector.fill();
+
+        let needs_recreate = self.height_texture.as_ref().is_none_or(|texture| {
+            !matches!(
+                texture.get_format(cx),
+                TextureFormat::VecRu8 { width, height, .. } if *width == size && *height == size
+            )
+        });
+
+        let pixels = preview
+            .height_map
+            .height_u16
+            .iter()
+            .map(|value| Self::preview_height_to_u8(*value))
+            .collect::<Vec<_>>();
+
+        if needs_recreate {
+            self.height_texture = Some(Texture::new_with_format(
+                cx,
+                TextureFormat::VecRu8 {
+                    width: size,
+                    height: size,
+                    data: Some(pixels),
+                    unpack_row_length: None,
+                    updated: TextureUpdated::Full,
+                },
+            ));
+            return;
+        }
+
+        if let Some(texture) = self.height_texture.as_ref() {
+            let mut data = texture.take_vec_u8(cx);
+            if data.len() != pixels.len() {
+                data.resize(pixels.len(), 0);
             }
+            data.copy_from_slice(&pixels);
+            texture.put_back_vec_u8(cx, data, None);
         }
     }
 
@@ -965,10 +946,10 @@ impl AlignmentSlicePreview {
         inner: f32,
     ) {
         let extent = Self::preview_extent(preview);
-        if preview.origin_x > 0.0
-            || preview.origin_z > 0.0
-            || preview.origin_x + extent < 0.0
-            || preview.origin_z + extent < 0.0
+        if preview.height_map.origin_x > 0.0
+            || preview.height_map.origin_z > 0.0
+            || preview.height_map.origin_x + extent < 0.0
+            || preview.height_map.origin_z + extent < 0.0
         {
             return;
         }
@@ -1018,16 +999,13 @@ impl AlignmentSlicePreview {
         let (Some(center), Some(forward)) = (preview.cutout_center, preview.cutout_forward) else {
             return;
         };
-        let (cx, cy) = Self::map_preview_point(preview, ox, oy, inner, center);
-        let heading_probe = center + forward * preview.cell_size_meters.max(0.05);
-        let (hx, hy) = Self::map_preview_point(preview, ox, oy, inner, heading_probe);
-        let dir_px = vec2f(hx - cx, hy - cy);
-        let dir_len = dir_px.length();
-        if dir_len <= 1.0e-4 {
+        let forward_len = forward.length();
+        if forward_len <= 1.0e-5 {
             return;
         }
+        let (cx, cy) = Self::map_preview_point(preview, ox, oy, inner, center);
         let extent = Self::preview_extent(preview).max(1.0e-5);
-        let dir = dir_px * dir_len.recip();
+        let dir = vec2f(forward.x, -forward.y) * forward_len.recip();
         let start = vec2f(cx, cy) + dir * (preview.cutout_radius_meters / extent * inner + 4.0);
         let tip = start + dir * 28.0;
         let side = vec2f(-dir.y, dir.x);
@@ -1041,47 +1019,6 @@ impl AlignmentSlicePreview {
         self.draw_vector.line_to(right.x, right.y);
         self.draw_vector.stroke(1.8);
     }
-
-    fn draw_segments(
-        &mut self,
-        preview: &XrDepthAlignSlicePreview,
-        ox: f32,
-        oy: f32,
-        inner: f32,
-        active_only: bool,
-    ) {
-        if preview.segments.is_empty() {
-            return;
-        }
-        let mut current_height = None::<f32>;
-        let mut current_width = 1.0f32;
-        for segment in preview
-            .segments
-            .iter()
-            .filter(|segment| segment.active_height == active_only)
-        {
-            if current_height
-                .is_some_and(|height| (height - segment.height_meters).abs() > 1.0e-4)
-            {
-                self.draw_vector.stroke(current_width);
-                current_height = None;
-            }
-            if current_height.is_none() {
-                let ((r, g, b, a), width) =
-                    Self::contour_style(preview, segment.height_meters, active_only);
-                self.draw_vector.set_color(r, g, b, a);
-                current_width = width;
-                current_height = Some(segment.height_meters);
-            }
-            let (sx, sy) = Self::map_preview_point(preview, ox, oy, inner, segment.start);
-            let (ex, ey) = Self::map_preview_point(preview, ox, oy, inner, segment.end);
-            self.draw_vector.move_to(sx, sy);
-            self.draw_vector.line_to(ex, ey);
-        }
-        if current_height.is_some() {
-            self.draw_vector.stroke(current_width);
-        }
-    }
 }
 
 impl Widget for AlignmentSlicePreview {
@@ -1091,26 +1028,38 @@ impl Widget for AlignmentSlicePreview {
         self.area = self.draw_bg.area();
 
         let (ox, oy, inner) = Self::preview_square(rect);
-        self.draw_vector.begin();
-
         if let Some(preview) = cx
             .cx
             .xr_depth_mesh()
             .latest_mesh()
             .and_then(|mesh| mesh.alignment_slice_preview.clone())
         {
-            self.draw_height_cells(&preview, ox, oy, inner);
+            self.ensure_height_texture(cx.cx, &preview);
+            if let Some(texture) = self.height_texture.as_ref() {
+                self.draw_map.draw_vars.set_texture(0, texture);
+                self.draw_map.draw_abs(
+                    cx,
+                    Rect {
+                        pos: dvec2(ox as f64, oy as f64),
+                        size: dvec2(inner as f64, inner as f64),
+                    },
+                );
+            } else {
+                self.draw_map.draw_vars.empty_texture(0);
+            }
+
+            self.draw_vector.begin();
             self.draw_grid(ox, oy, inner);
             self.draw_origin_cross(&preview, ox, oy, inner);
-            self.draw_segments(&preview, ox, oy, inner, false);
-            self.draw_segments(&preview, ox, oy, inner, true);
             self.draw_cutout_ring(&preview, ox, oy, inner);
             self.draw_cutout_heading(&preview, ox, oy, inner);
+            self.draw_vector.end(cx);
         } else {
+            self.draw_map.draw_vars.empty_texture(0);
+            self.draw_vector.begin();
             self.draw_grid(ox, oy, inner);
+            self.draw_vector.end(cx);
         }
-
-        self.draw_vector.end(cx);
         DrawStep::done()
     }
 
@@ -1145,8 +1094,6 @@ pub struct App {
     last_alignment_state_text: String,
     #[rust]
     last_alignment_debug_text: String,
-    #[rust]
-    last_plane_scan_text: String,
 }
 
 impl App {
@@ -1220,13 +1167,6 @@ impl App {
             .borrow::<XrPeopleDebug>()
             .map(|people_debug| people_debug.peer_scene_text().to_string())
             .unwrap_or_else(|| "PeerScene: unavailable".to_string());
-        let plane_scan_text = self
-            .ui
-            .widget(cx, ids!(xr_people_debug))
-            .borrow::<XrPeopleDebug>()
-            .map(|people_debug| people_debug.plane_scan_text().to_string())
-            .unwrap_or_else(|| "PlaneScan: unavailable".to_string());
-
         if self.last_peer_sync_status_text != peer_sync_status_text {
             self.ui
                 .widget(cx, ids!(peer_sync_status_field))
@@ -1257,13 +1197,6 @@ impl App {
                 .set_text(cx, &peer_scene_text);
             self.last_peer_scene_text = peer_scene_text;
         }
-        if self.last_plane_scan_text != plane_scan_text {
-            self.ui
-                .widget(cx, ids!(plane_scan_field))
-                .set_text(cx, &plane_scan_text);
-            self.last_plane_scan_text = plane_scan_text;
-        }
-
         let geometry_text = format!(
             "Physics geometry: {} planes, {} vertices, {} triangles",
             surface_count, vertex_count, triangle_count
