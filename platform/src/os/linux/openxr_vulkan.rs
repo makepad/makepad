@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     os::linux::openxr_depth::CxOpenXrDepthMeshPipeline,
     os::linux::vulkan::{CxVulkan, CxVulkanOpenXrFoveationImageInfo, CxVulkanOpenXrSessionData},
-    xr_depth_mesh::xr_depth_mesh_store,
+    xr_tsdf::xr_tsdf_store,
 };
 pub(super) struct CxOpenXrVulkanSession {
     _color_images: Vec<XrSwapchainImageVulkanKHR>,
@@ -581,6 +581,6 @@ impl CxOpenXrSession {
                 );
             }
         }
-        xr_depth_mesh_store().clear();
+        xr_tsdf_store().clear();
     }
 }

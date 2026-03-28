@@ -11,7 +11,7 @@ use crate::{
     xr_node::{XrBodyKind, XrRuntimeBodyState},
     *,
 };
-use makepad_widgets::makepad_platform::{event::XrHand, XrDepthMeshStore};
+use makepad_widgets::makepad_platform::{event::XrHand, XrTsdfStore};
 use std::{
     collections::HashMap,
     mem,
@@ -79,7 +79,7 @@ pub(super) struct XrPhysicsWorker {
 }
 
 impl XrPhysicsWorker {
-    pub(super) fn new(depth_mesh: XrDepthMeshStore) -> Self {
+    pub(super) fn new(depth_mesh: XrTsdfStore) -> Self {
         let mailbox = Arc::new((Mutex::new(PhysicsWorkerMailbox::default()), Condvar::new()));
         let latest_result = Arc::new(Mutex::new(None));
         let mailbox_thread = mailbox.clone();
@@ -184,7 +184,7 @@ impl Drop for XrPhysicsWorker {
 }
 
 fn physics_worker_loop(
-    depth_mesh: XrDepthMeshStore,
+    depth_mesh: XrTsdfStore,
     mailbox: Arc<(Mutex<PhysicsWorkerMailbox>, Condvar)>,
     latest_result: Arc<Mutex<Option<XrPhysicsWorkerResult>>>,
 ) {

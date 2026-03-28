@@ -1422,7 +1422,9 @@ mod tests {
         }
     }
 
-    fn make_tsdf_snapshot_for_descriptor(descriptor: XrDepthAlignDescriptor) -> TsdfPublishedSnapshot {
+    fn make_tsdf_snapshot_for_descriptor(
+        descriptor: XrDepthAlignDescriptor,
+    ) -> TsdfPublishedSnapshot {
         TsdfPublishedSnapshot {
             generation: 1,
             latest_topology_generation: 1,

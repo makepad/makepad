@@ -310,7 +310,7 @@ impl XrRoot {
     }
 
     fn set_depth_voxel_size(&mut self, cx: &mut Cx, voxel_size_meters: f32) -> f32 {
-        let voxel_size_meters = cx.xr_depth_mesh().set_voxel_size_meters(voxel_size_meters);
+        let voxel_size_meters = cx.xr_tsdf().set_voxel_size_meters(voxel_size_meters);
         self.env.reset_physics(cx);
         voxel_size_meters
     }
@@ -1020,7 +1020,7 @@ impl Widget for XrRoot {
             ));
         }
         if method == live_id!(set_depth_voxel_size) || method == live_id!(set_depth_resolution) {
-            let mut voxel_size_meters = vm.cx().xr_depth_mesh().voxel_size_meters();
+            let mut voxel_size_meters = vm.cx().xr_tsdf().voxel_size_meters();
             if let Some(args_obj) = args.as_object() {
                 let trap = vm.bx.threads.cur().trap.pass();
                 if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
@@ -1034,7 +1034,7 @@ impl Widget for XrRoot {
         }
         if method == live_id!(depth_voxel_size) || method == live_id!(depth_resolution) {
             return ScriptAsyncResult::Return(ScriptValue::from_f64(
-                vm.cx().xr_depth_mesh().voxel_size_meters() as f64,
+                vm.cx().xr_tsdf().voxel_size_meters() as f64,
             ));
         }
         if method == live_id!(set_render_scale) || method == live_id!(set_xr_render_scale) {

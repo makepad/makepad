@@ -428,8 +428,8 @@ impl Cx {
         &self.xr_capabilities
     }
 
-    pub fn xr_depth_mesh(&self) -> crate::xr_depth_mesh::XrDepthMeshStore {
-        crate::xr_depth_mesh::xr_depth_mesh_store()
+    pub fn xr_tsdf(&self) -> crate::xr_tsdf::XrTsdfStore {
+        crate::xr_tsdf::xr_tsdf_store()
     }
 
     pub fn xr_render_scale(&self) -> Option<f64> {
