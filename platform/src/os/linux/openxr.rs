@@ -131,7 +131,7 @@ impl Cx {
                 }
                 XrStructureType::EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING => {
                     let reset_generation =
-                        crate::xr_depth_mesh::xr_depth_mesh_store().request_reset();
+                        crate::xr_tsdf::xr_tsdf_store().request_reset();
                     redraw_requested = true;
                     crate::log!(
                         "OpenXR reference space changed, resetting depth mesh pipeline generation={}",
