@@ -1,11 +1,11 @@
-use ::rapier3d::prelude::{
+use makepad_widgets::event::TouchState;
+use makepad_widgets::*;
+use rapier3d::prelude::{
     BroadPhaseBvh, CCDSolver, ColliderBuilder, ColliderSet, ImpulseJointSet, IntegrationParameters,
     IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, QueryFilter, Ray as RapierRay,
     Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
     Rotation as RapierRotation, SharedShape, Vector as RapierVector,
 };
-use makepad_widgets::event::TouchState;
-use makepad_widgets::*;
 
 use crate::scene_draw::{
     apply_scene_to_draw_pbr, ray_from_scene_viewport, scene_state_from_cx, SceneState3D,

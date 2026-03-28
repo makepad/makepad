@@ -29,6 +29,8 @@ pub mod view_splat;
 pub mod xr_body_spawn;
 #[path = "scene/xr_env.rs"]
 pub mod xr_env;
+#[path = "scene/xr_gesture.rs"]
+mod xr_gesture;
 #[path = "xr_net.rs"]
 pub mod xr_net;
 #[path = "scene/xr_node.rs"]
