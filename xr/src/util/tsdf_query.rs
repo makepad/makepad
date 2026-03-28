@@ -440,6 +440,20 @@ pub(crate) fn depth_query_plane_quad(plane: DepthQuerySupportPlane) -> [Vec3f; 4
     ]
 }
 
+pub(crate) fn depth_query_might_need_impact_refresh(query: DepthQuery) -> bool {
+    let travel = query.predicted_center - query.center;
+    let travel_distance = travel.length();
+    let velocity_length = query.velocity.length();
+    if velocity_length < TSDF_QUERY_TSDF_IMPACT_MIN_SPEED && travel_distance < 0.03 {
+        return false;
+    }
+
+    let horizontal_speed = vec2f(query.velocity.x, query.velocity.z).length();
+    let upward_speed = query.velocity.y.max(0.0);
+    horizontal_speed >= TSDF_QUERY_TSDF_IMPACT_MIN_HORIZONTAL_SPEED
+        || upward_speed >= TSDF_QUERY_TSDF_IMPACT_MIN_UPWARD_SPEED
+}
+
 fn query_support_plane_fingerprint(
     plane: &DepthQuerySupportPlane,
     role: DepthQueryColliderRole,
@@ -646,19 +660,14 @@ fn evaluate_tsdf_impact_query(
     query: DepthQuery,
 ) -> Option<DepthQueryResolvedSurface> {
     let grid = sampler.grid;
+    if !depth_query_might_need_impact_refresh(query) {
+        return None;
+    }
     let travel = query.predicted_center - query.center;
     let travel_distance = travel.length();
     let velocity_length = query.velocity.length();
     let horizontal_speed = vec2f(query.velocity.x, query.velocity.z).length();
     let upward_speed = query.velocity.y.max(0.0);
-    if velocity_length < TSDF_QUERY_TSDF_IMPACT_MIN_SPEED && travel_distance < 0.03 {
-        return None;
-    }
-    if horizontal_speed < TSDF_QUERY_TSDF_IMPACT_MIN_HORIZONTAL_SPEED
-        && upward_speed < TSDF_QUERY_TSDF_IMPACT_MIN_UPWARD_SPEED
-    {
-        return None;
-    }
 
     let motion_dir = if velocity_length > 1.0e-4 {
         query.velocity.scale(1.0 / velocity_length)
