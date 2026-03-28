@@ -9,6 +9,25 @@ pub(super) const ACTION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const POLL_INTERVAL: Duration = Duration::from_millis(50);
 pub(super) const SPLASH_RUNNABLE: &str = "makepad.splash";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum StepScreenshotPolicy {
+    All,
+    None,
+    #[default]
+    Failures,
+}
+
+impl StepScreenshotPolicy {
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "all" => Some(Self::All),
+            "none" => Some(Self::None),
+            "failures" => Some(Self::Failures),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct SplashLaunchTarget {
     pub(super) root_package: String,
@@ -74,6 +93,7 @@ pub struct TestConfig {
     pub startup_pause: Duration,
     pub action_delay: Duration,
     pub keep_open: Duration,
+    pub(crate) step_screenshot_policy: StepScreenshotPolicy,
     pub(super) launch: TestLaunch,
 }
 
@@ -120,6 +140,7 @@ impl TestConfig {
             startup_pause: super::env_duration_ms("MAKEPAD_TEST_STARTUP_DELAY_MS"),
             action_delay: super::env_duration_ms("MAKEPAD_TEST_ACTION_DELAY_MS"),
             keep_open: super::env_duration_ms("MAKEPAD_TEST_KEEP_OPEN_MS"),
+            step_screenshot_policy: StepScreenshotPolicy::Failures,
             launch,
         })
     }

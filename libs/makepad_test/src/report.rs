@@ -74,10 +74,16 @@ pub fn write_case_report(case_dir: &Path, report: &CaseReport) -> TestResult<()>
     Ok(())
 }
 
-pub fn write_case_outputs(case_dir: &Path, report: &mut CaseReport) -> TestResult<()> {
+pub(crate) fn write_case_outputs(
+    case_dir: &Path,
+    report: &mut CaseReport,
+    frame_paths: &[PathBuf],
+) -> TestResult<()> {
     fs::create_dir_all(case_dir)?;
-    report.session_apng_path = build_case_apng(case_dir, report).ok().flatten();
-    write_case_report(case_dir, report)
+    report.session_apng_path = build_case_apng(case_dir, frame_paths).ok().flatten();
+    let result = write_case_report(case_dir, report);
+    let _ = fs::remove_dir_all(case_dir.join(".frames"));
+    result
 }
 
 pub fn render_suite_report_html(report: &SuiteReport) -> String {
@@ -240,13 +246,9 @@ fn render_step_evidence(step: &TraceStep) -> String {
     out
 }
 
-fn build_case_apng(case_dir: &Path, report: &CaseReport) -> TestResult<Option<String>> {
+fn build_case_apng(case_dir: &Path, frame_paths: &[PathBuf]) -> TestResult<Option<String>> {
     let mut frames: Vec<RgbaFrame> = Vec::new();
-    for step in &report.steps {
-        let Some(path) = &step.evidence.screenshot_path else {
-            continue;
-        };
-        let path = PathBuf::from(path);
+    for path in frame_paths {
         let Ok(frame) = decode_rgba_frame(&path) else {
             continue;
         };
@@ -429,7 +431,7 @@ mod tests {
             ..CaseReport::default()
         };
 
-        write_case_outputs(&case_dir, &mut case).unwrap();
+        write_case_outputs(&case_dir, &mut case, &[]).unwrap();
 
         let suite = SuiteReport {
             suite_id: "suite".to_string(),
@@ -467,7 +469,7 @@ mod tests {
             ..CaseReport::default()
         };
 
-        write_case_outputs(&case_dir, &mut case).unwrap();
+        write_case_outputs(&case_dir, &mut case, &[frame_a.clone(), frame_b.clone()]).unwrap();
 
         let session_path = case_dir.join("session.png");
         let expected = session_path.to_string_lossy().to_string();
@@ -505,7 +507,17 @@ mod tests {
             ..CaseReport::default()
         };
 
-        write_case_outputs(&case_dir, &mut case).unwrap();
+        write_case_outputs(
+            &case_dir,
+            &mut case,
+            &[
+                frame_a.clone(),
+                frame_b.clone(),
+                frame_bad.clone(),
+                frame_c.clone(),
+            ],
+        )
+        .unwrap();
 
         assert!(case_dir.join("session.png").exists());
         assert!(case.session_apng_path.is_some());
@@ -533,10 +545,53 @@ mod tests {
             ..CaseReport::default()
         };
 
-        write_case_outputs(&case_dir, &mut case).unwrap();
+        write_case_outputs(&case_dir, &mut case, &[frame_a.clone(), frame_bad.clone()]).unwrap();
 
         assert!(!case_dir.join("session.png").exists());
         assert!(case.session_apng_path.is_none());
+    }
+
+    #[test]
+    fn builds_apng_from_transient_frames_and_cleans_them_up() {
+        let root = temp_dir("apng_transient");
+        let case_dir = root.join("cases/smoke");
+        let frames_dir = case_dir.join(".frames");
+        fs::create_dir_all(&frames_dir).unwrap();
+        let frame_a = frames_dir.join("001-click.png");
+        let frame_b = frames_dir.join("002-fill.png");
+        write_png(&frame_a, 2, 2, &[255, 0, 0, 255].repeat(4));
+        write_png(&frame_b, 2, 2, &[0, 255, 0, 255].repeat(4));
+
+        let mut case = CaseReport {
+            case_name: "smoke".to_string(),
+            status: "passed".to_string(),
+            artifact_dir: case_dir.to_string_lossy().to_string(),
+            steps: vec![
+                TraceStep {
+                    index: 1,
+                    kind: "click".to_string(),
+                    detail: "click".to_string(),
+                    ..TraceStep::default()
+                },
+                TraceStep {
+                    index: 2,
+                    kind: "fill".to_string(),
+                    detail: "fill".to_string(),
+                    ..TraceStep::default()
+                },
+            ],
+            ..CaseReport::default()
+        };
+
+        write_case_outputs(&case_dir, &mut case, &[frame_a.clone(), frame_b.clone()]).unwrap();
+
+        assert!(case_dir.join("session.png").exists());
+        assert!(!frames_dir.exists());
+        assert!(!case_dir.join("steps").exists());
+        assert!(case
+            .steps
+            .iter()
+            .all(|step| step.evidence.screenshot_path.is_none()));
     }
 
     #[test]

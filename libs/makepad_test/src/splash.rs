@@ -1,7 +1,9 @@
 use crate::report::{
     write_case_outputs, write_suite_outputs, CaseReport, StepEvidence, SuiteReport, TraceStep,
 };
-use crate::runtime::{capture_failure_artifacts_to, run_with_config, sanitize_path_component};
+use crate::runtime::{
+    capture_failure_artifacts_to, run_with_config, sanitize_path_component, StepScreenshotPolicy,
+};
 use crate::selector::SelectorOptions;
 use crate::{Selector, TestApp, TestConfig, TestError, TestResult};
 use makepad_script_std::makepad_network::{NetworkConfig, NetworkRuntime};
@@ -35,6 +37,7 @@ enum SessionMode {
 struct SplashSuiteOptions {
     launch: Option<SplashLaunch>,
     session_mode: SessionMode,
+    step_screenshot_policy: Option<StepScreenshotPolicy>,
     startup_timeout: Option<Duration>,
     action_timeout: Option<Duration>,
     poll_interval: Option<Duration>,
@@ -121,30 +124,35 @@ impl SplashSuiteHost {
             started_at_ms,
             start_instant: Instant::now(),
             steps: Vec::new(),
+            frame_paths: Vec::new(),
             next_step_index: 1,
         });
     }
 
-    fn finish_case(&mut self, status: &str, failure_message: Option<String>) -> CaseReport {
+    fn finish_case(&mut self, status: &str, failure_message: Option<String>) -> FinishedCase {
         let case = self.current_case.take().unwrap_or_else(|| RunningCase {
             name: "unknown".to_string(),
             artifact_dir: PathBuf::new(),
             started_at_ms: 0,
             start_instant: Instant::now(),
             steps: Vec::new(),
+            frame_paths: Vec::new(),
             next_step_index: 1,
         });
-        CaseReport {
-            case_name: case.name,
-            status: status.to_string(),
-            started_at_ms: case.started_at_ms,
-            finished_at_ms: case.started_at_ms + duration_ms(case.start_instant.elapsed()),
-            duration_ms: duration_ms(case.start_instant.elapsed()),
-            artifact_dir: case.artifact_dir.to_string_lossy().to_string(),
-            failure_message,
-            session_apng_path: None,
-            generated_case_path: None,
-            steps: case.steps,
+        FinishedCase {
+            report: CaseReport {
+                case_name: case.name,
+                status: status.to_string(),
+                started_at_ms: case.started_at_ms,
+                finished_at_ms: case.started_at_ms + duration_ms(case.start_instant.elapsed()),
+                duration_ms: duration_ms(case.start_instant.elapsed()),
+                artifact_dir: case.artifact_dir.to_string_lossy().to_string(),
+                failure_message,
+                session_apng_path: None,
+                generated_case_path: None,
+                steps: case.steps,
+            },
+            frame_paths: case.frame_paths,
         }
     }
 
@@ -204,12 +212,21 @@ impl SplashSuiteHost {
             evidence.after_widgets =
                 selector.and_then(|selector| app.try_query_widgets(selector, false).ok());
         }
-        if evidence.screenshot_path.is_none() {
-            capture_step_screenshot(app, &case.artifact_dir, index, &kind, &mut evidence);
-        }
         let finished_at_ms = duration_ms(case.start_instant.elapsed());
+        let step_screenshot_policy = app.step_screenshot_policy();
         let step = match result {
             Ok(value) => {
+                if let Some(path) = frame_path_for_step(
+                    app,
+                    case,
+                    index,
+                    &kind,
+                    &mut evidence,
+                    step_screenshot_policy,
+                    false,
+                ) {
+                    case.frame_paths.push(path);
+                }
                 case.steps.push(TraceStep {
                     index,
                     kind,
@@ -232,6 +249,17 @@ impl SplashSuiteHost {
                         .try_widget_dump()
                         .ok()
                         .map(|dump| truncate_text(&dump, 2000));
+                }
+                if let Some(path) = frame_path_for_step(
+                    app,
+                    case,
+                    index,
+                    &kind,
+                    &mut evidence,
+                    step_screenshot_policy,
+                    true,
+                ) {
+                    case.frame_paths.push(path);
                 }
                 TraceStep {
                     index,
@@ -261,6 +289,7 @@ struct RunningCase {
     started_at_ms: u64,
     start_instant: Instant,
     steps: Vec<TraceStep>,
+    frame_paths: Vec<PathBuf>,
     next_step_index: usize,
 }
 
@@ -275,7 +304,18 @@ struct PendingTraceStep {
 
 struct CaseRunOutcome {
     report: CaseReport,
+    frame_paths: Vec<PathBuf>,
     error: Option<TestError>,
+}
+
+struct FinishedCase {
+    report: CaseReport,
+    frame_paths: Vec<PathBuf>,
+}
+
+struct CapturedStepFrame {
+    apng_path: PathBuf,
+    report_screenshot_path: Option<String>,
 }
 
 pub struct SplashSuiteRunner {
@@ -394,6 +434,9 @@ impl SplashSuiteRunner {
         if let Some(value) = options.keep_open {
             config.keep_open = value;
         }
+        if let Some(value) = options.step_screenshot_policy {
+            config.step_screenshot_policy = value;
+        }
 
         Ok(config)
     }
@@ -422,6 +465,7 @@ impl SplashSuiteRunner {
                 };
                 return CaseRunOutcome {
                     report,
+                    frame_paths: Vec::new(),
                     error: Some(err),
                 };
             }
@@ -445,17 +489,19 @@ impl SplashSuiteRunner {
                 "Splash test case `{}` failed: {}",
                 case.name, message
             ));
-            let report = self
+            let finished = self
                 .host
                 .finish_case("failed", Some(error.message().to_string()));
             return CaseRunOutcome {
-                report,
+                report: finished.report,
+                frame_paths: finished.frame_paths,
                 error: Some(error),
             };
         }
-        let report = self.host.finish_case("passed", None);
+        let finished = self.host.finish_case("passed", None);
         CaseRunOutcome {
-            report,
+            report: finished.report,
+            frame_paths: finished.frame_paths,
             error: None,
         }
     }
@@ -600,7 +646,7 @@ fn run_isolated_splash_suite(
             }
         });
         let mut outcome = outcome.expect("Splash isolated case outcome was not recorded");
-        write_case_outputs(&case_dir, &mut outcome.report)?;
+        write_case_outputs(&case_dir, &mut outcome.report, &outcome.frame_paths)?;
         case_reports.push(outcome.report);
         match result {
             Ok(()) => {
@@ -669,7 +715,7 @@ fn run_shared_splash_suite(
             if let Some(err) = outcome.error.clone() {
                 capture_failure_artifacts_to(&app, &case_dir, err.message());
             }
-            write_case_outputs(&case_dir, &mut outcome.report)?;
+            write_case_outputs(&case_dir, &mut outcome.report, &outcome.frame_paths)?;
             case_reports.push(outcome.report);
             if let Some(err) = outcome.error {
                 eprintln!(
@@ -763,23 +809,57 @@ where
     }
 }
 
-fn capture_step_screenshot(
+fn frame_path_for_step(
+    app: &TestApp,
+    case: &RunningCase,
+    index: usize,
+    kind: &str,
+    evidence: &mut StepEvidence,
+    step_screenshot_policy: StepScreenshotPolicy,
+    failed: bool,
+) -> Option<PathBuf> {
+    if let Some(path) = &evidence.screenshot_path {
+        return Some(PathBuf::from(path));
+    }
+    let retain_screenshot = match step_screenshot_policy {
+        StepScreenshotPolicy::All => true,
+        StepScreenshotPolicy::Failures => failed,
+        StepScreenshotPolicy::None => false,
+    };
+    let captured =
+        capture_auto_step_frame(app, &case.artifact_dir, index, kind, retain_screenshot)?;
+    if evidence.screenshot_path.is_none() {
+        evidence.screenshot_path = captured.report_screenshot_path;
+    }
+    Some(captured.apng_path)
+}
+
+fn capture_auto_step_frame(
     app: &TestApp,
     artifact_dir: &Path,
     index: usize,
     kind: &str,
-    evidence: &mut StepEvidence,
-) {
-    let steps_dir = artifact_dir.join("steps");
-    let _ = fs::create_dir_all(&steps_dir);
-    let screenshot_path = steps_dir.join(format!(
+    retain_screenshot: bool,
+) -> Option<CapturedStepFrame> {
+    let parent_dir = if retain_screenshot {
+        artifact_dir.join("steps")
+    } else {
+        artifact_dir.join(".frames")
+    };
+    let _ = fs::create_dir_all(&parent_dir);
+    let screenshot_path = parent_dir.join(format!(
         "{:03}-{}.png",
         index,
         sanitize_path_component(kind)
     ));
     if app.try_copy_screenshot_to(&screenshot_path).is_ok() {
-        evidence.screenshot_path = Some(screenshot_path.to_string_lossy().to_string());
+        return Some(CapturedStepFrame {
+            apng_path: screenshot_path.clone(),
+            report_screenshot_path: retain_screenshot
+                .then(|| screenshot_path.to_string_lossy().to_string()),
+        });
     }
+    None
 }
 
 fn merge_evidence(mut base: StepEvidence, extra: StepEvidence) -> StepEvidence {
@@ -1570,6 +1650,23 @@ fn parse_suite_options(
                 ))
             }
         };
+    let step_screenshot_policy = match optional_string_field(
+        vm,
+        object,
+        id!(step_screenshots),
+        "test.configure step_screenshots",
+    )? {
+        Some(value) => match StepScreenshotPolicy::from_str(&value) {
+            Some(policy) => Some(policy),
+            None => {
+                return Err(host_script_error(
+                    vm,
+                    format!("unknown test.configure step_screenshots `{}`", value),
+                ))
+            }
+        },
+        None => None,
+    };
     let headless_run_item = optional_string_field(
         vm,
         object,
@@ -1616,6 +1713,7 @@ fn parse_suite_options(
     Ok(SplashSuiteOptions {
         launch,
         session_mode,
+        step_screenshot_policy,
         startup_timeout: optional_duration_field(
             vm,
             object,
@@ -2123,7 +2221,10 @@ fn script_value_to_checked_string(
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_splash_mount_root, SessionMode, SplashLaunch, SplashSuiteRunner};
+    use super::{
+        discover_splash_mount_root, SessionMode, SplashLaunch, SplashSuiteRunner,
+        StepScreenshotPolicy,
+    };
     use crate::TestConfig;
     use std::fs;
     use std::path::PathBuf;
@@ -2211,6 +2312,55 @@ mod tests {
     }
 
     #[test]
+    fn defaults_step_screenshot_policy_to_failures() {
+        let runner = SplashSuiteRunner::load_from_source(
+            PathBuf::from("/tmp/example"),
+            PathBuf::from("/tmp/example/tests/ui.splash"),
+            "use mod.test\ntest.case(\"smoke\", || {})\n".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            runner
+                .test_config("makepad-example", "ui::test")
+                .unwrap()
+                .step_screenshot_policy,
+            StepScreenshotPolicy::Failures
+        );
+    }
+
+    #[test]
+    fn parses_step_screenshot_policy_from_config() {
+        let all_runner = SplashSuiteRunner::load_from_source(
+            PathBuf::from("/tmp/example"),
+            PathBuf::from("/tmp/example/tests/ui.splash"),
+            "use mod.test\ntest.configure({step_screenshots:\"all\"})\ntest.case(\"smoke\", || {})\n".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            all_runner
+                .test_config("makepad-example", "ui::test")
+                .unwrap()
+                .step_screenshot_policy,
+            StepScreenshotPolicy::All
+        );
+
+        let none_runner = SplashSuiteRunner::load_from_source(
+            PathBuf::from("/tmp/example"),
+            PathBuf::from("/tmp/example/tests/ui.splash"),
+            "use mod.test\ntest.configure({step_screenshots:\"none\"})\ntest.case(\"smoke\", || {})\n".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            none_runner
+                .test_config("makepad-example", "ui::test")
+                .unwrap()
+                .step_screenshot_policy,
+            StepScreenshotPolicy::None
+        );
+    }
+
+    #[test]
     fn rejects_invalid_session_mode() {
         let err = SplashSuiteRunner::load_from_source(
             PathBuf::from("/tmp/example"),
@@ -2221,6 +2371,19 @@ mod tests {
         .unwrap();
 
         assert!(err.message().contains("session_mode"));
+    }
+
+    #[test]
+    fn rejects_invalid_step_screenshot_policy() {
+        let err = SplashSuiteRunner::load_from_source(
+            PathBuf::from("/tmp/example"),
+            PathBuf::from("/tmp/example/tests/ui.splash"),
+            "use mod.test\ntest.configure({step_screenshots:\"broken\"})\n".to_string(),
+        )
+        .err()
+        .unwrap();
+
+        assert!(err.message().contains("step_screenshots"));
     }
 
     #[test]

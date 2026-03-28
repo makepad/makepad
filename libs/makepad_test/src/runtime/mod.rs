@@ -52,8 +52,9 @@ fn env_duration_ms(name: &str) -> Duration {
 
 mod config;
 
-pub use config::TestConfig;
 pub(crate) use config::sanitize_path_component;
+pub(crate) use config::StepScreenshotPolicy;
+pub use config::TestConfig;
 use config::{SplashLaunchTarget, TestLaunch, POLL_INTERVAL};
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
@@ -538,6 +539,10 @@ impl TestApp {
 
     pub(crate) fn artifacts_dir(&self) -> PathBuf {
         self.inner.borrow().config.artifacts_dir.clone()
+    }
+
+    pub(crate) fn step_screenshot_policy(&self) -> StepScreenshotPolicy {
+        self.inner.borrow().config.step_screenshot_policy
     }
 
     fn pace_after_action(&self) {
@@ -1147,8 +1152,12 @@ fn start_headless_app(config: &TestConfig) -> TestResult<StartedApp> {
             })
         }
         TestLaunch::SplashRunItem(target) => {
-            let root_build_id =
-                start_splash_root(&mut connection, &config.mount_name, target, config.startup_timeout)?;
+            let root_build_id = start_splash_root(
+                &mut connection,
+                &config.mount_name,
+                target,
+                config.startup_timeout,
+            )?;
             let app_build_id = start_splash_child(
                 &mut connection,
                 &config.mount_name,
@@ -1245,10 +1254,9 @@ fn clear_existing_visible_builds(
     })?;
     let builds = wait_for_builds(connection, timeout)?;
     let mut cleared_build_ids = HashSet::new();
-    for build in builds
-        .into_iter()
-        .filter(|build| build.mount == mount && packages.iter().any(|package| build.package == *package))
-    {
+    for build in builds.into_iter().filter(|build| {
+        build.mount == mount && packages.iter().any(|package| build.package == *package)
+    }) {
         cleared_build_ids.insert(build.build_id);
         let _ = connection.send(ClientToHub::ClearBuild {
             build_id: build.build_id,
@@ -1286,7 +1294,7 @@ fn start_splash_root(
     mount: &str,
     target: &SplashLaunchTarget,
     timeout: Duration,
-    ) -> TestResult<QueryId> {
+) -> TestResult<QueryId> {
     test_debug(format!(
         "starting splash root `{}` on mount `{mount}`",
         target.root_package
@@ -1395,18 +1403,19 @@ fn wait_for_splash_root_ready(
                 ));
                 root_build_id = Some(build_id);
             }
-            HubToClient::RunItems { mount: msg_mount, items }
-                if msg_mount == mount
-                    && items.iter().any(|item| item.name == run_item_name) =>
-            {
+            HubToClient::RunItems {
+                mount: msg_mount,
+                items,
+            } if msg_mount == mount && items.iter().any(|item| item.name == run_item_name) => {
                 test_debug(format!(
                     "splash root published run item `{run_item_name}` on mount `{msg_mount}`"
                 ));
                 run_item_ready = true;
             }
-            HubToClient::BuildStopped { build_id, exit_code }
-                if root_build_id.is_some_and(|root_id| root_id == build_id) =>
-            {
+            HubToClient::BuildStopped {
+                build_id,
+                exit_code,
+            } if root_build_id.is_some_and(|root_id| root_id == build_id) => {
                 let detail = match exit_code {
                     Some(code) => format!(
                         "splash root build {build_id:?} exited with code {code} before publishing run items"
@@ -1681,12 +1690,12 @@ fn primary_shortcut_modifiers() -> KeyModifiers {
 
 #[cfg(test)]
 mod tests {
+    use super::config::WidgetMatch;
     use super::{
         env_duration_ms, primary_window_scope, sanitize_path_component, snapshot_is_visible,
         snapshot_sort_key, studio_addr_from_env, studio_mount_from_env, visible_mode_enabled,
         TestError, TestResult,
     };
-    use super::config::WidgetMatch;
     use crate::{Selector, TestConfig};
     use makepad_studio_protocol::WidgetSnapshot;
     use std::path::PathBuf;
@@ -1780,7 +1789,10 @@ mod tests {
         restore_env_var("MAKEPAD_TEST_VISIBLE", old_visible);
 
         assert_eq!(config.mount_root, PathBuf::from("/tmp/repo"));
-        assert_eq!(config.manifest_dir, PathBuf::from("/tmp/repo/examples/splash"));
+        assert_eq!(
+            config.manifest_dir,
+            PathBuf::from("/tmp/repo/examples/splash")
+        );
         assert_eq!(config.package_name, "makepad-example-splash");
         assert_eq!(
             config.artifacts_dir,
