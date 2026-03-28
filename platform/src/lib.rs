@@ -218,8 +218,9 @@ pub use {
             WindowId, WindowVisuals,
         },
         xr_depth_mesh::{
-            xr_depth_align_analyze_remote_to_local, xr_depth_align_build_wall_normal_histogram,
-            xr_depth_align_loopback_preview_solution, xr_depth_align_rescore_remote_to_local,
+            xr_depth_align_analyze_remote_to_local, xr_depth_align_analyze_remote_to_local_seeded,
+            xr_depth_align_build_wall_normal_histogram, xr_depth_align_loopback_preview_solution,
+            xr_depth_align_rescore_remote_to_local,
             xr_depth_align_solution_is_accepted, xr_depth_align_solve_remote_to_local,
             xr_depth_align_test_markers, xr_depth_align_transform_descriptor, ChunkKey,
             XrDepthAlignDebug, XrDepthAlignDescriptor, XrDepthAlignPreview, XrDepthAlignSample,

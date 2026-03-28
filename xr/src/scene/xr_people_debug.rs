@@ -380,6 +380,50 @@ fn descriptor_frames_equal(
     }
 }
 
+fn height_map_change_score(
+    previous: &XrDepthAlignHeightMap,
+    next: &XrDepthAlignHeightMap,
+) -> f32 {
+    if previous.size_x != next.size_x
+        || previous.size_z != next.size_z
+        || (previous.origin_x - next.origin_x).abs() > 1.0e-4
+        || (previous.origin_z - next.origin_z).abs() > 1.0e-4
+        || (previous.cell_size_meters - next.cell_size_meters).abs() > 1.0e-5
+        || (previous.bottom_y_meters - next.bottom_y_meters).abs() > 1.0e-4
+        || (previous.top_y_meters - next.top_y_meters).abs() > 1.0e-4
+    {
+        return 1.0;
+    }
+    let total = previous
+        .height_u16
+        .len()
+        .min(next.height_u16.len())
+        .max(1);
+    let height_span = (previous.top_y_meters - previous.bottom_y_meters)
+        .abs()
+        .max((next.top_y_meters - next.bottom_y_meters).abs())
+        .max(1.0e-3);
+    let encoded_delta = ((0.05 / height_span) * 65534.0).ceil().max(1.0) as u16;
+    let mut changed = 0usize;
+    for (left, right) in previous.height_u16.iter().zip(next.height_u16.iter()) {
+        if (*left == 0) != (*right == 0) || left.abs_diff(*right) >= encoded_delta {
+            changed += 1;
+        }
+    }
+    changed as f32 / total as f32
+}
+
+fn descriptor_change_score(
+    previous: &XrDepthAlignDescriptor,
+    next: &XrDepthAlignDescriptor,
+) -> f32 {
+    match (previous.height_map.as_ref(), next.height_map.as_ref()) {
+        (Some(previous), Some(next)) => height_map_change_score(previous, next),
+        (None, None) => 0.0,
+        (Some(_), None) | (None, Some(_)) => 1.0,
+    }
+}
+
 fn refresh_alignment_worker_peer(
     peer_state: &mut AlignmentWorkerPeerState,
     local_descriptor: Option<&XrNetAlignmentDescriptorFrame>,
@@ -406,9 +450,10 @@ fn refresh_alignment_worker_peer(
     let previous_solution = peer_state.last_accepted_solution;
     let previous_diagnostic = peer_state.last_solve_diagnostic;
     let solve_started = Instant::now();
-    let diagnostic = xr_depth_align_analyze_remote_to_local(
+    let diagnostic = xr_depth_align_analyze_remote_to_local_seeded(
         &local_descriptor.descriptor,
         &remote_descriptor.descriptor,
+        previous_solution,
     );
     peer_state.last_solve_ms = solve_started.elapsed().as_secs_f64() * 1000.0;
     peer_state.last_solve_diagnostic = Some(diagnostic);
@@ -559,11 +604,33 @@ fn descriptor_contour_sample_count(descriptor: &XrDepthAlignDescriptor) -> usize
     }
 }
 
-fn descriptor_has_vertical_compact_scene(descriptor: &XrDepthAlignDescriptor) -> bool {
+fn descriptor_height_map_filled_cells(descriptor: &XrDepthAlignDescriptor) -> usize {
     descriptor
-        .vertical_descriptor
+        .height_map
         .as_ref()
-        .is_some_and(|vertical| !vertical.is_empty())
+        .map(|height_map| {
+            height_map
+                .height_u16
+                .iter()
+                .filter(|value| **value != 0)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn descriptor_height_map_status(descriptor: &XrDepthAlignDescriptor) -> String {
+    descriptor
+        .height_map
+        .as_ref()
+        .map(|height_map| {
+            format!(
+                "{}x{} fill {}",
+                height_map.size_x,
+                height_map.size_z,
+                descriptor_height_map_filled_cells(descriptor),
+            )
+        })
+        .unwrap_or_else(|| "missing".to_string())
 }
 
 fn solve_outcome_label(diagnostic: Option<XrDepthAlignSolveDiagnostic>) -> &'static str {
@@ -571,7 +638,7 @@ fn solve_outcome_label(diagnostic: Option<XrDepthAlignSolveDiagnostic>) -> &'sta
         return "pending";
     };
     match diagnostic.outcome() {
-        XrDepthAlignSolveOutcome::MissingSamples => "need-slice",
+        XrDepthAlignSolveOutcome::MissingSamples => "need-signal",
         XrDepthAlignSolveOutcome::NoCandidate => "no-candidate",
         XrDepthAlignSolveOutcome::Rejected => "rejected",
         XrDepthAlignSolveOutcome::Accepted => "accepted",
@@ -594,26 +661,19 @@ fn make_alignment_state_text(
         )
     }) else {
         return format!(
-            "AlignState: local {} v{} | waiting for peer",
+            "AlignState: local map {} v{} | waiting for peer map",
             if local_descriptor_ready { "yes" } else { "no" },
             local_version,
         );
     };
     let peer_label = format!("{:08x}", peer_id.0);
     let remote_descriptor = peer_state.latest_descriptor.as_ref();
-    let remote_slice_count = remote_descriptor
-        .map(|frame| descriptor_contour_sample_count(&frame.descriptor))
-        .unwrap_or(0);
-    let remote_vdesc = remote_descriptor
-        .is_some_and(|frame| descriptor_has_vertical_compact_scene(&frame.descriptor));
     format!(
-        "AlignState {peer_label}: local {} v{} | remote {} seq {} slice {} vdesc {} | worker lv{} rv{} {} {:.1}ms | pose {}",
+        "AlignState {peer_label}: local map {} v{} | remote map {} seq {} | worker lv{} rv{} {} {:.1}ms | pose {}",
         if local_descriptor_ready { "yes" } else { "no" },
         local_version,
         if remote_descriptor.is_some() { "yes" } else { "no" },
         descriptor_seq_label(remote_descriptor.map(|frame| frame.seq)),
-        remote_slice_count,
-        if remote_vdesc { "yes" } else { "no" },
         descriptor_version_label(peer_state.last_solved_local_descriptor_version),
         descriptor_seq_label(peer_state.last_solved_remote_descriptor_seq),
         solve_outcome_label(peer_state.last_solve_diagnostic),
@@ -634,7 +694,7 @@ fn make_peer_scene_debug_text(
             std::cmp::Reverse(peer_id.0),
         )
     }) else {
-        return "PeerScene: waiting for peer".to_string();
+        return "PeerMap: waiting for peer".to_string();
     };
     let peer_label = format!("{:08x}", peer_id.0);
     let state_text = if peer_state.latest_state.is_some() {
@@ -642,32 +702,25 @@ fn make_peer_scene_debug_text(
     } else {
         "no"
     };
+    let remote_seq = descriptor_seq_label(peer_state.latest_descriptor.as_ref().map(|frame| frame.seq));
     if let Some(diagnostic) = peer_state.last_solve_diagnostic {
         return format!(
-            "PeerScene {peer_label}: state {state_text} | desc {} | slice {} | vdesc {} | pose {}",
+            "PeerMap {peer_label}: state {state_text} | map {} seq {} | signal {} | pose {}",
             if peer_state.has_descriptor {
                 "yes"
             } else {
                 "no"
             },
+            remote_seq,
             diagnostic.remote_wall_samples,
-            if diagnostic.remote_vertical_descriptor {
-                "yes"
-            } else {
-                "no"
-            },
             transform_source_label(peer_state.transform_source),
         );
     }
     if let Some(descriptor) = peer_state.latest_descriptor.as_ref() {
         return format!(
-            "PeerScene {peer_label}: state {state_text} | desc yes | slice {} | vdesc {} | pose {}{}",
-            descriptor_contour_sample_count(&descriptor.descriptor),
-            if descriptor_has_vertical_compact_scene(&descriptor.descriptor) {
-                "yes"
-            } else {
-                "no"
-            },
+            "PeerMap {peer_label}: state {state_text} | map yes seq {} {} | pose {}{}",
+            descriptor_seq_label(Some(descriptor.seq)),
+            descriptor_height_map_status(&descriptor.descriptor),
             transform_source_label(peer_state.transform_source),
             if has_local_descriptor {
                 " | solve pending"
@@ -677,12 +730,13 @@ fn make_peer_scene_debug_text(
         );
     }
     format!(
-        "PeerScene {peer_label}: state {state_text} | desc {} | slice ? | vdesc ? | pose {}{}",
+        "PeerMap {peer_label}: state {state_text} | map {} seq {} | pose {}{}",
         if peer_state.has_descriptor {
             "yes"
         } else {
             "no"
         },
+        remote_seq,
         transform_source_label(peer_state.transform_source),
         if has_local_descriptor && peer_state.has_descriptor {
             " | solve pending"
@@ -704,7 +758,7 @@ fn make_pending_alignment_debug_text(
             std::cmp::Reverse(peer_id.0),
         )
     }) else {
-        return format!("{local_descriptor_text} | waiting for peer descriptor");
+        return format!("{local_descriptor_text} | waiting for peer heightmap");
     };
     if peer_state.last_solve_diagnostic.is_some() {
         return local_descriptor_text.to_string();
@@ -712,18 +766,14 @@ fn make_pending_alignment_debug_text(
     let peer_label = format!("{:08x}", peer_id.0);
     if let Some(descriptor) = peer_state.latest_descriptor.as_ref() {
         format!(
-            "{local_descriptor_text} | {peer_label}: remote slice {} | remote vdesc {} | solve pending",
-            descriptor_contour_sample_count(&descriptor.descriptor),
-            if descriptor_has_vertical_compact_scene(&descriptor.descriptor) {
-                "yes"
-            } else {
-                "no"
-            },
+            "{local_descriptor_text} | {peer_label}: remote map seq {} {} | solve pending",
+            descriptor.seq,
+            descriptor_height_map_status(&descriptor.descriptor),
         )
     } else if peer_state.has_descriptor {
         format!("{local_descriptor_text} | {peer_label}: solve pending")
     } else {
-        format!("{local_descriptor_text} | {peer_label}: waiting for peer descriptor")
+        format!("{local_descriptor_text} | {peer_label}: waiting for peer heightmap")
     }
 }
 
@@ -740,21 +790,16 @@ fn alignment_rejection_reason(
 ) -> String {
     if best.matched_samples < 2 {
         format!("matched {}<2", best.matched_samples)
-    } else if diagnostic.local_vertical_descriptor
-        && diagnostic.remote_vertical_descriptor
-        && best.symmetry_confidence <= 0.10
-    {
+    } else if best.symmetry_confidence <= 0.10 {
         format!("symmetry {:.2}<=0.10", best.symmetry_confidence)
     } else if best.confidence <= 0.18 {
         format!("confidence {:.2}<=0.18", best.confidence)
     } else if !best.residual_meters.is_finite() {
-        "vertical overlap missing".to_string()
+        "heightmap overlap missing".to_string()
     } else if best.residual_meters >= 0.18 {
         format!("residual {:.2}m>=0.18m", best.residual_meters)
     } else if diagnostic.remote_wall_samples < 4 {
-        format!("remote slice {}<4", diagnostic.remote_wall_samples)
-    } else if !diagnostic.remote_vertical_descriptor {
-        "remote compact scene missing".to_string()
+        format!("remote signal {}<4", diagnostic.remote_wall_samples)
     } else {
         "score below accept threshold".to_string()
     }
@@ -772,58 +817,41 @@ fn make_alignment_debug_text(
         )
     }) else {
         return match local_scene_state {
-            LocalSceneState::Ready => "AlignDbg: waiting for peer descriptor".to_string(),
+            LocalSceneState::Ready => "AlignDbg: waiting for peer heightmap".to_string(),
             LocalSceneState::PublishPending => {
-                "AlignDbg: local slice ready | waiting to publish local descriptor".to_string()
+                "AlignDbg: local heightmap ready | waiting to publish".to_string()
             }
-            LocalSceneState::Missing => "AlignDbg: waiting for local scene descriptor".to_string(),
+            LocalSceneState::Missing => "AlignDbg: waiting for local heightmap".to_string(),
         };
     };
     let peer_label = format!("{:08x}", peer_id.0);
     if local_scene_state == LocalSceneState::Missing {
-        return format!("AlignDbg {peer_label}: waiting for local scene descriptor");
+        return format!("AlignDbg {peer_label}: waiting for local heightmap");
     }
     if local_scene_state == LocalSceneState::PublishPending {
-        return format!(
-            "AlignDbg {peer_label}: local slice ready | waiting to publish local descriptor"
-        );
+        return format!("AlignDbg {peer_label}: local heightmap ready | waiting to publish");
     }
     let Some(diagnostic) = peer_state.last_solve_diagnostic else {
         if let Some(remote_descriptor) = peer_state.latest_descriptor.as_ref() {
             return format!(
-                "AlignDbg {peer_label}: remote desc seq {} slice {} vdesc {} | waiting for solve",
+                "AlignDbg {peer_label}: remote map seq {} {} | waiting for solve",
                 remote_descriptor.seq,
-                descriptor_contour_sample_count(&remote_descriptor.descriptor),
-                if descriptor_has_vertical_compact_scene(&remote_descriptor.descriptor) {
-                    "yes"
-                } else {
-                    "no"
-                },
+                descriptor_height_map_status(&remote_descriptor.descriptor),
             );
         }
-        return format!("AlignDbg {peer_label}: waiting for peer descriptor");
+        return format!("AlignDbg {peer_label}: waiting for peer heightmap");
     };
 
     let context = format!(
-        "local slice {} | remote slice {} | local vdesc {} | remote vdesc {} | yaw {} | pose {}",
+        "local signal {} | remote signal {} | yaw {} | pose {}",
         diagnostic.local_wall_samples,
         diagnostic.remote_wall_samples,
-        if diagnostic.local_vertical_descriptor {
-            "yes"
-        } else {
-            "no"
-        },
-        if diagnostic.remote_vertical_descriptor {
-            "yes"
-        } else {
-            "no"
-        },
         diagnostic.yaw_candidate_count,
         diagnostic.pose_candidate_count,
     );
     match diagnostic.outcome() {
         XrDepthAlignSolveOutcome::MissingSamples => {
-            format!("AlignDbg {peer_label}: need contour slice on both sides | {context}")
+            format!("AlignDbg {peer_label}: need more heightmap signal | {context}")
         }
         XrDepthAlignSolveOutcome::NoCandidate => {
             format!(
@@ -909,9 +937,15 @@ pub struct XrPeopleDebug {
     #[rust]
     local_descriptor_version: Option<(u64, u64)>,
     #[rust]
+    local_slice_preview: Option<XrDepthAlignSlicePreview>,
+    #[rust]
     local_alignment_debug: XrDepthAlignDebug,
     #[rust]
     last_sent_descriptor_signature: Option<(u64, u64)>,
+    #[rust]
+    last_sent_descriptor: Option<XrDepthAlignDescriptor>,
+    #[rust]
+    last_sent_descriptor_at: Option<f64>,
     #[rust]
     tx_state_count: u64,
     #[rust]
@@ -945,6 +979,8 @@ impl XrPeopleDebug {
     const ANCHOR_MARKER_SIZE: f32 = 0.060;
     const REMOTE_ANCHOR_MARKER_SIZE: f32 = 0.050;
     const SYNC_MATCH_RECEIVE_WINDOW_SECONDS: f64 = 0.45;
+    const DESCRIPTOR_SEND_MIN_CHANGE_SCORE: f32 = 0.02;
+    const DESCRIPTOR_SEND_MIN_INTERVAL_SECONDS: f64 = 1.0;
     const SYNC_MATCH_ACTIVE_WINDOW_SECONDS: f64 = 1.35;
     const FIST_ACK_MAX_VERTICAL_DELTA_METERS: f32 = 0.22;
     const FIST_ACK_MAX_DEPTH_DELTA_METERS: f32 = 0.22;
@@ -959,7 +995,7 @@ impl XrPeopleDebug {
 
     pub fn status_text(&self) -> &str {
         if self.last_status.is_empty() {
-            "Peers: off"
+            "AlignSync: off"
         } else {
             &self.last_status
         }
@@ -995,10 +1031,26 @@ impl XrPeopleDebug {
 
     pub fn peer_scene_text(&self) -> &str {
         if self.last_peer_scene_status.is_empty() {
-            "PeerScene: off"
+            "PeerMap: off"
         } else {
             &self.last_peer_scene_status
         }
+    }
+
+    pub fn aligned_peer_height_map(&self) -> Option<XrDepthAlignHeightMap> {
+        let (_, peer_state) = self.preferred_peer()?;
+        let transform = peer_state.descriptor_remote_to_local.or_else(|| {
+            peer_state
+                .last_solve_diagnostic
+                .and_then(|diagnostic| diagnostic.best_solution)
+                .map(|solution| solution.remote_to_local_transform())
+        })?;
+        let descriptor = peer_state.latest_descriptor?.descriptor;
+        xr_depth_align_transform_descriptor(&descriptor, &transform).height_map
+    }
+
+    pub fn local_slice_preview(&self) -> Option<XrDepthAlignSlicePreview> {
+        self.local_slice_preview.clone()
     }
 
     pub fn set_enabled(&mut self, cx: &mut Cx, enabled: bool) -> bool {
@@ -1018,8 +1070,11 @@ impl XrPeopleDebug {
         self.accepted_sync_ids.clear();
         self.local_descriptor = None;
         self.local_descriptor_version = None;
+        self.local_slice_preview = None;
         self.local_alignment_debug = XrDepthAlignDebug::default();
         self.last_sent_descriptor_signature = None;
+        self.last_sent_descriptor = None;
+        self.last_sent_descriptor_at = None;
         self.tx_state_count = 0;
         self.tx_descriptor_count = 0;
         self.rx_join_count = 0;
@@ -1035,28 +1090,28 @@ impl XrPeopleDebug {
             }
             self.ensure_net_node();
             if self.net_node.is_some() {
-                self.last_status = "Peers: scanning LAN for clients".to_string();
+                self.last_status = "AlignSync: waiting for peer heightmap".to_string();
                 self.last_network_status =
                     "Network: bridge ready | waiting for local XR frames".to_string();
             } else {
-                self.last_status = "Peers: network unavailable".to_string();
+                self.last_status = "AlignSync: network unavailable".to_string();
                 self.last_network_status = "Network: bind failed".to_string();
             }
-            self.last_peer_scene_status = "PeerScene: waiting for peer".to_string();
+            self.last_peer_scene_status = "PeerMap: waiting for peer".to_string();
             self.last_alignment_debug_status = if self.auto_alignment_enabled {
-                "AlignDbg: waiting for local scene descriptor".to_string()
+                "AlignDbg: waiting for local heightmap".to_string()
             } else {
                 "AlignDbg: manual sync idle".to_string()
             };
             self.last_alignment_state_status = if self.auto_alignment_enabled {
-                "AlignState: local no v- | waiting for peer".to_string()
+                "AlignState: local map no v- | waiting for peer map".to_string()
             } else {
                 "AlignState: local anchor no | sync idle | waiting for peer".to_string()
             };
         } else {
-            self.last_status = "Peers: off".to_string();
+            self.last_status = "AlignSync: off".to_string();
             self.last_network_status = "Network: off".to_string();
-            self.last_peer_scene_status = "PeerScene: off".to_string();
+            self.last_peer_scene_status = "PeerMap: off".to_string();
             self.last_alignment_debug_status = "AlignDbg: off".to_string();
             self.last_alignment_state_status = "AlignState: off".to_string();
         }
@@ -1072,10 +1127,12 @@ impl XrPeopleDebug {
             Ok(node) => {
                 self.net_node = Some(node);
                 self.last_sent_descriptor_signature = None;
+                self.last_sent_descriptor = None;
+                self.last_sent_descriptor_at = None;
                 self.last_event_text = "node started".to_string();
             }
             Err(err) => {
-                self.last_status = format!("Peers: network bind failed ({err})");
+                self.last_status = format!("AlignSync: network bind failed ({err})");
                 self.last_network_status = format!("Network: bind failed ({err})");
             }
         }
@@ -1111,7 +1168,10 @@ impl XrPeopleDebug {
             self.local_alignment_debug = XrDepthAlignDebug::default();
             self.local_descriptor = None;
             self.local_descriptor_version = None;
+            self.local_slice_preview = None;
             self.last_sent_descriptor_signature = None;
+            self.last_sent_descriptor = None;
+            self.last_sent_descriptor_at = None;
             if let Some(worker) = self.alignment_worker.as_mut() {
                 worker.clear_local_descriptor();
             }
@@ -1127,34 +1187,55 @@ impl XrPeopleDebug {
         let next_signature = next_mesh
             .as_ref()
             .map(|mesh| (mesh.mesh_generation, mesh.update_sequence));
+        let next_slice_preview = next_mesh
+            .as_ref()
+            .and_then(|mesh| mesh.alignment_slice_preview.clone());
         let next_descriptor = next_mesh.as_ref().and_then(|mesh| {
             XrNetAlignmentDescriptorFrame::from_depth_mesh(mesh.as_ref(), state.time)
         });
-        self.local_descriptor_version = if next_descriptor.is_some() {
-            next_signature
-        } else {
-            None
-        };
-
-        if !descriptor_frames_equal(self.local_descriptor.as_ref(), next_descriptor.as_ref()) {
-            self.local_descriptor = next_descriptor.clone();
-            if let Some(worker) = self.alignment_worker.as_mut() {
-                if let (Some(frame), Some(version)) = (next_descriptor.clone(), next_signature) {
-                    worker.set_local_descriptor(frame, version);
-                } else {
-                    worker.clear_local_descriptor();
-                }
-            }
-        }
 
         if let (Some(signature), Some(frame)) = (next_signature, next_descriptor) {
-            if self.last_sent_descriptor_signature != Some(signature) {
+            let change_score = self
+                .last_sent_descriptor
+                .as_ref()
+                .map(|previous| descriptor_change_score(previous, &frame.descriptor))
+                .unwrap_or(1.0);
+            let send_interval_ready = self
+                .last_sent_descriptor_at
+                .map(|sent_at| {
+                    state.time - sent_at >= Self::DESCRIPTOR_SEND_MIN_INTERVAL_SECONDS
+                })
+                .unwrap_or(true);
+            let should_publish = self.last_sent_descriptor_signature != Some(signature)
+                && (self.last_sent_descriptor.is_none()
+                    || change_score >= Self::DESCRIPTOR_SEND_MIN_CHANGE_SCORE)
+                && send_interval_ready;
+            if should_publish {
+                self.local_descriptor = Some(frame.clone());
+                self.local_descriptor_version = Some(signature);
+                self.local_slice_preview = next_slice_preview;
+                if let Some(worker) = self.alignment_worker.as_mut() {
+                    worker.set_local_descriptor(frame.clone(), signature);
+                }
                 net_node.send_alignment_descriptor(frame);
                 self.last_sent_descriptor_signature = Some(signature);
+                self.last_sent_descriptor = self
+                    .local_descriptor
+                    .as_ref()
+                    .map(|frame| frame.descriptor.clone());
+                self.last_sent_descriptor_at = Some(state.time);
                 self.tx_descriptor_count = self.tx_descriptor_count.saturating_add(1);
             }
         } else {
+            self.local_descriptor = None;
+            self.local_descriptor_version = None;
+            self.local_slice_preview = None;
             self.last_sent_descriptor_signature = None;
+            self.last_sent_descriptor = None;
+            self.last_sent_descriptor_at = None;
+            if let Some(worker) = self.alignment_worker.as_mut() {
+                worker.clear_local_descriptor();
+            }
         }
         self.refresh_peer_transforms(cx);
     }
@@ -1187,7 +1268,9 @@ impl XrPeopleDebug {
         if disconnected {
             self.net_node = None;
             self.last_sent_descriptor_signature = None;
-            self.last_status = "Peers: network worker disconnected, retrying".to_string();
+            self.last_sent_descriptor = None;
+            self.last_sent_descriptor_at = None;
+            self.last_status = "AlignSync: network worker disconnected, retrying".to_string();
             self.last_network_status = "Network: worker disconnected".to_string();
         } else if received_message {
             self.refresh_peer_transforms(cx);
@@ -1431,22 +1514,22 @@ impl XrPeopleDebug {
 
     fn refresh_status(&mut self) {
         if !self.enabled {
-            self.last_status = "Peers: off".to_string();
+            self.last_status = "AlignSync: off".to_string();
             self.last_network_status = "Network: off".to_string();
-            self.last_peer_scene_status = "PeerScene: off".to_string();
+            self.last_peer_scene_status = "PeerMap: off".to_string();
             self.last_alignment_debug_status = "AlignDbg: off".to_string();
             self.last_alignment_state_status = "AlignState: off".to_string();
             return;
         }
         if self.net_node.is_none() {
             if self.last_status.is_empty() {
-                self.last_status = "Peers: network unavailable".to_string();
+                self.last_status = "AlignSync: network unavailable".to_string();
             }
             if self.last_network_status.is_empty() {
                 self.last_network_status = "Network: unavailable".to_string();
             }
             if self.last_peer_scene_status.is_empty() {
-                self.last_peer_scene_status = "PeerScene: network unavailable".to_string();
+                self.last_peer_scene_status = "PeerMap: network unavailable".to_string();
             }
             return;
         }
@@ -1512,16 +1595,18 @@ impl XrPeopleDebug {
         }
 
         self.last_status = if peer_count == 0 {
-            "Peers: scanning LAN for clients".to_string()
+            "AlignSync: waiting for peer heightmap".to_string()
         } else if local_scene_state == LocalSceneState::Ready {
-            format!("Peers: {peer_count} seen | {visible_count} state | {aligned_count} descriptor-solved")
+            format!(
+                "AlignSync: peers {peer_count} | visible {visible_count} | remote maps {descriptor_count} | solved {aligned_count}"
+            )
         } else if local_scene_state == LocalSceneState::PublishPending {
             format!(
-                "Peers: {peer_count} seen | {visible_count} state | local slice {} ready | waiting to publish local descriptor",
+                "AlignSync: peers {peer_count} | local map signal {} ready | publish pending",
                 self.local_contour_sample_count()
             )
         } else {
-            format!("Peers: {peer_count} seen | {visible_count} state | waiting for local scene descriptor")
+            format!("AlignSync: peers {peer_count} | waiting for local heightmap")
         };
 
         let last_event = if self.last_event_text.is_empty() {
@@ -1530,7 +1615,7 @@ impl XrPeopleDebug {
             &self.last_event_text
         };
         self.last_network_status = format!(
-            "Network: tx s{} d{} | rx j{} l{} s{} d{} | peers {} vis {} desc {} align {} | local desc {} slice {} | last {}",
+            "Network: tx state {} | tx map {} | rx join {} leave {} state {} map {} | peers {} vis {} maps {} solved {} | local map {} signal {} | last {}",
             self.tx_state_count,
             self.tx_descriptor_count,
             self.rx_join_count,
@@ -1846,48 +1931,27 @@ impl XrPeopleDebug {
     }
 
     fn local_descriptor_debug_text(&self) -> String {
-        let (descriptor_cells, vertical_cells, clutter_cells) = self
-            .local_descriptor
-            .as_ref()
-            .and_then(|frame| frame.descriptor.vertical_descriptor.as_ref())
-            .map(|descriptor| {
-                let size = descriptor.size as usize;
-                let mut occupied = 0usize;
-                let mut vertical = 0usize;
-                let mut clutter = 0usize;
-                if size != 0
-                    && descriptor.vertical_surface_masks.len() == size * size
-                    && descriptor.clutter_surface_masks.len() == size * size
-                {
-                    for index in 0..size * size {
-                        if descriptor.vertical_surface_masks[index] != 0
-                            || descriptor.clutter_surface_masks[index] != 0
-                        {
-                            occupied += 1;
-                        }
-                        if descriptor.vertical_surface_masks[index] != 0 {
-                            vertical += 1;
-                        }
-                        if descriptor.clutter_surface_masks[index] != 0 {
-                            clutter += 1;
-                        }
-                    }
+        let Some(descriptor) = self.local_descriptor.as_ref().map(|frame| &frame.descriptor) else {
+            return match self.local_scene_state() {
+                LocalSceneState::Missing => "AlignDbg: waiting for local heightmap".to_string(),
+                LocalSceneState::PublishPending => {
+                    "AlignDbg: local heightmap ready | publish pending".to_string()
                 }
-                (occupied, vertical, clutter)
-            })
-            .unwrap_or((0, 0, 0));
+                LocalSceneState::Ready => "AlignDbg: local map missing".to_string(),
+            };
+        };
+        let map_status = descriptor_height_map_status(descriptor);
         match self.local_scene_state() {
-            LocalSceneState::Missing => "AlignDbg: waiting for local scene descriptor".to_string(),
+            LocalSceneState::Missing => "AlignDbg: waiting for local heightmap".to_string(),
             LocalSceneState::PublishPending => format!(
-                "AlignDbg: local slice {} ready | descriptor publish pending",
+                "AlignDbg: local map {} | signal {} | publish pending",
+                map_status,
                 self.local_contour_sample_count(),
             ),
             LocalSceneState::Ready => format!(
-                "AlignDbg: local slice {} | desc occ {} v {} c {}",
+                "AlignDbg: local map {} | signal {}",
+                map_status,
                 self.local_contour_sample_count(),
-                descriptor_cells,
-                vertical_cells,
-                clutter_cells,
             ),
         }
     }
