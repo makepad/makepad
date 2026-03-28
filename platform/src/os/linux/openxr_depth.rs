@@ -62,9 +62,12 @@ const DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS: u64 = 8;
 const DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS: u64 = 1000;
 const DEPTH_PROJECTED_HEIGHT_REFRESH_INTERVAL_MILLIS: u64 = 33;
 const DEPTH_ALIGN_HEIGHT_MAP_BOUNDS_PADDING_METERS: f32 = 0.45;
+const DEPTH_ALIGN_HEIGHT_MAP_FLOOR_BIN_METERS: f32 = 0.04;
+const DEPTH_ALIGN_HEIGHT_MAP_FLOOR_MIN_SUPPORT_RATIO: f32 = 0.005;
+const DEPTH_ALIGN_HEIGHT_MAP_FLOOR_MIN_SUPPORT_CELLS: usize = 24;
+const DEPTH_ALIGN_HEIGHT_MAP_FLOOR_SUPPORT_WINDOW_BINS: usize = 2;
 const DEPTH_ALIGN_VECTOR_SLICE_TOP_Y_METERS: f32 = 2.00;
 const DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS: f32 = 0.50;
-const DEPTH_ALIGN_VECTOR_SLICE_MIN_PROJECT_Y_METERS: f32 = 0.00;
 const DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS: f32 =
     DEPTH_PLAYER_EXCLUDE_RADIUS_METERS + 0.12;
 const DEPTH_ALIGN_PROJECTED_HEIGHT_SAMPLES_PER_TICK: usize = 512;
@@ -1104,10 +1107,7 @@ struct DepthPreprocessWorkerState {
     depth_height: usize,
 }
 
-fn depth_preprocess_tsdf_writer_worker(
-    mailbox: SharedLatestDepthJobMailbox,
-    store: XrTsdfStore,
-) {
+fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, store: XrTsdfStore) {
     let mut preprocess_state = DepthPreprocessWorkerState::default();
     let mut volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, store.voxel_size_meters());
     let mut next_height_map_slice_at = Instant::now();
@@ -1941,8 +1941,7 @@ fn vector_slice_projection_top_y(volume: &DepthMeshVolume) -> Option<f32> {
 
 fn vector_slice_projection_bottom_y(volume: &DepthMeshVolume, top_y: f32) -> Option<f32> {
     let (bounds_min, _) = volume.mesh_grid.world_bounds(1)?;
-    let min_y = (bounds_min.y + volume.voxel_size_meters)
-        .max(DEPTH_ALIGN_VECTOR_SLICE_MIN_PROJECT_Y_METERS);
+    let min_y = bounds_min.y + volume.voxel_size_meters;
     let max_y = top_y - volume.voxel_size_meters;
     (max_y > min_y).then_some(min_y)
 }
@@ -2044,10 +2043,57 @@ fn query_depth_grid_projected_column_height(
     }
 }
 
-fn encode_projected_height_u16(height: f32, bottom_y: f32, top_y: f32) -> u16 {
-    let span = (top_y - bottom_y).max(1.0e-5);
-    let normalized = ((height - bottom_y) / span).clamp(0.0, 1.0);
-    1 + (normalized * 65534.0).round() as u16
+fn estimate_projected_height_floor_y(valid_cell_heights: &[f32], bottom_y: f32, top_y: f32) -> f32 {
+    let heights = valid_cell_heights
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if heights.is_empty() {
+        return bottom_y;
+    }
+    let span = (top_y - bottom_y).max(1.0e-3);
+    let bin_size = DEPTH_ALIGN_HEIGHT_MAP_FLOOR_BIN_METERS
+        .max(span / 256.0)
+        .min(span);
+    let bin_count = ((span / bin_size).ceil() as usize).max(1) + 1;
+    let mut bins = vec![0usize; bin_count];
+    for height in &heights {
+        let bin = (((*height - bottom_y) / bin_size).floor() as isize)
+            .clamp(0, bin_count.saturating_sub(1) as isize) as usize;
+        bins[bin] += 1;
+    }
+
+    let min_support = DEPTH_ALIGN_HEIGHT_MAP_FLOOR_MIN_SUPPORT_CELLS.max(
+        (heights.len() as f32 * DEPTH_ALIGN_HEIGHT_MAP_FLOOR_MIN_SUPPORT_RATIO).ceil() as usize,
+    );
+    let support_window_bins = DEPTH_ALIGN_HEIGHT_MAP_FLOOR_SUPPORT_WINDOW_BINS.max(1);
+    for start_bin in 0..bin_count {
+        let end_bin = (start_bin + support_window_bins).min(bin_count);
+        let support = bins[start_bin..end_bin].iter().copied().sum::<usize>();
+        if support < min_support {
+            continue;
+        }
+        let low = bottom_y + start_bin as f32 * bin_size;
+        let high = bottom_y + end_bin as f32 * bin_size;
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        for height in &heights {
+            if *height >= low && *height <= high {
+                sum += *height;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            return (sum / count as f32).clamp(bottom_y, top_y);
+        }
+    }
+
+    let mut sorted = heights;
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let fallback_count = ((sorted.len() as f32 * 0.01).ceil() as usize).clamp(1, 32);
+    let fallback = &sorted[..fallback_count];
+    (fallback.iter().copied().sum::<f32>() / fallback.len() as f32).clamp(bottom_y, top_y)
 }
 
 fn build_projected_height_map(volume: &mut DepthMeshVolume) -> Option<XrDepthAlignHeightMap> {
@@ -2071,10 +2117,12 @@ fn build_projected_height_map(volume: &mut DepthMeshVolume) -> Option<XrDepthAli
         size_z: size_z as u16,
         bottom_y_meters: field.layout.bottom_y_meters,
         top_y_meters: field.layout.top_y_meters,
+        floor_y_meters: field.layout.bottom_y_meters,
         player_cutout_center: player_cutout_center.map(|center| vec2f(center.x, center.z)),
         player_cutout_radius_meters: DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS,
-        height_u16: vec![0; size_x * size_z],
+        heights_meters: vec![f32::NAN; size_x * size_z],
     };
+    let mut valid_cell_heights = Vec::<f32>::with_capacity(size_x.saturating_mul(size_z));
     for z in 0..size_z {
         for x in 0..size_x {
             if player_cutout_center.is_some_and(|camera_world| {
@@ -2106,15 +2154,17 @@ fn build_projected_height_map(volume: &mut DepthMeshVolume) -> Option<XrDepthAli
                 height_count += 1;
             }
             if height_count != 0 {
-                let encoded = encode_projected_height_u16(
-                    height_sum / height_count as f32,
-                    field.layout.bottom_y_meters,
-                    field.layout.top_y_meters,
-                );
-                height_map.height_u16[preview_index] = encoded;
+                let height = height_sum / height_count as f32;
+                height_map.heights_meters[preview_index] = height;
+                valid_cell_heights.push(height);
             }
         }
     }
+    height_map.floor_y_meters = estimate_projected_height_floor_y(
+        &valid_cell_heights,
+        field.layout.bottom_y_meters,
+        field.layout.top_y_meters,
+    );
     Some(height_map)
 }
 
