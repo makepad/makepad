@@ -9,10 +9,16 @@ pub mod gltf;
 pub mod gltf_bridge;
 #[path = "obj/icosphere.rs"]
 pub mod icosphere;
+#[path = "util/depth_debug_mesh.rs"]
+pub mod depth_debug_mesh;
+#[path = "util/depth_debug_mesh_worker.rs"]
+mod depth_debug_mesh_worker;
 #[path = "util/mesh_generators.rs"]
 pub mod mesh_generators;
 #[path = "util/passthrough_env.rs"]
 pub mod passthrough_env;
+#[path = "util/tsdf_query.rs"]
+mod tsdf_query;
 #[path = "obj/physics_view.rs"]
 pub mod physics_view;
 #[path = "obj/refractive_cube.rs"]

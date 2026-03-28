@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
-use super::xr_depth::{
-    depth_query_plane_supports_body, DepthQuerySurfaceCollider, DepthQuerySurfaceTarget,
-};
+use super::xr_depth::{DepthQuerySurfaceCollider, DepthQuerySurfaceTarget};
 use super::*;
+use crate::tsdf_query::{
+    depth_query_plane_supports_body, DepthQueryColliderGeometry, DepthQueryColliderRole,
+};
 use rapier3d::dynamics::CoefficientCombineRule;
 use rapier3d::pipeline::{ActiveHooks, PairFilterContext, PhysicsHooks};
 use rapier3d::prelude::SolverFlags;
@@ -626,7 +627,7 @@ impl RapierScene {
                 continue;
             };
             if let Some(collider) = self.colliders.get_mut(surface.collider) {
-                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = target.collider.geometry;
+                let DepthQueryColliderGeometry::HalfSpace(plane) = target.collider.geometry;
                 let footprint_supports_body = depth_query_plane_supports_body(
                     plane,
                     body_position,
@@ -634,8 +635,8 @@ impl RapierScene {
                     physics_edge_margin,
                 );
                 let supports_body = match target.collider.role {
-                    XrDepthMeshQueryColliderRole::Support => footprint_supports_body,
-                    XrDepthMeshQueryColliderRole::Impact => {
+                    DepthQueryColliderRole::Support => footprint_supports_body,
+                    DepthQueryColliderRole::Impact => {
                         let speed = body_velocity.length();
                         let approach_speed = -body_velocity.dot(plane.normal);
                         footprint_supports_body

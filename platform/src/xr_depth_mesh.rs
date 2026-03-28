@@ -3,13 +3,14 @@ use crate::{
     makepad_micro_serde::*,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        Arc, Mutex, OnceLock, RwLock,
+        Arc, OnceLock, RwLock,
     },
 };
 
+#[allow(dead_code)]
 const XR_DEPTH_QUERY_MAX_PENDING: usize = 256;
 pub const XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS: f32 = 0.03;
 const XR_DEPTH_ALIGN_MIN_WALL_SAMPLES: usize = 4;
@@ -57,8 +58,9 @@ pub struct XrDepthMeshStats {
     pub frames_dropped: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
-pub struct XrDepthMeshChunk {
+pub(crate) struct XrDepthMeshChunk {
     pub generation: u64,
     pub chunk_key: ChunkKey,
     pub fingerprint: u64,
@@ -70,14 +72,16 @@ pub struct XrDepthMeshChunk {
     pub planar_patches: Vec<XrDepthPlanePatch>,
 }
 
+#[allow(dead_code)]
 impl XrDepthMeshChunk {
-    pub fn triangle_count(&self) -> usize {
+    pub(crate) fn triangle_count(&self) -> usize {
         self.indices.len() / 3
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
-pub struct XrDepthMesh {
+pub(crate) struct XrDepthMesh {
     pub generation: u64,
     pub latest_topology_generation: u64,
     pub update_sequence: u64,
@@ -107,17 +111,61 @@ pub struct XrDepthMesh {
 
 #[derive(Clone, Debug, Default)]
 pub struct XrDepthMeshState {
-    pub latest_mesh: Option<Arc<XrDepthMesh>>,
     pub stats: XrDepthMeshStats,
     pub last_error: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct XrDepthAlignState {
+#[derive(Clone, Debug, Default)]
+pub struct SparseTsdReadChunk {
+    pub values: Vec<f32>,
+    pub valid: Vec<u8>,
+    pub confidence: Vec<u8>,
+    pub observed_generation: Vec<u64>,
+}
+
+impl SparseTsdReadChunk {
+    pub fn heap_bytes(&self) -> u64 {
+        (self.values.capacity() * std::mem::size_of::<f32>()
+            + self.valid.capacity() * std::mem::size_of::<u8>()
+            + self.confidence.capacity() * std::mem::size_of::<u8>()
+            + self.observed_generation.capacity() * std::mem::size_of::<u64>()) as u64
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SparseTsdGridReadSnapshot {
+    pub voxel_size: f32,
+    pub chunk_edge: i32,
+    pub chunk_volume: usize,
+    pub active_value_count: usize,
+    pub active_bounds: Option<(Vec3f, Vec3f)>,
+    pub chunks: HashMap<ChunkKey, Arc<SparseTsdReadChunk>>,
+}
+
+impl SparseTsdGridReadSnapshot {
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn heap_bytes(&self) -> u64 {
+        let chunk_bytes = self
+            .chunks
+            .values()
+            .map(|chunk| chunk.heap_bytes())
+            .sum::<u64>();
+        let table_bytes =
+            self.chunks.capacity() as u64 * std::mem::size_of::<(ChunkKey, Arc<SparseTsdReadChunk>)>() as u64;
+        chunk_bytes + table_bytes
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TsdfPublishedSnapshot {
+    pub generation: u64,
+    pub latest_topology_generation: u64,
     pub update_sequence: u64,
-    pub descriptor: Option<XrDepthAlignDescriptor>,
-    pub debug: XrDepthAlignDebug,
-    pub preview: XrDepthAlignPreview,
+    pub grid: Arc<SparseTsdGridReadSnapshot>,
+    pub height_map: Option<XrDepthAlignHeightMap>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, SerBin, DeBin)]
@@ -1985,8 +2033,9 @@ fn alignment_solution_better(
         .is_gt()
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum XrDepthPlaneKind {
+pub(crate) enum XrDepthPlaneKind {
     Floor,
     Table,
     Ceiling,
@@ -1995,8 +2044,9 @@ pub enum XrDepthPlaneKind {
     Unknown,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default)]
-pub struct XrDepthPlanePatch {
+pub(crate) struct XrDepthPlanePatch {
     pub generation: u64,
     pub kind: XrDepthPlaneKind,
     pub center: Vec3f,
@@ -2009,8 +2059,9 @@ pub struct XrDepthPlanePatch {
     pub support_triangles: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
-pub struct XrDepthMeshQuery {
+pub(crate) struct XrDepthMeshQuery {
     pub key: u64,
     pub center: Vec3f,
     pub predicted_center: Vec3f,
@@ -2020,8 +2071,9 @@ pub struct XrDepthMeshQuery {
     pub include_planar_patches: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
-pub struct XrDepthMeshQuerySurfaceHit {
+pub(crate) struct XrDepthMeshQuerySurfaceHit {
     pub distance: f32,
     pub point: Vec3f,
     pub normal: Vec3f,
@@ -2031,8 +2083,9 @@ pub struct XrDepthMeshQuerySurfaceHit {
     pub chunk_key: ChunkKey,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
-pub struct XrDepthMeshQuerySupportPlane {
+pub(crate) struct XrDepthMeshQuerySupportPlane {
     pub point: Vec3f,
     pub normal: Vec3f,
     pub tangent: Vec3f,
@@ -2041,43 +2094,49 @@ pub struct XrDepthMeshQuerySupportPlane {
     pub half_extent_bitangent: f32,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub enum XrDepthMeshQueryColliderGeometry {
+pub(crate) enum XrDepthMeshQueryColliderGeometry {
     HalfSpace(XrDepthMeshQuerySupportPlane),
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum XrDepthMeshQueryColliderRole {
+pub(crate) enum XrDepthMeshQueryColliderRole {
     Support,
     Impact,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub struct XrDepthMeshQueryCollider {
+pub(crate) struct XrDepthMeshQueryCollider {
     pub fingerprint: u64,
     pub geometry: XrDepthMeshQueryColliderGeometry,
     pub role: XrDepthMeshQueryColliderRole,
     pub restitution: f32,
 }
 
+#[allow(dead_code)]
 impl XrDepthMeshQueryCollider {
-    pub fn vertex_count(&self) -> usize {
+    pub(crate) fn vertex_count(&self) -> usize {
         0
     }
 
-    pub fn triangle_count(&self) -> usize {
+    pub(crate) fn triangle_count(&self) -> usize {
         0
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub struct XrDepthMeshQueryResolvedSurface {
+pub(crate) struct XrDepthMeshQueryResolvedSurface {
     pub surface: XrDepthMeshQuerySurfaceHit,
     pub collider: XrDepthMeshQueryCollider,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub struct XrDepthMeshQueryHit {
+pub(crate) struct XrDepthMeshQueryHit {
     pub key: u64,
     pub version: u64,
     pub mesh_generation: u64,
@@ -2092,8 +2151,9 @@ pub struct XrDepthMeshQueryHit {
     pub additional_hits: Vec<XrDepthMeshQueryResolvedSurface>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub enum XrDepthMeshQueryResult {
+pub(crate) enum XrDepthMeshQueryResult {
     Hit(XrDepthMeshQueryHit),
     Miss {
         key: u64,
@@ -2102,15 +2162,16 @@ pub enum XrDepthMeshQueryResult {
     },
 }
 
+#[allow(dead_code)]
 impl XrDepthMeshQueryResult {
-    pub fn key(&self) -> u64 {
+    pub(crate) fn key(&self) -> u64 {
         match self {
             Self::Hit(hit) => hit.key,
             Self::Miss { key, .. } => *key,
         }
     }
 
-    pub fn version(&self) -> u64 {
+    pub(crate) fn version(&self) -> u64 {
         match self {
             Self::Hit(hit) => hit.version,
             Self::Miss { version, .. } => *version,
@@ -2118,30 +2179,19 @@ impl XrDepthMeshQueryResult {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct XrDepthMeshPendingQuery {
     pub query: XrDepthMeshQuery,
     pub version: u64,
 }
 
-#[derive(Default)]
-struct XrDepthMeshQueryState {
-    next_versions: HashMap<u64, u64>,
-    pending: HashMap<u64, XrDepthMeshPendingQuery>,
-    pending_order: VecDeque<u64>,
-    results: HashMap<u64, XrDepthMeshQueryResult>,
-}
-
 #[derive(Clone)]
 pub struct XrDepthMeshStore {
     state: Arc<RwLock<XrDepthMeshState>>,
-    alignment_state: Arc<RwLock<Arc<XrDepthAlignState>>>,
-    queries: Arc<Mutex<XrDepthMeshQueryState>>,
+    published_snapshot: Arc<RwLock<Option<Arc<TsdfPublishedSnapshot>>>>,
     reset_generation: Arc<AtomicU64>,
-    mesh_enabled: Arc<AtomicBool>,
-    plane_scan_enabled: Arc<AtomicBool>,
     surface_analysis_enabled: Arc<AtomicBool>,
-    alignment_preview_enabled: Arc<AtomicBool>,
     voxel_size_meters_bits: Arc<AtomicU32>,
 }
 
@@ -2149,13 +2199,9 @@ impl Default for XrDepthMeshStore {
     fn default() -> Self {
         Self {
             state: Arc::new(RwLock::new(XrDepthMeshState::default())),
-            alignment_state: Arc::new(RwLock::new(Arc::new(XrDepthAlignState::default()))),
-            queries: Arc::new(Mutex::new(XrDepthMeshQueryState::default())),
+            published_snapshot: Arc::new(RwLock::new(None)),
             reset_generation: Arc::new(AtomicU64::new(0)),
-            mesh_enabled: Arc::new(AtomicBool::new(false)),
-            plane_scan_enabled: Arc::new(AtomicBool::new(false)),
             surface_analysis_enabled: Arc::new(AtomicBool::new(false)),
-            alignment_preview_enabled: Arc::new(AtomicBool::new(false)),
             voxel_size_meters_bits: Arc::new(AtomicU32::new(
                 XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS.to_bits(),
             )),
@@ -2163,11 +2209,8 @@ impl Default for XrDepthMeshStore {
     }
 }
 
+#[allow(dead_code)]
 impl XrDepthMeshStore {
-    fn keeps_latest_mesh_alive(&self) -> bool {
-        self.mesh_enabled() || self.surface_analysis_enabled() || self.plane_scan_enabled()
-    }
-
     pub fn set_voxel_size_meters(&self, voxel_size_meters: f32) -> f32 {
         let voxel_size_meters = voxel_size_meters.clamp(0.03, 0.10);
         let previous = self
@@ -2193,118 +2236,23 @@ impl XrDepthMeshStore {
         generation
     }
 
-    pub fn set_mesh_enabled(&self, enabled: bool) {
-        let was_enabled = self.mesh_enabled.swap(enabled, Ordering::AcqRel);
-        if was_enabled && !enabled && !self.keeps_latest_mesh_alive() {
-            if let Ok(mut state) = self.state.write() {
-                state.latest_mesh = None;
-            }
-        }
-    }
-
-    pub fn mesh_enabled(&self) -> bool {
-        self.mesh_enabled.load(Ordering::Acquire)
-    }
-
-    pub fn set_plane_scan_enabled(&self, enabled: bool) {
-        let was_enabled = self.plane_scan_enabled.swap(enabled, Ordering::AcqRel);
-        if was_enabled && !enabled && !self.keeps_latest_mesh_alive() {
-            if let Ok(mut state) = self.state.write() {
-                state.latest_mesh = None;
-            }
-        }
-    }
-
-    pub fn plane_scan_enabled(&self) -> bool {
-        self.plane_scan_enabled.load(Ordering::Acquire)
-    }
-
     pub fn set_surface_analysis_enabled(&self, enabled: bool) {
-        let was_enabled = self
-            .surface_analysis_enabled
-            .swap(enabled, Ordering::AcqRel);
-        if was_enabled && !enabled && !self.keeps_latest_mesh_alive() {
-            if let Ok(mut state) = self.state.write() {
-                state.latest_mesh = None;
-            }
-        }
+        self.surface_analysis_enabled.store(enabled, Ordering::Release);
     }
 
     pub fn surface_analysis_enabled(&self) -> bool {
         self.surface_analysis_enabled.load(Ordering::Acquire)
     }
 
-    pub fn set_alignment_preview_enabled(&self, enabled: bool) {
-        self.alignment_preview_enabled
-            .store(enabled, Ordering::Release);
-    }
-
-    pub fn alignment_preview_enabled(&self) -> bool {
-        self.alignment_preview_enabled.load(Ordering::Acquire)
-    }
-
     pub fn state(&self) -> Arc<RwLock<XrDepthMeshState>> {
         self.state.clone()
     }
 
-    pub fn latest_mesh(&self) -> Option<Arc<XrDepthMesh>> {
-        self.state
+    pub fn latest_tsdf_snapshot(&self) -> Option<Arc<TsdfPublishedSnapshot>> {
+        self.published_snapshot
             .read()
             .ok()
-            .and_then(|state| state.latest_mesh.clone())
-    }
-
-    pub fn latest_alignment_state(&self) -> Arc<XrDepthAlignState> {
-        self.alignment_state
-            .read()
-            .map(|state| state.clone())
-            .unwrap_or_else(|_| Arc::new(XrDepthAlignState::default()))
-    }
-
-    pub fn submit_query(&self, query: XrDepthMeshQuery) -> Option<u64> {
-        let Ok(mut state) = self.queries.lock() else {
-            return None;
-        };
-        let version = state
-            .next_versions
-            .entry(query.key)
-            .and_modify(|version| *version = version.saturating_add(1))
-            .or_insert(1);
-        let version = *version;
-
-        if let Some(pending) = state.pending.get_mut(&query.key) {
-            pending.query = query;
-            pending.version = version;
-            return Some(version);
-        }
-
-        if state.pending.len() >= XR_DEPTH_QUERY_MAX_PENDING {
-            return None;
-        }
-
-        state
-            .pending
-            .insert(query.key, XrDepthMeshPendingQuery { query, version });
-        state.pending_order.push_back(query.key);
-        Some(version)
-    }
-
-    pub fn latest_query_result(&self, key: u64) -> Option<XrDepthMeshQueryResult> {
-        self.queries
-            .lock()
-            .ok()
-            .and_then(|state| state.results.get(&key).cloned())
-    }
-
-    pub fn clear_query(&self, key: u64) {
-        if let Ok(mut state) = self.queries.lock() {
-            state.pending.remove(&key);
-            state
-                .pending_order
-                .retain(|pending_key| *pending_key != key);
-            state.results.remove(&key);
-            state.next_versions.remove(&key);
-        }
+            .and_then(|snapshot| snapshot.clone())
     }
 
     #[allow(dead_code)]
@@ -2329,71 +2277,24 @@ impl XrDepthMeshStore {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn publish(&self, mesh: XrDepthMesh) {
+    pub(crate) fn publish_tsdf_snapshot(&self, snapshot: TsdfPublishedSnapshot) {
+        if let Ok(mut published_snapshot) = self.published_snapshot.write() {
+            *published_snapshot = Some(Arc::new(snapshot));
+        }
         if let Ok(mut state) = self.state.write() {
-            state.latest_mesh = Some(Arc::new(mesh));
             state.stats.frames_meshed += 1;
             state.last_error = None;
         }
     }
 
     #[allow(dead_code)]
-    pub(crate) fn publish_alignment_state(&self, alignment_state: XrDepthAlignState) {
-        if let Ok(mut state) = self.alignment_state.write() {
-            *state = Arc::new(alignment_state);
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn drain_pending_queries(&self, max_queries: usize) -> Vec<XrDepthMeshPendingQuery> {
-        let Ok(mut state) = self.queries.lock() else {
-            return Vec::new();
-        };
-        let mut drained = Vec::with_capacity(max_queries.min(state.pending.len()));
-        for _ in 0..max_queries {
-            let Some(key) = state.pending_order.pop_front() else {
-                break;
-            };
-            let Some(query) = state.pending.remove(&key) else {
-                continue;
-            };
-            drained.push(query);
-        }
-        drained
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn has_pending_queries(&self) -> bool {
-        self.queries
-            .lock()
-            .map(|state| !state.pending.is_empty())
-            .unwrap_or(false)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn publish_query_results(&self, results: Vec<XrDepthMeshQueryResult>) {
-        if results.is_empty() {
-            return;
-        }
-        if let Ok(mut state) = self.queries.lock() {
-            for result in results {
-                state.results.insert(result.key(), result);
-            }
-        }
-    }
-
-    #[allow(dead_code)]
     pub(crate) fn clear(&self) {
         if let Ok(mut state) = self.state.write() {
-            state.latest_mesh = None;
             state.last_error = None;
             state.stats = XrDepthMeshStats::default();
         }
-        if let Ok(mut alignment_state) = self.alignment_state.write() {
-            *alignment_state = Arc::new(XrDepthAlignState::default());
-        }
-        if let Ok(mut queries) = self.queries.lock() {
-            *queries = XrDepthMeshQueryState::default();
+        if let Ok(mut published_snapshot) = self.published_snapshot.write() {
+            *published_snapshot = None;
         }
     }
 }
@@ -2637,25 +2538,6 @@ mod tests {
                 first_solution = Some(solution);
             }
         }
-    }
-
-    #[test]
-    fn disabling_mesh_keeps_latest_mesh_while_surface_analysis_is_enabled() {
-        let store = XrDepthMeshStore::default();
-        store.publish(XrDepthMesh::default());
-        store.set_surface_analysis_enabled(true);
-        store.set_mesh_enabled(true);
-        store.set_mesh_enabled(false);
-        assert!(store.latest_mesh().is_some());
-    }
-
-    #[test]
-    fn disabling_last_surface_consumer_clears_latest_mesh() {
-        let store = XrDepthMeshStore::default();
-        store.publish(XrDepthMesh::default());
-        store.set_surface_analysis_enabled(true);
-        store.set_surface_analysis_enabled(false);
-        assert!(store.latest_mesh().is_none());
     }
 
     #[test]
