@@ -1,5 +1,7 @@
 use makepad_widgets;
 
+use makepad_widgets::makepad_draw::DrawVector;
+use makepad_widgets::makepad_platform::XrDepthAlignSlicePreview;
 use makepad_widgets::*;
 use makepad_xr::*;
 
@@ -45,6 +47,15 @@ script_mod! {
                     .mix(self.color_disabled, self.disabled);
                 return Pal.premul(fill)
             }
+        }
+    }
+
+    let AlignmentSlicePreviewBase = #(AlignmentSlicePreview::register_widget(vm))
+    let AlignmentSlicePreview = set_type_default() do AlignmentSlicePreviewBase{
+        width: Fill
+        height: Fill
+        draw_bg +: {
+            color: #x09141d
         }
     }
 
@@ -367,7 +378,7 @@ script_mod! {
                 visible: false
                 show_in_non_xr: true
                 wrist_left: true
-                logical_size: vec2(920, 468)
+                logical_size: vec2(1220, 620)
                 pixel_scale: 0.000215
                 dpi_factor: 2.0
                 SolidView{
@@ -577,138 +588,162 @@ script_mod! {
 
                     View{
                         width: Fill
-                        height: Fit
-                        flow: Down
-                        spacing: 8
+                        height: Fill
+                        flow: Right
+                        spacing: 12
 
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
+                        View{
+                            width: 430
+                            height: Fill
+                            flow: Down
+                            spacing: 8
 
-                            peer_sync_status_field := Label{
+                            SolidView{
                                 width: Fill
-                                text: "Peers: off"
-                                draw_text.color: #xe8f4ff
+                                height: 32
+                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                draw_bg.color: #x0d1824
+
+                                peer_sync_status_field := Label{
+                                    width: Fill
+                                    text: "Peers: off"
+                                    draw_text.color: #xe8f4ff
+                                }
+                            }
+
+                            SolidView{
+                                width: Fill
+                                height: 32
+                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                draw_bg.color: #x0d1824
+
+                                network_status_field := Label{
+                                    width: Fill
+                                    text: "Network: off"
+                                    draw_text.color: #x9ec8e8
+                                }
+                            }
+
+                            SolidView{
+                                width: Fill
+                                height: 32
+                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                draw_bg.color: #x0d1824
+
+                                peer_scene_field := Label{
+                                    width: Fill
+                                    text: "PeerScene: off"
+                                    draw_text.color: #xffd29a
+                                }
+                            }
+
+                            SolidView{
+                                width: Fill
+                                height: 32
+                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                draw_bg.color: #x0d1824
+
+                                alignment_state_field := Label{
+                                    width: Fill
+                                    text: "AlignState: off"
+                                    draw_text.color: #xfff1ab
+                                }
+                            }
+
+                            SolidView{
+                                width: Fill
+                                height: 32
+                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                draw_bg.color: #x0d1824
+
+                                alignment_debug_field := Label{
+                                    width: Fill
+                                    text: "AlignDbg: off"
+                                    draw_text.color: #xffd29a
+                                }
+                            }
+
+                            SolidView{
+                                width: Fill
+                                height: 32
+                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                draw_bg.color: #x0d1824
+
+                                plane_scan_field := Label{
+                                    width: Fill
+                                    text: "PlaneScan: off"
+                                    draw_text.color: #x9af7c4
+                                }
+                            }
+
+                            SolidView{
+                                width: Fill
+                                height: 32
+                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                draw_bg.color: #x0d1824
+
+                                physics_geom_field := Label{
+                                    width: Fill
+                                    text: "Physics geometry: waiting for frame"
+                                    draw_text.color: #xe8f4ff
+                                }
+                            }
+
+                            SolidView{
+                                width: Fill
+                                height: 32
+                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                draw_bg.color: #x0d1824
+
+                                physics_timing_field := Label{
+                                    width: Fill
+                                    text: "Physics compute: waiting for frame"
+                                    draw_text.color: #xe8f4ff
+                                }
+                            }
+
+                            SolidView{
+                                width: Fill
+                                height: 32
+                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                draw_bg.color: #x0d1824
+
+                                frame_cpu_field := Label{
+                                    width: Fill
+                                    text: "CPU frame: waiting for frame"
+                                    draw_text.color: #xe8f4ff
+                                }
+                            }
+
+                            SolidView{
+                                width: Fill
+                                height: 32
+                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                draw_bg.color: #x0d1824
+
+                                xr_runtime_field := Label{
+                                    width: Fill
+                                    text: "XR render scale: waiting for XR session"
+                                    draw_text.color: #xe8f4ff
+                                }
                             }
                         }
 
                         SolidView{
                             width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                            height: Fill
+                            flow: Down
+                            spacing: 8
+                            padding: Inset{left: 10 right: 10 top: 10 bottom: 10}
                             draw_bg.color: #x0d1824
 
-                            network_status_field := Label{
+                            Label{
                                 width: Fill
-                                text: "Network: off"
-                                draw_text.color: #x9ec8e8
-                            }
-                        }
-
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            peer_scene_field := Label{
-                                width: Fill
-                                text: "PeerScene: off"
-                                draw_text.color: #xffd29a
-                            }
-                        }
-
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            alignment_state_field := Label{
-                                width: Fill
-                                text: "AlignState: off"
-                                draw_text.color: #xfff1ab
-                            }
-                        }
-
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            alignment_debug_field := Label{
-                                width: Fill
-                                text: "AlignDbg: off"
-                                draw_text.color: #xffd29a
-                            }
-                        }
-
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            plane_scan_field := Label{
-                                width: Fill
-                                text: "PlaneScan: off"
+                                text: "Projected Height Map"
                                 draw_text.color: #x9af7c4
                             }
-                        }
 
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            physics_geom_field := Label{
-                                width: Fill
-                                text: "Physics geometry: waiting for frame"
-                                draw_text.color: #xe8f4ff
-                            }
-                        }
-
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            physics_timing_field := Label{
-                                width: Fill
-                                text: "Physics compute: waiting for frame"
-                                draw_text.color: #xe8f4ff
-                            }
-                        }
-
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            frame_cpu_field := Label{
-                                width: Fill
-                                text: "CPU frame: waiting for frame"
-                                draw_text.color: #xe8f4ff
-                            }
-                        }
-
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            xr_runtime_field := Label{
-                                width: Fill
-                                text: "XR render scale: waiting for XR session"
-                                draw_text.color: #xe8f4ff
-                            }
+                            alignment_slice_preview := AlignmentSlicePreview{}
                         }
                     }
                 }
@@ -750,6 +785,338 @@ script_mod! {
             }
 
             xr_permissions := mod.widgets.XrPermissionsFlow{}
+        }
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct AlignmentSlicePreview {
+    #[uid]
+    uid: WidgetUid,
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawQuad,
+    #[redraw]
+    #[live]
+    draw_vector: DrawVector,
+    #[rust]
+    area: Area,
+}
+
+impl AlignmentSlicePreview {
+    const PAD: f32 = 14.0;
+    const GRID_DIVISIONS: usize = 4;
+    const CUTOUT_STEPS: usize = 40;
+
+    fn lerp(a: f32, b: f32, t: f32) -> f32 {
+        a + (b - a) * t
+    }
+
+    fn preview_square(rect: Rect) -> (f32, f32, f32) {
+        let rect_x = rect.pos.x as f32;
+        let rect_y = rect.pos.y as f32;
+        let rect_w = rect.size.x as f32;
+        let rect_h = rect.size.y as f32;
+        let inner = (rect_w.min(rect_h) - Self::PAD * 2.0).max(1.0);
+        let ox = rect_x + (rect_w - inner) * 0.5;
+        let oy = rect_y + (rect_h - inner) * 0.5;
+        (ox, oy, inner)
+    }
+
+    fn preview_extent(preview: &XrDepthAlignSlicePreview) -> f32 {
+        preview.cell_size_meters * preview.size.max(1) as f32
+    }
+
+    fn preview_height_span(preview: &XrDepthAlignSlicePreview) -> f32 {
+        (preview.top_y_meters - preview.bottom_y_meters).max(0.1)
+    }
+
+    fn map_preview_point(
+        preview: &XrDepthAlignSlicePreview,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+        point: Vec2f,
+    ) -> (f32, f32) {
+        let point = if let (Some(center), Some(forward)) = (preview.cutout_center, preview.cutout_forward)
+        {
+            let delta = point - center;
+            let right = vec2f(forward.y, -forward.x);
+            let local_x = delta.x * right.x + delta.y * right.y;
+            let local_z = delta.x * forward.x + delta.y * forward.y;
+            center + vec2f(local_x, local_z)
+        } else {
+            point
+        };
+        let extent = Self::preview_extent(preview).max(1.0e-5);
+        let nx = ((point.x - preview.origin_x) / extent).clamp(0.0, 1.0);
+        let nz = ((point.y - preview.origin_z) / extent).clamp(0.0, 1.0);
+        (ox + nx * inner, oy + inner - nz * inner)
+    }
+
+    fn height_fill_color(preview: &XrDepthAlignSlicePreview, height: f32) -> (f32, f32, f32, f32) {
+        let t = ((height - preview.bottom_y_meters) / Self::preview_height_span(preview))
+            .clamp(0.0, 1.0);
+        if t <= 0.55 {
+            let local_t = t / 0.55;
+            (
+                Self::lerp(0.05, 0.12, local_t),
+                Self::lerp(0.14, 0.52, local_t),
+                Self::lerp(0.21, 0.56, local_t),
+                Self::lerp(0.16, 0.28, local_t),
+            )
+        } else {
+            let local_t = (t - 0.55) / 0.45;
+            (
+                Self::lerp(0.12, 0.78, local_t),
+                Self::lerp(0.52, 0.74, local_t),
+                Self::lerp(0.56, 0.26, local_t),
+                Self::lerp(0.28, 0.36, local_t),
+            )
+        }
+    }
+
+    fn contour_style(
+        preview: &XrDepthAlignSlicePreview,
+        height: f32,
+        active: bool,
+    ) -> ((f32, f32, f32, f32), f32) {
+        if active {
+            ((0.21, 0.85, 1.0, 0.98), 2.4)
+        } else {
+            let t = ((height - preview.bottom_y_meters) / Self::preview_height_span(preview))
+                .clamp(0.0, 1.0);
+            (
+                (
+                    Self::lerp(0.22, 0.92, t),
+                    Self::lerp(0.72, 0.58, t),
+                    Self::lerp(0.88, 0.18, t),
+                    Self::lerp(0.28, 0.58, t),
+                ),
+                1.15,
+            )
+        }
+    }
+
+    fn draw_grid(&mut self, ox: f32, oy: f32, inner: f32) {
+        self.draw_vector.set_color_hex(0x163042, 1.0);
+        for step in 0..=Self::GRID_DIVISIONS {
+            let t = step as f32 / Self::GRID_DIVISIONS as f32;
+            let px = ox + inner * t;
+            let py = oy + inner * t;
+            self.draw_vector.move_to(px, oy);
+            self.draw_vector.line_to(px, oy + inner);
+            self.draw_vector.move_to(ox, py);
+            self.draw_vector.line_to(ox + inner, py);
+        }
+        self.draw_vector.stroke(1.0);
+
+        self.draw_vector.set_color_hex(0x42657c, 1.0);
+        self.draw_vector.rect(ox, oy, inner, inner);
+        self.draw_vector.stroke(1.5);
+    }
+
+    fn draw_height_cells(
+        &mut self,
+        preview: &XrDepthAlignSlicePreview,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+    ) {
+        let size = preview.size as usize;
+        if size == 0
+            || preview.cell_heights_meters.len() != size * size
+            || preview.cell_valid.len() != size * size
+        {
+            return;
+        }
+        for z in 0..size {
+            for x in 0..size {
+                let index = x + z * size;
+                if preview.cell_valid[index] == 0 {
+                    continue;
+                }
+                let x0 = preview.origin_x + x as f32 * preview.cell_size_meters;
+                let z0 = preview.origin_z + z as f32 * preview.cell_size_meters;
+                let x1 = x0 + preview.cell_size_meters;
+                let z1 = z0 + preview.cell_size_meters;
+                let (sx0, sy0) = Self::map_preview_point(preview, ox, oy, inner, vec2f(x0, z0));
+                let (sx1, sy1) = Self::map_preview_point(preview, ox, oy, inner, vec2f(x1, z1));
+                let rx = sx0.min(sx1);
+                let ry = sy0.min(sy1);
+                let rw = (sx1 - sx0).abs().max(1.0);
+                let rh = (sy1 - sy0).abs().max(1.0);
+                let (r, g, b, a) =
+                    Self::height_fill_color(preview, preview.cell_heights_meters[index]);
+                self.draw_vector.set_color(r, g, b, a);
+                self.draw_vector.rect(rx, ry, rw, rh);
+                self.draw_vector.fill();
+            }
+        }
+    }
+
+    fn draw_origin_cross(
+        &mut self,
+        preview: &XrDepthAlignSlicePreview,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+    ) {
+        let extent = Self::preview_extent(preview);
+        if preview.origin_x > 0.0
+            || preview.origin_z > 0.0
+            || preview.origin_x + extent < 0.0
+            || preview.origin_z + extent < 0.0
+        {
+            return;
+        }
+        let (cx, cy) = Self::map_preview_point(preview, ox, oy, inner, vec2f(0.0, 0.0));
+        self.draw_vector.set_color_hex(0xffcf6a, 1.0);
+        self.draw_vector.move_to(cx - 6.0, cy);
+        self.draw_vector.line_to(cx + 6.0, cy);
+        self.draw_vector.move_to(cx, cy - 6.0);
+        self.draw_vector.line_to(cx, cy + 6.0);
+        self.draw_vector.stroke(1.2);
+    }
+
+    fn draw_cutout_ring(
+        &mut self,
+        preview: &XrDepthAlignSlicePreview,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+    ) {
+        let Some(center) = preview.cutout_center else {
+            return;
+        };
+        let (cx, cy) = Self::map_preview_point(preview, ox, oy, inner, center);
+        let radius =
+            preview.cutout_radius_meters / Self::preview_extent(preview).max(1.0e-5) * inner;
+        self.draw_vector.set_color_hex(0xff8d62, 1.0);
+        for step in 0..=Self::CUTOUT_STEPS {
+            let angle = step as f32 / Self::CUTOUT_STEPS as f32 * std::f32::consts::TAU;
+            let px = cx + angle.cos() * radius;
+            let py = cy + angle.sin() * radius;
+            if step == 0 {
+                self.draw_vector.move_to(px, py);
+            } else {
+                self.draw_vector.line_to(px, py);
+            }
+        }
+        self.draw_vector.stroke(1.2);
+    }
+
+    fn draw_cutout_heading(
+        &mut self,
+        preview: &XrDepthAlignSlicePreview,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+    ) {
+        let (Some(center), Some(forward)) = (preview.cutout_center, preview.cutout_forward) else {
+            return;
+        };
+        let (cx, cy) = Self::map_preview_point(preview, ox, oy, inner, center);
+        let heading_probe = center + forward * preview.cell_size_meters.max(0.05);
+        let (hx, hy) = Self::map_preview_point(preview, ox, oy, inner, heading_probe);
+        let dir_px = vec2f(hx - cx, hy - cy);
+        let dir_len = dir_px.length();
+        if dir_len <= 1.0e-4 {
+            return;
+        }
+        let extent = Self::preview_extent(preview).max(1.0e-5);
+        let dir = dir_px * dir_len.recip();
+        let start = vec2f(cx, cy) + dir * (preview.cutout_radius_meters / extent * inner + 4.0);
+        let tip = start + dir * 28.0;
+        let side = vec2f(-dir.y, dir.x);
+        let left = tip - dir * 8.0 + side * 5.0;
+        let right = tip - dir * 8.0 - side * 5.0;
+        self.draw_vector.set_color_hex(0xffe07a, 1.0);
+        self.draw_vector.move_to(start.x, start.y);
+        self.draw_vector.line_to(tip.x, tip.y);
+        self.draw_vector.move_to(left.x, left.y);
+        self.draw_vector.line_to(tip.x, tip.y);
+        self.draw_vector.line_to(right.x, right.y);
+        self.draw_vector.stroke(1.8);
+    }
+
+    fn draw_segments(
+        &mut self,
+        preview: &XrDepthAlignSlicePreview,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+        active_only: bool,
+    ) {
+        if preview.segments.is_empty() {
+            return;
+        }
+        let mut current_height = None::<f32>;
+        let mut current_width = 1.0f32;
+        for segment in preview
+            .segments
+            .iter()
+            .filter(|segment| segment.active_height == active_only)
+        {
+            if current_height
+                .is_some_and(|height| (height - segment.height_meters).abs() > 1.0e-4)
+            {
+                self.draw_vector.stroke(current_width);
+                current_height = None;
+            }
+            if current_height.is_none() {
+                let ((r, g, b, a), width) =
+                    Self::contour_style(preview, segment.height_meters, active_only);
+                self.draw_vector.set_color(r, g, b, a);
+                current_width = width;
+                current_height = Some(segment.height_meters);
+            }
+            let (sx, sy) = Self::map_preview_point(preview, ox, oy, inner, segment.start);
+            let (ex, ey) = Self::map_preview_point(preview, ox, oy, inner, segment.end);
+            self.draw_vector.move_to(sx, sy);
+            self.draw_vector.line_to(ex, ey);
+        }
+        if current_height.is_some() {
+            self.draw_vector.stroke(current_width);
+        }
+    }
+}
+
+impl Widget for AlignmentSlicePreview {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rect = cx.walk_turtle(walk);
+        self.draw_bg.draw_abs(cx, rect);
+        self.area = self.draw_bg.area();
+
+        let (ox, oy, inner) = Self::preview_square(rect);
+        self.draw_vector.begin();
+
+        if let Some(preview) = cx
+            .cx
+            .xr_depth_mesh()
+            .latest_mesh()
+            .and_then(|mesh| mesh.alignment_slice_preview.clone())
+        {
+            self.draw_height_cells(&preview, ox, oy, inner);
+            self.draw_grid(ox, oy, inner);
+            self.draw_origin_cross(&preview, ox, oy, inner);
+            self.draw_segments(&preview, ox, oy, inner, false);
+            self.draw_segments(&preview, ox, oy, inner, true);
+            self.draw_cutout_ring(&preview, ox, oy, inner);
+            self.draw_cutout_heading(&preview, ox, oy, inner);
+        } else {
+            self.draw_grid(ox, oy, inner);
+        }
+
+        self.draw_vector.end(cx);
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if matches!(event, Event::Signal | Event::XrUpdate(_)) {
+            self.area.redraw(cx);
         }
     }
 }

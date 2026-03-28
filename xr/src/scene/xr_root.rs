@@ -1,8 +1,9 @@
 use crate::scene_draw::{ray_from_scene_viewport, SceneState3D};
 use crate::xr_env::XrEnv;
+use crate::xr_gesture::{hand_is_palm_down_closed_fist, CLOSED_FIST_GESTURE};
 use crate::xr_select::{XrSelect, XrSelectAction};
 use crate::*;
-use makepad_widgets::event::XrFingerTip;
+use makepad_widgets::event::{XrFingerTip, XrSyncAnchor};
 use makepad_widgets::makepad_script::ScriptFnRef;
 use std::{cell::Cell, cmp::Ordering, rc::Rc, time::Instant};
 
@@ -10,6 +11,18 @@ const DESKTOP_TOUCH_DOWN_Z: f32 = 0.0;
 const DESKTOP_TOUCH_UP_Z: f32 = 64.0;
 const XR_CONTENT_FORWARD_OFFSET: f32 = 0.28;
 const XR_CONTENT_VERTICAL_OFFSET: f32 = -0.58;
+const FISTBUMP_FORWARD_PEAK_MIN_METERS: f32 = 0.18;
+const FISTBUMP_RETREAT_MIN_METERS: f32 = 0.04;
+const FISTBUMP_MAX_WINDOW_SECONDS: f64 = 2.2;
+const FISTBUMP_MIN_ACTIVE_SECONDS: f64 = 0.14;
+const FISTBUMP_BROADCAST_SECONDS: f64 = 1.1;
+const FISTBUMP_COOLDOWN_SECONDS: f64 = 0.85;
+const FISTBUMP_MAX_VERTICAL_DELTA_METERS: f32 = 0.22;
+const FISTBUMP_MAX_DEPTH_DELTA_METERS: f32 = 0.22;
+const FISTBUMP_MIN_HAND_GAP_METERS: f32 = 0.06;
+const FISTBUMP_MAX_HAND_GAP_METERS: f32 = 0.78;
+const FISTBUMP_MIN_CHEST_DISTANCE_METERS: f32 = 0.10;
+const FISTBUMP_MAX_CHEST_DISTANCE_METERS: f32 = 1.05;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -194,6 +207,19 @@ impl XrCamera {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FistbumpPoseSample {
+    anchor: XrAnchor,
+    forward_distance: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct FistbumpGestureDetector {
+    started_at: Option<f64>,
+    peak_sample: Option<FistbumpPoseSample>,
+    cooldown_until: f64,
+}
+
 #[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct XrRoot {
     #[uid]
@@ -243,6 +269,8 @@ pub struct XrRoot {
     #[rust]
     last_xr_state: Option<Rc<XrState>>,
     #[rust]
+    last_dispatched_xr_state: Option<Rc<XrState>>,
+    #[rust]
     xr_content_pose: Option<Pose>,
     #[rust]
     next_frame: NextFrame,
@@ -254,6 +282,12 @@ pub struct XrRoot {
     last_frame_draw_cpu_ms: f64,
     #[rust]
     last_frame_cpu_ms: f64,
+    #[rust]
+    fistbump_detector: FistbumpGestureDetector,
+    #[rust]
+    pending_sync_anchor: Option<XrSyncAnchor>,
+    #[rust]
+    next_sync_anchor_id: u32,
 }
 
 impl XrRoot {
@@ -453,6 +487,149 @@ impl XrRoot {
         }
     }
 
+    fn hand_is_fist(hand: &XrHand, is_left: bool) -> bool {
+        hand_is_palm_down_closed_fist(hand, is_left, CLOSED_FIST_GESTURE)
+    }
+
+    fn hand_fist_anchor_point(hand: &XrHand, forward: Vec3f, is_left: bool) -> Option<Vec3f> {
+        if !Self::hand_is_fist(hand, is_left) {
+            return None;
+        }
+        let mut best_point = None;
+        let mut best_projection = f32::NEG_INFINITY;
+        for joint_index in [
+            XrHand::INDEX_KNUCKLE3,
+            XrHand::MIDDLE_KNUCKLE3,
+            XrHand::RING_KNUCKLE3,
+            XrHand::LITTLE_KNUCKLE3,
+        ] {
+            let point = hand.joints[joint_index].position;
+            let projection = point.dot(forward);
+            if projection > best_projection {
+                best_projection = projection;
+                best_point = Some(point);
+            }
+        }
+        best_point
+    }
+
+    fn fistbump_pose_sample(state: &XrState) -> Option<FistbumpPoseSample> {
+        let forward = Self::xr_flat_forward(state.head_pose.orientation);
+        let mut right = state
+            .head_pose
+            .orientation
+            .rotate_vec3(&vec3f(1.0, 0.0, 0.0));
+        right.y = 0.0;
+        right = if right.length() <= 1.0e-6 {
+            vec3f(1.0, 0.0, 0.0)
+        } else {
+            right.normalize()
+        };
+
+        let left_point = Self::hand_fist_anchor_point(&state.left_hand, forward, true)?;
+        let right_point = Self::hand_fist_anchor_point(&state.right_hand, forward, false)?;
+        let left_local = left_point - state.head_pose.position;
+        let right_local = right_point - state.head_pose.position;
+        let left_forward = left_local.dot(forward);
+        let right_forward = right_local.dot(forward);
+        let left_lateral = left_local.dot(right);
+        let right_lateral = right_local.dot(right);
+        let hand_gap = (right_point - left_point).length();
+        if left_lateral >= right_lateral
+            || (left_point.y - right_point.y).abs() > FISTBUMP_MAX_VERTICAL_DELTA_METERS
+            || (left_forward - right_forward).abs() > FISTBUMP_MAX_DEPTH_DELTA_METERS
+            || hand_gap < FISTBUMP_MIN_HAND_GAP_METERS
+            || hand_gap > FISTBUMP_MAX_HAND_GAP_METERS
+        {
+            return None;
+        }
+        let forward_distance = (left_forward + right_forward) * 0.5;
+        if !(FISTBUMP_MIN_CHEST_DISTANCE_METERS..=FISTBUMP_MAX_CHEST_DISTANCE_METERS)
+            .contains(&forward_distance)
+        {
+            return None;
+        }
+        Some(FistbumpPoseSample {
+            anchor: XrAnchor {
+                left: left_point,
+                right: right_point,
+            },
+            forward_distance,
+        })
+    }
+
+    fn update_fistbump_detector(&mut self, state: &XrState) -> Option<XrSyncAnchor> {
+        let time = state.time;
+        if time < self.fistbump_detector.cooldown_until {
+            return None;
+        }
+
+        let Some(sample) = Self::fistbump_pose_sample(state) else {
+            self.fistbump_detector.started_at = None;
+            self.fistbump_detector.peak_sample = None;
+            return None;
+        };
+
+        let started_at = self.fistbump_detector.started_at.unwrap_or(time);
+        if time - started_at > FISTBUMP_MAX_WINDOW_SECONDS {
+            self.fistbump_detector.started_at = Some(time);
+            self.fistbump_detector.peak_sample = Some(sample);
+            return None;
+        }
+
+        self.fistbump_detector.started_at = Some(started_at);
+        if self
+            .fistbump_detector
+            .peak_sample
+            .is_none_or(|peak| sample.forward_distance >= peak.forward_distance)
+        {
+            self.fistbump_detector.peak_sample = Some(sample);
+        }
+
+        let Some(peak_sample) = self.fistbump_detector.peak_sample else {
+            return None;
+        };
+        let retreat = peak_sample.forward_distance - sample.forward_distance;
+        if time - started_at < FISTBUMP_MIN_ACTIVE_SECONDS
+            || peak_sample.forward_distance < FISTBUMP_FORWARD_PEAK_MIN_METERS
+            || retreat < FISTBUMP_RETREAT_MIN_METERS
+        {
+            return None;
+        }
+
+        let sync_anchor = XrSyncAnchor {
+            id: self.next_sync_anchor_id,
+            captured_at: time,
+            anchor: peak_sample.anchor,
+        };
+        self.next_sync_anchor_id = self.next_sync_anchor_id.wrapping_add(1);
+        self.fistbump_detector.started_at = None;
+        self.fistbump_detector.peak_sample = None;
+        self.fistbump_detector.cooldown_until = time + FISTBUMP_COOLDOWN_SECONDS;
+        Some(sync_anchor)
+    }
+
+    fn current_sync_anchor(&mut self, state_time: f64) -> Option<XrSyncAnchor> {
+        let Some(sync_anchor) = self.pending_sync_anchor else {
+            return None;
+        };
+        if state_time - sync_anchor.captured_at <= FISTBUMP_BROADCAST_SECONDS {
+            Some(sync_anchor)
+        } else {
+            self.pending_sync_anchor = None;
+            None
+        }
+    }
+
+    fn augment_xr_state(&mut self, state: &XrState) -> Rc<XrState> {
+        if let Some(sync_anchor) = self.update_fistbump_detector(state) {
+            self.pending_sync_anchor = Some(sync_anchor);
+        }
+        let mut augmented = state.clone();
+        augmented.sync_anchor = self.current_sync_anchor(state.time);
+        Rc::new(augmented)
+    }
+
     fn handle_desktop_xr_pointer(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) -> bool {
         match event {
             Event::MouseDown(fe) if fe.button.is_primary() => {
@@ -635,10 +812,12 @@ impl XrRoot {
             },
         );
         if cx.in_xr_mode() {
-            if let Some(xr_state) = e.xr_state.as_ref() {
-                self.last_xr_state = Some(xr_state.clone());
+            if self.last_xr_state.is_none() {
+                if let Some(xr_state) = e.xr_state.as_ref() {
+                    self.last_xr_state = Some(xr_state.clone());
+                }
             }
-            let Some(xr_state) = self.last_xr_state.as_ref() else {
+            let Some(xr_state) = self.last_xr_state.as_ref().or_else(|| e.xr_state.as_ref()) else {
                 return;
             };
             let mut cx_draw = CxDraw::new(cx, e);
@@ -957,13 +1136,32 @@ impl Widget for XrRoot {
                 }
             }
             Event::XrUpdate(update) => {
-                self.ensure_xr_content_pose(cx, &update.state);
-                self.last_xr_state = Some(update.state.clone());
-                if update.clicked_menu() {
+                let augmented_state = self.augment_xr_state(update.state.as_ref());
+                let last = self
+                    .last_dispatched_xr_state
+                    .clone()
+                    .unwrap_or_else(|| augmented_state.clone());
+                let augmented_update = XrUpdateEvent {
+                    state: augmented_state.clone(),
+                    last,
+                };
+                self.last_dispatched_xr_state = Some(augmented_state.clone());
+                self.ensure_xr_content_pose(cx, &augmented_state);
+                self.last_xr_state = Some(augmented_state.clone());
+                if augmented_update.clicked_menu() {
                     self.env.reset_physics(cx);
                 }
                 self.env.ensure_physics(cx, &self.children);
                 self.env.step_physics(cx);
+                let mut event_scope_data = crate::xr_view::XrViewEventScopeData {
+                    content_transform: self.xr_content_transform(Some(&augmented_update.state)),
+                };
+                let mut event_scope = Scope::with_data(&mut event_scope_data);
+                let augmented_event = Event::XrUpdate(augmented_update);
+                for i in 0..self.children.len() {
+                    let child = self.children[i].1.clone();
+                    child.handle_event(cx, &augmented_event, &mut event_scope);
+                }
             }
             Event::NextFrame(_) if self.next_frame.is_event(event).is_some() => {
                 if !cx.in_xr_mode() {
@@ -1016,15 +1214,7 @@ impl Widget for XrRoot {
             );
 
         if swallow_desktop_pointer_event {
-        } else if let Event::XrUpdate(update) = event {
-            let mut event_scope_data = crate::xr_view::XrViewEventScopeData {
-                content_transform: self.xr_content_transform(Some(&update.state)),
-            };
-            let mut event_scope = Scope::with_data(&mut event_scope_data);
-            for i in 0..self.children.len() {
-                let child = self.children[i].1.clone();
-                child.handle_event(cx, event, &mut event_scope);
-            }
+        } else if matches!(event, Event::XrUpdate(_)) {
         } else {
             for i in 0..self.children.len() {
                 let child = self.children[i].1.clone();
