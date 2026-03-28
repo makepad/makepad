@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub const XR_NET_PROTOCOL_VERSION: u16 = 2;
+pub const XR_NET_PROTOCOL_VERSION: u16 = 3;
 pub const XR_NET_DEFAULT_DISCOVERY_PORT: u16 = 41546;
 pub const XR_NET_DEFAULT_DATA_PORT: u16 = 41547;
 pub const XR_NET_DEFAULT_SYNC_PORT: u16 = 41548;
@@ -22,7 +22,9 @@ const XR_NET_DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const XR_NET_DEFAULT_PEER_TIMEOUT: Duration = Duration::from_secs(2);
 const XR_NET_DEFAULT_SYNC_CONNECT_RETRY: Duration = Duration::from_millis(250);
 const XR_NET_SYNC_CONNECT_TIMEOUT: Duration = Duration::from_millis(120);
-const XR_NET_SYNC_MAX_FRAME_BYTES: usize = 256 * 1024;
+// Alignment descriptors now carry full f32 heightmaps, so the old 256 KiB cap
+// is too small once the published map grows beyond modest extents.
+const XR_NET_SYNC_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, SerBin, DeBin)]
 pub struct XrNetPeerId(pub u64);
@@ -91,12 +93,13 @@ pub struct XrNetAlignmentDescriptorFrame {
 impl XrNetAlignmentDescriptorFrame {
     pub fn from_tsdf_snapshot(snapshot: &TsdfPublishedSnapshot, sent_at: f64) -> Option<Self> {
         let height_map = snapshot.height_map.clone()?;
+        let floor_y = height_map.floor_y_meters;
         Some(Self {
             seq: 0,
             sent_at,
             descriptor: XrDepthAlignDescriptor {
                 voxel_size_meters: snapshot.grid.voxel_size,
-                floor_y: 0.0,
+                floor_y,
                 wall_normal_histogram: Vec::new(),
                 samples: Vec::new(),
                 vertical_descriptor: None,
@@ -125,6 +128,52 @@ impl XrNetAlignmentDescriptorFrame {
 }
 
 pub type XrNetAlignmentSolution = XrDepthAlignSolution;
+
+#[derive(Clone, Debug, Default, PartialEq, SerBin, DeBin)]
+pub struct XrNetAlignmentDescriptorDumpPair {
+    pub format_version: u32,
+    pub captured_at_unix_ms: u64,
+    pub remote_peer_id: XrNetPeerId,
+    pub local_descriptor: XrNetAlignmentDescriptorFrame,
+    pub remote_descriptor: XrNetAlignmentDescriptorFrame,
+}
+
+impl XrNetAlignmentDescriptorDumpPair {
+    pub const FORMAT_VERSION: u32 = 2;
+    pub const FILE_MAGIC: &[u8; 8] = b"MXRPAIR1";
+
+    pub fn new(
+        remote_peer_id: XrNetPeerId,
+        local_descriptor: XrNetAlignmentDescriptorFrame,
+        remote_descriptor: XrNetAlignmentDescriptorFrame,
+    ) -> Self {
+        let captured_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+            .unwrap_or(0);
+        Self {
+            format_version: Self::FORMAT_VERSION,
+            captured_at_unix_ms,
+            remote_peer_id,
+            local_descriptor,
+            remote_descriptor,
+        }
+    }
+
+    pub fn to_file_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(Self::FILE_MAGIC.len() + 512);
+        bytes.extend_from_slice(Self::FILE_MAGIC);
+        bytes.extend(self.serialize_bin());
+        bytes
+    }
+
+    pub fn from_file_bytes(bytes: &[u8]) -> Option<Self> {
+        if !bytes.starts_with(Self::FILE_MAGIC) {
+            return None;
+        }
+        Self::deserialize_bin(&bytes[Self::FILE_MAGIC.len()..]).ok()
+    }
+}
 
 pub fn tsdf_snapshot_height_map_preview(
     snapshot: &TsdfPublishedSnapshot,
@@ -303,6 +352,9 @@ impl XrNetSyncConnection {
 
     fn queue_packet(&mut self, packet: &XrNetSyncPacket) {
         let payload = packet.serialize_bin();
+        if payload.len() > XR_NET_SYNC_MAX_FRAME_BYTES {
+            return;
+        }
         let frame_len = payload.len().min(u32::MAX as usize) as u32;
         self.write_buf.extend_from_slice(&frame_len.to_le_bytes());
         self.write_buf
@@ -1342,12 +1394,6 @@ mod tests {
         wrap_angle(a - b).abs()
     }
 
-    fn encode_test_height(height: f32, bottom_y: f32, top_y: f32) -> u16 {
-        let span = (top_y - bottom_y).max(1.0e-3);
-        let normalized = ((height - bottom_y) / span).clamp(0.0, 1.0);
-        1 + (normalized * 65534.0).round() as u16
-    }
-
     fn synthetic_scene_height(point: Vec2f) -> f32 {
         let mut height: f32 = 0.02;
         if point.x.abs() >= 2.05 && point.x.abs() <= 2.25 && point.y >= -2.30 && point.y <= 2.10 {
@@ -1383,18 +1429,15 @@ mod tests {
         let origin = -extent * 0.5;
         let bottom_y_meters = 0.0;
         let top_y_meters = 2.3;
-        let mut height_u16 = vec![0u16; size * size];
+        let floor_y_meters = 0.0;
+        let mut heights_meters = vec![f32::NAN; size * size];
         for z in 0..size {
             for x in 0..size {
                 let point = vec2f(
                     origin + (x as f32 + 0.5) * cell_size_meters,
                     origin + (z as f32 + 0.5) * cell_size_meters,
                 );
-                height_u16[x + z * size] = encode_test_height(
-                    synthetic_scene_height(point),
-                    bottom_y_meters,
-                    top_y_meters,
-                );
+                heights_meters[x + z * size] = synthetic_scene_height(point);
             }
         }
         XrNetAlignmentDescriptorFrame {
@@ -1402,7 +1445,7 @@ mod tests {
             sent_at: 1.0,
             descriptor: XrDepthAlignDescriptor {
                 voxel_size_meters: 0.05,
-                floor_y: 0.0,
+                floor_y: floor_y_meters,
                 wall_normal_histogram: Vec::new(),
                 samples: Vec::new(),
                 vertical_descriptor: None,
@@ -1414,9 +1457,10 @@ mod tests {
                     size_z: size as u16,
                     bottom_y_meters,
                     top_y_meters,
+                    floor_y_meters,
                     player_cutout_center: None,
                     player_cutout_radius_meters: 0.0,
-                    height_u16,
+                    heights_meters,
                 }),
             },
         }

@@ -468,7 +468,7 @@ fn transform_height_map(
 ) -> Option<XrDepthAlignHeightMap> {
     let size_x = height_map.size_x_usize();
     let size_z = height_map.size_z_usize();
-    if size_x == 0 || size_z == 0 || height_map.height_u16.len() != size_x * size_z {
+    if size_x == 0 || size_z == 0 || height_map.heights_meters.len() != size_x * size_z {
         return None;
     }
     let cell_size = height_map.cell_size_meters.max(1.0e-5);
@@ -524,6 +524,7 @@ fn transform_height_map(
         size_z: target_size_z as u16,
         bottom_y_meters: height_map.bottom_y_meters + y_offset,
         top_y_meters: height_map.top_y_meters + y_offset,
+        floor_y_meters: height_map.floor_y_meters + y_offset,
         player_cutout_center: height_map.player_cutout_center.map(|center| {
             let mapped = transform
                 .transform_vec4(vec4f(center.x, 0.0, center.y, 1.0))
@@ -531,7 +532,7 @@ fn transform_height_map(
             vec2f(mapped.x, mapped.z)
         }),
         player_cutout_radius_meters: height_map.player_cutout_radius_meters,
-        height_u16: vec![0; target_size_x * target_size_z],
+        heights_meters: vec![f32::NAN; target_size_x * target_size_z],
     };
     for z in 0..target_size_z {
         for x in 0..target_size_x {
@@ -544,17 +545,10 @@ fn transform_height_map(
                 continue;
             };
             let target_index = transformed.cell_index(x, z);
-            transformed.height_u16[target_index] =
-                encode_height_map_height(&transformed, height + y_offset);
+            transformed.heights_meters[target_index] = height + y_offset;
         }
     }
     Some(transformed)
-}
-
-fn encode_height_map_height(height_map: &XrDepthAlignHeightMap, height: f32) -> u16 {
-    let span = (height_map.top_y_meters - height_map.bottom_y_meters).max(1.0e-3);
-    let normalized = ((height - height_map.bottom_y_meters) / span).clamp(0.0, 1.0);
-    1 + (normalized * 65534.0).round() as u16
 }
 
 fn transform_vertical_descriptor(
@@ -646,13 +640,12 @@ fn transform_vertical_descriptor(
     Some(transformed)
 }
 
-fn decode_height_map_height(height_map: &XrDepthAlignHeightMap, encoded: u16) -> Option<f32> {
-    if encoded == 0 {
-        return None;
-    }
-    let span = (height_map.top_y_meters - height_map.bottom_y_meters).max(1.0e-3);
-    let normalized = (encoded - 1) as f32 / 65534.0;
-    Some(height_map.bottom_y_meters + normalized * span)
+fn height_map_cell_height(height_map: &XrDepthAlignHeightMap, index: usize) -> Option<f32> {
+    height_map
+        .heights_meters
+        .get(index)
+        .copied()
+        .filter(|height| height.is_finite())
 }
 
 fn height_map_signal_weight(
@@ -678,26 +671,11 @@ fn height_map_cell_signal(
     if size_x < 3 || size_z < 3 || x == 0 || z == 0 || x + 1 >= size_x || z + 1 >= size_z {
         return None;
     }
-    let center = decode_height_map_height(
-        height_map,
-        height_map.height_u16[height_map.cell_index(x, z)],
-    )?;
-    let left = decode_height_map_height(
-        height_map,
-        height_map.height_u16[height_map.cell_index(x - 1, z)],
-    )?;
-    let right = decode_height_map_height(
-        height_map,
-        height_map.height_u16[height_map.cell_index(x + 1, z)],
-    )?;
-    let up = decode_height_map_height(
-        height_map,
-        height_map.height_u16[height_map.cell_index(x, z - 1)],
-    )?;
-    let down = decode_height_map_height(
-        height_map,
-        height_map.height_u16[height_map.cell_index(x, z + 1)],
-    )?;
+    let center = height_map_cell_height(height_map, height_map.cell_index(x, z))?;
+    let left = height_map_cell_height(height_map, height_map.cell_index(x - 1, z))?;
+    let right = height_map_cell_height(height_map, height_map.cell_index(x + 1, z))?;
+    let up = height_map_cell_height(height_map, height_map.cell_index(x, z - 1))?;
+    let down = height_map_cell_height(height_map, height_map.cell_index(x, z + 1))?;
     let cell_size = height_map.cell_size_meters.max(1.0e-3);
     let gradient = vec3(
         (right - left) / (2.0 * cell_size),
@@ -739,7 +717,7 @@ fn height_map_straightness(
 fn build_height_map_signal_cells(height_map: &XrDepthAlignHeightMap) -> Vec<HeightMapSignalCell> {
     let size_x = height_map.size_x_usize();
     let size_z = height_map.size_z_usize();
-    if size_x < 3 || size_z < 3 || height_map.height_u16.len() != size_x * size_z {
+    if size_x < 3 || size_z < 3 || height_map.heights_meters.len() != size_x * size_z {
         return Vec::new();
     }
     let mut signal = Vec::<HeightMapSignalCell>::new();
@@ -846,7 +824,7 @@ fn sample_height_map_nearest(
 ) -> Option<f32> {
     let size_x = height_map.size_x_usize();
     let size_z = height_map.size_z_usize();
-    if size_x == 0 || size_z == 0 || height_map.height_u16.len() != size_x * size_z {
+    if size_x == 0 || size_z == 0 || height_map.heights_meters.len() != size_x * size_z {
         return None;
     }
     let cell_size = height_map.cell_size_meters.max(1.0e-3);
@@ -855,9 +833,9 @@ fn sample_height_map_nearest(
     if grid_x < 0 || grid_z < 0 || grid_x >= size_x as isize || grid_z >= size_z as isize {
         return None;
     }
-    decode_height_map_height(
+    height_map_cell_height(
         height_map,
-        height_map.height_u16[height_map.cell_index(grid_x as usize, grid_z as usize)],
+        height_map.cell_index(grid_x as usize, grid_z as usize),
     )
 }
 
@@ -868,7 +846,7 @@ fn sample_height_map_signal_nearest(
 ) -> Option<(f32, Vec3f)> {
     let size_x = height_map.size_x_usize();
     let size_z = height_map.size_z_usize();
-    if size_x < 3 || size_z < 3 || height_map.height_u16.len() != size_x * size_z {
+    if size_x < 3 || size_z < 3 || height_map.heights_meters.len() != size_x * size_z {
         return None;
     }
     let cell_size = height_map.cell_size_meters.max(1.0e-3);
@@ -888,11 +866,11 @@ fn sample_height_map_bilinear(
 ) -> Option<f32> {
     let size_x = height_map.size_x_usize();
     let size_z = height_map.size_z_usize();
-    if size_x == 0 || size_z == 0 || height_map.height_u16.len() != size_x * size_z {
+    if size_x == 0 || size_z == 0 || height_map.heights_meters.len() != size_x * size_z {
         return None;
     }
     if size_x == 1 && size_z == 1 {
-        return decode_height_map_height(height_map, height_map.height_u16[0]);
+        return height_map_cell_height(height_map, 0);
     }
 
     let cell_size = height_map.cell_size_meters.max(1.0e-3);
@@ -907,22 +885,10 @@ fn sample_height_map_bilinear(
     let fx = (sample_x - x0 as f32).clamp(0.0, 1.0);
     let fz = (sample_z - z0 as f32).clamp(0.0, 1.0);
 
-    let h00 = decode_height_map_height(
-        height_map,
-        height_map.height_u16[height_map.cell_index(x0, z0)],
-    );
-    let h10 = decode_height_map_height(
-        height_map,
-        height_map.height_u16[height_map.cell_index(x1, z0)],
-    );
-    let h01 = decode_height_map_height(
-        height_map,
-        height_map.height_u16[height_map.cell_index(x0, z1)],
-    );
-    let h11 = decode_height_map_height(
-        height_map,
-        height_map.height_u16[height_map.cell_index(x1, z1)],
-    );
+    let h00 = height_map_cell_height(height_map, height_map.cell_index(x0, z0));
+    let h10 = height_map_cell_height(height_map, height_map.cell_index(x1, z0));
+    let h01 = height_map_cell_height(height_map, height_map.cell_index(x0, z1));
+    let h11 = height_map_cell_height(height_map, height_map.cell_index(x1, z1));
     match (h00, h10, h01, h11) {
         (Some(h00), Some(h10), Some(h01), Some(h11)) => {
             let hx0 = h00 + (h10 - h00) * fx;
@@ -1728,12 +1694,6 @@ mod tests {
         wrap_angle(a - b).abs()
     }
 
-    fn encode_test_height(height: f32, bottom_y: f32, top_y: f32) -> u16 {
-        let span = (top_y - bottom_y).max(1.0e-3);
-        let normalized = ((height - bottom_y) / span).clamp(0.0, 1.0);
-        1 + (normalized * 65534.0).round() as u16
-    }
-
     fn synthetic_scene_height(point: Vec2f) -> f32 {
         let mut height: f32 = 0.02;
         if point.x.abs() >= 2.05 && point.x.abs() <= 2.25 && point.y >= -2.30 && point.y <= 2.10 {
@@ -1795,7 +1755,8 @@ mod tests {
         let origin_z = -extent_z * 0.5;
         let bottom_y_meters = 0.0;
         let top_y_meters = 2.3;
-        let mut height_u16 = vec![0u16; size_x * size_z];
+        let floor_y_meters = 0.0;
+        let mut heights_meters = vec![f32::NAN; size_x * size_z];
         for z in 0..size_z {
             for x in 0..size_x {
                 let map_point = vec2f(
@@ -1827,13 +1788,12 @@ mod tests {
                     * artifacts.noise_scale;
                 height += artifacts.height_bias;
                 height = height.clamp(0.0, 2.25);
-                height_u16[x + z * size_x] =
-                    encode_test_height(height, bottom_y_meters, top_y_meters);
+                heights_meters[x + z * size_x] = height;
             }
         }
         XrDepthAlignDescriptor {
             voxel_size_meters: 0.05,
-            floor_y: 0.0,
+            floor_y: floor_y_meters,
             wall_normal_histogram: Vec::new(),
             samples: Vec::new(),
             vertical_descriptor: None,
@@ -1845,9 +1805,10 @@ mod tests {
                 size_z: size_z as u16,
                 bottom_y_meters,
                 top_y_meters,
+                floor_y_meters,
                 player_cutout_center: artifacts.cutout_center,
                 player_cutout_radius_meters: 0.36,
-                height_u16,
+                heights_meters,
             }),
         }
     }
@@ -1937,7 +1898,8 @@ mod tests {
         let origin = -extent * 0.5;
         let bottom_y_meters = 0.0;
         let top_y_meters = 2.3;
-        let mut height_u16 = vec![0u16; size * size];
+        let floor_y_meters = 0.0;
+        let mut heights_meters = vec![f32::NAN; size * size];
         for z in 0..size {
             for x in 0..size {
                 let point = vec2f(
@@ -1947,16 +1909,13 @@ mod tests {
                 let scene_point = map_to_scene
                     .transform_vec4(vec4f(point.x, 0.0, point.y, 1.0))
                     .to_vec3f();
-                height_u16[x + z * size] = encode_test_height(
-                    synthetic_scene_height(vec2f(scene_point.x, scene_point.z)),
-                    bottom_y_meters,
-                    top_y_meters,
-                );
+                heights_meters[x + z * size] =
+                    synthetic_scene_height(vec2f(scene_point.x, scene_point.z));
             }
         }
         XrDepthAlignDescriptor {
             voxel_size_meters: 0.05,
-            floor_y: 0.0,
+            floor_y: floor_y_meters,
             wall_normal_histogram: Vec::new(),
             samples: Vec::new(),
             vertical_descriptor: None,
@@ -1968,9 +1927,10 @@ mod tests {
                 size_z: size as u16,
                 bottom_y_meters,
                 top_y_meters,
+                floor_y_meters,
                 player_cutout_center: None,
                 player_cutout_radius_meters: 0.0,
-                height_u16,
+                heights_meters,
             }),
         }
     }

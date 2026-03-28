@@ -41,3 +41,4 @@ CLAUDE.md
 
 /tools/__pycache__/
 **/*.obsidian
+/xr/util/dumps/
