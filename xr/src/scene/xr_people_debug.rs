@@ -1,4 +1,6 @@
+use crate::xr_gesture::{hand_is_palm_down_closed_fist, CLOSED_FIST_GESTURE};
 use crate::*;
+use makepad_widgets::event::XrSyncAnchor;
 use std::{
     collections::HashMap,
     sync::{mpsc::TryRecvError, Arc, Condvar, Mutex},
@@ -22,6 +24,7 @@ script_mod! {
 enum RemoteTransformSource {
     #[default]
     Raw,
+    Anchor,
     Descriptor,
 }
 
@@ -29,8 +32,12 @@ enum RemoteTransformSource {
 struct RemotePeerState {
     peer: XrNetPeer,
     latest_state: Option<XrNetStateFrame>,
+    last_state_received_at: f64,
+    last_sync_anchor_seen_at: Option<f64>,
     latest_descriptor: Option<XrNetAlignmentDescriptorFrame>,
     has_descriptor: bool,
+    anchor_remote_to_local: Option<Mat4f>,
+    descriptor_remote_to_local: Option<Mat4f>,
     remote_to_local: Option<Mat4f>,
     transform_source: RemoteTransformSource,
     last_solve_diagnostic: Option<XrDepthAlignSolveDiagnostic>,
@@ -44,8 +51,12 @@ impl RemotePeerState {
         Self {
             peer,
             latest_state: None,
+            last_state_received_at: 0.0,
+            last_sync_anchor_seen_at: None,
             latest_descriptor: None,
             has_descriptor: false,
+            anchor_remote_to_local: None,
+            descriptor_remote_to_local: None,
             remote_to_local: None,
             transform_source: RemoteTransformSource::Raw,
             last_solve_diagnostic: None,
@@ -85,11 +96,6 @@ impl AlignmentWorkerPeerState {
     fn to_result(&self) -> AlignmentWorkerPeerResult {
         AlignmentWorkerPeerResult {
             remote_to_local: self.remote_to_local,
-            transform_source: if self.remote_to_local.is_some() {
-                RemoteTransformSource::Descriptor
-            } else {
-                RemoteTransformSource::Raw
-            },
             last_solve_diagnostic: self.last_solve_diagnostic,
             last_solve_ms: self.last_solve_ms,
             last_solved_local_descriptor_version: self.last_solved_local_descriptor_version,
@@ -101,7 +107,6 @@ impl AlignmentWorkerPeerState {
 #[derive(Clone, Copy, Debug, Default)]
 struct AlignmentWorkerPeerResult {
     remote_to_local: Option<Mat4f>,
-    transform_source: RemoteTransformSource,
     last_solve_diagnostic: Option<XrDepthAlignSolveDiagnostic>,
     last_solve_ms: f64,
     last_solved_local_descriptor_version: Option<(u64, u64)>,
@@ -407,10 +412,17 @@ fn refresh_alignment_worker_peer(
     );
     peer_state.last_solve_ms = solve_started.elapsed().as_secs_f64() * 1000.0;
     peer_state.last_solve_diagnostic = Some(diagnostic);
+    let previous_scored_on_current = previous_solution.map(|solution| {
+        xr_depth_align_rescore_remote_to_local(
+            &local_descriptor.descriptor,
+            &remote_descriptor.descriptor,
+            solution,
+        )
+    });
 
     let next_solution = choose_stable_alignment_solution(
         peer_state.last_accepted_solution,
-        previous_diagnostic,
+        previous_scored_on_current,
         &diagnostic,
     );
     peer_state.last_accepted_solution = next_solution;
@@ -435,29 +447,36 @@ fn clear_alignment_worker_peer(peer_state: &mut AlignmentWorkerPeerState) -> boo
 
 fn choose_stable_alignment_solution(
     previous: Option<XrDepthAlignSolution>,
-    previous_diagnostic: Option<XrDepthAlignSolveDiagnostic>,
+    previous_scored_on_current: Option<XrDepthAlignSolution>,
     diagnostic: &XrDepthAlignSolveDiagnostic,
 ) -> Option<XrDepthAlignSolution> {
     let candidate = diagnostic.accepted_solution();
     let Some(previous) = previous else {
         return candidate;
     };
+    let previous_on_current = previous_scored_on_current.unwrap_or(previous);
+    let previous_still_supported =
+        xr_depth_align_solution_is_accepted(diagnostic, previous_on_current);
     let Some(candidate) = candidate else {
-        return Some(previous);
+        return previous_still_supported.then_some(previous);
     };
-    let previous_score = alignment_lock_score(previous, previous_diagnostic);
+    let previous_score = alignment_lock_score(previous_on_current, Some(*diagnostic));
     let candidate_score = alignment_lock_score(candidate, Some(*diagnostic));
     let score_delta = candidate_score - previous_score;
-    if score_delta < -0.02 {
+    if previous_still_supported && score_delta < -0.02 {
         return Some(previous);
     }
-    if is_large_alignment_jump(previous, candidate) && score_delta < 0.08 {
+    if previous_still_supported
+        && is_large_alignment_jump(previous, candidate)
+        && score_delta < 0.08
+    {
         return Some(previous);
     }
-    if score_delta < 0.03
-        && candidate.residual_meters >= previous.residual_meters - 0.02
-        && candidate.symmetry_confidence <= previous.symmetry_confidence + 0.03
-        && candidate.matched_samples <= previous.matched_samples
+    if previous_still_supported
+        && score_delta < 0.03
+        && candidate.residual_meters >= previous_on_current.residual_meters - 0.02
+        && candidate.symmetry_confidence <= previous_on_current.symmetry_confidence + 0.03
+        && candidate.matched_samples <= previous_on_current.matched_samples
     {
         return Some(previous);
     }
@@ -470,11 +489,19 @@ fn alignment_lock_score(
 ) -> f32 {
     let wall_factor = diagnostic
         .map(|diagnostic| {
-            (diagnostic
-                .local_wall_features
-                .min(diagnostic.remote_wall_features) as f32
-                / 4.0)
-                .clamp(0.0, 1.0)
+            if diagnostic.used_wall_features {
+                (diagnostic
+                    .local_wall_features
+                    .min(diagnostic.remote_wall_features) as f32
+                    / 4.0)
+                    .clamp(0.0, 1.0)
+            } else {
+                (diagnostic
+                    .local_wall_samples
+                    .min(diagnostic.remote_wall_samples) as f32
+                    / 12.0)
+                    .clamp(0.0, 1.0)
+            }
         })
         .unwrap_or(0.5);
     let matched_factor = (solution.matched_samples as f32 / 4.0).clamp(0.0, 1.0);
@@ -504,6 +531,7 @@ fn is_large_alignment_jump(left: XrDepthAlignSolution, right: XrDepthAlignSoluti
 fn transform_source_label(source: RemoteTransformSource) -> &'static str {
     match source {
         RemoteTransformSource::Raw => "raw",
+        RemoteTransformSource::Anchor => "anchor",
         RemoteTransformSource::Descriptor => "solved",
     }
 }
@@ -519,13 +547,41 @@ fn descriptor_seq_label(seq: Option<u32>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn descriptor_contour_sample_count(descriptor: &XrDepthAlignDescriptor) -> usize {
+    let sample_count = descriptor
+        .samples
+        .iter()
+        .filter(|sample| sample.kind == XrDepthAlignSampleKind::Wall)
+        .count();
+    if sample_count != 0 {
+        sample_count
+    } else {
+        descriptor.wall_features.len()
+    }
+}
+
+fn descriptor_has_vertical_compact_scene(descriptor: &XrDepthAlignDescriptor) -> bool {
+    descriptor
+        .vertical_descriptor
+        .as_ref()
+        .is_some_and(|vertical| !vertical.is_empty())
+}
+
 fn solve_outcome_label(diagnostic: Option<XrDepthAlignSolveDiagnostic>) -> &'static str {
-    match diagnostic.map(|diagnostic| diagnostic.outcome()) {
-        Some(XrDepthAlignSolveOutcome::MissingSamples) => "need-walls",
-        Some(XrDepthAlignSolveOutcome::NoCandidate) => "no-candidate",
-        Some(XrDepthAlignSolveOutcome::Rejected) => "rejected",
-        Some(XrDepthAlignSolveOutcome::Accepted) => "accepted",
-        None => "pending",
+    let Some(diagnostic) = diagnostic else {
+        return "pending";
+    };
+    match diagnostic.outcome() {
+        XrDepthAlignSolveOutcome::MissingSamples => {
+            if diagnostic.used_wall_features {
+                "need-walls"
+            } else {
+                "need-slice"
+            }
+        }
+        XrDepthAlignSolveOutcome::NoCandidate => "no-candidate",
+        XrDepthAlignSolveOutcome::Rejected => "rejected",
+        XrDepthAlignSolveOutcome::Accepted => "accepted",
     }
 }
 
@@ -552,23 +608,18 @@ fn make_alignment_state_text(
     };
     let peer_label = format!("{:08x}", peer_id.0);
     let remote_descriptor = peer_state.latest_descriptor.as_ref();
-    let remote_wall_count = remote_descriptor
-        .map(|frame| frame.descriptor.wall_features.len())
+    let remote_slice_count = remote_descriptor
+        .map(|frame| descriptor_contour_sample_count(&frame.descriptor))
         .unwrap_or(0);
-    let remote_vdesc = remote_descriptor.is_some_and(|frame| {
-        frame
-            .descriptor
-            .vertical_descriptor
-            .as_ref()
-            .is_some_and(|vertical| !vertical.is_empty())
-    });
+    let remote_vdesc =
+        remote_descriptor.is_some_and(|frame| descriptor_has_vertical_compact_scene(&frame.descriptor));
     format!(
-        "AlignState {peer_label}: local {} v{} | remote {} seq {} walls {} vdesc {} | worker lv{} rv{} {} {:.1}ms | pose {}",
+        "AlignState {peer_label}: local {} v{} | remote {} seq {} slice {} vdesc {} | worker lv{} rv{} {} {:.1}ms | pose {}",
         if local_descriptor_ready { "yes" } else { "no" },
         local_version,
         if remote_descriptor.is_some() { "yes" } else { "no" },
         descriptor_seq_label(remote_descriptor.map(|frame| frame.seq)),
-        remote_wall_count,
+        remote_slice_count,
         if remote_vdesc { "yes" } else { "no" },
         descriptor_version_label(peer_state.last_solved_local_descriptor_version),
         descriptor_seq_label(peer_state.last_solved_remote_descriptor_seq),
@@ -600,13 +651,17 @@ fn make_peer_scene_debug_text(
     };
     if let Some(diagnostic) = peer_state.last_solve_diagnostic {
         return format!(
-            "PeerScene {peer_label}: state {state_text} | desc {} | walls {} | vdesc {} | pose {}",
+            "PeerScene {peer_label}: state {state_text} | desc {} | slice {} | vdesc {} | pose {}",
             if peer_state.has_descriptor {
                 "yes"
             } else {
                 "no"
             },
-            diagnostic.remote_wall_features,
+            if diagnostic.used_wall_features {
+                diagnostic.remote_wall_features
+            } else {
+                diagnostic.remote_wall_samples
+            },
             if diagnostic.remote_vertical_descriptor {
                 "yes"
             } else {
@@ -617,14 +672,9 @@ fn make_peer_scene_debug_text(
     }
     if let Some(descriptor) = peer_state.latest_descriptor.as_ref() {
         return format!(
-            "PeerScene {peer_label}: state {state_text} | desc yes | walls {} | vdesc {} | pose {}{}",
-            descriptor.descriptor.wall_features.len(),
-            if descriptor
-                .descriptor
-                .vertical_descriptor
-                .as_ref()
-                .is_some_and(|vertical| !vertical.is_empty())
-            {
+            "PeerScene {peer_label}: state {state_text} | desc yes | slice {} | vdesc {} | pose {}{}",
+            descriptor_contour_sample_count(&descriptor.descriptor),
+            if descriptor_has_vertical_compact_scene(&descriptor.descriptor) {
                 "yes"
             } else {
                 "no"
@@ -638,7 +688,7 @@ fn make_peer_scene_debug_text(
         );
     }
     format!(
-        "PeerScene {peer_label}: state {state_text} | desc {} | walls ? | vdesc ? | pose {}{}",
+        "PeerScene {peer_label}: state {state_text} | desc {} | slice ? | vdesc ? | pose {}{}",
         if peer_state.has_descriptor {
             "yes"
         } else {
@@ -673,14 +723,9 @@ fn make_pending_alignment_debug_text(
     let peer_label = format!("{:08x}", peer_id.0);
     if let Some(descriptor) = peer_state.latest_descriptor.as_ref() {
         format!(
-            "{local_descriptor_text} | {peer_label}: remote walls {} | remote vdesc {} | solve pending",
-            descriptor.descriptor.wall_features.len(),
-            if descriptor
-                .descriptor
-                .vertical_descriptor
-                .as_ref()
-                .is_some_and(|vertical| !vertical.is_empty())
-            {
+            "{local_descriptor_text} | {peer_label}: remote slice {} | remote vdesc {} | solve pending",
+            descriptor_contour_sample_count(&descriptor.descriptor),
+            if descriptor_has_vertical_compact_scene(&descriptor.descriptor) {
                 "yes"
             } else {
                 "no"
@@ -717,9 +762,11 @@ fn alignment_rejection_reason(
         "vertical overlap missing".to_string()
     } else if best.residual_meters >= 0.18 {
         format!("residual {:.2}m>=0.18m", best.residual_meters)
-    } else if diagnostic.remote_wall_features < 2 {
+    } else if diagnostic.used_wall_features && diagnostic.remote_wall_features < 2 {
         format!("remote walls {}<2", diagnostic.remote_wall_features)
-    } else if !diagnostic.remote_vertical_descriptor {
+    } else if !diagnostic.used_wall_features && diagnostic.remote_wall_samples < 4 {
+        format!("remote slice {}<4", diagnostic.remote_wall_samples)
+    } else if diagnostic.used_wall_features && !diagnostic.remote_vertical_descriptor {
         "remote compact scene missing".to_string()
     } else {
         "score below accept threshold".to_string()
@@ -740,7 +787,7 @@ fn make_alignment_debug_text(
         return match local_scene_state {
             LocalSceneState::Ready => "AlignDbg: waiting for peer descriptor".to_string(),
             LocalSceneState::PublishPending => {
-                "AlignDbg: local walls ready | waiting to publish local descriptor".to_string()
+                "AlignDbg: local slice ready | waiting to publish local descriptor".to_string()
             }
             LocalSceneState::Missing => "AlignDbg: waiting for local scene descriptor".to_string(),
         };
@@ -751,21 +798,16 @@ fn make_alignment_debug_text(
     }
     if local_scene_state == LocalSceneState::PublishPending {
         return format!(
-            "AlignDbg {peer_label}: local walls ready | waiting to publish local descriptor"
+            "AlignDbg {peer_label}: local slice ready | waiting to publish local descriptor"
         );
     }
     let Some(diagnostic) = peer_state.last_solve_diagnostic else {
         if let Some(remote_descriptor) = peer_state.latest_descriptor.as_ref() {
             return format!(
-                "AlignDbg {peer_label}: remote desc seq {} walls {} vdesc {} | waiting for solve",
+                "AlignDbg {peer_label}: remote desc seq {} slice {} vdesc {} | waiting for solve",
                 remote_descriptor.seq,
-                remote_descriptor.descriptor.wall_features.len(),
-                if remote_descriptor
-                    .descriptor
-                    .vertical_descriptor
-                    .as_ref()
-                    .is_some_and(|vertical| !vertical.is_empty())
-                {
+                descriptor_contour_sample_count(&remote_descriptor.descriptor),
+                if descriptor_has_vertical_compact_scene(&remote_descriptor.descriptor) {
                     "yes"
                 } else {
                     "no"
@@ -776,9 +818,17 @@ fn make_alignment_debug_text(
     };
 
     let context = format!(
-        "local walls {} | remote walls {} | local vdesc {} | remote vdesc {} | yaw {} | pose {}",
-        diagnostic.local_wall_features,
-        diagnostic.remote_wall_features,
+        "local slice {} | remote slice {} | local vdesc {} | remote vdesc {} | yaw {} | pose {}",
+        if diagnostic.used_wall_features {
+            diagnostic.local_wall_features
+        } else {
+            diagnostic.local_wall_samples
+        },
+        if diagnostic.used_wall_features {
+            diagnostic.remote_wall_features
+        } else {
+            diagnostic.remote_wall_samples
+        },
         if diagnostic.local_vertical_descriptor {
             "yes"
         } else {
@@ -794,7 +844,11 @@ fn make_alignment_debug_text(
     );
     match diagnostic.outcome() {
         XrDepthAlignSolveOutcome::MissingSamples => {
-            format!("AlignDbg {peer_label}: need >=2 room walls on both sides | {context}")
+            if diagnostic.used_wall_features {
+                format!("AlignDbg {peer_label}: need >=2 room walls on both sides | {context}")
+            } else {
+                format!("AlignDbg {peer_label}: need contour slice on both sides | {context}")
+            }
         }
         XrDepthAlignSolveOutcome::NoCandidate => {
             format!(
@@ -843,6 +897,8 @@ pub struct XrPeopleDebug {
     #[redraw]
     #[live]
     draw_cube: DrawCube,
+    #[live(false)]
+    auto_alignment_enabled: bool,
     #[rust]
     enabled: bool,
     #[rust]
@@ -863,6 +919,18 @@ pub struct XrPeopleDebug {
     alignment_worker: Option<XrPeopleAlignmentWorker>,
     #[rust]
     peers: HashMap<XrNetPeerId, RemotePeerState>,
+    #[rust]
+    local_state_time: f64,
+    #[rust]
+    local_anchor: Option<XrAnchor>,
+    #[rust]
+    local_anchor_override: Option<XrAnchor>,
+    #[rust]
+    local_sync_anchor: Option<XrSyncAnchor>,
+    #[rust]
+    local_fist_hold_anchor: Option<XrAnchor>,
+    #[rust]
+    accepted_sync_ids: HashMap<XrNetPeerId, (u32, u32)>,
     #[rust]
     local_descriptor: Option<XrNetAlignmentDescriptorFrame>,
     #[rust]
@@ -912,6 +980,16 @@ impl XrPeopleDebug {
     const PEER_ALIGN_WALL_BEAM_THICKNESS: f32 = 0.030;
     const PEER_ALIGN_WALL_BEAM_NORMAL_OFFSET: f32 = -0.05;
     const PEER_ALIGN_MARKER_SIZE: f32 = 0.055;
+    const ANCHOR_MARKER_SIZE: f32 = 0.060;
+    const REMOTE_ANCHOR_MARKER_SIZE: f32 = 0.050;
+    const SYNC_MATCH_RECEIVE_WINDOW_SECONDS: f64 = 0.45;
+    const SYNC_MATCH_ACTIVE_WINDOW_SECONDS: f64 = 1.35;
+    const FIST_ACK_MAX_VERTICAL_DELTA_METERS: f32 = 0.22;
+    const FIST_ACK_MAX_DEPTH_DELTA_METERS: f32 = 0.22;
+    const FIST_ACK_MIN_HAND_GAP_METERS: f32 = 0.06;
+    const FIST_ACK_MAX_HAND_GAP_METERS: f32 = 0.78;
+    const FIST_ACK_MIN_CHEST_DISTANCE_METERS: f32 = 0.10;
+    const FIST_ACK_MAX_CHEST_DISTANCE_METERS: f32 = 1.05;
     const DESCRIPTOR_MAX_HEIGHT_METERS: f32 = 2.00;
     const DESCRIPTOR_MIN_HEIGHT_METERS: f32 = 0.08;
     const DESCRIPTOR_CELL_FOOTPRINT: f32 = 0.62;
@@ -974,11 +1052,17 @@ impl XrPeopleDebug {
             return self.enabled;
         }
         self.enabled = enabled;
-        cx.xr_depth_mesh().set_plane_scan_enabled(enabled);
+        cx.xr_depth_mesh().set_plane_scan_enabled(false);
         cx.xr_depth_mesh().set_surface_analysis_enabled(enabled);
         self.net_node = None;
         self.alignment_worker = None;
         self.peers.clear();
+        self.local_state_time = 0.0;
+        self.local_anchor = None;
+        self.local_anchor_override = None;
+        self.local_sync_anchor = None;
+        self.local_fist_hold_anchor = None;
+        self.accepted_sync_ids.clear();
         self.local_descriptor = None;
         self.local_descriptor_version = None;
         self.local_plane_patches.clear();
@@ -996,7 +1080,9 @@ impl XrPeopleDebug {
         self.last_plane_scan_status.clear();
 
         if enabled {
-            self.alignment_worker = Some(XrPeopleAlignmentWorker::new());
+            if self.auto_alignment_enabled {
+                self.alignment_worker = Some(XrPeopleAlignmentWorker::new());
+            }
             self.ensure_net_node();
             if self.net_node.is_some() {
                 self.last_status = "Peers: scanning LAN for clients".to_string();
@@ -1007,11 +1093,21 @@ impl XrPeopleDebug {
                 self.last_network_status = "Network: bind failed".to_string();
             }
             self.last_peer_scene_status = "PeerScene: waiting for peer".to_string();
-            self.last_alignment_debug_status =
-                "AlignDbg: waiting for local scene descriptor".to_string();
-            self.last_alignment_state_status =
-                "AlignState: local no v- | waiting for peer".to_string();
-            self.last_plane_scan_status = "PlaneScan: waiting for TSDF scan".to_string();
+            self.last_alignment_debug_status = if self.auto_alignment_enabled {
+                "AlignDbg: waiting for local scene descriptor".to_string()
+            } else {
+                "AlignDbg: manual sync idle".to_string()
+            };
+            self.last_alignment_state_status = if self.auto_alignment_enabled {
+                "AlignState: local no v- | waiting for peer".to_string()
+            } else {
+                "AlignState: local anchor no | sync idle | waiting for peer".to_string()
+            };
+            self.last_plane_scan_status = if self.auto_alignment_enabled {
+                "PlaneScan: off (vector slice alignment)".to_string()
+            } else {
+                "PlaneScan: off (manual alignment, slice preview on)".to_string()
+            };
         } else {
             self.last_status = "Peers: off".to_string();
             self.last_network_status = "Network: off".to_string();
@@ -1046,12 +1142,40 @@ impl XrPeopleDebug {
             return;
         }
         self.ensure_net_node();
+        self.local_state_time = state.time;
+        self.local_anchor = state.anchor;
+        self.local_sync_anchor = state.sync_anchor;
+        self.local_fist_hold_anchor = Self::state_fist_preview_anchor(state);
+        if let (Some(local_anchor), Some(override_anchor)) =
+            (self.local_anchor, self.local_anchor_override)
+        {
+            if Self::anchors_match(local_anchor, override_anchor) {
+                self.local_anchor_override = None;
+            }
+        }
+        let effective_local_anchor = self.effective_local_anchor();
         let Some(net_node) = self.net_node.as_mut() else {
             return;
         };
 
-        net_node.send_state(state.clone());
+        let mut broadcast_state = state.clone();
+        broadcast_state.anchor = effective_local_anchor;
+        net_node.send_state(broadcast_state);
         self.tx_state_count = self.tx_state_count.saturating_add(1);
+
+        if !self.auto_alignment_enabled {
+            self.local_alignment_debug = XrDepthAlignDebug::default();
+            self.local_plane_patches.clear();
+            self.local_alignment_wall_features.clear();
+            self.local_descriptor = None;
+            self.local_descriptor_version = None;
+            self.last_sent_descriptor_signature = None;
+            if let Some(worker) = self.alignment_worker.as_mut() {
+                worker.clear_local_descriptor();
+            }
+            self.refresh_peer_transforms(cx);
+            return;
+        }
 
         let next_mesh = cx.xr_depth_mesh().latest_mesh();
         self.local_alignment_debug = next_mesh
@@ -1102,21 +1226,26 @@ impl XrPeopleDebug {
         } else {
             self.last_sent_descriptor_signature = None;
         }
+        self.refresh_peer_transforms(cx);
     }
 
-    fn poll_network(&mut self) {
+    fn poll_network(&mut self, cx: &mut Cx) {
         if !self.enabled {
             return;
         }
 
         let mut disconnected = false;
+        let mut received_message = false;
         loop {
             let result = match self.net_node.as_mut() {
                 Some(net_node) => net_node.incoming_receiver.try_recv(),
                 None => break,
             };
             match result {
-                Ok(message) => self.handle_network_message(message),
+                Ok(message) => {
+                    received_message = true;
+                    self.handle_network_message(message);
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -1130,6 +1259,8 @@ impl XrPeopleDebug {
             self.last_sent_descriptor_signature = None;
             self.last_status = "Peers: network worker disconnected, retrying".to_string();
             self.last_network_status = "Network: worker disconnected".to_string();
+        } else if received_message {
+            self.refresh_peer_transforms(cx);
         }
     }
 
@@ -1159,6 +1290,9 @@ impl XrPeopleDebug {
                     .entry(peer.id)
                     .or_insert_with(|| RemotePeerState::new(peer));
                 peer_state.peer = peer;
+                peer_state.last_state_received_at = self.local_state_time;
+                peer_state.last_sync_anchor_seen_at =
+                    frame.state.sync_anchor.map(|_| self.local_state_time);
                 peer_state.latest_state = Some(frame);
             }
             XrNetIncoming::AlignmentDescriptor { peer, frame } => {
@@ -1189,13 +1323,11 @@ impl XrPeopleDebug {
         };
 
         for peer_state in self.peers.values_mut() {
-            peer_state.remote_to_local = None;
-            peer_state.transform_source = RemoteTransformSource::Raw;
+            peer_state.descriptor_remote_to_local = None;
         }
         for (peer_id, peer_result) in result.peer_results {
             if let Some(peer_state) = self.peers.get_mut(&peer_id) {
-                peer_state.remote_to_local = peer_result.remote_to_local;
-                peer_state.transform_source = peer_result.transform_source;
+                peer_state.descriptor_remote_to_local = peer_result.remote_to_local;
                 peer_state.last_solve_diagnostic = peer_result.last_solve_diagnostic;
                 peer_state.last_solve_ms = peer_result.last_solve_ms;
                 peer_state.last_solved_local_descriptor_version =
@@ -1207,7 +1339,164 @@ impl XrPeopleDebug {
             }
         }
         self.last_alignment_debug_status = result.alignment_debug_text;
+        self.refresh_peer_transforms(cx);
         self.redraw(cx);
+    }
+
+    fn preferred_peer(&self) -> Option<(XrNetPeerId, RemotePeerState)> {
+        self.peers
+            .iter()
+            .max_by_key(|(peer_id, peer_state)| {
+                (
+                    peer_state.remote_to_local.is_some(),
+                    peer_state.latest_state.is_some(),
+                    std::cmp::Reverse(peer_id.0),
+                )
+            })
+            .map(|(peer_id, peer_state)| (*peer_id, peer_state.clone()))
+    }
+
+    fn local_sync_status_text(&self) -> String {
+        self.active_local_sync_anchor()
+            .map(|sync| format!("armed {}", sync.id))
+            .unwrap_or_else(|| "idle".to_string())
+    }
+
+    fn manual_peer_scene_text(&self) -> String {
+        let Some((peer_id, peer_state)) = self.preferred_peer() else {
+            return "PeerScene: waiting for peer".to_string();
+        };
+        let state_text = if peer_state.latest_state.is_some() {
+            "yes"
+        } else {
+            "no"
+        };
+        let anchor_text = peer_state
+            .latest_state
+            .as_ref()
+            .and_then(|state| state.state.anchor)
+            .map(|_| "yes")
+            .unwrap_or("no");
+        let sync_text = peer_state
+            .latest_state
+            .as_ref()
+            .and_then(|state| state.state.sync_anchor)
+            .filter(|_| {
+                peer_state.last_sync_anchor_seen_at.is_some_and(|seen_at| {
+                    self.local_state_time - seen_at <= Self::SYNC_MATCH_RECEIVE_WINDOW_SECONDS
+                })
+            })
+            .map(|sync| format!("yes {}", sync.id))
+            .unwrap_or_else(|| "no".to_string());
+        format!(
+            "PeerScene {:08x}: state {} | anchor {} | sync {} | pose {}",
+            peer_id.0,
+            state_text,
+            anchor_text,
+            sync_text,
+            transform_source_label(peer_state.transform_source),
+        )
+    }
+
+    fn manual_alignment_state_text(&self) -> String {
+        let local_anchor_text = if self.effective_local_anchor().is_some() {
+            "yes"
+        } else {
+            "no"
+        };
+        let local_sync_text = self.local_sync_status_text();
+        let Some((peer_id, peer_state)) = self.preferred_peer() else {
+            return format!(
+                "AlignState: local anchor {} | sync {} | waiting for peer",
+                local_anchor_text, local_sync_text
+            );
+        };
+        let remote_anchor_text = peer_state
+            .latest_state
+            .as_ref()
+            .and_then(|state| state.state.anchor)
+            .map(|_| "yes")
+            .unwrap_or("no");
+        let remote_sync_text = peer_state
+            .latest_state
+            .as_ref()
+            .and_then(|state| state.state.sync_anchor)
+            .filter(|_| {
+                peer_state.last_sync_anchor_seen_at.is_some_and(|seen_at| {
+                    self.local_state_time - seen_at <= Self::SYNC_MATCH_RECEIVE_WINDOW_SECONDS
+                })
+            })
+            .map(|sync| format!("armed {}", sync.id))
+            .unwrap_or_else(|| "idle".to_string());
+        format!(
+            "AlignState {:08x}: local anchor {} | local sync {} | remote anchor {} | remote sync {} | pose {}",
+            peer_id.0,
+            local_anchor_text,
+            local_sync_text,
+            remote_anchor_text,
+            remote_sync_text,
+            transform_source_label(peer_state.transform_source),
+        )
+    }
+
+    fn manual_alignment_debug_text(&self) -> String {
+        let Some((peer_id, peer_state)) = self.preferred_peer() else {
+            return match (self.active_local_sync_anchor(), self.local_fist_hold_anchor) {
+                (Some(sync), _) => format!(
+                    "AlignDbg: local sync {} armed | waiting for peer fistbump",
+                    sync.id
+                ),
+                (None, Some(_)) => "AlignDbg: local fists ready".to_string(),
+                _ => "AlignDbg: manual sync idle".to_string(),
+            };
+        };
+        if peer_state.transform_source == RemoteTransformSource::Anchor {
+            if peer_state
+                .latest_state
+                .as_ref()
+                .is_some_and(|state| state.state.anchor.is_some())
+            {
+                return format!("AlignDbg {:08x}: using saved anchors", peer_id.0);
+            }
+            if let Some(sync) = self.active_local_sync_anchor() {
+                return format!(
+                    "AlignDbg {:08x}: sync matched local {} -> persistent anchor requested",
+                    peer_id.0, sync.id
+                );
+            }
+            return format!("AlignDbg {:08x}: anchor transform active", peer_id.0);
+        }
+        if let Some(sync) = peer_state
+            .latest_state
+            .as_ref()
+            .and_then(|state| state.state.sync_anchor)
+        {
+            return format!(
+                "AlignDbg {:08x}: remote sync {} seen | hold both fists or perform local bump",
+                peer_id.0, sync.id
+            );
+        }
+        if peer_state
+            .latest_state
+            .as_ref()
+            .and_then(|state| Self::state_fist_ack_anchor(&state.state))
+            .is_some()
+        {
+            return format!(
+                "AlignDbg {:08x}: remote fists ready | perform local bump",
+                peer_id.0
+            );
+        }
+        if let Some(sync) = self.active_local_sync_anchor() {
+            return format!(
+                "AlignDbg {:08x}: local sync {} armed | waiting for remote sync or fists",
+                peer_id.0, sync.id
+            );
+        }
+        if self.local_fist_hold_anchor.is_some() {
+            return format!("AlignDbg {:08x}: local fists ready", peer_id.0);
+        }
+        format!("AlignDbg {:08x}: manual sync idle", peer_id.0)
     }
 
     fn refresh_status(&mut self) {
@@ -1249,7 +1538,51 @@ impl XrPeopleDebug {
             .values()
             .filter(|peer| peer.latest_state.is_some() && peer.remote_to_local.is_some())
             .count();
+        let anchor_aligned_count = self
+            .peers
+            .values()
+            .filter(|peer| {
+                peer.latest_state.is_some()
+                    && peer.transform_source == RemoteTransformSource::Anchor
+            })
+            .count();
         let local_scene_state = self.local_scene_state();
+
+        if !self.auto_alignment_enabled {
+            self.last_status = if peer_count == 0 {
+                "Peers: scanning LAN for clients".to_string()
+            } else {
+                format!(
+                    "Peers: {peer_count} seen | {visible_count} state | {anchor_aligned_count} anchor-aligned"
+                )
+            };
+            let last_event = if self.last_event_text.is_empty() {
+                "none"
+            } else {
+                &self.last_event_text
+            };
+            self.last_network_status = format!(
+                "Network: tx s{} d{} | rx j{} l{} s{} d{} | peers {} vis {} anchor {} | local anchor {} sync {} | last {}",
+                self.tx_state_count,
+                self.tx_descriptor_count,
+                self.rx_join_count,
+                self.rx_leave_count,
+                self.rx_state_count,
+                self.rx_descriptor_count,
+                peer_count,
+                visible_count,
+                anchor_aligned_count,
+                if self.effective_local_anchor().is_some() { "yes" } else { "no" },
+                self.local_sync_status_text(),
+                last_event,
+            );
+            self.last_peer_scene_status = self.manual_peer_scene_text();
+            self.last_alignment_state_status = self.manual_alignment_state_text();
+            self.last_alignment_debug_status = self.manual_alignment_debug_text();
+            self.last_plane_scan_status =
+                "PlaneScan: off (manual alignment, slice preview on)".to_string();
+            return;
+        }
 
         self.last_status = if peer_count == 0 {
             "Peers: scanning LAN for clients".to_string()
@@ -1257,8 +1590,8 @@ impl XrPeopleDebug {
             format!("Peers: {peer_count} seen | {visible_count} state | {aligned_count} descriptor-solved")
         } else if local_scene_state == LocalSceneState::PublishPending {
             format!(
-                "Peers: {peer_count} seen | {visible_count} state | local walls {} ready | waiting to publish local descriptor",
-                self.local_alignment_wall_features.len()
+                "Peers: {peer_count} seen | {visible_count} state | local slice {} ready | waiting to publish local descriptor",
+                self.local_contour_sample_count()
             )
         } else {
             format!("Peers: {peer_count} seen | {visible_count} state | waiting for local scene descriptor")
@@ -1270,7 +1603,7 @@ impl XrPeopleDebug {
             &self.last_event_text
         };
         self.last_network_status = format!(
-            "Network: tx s{} d{} | rx j{} l{} s{} d{} | peers {} vis {} desc {} align {} | local desc {} walls {} | last {}",
+            "Network: tx s{} d{} | rx j{} l{} s{} d{} | peers {} vis {} desc {} align {} | local desc {} slice {} | last {}",
             self.tx_state_count,
             self.tx_descriptor_count,
             self.rx_join_count,
@@ -1286,7 +1619,7 @@ impl XrPeopleDebug {
                 LocalSceneState::PublishPending => "pending",
                 LocalSceneState::Missing => "no",
             },
-            self.local_alignment_wall_features.len(),
+            self.local_contour_sample_count(),
             last_event,
         );
         self.last_peer_scene_status =
@@ -1331,19 +1664,234 @@ impl XrPeopleDebug {
 
     fn peer_alpha(peer: &RemotePeerState) -> f32 {
         match peer.transform_source {
+            RemoteTransformSource::Anchor => 1.0,
             RemoteTransformSource::Descriptor => 1.0,
             RemoteTransformSource::Raw => 0.42,
         }
     }
 
+    fn flat_forward(orientation: Quat) -> Vec3f {
+        let mut forward = orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        forward.y = 0.0;
+        if forward.length() <= 1.0e-6 {
+            vec3f(0.0, 0.0, -1.0)
+        } else {
+            forward.normalize()
+        }
+    }
+
+    fn hand_is_closed_fist(hand: &XrHand, is_left: bool) -> bool {
+        hand_is_palm_down_closed_fist(hand, is_left, CLOSED_FIST_GESTURE)
+    }
+
+    fn hand_fist_anchor_point(hand: &XrHand, forward: Vec3f, is_left: bool) -> Option<Vec3f> {
+        if !Self::hand_is_closed_fist(hand, is_left) {
+            return None;
+        }
+        let mut best_point = None;
+        let mut best_projection = f32::NEG_INFINITY;
+        for joint_index in [
+            XrHand::INDEX_KNUCKLE3,
+            XrHand::MIDDLE_KNUCKLE3,
+            XrHand::RING_KNUCKLE3,
+            XrHand::LITTLE_KNUCKLE3,
+        ] {
+            let point = hand.joints[joint_index].position;
+            let projection = point.dot(forward);
+            if projection > best_projection {
+                best_projection = projection;
+                best_point = Some(point);
+            }
+        }
+        best_point
+    }
+
+    fn state_fist_preview_anchor(state: &XrState) -> Option<XrAnchor> {
+        let forward = Self::flat_forward(state.head_pose.orientation);
+        let left_point = Self::hand_fist_anchor_point(&state.left_hand, forward, true)?;
+        let right_point = Self::hand_fist_anchor_point(&state.right_hand, forward, false)?;
+        Some(XrAnchor {
+            left: left_point,
+            right: right_point,
+        })
+    }
+
+    fn state_fist_ack_anchor(state: &XrState) -> Option<XrAnchor> {
+        let preview = Self::state_fist_preview_anchor(state)?;
+        let forward = Self::flat_forward(state.head_pose.orientation);
+        let mut right = state
+            .head_pose
+            .orientation
+            .rotate_vec3(&vec3f(1.0, 0.0, 0.0));
+        right.y = 0.0;
+        right = if right.length() <= 1.0e-6 {
+            vec3f(1.0, 0.0, 0.0)
+        } else {
+            right.normalize()
+        };
+
+        let left_point = preview.left;
+        let right_point = preview.right;
+        let left_local = left_point - state.head_pose.position;
+        let right_local = right_point - state.head_pose.position;
+        let left_forward = left_local.dot(forward);
+        let right_forward = right_local.dot(forward);
+        let left_lateral = left_local.dot(right);
+        let right_lateral = right_local.dot(right);
+        let hand_gap = (right_point - left_point).length();
+        if left_lateral >= right_lateral
+            || (left_point.y - right_point.y).abs() > Self::FIST_ACK_MAX_VERTICAL_DELTA_METERS
+            || (left_forward - right_forward).abs() > Self::FIST_ACK_MAX_DEPTH_DELTA_METERS
+            || hand_gap < Self::FIST_ACK_MIN_HAND_GAP_METERS
+            || hand_gap > Self::FIST_ACK_MAX_HAND_GAP_METERS
+        {
+            return None;
+        }
+        let forward_distance = (left_forward + right_forward) * 0.5;
+        if !(Self::FIST_ACK_MIN_CHEST_DISTANCE_METERS..=Self::FIST_ACK_MAX_CHEST_DISTANCE_METERS)
+            .contains(&forward_distance)
+        {
+            return None;
+        }
+        Some(XrAnchor {
+            left: left_point,
+            right: right_point,
+        })
+    }
+
+    fn effective_local_anchor(&self) -> Option<XrAnchor> {
+        self.local_anchor_override.or(self.local_anchor)
+    }
+
+    fn active_local_sync_anchor(&self) -> Option<XrSyncAnchor> {
+        self.local_sync_anchor.filter(|sync| {
+            self.local_state_time - sync.captured_at <= Self::SYNC_MATCH_ACTIVE_WINDOW_SECONDS
+        })
+    }
+
+    fn anchors_match(left: XrAnchor, right: XrAnchor) -> bool {
+        (left.left - right.left).length() <= 0.025 && (left.right - right.right).length() <= 0.025
+    }
+
+    fn refresh_peer_transforms(&mut self, cx: &mut Cx) {
+        if let (Some(local_anchor), Some(override_anchor)) =
+            (self.local_anchor, self.local_anchor_override)
+        {
+            if Self::anchors_match(local_anchor, override_anchor) {
+                self.local_anchor_override = None;
+            }
+        }
+
+        let local_anchor = self.effective_local_anchor();
+        let local_sync_anchor = self.active_local_sync_anchor();
+        let local_fist_hold_anchor = self.local_fist_hold_anchor;
+        let now = self.local_state_time;
+        let mut changed = false;
+
+        for (peer_id, peer_state) in self.peers.iter_mut() {
+            peer_state.anchor_remote_to_local = None;
+            if let (Some(local_anchor), Some(state_frame)) =
+                (local_anchor, peer_state.latest_state.as_ref())
+            {
+                if let Some(remote_anchor) = state_frame.state.anchor {
+                    peer_state.anchor_remote_to_local =
+                        Some(remote_anchor.mapping_to(&local_anchor));
+                }
+            }
+
+            if peer_state.anchor_remote_to_local.is_none() {
+                if let Some(state_frame) = peer_state.latest_state.as_ref() {
+                    let remote_sync_anchor = state_frame.state.sync_anchor.filter(|_| {
+                        peer_state
+                            .last_sync_anchor_seen_at
+                            .is_some_and(|last_seen_at| {
+                                now - last_seen_at <= Self::SYNC_MATCH_RECEIVE_WINDOW_SECONDS
+                            })
+                    });
+                    let remote_fist_hold_anchor = Self::state_fist_ack_anchor(&state_frame.state);
+
+                    if let Some(local_sync_anchor) = local_sync_anchor {
+                        if let Some(remote_anchor) = remote_sync_anchor
+                            .map(|sync| (sync.anchor, sync.id))
+                            .or_else(|| remote_fist_hold_anchor.map(|anchor| (anchor, u32::MAX)))
+                        {
+                            let sync_ids = (local_sync_anchor.id, remote_anchor.1);
+                            if self.accepted_sync_ids.get(peer_id) != Some(&sync_ids) {
+                                self.accepted_sync_ids.insert(*peer_id, sync_ids);
+                                self.local_anchor_override = Some(local_sync_anchor.anchor);
+                                cx.xr_set_local_anchor(local_sync_anchor.anchor);
+                            }
+                            peer_state.anchor_remote_to_local =
+                                Some(remote_anchor.0.mapping_to(&local_sync_anchor.anchor));
+                        }
+                    } else if let (Some(local_fist_hold_anchor), Some(remote_sync_anchor)) =
+                        (local_fist_hold_anchor, remote_sync_anchor)
+                    {
+                        let sync_ids = (u32::MAX, remote_sync_anchor.id);
+                        if self.accepted_sync_ids.get(peer_id) != Some(&sync_ids) {
+                            self.accepted_sync_ids.insert(*peer_id, sync_ids);
+                            self.local_anchor_override = Some(local_fist_hold_anchor);
+                            cx.xr_set_local_anchor(local_fist_hold_anchor);
+                        }
+                        peer_state.anchor_remote_to_local = Some(
+                            remote_sync_anchor
+                                .anchor
+                                .mapping_to(&local_fist_hold_anchor),
+                        );
+                    }
+                }
+            }
+
+            let next_transform = peer_state
+                .anchor_remote_to_local
+                .or(peer_state.descriptor_remote_to_local);
+            let next_source = if peer_state.anchor_remote_to_local.is_some() {
+                RemoteTransformSource::Anchor
+            } else if peer_state.descriptor_remote_to_local.is_some() {
+                RemoteTransformSource::Descriptor
+            } else {
+                RemoteTransformSource::Raw
+            };
+            if peer_state.remote_to_local != next_transform
+                || peer_state.transform_source != next_source
+            {
+                peer_state.remote_to_local = next_transform;
+                peer_state.transform_source = next_source;
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.redraw(cx);
+        }
+    }
+
+    fn peer_marker_anchor(peer: &RemotePeerState) -> Option<XrAnchor> {
+        peer.latest_state
+            .as_ref()
+            .and_then(|state| state.state.anchor)
+            .or_else(|| {
+                peer.latest_state
+                    .as_ref()
+                    .and_then(|state| state.state.sync_anchor.map(|sync| sync.anchor))
+            })
+    }
+
     fn local_scene_state(&self) -> LocalSceneState {
         if self.local_descriptor.is_some() {
             LocalSceneState::Ready
-        } else if !self.local_alignment_wall_features.is_empty() {
+        } else if self.local_contour_sample_count() != 0 {
             LocalSceneState::PublishPending
         } else {
             LocalSceneState::Missing
         }
+    }
+
+    fn local_contour_sample_count(&self) -> usize {
+        self.local_descriptor
+            .as_ref()
+            .map(|frame| descriptor_contour_sample_count(&frame.descriptor))
+            .unwrap_or(0)
     }
 
     fn draw_cube_at(
@@ -1360,6 +1908,15 @@ impl XrPeopleDebug {
         self.draw_cube.color = color;
         self.draw_cube.depth_clip = 1.0;
         self.draw_cube.draw(cx);
+    }
+
+    fn transform_point(transform: &Mat4f, point: Vec3f) -> Vec3f {
+        let point = transform.transform_vec4(vec4f(point.x, point.y, point.z, 1.0));
+        if point.w.abs() > 1.0e-6 {
+            vec3f(point.x / point.w, point.y / point.w, point.z / point.w)
+        } else {
+            point.to_vec3f()
+        }
     }
 
     fn draw_alignment_wall_features(
@@ -1442,12 +1999,12 @@ impl XrPeopleDebug {
         match self.local_scene_state() {
             LocalSceneState::Missing => "AlignDbg: waiting for local scene descriptor".to_string(),
             LocalSceneState::PublishPending => format!(
-                "AlignDbg: local walls {} ready | descriptor publish pending",
-                self.local_alignment_wall_features.len(),
+                "AlignDbg: local slice {} ready | descriptor publish pending",
+                self.local_contour_sample_count(),
             ),
             LocalSceneState::Ready => format!(
-                "AlignDbg: local wall feats {} | desc occ {} v {} c {}",
-                self.local_alignment_wall_features.len(),
+                "AlignDbg: local slice {} | desc occ {} v {} c {}",
+                self.local_contour_sample_count(),
                 descriptor_cells,
                 vertical_cells,
                 clutter_cells,
@@ -1469,7 +2026,7 @@ impl XrPeopleDebug {
         }
         let debug = self.local_alignment_debug;
         if debug.near_surface_voxel_count == 0 && self.local_plane_patches.is_empty() {
-            "PlaneScan: waiting for TSDF scan".to_string()
+            "PlaneScan: off (vector slice alignment)".to_string()
         } else {
             format!(
                 "PlaneScan: patches {} wall {} room {} other {} | near {} wall vox {}",
@@ -1564,6 +2121,104 @@ impl XrPeopleDebug {
             Self::ALIGN_WALL_BEAM_NORMAL_OFFSET,
             vec4f(1.0, 0.18, 0.14, 0.92),
         );
+    }
+
+    fn draw_anchor_markers(
+        &mut self,
+        cx: &mut Cx3d,
+        world: &Mat4f,
+        anchor: XrAnchor,
+        size: f32,
+        left_color: Vec4f,
+        right_color: Vec4f,
+    ) {
+        let left_transform = Pose::new(anchor.to_quat(), anchor.left).to_mat4();
+        self.draw_cube_at(
+            cx,
+            world,
+            &left_transform,
+            vec3(size, size, size),
+            left_color,
+        );
+        let right_transform = Pose::new(anchor.to_quat_rev(), anchor.right).to_mat4();
+        self.draw_cube_at(
+            cx,
+            world,
+            &right_transform,
+            vec3(size, size, size),
+            right_color,
+        );
+    }
+
+    fn draw_local_anchor_markers(&mut self, cx: &mut Cx3d, world: &Mat4f) {
+        let Some(anchor) = self.effective_local_anchor() else {
+            return;
+        };
+        self.draw_anchor_markers(
+            cx,
+            world,
+            anchor,
+            Self::ANCHOR_MARKER_SIZE,
+            vec4f(1.0, 0.15, 0.10, 0.96),
+            vec4f(0.18, 0.46, 1.0, 0.96),
+        );
+    }
+
+    fn draw_local_pending_sync_markers(&mut self, cx: &mut Cx3d, world: &Mat4f) {
+        if let Some(sync_anchor) = self.active_local_sync_anchor() {
+            self.draw_anchor_markers(
+                cx,
+                world,
+                sync_anchor.anchor,
+                Self::ANCHOR_MARKER_SIZE * 0.82,
+                vec4f(1.0, 0.48, 0.38, 0.82),
+                vec4f(0.46, 0.72, 1.0, 0.82),
+            );
+            return;
+        }
+        let Some(preview_anchor) = self.local_fist_hold_anchor else {
+            return;
+        };
+        self.draw_anchor_markers(
+            cx,
+            world,
+            preview_anchor,
+            Self::ANCHOR_MARKER_SIZE * 0.72,
+            vec4f(1.0, 0.62, 0.24, 0.62),
+            vec4f(0.36, 0.78, 1.0, 0.62),
+        );
+    }
+
+    fn draw_remote_anchor_markers(&mut self, cx: &mut Cx3d, world: &Mat4f) {
+        let peer_ids = self.peers.keys().copied().collect::<Vec<_>>();
+        for peer_id in peer_ids {
+            let Some(peer) = self.peers.get(&peer_id).cloned() else {
+                continue;
+            };
+            let Some(remote_to_local) = peer.remote_to_local else {
+                continue;
+            };
+            let Some(remote_anchor) = Self::peer_marker_anchor(&peer) else {
+                continue;
+            };
+            let solved_anchor = XrAnchor {
+                left: Self::transform_point(&remote_to_local, remote_anchor.left),
+                right: Self::transform_point(&remote_to_local, remote_anchor.right),
+            };
+            let alpha = if peer.transform_source == RemoteTransformSource::Anchor {
+                0.98
+            } else {
+                0.55
+            };
+            self.draw_anchor_markers(
+                cx,
+                world,
+                solved_anchor,
+                Self::REMOTE_ANCHOR_MARKER_SIZE,
+                vec4f(1.0, 0.44, 0.34, alpha),
+                vec4f(0.42, 0.68, 1.0, alpha),
+            );
+        }
     }
 
     fn draw_remote_alignment_walls(&mut self, cx: &mut Cx3d, world: &Mat4f) {
@@ -1724,6 +2379,31 @@ impl Widget for XrPeopleDebug {
         if method == live_id!(enabled) {
             return ScriptAsyncResult::Return(ScriptValue::from_bool(self.enabled));
         }
+        if method == live_id!(set_auto_alignment_enabled) {
+            let mut enabled = self.auto_alignment_enabled;
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                enabled = vm
+                    .bx
+                    .heap
+                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+            }
+            let restart = self.auto_alignment_enabled != enabled && self.enabled;
+            self.auto_alignment_enabled = enabled;
+            vm.with_cx_mut(|cx| {
+                if restart {
+                    self.set_enabled(cx, false);
+                    self.set_enabled(cx, true);
+                } else {
+                    cx.xr_depth_mesh().set_plane_scan_enabled(false);
+                    cx.xr_depth_mesh().set_surface_analysis_enabled(self.enabled);
+                }
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(enabled));
+        }
+        if method == live_id!(auto_alignment_enabled) {
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(self.auto_alignment_enabled));
+        }
         self.node.script_call(vm, method, args)
     }
 
@@ -1736,7 +2416,7 @@ impl Widget for XrPeopleDebug {
             if let Event::XrUpdate(update) = event {
                 self.refresh_from_local_state(cx, update.state.as_ref());
             }
-            self.poll_network();
+            self.poll_network(cx);
             self.apply_alignment_results(cx);
             self.refresh_status();
         }
@@ -1759,11 +2439,16 @@ impl Widget for XrPeopleDebug {
             self.node.local_transform()
         };
         self.draw_cube.begin_many_instances(cx);
-        if Self::SHOW_LOCAL_DESCRIPTOR_DEBUG {
+        self.draw_local_pending_sync_markers(cx, &world);
+        self.draw_local_anchor_markers(cx, &world);
+        self.draw_remote_anchor_markers(cx, &world);
+        if self.auto_alignment_enabled && Self::SHOW_LOCAL_DESCRIPTOR_DEBUG {
             self.draw_local_descriptor(cx, &world);
         }
-        self.draw_local_alignment_walls(cx, &world);
-        self.draw_remote_alignment_walls(cx, &world);
+        if self.auto_alignment_enabled {
+            self.draw_local_alignment_walls(cx, &world);
+            self.draw_remote_alignment_walls(cx, &world);
+        }
         self.draw_remote_peers(cx, &world);
         self.draw_cube.end_many_instances(cx);
         self.node.draw_3d(cx, scope)
@@ -1812,7 +2497,7 @@ mod tests {
 
         let chosen = choose_stable_alignment_solution(
             Some(previous),
-            Some(make_diagnostic(previous)),
+            Some(previous),
             &make_diagnostic(flipped),
         )
         .unwrap();
@@ -1827,7 +2512,7 @@ mod tests {
 
         let chosen = choose_stable_alignment_solution(
             Some(previous),
-            Some(make_diagnostic(previous)),
+            Some(previous),
             &make_diagnostic(refined),
         )
         .unwrap();
@@ -1857,14 +2542,67 @@ mod tests {
         weaker_diag.local_wall_features = 2;
         weaker_diag.remote_wall_features = 2;
 
+        let chosen =
+            choose_stable_alignment_solution(Some(previous), Some(previous), &weaker_diag).unwrap();
+
+        assert_eq!(chosen, previous);
+    }
+
+    #[test]
+    fn stable_alignment_switches_when_previous_pose_no_longer_scores_on_current_descriptor() {
+        let previous = make_solution(-0.41, vec3(0.58, 0.0, -0.44), 0.42, 0.03, 4);
+        let candidate = make_solution(1.18, vec3(-0.62, 0.0, 0.71), 0.39, 0.03, 4);
+        let stale_on_current = XrDepthAlignSolution {
+            yaw_radians: previous.yaw_radians,
+            translation: previous.translation,
+            confidence: 0.06,
+            symmetry_confidence: 0.01,
+            residual_meters: 0.21,
+            matched_samples: 1,
+        };
+
         let chosen = choose_stable_alignment_solution(
             Some(previous),
-            Some(make_diagnostic(previous)),
-            &weaker_diag,
+            Some(stale_on_current),
+            &make_diagnostic(candidate),
         )
         .unwrap();
 
-        assert_eq!(chosen, previous);
+        assert_eq!(chosen, candidate);
+    }
+
+    #[test]
+    fn stable_alignment_clears_previous_when_current_descriptor_no_longer_supports_it() {
+        let previous = make_solution(-0.41, vec3(0.58, 0.0, -0.44), 0.42, 0.03, 4);
+        let stale_on_current = XrDepthAlignSolution {
+            yaw_radians: previous.yaw_radians,
+            translation: previous.translation,
+            confidence: 0.05,
+            symmetry_confidence: 0.0,
+            residual_meters: 0.24,
+            matched_samples: 0,
+        };
+        let rejected = XrDepthAlignSolveDiagnostic {
+            used_wall_features: true,
+            local_wall_features: 4,
+            remote_wall_features: 4,
+            local_vertical_descriptor: true,
+            remote_vertical_descriptor: true,
+            best_solution: Some(XrDepthAlignSolution {
+                yaw_radians: 1.18,
+                translation: vec3(-0.62, 0.0, 0.71),
+                confidence: 0.10,
+                symmetry_confidence: 0.03,
+                residual_meters: 0.18,
+                matched_samples: 1,
+            }),
+            ..XrDepthAlignSolveDiagnostic::default()
+        };
+
+        let chosen =
+            choose_stable_alignment_solution(Some(previous), Some(stale_on_current), &rejected);
+
+        assert_eq!(chosen, None);
     }
 
     fn make_peer(peer_id: u64) -> XrNetPeer {
@@ -1903,12 +2641,12 @@ mod tests {
     #[test]
     fn pending_alignment_debug_reports_local_descriptor_before_peer_arrives() {
         let text = make_pending_alignment_debug_text(
-            "AlignDbg: local wall feats 2 | desc occ 0 v 0 c 0",
+            "AlignDbg: local slice 2 | desc occ 0 v 0 c 0",
             &HashMap::new(),
         );
         assert_eq!(
             text,
-            "AlignDbg: local wall feats 2 | desc occ 0 v 0 c 0 | waiting for peer descriptor"
+            "AlignDbg: local slice 2 | desc occ 0 v 0 c 0 | waiting for peer descriptor"
         );
     }
 
@@ -1921,12 +2659,12 @@ mod tests {
         peers.insert(peer.peer.id, peer);
 
         let text = make_pending_alignment_debug_text(
-            "AlignDbg: local wall feats 2 | desc occ 0 v 0 c 0",
+            "AlignDbg: local slice 2 | desc occ 0 v 0 c 0",
             &peers,
         );
         assert_eq!(
             text,
-            "AlignDbg: local wall feats 2 | desc occ 0 v 0 c 0 | 0000002a: remote walls 2 | remote vdesc yes | solve pending"
+            "AlignDbg: local slice 2 | desc occ 0 v 0 c 0 | 0000002a: remote slice 2 | remote vdesc yes | solve pending"
         );
     }
 
@@ -1941,7 +2679,7 @@ mod tests {
         let text = make_peer_scene_debug_text(true, &peers);
         assert_eq!(
             text,
-            "PeerScene 0000002a: state no | desc yes | walls 2 | vdesc yes | pose raw | solve pending"
+            "PeerScene 0000002a: state no | desc yes | slice 2 | vdesc yes | pose raw | solve pending"
         );
     }
 
@@ -1958,7 +2696,7 @@ mod tests {
         let text = make_peer_scene_debug_text(true, &peers);
         assert_eq!(
             text,
-            "PeerScene 0000002a: state no | desc yes | walls 2 | vdesc yes | pose raw | solve pending"
+            "PeerScene 0000002a: state no | desc yes | slice 2 | vdesc yes | pose raw | solve pending"
         );
     }
 
@@ -1984,7 +2722,7 @@ mod tests {
         let text = make_alignment_state_text(LocalSceneState::Ready, Some((4, 9)), &peers);
         assert_eq!(
             text,
-            "AlignState 0000002a: local yes v4/9 | remote yes seq 7 walls 2 vdesc yes | worker lv4/9 rv7 accepted 1.7ms | pose raw"
+            "AlignState 0000002a: local yes v4/9 | remote yes seq 7 slice 2 vdesc yes | worker lv4/9 rv7 accepted 1.7ms | pose raw"
         );
     }
 
@@ -1997,9 +2735,9 @@ mod tests {
         peers.insert(peer.peer.id, peer);
 
         let text = make_pending_alignment_debug_text(
-            "AlignDbg: local wall feats 2 | desc occ 0 v 0 c 0",
+            "AlignDbg: local slice 2 | desc occ 0 v 0 c 0",
             &peers,
         );
-        assert_eq!(text, "AlignDbg: local wall feats 2 | desc occ 0 v 0 c 0");
+        assert_eq!(text, "AlignDbg: local slice 2 | desc occ 0 v 0 c 0");
     }
 }

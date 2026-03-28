@@ -1,5 +1,5 @@
 use crate::{
-    makepad_math::{vec3, vec4f, Mat4f, Pose, Quat, Vec3f},
+    makepad_math::{vec3, vec4f, Mat4f, Pose, Quat, Vec2f, Vec3f},
     makepad_micro_serde::*,
 };
 use std::{
@@ -16,7 +16,7 @@ const XR_DEPTH_ALIGN_MIN_WALL_SAMPLES: usize = 4;
 const XR_DEPTH_ALIGN_MIN_WALL_FEATURES: usize = 2;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES: usize = 6;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE: f32 = 0.12;
-const XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_WALL_FEATURES: usize = 2;
+const XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_WALL_FEATURES: usize = 3;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_WALL_FEATURE_CONFIDENCE: f32 = 0.18;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE: f32 = 0.10;
 const XR_DEPTH_ALIGN_TRANSLATION_VOTE_STEP_METERS: f32 = 0.08;
@@ -93,6 +93,7 @@ pub struct XrDepthMesh {
     pub plane_patches: Vec<XrDepthPlanePatch>,
     pub alignment_descriptor: Option<XrDepthAlignDescriptor>,
     pub alignment_debug: XrDepthAlignDebug,
+    pub alignment_slice_preview: Option<XrDepthAlignSlicePreview>,
     pub alignment_preview: XrDepthAlignPreview,
     pub dirty_chunk_keys: Vec<ChunkKey>,
     pub removed_chunk_keys: Vec<ChunkKey>,
@@ -130,6 +131,31 @@ pub struct XrDepthAlignSample {
     pub point: Vec3f,
     pub normal: Vec3f,
     pub weight: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrDepthAlignSliceSegment {
+    pub start: Vec2f,
+    pub end: Vec2f,
+    pub height_meters: f32,
+    pub active_height: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct XrDepthAlignSlicePreview {
+    pub origin_x: f32,
+    pub origin_z: f32,
+    pub cell_size_meters: f32,
+    pub size: u16,
+    pub iso_height_meters: f32,
+    pub bottom_y_meters: f32,
+    pub top_y_meters: f32,
+    pub cutout_center: Option<Vec2f>,
+    pub cutout_forward: Option<Vec2f>,
+    pub cutout_radius_meters: f32,
+    pub cell_heights_meters: Vec<f32>,
+    pub cell_valid: Vec<u8>,
+    pub segments: Vec<XrDepthAlignSliceSegment>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, SerBin, DeBin)]
@@ -243,19 +269,8 @@ pub struct XrDepthAlignSolveDiagnostic {
 
 impl XrDepthAlignSolveDiagnostic {
     pub fn accepted_solution(&self) -> Option<XrDepthAlignSolution> {
-        self.best_solution.filter(|solution| {
-            if self.used_wall_features {
-                solution.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_WALL_FEATURES
-                    && solution.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_WALL_FEATURE_CONFIDENCE
-                    && (!self.local_vertical_descriptor
-                        || !self.remote_vertical_descriptor
-                        || solution.symmetry_confidence
-                            > XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE)
-            } else {
-                solution.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES
-                    && solution.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE
-            }
-        })
+        self.best_solution
+            .filter(|solution| xr_depth_align_solution_is_accepted(self, *solution))
     }
 
     pub fn outcome(&self) -> XrDepthAlignSolveOutcome {
@@ -276,6 +291,59 @@ impl XrDepthAlignSolveDiagnostic {
             XrDepthAlignSolveOutcome::Accepted
         } else {
             XrDepthAlignSolveOutcome::Rejected
+        }
+    }
+}
+
+pub fn xr_depth_align_solution_is_accepted(
+    diagnostic: &XrDepthAlignSolveDiagnostic,
+    solution: XrDepthAlignSolution,
+) -> bool {
+    if diagnostic.used_wall_features {
+        solution.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_WALL_FEATURES
+            && solution.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_WALL_FEATURE_CONFIDENCE
+            && (!diagnostic.local_vertical_descriptor
+                || !diagnostic.remote_vertical_descriptor
+                || solution.symmetry_confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE)
+    } else {
+        solution.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES
+            && solution.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE
+    }
+}
+
+fn solve_outcome_rank(outcome: XrDepthAlignSolveOutcome) -> u8 {
+    match outcome {
+        XrDepthAlignSolveOutcome::MissingSamples => 0,
+        XrDepthAlignSolveOutcome::NoCandidate => 1,
+        XrDepthAlignSolveOutcome::Rejected => 2,
+        XrDepthAlignSolveOutcome::Accepted => 3,
+    }
+}
+
+fn alignment_diagnostic_better(
+    candidate: &XrDepthAlignSolveDiagnostic,
+    current: &XrDepthAlignSolveDiagnostic,
+) -> bool {
+    match (candidate.accepted_solution(), current.accepted_solution()) {
+        (Some(candidate_solution), Some(current_solution)) => {
+            alignment_solution_better(&candidate_solution, &current_solution)
+        }
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => {
+            let candidate_rank = solve_outcome_rank(candidate.outcome());
+            let current_rank = solve_outcome_rank(current.outcome());
+            if candidate_rank != current_rank {
+                return candidate_rank > current_rank;
+            }
+            match (candidate.best_solution, current.best_solution) {
+                (Some(candidate_solution), Some(current_solution)) => {
+                    alignment_solution_better(&candidate_solution, &current_solution)
+                }
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => false,
+            }
         }
     }
 }
@@ -364,7 +432,12 @@ pub fn xr_depth_align_transform_descriptor(
         .vertical_descriptor
         .as_ref()
         .and_then(|vertical| transform_vertical_descriptor(vertical, transform));
-    descriptor.wall_normal_histogram = if descriptor.wall_features.is_empty() {
+    descriptor.wall_normal_histogram = if !descriptor.samples.is_empty() {
+        xr_depth_align_build_wall_normal_histogram(
+            &descriptor.samples,
+            descriptor.wall_normal_histogram.len(),
+        )
+    } else if descriptor.wall_features.is_empty() {
         xr_depth_align_build_wall_normal_histogram(
             &descriptor.samples,
             descriptor.wall_normal_histogram.len(),
@@ -560,7 +633,7 @@ pub fn xr_depth_align_analyze_remote_to_local(
     let remote_wall_samples = descriptor_samples_of_kind(remote, XrDepthAlignSampleKind::Wall);
     let local_vertical_descriptor = local.vertical_descriptor.as_ref();
     let remote_vertical_descriptor = remote.vertical_descriptor.as_ref();
-    let mut diagnostic = XrDepthAlignSolveDiagnostic {
+    let diagnostic = XrDepthAlignSolveDiagnostic {
         local_wall_features: local_wall_features.len(),
         remote_wall_features: remote_wall_features.len(),
         local_vertical_descriptor: local_vertical_descriptor.is_some(),
@@ -571,10 +644,55 @@ pub fn xr_depth_align_analyze_remote_to_local(
         remote_wall_samples: remote_wall_samples.len(),
         ..XrDepthAlignSolveDiagnostic::default()
     };
+    let mut best_diagnostic = None::<XrDepthAlignSolveDiagnostic>;
+    if local_wall_samples.len() >= XR_DEPTH_ALIGN_MIN_WALL_SAMPLES
+        && remote_wall_samples.len() >= XR_DEPTH_ALIGN_MIN_WALL_SAMPLES
+    {
+        let mut sample_diagnostic = diagnostic;
+        let floor_y = local.floor_y - remote.floor_y;
+        let mut best = None::<XrDepthAlignSolution>;
+        let yaw_candidates = candidate_yaws(
+            &local.wall_normal_histogram,
+            &remote.wall_normal_histogram,
+            &local_wall_samples,
+            &remote_wall_samples,
+        );
+        sample_diagnostic.yaw_candidate_count = yaw_candidates.len();
+        for yaw in yaw_candidates {
+            let translations =
+                candidate_translations(&local_wall_samples, &remote_wall_samples, floor_y, yaw);
+            sample_diagnostic.pose_candidate_count += translations.len();
+            for translation in translations {
+                let (refined_yaw, refined_translation) = refine_alignment(
+                    &local_wall_samples,
+                    &remote_wall_samples,
+                    floor_y,
+                    yaw,
+                    translation,
+                );
+                let candidate = score_alignment_solution(
+                    &local_wall_samples,
+                    &remote_wall_samples,
+                    refined_yaw,
+                    refined_translation,
+                );
+                if best
+                    .as_ref()
+                    .is_none_or(|current| alignment_solution_better(&candidate, current))
+                {
+                    best = Some(candidate);
+                }
+            }
+        }
+        sample_diagnostic.best_solution = best;
+        best_diagnostic = Some(sample_diagnostic);
+    }
+
     if local_wall_features.len() >= XR_DEPTH_ALIGN_MIN_WALL_FEATURES
         && remote_wall_features.len() >= XR_DEPTH_ALIGN_MIN_WALL_FEATURES
     {
-        diagnostic.used_wall_features = true;
+        let mut feature_diagnostic = diagnostic;
+        feature_diagnostic.used_wall_features = true;
         let mut best = None::<XrDepthAlignSolution>;
         let floor_y = local.floor_y - remote.floor_y;
         let yaw_candidates = candidate_wall_feature_yaws(
@@ -583,7 +701,7 @@ pub fn xr_depth_align_analyze_remote_to_local(
             &local_wall_features,
             &remote_wall_features,
         );
-        diagnostic.yaw_candidate_count = yaw_candidates.len();
+        feature_diagnostic.yaw_candidate_count = yaw_candidates.len();
         for yaw in yaw_candidates {
             let translations = candidate_wall_feature_translations(
                 &local_wall_features,
@@ -591,7 +709,7 @@ pub fn xr_depth_align_analyze_remote_to_local(
                 floor_y,
                 yaw,
             );
-            diagnostic.pose_candidate_count += translations.len();
+            feature_diagnostic.pose_candidate_count += translations.len();
             for translation in translations {
                 let (refined_yaw, refined_translation) = refine_wall_feature_alignment(
                     &local_wall_features,
@@ -615,53 +733,53 @@ pub fn xr_depth_align_analyze_remote_to_local(
                 }
             }
         }
-        diagnostic.best_solution = best;
-        return diagnostic;
-    }
-
-    if local_wall_samples.len() < XR_DEPTH_ALIGN_MIN_WALL_SAMPLES
-        || remote_wall_samples.len() < XR_DEPTH_ALIGN_MIN_WALL_SAMPLES
-    {
-        return diagnostic;
-    }
-
-    let floor_y = local.floor_y - remote.floor_y;
-    let mut best = None::<XrDepthAlignSolution>;
-    let yaw_candidates = candidate_yaws(
-        &local.wall_normal_histogram,
-        &remote.wall_normal_histogram,
-        &local_wall_samples,
-        &remote_wall_samples,
-    );
-    diagnostic.yaw_candidate_count = yaw_candidates.len();
-    for yaw in yaw_candidates {
-        let translations =
-            candidate_translations(&local_wall_samples, &remote_wall_samples, floor_y, yaw);
-        diagnostic.pose_candidate_count += translations.len();
-        for translation in translations {
-            let (refined_yaw, refined_translation) = refine_alignment(
-                &local_wall_samples,
-                &remote_wall_samples,
-                floor_y,
-                yaw,
-                translation,
-            );
-            let candidate = score_alignment_solution(
-                &local_wall_samples,
-                &remote_wall_samples,
-                refined_yaw,
-                refined_translation,
-            );
-            if best
-                .as_ref()
-                .is_none_or(|current| alignment_solution_better(&candidate, current))
-            {
-                best = Some(candidate);
-            }
+        feature_diagnostic.best_solution = best;
+        if best_diagnostic
+            .as_ref()
+            .is_none_or(|current| alignment_diagnostic_better(&feature_diagnostic, current))
+        {
+            best_diagnostic = Some(feature_diagnostic);
         }
     }
-    diagnostic.best_solution = best;
-    diagnostic
+    best_diagnostic.unwrap_or(diagnostic)
+}
+
+pub fn xr_depth_align_rescore_remote_to_local(
+    local: &XrDepthAlignDescriptor,
+    remote: &XrDepthAlignDescriptor,
+    solution: XrDepthAlignSolution,
+) -> XrDepthAlignSolution {
+    let local_wall_samples = descriptor_samples_of_kind(local, XrDepthAlignSampleKind::Wall);
+    let remote_wall_samples = descriptor_samples_of_kind(remote, XrDepthAlignSampleKind::Wall);
+    if !local_wall_samples.is_empty() && !remote_wall_samples.is_empty() {
+        return score_alignment_solution(
+            &local_wall_samples,
+            &remote_wall_samples,
+            solution.yaw_radians,
+            solution.translation,
+        );
+    }
+
+    let local_wall_features = descriptor_wall_features(local);
+    let remote_wall_features = descriptor_wall_features(remote);
+    if local_wall_features.len() >= XR_DEPTH_ALIGN_MIN_WALL_FEATURES
+        && remote_wall_features.len() >= XR_DEPTH_ALIGN_MIN_WALL_FEATURES
+    {
+        return score_wall_feature_alignment(
+            &local_wall_features,
+            &remote_wall_features,
+            local.vertical_descriptor.as_ref(),
+            remote.vertical_descriptor.as_ref(),
+            solution.yaw_radians,
+            solution.translation,
+        );
+    }
+    score_alignment_solution(
+        &local_wall_samples,
+        &remote_wall_samples,
+        solution.yaw_radians,
+        solution.translation,
+    )
 }
 
 pub fn xr_depth_align_build_wall_normal_histogram(
@@ -2954,6 +3072,49 @@ mod tests {
         assert!(
             correct_support > flipped_support + 0.10,
             "correct_support={correct_support} flipped_support={flipped_support} correct_residual={correct_residual} flipped_residual={flipped_residual}"
+        );
+    }
+
+    #[test]
+    fn rescoring_old_pose_against_resumed_descriptor_marks_it_stale() {
+        let local = make_box_room_descriptor_with_vertical_asymmetry();
+        let first_remote_to_local = Pose::new(
+            Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), -0.41),
+            vec3(0.58, 0.0, -0.44),
+        )
+        .to_mat4();
+        let first_remote =
+            xr_depth_align_transform_descriptor(&local, &first_remote_to_local.invert());
+        let first_diagnostic = xr_depth_align_analyze_remote_to_local(&local, &first_remote);
+        let previous_solution = first_diagnostic
+            .accepted_solution()
+            .expect("expected initial box-room alignment");
+
+        let resumed_remote_to_local = Pose::new(
+            Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), 1.18),
+            vec3(-0.62, 0.0, 0.71),
+        )
+        .to_mat4();
+        let resumed_remote =
+            xr_depth_align_transform_descriptor(&local, &resumed_remote_to_local.invert());
+        let resumed_diagnostic = xr_depth_align_analyze_remote_to_local(&local, &resumed_remote);
+        let resumed_solution = resumed_diagnostic
+            .accepted_solution()
+            .expect("expected resumed box-room alignment");
+        let stale_solution =
+            xr_depth_align_rescore_remote_to_local(&local, &resumed_remote, previous_solution);
+
+        assert!(
+            xr_depth_align_solution_is_accepted(&resumed_diagnostic, resumed_solution),
+            "{resumed_diagnostic:?} {resumed_solution:?}"
+        );
+        assert!(
+            resumed_solution.ranking_confidence() > stale_solution.ranking_confidence() + 0.25,
+            "resumed descriptor should strongly outrank the stale pose: stale={stale_solution:?} resumed={resumed_solution:?}"
+        );
+        assert!(
+            resumed_solution.symmetry_confidence > stale_solution.symmetry_confidence + 0.25,
+            "resumed heightmap symmetry should strongly favor the new pose: stale={stale_solution:?} resumed={resumed_solution:?}"
         );
     }
 }

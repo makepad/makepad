@@ -402,12 +402,20 @@ impl XrAnchor {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, PartialEq)]
+pub struct XrSyncAnchor {
+    pub id: u32,
+    pub captured_at: f64,
+    pub anchor: XrAnchor,
+}
+
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrState {
     pub time: f64,
     pub head_pose: Pose,
     pub order_counter: u8,
     pub anchor: Option<XrAnchor>,
+    pub sync_anchor: Option<XrSyncAnchor>,
     pub left_controller: XrController,
     pub right_controller: XrController,
     pub left_hand: XrHand,
@@ -420,6 +428,7 @@ impl XrState {
             time: (b.time - a.time) * f as f64 + a.time,
             head_pose: Pose::from_lerp(a.head_pose, b.head_pose, f),
             anchor: b.anchor,
+            sync_anchor: b.sync_anchor,
             left_controller: b.left_controller.clone(),
             right_controller: b.right_controller.clone(),
             left_hand: b.left_hand.clone(),
