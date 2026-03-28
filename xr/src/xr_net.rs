@@ -1,9 +1,5 @@
 use crate::*;
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
-#[cfg(test)]
-use makepad_widgets::makepad_platform::XrDepthAlignVerticalDescriptor;
-#[cfg(test)]
-use makepad_widgets::makepad_platform::XrDepthAlignWallFeature;
 use std::{
     collections::HashMap,
     io::{self, Read, Write},
@@ -1203,17 +1199,6 @@ pub fn decode_alignment_descriptor_packet(
 }
 
 #[cfg(test)]
-fn safe_normalize(v: Vec3f) -> Option<Vec3f> {
-    let len = v.length();
-    (len > 0.0001).then_some(v * (1.0 / len))
-}
-
-#[cfg(test)]
-fn xz_axis(vector: Vec3f) -> Option<Vec3f> {
-    safe_normalize(vec3f(vector.x, 0.0, vector.z))
-}
-
-#[cfg(test)]
 fn wrap_angle(mut angle: f32) -> f32 {
     while angle <= -std::f32::consts::PI {
         angle += std::f32::consts::TAU;
@@ -1222,31 +1207,6 @@ fn wrap_angle(mut angle: f32) -> f32 {
         angle -= std::f32::consts::TAU;
     }
     angle
-}
-
-#[cfg(test)]
-fn build_wall_feature_histogram(
-    features: &[XrDepthAlignWallFeature],
-    bin_count: usize,
-) -> Vec<f32> {
-    let bin_count = bin_count.max(1);
-    let mut histogram = vec![0.0; bin_count];
-    for feature in features {
-        let Some(axis) = xz_axis(feature.normal) else {
-            continue;
-        };
-        let angle = axis.x.atan2(-axis.z);
-        let normalized = (angle + std::f32::consts::PI) / std::f32::consts::TAU;
-        let bin = (normalized * bin_count as f32).floor() as isize;
-        histogram[bin.rem_euclid(bin_count as isize) as usize] += feature.area.max(0.05);
-    }
-    let total = histogram.iter().copied().sum::<f32>();
-    if total > 0.0 {
-        for value in &mut histogram {
-            *value = (*value / total * 100.0).round() / 100.0;
-        }
-    }
-    histogram
 }
 
 fn remove_peer(
@@ -1362,106 +1322,81 @@ mod tests {
         wrap_angle(a - b).abs()
     }
 
-    fn make_wall_feature(
-        center: Vec3f,
-        normal: Vec3f,
-        half_extent_along: f32,
-        min_y: f32,
-        max_y: f32,
-    ) -> XrDepthAlignWallFeature {
-        let normal = normal.normalize();
-        let along_axis = vec3f(-normal.z, 0.0, normal.x).normalize();
-        XrDepthAlignWallFeature {
-            center,
-            normal,
-            along_axis,
-            plane_distance: center.dot(normal),
-            half_extent_along,
-            min_y,
-            max_y,
-            area: (half_extent_along * 2.0) * (max_y - min_y).max(0.0),
+    fn encode_test_height(height: f32, bottom_y: f32, top_y: f32) -> u16 {
+        let span = (top_y - bottom_y).max(1.0e-3);
+        let normalized = ((height - bottom_y) / span).clamp(0.0, 1.0);
+        1 + (normalized * 65534.0).round() as u16
+    }
+
+    fn synthetic_scene_height(point: Vec2f) -> f32 {
+        let mut height: f32 = 0.02;
+        if point.x.abs() >= 2.05 && point.x.abs() <= 2.25 && point.y >= -2.30 && point.y <= 2.10 {
+            height = height.max(2.15);
         }
+        if point.y >= 1.75 && point.y <= 1.95 && point.x >= -2.25 && point.x <= 2.25 {
+            height = height.max(2.15);
+        }
+        if point.y <= -1.95 && point.y >= -2.20 && point.x >= -2.25 && point.x <= 2.05 {
+            height = height.max(2.15);
+        }
+        if point.x >= -0.95 && point.x <= -0.10 && point.y >= -0.42 && point.y <= 0.36 {
+            height = height.max(0.84);
+        }
+        if point.x >= 0.52 && point.x <= 1.12 && point.y >= 0.52 && point.y <= 1.18 {
+            height = height.max(1.38);
+        }
+        if point.x >= -1.58 && point.x <= -1.20 && point.y >= 0.92 && point.y <= 1.34 {
+            height = height.max(1.62);
+        }
+        if point.x >= 0.96 && point.x <= 1.34 && point.y >= -1.42 && point.y <= -0.66 {
+            height = height.max(0.68);
+        }
+        let wobble = ((point.x * 1.13 + point.y * 0.73).sin() * 0.018)
+            + ((point.x * 0.41 - point.y * 1.51).cos() * 0.014);
+        (height + wobble).clamp(0.0, 2.25)
     }
 
     fn make_descriptor_frame() -> XrNetAlignmentDescriptorFrame {
-        let wall_features = vec![
-            make_wall_feature(
-                vec3f(-1.10, 0.95, -0.90),
-                vec3f(1.0, 0.0, 0.0),
-                0.46,
-                0.52,
-                1.38,
-            ),
-            make_wall_feature(
-                vec3f(0.98, 0.88, -1.26),
-                vec3f(1.0, 0.0, 0.0),
-                0.34,
-                0.54,
-                1.22,
-            ),
-            make_wall_feature(
-                vec3f(0.08, 0.98, -2.12),
-                vec3f(0.0, 0.0, 1.0),
-                0.38,
-                0.58,
-                1.34,
-            ),
-            make_wall_feature(
-                vec3f(0.36, 0.92, -0.42),
-                vec3f(0.0, 0.0, 1.0),
-                0.30,
-                0.60,
-                1.24,
-            ),
-        ];
-        let vertical_descriptor = XrDepthAlignVerticalDescriptor {
-            origin_x: -2.0,
-            origin_z: -2.8,
-            cell_size_meters: 0.25,
-            size: 20,
-            vertical_surface_masks: {
-                let mut cells = vec![0u8; 20 * 20];
-                cells[4 + 6 * 20] = 0b0011_1100;
-                cells[5 + 6 * 20] = 0b0011_1000;
-                cells[13 + 11 * 20] = 0b0111_0000;
-                cells[11 + 14 * 20] = 0b0011_0000;
-                cells
-            },
-            clutter_surface_masks: {
-                let mut cells = vec![0u8; 20 * 20];
-                cells[8 + 10 * 20] = 0b0001_1110;
-                cells[6 + 12 * 20] = 0b0000_1110;
-                cells[12 + 7 * 20] = 0b0011_1000;
-                cells
-            },
-            free_space_masks: {
-                let mut cells = vec![0u8; 20 * 20];
-                cells[5 + 5 * 20] = 0b0000_0111;
-                cells[8 + 9 * 20] = 0b1110_0000;
-                cells[10 + 13 * 20] = 0b1111_0000;
-                cells[14 + 8 * 20] = 0b0000_1111;
-                cells
-            },
-            height_u8: {
-                let mut cells = vec![0u8; 20 * 20];
-                cells[4 + 6 * 20] = 185;
-                cells[5 + 6 * 20] = 176;
-                cells[8 + 10 * 20] = 118;
-                cells[13 + 11 * 20] = 212;
-                cells[11 + 14 * 20] = 144;
-                cells
-            },
-        };
+        let size = 120usize;
+        let cell_size_meters = 0.05;
+        let extent = size as f32 * cell_size_meters;
+        let origin = -extent * 0.5;
+        let bottom_y_meters = 0.0;
+        let top_y_meters = 2.3;
+        let mut height_u16 = vec![0u16; size * size];
+        for z in 0..size {
+            for x in 0..size {
+                let point = vec2f(
+                    origin + (x as f32 + 0.5) * cell_size_meters,
+                    origin + (z as f32 + 0.5) * cell_size_meters,
+                );
+                height_u16[x + z * size] = encode_test_height(
+                    synthetic_scene_height(point),
+                    bottom_y_meters,
+                    top_y_meters,
+                );
+            }
+        }
         XrNetAlignmentDescriptorFrame {
             seq: 0,
             sent_at: 1.0,
             descriptor: XrDepthAlignDescriptor {
                 voxel_size_meters: 0.05,
                 floor_y: 0.0,
-                wall_normal_histogram: build_wall_feature_histogram(&wall_features, 48),
-                wall_features,
+                wall_normal_histogram: Vec::new(),
                 samples: Vec::new(),
-                vertical_descriptor: Some(vertical_descriptor),
+                vertical_descriptor: None,
+                height_map: Some(XrDepthAlignHeightMap {
+                    origin_x: origin,
+                    origin_z: origin,
+                    cell_size_meters,
+                    size: size as u16,
+                    bottom_y_meters,
+                    top_y_meters,
+                    player_cutout_center: None,
+                    player_cutout_radius_meters: 0.0,
+                    height_u16,
+                }),
             },
         }
     }

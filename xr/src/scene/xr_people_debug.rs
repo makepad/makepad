@@ -489,19 +489,11 @@ fn alignment_lock_score(
 ) -> f32 {
     let wall_factor = diagnostic
         .map(|diagnostic| {
-            if diagnostic.used_wall_features {
-                (diagnostic
-                    .local_wall_features
-                    .min(diagnostic.remote_wall_features) as f32
-                    / 4.0)
-                    .clamp(0.0, 1.0)
-            } else {
-                (diagnostic
-                    .local_wall_samples
-                    .min(diagnostic.remote_wall_samples) as f32
-                    / 12.0)
-                    .clamp(0.0, 1.0)
-            }
+            (diagnostic
+                .local_wall_samples
+                .min(diagnostic.remote_wall_samples) as f32
+                / 12.0)
+                .clamp(0.0, 1.0)
         })
         .unwrap_or(0.5);
     let matched_factor = (solution.matched_samples as f32 / 4.0).clamp(0.0, 1.0);
@@ -555,8 +547,15 @@ fn descriptor_contour_sample_count(descriptor: &XrDepthAlignDescriptor) -> usize
         .count();
     if sample_count != 0 {
         sample_count
+    } else if let Some(height_map) = descriptor.height_map.as_ref() {
+        let valid_cells = height_map
+            .height_u16
+            .iter()
+            .filter(|value| **value != 0)
+            .count();
+        ((valid_cells + 127) / 128).max(1)
     } else {
-        descriptor.wall_features.len()
+        0
     }
 }
 
@@ -572,13 +571,7 @@ fn solve_outcome_label(diagnostic: Option<XrDepthAlignSolveDiagnostic>) -> &'sta
         return "pending";
     };
     match diagnostic.outcome() {
-        XrDepthAlignSolveOutcome::MissingSamples => {
-            if diagnostic.used_wall_features {
-                "need-walls"
-            } else {
-                "need-slice"
-            }
-        }
+        XrDepthAlignSolveOutcome::MissingSamples => "need-slice",
         XrDepthAlignSolveOutcome::NoCandidate => "no-candidate",
         XrDepthAlignSolveOutcome::Rejected => "rejected",
         XrDepthAlignSolveOutcome::Accepted => "accepted",
@@ -611,8 +604,8 @@ fn make_alignment_state_text(
     let remote_slice_count = remote_descriptor
         .map(|frame| descriptor_contour_sample_count(&frame.descriptor))
         .unwrap_or(0);
-    let remote_vdesc =
-        remote_descriptor.is_some_and(|frame| descriptor_has_vertical_compact_scene(&frame.descriptor));
+    let remote_vdesc = remote_descriptor
+        .is_some_and(|frame| descriptor_has_vertical_compact_scene(&frame.descriptor));
     format!(
         "AlignState {peer_label}: local {} v{} | remote {} seq {} slice {} vdesc {} | worker lv{} rv{} {} {:.1}ms | pose {}",
         if local_descriptor_ready { "yes" } else { "no" },
@@ -657,11 +650,7 @@ fn make_peer_scene_debug_text(
             } else {
                 "no"
             },
-            if diagnostic.used_wall_features {
-                diagnostic.remote_wall_features
-            } else {
-                diagnostic.remote_wall_samples
-            },
+            diagnostic.remote_wall_samples,
             if diagnostic.remote_vertical_descriptor {
                 "yes"
             } else {
@@ -762,11 +751,9 @@ fn alignment_rejection_reason(
         "vertical overlap missing".to_string()
     } else if best.residual_meters >= 0.18 {
         format!("residual {:.2}m>=0.18m", best.residual_meters)
-    } else if diagnostic.used_wall_features && diagnostic.remote_wall_features < 2 {
-        format!("remote walls {}<2", diagnostic.remote_wall_features)
-    } else if !diagnostic.used_wall_features && diagnostic.remote_wall_samples < 4 {
+    } else if diagnostic.remote_wall_samples < 4 {
         format!("remote slice {}<4", diagnostic.remote_wall_samples)
-    } else if diagnostic.used_wall_features && !diagnostic.remote_vertical_descriptor {
+    } else if !diagnostic.remote_vertical_descriptor {
         "remote compact scene missing".to_string()
     } else {
         "score below accept threshold".to_string()
@@ -819,16 +806,8 @@ fn make_alignment_debug_text(
 
     let context = format!(
         "local slice {} | remote slice {} | local vdesc {} | remote vdesc {} | yaw {} | pose {}",
-        if diagnostic.used_wall_features {
-            diagnostic.local_wall_features
-        } else {
-            diagnostic.local_wall_samples
-        },
-        if diagnostic.used_wall_features {
-            diagnostic.remote_wall_features
-        } else {
-            diagnostic.remote_wall_samples
-        },
+        diagnostic.local_wall_samples,
+        diagnostic.remote_wall_samples,
         if diagnostic.local_vertical_descriptor {
             "yes"
         } else {
@@ -844,11 +823,7 @@ fn make_alignment_debug_text(
     );
     match diagnostic.outcome() {
         XrDepthAlignSolveOutcome::MissingSamples => {
-            if diagnostic.used_wall_features {
-                format!("AlignDbg {peer_label}: need >=2 room walls on both sides | {context}")
-            } else {
-                format!("AlignDbg {peer_label}: need contour slice on both sides | {context}")
-            }
+            format!("AlignDbg {peer_label}: need contour slice on both sides | {context}")
         }
         XrDepthAlignSolveOutcome::NoCandidate => {
             format!(
@@ -912,8 +887,6 @@ pub struct XrPeopleDebug {
     #[rust]
     last_alignment_state_status: String,
     #[rust]
-    last_plane_scan_status: String,
-    #[rust]
     net_node: Option<XrNetNode>,
     #[rust]
     alignment_worker: Option<XrPeopleAlignmentWorker>,
@@ -935,10 +908,6 @@ pub struct XrPeopleDebug {
     local_descriptor: Option<XrNetAlignmentDescriptorFrame>,
     #[rust]
     local_descriptor_version: Option<(u64, u64)>,
-    #[rust]
-    local_plane_patches: Vec<XrDepthPlanePatch>,
-    #[rust]
-    local_alignment_wall_features: Vec<XrDepthAlignWallFeature>,
     #[rust]
     local_alignment_debug: XrDepthAlignDebug,
     #[rust]
@@ -973,13 +942,6 @@ impl XrPeopleDebug {
         y: 0.05,
         z: 0.10,
     };
-    const ALIGN_WALL_BEAM_HEIGHT: f32 = 0.10;
-    const ALIGN_WALL_BEAM_THICKNESS: f32 = 0.045;
-    const ALIGN_WALL_BEAM_NORMAL_OFFSET: f32 = 0.05;
-    const PEER_ALIGN_WALL_BEAM_HEIGHT: f32 = 0.075;
-    const PEER_ALIGN_WALL_BEAM_THICKNESS: f32 = 0.030;
-    const PEER_ALIGN_WALL_BEAM_NORMAL_OFFSET: f32 = -0.05;
-    const PEER_ALIGN_MARKER_SIZE: f32 = 0.055;
     const ANCHOR_MARKER_SIZE: f32 = 0.060;
     const REMOTE_ANCHOR_MARKER_SIZE: f32 = 0.050;
     const SYNC_MATCH_RECEIVE_WINDOW_SECONDS: f64 = 0.45;
@@ -1039,20 +1001,11 @@ impl XrPeopleDebug {
         }
     }
 
-    pub fn plane_scan_text(&self) -> &str {
-        if self.last_plane_scan_status.is_empty() {
-            "PlaneScan: off"
-        } else {
-            &self.last_plane_scan_status
-        }
-    }
-
     pub fn set_enabled(&mut self, cx: &mut Cx, enabled: bool) -> bool {
         if self.enabled == enabled {
             return self.enabled;
         }
         self.enabled = enabled;
-        cx.xr_depth_mesh().set_plane_scan_enabled(false);
         cx.xr_depth_mesh().set_surface_analysis_enabled(enabled);
         self.net_node = None;
         self.alignment_worker = None;
@@ -1065,8 +1018,6 @@ impl XrPeopleDebug {
         self.accepted_sync_ids.clear();
         self.local_descriptor = None;
         self.local_descriptor_version = None;
-        self.local_plane_patches.clear();
-        self.local_alignment_wall_features.clear();
         self.local_alignment_debug = XrDepthAlignDebug::default();
         self.last_sent_descriptor_signature = None;
         self.tx_state_count = 0;
@@ -1077,7 +1028,6 @@ impl XrPeopleDebug {
         self.rx_descriptor_count = 0;
         self.last_event_text.clear();
         self.last_peer_scene_status.clear();
-        self.last_plane_scan_status.clear();
 
         if enabled {
             if self.auto_alignment_enabled {
@@ -1103,18 +1053,12 @@ impl XrPeopleDebug {
             } else {
                 "AlignState: local anchor no | sync idle | waiting for peer".to_string()
             };
-            self.last_plane_scan_status = if self.auto_alignment_enabled {
-                "PlaneScan: off (vector slice alignment)".to_string()
-            } else {
-                "PlaneScan: off (manual alignment, slice preview on)".to_string()
-            };
         } else {
             self.last_status = "Peers: off".to_string();
             self.last_network_status = "Network: off".to_string();
             self.last_peer_scene_status = "PeerScene: off".to_string();
             self.last_alignment_debug_status = "AlignDbg: off".to_string();
             self.last_alignment_state_status = "AlignState: off".to_string();
-            self.last_plane_scan_status = "PlaneScan: off".to_string();
         }
         self.redraw(cx);
         self.enabled
@@ -1165,8 +1109,6 @@ impl XrPeopleDebug {
 
         if !self.auto_alignment_enabled {
             self.local_alignment_debug = XrDepthAlignDebug::default();
-            self.local_plane_patches.clear();
-            self.local_alignment_wall_features.clear();
             self.local_descriptor = None;
             self.local_descriptor_version = None;
             self.last_sent_descriptor_signature = None;
@@ -1181,18 +1123,6 @@ impl XrPeopleDebug {
         self.local_alignment_debug = next_mesh
             .as_ref()
             .map(|mesh| mesh.alignment_debug)
-            .unwrap_or_default();
-        self.local_plane_patches = next_mesh
-            .as_ref()
-            .map(|mesh| mesh.plane_patches.clone())
-            .unwrap_or_default();
-        self.local_alignment_wall_features = next_mesh
-            .as_ref()
-            .and_then(|mesh| {
-                mesh.alignment_descriptor
-                    .as_ref()
-                    .map(|descriptor| descriptor.wall_features.clone())
-            })
             .unwrap_or_default();
         let next_signature = next_mesh
             .as_ref()
@@ -1506,7 +1436,6 @@ impl XrPeopleDebug {
             self.last_peer_scene_status = "PeerScene: off".to_string();
             self.last_alignment_debug_status = "AlignDbg: off".to_string();
             self.last_alignment_state_status = "AlignState: off".to_string();
-            self.last_plane_scan_status = "PlaneScan: off".to_string();
             return;
         }
         if self.net_node.is_none() {
@@ -1579,8 +1508,6 @@ impl XrPeopleDebug {
             self.last_peer_scene_status = self.manual_peer_scene_text();
             self.last_alignment_state_status = self.manual_alignment_state_text();
             self.last_alignment_debug_status = self.manual_alignment_debug_text();
-            self.last_plane_scan_status =
-                "PlaneScan: off (manual alignment, slice preview on)".to_string();
             return;
         }
 
@@ -1629,7 +1556,6 @@ impl XrPeopleDebug {
             self.local_descriptor_version,
             &self.peers,
         );
-        self.last_plane_scan_status = self.local_plane_scan_text();
         let has_alignment_diagnostic = self
             .peers
             .values()
@@ -1919,52 +1845,6 @@ impl XrPeopleDebug {
         }
     }
 
-    fn draw_alignment_wall_features(
-        &mut self,
-        cx: &mut Cx3d,
-        world: &Mat4f,
-        walls: &[XrDepthAlignWallFeature],
-        beam_height: f32,
-        beam_thickness: f32,
-        normal_offset: f32,
-        color: Vec4f,
-    ) {
-        for wall in walls.iter().copied() {
-            let center = vec3(
-                wall.center.x + wall.normal.x * normal_offset,
-                wall.max_y - beam_height * 0.5,
-                wall.center.z + wall.normal.z * normal_offset,
-            );
-            let transform = Mat4f {
-                v: [
-                    wall.along_axis.x,
-                    wall.along_axis.y,
-                    wall.along_axis.z,
-                    0.0,
-                    0.0,
-                    1.0,
-                    0.0,
-                    0.0,
-                    wall.normal.x,
-                    wall.normal.y,
-                    wall.normal.z,
-                    0.0,
-                    center.x,
-                    center.y,
-                    center.z,
-                    1.0,
-                ],
-            };
-            self.draw_cube_at(
-                cx,
-                world,
-                &transform,
-                vec3(wall.half_extent_along * 2.0, beam_height, beam_thickness),
-                color,
-            );
-        }
-    }
-
     fn local_descriptor_debug_text(&self) -> String {
         let (descriptor_cells, vertical_cells, clutter_cells) = self
             .local_descriptor
@@ -2009,34 +1889,6 @@ impl XrPeopleDebug {
                 vertical_cells,
                 clutter_cells,
             ),
-        }
-    }
-
-    fn local_plane_scan_text(&self) -> String {
-        let mut wall_count = 0usize;
-        let mut other_count = 0usize;
-        for patch in &self.local_plane_patches {
-            match patch.kind {
-                XrDepthPlaneKind::Wall => wall_count += 1,
-                XrDepthPlaneKind::Floor
-                | XrDepthPlaneKind::Ceiling
-                | XrDepthPlaneKind::Table
-                | XrDepthPlaneKind::Unknown => other_count += 1,
-            }
-        }
-        let debug = self.local_alignment_debug;
-        if debug.near_surface_voxel_count == 0 && self.local_plane_patches.is_empty() {
-            "PlaneScan: off (vector slice alignment)".to_string()
-        } else {
-            format!(
-                "PlaneScan: patches {} wall {} room {} other {} | near {} wall vox {}",
-                self.local_plane_patches.len(),
-                wall_count,
-                self.local_alignment_wall_features.len(),
-                other_count,
-                debug.near_surface_voxel_count,
-                debug.wall_candidate_count,
-            )
         }
     }
 
@@ -2108,19 +1960,6 @@ impl XrPeopleDebug {
                 );
             }
         }
-    }
-
-    fn draw_local_alignment_walls(&mut self, cx: &mut Cx3d, world: &Mat4f) {
-        let walls = self.local_alignment_wall_features.clone();
-        self.draw_alignment_wall_features(
-            cx,
-            world,
-            &walls,
-            Self::ALIGN_WALL_BEAM_HEIGHT,
-            Self::ALIGN_WALL_BEAM_THICKNESS,
-            Self::ALIGN_WALL_BEAM_NORMAL_OFFSET,
-            vec4f(1.0, 0.18, 0.14, 0.92),
-        );
     }
 
     fn draw_anchor_markers(
@@ -2218,65 +2057,6 @@ impl XrPeopleDebug {
                 vec4f(1.0, 0.44, 0.34, alpha),
                 vec4f(0.42, 0.68, 1.0, alpha),
             );
-        }
-    }
-
-    fn draw_remote_alignment_walls(&mut self, cx: &mut Cx3d, world: &Mat4f) {
-        let peer_ids = self.peers.keys().copied().collect::<Vec<_>>();
-        for peer_id in peer_ids {
-            let Some(peer) = self.peers.get(&peer_id).cloned() else {
-                continue;
-            };
-            let (Some(remote_to_local), Some(descriptor_frame)) =
-                (peer.remote_to_local, peer.latest_descriptor.as_ref())
-            else {
-                continue;
-            };
-
-            let solved_frame = descriptor_frame.transformed(&remote_to_local);
-            if solved_frame.descriptor.wall_features.is_empty() {
-                continue;
-            }
-
-            let base = Self::peer_base_color(peer_id);
-            let wall_color = vec4f(
-                (base.x * 0.82 + 0.18).min(1.0),
-                (base.y * 0.82 + 0.18).min(1.0),
-                (base.z * 0.82 + 0.18).min(1.0),
-                0.86,
-            );
-            self.draw_alignment_wall_features(
-                cx,
-                world,
-                &solved_frame.descriptor.wall_features,
-                Self::PEER_ALIGN_WALL_BEAM_HEIGHT,
-                Self::PEER_ALIGN_WALL_BEAM_THICKNESS,
-                Self::PEER_ALIGN_WALL_BEAM_NORMAL_OFFSET,
-                wall_color,
-            );
-
-            if let Some(markers) = solved_frame.test_markers() {
-                let marker_color = vec4f(
-                    (base.x * 0.78 + 0.22).min(1.0),
-                    (base.y * 0.78 + 0.22).min(1.0),
-                    1.0,
-                    0.94,
-                );
-                for marker in markers {
-                    let transform = Pose::new(Quat::default(), marker).to_mat4();
-                    self.draw_cube_at(
-                        cx,
-                        world,
-                        &transform,
-                        vec3(
-                            Self::PEER_ALIGN_MARKER_SIZE,
-                            Self::PEER_ALIGN_MARKER_SIZE,
-                            Self::PEER_ALIGN_MARKER_SIZE,
-                        ),
-                        marker_color,
-                    );
-                }
-            }
         }
     }
 
@@ -2395,8 +2175,8 @@ impl Widget for XrPeopleDebug {
                     self.set_enabled(cx, false);
                     self.set_enabled(cx, true);
                 } else {
-                    cx.xr_depth_mesh().set_plane_scan_enabled(false);
-                    cx.xr_depth_mesh().set_surface_analysis_enabled(self.enabled);
+                    cx.xr_depth_mesh()
+                        .set_surface_analysis_enabled(self.enabled);
                 }
             });
             return ScriptAsyncResult::Return(ScriptValue::from_bool(enabled));
@@ -2431,8 +2211,8 @@ impl Widget for XrPeopleDebug {
             return DrawStep::done();
         }
         let world = if cx.cx.in_xr_mode() {
-            // Depth mesh and plane scan patches live in raw OpenXR local-space.
-            // Keep debug planes and remote peers in that same space so
+            // Depth mesh and remote peers live in raw OpenXR local-space.
+            // Keep debug geometry in that same space so
             // root/content recentering does not skew or shift them.
             Mat4f::identity()
         } else {
@@ -2444,10 +2224,6 @@ impl Widget for XrPeopleDebug {
         self.draw_remote_anchor_markers(cx, &world);
         if self.auto_alignment_enabled && Self::SHOW_LOCAL_DESCRIPTOR_DEBUG {
             self.draw_local_descriptor(cx, &world);
-        }
-        if self.auto_alignment_enabled {
-            self.draw_local_alignment_walls(cx, &world);
-            self.draw_remote_alignment_walls(cx, &world);
         }
         self.draw_remote_peers(cx, &world);
         self.draw_cube.end_many_instances(cx);
@@ -2482,9 +2258,8 @@ mod tests {
 
     fn make_diagnostic(solution: XrDepthAlignSolution) -> XrDepthAlignSolveDiagnostic {
         XrDepthAlignSolveDiagnostic {
-            used_wall_features: true,
-            local_wall_features: 4,
-            remote_wall_features: 4,
+            local_wall_samples: 8,
+            remote_wall_samples: 8,
             best_solution: Some(solution),
             ..XrDepthAlignSolveDiagnostic::default()
         }
@@ -2492,8 +2267,8 @@ mod tests {
 
     #[test]
     fn stable_alignment_prefers_existing_solution_over_flip() {
-        let previous = make_solution(0.42, vec3(0.28, 0.0, -0.64), 0.41, 0.03, 4);
-        let flipped = make_solution(-2.71, vec3(-0.34, 0.0, 0.71), 0.44, 0.03, 4);
+        let previous = make_solution(0.42, vec3(0.28, 0.0, -0.64), 0.41, 0.03, 8);
+        let flipped = make_solution(-2.71, vec3(-0.34, 0.0, 0.71), 0.44, 0.03, 8);
 
         let chosen = choose_stable_alignment_solution(
             Some(previous),
@@ -2507,8 +2282,8 @@ mod tests {
 
     #[test]
     fn stable_alignment_accepts_small_refinement() {
-        let previous = make_solution(0.42, vec3(0.28, 0.0, -0.64), 0.28, 0.06, 3);
-        let refined = make_solution(0.46, vec3(0.24, 0.0, -0.60), 0.35, 0.03, 4);
+        let previous = make_solution(0.42, vec3(0.28, 0.0, -0.64), 0.28, 0.06, 6);
+        let refined = make_solution(0.46, vec3(0.24, 0.0, -0.60), 0.35, 0.03, 8);
 
         let chosen = choose_stable_alignment_solution(
             Some(previous),
@@ -2528,7 +2303,7 @@ mod tests {
             confidence: 0.74,
             symmetry_confidence: 0.82,
             residual_meters: 0.03,
-            matched_samples: 4,
+            matched_samples: 8,
         };
         let weaker = XrDepthAlignSolution {
             yaw_radians: 0.52,
@@ -2539,8 +2314,8 @@ mod tests {
             matched_samples: 2,
         };
         let mut weaker_diag = make_diagnostic(weaker);
-        weaker_diag.local_wall_features = 2;
-        weaker_diag.remote_wall_features = 2;
+        weaker_diag.local_wall_samples = 2;
+        weaker_diag.remote_wall_samples = 2;
 
         let chosen =
             choose_stable_alignment_solution(Some(previous), Some(previous), &weaker_diag).unwrap();
@@ -2550,8 +2325,8 @@ mod tests {
 
     #[test]
     fn stable_alignment_switches_when_previous_pose_no_longer_scores_on_current_descriptor() {
-        let previous = make_solution(-0.41, vec3(0.58, 0.0, -0.44), 0.42, 0.03, 4);
-        let candidate = make_solution(1.18, vec3(-0.62, 0.0, 0.71), 0.39, 0.03, 4);
+        let previous = make_solution(-0.41, vec3(0.58, 0.0, -0.44), 0.42, 0.03, 8);
+        let candidate = make_solution(1.18, vec3(-0.62, 0.0, 0.71), 0.39, 0.03, 8);
         let stale_on_current = XrDepthAlignSolution {
             yaw_radians: previous.yaw_radians,
             translation: previous.translation,
@@ -2573,7 +2348,7 @@ mod tests {
 
     #[test]
     fn stable_alignment_clears_previous_when_current_descriptor_no_longer_supports_it() {
-        let previous = make_solution(-0.41, vec3(0.58, 0.0, -0.44), 0.42, 0.03, 4);
+        let previous = make_solution(-0.41, vec3(0.58, 0.0, -0.44), 0.42, 0.03, 8);
         let stale_on_current = XrDepthAlignSolution {
             yaw_radians: previous.yaw_radians,
             translation: previous.translation,
@@ -2583,9 +2358,8 @@ mod tests {
             matched_samples: 0,
         };
         let rejected = XrDepthAlignSolveDiagnostic {
-            used_wall_features: true,
-            local_wall_features: 4,
-            remote_wall_features: 4,
+            local_wall_samples: 4,
+            remote_wall_samples: 4,
             local_vertical_descriptor: true,
             remote_vertical_descriptor: true,
             best_solution: Some(XrDepthAlignSolution {
@@ -2616,11 +2390,19 @@ mod tests {
         wall_count: usize,
         has_vertical_descriptor: bool,
     ) -> XrNetAlignmentDescriptorFrame {
+        let samples = (0..wall_count)
+            .map(|index| XrDepthAlignSample {
+                kind: XrDepthAlignSampleKind::Wall,
+                point: vec3(index as f32 * 0.2, 0.0, 0.0),
+                normal: vec3(1.0, 0.0, 0.0),
+                weight: 1.0,
+            })
+            .collect();
         XrNetAlignmentDescriptorFrame {
             seq: 7,
             sent_at: 1.0,
             descriptor: XrDepthAlignDescriptor {
-                wall_features: vec![XrDepthAlignWallFeature::default(); wall_count],
+                samples,
                 vertical_descriptor: has_vertical_descriptor.then_some(
                     XrDepthAlignVerticalDescriptor {
                         origin_x: 0.0,
@@ -2709,12 +2491,11 @@ mod tests {
         peer.last_solved_local_descriptor_version = Some((4, 9));
         peer.last_solved_remote_descriptor_seq = Some(7);
         peer.last_solve_diagnostic = Some(XrDepthAlignSolveDiagnostic {
-            used_wall_features: true,
-            local_wall_features: 2,
-            remote_wall_features: 2,
+            local_wall_samples: 8,
+            remote_wall_samples: 8,
             local_vertical_descriptor: true,
             remote_vertical_descriptor: true,
-            best_solution: Some(make_solution(0.15, vec3(0.2, 0.0, -0.1), 0.42, 0.03, 3)),
+            best_solution: Some(make_solution(0.15, vec3(0.2, 0.0, -0.1), 0.42, 0.03, 8)),
             ..XrDepthAlignSolveDiagnostic::default()
         });
         peers.insert(peer.peer.id, peer);
