@@ -185,21 +185,6 @@ fn quantize_f32(value: f32, quantum: f32) -> i32 {
     (value / quantum.max(f32::EPSILON)).round() as i32
 }
 
-fn snapshot_chunk_key_and_id(
-    grid: &SparseTsdGridReadSnapshot,
-    coord: TsdfVoxelCoord,
-) -> (ChunkKey, usize) {
-    let cx = coord.x.div_euclid(grid.chunk_edge);
-    let cy = coord.y.div_euclid(grid.chunk_edge);
-    let cz = coord.z.div_euclid(grid.chunk_edge);
-    let lx = coord.x.rem_euclid(grid.chunk_edge) as usize;
-    let ly = coord.y.rem_euclid(grid.chunk_edge) as usize;
-    let lz = coord.z.rem_euclid(grid.chunk_edge) as usize;
-    let edge = grid.chunk_edge as usize;
-    let id = lx + ly * edge + lz * edge * edge;
-    (ChunkKey::new(cx, cy, cz), id)
-}
-
 fn tsdf_query_chunk_cache_slot(key: ChunkKey) -> usize {
     let hash = (key.x as u32).wrapping_mul(0x9E37_79B9)
         ^ (key.y as u32).wrapping_mul(0x85EB_CA6B)
@@ -217,11 +202,8 @@ impl<'a> TsdfQuerySampler<'a> {
     }
 
     fn world_to_voxel_coord(&self, point: Vec3f) -> TsdfVoxelCoord {
-        TsdfVoxelCoord::new(
-            (point.x / self.grid.voxel_size).floor() as i32,
-            (point.y / self.grid.voxel_size).floor() as i32,
-            (point.z / self.grid.voxel_size).floor() as i32,
-        )
+        let (x, y, z) = self.grid.world_to_voxel_xyz(point);
+        TsdfVoxelCoord::new(x, y, z)
     }
 
     fn chunk(&mut self, key: ChunkKey) -> Option<&'a SparseTsdReadChunk> {
@@ -237,7 +219,9 @@ impl<'a> TsdfQuerySampler<'a> {
     }
 
     fn normalized_distance(&mut self, coord: TsdfVoxelCoord) -> Option<f32> {
-        let (chunk_key, local_id) = snapshot_chunk_key_and_id(self.grid, coord);
+        let (chunk_key, local_id) = self
+            .grid
+            .chunk_key_and_local_index_xyz(coord.x, coord.y, coord.z);
         self.chunk(chunk_key)?.value(local_id)
     }
 
