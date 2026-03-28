@@ -380,10 +380,7 @@ fn descriptor_frames_equal(
     }
 }
 
-fn height_map_change_score(
-    previous: &XrDepthAlignHeightMap,
-    next: &XrDepthAlignHeightMap,
-) -> f32 {
+fn height_map_change_score(previous: &XrDepthAlignHeightMap, next: &XrDepthAlignHeightMap) -> f32 {
     if previous.size_x != next.size_x
         || previous.size_z != next.size_z
         || (previous.origin_x - next.origin_x).abs() > 1.0e-4
@@ -394,11 +391,7 @@ fn height_map_change_score(
     {
         return 1.0;
     }
-    let total = previous
-        .height_u16
-        .len()
-        .min(next.height_u16.len())
-        .max(1);
+    let total = previous.height_u16.len().min(next.height_u16.len()).max(1);
     let height_span = (previous.top_y_meters - previous.bottom_y_meters)
         .abs()
         .max((next.top_y_meters - next.bottom_y_meters).abs())
@@ -443,6 +436,15 @@ fn refresh_alignment_worker_peer(
         return false;
     }
 
+    if !descriptor_pair_ready_for_solve(
+        peer_state.last_solved_local_descriptor_version,
+        peer_state.last_solved_remote_descriptor_seq,
+        local_descriptor_version,
+        remote_descriptor.seq,
+    ) {
+        return false;
+    }
+
     peer_state.last_solved_local_descriptor_version = Some(local_descriptor_version);
     peer_state.last_solved_remote_descriptor_seq = Some(remote_descriptor.seq);
 
@@ -476,6 +478,23 @@ fn refresh_alignment_worker_peer(
     previous_transform != peer_state.remote_to_local
         || previous_solution != peer_state.last_accepted_solution
         || previous_diagnostic != peer_state.last_solve_diagnostic
+}
+
+fn descriptor_pair_ready_for_solve(
+    last_solved_local_descriptor_version: Option<(u64, u64)>,
+    last_solved_remote_descriptor_seq: Option<u32>,
+    local_descriptor_version: (u64, u64),
+    remote_descriptor_seq: u32,
+) -> bool {
+    match (
+        last_solved_local_descriptor_version,
+        last_solved_remote_descriptor_seq,
+    ) {
+        (Some(last_local), Some(last_remote)) => {
+            local_descriptor_version != last_local && remote_descriptor_seq != last_remote
+        }
+        _ => true,
+    }
 }
 
 fn clear_alignment_worker_peer(peer_state: &mut AlignmentWorkerPeerState) -> bool {
@@ -526,6 +545,38 @@ fn choose_stable_alignment_solution(
         return Some(previous);
     }
     Some(candidate)
+}
+
+#[cfg(test)]
+mod descriptor_pair_tests {
+    use super::descriptor_pair_ready_for_solve;
+
+    #[test]
+    fn initial_descriptor_pair_solves_immediately() {
+        assert!(descriptor_pair_ready_for_solve(None, None, (1, 0), 7));
+    }
+
+    #[test]
+    fn one_sided_descriptor_updates_wait_for_the_other_side() {
+        assert!(!descriptor_pair_ready_for_solve(
+            Some((1, 0)),
+            Some(7),
+            (2, 0),
+            7,
+        ));
+        assert!(!descriptor_pair_ready_for_solve(
+            Some((1, 0)),
+            Some(7),
+            (1, 0),
+            8,
+        ));
+        assert!(descriptor_pair_ready_for_solve(
+            Some((1, 0)),
+            Some(7),
+            (2, 0),
+            8,
+        ));
+    }
 }
 
 fn alignment_lock_score(
@@ -702,7 +753,8 @@ fn make_peer_scene_debug_text(
     } else {
         "no"
     };
-    let remote_seq = descriptor_seq_label(peer_state.latest_descriptor.as_ref().map(|frame| frame.seq));
+    let remote_seq =
+        descriptor_seq_label(peer_state.latest_descriptor.as_ref().map(|frame| frame.seq));
     if let Some(diagnostic) = peer_state.last_solve_diagnostic {
         return format!(
             "PeerMap {peer_label}: state {state_text} | map {} seq {} | signal {} | pose {}",
@@ -978,7 +1030,6 @@ impl XrPeopleDebug {
     const REMOTE_ANCHOR_MARKER_SIZE: f32 = 0.050;
     const SYNC_MATCH_RECEIVE_WINDOW_SECONDS: f64 = 0.45;
     const DESCRIPTOR_SEND_MIN_CHANGE_SCORE: f32 = 0.02;
-    const DESCRIPTOR_SEND_MIN_INTERVAL_SECONDS: f64 = 1.0;
     const SYNC_MATCH_ACTIVE_WINDOW_SECONDS: f64 = 1.35;
     const FIST_ACK_MAX_VERTICAL_DELTA_METERS: f32 = 0.22;
     const FIST_ACK_MAX_DEPTH_DELTA_METERS: f32 = 0.22;
@@ -1056,7 +1107,7 @@ impl XrPeopleDebug {
             return self.enabled;
         }
         self.enabled = enabled;
-        cx.xr_depth_mesh().set_surface_analysis_enabled(enabled);
+        cx.xr_tsdf().set_surface_analysis_enabled(enabled);
         self.net_node = None;
         self.alignment_worker = None;
         self.peers.clear();
@@ -1175,7 +1226,7 @@ impl XrPeopleDebug {
             return;
         }
 
-        let next_snapshot = cx.xr_depth_mesh().latest_tsdf_snapshot();
+        let next_snapshot = cx.xr_tsdf().latest_tsdf_snapshot();
         let next_signature = next_snapshot
             .as_ref()
             .map(|snapshot| (snapshot.generation, snapshot.update_sequence));
@@ -1192,16 +1243,9 @@ impl XrPeopleDebug {
                 .as_ref()
                 .map(|previous| descriptor_change_score(previous, &frame.descriptor))
                 .unwrap_or(1.0);
-            let send_interval_ready = self
-                .last_sent_descriptor_at
-                .map(|sent_at| {
-                    state.time - sent_at >= Self::DESCRIPTOR_SEND_MIN_INTERVAL_SECONDS
-                })
-                .unwrap_or(true);
             let should_publish = self.last_sent_descriptor_signature != Some(signature)
                 && (self.last_sent_descriptor.is_none()
-                    || change_score >= Self::DESCRIPTOR_SEND_MIN_CHANGE_SCORE)
-                && send_interval_ready;
+                    || change_score >= Self::DESCRIPTOR_SEND_MIN_CHANGE_SCORE);
             if should_publish {
                 self.local_descriptor = Some(frame.clone());
                 self.local_descriptor_version = Some(signature);
@@ -1923,7 +1967,11 @@ impl XrPeopleDebug {
     }
 
     fn local_descriptor_debug_text(&self) -> String {
-        let Some(descriptor) = self.local_descriptor.as_ref().map(|frame| &frame.descriptor) else {
+        let Some(descriptor) = self
+            .local_descriptor
+            .as_ref()
+            .map(|frame| &frame.descriptor)
+        else {
             return match self.local_scene_state() {
                 LocalSceneState::Missing => "AlignDbg: waiting for local heightmap".to_string(),
                 LocalSceneState::PublishPending => {
@@ -2231,7 +2279,7 @@ impl Widget for XrPeopleDebug {
                     self.set_enabled(cx, false);
                     self.set_enabled(cx, true);
                 } else {
-                    cx.xr_depth_mesh()
+                    cx.xr_tsdf()
                         .set_surface_analysis_enabled(self.enabled);
                 }
             });

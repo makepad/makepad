@@ -1,9 +1,7 @@
 use makepad_widgets;
 
 use makepad_widgets::makepad_draw::DrawVector;
-use makepad_widgets::makepad_platform::{
-    TextureFormat, TextureUpdated, XrDepthAlignHeightMap, XrDepthAlignSlicePreview,
-};
+use makepad_widgets::makepad_platform::{TextureFormat, TextureUpdated, XrDepthAlignHeightMap};
 use makepad_widgets::*;
 use makepad_xr::*;
 
@@ -1557,13 +1555,13 @@ impl App {
         }
 
         let tsdf_memory_mb = cx
-            .xr_depth_mesh()
+            .xr_tsdf()
             .latest_tsdf_snapshot()
             .as_ref()
             .map(|snapshot| snapshot.grid.heap_bytes() as f64 / 1_000_000.0)
             .unwrap_or(0.0);
         let (depth_frames_seen, depth_frames_dropped) = cx
-            .xr_depth_mesh()
+            .xr_tsdf()
             .state()
             .read()
             .ok()
@@ -1585,7 +1583,7 @@ impl App {
         ) {
             (Some(scale), Some(refresh_hz), Some(effective_hz), Some(gpu_ms)) => format!(
                 "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU {:.2} ms",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                cx.xr_tsdf().voxel_size_meters() * 100.0,
                 tsdf_memory_mb,
                 depth_frames_seen,
                 depth_frames_kept,
@@ -1598,7 +1596,7 @@ impl App {
             ),
             (Some(scale), Some(refresh_hz), Some(effective_hz), None) => format!(
                 "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU waiting",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                cx.xr_tsdf().voxel_size_meters() * 100.0,
                 tsdf_memory_mb,
                 depth_frames_seen,
                 depth_frames_kept,
@@ -1610,7 +1608,7 @@ impl App {
             ),
             (Some(scale), Some(refresh_hz), None, Some(gpu_ms)) => format!(
                 "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU {:.2} ms",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                cx.xr_tsdf().voxel_size_meters() * 100.0,
                 tsdf_memory_mb,
                 depth_frames_seen,
                 depth_frames_kept,
@@ -1622,7 +1620,7 @@ impl App {
             ),
             (Some(scale), Some(refresh_hz), None, None) => format!(
                 "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU waiting",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                cx.xr_tsdf().voxel_size_meters() * 100.0,
                 tsdf_memory_mb,
                 depth_frames_seen,
                 depth_frames_kept,
@@ -1634,7 +1632,7 @@ impl App {
             (Some(scale), None, _, Some(gpu_ms)) => {
                 format!(
                     "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh waiting | GPU {:.2} ms",
-                    cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                    cx.xr_tsdf().voxel_size_meters() * 100.0,
                     tsdf_memory_mb,
                     depth_frames_seen,
                     depth_frames_kept,
@@ -1647,7 +1645,7 @@ impl App {
             (Some(scale), None, _, None) => {
                 format!(
                     "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh waiting | GPU waiting",
-                    cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                    cx.xr_tsdf().voxel_size_meters() * 100.0,
                     tsdf_memory_mb,
                     depth_frames_seen,
                     depth_frames_kept,
@@ -1658,7 +1656,7 @@ impl App {
             }
             (None, _, _, _) => format!(
                 "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR render scale: not active",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                cx.xr_tsdf().voxel_size_meters() * 100.0,
                 tsdf_memory_mb
                 ,
                 depth_frames_seen,

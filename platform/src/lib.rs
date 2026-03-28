@@ -51,7 +51,7 @@ pub mod permission;
 mod texture;
 mod uniform_buffer;
 mod window;
-mod xr_depth_mesh;
+mod xr_tsdf;
 
 pub mod web_socket;
 
@@ -73,7 +73,7 @@ pub mod display_context;
 mod app_main;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
 pub use crate::cx_api::{can_play_type, CxSystemBrowser, SystemBrowserId};
-pub use crate::xr_depth_mesh::{XrDepthAlignHeightMap, XrDepthAlignSlicePreview};
+pub use crate::xr_tsdf::XrDepthAlignHeightMap;
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
@@ -217,17 +217,9 @@ pub use {
             ScriptWindowHandle, WindowBackdrop, WindowHandle, WindowIcon, WindowIconBuffer,
             WindowId, WindowVisuals,
         },
-        xr_depth_mesh::{
-            xr_depth_align_analyze_remote_to_local, xr_depth_align_analyze_remote_to_local_seeded,
-            xr_depth_align_build_wall_normal_histogram, xr_depth_align_loopback_preview_solution,
-            xr_depth_align_rescore_remote_to_local,
-            xr_depth_align_solution_is_accepted, xr_depth_align_solve_remote_to_local,
-            xr_depth_align_test_markers, xr_depth_align_transform_descriptor, ChunkKey,
-            SparseTsdGridReadSnapshot, SparseTsdReadChunk, TsdfPublishedSnapshot,
-            XrDepthAlignDebug, XrDepthAlignDescriptor, XrDepthAlignPreview, XrDepthAlignSample,
-            XrDepthAlignSampleKind, XrDepthAlignSolution, XrDepthAlignSolveDiagnostic,
-            XrDepthAlignSolveOutcome, XrDepthAlignVerticalDescriptor, XrDepthMeshState,
-            XrDepthMeshStats, XrDepthMeshStore,
+        xr_tsdf::{
+            ChunkKey, SparseTsdGridReadSnapshot, SparseTsdReadChunk, TsdfPublishedSnapshot,
+            XrTsdfState, XrTsdfStats, XrTsdfStore,
         },
     },
     app_main::*,
