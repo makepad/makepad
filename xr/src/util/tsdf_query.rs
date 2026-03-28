@@ -27,6 +27,7 @@ const TSDF_QUERY_TSDF_IMPACT_RAY_STEP_MIN: f32 = 0.02;
 const TSDF_QUERY_TSDF_IMPACT_EXTENT_SCALE: f32 = 1.20;
 const TSDF_QUERY_TSDF_IMPACT_EXTENT_MIN: f32 = 0.05;
 const TSDF_QUERY_TSDF_IMPACT_EXTENT_MAX: f32 = 0.16;
+const TSDF_QUERY_CHUNK_CACHE_SLOTS: usize = 8;
 pub(crate) const TSDF_QUERY_IMPACT_RESTITUTION: f32 = 0.38;
 
 #[derive(Clone, Copy, Debug)]
@@ -156,6 +157,26 @@ struct DepthGridSupportSample {
     radial_weight: f32,
 }
 
+#[derive(Clone, Copy)]
+struct TsdfQueryChunkCacheEntry<'a> {
+    key: ChunkKey,
+    chunk: &'a SparseTsdReadChunk,
+}
+
+struct TsdfQuerySampler<'a> {
+    grid: &'a SparseTsdGridReadSnapshot,
+    tsd_distance_meters: f32,
+    chunk_cache: [Option<TsdfQueryChunkCacheEntry<'a>>; TSDF_QUERY_CHUNK_CACHE_SLOTS],
+}
+
+#[derive(Clone, Copy)]
+struct TsdfQueryBilinearColumn {
+    x0: i32,
+    z0: i32,
+    tx: f32,
+    tz: f32,
+}
+
 fn depth_tsd_distance_meters(voxel_size_meters: f32) -> f32 {
     voxel_size_meters * 2.0
 }
@@ -179,21 +200,142 @@ fn snapshot_chunk_key_and_id(
     (ChunkKey::new(cx, cy, cz), id)
 }
 
-fn snapshot_normalized_distance(
-    grid: &SparseTsdGridReadSnapshot,
-    coord: TsdfVoxelCoord,
-) -> Option<f32> {
-    let (chunk_key, local_id) = snapshot_chunk_key_and_id(grid, coord);
-    let chunk = grid.chunks.get(&chunk_key)?;
-    (chunk.valid.get(local_id).copied().unwrap_or(0) != 0).then(|| chunk.values[local_id])
+fn tsdf_query_chunk_cache_slot(key: ChunkKey) -> usize {
+    let hash = (key.x as u32).wrapping_mul(0x9E37_79B9)
+        ^ (key.y as u32).wrapping_mul(0x85EB_CA6B)
+        ^ (key.z as u32).wrapping_mul(0xC2B2_AE35);
+    hash as usize & (TSDF_QUERY_CHUNK_CACHE_SLOTS - 1)
 }
 
-fn snapshot_world_to_voxel_coord(grid: &SparseTsdGridReadSnapshot, point: Vec3f) -> TsdfVoxelCoord {
-    TsdfVoxelCoord::new(
-        (point.x / grid.voxel_size).floor() as i32,
-        (point.y / grid.voxel_size).floor() as i32,
-        (point.z / grid.voxel_size).floor() as i32,
-    )
+impl<'a> TsdfQuerySampler<'a> {
+    fn new(grid: &'a SparseTsdGridReadSnapshot) -> Self {
+        Self {
+            grid,
+            tsd_distance_meters: depth_tsd_distance_meters(grid.voxel_size),
+            chunk_cache: [None; TSDF_QUERY_CHUNK_CACHE_SLOTS],
+        }
+    }
+
+    fn world_to_voxel_coord(&self, point: Vec3f) -> TsdfVoxelCoord {
+        TsdfVoxelCoord::new(
+            (point.x / self.grid.voxel_size).floor() as i32,
+            (point.y / self.grid.voxel_size).floor() as i32,
+            (point.z / self.grid.voxel_size).floor() as i32,
+        )
+    }
+
+    fn chunk(&mut self, key: ChunkKey) -> Option<&'a SparseTsdReadChunk> {
+        let slot = tsdf_query_chunk_cache_slot(key);
+        if let Some(entry) = self.chunk_cache[slot] {
+            if entry.key == key {
+                return Some(entry.chunk);
+            }
+        }
+        let chunk = self.grid.chunks.get(&key)?.as_ref();
+        self.chunk_cache[slot] = Some(TsdfQueryChunkCacheEntry { key, chunk });
+        Some(chunk)
+    }
+
+    fn normalized_distance(&mut self, coord: TsdfVoxelCoord) -> Option<f32> {
+        let (chunk_key, local_id) = snapshot_chunk_key_and_id(self.grid, coord);
+        self.chunk(chunk_key)?.value(local_id)
+    }
+
+    fn bilinear_column(&self, sample_x: f32, sample_z: f32) -> TsdfQueryBilinearColumn {
+        let voxel_size = self.grid.voxel_size;
+        let grid_x = sample_x / voxel_size - 0.5;
+        let grid_z = sample_z / voxel_size - 0.5;
+        let x0 = grid_x.floor() as i32;
+        let z0 = grid_z.floor() as i32;
+        TsdfQueryBilinearColumn {
+            x0,
+            z0,
+            tx: grid_x - x0 as f32,
+            tz: grid_z - z0 as f32,
+        }
+    }
+
+    fn bilinear_distance_at_y(
+        &mut self,
+        column: TsdfQueryBilinearColumn,
+        y_coord: i32,
+    ) -> Option<f32> {
+        let v00 = self.normalized_distance(TsdfVoxelCoord::new(column.x0, y_coord, column.z0))?;
+        let v10 =
+            self.normalized_distance(TsdfVoxelCoord::new(column.x0 + 1, y_coord, column.z0))?;
+        let v01 =
+            self.normalized_distance(TsdfVoxelCoord::new(column.x0, y_coord, column.z0 + 1))?;
+        let v11 =
+            self.normalized_distance(TsdfVoxelCoord::new(column.x0 + 1, y_coord, column.z0 + 1))?;
+
+        let vx0 = v00 + (v10 - v00) * column.tx;
+        let vx1 = v01 + (v11 - v01) * column.tx;
+        Some(vx0 + (vx1 - vx0) * column.tz)
+    }
+
+    fn trilinear_distance(&mut self, point: Vec3f) -> Option<f32> {
+        let voxel_size = self.grid.voxel_size;
+        let grid_x = point.x / voxel_size - 0.5;
+        let grid_y = point.y / voxel_size - 0.5;
+        let grid_z = point.z / voxel_size - 0.5;
+        let x0 = grid_x.floor() as i32;
+        let y0 = grid_y.floor() as i32;
+        let z0 = grid_z.floor() as i32;
+        let tx = grid_x - x0 as f32;
+        let ty = grid_y - y0 as f32;
+        let tz = grid_z - z0 as f32;
+
+        let sample = |sampler: &mut Self, x: i32, y: i32, z: i32| -> Option<f32> {
+            sampler
+                .normalized_distance(TsdfVoxelCoord::new(x, y, z))
+                .map(|distance| distance * sampler.tsd_distance_meters)
+        };
+
+        let s000 = sample(self, x0, y0, z0)?;
+        let s100 = sample(self, x0 + 1, y0, z0)?;
+        let s010 = sample(self, x0, y0 + 1, z0)?;
+        let s110 = sample(self, x0 + 1, y0 + 1, z0)?;
+        let s001 = sample(self, x0, y0, z0 + 1)?;
+        let s101 = sample(self, x0 + 1, y0, z0 + 1)?;
+        let s011 = sample(self, x0, y0 + 1, z0 + 1)?;
+        let s111 = sample(self, x0 + 1, y0 + 1, z0 + 1)?;
+
+        let x00 = s000 + (s100 - s000) * tx;
+        let x10 = s010 + (s110 - s010) * tx;
+        let x01 = s001 + (s101 - s001) * tx;
+        let x11 = s011 + (s111 - s011) * tx;
+        let y0_mix = x00 + (x10 - x00) * ty;
+        let y1_mix = x01 + (x11 - x01) * ty;
+        Some(y0_mix + (y1_mix - y0_mix) * tz)
+    }
+
+    fn distance_gradient(&mut self, point: Vec3f) -> Option<Vec3f> {
+        let center = self.trilinear_distance(point)?;
+        let step = self
+            .grid
+            .voxel_size
+            .max(TSDF_QUERY_TSDF_IMPACT_RAY_STEP_MIN);
+        let dx = finite_difference_axis(
+            center,
+            self.trilinear_distance(point + vec3f(step, 0.0, 0.0)),
+            self.trilinear_distance(point - vec3f(step, 0.0, 0.0)),
+            step,
+        )?;
+        let dy = finite_difference_axis(
+            center,
+            self.trilinear_distance(point + vec3f(0.0, step, 0.0)),
+            self.trilinear_distance(point - vec3f(0.0, step, 0.0)),
+            step,
+        )?;
+        let dz = finite_difference_axis(
+            center,
+            self.trilinear_distance(point + vec3f(0.0, 0.0, step)),
+            self.trilinear_distance(point - vec3f(0.0, 0.0, step)),
+            step,
+        )?;
+        let gradient = vec3f(dx, dy, dz);
+        (gradient.length() > 1.0e-5).then_some(gradient.normalize())
+    }
 }
 
 fn voxel_center_axis(voxel_size: f32, coord: i32) -> f32 {
@@ -264,12 +406,16 @@ fn query_support_plane_fallback_tangent(normal: Vec3f) -> Vec3f {
 }
 
 fn query_tsdf_support_radius(query_radius: f32) -> f32 {
-    (query_radius * TSDF_QUERY_TSDF_SUPPORT_RADIUS_SCALE)
-        .clamp(TSDF_QUERY_TSDF_SUPPORT_RADIUS_MIN, TSDF_QUERY_TSDF_SUPPORT_RADIUS_MAX)
+    (query_radius * TSDF_QUERY_TSDF_SUPPORT_RADIUS_SCALE).clamp(
+        TSDF_QUERY_TSDF_SUPPORT_RADIUS_MIN,
+        TSDF_QUERY_TSDF_SUPPORT_RADIUS_MAX,
+    )
 }
 
 fn query_support_plane_height_tolerance(query_radius: f32, voxel_size: f32) -> f32 {
-    (query_radius * 0.45).clamp(0.015, 0.05).max(voxel_size * 0.25)
+    (query_radius * 0.45)
+        .clamp(0.015, 0.05)
+        .max(voxel_size * 0.25)
 }
 
 fn query_tsdf_impact_half_extent(query_radius: f32, voxel_size: f32) -> f32 {
@@ -310,7 +456,10 @@ pub(crate) fn depth_query_plane_quad(plane: DepthQuerySupportPlane) -> [Vec3f; 4
     ]
 }
 
-fn query_support_plane_fingerprint(plane: &DepthQuerySupportPlane, role: DepthQueryColliderRole) -> u64 {
+fn query_support_plane_fingerprint(
+    plane: &DepthQuerySupportPlane,
+    role: DepthQueryColliderRole,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     role.hash(&mut hasher);
     [
@@ -355,124 +504,43 @@ fn make_query_halfspace_surface(
     }
 }
 
-fn query_grid_bilinear_distance_at_y(
-    grid: &SparseTsdGridReadSnapshot,
-    sample_x: f32,
-    sample_z: f32,
-    y_coord: i32,
-) -> Option<f32> {
-    let voxel_size = grid.voxel_size;
-    let grid_x = sample_x / voxel_size - 0.5;
-    let grid_z = sample_z / voxel_size - 0.5;
-    let x0 = grid_x.floor() as i32;
-    let z0 = grid_z.floor() as i32;
-    let tx = grid_x - x0 as f32;
-    let tz = grid_z - z0 as f32;
-
-    let v00 = snapshot_normalized_distance(grid, TsdfVoxelCoord::new(x0, y_coord, z0))?;
-    let v10 = snapshot_normalized_distance(grid, TsdfVoxelCoord::new(x0 + 1, y_coord, z0))?;
-    let v01 = snapshot_normalized_distance(grid, TsdfVoxelCoord::new(x0, y_coord, z0 + 1))?;
-    let v11 =
-        snapshot_normalized_distance(grid, TsdfVoxelCoord::new(x0 + 1, y_coord, z0 + 1))?;
-
-    let vx0 = v00 + (v10 - v00) * tx;
-    let vx1 = v01 + (v11 - v01) * tx;
-    Some(vx0 + (vx1 - vx0) * tz)
-}
-
-fn query_trilinear_distance(grid: &SparseTsdGridReadSnapshot, point: Vec3f) -> Option<f32> {
-    let voxel_size = grid.voxel_size;
-    let tsd_distance_meters = depth_tsd_distance_meters(voxel_size);
-    let grid_x = point.x / voxel_size - 0.5;
-    let grid_y = point.y / voxel_size - 0.5;
-    let grid_z = point.z / voxel_size - 0.5;
-    let x0 = grid_x.floor() as i32;
-    let y0 = grid_y.floor() as i32;
-    let z0 = grid_z.floor() as i32;
-    let tx = grid_x - x0 as f32;
-    let ty = grid_y - y0 as f32;
-    let tz = grid_z - z0 as f32;
-
-    let sample = |x: i32, y: i32, z: i32| -> Option<f32> {
-        snapshot_normalized_distance(grid, TsdfVoxelCoord::new(x, y, z))
-            .map(|distance| distance * tsd_distance_meters)
-    };
-
-    let s000 = sample(x0, y0, z0)?;
-    let s100 = sample(x0 + 1, y0, z0)?;
-    let s010 = sample(x0, y0 + 1, z0)?;
-    let s110 = sample(x0 + 1, y0 + 1, z0)?;
-    let s001 = sample(x0, y0, z0 + 1)?;
-    let s101 = sample(x0 + 1, y0, z0 + 1)?;
-    let s011 = sample(x0, y0 + 1, z0 + 1)?;
-    let s111 = sample(x0 + 1, y0 + 1, z0 + 1)?;
-
-    let x00 = s000 + (s100 - s000) * tx;
-    let x10 = s010 + (s110 - s010) * tx;
-    let x01 = s001 + (s101 - s001) * tx;
-    let x11 = s011 + (s111 - s011) * tx;
-    let y0_mix = x00 + (x10 - x00) * ty;
-    let y1_mix = x01 + (x11 - x01) * ty;
-    Some(y0_mix + (y1_mix - y0_mix) * tz)
-}
-
-fn query_distance_gradient(grid: &SparseTsdGridReadSnapshot, point: Vec3f) -> Option<Vec3f> {
-    let center = query_trilinear_distance(grid, point)?;
-    let step = grid.voxel_size.max(TSDF_QUERY_TSDF_IMPACT_RAY_STEP_MIN);
-    let dx = finite_difference_axis(
-        center,
-        query_trilinear_distance(grid, point + vec3f(step, 0.0, 0.0)),
-        query_trilinear_distance(grid, point - vec3f(step, 0.0, 0.0)),
-        step,
-    )?;
-    let dy = finite_difference_axis(
-        center,
-        query_trilinear_distance(grid, point + vec3f(0.0, step, 0.0)),
-        query_trilinear_distance(grid, point - vec3f(0.0, step, 0.0)),
-        step,
-    )?;
-    let dz = finite_difference_axis(
-        center,
-        query_trilinear_distance(grid, point + vec3f(0.0, 0.0, step)),
-        query_trilinear_distance(grid, point - vec3f(0.0, 0.0, step)),
-        step,
-    )?;
-    let gradient = vec3f(dx, dy, dz);
-    (gradient.length() > 1.0e-5).then_some(gradient.normalize())
-}
-
 fn query_first_support_height(
-    grid: &SparseTsdGridReadSnapshot,
+    sampler: &mut TsdfQuerySampler<'_>,
     sample_x: f32,
     sample_z: f32,
     top_y: f32,
     bottom_y: f32,
 ) -> Option<f32> {
-    let top_coord = snapshot_world_to_voxel_coord(grid, vec3f(sample_x, top_y, sample_z)).y;
-    let bottom_coord = snapshot_world_to_voxel_coord(grid, vec3f(sample_x, bottom_y, sample_z)).y;
+    let top_coord = sampler
+        .world_to_voxel_coord(vec3f(sample_x, top_y, sample_z))
+        .y;
+    let bottom_coord = sampler
+        .world_to_voxel_coord(vec3f(sample_x, bottom_y, sample_z))
+        .y;
     if top_coord <= bottom_coord {
         return None;
     }
+    let column = sampler.bilinear_column(sample_x, sample_z);
+    let mut above = sampler.bilinear_distance_at_y(column, top_coord);
 
     for y_coord in (bottom_coord + 1..=top_coord).rev() {
-        let Some(above) = query_grid_bilinear_distance_at_y(grid, sample_x, sample_z, y_coord) else {
+        let below = sampler.bilinear_distance_at_y(column, y_coord - 1);
+        let (Some(above_distance), Some(below_distance)) = (above, below) else {
+            above = below;
             continue;
         };
-        let Some(below) = query_grid_bilinear_distance_at_y(grid, sample_x, sample_z, y_coord - 1)
-        else {
-            continue;
-        };
-        if above <= 0.0 || below > 0.0 {
+        if above_distance <= 0.0 || below_distance > 0.0 {
+            above = below;
             continue;
         }
-        let denom = above - below;
+        let denom = above_distance - below_distance;
         let blend = if denom.abs() > 1.0e-6 {
-            (above / denom).clamp(0.0, 1.0)
+            (above_distance / denom).clamp(0.0, 1.0)
         } else {
             0.5
         };
-        let y_above = voxel_center_axis(grid.voxel_size, y_coord);
-        let y_below = voxel_center_axis(grid.voxel_size, y_coord - 1);
+        let y_above = voxel_center_axis(sampler.grid.voxel_size, y_coord);
+        let y_below = voxel_center_axis(sampler.grid.voxel_size, y_coord - 1);
         return Some(y_above + (y_below - y_above) * blend);
     }
 
@@ -556,7 +624,10 @@ fn query_trajectory_bounds_and_length(
     (min, max, length)
 }
 
-fn make_query_hit_from_resolved_surface(query: DepthQuery, surface: DepthQueryResolvedSurface) -> DepthQueryHit {
+fn make_query_hit_from_resolved_surface(
+    query: DepthQuery,
+    surface: DepthQueryResolvedSurface,
+) -> DepthQueryHit {
     DepthQueryHit {
         key: query.key,
         distance: surface.surface.distance,
@@ -569,11 +640,28 @@ fn make_query_hit_from_resolved_surface(query: DepthQuery, surface: DepthQueryRe
     }
 }
 
+fn query_might_overlap_active_bounds(snapshot: &TsdfPublishedSnapshot, query: DepthQuery) -> bool {
+    let Some((bounds_min, bounds_max)) = snapshot.grid.active_bounds else {
+        return false;
+    };
+    let padding =
+        query.radius + query.max_distance + depth_tsd_distance_meters(snapshot.grid.voxel_size);
+    let padding_vec = vec3f(padding, padding, padding);
+    let query_min = Vec3f::min_componentwise(query.center, query.predicted_center) - padding_vec;
+    let query_max = Vec3f::max_componentwise(query.center, query.predicted_center) + padding_vec;
+    query_max.x >= bounds_min.x
+        && query_min.x <= bounds_max.x
+        && query_max.y >= bounds_min.y
+        && query_min.y <= bounds_max.y
+        && query_max.z >= bounds_min.z
+        && query_min.z <= bounds_max.z
+}
+
 fn evaluate_tsdf_impact_query(
-    snapshot: &TsdfPublishedSnapshot,
+    sampler: &mut TsdfQuerySampler<'_>,
     query: DepthQuery,
 ) -> Option<DepthQueryResolvedSurface> {
-    let grid = snapshot.grid.as_ref();
+    let grid = sampler.grid;
     let travel = query.predicted_center - query.center;
     let travel_distance = travel.length();
     let velocity_length = query.velocity.length();
@@ -606,7 +694,7 @@ fn evaluate_tsdf_impact_query(
 
     while t <= max_search_distance + 1.0e-4 {
         let sample_position = query.center + motion_dir.scale(t);
-        let Some(sample_distance) = query_trilinear_distance(grid, sample_position) else {
+        let Some(sample_distance) = sampler.trilinear_distance(sample_position) else {
             previous_t = t;
             t += step_distance;
             continue;
@@ -617,7 +705,7 @@ fn evaluate_tsdf_impact_query(
             for _ in 0..5 {
                 let mid = (lo + hi) * 0.5;
                 let mid_position = query.center + motion_dir.scale(mid);
-                if let Some(mid_distance) = query_trilinear_distance(grid, mid_position) {
+                if let Some(mid_distance) = sampler.trilinear_distance(mid_position) {
                     if mid_distance <= hit_threshold {
                         hi = mid;
                     } else {
@@ -627,8 +715,8 @@ fn evaluate_tsdf_impact_query(
             }
 
             let hit_position = query.center + motion_dir.scale(hi);
-            let signed_distance = query_trilinear_distance(grid, hit_position)?;
-            let mut normal = query_distance_gradient(grid, hit_position)?;
+            let signed_distance = sampler.trilinear_distance(hit_position)?;
+            let mut normal = sampler.distance_gradient(hit_position)?;
             let mut opposing_dot = normal.dot(motion_dir.scale(-1.0));
             if opposing_dot <= TSDF_QUERY_MIN_OPPOSING_NORMAL_DOT {
                 let flipped = normal.scale(-1.0);
@@ -680,12 +768,13 @@ fn evaluate_tsdf_impact_query(
 }
 
 fn evaluate_tsdf_support_query(
-    snapshot: &TsdfPublishedSnapshot,
+    sampler: &mut TsdfQuerySampler<'_>,
     query: DepthQuery,
+    impact_surface: Option<DepthQueryResolvedSurface>,
 ) -> Option<DepthQueryHit> {
     const GRID_LAST: f32 = (TSDF_QUERY_TSDF_SUPPORT_GRID_DIM - 1) as f32;
 
-    let grid = snapshot.grid.as_ref();
+    let grid = sampler.grid;
     let trajectory_samples = query_trajectory_samples(query);
     let (trajectory_bounds_min, trajectory_bounds_max, travel_distance) =
         query_trajectory_bounds_and_length(&trajectory_samples);
@@ -697,8 +786,13 @@ fn evaluate_tsdf_support_query(
     let (_, search_sample, center_support_y) = trajectory_samples
         .iter()
         .filter_map(|sample| {
-            let support_y =
-                query_first_support_height(grid, sample.point.x, sample.point.z, top_y, bottom_y)?;
+            let support_y = query_first_support_height(
+                sampler,
+                sample.point.x,
+                sample.point.z,
+                top_y,
+                bottom_y,
+            )?;
             let support_point = vec3f(sample.point.x, support_y, sample.point.z);
             let score = (sample.point - support_point).length()
                 - sample.progress * (query.radius + grid.voxel_size) * 0.35;
@@ -725,7 +819,8 @@ fn evaluate_tsdf_support_query(
             };
             let sample_x = search_center.x + u * support_radius;
             let sample_z = search_center.z + v * support_radius;
-            let Some(sample_y) = query_first_support_height(grid, sample_x, sample_z, top_y, bottom_y)
+            let Some(sample_y) =
+                query_first_support_height(sampler, sample_x, sample_z, top_y, bottom_y)
             else {
                 continue;
             };
@@ -834,8 +929,8 @@ fn evaluate_tsdf_support_query(
     }
 
     let point = search_center - normal.scale(normal.dot(search_center) - plane_offset);
-    let extent_padding = (query.radius * TSDF_QUERY_TSDF_SUPPORT_EXTENT_PADDING_SCALE)
-        .max(grid.voxel_size * 0.45);
+    let extent_padding =
+        (query.radius * TSDF_QUERY_TSDF_SUPPORT_EXTENT_PADDING_SCALE).max(grid.voxel_size * 0.45);
     let debug_half_extent_max = support_radius;
     let debug_half_extent_min = (query.radius * 0.9)
         .max(grid.voxel_size * 0.35)
@@ -871,7 +966,6 @@ fn evaluate_tsdf_support_query(
         DepthQueryColliderRole::Support,
         0.0,
     );
-    let impact_surface = evaluate_tsdf_impact_query(snapshot, query);
     let additional_hits = impact_surface.into_iter().collect::<Vec<_>>();
 
     Some(DepthQueryHit {
@@ -890,11 +984,13 @@ pub(crate) fn evaluate_tsdf_query(
     snapshot: &TsdfPublishedSnapshot,
     query: DepthQuery,
 ) -> DepthQueryResult {
-    if snapshot.grid.active_value_count == 0 {
+    if snapshot.grid.active_value_count == 0 || !query_might_overlap_active_bounds(snapshot, query)
+    {
         return DepthQueryResult::Miss { key: query.key };
     }
 
-    let impact_surface = evaluate_tsdf_impact_query(snapshot, query);
+    let mut sampler = TsdfQuerySampler::new(snapshot.grid.as_ref());
+    let impact_surface = evaluate_tsdf_impact_query(&mut sampler, query);
     let prefer_impact = impact_surface.as_ref().is_some_and(|impact_surface| {
         let DepthQueryColliderGeometry::HalfSpace(plane) = &impact_surface.collider.geometry;
         query.velocity.y >= TSDF_QUERY_TSDF_IMPACT_MIN_UPWARD_SPEED
@@ -908,7 +1004,7 @@ pub(crate) fn evaluate_tsdf_query(
             .unwrap_or(DepthQueryResult::Miss { key: query.key });
     }
 
-    evaluate_tsdf_support_query(snapshot, query)
+    evaluate_tsdf_support_query(&mut sampler, query, impact_surface)
         .or_else(|| {
             impact_surface
                 .map(|impact_surface| make_query_hit_from_resolved_surface(query, impact_surface))
@@ -938,19 +1034,9 @@ mod tests {
         let chunk = Arc::make_mut(
             chunks
                 .entry(ChunkKey::new(cx, cy, cz))
-                .or_insert_with(|| {
-                    Arc::new(SparseTsdReadChunk {
-                        values: vec![0.0; edge * edge * edge],
-                        valid: vec![0; edge * edge * edge],
-                        confidence: vec![0; edge * edge * edge],
-                        observed_generation: vec![0; edge * edge * edge],
-                    })
-                }),
+                .or_insert_with(|| Arc::new(SparseTsdReadChunk::new(edge * edge * edge))),
         );
-        chunk.values[id] = normalized_distance;
-        chunk.valid[id] = 1;
-        chunk.confidence[id] = 8;
-        chunk.observed_generation[id] = 1;
+        chunk.set_value(id, normalized_distance, 8, 1);
     }
 
     fn make_flat_floor_snapshot(voxel_size: f32) -> TsdfPublishedSnapshot {
@@ -1010,8 +1096,15 @@ mod tests {
         match result {
             DepthQueryResult::Hit(hit) => {
                 let DepthQueryColliderGeometry::HalfSpace(plane) = hit.collider.geometry;
-                assert!(plane.normal.y >= 0.98, "expected floor support plane, got {plane:?}");
-                assert!(plane.point.y.abs() <= 0.03, "expected plane near y=0, got {:?}", plane.point);
+                assert!(
+                    plane.normal.y >= 0.98,
+                    "expected floor support plane, got {plane:?}"
+                );
+                assert!(
+                    plane.point.y.abs() <= 0.03,
+                    "expected plane near y=0, got {:?}",
+                    plane.point
+                );
             }
             DepthQueryResult::Miss { .. } => panic!("expected flat-floor TSDF query hit"),
         }
