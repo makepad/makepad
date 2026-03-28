@@ -5,9 +5,9 @@ use super::*;
 use crate::depth_debug_mesh::{push_debug_depth_plane, DebugDepthMeshChunk};
 use crate::depth_debug_mesh_worker::{XrDepthDebugMeshWorker, XrDepthDebugMeshWorkerResult};
 use crate::tsdf_query::{
-    depth_query_plane_supports_body, evaluate_tsdf_query, DepthQuery, DepthQueryCollider,
-    DepthQueryColliderGeometry, DepthQueryColliderRole, DepthQueryHit, DepthQueryResult,
-    DepthQuerySupportPlane,
+    depth_query_might_need_impact_refresh, depth_query_plane_supports_body, evaluate_tsdf_query,
+    DepthQuery, DepthQueryCollider, DepthQueryColliderGeometry, DepthQueryColliderRole,
+    DepthQueryHit, DepthQueryResult, DepthQuerySupportPlane,
 };
 use makepad_widgets::makepad_platform::XrDepthMeshStore;
 
@@ -50,6 +50,18 @@ fn depth_query_support_refresh_edge_margin(query_radius: f32) -> f32 {
 
 fn depth_query_support_refresh_margin_scale(body_speed: f32) -> f32 {
     (body_speed / XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN).clamp(0.25, 1.0)
+}
+
+fn depth_query_should_refresh_from_tsdf(
+    body_sleeping: bool,
+    can_skip_support_refresh: bool,
+    body_speed: f32,
+    needs_impact_refresh: bool,
+) -> bool {
+    !body_sleeping
+        && (!can_skip_support_refresh
+            || needs_impact_refresh
+            || body_speed >= XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN)
 }
 
 impl RetainedDepthQuerySurface {
@@ -330,6 +342,19 @@ mod tests {
             0.30,
         ));
     }
+
+    #[test]
+    fn retained_support_does_not_hide_impact_capable_motion() {
+        assert!(depth_query_should_refresh_from_tsdf(
+            false, true, 0.12, true,
+        ));
+        assert!(!depth_query_should_refresh_from_tsdf(
+            false, true, 0.12, false,
+        ));
+        assert!(!depth_query_should_refresh_from_tsdf(
+            true, false, 0.40, true,
+        ));
+    }
 }
 
 impl XrEnv {
@@ -370,8 +395,7 @@ impl XrEnv {
         let mut quad_vertices = Vec::new();
 
         let mut push_surface = |retained: &RetainedDepthQuerySurface| {
-            let DepthQueryColliderGeometry::HalfSpace(plane) =
-                retained.target.collider.geometry;
+            let DepthQueryColliderGeometry::HalfSpace(plane) = retained.target.collider.geometry;
             push_debug_depth_plane(&mut quad_indices, &mut quad_vertices, plane);
         };
 
@@ -631,7 +655,13 @@ pub(super) fn sync_depth_query_surfaces_with_store(
                 body_speed,
             )
         });
-        if !body_sleeping && !(can_skip_refresh && body_speed < XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN) {
+        let needs_impact_refresh = depth_query_might_need_impact_refresh(query_request);
+        if depth_query_should_refresh_from_tsdf(
+            body_sleeping,
+            can_skip_refresh,
+            body_speed,
+            needs_impact_refresh,
+        ) {
             let latest_result = snapshot
                 .as_ref()
                 .map(|snapshot| evaluate_tsdf_query(snapshot, query_request));
