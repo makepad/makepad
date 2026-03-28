@@ -388,18 +388,24 @@ fn height_map_change_score(previous: &XrDepthAlignHeightMap, next: &XrDepthAlign
         || (previous.cell_size_meters - next.cell_size_meters).abs() > 1.0e-5
         || (previous.bottom_y_meters - next.bottom_y_meters).abs() > 1.0e-4
         || (previous.top_y_meters - next.top_y_meters).abs() > 1.0e-4
+        || (previous.floor_y_meters - next.floor_y_meters).abs() > 1.0e-4
     {
         return 1.0;
     }
-    let total = previous.height_u16.len().min(next.height_u16.len()).max(1);
-    let height_span = (previous.top_y_meters - previous.bottom_y_meters)
-        .abs()
-        .max((next.top_y_meters - next.bottom_y_meters).abs())
-        .max(1.0e-3);
-    let encoded_delta = ((0.05 / height_span) * 65534.0).ceil().max(1.0) as u16;
+    let total = previous
+        .heights_meters
+        .len()
+        .min(next.heights_meters.len())
+        .max(1);
     let mut changed = 0usize;
-    for (left, right) in previous.height_u16.iter().zip(next.height_u16.iter()) {
-        if (*left == 0) != (*right == 0) || left.abs_diff(*right) >= encoded_delta {
+    for (left, right) in previous
+        .heights_meters
+        .iter()
+        .zip(next.heights_meters.iter())
+    {
+        if left.is_finite() != right.is_finite()
+            || (left.is_finite() && right.is_finite() && (*left - *right).abs() >= 0.05)
+        {
             changed += 1;
         }
     }
@@ -645,9 +651,9 @@ fn descriptor_contour_sample_count(descriptor: &XrDepthAlignDescriptor) -> usize
         sample_count
     } else if let Some(height_map) = descriptor.height_map.as_ref() {
         let valid_cells = height_map
-            .height_u16
+            .heights_meters
             .iter()
-            .filter(|value| **value != 0)
+            .filter(|value| value.is_finite())
             .count();
         ((valid_cells + 127) / 128).max(1)
     } else {
@@ -661,9 +667,9 @@ fn descriptor_height_map_filled_cells(descriptor: &XrDepthAlignDescriptor) -> us
         .as_ref()
         .map(|height_map| {
             height_map
-                .height_u16
+                .heights_meters
                 .iter()
-                .filter(|value| **value != 0)
+                .filter(|value| value.is_finite())
                 .count()
         })
         .unwrap_or(0)
@@ -1096,6 +1102,33 @@ impl XrPeopleDebug {
         })?;
         let descriptor = peer_state.latest_descriptor?.descriptor;
         xr_depth_align_transform_descriptor(&descriptor, &transform).height_map
+    }
+
+    pub fn raw_peer_alignment_descriptor(
+        &self,
+    ) -> Option<(XrNetPeerId, XrNetAlignmentDescriptorFrame)> {
+        let (peer_id, peer_state) = self.preferred_peer()?;
+        Some((peer_id, peer_state.latest_descriptor?))
+    }
+
+    pub fn raw_peer_height_map(&self) -> Option<XrDepthAlignHeightMap> {
+        let (_, descriptor) = self.raw_peer_alignment_descriptor()?;
+        descriptor.descriptor.height_map
+    }
+
+    pub fn raw_alignment_dump_pair(&self) -> Option<XrNetAlignmentDescriptorDumpPair> {
+        let local_descriptor = self.local_descriptor.clone()?;
+        let (peer_id, remote_descriptor) = self.raw_peer_alignment_descriptor()?;
+        if local_descriptor.descriptor.height_map.is_none()
+            || remote_descriptor.descriptor.height_map.is_none()
+        {
+            return None;
+        }
+        Some(XrNetAlignmentDescriptorDumpPair::new(
+            peer_id,
+            local_descriptor,
+            remote_descriptor,
+        ))
     }
 
     pub fn local_slice_preview(&self) -> Option<XrDepthAlignSlicePreview> {
@@ -2279,8 +2312,7 @@ impl Widget for XrPeopleDebug {
                     self.set_enabled(cx, false);
                     self.set_enabled(cx, true);
                 } else {
-                    cx.xr_tsdf()
-                        .set_surface_analysis_enabled(self.enabled);
+                    cx.xr_tsdf().set_surface_analysis_enabled(self.enabled);
                 }
             });
             return ScriptAsyncResult::Return(ScriptValue::from_bool(enabled));
