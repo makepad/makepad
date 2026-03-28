@@ -2,7 +2,10 @@ use crate::xr_node::{xr_widget_world_transform, XrNode};
 use crate::*;
 use makepad_widgets::{
     animator::{Animator, AnimatorImpl},
-    event::XrFingerTip,
+    event::{
+        XrFingerTip, XR_TOUCH_CAPTURE_BACK, XR_TOUCH_CAPTURE_FRONT, XR_TOUCH_DOWN_BACK,
+        XR_TOUCH_DOWN_FRONT,
+    },
 };
 use std::{cell::Cell, rc::Rc};
 
@@ -184,8 +187,6 @@ impl XrView {
     const XR_CURSOR_HOVER_FRONT: f32 = 84.0;
     const XR_CURSOR_SIZE_NEAR: f64 = 30.0;
     const XR_CURSOR_SIZE_FAR: f64 = 16.0;
-    const XR_TOUCH_DOWN_FRONT: f32 = 6.0;
-    const XR_TOUCH_DOWN_BACK: f32 = -12.0;
     const FACE_PANEL_DISTANCE: f32 = 0.46;
     const FACE_PANEL_VERTICAL_OFFSET: f32 = -0.10;
     const WRIST_PANEL_SURFACE_OFFSET: f32 = 0.048;
@@ -562,7 +563,11 @@ impl XrView {
     }
 
     fn tip_is_touching_for_down(touch_z: f32) -> bool {
-        touch_z <= Self::XR_TOUCH_DOWN_FRONT && touch_z >= Self::XR_TOUCH_DOWN_BACK
+        touch_z <= XR_TOUCH_DOWN_FRONT && touch_z >= XR_TOUCH_DOWN_BACK
+    }
+
+    fn tip_is_touching_for_capture(touch_z: f32) -> bool {
+        touch_z <= XR_TOUCH_CAPTURE_FRONT && touch_z >= XR_TOUCH_CAPTURE_BACK
     }
 
     fn fingertip_slot(is_left: bool, index: usize) -> usize {
@@ -711,12 +716,15 @@ impl XrView {
 
             if let Some(hit) = hit {
                 let tip_is_interactive = self.multitouch || tip.index == XrHand::INDEX_TIP;
-                let tip_is_down = tip.active
-                    && tip_is_interactive
-                    && self.contains_local(hit.projected)
-                    && Self::tip_is_touching_for_down(hit.touch_z);
                 let tip_slot = Self::fingertip_slot(tip.is_left, tip.index);
                 let was_tip_down = self.tip_down_state[tip_slot];
+                let tip_is_down = tip_is_interactive
+                    && self.contains_local(hit.projected)
+                    && if was_tip_down {
+                        Self::tip_is_touching_for_capture(hit.touch_z)
+                    } else {
+                        tip.active && Self::tip_is_touching_for_down(hit.touch_z)
+                    };
 
                 if let Some(mut cursor) = self.cursor_from_hit(hit, tip.is_left) {
                     cursor.index = tip.index;

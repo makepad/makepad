@@ -151,9 +151,7 @@ const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_Y_MIN: f32 = 0.20;
 const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_Y_MAX: f32 = 2.00;
 const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_CLUTTER_Y_MAX: f32 = 1.45;
 const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_VERTICAL_NORMAL_Y_MAX: f32 = 0.45;
-const DEPTH_ALIGN_HEIGHT_MAP_CELL_SIZE_METERS: f32 = 0.05;
 const DEPTH_ALIGN_HEIGHT_MAP_BOUNDS_PADDING_METERS: f32 = 0.45;
-const DEPTH_ALIGN_HEIGHT_MAP_MAX_EXTENT_METERS: f32 = 10.0;
 const DEPTH_ALIGN_VECTOR_SLICE_TOP_Y_METERS: f32 = 2.00;
 const DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS: f32 = 0.50;
 const DEPTH_ALIGN_VECTOR_SLICE_MIN_PROJECT_Y_METERS: f32 = 0.00;
@@ -164,7 +162,10 @@ const DEPTH_ALIGN_VECTOR_SLICE_MIN_SEGMENT_METERS: f32 = 0.05;
 const DEPTH_ALIGN_VECTOR_SLICE_SAMPLES_PER_CELL: f32 = 1.35;
 const DEPTH_ALIGN_VECTOR_SLICE_MAX_SAMPLES_PER_SEGMENT: usize = 3;
 const DEPTH_ALIGN_PROJECTED_HEIGHT_SAMPLES_PER_TICK: usize = 512;
+const DEPTH_ALIGN_DESCRIPTOR_BUILD_HEIGHTMAP_REFRESH_BUDGET: usize = 4096;
 const DEPTH_ALIGN_DESCRIPTOR_UPDATE_INTERVAL_MILLIS: u64 = 250;
+const DEPTH_ALIGN_PROJECTED_HEIGHT_DIRTY_SWIZZLE: usize = 8;
+const DEPTH_ALIGN_DESCRIPTOR_CHANGE_MIN_HEIGHT_DELTA_METERS: f32 = 0.05;
 const DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MIN: f32 = 0.16;
 const DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MAX: f32 = 0.36;
 const DEPTH_ALIGN_PREVIEW_MARKER_LERP: f32 = 0.24;
@@ -274,6 +275,13 @@ impl SparseTsdChunk {
             observed_generation: vec![0; chunk_volume],
             live_count: 0,
         }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.values.capacity() * std::mem::size_of::<f32>()
+            + self.valid.capacity() * std::mem::size_of::<u8>()
+            + self.confidence.capacity() * std::mem::size_of::<u8>()
+            + self.observed_generation.capacity() * std::mem::size_of::<u64>()
     }
 
     fn value(&self, id: usize) -> Option<f32> {
@@ -394,6 +402,25 @@ impl SparseTsdGrid {
 
     pub fn is_empty(&self) -> bool {
         self.active_value_count == 0
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn active_value_count(&self) -> usize {
+        self.active_value_count
+    }
+
+    pub fn heap_bytes(&self) -> u64 {
+        let chunk_bytes = self
+            .chunks
+            .values()
+            .map(|chunk| chunk.heap_bytes() as u64)
+            .sum::<u64>();
+        let table_bytes =
+            self.chunks.capacity() as u64 * std::mem::size_of::<(VoxelCoord, SparseTsdChunk)>() as u64;
+        chunk_bytes + table_bytes
     }
 
     pub fn normalized_distance(&self, coord: VoxelCoord) -> Option<f32> {
@@ -710,6 +737,7 @@ struct DepthMeshVolume {
     latest_camera_forward: Option<Vec3f>,
     projected_height_field: Option<ProjectedHeightField>,
     alignment_descriptor: Option<XrDepthAlignDescriptor>,
+    alignment_descriptor_change_score: f32,
     alignment_debug: XrDepthAlignDebug,
     alignment_slice_preview: Option<XrDepthAlignSlicePreview>,
     alignment_preview: XrDepthAlignPreview,
@@ -742,7 +770,8 @@ struct ProjectedHeightFieldLayout {
     origin_x: f32,
     origin_z: f32,
     cell_size_meters: f32,
-    size: usize,
+    size_x: usize,
+    size_z: usize,
     top_y_meters: f32,
     bottom_y_meters: f32,
 }
@@ -757,8 +786,7 @@ struct ProjectedHeightField {
 
 impl ProjectedHeightField {
     fn new(layout: ProjectedHeightFieldLayout, player_cutout_center: Option<Vec3f>) -> Self {
-        let sample_size = layout.size + 1;
-        let sample_count = sample_size * sample_size;
+        let sample_count = (layout.size_x + 1) * (layout.size_z + 1);
         Self {
             layout,
             player_cutout_center,
@@ -767,8 +795,12 @@ impl ProjectedHeightField {
         }
     }
 
-    fn sample_size(&self) -> usize {
-        self.layout.size + 1
+    fn sample_size_x(&self) -> usize {
+        self.layout.size_x + 1
+    }
+
+    fn sample_size_z(&self) -> usize {
+        self.layout.size_z + 1
     }
 
     fn sample_count(&self) -> usize {
@@ -810,6 +842,7 @@ impl DepthMeshVolume {
             latest_camera_forward: None,
             projected_height_field: None,
             alignment_descriptor: None,
+            alignment_descriptor_change_score: 0.0,
             alignment_debug: XrDepthAlignDebug::default(),
             alignment_slice_preview: None,
             alignment_preview: XrDepthAlignPreview::default(),
@@ -862,6 +895,7 @@ impl DepthMeshVolume {
             return false;
         }
         self.alignment_descriptor = None;
+        self.alignment_descriptor_change_score = 0.0;
         self.alignment_debug = XrDepthAlignDebug::default();
         self.alignment_slice_preview = None;
         self.update_sequence = self.update_sequence.saturating_add(1);
@@ -909,6 +943,7 @@ impl DepthMeshVolume {
             mesh_chunks: self.mesh_chunks.clone(),
             plane_patches: self.plane_patches.clone(),
             alignment_descriptor: self.alignment_descriptor.clone(),
+            alignment_descriptor_change_score: self.alignment_descriptor_change_score,
             alignment_debug: self.alignment_debug,
             alignment_slice_preview: self.alignment_slice_preview.clone(),
             alignment_preview: self.alignment_preview.clone(),
@@ -917,6 +952,9 @@ impl DepthMeshVolume {
             mesh_generation: self.mesh_generation,
             mesh_vertex_count: self.mesh_vertex_count,
             mesh_triangle_count: self.mesh_triangle_count,
+            tsdf_chunk_count: self.mesh_grid.chunk_count(),
+            tsdf_live_voxel_count: self.mesh_grid.active_value_count(),
+            tsdf_memory_bytes: self.mesh_grid.heap_bytes(),
         }
     }
 
@@ -1239,7 +1277,6 @@ fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: 
         }
 
         let query_changed = process_geometry_queries(&volume, &store, DEPTH_QUERY_BATCH_PER_TICK);
-        let queries_pending = store.has_pending_queries();
         let mesh_enabled = store.mesh_enabled();
         let plane_scan_enabled = store.plane_scan_enabled();
         let surface_analysis_enabled = store.surface_analysis_enabled();
@@ -1283,11 +1320,7 @@ fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: 
             );
         }
         let alignment_changed = if surface_analysis_enabled {
-            if plane_changed
-                || (!applied_update
-                    && !queries_pending
-                    && now >= next_alignment_descriptor_update_at)
-            {
+            if plane_changed || now >= next_alignment_descriptor_update_at {
                 next_alignment_descriptor_update_at =
                     now + Duration::from_millis(DEPTH_ALIGN_DESCRIPTOR_UPDATE_INTERVAL_MILLIS);
                 update_tsdf_alignment_descriptor(&mut volume)
@@ -1509,16 +1542,71 @@ struct AlignmentPreviewTemporalState {
     missing_solution_updates: u8,
 }
 
+fn height_map_change_score(
+    previous: &XrDepthAlignHeightMap,
+    next: &XrDepthAlignHeightMap,
+) -> f32 {
+    if previous.size_x != next.size_x
+        || previous.size_z != next.size_z
+        || (previous.origin_x - next.origin_x).abs() > 1.0e-4
+        || (previous.origin_z - next.origin_z).abs() > 1.0e-4
+        || (previous.cell_size_meters - next.cell_size_meters).abs() > 1.0e-5
+        || (previous.bottom_y_meters - next.bottom_y_meters).abs() > 1.0e-4
+        || (previous.top_y_meters - next.top_y_meters).abs() > 1.0e-4
+    {
+        return 1.0;
+    }
+    let total = previous
+        .height_u16
+        .len()
+        .min(next.height_u16.len())
+        .max(1);
+    let height_span = (previous.top_y_meters - previous.bottom_y_meters)
+        .abs()
+        .max((next.top_y_meters - next.bottom_y_meters).abs())
+        .max(1.0e-3);
+    let encoded_delta = ((DEPTH_ALIGN_DESCRIPTOR_CHANGE_MIN_HEIGHT_DELTA_METERS / height_span)
+        * 65534.0)
+        .ceil()
+        .max(1.0) as u16;
+    let mut changed = 0usize;
+    for (left, right) in previous.height_u16.iter().zip(next.height_u16.iter()) {
+        if (*left == 0) != (*right == 0) || left.abs_diff(*right) >= encoded_delta {
+            changed += 1;
+        }
+    }
+    changed as f32 / total as f32
+}
+
+fn alignment_descriptor_change_score(
+    previous: Option<&XrDepthAlignDescriptor>,
+    next: Option<&XrDepthAlignDescriptor>,
+) -> f32 {
+    match (previous, next) {
+        (None, None) => 0.0,
+        (Some(_), None) | (None, Some(_)) => 1.0,
+        (Some(previous), Some(next)) => match (previous.height_map.as_ref(), next.height_map.as_ref()) {
+            (Some(previous), Some(next)) => height_map_change_score(previous, next),
+            (None, None) => 0.0,
+            (Some(_), None) | (None, Some(_)) => 1.0,
+        },
+    }
+}
+
 fn update_tsdf_alignment_descriptor(volume: &mut DepthMeshVolume) -> bool {
     let previous_slice_preview = volume.alignment_slice_preview.clone();
     let (next_descriptor, next_debug) = build_tsdf_alignment_descriptor(volume);
+    let change_score =
+        alignment_descriptor_change_score(volume.alignment_descriptor.as_ref(), next_descriptor.as_ref());
     if volume.alignment_descriptor == next_descriptor
         && volume.alignment_debug == next_debug
         && previous_slice_preview == volume.alignment_slice_preview
     {
+        volume.alignment_descriptor_change_score = 0.0;
         return false;
     }
     volume.alignment_descriptor = next_descriptor;
+    volume.alignment_descriptor_change_score = change_score;
     volume.alignment_debug = next_debug;
     volume.update_sequence = volume.update_sequence.saturating_add(1);
     true
@@ -1878,26 +1966,28 @@ fn tsdf_alignment_descriptor_layout(volume: &DepthMeshVolume) -> Option<(f32, f3
 
 fn projected_height_field_layout(volume: &DepthMeshVolume) -> Option<ProjectedHeightFieldLayout> {
     let (bounds_min, bounds_max) = volume.mesh_grid.world_bounds(1)?;
-    let mut extent = (bounds_max.x - bounds_min.x)
-        .max(bounds_max.z - bounds_min.z)
-        .max(DEPTH_ALIGN_HEIGHT_MAP_CELL_SIZE_METERS);
-    extent = (extent + DEPTH_ALIGN_HEIGHT_MAP_BOUNDS_PADDING_METERS * 2.0)
-        .min(DEPTH_ALIGN_HEIGHT_MAP_MAX_EXTENT_METERS);
-    let size = (extent / DEPTH_ALIGN_HEIGHT_MAP_CELL_SIZE_METERS)
-        .ceil()
-        .max(1.0) as usize;
-    let snapped_extent = size as f32 * DEPTH_ALIGN_HEIGHT_MAP_CELL_SIZE_METERS;
-    let center_x = (bounds_min.x + bounds_max.x) * 0.5;
-    let center_z = (bounds_min.z + bounds_max.z) * 0.5;
-    let origin_x = center_x - snapped_extent * 0.5;
-    let origin_z = center_z - snapped_extent * 0.5;
+    let cell_size_meters = volume.voxel_size_meters.max(1.0e-5);
+    let padding_cells =
+        (DEPTH_ALIGN_HEIGHT_MAP_BOUNDS_PADDING_METERS / cell_size_meters).ceil() as i32;
+    let min_cell_x = (bounds_min.x / cell_size_meters).floor() as i32 - padding_cells;
+    let max_cell_x = (bounds_max.x / cell_size_meters).ceil() as i32 + padding_cells;
+    let min_cell_z = (bounds_min.z / cell_size_meters).floor() as i32 - padding_cells;
+    let max_cell_z = (bounds_max.z / cell_size_meters).ceil() as i32 + padding_cells;
+    let size_x = (max_cell_x - min_cell_x).max(1) as usize;
+    let size_z = (max_cell_z - min_cell_z).max(1) as usize;
+    if size_x > u16::MAX as usize || size_z > u16::MAX as usize {
+        return None;
+    }
+    let origin_x = min_cell_x as f32 * cell_size_meters;
+    let origin_z = min_cell_z as f32 * cell_size_meters;
     let top_y_meters = vector_slice_projection_top_y(volume)?;
     let bottom_y_meters = vector_slice_projection_bottom_y(volume, top_y_meters)?;
     Some(ProjectedHeightFieldLayout {
         origin_x,
         origin_z,
-        cell_size_meters: DEPTH_ALIGN_HEIGHT_MAP_CELL_SIZE_METERS,
-        size,
+        cell_size_meters,
+        size_x,
+        size_z,
         top_y_meters,
         bottom_y_meters,
     })
@@ -1922,17 +2012,111 @@ fn enqueue_projected_height_sample_dirty(volume: &mut DepthMeshVolume, sample_in
     }
 }
 
+fn projected_height_sample_index(sample_size_x: usize, x: usize, z: usize) -> usize {
+    x + z * sample_size_x
+}
+
 fn mark_all_projected_height_samples_dirty(volume: &mut DepthMeshVolume) {
-    let Some(sample_count) = volume
+    let Some((sample_size_x, sample_size_z)) = volume
         .projected_height_field
         .as_ref()
-        .map(ProjectedHeightField::sample_count)
+        .map(|field| (field.sample_size_x(), field.sample_size_z()))
     else {
         return;
     };
-    for sample_index in 0..sample_count {
-        enqueue_projected_height_sample_dirty(volume, sample_index);
+    let swizzle = DEPTH_ALIGN_PROJECTED_HEIGHT_DIRTY_SWIZZLE.max(1);
+    for z_phase in 0..swizzle {
+        for x_phase in 0..swizzle {
+            for z in (z_phase..sample_size_z).step_by(swizzle) {
+                for x in (x_phase..sample_size_x).step_by(swizzle) {
+                    enqueue_projected_height_sample_dirty(
+                        volume,
+                        projected_height_sample_index(sample_size_x, x, z),
+                    );
+                }
+            }
+        }
     }
+}
+
+fn projected_height_layout_sample_offset(
+    source: ProjectedHeightFieldLayout,
+    target: ProjectedHeightFieldLayout,
+) -> Option<(isize, isize)> {
+    let cell_size = source.cell_size_meters.max(1.0e-5);
+    if (source.cell_size_meters - target.cell_size_meters).abs() > 1.0e-5 {
+        return None;
+    }
+    let offset_x = (source.origin_x - target.origin_x) / cell_size;
+    let offset_z = (source.origin_z - target.origin_z) / cell_size;
+    let snapped_x = offset_x.round();
+    let snapped_z = offset_z.round();
+    ((offset_x - snapped_x).abs() <= 1.0e-4 && (offset_z - snapped_z).abs() <= 1.0e-4)
+        .then_some((snapped_x as isize, snapped_z as isize))
+}
+
+fn copy_projected_height_field_overlap(
+    previous: &ProjectedHeightField,
+    next: &mut ProjectedHeightField,
+) -> bool {
+    let Some((offset_x, offset_z)) =
+        projected_height_layout_sample_offset(previous.layout, next.layout)
+    else {
+        return false;
+    };
+    let previous_size_x = previous.sample_size_x();
+    let previous_size_z = previous.sample_size_z();
+    let next_size_x = next.sample_size_x();
+    let next_size_z = next.sample_size_z();
+    for previous_z in 0..previous_size_z {
+        let next_z = previous_z as isize + offset_z;
+        if next_z < 0 || next_z >= next_size_z as isize {
+            continue;
+        }
+        for previous_x in 0..previous_size_x {
+            let next_x = previous_x as isize + offset_x;
+            if next_x < 0 || next_x >= next_size_x as isize {
+                continue;
+            }
+            let previous_index = projected_height_sample_index(previous_size_x, previous_x, previous_z);
+            let next_index =
+                projected_height_sample_index(next_size_x, next_x as usize, next_z as usize);
+            next.valid[next_index] = previous.valid[previous_index];
+            next.heights_meters[next_index] = previous.heights_meters[previous_index];
+        }
+    }
+    true
+}
+
+fn remap_projected_height_dirty_samples(
+    previous: &ProjectedHeightField,
+    next: &ProjectedHeightField,
+    previous_dirty_samples: &[usize],
+) -> Vec<usize> {
+    let Some((offset_x, offset_z)) =
+        projected_height_layout_sample_offset(previous.layout, next.layout)
+    else {
+        return Vec::new();
+    };
+    let previous_size_x = previous.sample_size_x();
+    let next_size_x = next.sample_size_x();
+    let next_size_z = next.sample_size_z();
+    let mut remapped = Vec::new();
+    for previous_index in previous_dirty_samples {
+        let previous_x = previous_index % previous_size_x;
+        let previous_z = previous_index / previous_size_x;
+        let next_x = previous_x as isize + offset_x;
+        let next_z = previous_z as isize + offset_z;
+        if next_x < 0 || next_z < 0 || next_x >= next_size_x as isize || next_z >= next_size_z as isize {
+            continue;
+        }
+        remapped.push(projected_height_sample_index(
+            next_size_x,
+            next_x as usize,
+            next_z as usize,
+        ));
+    }
+    remapped
 }
 
 fn sync_projected_height_field_layout(volume: &mut DepthMeshVolume) {
@@ -1950,13 +2134,45 @@ fn sync_projected_height_field_layout(volume: &mut DepthMeshVolume) {
     if !needs_rebuild {
         return;
     }
-    volume.projected_height_field = Some(ProjectedHeightField::new(
-        layout,
-        volume.latest_camera_world,
-    ));
+    let previous_field = volume.projected_height_field.take();
+    let previous_dirty_samples = volume
+        .pending_projected_height_sample_queue
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    let mut next_field = ProjectedHeightField::new(layout, volume.latest_camera_world);
+    let copied_overlap = previous_field
+        .as_ref()
+        .is_some_and(|previous_field| copy_projected_height_field_overlap(previous_field, &mut next_field));
+    let remapped_dirty_samples = previous_field
+        .as_ref()
+        .map(|previous_field| {
+            remap_projected_height_dirty_samples(
+                previous_field,
+                &next_field,
+                &previous_dirty_samples,
+            )
+        })
+        .unwrap_or_default();
+    let missing_sample_indices = next_field
+        .valid
+        .iter()
+        .enumerate()
+        .filter_map(|(sample_index, valid)| (*valid == 0).then_some(sample_index))
+        .collect::<Vec<_>>();
+    volume.projected_height_field = Some(next_field);
     volume.pending_projected_height_dirty_samples.clear();
     volume.pending_projected_height_sample_queue.clear();
-    mark_all_projected_height_samples_dirty(volume);
+    if copied_overlap {
+        for sample_index in remapped_dirty_samples {
+            enqueue_projected_height_sample_dirty(volume, sample_index);
+        }
+        for sample_index in missing_sample_indices {
+            enqueue_projected_height_sample_dirty(volume, sample_index);
+        }
+    } else {
+        mark_all_projected_height_samples_dirty(volume);
+    }
 }
 
 fn mark_projected_height_samples_dirty_world_rect(
@@ -1966,37 +2182,39 @@ fn mark_projected_height_samples_dirty_world_rect(
     min_z: f32,
     max_z: f32,
 ) {
-    let Some((origin_x, origin_z, cell_size_meters, sample_size)) =
+    let Some((origin_x, origin_z, cell_size_meters, sample_size_x, sample_size_z)) =
         volume.projected_height_field.as_ref().map(|field| {
             (
                 field.layout.origin_x,
                 field.layout.origin_z,
                 field.layout.cell_size_meters,
-                field.sample_size(),
+                field.sample_size_x(),
+                field.sample_size_z(),
             )
         })
     else {
         return;
     };
-    let max_sample_index = sample_size as isize - 1;
+    let max_sample_x = sample_size_x as isize - 1;
+    let max_sample_z = sample_size_z as isize - 1;
     let raw_min_x = ((min_x - origin_x) / cell_size_meters.max(1.0e-5)).floor() as isize;
     let raw_max_x = ((max_x - origin_x) / cell_size_meters.max(1.0e-5)).ceil() as isize;
     let raw_min_z = ((min_z - origin_z) / cell_size_meters.max(1.0e-5)).floor() as isize;
     let raw_max_z = ((max_z - origin_z) / cell_size_meters.max(1.0e-5)).ceil() as isize;
     if raw_max_x < 0
         || raw_max_z < 0
-        || raw_min_x > max_sample_index
-        || raw_min_z > max_sample_index
+        || raw_min_x > max_sample_x
+        || raw_min_z > max_sample_z
     {
         return;
     }
-    let sample_min_x = raw_min_x.clamp(0, max_sample_index) as usize;
-    let sample_max_x = raw_max_x.clamp(0, max_sample_index) as usize;
-    let sample_min_z = raw_min_z.clamp(0, max_sample_index) as usize;
-    let sample_max_z = raw_max_z.clamp(0, max_sample_index) as usize;
+    let sample_min_x = raw_min_x.clamp(0, max_sample_x) as usize;
+    let sample_max_x = raw_max_x.clamp(0, max_sample_x) as usize;
+    let sample_min_z = raw_min_z.clamp(0, max_sample_z) as usize;
+    let sample_max_z = raw_max_z.clamp(0, max_sample_z) as usize;
     for z in sample_min_z..=sample_max_z {
         for x in sample_min_x..=sample_max_x {
-            enqueue_projected_height_sample_dirty(volume, x + z * sample_size);
+            enqueue_projected_height_sample_dirty(volume, x + z * sample_size_x);
         }
     }
 }
@@ -2072,12 +2290,12 @@ fn refresh_projected_height_field(volume: &mut DepthMeshVolume, max_samples: usi
         volume
             .pending_projected_height_dirty_samples
             .remove(&sample_index);
-        let Some((layout, cutout_center, sample_size, current_height, current_valid)) =
+        let Some((layout, cutout_center, sample_size_x, current_height, current_valid)) =
             volume.projected_height_field.as_ref().map(|field| {
                 (
                     field.layout,
                     field.player_cutout_center,
-                    field.sample_size(),
+                    field.sample_size_x(),
                     field.heights_meters[sample_index],
                     field.valid[sample_index] != 0,
                 )
@@ -2085,8 +2303,8 @@ fn refresh_projected_height_field(volume: &mut DepthMeshVolume, max_samples: usi
         else {
             break;
         };
-        let sample_x = sample_index % sample_size;
-        let sample_z = sample_index / sample_size;
+        let sample_x = sample_index % sample_size_x;
+        let sample_z = sample_index / sample_size_x;
         let point = vector_slice_corner_world(
             layout.origin_x,
             layout.origin_z,
@@ -2123,12 +2341,6 @@ fn refresh_projected_height_field(volume: &mut DepthMeshVolume, max_samples: usi
         processed += 1;
     }
     changed
-}
-
-fn ensure_projected_height_field_current(volume: &mut DepthMeshVolume) {
-    sync_projected_height_field_layout(volume);
-    sync_projected_height_field_player_cutout(volume);
-    refresh_projected_height_field(volume, usize::MAX);
 }
 
 fn vector_slice_projection_top_y(volume: &DepthMeshVolume) -> Option<f32> {
@@ -2252,25 +2464,32 @@ fn query_depth_grid_projected_column_height(
     }
 }
 
-fn vector_slice_sample_nearest(values: &[f32], size: usize, x: isize, z: isize) -> f32 {
-    let x = x.clamp(0, size.saturating_sub(1) as isize) as usize;
-    let z = z.clamp(0, size.saturating_sub(1) as isize) as usize;
-    values[x + z * size]
+fn vector_slice_sample_nearest(
+    values: &[f32],
+    size_x: usize,
+    size_z: usize,
+    x: isize,
+    z: isize,
+) -> f32 {
+    let x = x.clamp(0, size_x.saturating_sub(1) as isize) as usize;
+    let z = z.clamp(0, size_z.saturating_sub(1) as isize) as usize;
+    values[x + z * size_x]
 }
 
 fn vector_slice_sample_gradient(
     values: &[f32],
-    size: usize,
+    size_x: usize,
+    size_z: usize,
     x: usize,
     z: usize,
     cell_size: f32,
 ) -> Vec3f {
     let x = x as isize;
     let z = z as isize;
-    let dx = vector_slice_sample_nearest(values, size, x + 1, z)
-        - vector_slice_sample_nearest(values, size, x - 1, z);
-    let dz = vector_slice_sample_nearest(values, size, x, z + 1)
-        - vector_slice_sample_nearest(values, size, x, z - 1);
+    let dx = vector_slice_sample_nearest(values, size_x, size_z, x + 1, z)
+        - vector_slice_sample_nearest(values, size_x, size_z, x - 1, z);
+    let dz = vector_slice_sample_nearest(values, size_x, size_z, x, z + 1)
+        - vector_slice_sample_nearest(values, size_x, size_z, x, z - 1);
     let gradient = vec3f(dx / cell_size.max(1.0e-5), 0.0, dz / cell_size.max(1.0e-5));
     let horizontal_length = gradient.length();
     if horizontal_length < DEPTH_ALIGN_VECTOR_SLICE_MIN_HORIZONTAL_NORMAL {
@@ -2348,8 +2567,9 @@ fn append_projected_height_iso_samples(
     origin_x: f32,
     origin_z: f32,
     cell_size: f32,
-    size: usize,
-    sample_size: usize,
+    size_x: usize,
+    size_z: usize,
+    sample_size_x: usize,
     heights: &[f32],
     valid: &[u8],
     player_cutout_center: Option<Vec3f>,
@@ -2357,10 +2577,10 @@ fn append_projected_height_iso_samples(
     z: usize,
 ) {
     let corner_indices = [
-        x + z * sample_size,
-        x + 1 + z * sample_size,
-        x + 1 + (z + 1) * sample_size,
-        x + (z + 1) * sample_size,
+        x + z * sample_size_x,
+        x + 1 + z * sample_size_x,
+        x + 1 + (z + 1) * sample_size_x,
+        x + (z + 1) * sample_size_x,
     ];
     if !corner_indices.iter().all(|index| valid[*index] != 0) {
         return;
@@ -2418,12 +2638,18 @@ fn append_projected_height_iso_samples(
             }
             let sample_x = ((point.x - origin_x) / cell_size)
                 .round()
-                .clamp(0.0, size as f32) as usize;
+                .clamp(0.0, size_x as f32) as usize;
             let sample_z = ((point.z - origin_z) / cell_size)
                 .round()
-                .clamp(0.0, size as f32) as usize;
-            let gradient =
-                vector_slice_sample_gradient(heights, sample_size, sample_x, sample_z, cell_size);
+                .clamp(0.0, size_z as f32) as usize;
+            let gradient = vector_slice_sample_gradient(
+                heights,
+                size_x + 1,
+                size_z + 1,
+                sample_x,
+                sample_z,
+                cell_size,
+            );
             let normal = if gradient.length() > 1.0e-5 {
                 gradient
             } else {
@@ -2447,15 +2673,26 @@ fn build_tsdf_vector_slice_preview_and_samples(
     Option<XrDepthAlignHeightMap>,
     Vec<XrDepthAlignSample>,
 ) {
-    ensure_projected_height_field_current(volume);
+    sync_projected_height_field_layout(volume);
+    sync_projected_height_field_player_cutout(volume);
+    if !volume.pending_projected_height_sample_queue.is_empty() {
+        refresh_projected_height_field(
+            volume,
+            volume
+                .pending_projected_height_sample_queue
+                .len()
+                .min(DEPTH_ALIGN_DESCRIPTOR_BUILD_HEIGHTMAP_REFRESH_BUDGET),
+        );
+    }
     let Some(field) = volume.projected_height_field.as_ref() else {
         return (None, None, Vec::new());
     };
     let origin_x = field.layout.origin_x;
     let origin_z = field.layout.origin_z;
     let cell_size = field.layout.cell_size_meters;
-    let size = field.layout.size;
-    let sample_size = field.sample_size();
+    let size_x = field.layout.size_x;
+    let size_z = field.layout.size_z;
+    let sample_size_x = field.sample_size_x();
     let heights = &field.heights_meters;
     let valid = &field.valid;
     let player_cutout_center = field.player_cutout_center;
@@ -2466,12 +2703,13 @@ fn build_tsdf_vector_slice_preview_and_samples(
         origin_x,
         origin_z,
         cell_size_meters: cell_size,
-        size: size as u16,
+        size_x: size_x as u16,
+        size_z: size_z as u16,
         bottom_y_meters: field.layout.bottom_y_meters,
         top_y_meters: field.layout.top_y_meters,
         player_cutout_center: player_cutout_center.map(|center| vec2f(center.x, center.z)),
         player_cutout_radius_meters: DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS,
-        height_u16: vec![0; size * size],
+        height_u16: vec![0; size_x * size_z],
     };
     let mut slice_preview = XrDepthAlignSlicePreview {
         height_map: height_map.clone(),
@@ -2480,8 +2718,8 @@ fn build_tsdf_vector_slice_preview_and_samples(
         cutout_radius_meters: DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS,
     };
     let mut samples = Vec::<XrDepthAlignSample>::new();
-    for z in 0..size {
-        for x in 0..size {
+    for z in 0..size_z {
+        for x in 0..size_x {
             if player_cutout_center.is_some_and(|camera_world| {
                 vector_slice_cell_inside_player_cutout(
                     camera_world,
@@ -2495,12 +2733,12 @@ fn build_tsdf_vector_slice_preview_and_samples(
                 continue;
             }
             let corner_indices = [
-                x + z * sample_size,
-                x + 1 + z * sample_size,
-                x + 1 + (z + 1) * sample_size,
-                x + (z + 1) * sample_size,
+                x + z * sample_size_x,
+                x + 1 + z * sample_size_x,
+                x + 1 + (z + 1) * sample_size_x,
+                x + (z + 1) * sample_size_x,
             ];
-            let preview_index = x + z * size;
+            let preview_index = height_map.cell_index(x, z);
             let mut height_sum = 0.0;
             let mut height_count = 0usize;
             for corner_index in corner_indices {
@@ -2522,16 +2760,17 @@ fn build_tsdf_vector_slice_preview_and_samples(
     }
     slice_preview.height_map = height_map.clone();
 
-    for z in 0..size {
-        for x in 0..size {
+    for z in 0..size_z {
+        for x in 0..size_x {
             append_projected_height_iso_samples(
                 &mut samples,
                 DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS,
                 origin_x,
                 origin_z,
                 cell_size,
-                size,
-                sample_size,
+                size_x,
+                size_z,
+                sample_size_x,
                 heights,
                 valid,
                 player_cutout_center,
