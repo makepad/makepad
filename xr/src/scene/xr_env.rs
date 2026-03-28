@@ -14,7 +14,7 @@ use rapier3d::prelude::{
     Pose as RapierPose, Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
     Rotation as RapierRotation, SharedShape, Vector as RapierVector,
 };
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 #[path = "xr_depth.rs"]
 mod xr_depth;
@@ -35,6 +35,7 @@ use self::{
     },
     xr_physics_worker::{XrPhysicsWorker, XrPhysicsWorkerResult},
 };
+use crate::depth_debug_mesh_worker::XrDepthDebugMeshWorker;
 
 script_mod! {
     use mod.pod.*
@@ -51,30 +52,41 @@ script_mod! {
         draw_call: uniform_buffer(draw.DrawCallUniforms)
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
-        geom: vertex_buffer(geom.PbrVertex, geom.PbrGeom)
+        geom: vertex_buffer(geom.IcoVertex, geom.IcoGeom)
 
         v_world: varying(vec3f)
-        v_normal: varying(vec3f)
+        v_geom_normal: varying(vec3f)
 
         vertex: fn() {
             let world = vec4(
-                self.geom.pos_nx.x,
-                self.geom.pos_nx.y,
-                self.geom.pos_nx.z,
+                self.geom.pos.x,
+                self.geom.pos.y,
+                self.geom.pos.z,
                 1.0
             );
-            self.v_normal = normalize(vec3(
-                self.geom.pos_nx.w,
-                self.geom.ny_nz_uv.x,
-                self.geom.ny_nz_uv.y
+            let geom_normal = normalize(vec3(
+                self.geom.normal.x,
+                self.geom.normal.y,
+                self.geom.normal.z
             ));
-            let biased_world = vec4(world.xyz + self.v_normal * self.normal_bias, 1.0);
-            self.v_world = biased_world.xyz;
+            let biased_world = vec4(world.xyz + geom_normal * self.normal_bias, 1.0);
+            self.v_world = world.xyz;
+            self.v_geom_normal = geom_normal;
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * biased_world);
         }
 
         pixel: fn() {
-            let n = normalize(self.v_normal);
+            let face_raw = cross(dFdx(self.v_world), dFdy(self.v_world));
+            let face_len = length(face_raw);
+            let geom_normal = normalize(self.v_geom_normal);
+            let mut n = if face_len > 0.00001 {
+                normalize(face_raw)
+            } else {
+                geom_normal
+            };
+            if dot(n, geom_normal) < 0.0 {
+                n = -n;
+            }
             let l = normalize(self.light_dir);
             let diffuse = max(dot(n, l), 0.0);
             let lit = self.ambient + diffuse * (1.0 - self.ambient);
@@ -146,7 +158,6 @@ const XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN: f32 = 0.30;
 const XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_SCALE: f32 = 0.45;
 const XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_MIN: f32 = 0.012;
 const XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_MAX: f32 = 0.04;
-const XR_DEPTH_QUERY_INCLUDE_PLANAR_PATCHES: bool = false;
 #[allow(dead_code)]
 const XR_DEPTH_QUERY_STICKY_KEEP_MARGIN: f32 = 0.015;
 #[allow(dead_code)]
@@ -209,11 +220,17 @@ pub struct XrEnv {
     #[rust]
     depth_surface_mesh_update_sequence: u64,
     #[rust]
+    depth_surface_mesh_requested_snapshot_grid: Option<Arc<SparseTsdGridReadSnapshot>>,
+    #[rust]
+    depth_surface_mesh_snapshot_grid: Option<Arc<SparseTsdGridReadSnapshot>>,
+    #[rust]
     depth_surface_mesh_chunks: HashMap<(i32, i32, i32), (Geometry, DepthSurfaceMeshChunkHandle)>,
     #[rust]
     depth_query_hit_geometry: Option<Geometry>,
     #[rust]
     depth_surface_mesh_upload_count: usize,
+    #[rust]
+    depth_surface_mesh_worker: Option<XrDepthDebugMeshWorker>,
     #[allow(dead_code)]
     #[rust]
     depth_query_retained_hits: HashMap<u64, RetainedDepthQueryHit>,
@@ -367,8 +384,27 @@ impl XrEnv {
         draw_pbr.set_env_texture(Some(env_tex));
     }
 
-    fn prepare_depth_mesh(&mut self, _cx: &mut Cx2d) {
+    fn prepare_depth_mesh(&mut self, cx: &mut Cx2d) {
         self.draw_depth_mesh.draw_vars.options.depth_write = true;
+        self.poll_depth_surface_mesh_worker(cx);
+        if !self.depth_mesh_visible() {
+            self.clear_depth_surface_mesh();
+            return;
+        }
+        let Some(snapshot) = cx.cx.xr_depth_mesh().latest_tsdf_snapshot() else {
+            self.clear_depth_surface_mesh();
+            return;
+        };
+        if self
+            .depth_surface_mesh_requested_snapshot_grid
+            .as_ref()
+            .is_some_and(|previous| Arc::ptr_eq(previous, &snapshot.grid))
+        {
+            return;
+        }
+        self.ensure_depth_surface_mesh_worker()
+            .request_snapshot(snapshot.clone());
+        self.depth_surface_mesh_requested_snapshot_grid = Some(snapshot.grid.clone());
     }
 
     fn draw_pbr_rounded_cube(
@@ -779,9 +815,6 @@ impl XrEnv {
     // --- New API for XrRoot ---
 
     pub fn prepare_and_draw(&mut self, cx: &mut Cx2d) -> XrDrawScopeData {
-        cx.cx
-            .xr_depth_mesh()
-            .set_mesh_enabled(self.depth_mesh_visible());
         let state = self.last_xr_state.clone();
         if let Some(state) = state.as_deref() {
             if self.depth_debug_enabled() {

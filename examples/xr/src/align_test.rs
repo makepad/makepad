@@ -62,7 +62,6 @@ impl AlignTest {
         }
         self.enabled = enabled;
         cx.xr_depth_mesh().set_surface_analysis_enabled(enabled);
-        cx.xr_depth_mesh().set_alignment_preview_enabled(enabled);
         self.last_mesh_generation = 0;
         self.last_mesh_update_sequence = 0;
         self.last_solution = None;
@@ -82,7 +81,7 @@ impl AlignTest {
             return;
         }
 
-        let Some(depth_mesh) = cx.xr_depth_mesh().latest_mesh() else {
+        let Some(snapshot) = cx.xr_depth_mesh().latest_tsdf_snapshot() else {
             self.last_solution = None;
             self.local_markers = None;
             self.remote_markers_local = None;
@@ -90,53 +89,52 @@ impl AlignTest {
                 "Test align: waiting for TSDF depth snapshot for loopback packets".to_string();
             return;
         };
-
-        let mesh_unchanged = depth_mesh.mesh_generation == self.last_mesh_generation
-            && depth_mesh.update_sequence == self.last_mesh_update_sequence;
+        let mesh_unchanged = snapshot.generation == self.last_mesh_generation
+            && snapshot.update_sequence == self.last_mesh_update_sequence;
         if mesh_unchanged {
             return;
         }
 
-        self.last_mesh_generation = depth_mesh.mesh_generation;
-        self.last_mesh_update_sequence = depth_mesh.update_sequence;
-        let Some(_local_descriptor) = depth_mesh.alignment_descriptor.as_ref() else {
+        self.last_mesh_generation = snapshot.generation;
+        self.last_mesh_update_sequence = snapshot.update_sequence;
+        let Some(local_descriptor) =
+            XrNetAlignmentDescriptorFrame::from_tsdf_snapshot(snapshot.as_ref(), 0.0)
+        else {
             self.last_solution = None;
             self.local_markers = None;
             self.remote_markers_local = None;
-            self.last_status = Self::missing_patch_status(&depth_mesh);
+            self.last_status = Self::missing_patch_status(snapshot.as_ref());
             self.redraw(cx);
             return;
         };
-        let preview = &depth_mesh.alignment_preview;
-        self.local_markers = preview.local_markers;
-        self.remote_markers_local = preview.remote_markers_local;
-        self.last_solution = preview.solution;
+        let ground_truth_translation = vec3f(-0.82, 0.0, 0.67);
+        let ground_truth_yaw = 0.58f32;
+        let ground_truth_remote_to_local = Pose::new(
+            Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), ground_truth_yaw),
+            ground_truth_translation,
+        )
+        .to_mat4();
+        let local_to_remote = ground_truth_remote_to_local.invert();
+        let remote_descriptor = local_descriptor.transformed(&local_to_remote);
 
-        let Some(solution) = preview.solution else {
-            if preview.local_markers.is_none() {
+        self.local_markers = local_descriptor.test_markers();
+        self.remote_markers_local = remote_descriptor
+            .transformed(&ground_truth_remote_to_local)
+            .test_markers();
+        self.last_solution =
+            XrNetAlignmentDescriptorFrame::solve_remote_to_local(&local_descriptor, &remote_descriptor);
+
+        let Some(solution) = self.last_solution else {
+            if self.local_markers.is_none() {
                 self.last_status =
-                    "Test align: descriptor exists but floor marker frame is unstable".to_string();
+                    "Test align: heightmap exists but marker frame is unstable".to_string();
             } else {
-                let (local_floor, local_wall) =
-                    (preview.local_floor_sample_count, preview.local_wall_sample_count);
-                let (remote_floor, remote_wall) =
-                    (preview.remote_floor_sample_count, preview.remote_wall_sample_count);
-                self.last_status = format!(
-                    "Test align: no loopback solve yet | local samples {} (f{} w{}) | remote samples {} (f{} w{})",
-                    preview.local_sample_count,
-                    local_floor,
-                    local_wall,
-                    preview.remote_sample_count,
-                    remote_floor,
-                    remote_wall
-                );
+                self.last_status = "Test align: waiting for loopback heightmap solve".to_string();
             }
             self.redraw(cx);
             return;
         };
 
-        let ground_truth_translation = vec3f(-0.82, 0.0, 0.67);
-        let ground_truth_yaw = 0.58f32;
         let position_error_cm = (solution.translation - ground_truth_translation).length() * 100.0;
         let yaw_error_deg = wrap_angle(solution.yaw_radians - ground_truth_yaw)
             .abs()
@@ -157,16 +155,10 @@ impl AlignTest {
         self.redraw(cx);
     }
 
-    fn missing_patch_status(depth_mesh: &XrDepthMesh) -> String {
-        let debug = depth_mesh.alignment_debug;
+    fn missing_patch_status(snapshot: &TsdfPublishedSnapshot) -> String {
         format!(
-            "Test align: no TSDF align descriptor yet | near {} | floor cand {} -> {} | wall cand {} -> {} | tris {}",
-            debug.near_surface_voxel_count,
-            debug.floor_candidate_count,
-            debug.floor_sample_count,
-            debug.wall_candidate_count,
-            debug.wall_sample_count,
-            depth_mesh.mesh_triangle_count
+            "Test align: waiting for published heightmap | chunks {}",
+            snapshot.grid.chunk_count()
         )
     }
 

@@ -211,7 +211,7 @@ fn physics_worker_loop(
                 };
             }
             if guard.shutdown {
-                clear_depth_query_state_for_scene(&depth_mesh, scene.as_ref(), &mut retained_hits);
+                clear_depth_query_state_for_scene(scene.as_ref(), &mut retained_hits);
                 return;
             }
             seen_version = guard.version;
@@ -227,7 +227,7 @@ fn physics_worker_loop(
 
         if let Some(reset_revision) = pending_reset_revision {
             revision = reset_revision;
-            clear_depth_query_state_for_scene(&depth_mesh, scene.as_ref(), &mut retained_hits);
+            clear_depth_query_state_for_scene(scene.as_ref(), &mut retained_hits);
             scene = None;
             last_step_started_at = None;
             adaptive_step_dt = XR_WORKER_SIMULATION_DT_DEFAULT;
@@ -236,7 +236,7 @@ fn physics_worker_loop(
 
         if let Some(rebuild) = pending_rebuild {
             revision = rebuild.revision;
-            clear_depth_query_state_for_scene(&depth_mesh, scene.as_ref(), &mut retained_hits);
+            clear_depth_query_state_for_scene(scene.as_ref(), &mut retained_hits);
             scene = Some(build_scene(rebuild.gravity, rebuild.cubes));
             last_step_started_at = None;
             adaptive_step_dt = scene
@@ -259,7 +259,6 @@ fn physics_worker_loop(
                         body_spawn.spawn.linvel,
                         body_spawn.spawn.angvel,
                     ) {
-                        depth_mesh.clear_query(query_key);
                         retained_hits.remove(&query_key);
                     }
                     applied_spawn = true;

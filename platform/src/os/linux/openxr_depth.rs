@@ -9,13 +9,14 @@ use crate::{
         empty_bounds, xr_depth_align_build_wall_normal_histogram,
         xr_depth_align_loopback_preview_solution, xr_depth_align_solve_remote_to_local,
         xr_depth_align_test_markers, xr_depth_align_transform_descriptor, xr_depth_mesh_store,
-        ChunkKey, XrDepthAlignDebug, XrDepthAlignDescriptor, XrDepthAlignHeightMap,
-        XrDepthAlignPreview, XrDepthAlignSample, XrDepthAlignSampleKind, XrDepthAlignSlicePreview,
-        XrDepthAlignSolution, XrDepthAlignVerticalDescriptor, XrDepthMesh, XrDepthMeshChunk,
-        XrDepthMeshQuery, XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry,
-        XrDepthMeshQueryColliderRole, XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface,
-        XrDepthMeshQueryResult, XrDepthMeshQuerySupportPlane, XrDepthMeshQuerySurfaceHit,
-        XrDepthMeshStore, XrDepthPlaneKind, XrDepthPlanePatch,
+        ChunkKey, SparseTsdGridReadSnapshot, SparseTsdReadChunk, TsdfPublishedSnapshot,
+        XrDepthAlignDebug, XrDepthAlignDescriptor, XrDepthAlignHeightMap, XrDepthAlignPreview,
+        XrDepthAlignSample, XrDepthAlignSampleKind, XrDepthAlignSlicePreview, XrDepthAlignSolution,
+        XrDepthAlignVerticalDescriptor, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery,
+        XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry, XrDepthMeshQueryColliderRole,
+        XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface, XrDepthMeshQueryResult,
+        XrDepthMeshQuerySupportPlane, XrDepthMeshQuerySurfaceHit, XrDepthMeshStore,
+        XrDepthPlaneKind, XrDepthPlanePatch,
         XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS,
     },
 };
@@ -59,8 +60,10 @@ const DEPTH_PLAYER_EXCLUDE_TOP_METERS: f32 = 0.12;
 const DEPTH_PLAYER_EXCLUDE_BOTTOM_METERS: f32 = 1.30;
 const DEPTH_MESH_UPDATE_DISTANCE_METERS: f32 = 4.0;
 const DEPTH_SURFACE_MESH_CHUNKS_PER_TICK: usize = 1;
+#[allow(dead_code)]
 const DEPTH_PLANE_SCAN_CHUNKS_PER_TICK: usize = 1;
 const DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS: u64 = 8;
+const DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS: u64 = 1000;
 const DEPTH_QUERY_BATCH_PER_TICK: usize = 24;
 const DEPTH_QUERY_MAX_SURFACES_PER_QUERY: usize = 1;
 const DEPTH_DEBUG_LOG_CHUNK_MESH_TIMING: bool = false;
@@ -162,7 +165,6 @@ const DEPTH_ALIGN_VECTOR_SLICE_MIN_SEGMENT_METERS: f32 = 0.05;
 const DEPTH_ALIGN_VECTOR_SLICE_SAMPLES_PER_CELL: f32 = 1.35;
 const DEPTH_ALIGN_VECTOR_SLICE_MAX_SAMPLES_PER_SEGMENT: usize = 3;
 const DEPTH_ALIGN_PROJECTED_HEIGHT_SAMPLES_PER_TICK: usize = 512;
-const DEPTH_ALIGN_DESCRIPTOR_BUILD_HEIGHTMAP_REFRESH_BUDGET: usize = 4096;
 const DEPTH_ALIGN_DESCRIPTOR_UPDATE_INTERVAL_MILLIS: u64 = 250;
 const DEPTH_ALIGN_PROJECTED_HEIGHT_DIRTY_SWIZZLE: usize = 8;
 const DEPTH_ALIGN_DESCRIPTOR_CHANGE_MIN_HEIGHT_DELTA_METERS: f32 = 0.05;
@@ -266,6 +268,13 @@ struct SparseTsdChunk {
     live_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SparseTsdWriteResult {
+    state_changed: bool,
+    value_changed: bool,
+    became_live: bool,
+}
+
 impl SparseTsdChunk {
     fn new(chunk_volume: usize) -> Self {
         Self {
@@ -316,7 +325,10 @@ impl SparseTsdChunk {
         }
     }
 
-    fn accumulate(&mut self, id: usize, value: f32, generation: u64) -> (bool, bool) {
+    fn accumulate(&mut self, id: usize, value: f32, generation: u64) -> SparseTsdWriteResult {
+        let previous_valid = self.valid[id];
+        let previous_confidence = self.confidence[id];
+        let previous_generation = self.observed_generation[id];
         let previous = self.value(id);
         let next_value = if let Some(previous) = previous {
             let delta = (previous - value).abs();
@@ -355,10 +367,20 @@ impl SparseTsdChunk {
         if previous.is_none() {
             self.live_count += 1;
         }
-        (changed, previous.is_none())
+        SparseTsdWriteResult {
+            state_changed: previous_valid == 0
+                || changed
+                || previous_confidence != self.confidence[id]
+                || previous_generation != self.observed_generation[id],
+            value_changed: changed,
+            became_live: previous.is_none(),
+        }
     }
 
-    fn overwrite(&mut self, id: usize, value: f32, generation: u64) -> (bool, bool) {
+    fn overwrite(&mut self, id: usize, value: f32, generation: u64) -> SparseTsdWriteResult {
+        let previous_valid = self.valid[id];
+        let previous_confidence = self.confidence[id];
+        let previous_generation = self.observed_generation[id];
         let previous = self.value(id);
         let changed = previous
             .map(|previous| (previous - value).abs() > 1.0e-4)
@@ -370,7 +392,14 @@ impl SparseTsdChunk {
         if previous.is_none() {
             self.live_count += 1;
         }
-        (changed, previous.is_none())
+        SparseTsdWriteResult {
+            state_changed: previous_valid == 0
+                || changed
+                || previous_confidence != self.confidence[id]
+                || previous_generation != self.observed_generation[id],
+            value_changed: changed,
+            became_live: previous.is_none(),
+        }
     }
 }
 
@@ -448,17 +477,17 @@ impl SparseTsdGrid {
         coord: VoxelCoord,
         value: f32,
         generation: u64,
-    ) -> bool {
+    ) -> SparseTsdWriteResult {
         let (chunk_key, local_id) = self.chunk_key_and_id(coord);
         let chunk = self
             .chunks
             .entry(chunk_key)
             .or_insert_with(|| SparseTsdChunk::new(self.chunk_volume));
-        let (changed, became_live) = chunk.accumulate(local_id, value, generation);
-        if became_live {
+        let result = chunk.accumulate(local_id, value, generation);
+        if result.became_live {
             self.active_value_count += 1;
         }
-        changed
+        result
     }
 
     pub fn overwrite_normalized_distance(
@@ -466,17 +495,17 @@ impl SparseTsdGrid {
         coord: VoxelCoord,
         value: f32,
         generation: u64,
-    ) -> bool {
+    ) -> SparseTsdWriteResult {
         let (chunk_key, local_id) = self.chunk_key_and_id(coord);
         let chunk = self
             .chunks
             .entry(chunk_key)
             .or_insert_with(|| SparseTsdChunk::new(self.chunk_volume));
-        let (changed, became_live) = chunk.overwrite(local_id, value, generation);
-        if became_live {
+        let result = chunk.overwrite(local_id, value, generation);
+        if result.became_live {
             self.active_value_count += 1;
         }
-        changed
+        result
     }
 
     pub fn world_to_voxel_coord(&self, point: Vec3f) -> VoxelCoord {
@@ -635,6 +664,156 @@ impl SparseTsdGrid {
         let id = lx + ly * edge + lz * edge * edge;
         (VoxelCoord::new(cx, cy, cz), id)
     }
+
+    fn copy_read_chunk(&self, chunk_key: VoxelCoord) -> Option<SparseTsdReadChunk> {
+        let chunk = self.chunks.get(&chunk_key)?;
+        Some(SparseTsdReadChunk {
+            values: chunk.values.clone(),
+            valid: chunk.valid.clone(),
+            confidence: chunk.confidence.clone(),
+            observed_generation: chunk.observed_generation.clone(),
+        })
+    }
+
+    fn build_read_snapshot(
+        &self,
+        previous: Option<&SparseTsdGridReadSnapshot>,
+        dirty_chunk_keys: &HashSet<VoxelCoord>,
+    ) -> SparseTsdGridReadSnapshot {
+        let previous = previous.filter(|previous| {
+            previous.chunk_edge == self.chunk_edge
+                && previous.chunk_volume == self.chunk_volume
+                && (previous.voxel_size - self.voxel_size).abs() <= f32::EPSILON
+        });
+        let mut chunks = HashMap::with_capacity(self.chunks.len());
+        for (&chunk_key, chunk) in &self.chunks {
+            if chunk.live_count == 0 {
+                continue;
+            }
+            let read_chunk_key = voxel_coord_to_chunk_key(chunk_key);
+            let read_chunk = previous
+                .filter(|_| !dirty_chunk_keys.contains(&chunk_key))
+                .and_then(|previous| previous.chunks.get(&read_chunk_key).cloned())
+                .unwrap_or_else(|| {
+                    Arc::new(
+                        self.copy_read_chunk(chunk_key)
+                            .expect("mutable chunk should exist while publishing TSDF snapshot"),
+                    )
+                });
+            chunks.insert(read_chunk_key, read_chunk);
+        }
+        SparseTsdGridReadSnapshot {
+            voxel_size: self.voxel_size,
+            chunk_edge: self.chunk_edge,
+            chunk_volume: self.chunk_volume,
+            active_value_count: self.active_value_count,
+            active_bounds: self.world_bounds(0),
+            chunks,
+        }
+    }
+}
+
+fn voxel_coord_to_chunk_key(coord: VoxelCoord) -> ChunkKey {
+    ChunkKey::new(coord.x, coord.y, coord.z)
+}
+
+impl SparseTsdReadChunk {
+    pub fn value(&self, id: usize) -> Option<f32> {
+        if self.valid[id] == 0 {
+            None
+        } else {
+            Some(self.values[id])
+        }
+    }
+
+    pub fn meshing_value(&self, id: usize, current_generation: u64) -> Option<f32> {
+        if self.valid[id] == 0 {
+            None
+        } else if self.confidence[id] >= DEPTH_TSD_MIN_MESH_CONFIDENCE {
+            Some(self.values[id])
+        } else if self.confidence[id] >= DEPTH_TSD_RECENT_MESH_CONFIDENCE
+            && current_generation.saturating_sub(self.observed_generation[id])
+                <= DEPTH_TSD_RECENT_MESH_GENERATIONS
+            && self.values[id].abs() <= DEPTH_TSD_RECENT_MESH_MAX_ABS_DISTANCE
+        {
+            Some(self.values[id])
+        } else {
+            None
+        }
+    }
+
+    pub fn confidence(&self, id: usize) -> u8 {
+        if self.valid[id] == 0 {
+            0
+        } else {
+            self.confidence[id]
+        }
+    }
+}
+
+impl SparseTsdGridReadSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.active_value_count == 0
+    }
+
+    pub fn normalized_distance(&self, coord: VoxelCoord) -> Option<f32> {
+        let (chunk_key, local_id) = self.chunk_key_and_id(coord);
+        let chunk = self.chunks.get(&chunk_key)?;
+        chunk.value(local_id)
+    }
+
+    pub fn meshing_distance(&self, coord: VoxelCoord, current_generation: u64) -> Option<f32> {
+        let (chunk_key, local_id) = self.chunk_key_and_id(coord);
+        let chunk = self.chunks.get(&chunk_key)?;
+        chunk.meshing_value(local_id, current_generation)
+    }
+
+    pub fn confidence(&self, coord: VoxelCoord) -> u8 {
+        let (chunk_key, local_id) = self.chunk_key_and_id(coord);
+        self.chunks
+            .get(&chunk_key)
+            .map(|chunk| chunk.confidence(local_id))
+            .unwrap_or(0)
+    }
+
+    pub fn world_to_voxel_coord(&self, point: Vec3f) -> VoxelCoord {
+        VoxelCoord::new(
+            (point.x / self.voxel_size).floor() as i32,
+            (point.y / self.voxel_size).floor() as i32,
+            (point.z / self.voxel_size).floor() as i32,
+        )
+    }
+
+    pub fn voxel_center_world(&self, coord: VoxelCoord) -> Vec3f {
+        vec3f(
+            (coord.x as f32 + 0.5) * self.voxel_size,
+            (coord.y as f32 + 0.5) * self.voxel_size,
+            (coord.z as f32 + 0.5) * self.voxel_size,
+        )
+    }
+
+    pub fn world_bounds(&self, padding_voxels: i32) -> Option<(Vec3f, Vec3f)> {
+        let (min, max) = self.active_bounds?;
+        let padding = padding_voxels as f32 * self.voxel_size;
+        Some((
+            vec3f(min.x - padding, min.y - padding, min.z - padding),
+            vec3f(max.x + padding, max.y + padding, max.z + padding),
+        ))
+    }
+
+    pub fn chunk_key_and_id(&self, coord: VoxelCoord) -> (ChunkKey, usize) {
+        let chunk_coord = VoxelCoord::new(
+            coord.x.div_euclid(self.chunk_edge),
+            coord.y.div_euclid(self.chunk_edge),
+            coord.z.div_euclid(self.chunk_edge),
+        );
+        let lx = coord.x.rem_euclid(self.chunk_edge) as usize;
+        let ly = coord.y.rem_euclid(self.chunk_edge) as usize;
+        let lz = coord.z.rem_euclid(self.chunk_edge) as usize;
+        let edge = self.chunk_edge as usize;
+        let id = lx + ly * edge + lz * edge * edge;
+        (voxel_coord_to_chunk_key(chunk_coord), id)
+    }
 }
 
 fn repair_dense_meshing_holes(dense: &mut Vec<f32>, scratch: &mut Vec<f32>, extent: VoxelCoord) {
@@ -722,6 +901,7 @@ struct DepthMeshVolume {
     bounds_max: Vec3f,
     mesh_grid: SparseTsdGrid,
     mesh_config: SparseVoxelMeshingConfig,
+    dirty_tsdf_chunk_keys: HashSet<VoxelCoord>,
     mesh_chunks: Vec<XrDepthMeshChunk>,
     mesh_generation: u64,
     update_sequence: u64,
@@ -736,6 +916,8 @@ struct DepthMeshVolume {
     latest_camera_world: Option<Vec3f>,
     latest_camera_forward: Option<Vec3f>,
     projected_height_field: Option<ProjectedHeightField>,
+    projected_height_layout_rebuild_pending: bool,
+    published_height_map: Option<XrDepthAlignHeightMap>,
     alignment_descriptor: Option<XrDepthAlignDescriptor>,
     alignment_descriptor_change_score: f32,
     alignment_debug: XrDepthAlignDebug,
@@ -827,6 +1009,7 @@ impl DepthMeshVolume {
             bounds_max: vec3f(0.0, 0.0, 0.0),
             mesh_grid: SparseTsdGrid::new(voxel_size_meters, 8),
             mesh_config,
+            dirty_tsdf_chunk_keys: HashSet::new(),
             mesh_chunks: Vec::new(),
             mesh_generation: 0,
             update_sequence: 0,
@@ -841,6 +1024,8 @@ impl DepthMeshVolume {
             latest_camera_world: None,
             latest_camera_forward: None,
             projected_height_field: None,
+            projected_height_layout_rebuild_pending: false,
+            published_height_map: None,
             alignment_descriptor: None,
             alignment_descriptor_change_score: 0.0,
             alignment_debug: XrDepthAlignDebug::default(),
@@ -926,6 +1111,59 @@ impl DepthMeshVolume {
         } else {
             (self.bounds_min, self.bounds_max) = empty_bounds();
         }
+    }
+
+    fn published_tsdf_snapshot(
+        &self,
+        previous: Option<&TsdfPublishedSnapshot>,
+    ) -> TsdfPublishedSnapshot {
+        let grid = if self.dirty_tsdf_chunk_keys.is_empty() {
+            previous
+                .map(|previous| previous.grid.clone())
+                .unwrap_or_else(|| {
+                    Arc::new(self.mesh_grid.build_read_snapshot(None, &self.dirty_tsdf_chunk_keys))
+                })
+        } else {
+            Arc::new(self.mesh_grid.build_read_snapshot(
+                previous.map(|previous| previous.grid.as_ref()),
+                &self.dirty_tsdf_chunk_keys,
+            ))
+        };
+        TsdfPublishedSnapshot {
+            generation: self.generation,
+            latest_topology_generation: self.latest_topology_generation,
+            update_sequence: self.update_sequence,
+            grid,
+            height_map: self.published_height_map.clone(),
+        }
+    }
+
+    fn clear_published_tsdf_dirty_state(&mut self) {
+        self.dirty_tsdf_chunk_keys.clear();
+    }
+
+    fn clear_published_height_map(&mut self) -> bool {
+        if self.published_height_map.is_none() {
+            return false;
+        }
+        self.published_height_map = None;
+        self.update_sequence = self.update_sequence.saturating_add(1);
+        true
+    }
+
+    fn discard_obsolete_surface_state(&mut self) {
+        self.mesh_chunks.clear();
+        self.dirty_chunk_keys.clear();
+        self.removed_chunk_keys.clear();
+        self.mesh_vertex_count = 0;
+        self.mesh_triangle_count = 0;
+        self.pending_mesh_dirty_chunks.clear();
+        self.pending_mesh_chunk_queue.clear();
+        self.plane_patches.clear();
+        self.stable_wall_tracks.clear();
+        self.plane_scan_chunks.clear();
+        self.pending_plane_scan_dirty_chunks.clear();
+        self.pending_plane_scan_chunk_queue.clear();
     }
 
     fn snapshot(&self) -> XrDepthMesh {
@@ -1027,15 +1265,10 @@ impl CxOpenXrDepthMeshPipeline {
         let store = xr_depth_mesh_store();
         let busy = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = channel::<CxOpenXrDepthMeshJob>();
-        let (prepared_sender, prepared_receiver) = channel::<CxOpenXrPreparedDepthMeshJob>();
         std::thread::spawn({
             let busy = busy.clone();
             let store = store.clone();
-            move || depth_preprocess_worker(receiver, prepared_sender, busy, store)
-        });
-        std::thread::spawn({
-            let store = store.clone();
-            move || depth_mesher_worker(prepared_receiver, store)
+            move || depth_preprocess_tsdf_writer_worker(receiver, busy, store)
         });
         Self {
             sender,
@@ -1207,110 +1440,64 @@ struct DepthMesherWorkerState {
     mesh_fill_scratch: Vec<f32>,
 }
 
-fn depth_preprocess_worker(
+fn depth_preprocess_tsdf_writer_worker(
     receiver: Receiver<CxOpenXrDepthMeshJob>,
-    sender: Sender<CxOpenXrPreparedDepthMeshJob>,
     busy: Arc<AtomicBool>,
     store: XrDepthMeshStore,
 ) {
-    let mut worker_state = DepthPreprocessWorkerState::default();
-    while let Ok(job) = receiver.recv() {
-        if job.reset_generation != store.reset_generation() {
-            busy.store(false, Ordering::Release);
-            continue;
-        }
-        if (job.voxel_size_meters - store.voxel_size_meters()).abs() > f32::EPSILON {
-            busy.store(false, Ordering::Release);
-            continue;
-        }
-        let result = preprocess_depth_mesh(job, &mut worker_state);
-        busy.store(false, Ordering::Release);
-        match result {
-            Ok(job) => {
-                if let Err(err) = sender.send(job) {
-                    store.set_error(format!("OpenXR depth mesher is unavailable: {err}"));
-                    break;
-                }
-            }
-            Err(err) => {
-                store.set_error(err);
-            }
-        }
-    }
-}
-
-fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: XrDepthMeshStore) {
-    let mut worker_state = DepthMesherWorkerState::default();
+    let mut preprocess_state = DepthPreprocessWorkerState::default();
     let mut volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, store.voxel_size_meters());
-    let mut next_alignment_descriptor_update_at = Instant::now();
+    let mut next_height_map_publish_at = Instant::now();
     let mut applied_reset_generation = store.reset_generation();
     loop {
         let configured_voxel_size = store.voxel_size_meters();
         if (volume.voxel_size_meters - configured_voxel_size).abs() > f32::EPSILON {
             volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, configured_voxel_size);
-            next_alignment_descriptor_update_at = Instant::now();
+            next_height_map_publish_at = Instant::now();
         }
         let requested_reset_generation = store.reset_generation();
         if applied_reset_generation != requested_reset_generation {
             applied_reset_generation = requested_reset_generation;
             volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, configured_voxel_size);
-            next_alignment_descriptor_update_at = Instant::now();
+            next_height_map_publish_at = Instant::now();
         }
         let mut applied_update = false;
         match receiver.recv_timeout(Duration::from_millis(DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS)) {
-            Ok(mut job) => {
-                while let Ok(newer) = receiver.try_recv() {
-                    job = newer;
-                }
+            Ok(job) => {
                 if job.reset_generation != store.reset_generation() {
+                    busy.store(false, Ordering::Release);
                     continue;
                 }
-                let configured_voxel_size = store.voxel_size_meters();
-                if (job.voxel_size_meters - configured_voxel_size).abs() > f32::EPSILON {
+                if (job.voxel_size_meters - store.voxel_size_meters()).abs() > f32::EPSILON {
+                    busy.store(false, Ordering::Release);
                     continue;
                 }
-                apply_preprocessed_depth_mesh(job, &mut volume);
-                applied_update = true;
+                let result = preprocess_depth_mesh(job, &mut preprocess_state);
+                busy.store(false, Ordering::Release);
+                match result {
+                    Ok(job) => {
+                        if job.reset_generation != store.reset_generation() {
+                            continue;
+                        }
+                        if (job.voxel_size_meters - store.voxel_size_meters()).abs() > f32::EPSILON
+                        {
+                            continue;
+                        }
+                        apply_preprocessed_depth_mesh(job, &mut volume);
+                        volume.discard_obsolete_surface_state();
+                        applied_update = true;
+                    }
+                    Err(err) => {
+                        store.set_error(err);
+                    }
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
-        let query_changed = process_geometry_queries(&volume, &store, DEPTH_QUERY_BATCH_PER_TICK);
-        let mesh_enabled = store.mesh_enabled();
-        let plane_scan_enabled = store.plane_scan_enabled();
         let surface_analysis_enabled = store.surface_analysis_enabled();
-        let alignment_preview_enabled = store.alignment_preview_enabled();
         let now = Instant::now();
-        let mesh_changed = if mesh_enabled {
-            process_incremental_surface_mesh(
-                &mut volume,
-                &mut worker_state,
-                DEPTH_SURFACE_MESH_CHUNKS_PER_TICK,
-            )
-        } else if !volume.mesh_chunks.is_empty()
-            || !volume.pending_mesh_dirty_chunks.is_empty()
-            || !volume.pending_mesh_chunk_queue.is_empty()
-        {
-            volume.reset_render_mesh_state();
-            true
-        } else {
-            false
-        };
-        let plane_changed = if plane_scan_enabled {
-            process_incremental_tsdf_plane_scan(&mut volume, DEPTH_PLANE_SCAN_CHUNKS_PER_TICK)
-        } else if volume.reset_plane_scan_state() {
-            true
-        } else if mesh_enabled {
-            update_reduced_planar_patches(&mut volume, mesh_changed)
-        } else if !volume.plane_patches.is_empty() {
-            volume.plane_patches.clear();
-            volume.plane_generation = volume.plane_generation.saturating_add(1);
-            volume.update_sequence = volume.update_sequence.saturating_add(1);
-            true
-        } else {
-            false
-        };
         if surface_analysis_enabled {
             sync_projected_height_field_layout(&mut volume);
             sync_projected_height_field_player_cutout(&mut volume);
@@ -1319,38 +1506,28 @@ fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: 
                 DEPTH_ALIGN_PROJECTED_HEIGHT_SAMPLES_PER_TICK,
             );
         }
-        let alignment_changed = if surface_analysis_enabled {
-            if plane_changed || now >= next_alignment_descriptor_update_at {
-                next_alignment_descriptor_update_at =
-                    now + Duration::from_millis(DEPTH_ALIGN_DESCRIPTOR_UPDATE_INTERVAL_MILLIS);
-                update_tsdf_alignment_descriptor(&mut volume)
-            } else {
-                false
-            }
-        } else {
-            next_alignment_descriptor_update_at = now;
-            volume.clear_alignment_descriptor()
-        };
-        let preview_changed = if alignment_preview_enabled && surface_analysis_enabled {
-            if alignment_changed
-                || (volume.alignment_descriptor.is_some()
-                    && volume.alignment_preview == XrDepthAlignPreview::default())
+        let height_map_changed = if surface_analysis_enabled {
+            let ready_to_publish = !volume.projected_height_layout_rebuild_pending
+                && volume.pending_projected_height_sample_queue.is_empty();
+            if ready_to_publish
+                && (volume.published_height_map.is_none() || now >= next_height_map_publish_at)
             {
-                update_alignment_preview(&mut volume)
+                next_height_map_publish_at =
+                    now + Duration::from_millis(DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS);
+                update_published_height_map(&mut volume)
             } else {
                 false
             }
         } else {
-            volume.clear_alignment_preview()
+            next_height_map_publish_at = now;
+            volume.clear_published_height_map()
         };
-        if (mesh_enabled && applied_update)
-            || mesh_changed
-            || plane_changed
-            || alignment_changed
-            || preview_changed
-            || query_changed
-        {
-            store.publish(volume.snapshot());
+        let snapshot_changed = applied_update || height_map_changed;
+        if snapshot_changed {
+            let previous_snapshot = store.latest_tsdf_snapshot();
+            let snapshot = volume.published_tsdf_snapshot(previous_snapshot.as_deref());
+            store.publish_tsdf_snapshot(snapshot);
+            volume.clear_published_tsdf_dirty_state();
             SignalToUI::set_ui_signal();
         }
     }
@@ -1515,7 +1692,16 @@ fn apply_preprocessed_depth_mesh(job: CxOpenXrPreparedDepthMeshJob, volume: &mut
         volume.latest_topology_generation = job.generation;
     }
     volume.update_bounds();
-    enqueue_visible_mesh_chunks(volume, job.visible_world_min, job.visible_world_max);
+}
+
+fn update_published_height_map(volume: &mut DepthMeshVolume) -> bool {
+    let (_, next_height_map, _) = build_tsdf_vector_slice_preview_and_samples(volume);
+    if volume.published_height_map == next_height_map {
+        return false;
+    }
+    volume.published_height_map = next_height_map;
+    volume.update_sequence = volume.update_sequence.saturating_add(1);
+    true
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1594,6 +1780,9 @@ fn alignment_descriptor_change_score(
 }
 
 fn update_tsdf_alignment_descriptor(volume: &mut DepthMeshVolume) -> bool {
+    if volume.projected_height_layout_rebuild_pending {
+        return false;
+    }
     let previous_slice_preview = volume.alignment_slice_preview.clone();
     let (next_descriptor, next_debug) = build_tsdf_alignment_descriptor(volume);
     let change_score =
@@ -2122,6 +2311,7 @@ fn remap_projected_height_dirty_samples(
 fn sync_projected_height_field_layout(volume: &mut DepthMeshVolume) {
     let Some(layout) = projected_height_field_layout(volume) else {
         volume.projected_height_field = None;
+        volume.projected_height_layout_rebuild_pending = false;
         volume.pending_projected_height_dirty_samples.clear();
         volume.pending_projected_height_sample_queue.clear();
         return;
@@ -2161,6 +2351,7 @@ fn sync_projected_height_field_layout(volume: &mut DepthMeshVolume) {
         .filter_map(|(sample_index, valid)| (*valid == 0).then_some(sample_index))
         .collect::<Vec<_>>();
     volume.projected_height_field = Some(next_field);
+    volume.projected_height_layout_rebuild_pending = true;
     volume.pending_projected_height_dirty_samples.clear();
     volume.pending_projected_height_sample_queue.clear();
     if copied_overlap {
@@ -2339,6 +2530,9 @@ fn refresh_projected_height_field(volume: &mut DepthMeshVolume, max_samples: usi
             changed = true;
         }
         processed += 1;
+    }
+    if volume.pending_projected_height_sample_queue.is_empty() {
+        volume.projected_height_layout_rebuild_pending = false;
     }
     changed
 }
@@ -2675,15 +2869,6 @@ fn build_tsdf_vector_slice_preview_and_samples(
 ) {
     sync_projected_height_field_layout(volume);
     sync_projected_height_field_player_cutout(volume);
-    if !volume.pending_projected_height_sample_queue.is_empty() {
-        refresh_projected_height_field(
-            volume,
-            volume
-                .pending_projected_height_sample_queue
-                .len()
-                .min(DEPTH_ALIGN_DESCRIPTOR_BUILD_HEIGHTMAP_REFRESH_BUDGET),
-        );
-    }
     let Some(field) = volume.projected_height_field.as_ref() else {
         return (None, None, Vec::new());
     };
@@ -2789,6 +2974,11 @@ fn build_tsdf_vector_slice_preview_and_samples(
 
 #[cfg(test)]
 fn build_tsdf_vector_slice_samples(volume: &mut DepthMeshVolume) -> Vec<XrDepthAlignSample> {
+    sync_projected_height_field_layout(volume);
+    sync_projected_height_field_player_cutout(volume);
+    while !volume.pending_projected_height_sample_queue.is_empty() {
+        refresh_projected_height_field(volume, usize::MAX);
+    }
     build_tsdf_vector_slice_preview_and_samples(volume).2
 }
 
@@ -3389,10 +3579,13 @@ fn apply_tsd_samples(
     let mut changed = 0;
     for (&coord, &normalized) in frame_tsd_samples {
         let previous = volume.mesh_grid.normalized_distance(coord).unwrap_or(2.0);
-        if volume
+        let update = volume
             .mesh_grid
-            .accumulate_normalized_distance(coord, normalized, volume.generation)
-        {
+            .accumulate_normalized_distance(coord, normalized, volume.generation);
+        if update.state_changed {
+            mark_tsdf_chunk_dirty(volume, coord);
+        }
+        if update.value_changed {
             let current = volume
                 .mesh_grid
                 .normalized_distance(coord)
@@ -3470,10 +3663,13 @@ fn refresh_visible_free_space(
                 {
                     continue;
                 }
-                if volume
+                let update = volume
                     .mesh_grid
-                    .accumulate_normalized_distance(coord, 1.0, volume.generation)
-                {
+                    .accumulate_normalized_distance(coord, 1.0, volume.generation);
+                if update.state_changed {
+                    mark_tsdf_chunk_dirty(volume, coord);
+                }
+                if update.value_changed {
                     let current = volume
                         .mesh_grid
                         .normalized_distance(coord)
@@ -3522,10 +3718,13 @@ fn clear_player_exclusion_volume(volume: &mut DepthMeshVolume, camera_world: Vec
                 if previous >= 1.0 - 1.0e-4 {
                     continue;
                 }
-                if volume
+                let update = volume
                     .mesh_grid
-                    .overwrite_normalized_distance(coord, 1.0, volume.generation)
-                {
+                    .overwrite_normalized_distance(coord, 1.0, volume.generation);
+                if update.state_changed {
+                    mark_tsdf_chunk_dirty(volume, coord);
+                }
+                if update.value_changed {
                     mark_mesh_chunk_dirty(volume, coord);
                     mark_projected_height_samples_dirty_around_voxel(volume, coord);
                     changed += 1;
@@ -3534,6 +3733,11 @@ fn clear_player_exclusion_volume(volume: &mut DepthMeshVolume, camera_world: Vec
         }
     }
     changed
+}
+
+fn mark_tsdf_chunk_dirty(volume: &mut DepthMeshVolume, voxel: VoxelCoord) {
+    let (chunk_key, _) = volume.mesh_grid.chunk_key_and_id(voxel);
+    volume.dirty_tsdf_chunk_keys.insert(chunk_key);
 }
 
 fn mark_mesh_chunk_dirty(volume: &mut DepthMeshVolume, voxel: VoxelCoord) {
@@ -5427,21 +5631,8 @@ fn process_geometry_queries(
     store: &XrDepthMeshStore,
     max_queries: usize,
 ) -> bool {
-    let pending = store.drain_pending_queries(max_queries);
-    if pending.is_empty() {
-        return false;
-    }
-
-    let mut results = Vec::with_capacity(pending.len());
-    for pending_query in pending {
-        results.push(evaluate_geometry_query(
-            volume,
-            pending_query.query,
-            pending_query.version,
-        ));
-    }
-    store.publish_query_results(results);
-    true
+    let _ = (volume, store, max_queries);
+    false
 }
 
 #[derive(Clone, Copy)]
@@ -7878,15 +8069,200 @@ mod tests {
                     let world = volume.mesh_grid.voxel_center_world(coord);
                     let normalized =
                         (signed_distance(world) / tsd_distance_meters).clamp(-1.0, 1.0);
-                    volume.mesh_grid.overwrite_normalized_distance(
+                    let update = volume.mesh_grid.overwrite_normalized_distance(
                         coord,
                         normalized,
                         volume.generation.max(1),
                     );
+                    if update.state_changed {
+                        mark_tsdf_chunk_dirty(volume, coord);
+                    }
                 }
             }
         }
         volume.update_bounds();
+    }
+
+    fn assert_vec3_close(actual: Vec3f, expected: Vec3f, epsilon: f32) {
+        assert!(
+            (actual - expected).length() <= epsilon,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn tsdf_read_snapshot_matches_mutable_grid_sampling() {
+        let mut volume = DepthMeshVolume::new(1, 0.05);
+        volume.generation = 33;
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-5, -4, -3),
+            VoxelCoord::new(9, 6, 7),
+            |world| world.y - 0.10,
+        );
+
+        let snapshot = volume.published_tsdf_snapshot(None);
+        assert_eq!(snapshot.generation, volume.generation);
+        assert_eq!(
+            snapshot.latest_topology_generation,
+            volume.latest_topology_generation
+        );
+        assert_eq!(snapshot.update_sequence, volume.update_sequence);
+        assert_eq!(snapshot.height_map, volume.published_height_map);
+        assert_eq!(snapshot.grid.chunk_count(), volume.mesh_grid.chunk_count());
+        assert_eq!(
+            snapshot.grid.active_value_count,
+            volume.mesh_grid.active_value_count()
+        );
+        assert!(snapshot.grid.heap_bytes() > 0);
+        assert_eq!(
+            snapshot.grid.world_bounds(0),
+            volume.mesh_grid.world_bounds(0)
+        );
+        assert_eq!(
+            snapshot.grid.world_bounds(2),
+            volume.mesh_grid.world_bounds(2)
+        );
+
+        for z in -4..=7 {
+            for y in -4..=6 {
+                for x in -5..=9 {
+                    let coord = VoxelCoord::new(x, y, z);
+                    assert_eq!(
+                        snapshot.grid.normalized_distance(coord),
+                        volume.mesh_grid.normalized_distance(coord),
+                        "normalized distance mismatch at {coord:?}"
+                    );
+                    assert_eq!(
+                        snapshot.grid.confidence(coord),
+                        volume.mesh_grid.confidence(coord),
+                        "confidence mismatch at {coord:?}"
+                    );
+                    assert_eq!(
+                        snapshot.grid.meshing_distance(coord, volume.generation),
+                        volume.mesh_grid.meshing_distance(coord, volume.generation),
+                        "meshing distance mismatch at {coord:?}"
+                    );
+                    assert_vec3_close(
+                        snapshot.grid.voxel_center_world(coord),
+                        volume.mesh_grid.voxel_center_world(coord),
+                        1.0e-6,
+                    );
+                }
+            }
+        }
+
+        for point in [
+            vec3f(-0.21, -0.07, 0.11),
+            vec3f(0.03, 0.24, -0.14),
+            vec3f(0.41, 0.18, 0.32),
+        ] {
+            assert_eq!(
+                snapshot.grid.world_to_voxel_coord(point),
+                volume.mesh_grid.world_to_voxel_coord(point),
+                "world_to_voxel_coord mismatch for {point:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tsdf_snapshot_reuses_unchanged_chunk_arcs_across_partial_publish() {
+        let mut volume = DepthMeshVolume::new(1, 0.05);
+        volume.generation = 34;
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(0, 0, 0),
+            VoxelCoord::new(12, 2, 2),
+            |world| world.x - 0.22,
+        );
+
+        let first = volume.published_tsdf_snapshot(None);
+        volume.clear_published_tsdf_dirty_state();
+
+        let first_chunk_a = first
+            .grid
+            .chunks
+            .get(&ChunkKey::new(0, 0, 0))
+            .cloned()
+            .expect("expected chunk 0/0/0 in initial TSDF snapshot");
+        let first_chunk_b = first
+            .grid
+            .chunks
+            .get(&ChunkKey::new(1, 0, 0))
+            .cloned()
+            .expect("expected chunk 1/0/0 in initial TSDF snapshot");
+
+        volume.generation = 35;
+        volume.latest_topology_generation = 35;
+        let updated_coord = VoxelCoord::new(8, 1, 1);
+        let update = volume
+            .mesh_grid
+            .overwrite_normalized_distance(updated_coord, -0.35, volume.generation);
+        assert!(update.state_changed, "expected TSDF edit to mark state dirty");
+        mark_tsdf_chunk_dirty(&mut volume, updated_coord);
+
+        let second = volume.published_tsdf_snapshot(Some(&first));
+        let second_chunk_a = second
+            .grid
+            .chunks
+            .get(&ChunkKey::new(0, 0, 0))
+            .cloned()
+            .expect("expected chunk 0/0/0 in updated TSDF snapshot");
+        let second_chunk_b = second
+            .grid
+            .chunks
+            .get(&ChunkKey::new(1, 0, 0))
+            .cloned()
+            .expect("expected chunk 1/0/0 in updated TSDF snapshot");
+
+        assert!(
+            Arc::ptr_eq(&first_chunk_a, &second_chunk_a),
+            "unchanged TSDF chunk should reuse the previous Arc"
+        );
+        assert!(
+            !Arc::ptr_eq(&first_chunk_b, &second_chunk_b),
+            "dirty TSDF chunk should publish a fresh Arc"
+        );
+        assert_eq!(
+            second.grid.normalized_distance(updated_coord),
+            volume.mesh_grid.normalized_distance(updated_coord)
+        );
+    }
+
+    #[test]
+    fn tsdf_snapshot_reuses_entire_grid_arc_when_only_metadata_changes() {
+        let mut volume = DepthMeshVolume::new(1, 0.05);
+        volume.generation = 36;
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-4, -4, -4),
+            VoxelCoord::new(4, 4, 4),
+            |world| world.y - 0.05,
+        );
+
+        let first = volume.published_tsdf_snapshot(None);
+        volume.clear_published_tsdf_dirty_state();
+        volume.update_sequence = volume.update_sequence.saturating_add(1);
+        volume.published_height_map = Some(XrDepthAlignHeightMap {
+            origin_x: -0.4,
+            origin_z: -0.4,
+            cell_size_meters: 0.1,
+            size_x: 2,
+            size_z: 2,
+            bottom_y_meters: -0.2,
+            top_y_meters: 1.4,
+            player_cutout_center: Some(vec2f(0.1, -0.1)),
+            player_cutout_radius_meters: 0.25,
+            height_u16: vec![0, u16::MAX / 4, u16::MAX / 2, u16::MAX],
+        });
+
+        let second = volume.published_tsdf_snapshot(Some(&first));
+
+        assert!(
+            Arc::ptr_eq(&first.grid, &second.grid),
+            "metadata-only snapshot publish should reuse the previous grid Arc"
+        );
+        assert_eq!(second.height_map, volume.published_height_map);
     }
 
     fn room_signed_distance(
@@ -8592,6 +8968,11 @@ mod tests {
             |world| world.y.min(0.55 - world.x),
         );
 
+        sync_projected_height_field_layout(&mut volume);
+        sync_projected_height_field_player_cutout(&mut volume);
+        while !volume.pending_projected_height_sample_queue.is_empty() {
+            refresh_projected_height_field(&mut volume, usize::MAX);
+        }
         let (descriptor, debug) = build_tsdf_alignment_descriptor(&mut volume);
         let descriptor = descriptor.unwrap_or_else(|| {
             panic!(

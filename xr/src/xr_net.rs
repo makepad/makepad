@@ -89,11 +89,19 @@ pub struct XrNetAlignmentDescriptorFrame {
 }
 
 impl XrNetAlignmentDescriptorFrame {
-    pub fn from_depth_mesh(depth_mesh: &XrDepthMesh, sent_at: f64) -> Option<Self> {
+    pub fn from_tsdf_snapshot(snapshot: &TsdfPublishedSnapshot, sent_at: f64) -> Option<Self> {
+        let height_map = snapshot.height_map.clone()?;
         Some(Self {
             seq: 0,
             sent_at,
-            descriptor: depth_mesh.alignment_descriptor.clone()?,
+            descriptor: XrDepthAlignDescriptor {
+                voxel_size_meters: snapshot.grid.voxel_size,
+                floor_y: 0.0,
+                wall_normal_histogram: Vec::new(),
+                samples: Vec::new(),
+                vertical_descriptor: None,
+                height_map: Some(height_map),
+            },
         })
     }
 
@@ -117,6 +125,18 @@ impl XrNetAlignmentDescriptorFrame {
 }
 
 pub type XrNetAlignmentSolution = XrDepthAlignSolution;
+
+pub fn tsdf_snapshot_height_map_preview(
+    snapshot: &TsdfPublishedSnapshot,
+) -> Option<XrDepthAlignSlicePreview> {
+    let height_map = snapshot.height_map.clone()?;
+    Some(XrDepthAlignSlicePreview {
+        cutout_center: height_map.player_cutout_center,
+        cutout_forward: None,
+        cutout_radius_meters: height_map.player_cutout_radius_meters,
+        height_map,
+    })
+}
 
 #[derive(Clone, Debug)]
 pub enum XrNetIncoming {
@@ -1402,36 +1422,17 @@ mod tests {
         }
     }
 
-    fn make_depth_mesh_for_descriptor(descriptor: XrDepthAlignDescriptor) -> XrDepthMesh {
-        let mut mesh = XrDepthMesh::default();
-        mesh.voxel_size_meters = descriptor.voxel_size_meters;
-        mesh.alignment_descriptor = Some(descriptor.clone());
-        mesh.alignment_debug = XrDepthAlignDebug {
-            near_surface_voxel_count: descriptor.samples.len() as u32 * 6,
-            floor_candidate_count: descriptor
-                .samples
-                .iter()
-                .filter(|sample| sample.kind == XrDepthAlignSampleKind::Floor)
-                .count() as u32
-                * 3,
-            wall_candidate_count: descriptor
-                .samples
-                .iter()
-                .filter(|sample| sample.kind == XrDepthAlignSampleKind::Wall)
-                .count() as u32
-                * 3,
-            floor_sample_count: descriptor
-                .samples
-                .iter()
-                .filter(|sample| sample.kind == XrDepthAlignSampleKind::Floor)
-                .count() as u32,
-            wall_sample_count: descriptor
-                .samples
-                .iter()
-                .filter(|sample| sample.kind == XrDepthAlignSampleKind::Wall)
-                .count() as u32,
-        };
-        mesh
+    fn make_tsdf_snapshot_for_descriptor(descriptor: XrDepthAlignDescriptor) -> TsdfPublishedSnapshot {
+        TsdfPublishedSnapshot {
+            generation: 1,
+            latest_topology_generation: 1,
+            update_sequence: 1,
+            grid: Arc::new(SparseTsdGridReadSnapshot {
+                voxel_size: descriptor.voxel_size_meters,
+                ..Default::default()
+            }),
+            height_map: descriptor.height_map.clone(),
+        }
     }
 
     #[test]
@@ -1609,13 +1610,13 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_from_depth_mesh_uses_tsdf_alignment_descriptor_snapshot() {
+    fn descriptor_from_tsdf_snapshot_uses_tsdf_alignment_descriptor_snapshot() {
         let descriptor = make_descriptor_frame().descriptor;
-        let mesh = make_depth_mesh_for_descriptor(descriptor.clone());
-        let descriptor = XrNetAlignmentDescriptorFrame::from_depth_mesh(&mesh, 1.0)
+        let snapshot = make_tsdf_snapshot_for_descriptor(descriptor.clone());
+        let descriptor = XrNetAlignmentDescriptorFrame::from_tsdf_snapshot(&snapshot, 1.0)
             .expect("descriptor should use the TSDF alignment descriptor from the depth snapshot");
 
-        assert_eq!(descriptor.descriptor, mesh.alignment_descriptor.unwrap());
+        assert_eq!(descriptor.descriptor.height_map, snapshot.height_map);
         assert!(descriptor.test_markers().is_some());
     }
 
