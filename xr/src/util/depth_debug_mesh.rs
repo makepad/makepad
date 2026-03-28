@@ -1,7 +1,7 @@
 use crate::tsdf_query::{depth_query_plane_quad, DepthQuerySupportPlane};
 use crate::*;
 use std::{
-    collections::{HashSet, hash_map::DefaultHasher},
+    collections::{hash_map::DefaultHasher, HashSet},
     hash::{Hash, Hasher},
 };
 
@@ -113,15 +113,12 @@ fn snapshot_meshing_distance(
 ) -> Option<f32> {
     let (chunk_key, id) = chunk_key_and_id(grid, coord);
     let chunk = grid.chunks.get(&chunk_key)?;
-    if chunk.valid.get(id).copied().unwrap_or(0) == 0 {
-        return None;
-    }
-    let confidence = chunk.confidence.get(id).copied().unwrap_or(0);
-    let value = *chunk.values.get(id)?;
+    let confidence = chunk.confidence(id);
+    let value = chunk.value(id)?;
     if confidence >= XR_DEBUG_TSDF_MIN_MESH_CONFIDENCE {
         return Some(value);
     }
-    let observed_generation = chunk.observed_generation.get(id).copied().unwrap_or(0);
+    let observed_generation = chunk.observed_generation(id, current_generation);
     (confidence >= XR_DEBUG_TSDF_RECENT_MESH_CONFIDENCE
         && current_generation.saturating_sub(observed_generation)
             <= XR_DEBUG_TSDF_RECENT_MESH_GENERATIONS
@@ -343,7 +340,11 @@ fn surface_net_mesh_from_dense(
 
     let sample_value = |coord: VoxelCoord| -> f32 {
         let raw = volume[flatten_coord(coord, voxel_count)];
-        if raw.is_finite() { raw } else { 0.0 }
+        if raw.is_finite() {
+            raw
+        } else {
+            0.0
+        }
     };
     let raw_value = |coord: VoxelCoord| -> f32 { volume[flatten_coord(coord, voxel_count)] };
 
@@ -533,13 +534,7 @@ fn snapshot_surface_net_chunk_mesh(
         dense,
     );
     repair_dense_meshing_holes(dense, fill_scratch, dense_size);
-    surface_net_mesh_from_dense(
-        dense,
-        dense_size,
-        snapshot.grid.voxel_size,
-        start,
-        stride,
-    )
+    surface_net_mesh_from_dense(dense, dense_size, snapshot.grid.voxel_size, start, stride)
 }
 
 fn mesh_chunk_fingerprint(chunk_key: ChunkKey, mesh: &SurfaceMesh32) -> u64 {
@@ -603,7 +598,8 @@ pub(crate) fn build_tsdf_snapshot_debug_mesh_chunks(
     let mut chunks = Vec::new();
 
     for chunk_key in snapshot_debug_mesh_chunk_keys(snapshot) {
-        let Some(mesh) = snapshot_surface_net_chunk_mesh(snapshot, chunk_key, &mut dense, &mut fill_scratch)
+        let Some(mesh) =
+            snapshot_surface_net_chunk_mesh(snapshot, chunk_key, &mut dense, &mut fill_scratch)
         else {
             continue;
         };
@@ -653,19 +649,9 @@ mod tests {
         let chunk = Arc::make_mut(
             chunks
                 .entry(chunk_key)
-                .or_insert_with(|| {
-                    Arc::new(SparseTsdReadChunk {
-                        values: vec![0.0; edge * edge * edge],
-                        valid: vec![0; edge * edge * edge],
-                        confidence: vec![0; edge * edge * edge],
-                        observed_generation: vec![0; edge * edge * edge],
-                    })
-                }),
+                .or_insert_with(|| Arc::new(SparseTsdReadChunk::new(edge * edge * edge))),
         );
-        chunk.values[id] = normalized_distance;
-        chunk.valid[id] = 1;
-        chunk.confidence[id] = 8;
-        chunk.observed_generation[id] = 1;
+        chunk.set_value(id, normalized_distance, 8, 1);
     }
 
     fn make_flat_floor_snapshot(voxel_size: f32) -> TsdfPublishedSnapshot {
@@ -756,7 +742,12 @@ mod tests {
         let snapshot = make_flat_floor_snapshot(0.05);
         let chunks = build_tsdf_snapshot_debug_mesh_chunks(&snapshot);
 
-        assert!(!chunks.is_empty(), "expected debug mesh chunks for a flat floor snapshot");
-        assert!(chunks.iter().all(|chunk| !chunk.indices.is_empty() && !chunk.vertices.is_empty()));
+        assert!(
+            !chunks.is_empty(),
+            "expected debug mesh chunks for a flat floor snapshot"
+        );
+        assert!(chunks
+            .iter()
+            .all(|chunk| !chunk.indices.is_empty() && !chunk.vertices.is_empty()));
     }
 }

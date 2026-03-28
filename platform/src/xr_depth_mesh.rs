@@ -117,18 +117,118 @@ pub struct XrDepthMeshState {
 
 #[derive(Clone, Debug, Default)]
 pub struct SparseTsdReadChunk {
-    pub values: Vec<f32>,
-    pub valid: Vec<u8>,
+    pub values: Vec<i16>,
+    pub valid_bits: Vec<u64>,
     pub confidence: Vec<u8>,
-    pub observed_generation: Vec<u64>,
+    pub observed_generation: Vec<u16>,
 }
 
 impl SparseTsdReadChunk {
+    const NORMALIZED_DISTANCE_ENCODE_SCALE: f32 = i16::MAX as f32;
+    const GENERATION_WRAP: u64 = u16::MAX as u64 + 1;
+    const GENERATION_MASK: u64 = u16::MAX as u64;
+
+    pub fn new(chunk_volume: usize) -> Self {
+        Self {
+            values: vec![0; chunk_volume],
+            valid_bits: vec![0; Self::valid_word_count(chunk_volume)],
+            confidence: vec![0; chunk_volume],
+            observed_generation: vec![0; chunk_volume],
+        }
+    }
+
+    pub fn valid_word_count(chunk_volume: usize) -> usize {
+        (chunk_volume + u64::BITS as usize - 1) / u64::BITS as usize
+    }
+
+    pub fn valid_bit_parts(id: usize) -> (usize, u64) {
+        let word_index = id / u64::BITS as usize;
+        let bit_mask = 1u64 << (id % u64::BITS as usize);
+        (word_index, bit_mask)
+    }
+
+    pub fn is_valid_index(valid_bits: &[u64], id: usize) -> bool {
+        let (word_index, bit_mask) = Self::valid_bit_parts(id);
+        valid_bits
+            .get(word_index)
+            .copied()
+            .is_some_and(|word| (word & bit_mask) != 0)
+    }
+
+    pub fn set_valid_index(valid_bits: &mut [u64], id: usize) -> bool {
+        let (word_index, bit_mask) = Self::valid_bit_parts(id);
+        let Some(word) = valid_bits.get_mut(word_index) else {
+            return false;
+        };
+        let was_valid = (*word & bit_mask) != 0;
+        *word |= bit_mask;
+        was_valid
+    }
+
+    pub fn encode_normalized_distance(value: f32) -> i16 {
+        (value.clamp(-1.0, 1.0) * Self::NORMALIZED_DISTANCE_ENCODE_SCALE).round() as i16
+    }
+
+    pub fn decode_normalized_distance(value: i16) -> f32 {
+        value as f32 / Self::NORMALIZED_DISTANCE_ENCODE_SCALE
+    }
+
+    pub fn encode_generation_tag(generation: u64) -> u16 {
+        generation as u16
+    }
+
+    pub fn decode_generation_tag(tag: u16, current_generation: u64) -> u64 {
+        let base = current_generation & !Self::GENERATION_MASK;
+        let candidate = base | tag as u64;
+        if candidate > current_generation {
+            candidate.saturating_sub(Self::GENERATION_WRAP)
+        } else {
+            candidate
+        }
+    }
+
+    pub fn value(&self, id: usize) -> Option<f32> {
+        if !Self::is_valid_index(&self.valid_bits, id) {
+            None
+        } else {
+            self.values
+                .get(id)
+                .copied()
+                .map(Self::decode_normalized_distance)
+        }
+    }
+
+    pub fn confidence(&self, id: usize) -> u8 {
+        if !Self::is_valid_index(&self.valid_bits, id) {
+            0
+        } else {
+            self.confidence.get(id).copied().unwrap_or(0)
+        }
+    }
+
+    pub fn observed_generation(&self, id: usize, current_generation: u64) -> u64 {
+        let tag = self.observed_generation.get(id).copied().unwrap_or(0);
+        Self::decode_generation_tag(tag, current_generation)
+    }
+
+    pub fn set_value(&mut self, id: usize, value: f32, confidence: u8, observed_generation: u64) {
+        if id >= self.values.len()
+            || id >= self.confidence.len()
+            || id >= self.observed_generation.len()
+        {
+            return;
+        }
+        self.values[id] = Self::encode_normalized_distance(value);
+        Self::set_valid_index(&mut self.valid_bits, id);
+        self.confidence[id] = confidence;
+        self.observed_generation[id] = Self::encode_generation_tag(observed_generation);
+    }
+
     pub fn heap_bytes(&self) -> u64 {
-        (self.values.capacity() * std::mem::size_of::<f32>()
-            + self.valid.capacity() * std::mem::size_of::<u8>()
+        (self.values.capacity() * std::mem::size_of::<i16>()
+            + self.valid_bits.capacity() * std::mem::size_of::<u64>()
             + self.confidence.capacity() * std::mem::size_of::<u8>()
-            + self.observed_generation.capacity() * std::mem::size_of::<u64>()) as u64
+            + self.observed_generation.capacity() * std::mem::size_of::<u16>()) as u64
     }
 }
 
@@ -153,8 +253,8 @@ impl SparseTsdGridReadSnapshot {
             .values()
             .map(|chunk| chunk.heap_bytes())
             .sum::<u64>();
-        let table_bytes =
-            self.chunks.capacity() as u64 * std::mem::size_of::<(ChunkKey, Arc<SparseTsdReadChunk>)>() as u64;
+        let table_bytes = self.chunks.capacity() as u64
+            * std::mem::size_of::<(ChunkKey, Arc<SparseTsdReadChunk>)>() as u64;
         chunk_bytes + table_bytes
     }
 }
@@ -723,11 +823,26 @@ fn height_map_cell_signal(
     if size_x < 3 || size_z < 3 || x == 0 || z == 0 || x + 1 >= size_x || z + 1 >= size_z {
         return None;
     }
-    let center = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x, z)])?;
-    let left = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x - 1, z)])?;
-    let right = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x + 1, z)])?;
-    let up = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x, z - 1)])?;
-    let down = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x, z + 1)])?;
+    let center = decode_height_map_height(
+        height_map,
+        height_map.height_u16[height_map.cell_index(x, z)],
+    )?;
+    let left = decode_height_map_height(
+        height_map,
+        height_map.height_u16[height_map.cell_index(x - 1, z)],
+    )?;
+    let right = decode_height_map_height(
+        height_map,
+        height_map.height_u16[height_map.cell_index(x + 1, z)],
+    )?;
+    let up = decode_height_map_height(
+        height_map,
+        height_map.height_u16[height_map.cell_index(x, z - 1)],
+    )?;
+    let down = decode_height_map_height(
+        height_map,
+        height_map.height_u16[height_map.cell_index(x, z + 1)],
+    )?;
     let cell_size = height_map.cell_size_meters.max(1.0e-3);
     let gradient = vec3(
         (right - left) / (2.0 * cell_size),
@@ -857,10 +972,22 @@ fn sample_height_map_bilinear(
     let fx = (sample_x - x0 as f32).clamp(0.0, 1.0);
     let fz = (sample_z - z0 as f32).clamp(0.0, 1.0);
 
-    let h00 = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x0, z0)]);
-    let h10 = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x1, z0)]);
-    let h01 = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x0, z1)]);
-    let h11 = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x1, z1)]);
+    let h00 = decode_height_map_height(
+        height_map,
+        height_map.height_u16[height_map.cell_index(x0, z0)],
+    );
+    let h10 = decode_height_map_height(
+        height_map,
+        height_map.height_u16[height_map.cell_index(x1, z0)],
+    );
+    let h01 = decode_height_map_height(
+        height_map,
+        height_map.height_u16[height_map.cell_index(x0, z1)],
+    );
+    let h11 = decode_height_map_height(
+        height_map,
+        height_map.height_u16[height_map.cell_index(x1, z1)],
+    );
     match (h00, h10, h01, h11) {
         (Some(h00), Some(h10), Some(h01), Some(h11)) => {
             let hx0 = h00 + (h10 - h00) * fx;
@@ -1100,12 +1227,8 @@ fn refine_seed_alignment_solution(
         best_yaw,
         best_translation,
     );
-    for (yaw_step, translation_step) in [
-        (0.10, 0.18),
-        (0.04, 0.07),
-        (0.015, 0.03),
-        (0.006, 0.012),
-    ] {
+    for (yaw_step, translation_step) in [(0.10, 0.18), (0.04, 0.07), (0.015, 0.03), (0.006, 0.012)]
+    {
         loop {
             let mut improved = false;
             for yaw_delta in [-yaw_step, 0.0, yaw_step] {
@@ -1157,8 +1280,7 @@ fn seeded_alignment_lock_is_strong(
     {
         return false;
     }
-    let overlap =
-        candidate.matched_samples as f32 / diagnostic.remote_wall_samples.max(1) as f32;
+    let overlap = candidate.matched_samples as f32 / diagnostic.remote_wall_samples.max(1) as f32;
     if overlap < XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_OVERLAP {
         return false;
     }
@@ -2237,7 +2359,8 @@ impl XrDepthMeshStore {
     }
 
     pub fn set_surface_analysis_enabled(&self, enabled: bool) {
-        self.surface_analysis_enabled.store(enabled, Ordering::Release);
+        self.surface_analysis_enabled
+            .store(enabled, Ordering::Release);
     }
 
     pub fn surface_analysis_enabled(&self) -> bool {
@@ -2773,7 +2896,10 @@ mod tests {
 
         assert!(diagnostic.yaw_candidate_count == 1, "{diagnostic:?}");
         assert!(diagnostic.pose_candidate_count == 1, "{diagnostic:?}");
-        assert!(angle_error(solution.yaw_radians, 0.34) < 0.02, "{solution:?}");
+        assert!(
+            angle_error(solution.yaw_radians, 0.34) < 0.02,
+            "{solution:?}"
+        );
         assert!(
             (solution.translation - vec3(-0.52, 0.0, 0.46)).length() < 0.03,
             "{solution:?}"
