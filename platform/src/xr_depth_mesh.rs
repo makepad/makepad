@@ -11,7 +11,7 @@ use std::{
 };
 
 const XR_DEPTH_QUERY_MAX_PENDING: usize = 256;
-pub const XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS: f32 = 0.05;
+pub const XR_DEPTH_MESH_DEFAULT_VOXEL_SIZE_METERS: f32 = 0.03;
 const XR_DEPTH_ALIGN_MIN_WALL_SAMPLES: usize = 4;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES: usize = 6;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE: f32 = 0.12;
@@ -24,6 +24,11 @@ const XR_DEPTH_ALIGN_HEIGHT_MAP_MAX_SAMPLES: usize = 96;
 const XR_DEPTH_ALIGN_HEIGHT_MAP_GRADIENT_MIN_METERS: f32 = 0.10;
 const XR_DEPTH_ALIGN_HEIGHT_MAP_MIN_SPACING_METERS: f32 = 0.14;
 const XR_DEPTH_ALIGN_HEIGHT_MAP_WALL_BIAS_MIN_HEIGHT_METERS: f32 = 1.2;
+const XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_CONFIDENCE: f32 = 0.20;
+const XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_SYMMETRY_CONFIDENCE: f32 = 0.18;
+const XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_OVERLAP: f32 = 0.35;
+const XR_DEPTH_ALIGN_SEEDED_LOCK_MAX_TRANSLATION_JUMP_METERS: f32 = 0.75;
+const XR_DEPTH_ALIGN_SEEDED_LOCK_MAX_YAW_JUMP_RADIANS: f32 = 0.45;
 
 #[derive(Clone, Copy, Debug)]
 struct HeightMapSignalCell {
@@ -86,6 +91,7 @@ pub struct XrDepthMesh {
     pub mesh_chunks: Vec<XrDepthMeshChunk>,
     pub plane_patches: Vec<XrDepthPlanePatch>,
     pub alignment_descriptor: Option<XrDepthAlignDescriptor>,
+    pub alignment_descriptor_change_score: f32,
     pub alignment_debug: XrDepthAlignDebug,
     pub alignment_slice_preview: Option<XrDepthAlignSlicePreview>,
     pub alignment_preview: XrDepthAlignPreview,
@@ -94,6 +100,9 @@ pub struct XrDepthMesh {
     pub mesh_generation: u64,
     pub mesh_vertex_count: usize,
     pub mesh_triangle_count: usize,
+    pub tsdf_chunk_count: usize,
+    pub tsdf_live_voxel_count: usize,
+    pub tsdf_memory_bytes: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -132,7 +141,8 @@ pub struct XrDepthAlignHeightMap {
     pub origin_x: f32,
     pub origin_z: f32,
     pub cell_size_meters: f32,
-    pub size: u16,
+    pub size_x: u16,
+    pub size_z: u16,
     pub bottom_y_meters: f32,
     pub top_y_meters: f32,
     pub player_cutout_center: Option<Vec2f>,
@@ -142,11 +152,32 @@ pub struct XrDepthAlignHeightMap {
 
 impl XrDepthAlignHeightMap {
     pub fn cell_count(&self) -> usize {
-        self.size as usize * self.size as usize
+        self.size_x as usize * self.size_z as usize
+    }
+
+    pub fn size_x_usize(&self) -> usize {
+        self.size_x as usize
+    }
+
+    pub fn size_z_usize(&self) -> usize {
+        self.size_z as usize
+    }
+
+    pub fn extent_x_meters(&self) -> f32 {
+        self.cell_size_meters * self.size_x.max(1) as f32
+    }
+
+    pub fn extent_z_meters(&self) -> f32 {
+        self.cell_size_meters * self.size_z.max(1) as f32
+    }
+
+    pub fn cell_index(&self, x: usize, z: usize) -> usize {
+        x + z * self.size_x_usize()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.size == 0
+        self.size_x == 0
+            || self.size_z == 0
             || self.height_u16.len() != self.cell_count()
             || self.height_u16.iter().all(|value| *value == 0)
     }
@@ -367,21 +398,23 @@ fn transform_height_map(
     height_map: &XrDepthAlignHeightMap,
     transform: &Mat4f,
 ) -> Option<XrDepthAlignHeightMap> {
-    let size = height_map.size as usize;
-    if size == 0 || height_map.height_u16.len() != size * size {
+    let size_x = height_map.size_x_usize();
+    let size_z = height_map.size_z_usize();
+    if size_x == 0 || size_z == 0 || height_map.height_u16.len() != size_x * size_z {
         return None;
     }
     let cell_size = height_map.cell_size_meters.max(1.0e-5);
-    let extent = cell_size * size as f32;
+    let extent_x = cell_size * size_x as f32;
+    let extent_z = cell_size * size_z as f32;
     let corners = [
         vec3(height_map.origin_x, 0.0, height_map.origin_z),
-        vec3(height_map.origin_x + extent, 0.0, height_map.origin_z),
+        vec3(height_map.origin_x + extent_x, 0.0, height_map.origin_z),
         vec3(
-            height_map.origin_x + extent,
+            height_map.origin_x + extent_x,
             0.0,
-            height_map.origin_z + extent,
+            height_map.origin_z + extent_z,
         ),
-        vec3(height_map.origin_x, 0.0, height_map.origin_z + extent),
+        vec3(height_map.origin_x, 0.0, height_map.origin_z + extent_z),
     ];
     let mut min_x = f32::INFINITY;
     let mut min_z = f32::INFINITY;
@@ -399,11 +432,17 @@ fn transform_height_map(
     if !min_x.is_finite() || !min_z.is_finite() || !max_x.is_finite() || !max_z.is_finite() {
         return None;
     }
-    let snapped_extent = (max_x - min_x)
-        .max(max_z - min_z)
-        .max(cell_size * size as f32);
-    let origin_x = (min_x + max_x) * 0.5 - snapped_extent * 0.5;
-    let origin_z = (min_z + max_z) * 0.5 - snapped_extent * 0.5;
+    let min_cell_x = (min_x / cell_size).floor() as i32;
+    let max_cell_x = (max_x / cell_size).ceil() as i32;
+    let min_cell_z = (min_z / cell_size).floor() as i32;
+    let max_cell_z = (max_z / cell_size).ceil() as i32;
+    let target_size_x = (max_cell_x - min_cell_x).max(1) as usize;
+    let target_size_z = (max_cell_z - min_cell_z).max(1) as usize;
+    if target_size_x > u16::MAX as usize || target_size_z > u16::MAX as usize {
+        return None;
+    }
+    let origin_x = min_cell_x as f32 * cell_size;
+    let origin_z = min_cell_z as f32 * cell_size;
     let y_offset = transform
         .transform_vec4(vec4f(0.0, 0.0, 0.0, 1.0))
         .to_vec3f()
@@ -412,8 +451,9 @@ fn transform_height_map(
     let mut transformed = XrDepthAlignHeightMap {
         origin_x,
         origin_z,
-        cell_size_meters: snapped_extent / size as f32,
-        size: height_map.size,
+        cell_size_meters: cell_size,
+        size_x: target_size_x as u16,
+        size_z: target_size_z as u16,
         bottom_y_meters: height_map.bottom_y_meters + y_offset,
         top_y_meters: height_map.top_y_meters + y_offset,
         player_cutout_center: height_map.player_cutout_center.map(|center| {
@@ -423,10 +463,10 @@ fn transform_height_map(
             vec2f(mapped.x, mapped.z)
         }),
         player_cutout_radius_meters: height_map.player_cutout_radius_meters,
-        height_u16: vec![0; size * size],
+        height_u16: vec![0; target_size_x * target_size_z],
     };
-    for z in 0..size {
-        for x in 0..size {
+    for z in 0..target_size_z {
+        for x in 0..target_size_x {
             let world_x = origin_x + (x as f32 + 0.5) * transformed.cell_size_meters;
             let world_z = origin_z + (z as f32 + 0.5) * transformed.cell_size_meters;
             let source = inverse
@@ -435,7 +475,8 @@ fn transform_height_map(
             let Some(height) = sample_height_map_nearest(height_map, source.x, source.z) else {
                 continue;
             };
-            transformed.height_u16[x + z * size] =
+            let target_index = transformed.cell_index(x, z);
+            transformed.height_u16[target_index] =
                 encode_height_map_height(&transformed, height + y_offset);
         }
     }
@@ -549,16 +590,17 @@ fn decode_height_map_height(height_map: &XrDepthAlignHeightMap, encoded: u16) ->
 fn build_height_map_alignment_samples(
     height_map: &XrDepthAlignHeightMap,
 ) -> Vec<XrDepthAlignSample> {
-    let size = height_map.size as usize;
-    if size < 3 || height_map.height_u16.len() != size * size {
+    let size_x = height_map.size_x_usize();
+    let size_z = height_map.size_z_usize();
+    if size_x < 3 || size_z < 3 || height_map.height_u16.len() != size_x * size_z {
         return Vec::new();
     }
 
     let cell_size = height_map.cell_size_meters.max(1.0e-3);
     let mut candidates = Vec::<XrDepthAlignSample>::new();
 
-    for z in 1..size - 1 {
-        for x in 1..size - 1 {
+    for z in 1..size_z - 1 {
+        for x in 1..size_x - 1 {
             let Some((center, gradient)) = height_map_cell_signal(height_map, x, z) else {
                 continue;
             };
@@ -628,15 +670,16 @@ fn height_map_cell_signal(
     x: usize,
     z: usize,
 ) -> Option<(f32, Vec3f)> {
-    let size = height_map.size as usize;
-    if size < 3 || x == 0 || z == 0 || x + 1 >= size || z + 1 >= size {
+    let size_x = height_map.size_x_usize();
+    let size_z = height_map.size_z_usize();
+    if size_x < 3 || size_z < 3 || x == 0 || z == 0 || x + 1 >= size_x || z + 1 >= size_z {
         return None;
     }
-    let center = decode_height_map_height(height_map, height_map.height_u16[x + z * size])?;
-    let left = decode_height_map_height(height_map, height_map.height_u16[x - 1 + z * size])?;
-    let right = decode_height_map_height(height_map, height_map.height_u16[x + 1 + z * size])?;
-    let up = decode_height_map_height(height_map, height_map.height_u16[x + (z - 1) * size])?;
-    let down = decode_height_map_height(height_map, height_map.height_u16[x + (z + 1) * size])?;
+    let center = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x, z)])?;
+    let left = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x - 1, z)])?;
+    let right = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x + 1, z)])?;
+    let up = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x, z - 1)])?;
+    let down = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x, z + 1)])?;
     let cell_size = height_map.cell_size_meters.max(1.0e-3);
     let gradient = vec3(
         (right - left) / (2.0 * cell_size),
@@ -676,13 +719,14 @@ fn height_map_straightness(
 }
 
 fn build_height_map_signal_cells(height_map: &XrDepthAlignHeightMap) -> Vec<HeightMapSignalCell> {
-    let size = height_map.size as usize;
-    if size < 3 {
+    let size_x = height_map.size_x_usize();
+    let size_z = height_map.size_z_usize();
+    if size_x < 3 || size_z < 3 {
         return Vec::new();
     }
     let mut signal = Vec::<HeightMapSignalCell>::new();
-    for z in (1..size - 1).step_by(2) {
-        for x in (1..size - 1).step_by(2) {
+    for z in (1..size_z - 1).step_by(2) {
+        for x in (1..size_x - 1).step_by(2) {
             let Some((height, gradient)) = height_map_cell_signal(height_map, x, z) else {
                 continue;
             };
@@ -722,20 +766,61 @@ fn sample_height_map_nearest(
     world_x: f32,
     world_z: f32,
 ) -> Option<f32> {
-    let size = height_map.size as usize;
-    if size == 0 || height_map.height_u16.len() != size * size {
+    let size_x = height_map.size_x_usize();
+    let size_z = height_map.size_z_usize();
+    if size_x == 0 || size_z == 0 || height_map.height_u16.len() != size_x * size_z {
         return None;
     }
     let cell_size = height_map.cell_size_meters.max(1.0e-3);
     let grid_x = ((world_x - height_map.origin_x) / cell_size).floor() as isize;
     let grid_z = ((world_z - height_map.origin_z) / cell_size).floor() as isize;
-    if grid_x < 0 || grid_z < 0 || grid_x >= size as isize || grid_z >= size as isize {
+    if grid_x < 0 || grid_z < 0 || grid_x >= size_x as isize || grid_z >= size_z as isize {
         return None;
     }
     decode_height_map_height(
         height_map,
-        height_map.height_u16[grid_x as usize + grid_z as usize * size],
+        height_map.height_u16[height_map.cell_index(grid_x as usize, grid_z as usize)],
     )
+}
+
+fn sample_height_map_bilinear(
+    height_map: &XrDepthAlignHeightMap,
+    world_x: f32,
+    world_z: f32,
+) -> Option<f32> {
+    let size_x = height_map.size_x_usize();
+    let size_z = height_map.size_z_usize();
+    if size_x == 0 || size_z == 0 || height_map.height_u16.len() != size_x * size_z {
+        return None;
+    }
+    if size_x == 1 && size_z == 1 {
+        return decode_height_map_height(height_map, height_map.height_u16[0]);
+    }
+
+    let cell_size = height_map.cell_size_meters.max(1.0e-3);
+    let sample_x =
+        ((world_x - height_map.origin_x) / cell_size - 0.5).clamp(0.0, size_x as f32 - 1.0);
+    let sample_z =
+        ((world_z - height_map.origin_z) / cell_size - 0.5).clamp(0.0, size_z as f32 - 1.0);
+    let x0 = sample_x.floor() as usize;
+    let z0 = sample_z.floor() as usize;
+    let x1 = (x0 + 1).min(size_x - 1);
+    let z1 = (z0 + 1).min(size_z - 1);
+    let fx = (sample_x - x0 as f32).clamp(0.0, 1.0);
+    let fz = (sample_z - z0 as f32).clamp(0.0, 1.0);
+
+    let h00 = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x0, z0)]);
+    let h10 = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x1, z0)]);
+    let h01 = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x0, z1)]);
+    let h11 = decode_height_map_height(height_map, height_map.height_u16[height_map.cell_index(x1, z1)]);
+    match (h00, h10, h01, h11) {
+        (Some(h00), Some(h10), Some(h01), Some(h11)) => {
+            let hx0 = h00 + (h10 - h00) * fx;
+            let hx1 = h01 + (h11 - h01) * fx;
+            Some(hx0 + (hx1 - hx0) * fz)
+        }
+        _ => sample_height_map_nearest(height_map, world_x, world_z),
+    }
 }
 
 fn score_height_map_alignment(
@@ -767,7 +852,7 @@ fn score_height_map_alignment(
         }) {
             continue;
         }
-        let Some(local_height) = sample_height_map_nearest(local_map, mapped.x, mapped.z) else {
+        let Some(local_height) = sample_height_map_bilinear(local_map, mapped.x, mapped.z) else {
             continue;
         };
         let diff = (local_height - cell.height).abs();
@@ -824,6 +909,23 @@ fn apply_height_map_alignment_support(
     candidate
 }
 
+fn score_full_alignment_solution(
+    local_walls: &[&XrDepthAlignSample],
+    remote_walls: &[&XrDepthAlignSample],
+    local_map: Option<&XrDepthAlignHeightMap>,
+    remote_map: Option<&XrDepthAlignHeightMap>,
+    remote_signal: &[HeightMapSignalCell],
+    yaw: f32,
+    translation: Vec3f,
+) -> XrDepthAlignSolution {
+    apply_height_map_alignment_support(
+        score_alignment_solution(local_walls, remote_walls, yaw, translation),
+        local_map,
+        remote_map,
+        remote_signal,
+    )
+}
+
 fn height_map_score_better(candidate: (f32, f32, usize), current: (f32, f32, usize)) -> bool {
     candidate
         .0
@@ -855,7 +957,13 @@ fn refine_height_map_alignment(
         best_yaw,
         best_translation,
     );
-    for (yaw_step, translation_step) in [(0.18, 0.36), (0.08, 0.14), (0.03, 0.06)] {
+    for (yaw_step, translation_step) in [
+        (0.18, 0.36),
+        (0.08, 0.14),
+        (0.03, 0.06),
+        (0.012, 0.025),
+        (0.005, 0.01),
+    ] {
         loop {
             let mut improved = false;
             for yaw_delta in [-yaw_step, 0.0, yaw_step] {
@@ -894,6 +1002,137 @@ fn refine_height_map_alignment(
     (best_yaw, best_translation)
 }
 
+fn refine_seed_alignment_solution(
+    local_walls: &[&XrDepthAlignSample],
+    remote_walls: &[&XrDepthAlignSample],
+    local_map: Option<&XrDepthAlignHeightMap>,
+    remote_map: Option<&XrDepthAlignHeightMap>,
+    remote_signal: &[HeightMapSignalCell],
+    floor_y: f32,
+    seed: XrDepthAlignSolution,
+) -> XrDepthAlignSolution {
+    let mut best_yaw = wrap_angle(seed.yaw_radians);
+    let mut best_translation = seed.translation;
+    best_translation.y = floor_y;
+    if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
+        if !remote_signal.is_empty() {
+            (best_yaw, best_translation) = refine_height_map_alignment(
+                local_map,
+                remote_map,
+                remote_signal,
+                best_yaw,
+                best_translation,
+            );
+            best_translation.y = floor_y;
+        }
+    }
+    let (wall_refined_yaw, wall_refined_translation) = refine_alignment(
+        local_walls,
+        remote_walls,
+        floor_y,
+        best_yaw,
+        best_translation,
+    );
+    let wall_translation_jump = vec3(
+        wall_refined_translation.x - best_translation.x,
+        0.0,
+        wall_refined_translation.z - best_translation.z,
+    )
+    .length();
+    if wrap_angle(wall_refined_yaw - best_yaw).abs() <= 0.18 && wall_translation_jump <= 0.28 {
+        best_yaw = wall_refined_yaw;
+        best_translation = wall_refined_translation;
+    }
+    let mut best = score_full_alignment_solution(
+        local_walls,
+        remote_walls,
+        local_map,
+        remote_map,
+        remote_signal,
+        best_yaw,
+        best_translation,
+    );
+    for (yaw_step, translation_step) in [
+        (0.10, 0.18),
+        (0.04, 0.07),
+        (0.015, 0.03),
+        (0.006, 0.012),
+    ] {
+        loop {
+            let mut improved = false;
+            for yaw_delta in [-yaw_step, 0.0, yaw_step] {
+                for tx_delta in [-translation_step, 0.0, translation_step] {
+                    for tz_delta in [-translation_step, 0.0, translation_step] {
+                        if yaw_delta == 0.0 && tx_delta == 0.0 && tz_delta == 0.0 {
+                            continue;
+                        }
+                        let candidate = score_full_alignment_solution(
+                            local_walls,
+                            remote_walls,
+                            local_map,
+                            remote_map,
+                            remote_signal,
+                            wrap_angle(best.yaw_radians + yaw_delta),
+                            vec3(
+                                best.translation.x + tx_delta,
+                                floor_y,
+                                best.translation.z + tz_delta,
+                            ),
+                        );
+                        if alignment_solution_better(&candidate, &best) {
+                            best = candidate;
+                            improved = true;
+                        }
+                    }
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+    }
+    best
+}
+
+fn seeded_alignment_lock_is_strong(
+    diagnostic: &XrDepthAlignSolveDiagnostic,
+    candidate: XrDepthAlignSolution,
+    previous: XrDepthAlignSolution,
+    local_map: Option<&XrDepthAlignHeightMap>,
+    remote_map: Option<&XrDepthAlignHeightMap>,
+) -> bool {
+    if !xr_depth_align_solution_is_accepted(diagnostic, candidate) {
+        return false;
+    }
+    if candidate.confidence < XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_CONFIDENCE
+        || candidate.symmetry_confidence < XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_SYMMETRY_CONFIDENCE
+    {
+        return false;
+    }
+    let overlap =
+        candidate.matched_samples as f32 / diagnostic.remote_wall_samples.max(1) as f32;
+    if overlap < XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_OVERLAP {
+        return false;
+    }
+    let max_cell_size = local_map
+        .map(|map| map.cell_size_meters)
+        .unwrap_or(0.03)
+        .max(remote_map.map(|map| map.cell_size_meters).unwrap_or(0.03));
+    let max_residual_meters = (max_cell_size * 4.0).clamp(0.08, 0.16);
+    if !candidate.residual_meters.is_finite() || candidate.residual_meters > max_residual_meters {
+        return false;
+    }
+    let translation_jump = vec3(
+        candidate.translation.x - previous.translation.x,
+        0.0,
+        candidate.translation.z - previous.translation.z,
+    )
+    .length();
+    translation_jump <= XR_DEPTH_ALIGN_SEEDED_LOCK_MAX_TRANSLATION_JUMP_METERS
+        && wrap_angle(candidate.yaw_radians - previous.yaw_radians).abs()
+            <= XR_DEPTH_ALIGN_SEEDED_LOCK_MAX_YAW_JUMP_RADIANS
+}
+
 pub fn xr_depth_align_test_markers(descriptor: &XrDepthAlignDescriptor) -> Option<[Vec3f; 2]> {
     let wall_samples = descriptor_height_map_samples(descriptor);
     let mut best = None::<(f32, f32, Vec3f, Vec3f)>;
@@ -928,6 +1167,14 @@ pub fn xr_depth_align_solve_remote_to_local(
 pub fn xr_depth_align_analyze_remote_to_local(
     local: &XrDepthAlignDescriptor,
     remote: &XrDepthAlignDescriptor,
+) -> XrDepthAlignSolveDiagnostic {
+    xr_depth_align_analyze_remote_to_local_seeded(local, remote, None)
+}
+
+pub fn xr_depth_align_analyze_remote_to_local_seeded(
+    local: &XrDepthAlignDescriptor,
+    remote: &XrDepthAlignDescriptor,
+    previous_solution: Option<XrDepthAlignSolution>,
 ) -> XrDepthAlignSolveDiagnostic {
     let local_height_map_samples = descriptor_height_map_samples(local);
     let remote_height_map_samples = descriptor_height_map_samples(remote);
@@ -974,7 +1221,34 @@ pub fn xr_depth_align_analyze_remote_to_local(
     {
         let mut sample_diagnostic = diagnostic;
         let floor_y = local.floor_y - remote.floor_y;
-        let mut best = None::<XrDepthAlignSolution>;
+        let local_map = local.height_map.as_ref();
+        let remote_map = remote.height_map.as_ref();
+        let seeded_candidate = previous_solution.map(|seed| {
+            sample_diagnostic.yaw_candidate_count += 1;
+            sample_diagnostic.pose_candidate_count += 1;
+            refine_seed_alignment_solution(
+                &local_wall_samples,
+                &remote_wall_samples,
+                local_map,
+                remote_map,
+                &remote_height_map_signal,
+                floor_y,
+                seed,
+            )
+        });
+        if let (Some(seed), Some(candidate)) = (previous_solution, seeded_candidate) {
+            sample_diagnostic.best_solution = Some(candidate);
+            if seeded_alignment_lock_is_strong(
+                &sample_diagnostic,
+                candidate,
+                seed,
+                local_map,
+                remote_map,
+            ) {
+                return sample_diagnostic;
+            }
+        }
+        let mut best = seeded_candidate;
         let yaw_candidates = candidate_yaws(
             &local_wall_histogram,
             &remote_wall_histogram,
@@ -994,11 +1268,11 @@ pub fn xr_depth_align_analyze_remote_to_local(
                     yaw,
                     translation,
                 );
-                if let Some(local_map) = local.height_map.as_ref() {
+                if let Some(local_map) = local_map {
                     if !remote_height_map_signal.is_empty() {
                         (refined_yaw, refined_translation) = refine_height_map_alignment(
                             local_map,
-                            remote.height_map.as_ref().unwrap(),
+                            remote_map.unwrap(),
                             &remote_height_map_signal,
                             refined_yaw,
                             refined_translation,
@@ -1006,16 +1280,14 @@ pub fn xr_depth_align_analyze_remote_to_local(
                         refined_translation.y = floor_y;
                     }
                 }
-                let candidate = apply_height_map_alignment_support(
-                    score_alignment_solution(
-                        &local_wall_samples,
-                        &remote_wall_samples,
-                        refined_yaw,
-                        refined_translation,
-                    ),
-                    local.height_map.as_ref(),
-                    remote.height_map.as_ref(),
+                let candidate = score_full_alignment_solution(
+                    &local_wall_samples,
+                    &remote_wall_samples,
+                    local_map,
+                    remote_map,
                     &remote_height_map_signal,
+                    refined_yaw,
+                    refined_translation,
                 );
                 if best
                     .as_ref()
@@ -2248,18 +2520,21 @@ mod tests {
         map_to_scene: Mat4f,
         artifacts: HeightMapTestArtifacts,
     ) -> XrDepthAlignDescriptor {
-        let size = 120usize;
+        let size_x = 120usize;
+        let size_z = 114usize;
         let cell_size_meters = 0.05;
-        let extent = size as f32 * cell_size_meters;
-        let origin = -extent * 0.5;
+        let extent_x = size_x as f32 * cell_size_meters;
+        let extent_z = size_z as f32 * cell_size_meters;
+        let origin_x = -extent_x * 0.5;
+        let origin_z = -extent_z * 0.5;
         let bottom_y_meters = 0.0;
         let top_y_meters = 2.3;
-        let mut height_u16 = vec![0u16; size * size];
-        for z in 0..size {
-            for x in 0..size {
+        let mut height_u16 = vec![0u16; size_x * size_z];
+        for z in 0..size_z {
+            for x in 0..size_x {
                 let map_point = vec2f(
-                    origin + (x as f32 + 0.5) * cell_size_meters,
-                    origin + (z as f32 + 0.5) * cell_size_meters,
+                    origin_x + (x as f32 + 0.5) * cell_size_meters,
+                    origin_z + (z as f32 + 0.5) * cell_size_meters,
                 );
                 if artifacts
                     .cutout_center
@@ -2286,7 +2561,7 @@ mod tests {
                     * artifacts.noise_scale;
                 height += artifacts.height_bias;
                 height = height.clamp(0.0, 2.25);
-                height_u16[x + z * size] =
+                height_u16[x + z * size_x] =
                     encode_test_height(height, bottom_y_meters, top_y_meters);
             }
         }
@@ -2297,10 +2572,11 @@ mod tests {
             samples: Vec::new(),
             vertical_descriptor: None,
             height_map: Some(XrDepthAlignHeightMap {
-                origin_x: origin,
-                origin_z: origin,
+                origin_x,
+                origin_z,
                 cell_size_meters,
-                size: size as u16,
+                size_x: size_x as u16,
+                size_z: size_z as u16,
                 bottom_y_meters,
                 top_y_meters,
                 player_cutout_center: artifacts.cutout_center,
@@ -2578,6 +2854,103 @@ mod tests {
         assert!(
             resumed_solution.symmetry_confidence > stale_solution.symmetry_confidence + 0.25,
             "resumed heightmap symmetry should strongly favor the new pose: stale={stale_solution:?} resumed={resumed_solution:?}"
+        );
+    }
+
+    #[test]
+    fn seeded_height_map_solver_reuses_stable_lock_locally() {
+        let local = make_height_map_descriptor_with_artifacts(
+            Mat4f::identity(),
+            HeightMapTestArtifacts {
+                cutout_center: Some(vec2f(-0.10, 0.14)),
+                occlusion_center: Some(vec2f(0.94, -0.82)),
+                noise_seed: 1.2,
+                noise_scale: 0.55,
+                ..HeightMapTestArtifacts::default()
+            },
+        );
+        let first_remote_to_local = Pose::new(
+            Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), 0.34),
+            vec3(-0.52, 0.0, 0.46),
+        )
+        .to_mat4();
+        let first_remote =
+            xr_depth_align_transform_descriptor(&local, &first_remote_to_local.invert());
+        let first_solution = xr_depth_align_analyze_remote_to_local(&local, &first_remote)
+            .accepted_solution()
+            .expect("expected initial alignment");
+
+        let diagnostic = xr_depth_align_analyze_remote_to_local_seeded(
+            &local,
+            &first_remote,
+            Some(first_solution),
+        );
+        let solution = diagnostic
+            .accepted_solution()
+            .expect("expected seeded solve to reuse the stable lock");
+
+        assert!(diagnostic.yaw_candidate_count == 1, "{diagnostic:?}");
+        assert!(diagnostic.pose_candidate_count == 1, "{diagnostic:?}");
+        assert!(angle_error(solution.yaw_radians, 0.34) < 0.02, "{solution:?}");
+        assert!(
+            (solution.translation - vec3(-0.52, 0.0, 0.46)).length() < 0.03,
+            "{solution:?}"
+        );
+    }
+
+    #[test]
+    fn seeded_height_map_solver_falls_back_when_seed_is_stale() {
+        let local = make_height_map_descriptor_with_artifacts(
+            Mat4f::identity(),
+            HeightMapTestArtifacts {
+                cutout_center: Some(vec2f(0.14, -0.12)),
+                occlusion_center: Some(vec2f(-0.98, 0.86)),
+                noise_seed: 2.1,
+                noise_scale: 0.6,
+                ..HeightMapTestArtifacts::default()
+            },
+        );
+        let first_remote_to_local = Pose::new(
+            Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), -0.28),
+            vec3(0.42, 0.0, -0.34),
+        )
+        .to_mat4();
+        let first_remote =
+            xr_depth_align_transform_descriptor(&local, &first_remote_to_local.invert());
+        let stale_seed = xr_depth_align_analyze_remote_to_local(&local, &first_remote)
+            .accepted_solution()
+            .expect("expected initial alignment");
+
+        let resumed_yaw = 1.02;
+        let resumed_translation = vec3(-0.64, 0.0, 0.78);
+        let resumed_remote_to_local = Pose::new(
+            Quat::from_axis_angle(vec3(0.0, 1.0, 0.0), resumed_yaw),
+            resumed_translation,
+        )
+        .to_mat4();
+        let resumed_remote =
+            xr_depth_align_transform_descriptor(&local, &resumed_remote_to_local.invert());
+        let seeded = xr_depth_align_analyze_remote_to_local_seeded(
+            &local,
+            &resumed_remote,
+            Some(stale_seed),
+        );
+        let seeded_solution = seeded
+            .accepted_solution()
+            .expect("expected seeded solve to fall back to global search");
+        let global = xr_depth_align_analyze_remote_to_local(&local, &resumed_remote);
+        let global_solution = global
+            .accepted_solution()
+            .expect("expected global solve to recover resumed pose");
+
+        assert!(seeded.yaw_candidate_count > 1, "{seeded:?}");
+        assert!(
+            angle_error(seeded_solution.yaw_radians, global_solution.yaw_radians) < 0.05,
+            "{seeded_solution:?} {global_solution:?}"
+        );
+        assert!(
+            (seeded_solution.translation - global_solution.translation).length() < 0.08,
+            "{seeded_solution:?} {global_solution:?}"
         );
     }
 

@@ -1,7 +1,9 @@
 use makepad_widgets;
 
 use makepad_widgets::makepad_draw::DrawVector;
-use makepad_widgets::makepad_platform::{TextureFormat, TextureUpdated, XrDepthAlignSlicePreview};
+use makepad_widgets::makepad_platform::{
+    TextureFormat, TextureUpdated, XrDepthAlignHeightMap, XrDepthAlignSlicePreview,
+};
 use makepad_widgets::*;
 use makepad_xr::*;
 
@@ -53,10 +55,14 @@ script_mod! {
     let DrawHeightMap = set_type_default() do #(DrawHeightMap::script_shader(vm)){
         ..mod.draw.DrawQuad
         height_texture: texture_2d(float)
+        alpha: 0.96
+        uv_min: vec2(0.0, 0.0)
+        uv_max: vec2(1.0, 1.0)
         wall_band_start: 0.72
 
         pixel: fn() {
-            let sample = self.height_texture.sample(self.pos).x
+            let uv = self.uv_min + (self.uv_max - self.uv_min) * self.pos
+            let sample = self.height_texture.sample(uv).x
             if sample <= 0.00001 {
                 return #0000
             }
@@ -73,7 +79,7 @@ script_mod! {
             )
             let bright = mix(base, vec3(0.98, 0.92, 0.74), clamp(pow(lifted, 1.7), 0.0, 1.0))
             let color = mix(bright, vec3(1.0, 0.66, 0.22), wall_mix * 0.82)
-            return Pal.premul(vec4(color, 0.96))
+            return Pal.premul(vec4(color, self.alpha))
         }
     }
 
@@ -399,13 +405,15 @@ script_mod! {
                     }
                 }
             }
-            xr_people_debug := XrPeopleDebug{}
+            xr_people_debug := XrPeopleDebug{
+                auto_alignment_enabled: true
+            }
 
             control_strip := XrView{
                 visible: false
                 show_in_non_xr: true
                 wrist_left: true
-                logical_size: vec2(1220, 620)
+                logical_size: vec2(1220, 700)
                 pixel_scale: 0.000215
                 dpi_factor: 2.0
                 SolidView{
@@ -556,6 +564,12 @@ script_mod! {
                             draw_text.color: #xe8f4ff
                         }
 
+                        depth_resolution_3_button := XrUiButton{
+                            width: 64
+                            text: "3 cm"
+                            on_press: || ui.root.set_depth_voxel_size(0.03)
+                        }
+
                         depth_resolution_5_button := XrUiButton{
                             width: 64
                             text: "5 cm"
@@ -633,7 +647,7 @@ script_mod! {
 
                                 peer_sync_status_field := Label{
                                     width: Fill
-                                    text: "Peers: off"
+                                    text: "AlignSync: off"
                                     draw_text.color: #xe8f4ff
                                 }
                             }
@@ -809,6 +823,12 @@ pub struct DrawHeightMap {
     #[deref]
     draw_super: DrawQuad,
     #[live]
+    alpha: f32,
+    #[live]
+    uv_min: Vec2f,
+    #[live]
+    uv_max: Vec2f,
+    #[live]
     wall_band_start: f32,
 }
 
@@ -831,12 +851,20 @@ pub struct AlignmentSlicePreview {
     area: Area,
     #[rust]
     height_texture: Option<Texture>,
+    #[rust]
+    remote_height_texture: Option<Texture>,
+    #[rust]
+    local_preview: Option<XrDepthAlignSlicePreview>,
+    #[rust]
+    remote_height_map: Option<XrDepthAlignHeightMap>,
 }
 
 impl AlignmentSlicePreview {
     const PAD: f32 = 14.0;
+    const PANEL_GAP: f32 = 14.0;
     const GRID_DIVISIONS: usize = 4;
     const CUTOUT_STEPS: usize = 40;
+    const MAP_ALPHA: f32 = 0.96;
 
     fn preview_square(rect: Rect) -> (f32, f32, f32) {
         let rect_x = rect.pos.x as f32;
@@ -849,8 +877,112 @@ impl AlignmentSlicePreview {
         (ox, oy, inner)
     }
 
-    fn preview_extent(preview: &XrDepthAlignSlicePreview) -> f32 {
-        preview.height_map.cell_size_meters * preview.height_map.size.max(1) as f32
+    fn preview_panel_square(rect: Rect, panel_index: usize, panel_count: usize) -> (f32, f32, f32) {
+        if panel_count <= 1 {
+            return Self::preview_square(rect);
+        }
+        let rect_x = rect.pos.x as f32;
+        let rect_y = rect.pos.y as f32;
+        let rect_w = rect.size.x as f32;
+        let rect_h = rect.size.y as f32;
+        let total_gap = Self::PANEL_GAP * (panel_count.saturating_sub(1)) as f32;
+        let inner =
+            (((rect_w - total_gap) / panel_count.max(1) as f32).min(rect_h) - Self::PAD * 2.0)
+                .max(1.0);
+        let total_w = inner * panel_count as f32 + total_gap;
+        let start_x = rect_x + (rect_w - total_w) * 0.5;
+        let ox = start_x + panel_index as f32 * (inner + Self::PANEL_GAP);
+        let oy = rect_y + (rect_h - inner) * 0.5;
+        (ox, oy, inner)
+    }
+
+    fn set_remote_height_map(
+        &mut self,
+        cx: &mut Cx,
+        remote_height_map: Option<XrDepthAlignHeightMap>,
+    ) {
+        if self.remote_height_map == remote_height_map {
+            return;
+        }
+        self.remote_height_map = remote_height_map;
+        if self.remote_height_map.is_none() {
+            self.remote_height_texture = None;
+        }
+        self.area.redraw(cx);
+    }
+
+    fn set_local_preview(
+        &mut self,
+        cx: &mut Cx,
+        local_preview: Option<XrDepthAlignSlicePreview>,
+    ) {
+        if self.local_preview == local_preview {
+            return;
+        }
+        self.local_preview = local_preview;
+        if self.local_preview.is_none() {
+            self.height_texture = None;
+        }
+        self.area.redraw(cx);
+    }
+
+    fn height_map_extent_x(height_map: &XrDepthAlignHeightMap) -> f32 {
+        height_map.extent_x_meters()
+    }
+
+    fn height_map_extent_z(height_map: &XrDepthAlignHeightMap) -> f32 {
+        height_map.extent_z_meters()
+    }
+
+    fn preview_scale(height_map: &XrDepthAlignHeightMap, inner: f32) -> f32 {
+        inner
+            / Self::height_map_extent_x(height_map)
+                .max(Self::height_map_extent_z(height_map))
+                .max(1.0e-5)
+    }
+
+    fn height_map_draw_rect(
+        height_map: &XrDepthAlignHeightMap,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+    ) -> Rect {
+        let extent_x = Self::height_map_extent_x(height_map);
+        let extent_z = Self::height_map_extent_z(height_map);
+        if extent_x <= 1.0e-5 || extent_z <= 1.0e-5 {
+            return Rect {
+                pos: dvec2(ox as f64, oy as f64),
+                size: dvec2(inner.max(1.0) as f64, inner.max(1.0) as f64),
+            };
+        }
+        let scale = Self::preview_scale(height_map, inner);
+        let draw_w = extent_x * scale;
+        let draw_h = extent_z * scale;
+        Rect {
+            pos: dvec2(
+                (ox + (inner - draw_w) * 0.5) as f64,
+                (oy + (inner - draw_h) * 0.5) as f64,
+            ),
+            size: dvec2(draw_w.max(1.0) as f64, draw_h.max(1.0) as f64),
+        }
+    }
+
+    fn height_map_preview_point(
+        height_map: &XrDepthAlignHeightMap,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+        point: Vec2f,
+    ) -> (f32, f32) {
+        let rect = Self::height_map_draw_rect(height_map, ox, oy, inner);
+        let extent_x = Self::height_map_extent_x(height_map).max(1.0e-5);
+        let extent_z = Self::height_map_extent_z(height_map).max(1.0e-5);
+        let nx = ((point.x - height_map.origin_x) / extent_x).clamp(0.0, 1.0);
+        let nz = ((point.y - height_map.origin_z) / extent_z).clamp(0.0, 1.0);
+        (
+            rect.pos.x as f32 + nx * rect.size.x as f32,
+            rect.pos.y as f32 + nz * rect.size.y as f32,
+        )
     }
 
     fn map_preview_point(
@@ -860,27 +992,37 @@ impl AlignmentSlicePreview {
         inner: f32,
         point: Vec2f,
     ) -> (f32, f32) {
-        let extent = Self::preview_extent(preview).max(1.0e-5);
-        let nx = ((point.x - preview.height_map.origin_x) / extent).clamp(0.0, 1.0);
-        let nz = ((point.y - preview.height_map.origin_z) / extent).clamp(0.0, 1.0);
-        (ox + nx * inner, oy + inner - nz * inner)
+        // The height-map texture is uploaded row-major with z increasing downward on screen,
+        // so the vector overlay must use the same orientation to line up with the image.
+        Self::height_map_preview_point(&preview.height_map, ox, oy, inner, point)
     }
 
-    fn draw_grid(&mut self, ox: f32, oy: f32, inner: f32) {
+    fn draw_grid(
+        &mut self,
+        height_map: &XrDepthAlignHeightMap,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+    ) {
+        let rect = Self::height_map_draw_rect(height_map, ox, oy, inner);
+        let ox = rect.pos.x as f32;
+        let oy = rect.pos.y as f32;
+        let inner_w = rect.size.x as f32;
+        let inner_h = rect.size.y as f32;
         self.draw_vector.set_color_hex(0x163042, 1.0);
         for step in 0..=Self::GRID_DIVISIONS {
             let t = step as f32 / Self::GRID_DIVISIONS as f32;
-            let px = ox + inner * t;
-            let py = oy + inner * t;
+            let px = ox + inner_w * t;
+            let py = oy + inner_h * t;
             self.draw_vector.move_to(px, oy);
-            self.draw_vector.line_to(px, oy + inner);
+            self.draw_vector.line_to(px, oy + inner_h);
             self.draw_vector.move_to(ox, py);
-            self.draw_vector.line_to(ox + inner, py);
+            self.draw_vector.line_to(ox + inner_w, py);
         }
         self.draw_vector.stroke(1.0);
 
         self.draw_vector.set_color_hex(0x42657c, 1.0);
-        self.draw_vector.rect(ox, oy, inner, inner);
+        self.draw_vector.rect(ox, oy, inner_w, inner_h);
         self.draw_vector.stroke(1.5);
     }
 
@@ -893,33 +1035,41 @@ impl AlignmentSlicePreview {
         }
     }
 
-    fn ensure_height_texture(&mut self, cx: &mut Cx, preview: &XrDepthAlignSlicePreview) {
-        let size = preview.height_map.size as usize;
-        if size == 0 || preview.height_map.height_u16.len() != size * size {
-            self.height_texture = None;
+    fn ensure_height_texture(
+        texture_slot: &mut Option<Texture>,
+        cx: &mut Cx,
+        height_map: &XrDepthAlignHeightMap,
+    ) {
+        let map_width = height_map.size_x as usize;
+        let map_height = height_map.size_z as usize;
+        if map_width == 0
+            || map_height == 0
+            || height_map.height_u16.len() != map_width * map_height
+        {
+            *texture_slot = None;
             return;
         }
 
-        let needs_recreate = self.height_texture.as_ref().is_none_or(|texture| {
+        let needs_recreate = texture_slot.as_ref().is_none_or(|texture| {
             !matches!(
                 texture.get_format(cx),
-                TextureFormat::VecRu8 { width, height, .. } if *width == size && *height == size
+                TextureFormat::VecRu8 { width, height, .. }
+                    if *width == map_width && *height == map_height
             )
         });
 
-        let pixels = preview
-            .height_map
+        let pixels = height_map
             .height_u16
             .iter()
             .map(|value| Self::preview_height_to_u8(*value))
             .collect::<Vec<_>>();
 
         if needs_recreate {
-            self.height_texture = Some(Texture::new_with_format(
+            *texture_slot = Some(Texture::new_with_format(
                 cx,
                 TextureFormat::VecRu8 {
-                    width: size,
-                    height: size,
+                    width: map_width,
+                    height: map_height,
                     data: Some(pixels),
                     unpack_row_length: None,
                     updated: TextureUpdated::Full,
@@ -928,7 +1078,7 @@ impl AlignmentSlicePreview {
             return;
         }
 
-        if let Some(texture) = self.height_texture.as_ref() {
+        if let Some(texture) = texture_slot.as_ref() {
             let mut data = texture.take_vec_u8(cx);
             if data.len() != pixels.len() {
                 data.resize(pixels.len(), 0);
@@ -945,11 +1095,10 @@ impl AlignmentSlicePreview {
         oy: f32,
         inner: f32,
     ) {
-        let extent = Self::preview_extent(preview);
         if preview.height_map.origin_x > 0.0
             || preview.height_map.origin_z > 0.0
-            || preview.height_map.origin_x + extent < 0.0
-            || preview.height_map.origin_z + extent < 0.0
+            || preview.height_map.origin_x + Self::height_map_extent_x(&preview.height_map) < 0.0
+            || preview.height_map.origin_z + Self::height_map_extent_z(&preview.height_map) < 0.0
         {
             return;
         }
@@ -973,8 +1122,7 @@ impl AlignmentSlicePreview {
             return;
         };
         let (cx, cy) = Self::map_preview_point(preview, ox, oy, inner, center);
-        let radius =
-            preview.cutout_radius_meters / Self::preview_extent(preview).max(1.0e-5) * inner;
+        let radius = preview.cutout_radius_meters * Self::preview_scale(&preview.height_map, inner);
         self.draw_vector.set_color_hex(0xff8d62, 1.0);
         for step in 0..=Self::CUTOUT_STEPS {
             let angle = step as f32 / Self::CUTOUT_STEPS as f32 * std::f32::consts::TAU;
@@ -1004,9 +1152,9 @@ impl AlignmentSlicePreview {
             return;
         }
         let (cx, cy) = Self::map_preview_point(preview, ox, oy, inner, center);
-        let extent = Self::preview_extent(preview).max(1.0e-5);
-        let dir = vec2f(forward.x, -forward.y) * forward_len.recip();
-        let start = vec2f(cx, cy) + dir * (preview.cutout_radius_meters / extent * inner + 4.0);
+        let scale = Self::preview_scale(&preview.height_map, inner);
+        let dir = vec2f(forward.x, forward.y) * forward_len.recip();
+        let start = vec2f(cx, cy) + dir * (preview.cutout_radius_meters * scale + 4.0);
         let tip = start + dir * 28.0;
         let side = vec2f(-dir.y, dir.x);
         let left = tip - dir * 8.0 + side * 5.0;
@@ -1019,6 +1167,113 @@ impl AlignmentSlicePreview {
         self.draw_vector.line_to(right.x, right.y);
         self.draw_vector.stroke(1.8);
     }
+
+    fn draw_cutout_ring_in_local_frame(
+        &mut self,
+        preview: &XrDepthAlignSlicePreview,
+        center: Vec2f,
+        radius_meters: f32,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+        color_hex: u32,
+    ) {
+        let (cx, cy) = Self::map_preview_point(preview, ox, oy, inner, center);
+        let radius = radius_meters * Self::preview_scale(&preview.height_map, inner);
+        self.draw_vector.set_color_hex(color_hex, 1.0);
+        for step in 0..=Self::CUTOUT_STEPS {
+            let angle = step as f32 / Self::CUTOUT_STEPS as f32 * std::f32::consts::TAU;
+            let px = cx + angle.cos() * radius;
+            let py = cy + angle.sin() * radius;
+            if step == 0 {
+                self.draw_vector.move_to(px, py);
+            } else {
+                self.draw_vector.line_to(px, py);
+            }
+        }
+        self.draw_vector.stroke(1.2);
+    }
+
+    fn draw_height_map_rect(
+        &mut self,
+        cx: &mut Cx2d,
+        texture: &Texture,
+        rect: Rect,
+        alpha: f32,
+        uv_min: Vec2f,
+        uv_max: Vec2f,
+    ) {
+        self.draw_map.alpha = alpha;
+        self.draw_map.uv_min = uv_min;
+        self.draw_map.uv_max = uv_max;
+        self.draw_map.draw_vars.set_texture(0, texture);
+        self.draw_map.draw_abs(cx, rect);
+    }
+
+    fn remote_overlay_draw_params(
+        preview: &XrDepthAlignSlicePreview,
+        remote_height_map: &XrDepthAlignHeightMap,
+        ox: f32,
+        oy: f32,
+        inner: f32,
+    ) -> Option<(Rect, Vec2f, Vec2f)> {
+        let local_map = &preview.height_map;
+        let local_extent_x = Self::height_map_extent_x(local_map);
+        let local_extent_z = Self::height_map_extent_z(local_map);
+        let remote_extent_x = Self::height_map_extent_x(remote_height_map);
+        let remote_extent_z = Self::height_map_extent_z(remote_height_map);
+        if local_extent_x <= 1.0e-5
+            || local_extent_z <= 1.0e-5
+            || remote_extent_x <= 1.0e-5
+            || remote_extent_z <= 1.0e-5
+        {
+            return None;
+        }
+
+        let draw_min_x = local_map.origin_x.max(remote_height_map.origin_x);
+        let draw_min_z = local_map.origin_z.max(remote_height_map.origin_z);
+        let draw_max_x = (local_map.origin_x + local_extent_x)
+            .min(remote_height_map.origin_x + remote_extent_x);
+        let draw_max_z = (local_map.origin_z + local_extent_z)
+            .min(remote_height_map.origin_z + remote_extent_z);
+        if draw_max_x <= draw_min_x || draw_max_z <= draw_min_z {
+            return None;
+        }
+
+        let (screen_min_x, screen_min_y) = Self::height_map_preview_point(
+            local_map,
+            ox,
+            oy,
+            inner,
+            vec2f(draw_min_x, draw_min_z),
+        );
+        let (screen_max_x, screen_max_y) = Self::height_map_preview_point(
+            local_map,
+            ox,
+            oy,
+            inner,
+            vec2f(draw_max_x, draw_max_z),
+        );
+        let uv_min = vec2f(
+            ((draw_min_x - remote_height_map.origin_x) / remote_extent_x).clamp(0.0, 1.0),
+            ((draw_min_z - remote_height_map.origin_z) / remote_extent_z).clamp(0.0, 1.0),
+        );
+        let uv_max = vec2f(
+            ((draw_max_x - remote_height_map.origin_x) / remote_extent_x).clamp(0.0, 1.0),
+            ((draw_max_z - remote_height_map.origin_z) / remote_extent_z).clamp(0.0, 1.0),
+        );
+        Some((
+            Rect {
+                pos: dvec2(screen_min_x as f64, screen_min_y as f64),
+                size: dvec2(
+                    (screen_max_x - screen_min_x).max(1.0) as f64,
+                    (screen_max_y - screen_min_y).max(1.0) as f64,
+                ),
+            },
+            uv_min,
+            uv_max,
+        ))
+    }
 }
 
 impl Widget for AlignmentSlicePreview {
@@ -1027,37 +1282,86 @@ impl Widget for AlignmentSlicePreview {
         self.draw_bg.draw_abs(cx, rect);
         self.area = self.draw_bg.area();
 
-        let (ox, oy, inner) = Self::preview_square(rect);
-        if let Some(preview) = cx
-            .cx
-            .xr_depth_mesh()
-            .latest_mesh()
-            .and_then(|mesh| mesh.alignment_slice_preview.clone())
-        {
-            self.ensure_height_texture(cx.cx, &preview);
-            if let Some(texture) = self.height_texture.as_ref() {
-                self.draw_map.draw_vars.set_texture(0, texture);
-                self.draw_map.draw_abs(
+        let panel_count = if self.remote_height_map.is_some() { 2 } else { 1 };
+        let (local_ox, local_oy, local_inner) = Self::preview_panel_square(rect, 0, panel_count);
+        let remote_panel = (panel_count > 1).then(|| Self::preview_panel_square(rect, 1, panel_count));
+        if let Some(preview) = self.local_preview.clone() {
+            Self::ensure_height_texture(&mut self.height_texture, cx.cx, &preview.height_map);
+            if let Some(texture) = self.height_texture.as_ref().cloned() {
+                self.draw_height_map_rect(
                     cx,
-                    Rect {
-                        pos: dvec2(ox as f64, oy as f64),
-                        size: dvec2(inner as f64, inner as f64),
-                    },
+                    &texture,
+                    Self::height_map_draw_rect(&preview.height_map, local_ox, local_oy, local_inner),
+                    Self::MAP_ALPHA,
+                    vec2f(0.0, 0.0),
+                    vec2f(1.0, 1.0),
                 );
             } else {
                 self.draw_map.draw_vars.empty_texture(0);
             }
+            if let (Some(remote_height_map), Some((remote_ox, remote_oy, remote_inner))) =
+                (self.remote_height_map.as_ref(), remote_panel)
+            {
+                let panel_rect = Self::remote_overlay_draw_params(
+                    &preview,
+                    remote_height_map,
+                    remote_ox,
+                    remote_oy,
+                    remote_inner,
+                );
+                if let Some((rect, uv_min, uv_max)) = panel_rect {
+                    Self::ensure_height_texture(
+                        &mut self.remote_height_texture,
+                        cx.cx,
+                        remote_height_map,
+                    );
+                    if let Some(texture) = self.remote_height_texture.as_ref().cloned() {
+                        self.draw_height_map_rect(
+                            cx,
+                            &texture,
+                            rect,
+                            Self::MAP_ALPHA,
+                            uv_min,
+                            uv_max,
+                        );
+                    }
+                }
+            }
 
             self.draw_vector.begin();
-            self.draw_grid(ox, oy, inner);
-            self.draw_origin_cross(&preview, ox, oy, inner);
-            self.draw_cutout_ring(&preview, ox, oy, inner);
-            self.draw_cutout_heading(&preview, ox, oy, inner);
+            self.draw_grid(&preview.height_map, local_ox, local_oy, local_inner);
+            self.draw_origin_cross(&preview, local_ox, local_oy, local_inner);
+            self.draw_cutout_ring(&preview, local_ox, local_oy, local_inner);
+            self.draw_cutout_heading(&preview, local_ox, local_oy, local_inner);
+            if let Some((remote_ox, remote_oy, remote_inner)) = remote_panel {
+                self.draw_grid(&preview.height_map, remote_ox, remote_oy, remote_inner);
+                self.draw_origin_cross(&preview, remote_ox, remote_oy, remote_inner);
+                let remote_cutout = self.remote_height_map.as_ref().and_then(|height_map| {
+                    height_map
+                        .player_cutout_center
+                        .map(|center| (center, height_map.player_cutout_radius_meters))
+                });
+                if let Some((center, radius_meters)) = remote_cutout {
+                    self.draw_cutout_ring_in_local_frame(
+                        &preview,
+                        center,
+                        radius_meters,
+                        remote_ox,
+                        remote_oy,
+                        remote_inner,
+                        0x9ed5ff,
+                    );
+                }
+            }
             self.draw_vector.end(cx);
         } else {
             self.draw_map.draw_vars.empty_texture(0);
             self.draw_vector.begin();
-            self.draw_grid(ox, oy, inner);
+            let empty_map = XrDepthAlignHeightMap::default();
+            self.draw_grid(&empty_map, local_ox, local_oy, local_inner);
+            if let Some((remote_ox, remote_oy, remote_inner)) = remote_panel {
+                self.draw_grid(&empty_map, remote_ox, remote_oy, remote_inner);
+            }
             self.draw_vector.end(cx);
         }
         DrawStep::done()
@@ -1137,36 +1441,48 @@ impl App {
         } else {
             return;
         };
-        let peer_sync_status_text = self
+        let (
+            peer_sync_status_text,
+            network_status_text,
+            alignment_debug_text,
+            alignment_state_text,
+            peer_scene_text,
+            local_slice_preview,
+            remote_height_map,
+        ) = self
             .ui
             .widget(cx, ids!(xr_people_debug))
             .borrow::<XrPeopleDebug>()
-            .map(|people_debug| people_debug.status_text().to_string())
-            .unwrap_or_else(|| "Peers: unavailable".to_string());
-        let network_status_text = self
+            .map(|people_debug| {
+                (
+                    people_debug.status_text().to_string(),
+                    people_debug.network_status_text().to_string(),
+                    people_debug.alignment_debug_text().to_string(),
+                    people_debug.alignment_state_text().to_string(),
+                    people_debug.peer_scene_text().to_string(),
+                    people_debug.local_slice_preview(),
+                    people_debug.aligned_peer_height_map(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "AlignSync: unavailable".to_string(),
+                    "Network: unavailable".to_string(),
+                    "AlignDbg: unavailable".to_string(),
+                    "AlignState: unavailable".to_string(),
+                    "PeerMap: unavailable".to_string(),
+                    None,
+                    None,
+                )
+            });
+        if let Some(mut preview) = self
             .ui
-            .widget(cx, ids!(xr_people_debug))
-            .borrow::<XrPeopleDebug>()
-            .map(|people_debug| people_debug.network_status_text().to_string())
-            .unwrap_or_else(|| "Network: unavailable".to_string());
-        let alignment_debug_text = self
-            .ui
-            .widget(cx, ids!(xr_people_debug))
-            .borrow::<XrPeopleDebug>()
-            .map(|people_debug| people_debug.alignment_debug_text().to_string())
-            .unwrap_or_else(|| "AlignDbg: unavailable".to_string());
-        let alignment_state_text = self
-            .ui
-            .widget(cx, ids!(xr_people_debug))
-            .borrow::<XrPeopleDebug>()
-            .map(|people_debug| people_debug.alignment_state_text().to_string())
-            .unwrap_or_else(|| "AlignState: unavailable".to_string());
-        let peer_scene_text = self
-            .ui
-            .widget(cx, ids!(xr_people_debug))
-            .borrow::<XrPeopleDebug>()
-            .map(|people_debug| people_debug.peer_scene_text().to_string())
-            .unwrap_or_else(|| "PeerScene: unavailable".to_string());
+            .widget(cx, ids!(alignment_slice_preview))
+            .borrow_mut::<AlignmentSlicePreview>()
+        {
+            preview.set_local_preview(cx, local_slice_preview);
+            preview.set_remote_height_map(cx, remote_height_map);
+        }
         if self.last_peer_sync_status_text != peer_sync_status_text {
             self.ui
                 .widget(cx, ids!(peer_sync_status_field))
@@ -1240,6 +1556,30 @@ impl App {
             self.last_frame_cpu_text = frame_cpu_text;
         }
 
+        let (tsdf_memory_mb, depth_frames_seen, depth_frames_dropped) = cx
+            .xr_depth_mesh()
+            .state()
+            .read()
+            .ok()
+            .map(|state| {
+                let tsdf_memory_mb = state
+                    .latest_mesh
+                    .as_ref()
+                    .map(|mesh| mesh.tsdf_memory_bytes as f64 / 1_000_000.0)
+                    .unwrap_or(0.0);
+                (
+                    tsdf_memory_mb,
+                    state.stats.frames_seen,
+                    state.stats.frames_dropped,
+                )
+            })
+            .unwrap_or((0.0, 0, 0));
+        let depth_frames_kept = depth_frames_seen.saturating_sub(depth_frames_dropped);
+        let depth_drop_percent = if depth_frames_seen > 0 {
+            depth_frames_dropped as f64 * 100.0 / depth_frames_seen as f64
+        } else {
+            0.0
+        };
         let xr_runtime_text = match (
             cx.xr_render_scale(),
             cx.xr_display_refresh_rate_hz(),
@@ -1247,51 +1587,87 @@ impl App {
             cx.xr_gpu_frame_time_ms(),
         ) {
             (Some(scale), Some(refresh_hz), Some(effective_hz), Some(gpu_ms)) => format!(
-                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU {:.2} ms",
+                "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU {:.2} ms",
                 cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                tsdf_memory_mb,
+                depth_frames_seen,
+                depth_frames_kept,
+                depth_frames_dropped,
+                depth_drop_percent,
                 scale,
                 refresh_hz,
                 effective_hz,
                 gpu_ms
             ),
             (Some(scale), Some(refresh_hz), Some(effective_hz), None) => format!(
-                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU waiting",
+                "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU waiting",
                 cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                tsdf_memory_mb,
+                depth_frames_seen,
+                depth_frames_kept,
+                depth_frames_dropped,
+                depth_drop_percent,
                 scale,
                 refresh_hz,
                 effective_hz
             ),
             (Some(scale), Some(refresh_hz), None, Some(gpu_ms)) => format!(
-                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU {:.2} ms",
+                "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU {:.2} ms",
                 cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                tsdf_memory_mb,
+                depth_frames_seen,
+                depth_frames_kept,
+                depth_frames_dropped,
+                depth_drop_percent,
                 scale,
                 refresh_hz,
                 gpu_ms
             ),
             (Some(scale), Some(refresh_hz), None, None) => format!(
-                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU waiting",
+                "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU waiting",
                 cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                tsdf_memory_mb,
+                depth_frames_seen,
+                depth_frames_kept,
+                depth_frames_dropped,
+                depth_drop_percent,
                 scale,
                 refresh_hz
             ),
             (Some(scale), None, _, Some(gpu_ms)) => {
                 format!(
-                    "Depth: {:.0} cm | XR scale: {:.2} | refresh waiting | GPU {:.2} ms",
+                    "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh waiting | GPU {:.2} ms",
                     cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                    tsdf_memory_mb,
+                    depth_frames_seen,
+                    depth_frames_kept,
+                    depth_frames_dropped,
+                    depth_drop_percent,
                     scale,
                     gpu_ms
                 )
             }
             (Some(scale), None, _, None) => {
                 format!(
-                    "Depth: {:.0} cm | XR scale: {:.2} | refresh waiting | GPU waiting",
+                    "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh waiting | GPU waiting",
                     cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                    tsdf_memory_mb,
+                    depth_frames_seen,
+                    depth_frames_kept,
+                    depth_frames_dropped,
+                    depth_drop_percent,
                     scale
                 )
             }
             (None, _, _, _) => format!(
-                "Depth: {:.0} cm | XR render scale: not active",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0
+                "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR render scale: not active",
+                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
+                tsdf_memory_mb
+                ,
+                depth_frames_seen,
+                depth_frames_kept,
+                depth_frames_dropped,
+                depth_drop_percent
             ),
         };
         if self.last_xr_runtime_text != xr_runtime_text {
