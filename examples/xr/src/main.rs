@@ -1556,24 +1556,21 @@ impl App {
             self.last_frame_cpu_text = frame_cpu_text;
         }
 
-        let (tsdf_memory_mb, depth_frames_seen, depth_frames_dropped) = cx
+        let tsdf_memory_mb = cx
+            .xr_depth_mesh()
+            .latest_tsdf_snapshot()
+            .as_ref()
+            .map(|snapshot| snapshot.grid.heap_bytes() as f64 / 1_000_000.0)
+            .unwrap_or(0.0);
+        let (depth_frames_seen, depth_frames_dropped) = cx
             .xr_depth_mesh()
             .state()
             .read()
             .ok()
             .map(|state| {
-                let tsdf_memory_mb = state
-                    .latest_mesh
-                    .as_ref()
-                    .map(|mesh| mesh.tsdf_memory_bytes as f64 / 1_000_000.0)
-                    .unwrap_or(0.0);
-                (
-                    tsdf_memory_mb,
-                    state.stats.frames_seen,
-                    state.stats.frames_dropped,
-                )
+                (state.stats.frames_seen, state.stats.frames_dropped)
             })
-            .unwrap_or((0.0, 0, 0));
+            .unwrap_or((0, 0));
         let depth_frames_kept = depth_frames_seen.saturating_sub(depth_frames_dropped);
         let depth_drop_percent = if depth_frames_seen > 0 {
             depth_frames_dropped as f64 * 100.0 / depth_frames_seen as f64
