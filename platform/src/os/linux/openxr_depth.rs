@@ -7,10 +7,11 @@ use crate::{
     thread::SignalToUI,
     xr_depth_mesh::{
         empty_bounds, xr_depth_align_build_wall_feature_normal_histogram,
-        xr_depth_align_loopback_preview_solution, xr_depth_align_solve_remote_to_local,
-        xr_depth_align_test_markers, xr_depth_align_transform_descriptor, xr_depth_mesh_store,
-        ChunkKey, XrDepthAlignDebug, XrDepthAlignDescriptor, XrDepthAlignPreview,
-        XrDepthAlignSample, XrDepthAlignSampleKind, XrDepthAlignSolution,
+        xr_depth_align_build_wall_normal_histogram, xr_depth_align_loopback_preview_solution,
+        xr_depth_align_solve_remote_to_local, xr_depth_align_test_markers,
+        xr_depth_align_transform_descriptor, xr_depth_mesh_store, ChunkKey, XrDepthAlignDebug,
+        XrDepthAlignDescriptor, XrDepthAlignPreview, XrDepthAlignSample, XrDepthAlignSampleKind,
+        XrDepthAlignSlicePreview, XrDepthAlignSliceSegment, XrDepthAlignSolution,
         XrDepthAlignVerticalDescriptor, XrDepthAlignWallFeature, XrDepthMesh, XrDepthMeshChunk,
         XrDepthMeshQuery, XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry,
         XrDepthMeshQueryColliderRole, XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface,
@@ -163,6 +164,17 @@ const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_Y_MIN: f32 = 0.20;
 const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_Y_MAX: f32 = 2.00;
 const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_CLUTTER_Y_MAX: f32 = 1.45;
 const DEPTH_ALIGN_VERTICAL_DESCRIPTOR_VERTICAL_NORMAL_Y_MAX: f32 = 0.45;
+const DEPTH_ALIGN_VECTOR_SLICE_TOP_Y_METERS: f32 = 2.00;
+const DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS: f32 = 0.50;
+const DEPTH_ALIGN_VECTOR_SLICE_MIN_PROJECT_Y_METERS: f32 = 0.00;
+const DEPTH_ALIGN_VECTOR_SLICE_MIN_HORIZONTAL_NORMAL: f32 = 0.55;
+const DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS: f32 =
+    DEPTH_PLAYER_EXCLUDE_RADIUS_METERS + 0.12;
+const DEPTH_ALIGN_VECTOR_SLICE_PREVIEW_LEVEL_STEP_METERS: f32 = 0.25;
+const DEPTH_ALIGN_VECTOR_SLICE_MIN_SEGMENT_METERS: f32 = 0.05;
+const DEPTH_ALIGN_VECTOR_SLICE_SAMPLES_PER_CELL: f32 = 1.35;
+const DEPTH_ALIGN_VECTOR_SLICE_MAX_SAMPLES_PER_SEGMENT: usize = 3;
+const DEPTH_ALIGN_PROJECTED_HEIGHT_SAMPLES_PER_TICK: usize = 512;
 const DEPTH_ALIGN_DESCRIPTOR_UPDATE_INTERVAL_MILLIS: u64 = 250;
 const DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MIN: f32 = 0.16;
 const DEPTH_ALIGN_PREVIEW_SOLUTION_LERP_MAX: f32 = 0.36;
@@ -706,14 +718,20 @@ struct DepthMeshVolume {
     stable_wall_tracks: Vec<StableWallPatchTrack>,
     room_wall_tracks: Vec<StableRoomWallTrack>,
     plane_scan_chunks: HashMap<ChunkKey, ScannedPlaneChunk>,
+    latest_camera_world: Option<Vec3f>,
+    latest_camera_forward: Option<Vec3f>,
+    projected_height_field: Option<ProjectedHeightField>,
     alignment_descriptor: Option<XrDepthAlignDescriptor>,
     alignment_debug: XrDepthAlignDebug,
+    alignment_slice_preview: Option<XrDepthAlignSlicePreview>,
     alignment_preview: XrDepthAlignPreview,
     alignment_preview_temporal: AlignmentPreviewTemporalState,
     pending_mesh_dirty_chunks: HashSet<ChunkKey>,
     pending_mesh_chunk_queue: VecDeque<ChunkKey>,
     pending_plane_scan_dirty_chunks: HashSet<ChunkKey>,
     pending_plane_scan_chunk_queue: VecDeque<ChunkKey>,
+    pending_projected_height_dirty_samples: HashSet<usize>,
+    pending_projected_height_sample_queue: VecDeque<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -774,6 +792,45 @@ struct StableRoomWallTrack {
     missing_updates: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProjectedHeightFieldLayout {
+    origin_x: f32,
+    origin_z: f32,
+    cell_size_meters: f32,
+    size: usize,
+    top_y_meters: f32,
+    bottom_y_meters: f32,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectedHeightField {
+    layout: ProjectedHeightFieldLayout,
+    player_cutout_center: Option<Vec3f>,
+    heights_meters: Vec<f32>,
+    valid: Vec<u8>,
+}
+
+impl ProjectedHeightField {
+    fn new(layout: ProjectedHeightFieldLayout, player_cutout_center: Option<Vec3f>) -> Self {
+        let sample_size = layout.size + 1;
+        let sample_count = sample_size * sample_size;
+        Self {
+            layout,
+            player_cutout_center,
+            heights_meters: vec![0.0; sample_count],
+            valid: vec![0; sample_count],
+        }
+    }
+
+    fn sample_size(&self) -> usize {
+        self.layout.size + 1
+    }
+
+    fn sample_count(&self) -> usize {
+        self.heights_meters.len()
+    }
+}
+
 impl DepthMeshVolume {
     fn new(sample_step: u32, voxel_size_meters: f32) -> Self {
         let mesh_config = SparseVoxelMeshingConfig {
@@ -805,14 +862,20 @@ impl DepthMeshVolume {
             stable_wall_tracks: Vec::new(),
             room_wall_tracks: Vec::new(),
             plane_scan_chunks: HashMap::new(),
+            latest_camera_world: None,
+            latest_camera_forward: None,
+            projected_height_field: None,
             alignment_descriptor: None,
             alignment_debug: XrDepthAlignDebug::default(),
+            alignment_slice_preview: None,
             alignment_preview: XrDepthAlignPreview::default(),
             alignment_preview_temporal: AlignmentPreviewTemporalState::default(),
             pending_mesh_dirty_chunks: HashSet::new(),
             pending_mesh_chunk_queue: VecDeque::new(),
             pending_plane_scan_dirty_chunks: HashSet::new(),
             pending_plane_scan_chunk_queue: VecDeque::new(),
+            pending_projected_height_dirty_samples: HashSet::new(),
+            pending_projected_height_sample_queue: VecDeque::new(),
         }
     }
 
@@ -852,11 +915,13 @@ impl DepthMeshVolume {
     fn clear_alignment_descriptor(&mut self) -> bool {
         if self.alignment_descriptor.is_none()
             && self.alignment_debug == XrDepthAlignDebug::default()
+            && self.alignment_slice_preview.is_none()
         {
             return false;
         }
         self.alignment_descriptor = None;
         self.alignment_debug = XrDepthAlignDebug::default();
+        self.alignment_slice_preview = None;
         self.update_sequence = self.update_sequence.saturating_add(1);
         true
     }
@@ -903,6 +968,7 @@ impl DepthMeshVolume {
             plane_patches: self.plane_patches.clone(),
             alignment_descriptor: self.alignment_descriptor.clone(),
             alignment_debug: self.alignment_debug,
+            alignment_slice_preview: self.alignment_slice_preview.clone(),
             alignment_preview: self.alignment_preview.clone(),
             dirty_chunk_keys: self.dirty_chunk_keys.clone(),
             removed_chunk_keys: self.removed_chunk_keys.clone(),
@@ -932,6 +998,7 @@ pub(super) struct CxOpenXrDepthMeshJob {
     sample_step: u32,
     voxel_size_meters: f32,
     camera_world: Vec3f,
+    camera_forward: Vec3f,
     depth_proj: Mat4f,
     inv_depth_proj: Mat4f,
     depth_view_from_world: Mat4f,
@@ -948,6 +1015,7 @@ struct CxOpenXrPreparedDepthMeshJob {
     sample_step: u32,
     voxel_size_meters: f32,
     camera_world: Vec3f,
+    camera_forward: Vec3f,
     depth_proj: Mat4f,
     inv_depth_proj: Mat4f,
     depth_view_from_world: Mat4f,
@@ -1105,6 +1173,7 @@ impl CxOpenXrDepthMeshPipeline {
                 sample_step: DEPTH_VOXEL_SAMPLE_STEP,
                 voxel_size_meters,
                 camera_world,
+                camera_forward,
                 depth_proj: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_proj_mat,
                 inv_depth_proj: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_proj_mat.invert(),
                 depth_view_from_world: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_view_mat,
@@ -1264,6 +1333,14 @@ fn depth_mesher_worker(receiver: Receiver<CxOpenXrPreparedDepthMeshJob>, store: 
         } else {
             false
         };
+        if surface_analysis_enabled {
+            sync_projected_height_field_layout(&mut volume);
+            sync_projected_height_field_player_cutout(&mut volume);
+            refresh_projected_height_field(
+                &mut volume,
+                DEPTH_ALIGN_PROJECTED_HEIGHT_SAMPLES_PER_TICK,
+            );
+        }
         let alignment_changed = if surface_analysis_enabled {
             if plane_changed
                 || (!applied_update
@@ -1437,6 +1514,7 @@ fn preprocess_depth_mesh(
         sample_step: job.sample_step,
         voxel_size_meters,
         camera_world: job.camera_world,
+        camera_forward: job.camera_forward,
         depth_proj: job.depth_proj,
         inv_depth_proj: job.inv_depth_proj,
         depth_view_from_world: job.depth_view_from_world,
@@ -1453,6 +1531,8 @@ fn apply_preprocessed_depth_mesh(job: CxOpenXrPreparedDepthMeshJob, volume: &mut
     volume.image_width = job.width;
     volume.image_height = job.height;
     volume.sample_step = job.sample_step;
+    volume.latest_camera_world = Some(job.camera_world);
+    volume.latest_camera_forward = Some(job.camera_forward);
 
     let mut topology_changes = apply_tsd_samples(volume, &job.frame_tsd_samples);
     topology_changes += refresh_visible_free_space(volume, &job);
@@ -1487,8 +1567,12 @@ struct AlignmentPreviewTemporalState {
 }
 
 fn update_tsdf_alignment_descriptor(volume: &mut DepthMeshVolume) -> bool {
+    let previous_slice_preview = volume.alignment_slice_preview.clone();
     let (next_descriptor, next_debug) = build_tsdf_alignment_descriptor(volume);
-    if volume.alignment_descriptor == next_descriptor && volume.alignment_debug == next_debug {
+    if volume.alignment_descriptor == next_descriptor
+        && volume.alignment_debug == next_debug
+        && previous_slice_preview == volume.alignment_slice_preview
+    {
         return false;
     }
     volume.alignment_descriptor = next_descriptor;
@@ -1769,7 +1853,12 @@ fn build_loopback_preview_remote_descriptor(
         degraded.push(sample);
     }
     remote.samples = degraded;
-    remote.wall_normal_histogram = if remote.wall_features.is_empty() {
+    remote.wall_normal_histogram = if !remote.samples.is_empty() {
+        xr_depth_align_build_wall_normal_histogram(
+            &remote.samples,
+            local.wall_normal_histogram.len(),
+        )
+    } else if remote.wall_features.is_empty() {
         Vec::new()
     } else {
         xr_depth_align_build_wall_feature_normal_histogram(
@@ -1833,6 +1922,678 @@ fn vertical_descriptor_height_u8(y: f32) -> u8 {
     (normalized * 255.0).round() as u8
 }
 
+fn tsdf_alignment_descriptor_layout(volume: &DepthMeshVolume) -> Option<(f32, f32, f32, usize)> {
+    let (bounds_min, bounds_max) = volume.mesh_grid.world_bounds(1)?;
+    let mut extent = (bounds_max.x - bounds_min.x)
+        .max(bounds_max.z - bounds_min.z)
+        .max(volume.voxel_size_meters * DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as f32);
+    extent = (extent + DEPTH_ALIGN_VERTICAL_DESCRIPTOR_BOUNDS_PADDING_METERS * 2.0)
+        .min(DEPTH_ALIGN_VERTICAL_DESCRIPTOR_MAX_EXTENT_METERS);
+    let center_x = (bounds_min.x + bounds_max.x) * 0.5;
+    let center_z = (bounds_min.z + bounds_max.z) * 0.5;
+    let origin_x = center_x - extent * 0.5;
+    let origin_z = center_z - extent * 0.5;
+    let size = DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE;
+    let cell_size = extent / size as f32;
+    Some((origin_x, origin_z, cell_size, size))
+}
+
+fn projected_height_field_layout(volume: &DepthMeshVolume) -> Option<ProjectedHeightFieldLayout> {
+    let (origin_x, origin_z, cell_size_meters, size) = tsdf_alignment_descriptor_layout(volume)?;
+    let top_y_meters = vector_slice_projection_top_y(volume)?;
+    let bottom_y_meters = vector_slice_projection_bottom_y(volume, top_y_meters)?;
+    Some(ProjectedHeightFieldLayout {
+        origin_x,
+        origin_z,
+        cell_size_meters,
+        size,
+        top_y_meters,
+        bottom_y_meters,
+    })
+}
+
+fn projected_height_cutout_center_matches(a: Option<Vec3f>, b: Option<Vec3f>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => (a - b).length() <= 1.0e-4,
+        _ => false,
+    }
+}
+
+fn enqueue_projected_height_sample_dirty(volume: &mut DepthMeshVolume, sample_index: usize) {
+    if volume
+        .pending_projected_height_dirty_samples
+        .insert(sample_index)
+    {
+        volume
+            .pending_projected_height_sample_queue
+            .push_back(sample_index);
+    }
+}
+
+fn mark_all_projected_height_samples_dirty(volume: &mut DepthMeshVolume) {
+    let Some(sample_count) = volume
+        .projected_height_field
+        .as_ref()
+        .map(ProjectedHeightField::sample_count)
+    else {
+        return;
+    };
+    for sample_index in 0..sample_count {
+        enqueue_projected_height_sample_dirty(volume, sample_index);
+    }
+}
+
+fn sync_projected_height_field_layout(volume: &mut DepthMeshVolume) {
+    let Some(layout) = projected_height_field_layout(volume) else {
+        volume.projected_height_field = None;
+        volume.pending_projected_height_dirty_samples.clear();
+        volume.pending_projected_height_sample_queue.clear();
+        return;
+    };
+    let needs_rebuild = volume
+        .projected_height_field
+        .as_ref()
+        .map(|field| field.layout != layout)
+        .unwrap_or(true);
+    if !needs_rebuild {
+        return;
+    }
+    volume.projected_height_field = Some(ProjectedHeightField::new(
+        layout,
+        volume.latest_camera_world,
+    ));
+    volume.pending_projected_height_dirty_samples.clear();
+    volume.pending_projected_height_sample_queue.clear();
+    mark_all_projected_height_samples_dirty(volume);
+}
+
+fn mark_projected_height_samples_dirty_world_rect(
+    volume: &mut DepthMeshVolume,
+    min_x: f32,
+    max_x: f32,
+    min_z: f32,
+    max_z: f32,
+) {
+    let Some((origin_x, origin_z, cell_size_meters, sample_size)) =
+        volume.projected_height_field.as_ref().map(|field| {
+            (
+                field.layout.origin_x,
+                field.layout.origin_z,
+                field.layout.cell_size_meters,
+                field.sample_size(),
+            )
+        })
+    else {
+        return;
+    };
+    let max_sample_index = sample_size as isize - 1;
+    let raw_min_x = ((min_x - origin_x) / cell_size_meters.max(1.0e-5)).floor() as isize;
+    let raw_max_x = ((max_x - origin_x) / cell_size_meters.max(1.0e-5)).ceil() as isize;
+    let raw_min_z = ((min_z - origin_z) / cell_size_meters.max(1.0e-5)).floor() as isize;
+    let raw_max_z = ((max_z - origin_z) / cell_size_meters.max(1.0e-5)).ceil() as isize;
+    if raw_max_x < 0
+        || raw_max_z < 0
+        || raw_min_x > max_sample_index
+        || raw_min_z > max_sample_index
+    {
+        return;
+    }
+    let sample_min_x = raw_min_x.clamp(0, max_sample_index) as usize;
+    let sample_max_x = raw_max_x.clamp(0, max_sample_index) as usize;
+    let sample_min_z = raw_min_z.clamp(0, max_sample_index) as usize;
+    let sample_max_z = raw_max_z.clamp(0, max_sample_index) as usize;
+    for z in sample_min_z..=sample_max_z {
+        for x in sample_min_x..=sample_max_x {
+            enqueue_projected_height_sample_dirty(volume, x + z * sample_size);
+        }
+    }
+}
+
+fn mark_projected_height_samples_dirty_around_voxel(
+    volume: &mut DepthMeshVolume,
+    voxel: VoxelCoord,
+) {
+    if volume.projected_height_field.is_none() {
+        return;
+    }
+    let center = volume.mesh_grid.voxel_center_world(voxel);
+    let radius = volume.voxel_size_meters;
+    mark_projected_height_samples_dirty_world_rect(
+        volume,
+        center.x - radius,
+        center.x + radius,
+        center.z - radius,
+        center.z + radius,
+    );
+}
+
+fn mark_projected_height_samples_dirty_around_point(
+    volume: &mut DepthMeshVolume,
+    point: Vec3f,
+    radius: f32,
+) {
+    mark_projected_height_samples_dirty_world_rect(
+        volume,
+        point.x - radius,
+        point.x + radius,
+        point.z - radius,
+        point.z + radius,
+    );
+}
+
+fn sync_projected_height_field_player_cutout(volume: &mut DepthMeshVolume) {
+    let Some(previous_cutout_center) = volume
+        .projected_height_field
+        .as_ref()
+        .map(|field| field.player_cutout_center)
+    else {
+        return;
+    };
+    let next_cutout_center = volume.latest_camera_world;
+    if projected_height_cutout_center_matches(previous_cutout_center, next_cutout_center) {
+        return;
+    }
+    let dirty_radius =
+        DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS + volume.voxel_size_meters;
+    if let Some(center) = previous_cutout_center {
+        mark_projected_height_samples_dirty_around_point(volume, center, dirty_radius);
+    }
+    if let Some(center) = next_cutout_center {
+        mark_projected_height_samples_dirty_around_point(volume, center, dirty_radius);
+    }
+    if let Some(field) = volume.projected_height_field.as_mut() {
+        field.player_cutout_center = next_cutout_center;
+    }
+}
+
+fn refresh_projected_height_field(volume: &mut DepthMeshVolume, max_samples: usize) -> bool {
+    let flush_all = max_samples == usize::MAX;
+    let mut processed = 0usize;
+    let mut changed = false;
+    loop {
+        if !flush_all && processed >= max_samples {
+            break;
+        }
+        let Some(sample_index) = volume.pending_projected_height_sample_queue.pop_front() else {
+            break;
+        };
+        volume
+            .pending_projected_height_dirty_samples
+            .remove(&sample_index);
+        let Some((layout, cutout_center, sample_size, current_height, current_valid)) =
+            volume.projected_height_field.as_ref().map(|field| {
+                (
+                    field.layout,
+                    field.player_cutout_center,
+                    field.sample_size(),
+                    field.heights_meters[sample_index],
+                    field.valid[sample_index] != 0,
+                )
+            })
+        else {
+            break;
+        };
+        let sample_x = sample_index % sample_size;
+        let sample_z = sample_index / sample_size;
+        let point = vector_slice_corner_world(
+            layout.origin_x,
+            layout.origin_z,
+            layout.cell_size_meters,
+            DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS,
+            sample_x,
+            sample_z,
+        );
+        let (next_valid, next_height) = if cutout_center.is_some_and(|camera_world| {
+            vector_slice_point_inside_player_cutout(camera_world, point)
+        }) {
+            (false, 0.0)
+        } else if let Some(height) = query_depth_grid_projected_column_height(
+            volume,
+            point.x,
+            point.z,
+            layout.top_y_meters,
+            layout.bottom_y_meters,
+        ) {
+            (true, height)
+        } else {
+            (false, 0.0)
+        };
+        if current_valid != next_valid
+            || (next_valid && (current_height - next_height).abs() > 1.0e-4)
+            || (!next_valid && current_height != 0.0)
+        {
+            if let Some(field) = volume.projected_height_field.as_mut() {
+                field.valid[sample_index] = next_valid as u8;
+                field.heights_meters[sample_index] = next_height;
+            }
+            changed = true;
+        }
+        processed += 1;
+    }
+    changed
+}
+
+fn ensure_projected_height_field_current(volume: &mut DepthMeshVolume) {
+    sync_projected_height_field_layout(volume);
+    sync_projected_height_field_player_cutout(volume);
+    refresh_projected_height_field(volume, usize::MAX);
+}
+
+fn vector_slice_projection_top_y(volume: &DepthMeshVolume) -> Option<f32> {
+    let (bounds_min, bounds_max) = volume.mesh_grid.world_bounds(1)?;
+    let min_y = bounds_min.y + volume.voxel_size_meters;
+    let max_y = bounds_max.y - volume.voxel_size_meters;
+    if max_y <= min_y {
+        return None;
+    }
+    Some(DEPTH_ALIGN_VECTOR_SLICE_TOP_Y_METERS.clamp(min_y, max_y))
+}
+
+fn vector_slice_projection_bottom_y(volume: &DepthMeshVolume, top_y: f32) -> Option<f32> {
+    let (bounds_min, _) = volume.mesh_grid.world_bounds(1)?;
+    let min_y = (bounds_min.y + volume.voxel_size_meters)
+        .max(DEPTH_ALIGN_VECTOR_SLICE_MIN_PROJECT_Y_METERS);
+    let max_y = top_y - volume.voxel_size_meters;
+    (max_y > min_y).then_some(min_y)
+}
+
+fn vector_slice_corner_world(
+    origin_x: f32,
+    origin_z: f32,
+    cell_size: f32,
+    y: f32,
+    x: usize,
+    z: usize,
+) -> Vec3f {
+    vec3f(
+        origin_x + x as f32 * cell_size,
+        y,
+        origin_z + z as f32 * cell_size,
+    )
+}
+
+fn vector_slice_point_inside_player_cutout(camera_world: Vec3f, point: Vec3f) -> bool {
+    let dx = point.x - camera_world.x;
+    let dz = point.z - camera_world.z;
+    dx * dx + dz * dz
+        <= DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS
+            * DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS
+}
+
+fn vector_slice_flatten_forward(forward: Vec3f) -> Option<Vec2f> {
+    let flat = vec2f(forward.x, forward.z);
+    let length = flat.length();
+    (length > 1.0e-5).then_some(flat * length.recip())
+}
+
+fn query_depth_grid_projected_column_height(
+    volume: &DepthMeshVolume,
+    sample_x: f32,
+    sample_z: f32,
+    top_y: f32,
+    bottom_y: f32,
+) -> Option<f32> {
+    let top_coord = volume
+        .mesh_grid
+        .world_to_voxel_coord(vec3f(sample_x, top_y, sample_z))
+        .y;
+    let bottom_coord = volume
+        .mesh_grid
+        .world_to_voxel_coord(vec3f(sample_x, bottom_y, sample_z))
+        .y;
+    if top_coord <= bottom_coord {
+        return None;
+    }
+    let mut had_data = false;
+    let mut topmost_valid_distance = None::<f32>;
+    for y_coord in (bottom_coord + 1..=top_coord).rev() {
+        let Some(above) = query_grid_bilinear_distance_at_y(volume, sample_x, sample_z, y_coord)
+        else {
+            continue;
+        };
+        let Some(below) =
+            query_grid_bilinear_distance_at_y(volume, sample_x, sample_z, y_coord - 1)
+        else {
+            continue;
+        };
+        had_data = true;
+        topmost_valid_distance.get_or_insert(above);
+        if above <= 0.0 || below > 0.0 {
+            continue;
+        }
+
+        let denom = above - below;
+        let blend = if denom.abs() > 1.0e-6 {
+            (above / denom).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        let y_above = voxel_center_axis(volume.voxel_size_meters, y_coord);
+        let y_below = voxel_center_axis(volume.voxel_size_meters, y_coord - 1);
+        return Some(y_above + (y_below - y_above) * blend);
+    }
+    if topmost_valid_distance.is_some_and(|distance| distance <= 0.0) {
+        Some(top_y)
+    } else if had_data {
+        Some(bottom_y)
+    } else {
+        None
+    }
+}
+
+fn vector_slice_sample_nearest(values: &[f32], size: usize, x: isize, z: isize) -> f32 {
+    let x = x.clamp(0, size.saturating_sub(1) as isize) as usize;
+    let z = z.clamp(0, size.saturating_sub(1) as isize) as usize;
+    values[x + z * size]
+}
+
+fn vector_slice_sample_gradient(
+    values: &[f32],
+    size: usize,
+    x: usize,
+    z: usize,
+    cell_size: f32,
+) -> Vec3f {
+    let x = x as isize;
+    let z = z as isize;
+    let dx = vector_slice_sample_nearest(values, size, x + 1, z)
+        - vector_slice_sample_nearest(values, size, x - 1, z);
+    let dz = vector_slice_sample_nearest(values, size, x, z + 1)
+        - vector_slice_sample_nearest(values, size, x, z - 1);
+    let gradient = vec3f(dx / cell_size.max(1.0e-5), 0.0, dz / cell_size.max(1.0e-5));
+    let horizontal_length = gradient.length();
+    if horizontal_length < DEPTH_ALIGN_VECTOR_SLICE_MIN_HORIZONTAL_NORMAL {
+        vec3f(0.0, 0.0, 0.0)
+    } else {
+        gradient * (1.0 / horizontal_length)
+    }
+}
+
+fn projected_height_preview_levels(bottom_y: f32, top_y: f32) -> Vec<f32> {
+    let step = DEPTH_ALIGN_VECTOR_SLICE_PREVIEW_LEVEL_STEP_METERS.max(0.05);
+    let mut levels = Vec::new();
+    let mut level = (bottom_y / step).ceil() * step;
+    if level <= bottom_y + 0.04 {
+        level += step;
+    }
+    while level < top_y - 0.04 {
+        levels.push(level);
+        level += step;
+    }
+    if DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS > bottom_y + 0.04
+        && DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS < top_y - 0.04
+    {
+        levels.push(DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS);
+    }
+    levels.sort_by(|a, b| a.total_cmp(b));
+    levels.dedup_by(|a, b| (*a - *b).abs() <= 1.0e-4);
+    levels
+}
+
+fn marching_squares_segment_edges(mask: u8) -> &'static [(u8, u8)] {
+    match mask {
+        0 | 15 => &[],
+        1 => &[(3, 0)],
+        2 => &[(0, 1)],
+        3 => &[(3, 1)],
+        4 => &[(1, 2)],
+        5 => &[(3, 2), (0, 1)],
+        6 => &[(0, 2)],
+        7 => &[(3, 2)],
+        8 => &[(2, 3)],
+        9 => &[(0, 2)],
+        10 => &[(0, 1), (2, 3)],
+        11 => &[(1, 2)],
+        12 => &[(1, 3)],
+        13 => &[(0, 1)],
+        14 => &[(3, 0)],
+        _ => &[],
+    }
+}
+
+fn marching_squares_edge_point(
+    origin_x: f32,
+    origin_z: f32,
+    cell_size: f32,
+    slice_y: f32,
+    x: usize,
+    z: usize,
+    edge: u8,
+    values: [f32; 4],
+) -> Vec3f {
+    let corners = [
+        vector_slice_corner_world(origin_x, origin_z, cell_size, slice_y, x, z),
+        vector_slice_corner_world(origin_x, origin_z, cell_size, slice_y, x + 1, z),
+        vector_slice_corner_world(origin_x, origin_z, cell_size, slice_y, x + 1, z + 1),
+        vector_slice_corner_world(origin_x, origin_z, cell_size, slice_y, x, z + 1),
+    ];
+    let (a_idx, b_idx) = match edge {
+        0 => (0, 1),
+        1 => (1, 2),
+        2 => (3, 2),
+        3 => (0, 3),
+        _ => (0, 1),
+    };
+    let a = corners[a_idx];
+    let b = corners[b_idx];
+    let va = values[a_idx];
+    let vb = values[b_idx];
+    let t = if (vb - va).abs() > 1.0e-5 {
+        (-va / (vb - va)).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    vec3f(a.x + (b.x - a.x) * t, slice_y, a.z + (b.z - a.z) * t)
+}
+
+fn append_projected_height_iso_segments(
+    preview_segments: &mut Vec<XrDepthAlignSliceSegment>,
+    samples: &mut Vec<XrDepthAlignSample>,
+    contour_height: f32,
+    active_height: bool,
+    origin_x: f32,
+    origin_z: f32,
+    cell_size: f32,
+    size: usize,
+    sample_size: usize,
+    heights: &[f32],
+    valid: &[u8],
+    player_cutout_center: Option<Vec3f>,
+    x: usize,
+    z: usize,
+) {
+    let corner_indices = [
+        x + z * sample_size,
+        x + 1 + z * sample_size,
+        x + 1 + (z + 1) * sample_size,
+        x + (z + 1) * sample_size,
+    ];
+    if !corner_indices.iter().all(|index| valid[*index] != 0) {
+        return;
+    }
+    let values = [
+        heights[corner_indices[0]] - contour_height,
+        heights[corner_indices[1]] - contour_height,
+        heights[corner_indices[2]] - contour_height,
+        heights[corner_indices[3]] - contour_height,
+    ];
+    let mask = values.iter().enumerate().fold(0u8, |mask, (bit, value)| {
+        mask | (((*value >= 0.0) as u8) << bit)
+    });
+    if mask == 0 || mask == 15 {
+        return;
+    }
+    for &(edge_a, edge_b) in marching_squares_segment_edges(mask) {
+        let start = marching_squares_edge_point(
+            origin_x,
+            origin_z,
+            cell_size,
+            contour_height,
+            x,
+            z,
+            edge_a,
+            values,
+        );
+        let end = marching_squares_edge_point(
+            origin_x,
+            origin_z,
+            cell_size,
+            contour_height,
+            x,
+            z,
+            edge_b,
+            values,
+        );
+        let delta = end - start;
+        let length = delta.length();
+        if length < DEPTH_ALIGN_VECTOR_SLICE_MIN_SEGMENT_METERS {
+            continue;
+        }
+        preview_segments.push(XrDepthAlignSliceSegment {
+            start: vec2f(start.x, start.z),
+            end: vec2f(end.x, end.z),
+            height_meters: contour_height,
+            active_height,
+        });
+        if !active_height {
+            continue;
+        }
+        let tangent = delta.normalize();
+        let sample_count = (((length / cell_size.max(1.0e-5))
+            * DEPTH_ALIGN_VECTOR_SLICE_SAMPLES_PER_CELL)
+            .ceil() as usize)
+            .clamp(1, DEPTH_ALIGN_VECTOR_SLICE_MAX_SAMPLES_PER_SEGMENT);
+        for sample_index in 0..sample_count {
+            let t = (sample_index as f32 + 0.5) / sample_count as f32;
+            let point = start + delta * t;
+            if player_cutout_center.is_some_and(|camera_world| {
+                vector_slice_point_inside_player_cutout(camera_world, point)
+            }) {
+                continue;
+            }
+            let sample_x = ((point.x - origin_x) / cell_size)
+                .round()
+                .clamp(0.0, size as f32) as usize;
+            let sample_z = ((point.z - origin_z) / cell_size)
+                .round()
+                .clamp(0.0, size as f32) as usize;
+            let gradient =
+                vector_slice_sample_gradient(heights, sample_size, sample_x, sample_z, cell_size);
+            let normal = if gradient.length() > 1.0e-5 {
+                gradient
+            } else {
+                vec3f(-tangent.z, 0.0, tangent.x)
+            };
+            let weight = (length / sample_count as f32).max(cell_size * 0.35);
+            samples.push(XrDepthAlignSample {
+                kind: XrDepthAlignSampleKind::Wall,
+                point: vec3f(point.x, contour_height, point.z),
+                normal,
+                weight,
+            });
+        }
+    }
+}
+
+fn build_tsdf_vector_slice_preview_and_samples(
+    volume: &mut DepthMeshVolume,
+) -> (Option<XrDepthAlignSlicePreview>, Vec<XrDepthAlignSample>) {
+    ensure_projected_height_field_current(volume);
+    let Some(field) = volume.projected_height_field.as_ref() else {
+        return (None, Vec::new());
+    };
+    let origin_x = field.layout.origin_x;
+    let origin_z = field.layout.origin_z;
+    let cell_size = field.layout.cell_size_meters;
+    let size = field.layout.size;
+    let sample_size = field.sample_size();
+    let heights = &field.heights_meters;
+    let valid = &field.valid;
+    let player_cutout_center = field.player_cutout_center;
+    let player_cutout_forward = volume
+        .latest_camera_forward
+        .and_then(vector_slice_flatten_forward);
+    let mut slice_preview = XrDepthAlignSlicePreview {
+        origin_x,
+        origin_z,
+        cell_size_meters: cell_size,
+        size: size as u16,
+        iso_height_meters: DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS,
+        bottom_y_meters: field.layout.bottom_y_meters,
+        top_y_meters: field.layout.top_y_meters,
+        cutout_center: player_cutout_center.map(|center| vec2f(center.x, center.z)),
+        cutout_forward: player_cutout_forward,
+        cutout_radius_meters: DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS,
+        cell_heights_meters: vec![0.0; size * size],
+        cell_valid: vec![0; size * size],
+        segments: Vec::new(),
+    };
+    let mut samples = Vec::<XrDepthAlignSample>::new();
+    for z in 0..size {
+        for x in 0..size {
+            let corner_indices = [
+                x + z * sample_size,
+                x + 1 + z * sample_size,
+                x + 1 + (z + 1) * sample_size,
+                x + (z + 1) * sample_size,
+            ];
+            let preview_index = x + z * size;
+            let mut height_sum = 0.0;
+            let mut height_count = 0usize;
+            for corner_index in corner_indices {
+                if valid[corner_index] == 0 {
+                    continue;
+                }
+                height_sum += heights[corner_index];
+                height_count += 1;
+            }
+            if height_count != 0 {
+                slice_preview.cell_valid[preview_index] = 1;
+                slice_preview.cell_heights_meters[preview_index] = height_sum / height_count as f32;
+            }
+        }
+    }
+
+    for contour_height in projected_height_preview_levels(
+        field.layout.bottom_y_meters,
+        field.layout.top_y_meters,
+    ) {
+        let active_height =
+            (contour_height - DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS).abs() <= 1.0e-4;
+        for z in 0..size {
+            for x in 0..size {
+                append_projected_height_iso_segments(
+                    &mut slice_preview.segments,
+                    &mut samples,
+                    contour_height,
+                    active_height,
+                    origin_x,
+                    origin_z,
+                    cell_size,
+                    size,
+                    sample_size,
+                    heights,
+                    valid,
+                    player_cutout_center,
+                    x,
+                    z,
+                );
+            }
+        }
+    }
+
+    samples.sort_by(|a, b| b.weight.total_cmp(&a.weight));
+    if samples.len() > DEPTH_ALIGN_MAX_WALL_SAMPLES {
+        samples.truncate(DEPTH_ALIGN_MAX_WALL_SAMPLES);
+    }
+    (Some(slice_preview), samples)
+}
+
+fn build_tsdf_vector_slice_samples(volume: &mut DepthMeshVolume) -> Vec<XrDepthAlignSample> {
+    build_tsdf_vector_slice_preview_and_samples(volume).1
+}
+
 fn tsdf_surface_gradient(volume: &DepthMeshVolume, coord: VoxelCoord) -> Option<Vec3f> {
     let sample_axis = |dx: i32, dy: i32, dz: i32| -> Option<f32> {
         volume
@@ -1853,23 +2614,13 @@ fn tsdf_surface_gradient(volume: &DepthMeshVolume, coord: VoxelCoord) -> Option<
 fn build_tsdf_vertical_descriptor(
     volume: &DepthMeshVolume,
 ) -> Option<XrDepthAlignVerticalDescriptor> {
-    let (bounds_min, bounds_max) = volume.mesh_grid.world_bounds(1)?;
-    let mut extent = (bounds_max.x - bounds_min.x)
-        .max(bounds_max.z - bounds_min.z)
-        .max(volume.voxel_size_meters * DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as f32);
-    extent = (extent + DEPTH_ALIGN_VERTICAL_DESCRIPTOR_BOUNDS_PADDING_METERS * 2.0)
-        .min(DEPTH_ALIGN_VERTICAL_DESCRIPTOR_MAX_EXTENT_METERS);
-    let center_x = (bounds_min.x + bounds_max.x) * 0.5;
-    let center_z = (bounds_min.z + bounds_max.z) * 0.5;
-    let origin_x = center_x - extent * 0.5;
-    let origin_z = center_z - extent * 0.5;
-    let cell_size = extent / DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as f32;
-    let cell_count = DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE * DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE;
+    let (origin_x, origin_z, cell_size, size) = tsdf_alignment_descriptor_layout(volume)?;
+    let cell_count = size * size;
     let mut descriptor = XrDepthAlignVerticalDescriptor {
         origin_x,
         origin_z,
         cell_size_meters: cell_size,
-        size: DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as u16,
+        size: size as u16,
         vertical_surface_masks: vec![0; cell_count],
         clutter_surface_masks: vec![0; cell_count],
         free_space_masks: vec![0; cell_count],
@@ -1900,13 +2651,12 @@ fn build_tsdf_vertical_descriptor(
                     let grid_z = ((world.z - origin_z) / cell_size).floor() as isize;
                     if grid_x < 0
                         || grid_z < 0
-                        || grid_x >= DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as isize
-                        || grid_z >= DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE as isize
+                        || grid_x >= size as isize
+                        || grid_z >= size as isize
                     {
                         continue;
                     }
-                    let index =
-                        grid_x as usize + grid_z as usize * DEPTH_ALIGN_VERTICAL_DESCRIPTOR_SIZE;
+                    let index = grid_x as usize + grid_z as usize * size;
                     let normalized_distance = chunk.values[id];
 
                     if normalized_distance >= DEPTH_ALIGN_VERTICAL_DESCRIPTOR_FREE_NORMALIZED_MIN {
@@ -1953,7 +2703,7 @@ fn build_tsdf_vertical_descriptor(
 }
 
 fn build_tsdf_alignment_descriptor(
-    volume: &DepthMeshVolume,
+    volume: &mut DepthMeshVolume,
 ) -> (Option<XrDepthAlignDescriptor>, XrDepthAlignDebug) {
     let mut debug = XrDepthAlignDebug::default();
     for chunk in volume.plane_scan_chunks.values() {
@@ -1967,43 +2717,25 @@ fn build_tsdf_alignment_descriptor(
             .wall_candidate_count
             .saturating_add(chunk.wall_candidate_count);
     }
-    let wall_patches = visible_stable_wall_patches(&volume.stable_wall_tracks);
-    let wall_features = visible_room_wall_features(&volume.room_wall_tracks);
     let vertical_descriptor = build_tsdf_vertical_descriptor(volume);
-    if wall_patches.is_empty() && wall_features.is_empty() {
+    let (slice_preview, samples) = build_tsdf_vector_slice_preview_and_samples(volume);
+    volume.alignment_slice_preview = slice_preview;
+    if vertical_descriptor.is_none() && samples.is_empty() {
         return (None, debug);
     }
 
-    let mut wall_samples = HashMap::<AlignmentWallKey, AlignmentCandidateSample>::new();
-    for patch in &wall_patches {
-        append_wall_patch_alignment_samples(&mut wall_samples, patch);
-    }
-
-    let mut samples = wall_samples
-        .into_values()
-        .map(quantized_align_sample)
-        .collect::<Vec<_>>();
-    samples.sort_by(|a, b| b.weight.total_cmp(&a.weight));
-    if samples.len() > DEPTH_ALIGN_MAX_WALL_SAMPLES {
-        samples.truncate(DEPTH_ALIGN_MAX_WALL_SAMPLES);
-    }
     debug.wall_sample_count = samples.len() as u32;
-    if wall_features.is_empty() {
-        return (None, debug);
-    }
-    debug.wall_candidate_count = debug.wall_candidate_count.max(wall_features.len() as u32);
-    let wall_histogram = xr_depth_align_build_wall_feature_normal_histogram(
-        &wall_features,
-        DEPTH_ALIGN_WALL_HISTOGRAM_BINS,
-    );
+    debug.wall_candidate_count = debug.wall_candidate_count.max(samples.len() as u32);
+    let wall_histogram =
+        xr_depth_align_build_wall_normal_histogram(&samples, DEPTH_ALIGN_WALL_HISTOGRAM_BINS);
 
     (
         Some(XrDepthAlignDescriptor {
             voxel_size_meters: volume.voxel_size_meters,
             floor_y: 0.0,
             wall_normal_histogram: wall_histogram,
-            wall_features,
-            samples: Vec::new(),
+            wall_features: Vec::new(),
+            samples,
             vertical_descriptor,
         }),
         debug,
@@ -2465,6 +3197,7 @@ fn apply_tsd_samples(
                 .unwrap_or(previous);
             if (previous - current).abs() >= DEPTH_TSD_APPLY_DELTA_EPSILON {
                 mark_mesh_chunk_dirty(volume, coord);
+                mark_projected_height_samples_dirty_around_voxel(volume, coord);
                 changed += 1;
             }
         }
@@ -2545,6 +3278,7 @@ fn refresh_visible_free_space(
                         .unwrap_or(previous);
                     if (previous - current).abs() >= DEPTH_TSD_APPLY_DELTA_EPSILON {
                         mark_mesh_chunk_dirty(volume, coord);
+                        mark_projected_height_samples_dirty_around_voxel(volume, coord);
                         changed += 1;
                     }
                 }
@@ -2591,6 +3325,7 @@ fn clear_player_exclusion_volume(volume: &mut DepthMeshVolume, camera_world: Vec
                     .overwrite_normalized_distance(coord, 1.0, volume.generation)
                 {
                     mark_mesh_chunk_dirty(volume, coord);
+                    mark_projected_height_samples_dirty_around_voxel(volume, coord);
                     changed += 1;
                 }
             }
@@ -8083,9 +8818,8 @@ mod tests {
             VoxelCoord::new(18, 28, 18),
             |world| world.y.min(0.55 - world.x),
         );
-        scan_full_tsdf_plane_set(&mut volume);
 
-        let (descriptor, debug) = build_tsdf_alignment_descriptor(&volume);
+        let (descriptor, debug) = build_tsdf_alignment_descriptor(&mut volume);
         let descriptor = descriptor.unwrap_or_else(|| {
             panic!(
                 "expected TSDF-native alignment descriptor, debug={debug:?}, chunks={}",
@@ -8098,16 +8832,16 @@ mod tests {
             "TSDF descriptor test should not depend on render-mesh chunks"
         );
         assert!(
-            !volume.plane_patches.is_empty(),
-            "expected plane scan to populate plane patches"
+            volume.plane_patches.is_empty(),
+            "TSDF descriptor test should not depend on plane-scan patches"
         );
         assert!(
-            descriptor.samples.is_empty(),
-            "raw wall patch samples should stay local and not be published in the network descriptor"
+            !descriptor.samples.is_empty(),
+            "expected fixed-height contour samples to be published in the network descriptor"
         );
         assert!(
-            !descriptor.wall_features.is_empty(),
-            "expected inferred room-wall features in TSDF descriptor"
+            descriptor.wall_features.is_empty(),
+            "runtime descriptor should not publish room-wall features while vector-slice alignment is active"
         );
         assert!(
             descriptor.floor_y.abs() <= 0.001,
@@ -8129,7 +8863,92 @@ mod tests {
         );
         assert!(
             debug.wall_sample_count > 0,
-            "expected local wall patches to still contribute to room-wall building"
+            "expected fixed-height contour extraction to contribute published samples"
+        );
+    }
+
+    #[test]
+    fn vector_slice_descriptor_cuts_out_local_player_blob() {
+        let mut volume = DepthMeshVolume::new(1, 0.05);
+        volume.generation = 28;
+        let room_half_x = 1.45;
+        let room_half_z = 1.20;
+        let floor_y = 0.0;
+        let ceiling_y = 2.40;
+        let camera_world = vec3f(0.0, 1.60, 0.0);
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-34, -8, -30),
+            VoxelCoord::new(34, 56, 30),
+            |world| {
+                let room =
+                    room_signed_distance(world, room_half_x, room_half_z, floor_y, ceiling_y);
+                let body_blob = ((world.x - camera_world.x).powi(2)
+                    + (world.z - camera_world.z).powi(2))
+                .sqrt()
+                    - 0.20;
+                room.min(body_blob)
+            },
+        );
+
+        let without_cutout = build_tsdf_vector_slice_samples(&mut volume);
+        assert!(
+            without_cutout.iter().any(|sample| {
+                let dx = sample.point.x - camera_world.x;
+                let dz = sample.point.z - camera_world.z;
+                (dx * dx + dz * dz).sqrt() <= 0.28
+            }),
+            "expected synthetic body blob to show up in the uncut contour slice"
+        );
+
+        volume.latest_camera_world = Some(camera_world);
+        let with_cutout = build_tsdf_vector_slice_samples(&mut volume);
+        assert!(
+            !with_cutout.iter().any(|sample| {
+                let dx = sample.point.x - camera_world.x;
+                let dz = sample.point.z - camera_world.z;
+                (dx * dx + dz * dz).sqrt()
+                    <= DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS - 0.02
+            }),
+            "expected published contour slice to omit the local player blob"
+        );
+    }
+
+    #[test]
+    fn vector_slice_projects_table_footprint_below_slice_height() {
+        fn box_sdf(point: Vec3f, center: Vec3f, half_extent: Vec3f) -> f32 {
+            let q = vec3f(
+                (point.x - center.x).abs() - half_extent.x,
+                (point.y - center.y).abs() - half_extent.y,
+                (point.z - center.z).abs() - half_extent.z,
+            );
+            let outside = vec3f(q.x.max(0.0), q.y.max(0.0), q.z.max(0.0)).length();
+            let inside = q.x.max(q.y).max(q.z).min(0.0);
+            outside + inside
+        }
+
+        let mut volume = DepthMeshVolume::new(1, 0.05);
+        volume.generation = 29;
+        let table_center = vec3f(0.0, 0.76, 0.0);
+        let table_half_extent = vec3f(0.34, 0.05, 0.24);
+        fill_volume_signed_distance_field(
+            &mut volume,
+            VoxelCoord::new(-20, -2, -20),
+            VoxelCoord::new(20, 24, 20),
+            |world| box_sdf(world, table_center, table_half_extent),
+        );
+
+        let samples = build_tsdf_vector_slice_samples(&mut volume);
+        assert!(
+            !samples.is_empty(),
+            "expected projected contour samples from a table below the slice height"
+        );
+        assert!(
+            samples.iter().any(|sample| {
+                (sample.point.x.abs() - table_half_extent.x).abs() <= 0.10
+                    && sample.point.z.abs() <= table_half_extent.z + 0.12
+            }),
+            "expected contour samples near the projected table footprint boundary, got {samples:?}"
         );
     }
 
