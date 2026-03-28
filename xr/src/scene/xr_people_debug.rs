@@ -939,8 +939,6 @@ pub struct XrPeopleDebug {
     #[rust]
     local_slice_preview: Option<XrDepthAlignSlicePreview>,
     #[rust]
-    local_alignment_debug: XrDepthAlignDebug,
-    #[rust]
     last_sent_descriptor_signature: Option<(u64, u64)>,
     #[rust]
     last_sent_descriptor: Option<XrDepthAlignDescriptor>,
@@ -1071,7 +1069,6 @@ impl XrPeopleDebug {
         self.local_descriptor = None;
         self.local_descriptor_version = None;
         self.local_slice_preview = None;
-        self.local_alignment_debug = XrDepthAlignDebug::default();
         self.last_sent_descriptor_signature = None;
         self.last_sent_descriptor = None;
         self.last_sent_descriptor_at = None;
@@ -1165,7 +1162,6 @@ impl XrPeopleDebug {
         self.tx_state_count = self.tx_state_count.saturating_add(1);
 
         if !self.auto_alignment_enabled {
-            self.local_alignment_debug = XrDepthAlignDebug::default();
             self.local_descriptor = None;
             self.local_descriptor_version = None;
             self.local_slice_preview = None;
@@ -1179,19 +1175,15 @@ impl XrPeopleDebug {
             return;
         }
 
-        let next_mesh = cx.xr_depth_mesh().latest_mesh();
-        self.local_alignment_debug = next_mesh
+        let next_snapshot = cx.xr_depth_mesh().latest_tsdf_snapshot();
+        let next_signature = next_snapshot
             .as_ref()
-            .map(|mesh| mesh.alignment_debug)
-            .unwrap_or_default();
-        let next_signature = next_mesh
+            .map(|snapshot| (snapshot.generation, snapshot.update_sequence));
+        let next_slice_preview = next_snapshot
             .as_ref()
-            .map(|mesh| (mesh.mesh_generation, mesh.update_sequence));
-        let next_slice_preview = next_mesh
-            .as_ref()
-            .and_then(|mesh| mesh.alignment_slice_preview.clone());
-        let next_descriptor = next_mesh.as_ref().and_then(|mesh| {
-            XrNetAlignmentDescriptorFrame::from_depth_mesh(mesh.as_ref(), state.time)
+            .and_then(|snapshot| tsdf_snapshot_height_map_preview(snapshot.as_ref()));
+        let next_descriptor = next_snapshot.as_ref().and_then(|snapshot| {
+            XrNetAlignmentDescriptorFrame::from_tsdf_snapshot(snapshot.as_ref(), state.time)
         });
 
         if let (Some(signature), Some(frame)) = (next_signature, next_descriptor) {
