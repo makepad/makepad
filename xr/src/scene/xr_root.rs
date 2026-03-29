@@ -859,6 +859,14 @@ impl XrRoot {
         self.env.physics_compute_ms()
     }
 
+    pub fn physics_tsdf_query_ms(&self) -> f64 {
+        self.env.physics_tsdf_query_ms()
+    }
+
+    pub fn physics_rapier_step_ms(&self) -> f64 {
+        self.env.physics_rapier_step_ms()
+    }
+
     pub fn physics_time_scale(&self) -> f32 {
         self.env.physics_time_scale()
     }

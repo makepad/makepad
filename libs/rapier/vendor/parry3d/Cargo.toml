@@ -124,6 +124,14 @@ path = "../glamx"
 version = "2"
 optional = true
 path = "../../../../libs/vulkan/indexmap"
+[dependencies.foldhash]
+version = "0.2.0"
+default-features = false
+path = "../../../../libs/vulkan/foldhash"
+[dependencies.hashbrown]
+version = "0.16.1"
+default-features = false
+path = "../../../../libs/vulkan/hashbrown"
 [dependencies.log]
 package = "makepad-error-log"
 path = "../../../../libs/error_log"
