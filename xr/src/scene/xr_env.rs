@@ -14,7 +14,11 @@ use rapier3d::prelude::{
     Pose as RapierPose, Real as RapierReal, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
     Rotation as RapierRotation, SharedShape, Vector as RapierVector,
 };
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    sync::Arc,
+};
 
 #[path = "xr_depth.rs"]
 mod xr_depth;
@@ -164,6 +168,8 @@ const XR_DEPTH_QUERY_STICKY_KEEP_MARGIN: f32 = 0.015;
 const XR_DEPTH_QUERY_FINGERPRINT_QUANTIZATION_METERS: f32 = 0.01;
 #[allow(dead_code)]
 const XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES: u8 = 3;
+const XR_DEPTH_SURFACE_MESH_REQUEST_MOVE_METERS: f32 = 0.20;
+const XR_DEPTH_SURFACE_MESH_REQUEST_ROTATE_DEGREES: f32 = 12.0;
 const XR_HAND_COLLIDER_SLOTS_PER_HAND: usize = 25;
 const XR_HAND_COLLIDER_FRICTION: f32 = 0.8;
 const XR_HAND_PLATE_HALF_WIDTH: f32 = 0.045;
@@ -222,13 +228,17 @@ pub struct XrEnv {
     #[rust]
     depth_surface_mesh_requested_snapshot_grid: Option<Arc<SparseTsdGridReadSnapshot>>,
     #[rust]
+    depth_surface_mesh_requested_head_pose: Option<Pose>,
+    #[rust]
     depth_surface_mesh_snapshot_grid: Option<Arc<SparseTsdGridReadSnapshot>>,
     #[rust]
-    depth_surface_mesh_chunks: HashMap<(i32, i32, i32), (Geometry, DepthSurfaceMeshChunkHandle)>,
+    depth_surface_mesh_visible_request_id: u64,
+    #[rust]
+    depth_surface_mesh_visible_chunks: HashSet<ChunkKey>,
+    #[rust]
+    depth_surface_mesh_chunks: HashMap<ChunkKey, (Geometry, DepthSurfaceMeshChunkHandle)>,
     #[rust]
     depth_query_hit_geometry: Option<Geometry>,
-    #[rust]
-    depth_surface_mesh_upload_count: usize,
     #[rust]
     depth_surface_mesh_worker: Option<XrDepthDebugMeshWorker>,
     #[allow(dead_code)]
@@ -396,7 +406,25 @@ impl XrEnv {
         draw_pbr.set_env_texture(Some(env_tex));
     }
 
-    fn prepare_depth_mesh(&mut self, cx: &mut Cx2d) {
+    fn depth_surface_mesh_request_pose_changed(previous: Pose, next: Pose) -> bool {
+        if (next.position - previous.position).length() >= XR_DEPTH_SURFACE_MESH_REQUEST_MOVE_METERS
+        {
+            return true;
+        }
+        let mut previous_forward = previous.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        let mut next_forward = next.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
+        if previous_forward.length() <= 1.0e-4 || next_forward.length() <= 1.0e-4 {
+            return false;
+        }
+        previous_forward = previous_forward.normalize();
+        next_forward = next_forward.normalize();
+        let cos_threshold = XR_DEPTH_SURFACE_MESH_REQUEST_ROTATE_DEGREES
+            .to_radians()
+            .cos();
+        previous_forward.dot(next_forward) <= cos_threshold
+    }
+
+    fn prepare_depth_mesh(&mut self, cx: &mut Cx2d, state: &XrState) {
         self.draw_depth_mesh.draw_vars.options.depth_write = true;
         self.poll_depth_surface_mesh_worker(cx);
         if !self.depth_mesh_visible() {
@@ -407,16 +435,23 @@ impl XrEnv {
             self.clear_depth_surface_mesh();
             return;
         };
-        if self
+        let snapshot_unchanged = self
             .depth_surface_mesh_requested_snapshot_grid
             .as_ref()
-            .is_some_and(|previous| Arc::ptr_eq(previous, &snapshot.grid))
-        {
+            .is_some_and(|previous| Arc::ptr_eq(previous, &snapshot.grid));
+        let pose_unchanged = self
+            .depth_surface_mesh_requested_head_pose
+            .map(|previous| {
+                !Self::depth_surface_mesh_request_pose_changed(previous, state.head_pose)
+            })
+            .unwrap_or(false);
+        if snapshot_unchanged && pose_unchanged {
             return;
         }
         self.ensure_depth_surface_mesh_worker()
-            .request_snapshot(snapshot.clone());
+            .request_snapshot(snapshot.clone(), state.head_pose);
         self.depth_surface_mesh_requested_snapshot_grid = Some(snapshot.grid.clone());
+        self.depth_surface_mesh_requested_head_pose = Some(state.head_pose);
     }
 
     fn draw_pbr_rounded_cube(
@@ -834,7 +869,7 @@ impl XrEnv {
         let state = self.last_xr_state.clone();
         if let Some(state) = state.as_deref() {
             if self.depth_debug_enabled() {
-                self.prepare_depth_mesh(cx);
+                self.prepare_depth_mesh(cx, state);
                 if self.depth_mesh_visible() {
                     self.sync_depth_surface_mesh(cx);
                 }
