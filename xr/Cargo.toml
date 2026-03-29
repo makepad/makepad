@@ -6,6 +6,9 @@ edition = "2021"
 description = "Reusable XR scene components for Makepad"
 license = "MIT OR Apache-2.0"
 
+[features]
+lz4_force_scalar = ["makepad-lz4/force-scalar"]
+
 [dependencies]
 makepad-lz4 = { path = "../libs/lz4", version = "0.1.0" }
 makepad-widgets = { path = "../widgets", version = "2.0.0" }
