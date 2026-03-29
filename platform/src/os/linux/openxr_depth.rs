@@ -14,7 +14,6 @@ use crate::{
         DEPTH_ALIGN_PROJECTED_HEIGHT_MAX_SLICE_CREDITS,
         DEPTH_PROJECTED_HEIGHT_REFRESH_INTERVAL_MILLIS, DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS,
         DEPTH_TSD_TARGET_INTEGRATION_INTERVAL_MILLIS, DEPTH_VOXEL_EYE_INDEX,
-        DEPTH_VOXEL_SAMPLE_STEP,
     },
 };
 use std::{
@@ -215,7 +214,6 @@ impl CxOpenXrDepthMeshPipeline {
                 eye_index: DEPTH_VOXEL_EYE_INDEX,
                 width,
                 height,
-                sample_step: DEPTH_VOXEL_SAMPLE_STEP,
                 voxel_size_meters,
                 camera_world,
                 camera_forward,
@@ -246,7 +244,7 @@ impl CxOpenXrDepthMeshPipeline {
 
 fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, store: XrTsdfStore) {
     let mut preprocess_state = DepthPreprocessWorkerState::default();
-    let mut volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, store.voxel_size_meters());
+    let mut volume = DepthMeshVolume::new(store.voxel_size_meters());
     let mut next_height_map_slice_at = Instant::now();
     let mut next_height_map_publish_at =
         next_height_map_slice_at + matched_height_map_publish_interval(&store);
@@ -257,7 +255,7 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
     loop {
         let configured_voxel_size = store.voxel_size_meters();
         if (volume.voxel_size_meters() - configured_voxel_size).abs() > f32::EPSILON {
-            volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, configured_voxel_size);
+            volume = DepthMeshVolume::new(configured_voxel_size);
             next_height_map_slice_at = Instant::now();
             next_height_map_publish_at =
                 next_height_map_slice_at + matched_height_map_publish_interval(&store);
@@ -268,7 +266,7 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
         let requested_reset_generation = store.reset_generation();
         if applied_reset_generation != requested_reset_generation {
             applied_reset_generation = requested_reset_generation;
-            volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, configured_voxel_size);
+            volume = DepthMeshVolume::new(configured_voxel_size);
             next_height_map_slice_at = Instant::now();
             next_height_map_publish_at =
                 next_height_map_slice_at + matched_height_map_publish_interval(&store);
