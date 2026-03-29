@@ -195,11 +195,15 @@ const XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_TRANSLATION_EPSILON_METERS: f32 = 0.10;
 const XR_DEPTH_ALIGN_HEIGHT_REFINE_MAX_DENSE_SAMPLES: usize = 1536;
 const XR_DEPTH_ALIGN_HEIGHT_MAP_GRADIENT_MIN_METERS: f32 = 0.05;
 const XR_DEPTH_ALIGN_HEIGHT_MAP_MIN_SPACING_METERS: f32 = 0.14;
-const XR_DEPTH_ALIGN_VERTICAL_OFFSET_BIN_METERS: f32 = 0.02;
 const XR_DEPTH_ALIGN_VERTICAL_OFFSET_MAX_DELTA_METERS: f32 = 0.80;
 const XR_DEPTH_ALIGN_VERTICAL_OFFSET_MIN_MATCHES: usize = 24;
 const XR_DEPTH_ALIGN_VERTICAL_OFFSET_MIN_SUPPORT_RATIO: f32 = 0.08;
-const XR_DEPTH_ALIGN_VERTICAL_OFFSET_SUPPORT_WINDOW_BINS: usize = 3;
+const XR_DEPTH_ALIGN_VERTICAL_OFFSET_CONSENSUS_RADIUS_METERS: f32 = 0.06;
+const XR_DEPTH_ALIGN_VERTICAL_OFFSET_MAX_FLAT_SAMPLES: usize = 4096;
+const XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_GRADIENT_METERS: f32 = 0.11;
+const XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_NEIGHBOR_DELTA_METERS: f32 = 0.07;
+const XR_DEPTH_ALIGN_VERTICAL_SURFACE_MIN_NEIGHBORS: usize = 7;
+const XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_RELATIVE_HEIGHT_METERS: f32 = 1.80;
 const XR_DEPTH_ALIGN_SIGNAL_MATCH_RADIUS_METERS: f32 = 0.42;
 const XR_DEPTH_ALIGN_SIGNAL_MATCH_MIN_DIRECTION_DOT: f32 = 0.45;
 const XR_DEPTH_ALIGN_SIGNAL_MATCH_MAX_HEIGHT_DELTA_METERS: f32 = 0.75;
@@ -240,6 +244,14 @@ struct DenseHeightMapSignalCell {
     height: f32,
     axis_x: f32,
     axis_z: f32,
+    weight: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FlatHeightMapSurfaceCell {
+    point_x: f32,
+    point_z: f32,
+    height: f32,
     weight: f32,
 }
 
@@ -411,7 +423,14 @@ pub fn xr_depth_align_rescore_remote_to_local(
     let local_signal = selected_descriptor_signal_cells(local);
     let remote_signal = selected_descriptor_signal_cells(remote);
     let remote_dense_signal = descriptor_dense_signal_cells(remote);
-    let local_sample_cache = local.height_map.as_ref().and_then(build_height_map_sample_cache);
+    let remote_flat_signal = decimate_signal_cells(
+        &descriptor_flat_surface_cells(remote),
+        XR_DEPTH_ALIGN_VERTICAL_OFFSET_MAX_FLAT_SAMPLES,
+    );
+    let local_sample_cache = local
+        .height_map
+        .as_ref()
+        .and_then(build_height_map_sample_cache);
     if local_signal.is_empty() || remote_signal.is_empty() {
         return XrDepthAlignSolution {
             yaw_radians: solution.yaw_radians,
@@ -432,7 +451,7 @@ pub fn xr_depth_align_rescore_remote_to_local(
         (Some(local_map), Some(remote_map)) => refine_solution_vertical_offset_from_overlap(
             local_map,
             remote_map,
-            &remote_dense_signal,
+            &remote_flat_signal,
             rescored,
         ),
         _ => rescored,
@@ -877,8 +896,7 @@ impl WallProfileTask {
                             corrected,
                             *current_profile_score,
                             *best_profile_score,
-                        )
-                    {
+                        ) {
                         corrected
                     } else {
                         self.current
@@ -966,6 +984,7 @@ pub struct XrDepthAlignMatcher {
     remote_signal: Vec<HeightMapSignalCell>,
     remote_dense_signal: Vec<DenseHeightMapSignalCell>,
     remote_refine_signal: Vec<DenseHeightMapSignalCell>,
+    remote_flat_signal: Vec<FlatHeightMapSurfaceCell>,
     local_histogram: Vec<f32>,
     remote_histogram: Vec<f32>,
     local_sample_cache: Option<HeightMapSampleCache>,
@@ -1000,6 +1019,7 @@ impl XrDepthAlignMatcher {
             remote_signal: Vec::new(),
             remote_dense_signal: Vec::new(),
             remote_refine_signal: Vec::new(),
+            remote_flat_signal: Vec::new(),
             local_histogram: Vec::new(),
             remote_histogram: Vec::new(),
             local_sample_cache: None,
@@ -1085,11 +1105,15 @@ impl XrDepthAlignMatcher {
                 progress.current_translation_index =
                     ((*translation_index).min(translations.len().saturating_sub(1)) + 1) as u32;
             }
-            XrDepthAlignMatcherState::HeightRefineCandidate { shortlist_index, .. } => {
+            XrDepthAlignMatcherState::HeightRefineCandidate {
+                shortlist_index, ..
+            } => {
                 progress.stage_label = "height";
                 progress.current_shortlist_index = (*shortlist_index + 1) as u32;
             }
-            XrDepthAlignMatcherState::FinalScoreCandidate { shortlist_index, .. } => {
+            XrDepthAlignMatcherState::FinalScoreCandidate {
+                shortlist_index, ..
+            } => {
                 progress.stage_label = "final-score";
                 progress.current_shortlist_index = (*shortlist_index + 1) as u32;
             }
@@ -1144,6 +1168,10 @@ impl XrDepthAlignMatcher {
                         &self.remote_dense_signal,
                         XR_DEPTH_ALIGN_HEIGHT_REFINE_MAX_DENSE_SAMPLES,
                     );
+                    self.remote_flat_signal = decimate_signal_cells(
+                        &descriptor_flat_surface_cells(&self.remote),
+                        XR_DEPTH_ALIGN_VERTICAL_OFFSET_MAX_FLAT_SAMPLES,
+                    );
                     self.local_histogram = build_height_map_signal_histogram(
                         &self.local_signal,
                         XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS,
@@ -1152,8 +1180,11 @@ impl XrDepthAlignMatcher {
                         &self.remote_signal,
                         XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS,
                     );
-                    self.local_sample_cache =
-                        self.local.height_map.as_ref().and_then(build_height_map_sample_cache);
+                    self.local_sample_cache = self
+                        .local
+                        .height_map
+                        .as_ref()
+                        .and_then(build_height_map_sample_cache);
                     self.floor_y = self.local.floor_y - self.remote.floor_y;
                     self.use_height_refine = self.local.height_map.is_some()
                         && self.remote.height_map.is_some()
@@ -1279,14 +1310,13 @@ impl XrDepthAlignMatcher {
                         best_translation,
                     );
                     self.final_score_time += started.elapsed();
-                    self.state = XrDepthAlignMatcherState::SeedLocalSearch(
-                        FullAlignmentSearchTask::new(
+                    self.state =
+                        XrDepthAlignMatcherState::SeedLocalSearch(FullAlignmentSearchTask::new(
                             best,
                             self.floor_y,
                             &XR_DEPTH_ALIGN_SEEDED_LOCAL_SEARCH_PHASES,
                             false,
-                        ),
-                    );
+                        ));
                     break true;
                 }
                 XrDepthAlignMatcherState::SeedLocalSearch(mut task) => {
@@ -1346,18 +1376,18 @@ impl XrDepthAlignMatcher {
                 }
                 XrDepthAlignMatcherState::SeedVerticalOffset { candidate } => {
                     let started = std::time::Instant::now();
-                    let candidate =
-                        if let (Some(local_map), Some(remote_map)) = (self.local_map(), self.remote_map())
-                        {
-                            refine_solution_vertical_offset_from_overlap(
-                                local_map,
-                                remote_map,
-                                &self.remote_dense_signal,
-                                candidate,
-                            )
-                        } else {
-                            candidate
-                        };
+                    let candidate = if let (Some(local_map), Some(remote_map)) =
+                        (self.local_map(), self.remote_map())
+                    {
+                        refine_solution_vertical_offset_from_overlap(
+                            local_map,
+                            remote_map,
+                            &self.remote_flat_signal,
+                            candidate,
+                        )
+                    } else {
+                        candidate
+                    };
                     self.final_score_time += started.elapsed();
                     self.state = XrDepthAlignMatcherState::SeedComplete { candidate };
                     break true;
@@ -1629,12 +1659,13 @@ impl XrDepthAlignMatcher {
                 XrDepthAlignMatcherState::FinalVerticalOffset { candidate } => {
                     let started = std::time::Instant::now();
                     self.best = Some(
-                        if let (Some(local_map), Some(remote_map)) = (self.local_map(), self.remote_map())
+                        if let (Some(local_map), Some(remote_map)) =
+                            (self.local_map(), self.remote_map())
                         {
                             refine_solution_vertical_offset_from_overlap(
                                 local_map,
                                 remote_map,
-                                &self.remote_dense_signal,
+                                &self.remote_flat_signal,
                                 candidate,
                             )
                         } else {
@@ -2185,6 +2216,91 @@ fn build_height_map_signal_cells(height_map: &XrDepthAlignHeightMap) -> Vec<Heig
     signal
 }
 
+fn height_map_flat_surface_cell(
+    height_map: &XrDepthAlignHeightMap,
+    x: usize,
+    z: usize,
+) -> Option<(f32, f32)> {
+    let size_x = height_map.size_x_usize();
+    let size_z = height_map.size_z_usize();
+    if size_x < 3 || size_z < 3 || x == 0 || z == 0 || x + 1 >= size_x || z + 1 >= size_z {
+        return None;
+    }
+    let center = height_map_cell_height(height_map, height_map.cell_index(x, z))?;
+    let relative_height = center - height_map.floor_y_meters;
+    if relative_height > XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_RELATIVE_HEIGHT_METERS {
+        return None;
+    }
+    let Some((_height, gradient)) = height_map_cell_signal(height_map, x, z) else {
+        return None;
+    };
+    let gradient_magnitude = gradient.length();
+    if gradient_magnitude > XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_GRADIENT_METERS {
+        return None;
+    }
+    let mut support = 0usize;
+    let mut mean_abs_delta = 0.0f32;
+    let mut max_abs_delta = 0.0f32;
+    for nz in z - 1..=z + 1 {
+        for nx in x - 1..=x + 1 {
+            let Some(height) = height_map_cell_height(height_map, height_map.cell_index(nx, nz))
+            else {
+                continue;
+            };
+            let abs_delta = (height - center).abs();
+            support += 1;
+            mean_abs_delta += abs_delta;
+            max_abs_delta = max_abs_delta.max(abs_delta);
+        }
+    }
+    if support < XR_DEPTH_ALIGN_VERTICAL_SURFACE_MIN_NEIGHBORS
+        || max_abs_delta > XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_NEIGHBOR_DELTA_METERS
+    {
+        return None;
+    }
+    mean_abs_delta /= support as f32;
+    let support_ratio = support as f32 / 9.0;
+    let gradient_score = 1.0
+        - (gradient_magnitude / XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_GRADIENT_METERS)
+            .clamp(0.0, 1.0);
+    let plateau_score = 1.0
+        - (max_abs_delta / XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_NEIGHBOR_DELTA_METERS)
+            .clamp(0.0, 1.0);
+    let consistency_score = 1.0
+        - (mean_abs_delta / XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_NEIGHBOR_DELTA_METERS)
+            .clamp(0.0, 1.0);
+    let weight = (0.25 + 0.75 * support_ratio)
+        * (0.30 + 0.70 * gradient_score)
+        * (0.30 + 0.70 * plateau_score)
+        * (0.30 + 0.70 * consistency_score);
+    (weight > 0.05).then_some((center, weight.clamp(0.05, 1.0)))
+}
+
+fn build_flat_height_map_surface_cells(
+    height_map: &XrDepthAlignHeightMap,
+) -> Vec<FlatHeightMapSurfaceCell> {
+    let size_x = height_map.size_x_usize();
+    let size_z = height_map.size_z_usize();
+    if size_x < 3 || size_z < 3 || height_map.heights_meters.len() != size_x * size_z {
+        return Vec::new();
+    }
+    let mut surfaces = Vec::<FlatHeightMapSurfaceCell>::new();
+    for z in 1..size_z - 1 {
+        for x in 1..size_x - 1 {
+            let Some((height, weight)) = height_map_flat_surface_cell(height_map, x, z) else {
+                continue;
+            };
+            surfaces.push(FlatHeightMapSurfaceCell {
+                point_x: height_map.origin_x + (x as f32 + 0.5) * height_map.cell_size_meters,
+                point_z: height_map.origin_z + (z as f32 + 0.5) * height_map.cell_size_meters,
+                height,
+                weight,
+            });
+        }
+    }
+    surfaces
+}
+
 fn select_height_map_alignment_signal_cells(
     signal_cells: &[HeightMapSignalCell],
 ) -> Vec<HeightMapSignalCell> {
@@ -2237,10 +2353,16 @@ fn decimate_signal_cells<T: Copy>(signal_cells: &[T], max_samples: usize) -> Vec
         return signal_cells.to_vec();
     }
     let stride = signal_cells.len().div_ceil(max_samples);
-    signal_cells.iter().copied().step_by(stride.max(1)).collect()
+    signal_cells
+        .iter()
+        .copied()
+        .step_by(stride.max(1))
+        .collect()
 }
 
-fn build_height_map_sample_cache(height_map: &XrDepthAlignHeightMap) -> Option<HeightMapSampleCache> {
+fn build_height_map_sample_cache(
+    height_map: &XrDepthAlignHeightMap,
+) -> Option<HeightMapSampleCache> {
     let size_x = height_map.size_x_usize();
     let size_z = height_map.size_z_usize();
     if size_x < 3 || size_z < 3 || height_map.heights_meters.len() != size_x * size_z {
@@ -2278,7 +2400,9 @@ fn descriptor_signal_cells(descriptor: &XrDepthAlignDescriptor) -> Vec<HeightMap
         .unwrap_or_default()
 }
 
-fn descriptor_dense_signal_cells(descriptor: &XrDepthAlignDescriptor) -> Vec<DenseHeightMapSignalCell> {
+fn descriptor_dense_signal_cells(
+    descriptor: &XrDepthAlignDescriptor,
+) -> Vec<DenseHeightMapSignalCell> {
     descriptor_signal_cells(descriptor)
         .into_iter()
         .map(|cell| DenseHeightMapSignalCell {
@@ -2290,6 +2414,16 @@ fn descriptor_dense_signal_cells(descriptor: &XrDepthAlignDescriptor) -> Vec<Den
             weight: cell.weight,
         })
         .collect()
+}
+
+fn descriptor_flat_surface_cells(
+    descriptor: &XrDepthAlignDescriptor,
+) -> Vec<FlatHeightMapSurfaceCell> {
+    descriptor
+        .height_map
+        .as_ref()
+        .map(build_flat_height_map_surface_cells)
+        .unwrap_or_default()
 }
 
 fn selected_descriptor_signal_cells(
@@ -2433,6 +2567,52 @@ fn sample_height_map_bilinear_and_axis_fast(
     Some((height, axis))
 }
 
+fn sample_height_map_flat_surface_weight(
+    height_map: &XrDepthAlignHeightMap,
+    world_x: f32,
+    world_z: f32,
+) -> Option<f32> {
+    let size_x = height_map.size_x_usize();
+    let size_z = height_map.size_z_usize();
+    if size_x < 3 || size_z < 3 || height_map.heights_meters.len() != size_x * size_z {
+        return None;
+    }
+    let cell_size = height_map.cell_size_meters.max(1.0e-3);
+    let grid_x = ((world_x - height_map.origin_x) / cell_size - 0.5).round() as isize;
+    let grid_z = ((world_z - height_map.origin_z) / cell_size - 0.5).round() as isize;
+    if grid_x <= 0 || grid_z <= 0 || grid_x + 1 >= size_x as isize || grid_z + 1 >= size_z as isize
+    {
+        return None;
+    }
+    height_map_flat_surface_cell(height_map, grid_x as usize, grid_z as usize)
+        .map(|(_, weight)| weight)
+}
+
+fn weighted_delta_median(samples: &[(f32, f32)]) -> Option<f32> {
+    let mut sorted = samples
+        .iter()
+        .copied()
+        .filter(|(delta, weight)| delta.is_finite() && *weight > 0.0)
+        .collect::<Vec<_>>();
+    if sorted.is_empty() {
+        return None;
+    }
+    sorted.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let total_weight = sorted.iter().map(|(_, weight)| *weight).sum::<f32>();
+    if total_weight <= 1.0e-4 {
+        return None;
+    }
+    let target = total_weight * 0.5;
+    let mut running_weight = 0.0f32;
+    for (delta, weight) in sorted {
+        running_weight += weight;
+        if running_weight >= target {
+            return Some(delta);
+        }
+    }
+    None
+}
+
 fn score_height_map_alignment(
     local_map: &XrDepthAlignHeightMap,
     local_sample_cache: Option<&HeightMapSampleCache>,
@@ -2526,9 +2706,12 @@ fn score_height_map_alignment_with_stride(
             }) {
                 continue;
             }
-            let Some((local_height, local_axis)) =
-                sample_height_map_bilinear_and_axis_fast(local_map, sample_cache, mapped_x, mapped_z)
-            else {
+            let Some((local_height, local_axis)) = sample_height_map_bilinear_and_axis_fast(
+                local_map,
+                sample_cache,
+                mapped_x,
+                mapped_z,
+            ) else {
                 continue;
             };
             let diff = (local_height - cell.height).abs();
@@ -2536,7 +2719,9 @@ fn score_height_map_alignment_with_stride(
             let (remote_axis_x, remote_axis_z) =
                 rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.axis_x, cell.axis_z);
             let direction_similarity = local_axis
-                .map(|local_axis| (local_axis.x * remote_axis_x + local_axis.y * remote_axis_z).clamp(0.0, 1.0))
+                .map(|local_axis| {
+                    (local_axis.x * remote_axis_x + local_axis.y * remote_axis_z).clamp(0.0, 1.0)
+                })
                 .unwrap_or(0.5);
             let similarity =
                 (height_similarity * 0.65 + direction_similarity * 0.35).clamp(0.0, 1.0);
@@ -2559,7 +2744,8 @@ fn score_height_map_alignment_with_stride(
             }) {
                 continue;
             }
-            let Some(local_height) = sample_height_map_bilinear(local_map, mapped_x, mapped_z) else {
+            let Some(local_height) = sample_height_map_bilinear(local_map, mapped_x, mapped_z)
+            else {
                 continue;
             };
             let diff = (local_height - cell.height).abs();
@@ -2623,15 +2809,20 @@ fn score_rotated_height_map_alignment(
             }) {
                 continue;
             }
-            let Some((local_height, local_axis)) =
-                sample_height_map_bilinear_and_axis_fast(local_map, sample_cache, mapped_x, mapped_z)
-            else {
+            let Some((local_height, local_axis)) = sample_height_map_bilinear_and_axis_fast(
+                local_map,
+                sample_cache,
+                mapped_x,
+                mapped_z,
+            ) else {
                 continue;
             };
             let diff = (local_height - cell.height).abs();
             let height_similarity = (1.0 - diff / 0.45).clamp(0.0, 1.0);
             let direction_similarity = local_axis
-                .map(|local_axis| (local_axis.x * cell.axis_x + local_axis.y * cell.axis_z).clamp(0.0, 1.0))
+                .map(|local_axis| {
+                    (local_axis.x * cell.axis_x + local_axis.y * cell.axis_z).clamp(0.0, 1.0)
+                })
                 .unwrap_or(0.5);
             let similarity =
                 (height_similarity * 0.65 + direction_similarity * 0.35).clamp(0.0, 1.0);
@@ -2652,7 +2843,8 @@ fn score_rotated_height_map_alignment(
             }) {
                 continue;
             }
-            let Some(local_height) = sample_height_map_bilinear(local_map, mapped_x, mapped_z) else {
+            let Some(local_height) = sample_height_map_bilinear(local_map, mapped_x, mapped_z)
+            else {
                 continue;
             };
             let diff = (local_height - cell.height).abs();
@@ -2682,7 +2874,7 @@ fn score_rotated_height_map_alignment(
 fn estimate_height_map_vertical_offset(
     local_map: &XrDepthAlignHeightMap,
     remote_map: &XrDepthAlignHeightMap,
-    remote_signal: &[DenseHeightMapSignalCell],
+    remote_signal: &[FlatHeightMapSurfaceCell],
     yaw: f32,
     translation: Vec3f,
 ) -> Option<f32> {
@@ -2698,11 +2890,8 @@ fn estimate_height_map_vertical_offset(
     let mapped_remote_cutout_radius =
         (remote_map.player_cutout_radius_meters + 0.14).max(remote_map.cell_size_meters * 2.0);
     let mapped_remote_cutout_radius_sq = mapped_remote_cutout_radius * mapped_remote_cutout_radius;
-    let bin_size = XR_DEPTH_ALIGN_VERTICAL_OFFSET_BIN_METERS.max(1.0e-3);
     let min_delta = translation.y - XR_DEPTH_ALIGN_VERTICAL_OFFSET_MAX_DELTA_METERS;
     let max_delta = translation.y + XR_DEPTH_ALIGN_VERTICAL_OFFSET_MAX_DELTA_METERS;
-    let bin_count = (((max_delta - min_delta) / bin_size).ceil() as usize).max(1) + 1;
-    let mut bins = vec![0.0f32; bin_count];
     let mut deltas = Vec::<(f32, f32)>::new();
     let mut total_weight = 0.0f32;
 
@@ -2721,15 +2910,16 @@ fn estimate_height_map_vertical_offset(
         let Some(local_height) = sample_height_map_bilinear(local_map, mapped_x, mapped_z) else {
             continue;
         };
+        let Some(local_weight) =
+            sample_height_map_flat_surface_weight(local_map, mapped_x, mapped_z)
+        else {
+            continue;
+        };
         let delta = local_height - cell.height;
         if !delta.is_finite() || delta < min_delta || delta > max_delta {
             continue;
         }
-        let weight = cell.weight.max(0.01);
-        let bin = ((delta - min_delta) / bin_size)
-            .floor()
-            .clamp(0.0, bin_count.saturating_sub(1) as f32) as usize;
-        bins[bin] += weight;
+        let weight = cell.weight.max(0.01) * local_weight.max(0.01);
         total_weight += weight;
         deltas.push((delta, weight));
     }
@@ -2737,55 +2927,27 @@ fn estimate_height_map_vertical_offset(
     if deltas.len() < XR_DEPTH_ALIGN_VERTICAL_OFFSET_MIN_MATCHES || total_weight <= 1.0e-4 {
         return None;
     }
-    let window_bins = XR_DEPTH_ALIGN_VERTICAL_OFFSET_SUPPORT_WINDOW_BINS.max(1);
-    let mut best_start_bin = 0usize;
-    let mut best_support = 0.0f32;
-    for start_bin in 0..bin_count {
-        let end_bin = (start_bin + window_bins).min(bin_count);
-        let support = bins[start_bin..end_bin].iter().copied().sum::<f32>();
-        if support > best_support {
-            best_support = support;
-            best_start_bin = start_bin;
-        }
-    }
-    if best_support < total_weight * XR_DEPTH_ALIGN_VERTICAL_OFFSET_MIN_SUPPORT_RATIO {
+    let median = weighted_delta_median(&deltas)?;
+    let consensus = deltas
+        .iter()
+        .copied()
+        .filter(|(delta, _)| {
+            (*delta - median).abs() <= XR_DEPTH_ALIGN_VERTICAL_OFFSET_CONSENSUS_RADIUS_METERS
+        })
+        .collect::<Vec<_>>();
+    let consensus_weight = consensus.iter().map(|(_, weight)| *weight).sum::<f32>();
+    if consensus.len() < XR_DEPTH_ALIGN_VERTICAL_OFFSET_MIN_MATCHES
+        || consensus_weight < total_weight * XR_DEPTH_ALIGN_VERTICAL_OFFSET_MIN_SUPPORT_RATIO
+    {
         return None;
     }
-
-    let low = min_delta + best_start_bin as f32 * bin_size;
-    let high = min_delta + (best_start_bin + window_bins).min(bin_count) as f32 * bin_size;
-    let mut weighted_sum = 0.0f32;
-    let mut weight_sum = 0.0f32;
-    for (delta, weight) in &deltas {
-        if *delta >= low && *delta <= high {
-            weighted_sum += *delta * *weight;
-            weight_sum += *weight;
-        }
-    }
-    if weight_sum <= 1.0e-4 {
-        return None;
-    }
-
-    let coarse_mean = weighted_sum / weight_sum;
-    let refine_radius = (window_bins as f32 * bin_size * 0.75).max(bin_size);
-    let mut refined_sum = 0.0f32;
-    let mut refined_weight_sum = 0.0f32;
-    for (delta, weight) in &deltas {
-        if (*delta - coarse_mean).abs() <= refine_radius {
-            refined_sum += *delta * *weight;
-            refined_weight_sum += *weight;
-        }
-    }
-    if refined_weight_sum <= 1.0e-4 {
-        return Some(coarse_mean);
-    }
-    Some(refined_sum / refined_weight_sum)
+    weighted_delta_median(&consensus).or(Some(median))
 }
 
 fn refine_solution_vertical_offset_from_overlap(
     local_map: &XrDepthAlignHeightMap,
     remote_map: &XrDepthAlignHeightMap,
-    remote_signal: &[DenseHeightMapSignalCell],
+    remote_signal: &[FlatHeightMapSurfaceCell],
     current: XrDepthAlignSolution,
 ) -> XrDepthAlignSolution {
     let Some(refined_y) = estimate_height_map_vertical_offset(
@@ -2914,13 +3076,11 @@ fn wall_profile_yaw_sidecar_is_safe(
         return false;
     }
     if best_profile_score < current_profile_score + XR_DEPTH_ALIGN_WALL_PROFILE_MIN_SCORE_GAIN
-        && best_profile_score
-            < current_profile_score * XR_DEPTH_ALIGN_WALL_PROFILE_MIN_SCORE_RATIO
+        && best_profile_score < current_profile_score * XR_DEPTH_ALIGN_WALL_PROFILE_MIN_SCORE_RATIO
     {
         return false;
     }
-    corrected.confidence
-        >= current.confidence * XR_DEPTH_ALIGN_WALL_PROFILE_MIN_CONFIDENCE_RATIO
+    corrected.confidence >= current.confidence * XR_DEPTH_ALIGN_WALL_PROFILE_MIN_CONFIDENCE_RATIO
         && corrected.matched_samples + XR_DEPTH_ALIGN_WALL_PROFILE_MAX_MATCH_LOSS
             >= current.matched_samples
         && corrected.residual_meters.is_finite()
@@ -3721,7 +3881,11 @@ fn wrap_angle(mut angle: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::{Path, PathBuf}, time::Instant};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::Instant,
+    };
 
     #[derive(Clone, Copy, Debug, Default)]
     struct HeightMapTestArtifacts {
@@ -4136,6 +4300,30 @@ mod tests {
             (solution.translation.y - (local.floor_y - remote.floor_y)).abs() > 0.12,
             "{solution:?}"
         );
+    }
+
+    #[test]
+    fn flat_vertical_offset_samples_focus_on_floor_and_tables() {
+        let descriptor = make_height_map_descriptor(Mat4f::identity());
+        let height_map = descriptor
+            .height_map
+            .as_ref()
+            .expect("synthetic descriptor should carry a height map");
+        let samples = descriptor_flat_surface_cells(&descriptor);
+        assert!(!samples.is_empty());
+        assert!(samples.iter().all(|cell| {
+            cell.height - height_map.floor_y_meters
+                <= XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_RELATIVE_HEIGHT_METERS + 1.0e-3
+        }));
+        assert!(samples.iter().any(|cell| {
+            let relative_height = cell.height - height_map.floor_y_meters;
+            relative_height <= 0.08
+        }));
+        assert!(samples.iter().any(|cell| {
+            let relative_height = cell.height - height_map.floor_y_meters;
+            relative_height >= 0.45
+                && relative_height <= XR_DEPTH_ALIGN_VERTICAL_SURFACE_MAX_RELATIVE_HEIGHT_METERS
+        }));
     }
 
     #[test]

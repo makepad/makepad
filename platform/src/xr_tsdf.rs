@@ -206,10 +206,7 @@ impl SparseTsdGridReadSnapshot {
     pub fn chunk_axis_and_local(&self, value: i32) -> (i32, usize) {
         if let Some(shift) = self.chunk_edge_shift {
             let mask = self.chunk_edge_mask;
-            (
-                value >> shift,
-                (value & mask.max(0)) as usize,
-            )
+            (value >> shift, (value & mask.max(0)) as usize)
         } else {
             (
                 value.div_euclid(self.chunk_edge),
@@ -374,17 +371,16 @@ impl Default for XrTsdfStore {
                 XR_TSDF_DEFAULT_VOXEL_SIZE_METERS.to_bits(),
             )),
             cooperative_step: Arc::new(Mutex::new(XrTsdfCooperativeStepSlot::default())),
-            cooperative_step_stats_cache: Arc::new(RwLock::new(XrTsdfCooperativeStepStats::default())),
+            cooperative_step_stats_cache: Arc::new(RwLock::new(
+                XrTsdfCooperativeStepStats::default(),
+            )),
         }
     }
 }
 
 #[allow(dead_code)]
 impl XrTsdfStore {
-    pub fn set_cooperative_step_callback(
-        &self,
-        callback: Option<XrTsdfCooperativeStepCallback>,
-    ) {
+    pub fn set_cooperative_step_callback(&self, callback: Option<XrTsdfCooperativeStepCallback>) {
         if let Ok(mut slot) = self.cooperative_step.lock() {
             slot.callback = callback;
             slot.stats.callback_registered = slot.callback.is_some();
@@ -512,8 +508,9 @@ impl XrTsdfStore {
             ema_u64(slot.stats.average_step_micros, elapsed_micros, 1, 4);
         if result.did_work {
             slot.current_cycle_started_at.get_or_insert(started);
-            slot.current_cycle_compute_micros =
-                slot.current_cycle_compute_micros.saturating_add(elapsed_micros);
+            slot.current_cycle_compute_micros = slot
+                .current_cycle_compute_micros
+                .saturating_add(elapsed_micros);
             slot.stats.current_cycle_steps = slot.stats.current_cycle_steps.saturating_add(1);
         } else if !result.has_more_work {
             slot.reset_cycle();
@@ -523,10 +520,7 @@ impl XrTsdfStore {
             let cycle_wall_micros = slot
                 .current_cycle_started_at
                 .map(|cycle_started| {
-                    cycle_started
-                        .elapsed()
-                        .as_micros()
-                        .min(u64::MAX as u128) as u64
+                    cycle_started.elapsed().as_micros().min(u64::MAX as u128) as u64
                 })
                 .unwrap_or(slot.current_cycle_compute_micros);
             slot.stats.last_cycle_compute_micros = slot.current_cycle_compute_micros;
