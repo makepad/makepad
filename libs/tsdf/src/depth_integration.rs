@@ -10,7 +10,6 @@ use std::{
 };
 
 pub const DEPTH_VOXEL_EYE_INDEX: usize = 0;
-pub const DEPTH_VOXEL_SAMPLE_STEP: u32 = 1;
 const DEPTH_TSD_CHUNK_EDGE_VOXELS: i32 = 8;
 const DEPTH_TSD_CHUNK_VOLUME: usize = (DEPTH_TSD_CHUNK_EDGE_VOXELS as usize)
     * (DEPTH_TSD_CHUNK_EDGE_VOXELS as usize)
@@ -421,19 +420,19 @@ impl SparseTsdChunk {
         if !self.is_valid(id) {
             0
         } else {
-            self.data.confidence[id]
+            SparseTsdReadChunk::decode_metadata_confidence(self.data.metadata[id])
         }
     }
 
     fn accumulate(&mut self, id: usize, value: f32, generation: u64) -> SparseTsdWriteResult {
         let previous_valid = self.is_valid(id);
-        let previous_confidence = self.data.confidence[id];
-        let previous_generation = self.data.observed_generation[id];
+        let previous_meta = self.data.metadata[id];
         let previous = self.value(id);
         let value = value.clamp(-1.0, 1.0);
         let next_value = if let Some(previous) = previous {
             let delta = (previous - value).abs();
-            let mut confidence = self.data.confidence[id].max(1);
+            let mut confidence =
+                SparseTsdReadChunk::decode_metadata_confidence(previous_meta).max(1);
             if delta < 0.08 {
                 confidence = confidence.saturating_add(2).min(DEPTH_TSD_MAX_CONFIDENCE);
             } else if delta > 0.35 {
@@ -451,30 +450,29 @@ impl SparseTsdChunk {
         let data = Arc::make_mut(&mut self.data);
         data.values[id] = SparseTsdReadChunk::encode_normalized_distance(next_value);
         SparseTsdReadChunk::set_valid_index(&mut data.valid_bits, id);
-        if let Some(previous) = previous {
+        let next_confidence = if let Some(previous) = previous {
             let delta = (previous - value).abs();
-            let confidence = &mut data.confidence[id];
+            let mut confidence =
+                SparseTsdReadChunk::decode_metadata_confidence(previous_meta).max(1);
             if delta < 0.08 {
-                *confidence = confidence.saturating_add(2).min(DEPTH_TSD_MAX_CONFIDENCE);
+                confidence = confidence.saturating_add(2).min(DEPTH_TSD_MAX_CONFIDENCE);
             } else if delta < 0.18 {
-                *confidence = confidence.saturating_add(1).min(DEPTH_TSD_MAX_CONFIDENCE);
+                confidence = confidence.saturating_add(1).min(DEPTH_TSD_MAX_CONFIDENCE);
             } else if delta > 0.35 {
-                *confidence = confidence.saturating_sub(2).max(1);
+                confidence = confidence.saturating_sub(2).max(1);
             } else {
-                *confidence = confidence.saturating_sub(1).max(1);
+                confidence = confidence.saturating_sub(1).max(1);
             }
+            confidence
         } else {
-            data.confidence[id] = 1;
-        }
-        data.observed_generation[id] = SparseTsdReadChunk::encode_generation_tag(generation);
+            1
+        };
+        data.metadata[id] = SparseTsdReadChunk::encode_metadata(next_confidence, generation);
         if previous.is_none() {
             self.live_count += 1;
         }
         SparseTsdWriteResult {
-            state_changed: !previous_valid
-                || changed
-                || previous_confidence != data.confidence[id]
-                || previous_generation != data.observed_generation[id],
+            state_changed: !previous_valid || changed || previous_meta != data.metadata[id],
             value_changed: changed,
             became_live: previous.is_none(),
         }
@@ -482,8 +480,7 @@ impl SparseTsdChunk {
 
     fn overwrite(&mut self, id: usize, value: f32, generation: u64) -> SparseTsdWriteResult {
         let previous_valid = self.is_valid(id);
-        let previous_confidence = self.data.confidence[id];
-        let previous_generation = self.data.observed_generation[id];
+        let previous_meta = self.data.metadata[id];
         let previous = self.value(id);
         let value = value.clamp(-1.0, 1.0);
         let changed = previous
@@ -492,16 +489,13 @@ impl SparseTsdChunk {
         let data = Arc::make_mut(&mut self.data);
         data.values[id] = SparseTsdReadChunk::encode_normalized_distance(value);
         SparseTsdReadChunk::set_valid_index(&mut data.valid_bits, id);
-        data.confidence[id] = DEPTH_TSD_MAX_CONFIDENCE;
-        data.observed_generation[id] = SparseTsdReadChunk::encode_generation_tag(generation);
+        data.metadata[id] =
+            SparseTsdReadChunk::encode_metadata(DEPTH_TSD_MAX_CONFIDENCE, generation);
         if previous.is_none() {
             self.live_count += 1;
         }
         SparseTsdWriteResult {
-            state_changed: !previous_valid
-                || changed
-                || previous_confidence != data.confidence[id]
-                || previous_generation != data.observed_generation[id],
+            state_changed: !previous_valid || changed || previous_meta != data.metadata[id],
             value_changed: changed,
             became_live: previous.is_none(),
         }
@@ -665,7 +659,6 @@ pub struct DepthMeshVolume {
     eye_index: usize,
     image_width: u32,
     image_height: u32,
-    sample_step: u32,
     voxel_size_meters: f32,
     bounds_min: Vec3f,
     bounds_max: Vec3f,
@@ -728,14 +721,13 @@ impl ProjectedHeightField {
 }
 
 impl DepthMeshVolume {
-    pub fn new(sample_step: u32, voxel_size_meters: f32) -> Self {
+    pub fn new(voxel_size_meters: f32) -> Self {
         Self {
             generation: 0,
             latest_topology_generation: 0,
             eye_index: 0,
             image_width: 0,
             image_height: 0,
-            sample_step,
             voxel_size_meters,
             bounds_min: vec3f(0.0, 0.0, 0.0),
             bounds_max: vec3f(0.0, 0.0, 0.0),
@@ -838,7 +830,6 @@ pub struct DepthMeshJob {
     pub eye_index: usize,
     pub width: u32,
     pub height: u32,
-    pub sample_step: u32,
     pub voxel_size_meters: f32,
     pub camera_world: Vec3f,
     pub camera_forward: Vec3f,
@@ -855,7 +846,6 @@ pub struct PreparedDepthMeshJob {
     eye_index: usize,
     width: u32,
     height: u32,
-    sample_step: u32,
     voxel_size_meters: f32,
     camera_world: Vec3f,
     camera_forward: Vec3f,
@@ -1190,10 +1180,8 @@ pub fn preprocess_depth_mesh(
     worker_state.clear_frame_tsd_accum();
     let mut observed_world_min = vec3f(f32::INFINITY, f32::INFINITY, f32::INFINITY);
     let mut observed_world_max = vec3f(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    let sample_step = job.sample_step.max(1) as usize;
-
-    for y in (0..worker_state.depth_height).step_by(sample_step) {
-        for x in (0..worker_state.depth_width).step_by(sample_step) {
+    for y in 0..worker_state.depth_height {
+        for x in 0..worker_state.depth_width {
             if !depth_pixel_inside_margin(worker_state.depth_width, worker_state.depth_height, x, y)
             {
                 continue;
@@ -1270,7 +1258,6 @@ pub fn preprocess_depth_mesh(
         eye_index: job.eye_index,
         width: job.width,
         height: job.height,
-        sample_step: job.sample_step,
         voxel_size_meters,
         camera_world: job.camera_world,
         camera_forward: job.camera_forward,
@@ -1292,7 +1279,6 @@ pub fn apply_preprocessed_depth_mesh(
     volume.eye_index = job.eye_index;
     volume.image_width = job.width;
     volume.image_height = job.height;
-    volume.sample_step = job.sample_step;
     volume.latest_camera_world = Some(job.camera_world);
     volume.latest_camera_forward = Some(job.camera_forward);
 
