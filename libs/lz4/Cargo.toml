@@ -5,4 +5,7 @@ edition = "2021"
 license = "BSD-2-Clause"
 description = "Rust port of the core LZ4 block compressor and decompressor"
 
+[features]
+force-scalar = []
+
 [dependencies]
