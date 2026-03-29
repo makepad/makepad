@@ -231,6 +231,16 @@ struct HeightMapSignalCell {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct DenseHeightMapSignalCell {
+    point_x: f32,
+    point_z: f32,
+    height: f32,
+    axis_x: f32,
+    axis_z: f32,
+    weight: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct RotatedHeightMapSignalCell {
     point_x: f32,
     point_z: f32,
@@ -391,7 +401,7 @@ pub fn xr_depth_align_analyze_remote_to_local_seeded(
     let signal_build_started = std::time::Instant::now();
     let local_signal = selected_descriptor_signal_cells(local);
     let remote_signal = selected_descriptor_signal_cells(remote);
-    let remote_dense_signal = descriptor_signal_cells(remote);
+    let remote_dense_signal = descriptor_dense_signal_cells(remote);
     let remote_refine_signal =
         decimate_signal_cells(&remote_dense_signal, XR_DEPTH_ALIGN_HEIGHT_REFINE_MAX_DENSE_SAMPLES);
     let signal_build_ms = duration_ms_u32(signal_build_started.elapsed());
@@ -625,7 +635,7 @@ pub fn xr_depth_align_rescore_remote_to_local(
 ) -> XrDepthAlignSolution {
     let local_signal = selected_descriptor_signal_cells(local);
     let remote_signal = selected_descriptor_signal_cells(remote);
-    let remote_dense_signal = descriptor_signal_cells(remote);
+    let remote_dense_signal = descriptor_dense_signal_cells(remote);
     let local_sample_cache = local.height_map.as_ref().and_then(build_height_map_sample_cache);
     if local_signal.is_empty() || remote_signal.is_empty() {
         return XrDepthAlignSolution {
@@ -1209,10 +1219,7 @@ fn normalize_histogram(histogram: &mut [f32]) {
     }
 }
 
-fn decimate_signal_cells(
-    signal_cells: &[HeightMapSignalCell],
-    max_samples: usize,
-) -> Vec<HeightMapSignalCell> {
+fn decimate_signal_cells<T: Copy>(signal_cells: &[T], max_samples: usize) -> Vec<T> {
     if signal_cells.len() <= max_samples {
         return signal_cells.to_vec();
     }
@@ -1259,6 +1266,20 @@ fn descriptor_signal_cells(descriptor: &XrDepthAlignDescriptor) -> Vec<HeightMap
         .as_ref()
         .map(build_height_map_signal_cells)
         .unwrap_or_default()
+}
+
+fn descriptor_dense_signal_cells(descriptor: &XrDepthAlignDescriptor) -> Vec<DenseHeightMapSignalCell> {
+    descriptor_signal_cells(descriptor)
+        .into_iter()
+        .map(|cell| DenseHeightMapSignalCell {
+            point_x: cell.point.x,
+            point_z: cell.point.z,
+            height: cell.height,
+            axis_x: cell.axis_xz.x,
+            axis_z: cell.axis_xz.y,
+            weight: cell.weight,
+        })
+        .collect()
 }
 
 fn selected_descriptor_signal_cells(
@@ -1351,11 +1372,85 @@ fn sample_height_map_bilinear(
     }
 }
 
+#[inline(always)]
+fn sample_height_map_bilinear_and_axis_fast(
+    height_map: &XrDepthAlignHeightMap,
+    sample_cache: &HeightMapSampleCache,
+    world_x: f32,
+    world_z: f32,
+) -> Option<(f32, Option<Vec2f>)> {
+    let size_x = sample_cache.size_x;
+    let size_z = sample_cache.size_z;
+    let heights = &height_map.heights_meters;
+    if size_x == 0 || size_z == 0 || heights.len() != size_x * size_z {
+        return None;
+    }
+    if size_x == 1 && size_z == 1 {
+        let height = *heights.first()?;
+        return height.is_finite().then_some((height, None));
+    }
+
+    let raw_x = (world_x - sample_cache.origin_x) * sample_cache.inv_cell_size_meters;
+    let raw_z = (world_z - sample_cache.origin_z) * sample_cache.inv_cell_size_meters;
+    let sample_x = (raw_x - 0.5).clamp(0.0, size_x as f32 - 1.0);
+    let sample_z = (raw_z - 0.5).clamp(0.0, size_z as f32 - 1.0);
+    let x0 = sample_x.floor() as usize;
+    let z0 = sample_z.floor() as usize;
+    let x1 = (x0 + 1).min(size_x - 1);
+    let z1 = (z0 + 1).min(size_z - 1);
+    let fx = (sample_x - x0 as f32).clamp(0.0, 1.0);
+    let fz = (sample_z - z0 as f32).clamp(0.0, 1.0);
+
+    let index00 = x0 + z0 * size_x;
+    let index10 = x1 + z0 * size_x;
+    let index01 = x0 + z1 * size_x;
+    let index11 = x1 + z1 * size_x;
+    let h00 = unsafe { *heights.get_unchecked(index00) };
+    let h10 = unsafe { *heights.get_unchecked(index10) };
+    let h01 = unsafe { *heights.get_unchecked(index01) };
+    let h11 = unsafe { *heights.get_unchecked(index11) };
+    let height = if h00.is_finite() && h10.is_finite() && h01.is_finite() && h11.is_finite() {
+        let hx0 = h00 + (h10 - h00) * fx;
+        let hx1 = h01 + (h11 - h01) * fx;
+        hx0 + (hx1 - hx0) * fz
+    } else {
+        let grid_x = raw_x.floor() as isize;
+        let grid_z = raw_z.floor() as isize;
+        if grid_x < 0 || grid_z < 0 || grid_x >= size_x as isize || grid_z >= size_z as isize {
+            return None;
+        }
+        let height = unsafe { *heights.get_unchecked(grid_x as usize + grid_z as usize * size_x) };
+        if !height.is_finite() {
+            return None;
+        }
+        height
+    };
+
+    let axis = {
+        let grid_x = raw_x.round() as isize;
+        let grid_z = raw_z.round() as isize;
+        if grid_x <= 0
+            || grid_z <= 0
+            || grid_x + 1 >= size_x as isize
+            || grid_z + 1 >= size_z as isize
+        {
+            None
+        } else {
+            let index = grid_x as usize + grid_z as usize * size_x;
+            let axis_x = unsafe { *sample_cache.signal_axis_x.get_unchecked(index) };
+            let axis_z = unsafe { *sample_cache.signal_axis_z.get_unchecked(index) };
+            (axis_x.is_finite() && axis_z.is_finite()).then_some(vec2f(axis_x, axis_z))
+        }
+    };
+
+    Some((height, axis))
+}
+
 fn score_height_map_alignment(
     local_map: &XrDepthAlignHeightMap,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: &XrDepthAlignHeightMap,
-    remote_signal: &[HeightMapSignalCell],
+    remote_signal: &[DenseHeightMapSignalCell],
     yaw: f32,
     translation: Vec3f,
 ) -> (f32, f32, usize) {
@@ -1370,30 +1465,34 @@ fn score_height_map_alignment(
     )
 }
 
-fn build_rotated_height_map_signal(
-    remote_signal: &[HeightMapSignalCell],
+fn fill_rotated_height_map_signal(
+    rotated: &mut Vec<RotatedHeightMapSignalCell>,
+    remote_signal: &[DenseHeightMapSignalCell],
     yaw: f32,
-) -> Vec<RotatedHeightMapSignalCell> {
+) {
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
+    rotated.clear();
+    rotated.reserve(remote_signal.len());
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        return build_rotated_height_map_signal_neon(remote_signal, sin_yaw, cos_yaw);
+        fill_rotated_height_map_signal_neon(rotated, remote_signal, sin_yaw, cos_yaw);
+        return;
     }
     #[allow(unreachable_code)]
-    build_rotated_height_map_signal_scalar(remote_signal, sin_yaw, cos_yaw)
+    fill_rotated_height_map_signal_scalar(rotated, remote_signal, sin_yaw, cos_yaw)
 }
 
-fn build_rotated_height_map_signal_scalar(
-    remote_signal: &[HeightMapSignalCell],
+fn fill_rotated_height_map_signal_scalar(
+    rotated: &mut Vec<RotatedHeightMapSignalCell>,
+    remote_signal: &[DenseHeightMapSignalCell],
     sin_yaw: f32,
     cos_yaw: f32,
-) -> Vec<RotatedHeightMapSignalCell> {
-    let mut rotated = Vec::with_capacity(remote_signal.len());
+) {
     for cell in remote_signal {
         let (point_x, point_z) =
-            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point.x, cell.point.z);
+            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point_x, cell.point_z);
         let (axis_x, axis_z) =
-            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.axis_xz.x, cell.axis_xz.y);
+            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.axis_x, cell.axis_z);
         rotated.push(RotatedHeightMapSignalCell {
             point_x,
             point_z,
@@ -1403,46 +1502,45 @@ fn build_rotated_height_map_signal_scalar(
             weight: cell.weight,
         });
     }
-    rotated
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn build_rotated_height_map_signal_neon(
-    remote_signal: &[HeightMapSignalCell],
+unsafe fn fill_rotated_height_map_signal_neon(
+    rotated: &mut Vec<RotatedHeightMapSignalCell>,
+    remote_signal: &[DenseHeightMapSignalCell],
     sin_yaw: f32,
     cos_yaw: f32,
-) -> Vec<RotatedHeightMapSignalCell> {
+) {
     use core::arch::aarch64::*;
 
-    let mut rotated = Vec::with_capacity(remote_signal.len());
     let sin_v = vdupq_n_f32(sin_yaw);
     let cos_v = vdupq_n_f32(cos_yaw);
     let mut chunks = remote_signal.chunks_exact(4);
     for chunk in &mut chunks {
         let point_x = [
-            chunk[0].point.x,
-            chunk[1].point.x,
-            chunk[2].point.x,
-            chunk[3].point.x,
+            chunk[0].point_x,
+            chunk[1].point_x,
+            chunk[2].point_x,
+            chunk[3].point_x,
         ];
         let point_z = [
-            chunk[0].point.z,
-            chunk[1].point.z,
-            chunk[2].point.z,
-            chunk[3].point.z,
+            chunk[0].point_z,
+            chunk[1].point_z,
+            chunk[2].point_z,
+            chunk[3].point_z,
         ];
         let axis_x = [
-            chunk[0].axis_xz.x,
-            chunk[1].axis_xz.x,
-            chunk[2].axis_xz.x,
-            chunk[3].axis_xz.x,
+            chunk[0].axis_x,
+            chunk[1].axis_x,
+            chunk[2].axis_x,
+            chunk[3].axis_x,
         ];
         let axis_z = [
-            chunk[0].axis_xz.y,
-            chunk[1].axis_xz.y,
-            chunk[2].axis_xz.y,
-            chunk[3].axis_xz.y,
+            chunk[0].axis_z,
+            chunk[1].axis_z,
+            chunk[2].axis_z,
+            chunk[3].axis_z,
         ];
         let point_x_v = vld1q_f32(point_x.as_ptr());
         let point_z_v = vld1q_f32(point_z.as_ptr());
@@ -1480,9 +1578,9 @@ unsafe fn build_rotated_height_map_signal_neon(
     }
     for cell in chunks.remainder() {
         let (point_x, point_z) =
-            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point.x, cell.point.z);
+            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point_x, cell.point_z);
         let (axis_x, axis_z) =
-            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.axis_xz.x, cell.axis_xz.y);
+            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.axis_x, cell.axis_z);
         rotated.push(RotatedHeightMapSignalCell {
             point_x,
             point_z,
@@ -1492,14 +1590,13 @@ unsafe fn build_rotated_height_map_signal_neon(
             weight: cell.weight,
         });
     }
-    rotated
 }
 
 fn score_height_map_alignment_with_stride(
     local_map: &XrDepthAlignHeightMap,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: &XrDepthAlignHeightMap,
-    remote_signal: &[HeightMapSignalCell],
+    remote_signal: &[DenseHeightMapSignalCell],
     yaw: f32,
     translation: Vec3f,
     sample_stride: usize,
@@ -1525,7 +1622,7 @@ fn score_height_map_alignment_with_stride(
     for cell in remote_signal.iter().step_by(sample_stride) {
         total_weight += cell.weight;
         let (rotated_x, rotated_z) =
-            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point.x, cell.point.z);
+            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point_x, cell.point_z);
         let mapped_x = rotated_x + translation.x;
         let mapped_z = rotated_z + translation.z;
         if mapped_remote_cutout_center.is_some_and(|(center_x, center_z)| {
@@ -1546,8 +1643,8 @@ fn score_height_map_alignment_with_stride(
                 let (remote_axis_x, remote_axis_z) = rotate_xz_quat_with_sin_cos(
                     sin_yaw,
                     cos_yaw,
-                    cell.axis_xz.x,
-                    cell.axis_xz.y,
+                    cell.axis_x,
+                    cell.axis_z,
                 );
                 (local_axis.x * remote_axis_x + local_axis.y * remote_axis_z).clamp(0.0, 1.0)
             })
@@ -1598,31 +1695,58 @@ fn score_rotated_height_map_alignment(
     let mut total_weight = 0.0;
     let mut residual_sum = 0.0;
     let mut matched = 0usize;
-    for cell in rotated_remote_signal {
-        total_weight += cell.weight;
-        let mapped_x = cell.point_x + translation.x;
-        let mapped_z = cell.point_z + translation.z;
-        if mapped_remote_cutout_center.is_some_and(|(center_x, center_z)| {
-            let delta_x = mapped_x - center_x;
-            let delta_z = mapped_z - center_z;
-            delta_x * delta_x + delta_z * delta_z <= mapped_remote_cutout_radius_sq
-        }) {
-            continue;
+    if let Some(sample_cache) = local_sample_cache {
+        for cell in rotated_remote_signal {
+            total_weight += cell.weight;
+            let mapped_x = cell.point_x + translation.x;
+            let mapped_z = cell.point_z + translation.z;
+            if mapped_remote_cutout_center.is_some_and(|(center_x, center_z)| {
+                let delta_x = mapped_x - center_x;
+                let delta_z = mapped_z - center_z;
+                delta_x * delta_x + delta_z * delta_z <= mapped_remote_cutout_radius_sq
+            }) {
+                continue;
+            }
+            let Some((local_height, local_axis)) =
+                sample_height_map_bilinear_and_axis_fast(local_map, sample_cache, mapped_x, mapped_z)
+            else {
+                continue;
+            };
+            let diff = (local_height - cell.height).abs();
+            let height_similarity = (1.0 - diff / 0.45).clamp(0.0, 1.0);
+            let direction_similarity = local_axis
+                .map(|local_axis| (local_axis.x * cell.axis_x + local_axis.y * cell.axis_z).clamp(0.0, 1.0))
+                .unwrap_or(0.5);
+            let similarity =
+                (height_similarity * 0.65 + direction_similarity * 0.35).clamp(0.0, 1.0);
+            support_sum += cell.weight * similarity;
+            weight_sum += cell.weight;
+            residual_sum += diff;
+            matched += 1;
         }
-        let Some(local_height) = sample_height_map_bilinear(local_map, mapped_x, mapped_z) else {
-            continue;
-        };
-        let diff = (local_height - cell.height).abs();
-        let height_similarity = (1.0 - diff / 0.45).clamp(0.0, 1.0);
-        let direction_similarity = local_sample_cache
-            .and_then(|sample_cache| sample_height_map_axis_nearest(sample_cache, mapped_x, mapped_z))
-            .map(|local_axis| (local_axis.x * cell.axis_x + local_axis.y * cell.axis_z).clamp(0.0, 1.0))
-            .unwrap_or(0.5);
-        let similarity = (height_similarity * 0.65 + direction_similarity * 0.35).clamp(0.0, 1.0);
-        support_sum += cell.weight * similarity;
-        weight_sum += cell.weight;
-        residual_sum += diff;
-        matched += 1;
+    } else {
+        for cell in rotated_remote_signal {
+            total_weight += cell.weight;
+            let mapped_x = cell.point_x + translation.x;
+            let mapped_z = cell.point_z + translation.z;
+            if mapped_remote_cutout_center.is_some_and(|(center_x, center_z)| {
+                let delta_x = mapped_x - center_x;
+                let delta_z = mapped_z - center_z;
+                delta_x * delta_x + delta_z * delta_z <= mapped_remote_cutout_radius_sq
+            }) {
+                continue;
+            }
+            let Some(local_height) = sample_height_map_bilinear(local_map, mapped_x, mapped_z) else {
+                continue;
+            };
+            let diff = (local_height - cell.height).abs();
+            let height_similarity = (1.0 - diff / 0.45).clamp(0.0, 1.0);
+            let similarity = (height_similarity * 0.65 + 0.5 * 0.35).clamp(0.0, 1.0);
+            support_sum += cell.weight * similarity;
+            weight_sum += cell.weight;
+            residual_sum += diff;
+            matched += 1;
+        }
     }
 
     if matched < 8 || weight_sum <= 1.0e-4 || total_weight <= 1.0e-4 {
@@ -1642,7 +1766,7 @@ fn score_rotated_height_map_alignment(
 fn estimate_height_map_vertical_offset(
     local_map: &XrDepthAlignHeightMap,
     remote_map: &XrDepthAlignHeightMap,
-    remote_signal: &[HeightMapSignalCell],
+    remote_signal: &[DenseHeightMapSignalCell],
     yaw: f32,
     translation: Vec3f,
 ) -> Option<f32> {
@@ -1668,7 +1792,7 @@ fn estimate_height_map_vertical_offset(
 
     for cell in remote_signal {
         let (rotated_x, rotated_z) =
-            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point.x, cell.point.z);
+            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point_x, cell.point_z);
         let mapped_x = rotated_x + translation.x;
         let mapped_z = rotated_z + translation.z;
         if mapped_remote_cutout_center.is_some_and(|(center_x, center_z)| {
@@ -1745,7 +1869,7 @@ fn estimate_height_map_vertical_offset(
 fn refine_solution_vertical_offset_from_overlap(
     local_map: &XrDepthAlignHeightMap,
     remote_map: &XrDepthAlignHeightMap,
-    remote_signal: &[HeightMapSignalCell],
+    remote_signal: &[DenseHeightMapSignalCell],
     current: XrDepthAlignSolution,
 ) -> XrDepthAlignSolution {
     let Some(refined_y) = estimate_height_map_vertical_offset(
@@ -1767,7 +1891,7 @@ fn apply_height_map_alignment_support(
     local_map: Option<&XrDepthAlignHeightMap>,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: Option<&XrDepthAlignHeightMap>,
-    remote_signal: &[HeightMapSignalCell],
+    remote_signal: &[DenseHeightMapSignalCell],
 ) -> XrDepthAlignSolution {
     let (Some(local_map), Some(remote_map)) = (local_map, remote_map) else {
         return candidate;
@@ -1802,7 +1926,7 @@ fn score_full_alignment_solution(
     local_map: Option<&XrDepthAlignHeightMap>,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: Option<&XrDepthAlignHeightMap>,
-    remote_dense_signal: &[HeightMapSignalCell],
+    remote_dense_signal: &[DenseHeightMapSignalCell],
     yaw: f32,
     translation: Vec3f,
 ) -> XrDepthAlignSolution {
@@ -1821,7 +1945,7 @@ fn refine_translation_only_for_yaw(
     local_map: Option<&XrDepthAlignHeightMap>,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: Option<&XrDepthAlignHeightMap>,
-    remote_dense_signal: &[HeightMapSignalCell],
+    remote_dense_signal: &[DenseHeightMapSignalCell],
     floor_y: f32,
     initial: XrDepthAlignSolution,
 ) -> XrDepthAlignSolution {
@@ -1894,7 +2018,7 @@ fn refine_solution_with_wall_profile_yaw_sidecar(
     local_map: &XrDepthAlignHeightMap,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: &XrDepthAlignHeightMap,
-    remote_dense_signal: &[HeightMapSignalCell],
+    remote_dense_signal: &[DenseHeightMapSignalCell],
     floor_y: f32,
     current: XrDepthAlignSolution,
 ) -> XrDepthAlignSolution {
@@ -1990,7 +2114,7 @@ fn refine_height_map_alignment(
     local_map: &XrDepthAlignHeightMap,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: &XrDepthAlignHeightMap,
-    remote_signal: &[HeightMapSignalCell],
+    remote_signal: &[DenseHeightMapSignalCell],
     yaw: f32,
     translation: Vec3f,
 ) -> (f32, Vec3f) {
@@ -2011,10 +2135,10 @@ fn refine_height_map_alignment(
         (0.012, 0.025),
         (0.005, 0.01),
     ] {
+        let mut rotated_remote_signal = Vec::<RotatedHeightMapSignalCell>::new();
         loop {
             let mut improved = false;
             let mut rotated_signal_yaw = f32::NAN;
-            let mut rotated_remote_signal = Vec::<RotatedHeightMapSignalCell>::new();
             for yaw_delta in [-yaw_step, 0.0, yaw_step] {
                 for tx_delta in [-translation_step, 0.0, translation_step] {
                     for tz_delta in [-translation_step, 0.0, translation_step] {
@@ -2025,8 +2149,11 @@ fn refine_height_map_alignment(
                         if !rotated_signal_yaw.is_finite()
                             || wrap_angle(candidate_yaw - rotated_signal_yaw).abs() > 1.0e-6
                         {
-                            rotated_remote_signal =
-                                build_rotated_height_map_signal(remote_signal, candidate_yaw);
+                            fill_rotated_height_map_signal(
+                                &mut rotated_remote_signal,
+                                remote_signal,
+                                candidate_yaw,
+                            );
                             rotated_signal_yaw = candidate_yaw;
                         }
                         let candidate_translation = vec3(
@@ -2379,8 +2506,8 @@ fn refine_seed_alignment_solution(
     local_map: Option<&XrDepthAlignHeightMap>,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: Option<&XrDepthAlignHeightMap>,
-    remote_dense_signal: &[HeightMapSignalCell],
-    remote_refine_signal: &[HeightMapSignalCell],
+    remote_dense_signal: &[DenseHeightMapSignalCell],
+    remote_refine_signal: &[DenseHeightMapSignalCell],
     floor_y: f32,
     seed: XrDepthAlignSolution,
 ) -> XrDepthAlignSolution {
@@ -2640,6 +2767,7 @@ fn rotate_xz(yaw: f32, x: f32, z: f32) -> (f32, f32) {
     (x * cos_yaw - z * sin_yaw, x * sin_yaw + z * cos_yaw)
 }
 
+#[inline(always)]
 fn rotate_xz_quat_with_sin_cos(sin_yaw: f32, cos_yaw: f32, x: f32, z: f32) -> (f32, f32) {
     (x * cos_yaw + z * sin_yaw, z * cos_yaw - x * sin_yaw)
 }
