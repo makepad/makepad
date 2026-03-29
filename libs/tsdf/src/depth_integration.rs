@@ -665,18 +665,10 @@ pub struct DepthMeshVolume {
     mesh_grid: SparseTsdGrid,
     dirty_tsdf_chunk_keys: HashSet<VoxelCoord>,
     update_sequence: u64,
-    dirty_chunk_keys: Vec<ChunkKey>,
-    removed_chunk_keys: Vec<ChunkKey>,
     latest_camera_world: Option<Vec3f>,
-    latest_camera_forward: Option<Vec3f>,
     projected_height_field: Option<ProjectedHeightField>,
-    projected_height_layout_rebuild_pending: bool,
     projected_height_publish_pending: bool,
     published_height_map: Option<XrDepthAlignHeightMap>,
-    pending_mesh_dirty_chunks: HashSet<ChunkKey>,
-    pending_mesh_chunk_queue: VecDeque<ChunkKey>,
-    pending_plane_scan_dirty_chunks: HashSet<ChunkKey>,
-    pending_plane_scan_chunk_queue: VecDeque<ChunkKey>,
     pending_projected_height_dirty_samples: HashSet<usize>,
     pending_projected_height_sample_queue: VecDeque<usize>,
 }
@@ -734,18 +726,10 @@ impl DepthMeshVolume {
             mesh_grid: SparseTsdGrid::new(voxel_size_meters, DEPTH_TSD_CHUNK_EDGE_VOXELS),
             dirty_tsdf_chunk_keys: HashSet::new(),
             update_sequence: 0,
-            dirty_chunk_keys: Vec::new(),
-            removed_chunk_keys: Vec::new(),
             latest_camera_world: None,
-            latest_camera_forward: None,
             projected_height_field: None,
-            projected_height_layout_rebuild_pending: false,
             projected_height_publish_pending: false,
             published_height_map: None,
-            pending_mesh_dirty_chunks: HashSet::new(),
-            pending_mesh_chunk_queue: VecDeque::new(),
-            pending_plane_scan_dirty_chunks: HashSet::new(),
-            pending_plane_scan_chunk_queue: VecDeque::new(),
             pending_projected_height_dirty_samples: HashSet::new(),
             pending_projected_height_sample_queue: VecDeque::new(),
         }
@@ -813,14 +797,7 @@ impl DepthMeshVolume {
         true
     }
 
-    pub fn discard_obsolete_surface_state(&mut self) {
-        self.dirty_chunk_keys.clear();
-        self.removed_chunk_keys.clear();
-        self.pending_mesh_dirty_chunks.clear();
-        self.pending_mesh_chunk_queue.clear();
-        self.pending_plane_scan_dirty_chunks.clear();
-        self.pending_plane_scan_chunk_queue.clear();
-    }
+    pub fn discard_obsolete_surface_state(&mut self) {}
 }
 
 #[derive(Clone, Debug)]
@@ -832,7 +809,6 @@ pub struct DepthMeshJob {
     pub height: u32,
     pub voxel_size_meters: f32,
     pub camera_world: Vec3f,
-    pub camera_forward: Vec3f,
     pub depth_proj: Mat4f,
     pub inv_depth_proj: Mat4f,
     pub depth_view_from_world: Mat4f,
@@ -848,7 +824,6 @@ pub struct PreparedDepthMeshJob {
     height: u32,
     voxel_size_meters: f32,
     camera_world: Vec3f,
-    camera_forward: Vec3f,
     depth_proj: Mat4f,
     inv_depth_proj: Mat4f,
     depth_view_from_world: Mat4f,
@@ -1260,7 +1235,6 @@ pub fn preprocess_depth_mesh(
         height: job.height,
         voxel_size_meters,
         camera_world: job.camera_world,
-        camera_forward: job.camera_forward,
         depth_proj: job.depth_proj,
         inv_depth_proj: job.inv_depth_proj,
         depth_view_from_world: job.depth_view_from_world,
@@ -1280,7 +1254,6 @@ pub fn apply_preprocessed_depth_mesh(
     volume.image_width = job.width;
     volume.image_height = job.height;
     volume.latest_camera_world = Some(job.camera_world);
-    volume.latest_camera_forward = Some(job.camera_forward);
 
     let mut topology_changes = apply_tsd_samples(volume, &worker_state.reduced_tsd_samples);
     topology_changes += refresh_visible_free_space(volume, &job);
@@ -1326,7 +1299,6 @@ pub fn projected_height_refresh_budget(
 pub fn sync_projected_height_field_layout(volume: &mut DepthMeshVolume) {
     let Some(layout) = projected_height_field_layout(volume) else {
         volume.projected_height_field = None;
-        volume.projected_height_layout_rebuild_pending = false;
         volume.projected_height_publish_pending = false;
         volume.pending_projected_height_dirty_samples.clear();
         volume.pending_projected_height_sample_queue.clear();
@@ -1367,7 +1339,6 @@ pub fn sync_projected_height_field_layout(volume: &mut DepthMeshVolume) {
         .filter_map(|(sample_index, valid)| (*valid == 0).then_some(sample_index))
         .collect::<Vec<_>>();
     volume.projected_height_field = Some(next_field);
-    volume.projected_height_layout_rebuild_pending = true;
     volume.projected_height_publish_pending = true;
     volume.pending_projected_height_dirty_samples.clear();
     volume.pending_projected_height_sample_queue.clear();
@@ -1472,9 +1443,6 @@ pub fn refresh_projected_height_field(volume: &mut DepthMeshVolume, max_samples:
             changed = true;
         }
         processed += 1;
-    }
-    if volume.pending_projected_height_sample_queue.is_empty() {
-        volume.projected_height_layout_rebuild_pending = false;
     }
     changed
 }

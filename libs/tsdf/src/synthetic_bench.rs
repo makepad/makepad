@@ -128,7 +128,6 @@ fn synthetic_depth_job(
         height,
         voxel_size_meters,
         camera_world,
-        camera_forward: vec3f(0.0, 0.0, -1.0),
         depth_proj,
         inv_depth_proj,
         depth_view_from_world,
