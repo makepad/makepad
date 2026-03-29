@@ -127,8 +127,19 @@ pub struct XrDepthAlignSolveDiagnostic {
     pub local_wall_samples: usize,
     pub remote_floor_samples: usize,
     pub remote_wall_samples: usize,
+    pub remote_dense_wall_samples: usize,
+    pub remote_refine_wall_samples: usize,
     pub yaw_candidate_count: usize,
     pub pose_candidate_count: usize,
+    pub shortlisted_pose_count: usize,
+    pub signal_build_ms: u32,
+    pub yaw_candidate_ms: u32,
+    pub translation_vote_ms: u32,
+    pub signal_refine_ms: u32,
+    pub signal_score_ms: u32,
+    pub height_refine_ms: u32,
+    pub final_score_ms: u32,
+    pub wall_profile_ms: u32,
     pub best_solution: Option<XrDepthAlignSolution>,
 }
 
@@ -170,38 +181,40 @@ pub struct XrDepthAlignPreview {
 const XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES: usize = 4;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES: usize = 6;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE: f32 = 0.12;
-const XR_DEPTH_ALIGN_ACCEPT_MIN_HEIGHT_MAP_SUPPORT: f32 = 0.28;
 const XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE: f32 = 0.10;
 const XR_DEPTH_ALIGN_TRANSLATION_VOTE_STEP_METERS: f32 = 0.08;
 const XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS: usize = 48;
+const XR_DEPTH_ALIGN_HEIGHT_MAP_MAX_SAMPLES: usize = 96;
+const XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_MAX_CANDIDATES: usize = 96;
+const XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_PER_YAW: usize = 2;
+const XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_YAW_EPSILON_RADIANS: f32 = 1.0_f32.to_radians();
+const XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_TRANSLATION_EPSILON_METERS: f32 = 0.10;
+const XR_DEPTH_ALIGN_HEIGHT_REFINE_MAX_DENSE_SAMPLES: usize = 1536;
 const XR_DEPTH_ALIGN_HEIGHT_MAP_GRADIENT_MIN_METERS: f32 = 0.05;
-const XR_DEPTH_ALIGN_HEIGHT_MAP_FINE_MAX_SAMPLES: usize = 96;
-const XR_DEPTH_ALIGN_HEIGHT_MAP_FINE_MIN_SPACING_METERS: f32 = 0.14;
-const XR_DEPTH_ALIGN_HEIGHT_MAP_SEARCH_MAX_SAMPLES: usize = 256;
-const XR_DEPTH_ALIGN_HEIGHT_MAP_SEARCH_MIN_SPACING_METERS: f32 = 0.10;
-const XR_DEPTH_ALIGN_SIGNAL_DOWNSAMPLE_FACTOR: usize = 2;
-const XR_DEPTH_ALIGN_SIGNAL_DOWNSAMPLE_MIN_MAP_DIM: usize = 180;
-const XR_DEPTH_ALIGN_COARSE_DOWNSAMPLE_FACTOR: usize = 4;
-const XR_DEPTH_ALIGN_COARSE_MIN_MAP_DIM: usize = 96;
+const XR_DEPTH_ALIGN_HEIGHT_MAP_MIN_SPACING_METERS: f32 = 0.14;
 const XR_DEPTH_ALIGN_SIGNAL_MATCH_RADIUS_METERS: f32 = 0.42;
 const XR_DEPTH_ALIGN_SIGNAL_MATCH_MIN_DIRECTION_DOT: f32 = 0.45;
-// Floor-aligned f32 maps let us reject much larger mismatches earlier than the
-// old quantized path without losing true correspondences.
-const XR_DEPTH_ALIGN_SIGNAL_MATCH_MAX_HEIGHT_DELTA_METERS: f32 = 0.50;
+const XR_DEPTH_ALIGN_SIGNAL_MATCH_MAX_HEIGHT_DELTA_METERS: f32 = 0.75;
 const XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_CONFIDENCE: f32 = 0.20;
 const XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_SYMMETRY_CONFIDENCE: f32 = 0.18;
 const XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_OVERLAP: f32 = 0.35;
 const XR_DEPTH_ALIGN_SEEDED_LOCK_MAX_TRANSLATION_JUMP_METERS: f32 = 0.75;
 const XR_DEPTH_ALIGN_SEEDED_LOCK_MAX_YAW_JUMP_RADIANS: f32 = 0.45;
-const XR_DEPTH_ALIGN_COARSE_SEED_RETURN_MIN_CONFIDENCE: f32 = 0.18;
-const XR_DEPTH_ALIGN_COARSE_SEED_RETURN_MAX_RESIDUAL_METERS: f32 = 0.32;
-const XR_DEPTH_ALIGN_COARSE_SEED_YAW_OFFSETS_RADIANS: [f32; 5] = [-0.28, -0.14, 0.0, 0.14, 0.28];
-const XR_DEPTH_ALIGN_COARSE_SEED_TRANSLATION_OFFSETS_METERS: [f32; 5] =
-    [-0.48, -0.24, 0.0, 0.24, 0.48];
-const XR_DEPTH_ALIGN_FINALIST_COUNT: usize = 32;
-const XR_DEPTH_ALIGN_YAW_FINALIST_COUNT: usize = 2;
-const XR_DEPTH_ALIGN_FINALIST_TRANSLATION_EPSILON_METERS: f32 = 0.18;
-const XR_DEPTH_ALIGN_FINALIST_YAW_EPSILON_RADIANS: f32 = 0.08;
+const XR_DEPTH_ALIGN_WALL_PROFILE_MIN_HEIGHT_METERS: f32 = 0.60;
+const XR_DEPTH_ALIGN_WALL_PROFILE_MAX_HEIGHT_METERS: f32 = 1.80;
+const XR_DEPTH_ALIGN_WALL_PROFILE_CELL_METERS: f32 = 0.09;
+const XR_DEPTH_ALIGN_WALL_PROFILE_MIN_POINTS: usize = 16;
+const XR_DEPTH_ALIGN_WALL_PROFILE_YAW_WINDOW_RADIANS: f32 = 10.0_f32.to_radians();
+const XR_DEPTH_ALIGN_WALL_PROFILE_YAW_STEP_RADIANS: f32 = 0.5_f32.to_radians();
+const XR_DEPTH_ALIGN_WALL_PROFILE_TRANSLATION_WINDOW_METERS: f32 = 0.18;
+const XR_DEPTH_ALIGN_WALL_PROFILE_TRANSLATION_STEP_METERS: f32 = 0.06;
+const XR_DEPTH_ALIGN_WALL_PROFILE_TRANSLATION_SIGMA_METERS: f32 = 0.12;
+const XR_DEPTH_ALIGN_WALL_PROFILE_MIN_YAW_DELTA_RADIANS: f32 = 1.2_f32.to_radians();
+const XR_DEPTH_ALIGN_WALL_PROFILE_MIN_SCORE_GAIN: f32 = 0.010;
+const XR_DEPTH_ALIGN_WALL_PROFILE_MIN_SCORE_RATIO: f32 = 1.02;
+const XR_DEPTH_ALIGN_WALL_PROFILE_MIN_CONFIDENCE_RATIO: f32 = 0.82;
+const XR_DEPTH_ALIGN_WALL_PROFILE_MAX_RESIDUAL_INCREASE_METERS: f32 = 0.08;
+const XR_DEPTH_ALIGN_WALL_PROFILE_MAX_MATCH_LOSS: usize = 6;
 
 #[derive(Clone, Copy, Debug)]
 struct HeightMapSignalCell {
@@ -211,15 +224,22 @@ struct HeightMapSignalCell {
     weight: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ProjectionBounds {
+    min: f32,
+    max: f32,
+}
+
+fn duration_ms_u32(duration: std::time::Duration) -> u32 {
+    duration.as_millis().min(u32::MAX as u128) as u32
+}
+
 pub fn xr_depth_align_solution_is_accepted(
     diagnostic: &XrDepthAlignSolveDiagnostic,
     solution: XrDepthAlignSolution,
 ) -> bool {
-    let has_height_map_support = solution.symmetry_confidence < 0.999;
     solution.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES
         && solution.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE
-        && (!has_height_map_support
-            || solution.symmetry_confidence >= XR_DEPTH_ALIGN_ACCEPT_MIN_HEIGHT_MAP_SUPPORT)
         && (!diagnostic.local_vertical_descriptor
             || !diagnostic.remote_vertical_descriptor
             || solution.symmetry_confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE)
@@ -341,67 +361,22 @@ pub fn xr_depth_align_analyze_remote_to_local_seeded(
     remote: &XrDepthAlignDescriptor,
     previous_solution: Option<XrDepthAlignSolution>,
 ) -> XrDepthAlignSolveDiagnostic {
-    let coarse_seed = previous_solution
-        .is_none()
-        .then(|| coarse_height_map_seed(local, remote))
-        .flatten();
-    let seeded_solution = previous_solution.or(coarse_seed);
-    xr_depth_align_analyze_remote_to_local_seeded_internal(
-        local,
-        remote,
-        seeded_solution,
-        coarse_seed.is_some(),
-    )
-}
-
-fn coarse_height_map_seed(
-    local: &XrDepthAlignDescriptor,
-    remote: &XrDepthAlignDescriptor,
-) -> Option<XrDepthAlignSolution> {
-    let local_map = local.height_map.as_ref()?;
-    let remote_map = remote.height_map.as_ref()?;
-    if local_map.size_x_usize().min(local_map.size_z_usize()) < XR_DEPTH_ALIGN_COARSE_MIN_MAP_DIM
-        || remote_map.size_x_usize().min(remote_map.size_z_usize()) < XR_DEPTH_ALIGN_COARSE_MIN_MAP_DIM
-    {
-        return None;
-    }
-    let local_coarse_map = downsample_height_map(local_map, XR_DEPTH_ALIGN_COARSE_DOWNSAMPLE_FACTOR)?;
-    let remote_coarse_map =
-        downsample_height_map(remote_map, XR_DEPTH_ALIGN_COARSE_DOWNSAMPLE_FACTOR)?;
-    let local_coarse = XrDepthAlignDescriptor {
-        height_map: Some(local_coarse_map),
-        ..local.clone()
-    };
-    let remote_coarse = XrDepthAlignDescriptor {
-        height_map: Some(remote_coarse_map),
-        ..remote.clone()
-    };
-    let diagnostic =
-        xr_depth_align_analyze_remote_to_local_seeded_internal(
-            &local_coarse,
-            &remote_coarse,
-            None,
-            false,
-        );
-    diagnostic.accepted_solution()
-}
-
-fn xr_depth_align_analyze_remote_to_local_seeded_internal(
-    local: &XrDepthAlignDescriptor,
-    remote: &XrDepthAlignDescriptor,
-    previous_solution: Option<XrDepthAlignSolution>,
-    coarse_seeded: bool,
-) -> XrDepthAlignSolveDiagnostic {
-    let local_signal = solver_selected_descriptor_signal_cells(local);
-    let remote_signal = solver_selected_descriptor_signal_cells(remote);
+    let signal_build_started = std::time::Instant::now();
+    let local_signal = selected_descriptor_signal_cells(local);
+    let remote_signal = selected_descriptor_signal_cells(remote);
     let remote_dense_signal = descriptor_signal_cells(remote);
-    let remote_search_signal = search_height_map_signal_cells(&remote_dense_signal);
+    let remote_refine_signal =
+        decimate_signal_cells(&remote_dense_signal, XR_DEPTH_ALIGN_HEIGHT_REFINE_MAX_DENSE_SAMPLES);
+    let signal_build_ms = duration_ms_u32(signal_build_started.elapsed());
 
     let diagnostic = XrDepthAlignSolveDiagnostic {
         local_vertical_descriptor: local.vertical_descriptor.is_some(),
         remote_vertical_descriptor: remote.vertical_descriptor.is_some(),
         local_wall_samples: local_signal.len(),
         remote_wall_samples: remote_signal.len(),
+        remote_dense_wall_samples: remote_dense_signal.len(),
+        remote_refine_wall_samples: remote_refine_signal.len(),
+        signal_build_ms,
         ..XrDepthAlignSolveDiagnostic::default()
     };
 
@@ -420,20 +395,43 @@ fn xr_depth_align_analyze_remote_to_local_seeded_internal(
         build_height_map_signal_histogram(&remote_signal, XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS);
     let local_signal_refs = local_signal.iter().collect::<Vec<_>>();
     let remote_signal_refs = remote_signal.iter().collect::<Vec<_>>();
+    let mut translation_vote_time = std::time::Duration::ZERO;
+    let mut signal_refine_time = std::time::Duration::ZERO;
+    let mut signal_score_time = std::time::Duration::ZERO;
+    let mut height_refine_time = std::time::Duration::ZERO;
+    let mut final_score_time = std::time::Duration::ZERO;
+    let mut wall_profile_time = std::time::Duration::ZERO;
 
     let mut sample_diagnostic = diagnostic;
     let seeded_candidate = previous_solution.map(|seed| {
         sample_diagnostic.yaw_candidate_count += 1;
         sample_diagnostic.pose_candidate_count += 1;
-        refine_seed_alignment_solution(
+        let candidate = refine_seed_alignment_solution(
             &local_signal_refs,
             &remote_signal_refs,
             local_map,
             remote_map,
             &remote_dense_signal,
+            &remote_refine_signal,
             floor_y,
             seed,
-        )
+        );
+        if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
+            let wall_profile_started = std::time::Instant::now();
+            let refined = refine_solution_with_wall_profile_yaw_sidecar(
+                &local_signal_refs,
+                &remote_signal_refs,
+                local_map,
+                remote_map,
+                &remote_dense_signal,
+                floor_y,
+                candidate,
+            );
+            wall_profile_time += wall_profile_started.elapsed();
+            refined
+        } else {
+            candidate
+        }
     });
     if let (Some(seed), Some(candidate)) = (previous_solution, seeded_candidate) {
         sample_diagnostic.best_solution = Some(candidate);
@@ -450,121 +448,89 @@ fn xr_depth_align_analyze_remote_to_local_seeded_internal(
     }
 
     let mut best = seeded_candidate;
-    if coarse_seeded {
-        if let Some(seed_candidate) = seeded_candidate {
-            let candidate = search_coarse_seed_neighborhood(
-                &local_signal_refs,
-                &remote_signal_refs,
-                local_map,
-                remote_map,
-                &remote_search_signal,
-                floor_y,
-                seed_candidate,
-            );
-            if let Some(candidate) = candidate {
-                best = Some(
-                    rescore_alignment_candidate_with_full_height_map(
-                        candidate,
-                        &local_signal_refs,
-                        &remote_signal_refs,
-                        local_map,
-                        remote_map,
-                        &remote_dense_signal,
-                        floor_y,
-                    )
-                    .unwrap_or(candidate),
-                );
-                if best.is_some_and(|candidate| {
-                    xr_depth_align_solution_is_accepted(&diagnostic, candidate)
-                        && candidate.confidence >= XR_DEPTH_ALIGN_COARSE_SEED_RETURN_MIN_CONFIDENCE
-                        && candidate.residual_meters.is_finite()
-                        && candidate.residual_meters
-                            <= XR_DEPTH_ALIGN_COARSE_SEED_RETURN_MAX_RESIDUAL_METERS
-                }) {
-                    sample_diagnostic.best_solution = best;
-                    return sample_diagnostic;
-                }
-            }
-        }
-    }
-    let mut finalists = Vec::<XrDepthAlignSolution>::new();
+    let yaw_candidates_started = std::time::Instant::now();
     let yaw_candidates = candidate_signal_yaws(
         &local_histogram,
         &remote_histogram,
         &local_signal,
         &remote_signal,
     );
+    sample_diagnostic.yaw_candidate_ms = duration_ms_u32(yaw_candidates_started.elapsed());
     sample_diagnostic.yaw_candidate_count = yaw_candidates.len();
+
+    // Rank poses cheaply on sparse wall signal first, then spend dense-map refinement
+    // only on a bounded shortlist.
+    let use_height_refine =
+        local_map.is_some() && remote_map.is_some() && !remote_refine_signal.is_empty();
+    let mut shortlist = Vec::<XrDepthAlignSolution>::new();
     for yaw in yaw_candidates {
+        let translation_started = std::time::Instant::now();
         let translations =
             candidate_signal_translations(&local_signal, &remote_signal, floor_y, yaw);
+        translation_vote_time += translation_started.elapsed();
         sample_diagnostic.pose_candidate_count += translations.len();
-        let mut yaw_finalists = Vec::<XrDepthAlignSolution>::new();
+        let mut yaw_shortlist = Vec::<XrDepthAlignSolution>::new();
         for translation in translations {
-            let candidate = refine_and_score_alignment_candidate(
+            let signal_refine_started = std::time::Instant::now();
+            let (refined_yaw, refined_translation) = refine_signal_alignment(
                 &local_signal_refs,
                 &remote_signal_refs,
-                local_map,
-                remote_map,
-                &remote_search_signal,
                 floor_y,
                 yaw,
                 translation,
             );
-            push_alignment_finalist(
-                &mut yaw_finalists,
-                candidate,
-                XR_DEPTH_ALIGN_YAW_FINALIST_COUNT,
+            signal_refine_time += signal_refine_started.elapsed();
+
+            let signal_score_started = std::time::Instant::now();
+            let signal_candidate = score_signal_alignment_solution(
+                &local_signal_refs,
+                &remote_signal_refs,
+                refined_yaw,
+                refined_translation,
             );
-            push_alignment_finalist(&mut finalists, candidate, XR_DEPTH_ALIGN_FINALIST_COUNT);
-            if best
+            signal_score_time += signal_score_started.elapsed();
+
+            if use_height_refine {
+                push_shortlisted_alignment_solution(
+                    &mut yaw_shortlist,
+                    signal_candidate,
+                    XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_PER_YAW,
+                    XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_TRANSLATION_EPSILON_METERS,
+                    XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_YAW_EPSILON_RADIANS,
+                );
+            } else if best
                 .as_ref()
-                .is_none_or(|current| alignment_solution_better(&candidate, current))
+                .is_none_or(|current| alignment_solution_better(&signal_candidate, current))
             {
-                best = Some(candidate);
+                best = Some(signal_candidate);
             }
         }
-        if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
-            if remote_search_signal.len() < remote_dense_signal.len() {
-                for finalist in yaw_finalists {
-                    let (refined_yaw, mut refined_translation) = refine_height_map_alignment(
-                        local_map,
-                        remote_map,
-                        &remote_dense_signal,
-                        finalist.yaw_radians,
-                        finalist.translation,
-                    );
-                    refined_translation.y = floor_y;
-                    let candidate = score_full_alignment_solution(
-                        &local_signal_refs,
-                        &remote_signal_refs,
-                        Some(local_map),
-                        Some(remote_map),
-                        &remote_dense_signal,
-                        refined_yaw,
-                        refined_translation,
-                    );
-                    if best
-                        .as_ref()
-                        .is_none_or(|current| alignment_solution_better(&candidate, current))
-                    {
-                        best = Some(candidate);
-                    }
-                }
-            }
+        for signal_candidate in yaw_shortlist {
+            push_shortlisted_alignment_solution(
+                &mut shortlist,
+                signal_candidate,
+                XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_MAX_CANDIDATES,
+                XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_TRANSLATION_EPSILON_METERS,
+                XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_YAW_EPSILON_RADIANS,
+            );
         }
     }
+
     if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
-        if remote_search_signal.len() < remote_dense_signal.len() && !finalists.is_empty() {
-            for finalist in finalists {
-                let (refined_yaw, mut refined_translation) = refine_height_map_alignment(
+        if use_height_refine {
+            sample_diagnostic.shortlisted_pose_count = shortlist.len();
+            for signal_candidate in shortlist {
+                let height_refine_started = std::time::Instant::now();
+                let (refined_yaw, refined_translation) = refine_height_map_alignment(
                     local_map,
                     remote_map,
-                    &remote_dense_signal,
-                    finalist.yaw_radians,
-                    finalist.translation,
+                    &remote_refine_signal,
+                    signal_candidate.yaw_radians,
+                    signal_candidate.translation,
                 );
-                refined_translation.y = floor_y;
+                height_refine_time += height_refine_started.elapsed();
+
+                let final_score_started = std::time::Instant::now();
                 let candidate = score_full_alignment_solution(
                     &local_signal_refs,
                     &remote_signal_refs,
@@ -572,8 +538,9 @@ fn xr_depth_align_analyze_remote_to_local_seeded_internal(
                     Some(remote_map),
                     &remote_dense_signal,
                     refined_yaw,
-                    refined_translation,
+                    vec3(refined_translation.x, floor_y, refined_translation.z),
                 );
+                final_score_time += final_score_started.elapsed();
                 if best
                     .as_ref()
                     .is_none_or(|current| alignment_solution_better(&candidate, current))
@@ -583,6 +550,26 @@ fn xr_depth_align_analyze_remote_to_local_seeded_internal(
             }
         }
     }
+
+    if let (Some(candidate), Some(local_map), Some(remote_map)) = (best, local_map, remote_map) {
+        let wall_profile_started = std::time::Instant::now();
+        best = Some(refine_solution_with_wall_profile_yaw_sidecar(
+            &local_signal_refs,
+            &remote_signal_refs,
+            local_map,
+            remote_map,
+            &remote_dense_signal,
+            floor_y,
+            candidate,
+        ));
+        wall_profile_time += wall_profile_started.elapsed();
+    }
+    sample_diagnostic.translation_vote_ms = duration_ms_u32(translation_vote_time);
+    sample_diagnostic.signal_refine_ms = duration_ms_u32(signal_refine_time);
+    sample_diagnostic.signal_score_ms = duration_ms_u32(signal_score_time);
+    sample_diagnostic.height_refine_ms = duration_ms_u32(height_refine_time);
+    sample_diagnostic.final_score_ms = duration_ms_u32(final_score_time);
+    sample_diagnostic.wall_profile_ms = duration_ms_u32(wall_profile_time);
     sample_diagnostic.best_solution = best;
     sample_diagnostic
 }
@@ -592,8 +579,8 @@ pub fn xr_depth_align_rescore_remote_to_local(
     remote: &XrDepthAlignDescriptor,
     solution: XrDepthAlignSolution,
 ) -> XrDepthAlignSolution {
-    let local_signal = solver_selected_descriptor_signal_cells(local);
-    let remote_signal = solver_selected_descriptor_signal_cells(remote);
+    let local_signal = selected_descriptor_signal_cells(local);
+    let remote_signal = selected_descriptor_signal_cells(remote);
     let remote_dense_signal = descriptor_signal_cells(remote);
     if local_signal.is_empty() || remote_signal.is_empty() {
         return XrDepthAlignSolution {
@@ -709,59 +696,211 @@ fn transform_height_map(
     Some(transformed)
 }
 
-fn downsample_height_map(height_map: &XrDepthAlignHeightMap, factor: usize) -> Option<XrDepthAlignHeightMap> {
-    let factor = factor.max(1);
-    let size_x = height_map.size_x_usize();
-    let size_z = height_map.size_z_usize();
-    if factor <= 1 || size_x == 0 || size_z == 0 || height_map.heights_meters.len() != size_x * size_z {
-        return Some(height_map.clone());
+fn build_wall_profile_contour_points(height_map: &XrDepthAlignHeightMap) -> Vec<(f32, f32)> {
+    let coarse_cell = XR_DEPTH_ALIGN_WALL_PROFILE_CELL_METERS
+        .max(height_map.cell_size_meters)
+        .max(1.0e-3);
+    let size_x = ((height_map.extent_x_meters() / coarse_cell).ceil() as usize).max(1);
+    let size_z = ((height_map.extent_z_meters() / coarse_cell).ceil() as usize).max(1);
+    let mut occupied = vec![false; size_x * size_z];
+    let cutout_center = height_map.player_cutout_center;
+    let cutout_radius = (height_map.player_cutout_radius_meters + height_map.cell_size_meters)
+        .max(height_map.cell_size_meters * 2.0);
+    for src_z in 0..height_map.size_z_usize() {
+        for src_x in 0..height_map.size_x_usize() {
+            let index = height_map.cell_index(src_x, src_z);
+            let Some(height) = height_map_cell_height(height_map, index) else {
+                continue;
+            };
+            let world_x = height_map.origin_x + (src_x as f32 + 0.5) * height_map.cell_size_meters;
+            let world_z = height_map.origin_z + (src_z as f32 + 0.5) * height_map.cell_size_meters;
+            if cutout_center.is_some_and(|center| {
+                let dx = world_x - center.x;
+                let dz = world_z - center.y;
+                (dx * dx + dz * dz).sqrt() <= cutout_radius
+            }) {
+                continue;
+            }
+            let relative_height = height - height_map.floor_y_meters;
+            if relative_height < XR_DEPTH_ALIGN_WALL_PROFILE_MIN_HEIGHT_METERS
+                || relative_height > XR_DEPTH_ALIGN_WALL_PROFILE_MAX_HEIGHT_METERS
+            {
+                continue;
+            }
+            let coarse_x = ((world_x - height_map.origin_x) / coarse_cell)
+                .floor()
+                .clamp(0.0, size_x.saturating_sub(1) as f32) as usize;
+            let coarse_z = ((world_z - height_map.origin_z) / coarse_cell)
+                .floor()
+                .clamp(0.0, size_z.saturating_sub(1) as f32) as usize;
+            occupied[coarse_x + coarse_z * size_x] = true;
+        }
     }
-    let target_size_x = size_x.div_ceil(factor);
-    let target_size_z = size_z.div_ceil(factor);
-    if target_size_x == 0
-        || target_size_z == 0
-        || target_size_x > u16::MAX as usize
-        || target_size_z > u16::MAX as usize
-    {
-        return None;
-    }
-    let mut downsampled = XrDepthAlignHeightMap {
-        origin_x: height_map.origin_x,
-        origin_z: height_map.origin_z,
-        cell_size_meters: height_map.cell_size_meters * factor as f32,
-        size_x: target_size_x as u16,
-        size_z: target_size_z as u16,
-        bottom_y_meters: height_map.bottom_y_meters,
-        top_y_meters: height_map.top_y_meters,
-        floor_y_meters: height_map.floor_y_meters,
-        player_cutout_center: height_map.player_cutout_center,
-        player_cutout_radius_meters: height_map.player_cutout_radius_meters,
-        heights_meters: vec![f32::NAN; target_size_x * target_size_z],
-    };
-    for tz in 0..target_size_z {
-        for tx in 0..target_size_x {
-            let mut height_sum = 0.0;
-            let mut height_count = 0usize;
-            let start_x = tx * factor;
-            let start_z = tz * factor;
-            let end_x = (start_x + factor).min(size_x);
-            let end_z = (start_z + factor).min(size_z);
-            for z in start_z..end_z {
-                for x in start_x..end_x {
-                    let Some(height) = height_map_cell_height(height_map, height_map.cell_index(x, z)) else {
-                        continue;
-                    };
-                    height_sum += height;
-                    height_count += 1;
+
+    let mut contour_points = Vec::new();
+    for z in 0..size_z {
+        for x in 0..size_x {
+            let index = x + z * size_x;
+            if !occupied[index] {
+                continue;
+            }
+            let mut is_edge = false;
+            for (dx, dz) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
+                let nx = x as isize + dx;
+                let nz = z as isize + dz;
+                if nx < 0
+                    || nz < 0
+                    || nx >= size_x as isize
+                    || nz >= size_z as isize
+                    || !occupied[nx as usize + nz as usize * size_x]
+                {
+                    is_edge = true;
+                    break;
                 }
             }
-            if height_count != 0 {
-                let target_index = downsampled.cell_index(tx, tz);
-                downsampled.heights_meters[target_index] = height_sum / height_count as f32;
+            if is_edge {
+                contour_points.push((
+                    height_map.origin_x + (x as f32 + 0.5) * coarse_cell,
+                    height_map.origin_z + (z as f32 + 0.5) * coarse_cell,
+                ));
             }
         }
     }
-    Some(downsampled)
+    if contour_points.len() >= XR_DEPTH_ALIGN_WALL_PROFILE_MIN_POINTS {
+        contour_points
+    } else {
+        Vec::new()
+    }
+}
+
+fn projection_bounds(
+    local_points: &[(f32, f32)],
+    remote_points: &[(f32, f32)],
+    axis_x: f32,
+    axis_z: f32,
+) -> Option<ProjectionBounds> {
+    let mut min_projection = f32::INFINITY;
+    let mut max_projection = f32::NEG_INFINITY;
+    for &(x, z) in local_points.iter().chain(remote_points.iter()) {
+        let projection = x * axis_x + z * axis_z;
+        min_projection = min_projection.min(projection);
+        max_projection = max_projection.max(projection);
+    }
+    (min_projection.is_finite() && max_projection.is_finite()).then_some(ProjectionBounds {
+        min: min_projection,
+        max: max_projection,
+    })
+}
+
+fn projection_histogram_overlap(
+    local_points: &[(f32, f32)],
+    remote_points: &[(f32, f32)],
+    axis_x: f32,
+    axis_z: f32,
+    bin_size_meters: f32,
+) -> f32 {
+    let Some(bounds) = projection_bounds(local_points, remote_points, axis_x, axis_z) else {
+        return 0.0;
+    };
+    let bin_size = bin_size_meters.max(0.04);
+    let bin_count = (((bounds.max - bounds.min) / bin_size).ceil() as usize).max(1) + 1;
+    let mut local_hist = vec![0.0f32; bin_count];
+    let mut remote_hist = vec![0.0f32; bin_count];
+    for &(x, z) in local_points {
+        let projection = x * axis_x + z * axis_z;
+        let bin = ((projection - bounds.min) / bin_size)
+            .floor()
+            .clamp(0.0, bin_count.saturating_sub(1) as f32) as usize;
+        local_hist[bin] += 1.0;
+    }
+    for &(x, z) in remote_points {
+        let projection = x * axis_x + z * axis_z;
+        let bin = ((projection - bounds.min) / bin_size)
+            .floor()
+            .clamp(0.0, bin_count.saturating_sub(1) as f32) as usize;
+        remote_hist[bin] += 1.0;
+    }
+    let mut intersection = 0.0f32;
+    let mut union = 0.0f32;
+    for index in 0..bin_count {
+        intersection += local_hist[index].min(remote_hist[index]);
+        union += local_hist[index].max(remote_hist[index]);
+    }
+    intersection / union.max(1.0e-6)
+}
+
+fn score_wall_profile_alignment_at_translation(
+    local_points: &[(f32, f32)],
+    remote_points: &[(f32, f32)],
+    yaw: f32,
+    translation_x: f32,
+    translation_z: f32,
+    bin_size_meters: f32,
+) -> f32 {
+    if local_points.len() < XR_DEPTH_ALIGN_WALL_PROFILE_MIN_POINTS
+        || remote_points.len() < XR_DEPTH_ALIGN_WALL_PROFILE_MIN_POINTS
+    {
+        return 0.0;
+    }
+    let transformed_remote = remote_points
+        .iter()
+        .map(|&(x, z)| {
+            let (rx, rz) = rotate_xz(yaw, x, z);
+            (rx + translation_x, rz + translation_z)
+        })
+        .collect::<Vec<_>>();
+    let (axis_z, axis_x) = yaw.sin_cos();
+    let parallel = projection_histogram_overlap(
+        local_points,
+        &transformed_remote,
+        axis_x,
+        axis_z,
+        bin_size_meters,
+    );
+    let perpendicular = projection_histogram_overlap(
+        local_points,
+        &transformed_remote,
+        -axis_z,
+        axis_x,
+        bin_size_meters,
+    );
+    (parallel * perpendicular).sqrt()
+}
+
+fn score_wall_profile_alignment_with_translation_prior(
+    local_points: &[(f32, f32)],
+    remote_points: &[(f32, f32)],
+    yaw: f32,
+    base_translation: Vec3f,
+) -> f32 {
+    let step = XR_DEPTH_ALIGN_WALL_PROFILE_TRANSLATION_STEP_METERS.max(1.0e-3);
+    let window = XR_DEPTH_ALIGN_WALL_PROFILE_TRANSLATION_WINDOW_METERS.max(step);
+    let steps = (window / step).ceil().max(1.0) as isize;
+    let mut best = 0.0f32;
+    for x_step in -steps..=steps {
+        let translation_x = base_translation.x + x_step as f32 * step;
+        for z_step in -steps..=steps {
+            let translation_z = base_translation.z + z_step as f32 * step;
+            let translation_delta = ((translation_x - base_translation.x).powi(2)
+                + (translation_z - base_translation.z).powi(2))
+            .sqrt();
+            let prior = (-0.5
+                * (translation_delta / XR_DEPTH_ALIGN_WALL_PROFILE_TRANSLATION_SIGMA_METERS)
+                    .powi(2))
+            .exp()
+            .clamp(0.0, 1.0);
+            let score = score_wall_profile_alignment_at_translation(
+                local_points,
+                remote_points,
+                yaw,
+                translation_x,
+                translation_z,
+                XR_DEPTH_ALIGN_WALL_PROFILE_CELL_METERS,
+            ) * prior;
+            best = best.max(score);
+        }
+    }
+    best
 }
 
 fn transform_vertical_descriptor(
@@ -966,10 +1105,8 @@ fn build_height_map_signal_cells(height_map: &XrDepthAlignHeightMap) -> Vec<Heig
     signal
 }
 
-fn select_height_map_alignment_signal_cells_with_params(
+fn select_height_map_alignment_signal_cells(
     signal_cells: &[HeightMapSignalCell],
-    max_samples: usize,
-    min_spacing_meters: f32,
 ) -> Vec<HeightMapSignalCell> {
     let mut candidates = signal_cells.to_vec();
     candidates.sort_by(|a, b| b.weight.total_cmp(&a.weight));
@@ -978,12 +1115,12 @@ fn select_height_map_alignment_signal_cells_with_params(
         if selected.iter().any(|existing| {
             let delta = existing.point - candidate.point;
             (delta.x * delta.x + delta.z * delta.z).sqrt()
-                < min_spacing_meters
+                < XR_DEPTH_ALIGN_HEIGHT_MAP_MIN_SPACING_METERS
         }) {
             continue;
         }
         selected.push(candidate);
-        if selected.len() >= max_samples {
+        if selected.len() >= XR_DEPTH_ALIGN_HEIGHT_MAP_MAX_SAMPLES {
             break;
         }
     }
@@ -1018,6 +1155,17 @@ fn normalize_histogram(histogram: &mut [f32]) {
     }
 }
 
+fn decimate_signal_cells(
+    signal_cells: &[HeightMapSignalCell],
+    max_samples: usize,
+) -> Vec<HeightMapSignalCell> {
+    if signal_cells.len() <= max_samples {
+        return signal_cells.to_vec();
+    }
+    let stride = signal_cells.len().div_ceil(max_samples);
+    signal_cells.iter().copied().step_by(stride.max(1)).collect()
+}
+
 fn descriptor_signal_cells(descriptor: &XrDepthAlignDescriptor) -> Vec<HeightMapSignalCell> {
     descriptor
         .height_map
@@ -1029,50 +1177,7 @@ fn descriptor_signal_cells(descriptor: &XrDepthAlignDescriptor) -> Vec<HeightMap
 fn selected_descriptor_signal_cells(
     descriptor: &XrDepthAlignDescriptor,
 ) -> Vec<HeightMapSignalCell> {
-    select_height_map_alignment_signal_cells_with_params(
-        &descriptor_signal_cells(descriptor),
-        XR_DEPTH_ALIGN_HEIGHT_MAP_FINE_MAX_SAMPLES,
-        XR_DEPTH_ALIGN_HEIGHT_MAP_FINE_MIN_SPACING_METERS,
-    )
-}
-
-fn solver_selected_descriptor_signal_cells(
-    descriptor: &XrDepthAlignDescriptor,
-) -> Vec<HeightMapSignalCell> {
-    let Some(height_map) = descriptor.height_map.as_ref() else {
-        return selected_descriptor_signal_cells(descriptor);
-    };
-    if height_map.size_x_usize().min(height_map.size_z_usize())
-        < XR_DEPTH_ALIGN_SIGNAL_DOWNSAMPLE_MIN_MAP_DIM
-    {
-        return selected_descriptor_signal_cells(descriptor);
-    }
-    let Some(signal_map) =
-        downsample_height_map(height_map, XR_DEPTH_ALIGN_SIGNAL_DOWNSAMPLE_FACTOR)
-    else {
-        return selected_descriptor_signal_cells(descriptor);
-    };
-    let selected = select_height_map_alignment_signal_cells_with_params(
-        &build_height_map_signal_cells(&signal_map),
-        XR_DEPTH_ALIGN_HEIGHT_MAP_FINE_MAX_SAMPLES,
-        XR_DEPTH_ALIGN_HEIGHT_MAP_FINE_MIN_SPACING_METERS,
-    );
-    if selected.len() >= XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES {
-        selected
-    } else {
-        selected_descriptor_signal_cells(descriptor)
-    }
-}
-
-fn search_height_map_signal_cells(signal_cells: &[HeightMapSignalCell]) -> Vec<HeightMapSignalCell> {
-    if signal_cells.len() <= XR_DEPTH_ALIGN_HEIGHT_MAP_SEARCH_MAX_SAMPLES {
-        return signal_cells.to_vec();
-    }
-    select_height_map_alignment_signal_cells_with_params(
-        signal_cells,
-        XR_DEPTH_ALIGN_HEIGHT_MAP_SEARCH_MAX_SAMPLES,
-        XR_DEPTH_ALIGN_HEIGHT_MAP_SEARCH_MIN_SPACING_METERS,
-    )
+    select_height_map_alignment_signal_cells(&descriptor_signal_cells(descriptor))
 }
 
 fn sample_height_map_nearest(
@@ -1268,6 +1373,157 @@ fn score_full_alignment_solution(
     )
 }
 
+fn refine_translation_only_for_yaw(
+    local_signal: &[&HeightMapSignalCell],
+    remote_signal: &[&HeightMapSignalCell],
+    local_map: Option<&XrDepthAlignHeightMap>,
+    remote_map: Option<&XrDepthAlignHeightMap>,
+    remote_dense_signal: &[HeightMapSignalCell],
+    floor_y: f32,
+    initial: XrDepthAlignSolution,
+) -> XrDepthAlignSolution {
+    let mut best = initial;
+    for translation_step in [0.06, 0.025, 0.01] {
+        loop {
+            let mut improved = false;
+            for tx_delta in [-translation_step, 0.0, translation_step] {
+                for tz_delta in [-translation_step, 0.0, translation_step] {
+                    if tx_delta == 0.0 && tz_delta == 0.0 {
+                        continue;
+                    }
+                    let candidate = score_full_alignment_solution(
+                        local_signal,
+                        remote_signal,
+                        local_map,
+                        remote_map,
+                        remote_dense_signal,
+                        best.yaw_radians,
+                        vec3(
+                            best.translation.x + tx_delta,
+                            floor_y,
+                            best.translation.z + tz_delta,
+                        ),
+                    );
+                    if alignment_solution_better(&candidate, &best) {
+                        best = candidate;
+                        improved = true;
+                    }
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+    }
+    best
+}
+
+fn wall_profile_yaw_sidecar_is_safe(
+    current: XrDepthAlignSolution,
+    corrected: XrDepthAlignSolution,
+    current_profile_score: f32,
+    best_profile_score: f32,
+) -> bool {
+    let yaw_delta = wrap_angle(corrected.yaw_radians - current.yaw_radians).abs();
+    if yaw_delta < XR_DEPTH_ALIGN_WALL_PROFILE_MIN_YAW_DELTA_RADIANS {
+        return false;
+    }
+    if best_profile_score < current_profile_score + XR_DEPTH_ALIGN_WALL_PROFILE_MIN_SCORE_GAIN
+        && best_profile_score
+            < current_profile_score * XR_DEPTH_ALIGN_WALL_PROFILE_MIN_SCORE_RATIO
+    {
+        return false;
+    }
+    corrected.confidence
+        >= current.confidence * XR_DEPTH_ALIGN_WALL_PROFILE_MIN_CONFIDENCE_RATIO
+        && corrected.matched_samples + XR_DEPTH_ALIGN_WALL_PROFILE_MAX_MATCH_LOSS
+            >= current.matched_samples
+        && corrected.residual_meters.is_finite()
+        && current.residual_meters.is_finite()
+        && corrected.residual_meters
+            <= current.residual_meters + XR_DEPTH_ALIGN_WALL_PROFILE_MAX_RESIDUAL_INCREASE_METERS
+}
+
+fn refine_solution_with_wall_profile_yaw_sidecar(
+    local_signal: &[&HeightMapSignalCell],
+    remote_signal: &[&HeightMapSignalCell],
+    local_map: &XrDepthAlignHeightMap,
+    remote_map: &XrDepthAlignHeightMap,
+    remote_dense_signal: &[HeightMapSignalCell],
+    floor_y: f32,
+    current: XrDepthAlignSolution,
+) -> XrDepthAlignSolution {
+    let local_profile = build_wall_profile_contour_points(local_map);
+    let remote_profile = build_wall_profile_contour_points(remote_map);
+    if local_profile.len() < XR_DEPTH_ALIGN_WALL_PROFILE_MIN_POINTS
+        || remote_profile.len() < XR_DEPTH_ALIGN_WALL_PROFILE_MIN_POINTS
+    {
+        return current;
+    }
+
+    let current_profile_score = score_wall_profile_alignment_with_translation_prior(
+        &local_profile,
+        &remote_profile,
+        current.yaw_radians,
+        current.translation,
+    );
+    let mut best_profile_yaw = current.yaw_radians;
+    let mut best_profile_score = current_profile_score;
+    let yaw_step = XR_DEPTH_ALIGN_WALL_PROFILE_YAW_STEP_RADIANS;
+    let yaw_steps = (XR_DEPTH_ALIGN_WALL_PROFILE_YAW_WINDOW_RADIANS / yaw_step)
+        .ceil()
+        .max(1.0) as isize;
+    for yaw_index in -yaw_steps..=yaw_steps {
+        let yaw = wrap_angle(current.yaw_radians + yaw_index as f32 * yaw_step);
+        let score = score_wall_profile_alignment_with_translation_prior(
+            &local_profile,
+            &remote_profile,
+            yaw,
+            current.translation,
+        );
+        if score > best_profile_score {
+            best_profile_score = score;
+            best_profile_yaw = yaw;
+        }
+    }
+    if wrap_angle(best_profile_yaw - current.yaw_radians).abs()
+        < XR_DEPTH_ALIGN_WALL_PROFILE_MIN_YAW_DELTA_RADIANS
+    {
+        return current;
+    }
+
+    let corrected_initial = score_full_alignment_solution(
+        local_signal,
+        remote_signal,
+        Some(local_map),
+        Some(remote_map),
+        remote_dense_signal,
+        best_profile_yaw,
+        vec3(current.translation.x, floor_y, current.translation.z),
+    );
+    let corrected = refine_translation_only_for_yaw(
+        local_signal,
+        remote_signal,
+        Some(local_map),
+        Some(remote_map),
+        remote_dense_signal,
+        floor_y,
+        corrected_initial,
+    );
+    if alignment_solution_better(&corrected, &current)
+        || wall_profile_yaw_sidecar_is_safe(
+            current,
+            corrected,
+            current_profile_score,
+            best_profile_score,
+        )
+    {
+        corrected
+    } else {
+        current
+    }
+}
+
 fn height_map_score_better(candidate: (f32, f32, usize), current: (f32, f32, usize)) -> bool {
     candidate
         .0
@@ -1342,114 +1598,6 @@ fn refine_height_map_alignment(
         }
     }
     (best_yaw, best_translation)
-}
-
-fn refine_and_score_alignment_candidate(
-    local_signal: &[&HeightMapSignalCell],
-    remote_signal: &[&HeightMapSignalCell],
-    local_map: Option<&XrDepthAlignHeightMap>,
-    remote_map: Option<&XrDepthAlignHeightMap>,
-    remote_height_map_signal: &[HeightMapSignalCell],
-    floor_y: f32,
-    yaw: f32,
-    translation: Vec3f,
-) -> XrDepthAlignSolution {
-    let (mut refined_yaw, mut refined_translation) =
-        refine_signal_alignment(local_signal, remote_signal, floor_y, yaw, translation);
-    if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
-        if !remote_height_map_signal.is_empty() {
-            (refined_yaw, refined_translation) = refine_height_map_alignment(
-                local_map,
-                remote_map,
-                remote_height_map_signal,
-                refined_yaw,
-                refined_translation,
-            );
-            refined_translation.y = floor_y;
-        }
-    }
-    score_full_alignment_solution(
-        local_signal,
-        remote_signal,
-        local_map,
-        remote_map,
-        remote_height_map_signal,
-        refined_yaw,
-        refined_translation,
-    )
-}
-
-fn search_coarse_seed_neighborhood(
-    local_signal: &[&HeightMapSignalCell],
-    remote_signal: &[&HeightMapSignalCell],
-    local_map: Option<&XrDepthAlignHeightMap>,
-    remote_map: Option<&XrDepthAlignHeightMap>,
-    remote_search_signal: &[HeightMapSignalCell],
-    floor_y: f32,
-    seed: XrDepthAlignSolution,
-) -> Option<XrDepthAlignSolution> {
-    let mut best = None::<XrDepthAlignSolution>;
-    for yaw_offset in XR_DEPTH_ALIGN_COARSE_SEED_YAW_OFFSETS_RADIANS {
-        for tx_offset in XR_DEPTH_ALIGN_COARSE_SEED_TRANSLATION_OFFSETS_METERS {
-            for tz_offset in XR_DEPTH_ALIGN_COARSE_SEED_TRANSLATION_OFFSETS_METERS {
-                let candidate = refine_and_score_alignment_candidate(
-                    local_signal,
-                    remote_signal,
-                    local_map,
-                    remote_map,
-                    remote_search_signal,
-                    floor_y,
-                    wrap_angle(seed.yaw_radians + yaw_offset),
-                    vec3(
-                        seed.translation.x + tx_offset,
-                        floor_y,
-                        seed.translation.z + tz_offset,
-                    ),
-                );
-                if best
-                    .as_ref()
-                    .is_none_or(|current| alignment_solution_better(&candidate, current))
-                {
-                    best = Some(candidate);
-                }
-            }
-        }
-    }
-    best
-}
-
-fn rescore_alignment_candidate_with_full_height_map(
-    candidate: XrDepthAlignSolution,
-    local_signal: &[&HeightMapSignalCell],
-    remote_signal: &[&HeightMapSignalCell],
-    local_map: Option<&XrDepthAlignHeightMap>,
-    remote_map: Option<&XrDepthAlignHeightMap>,
-    remote_dense_signal: &[HeightMapSignalCell],
-    floor_y: f32,
-) -> Option<XrDepthAlignSolution> {
-    let (Some(local_map), Some(remote_map)) = (local_map, remote_map) else {
-        return None;
-    };
-    if remote_dense_signal.is_empty() {
-        return None;
-    }
-    let (refined_yaw, mut refined_translation) = refine_height_map_alignment(
-        local_map,
-        remote_map,
-        remote_dense_signal,
-        candidate.yaw_radians,
-        vec3(candidate.translation.x, floor_y, candidate.translation.z),
-    );
-    refined_translation.y = floor_y;
-    Some(score_full_alignment_solution(
-        local_signal,
-        remote_signal,
-        Some(local_map),
-        Some(remote_map),
-        remote_dense_signal,
-        refined_yaw,
-        refined_translation,
-    ))
 }
 
 fn candidate_signal_yaws(
@@ -1773,6 +1921,7 @@ fn refine_seed_alignment_solution(
     local_map: Option<&XrDepthAlignHeightMap>,
     remote_map: Option<&XrDepthAlignHeightMap>,
     remote_dense_signal: &[HeightMapSignalCell],
+    remote_refine_signal: &[HeightMapSignalCell],
     floor_y: f32,
     seed: XrDepthAlignSolution,
 ) -> XrDepthAlignSolution {
@@ -1780,11 +1929,11 @@ fn refine_seed_alignment_solution(
     let mut best_translation = seed.translation;
     best_translation.y = floor_y;
     if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
-        if !remote_dense_signal.is_empty() {
+        if !remote_refine_signal.is_empty() {
             (best_yaw, best_translation) = refine_height_map_alignment(
                 local_map,
                 remote_map,
-                remote_dense_signal,
+                remote_refine_signal,
                 best_yaw,
                 best_translation,
             );
@@ -1924,6 +2073,59 @@ fn dedupe_translations(translations: Vec<Vec3f>, step: f32) -> Vec<Vec3f> {
     deduped
 }
 
+fn alignment_solution_is_distinct(
+    candidate: XrDepthAlignSolution,
+    current: XrDepthAlignSolution,
+    translation_epsilon: f32,
+    yaw_epsilon: f32,
+) -> bool {
+    let translation_delta = vec3(
+        candidate.translation.x - current.translation.x,
+        0.0,
+        candidate.translation.z - current.translation.z,
+    )
+    .length();
+    let yaw_delta = wrap_angle(candidate.yaw_radians - current.yaw_radians).abs();
+    translation_delta > translation_epsilon || yaw_delta > yaw_epsilon
+}
+
+fn push_shortlisted_alignment_solution(
+    shortlist: &mut Vec<XrDepthAlignSolution>,
+    candidate: XrDepthAlignSolution,
+    max_candidates: usize,
+    translation_epsilon: f32,
+    yaw_epsilon: f32,
+) {
+    if shortlist.iter().any(|existing| {
+        !alignment_solution_is_distinct(candidate, *existing, translation_epsilon, yaw_epsilon)
+    }) {
+        if let Some(existing) = shortlist.iter_mut().find(|existing| {
+            !alignment_solution_is_distinct(candidate, **existing, translation_epsilon, yaw_epsilon)
+        }) {
+            if alignment_solution_better(&candidate, existing) {
+                *existing = candidate;
+            }
+        }
+    } else {
+        shortlist.push(candidate);
+    }
+    shortlist.sort_by(|left, right| {
+        right
+            .ranking_confidence()
+            .partial_cmp(&left.ranking_confidence())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.matched_samples.cmp(&left.matched_samples))
+            .then_with(|| {
+                left.residual_meters
+                    .partial_cmp(&right.residual_meters)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    if shortlist.len() > max_candidates {
+        shortlist.truncate(max_candidates);
+    }
+}
+
 fn quantize_translation_axis(value: f32, step: f32) -> i32 {
     (value / step.max(f32::EPSILON)).round() as i32
 }
@@ -1958,41 +2160,6 @@ fn alignment_solution_better(
         .is_gt()
 }
 
-fn push_alignment_finalist(
-    finalists: &mut Vec<XrDepthAlignSolution>,
-    candidate: XrDepthAlignSolution,
-    limit: usize,
-) {
-    for existing in finalists.iter_mut() {
-        let planar_delta = vec3(
-            existing.translation.x - candidate.translation.x,
-            0.0,
-            existing.translation.z - candidate.translation.z,
-        )
-        .length();
-        if planar_delta <= XR_DEPTH_ALIGN_FINALIST_TRANSLATION_EPSILON_METERS
-            && wrap_angle(existing.yaw_radians - candidate.yaw_radians).abs()
-                <= XR_DEPTH_ALIGN_FINALIST_YAW_EPSILON_RADIANS
-        {
-            if alignment_solution_better(&candidate, existing) {
-                *existing = candidate;
-            }
-            return;
-        }
-    }
-    finalists.push(candidate);
-    finalists.sort_by(|left, right| {
-        if alignment_solution_better(left, right) {
-            std::cmp::Ordering::Less
-        } else if alignment_solution_better(right, left) {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    });
-    finalists.truncate(limit.max(1));
-}
-
 fn align_safe_normalize(v: Vec3f) -> Option<Vec3f> {
     let len = v.length();
     (len > 0.0001).then_some(v * (1.0 / len))
@@ -2004,6 +2171,11 @@ fn yaw_rotation(yaw: f32) -> Quat {
 
 fn rotate_y(yaw: f32, vector: Vec3f) -> Vec3f {
     yaw_rotation(yaw).rotate_vec3(&vector)
+}
+
+fn rotate_xz(yaw: f32, x: f32, z: f32) -> (f32, f32) {
+    let (sin_yaw, cos_yaw) = yaw.sin_cos();
+    (x * cos_yaw - z * sin_yaw, x * sin_yaw + z * cos_yaw)
 }
 
 fn xz_axis(vector: Vec3f) -> Option<Vec3f> {
@@ -2029,7 +2201,6 @@ fn wrap_angle(mut angle: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::PathBuf};
 
     #[derive(Clone, Copy, Debug, Default)]
     struct HeightMapTestArtifacts {
@@ -2335,407 +2506,6 @@ mod tests {
                 heights_meters,
             }),
         }
-    }
-
-    #[derive(Clone, Copy, Debug, Default)]
-    struct ManualPose {
-        shift_x_meters: f32,
-        shift_y_meters: f32,
-        rotation_radians: f32,
-    }
-
-    #[derive(Clone, Debug)]
-    struct RealDumpCase {
-        stem: String,
-        local: XrDepthAlignDescriptor,
-        remote: XrDepthAlignDescriptor,
-        manual_pose: ManualPose,
-    }
-
-    fn legacy_solution_is_accepted(
-        diagnostic: &XrDepthAlignSolveDiagnostic,
-        solution: XrDepthAlignSolution,
-    ) -> bool {
-        solution.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES
-            && solution.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE
-            && (!diagnostic.local_vertical_descriptor
-                || !diagnostic.remote_vertical_descriptor
-                || solution.symmetry_confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE)
-    }
-
-    fn legacy_analyze_remote_to_local(
-        local: &XrDepthAlignDescriptor,
-        remote: &XrDepthAlignDescriptor,
-    ) -> XrDepthAlignSolveDiagnostic {
-        legacy_analyze_remote_to_local_seeded(local, remote, None)
-    }
-
-    fn legacy_analyze_remote_to_local_seeded(
-        local: &XrDepthAlignDescriptor,
-        remote: &XrDepthAlignDescriptor,
-        previous_solution: Option<XrDepthAlignSolution>,
-    ) -> XrDepthAlignSolveDiagnostic {
-        let local_signal = selected_descriptor_signal_cells(local);
-        let remote_signal = selected_descriptor_signal_cells(remote);
-        let remote_dense_signal = descriptor_signal_cells(remote);
-
-        let diagnostic = XrDepthAlignSolveDiagnostic {
-            local_vertical_descriptor: local.vertical_descriptor.is_some(),
-            remote_vertical_descriptor: remote.vertical_descriptor.is_some(),
-            local_wall_samples: local_signal.len(),
-            remote_wall_samples: remote_signal.len(),
-            ..XrDepthAlignSolveDiagnostic::default()
-        };
-
-        if local_signal.len() < XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES
-            || remote_signal.len() < XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES
-        {
-            return diagnostic;
-        }
-
-        let floor_y = local.floor_y - remote.floor_y;
-        let local_map = local.height_map.as_ref();
-        let remote_map = remote.height_map.as_ref();
-        let local_histogram = build_height_map_signal_histogram(
-            &local_signal,
-            XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS,
-        );
-        let remote_histogram = build_height_map_signal_histogram(
-            &remote_signal,
-            XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS,
-        );
-        let local_signal_refs = local_signal.iter().collect::<Vec<_>>();
-        let remote_signal_refs = remote_signal.iter().collect::<Vec<_>>();
-
-        let mut sample_diagnostic = diagnostic;
-        let seeded_candidate = previous_solution.map(|seed| {
-            sample_diagnostic.yaw_candidate_count += 1;
-            sample_diagnostic.pose_candidate_count += 1;
-            refine_seed_alignment_solution(
-                &local_signal_refs,
-                &remote_signal_refs,
-                local_map,
-                remote_map,
-                &remote_dense_signal,
-                floor_y,
-                seed,
-            )
-        });
-        if let (Some(seed), Some(candidate)) = (previous_solution, seeded_candidate) {
-            sample_diagnostic.best_solution = Some(candidate);
-            if seeded_alignment_lock_is_strong(
-                &sample_diagnostic,
-                candidate,
-                seed,
-                remote_signal.len(),
-                local_map,
-                remote_map,
-            ) {
-                return sample_diagnostic;
-            }
-        }
-
-        let mut best = seeded_candidate;
-        let yaw_candidates = candidate_signal_yaws(
-            &local_histogram,
-            &remote_histogram,
-            &local_signal,
-            &remote_signal,
-        );
-        sample_diagnostic.yaw_candidate_count = yaw_candidates.len();
-        for yaw in yaw_candidates {
-            let translations =
-                candidate_signal_translations(&local_signal, &remote_signal, floor_y, yaw);
-            sample_diagnostic.pose_candidate_count += translations.len();
-            for translation in translations {
-                let (mut refined_yaw, mut refined_translation) = refine_signal_alignment(
-                    &local_signal_refs,
-                    &remote_signal_refs,
-                    floor_y,
-                    yaw,
-                    translation,
-                );
-                if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
-                    if !remote_dense_signal.is_empty() {
-                        (refined_yaw, refined_translation) = refine_height_map_alignment(
-                            local_map,
-                            remote_map,
-                            &remote_dense_signal,
-                            refined_yaw,
-                            refined_translation,
-                        );
-                        refined_translation.y = floor_y;
-                    }
-                }
-                let candidate = score_full_alignment_solution(
-                    &local_signal_refs,
-                    &remote_signal_refs,
-                    local_map,
-                    remote_map,
-                    &remote_dense_signal,
-                    refined_yaw,
-                    refined_translation,
-                );
-                if best
-                    .as_ref()
-                    .is_none_or(|current| alignment_solution_better(&candidate, current))
-                {
-                    best = Some(candidate);
-                }
-            }
-        }
-        sample_diagnostic.best_solution = best;
-        sample_diagnostic
-    }
-
-    fn real_dump_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("util/dumps")
-    }
-
-    fn load_manual_pose(path: &PathBuf) -> Option<ManualPose> {
-        let text = fs::read_to_string(path).ok()?;
-        let mut pose = ManualPose::default();
-        for line in text.lines() {
-            let (key, value) = line.split_once(':')?;
-            let value = value.trim();
-            match key.trim() {
-                "shift_x_meters" => pose.shift_x_meters = value.parse().ok()?,
-                "shift_y_meters" => pose.shift_y_meters = value.parse().ok()?,
-                "rotation_radians" => pose.rotation_radians = value.parse().ok()?,
-                _ => {}
-            }
-        }
-        Some(pose)
-    }
-
-    fn load_real_dump_cases() -> Vec<RealDumpCase> {
-        let dump_dir = real_dump_dir();
-        let mut sidecars = fs::read_dir(&dump_dir)
-            .expect("dump dir should exist")
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with(".manual_pose.ron"))
-            })
-            .collect::<Vec<_>>();
-        sidecars.sort();
-        sidecars
-            .into_iter()
-            .filter_map(|sidecar_path| {
-                let stem = sidecar_path.file_name()?.to_str()?.strip_suffix(".manual_pose.ron")?;
-                let dump_path = dump_dir.join(format!("{stem}.bin"));
-                let bytes = fs::read(&dump_path).ok()?;
-                let pair = XrNetAlignmentDescriptorDumpPair::from_file_bytes(&bytes)?;
-                Some(RealDumpCase {
-                    stem: stem.to_string(),
-                    local: pair.local_descriptor.descriptor,
-                    remote: pair.remote_descriptor.descriptor,
-                    manual_pose: load_manual_pose(&sidecar_path)?,
-                })
-            })
-            .collect()
-    }
-
-    fn load_named_real_dump_case(name_fragment: &str) -> RealDumpCase {
-        load_real_dump_cases()
-            .into_iter()
-            .find(|case| case.stem.contains(name_fragment))
-            .unwrap_or_else(|| panic!("missing annotated dump containing {name_fragment}"))
-    }
-
-    fn manual_pose_seed(
-        local: &XrDepthAlignDescriptor,
-        remote: &XrDepthAlignDescriptor,
-        pose: ManualPose,
-    ) -> XrDepthAlignSolution {
-        XrDepthAlignSolution {
-            yaw_radians: pose.rotation_radians,
-            translation: vec3(
-                pose.shift_x_meters,
-                local.floor_y - remote.floor_y,
-                pose.shift_y_meters,
-            ),
-            confidence: 0.0,
-            symmetry_confidence: 0.0,
-            residual_meters: f32::INFINITY,
-            matched_samples: 0,
-        }
-    }
-
-    fn planar_error(solution: XrDepthAlignSolution, pose: ManualPose) -> f32 {
-        let dx = solution.translation.x - pose.shift_x_meters;
-        let dz = solution.translation.z - pose.shift_y_meters;
-        (dx * dx + dz * dz).sqrt()
-    }
-
-    fn print_case_comparison(case: &RealDumpCase) {
-        let current = xr_depth_align_analyze_remote_to_local(&case.local, &case.remote);
-        let legacy = legacy_analyze_remote_to_local(&case.local, &case.remote);
-        let manual_seed = manual_pose_seed(&case.local, &case.remote, case.manual_pose);
-        let manual_scored =
-            xr_depth_align_rescore_remote_to_local(&case.local, &case.remote, manual_seed);
-
-        let current_best = current.best_solution.expect("current solver should produce a best");
-        let legacy_best = legacy.best_solution.expect("legacy solver should produce a best");
-
-        let current_planar = planar_error(current_best, case.manual_pose);
-        let legacy_planar = planar_error(legacy_best, case.manual_pose);
-        let current_yaw = angle_error(current_best.yaw_radians, case.manual_pose.rotation_radians);
-        let legacy_yaw = angle_error(legacy_best.yaw_radians, case.manual_pose.rotation_radians);
-
-        println!("dump {}", case.stem);
-        println!(
-            "  manual: yaw {:.1} deg | translation ({:.3}, {:.3}) | rescored conf {:.3} sym {:.3} residual {:.3} matched {}",
-            case.manual_pose.rotation_radians.to_degrees(),
-            case.manual_pose.shift_x_meters,
-            case.manual_pose.shift_y_meters,
-            manual_scored.confidence,
-            manual_scored.symmetry_confidence,
-            manual_scored.residual_meters,
-            manual_scored.matched_samples,
-        );
-        println!(
-            "  current: yaw {:.1} deg | dxz {:.3} m | dyaw {:.1} deg | conf {:.3} sym {:.3} residual {:.3} matched {} | accepted {}",
-            current_best.yaw_radians.to_degrees(),
-            current_planar,
-            current_yaw.to_degrees(),
-            current_best.confidence,
-            current_best.symmetry_confidence,
-            current_best.residual_meters,
-            current_best.matched_samples,
-            current.accepted_solution().is_some(),
-        );
-        println!(
-            "  legacy:  yaw {:.1} deg | dxz {:.3} m | dyaw {:.1} deg | conf {:.3} sym {:.3} residual {:.3} matched {} | accepted {}",
-            legacy_best.yaw_radians.to_degrees(),
-            legacy_planar,
-            legacy_yaw.to_degrees(),
-            legacy_best.confidence,
-            legacy_best.symmetry_confidence,
-            legacy_best.residual_meters,
-            legacy_best.matched_samples,
-            legacy
-                .best_solution
-                .is_some_and(|solution| legacy_solution_is_accepted(&legacy, solution)),
-        );
-    }
-
-    fn print_current_case(case: &RealDumpCase) {
-        let current = xr_depth_align_analyze_remote_to_local(&case.local, &case.remote);
-        let manual_seed = manual_pose_seed(&case.local, &case.remote, case.manual_pose);
-        let manual_scored =
-            xr_depth_align_rescore_remote_to_local(&case.local, &case.remote, manual_seed);
-        let current_best = current.best_solution.expect("current solver should produce a best");
-        let current_planar = planar_error(current_best, case.manual_pose);
-        let current_yaw = angle_error(current_best.yaw_radians, case.manual_pose.rotation_radians);
-        println!("dump {}", case.stem);
-        println!(
-            "  manual: yaw {:.1} deg | translation ({:.3}, {:.3}) | rescored conf {:.3} sym {:.3} residual {:.3} matched {}",
-            case.manual_pose.rotation_radians.to_degrees(),
-            case.manual_pose.shift_x_meters,
-            case.manual_pose.shift_y_meters,
-            manual_scored.confidence,
-            manual_scored.symmetry_confidence,
-            manual_scored.residual_meters,
-            manual_scored.matched_samples,
-        );
-        println!(
-            "  current: yaw {:.1} deg | dxz {:.3} m | dyaw {:.1} deg | conf {:.3} sym {:.3} residual {:.3} matched {} | accepted {}",
-            current_best.yaw_radians.to_degrees(),
-            current_planar,
-            current_yaw.to_degrees(),
-            current_best.confidence,
-            current_best.symmetry_confidence,
-            current_best.residual_meters,
-            current_best.matched_samples,
-            current.accepted_solution().is_some(),
-        );
-    }
-
-    #[test]
-    #[ignore = "manual dump benchmark"]
-    fn print_current_real_dump_alignment_all() {
-        let cases = load_real_dump_cases();
-        assert!(!cases.is_empty(), "expected annotated dumps");
-        for case in &cases {
-            print_current_case(case);
-        }
-    }
-
-    #[test]
-    #[ignore = "manual dump benchmark"]
-    fn print_real_dump_alignment_benchmark() {
-        let cases = load_real_dump_cases();
-        assert!(
-            !cases.is_empty(),
-            "expected at least one annotated dump in {}",
-            real_dump_dir().display()
-        );
-
-        let mut current_better = 0usize;
-        let mut legacy_better = 0usize;
-        let mut tied = 0usize;
-
-        for case in cases {
-            let current = xr_depth_align_analyze_remote_to_local(&case.local, &case.remote);
-            let legacy = legacy_analyze_remote_to_local(&case.local, &case.remote);
-
-            let current_best = current.best_solution.expect("current solver should produce a best");
-            let legacy_best = legacy.best_solution.expect("legacy solver should produce a best");
-
-            let current_planar = planar_error(current_best, case.manual_pose);
-            let legacy_planar = planar_error(legacy_best, case.manual_pose);
-            let current_yaw = angle_error(current_best.yaw_radians, case.manual_pose.rotation_radians);
-            let legacy_yaw = angle_error(legacy_best.yaw_radians, case.manual_pose.rotation_radians);
-            let current_metric = current_planar + current_yaw * 0.35;
-            let legacy_metric = legacy_planar + legacy_yaw * 0.35;
-
-            if current_metric + 1.0e-4 < legacy_metric {
-                current_better += 1;
-            } else if legacy_metric + 1.0e-4 < current_metric {
-                legacy_better += 1;
-            } else {
-                tied += 1;
-            }
-
-            print_case_comparison(&case);
-        }
-
-        println!(
-            "summary: current_better {} | legacy_better {} | tied {}",
-            current_better,
-            legacy_better,
-            tied,
-        );
-    }
-
-    #[test]
-    #[ignore = "manual dump benchmark"]
-    fn print_real_dump_alignment_benchmark_r0218() {
-        let case = load_named_real_dump_case("r0218");
-        print_case_comparison(&case);
-    }
-
-    #[test]
-    #[ignore = "manual dump benchmark"]
-    fn print_real_dump_alignment_benchmark_r0062() {
-        let case = load_named_real_dump_case("r0062");
-        print_case_comparison(&case);
-    }
-
-    #[test]
-    #[ignore = "manual dump benchmark"]
-    fn print_current_real_dump_alignment_r0218() {
-        let case = load_named_real_dump_case("r0218");
-        print_current_case(&case);
-    }
-
-    #[test]
-    #[ignore = "manual dump benchmark"]
-    fn print_current_real_dump_alignment_r0062() {
-        let case = load_named_real_dump_case("r0062");
-        print_current_case(&case);
     }
 
     #[test]
