@@ -1656,22 +1656,31 @@ impl App {
             self.last_frame_cpu_text = frame_cpu_text;
         }
 
-        let (tsdf_memory_mb, tsdf_fill_percent) = cx
+        let (tsdf_memory_mb, tsdf_fill_percent, tsdf_bytes_per_active_voxel) = cx
             .xr_tsdf()
             .latest_tsdf_snapshot()
             .as_ref()
             .map(|snapshot| {
                 let grid = &snapshot.grid;
+                let heap_bytes = grid.heap_bytes() as f64;
                 let allocated_voxels = grid.chunk_count().saturating_mul(grid.chunk_volume);
                 let fill_percent = if allocated_voxels == 0 {
                     0.0
                 } else {
                     grid.active_value_count as f64 * 100.0 / allocated_voxels as f64
                 };
-                (grid.heap_bytes() as f64 / 1_000_000.0, fill_percent)
+                let bytes_per_active_voxel = if grid.active_value_count == 0 {
+                    0.0
+                } else {
+                    heap_bytes / grid.active_value_count as f64
+                };
+                (heap_bytes / 1_000_000.0, fill_percent, bytes_per_active_voxel)
             })
-            .unwrap_or((0.0, 0.0));
-        let tsdf_debug_text = format!("{:.1} MB | occ {:.0}%", tsdf_memory_mb, tsdf_fill_percent);
+            .unwrap_or((0.0, 0.0, 0.0));
+        let tsdf_debug_text = format!(
+            "{:.1} MB | occ {:.0}% | {:.1} B/active",
+            tsdf_memory_mb, tsdf_fill_percent, tsdf_bytes_per_active_voxel
+        );
         let (depth_frames_seen, depth_frames_dropped) = cx
             .xr_tsdf()
             .state()
