@@ -7,6 +7,7 @@ description = "Reusable XR scene components for Makepad"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+makepad-lz4 = { path = "../libs/lz4", version = "0.1.0" }
 makepad-widgets = { path = "../widgets", version = "2.0.0" }
 makepad-gltf = { path = "../libs/gltf", version = "1.0.0" }
 makepad-splat = { path = "../libs/splat", version = "1.0.0" }

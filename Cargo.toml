@@ -53,6 +53,7 @@ workspace.members = [
     "libs/openexr",
     "libs/git",
     "libs/fast_inflate",
+    "libs/lz4",
     "xr",
     "libs/cef",
 ]
