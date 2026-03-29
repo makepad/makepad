@@ -661,118 +661,99 @@ script_mod! {
 
                             SolidView{
                                 width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                height: Fit
+                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                 draw_bg.color: #x0d1824
 
                                 peer_sync_status_field := Label{
                                     width: Fill
                                     text: "AlignSync: off"
                                     draw_text.color: #xe8f4ff
+                                    draw_text.flow: Flow.Right{wrap: true}
                                 }
                             }
 
                             SolidView{
                                 width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                                draw_bg.color: #x0d1824
-
-                                network_status_field := Label{
-                                    width: Fill
-                                    text: "Network: off"
-                                    draw_text.color: #x9ec8e8
-                                }
-                            }
-
-                            SolidView{
-                                width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                                draw_bg.color: #x0d1824
-
-                                peer_scene_field := Label{
-                                    width: Fill
-                                    text: "PeerScene: off"
-                                    draw_text.color: #xffd29a
-                                }
-                            }
-
-                            SolidView{
-                                width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                height: Fit
+                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                 draw_bg.color: #x0d1824
 
                                 alignment_state_field := Label{
                                     width: Fill
                                     text: "AlignState: off"
                                     draw_text.color: #xfff1ab
+                                    draw_text.flow: Flow.Right{wrap: true}
                                 }
                             }
 
                             SolidView{
                                 width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                height: Fit
+                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                 draw_bg.color: #x0d1824
 
                                 alignment_debug_field := Label{
                                     width: Fill
                                     text: "AlignDbg: off"
                                     draw_text.color: #xffd29a
+                                    draw_text.flow: Flow.Right{wrap: true}
                                 }
                             }
 
                             SolidView{
                                 width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                height: Fit
+                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                 draw_bg.color: #x0d1824
 
                                 physics_geom_field := Label{
                                     width: Fill
                                     text: "Physics geometry: waiting for frame"
                                     draw_text.color: #xe8f4ff
+                                    draw_text.flow: Flow.Right{wrap: true}
                                 }
                             }
 
                             SolidView{
                                 width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                height: Fit
+                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                 draw_bg.color: #x0d1824
 
                                 physics_timing_field := Label{
                                     width: Fill
                                     text: "Physics compute: waiting for frame"
                                     draw_text.color: #xe8f4ff
+                                    draw_text.flow: Flow.Right{wrap: true}
                                 }
                             }
 
                             SolidView{
                                 width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                height: Fit
+                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                 draw_bg.color: #x0d1824
 
                                 frame_cpu_field := Label{
                                     width: Fill
                                     text: "CPU frame: waiting for frame"
                                     draw_text.color: #xe8f4ff
+                                    draw_text.flow: Flow.Right{wrap: true}
                                 }
                             }
 
                             SolidView{
                                 width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                height: Fit
+                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                 draw_bg.color: #x0d1824
 
                                 xr_runtime_field := Label{
                                     width: Fill
                                     text: "XR render scale: waiting for XR session"
                                     draw_text.color: #xe8f4ff
+                                    draw_text.flow: Flow.Right{wrap: true}
                                 }
                             }
                         }
@@ -806,14 +787,15 @@ script_mod! {
 
                             SolidView{
                                 width: Fill
-                                height: 32
-                                padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
+                                height: Fit
+                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                 draw_bg.color: #x102031
 
                                 dump_status_field := Label{
                                     width: Fill
                                     text: "Dump: waiting for local + peer heightmaps"
                                     draw_text.color: #xd7e7f6
+                                    draw_text.flow: Flow.Right{wrap: true}
                                 }
                             }
 
@@ -1374,10 +1356,6 @@ pub struct App {
     #[rust]
     last_peer_sync_status_text: String,
     #[rust]
-    last_network_status_text: String,
-    #[rust]
-    last_peer_scene_text: String,
-    #[rust]
     last_alignment_state_text: String,
     #[rust]
     last_alignment_debug_text: String,
@@ -1557,10 +1535,8 @@ impl App {
         };
         let (
             peer_sync_status_text,
-            network_status_text,
             alignment_debug_text,
             alignment_state_text,
-            peer_scene_text,
             remote_height_map,
         ) = self
             .ui
@@ -1569,20 +1545,16 @@ impl App {
             .map(|people_debug| {
                 (
                     people_debug.status_text().to_string(),
-                    people_debug.network_status_text().to_string(),
                     people_debug.alignment_debug_text().to_string(),
                     people_debug.alignment_state_text().to_string(),
-                    people_debug.peer_scene_text().to_string(),
                     people_debug.raw_peer_height_map(),
                 )
             })
             .unwrap_or_else(|| {
                 (
                     "AlignSync: unavailable".to_string(),
-                    "Network: unavailable".to_string(),
                     "AlignDbg: unavailable".to_string(),
                     "AlignState: unavailable".to_string(),
-                    "PeerMap: unavailable".to_string(),
                     None,
                 )
             });
@@ -1605,12 +1577,6 @@ impl App {
                 .set_text(cx, &peer_sync_status_text);
             self.last_peer_sync_status_text = peer_sync_status_text;
         }
-        if self.last_network_status_text != network_status_text {
-            self.ui
-                .widget(cx, ids!(network_status_field))
-                .set_text(cx, &network_status_text);
-            self.last_network_status_text = network_status_text;
-        }
         if self.last_alignment_debug_text != alignment_debug_text {
             self.ui
                 .widget(cx, ids!(alignment_debug_field))
@@ -1622,12 +1588,6 @@ impl App {
                 .widget(cx, ids!(alignment_state_field))
                 .set_text(cx, &alignment_state_text);
             self.last_alignment_state_text = alignment_state_text;
-        }
-        if self.last_peer_scene_text != peer_scene_text {
-            self.ui
-                .widget(cx, ids!(peer_scene_field))
-                .set_text(cx, &peer_scene_text);
-            self.last_peer_scene_text = peer_scene_text;
         }
         let geometry_text = format!(
             "Physics geometry: {} planes, {} vertices, {} triangles",

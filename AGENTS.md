@@ -2,6 +2,7 @@
 
 ## Execution Policy
 - Visual UI programs must be launched and controlled through the Makepad Studio remote protocol.
+- Always use release builds for runtime validation, profiling, benchmarks, timing checks, or any performance-sensitive command. Use `--release` unless the user explicitly asks for a debug build.
 - Do not use mount observation or runnable discovery from the bridge client. The bridge must not claim mount ownership from Studio desktop.
 - Do not launch UI programs with raw `cargo run`, `cargo makepad`, or ad hoc cargo invocation when a runnable item exists.
 - Do not use bridge `Cargo` requests to run applications. Only launch apps from runnable items via bridge `RunItem`.
@@ -135,6 +136,8 @@ Use the Studio bridge runnable-item flow instead of launching UI apps directly f
 Do not use `ObserveMount` from the bridge. That call is for mount ownership/subscription and can steal RunView/framebuffer routing away from Studio desktop.
 
 Use direct shell cargo commands only for non-UI tasks such as `check`, `build`, `test`, and file/search operations. They are not a substitute for a fresh Studio re-run.
+
+When those non-UI tasks are used for runtime behavior or performance measurements, prefer their release variants (`cargo run --release`, `cargo test --release`, `cargo build --release`).
 
 ## Cargo.toml Setup
 

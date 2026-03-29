@@ -59,6 +59,8 @@ const DEPTH_PLAYER_EXCLUDE_TOP_METERS: f32 = 0.12;
 const DEPTH_PLAYER_EXCLUDE_BOTTOM_METERS: f32 = 1.30;
 const DEPTH_MESH_UPDATE_DISTANCE_METERS: f32 = 4.0;
 const DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS: u64 = 8;
+const DEPTH_COOPERATIVE_STEP_INTERVAL_MILLIS: u64 = 8;
+const DEPTH_COOPERATIVE_IDLE_POLL_INTERVAL_MILLIS: u64 = 33;
 const DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS: u64 = 1000;
 const DEPTH_PROJECTED_HEIGHT_REFRESH_INTERVAL_MILLIS: u64 = 33;
 const DEPTH_ALIGN_HEIGHT_MAP_BOUNDS_PADDING_METERS: f32 = 0.45;
@@ -1111,8 +1113,9 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
     let mut preprocess_state = DepthPreprocessWorkerState::default();
     let mut volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, store.voxel_size_meters());
     let mut next_height_map_slice_at = Instant::now();
-    let mut next_height_map_publish_at = next_height_map_slice_at
-        + Duration::from_millis(DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS);
+    let mut next_height_map_publish_at =
+        next_height_map_slice_at + matched_height_map_publish_interval(&store);
+    let mut next_cooperative_step_at = next_height_map_slice_at;
     let mut applied_reset_generation = store.reset_generation();
     let mut pending_depth_candidate = None::<PendingDepthCandidate>;
     let mut last_depth_integration_at = None::<Instant>;
@@ -1121,8 +1124,9 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
         if (volume.voxel_size_meters - configured_voxel_size).abs() > f32::EPSILON {
             volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, configured_voxel_size);
             next_height_map_slice_at = Instant::now();
-            next_height_map_publish_at = next_height_map_slice_at
-                + Duration::from_millis(DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS);
+            next_height_map_publish_at =
+                next_height_map_slice_at + matched_height_map_publish_interval(&store);
+            next_cooperative_step_at = next_height_map_slice_at;
             pending_depth_candidate = None;
             last_depth_integration_at = None;
         }
@@ -1131,8 +1135,9 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
             applied_reset_generation = requested_reset_generation;
             volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, configured_voxel_size);
             next_height_map_slice_at = Instant::now();
-            next_height_map_publish_at = next_height_map_slice_at
-                + Duration::from_millis(DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS);
+            next_height_map_publish_at =
+                next_height_map_slice_at + matched_height_map_publish_interval(&store);
+            next_cooperative_step_at = next_height_map_slice_at;
             pending_depth_candidate = None;
             last_depth_integration_at = None;
         }
@@ -1199,8 +1204,7 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
             sync_projected_height_field_player_cutout(&mut volume);
         } else {
             next_height_map_slice_at = now;
-            next_height_map_publish_at =
-                now + Duration::from_millis(DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS);
+            next_height_map_publish_at = now + matched_height_map_publish_interval(&store);
             volume.projected_height_publish_pending = false;
         }
         let mut slice_credits = 0usize;
@@ -1229,8 +1233,7 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
                     || volume.published_height_map.is_none())
             {
                 while now >= next_height_map_publish_at {
-                    next_height_map_publish_at +=
-                        Duration::from_millis(DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS);
+                    next_height_map_publish_at += matched_height_map_publish_interval(&store);
                 }
                 volume.projected_height_publish_pending = false;
                 update_published_height_map(&mut volume)
@@ -1248,6 +1251,32 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
             volume.clear_published_tsdf_dirty_state();
             SignalToUI::set_ui_signal();
         }
+
+        let now = Instant::now();
+        if now >= next_cooperative_step_at {
+            let schedule_fast = store
+                .run_cooperative_step()
+                .is_some_and(|result| result.did_work || result.has_more_work);
+            next_cooperative_step_at = now
+                + Duration::from_millis(if schedule_fast {
+                    DEPTH_COOPERATIVE_STEP_INTERVAL_MILLIS
+                } else {
+                    DEPTH_COOPERATIVE_IDLE_POLL_INTERVAL_MILLIS
+                });
+        }
+    }
+}
+
+fn matched_height_map_publish_interval(store: &XrTsdfStore) -> Duration {
+    let base = Duration::from_millis(DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS);
+    let stats = store.cooperative_step_stats();
+    let cycle_micros = stats
+        .average_cycle_micros
+        .max(stats.last_cycle_micros);
+    if cycle_micros == 0 {
+        base
+    } else {
+        base.max(Duration::from_micros(cycle_micros))
     }
 }
 

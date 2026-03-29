@@ -140,6 +140,9 @@ pub struct XrDepthAlignSolveDiagnostic {
     pub height_refine_ms: u32,
     pub final_score_ms: u32,
     pub wall_profile_ms: u32,
+    pub total_compute_ms: u32,
+    pub step_count: u32,
+    pub max_step_ms: u32,
     pub best_solution: Option<XrDepthAlignSolution>,
 }
 
@@ -397,234 +400,7 @@ pub fn xr_depth_align_analyze_remote_to_local_seeded(
     remote: &XrDepthAlignDescriptor,
     previous_solution: Option<XrDepthAlignSolution>,
 ) -> XrDepthAlignSolveDiagnostic {
-    let signal_build_started = std::time::Instant::now();
-    let local_signal = selected_descriptor_signal_cells(local);
-    let remote_signal = selected_descriptor_signal_cells(remote);
-    let remote_dense_signal = descriptor_dense_signal_cells(remote);
-    let remote_refine_signal =
-        decimate_signal_cells(&remote_dense_signal, XR_DEPTH_ALIGN_HEIGHT_REFINE_MAX_DENSE_SAMPLES);
-    let signal_build_ms = duration_ms_u32(signal_build_started.elapsed());
-
-    let diagnostic = XrDepthAlignSolveDiagnostic {
-        local_vertical_descriptor: local.vertical_descriptor.is_some(),
-        remote_vertical_descriptor: remote.vertical_descriptor.is_some(),
-        local_wall_samples: local_signal.len(),
-        remote_wall_samples: remote_signal.len(),
-        remote_dense_wall_samples: remote_dense_signal.len(),
-        remote_refine_wall_samples: remote_refine_signal.len(),
-        signal_build_ms,
-        ..XrDepthAlignSolveDiagnostic::default()
-    };
-
-    if local_signal.len() < XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES
-        || remote_signal.len() < XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES
-    {
-        return diagnostic;
-    }
-
-    let floor_y = local.floor_y - remote.floor_y;
-    let local_map = local.height_map.as_ref();
-    let local_sample_cache = local_map.and_then(build_height_map_sample_cache);
-    let remote_map = remote.height_map.as_ref();
-    let local_histogram =
-        build_height_map_signal_histogram(&local_signal, XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS);
-    let remote_histogram =
-        build_height_map_signal_histogram(&remote_signal, XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS);
-    let local_signal_refs = local_signal.iter().collect::<Vec<_>>();
-    let remote_signal_refs = remote_signal.iter().collect::<Vec<_>>();
-    let mut translation_vote_time = std::time::Duration::ZERO;
-    let mut signal_refine_time = std::time::Duration::ZERO;
-    let mut signal_score_time = std::time::Duration::ZERO;
-    let mut height_refine_time = std::time::Duration::ZERO;
-    let mut final_score_time = std::time::Duration::ZERO;
-    let mut wall_profile_time = std::time::Duration::ZERO;
-
-    let mut sample_diagnostic = diagnostic;
-    let seeded_candidate = previous_solution.map(|seed| {
-        sample_diagnostic.yaw_candidate_count += 1;
-        sample_diagnostic.pose_candidate_count += 1;
-        let candidate = refine_seed_alignment_solution(
-            &local_signal_refs,
-            &remote_signal_refs,
-            local_map,
-            local_sample_cache.as_ref(),
-            remote_map,
-            &remote_dense_signal,
-            &remote_refine_signal,
-            floor_y,
-            seed,
-        );
-        if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
-            let wall_profile_started = std::time::Instant::now();
-            let refined = refine_solution_with_wall_profile_yaw_sidecar(
-                &local_signal_refs,
-                &remote_signal_refs,
-                local_map,
-                local_sample_cache.as_ref(),
-                remote_map,
-                &remote_dense_signal,
-                floor_y,
-                candidate,
-            );
-            wall_profile_time += wall_profile_started.elapsed();
-            refine_solution_vertical_offset_from_overlap(
-                local_map,
-                remote_map,
-                &remote_dense_signal,
-                refined,
-            )
-        } else {
-            candidate
-        }
-    });
-    if let (Some(seed), Some(candidate)) = (previous_solution, seeded_candidate) {
-        sample_diagnostic.best_solution = Some(candidate);
-        if seeded_alignment_lock_is_strong(
-            &sample_diagnostic,
-            candidate,
-            seed,
-            remote_signal.len(),
-            local_map,
-            remote_map,
-        ) {
-            return sample_diagnostic;
-        }
-    }
-
-    let mut best = seeded_candidate;
-    let yaw_candidates_started = std::time::Instant::now();
-    let yaw_candidates = candidate_signal_yaws(
-        &local_histogram,
-        &remote_histogram,
-        &local_signal,
-        &remote_signal,
-    );
-    sample_diagnostic.yaw_candidate_ms = duration_ms_u32(yaw_candidates_started.elapsed());
-    sample_diagnostic.yaw_candidate_count = yaw_candidates.len();
-
-    // Rank poses cheaply on sparse wall signal first, then spend dense-map refinement
-    // only on a bounded shortlist.
-    let use_height_refine =
-        local_map.is_some() && remote_map.is_some() && !remote_refine_signal.is_empty();
-    let mut shortlist = Vec::<XrDepthAlignSolution>::new();
-    for yaw in yaw_candidates {
-        let translation_started = std::time::Instant::now();
-        let translations =
-            candidate_signal_translations(&local_signal, &remote_signal, floor_y, yaw);
-        translation_vote_time += translation_started.elapsed();
-        sample_diagnostic.pose_candidate_count += translations.len();
-        let mut yaw_shortlist = Vec::<XrDepthAlignSolution>::new();
-        for translation in translations {
-            let signal_refine_started = std::time::Instant::now();
-            let (refined_yaw, refined_translation) = refine_signal_alignment(
-                &local_signal_refs,
-                &remote_signal_refs,
-                floor_y,
-                yaw,
-                translation,
-            );
-            signal_refine_time += signal_refine_started.elapsed();
-
-            let signal_score_started = std::time::Instant::now();
-            let signal_candidate = score_signal_alignment_solution(
-                &local_signal_refs,
-                &remote_signal_refs,
-                refined_yaw,
-                refined_translation,
-            );
-            signal_score_time += signal_score_started.elapsed();
-
-            if use_height_refine {
-                push_shortlisted_alignment_solution(
-                    &mut yaw_shortlist,
-                    signal_candidate,
-                    XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_PER_YAW,
-                    XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_TRANSLATION_EPSILON_METERS,
-                    XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_YAW_EPSILON_RADIANS,
-                );
-            } else if best
-                .as_ref()
-                .is_none_or(|current| alignment_solution_better(&signal_candidate, current))
-            {
-                best = Some(signal_candidate);
-            }
-        }
-        for signal_candidate in yaw_shortlist {
-            push_shortlisted_alignment_solution(
-                &mut shortlist,
-                signal_candidate,
-                XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_MAX_CANDIDATES,
-                XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_TRANSLATION_EPSILON_METERS,
-                XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_YAW_EPSILON_RADIANS,
-            );
-        }
-    }
-
-    if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
-        if use_height_refine {
-            sample_diagnostic.shortlisted_pose_count = shortlist.len();
-            for signal_candidate in shortlist {
-                let height_refine_started = std::time::Instant::now();
-                let (refined_yaw, refined_translation) = refine_height_map_alignment(
-                    local_map,
-                    local_sample_cache.as_ref(),
-                    remote_map,
-                    &remote_refine_signal,
-                    signal_candidate.yaw_radians,
-                    signal_candidate.translation,
-                );
-                height_refine_time += height_refine_started.elapsed();
-
-                let final_score_started = std::time::Instant::now();
-                let candidate = score_full_alignment_solution(
-                    &local_signal_refs,
-                    &remote_signal_refs,
-                    Some(local_map),
-                    local_sample_cache.as_ref(),
-                    Some(remote_map),
-                    &remote_dense_signal,
-                    refined_yaw,
-                    vec3(refined_translation.x, floor_y, refined_translation.z),
-                );
-                final_score_time += final_score_started.elapsed();
-                if best
-                    .as_ref()
-                    .is_none_or(|current| alignment_solution_better(&candidate, current))
-                {
-                    best = Some(candidate);
-                }
-            }
-        }
-    }
-
-    if let (Some(candidate), Some(local_map), Some(remote_map)) = (best, local_map, remote_map) {
-        let wall_profile_started = std::time::Instant::now();
-        let corrected = refine_solution_with_wall_profile_yaw_sidecar(
-            &local_signal_refs,
-            &remote_signal_refs,
-            local_map,
-            local_sample_cache.as_ref(),
-            remote_map,
-            &remote_dense_signal,
-            floor_y,
-            candidate,
-        );
-        wall_profile_time += wall_profile_started.elapsed();
-        best = Some(refine_solution_vertical_offset_from_overlap(
-            local_map,
-            remote_map,
-            &remote_dense_signal,
-            corrected,
-        ));
-    }
-    sample_diagnostic.translation_vote_ms = duration_ms_u32(translation_vote_time);
-    sample_diagnostic.signal_refine_ms = duration_ms_u32(signal_refine_time);
-    sample_diagnostic.signal_score_ms = duration_ms_u32(signal_score_time);
-    sample_diagnostic.height_refine_ms = duration_ms_u32(height_refine_time);
-    sample_diagnostic.final_score_ms = duration_ms_u32(final_score_time);
-    sample_diagnostic.wall_profile_ms = duration_ms_u32(wall_profile_time);
-    sample_diagnostic.best_solution = best;
-    sample_diagnostic
+    XrDepthAlignMatcher::new(local, remote, previous_solution).finish()
 }
 
 pub fn xr_depth_align_rescore_remote_to_local(
@@ -646,11 +422,9 @@ pub fn xr_depth_align_rescore_remote_to_local(
             matched_samples: 0,
         };
     }
-    let local_signal_refs = local_signal.iter().collect::<Vec<_>>();
-    let remote_signal_refs = remote_signal.iter().collect::<Vec<_>>();
     let rescored = score_signal_alignment_solution(
-        &local_signal_refs,
-        &remote_signal_refs,
+        &local_signal,
+        &remote_signal,
         solution.yaw_radians,
         solution.translation,
     );
@@ -670,6 +444,1246 @@ pub fn xr_depth_align_rescore_remote_to_local(
         remote.height_map.as_ref(),
         &remote_dense_signal,
     )
+}
+
+const XR_DEPTH_ALIGN_HEIGHT_REFINE_PHASES: [(f32, f32); 5] = [
+    (0.18, 0.36),
+    (0.08, 0.14),
+    (0.03, 0.06),
+    (0.012, 0.025),
+    (0.005, 0.01),
+];
+
+const XR_DEPTH_ALIGN_SEEDED_LOCAL_SEARCH_PHASES: [(f32, f32); 4] =
+    [(0.10, 0.18), (0.04, 0.07), (0.015, 0.03), (0.006, 0.012)];
+
+const XR_DEPTH_ALIGN_TRANSLATION_ONLY_SEARCH_PHASES: [(f32, f32); 3] =
+    [(0.0, 0.06), (0.0, 0.025), (0.0, 0.01)];
+
+#[derive(Debug)]
+struct FullAlignmentSearchTask {
+    best: XrDepthAlignSolution,
+    floor_y: f32,
+    phases: &'static [(f32, f32)],
+    translation_only: bool,
+    phase_index: usize,
+    yaw_index: usize,
+    tx_index: usize,
+    tz_index: usize,
+    improved_in_pass: bool,
+}
+
+impl FullAlignmentSearchTask {
+    fn new(
+        best: XrDepthAlignSolution,
+        floor_y: f32,
+        phases: &'static [(f32, f32)],
+        translation_only: bool,
+    ) -> Self {
+        Self {
+            best,
+            floor_y,
+            phases,
+            translation_only,
+            phase_index: 0,
+            yaw_index: 0,
+            tx_index: 0,
+            tz_index: 0,
+            improved_in_pass: false,
+        }
+    }
+
+    fn step(
+        &mut self,
+        local_signal: &[HeightMapSignalCell],
+        remote_signal: &[HeightMapSignalCell],
+        local_map: Option<&XrDepthAlignHeightMap>,
+        local_sample_cache: Option<&HeightMapSampleCache>,
+        remote_map: Option<&XrDepthAlignHeightMap>,
+        remote_dense_signal: &[DenseHeightMapSignalCell],
+    ) -> Option<XrDepthAlignSolution> {
+        let translation_deltas = [-1.0f32, 0.0, 1.0];
+        loop {
+            let Some(&(yaw_step, translation_step)) = self.phases.get(self.phase_index) else {
+                return Some(self.best);
+            };
+            let yaw_count = if self.translation_only { 1 } else { 3 };
+            while self.yaw_index < yaw_count {
+                let yaw_delta = if self.translation_only {
+                    0.0
+                } else {
+                    [-yaw_step, 0.0, yaw_step][self.yaw_index]
+                };
+                let tx_delta = translation_deltas[self.tx_index] * translation_step;
+                let tz_delta = translation_deltas[self.tz_index] * translation_step;
+                self.advance_indices(yaw_count);
+                if yaw_delta == 0.0 && tx_delta == 0.0 && tz_delta == 0.0 {
+                    continue;
+                }
+                let candidate = score_full_alignment_solution(
+                    local_signal,
+                    remote_signal,
+                    local_map,
+                    local_sample_cache,
+                    remote_map,
+                    remote_dense_signal,
+                    wrap_angle(self.best.yaw_radians + yaw_delta),
+                    vec3(
+                        self.best.translation.x + tx_delta,
+                        self.floor_y,
+                        self.best.translation.z + tz_delta,
+                    ),
+                );
+                if alignment_solution_better(&candidate, &self.best) {
+                    self.best = candidate;
+                    self.improved_in_pass = true;
+                }
+                return None;
+            }
+            if self.improved_in_pass {
+                self.improved_in_pass = false;
+                self.reset_pass();
+                continue;
+            }
+            self.phase_index += 1;
+            self.reset_pass();
+        }
+    }
+
+    fn advance_indices(&mut self, yaw_count: usize) {
+        self.tz_index += 1;
+        if self.tz_index < 3 {
+            return;
+        }
+        self.tz_index = 0;
+        self.tx_index += 1;
+        if self.tx_index < 3 {
+            return;
+        }
+        self.tx_index = 0;
+        self.yaw_index += 1;
+        if self.yaw_index > yaw_count {
+            self.yaw_index = yaw_count;
+        }
+    }
+
+    fn reset_pass(&mut self) {
+        self.yaw_index = 0;
+        self.tx_index = 0;
+        self.tz_index = 0;
+    }
+}
+
+#[derive(Debug)]
+struct HeightMapRefineTask {
+    best_yaw: f32,
+    best_translation: Vec3f,
+    best_score: (f32, f32, usize),
+    initialized: bool,
+    phase_index: usize,
+    yaw_index: usize,
+    tx_index: usize,
+    tz_index: usize,
+    improved_in_pass: bool,
+    rotated_remote_signal: Vec<RotatedHeightMapSignalCell>,
+    rotated_signal_yaw: Option<f32>,
+}
+
+impl HeightMapRefineTask {
+    fn new(yaw: f32, translation: Vec3f) -> Self {
+        Self {
+            best_yaw: wrap_angle(yaw),
+            best_translation: translation,
+            best_score: (0.0, f32::INFINITY, 0),
+            initialized: false,
+            phase_index: 0,
+            yaw_index: 0,
+            tx_index: 0,
+            tz_index: 0,
+            improved_in_pass: false,
+            rotated_remote_signal: Vec::new(),
+            rotated_signal_yaw: None,
+        }
+    }
+
+    fn step(
+        &mut self,
+        local_map: &XrDepthAlignHeightMap,
+        local_sample_cache: Option<&HeightMapSampleCache>,
+        remote_map: &XrDepthAlignHeightMap,
+        remote_signal: &[DenseHeightMapSignalCell],
+    ) -> Option<(f32, Vec3f)> {
+        if !self.initialized {
+            self.best_score = score_height_map_alignment(
+                local_map,
+                local_sample_cache,
+                remote_map,
+                remote_signal,
+                self.best_yaw,
+                self.best_translation,
+            );
+            self.initialized = true;
+            return None;
+        }
+        let translation_deltas = [-1.0f32, 0.0, 1.0];
+        loop {
+            let Some(&(yaw_step, translation_step)) =
+                XR_DEPTH_ALIGN_HEIGHT_REFINE_PHASES.get(self.phase_index)
+            else {
+                return Some((self.best_yaw, self.best_translation));
+            };
+            while self.yaw_index < 3 {
+                let yaw_delta = [-yaw_step, 0.0, yaw_step][self.yaw_index];
+                let tx_delta = translation_deltas[self.tx_index] * translation_step;
+                let tz_delta = translation_deltas[self.tz_index] * translation_step;
+                self.advance_indices();
+                if yaw_delta == 0.0 && tx_delta == 0.0 && tz_delta == 0.0 {
+                    continue;
+                }
+                let candidate_yaw = wrap_angle(self.best_yaw + yaw_delta);
+                if self.rotated_signal_yaw != Some(candidate_yaw) {
+                    fill_rotated_height_map_signal(
+                        &mut self.rotated_remote_signal,
+                        remote_signal,
+                        candidate_yaw,
+                    );
+                    self.rotated_signal_yaw = Some(candidate_yaw);
+                }
+                let candidate_translation = vec3(
+                    self.best_translation.x + tx_delta,
+                    self.best_translation.y,
+                    self.best_translation.z + tz_delta,
+                );
+                let candidate_score = score_rotated_height_map_alignment(
+                    local_map,
+                    local_sample_cache,
+                    remote_map,
+                    &self.rotated_remote_signal,
+                    candidate_yaw,
+                    candidate_translation,
+                );
+                if height_map_score_better(candidate_score, self.best_score) {
+                    self.best_yaw = candidate_yaw;
+                    self.best_translation = candidate_translation;
+                    self.best_score = candidate_score;
+                    self.improved_in_pass = true;
+                }
+                return None;
+            }
+            if self.improved_in_pass {
+                self.improved_in_pass = false;
+                self.reset_pass();
+                continue;
+            }
+            self.phase_index += 1;
+            self.reset_pass();
+        }
+    }
+
+    fn advance_indices(&mut self) {
+        self.tz_index += 1;
+        if self.tz_index < 3 {
+            return;
+        }
+        self.tz_index = 0;
+        self.tx_index += 1;
+        if self.tx_index < 3 {
+            return;
+        }
+        self.tx_index = 0;
+        self.yaw_index += 1;
+        if self.yaw_index > 3 {
+            self.yaw_index = 3;
+        }
+    }
+
+    fn reset_pass(&mut self) {
+        self.yaw_index = 0;
+        self.tx_index = 0;
+        self.tz_index = 0;
+    }
+}
+
+#[derive(Debug)]
+enum WallProfileTaskStage {
+    BuildProfiles,
+    SearchYaw {
+        current_profile_score: f32,
+        best_profile_yaw: f32,
+        best_profile_score: f32,
+        next_yaw_index: isize,
+        yaw_steps: isize,
+    },
+    ScoreCorrectedInitial {
+        current_profile_score: f32,
+        best_profile_yaw: f32,
+        best_profile_score: f32,
+    },
+    RefineTranslation {
+        current_profile_score: f32,
+        best_profile_score: f32,
+        search: FullAlignmentSearchTask,
+    },
+    Done(XrDepthAlignSolution),
+}
+
+#[derive(Debug)]
+struct WallProfileTask {
+    current: XrDepthAlignSolution,
+    floor_y: f32,
+    local_profile: Vec<(f32, f32)>,
+    remote_profile: Vec<(f32, f32)>,
+    stage: WallProfileTaskStage,
+}
+
+impl WallProfileTask {
+    fn new(current: XrDepthAlignSolution, floor_y: f32) -> Self {
+        Self {
+            current,
+            floor_y,
+            local_profile: Vec::new(),
+            remote_profile: Vec::new(),
+            stage: WallProfileTaskStage::BuildProfiles,
+        }
+    }
+
+    fn step(
+        &mut self,
+        local_signal: &[HeightMapSignalCell],
+        remote_signal: &[HeightMapSignalCell],
+        local_map: &XrDepthAlignHeightMap,
+        local_sample_cache: Option<&HeightMapSampleCache>,
+        remote_map: &XrDepthAlignHeightMap,
+        remote_dense_signal: &[DenseHeightMapSignalCell],
+    ) -> Option<XrDepthAlignSolution> {
+        loop {
+            match &mut self.stage {
+                WallProfileTaskStage::BuildProfiles => {
+                    self.local_profile = build_wall_profile_contour_points(local_map);
+                    self.remote_profile = build_wall_profile_contour_points(remote_map);
+                    if self.local_profile.len() < XR_DEPTH_ALIGN_WALL_PROFILE_MIN_POINTS
+                        || self.remote_profile.len() < XR_DEPTH_ALIGN_WALL_PROFILE_MIN_POINTS
+                    {
+                        self.stage = WallProfileTaskStage::Done(self.current);
+                        continue;
+                    }
+                    let current_profile_score = score_wall_profile_alignment_with_translation_prior(
+                        &self.local_profile,
+                        &self.remote_profile,
+                        self.current.yaw_radians,
+                        self.current.translation,
+                    );
+                    let yaw_step = XR_DEPTH_ALIGN_WALL_PROFILE_YAW_STEP_RADIANS;
+                    let yaw_steps = (XR_DEPTH_ALIGN_WALL_PROFILE_YAW_WINDOW_RADIANS / yaw_step)
+                        .ceil()
+                        .max(1.0) as isize;
+                    self.stage = WallProfileTaskStage::SearchYaw {
+                        current_profile_score,
+                        best_profile_yaw: self.current.yaw_radians,
+                        best_profile_score: current_profile_score,
+                        next_yaw_index: -yaw_steps,
+                        yaw_steps,
+                    };
+                    return None;
+                }
+                WallProfileTaskStage::SearchYaw {
+                    current_profile_score,
+                    best_profile_yaw,
+                    best_profile_score,
+                    next_yaw_index,
+                    yaw_steps,
+                } => {
+                    if *next_yaw_index > *yaw_steps {
+                        if wrap_angle(*best_profile_yaw - self.current.yaw_radians).abs()
+                            < XR_DEPTH_ALIGN_WALL_PROFILE_MIN_YAW_DELTA_RADIANS
+                        {
+                            self.stage = WallProfileTaskStage::Done(self.current);
+                            continue;
+                        }
+                        self.stage = WallProfileTaskStage::ScoreCorrectedInitial {
+                            current_profile_score: *current_profile_score,
+                            best_profile_yaw: *best_profile_yaw,
+                            best_profile_score: *best_profile_score,
+                        };
+                        continue;
+                    }
+                    let yaw = wrap_angle(
+                        self.current.yaw_radians
+                            + *next_yaw_index as f32 * XR_DEPTH_ALIGN_WALL_PROFILE_YAW_STEP_RADIANS,
+                    );
+                    let score = score_wall_profile_alignment_with_translation_prior(
+                        &self.local_profile,
+                        &self.remote_profile,
+                        yaw,
+                        self.current.translation,
+                    );
+                    if score > *best_profile_score {
+                        *best_profile_score = score;
+                        *best_profile_yaw = yaw;
+                    }
+                    *next_yaw_index += 1;
+                    return None;
+                }
+                WallProfileTaskStage::ScoreCorrectedInitial {
+                    current_profile_score,
+                    best_profile_yaw,
+                    best_profile_score,
+                } => {
+                    let corrected_initial = score_full_alignment_solution(
+                        local_signal,
+                        remote_signal,
+                        Some(local_map),
+                        local_sample_cache,
+                        Some(remote_map),
+                        remote_dense_signal,
+                        *best_profile_yaw,
+                        vec3(
+                            self.current.translation.x,
+                            self.floor_y,
+                            self.current.translation.z,
+                        ),
+                    );
+                    let search = FullAlignmentSearchTask::new(
+                        corrected_initial,
+                        self.floor_y,
+                        &XR_DEPTH_ALIGN_TRANSLATION_ONLY_SEARCH_PHASES,
+                        true,
+                    );
+                    self.stage = WallProfileTaskStage::RefineTranslation {
+                        current_profile_score: *current_profile_score,
+                        best_profile_score: *best_profile_score,
+                        search,
+                    };
+                    return None;
+                }
+                WallProfileTaskStage::RefineTranslation {
+                    current_profile_score,
+                    best_profile_score,
+                    search,
+                } => {
+                    let Some(corrected) = search.step(
+                        local_signal,
+                        remote_signal,
+                        Some(local_map),
+                        local_sample_cache,
+                        Some(remote_map),
+                        remote_dense_signal,
+                    ) else {
+                        return None;
+                    };
+                    let result = if alignment_solution_better(&corrected, &self.current)
+                        || wall_profile_yaw_sidecar_is_safe(
+                            self.current,
+                            corrected,
+                            *current_profile_score,
+                            *best_profile_score,
+                        )
+                    {
+                        corrected
+                    } else {
+                        self.current
+                    };
+                    self.stage = WallProfileTaskStage::Done(result);
+                    continue;
+                }
+                WallProfileTaskStage::Done(result) => return Some(*result),
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum XrDepthAlignMatcherState {
+    BuildSignals,
+    SeedStart,
+    SeedHeightRefine(HeightMapRefineTask),
+    SeedSignalRefine {
+        best_yaw: f32,
+        best_translation: Vec3f,
+    },
+    SeedScore {
+        best_yaw: f32,
+        best_translation: Vec3f,
+    },
+    SeedLocalSearch(FullAlignmentSearchTask),
+    SeedWallProfile(WallProfileTask),
+    SeedVerticalOffset {
+        candidate: XrDepthAlignSolution,
+    },
+    SeedComplete {
+        candidate: XrDepthAlignSolution,
+    },
+    BuildYawCandidates,
+    BuildTranslations {
+        yaw_index: usize,
+    },
+    ScoreTranslations {
+        yaw_index: usize,
+        yaw: f32,
+        translations: Vec<Vec3f>,
+        translation_index: usize,
+        yaw_shortlist: Vec<XrDepthAlignSolution>,
+    },
+    HeightRefineCandidate {
+        shortlist_index: usize,
+        signal_candidate: XrDepthAlignSolution,
+        task: HeightMapRefineTask,
+    },
+    FinalScoreCandidate {
+        shortlist_index: usize,
+        refined_yaw: f32,
+        refined_translation: Vec3f,
+    },
+    FinalWallProfile(WallProfileTask),
+    FinalVerticalOffset {
+        candidate: XrDepthAlignSolution,
+    },
+    Finish,
+    Done,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XrDepthAlignMatcherProgress {
+    pub stage_label: &'static str,
+    pub step_count: u32,
+    pub yaw_candidate_count: u32,
+    pub current_yaw_index: u32,
+    pub current_translation_index: u32,
+    pub current_translation_count: u32,
+    pub shortlist_count: u32,
+    pub current_shortlist_index: u32,
+}
+
+#[derive(Debug)]
+pub struct XrDepthAlignMatcher {
+    local: XrDepthAlignDescriptor,
+    remote: XrDepthAlignDescriptor,
+    previous_solution: Option<XrDepthAlignSolution>,
+    state: XrDepthAlignMatcherState,
+    diagnostic: XrDepthAlignSolveDiagnostic,
+    floor_y: f32,
+    local_signal: Vec<HeightMapSignalCell>,
+    remote_signal: Vec<HeightMapSignalCell>,
+    remote_dense_signal: Vec<DenseHeightMapSignalCell>,
+    remote_refine_signal: Vec<DenseHeightMapSignalCell>,
+    local_histogram: Vec<f32>,
+    remote_histogram: Vec<f32>,
+    local_sample_cache: Option<HeightMapSampleCache>,
+    use_height_refine: bool,
+    yaw_candidates: Vec<f32>,
+    shortlist: Vec<XrDepthAlignSolution>,
+    best: Option<XrDepthAlignSolution>,
+    translation_vote_time: std::time::Duration,
+    signal_refine_time: std::time::Duration,
+    signal_score_time: std::time::Duration,
+    height_refine_time: std::time::Duration,
+    final_score_time: std::time::Duration,
+    wall_profile_time: std::time::Duration,
+    total_compute_time: std::time::Duration,
+    max_step_time: std::time::Duration,
+}
+
+impl XrDepthAlignMatcher {
+    pub fn new(
+        local: &XrDepthAlignDescriptor,
+        remote: &XrDepthAlignDescriptor,
+        previous_solution: Option<XrDepthAlignSolution>,
+    ) -> Self {
+        Self {
+            local: local.clone(),
+            remote: remote.clone(),
+            previous_solution,
+            state: XrDepthAlignMatcherState::BuildSignals,
+            diagnostic: XrDepthAlignSolveDiagnostic::default(),
+            floor_y: 0.0,
+            local_signal: Vec::new(),
+            remote_signal: Vec::new(),
+            remote_dense_signal: Vec::new(),
+            remote_refine_signal: Vec::new(),
+            local_histogram: Vec::new(),
+            remote_histogram: Vec::new(),
+            local_sample_cache: None,
+            use_height_refine: false,
+            yaw_candidates: Vec::new(),
+            shortlist: Vec::new(),
+            best: None,
+            translation_vote_time: std::time::Duration::ZERO,
+            signal_refine_time: std::time::Duration::ZERO,
+            signal_score_time: std::time::Duration::ZERO,
+            height_refine_time: std::time::Duration::ZERO,
+            final_score_time: std::time::Duration::ZERO,
+            wall_profile_time: std::time::Duration::ZERO,
+            total_compute_time: std::time::Duration::ZERO,
+            max_step_time: std::time::Duration::ZERO,
+        }
+    }
+
+    pub fn is_finished(&self) -> bool {
+        matches!(self.state, XrDepthAlignMatcherState::Done)
+    }
+
+    pub fn diagnostic(&self) -> Option<XrDepthAlignSolveDiagnostic> {
+        self.is_finished().then_some(self.diagnostic)
+    }
+
+    pub fn finish(mut self) -> XrDepthAlignSolveDiagnostic {
+        while self.step() {}
+        self.diagnostic
+    }
+
+    pub fn progress(&self) -> XrDepthAlignMatcherProgress {
+        let mut progress = XrDepthAlignMatcherProgress {
+            step_count: self.diagnostic.step_count,
+            yaw_candidate_count: self.yaw_candidates.len() as u32,
+            shortlist_count: self.shortlist.len() as u32,
+            ..XrDepthAlignMatcherProgress::default()
+        };
+        match &self.state {
+            XrDepthAlignMatcherState::BuildSignals => {
+                progress.stage_label = "signals";
+            }
+            XrDepthAlignMatcherState::SeedStart => {
+                progress.stage_label = "seed-start";
+            }
+            XrDepthAlignMatcherState::SeedHeightRefine(_) => {
+                progress.stage_label = "seed-height";
+            }
+            XrDepthAlignMatcherState::SeedSignalRefine { .. } => {
+                progress.stage_label = "seed-signal";
+            }
+            XrDepthAlignMatcherState::SeedScore { .. } => {
+                progress.stage_label = "seed-score";
+            }
+            XrDepthAlignMatcherState::SeedLocalSearch(_) => {
+                progress.stage_label = "seed-search";
+            }
+            XrDepthAlignMatcherState::SeedWallProfile(_) => {
+                progress.stage_label = "seed-wall";
+            }
+            XrDepthAlignMatcherState::SeedVerticalOffset { .. } => {
+                progress.stage_label = "seed-vertical";
+            }
+            XrDepthAlignMatcherState::SeedComplete { .. } => {
+                progress.stage_label = "seed-complete";
+            }
+            XrDepthAlignMatcherState::BuildYawCandidates => {
+                progress.stage_label = "yaw";
+            }
+            XrDepthAlignMatcherState::BuildTranslations { yaw_index } => {
+                progress.stage_label = "vote";
+                progress.current_yaw_index = (*yaw_index + 1) as u32;
+            }
+            XrDepthAlignMatcherState::ScoreTranslations {
+                yaw_index,
+                translations,
+                translation_index,
+                ..
+            } => {
+                progress.stage_label = "score";
+                progress.current_yaw_index = (*yaw_index + 1) as u32;
+                progress.current_translation_count = translations.len() as u32;
+                progress.current_translation_index =
+                    ((*translation_index).min(translations.len().saturating_sub(1)) + 1) as u32;
+            }
+            XrDepthAlignMatcherState::HeightRefineCandidate { shortlist_index, .. } => {
+                progress.stage_label = "height";
+                progress.current_shortlist_index = (*shortlist_index + 1) as u32;
+            }
+            XrDepthAlignMatcherState::FinalScoreCandidate { shortlist_index, .. } => {
+                progress.stage_label = "final-score";
+                progress.current_shortlist_index = (*shortlist_index + 1) as u32;
+            }
+            XrDepthAlignMatcherState::FinalWallProfile(_) => {
+                progress.stage_label = "wall";
+            }
+            XrDepthAlignMatcherState::FinalVerticalOffset { .. } => {
+                progress.stage_label = "vertical";
+            }
+            XrDepthAlignMatcherState::Finish => {
+                progress.stage_label = "finish";
+            }
+            XrDepthAlignMatcherState::Done => {
+                progress.stage_label = "done";
+            }
+        }
+        progress
+    }
+
+    pub fn step_for_budget(&mut self, budget: std::time::Duration, max_steps: usize) -> u32 {
+        if self.is_finished() || max_steps == 0 {
+            return 0;
+        }
+        let started = std::time::Instant::now();
+        let mut steps = 0u32;
+        while steps < max_steps as u32 {
+            if steps != 0 && !budget.is_zero() && started.elapsed() >= budget {
+                break;
+            }
+            if !self.step() {
+                break;
+            }
+            steps = steps.saturating_add(1);
+        }
+        steps
+    }
+
+    pub fn step(&mut self) -> bool {
+        if self.is_finished() {
+            return false;
+        }
+        let step_started = std::time::Instant::now();
+        let did_work = loop {
+            let state = std::mem::replace(&mut self.state, XrDepthAlignMatcherState::Done);
+            match state {
+                XrDepthAlignMatcherState::BuildSignals => {
+                    let started = std::time::Instant::now();
+                    self.local_signal = selected_descriptor_signal_cells(&self.local);
+                    self.remote_signal = selected_descriptor_signal_cells(&self.remote);
+                    self.remote_dense_signal = descriptor_dense_signal_cells(&self.remote);
+                    self.remote_refine_signal = decimate_signal_cells(
+                        &self.remote_dense_signal,
+                        XR_DEPTH_ALIGN_HEIGHT_REFINE_MAX_DENSE_SAMPLES,
+                    );
+                    self.local_histogram = build_height_map_signal_histogram(
+                        &self.local_signal,
+                        XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS,
+                    );
+                    self.remote_histogram = build_height_map_signal_histogram(
+                        &self.remote_signal,
+                        XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS,
+                    );
+                    self.local_sample_cache =
+                        self.local.height_map.as_ref().and_then(build_height_map_sample_cache);
+                    self.floor_y = self.local.floor_y - self.remote.floor_y;
+                    self.use_height_refine = self.local.height_map.is_some()
+                        && self.remote.height_map.is_some()
+                        && !self.remote_refine_signal.is_empty();
+                    self.diagnostic = XrDepthAlignSolveDiagnostic {
+                        local_vertical_descriptor: self.local.vertical_descriptor.is_some(),
+                        remote_vertical_descriptor: self.remote.vertical_descriptor.is_some(),
+                        local_wall_samples: self.local_signal.len(),
+                        remote_wall_samples: self.remote_signal.len(),
+                        remote_dense_wall_samples: self.remote_dense_signal.len(),
+                        remote_refine_wall_samples: self.remote_refine_signal.len(),
+                        signal_build_ms: duration_ms_u32(started.elapsed()),
+                        ..XrDepthAlignSolveDiagnostic::default()
+                    };
+                    self.state = if self.local_signal.len() < XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES
+                        || self.remote_signal.len() < XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES
+                    {
+                        XrDepthAlignMatcherState::Finish
+                    } else if self.previous_solution.is_some() {
+                        XrDepthAlignMatcherState::SeedStart
+                    } else {
+                        XrDepthAlignMatcherState::BuildYawCandidates
+                    };
+                    break true;
+                }
+                XrDepthAlignMatcherState::SeedStart => {
+                    self.diagnostic.yaw_candidate_count += 1;
+                    self.diagnostic.pose_candidate_count += 1;
+                    let seed = self.previous_solution.expect("seeded state requires seed");
+                    let translation = vec3(seed.translation.x, self.floor_y, seed.translation.z);
+                    self.state = if self.use_height_refine {
+                        XrDepthAlignMatcherState::SeedHeightRefine(HeightMapRefineTask::new(
+                            seed.yaw_radians,
+                            translation,
+                        ))
+                    } else {
+                        XrDepthAlignMatcherState::SeedSignalRefine {
+                            best_yaw: wrap_angle(seed.yaw_radians),
+                            best_translation: translation,
+                        }
+                    };
+                    continue;
+                }
+                XrDepthAlignMatcherState::SeedHeightRefine(mut task) => {
+                    let started = std::time::Instant::now();
+                    let Some(local_map) = self.local_map() else {
+                        self.state = XrDepthAlignMatcherState::SeedSignalRefine {
+                            best_yaw: task.best_yaw,
+                            best_translation: task.best_translation,
+                        };
+                        continue;
+                    };
+                    let Some(remote_map) = self.remote_map() else {
+                        self.state = XrDepthAlignMatcherState::SeedSignalRefine {
+                            best_yaw: task.best_yaw,
+                            best_translation: task.best_translation,
+                        };
+                        continue;
+                    };
+                    let completed = task.step(
+                        local_map,
+                        self.local_sample_cache.as_ref(),
+                        remote_map,
+                        &self.remote_refine_signal,
+                    );
+                    self.height_refine_time += started.elapsed();
+                    if let Some((best_yaw, best_translation)) = completed {
+                        self.state = XrDepthAlignMatcherState::SeedSignalRefine {
+                            best_yaw,
+                            best_translation,
+                        };
+                    } else {
+                        self.state = XrDepthAlignMatcherState::SeedHeightRefine(task);
+                    }
+                    break true;
+                }
+                XrDepthAlignMatcherState::SeedSignalRefine {
+                    best_yaw,
+                    best_translation,
+                } => {
+                    let started = std::time::Instant::now();
+                    let (signal_refined_yaw, signal_refined_translation) = refine_signal_alignment(
+                        &self.local_signal,
+                        &self.remote_signal,
+                        self.floor_y,
+                        best_yaw,
+                        best_translation,
+                    );
+                    self.signal_refine_time += started.elapsed();
+                    let signal_translation_jump = vec3(
+                        signal_refined_translation.x - best_translation.x,
+                        0.0,
+                        signal_refined_translation.z - best_translation.z,
+                    )
+                    .length();
+                    let (next_yaw, next_translation) =
+                        if wrap_angle(signal_refined_yaw - best_yaw).abs() <= 0.18
+                            && signal_translation_jump <= 0.28
+                        {
+                            (signal_refined_yaw, signal_refined_translation)
+                        } else {
+                            (best_yaw, best_translation)
+                        };
+                    self.state = XrDepthAlignMatcherState::SeedScore {
+                        best_yaw: next_yaw,
+                        best_translation: next_translation,
+                    };
+                    break true;
+                }
+                XrDepthAlignMatcherState::SeedScore {
+                    best_yaw,
+                    best_translation,
+                } => {
+                    let started = std::time::Instant::now();
+                    let best = score_full_alignment_solution(
+                        &self.local_signal,
+                        &self.remote_signal,
+                        self.local_map(),
+                        self.local_sample_cache.as_ref(),
+                        self.remote_map(),
+                        &self.remote_dense_signal,
+                        best_yaw,
+                        best_translation,
+                    );
+                    self.final_score_time += started.elapsed();
+                    self.state = XrDepthAlignMatcherState::SeedLocalSearch(
+                        FullAlignmentSearchTask::new(
+                            best,
+                            self.floor_y,
+                            &XR_DEPTH_ALIGN_SEEDED_LOCAL_SEARCH_PHASES,
+                            false,
+                        ),
+                    );
+                    break true;
+                }
+                XrDepthAlignMatcherState::SeedLocalSearch(mut task) => {
+                    let started = std::time::Instant::now();
+                    let completed = task.step(
+                        &self.local_signal,
+                        &self.remote_signal,
+                        self.local_map(),
+                        self.local_sample_cache.as_ref(),
+                        self.remote_map(),
+                        &self.remote_dense_signal,
+                    );
+                    self.final_score_time += started.elapsed();
+                    if let Some(candidate) = completed {
+                        self.state = if self.local_map().is_some() && self.remote_map().is_some() {
+                            XrDepthAlignMatcherState::SeedWallProfile(WallProfileTask::new(
+                                candidate,
+                                self.floor_y,
+                            ))
+                        } else {
+                            XrDepthAlignMatcherState::SeedComplete { candidate }
+                        };
+                    } else {
+                        self.state = XrDepthAlignMatcherState::SeedLocalSearch(task);
+                    }
+                    break true;
+                }
+                XrDepthAlignMatcherState::SeedWallProfile(mut task) => {
+                    let Some(local_map) = self.local_map() else {
+                        self.state = XrDepthAlignMatcherState::SeedComplete {
+                            candidate: task.current,
+                        };
+                        continue;
+                    };
+                    let Some(remote_map) = self.remote_map() else {
+                        self.state = XrDepthAlignMatcherState::SeedComplete {
+                            candidate: task.current,
+                        };
+                        continue;
+                    };
+                    let started = std::time::Instant::now();
+                    let completed = task.step(
+                        &self.local_signal,
+                        &self.remote_signal,
+                        local_map,
+                        self.local_sample_cache.as_ref(),
+                        remote_map,
+                        &self.remote_dense_signal,
+                    );
+                    self.wall_profile_time += started.elapsed();
+                    if let Some(candidate) = completed {
+                        self.state = XrDepthAlignMatcherState::SeedVerticalOffset { candidate };
+                    } else {
+                        self.state = XrDepthAlignMatcherState::SeedWallProfile(task);
+                    }
+                    break true;
+                }
+                XrDepthAlignMatcherState::SeedVerticalOffset { candidate } => {
+                    let started = std::time::Instant::now();
+                    let candidate =
+                        if let (Some(local_map), Some(remote_map)) = (self.local_map(), self.remote_map())
+                        {
+                            refine_solution_vertical_offset_from_overlap(
+                                local_map,
+                                remote_map,
+                                &self.remote_dense_signal,
+                                candidate,
+                            )
+                        } else {
+                            candidate
+                        };
+                    self.final_score_time += started.elapsed();
+                    self.state = XrDepthAlignMatcherState::SeedComplete { candidate };
+                    break true;
+                }
+                XrDepthAlignMatcherState::SeedComplete { candidate } => {
+                    self.best = Some(candidate);
+                    if let Some(seed) = self.previous_solution {
+                        if seeded_alignment_lock_is_strong(
+                            &self.diagnostic,
+                            candidate,
+                            seed,
+                            self.remote_signal.len(),
+                            self.local_map(),
+                            self.remote_map(),
+                        ) {
+                            self.state = XrDepthAlignMatcherState::Finish;
+                            continue;
+                        }
+                    }
+                    self.state = XrDepthAlignMatcherState::BuildYawCandidates;
+                    continue;
+                }
+                XrDepthAlignMatcherState::BuildYawCandidates => {
+                    let started = std::time::Instant::now();
+                    self.yaw_candidates = candidate_signal_yaws(
+                        &self.local_histogram,
+                        &self.remote_histogram,
+                        &self.local_signal,
+                        &self.remote_signal,
+                    );
+                    self.diagnostic.yaw_candidate_ms = duration_ms_u32(started.elapsed());
+                    self.diagnostic.yaw_candidate_count = self.yaw_candidates.len();
+                    self.state = if self.yaw_candidates.is_empty() {
+                        XrDepthAlignMatcherState::Finish
+                    } else {
+                        XrDepthAlignMatcherState::BuildTranslations { yaw_index: 0 }
+                    };
+                    break true;
+                }
+                XrDepthAlignMatcherState::BuildTranslations { yaw_index } => {
+                    let yaw = self.yaw_candidates[yaw_index];
+                    let started = std::time::Instant::now();
+                    let translations = candidate_signal_translations(
+                        &self.local_signal,
+                        &self.remote_signal,
+                        self.floor_y,
+                        yaw,
+                    );
+                    self.translation_vote_time += started.elapsed();
+                    self.diagnostic.pose_candidate_count += translations.len();
+                    self.state = XrDepthAlignMatcherState::ScoreTranslations {
+                        yaw_index,
+                        yaw,
+                        translations,
+                        translation_index: 0,
+                        yaw_shortlist: Vec::new(),
+                    };
+                    break true;
+                }
+                XrDepthAlignMatcherState::ScoreTranslations {
+                    yaw_index,
+                    yaw,
+                    translations,
+                    translation_index,
+                    mut yaw_shortlist,
+                } => {
+                    if translation_index >= translations.len() {
+                        for signal_candidate in yaw_shortlist {
+                            push_shortlisted_alignment_solution(
+                                &mut self.shortlist,
+                                signal_candidate,
+                                XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_MAX_CANDIDATES,
+                                XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_TRANSLATION_EPSILON_METERS,
+                                XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_YAW_EPSILON_RADIANS,
+                            );
+                        }
+                        self.state = if yaw_index + 1 < self.yaw_candidates.len() {
+                            XrDepthAlignMatcherState::BuildTranslations {
+                                yaw_index: yaw_index + 1,
+                            }
+                        } else if self.use_height_refine && !self.shortlist.is_empty() {
+                            self.diagnostic.shortlisted_pose_count = self.shortlist.len();
+                            let signal_candidate = self.shortlist[0];
+                            XrDepthAlignMatcherState::HeightRefineCandidate {
+                                shortlist_index: 0,
+                                signal_candidate,
+                                task: HeightMapRefineTask::new(
+                                    signal_candidate.yaw_radians,
+                                    signal_candidate.translation,
+                                ),
+                            }
+                        } else if let Some(best) = self.best {
+                            if self.local_map().is_some() && self.remote_map().is_some() {
+                                XrDepthAlignMatcherState::FinalWallProfile(WallProfileTask::new(
+                                    best,
+                                    self.floor_y,
+                                ))
+                            } else {
+                                XrDepthAlignMatcherState::Finish
+                            }
+                        } else {
+                            XrDepthAlignMatcherState::Finish
+                        };
+                        continue;
+                    }
+
+                    let translation = translations[translation_index];
+                    let signal_refine_started = std::time::Instant::now();
+                    let (refined_yaw, refined_translation) = refine_signal_alignment(
+                        &self.local_signal,
+                        &self.remote_signal,
+                        self.floor_y,
+                        yaw,
+                        translation,
+                    );
+                    self.signal_refine_time += signal_refine_started.elapsed();
+
+                    let signal_score_started = std::time::Instant::now();
+                    let signal_candidate = score_signal_alignment_solution(
+                        &self.local_signal,
+                        &self.remote_signal,
+                        refined_yaw,
+                        refined_translation,
+                    );
+                    self.signal_score_time += signal_score_started.elapsed();
+
+                    if self.use_height_refine {
+                        push_shortlisted_alignment_solution(
+                            &mut yaw_shortlist,
+                            signal_candidate,
+                            XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_PER_YAW,
+                            XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_TRANSLATION_EPSILON_METERS,
+                            XR_DEPTH_ALIGN_SIGNAL_SHORTLIST_YAW_EPSILON_RADIANS,
+                        );
+                    } else if self
+                        .best
+                        .as_ref()
+                        .is_none_or(|current| alignment_solution_better(&signal_candidate, current))
+                    {
+                        self.best = Some(signal_candidate);
+                    }
+                    self.state = XrDepthAlignMatcherState::ScoreTranslations {
+                        yaw_index,
+                        yaw,
+                        translations,
+                        translation_index: translation_index + 1,
+                        yaw_shortlist,
+                    };
+                    break true;
+                }
+                XrDepthAlignMatcherState::HeightRefineCandidate {
+                    shortlist_index,
+                    signal_candidate,
+                    mut task,
+                } => {
+                    let Some(local_map) = self.local_map() else {
+                        self.state = XrDepthAlignMatcherState::FinalScoreCandidate {
+                            shortlist_index,
+                            refined_yaw: signal_candidate.yaw_radians,
+                            refined_translation: signal_candidate.translation,
+                        };
+                        continue;
+                    };
+                    let Some(remote_map) = self.remote_map() else {
+                        self.state = XrDepthAlignMatcherState::FinalScoreCandidate {
+                            shortlist_index,
+                            refined_yaw: signal_candidate.yaw_radians,
+                            refined_translation: signal_candidate.translation,
+                        };
+                        continue;
+                    };
+                    let started = std::time::Instant::now();
+                    let completed = task.step(
+                        local_map,
+                        self.local_sample_cache.as_ref(),
+                        remote_map,
+                        &self.remote_refine_signal,
+                    );
+                    self.height_refine_time += started.elapsed();
+                    if let Some((refined_yaw, refined_translation)) = completed {
+                        self.state = XrDepthAlignMatcherState::FinalScoreCandidate {
+                            shortlist_index,
+                            refined_yaw,
+                            refined_translation,
+                        };
+                    } else {
+                        self.state = XrDepthAlignMatcherState::HeightRefineCandidate {
+                            shortlist_index,
+                            signal_candidate,
+                            task,
+                        };
+                    }
+                    break true;
+                }
+                XrDepthAlignMatcherState::FinalScoreCandidate {
+                    shortlist_index,
+                    refined_yaw,
+                    refined_translation,
+                } => {
+                    let started = std::time::Instant::now();
+                    let candidate = score_full_alignment_solution(
+                        &self.local_signal,
+                        &self.remote_signal,
+                        self.local_map(),
+                        self.local_sample_cache.as_ref(),
+                        self.remote_map(),
+                        &self.remote_dense_signal,
+                        refined_yaw,
+                        vec3(refined_translation.x, self.floor_y, refined_translation.z),
+                    );
+                    self.final_score_time += started.elapsed();
+                    if self
+                        .best
+                        .as_ref()
+                        .is_none_or(|current| alignment_solution_better(&candidate, current))
+                    {
+                        self.best = Some(candidate);
+                    }
+                    self.state = if shortlist_index + 1 < self.shortlist.len() {
+                        let signal_candidate = self.shortlist[shortlist_index + 1];
+                        XrDepthAlignMatcherState::HeightRefineCandidate {
+                            shortlist_index: shortlist_index + 1,
+                            signal_candidate,
+                            task: HeightMapRefineTask::new(
+                                signal_candidate.yaw_radians,
+                                signal_candidate.translation,
+                            ),
+                        }
+                    } else if let Some(best) = self.best {
+                        if self.local_map().is_some() && self.remote_map().is_some() {
+                            XrDepthAlignMatcherState::FinalWallProfile(WallProfileTask::new(
+                                best,
+                                self.floor_y,
+                            ))
+                        } else {
+                            XrDepthAlignMatcherState::Finish
+                        }
+                    } else {
+                        XrDepthAlignMatcherState::Finish
+                    };
+                    break true;
+                }
+                XrDepthAlignMatcherState::FinalWallProfile(mut task) => {
+                    let Some(local_map) = self.local_map() else {
+                        self.state = XrDepthAlignMatcherState::Finish;
+                        continue;
+                    };
+                    let Some(remote_map) = self.remote_map() else {
+                        self.state = XrDepthAlignMatcherState::Finish;
+                        continue;
+                    };
+                    let started = std::time::Instant::now();
+                    let completed = task.step(
+                        &self.local_signal,
+                        &self.remote_signal,
+                        local_map,
+                        self.local_sample_cache.as_ref(),
+                        remote_map,
+                        &self.remote_dense_signal,
+                    );
+                    self.wall_profile_time += started.elapsed();
+                    if let Some(candidate) = completed {
+                        self.state = XrDepthAlignMatcherState::FinalVerticalOffset { candidate };
+                    } else {
+                        self.state = XrDepthAlignMatcherState::FinalWallProfile(task);
+                    }
+                    break true;
+                }
+                XrDepthAlignMatcherState::FinalVerticalOffset { candidate } => {
+                    let started = std::time::Instant::now();
+                    self.best = Some(
+                        if let (Some(local_map), Some(remote_map)) = (self.local_map(), self.remote_map())
+                        {
+                            refine_solution_vertical_offset_from_overlap(
+                                local_map,
+                                remote_map,
+                                &self.remote_dense_signal,
+                                candidate,
+                            )
+                        } else {
+                            candidate
+                        },
+                    );
+                    self.final_score_time += started.elapsed();
+                    self.state = XrDepthAlignMatcherState::Finish;
+                    break true;
+                }
+                XrDepthAlignMatcherState::Finish => {
+                    self.finalize_diagnostic();
+                    self.state = XrDepthAlignMatcherState::Done;
+                    continue;
+                }
+                XrDepthAlignMatcherState::Done => {
+                    self.state = XrDepthAlignMatcherState::Done;
+                    return false;
+                }
+            }
+        };
+        if did_work {
+            let elapsed = step_started.elapsed();
+            self.total_compute_time += elapsed;
+            self.max_step_time = self.max_step_time.max(elapsed);
+            self.diagnostic.step_count = self.diagnostic.step_count.saturating_add(1);
+        }
+        did_work
+    }
+
+    fn local_map(&self) -> Option<&XrDepthAlignHeightMap> {
+        self.local.height_map.as_ref()
+    }
+
+    fn remote_map(&self) -> Option<&XrDepthAlignHeightMap> {
+        self.remote.height_map.as_ref()
+    }
+
+    fn finalize_diagnostic(&mut self) {
+        self.diagnostic.translation_vote_ms = duration_ms_u32(self.translation_vote_time);
+        self.diagnostic.signal_refine_ms = duration_ms_u32(self.signal_refine_time);
+        self.diagnostic.signal_score_ms = duration_ms_u32(self.signal_score_time);
+        self.diagnostic.height_refine_ms = duration_ms_u32(self.height_refine_time);
+        self.diagnostic.final_score_ms = duration_ms_u32(self.final_score_time);
+        self.diagnostic.wall_profile_ms = duration_ms_u32(self.wall_profile_time);
+        self.diagnostic.total_compute_ms = duration_ms_u32(self.total_compute_time);
+        self.diagnostic.max_step_ms = duration_ms_u32(self.max_step_time);
+        self.diagnostic.best_solution = self.best;
+    }
 }
 
 fn transform_height_map(
@@ -1823,8 +2837,8 @@ fn apply_height_map_alignment_support(
 }
 
 fn score_full_alignment_solution(
-    local_signal: &[&HeightMapSignalCell],
-    remote_signal: &[&HeightMapSignalCell],
+    local_signal: &[HeightMapSignalCell],
+    remote_signal: &[HeightMapSignalCell],
     local_map: Option<&XrDepthAlignHeightMap>,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: Option<&XrDepthAlignHeightMap>,
@@ -1841,9 +2855,10 @@ fn score_full_alignment_solution(
     )
 }
 
+#[allow(dead_code)]
 fn refine_translation_only_for_yaw(
-    local_signal: &[&HeightMapSignalCell],
-    remote_signal: &[&HeightMapSignalCell],
+    local_signal: &[HeightMapSignalCell],
+    remote_signal: &[HeightMapSignalCell],
     local_map: Option<&XrDepthAlignHeightMap>,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: Option<&XrDepthAlignHeightMap>,
@@ -1914,9 +2929,10 @@ fn wall_profile_yaw_sidecar_is_safe(
             <= current.residual_meters + XR_DEPTH_ALIGN_WALL_PROFILE_MAX_RESIDUAL_INCREASE_METERS
 }
 
+#[allow(dead_code)]
 fn refine_solution_with_wall_profile_yaw_sidecar(
-    local_signal: &[&HeightMapSignalCell],
-    remote_signal: &[&HeightMapSignalCell],
+    local_signal: &[HeightMapSignalCell],
+    remote_signal: &[HeightMapSignalCell],
     local_map: &XrDepthAlignHeightMap,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: &XrDepthAlignHeightMap,
@@ -2012,6 +3028,7 @@ fn height_map_score_better(candidate: (f32, f32, usize), current: (f32, f32, usi
         .is_gt()
 }
 
+#[allow(dead_code)]
 fn refine_height_map_alignment(
     local_map: &XrDepthAlignHeightMap,
     local_sample_cache: Option<&HeightMapSampleCache>,
@@ -2216,8 +3233,8 @@ struct HeightMapSignalMatch<'a> {
 }
 
 fn collect_unique_signal_matches<'a>(
-    local_signal: &[&'a HeightMapSignalCell],
-    remote_signal: &[&'a HeightMapSignalCell],
+    local_signal: &'a [HeightMapSignalCell],
+    remote_signal: &'a [HeightMapSignalCell],
     yaw: f32,
     translation: Vec3f,
 ) -> Vec<HeightMapSignalMatch<'a>> {
@@ -2304,8 +3321,8 @@ fn collect_unique_signal_matches<'a>(
 }
 
 fn refine_signal_alignment(
-    local_signal: &[&HeightMapSignalCell],
-    remote_signal: &[&HeightMapSignalCell],
+    local_signal: &[HeightMapSignalCell],
+    remote_signal: &[HeightMapSignalCell],
     floor_y: f32,
     yaw: f32,
     translation: Vec3f,
@@ -2359,8 +3376,8 @@ fn refine_signal_alignment(
 }
 
 fn score_signal_alignment_solution(
-    local_signal: &[&HeightMapSignalCell],
-    remote_signal: &[&HeightMapSignalCell],
+    local_signal: &[HeightMapSignalCell],
+    remote_signal: &[HeightMapSignalCell],
     yaw: f32,
     translation: Vec3f,
 ) -> XrDepthAlignSolution {
@@ -2402,9 +3419,10 @@ fn score_signal_alignment_solution(
     }
 }
 
+#[allow(dead_code)]
 fn refine_seed_alignment_solution(
-    local_signal: &[&HeightMapSignalCell],
-    remote_signal: &[&HeightMapSignalCell],
+    local_signal: &[HeightMapSignalCell],
+    remote_signal: &[HeightMapSignalCell],
     local_map: Option<&XrDepthAlignHeightMap>,
     local_sample_cache: Option<&HeightMapSampleCache>,
     remote_map: Option<&XrDepthAlignHeightMap>,
@@ -2703,6 +3721,7 @@ fn wrap_angle(mut angle: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, path::{Path, PathBuf}, time::Instant};
 
     #[derive(Clone, Copy, Debug, Default)]
     struct HeightMapTestArtifacts {
@@ -3010,6 +4029,42 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Default)]
+    struct ReferenceManualPose {
+        shift_x_meters: f32,
+        shift_z_meters: f32,
+        rotation_radians: f32,
+    }
+
+    fn reference_dump_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("util/dumps/align-pair-226a39e4b300-r0097-1774792873191.bin")
+    }
+
+    fn reference_manual_pose_path(dump_path: &Path) -> PathBuf {
+        let stem = dump_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("align-pair");
+        dump_path.with_file_name(format!("{stem}.manual_pose.ron"))
+    }
+
+    fn load_reference_manual_pose(dump_path: &Path) -> Option<ReferenceManualPose> {
+        let text = fs::read_to_string(reference_manual_pose_path(dump_path)).ok()?;
+        let mut pose = ReferenceManualPose::default();
+        for line in text.lines() {
+            let (key, value) = line.split_once(':')?;
+            let value = value.trim();
+            match key.trim() {
+                "shift_x_meters" => pose.shift_x_meters = value.parse().ok()?,
+                "shift_y_meters" => pose.shift_z_meters = value.parse().ok()?,
+                "rotation_radians" => pose.rotation_radians = value.parse().ok()?,
+                _ => {}
+            }
+        }
+        Some(pose)
+    }
+
     #[test]
     fn dense_height_map_solver_recovers_rotated_translated_pose() {
         let local = make_height_map_descriptor(Mat4f::identity());
@@ -3169,6 +4224,59 @@ mod tests {
         let summary = run_random_noisy_cases(0x5eed_cafe_d15c_a11e, 4, 120, 114);
         assert!(summary.accepted_cases >= 4, "summary={summary:?}");
         assert!(summary.seeded_reuse_cases >= 2, "summary={summary:?}");
+    }
+
+    #[test]
+    fn timesliced_solver_matches_reference_dump_and_keeps_steps_bounded() {
+        let dump_path = reference_dump_path();
+        let bytes = fs::read(&dump_path).expect("reference dump should exist");
+        let pair = XrNetAlignmentDescriptorDumpPair::from_file_bytes(&bytes)
+            .expect("reference dump should decode");
+        let manual_pose =
+            load_reference_manual_pose(&dump_path).expect("reference manual pose should exist");
+        let local = &pair.local_descriptor.descriptor;
+        let remote = &pair.remote_descriptor.descriptor;
+        let mut matcher = XrDepthAlignMatcher::new(local, remote, None);
+        let mut measured_steps = 0u32;
+        let mut max_step = std::time::Duration::ZERO;
+
+        while !matcher.is_finished() {
+            let started = Instant::now();
+            let progressed = matcher.step();
+            let elapsed = started.elapsed();
+            if progressed {
+                measured_steps = measured_steps.saturating_add(1);
+                max_step = max_step.max(elapsed);
+            }
+        }
+
+        let diagnostic = matcher
+            .diagnostic()
+            .expect("timesliced matcher should finish with a diagnostic");
+        let solution = diagnostic
+            .accepted_solution()
+            .expect("reference dump should produce an accepted solution");
+        let manual_translation = vec3(
+            manual_pose.shift_x_meters,
+            solution.translation.y,
+            manual_pose.shift_z_meters,
+        );
+        let planar_error = vec3(
+            solution.translation.x - manual_translation.x,
+            0.0,
+            solution.translation.z - manual_translation.z,
+        )
+        .length();
+        let yaw_error = wrap_angle(solution.yaw_radians - manual_pose.rotation_radians).abs();
+
+        assert_eq!(diagnostic.step_count, measured_steps, "{diagnostic:?}");
+        assert!(
+            diagnostic.max_step_ms <= 50,
+            "diagnostic={diagnostic:?} measured_max_step={:?}",
+            max_step
+        );
+        assert!(yaw_error <= 0.10, "{solution:?} manual={manual_pose:?}");
+        assert!(planar_error <= 0.08, "{solution:?} manual={manual_pose:?}");
     }
 
     #[test]

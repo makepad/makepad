@@ -140,6 +140,31 @@ fn install_android_panic_hook() {
     }));
 }
 
+pub fn set_current_thread_priority(priority: crate::CxThreadPriority) {
+    use core::ffi::{c_int, c_uint};
+
+    const PRIO_PROCESS: c_int = 0;
+
+    unsafe extern "C" {
+        fn gettid() -> c_int;
+        fn setpriority(which: c_int, who: c_uint, prio: c_int) -> c_int;
+    }
+
+    let nice = match priority {
+        crate::CxThreadPriority::Normal => 0,
+        crate::CxThreadPriority::Utility => 5,
+        crate::CxThreadPriority::Background => 10,
+        crate::CxThreadPriority::Idle => 15,
+    };
+
+    unsafe {
+        let tid = gettid();
+        if tid > 0 {
+            let _ = setpriority(PRIO_PROCESS, tid as c_uint, nice);
+        }
+    }
+}
+
 impl Cx {
     pub(crate) fn current_android_xr_options(&self) -> CxOpenXrOptions {
         CxOpenXrOptions {
