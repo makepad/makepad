@@ -426,7 +426,7 @@ script_mod! {
                     }
                 }
             }
-            xr_people_debug := XrPeopleDebug{
+            xr_peer_sync := XrPeerSync{
                 auto_alignment_enabled: true
             }
 
@@ -1395,22 +1395,22 @@ impl App {
         let local_descriptor =
             XrNetAlignmentDescriptorFrame::from_tsdf_snapshot(snapshot.as_ref(), 0.0)
                 .ok_or_else(|| "Dump: waiting for local published heightmap".to_string())?;
-        let people_debug_widget = self.ui.widget(cx, ids!(xr_people_debug));
-        let Some(people_debug) = people_debug_widget.borrow::<XrPeopleDebug>() else {
-            return Err("Dump: XR people debug unavailable".to_string());
+        let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
+        let Some(peer_sync) = peer_sync_widget.borrow::<XrPeerSync>() else {
+            return Err("Dump: XR peer sync unavailable".to_string());
         };
-        let Some((peer_id, remote_descriptor)) = people_debug.raw_peer_alignment_descriptor()
+        let Some((peer_id, remote_descriptor)) = peer_sync.raw_peer_alignment_descriptor()
         else {
             return Err(format!(
                 "Dump: waiting for peer heightmap | {} | {}",
-                people_debug.status_text(),
-                people_debug.peer_scene_text()
+                peer_sync.status_text(),
+                peer_sync.peer_scene_text()
             ));
         };
         if remote_descriptor.descriptor.height_map.is_none() {
             return Err(format!(
                 "Dump: peer descriptor arrived without heightmap | {}",
-                people_debug.peer_scene_text()
+                peer_sync.peer_scene_text()
             ));
         }
         Ok(XrNetAlignmentDescriptorDumpPair::new(
@@ -1503,12 +1503,12 @@ impl App {
         if self.network_started {
             return;
         }
-        if let Some(mut people_debug) = self
+        if let Some(mut peer_sync) = self
             .ui
-            .widget(cx, ids!(xr_people_debug))
-            .borrow_mut::<XrPeopleDebug>()
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow_mut::<XrPeerSync>()
         {
-            people_debug.set_enabled(cx, true);
+            peer_sync.set_enabled(cx, true);
             self.network_started = true;
         }
     }
@@ -1547,13 +1547,13 @@ impl App {
         };
         let (peer_sync_status_text, alignment_debug_text, alignment_state_text) = self
             .ui
-            .widget(cx, ids!(xr_people_debug))
-            .borrow::<XrPeopleDebug>()
-            .map(|people_debug| {
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow::<XrPeerSync>()
+            .map(|peer_sync| {
                 (
-                    people_debug.status_text().to_string(),
-                    people_debug.alignment_debug_text().to_string(),
-                    people_debug.alignment_state_text().to_string(),
+                    peer_sync.status_text().to_string(),
+                    peer_sync.alignment_debug_text().to_string(),
+                    peer_sync.alignment_state_text().to_string(),
                 )
             })
             .unwrap_or_else(|| {
@@ -1569,9 +1569,9 @@ impl App {
         if XR_SHOW_ALIGNMENT_HEIGHTMAP_PREVIEW {
             let remote_height_map = self
                 .ui
-                .widget(cx, ids!(xr_people_debug))
-                .borrow::<XrPeopleDebug>()
-                .and_then(|people_debug| people_debug.raw_peer_height_map());
+                .widget(cx, ids!(xr_peer_sync))
+                .borrow::<XrPeerSync>()
+                .and_then(|peer_sync| peer_sync.raw_peer_height_map());
             let local_slice_preview = cx
                 .xr_tsdf()
                 .latest_tsdf_snapshot()

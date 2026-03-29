@@ -10,8 +10,8 @@ use std::{
 script_mod! {
     use mod.prelude.widgets_internal.*
 
-    mod.widgets.XrPeopleDebugBase = #(XrPeopleDebug::register_widget(vm))
-    mod.widgets.XrPeopleDebug = set_type_default() do mod.widgets.XrPeopleDebugBase{
+    mod.widgets.XrPeerSyncBase = #(XrPeerSync::register_widget(vm))
+    mod.widgets.XrPeerSync = set_type_default() do mod.widgets.XrPeerSyncBase{
         body: mod.widgets.XrBodyKind.Disabled
         draw_cube +: {
             light_dir: vec3(0.35, 0.8, 0.45)
@@ -859,10 +859,6 @@ fn solve_outcome_label(diagnostic: Option<XrDepthAlignSolveDiagnostic>) -> &'sta
     }
 }
 
-fn matcher_progress_summary(progress: XrDepthAlignMatcherProgress) -> String {
-    format!("step {}", progress.step_count)
-}
-
 fn make_alignment_state_text(
     local_scene_state: LocalSceneState,
     local_descriptor_version: Option<(u64, u64)>,
@@ -887,11 +883,8 @@ fn make_alignment_state_text(
     };
     let peer_label = format!("{:08x}", peer_id.0);
     let remote_descriptor = peer_state.latest_descriptor.as_ref();
-    if let Some(progress) = peer_state.worker_progress {
-        return format!(
-            "AlignState {peer_label}: solving {}",
-            matcher_progress_summary(progress),
-        );
+    if peer_state.worker_progress.is_some() {
+        return format!("AlignState {peer_label}: solving");
     }
     format!(
         "AlignState {peer_label}: local map {} v{} | remote map {} seq {} | worker lv{} rv{} {} match {:.1}ms | pose {}",
@@ -1010,31 +1003,6 @@ enum LocalSceneState {
     Ready,
 }
 
-fn alignment_rejection_reason(
-    diagnostic: &XrDepthAlignSolveDiagnostic,
-    best: XrDepthAlignSolution,
-) -> String {
-    if best.matched_samples < 2 {
-        format!("matched {}<2", best.matched_samples)
-    } else if best.symmetry_confidence <= 0.10 {
-        format!("symmetry {:.2}<=0.10", best.symmetry_confidence)
-    } else if best.confidence <= 0.18 {
-        format!("confidence {:.2}<=0.18", best.confidence)
-    } else if !best.residual_meters.is_finite() {
-        "heightmap overlap missing".to_string()
-    } else if best.residual_meters >= 0.18 {
-        format!("residual {:.2}m>=0.18m", best.residual_meters)
-    } else if diagnostic.remote_wall_samples < 4 {
-        format!("remote signal {}<4", diagnostic.remote_wall_samples)
-    } else {
-        "score below accept threshold".to_string()
-    }
-}
-
-fn format_alignment_debug_lines(summary: String, context: &str) -> String {
-    format!("{summary} | {context}")
-}
-
 fn make_alignment_debug_text(
     local_scene_state: LocalSceneState,
     peers: &HashMap<XrNetPeerId, AlignmentWorkerPeerState>,
@@ -1063,13 +1031,11 @@ fn make_alignment_debug_text(
         return format!("AlignDbg {peer_label}: local heightmap ready | waiting to publish");
     }
     let Some(diagnostic) = peer_state.last_solve_diagnostic else {
-        if let Some(remote_descriptor) = peer_state.latest_descriptor.as_ref() {
+        if peer_state.latest_descriptor.is_some() {
             return format!(
-                "AlignDbg {peer_label}: remote map seq {} {} | {}",
-                remote_descriptor.seq,
-                descriptor_height_map_status(&remote_descriptor.descriptor),
+                "AlignDbg {peer_label}: {}",
                 if peer_state.matcher.is_some() {
-                    "solve running"
+                    "solving"
                 } else {
                     "waiting for solve"
                 },
@@ -1077,42 +1043,16 @@ fn make_alignment_debug_text(
         }
         return format!("AlignDbg {peer_label}: waiting for peer heightmap");
     };
-
-    let context = format!(
-        "local signal {} | remote signal {}",
-        diagnostic.local_wall_samples, diagnostic.remote_wall_samples,
-    );
     match diagnostic.outcome() {
-        XrDepthAlignSolveOutcome::MissingSamples => format_alignment_debug_lines(
-            format!("AlignDbg {peer_label}: need more heightmap signal"),
-            &context,
-        ),
-        XrDepthAlignSolveOutcome::NoCandidate => {
-            format_alignment_debug_lines(format!("AlignDbg {peer_label}: no candidate"), &context)
-        }
-        XrDepthAlignSolveOutcome::Rejected => {
-            let Some(best) = diagnostic.best_solution else {
-                return format!("AlignDbg {peer_label}: reject | {context}");
-            };
-            format_alignment_debug_lines(
-                format!(
-                    "AlignDbg {peer_label}: reject {}",
-                    alignment_rejection_reason(&diagnostic, best),
-                ),
-                &context,
-            )
-        }
-        XrDepthAlignSolveOutcome::Accepted => {
-            if diagnostic.best_solution.is_none() {
-                return format!("AlignDbg {peer_label}: aligned | {context}");
-            }
-            format_alignment_debug_lines(format!("AlignDbg {peer_label}: aligned"), &context)
-        }
+        XrDepthAlignSolveOutcome::MissingSamples => format!("AlignDbg {peer_label}: need-signal"),
+        XrDepthAlignSolveOutcome::NoCandidate => format!("AlignDbg {peer_label}: no-candidate"),
+        XrDepthAlignSolveOutcome::Rejected => format!("AlignDbg {peer_label}: rejected"),
+        XrDepthAlignSolveOutcome::Accepted => format!("AlignDbg {peer_label}: aligned"),
     }
 }
 
 #[derive(Script, ScriptHook, Widget)]
-pub struct XrPeopleDebug {
+pub struct XrPeerSync {
     #[redraw]
     #[live]
     draw_cube: DrawCube,
@@ -1179,7 +1119,7 @@ pub struct XrPeopleDebug {
     node: XrNode,
 }
 
-impl XrPeopleDebug {
+impl XrPeerSync {
     const HEADSET_SIZE: Vec3f = Vec3f {
         x: 0.18,
         y: 0.11,
@@ -2435,7 +2375,7 @@ impl XrPeopleDebug {
     }
 }
 
-impl Widget for XrPeopleDebug {
+impl Widget for XrPeerSync {
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
