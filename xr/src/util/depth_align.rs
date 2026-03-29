@@ -221,6 +221,7 @@ struct HeightMapSignalCell {
     point: Vec3f,
     height: f32,
     gradient: Vec3f,
+    axis_xz: Vec2f,
     weight: f32,
 }
 
@@ -1098,6 +1099,7 @@ fn build_height_map_signal_cells(height_map: &XrDepthAlignHeightMap) -> Vec<Heig
                 ),
                 height,
                 gradient,
+                axis_xz: vec2f(normal.x, normal.z),
                 weight,
             });
         }
@@ -1134,10 +1136,7 @@ fn build_height_map_signal_histogram(
     let bin_count = bin_count.max(1);
     let mut histogram = vec![0.0; bin_count];
     for cell in signal_cells {
-        let Some(axis) = xz_axis(cell.gradient) else {
-            continue;
-        };
-        let angle = axis.x.atan2(-axis.z);
+        let angle = cell.axis_xz.x.atan2(-cell.axis_xz.y);
         let normalized = (angle + std::f32::consts::PI) / std::f32::consts::TAU;
         let bin = (normalized * bin_count as f32).floor() as isize;
         histogram[bin.rem_euclid(bin_count as isize) as usize] += cell.weight.max(0.01);
@@ -1272,11 +1271,13 @@ fn score_height_map_alignment(
     if remote_signal.is_empty() {
         return (0.0, f32::INFINITY, 0);
     }
+    let (sin_yaw, cos_yaw) = yaw.sin_cos();
     let mapped_remote_cutout_center = remote_map
         .player_cutout_center
-        .map(|center| rotate_y(yaw, vec3(center.x, 0.0, center.y)) + translation);
+        .map(|center| rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, center.x, center.y));
     let mapped_remote_cutout_radius =
         (remote_map.player_cutout_radius_meters + 0.14).max(remote_map.cell_size_meters * 2.0);
+    let mapped_remote_cutout_radius_sq = mapped_remote_cutout_radius * mapped_remote_cutout_radius;
     let mut support_sum = 0.0;
     let mut weight_sum = 0.0;
     let mut total_weight = 0.0;
@@ -1284,23 +1285,39 @@ fn score_height_map_alignment(
     let mut matched = 0usize;
     for cell in remote_signal {
         total_weight += cell.weight;
-        let mapped = rotate_y(yaw, cell.point) + translation;
-        if mapped_remote_cutout_center.is_some_and(|center| {
-            let delta = mapped - center;
-            (delta.x * delta.x + delta.z * delta.z).sqrt() <= mapped_remote_cutout_radius
+        let (rotated_x, rotated_z) =
+            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point.x, cell.point.z);
+        let mapped_x = rotated_x + translation.x;
+        let mapped_z = rotated_z + translation.z;
+        if mapped_remote_cutout_center.is_some_and(|(center_x, center_z)| {
+            let delta_x = mapped_x - (center_x + translation.x);
+            let delta_z = mapped_z - (center_z + translation.z);
+            delta_x * delta_x + delta_z * delta_z <= mapped_remote_cutout_radius_sq
         }) {
             continue;
         }
-        let Some(local_height) = sample_height_map_bilinear(local_map, mapped.x, mapped.z) else {
+        let Some(local_height) = sample_height_map_bilinear(local_map, mapped_x, mapped_z) else {
             continue;
         };
         let diff = (local_height - cell.height).abs();
         let height_similarity = (1.0 - diff / 0.45).clamp(0.0, 1.0);
-        let direction_similarity = sample_height_map_signal_nearest(local_map, mapped.x, mapped.z)
-            .and_then(|(_, local_gradient)| {
-                let local_axis = xz_axis(local_gradient)?;
-                let remote_axis = xz_axis(rotate_y(yaw, cell.gradient))?;
-                Some(local_axis.dot(remote_axis).clamp(0.0, 1.0))
+        let direction_similarity = sample_height_map_signal_nearest(local_map, mapped_x, mapped_z)
+            .map(|(_, local_gradient)| {
+                let local_len_sq =
+                    local_gradient.x * local_gradient.x + local_gradient.z * local_gradient.z;
+                if local_len_sq <= 1.0e-8 {
+                    return 0.5;
+                }
+                let inv_local_len = local_len_sq.sqrt().recip();
+                let (remote_axis_x, remote_axis_z) = rotate_xz_quat_with_sin_cos(
+                    sin_yaw,
+                    cos_yaw,
+                    cell.axis_xz.x,
+                    cell.axis_xz.y,
+                );
+                (local_gradient.x * remote_axis_x + local_gradient.z * remote_axis_z)
+                    .mul_add(inv_local_len, 0.0)
+                    .clamp(0.0, 1.0)
             })
             .unwrap_or(0.5);
         let similarity = (height_similarity * 0.65 + direction_similarity * 0.35).clamp(0.0, 1.0);
@@ -1627,14 +1644,13 @@ fn candidate_signal_yaws(
     }
 
     for local_cell in local_signal.iter().take(16) {
-        let Some(local_axis) = xz_axis(local_cell.gradient) else {
-            continue;
-        };
         for remote_cell in remote_signal.iter().take(16) {
-            let Some(remote_axis) = xz_axis(remote_cell.gradient) else {
-                continue;
-            };
-            candidates.push(wrap_angle(signed_xz_angle(remote_axis, local_axis)));
+            candidates.push(wrap_angle(signed_xz_angle_2d(
+                remote_cell.axis_xz.x,
+                remote_cell.axis_xz.y,
+                local_cell.axis_xz.x,
+                local_cell.axis_xz.y,
+            )));
         }
     }
     dedupe_angles(candidates, 0.05)
@@ -2176,6 +2192,16 @@ fn rotate_y(yaw: f32, vector: Vec3f) -> Vec3f {
 fn rotate_xz(yaw: f32, x: f32, z: f32) -> (f32, f32) {
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
     (x * cos_yaw - z * sin_yaw, x * sin_yaw + z * cos_yaw)
+}
+
+fn rotate_xz_quat_with_sin_cos(sin_yaw: f32, cos_yaw: f32, x: f32, z: f32) -> (f32, f32) {
+    (x * cos_yaw + z * sin_yaw, z * cos_yaw - x * sin_yaw)
+}
+
+fn signed_xz_angle_2d(from_x: f32, from_z: f32, to_x: f32, to_z: f32) -> f32 {
+    let cross = from_z * to_x - from_x * to_z;
+    let dot = from_x * to_x + from_z * to_z;
+    cross.atan2(dot)
 }
 
 fn xz_axis(vector: Vec3f) -> Option<Vec3f> {
