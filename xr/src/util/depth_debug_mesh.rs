@@ -9,10 +9,6 @@ const XR_DEBUG_DEPTH_FLOATS_PER_VERTEX: usize = 8;
 const XR_DEBUG_TSDF_MESH_CHUNK_EDGE_VOXELS: i32 = 24;
 const XR_DEBUG_TSDF_MESH_CHUNK_OVERLAP_VOXELS: i32 = 4;
 const XR_DEBUG_TSDF_MESH_CELL_STRIDE_VOXELS: i32 = 1;
-const XR_DEBUG_TSDF_MIN_MESH_CONFIDENCE: u8 = 3;
-const XR_DEBUG_TSDF_RECENT_MESH_CONFIDENCE: u8 = 1;
-const XR_DEBUG_TSDF_RECENT_MESH_GENERATIONS: u64 = 6;
-const XR_DEBUG_TSDF_RECENT_MESH_MAX_ABS_DISTANCE: f32 = 0.6;
 const XR_DEBUG_TSDF_DENSE_HOLE_FILL_MAX_PASSES: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -113,17 +109,7 @@ fn snapshot_meshing_distance(
 ) -> Option<f32> {
     let (chunk_key, id) = chunk_key_and_id(grid, coord);
     let chunk = grid.chunks.get(&chunk_key)?;
-    let confidence = chunk.confidence(id);
-    let value = chunk.value(id)?;
-    if confidence >= XR_DEBUG_TSDF_MIN_MESH_CONFIDENCE {
-        return Some(value);
-    }
-    let observed_generation = chunk.observed_generation(id, current_generation);
-    (confidence >= XR_DEBUG_TSDF_RECENT_MESH_CONFIDENCE
-        && current_generation.saturating_sub(observed_generation)
-            <= XR_DEBUG_TSDF_RECENT_MESH_GENERATIONS
-        && value.abs() <= XR_DEBUG_TSDF_RECENT_MESH_MAX_ABS_DISTANCE)
-        .then_some(value)
+    chunk.meshing_value(id, current_generation)
 }
 
 fn push_debug_depth_vertex(vertices: &mut Vec<f32>, position: Vec3f, normal: Vec3f) {
