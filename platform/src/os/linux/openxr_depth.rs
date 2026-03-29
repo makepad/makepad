@@ -150,9 +150,6 @@ impl CxOpenXrDepthMeshPipeline {
             if !camera_world.w.is_finite() || camera_world.w.abs() < 1.0e-6 {
                 return Err("OpenXR depth camera transform is invalid".to_string());
             }
-            let camera_forward = world_from_depth_view.transform_vec4(vec4f(0.0, 0.0, -1.0, 0.0));
-            let camera_forward =
-                vec3f(camera_forward.x, camera_forward.y, camera_forward.z).normalize();
             let camera_world = vec3f(
                 camera_world.x / camera_world.w,
                 camera_world.y / camera_world.w,
@@ -165,25 +162,17 @@ impl CxOpenXrDepthMeshPipeline {
                 inv_depth_proj,
                 world_from_depth_view,
                 camera_world,
-                camera_forward,
             ))
         })();
 
-        let (
-            width,
-            height,
-            depth_proj,
-            inv_depth_proj,
-            world_from_depth_view,
-            camera_world,
-            camera_forward,
-        ) = match pose_result {
-            Ok(parts) => parts,
-            Err(err) => {
-                self.store.set_error(err.clone());
-                return Err(err);
-            }
-        };
+        let (width, height, depth_proj, inv_depth_proj, world_from_depth_view, camera_world) =
+            match pose_result {
+                Ok(parts) => parts,
+                Err(err) => {
+                    self.store.set_error(err.clone());
+                    return Err(err);
+                }
+            };
 
         let now = Instant::now();
         if !submit_should_readback_depth_frame(
@@ -216,7 +205,6 @@ impl CxOpenXrDepthMeshPipeline {
                 height,
                 voxel_size_meters,
                 camera_world,
-                camera_forward,
                 depth_proj,
                 inv_depth_proj,
                 depth_view_from_world: frame.eyes[DEPTH_VOXEL_EYE_INDEX].depth_view_mat,
