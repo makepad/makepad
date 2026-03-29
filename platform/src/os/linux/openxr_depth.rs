@@ -46,21 +46,13 @@ const DEPTH_TSD_NOVELTY_OUTSIDE_BOUNDS_WEIGHT: f32 = 2.0;
 const DEPTH_VOXEL_MIN_DEPTH_VALUE: f32 = 1.0 / 65535.0;
 const DEPTH_VOXEL_MAX_DEPTH_VALUE: f32 = 0.9995;
 const DEPTH_TSD_MIN_NORMAL_DOT: f32 = 0.3;
+const DEPTH_TSD_APPLY_DELTA_EPSILON: f32 = 0.01;
 const DEPTH_TSD_MAX_CONFIDENCE: u8 = 32;
+const DEPTH_TSD_MIN_MESH_CONFIDENCE: u8 = 3;
+const DEPTH_TSD_RECENT_MESH_CONFIDENCE: u8 = 1;
+const DEPTH_TSD_RECENT_MESH_GENERATIONS: u64 = 6;
+const DEPTH_TSD_RECENT_MESH_MAX_ABS_DISTANCE: f32 = 0.6;
 const DEPTH_TSD_STABLE_CONFIDENCE: u8 = 8;
-const DEPTH_TSD_BOOTSTRAP_STABILITY: u8 = 3;
-const DEPTH_TSD_MAX_STABILITY: u8 = 32;
-const DEPTH_TSD_MAX_CLEAR_SCORE: u8 = 16;
-const DEPTH_TSD_MIN_MESH_STABILITY: u8 = 3;
-const DEPTH_TSD_SURFACE_AGREE_DELTA: f32 = 0.08;
-const DEPTH_TSD_SURFACE_SOFT_DELTA: f32 = 0.18;
-const DEPTH_TSD_SURFACE_LAYER_DELTA: f32 = 0.32;
-const DEPTH_TSD_SURFACE_OUTLIER_DELTA: f32 = 0.55;
-const DEPTH_TSD_CONFIDENT_BLEND_RADIUS: f32 = 0.10;
-const DEPTH_TSD_UNCERTAIN_BLEND_RADIUS: f32 = 0.22;
-const DEPTH_TSD_DIRECT_OBSERVATION_MAX_WEIGHT: f32 = 4.0;
-const DEPTH_TSD_DIRECT_CONTRADICTION_RESET_DELTA: f32 = 0.75;
-const DEPTH_TSD_DIRECT_CONTRADICTION_SIGN_FLIP_DELTA: f32 = 0.25;
 const DEPTH_PLAYER_CLEAR_MAX_CONFIDENCE: u8 = 2;
 const DEPTH_PLAYER_EXCLUDE_RADIUS_METERS: f32 = 0.32;
 const DEPTH_PLAYER_EXCLUDE_TOP_METERS: f32 = 0.12;
@@ -489,53 +481,22 @@ impl SparseTsdChunk {
         }
     }
 
-    fn stability(&self, id: usize) -> u8 {
-        if !self.is_valid(id) {
-            0
-        } else {
-            self.data.stability[id]
-        }
-    }
-
-    fn accumulate(
-        &mut self,
-        id: usize,
-        value: f32,
-        sample_weight: f32,
-        view_mask: u8,
-        generation: u64,
-    ) -> SparseTsdWriteResult {
+    fn accumulate(&mut self, id: usize, value: f32, generation: u64) -> SparseTsdWriteResult {
         let previous_valid = self.is_valid(id);
         let previous_confidence = self.data.confidence[id];
         let previous_generation = self.data.observed_generation[id];
-        let previous_stability = self.data.stability[id];
-        let previous_clear_score = self.data.clear_score[id];
-        let previous_view_mask = self.data.view_mask[id];
         let previous = self.value(id);
         let value = value.clamp(-1.0, 1.0);
-        let sample_weight = sample_weight.clamp(0.25, DEPTH_TSD_DIRECT_OBSERVATION_MAX_WEIGHT);
-        let sample_strength = tsdf_observation_strength(sample_weight);
-        let contradiction_reset = previous.is_some_and(|previous| {
-            previous_confidence < DEPTH_TSD_STABLE_CONFIDENCE
-                && tsdf_direct_observation_should_reset(previous, value)
-        });
-        let reject_outlier = previous.is_some_and(|previous| {
-            previous_confidence >= DEPTH_TSD_STABLE_CONFIDENCE
-                && previous_stability >= DEPTH_TSD_MIN_MESH_STABILITY
-                && (previous - value).abs() >= DEPTH_TSD_SURFACE_OUTLIER_DELTA
-        });
         let next_value = if let Some(previous) = previous {
-            if contradiction_reset {
-                value
-            } else if reject_outlier {
-                previous
-            } else {
-                let delta = (previous - value).abs();
-                let prior_weight = previous_confidence.max(1) as f32;
-                let blend_weight =
-                    tsdf_robust_observation_weight(delta, previous_confidence, sample_weight);
-                previous + (value - previous) * (blend_weight / (prior_weight + blend_weight))
+            let delta = (previous - value).abs();
+            let mut confidence = self.data.confidence[id].max(1);
+            if delta < 0.08 {
+                confidence = confidence.saturating_add(2).min(DEPTH_TSD_MAX_CONFIDENCE);
+            } else if delta > 0.35 {
+                confidence = confidence.saturating_sub(2).max(1);
             }
+            let confidence = confidence as f32;
+            previous + (value - previous) / (confidence + 1.0)
         } else {
             value
         }
@@ -547,65 +508,30 @@ impl SparseTsdChunk {
         data.values[id] = SparseTsdReadChunk::encode_normalized_distance(next_value);
         SparseTsdReadChunk::set_valid_index(&mut data.valid_bits, id);
         if let Some(previous) = previous {
-            if contradiction_reset {
-                data.confidence[id] = sample_strength.max(1);
-                data.stability[id] = DEPTH_TSD_BOOTSTRAP_STABILITY;
-                data.clear_score[id] = 0;
-                data.view_mask[id] = view_mask;
-            } else if reject_outlier {
-                data.confidence[id] = data.confidence[id].saturating_sub(1).max(1);
-                data.stability[id] = data.stability[id].saturating_sub(sample_strength + 1);
+            let delta = (previous - value).abs();
+            let confidence = &mut data.confidence[id];
+            if delta < 0.08 {
+                *confidence = confidence.saturating_add(2).min(DEPTH_TSD_MAX_CONFIDENCE);
+            } else if delta < 0.18 {
+                *confidence = confidence.saturating_add(1).min(DEPTH_TSD_MAX_CONFIDENCE);
+            } else if delta > 0.35 {
+                *confidence = confidence.saturating_sub(2).max(1);
             } else {
-                let delta = (previous - value).abs();
-                let confidence = &mut data.confidence[id];
-                if delta < DEPTH_TSD_SURFACE_AGREE_DELTA {
-                    *confidence = confidence
-                        .saturating_add(sample_strength + 1)
-                        .min(DEPTH_TSD_MAX_CONFIDENCE);
-                    data.stability[id] = data.stability[id]
-                        .saturating_add(sample_strength + 1)
-                        .min(DEPTH_TSD_MAX_STABILITY);
-                    data.clear_score[id] = data.clear_score[id].saturating_sub(2);
-                    data.view_mask[id] |= view_mask;
-                } else if delta < DEPTH_TSD_SURFACE_SOFT_DELTA {
-                    *confidence = confidence
-                        .saturating_add(sample_strength)
-                        .min(DEPTH_TSD_MAX_CONFIDENCE);
-                    data.stability[id] = data.stability[id]
-                        .saturating_add(sample_strength)
-                        .min(DEPTH_TSD_MAX_STABILITY);
-                    data.clear_score[id] = data.clear_score[id].saturating_sub(1);
-                    data.view_mask[id] |= view_mask;
-                } else if delta < DEPTH_TSD_SURFACE_LAYER_DELTA {
-                    *confidence = confidence.saturating_sub(1).max(1);
-                    data.stability[id] = data.stability[id].saturating_sub(1);
-                } else {
-                    *confidence = confidence.saturating_sub(sample_strength + 1).max(1);
-                    data.stability[id] = data.stability[id].saturating_sub(sample_strength + 1);
-                }
+                *confidence = confidence.saturating_sub(1).max(1);
             }
         } else {
-            data.confidence[id] = sample_strength.max(1);
-            data.stability[id] = DEPTH_TSD_BOOTSTRAP_STABILITY
-                .saturating_add(sample_strength.saturating_sub(1))
-                .min(DEPTH_TSD_MAX_STABILITY);
-            data.clear_score[id] = 0;
-            data.view_mask[id] = view_mask;
+            data.confidence[id] = 1;
         }
         data.observed_generation[id] = SparseTsdReadChunk::encode_generation_tag(generation);
-        let support_changed = previous_stability != data.stability[id]
-            || previous_clear_score != data.clear_score[id]
-            || previous_view_mask != data.view_mask[id];
         if previous.is_none() {
             self.live_count += 1;
         }
         SparseTsdWriteResult {
             state_changed: !previous_valid
                 || changed
-                || support_changed
                 || previous_confidence != data.confidence[id]
                 || previous_generation != data.observed_generation[id],
-            value_changed: changed || support_changed,
+            value_changed: changed,
             became_live: previous.is_none(),
         }
     }
@@ -614,9 +540,6 @@ impl SparseTsdChunk {
         let previous_valid = self.is_valid(id);
         let previous_confidence = self.data.confidence[id];
         let previous_generation = self.data.observed_generation[id];
-        let previous_stability = self.data.stability[id];
-        let previous_clear_score = self.data.clear_score[id];
-        let previous_view_mask = self.data.view_mask[id];
         let previous = self.value(id);
         let value = value.clamp(-1.0, 1.0);
         let changed = previous
@@ -627,66 +550,16 @@ impl SparseTsdChunk {
         SparseTsdReadChunk::set_valid_index(&mut data.valid_bits, id);
         data.confidence[id] = DEPTH_TSD_MAX_CONFIDENCE;
         data.observed_generation[id] = SparseTsdReadChunk::encode_generation_tag(generation);
-        data.stability[id] = 0;
-        data.clear_score[id] = DEPTH_TSD_MAX_CLEAR_SCORE;
-        data.view_mask[id] = 0;
         if previous.is_none() {
             self.live_count += 1;
         }
-        let support_changed = previous_stability != data.stability[id]
-            || previous_clear_score != data.clear_score[id]
-            || previous_view_mask != data.view_mask[id];
         SparseTsdWriteResult {
             state_changed: !previous_valid
                 || changed
-                || support_changed
                 || previous_confidence != data.confidence[id]
                 || previous_generation != data.observed_generation[id],
-            value_changed: changed || support_changed,
+            value_changed: changed,
             became_live: previous.is_none(),
-        }
-    }
-
-    fn apply_clear_evidence(
-        &mut self,
-        id: usize,
-        clearance: f32,
-        tsd_distance_meters: f32,
-        generation: u64,
-    ) -> SparseTsdWriteResult {
-        let Some(previous) = self.value(id) else {
-            return SparseTsdWriteResult::default();
-        };
-        if tsdf_free_space_should_overwrite(previous, clearance, tsd_distance_meters) {
-            return self.overwrite(id, 1.0, generation);
-        }
-        let previous_confidence = self.data.confidence[id];
-        let previous_generation = self.data.observed_generation[id];
-        let previous_stability = self.data.stability[id];
-        let previous_clear_score = self.data.clear_score[id];
-        let previous_view_mask = self.data.view_mask[id];
-        let clear_strength = tsdf_clear_strength(clearance, tsd_distance_meters);
-        let next_value = (previous + (1.0 - previous) * 0.35).clamp(-1.0, 1.0);
-        let changed = (previous - next_value).abs() > 1.0e-4;
-        let data = Arc::make_mut(&mut self.data);
-        data.values[id] = SparseTsdReadChunk::encode_normalized_distance(next_value);
-        data.confidence[id] = data.confidence[id].saturating_sub(1).max(1);
-        data.observed_generation[id] = SparseTsdReadChunk::encode_generation_tag(generation);
-        data.stability[id] = data.stability[id].saturating_sub(clear_strength + 1);
-        data.clear_score[id] = data.clear_score[id]
-            .saturating_add(clear_strength)
-            .min(DEPTH_TSD_MAX_CLEAR_SCORE);
-        data.view_mask[id] = 0;
-        let support_changed = previous_stability != data.stability[id]
-            || previous_clear_score != data.clear_score[id]
-            || previous_view_mask != data.view_mask[id];
-        SparseTsdWriteResult {
-            state_changed: changed
-                || support_changed
-                || previous_confidence != data.confidence[id]
-                || previous_generation != data.observed_generation[id],
-            value_changed: changed || support_changed,
-            became_live: false,
         }
     }
 }
@@ -723,12 +596,6 @@ impl SparseTsdGrid {
             .get(&chunk_key)
             .map(|chunk| chunk.confidence(local_id))
             .unwrap_or(0)
-    }
-
-    pub fn meshing_distance(&self, coord: VoxelCoord, current_generation: u64) -> Option<f32> {
-        let (chunk_key, local_id) = self.chunk_key_and_id(coord);
-        let chunk = self.chunks.get(&chunk_key)?;
-        chunk.data.meshing_value(local_id, current_generation)
     }
 
     pub fn overwrite_normalized_distance(
@@ -833,6 +700,24 @@ impl SparseTsdGrid {
 
 fn voxel_coord_to_chunk_key(coord: VoxelCoord) -> ChunkKey {
     ChunkKey::new(coord.x, coord.y, coord.z)
+}
+
+impl SparseTsdReadChunk {
+    pub fn meshing_value(&self, id: usize, current_generation: u64) -> Option<f32> {
+        let value = self.value(id)?;
+        let confidence = self.confidence(id);
+        if confidence >= DEPTH_TSD_MIN_MESH_CONFIDENCE {
+            Some(value)
+        } else if confidence >= DEPTH_TSD_RECENT_MESH_CONFIDENCE
+            && current_generation.saturating_sub(self.observed_generation(id, current_generation))
+                <= DEPTH_TSD_RECENT_MESH_GENERATIONS
+            && value.abs() <= DEPTH_TSD_RECENT_MESH_MAX_ABS_DISTANCE
+        {
+            Some(value)
+        } else {
+            None
+        }
+    }
 }
 
 impl SparseTsdGridReadSnapshot {
@@ -1057,8 +942,6 @@ struct FrameTsdSample {
     chunk_key: VoxelCoord,
     local_id: u16,
     normalized: f32,
-    weight: f32,
-    view_mask: u8,
 }
 
 pub(super) struct CxOpenXrDepthMeshPipeline {
@@ -1486,8 +1369,6 @@ fn preprocess_depth_mesh(
             if sample.has_normal && norm_dot <= DEPTH_TSD_MIN_NORMAL_DOT {
                 continue;
             }
-            let sample_weight = tsdf_observation_weight(surface_distance, norm_dot);
-            let view_mask = tsdf_observation_view_mask(ray_dir);
 
             observed_world_min = Vec3f::min_componentwise(observed_world_min, sample.world);
             observed_world_max = Vec3f::max_componentwise(observed_world_max, sample.world);
@@ -1533,8 +1414,6 @@ fn preprocess_depth_mesh(
                     chunk_key,
                     local_id,
                     normalized,
-                    weight: sample_weight,
-                    view_mask,
                 });
                 distance += ray_step;
             }
@@ -1556,24 +1435,19 @@ fn preprocess_depth_mesh(
         let chunk_key = worker_state.staged_tsd_samples[index].chunk_key;
         let local_id = worker_state.staged_tsd_samples[index].local_id;
         let mut sum = 0.0f32;
-        let mut weight_sum = 0.0f32;
-        let mut merged_view_mask = 0u8;
+        let mut count = 0u16;
         while index < worker_state.staged_tsd_samples.len()
             && worker_state.staged_tsd_samples[index].chunk_key == chunk_key
             && worker_state.staged_tsd_samples[index].local_id == local_id
         {
-            let sample = worker_state.staged_tsd_samples[index];
-            sum += sample.normalized * sample.weight;
-            weight_sum += sample.weight;
-            merged_view_mask |= sample.view_mask;
+            sum += worker_state.staged_tsd_samples[index].normalized;
+            count = count.saturating_add(1);
             index += 1;
         }
         worker_state.reduced_tsd_samples.push(FrameTsdSample {
             chunk_key,
             local_id,
-            normalized: sum / weight_sum.max(1.0e-4),
-            weight: weight_sum.min(DEPTH_TSD_DIRECT_OBSERVATION_MAX_WEIGHT),
-            view_mask: merged_view_mask,
+            normalized: sum / count.max(1) as f32,
         });
     }
 
@@ -2406,70 +2280,6 @@ fn depth_pixel_inside_margin(width: usize, height: usize, x: usize, y: usize) ->
     x >= margin && y >= margin && x + margin < width && y + margin < height
 }
 
-fn tsdf_observation_weight(surface_distance: f32, norm_dot: f32) -> f32 {
-    let distance_span = (DEPTH_VOXEL_MAX_DISTANCE_METERS - DEPTH_TSD_MIN_UPDATE_DISTANCE_METERS)
-        .max(1.0e-3);
-    let distance_t =
-        ((surface_distance - DEPTH_TSD_MIN_UPDATE_DISTANCE_METERS) / distance_span).clamp(0.0, 1.0);
-    let range_quality = 1.0 - 0.55 * distance_t;
-    let angle_quality = norm_dot.clamp(DEPTH_TSD_MIN_NORMAL_DOT, 1.0).powf(1.5);
-    (range_quality * angle_quality)
-        .clamp(0.25, 1.0)
-        .min(DEPTH_TSD_DIRECT_OBSERVATION_MAX_WEIGHT)
-}
-
-fn tsdf_observation_strength(weight: f32) -> u8 {
-    if weight >= 0.85 {
-        2
-    } else {
-        1
-    }
-}
-
-fn tsdf_observation_view_mask(ray_dir: Vec3f) -> u8 {
-    let angle = ray_dir.z.atan2(ray_dir.x);
-    let bin = (((angle + std::f32::consts::PI) / std::f32::consts::TAU) * 8.0).floor() as i32;
-    1u8 << bin.rem_euclid(8)
-}
-
-fn tsdf_robust_observation_weight(delta: f32, confidence: u8, sample_weight: f32) -> f32 {
-    let huber_radius = if confidence >= DEPTH_TSD_STABLE_CONFIDENCE {
-        DEPTH_TSD_CONFIDENT_BLEND_RADIUS
-    } else {
-        DEPTH_TSD_UNCERTAIN_BLEND_RADIUS
-    };
-    let scale = if delta <= huber_radius {
-        1.0
-    } else {
-        huber_radius / delta.max(1.0e-4)
-    };
-    (sample_weight * scale * scale)
-        .clamp(0.05, DEPTH_TSD_DIRECT_OBSERVATION_MAX_WEIGHT)
-}
-
-fn tsdf_direct_observation_should_reset(previous: f32, value: f32) -> bool {
-    let delta = (previous - value).abs();
-    let sign_flip = previous.signum() != value.signum();
-    delta >= DEPTH_TSD_DIRECT_CONTRADICTION_RESET_DELTA
-        || (sign_flip && delta >= DEPTH_TSD_DIRECT_CONTRADICTION_SIGN_FLIP_DELTA)
-}
-
-fn tsdf_free_space_should_overwrite(
-    previous: f32,
-    clearance: f32,
-    tsd_distance_meters: f32,
-) -> bool {
-    previous < 0.0 || clearance >= tsd_distance_meters
-}
-
-fn tsdf_clear_strength(clearance: f32, tsd_distance_meters: f32) -> u8 {
-    if clearance >= tsd_distance_meters {
-        2
-    } else {
-        1
-    }
-}
-
 fn depth_ndc_to_view(
     job: &CxOpenXrDepthMeshJob,
     ndc_x: f32,
@@ -2658,22 +2468,20 @@ fn apply_tsd_samples(volume: &mut DepthMeshVolume, frame_tsd_samples: &[FrameTsd
             {
                 let sample = frame_tsd_samples[index];
                 let local_id = sample.local_id as usize;
-                let update = chunk.accumulate(
-                    local_id,
-                    sample.normalized,
-                    sample.weight,
-                    sample.view_mask,
-                    volume.generation,
-                );
+                let previous = chunk.value(local_id).unwrap_or(2.0);
+                let update = chunk.accumulate(local_id, sample.normalized, volume.generation);
                 if update.became_live {
                     became_live += 1;
                 }
                 chunk_dirty |= update.state_changed;
                 if update.value_changed {
-                    changed_coords.push(tsd_voxel_coord_from_chunk_key_and_local_id(
-                        chunk_key,
-                        sample.local_id,
-                    ));
+                    let current = chunk.value(local_id).unwrap_or(previous);
+                    if (previous - current).abs() >= DEPTH_TSD_APPLY_DELTA_EPSILON {
+                        changed_coords.push(tsd_voxel_coord_from_chunk_key_and_local_id(
+                            chunk_key,
+                            sample.local_id,
+                        ));
+                    }
                 }
                 index += 1;
             }
@@ -2798,21 +2606,18 @@ fn refresh_visible_free_space(
                     }
                     let confidence = chunk.confidence(local_id);
                     if confidence >= DEPTH_TSD_STABLE_CONFIDENCE
-                        && chunk.stability(local_id) >= DEPTH_TSD_MIN_MESH_STABILITY
                         && previous <= 0.25
                         && clearance < tsd_distance_meters
                     {
                         continue;
                     }
-                    let update = chunk.apply_clear_evidence(
-                        local_id,
-                        clearance,
-                        tsd_distance_meters,
-                        volume.generation,
-                    );
+                    let update = chunk.accumulate(local_id, 1.0, volume.generation);
                     chunk_dirty |= update.state_changed;
                     if update.value_changed {
-                        changed_coords.push(coord);
+                        let current = chunk.value(local_id).unwrap_or(previous);
+                        if (previous - current).abs() >= DEPTH_TSD_APPLY_DELTA_EPSILON {
+                            changed_coords.push(coord);
+                        }
                     }
                 }
             }
@@ -2948,71 +2753,18 @@ fn query_grid_bilinear_distance_at_y(
 
     let v00 = volume
         .mesh_grid
-        .meshing_distance(VoxelCoord::new(x0, y_coord, z0), volume.generation)?;
+        .normalized_distance(VoxelCoord::new(x0, y_coord, z0))?;
     let v10 = volume
         .mesh_grid
-        .meshing_distance(VoxelCoord::new(x0 + 1, y_coord, z0), volume.generation)?;
+        .normalized_distance(VoxelCoord::new(x0 + 1, y_coord, z0))?;
     let v01 = volume
         .mesh_grid
-        .meshing_distance(VoxelCoord::new(x0, y_coord, z0 + 1), volume.generation)?;
+        .normalized_distance(VoxelCoord::new(x0, y_coord, z0 + 1))?;
     let v11 = volume
         .mesh_grid
-        .meshing_distance(VoxelCoord::new(x0 + 1, y_coord, z0 + 1), volume.generation)?;
+        .normalized_distance(VoxelCoord::new(x0 + 1, y_coord, z0 + 1))?;
 
     let vx0 = v00 + (v10 - v00) * tx;
     let vx1 = v01 + (v11 - v01) * tx;
     Some(vx0 + (vx1 - vx0) * tz)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn direct_observation_reset_triggers_on_strong_conflict() {
-        assert!(tsdf_direct_observation_should_reset(0.9, -0.8));
-        assert!(tsdf_direct_observation_should_reset(0.2, -0.2));
-        assert!(!tsdf_direct_observation_should_reset(0.1, -0.05));
-        assert!(!tsdf_direct_observation_should_reset(0.45, 0.6));
-    }
-
-    #[test]
-    fn free_space_overwrite_requires_clear_conflict_or_large_clearance() {
-        assert!(tsdf_free_space_should_overwrite(-0.2, 0.03, 0.06));
-        assert!(tsdf_free_space_should_overwrite(0.3, 0.06, 0.06));
-        assert!(!tsdf_free_space_should_overwrite(0.3, 0.03, 0.06));
-    }
-
-    #[test]
-    fn chunk_accumulate_resets_on_direct_contradiction() {
-        let mut chunk = SparseTsdChunk::new(8);
-        let first = chunk.accumulate(0, 0.9, 1.0, 1, 1);
-        assert!(first.state_changed);
-        assert_eq!(chunk.confidence(0), 2);
-
-        let second = chunk.accumulate(0, -0.8, 1.0, 1, 2);
-        assert!(second.state_changed);
-        assert_eq!(chunk.confidence(0), 2);
-        let value = chunk.value(0).expect("voxel should stay valid");
-        assert!((value + 0.8).abs() <= 1.0 / i16::MAX as f32);
-    }
-
-    #[test]
-    fn chunk_rejects_outlier_layer_once_wall_is_supported() {
-        let mut chunk = SparseTsdChunk::new(8);
-        for generation in 1..=8 {
-            let update = chunk.accumulate(0, 0.05, 1.0, 1, generation);
-            assert!(update.state_changed);
-        }
-        let before = chunk.value(0).expect("voxel should exist");
-        let before_stability = chunk.stability(0);
-        assert!(chunk.confidence(0) >= DEPTH_TSD_STABLE_CONFIDENCE);
-        assert!(chunk.stability(0) >= DEPTH_TSD_MIN_MESH_STABILITY);
-
-        let update = chunk.accumulate(0, -0.65, 1.0, 2, 9);
-        assert!(update.state_changed);
-        let after = chunk.value(0).expect("voxel should remain valid");
-        assert!((after - before).abs() < 0.02);
-        assert!(chunk.stability(0) < before_stability);
-    }
 }

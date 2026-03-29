@@ -11,13 +11,6 @@ use std::{
 };
 
 pub const XR_TSDF_DEFAULT_VOXEL_SIZE_METERS: f32 = 0.03;
-const XR_TSDF_MIN_MESH_CONFIDENCE: u8 = 3;
-const XR_TSDF_RECENT_MESH_CONFIDENCE: u8 = 1;
-const XR_TSDF_RECENT_MESH_GENERATIONS: u64 = 6;
-const XR_TSDF_RECENT_MESH_MAX_ABS_DISTANCE: f32 = 0.6;
-const XR_TSDF_BOOTSTRAP_STABILITY: u8 = 3;
-const XR_TSDF_MIN_MESH_STABILITY: u8 = 3;
-const XR_TSDF_MAX_MESH_CLEAR_SCORE: u8 = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ChunkKey {
@@ -51,9 +44,6 @@ pub struct SparseTsdReadChunk {
     pub valid_bits: Vec<u64>,
     pub confidence: Vec<u8>,
     pub observed_generation: Vec<u16>,
-    pub stability: Vec<u8>,
-    pub clear_score: Vec<u8>,
-    pub view_mask: Vec<u8>,
 }
 
 impl SparseTsdReadChunk {
@@ -67,9 +57,6 @@ impl SparseTsdReadChunk {
             valid_bits: vec![0; Self::valid_word_count(chunk_volume)],
             confidence: vec![0; chunk_volume],
             observed_generation: vec![0; chunk_volume],
-            stability: vec![0; chunk_volume],
-            clear_score: vec![0; chunk_volume],
-            view_mask: vec![0; chunk_volume],
         }
     }
 
@@ -142,56 +129,9 @@ impl SparseTsdReadChunk {
         }
     }
 
-    pub fn stability(&self, id: usize) -> u8 {
-        if !Self::is_valid_index(&self.valid_bits, id) {
-            0
-        } else {
-            self.stability.get(id).copied().unwrap_or(0)
-        }
-    }
-
-    pub fn clear_score(&self, id: usize) -> u8 {
-        if !Self::is_valid_index(&self.valid_bits, id) {
-            0
-        } else {
-            self.clear_score.get(id).copied().unwrap_or(0)
-        }
-    }
-
-    pub fn view_mask(&self, id: usize) -> u8 {
-        if !Self::is_valid_index(&self.valid_bits, id) {
-            0
-        } else {
-            self.view_mask.get(id).copied().unwrap_or(0)
-        }
-    }
-
     pub fn observed_generation(&self, id: usize, current_generation: u64) -> u64 {
         let tag = self.observed_generation.get(id).copied().unwrap_or(0);
         Self::decode_generation_tag(tag, current_generation)
-    }
-
-    pub fn meshing_value(&self, id: usize, current_generation: u64) -> Option<f32> {
-        let value = self.value(id)?;
-        let confidence = self.confidence(id);
-        let stability = self.stability(id);
-        let clear_score = self.clear_score(id);
-        if clear_score > XR_TSDF_MAX_MESH_CLEAR_SCORE {
-            None
-        } else if confidence >= XR_TSDF_MIN_MESH_CONFIDENCE
-            && stability >= XR_TSDF_MIN_MESH_STABILITY
-        {
-            Some(value)
-        } else if stability >= XR_TSDF_BOOTSTRAP_STABILITY
-            && confidence >= XR_TSDF_RECENT_MESH_CONFIDENCE
-            && current_generation.saturating_sub(self.observed_generation(id, current_generation))
-                <= XR_TSDF_RECENT_MESH_GENERATIONS
-            && value.abs() <= XR_TSDF_RECENT_MESH_MAX_ABS_DISTANCE
-        {
-            Some(value)
-        } else {
-            None
-        }
     }
 
     pub fn set_value(&mut self, id: usize, value: f32, confidence: u8, observed_generation: u64) {
@@ -205,19 +145,13 @@ impl SparseTsdReadChunk {
         Self::set_valid_index(&mut self.valid_bits, id);
         self.confidence[id] = confidence;
         self.observed_generation[id] = Self::encode_generation_tag(observed_generation);
-        self.stability[id] = confidence;
-        self.clear_score[id] = 0;
-        self.view_mask[id] = u8::MAX;
     }
 
     pub fn heap_bytes(&self) -> u64 {
         (self.values.capacity() * std::mem::size_of::<i16>()
             + self.valid_bits.capacity() * std::mem::size_of::<u64>()
             + self.confidence.capacity() * std::mem::size_of::<u8>()
-            + self.observed_generation.capacity() * std::mem::size_of::<u16>()
-            + self.stability.capacity() * std::mem::size_of::<u8>()
-            + self.clear_score.capacity() * std::mem::size_of::<u8>()
-            + self.view_mask.capacity() * std::mem::size_of::<u8>()) as u64
+            + self.observed_generation.capacity() * std::mem::size_of::<u16>()) as u64
     }
 }
 
