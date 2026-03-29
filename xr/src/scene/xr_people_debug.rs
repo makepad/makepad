@@ -4,7 +4,7 @@ use makepad_widgets::event::XrSyncAnchor;
 use std::{
     collections::HashMap,
     sync::{mpsc::TryRecvError, Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 script_mod! {
@@ -19,8 +19,9 @@ script_mod! {
     }
 }
 
-const XR_ALIGNMENT_CALLBACK_BUDGET_MILLIS: u64 = 40;
+const XR_ALIGNMENT_CALLBACK_BUDGET_MILLIS: u64 = 25;
 const XR_ALIGNMENT_CALLBACK_MAX_STEPS: usize = 4096;
+const XR_ALIGNMENT_PROGRESS_SIGNAL_INTERVAL_MILLIS: u64 = 100;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum RemoteTransformSource {
@@ -243,6 +244,7 @@ struct AlignmentWorkerState {
     peers: HashMap<XrNetPeerId, AlignmentWorkerPeerState>,
     local_descriptor: Option<XrNetAlignmentDescriptorFrame>,
     local_descriptor_version: Option<(u64, u64)>,
+    last_progress_publish_at: Option<Instant>,
 }
 
 impl AlignmentWorkerState {
@@ -489,8 +491,21 @@ fn xr_people_alignment_worker_step(
             step_outcome.has_more_work |= state.has_pending_work();
             let publish_result = (result_changed
                 || step_outcome.result_changed
-                || step_outcome.did_work)
-                .then(|| state.make_result());
+                || step_outcome.completed_cycle
+                || (step_outcome.did_work
+                    && state.last_progress_publish_at.is_none_or(|last_publish| {
+                        last_publish.elapsed()
+                            >= Duration::from_millis(
+                                XR_ALIGNMENT_PROGRESS_SIGNAL_INTERVAL_MILLIS,
+                            )
+                    })))
+            .then(|| {
+                state.last_progress_publish_at = Some(Instant::now());
+                state.make_result()
+            });
+            if !step_outcome.has_more_work {
+                state.last_progress_publish_at = None;
+            }
             (step_outcome, publish_result)
         }
         Err(_) => return XrTsdfCooperativeStepResult::default(),
@@ -1221,7 +1236,8 @@ impl XrPeopleDebug {
     const ANCHOR_MARKER_SIZE: f32 = 0.060;
     const REMOTE_ANCHOR_MARKER_SIZE: f32 = 0.050;
     const SYNC_MATCH_RECEIVE_WINDOW_SECONDS: f64 = 0.45;
-    const DESCRIPTOR_SEND_MIN_CHANGE_SCORE: f32 = 0.02;
+    // Fraction of heightmap cells that must change by at least 5 cm before we republish.
+    const DESCRIPTOR_SEND_MIN_CHANGE_PERCENT: f32 = 4.0;
     const SYNC_MATCH_ACTIVE_WINDOW_SECONDS: f64 = 1.35;
     const FIST_ACK_MAX_VERTICAL_DELTA_METERS: f32 = 0.22;
     const FIST_ACK_MAX_DEPTH_DELTA_METERS: f32 = 0.22;
@@ -1464,7 +1480,7 @@ impl XrPeopleDebug {
                 .unwrap_or(1.0);
             let should_publish = self.last_sent_descriptor_signature != Some(signature)
                 && (self.last_sent_descriptor.is_none()
-                    || change_score >= Self::DESCRIPTOR_SEND_MIN_CHANGE_SCORE);
+                    || change_score * 100.0 >= Self::DESCRIPTOR_SEND_MIN_CHANGE_PERCENT);
             if should_publish {
                 self.local_descriptor = Some(frame.clone());
                 self.local_descriptor_version = Some(signature);
@@ -1609,7 +1625,6 @@ impl XrPeopleDebug {
         }
         self.last_alignment_debug_status = result.alignment_debug_text;
         self.refresh_peer_transforms(cx);
-        self.redraw(cx);
     }
 
     fn preferred_peer(&self) -> Option<(XrNetPeerId, RemotePeerState)> {

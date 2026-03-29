@@ -13,6 +13,7 @@ use std::{
 const XR_ALIGNMENT_DUMP_SERVER: &str = "10.0.0.112:8332";
 const XR_ALIGNMENT_DUMP_CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
 const XR_ALIGNMENT_DUMP_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const XR_SHOW_ALIGNMENT_HEIGHTMAP_PREVIEW: bool = false;
 
 #[derive(Clone, Debug)]
 enum DumpUploadResult {
@@ -799,7 +800,12 @@ script_mod! {
                                 }
                             }
 
-                            alignment_slice_preview := AlignmentSlicePreview{}
+                            alignment_preview_panel := View{
+                                width: Fill
+                                height: Fill
+
+                                alignment_slice_preview := AlignmentSlicePreview{}
+                            }
                         }
                     }
                 }
@@ -1513,8 +1519,11 @@ impl App {
             vertex_count,
             triangle_count,
             compute_ms,
+            query_ms,
+            rapier_ms,
             physics_time_scale,
             step_dt_ms,
+            tsdf_step_stats,
             frame_cpu_ms,
             frame_update_cpu_ms,
             frame_draw_cpu_ms,
@@ -1524,8 +1533,11 @@ impl App {
                 root.physics_depth_query_vertex_count(),
                 root.physics_depth_query_triangle_count(),
                 root.physics_compute_ms(),
+                root.physics_tsdf_query_ms(),
+                root.physics_rapier_step_ms(),
                 root.physics_time_scale(),
                 root.physics_step_dt_ms(),
+                cx.xr_tsdf().cooperative_step_stats(),
                 root.frame_cpu_ms(),
                 root.frame_update_cpu_ms(),
                 root.frame_draw_cpu_ms(),
@@ -1537,7 +1549,6 @@ impl App {
             peer_sync_status_text,
             alignment_debug_text,
             alignment_state_text,
-            remote_height_map,
         ) = self
             .ui
             .widget(cx, ids!(xr_people_debug))
@@ -1547,7 +1558,6 @@ impl App {
                     people_debug.status_text().to_string(),
                     people_debug.alignment_debug_text().to_string(),
                     people_debug.alignment_state_text().to_string(),
-                    people_debug.raw_peer_height_map(),
                 )
             })
             .unwrap_or_else(|| {
@@ -1555,21 +1565,30 @@ impl App {
                     "AlignSync: unavailable".to_string(),
                     "AlignDbg: unavailable".to_string(),
                     "AlignState: unavailable".to_string(),
-                    None,
                 )
             });
-        let local_slice_preview = cx
-            .xr_tsdf()
-            .latest_tsdf_snapshot()
-            .as_ref()
-            .and_then(|snapshot| tsdf_snapshot_height_map_preview(snapshot.as_ref()));
-        if let Some(mut preview) = self
-            .ui
-            .widget(cx, ids!(alignment_slice_preview))
-            .borrow_mut::<AlignmentSlicePreview>()
-        {
-            preview.set_local_preview(cx, local_slice_preview);
-            preview.set_remote_height_map(cx, remote_height_map);
+        self.ui
+            .widget(cx, ids!(alignment_preview_panel))
+            .set_visible(cx, XR_SHOW_ALIGNMENT_HEIGHTMAP_PREVIEW);
+        if XR_SHOW_ALIGNMENT_HEIGHTMAP_PREVIEW {
+            let remote_height_map = self
+                .ui
+                .widget(cx, ids!(xr_people_debug))
+                .borrow::<XrPeopleDebug>()
+                .and_then(|people_debug| people_debug.raw_peer_height_map());
+            let local_slice_preview = cx
+                .xr_tsdf()
+                .latest_tsdf_snapshot()
+                .as_ref()
+                .and_then(|snapshot| tsdf_snapshot_height_map_preview(snapshot.as_ref()));
+            if let Some(mut preview) = self
+                .ui
+                .widget(cx, ids!(alignment_slice_preview))
+                .borrow_mut::<AlignmentSlicePreview>()
+            {
+                preview.set_local_preview(cx, local_slice_preview);
+                preview.set_remote_height_map(cx, remote_height_map);
+            }
         }
         if self.last_peer_sync_status_text != peer_sync_status_text {
             self.ui
@@ -1602,16 +1621,25 @@ impl App {
 
         let timing_text = if step_dt_ms > 0.0 {
             format!(
-                "Physics compute: {:.2} ms | tick {:.2} ms ({:.0} Hz) | sim {:.2}x",
+                "Physics compute: {:.2} ms | query {:.2} ms | rapier {:.2} ms | tick {:.2} ms ({:.0} Hz) | sim {:.2}x | TSDF step {:.2}/{:.2} ms",
                 compute_ms,
+                query_ms,
+                rapier_ms,
                 step_dt_ms,
                 1000.0 / step_dt_ms,
-                physics_time_scale
+                physics_time_scale,
+                tsdf_step_stats.last_step_micros as f64 / 1000.0,
+                tsdf_step_stats.average_step_micros as f64 / 1000.0,
             )
         } else {
             format!(
-                "Physics compute: {:.2} ms | sim {:.2}x",
-                compute_ms, physics_time_scale
+                "Physics compute: {:.2} ms | query {:.2} ms | rapier {:.2} ms | sim {:.2}x | TSDF step {:.2}/{:.2} ms",
+                compute_ms,
+                query_ms,
+                rapier_ms,
+                physics_time_scale,
+                tsdf_step_stats.last_step_micros as f64 / 1000.0,
+                tsdf_step_stats.average_step_micros as f64 / 1000.0,
             )
         };
         if self.last_physics_timing_text != timing_text {
@@ -1632,12 +1660,22 @@ impl App {
             self.last_frame_cpu_text = frame_cpu_text;
         }
 
-        let tsdf_memory_mb = cx
+        let (tsdf_memory_mb, tsdf_fill_percent) = cx
             .xr_tsdf()
             .latest_tsdf_snapshot()
             .as_ref()
-            .map(|snapshot| snapshot.grid.heap_bytes() as f64 / 1_000_000.0)
-            .unwrap_or(0.0);
+            .map(|snapshot| {
+                let grid = &snapshot.grid;
+                let allocated_voxels = grid.chunk_count().saturating_mul(grid.chunk_volume);
+                let fill_percent = if allocated_voxels == 0 {
+                    0.0
+                } else {
+                    grid.active_value_count as f64 * 100.0 / allocated_voxels as f64
+                };
+                (grid.heap_bytes() as f64 / 1_000_000.0, fill_percent)
+            })
+            .unwrap_or((0.0, 0.0));
+        let tsdf_debug_text = format!("{:.1} MB | occ {:.0}%", tsdf_memory_mb, tsdf_fill_percent);
         let (depth_frames_seen, depth_frames_dropped) = cx
             .xr_tsdf()
             .state()
@@ -1658,9 +1696,9 @@ impl App {
             cx.xr_gpu_frame_time_ms(),
         ) {
             (Some(scale), Some(refresh_hz), Some(effective_hz), Some(gpu_ms)) => format!(
-                "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU {:.2} ms",
+                "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU {:.2} ms",
                 cx.xr_tsdf().voxel_size_meters() * 100.0,
-                tsdf_memory_mb,
+                tsdf_debug_text,
                 depth_frames_seen,
                 depth_frames_kept,
                 depth_frames_dropped,
@@ -1671,9 +1709,9 @@ impl App {
                 gpu_ms
             ),
             (Some(scale), Some(refresh_hz), Some(effective_hz), None) => format!(
-                "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU waiting",
+                "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU waiting",
                 cx.xr_tsdf().voxel_size_meters() * 100.0,
-                tsdf_memory_mb,
+                tsdf_debug_text,
                 depth_frames_seen,
                 depth_frames_kept,
                 depth_frames_dropped,
@@ -1683,9 +1721,9 @@ impl App {
                 effective_hz
             ),
             (Some(scale), Some(refresh_hz), None, Some(gpu_ms)) => format!(
-                "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU {:.2} ms",
+                "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU {:.2} ms",
                 cx.xr_tsdf().voxel_size_meters() * 100.0,
-                tsdf_memory_mb,
+                tsdf_debug_text,
                 depth_frames_seen,
                 depth_frames_kept,
                 depth_frames_dropped,
@@ -1695,9 +1733,9 @@ impl App {
                 gpu_ms
             ),
             (Some(scale), Some(refresh_hz), None, None) => format!(
-                "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU waiting",
+                "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU waiting",
                 cx.xr_tsdf().voxel_size_meters() * 100.0,
-                tsdf_memory_mb,
+                tsdf_debug_text,
                 depth_frames_seen,
                 depth_frames_kept,
                 depth_frames_dropped,
@@ -1707,9 +1745,9 @@ impl App {
             ),
             (Some(scale), None, _, Some(gpu_ms)) => {
                 format!(
-                    "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh waiting | GPU {:.2} ms",
+                    "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh waiting | GPU {:.2} ms",
                     cx.xr_tsdf().voxel_size_meters() * 100.0,
-                    tsdf_memory_mb,
+                    tsdf_debug_text,
                     depth_frames_seen,
                     depth_frames_kept,
                     depth_frames_dropped,
@@ -1720,9 +1758,9 @@ impl App {
             }
             (Some(scale), None, _, None) => {
                 format!(
-                    "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh waiting | GPU waiting",
+                    "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh waiting | GPU waiting",
                     cx.xr_tsdf().voxel_size_meters() * 100.0,
-                    tsdf_memory_mb,
+                    tsdf_debug_text,
                     depth_frames_seen,
                     depth_frames_kept,
                     depth_frames_dropped,
@@ -1731,10 +1769,9 @@ impl App {
                 )
             }
             (None, _, _, _) => format!(
-                "Depth: {:.0} cm | TSDF {:.1} MB | in {} keep {} drop {} ({:.0}%) | XR render scale: not active",
+                "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR render scale: not active",
                 cx.xr_tsdf().voxel_size_meters() * 100.0,
-                tsdf_memory_mb
-                ,
+                tsdf_debug_text,
                 depth_frames_seen,
                 depth_frames_kept,
                 depth_frames_dropped,

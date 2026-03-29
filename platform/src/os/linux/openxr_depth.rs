@@ -689,9 +689,21 @@ impl SparseTsdGrid {
             let read_chunk_key = voxel_coord_to_chunk_key(chunk_key);
             chunks.insert(read_chunk_key, chunk.data.clone());
         }
+        let chunk_edge_shift = self
+            .chunk_edge
+            .is_positive()
+            .then_some(self.chunk_edge as u32)
+            .filter(|edge| edge.is_power_of_two())
+            .map(|edge| edge.trailing_zeros() as u8);
         SparseTsdGridReadSnapshot {
             voxel_size: self.voxel_size,
             chunk_edge: self.chunk_edge,
+            chunk_edge_shift,
+            chunk_edge_mask: if chunk_edge_shift.is_some() {
+                self.chunk_edge - 1
+            } else {
+                0
+            },
             chunk_volume: self.chunk_volume,
             active_value_count: self.active_value_count,
             active_bounds: self.world_bounds(0),
