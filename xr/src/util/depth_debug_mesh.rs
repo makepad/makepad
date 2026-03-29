@@ -11,7 +11,7 @@ const XR_DEBUG_TSDF_MESH_CHUNK_WORLD_SIZE_METERS: f32 = 1.0;
 const XR_DEBUG_TSDF_MESH_VIEW_DISTANCE_METERS: f32 = 5.5;
 const XR_DEBUG_TSDF_MESH_NEAR_VISIBILITY_METERS: f32 = 1.35;
 const XR_DEBUG_TSDF_MESH_VIEW_CONE_DOT: f32 = 0.309_016_88;
-const XR_DEBUG_TSDF_MESH_CELL_STRIDE_VOXELS: i32 = 2;
+const XR_DEBUG_TSDF_MESH_CELL_STRIDE_VOXELS: i32 = 1;
 const XR_DEBUG_TSDF_MESH_CHUNK_OVERLAP_CELLS: i32 = 2;
 const XR_DEBUG_TSDF_MIN_MESH_CONFIDENCE: u8 = 3;
 const XR_DEBUG_TSDF_RECENT_MESH_CONFIDENCE: u8 = 1;
@@ -79,7 +79,6 @@ pub(crate) struct DebugDepthMeshViewPlan {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct SurfaceMesh32 {
     positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
 }
 
@@ -123,6 +122,9 @@ const SURFACE_NET_EDGES: [(usize, usize); 12] = [
     (3, 7),
 ];
 
+const DEBUG_DEPTH_TRIANGLE_BARYCENTRICS: [[f32; 3]; 3] =
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
 fn quantize_f32(value: f32, quantum: f32) -> i32 {
     (value / quantum.max(f32::EPSILON)).round() as i32
 }
@@ -132,36 +134,48 @@ fn depth_tsd_distance_meters(voxel_size_meters: f32) -> f32 {
     voxel_size_meters * 2.0
 }
 
-fn push_debug_depth_vertex(vertices: &mut Vec<f32>, position: Vec3f, normal: Vec3f) {
+fn push_debug_depth_vertex(vertices: &mut Vec<f32>, position: Vec3f, barycentric: [f32; 3]) {
     vertices.extend_from_slice(&[
-        position.x, position.y, position.z, 1.0, normal.x, normal.y, normal.z, 0.0,
+        position.x,
+        position.y,
+        position.z,
+        1.0,
+        barycentric[0],
+        barycentric[1],
+        barycentric[2],
+        0.0,
     ]);
 }
 
 fn pack_surface_mesh_debug_vertices(mesh: &SurfaceMesh32) -> (Vec<u32>, Vec<f32>) {
-    let mut vertices = Vec::with_capacity(mesh.positions.len() * XR_DEBUG_DEPTH_FLOATS_PER_VERTEX);
-    for (position, normal) in mesh.positions.iter().zip(mesh.normals.iter()) {
-        push_debug_depth_vertex(
-            &mut vertices,
-            vec3f(position[0], position[1], position[2]),
-            vec3f(normal[0], normal[1], normal[2]),
-        );
+    let mut indices = Vec::with_capacity(mesh.indices.len());
+    let mut vertices = Vec::with_capacity(mesh.indices.len() * XR_DEBUG_DEPTH_FLOATS_PER_VERTEX);
+    for triangle in mesh.indices.chunks_exact(3) {
+        let base = (vertices.len() / XR_DEBUG_DEPTH_FLOATS_PER_VERTEX) as u32;
+        for (corner, vertex_index) in triangle.iter().enumerate() {
+            let position = mesh.positions[*vertex_index as usize];
+            push_debug_depth_vertex(
+                &mut vertices,
+                vec3f(position[0], position[1], position[2]),
+                DEBUG_DEPTH_TRIANGLE_BARYCENTRICS[corner],
+            );
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
-    (mesh.indices.clone(), vertices)
+    (indices, vertices)
+}
+
+fn push_debug_depth_triangle(indices: &mut Vec<u32>, vertices: &mut Vec<f32>, tri: [Vec3f; 3]) {
+    let base = (vertices.len() / XR_DEBUG_DEPTH_FLOATS_PER_VERTEX) as u32;
+    for (corner, position) in tri.into_iter().enumerate() {
+        push_debug_depth_vertex(vertices, position, DEBUG_DEPTH_TRIANGLE_BARYCENTRICS[corner]);
+    }
+    indices.extend_from_slice(&[base, base + 1, base + 2]);
 }
 
 fn push_debug_depth_quad(indices: &mut Vec<u32>, vertices: &mut Vec<f32>, quad: [Vec3f; 4]) {
-    let base = (vertices.len() / XR_DEBUG_DEPTH_FLOATS_PER_VERTEX) as u32;
-    let raw_normal = Vec3f::cross(quad[1] - quad[0], quad[2] - quad[0]);
-    let normal = if raw_normal.length() > 1.0e-6 {
-        raw_normal.normalize()
-    } else {
-        vec3f(0.0, 1.0, 0.0)
-    };
-    for position in quad {
-        push_debug_depth_vertex(vertices, position, normal);
-    }
-    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    push_debug_depth_triangle(indices, vertices, [quad[0], quad[1], quad[2]]);
+    push_debug_depth_triangle(indices, vertices, [quad[0], quad[2], quad[3]]);
 }
 
 pub(crate) fn push_debug_depth_plane(
@@ -340,7 +354,6 @@ fn surface_net_mesh_from_dense(
     let raw_value = |coord: VoxelCoord| -> f32 { volume[flatten_coord(coord, voxel_count)] };
 
     let mut positions = Vec::<[f32; 3]>::new();
-    let mut normals = Vec::<[f32; 3]>::new();
     let mut indices = Vec::<u32>::new();
     let mut coord_vert_map =
         vec![i32::MIN; (scaled_count.x * scaled_count.y * scaled_count.z) as usize];
@@ -354,7 +367,6 @@ fn surface_net_mesh_from_dense(
                 }
                 let coord = VoxelCoord::new(x, y, z);
                 let mut pos_coord = vec3f(0.0, 0.0, 0.0);
-                let mut direction = vec3f(0.0, 0.0, 0.0);
                 let mut crossings = 0u8;
                 let mut bad_crossings = 0u8;
 
@@ -364,12 +376,6 @@ fn surface_net_mesh_from_dense(
                     let value_a = sample_value(coord_a);
                     let value_b = sample_value(coord_b);
                     let change = value_a - value_b;
-                    direction += vec3f(
-                        (coord_a.x - coord_b.x) as f32,
-                        (coord_a.y - coord_b.y) as f32,
-                        (coord_a.z - coord_b.z) as f32,
-                    )
-                    .scale(change);
                     if (value_a < 0.0) == (value_b < 0.0) || change.abs() <= f32::EPSILON {
                         continue;
                     }
@@ -395,14 +401,8 @@ fn surface_net_mesh_from_dense(
                     (start_coord.y as f32 + pos_coord.y + 0.5) * voxel_size,
                     (start_coord.z as f32 + pos_coord.z + 0.5) * voxel_size,
                 );
-                let normal = if direction.length() > 1.0e-6 {
-                    direction.normalize()
-                } else {
-                    vec3f(0.0, 1.0, 0.0)
-                };
                 let vertex_index = positions.len() as u32;
                 positions.push([world.x, world.y, world.z]);
-                normals.push([normal.x, normal.y, normal.z]);
                 coord_vert_map[flatten_coord(coord, scaled_count)] = vertex_index as i32;
                 vert_coords.push(coord);
             }
@@ -450,7 +450,6 @@ fn surface_net_mesh_from_dense(
     } else {
         Some(SurfaceMesh32 {
             positions,
-            normals,
             indices,
         })
     }
@@ -709,10 +708,9 @@ pub(crate) fn debug_depth_mesh_view_plan(
     }
 
     candidates.sort_by(|left, right| {
-        right
-            .forward_depth
-            .total_cmp(&left.forward_depth)
-            .then_with(|| left.distance.total_cmp(&right.distance))
+        left.distance
+            .total_cmp(&right.distance)
+            .then_with(|| right.forward_depth.total_cmp(&left.forward_depth))
             .then_with(|| {
                 (
                     left.plan.chunk_key.x,
@@ -787,6 +785,11 @@ mod tests {
         vec3f(vertices[base], vertices[base + 1], vertices[base + 2])
     }
 
+    fn packed_barycentric(vertices: &[f32], vertex_index: usize) -> Vec3f {
+        let base = vertex_index * XR_DEBUG_DEPTH_FLOATS_PER_VERTEX;
+        vec3f(vertices[base + 4], vertices[base + 5], vertices[base + 6])
+    }
+
     fn set_normalized_distance(
         chunks: &mut HashMap<ChunkKey, Arc<SparseTsdReadChunk>>,
         chunk_edge: i32,
@@ -854,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_surface_mesh_debug_vertices_keeps_shared_indexed_vertices() {
+    fn pack_surface_mesh_debug_vertices_expands_to_triangle_barycentrics() {
         let mesh = SurfaceMesh32 {
             positions: vec![
                 [0.0, 0.0, 0.0],
@@ -862,16 +865,19 @@ mod tests {
                 [1.0, 1.0, 0.0],
                 [0.0, 1.0, 0.0],
             ],
-            normals: vec![[0.0, 0.0, 1.0]; 4],
             indices: vec![0, 1, 2, 0, 2, 3],
         };
 
         let (indices, vertices) = pack_surface_mesh_debug_vertices(&mesh);
 
-        assert_eq!(indices, vec![0, 1, 2, 0, 2, 3]);
-        assert_eq!(vertices.len(), 4 * XR_DEBUG_DEPTH_FLOATS_PER_VERTEX);
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(vertices.len(), 6 * XR_DEBUG_DEPTH_FLOATS_PER_VERTEX);
         assert_eq!(packed_position(&vertices, 0), vec3f(0.0, 0.0, 0.0));
         assert_eq!(packed_position(&vertices, 2), vec3f(1.0, 1.0, 0.0));
+        assert_eq!(packed_position(&vertices, 5), vec3f(0.0, 1.0, 0.0));
+        assert_eq!(packed_barycentric(&vertices, 0), vec3f(1.0, 0.0, 0.0));
+        assert_eq!(packed_barycentric(&vertices, 1), vec3f(0.0, 1.0, 0.0));
+        assert_eq!(packed_barycentric(&vertices, 2), vec3f(0.0, 0.0, 1.0));
     }
 
     #[test]
@@ -889,12 +895,15 @@ mod tests {
 
         push_debug_depth_plane(&mut indices, &mut vertices, plane);
 
-        assert_eq!(indices, vec![0, 1, 2, 0, 2, 3]);
-        assert_eq!(vertices.len(), 4 * XR_DEBUG_DEPTH_FLOATS_PER_VERTEX);
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(vertices.len(), 6 * XR_DEBUG_DEPTH_FLOATS_PER_VERTEX);
         let first = packed_position(&vertices, 0);
-        let third = packed_position(&vertices, 2);
+        let sixth = packed_position(&vertices, 5);
         assert_eq!(first, vec3f(-0.25, 0.5, -0.10));
-        assert_eq!(third, vec3f(0.25, 0.5, 0.10));
+        assert_eq!(sixth, vec3f(-0.25, 0.5, 0.10));
+        assert_eq!(packed_barycentric(&vertices, 3), vec3f(1.0, 0.0, 0.0));
+        assert_eq!(packed_barycentric(&vertices, 4), vec3f(0.0, 1.0, 0.0));
+        assert_eq!(packed_barycentric(&vertices, 5), vec3f(0.0, 0.0, 1.0));
     }
 
     #[test]

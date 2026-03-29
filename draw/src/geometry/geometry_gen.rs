@@ -89,6 +89,14 @@ pub struct IcoVertex {
     pub normal: Vec4f,
 }
 
+#[derive(Clone, Script, ScriptHook)]
+pub struct DepthMeshVertex {
+    #[live]
+    pub pos: Vec4f,
+    #[live]
+    pub barycentric: Vec4f,
+}
+
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     let geom = vm.new_module(id!(geom));
     // lets make a Quad geometry here
@@ -123,6 +131,12 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         .into_geometry(vm.cx_mut())
         .into_script_handle(vm);
     set_script_value!(vm, geom.IcoGeom = igen);
+    // Depth mesh geometry: position plus per-triangle barycentrics.
+    set_script_value_to_pod!(vm, geom.DepthMeshVertex);
+    let dgen = GeometryGen::from_triangle_depth_mesh()
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
+    set_script_value!(vm, geom.DepthMeshGeom = dgen);
     NIL
 }
 
@@ -200,6 +214,21 @@ impl GeometryGen {
                 0.0, 0.0, 1.0, 0.0, // normal xyz + pad
             ]);
         }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    /// Placeholder single-triangle geometry for depth-mesh drawing with barycentrics.
+    pub fn from_triangle_depth_mesh() -> GeometryGen {
+        let mut g = Self::default();
+        g.vertices.extend_from_slice(&[
+            0.0, 0.0, 0.0, 1.0, // pos xyz + pad
+            1.0, 0.0, 0.0, 0.0, // barycentric xyz + pad
+            0.0, 0.0, 0.0, 1.0, // pos xyz + pad
+            0.0, 1.0, 0.0, 0.0, // barycentric xyz + pad
+            0.0, 0.0, 0.0, 1.0, // pos xyz + pad
+            0.0, 0.0, 1.0, 0.0, // barycentric xyz + pad
+        ]);
         g.indices.extend_from_slice(&[0, 1, 2]);
         g
     }

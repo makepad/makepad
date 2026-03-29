@@ -211,11 +211,6 @@ fn depth_debug_mesh_worker_loop(
             continue;
         }
 
-        if let Ok(mut results) = pending_results.lock() {
-            results.clear();
-        } else {
-            return;
-        }
         if !push_worker_result(
             &pending_results,
             XrDepthDebugMeshWorkerResult::VisibleSet(XrDepthDebugMeshVisibleSet {
@@ -260,8 +255,10 @@ fn depth_debug_mesh_worker_loop(
             )
         };
 
+        let mut aborted = false;
         for plan in &view_plan.visible_chunks {
             if request_obsolete(&mailbox, active_version) {
+                aborted = true;
                 break;
             }
 
@@ -281,16 +278,7 @@ fn depth_debug_mesh_worker_loop(
                 continue;
             }
 
-            if entry.sent_to_ui {
-                removal_batch.push(plan.chunk_key);
-                entry.sent_to_ui = false;
-                if removal_batch.len() >= XR_DEPTH_DEBUG_MESH_RESULT_BATCH_REMOVALS
-                    && !flush_removals(&mut removal_batch)
-                {
-                    return;
-                }
-            }
-
+            let was_sent_to_ui = entry.sent_to_ui;
             entry.signature = plan.signature.clone();
             entry.mesh = triangulator
                 .build_chunk(request.snapshot.as_ref(), view_plan.layout, plan)
@@ -303,10 +291,23 @@ fn depth_debug_mesh_worker_loop(
                 {
                     return;
                 }
+            } else {
+                entry.sent_to_ui = false;
+                if was_sent_to_ui {
+                    removal_batch.push(plan.chunk_key);
+                    if removal_batch.len() >= XR_DEPTH_DEBUG_MESH_RESULT_BATCH_REMOVALS
+                        && !flush_removals(&mut removal_batch)
+                    {
+                        return;
+                    }
+                }
             }
         }
 
-        if request_obsolete(&mailbox, active_version) {
+        if aborted {
+            if !flush_removals(&mut removal_batch) || !flush_upserts(&mut upsert_batch) {
+                return;
+            }
             continue;
         }
         if !flush_removals(&mut removal_batch) || !flush_upserts(&mut upsert_batch) {
