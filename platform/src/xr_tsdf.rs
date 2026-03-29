@@ -6,8 +6,9 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        Arc, OnceLock, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
     },
+    time::Instant,
 };
 
 pub const XR_TSDF_DEFAULT_VOXEL_SIZE_METERS: f32 = 0.03;
@@ -294,6 +295,47 @@ pub struct TsdfPublishedSnapshot {
     pub height_map: Option<XrDepthAlignHeightMap>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XrTsdfCooperativeStepResult {
+    pub did_work: bool,
+    pub has_more_work: bool,
+    pub completed_cycle: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XrTsdfCooperativeStepStats {
+    pub callback_registered: bool,
+    pub has_more_work: bool,
+    pub last_step_micros: u64,
+    pub average_step_micros: u64,
+    pub last_cycle_compute_micros: u64,
+    pub average_cycle_compute_micros: u64,
+    pub last_cycle_micros: u64,
+    pub average_cycle_micros: u64,
+    pub current_cycle_steps: u32,
+    pub completed_cycles: u64,
+}
+
+type XrTsdfCooperativeStepCallback =
+    Box<dyn FnMut() -> XrTsdfCooperativeStepResult + Send + 'static>;
+
+#[derive(Default)]
+struct XrTsdfCooperativeStepSlot {
+    callback: Option<XrTsdfCooperativeStepCallback>,
+    stats: XrTsdfCooperativeStepStats,
+    current_cycle_compute_micros: u64,
+    current_cycle_started_at: Option<Instant>,
+}
+
+impl XrTsdfCooperativeStepSlot {
+    fn reset_cycle(&mut self) {
+        self.current_cycle_compute_micros = 0;
+        self.current_cycle_started_at = None;
+        self.stats.current_cycle_steps = 0;
+        self.stats.has_more_work = false;
+    }
+}
+
 #[derive(Clone)]
 pub struct XrTsdfStore {
     state: Arc<RwLock<XrTsdfState>>,
@@ -301,6 +343,7 @@ pub struct XrTsdfStore {
     reset_generation: Arc<AtomicU64>,
     surface_analysis_enabled: Arc<AtomicBool>,
     voxel_size_meters_bits: Arc<AtomicU32>,
+    cooperative_step: Arc<Mutex<XrTsdfCooperativeStepSlot>>,
 }
 
 impl Default for XrTsdfStore {
@@ -313,12 +356,40 @@ impl Default for XrTsdfStore {
             voxel_size_meters_bits: Arc::new(AtomicU32::new(
                 XR_TSDF_DEFAULT_VOXEL_SIZE_METERS.to_bits(),
             )),
+            cooperative_step: Arc::new(Mutex::new(XrTsdfCooperativeStepSlot::default())),
         }
     }
 }
 
 #[allow(dead_code)]
 impl XrTsdfStore {
+    pub fn set_cooperative_step_callback(
+        &self,
+        callback: Option<XrTsdfCooperativeStepCallback>,
+    ) {
+        if let Ok(mut slot) = self.cooperative_step.lock() {
+            slot.callback = callback;
+            slot.stats.callback_registered = slot.callback.is_some();
+            if slot.callback.is_none() {
+                slot.reset_cycle();
+                slot.stats.last_step_micros = 0;
+                slot.stats.average_step_micros = 0;
+                slot.stats.last_cycle_compute_micros = 0;
+                slot.stats.average_cycle_compute_micros = 0;
+                slot.stats.last_cycle_micros = 0;
+                slot.stats.average_cycle_micros = 0;
+                slot.stats.completed_cycles = 0;
+            }
+        }
+    }
+
+    pub fn cooperative_step_stats(&self) -> XrTsdfCooperativeStepStats {
+        self.cooperative_step
+            .lock()
+            .map(|slot| slot.stats)
+            .unwrap_or_default()
+    }
+
     pub fn set_voxel_size_meters(&self, voxel_size_meters: f32) -> f32 {
         let voxel_size_meters = voxel_size_meters.clamp(0.03, 0.10);
         let previous = self
@@ -400,6 +471,68 @@ impl XrTsdfStore {
         if let Ok(mut published_snapshot) = self.published_snapshot.write() {
             *published_snapshot = None;
         }
+        if let Ok(mut slot) = self.cooperative_step.lock() {
+            slot.reset_cycle();
+        }
+    }
+
+    pub(crate) fn run_cooperative_step(&self) -> Option<XrTsdfCooperativeStepResult> {
+        let mut slot = self.cooperative_step.lock().ok()?;
+        let callback = slot.callback.as_mut()?;
+        let started = Instant::now();
+        let result = callback();
+        let elapsed_micros = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        slot.stats.callback_registered = true;
+        slot.stats.last_step_micros = elapsed_micros;
+        slot.stats.average_step_micros =
+            ema_u64(slot.stats.average_step_micros, elapsed_micros, 1, 4);
+        if result.did_work {
+            slot.current_cycle_started_at.get_or_insert(started);
+            slot.current_cycle_compute_micros =
+                slot.current_cycle_compute_micros.saturating_add(elapsed_micros);
+            slot.stats.current_cycle_steps = slot.stats.current_cycle_steps.saturating_add(1);
+        } else if !result.has_more_work {
+            slot.reset_cycle();
+        }
+        slot.stats.has_more_work = result.has_more_work;
+        if result.completed_cycle {
+            let cycle_wall_micros = slot
+                .current_cycle_started_at
+                .map(|cycle_started| {
+                    cycle_started
+                        .elapsed()
+                        .as_micros()
+                        .min(u64::MAX as u128) as u64
+                })
+                .unwrap_or(slot.current_cycle_compute_micros);
+            slot.stats.last_cycle_compute_micros = slot.current_cycle_compute_micros;
+            slot.stats.average_cycle_compute_micros = ema_u64(
+                slot.stats.average_cycle_compute_micros,
+                slot.current_cycle_compute_micros,
+                1,
+                4,
+            );
+            slot.stats.last_cycle_micros = cycle_wall_micros;
+            slot.stats.average_cycle_micros =
+                ema_u64(slot.stats.average_cycle_micros, cycle_wall_micros, 1, 4);
+            slot.stats.completed_cycles = slot.stats.completed_cycles.saturating_add(1);
+            slot.reset_cycle();
+        }
+        Some(result)
+    }
+}
+
+fn ema_u64(current: u64, sample: u64, numerator: u64, denominator: u64) -> u64 {
+    if denominator == 0 {
+        return sample;
+    }
+    if current == 0 {
+        sample
+    } else {
+        current
+            .saturating_mul(denominator.saturating_sub(numerator))
+            .saturating_add(sample.saturating_mul(numerator))
+            / denominator
     }
 }
 

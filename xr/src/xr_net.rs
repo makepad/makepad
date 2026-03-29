@@ -22,6 +22,8 @@ const XR_NET_DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const XR_NET_DEFAULT_PEER_TIMEOUT: Duration = Duration::from_secs(2);
 const XR_NET_DEFAULT_SYNC_CONNECT_RETRY: Duration = Duration::from_millis(250);
 const XR_NET_SYNC_CONNECT_TIMEOUT: Duration = Duration::from_millis(120);
+const XR_NET_SYNC_READ_BUDGET_BYTES_PER_POLL: usize = 256 * 1024;
+const XR_NET_SYNC_WRITE_BUDGET_BYTES_PER_POLL: usize = 256 * 1024;
 // Alignment descriptors now carry full f32 heightmaps, so the old 256 KiB cap
 // is too small once the published map grows beyond modest extents.
 const XR_NET_SYNC_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -296,17 +298,50 @@ enum XrNetDataPacket {
 }
 
 #[derive(Debug)]
-enum XrNetOutgoing {
+enum XrNetUdpOutgoing {
     State(XrNetStateFrame),
+    Break,
+}
+
+#[derive(Debug)]
+enum XrNetSyncOutgoing {
+    PeerUp {
+        peer: XrNetPeer,
+        sync_addr: SocketAddr,
+    },
+    PeerRemoved {
+        peer_id: XrNetPeerId,
+    },
     Alignment(XrNetAlignmentFrame),
     AlignmentDescriptor(XrNetAlignmentDescriptorFrame),
     Break,
 }
 
-struct WorkerPeerState {
+struct UdpWorkerPeerState {
     peer: XrNetPeer,
     sync_addr: SocketAddr,
     last_seen: Instant,
+    last_state_seq: Option<u32>,
+    last_alignment_seq: Option<u32>,
+    last_alignment_descriptor_seq: Option<u32>,
+}
+
+impl UdpWorkerPeerState {
+    fn new(peer: XrNetPeer, sync_addr: SocketAddr, now: Instant) -> Self {
+        Self {
+            peer,
+            sync_addr,
+            last_seen: now,
+            last_state_seq: None,
+            last_alignment_seq: None,
+            last_alignment_descriptor_seq: None,
+        }
+    }
+}
+
+struct SyncWorkerPeerState {
+    peer: XrNetPeer,
+    sync_addr: SocketAddr,
     last_state_seq: Option<u32>,
     last_alignment_seq: Option<u32>,
     last_alignment_descriptor_seq: Option<u32>,
@@ -314,12 +349,11 @@ struct WorkerPeerState {
     next_sync_connect_attempt_at: Instant,
 }
 
-impl WorkerPeerState {
+impl SyncWorkerPeerState {
     fn new(peer: XrNetPeer, sync_addr: SocketAddr, now: Instant) -> Self {
         Self {
             peer,
             sync_addr,
-            last_seen: now,
             last_state_seq: None,
             last_alignment_seq: None,
             last_alignment_descriptor_seq: None,
@@ -376,9 +410,11 @@ impl XrNetSyncConnection {
 #[derive(Debug)]
 pub struct XrNetNode {
     pub incoming_receiver: mpsc::Receiver<XrNetIncoming>,
-    outgoing_sender: mpsc::Sender<XrNetOutgoing>,
+    udp_outgoing_sender: mpsc::Sender<XrNetUdpOutgoing>,
+    sync_outgoing_sender: mpsc::Sender<XrNetSyncOutgoing>,
     thread_loop: Arc<AtomicBool>,
-    worker_thread: Option<JoinHandle<()>>,
+    udp_worker_thread: Option<JoinHandle<()>>,
+    sync_worker_thread: Option<JoinHandle<()>>,
     next_state_seq: u32,
     next_alignment_seq: u32,
     next_alignment_descriptor_seq: u32,
@@ -403,25 +439,40 @@ impl XrNetNode {
         let bound_data_addr = data_socket.local_addr()?;
         let bound_sync_addr = sync_listener.local_addr()?;
         let (incoming_sender, incoming_receiver) = mpsc::channel();
-        let (outgoing_sender, outgoing_receiver) = mpsc::channel();
+        let (udp_outgoing_sender, udp_outgoing_receiver) = mpsc::channel();
+        let (sync_outgoing_sender, sync_outgoing_receiver) = mpsc::channel();
         let thread_loop = Arc::new(AtomicBool::new(true));
-        let worker_thread = Some(spawn_worker_thread(
-            config,
+        let udp_worker_thread = Some(spawn_udp_worker_thread(
+            config.node_id,
+            config.discovery_targets,
+            config.discovery_interval,
+            config.peer_timeout,
+            config.poll_interval,
             bound_data_addr.port(),
             bound_sync_addr.port(),
             discovery_socket,
             data_socket,
+            incoming_sender.clone(),
+            udp_outgoing_receiver,
+            sync_outgoing_sender.clone(),
+            thread_loop.clone(),
+        ));
+        let sync_worker_thread = Some(spawn_sync_worker_thread(
+            config.node_id,
+            config.poll_interval,
             sync_listener,
             incoming_sender,
-            outgoing_receiver,
+            sync_outgoing_receiver,
             thread_loop.clone(),
         ));
 
         Ok(Self {
             incoming_receiver,
-            outgoing_sender,
+            udp_outgoing_sender,
+            sync_outgoing_sender,
             thread_loop,
-            worker_thread,
+            udp_worker_thread,
+            sync_worker_thread,
             next_state_seq: 0,
             next_alignment_seq: 0,
             next_alignment_descriptor_seq: 0,
@@ -435,7 +486,7 @@ impl XrNetNode {
             state,
         };
         self.next_state_seq = self.next_state_seq.wrapping_add(1);
-        let _ = self.outgoing_sender.send(XrNetOutgoing::State(frame));
+        let _ = self.udp_outgoing_sender.send(XrNetUdpOutgoing::State(frame));
     }
 
     pub fn send_alignment(&mut self, anchor: XrAnchor, confidence: f32, sent_at: f64) {
@@ -446,45 +497,52 @@ impl XrNetNode {
             confidence,
         };
         self.next_alignment_seq = self.next_alignment_seq.wrapping_add(1);
-        let _ = self.outgoing_sender.send(XrNetOutgoing::Alignment(frame));
+        let _ = self
+            .sync_outgoing_sender
+            .send(XrNetSyncOutgoing::Alignment(frame));
     }
 
     pub fn send_alignment_descriptor(&mut self, mut frame: XrNetAlignmentDescriptorFrame) {
         frame.seq = self.next_alignment_descriptor_seq;
         self.next_alignment_descriptor_seq = self.next_alignment_descriptor_seq.wrapping_add(1);
         let _ = self
-            .outgoing_sender
-            .send(XrNetOutgoing::AlignmentDescriptor(frame));
+            .sync_outgoing_sender
+            .send(XrNetSyncOutgoing::AlignmentDescriptor(frame));
     }
 }
 
 impl Drop for XrNetNode {
     fn drop(&mut self) {
         self.thread_loop.store(false, Ordering::Relaxed);
-        let _ = self.outgoing_sender.send(XrNetOutgoing::Break);
-        if let Some(worker_thread) = self.worker_thread.take() {
+        let _ = self.udp_outgoing_sender.send(XrNetUdpOutgoing::Break);
+        let _ = self.sync_outgoing_sender.send(XrNetSyncOutgoing::Break);
+        if let Some(worker_thread) = self.udp_worker_thread.take() {
+            let _ = worker_thread.join();
+        }
+        if let Some(worker_thread) = self.sync_worker_thread.take() {
             let _ = worker_thread.join();
         }
     }
 }
 
-fn spawn_worker_thread(
-    config: XrNetConfig,
+fn spawn_udp_worker_thread(
+    node_id: XrNetPeerId,
+    discovery_targets: Vec<SocketAddr>,
+    discovery_interval: Duration,
+    peer_timeout: Duration,
+    poll_interval: Duration,
     bound_data_port: u16,
     bound_sync_port: u16,
     discovery_socket: UdpSocket,
     data_socket: UdpSocket,
-    sync_listener: TcpListener,
     incoming_sender: mpsc::Sender<XrNetIncoming>,
-    outgoing_receiver: mpsc::Receiver<XrNetOutgoing>,
+    outgoing_receiver: mpsc::Receiver<XrNetUdpOutgoing>,
+    sync_outgoing_sender: mpsc::Sender<XrNetSyncOutgoing>,
     thread_loop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        let mut peers = HashMap::<XrNetPeerId, WorkerPeerState>::new();
-        let mut pending_sync_connections = Vec::<XrNetSyncConnection>::new();
+        let mut peers = HashMap::<XrNetPeerId, UdpWorkerPeerState>::new();
         let mut cached_state = None;
-        let mut cached_alignment = None;
-        let mut cached_alignment_descriptor = None;
         let mut next_discovery_at = Instant::now();
         let mut read_buf = [0u8; 65536];
 
@@ -493,22 +551,28 @@ fn spawn_worker_thread(
             if now >= next_discovery_at {
                 send_discovery_hello(
                     &discovery_socket,
-                    &config.discovery_targets,
-                    config.node_id,
+                    &discovery_targets,
+                    node_id,
                     bound_data_port,
                     bound_sync_port,
                 );
-                next_discovery_at = now + config.discovery_interval;
+                next_discovery_at = now + discovery_interval;
             }
 
-            let should_break = drain_outgoing_messages(
+            let should_break = drain_udp_outgoing_messages(
                 &data_socket,
                 &mut peers,
-                config.node_id,
+                node_id,
                 &outgoing_receiver,
                 &mut cached_state,
-                &mut cached_alignment,
-                &mut cached_alignment_descriptor,
+            );
+            process_data_packets(
+                &data_socket,
+                &mut read_buf,
+                &mut peers,
+                &incoming_sender,
+                &sync_outgoing_sender,
+                node_id,
             );
             process_discovery_packets(
                 &discovery_socket,
@@ -516,49 +580,74 @@ fn spawn_worker_thread(
                 &mut read_buf,
                 &mut peers,
                 &incoming_sender,
-                config.node_id,
+                &sync_outgoing_sender,
+                node_id,
                 &cached_state,
-                &cached_alignment,
-                &cached_alignment_descriptor,
             );
-            accept_sync_connections(
-                &sync_listener,
-                &mut pending_sync_connections,
-                config.node_id,
+            expire_timed_out_peers(
+                &mut peers,
+                &incoming_sender,
+                &sync_outgoing_sender,
+                peer_timeout,
             );
-            ensure_outbound_sync_connections(&mut peers, config.node_id);
+
+            if should_break {
+                break;
+            }
+            thread::sleep(poll_interval);
+        }
+
+        broadcast_explicit_leave(&data_socket, &peers, node_id);
+        broadcast_discovery_leave(&discovery_socket, &discovery_targets, node_id);
+    })
+}
+
+fn spawn_sync_worker_thread(
+    node_id: XrNetPeerId,
+    poll_interval: Duration,
+    sync_listener: TcpListener,
+    incoming_sender: mpsc::Sender<XrNetIncoming>,
+    outgoing_receiver: mpsc::Receiver<XrNetSyncOutgoing>,
+    thread_loop: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut peers = HashMap::<XrNetPeerId, SyncWorkerPeerState>::new();
+        let mut pending_sync_connections = Vec::<XrNetSyncConnection>::new();
+        let mut cached_alignment = None;
+        let mut cached_alignment_descriptor = None;
+
+        while thread_loop.load(Ordering::Relaxed) {
+            let should_break = drain_sync_outgoing_messages(
+                &mut peers,
+                node_id,
+                &outgoing_receiver,
+                &mut cached_alignment,
+                &mut cached_alignment_descriptor,
+            );
+            accept_sync_connections(&sync_listener, &mut pending_sync_connections, node_id);
+            ensure_outbound_sync_connections(&mut peers, node_id);
             process_pending_sync_connections(
                 &mut pending_sync_connections,
                 &mut peers,
                 &incoming_sender,
-                config.node_id,
+                node_id,
                 &cached_alignment,
                 &cached_alignment_descriptor,
             );
             process_sync_connections(
                 &mut peers,
                 &incoming_sender,
-                config.node_id,
+                node_id,
                 &cached_alignment,
                 &cached_alignment_descriptor,
             );
-            process_data_packets(
-                &data_socket,
-                &mut read_buf,
-                &mut peers,
-                &incoming_sender,
-                config.node_id,
-            );
-            expire_timed_out_peers(&mut peers, &incoming_sender, config.peer_timeout);
 
             if should_break {
                 break;
             }
-            thread::sleep(config.poll_interval);
+            thread::sleep(poll_interval);
         }
 
-        broadcast_explicit_leave(&data_socket, &peers, config.node_id);
-        broadcast_discovery_leave(&discovery_socket, &config.discovery_targets, config.node_id);
         for peer_state in peers.values_mut() {
             close_sync_connection(peer_state);
         }
@@ -604,7 +693,7 @@ fn broadcast_discovery_leave(
 
 fn broadcast_explicit_leave(
     socket: &UdpSocket,
-    peers: &HashMap<XrNetPeerId, WorkerPeerState>,
+    peers: &HashMap<XrNetPeerId, UdpWorkerPeerState>,
     node_id: XrNetPeerId,
 ) {
     let packet = XrNetDataPacket::Leave(XrNetLeavePacket {
@@ -617,18 +706,16 @@ fn broadcast_explicit_leave(
     }
 }
 
-fn drain_outgoing_messages(
+fn drain_udp_outgoing_messages(
     socket: &UdpSocket,
-    peers: &mut HashMap<XrNetPeerId, WorkerPeerState>,
+    peers: &mut HashMap<XrNetPeerId, UdpWorkerPeerState>,
     node_id: XrNetPeerId,
-    outgoing_receiver: &mpsc::Receiver<XrNetOutgoing>,
+    outgoing_receiver: &mpsc::Receiver<XrNetUdpOutgoing>,
     cached_state: &mut Option<XrNetStateFrame>,
-    cached_alignment: &mut Option<XrNetAlignmentFrame>,
-    cached_alignment_descriptor: &mut Option<XrNetAlignmentDescriptorFrame>,
 ) -> bool {
     loop {
         match outgoing_receiver.try_recv() {
-            Ok(XrNetOutgoing::State(frame)) => {
+            Ok(XrNetUdpOutgoing::State(frame)) => {
                 *cached_state = Some(frame.clone());
                 let packet = XrNetDataPacket::State {
                     version: XR_NET_PROTOCOL_VERSION,
@@ -640,7 +727,29 @@ fn drain_outgoing_messages(
                     let _ = socket.send_to(&buf, peer.peer.addr);
                 }
             }
-            Ok(XrNetOutgoing::Alignment(frame)) => {
+            Ok(XrNetUdpOutgoing::Break) => return true,
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => return true,
+        }
+    }
+}
+
+fn drain_sync_outgoing_messages(
+    peers: &mut HashMap<XrNetPeerId, SyncWorkerPeerState>,
+    node_id: XrNetPeerId,
+    outgoing_receiver: &mpsc::Receiver<XrNetSyncOutgoing>,
+    cached_alignment: &mut Option<XrNetAlignmentFrame>,
+    cached_alignment_descriptor: &mut Option<XrNetAlignmentDescriptorFrame>,
+) -> bool {
+    loop {
+        match outgoing_receiver.try_recv() {
+            Ok(XrNetSyncOutgoing::PeerUp { peer, sync_addr }) => {
+                register_sync_peer(peers, peer, sync_addr);
+            }
+            Ok(XrNetSyncOutgoing::PeerRemoved { peer_id }) => {
+                remove_sync_peer(peers, peer_id);
+            }
+            Ok(XrNetSyncOutgoing::Alignment(frame)) => {
                 *cached_alignment = Some(frame);
                 let packet = XrNetDataPacket::Alignment {
                     version: XR_NET_PROTOCOL_VERSION,
@@ -653,7 +762,7 @@ fn drain_outgoing_messages(
                     }
                 }
             }
-            Ok(XrNetOutgoing::AlignmentDescriptor(frame)) => {
+            Ok(XrNetSyncOutgoing::AlignmentDescriptor(frame)) => {
                 *cached_alignment_descriptor = Some(frame.clone());
                 let packet = XrNetDataPacket::AlignmentDescriptor {
                     version: XR_NET_PROTOCOL_VERSION,
@@ -666,7 +775,7 @@ fn drain_outgoing_messages(
                     }
                 }
             }
-            Ok(XrNetOutgoing::Break) => return true,
+            Ok(XrNetSyncOutgoing::Break) => return true,
             Err(mpsc::TryRecvError::Empty) => return false,
             Err(mpsc::TryRecvError::Disconnected) => return true,
         }
@@ -677,12 +786,11 @@ fn process_discovery_packets(
     discovery_socket: &UdpSocket,
     data_socket: &UdpSocket,
     read_buf: &mut [u8],
-    peers: &mut HashMap<XrNetPeerId, WorkerPeerState>,
+    peers: &mut HashMap<XrNetPeerId, UdpWorkerPeerState>,
     incoming_sender: &mpsc::Sender<XrNetIncoming>,
+    sync_outgoing_sender: &mpsc::Sender<XrNetSyncOutgoing>,
     node_id: XrNetPeerId,
     cached_state: &Option<XrNetStateFrame>,
-    _cached_alignment: &Option<XrNetAlignmentFrame>,
-    _cached_alignment_descriptor: &Option<XrNetAlignmentDescriptorFrame>,
 ) {
     loop {
         match discovery_socket.recv_from(read_buf) {
@@ -697,9 +805,10 @@ fn process_discovery_packets(
                         }
                         let peer_addr = SocketAddr::new(source_addr.ip(), packet.data_port);
                         let peer_sync_addr = SocketAddr::new(source_addr.ip(), packet.sync_port);
-                        let (peer, is_new) = touch_peer(
+                        let (peer, is_new) = touch_udp_peer(
                             peers,
                             incoming_sender,
+                            sync_outgoing_sender,
                             packet.node_id,
                             peer_addr,
                             peer_sync_addr,
@@ -712,9 +821,10 @@ fn process_discovery_packets(
                         if packet.version != XR_NET_PROTOCOL_VERSION || packet.node_id == node_id {
                             continue;
                         }
-                        remove_peer(
+                        remove_udp_peer(
                             peers,
                             incoming_sender,
+                            sync_outgoing_sender,
                             packet.node_id,
                             XrNetLeaveReason::Explicit,
                         );
@@ -730,8 +840,9 @@ fn process_discovery_packets(
 fn process_data_packets(
     socket: &UdpSocket,
     read_buf: &mut [u8],
-    peers: &mut HashMap<XrNetPeerId, WorkerPeerState>,
+    peers: &mut HashMap<XrNetPeerId, UdpWorkerPeerState>,
     incoming_sender: &mpsc::Sender<XrNetIncoming>,
+    sync_outgoing_sender: &mpsc::Sender<XrNetSyncOutgoing>,
     node_id: XrNetPeerId,
 ) {
     loop {
@@ -756,7 +867,14 @@ fn process_data_packets(
                                 SocketAddr::new(source_addr.ip(), XR_NET_DEFAULT_SYNC_PORT)
                             });
                         let (peer, _) =
-                            touch_peer(peers, incoming_sender, remote_id, source_addr, sync_addr);
+                            touch_udp_peer(
+                                peers,
+                                incoming_sender,
+                                sync_outgoing_sender,
+                                remote_id,
+                                source_addr,
+                                sync_addr,
+                            );
                         let Some(peer_state) = peers.get_mut(&remote_id) else {
                             continue;
                         };
@@ -781,7 +899,14 @@ fn process_data_packets(
                                 SocketAddr::new(source_addr.ip(), XR_NET_DEFAULT_SYNC_PORT)
                             });
                         let (peer, _) =
-                            touch_peer(peers, incoming_sender, remote_id, source_addr, sync_addr);
+                            touch_udp_peer(
+                                peers,
+                                incoming_sender,
+                                sync_outgoing_sender,
+                                remote_id,
+                                source_addr,
+                                sync_addr,
+                            );
                         let Some(peer_state) = peers.get_mut(&remote_id) else {
                             continue;
                         };
@@ -806,7 +931,14 @@ fn process_data_packets(
                                 SocketAddr::new(source_addr.ip(), XR_NET_DEFAULT_SYNC_PORT)
                             });
                         let (peer, _) =
-                            touch_peer(peers, incoming_sender, remote_id, source_addr, sync_addr);
+                            touch_udp_peer(
+                                peers,
+                                incoming_sender,
+                                sync_outgoing_sender,
+                                remote_id,
+                                source_addr,
+                                sync_addr,
+                            );
                         let Some(peer_state) = peers.get_mut(&remote_id) else {
                             continue;
                         };
@@ -821,9 +953,10 @@ fn process_data_packets(
                         if packet.version != XR_NET_PROTOCOL_VERSION || packet.node_id == node_id {
                             continue;
                         }
-                        remove_peer(
+                        remove_udp_peer(
                             peers,
                             incoming_sender,
+                            sync_outgoing_sender,
                             packet.node_id,
                             XrNetLeaveReason::Explicit,
                         );
@@ -836,28 +969,32 @@ fn process_data_packets(
     }
 }
 
-fn touch_peer(
-    peers: &mut HashMap<XrNetPeerId, WorkerPeerState>,
+fn touch_udp_peer(
+    peers: &mut HashMap<XrNetPeerId, UdpWorkerPeerState>,
     incoming_sender: &mpsc::Sender<XrNetIncoming>,
+    sync_outgoing_sender: &mpsc::Sender<XrNetSyncOutgoing>,
     peer_id: XrNetPeerId,
     addr: SocketAddr,
     sync_addr: SocketAddr,
 ) -> (XrNetPeer, bool) {
     let now = Instant::now();
     if let Some(peer_state) = peers.get_mut(&peer_id) {
-        let sync_addr_changed = peer_state.sync_addr != sync_addr;
+        let peer_changed = peer_state.peer.addr != addr || peer_state.sync_addr != sync_addr;
         peer_state.peer.addr = addr;
         peer_state.sync_addr = sync_addr;
         peer_state.last_seen = now;
-        if sync_addr_changed {
-            close_sync_connection(peer_state);
-            peer_state.next_sync_connect_attempt_at = now;
+        if peer_changed {
+            let _ = sync_outgoing_sender.send(XrNetSyncOutgoing::PeerUp {
+                peer: peer_state.peer,
+                sync_addr,
+            });
         }
         (peer_state.peer, false)
     } else {
         let peer = XrNetPeer { id: peer_id, addr };
-        peers.insert(peer_id, WorkerPeerState::new(peer, sync_addr, now));
+        peers.insert(peer_id, UdpWorkerPeerState::new(peer, sync_addr, now));
         let _ = incoming_sender.send(XrNetIncoming::Join { peer });
+        let _ = sync_outgoing_sender.send(XrNetSyncOutgoing::PeerUp { peer, sync_addr });
         (peer, true)
     }
 }
@@ -878,11 +1015,37 @@ fn send_cached_state_to_peer(
     }
 }
 
-fn close_sync_connection(peer_state: &mut WorkerPeerState) {
+fn close_sync_connection(peer_state: &mut SyncWorkerPeerState) {
     if let Some(connection) = peer_state.sync_connection.as_mut() {
         connection.shutdown();
     }
     peer_state.sync_connection = None;
+}
+
+fn register_sync_peer(
+    peers: &mut HashMap<XrNetPeerId, SyncWorkerPeerState>,
+    peer: XrNetPeer,
+    sync_addr: SocketAddr,
+) {
+    let now = Instant::now();
+    if let Some(peer_state) = peers.get_mut(&peer.id) {
+        let sync_addr_changed = peer_state.sync_addr != sync_addr;
+        peer_state.peer = peer;
+        peer_state.sync_addr = sync_addr;
+        if sync_addr_changed {
+            close_sync_connection(peer_state);
+            peer_state.next_sync_connect_attempt_at = now;
+        }
+    } else {
+        peers.insert(peer.id, SyncWorkerPeerState::new(peer, sync_addr, now));
+    }
+}
+
+fn remove_sync_peer(peers: &mut HashMap<XrNetPeerId, SyncWorkerPeerState>, peer_id: XrNetPeerId) {
+    let Some(mut peer_state) = peers.remove(&peer_id) else {
+        return;
+    };
+    close_sync_connection(&mut peer_state);
 }
 
 fn should_initiate_sync_connection(local_node_id: XrNetPeerId, peer_id: XrNetPeerId) -> bool {
@@ -910,7 +1073,7 @@ fn accept_sync_connections(
 }
 
 fn ensure_outbound_sync_connections(
-    peers: &mut HashMap<XrNetPeerId, WorkerPeerState>,
+    peers: &mut HashMap<XrNetPeerId, SyncWorkerPeerState>,
     node_id: XrNetPeerId,
 ) {
     let now = Instant::now();
@@ -941,7 +1104,7 @@ fn ensure_outbound_sync_connections(
 
 fn process_pending_sync_connections(
     pending_sync_connections: &mut Vec<XrNetSyncConnection>,
-    peers: &mut HashMap<XrNetPeerId, WorkerPeerState>,
+    peers: &mut HashMap<XrNetPeerId, SyncWorkerPeerState>,
     incoming_sender: &mpsc::Sender<XrNetIncoming>,
     node_id: XrNetPeerId,
     cached_alignment: &Option<XrNetAlignmentFrame>,
@@ -1017,7 +1180,7 @@ fn process_pending_sync_connections(
 }
 
 fn process_sync_connections(
-    peers: &mut HashMap<XrNetPeerId, WorkerPeerState>,
+    peers: &mut HashMap<XrNetPeerId, SyncWorkerPeerState>,
     incoming_sender: &mpsc::Sender<XrNetIncoming>,
     node_id: XrNetPeerId,
     cached_alignment: &Option<XrNetAlignmentFrame>,
@@ -1116,6 +1279,7 @@ fn pump_sync_connection(connection: &mut XrNetSyncConnection) -> io::Result<Vec<
     flush_sync_connection(connection)?;
 
     let mut read_chunk = [0u8; 16384];
+    let mut total_read = 0usize;
     loop {
         match connection.stream.read(&mut read_chunk) {
             Ok(0) => {
@@ -1126,6 +1290,10 @@ fn pump_sync_connection(connection: &mut XrNetSyncConnection) -> io::Result<Vec<
             }
             Ok(len) => {
                 connection.read_buf.extend_from_slice(&read_chunk[..len]);
+                total_read += len;
+                if total_read >= XR_NET_SYNC_READ_BUDGET_BYTES_PER_POLL {
+                    break;
+                }
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
             Err(err) => return Err(err),
@@ -1135,6 +1303,7 @@ fn pump_sync_connection(connection: &mut XrNetSyncConnection) -> io::Result<Vec<
 }
 
 fn flush_sync_connection(connection: &mut XrNetSyncConnection) -> io::Result<()> {
+    let mut total_written = 0usize;
     while !connection.write_buf.is_empty() {
         match connection.stream.write(&connection.write_buf) {
             Ok(0) => {
@@ -1144,7 +1313,11 @@ fn flush_sync_connection(connection: &mut XrNetSyncConnection) -> io::Result<()>
                 ))
             }
             Ok(written) => {
-                connection.write_buf.drain(0..written);
+                consume_vec_prefix(&mut connection.write_buf, written);
+                total_written += written;
+                if total_written >= XR_NET_SYNC_WRITE_BUDGET_BYTES_PER_POLL {
+                    break;
+                }
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
             Err(err) => return Err(err),
@@ -1181,18 +1354,30 @@ fn drain_sync_packets(read_buf: &mut Vec<u8>) -> io::Result<Vec<XrNetSyncPacket>
         offset = end;
     }
     if offset > 0 {
-        read_buf.drain(0..offset);
+        consume_vec_prefix(read_buf, offset);
     }
     Ok(packets)
 }
 
+fn consume_vec_prefix(buf: &mut Vec<u8>, len: usize) {
+    if len == 0 {
+        return;
+    }
+    if len >= buf.len() {
+        buf.clear();
+        return;
+    }
+    let remaining = buf.len() - len;
+    buf.copy_within(len.., 0);
+    buf.truncate(remaining);
+}
+
 fn route_sync_data_packet(
-    peer_state: &mut WorkerPeerState,
+    peer_state: &mut SyncWorkerPeerState,
     incoming_sender: &mpsc::Sender<XrNetIncoming>,
     node_id: XrNetPeerId,
     packet: XrNetDataPacket,
 ) {
-    peer_state.last_seen = Instant::now();
     let peer = peer_state.peer;
     match packet {
         XrNetDataPacket::State {
@@ -1281,16 +1466,17 @@ fn wrap_angle(mut angle: f32) -> f32 {
     angle
 }
 
-fn remove_peer(
-    peers: &mut HashMap<XrNetPeerId, WorkerPeerState>,
+fn remove_udp_peer(
+    peers: &mut HashMap<XrNetPeerId, UdpWorkerPeerState>,
     incoming_sender: &mpsc::Sender<XrNetIncoming>,
+    sync_outgoing_sender: &mpsc::Sender<XrNetSyncOutgoing>,
     peer_id: XrNetPeerId,
     reason: XrNetLeaveReason,
 ) {
-    let Some(mut peer_state) = peers.remove(&peer_id) else {
+    let Some(peer_state) = peers.remove(&peer_id) else {
         return;
     };
-    close_sync_connection(&mut peer_state);
+    let _ = sync_outgoing_sender.send(XrNetSyncOutgoing::PeerRemoved { peer_id });
     let _ = incoming_sender.send(XrNetIncoming::Leave {
         peer: peer_state.peer,
         reason,
@@ -1298,8 +1484,9 @@ fn remove_peer(
 }
 
 fn expire_timed_out_peers(
-    peers: &mut HashMap<XrNetPeerId, WorkerPeerState>,
+    peers: &mut HashMap<XrNetPeerId, UdpWorkerPeerState>,
     incoming_sender: &mpsc::Sender<XrNetIncoming>,
+    sync_outgoing_sender: &mpsc::Sender<XrNetSyncOutgoing>,
     peer_timeout: Duration,
 ) {
     let now = Instant::now();
@@ -1310,7 +1497,13 @@ fn expire_timed_out_peers(
         })
         .collect();
     for peer_id in expired {
-        remove_peer(peers, incoming_sender, peer_id, XrNetLeaveReason::Timeout);
+        remove_udp_peer(
+            peers,
+            incoming_sender,
+            sync_outgoing_sender,
+            peer_id,
+            XrNetLeaveReason::Timeout,
+        );
     }
 }
 
