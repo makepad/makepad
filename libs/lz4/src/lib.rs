@@ -7,6 +7,9 @@
 
 use std::{fmt, ptr};
 
+#[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+use std::arch::aarch64::{vceqq_u8, vld1q_u8, vminvq_u8, vst1q_u8};
+
 const MINMATCH: usize = 4;
 const LASTLITERALS: usize = 5;
 const MFLIMIT: usize = 12;
@@ -70,6 +73,21 @@ pub const fn compress_bound(input_size: usize) -> usize {
         0
     } else {
         input_size + input_size / 255 + 16
+    }
+}
+
+pub const fn implementation_name() -> &'static str {
+    #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+    {
+        "aarch64-neon"
+    }
+    #[cfg(all(target_arch = "aarch64", feature = "force-scalar"))]
+    {
+        "aarch64-scalar"
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        "scalar"
     }
 }
 
@@ -246,7 +264,7 @@ pub fn decompress_safe(input: &[u8], output: &mut [u8]) -> Result<usize, Decompr
             && dst <= short_output_end
         {
             unsafe {
-                ptr::copy_nonoverlapping(input_ptr.add(src), output_ptr.add(dst), 16);
+                copy_16_bytes(output_ptr.add(dst), input_ptr.add(src));
             }
             src += literal_len;
             dst += literal_len;
@@ -261,8 +279,12 @@ pub fn decompress_safe(input: &[u8], output: &mut [u8]) -> Result<usize, Decompr
             if match_token != ML_MASK && fast_offset >= 8 {
                 let match_src = dst - fast_offset;
                 unsafe {
-                    copy_u64(output_ptr.add(dst), output_ptr.add(match_src));
-                    copy_u64(output_ptr.add(dst + 8), output_ptr.add(match_src + 8));
+                    if fast_offset >= 16 {
+                        copy_16_bytes(output_ptr.add(dst), output_ptr.add(match_src));
+                    } else {
+                        copy_u64(output_ptr.add(dst), output_ptr.add(match_src));
+                        copy_u64(output_ptr.add(dst + 8), output_ptr.add(match_src + 8));
+                    }
                     ptr::copy_nonoverlapping(output_ptr.add(match_src + 16), output_ptr.add(dst + 16), 2);
                 }
                 dst += match_token + MINMATCH;
@@ -441,7 +463,22 @@ fn hash_at(input: &[u8], pos: usize) -> usize {
 }
 
 #[inline]
-fn count_match(input: &[u8], mut a: usize, mut b: usize, limit: usize) -> usize {
+fn count_match(input: &[u8], a: usize, b: usize, limit: usize) -> usize {
+    #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+    {
+        let remaining = (limit - a).min(limit - b);
+        if remaining >= 16 {
+            unsafe {
+                return count_match_aarch64(input.as_ptr().add(a), input.as_ptr().add(b), remaining);
+            }
+        }
+    }
+
+    count_match_scalar(input, a, b, limit)
+}
+
+#[inline]
+fn count_match_scalar(input: &[u8], mut a: usize, mut b: usize, limit: usize) -> usize {
     let start = a;
     while a + 8 <= limit && b + 8 <= limit {
         let diff = load_u64(input, a) ^ load_u64(input, b);
@@ -457,6 +494,56 @@ fn count_match(input: &[u8], mut a: usize, mut b: usize, limit: usize) -> usize 
         b += 1;
     }
     a - start
+}
+
+#[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+#[target_feature(enable = "neon")]
+unsafe fn count_match_aarch64(mut a_ptr: *const u8, mut b_ptr: *const u8, mut remaining: usize) -> usize {
+    let mut matched = 0usize;
+
+    while remaining >= 16 {
+        let diff_index = first_diff_16(a_ptr, b_ptr);
+        if diff_index != 16 {
+            return matched + diff_index;
+        }
+        a_ptr = a_ptr.add(16);
+        b_ptr = b_ptr.add(16);
+        matched += 16;
+        remaining -= 16;
+    }
+
+    while remaining >= 8 {
+        let diff = ptr::read_unaligned(a_ptr as *const u64) ^ ptr::read_unaligned(b_ptr as *const u64);
+        if diff != 0 {
+            return matched + (diff.trailing_zeros() as usize / 8);
+        }
+        a_ptr = a_ptr.add(8);
+        b_ptr = b_ptr.add(8);
+        matched += 8;
+        remaining -= 8;
+    }
+
+    while remaining > 0 && *a_ptr == *b_ptr {
+        a_ptr = a_ptr.add(1);
+        b_ptr = b_ptr.add(1);
+        matched += 1;
+        remaining -= 1;
+    }
+
+    matched
+}
+
+#[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+#[target_feature(enable = "neon")]
+unsafe fn first_diff_16(a_ptr: *const u8, b_ptr: *const u8) -> usize {
+    let matches = vceqq_u8(vld1q_u8(a_ptr), vld1q_u8(b_ptr));
+    if vminvq_u8(matches) == u8::MAX {
+        return 16;
+    }
+
+    let mut mask = [0u8; 16];
+    vst1q_u8(mask.as_mut_ptr(), matches);
+    mask.iter().position(|&byte| byte == 0).unwrap_or(16)
 }
 
 #[inline]
@@ -498,6 +585,26 @@ unsafe fn copy_u64(dst: *mut u8, src: *const u8) {
 }
 
 #[inline(always)]
+unsafe fn copy_16_bytes(dst: *mut u8, src: *const u8) {
+    #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+    {
+        return copy_16_bytes_aarch64(dst, src);
+    }
+
+    #[cfg(any(not(target_arch = "aarch64"), feature = "force-scalar"))]
+    {
+        ptr::copy_nonoverlapping(src, dst, 16);
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+#[target_feature(enable = "neon")]
+unsafe fn copy_16_bytes_aarch64(dst: *mut u8, src: *const u8) {
+    let bytes = vld1q_u8(src);
+    vst1q_u8(dst, bytes);
+}
+
+#[inline(always)]
 unsafe fn copy_match(output_ptr: *mut u8, dst: usize, offset: usize, match_len: usize) {
     let dst_ptr = output_ptr.add(dst);
     let src_ptr = dst_ptr.sub(offset) as *const u8;
@@ -508,6 +615,10 @@ unsafe fn copy_match(output_ptr: *mut u8, dst: usize, offset: usize, match_len: 
     }
 
     let mut copied = 0usize;
+    while copied + 16 <= match_len && offset >= 16 {
+        copy_16_bytes(dst_ptr.add(copied), src_ptr.add(copied));
+        copied += 16;
+    }
     while copied + 8 <= match_len {
         copy_u64(dst_ptr.add(copied), src_ptr.add(copied));
         copied += 8;
