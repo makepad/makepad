@@ -390,7 +390,8 @@ impl AlignmentWorkerState {
             .take()
             .and_then(|matcher| matcher.diagnostic())
             .expect("finished matcher should produce a diagnostic");
-        peer_state.last_solved_local_descriptor_version = peer_state.active_local_descriptor_version;
+        peer_state.last_solved_local_descriptor_version =
+            peer_state.active_local_descriptor_version;
         peer_state.last_solved_remote_descriptor_seq = peer_state.active_remote_descriptor_seq;
         peer_state.active_local_descriptor_version = None;
         peer_state.active_remote_descriptor_seq = None;
@@ -412,7 +413,8 @@ impl AlignmentWorkerState {
             &diagnostic,
         );
         peer_state.last_accepted_solution = next_solution;
-        peer_state.remote_to_local = next_solution.map(|solution| solution.remote_to_local_transform());
+        peer_state.remote_to_local =
+            next_solution.map(|solution| solution.remote_to_local_transform());
         let queued_rerun = peer_state.queued_rerun;
         peer_state.queued_rerun = false;
         let rerun_changed = if queued_rerun {
@@ -495,9 +497,7 @@ fn xr_people_alignment_worker_step(
                 || (step_outcome.did_work
                     && state.last_progress_publish_at.is_none_or(|last_publish| {
                         last_publish.elapsed()
-                            >= Duration::from_millis(
-                                XR_ALIGNMENT_PROGRESS_SIGNAL_INTERVAL_MILLIS,
-                            )
+                            >= Duration::from_millis(XR_ALIGNMENT_PROGRESS_SIGNAL_INTERVAL_MILLIS)
                     })))
             .then(|| {
                 state.last_progress_publish_at = Some(Instant::now());
@@ -593,9 +593,9 @@ fn schedule_alignment_worker_peer(
     };
 
     if peer_state.matcher.is_some() {
-        let solving_current_pair =
-            peer_state.active_local_descriptor_version == Some(local_descriptor_version)
-                && peer_state.active_remote_descriptor_seq == Some(remote_descriptor.seq);
+        let solving_current_pair = peer_state.active_local_descriptor_version
+            == Some(local_descriptor_version)
+            && peer_state.active_remote_descriptor_seq == Some(remote_descriptor.seq);
         if solving_current_pair {
             return false;
         }
@@ -650,10 +650,9 @@ fn descriptor_pair_ready_for_solve(
 }
 
 fn clear_alignment_worker_peer(peer_state: &mut AlignmentWorkerPeerState) -> bool {
-    let changed =
-        peer_state.remote_to_local.is_some()
-            || peer_state.last_solve_diagnostic.is_some()
-            || peer_state.matcher.is_some();
+    let changed = peer_state.remote_to_local.is_some()
+        || peer_state.last_solve_diagnostic.is_some()
+        || peer_state.matcher.is_some();
     peer_state.remote_to_local = None;
     peer_state.last_accepted_solution = None;
     peer_state.last_solve_diagnostic = None;
@@ -741,20 +740,26 @@ fn alignment_lock_score(
     solution: XrDepthAlignSolution,
     diagnostic: Option<XrDepthAlignSolveDiagnostic>,
 ) -> f32 {
-    let wall_factor = diagnostic
+    let (signal_factor, overlap_factor) = diagnostic
         .map(|diagnostic| {
-            (diagnostic
+            let signal_factor = (diagnostic
                 .local_wall_samples
                 .min(diagnostic.remote_wall_samples) as f32
                 / 12.0)
-                .clamp(0.0, 1.0)
+                .clamp(0.0, 1.0);
+            let overlap_ratio = (solution.matched_samples as f32
+                / diagnostic.remote_wall_samples.max(1) as f32)
+                .clamp(0.0, 1.0);
+            (signal_factor, overlap_ratio * signal_factor.sqrt())
         })
-        .unwrap_or(0.5);
-    let matched_factor = (solution.matched_samples as f32 / 4.0).clamp(0.0, 1.0);
-    (solution.ranking_confidence() * 0.55
-        + solution.symmetry_confidence * 0.25
-        + wall_factor * 0.15
-        + matched_factor * 0.05)
+        .unwrap_or_else(|| {
+            let matched = (solution.matched_samples as f32 / 4.0).clamp(0.0, 1.0);
+            (0.5, matched)
+        });
+    (solution.ranking_confidence() * 0.50
+        + solution.symmetry_confidence * 0.20
+        + signal_factor * 0.15
+        + overlap_factor * 0.15)
         .clamp(0.0, 1.0)
 }
 
@@ -888,16 +893,8 @@ fn make_alignment_state_text(
             matcher_progress_summary(progress),
         );
     }
-    let solve_steps = peer_state
-        .last_solve_diagnostic
-        .map(|diagnostic| diagnostic.step_count)
-        .unwrap_or_default();
-    let max_step_ms = peer_state
-        .last_solve_diagnostic
-        .map(|diagnostic| diagnostic.max_step_ms)
-        .unwrap_or_default();
     format!(
-        "AlignState {peer_label}: local map {} v{} | remote map {} seq {} | worker lv{} rv{} {} match {:.1}ms s{} max{}ms | pose {}",
+        "AlignState {peer_label}: local map {} v{} | remote map {} seq {} | worker lv{} rv{} {} match {:.1}ms | pose {}",
         if local_descriptor_ready { "yes" } else { "no" },
         local_version,
         if remote_descriptor.is_some() { "yes" } else { "no" },
@@ -906,8 +903,6 @@ fn make_alignment_state_text(
         descriptor_seq_label(peer_state.last_solved_remote_descriptor_seq),
         solve_outcome_label(peer_state.last_solve_diagnostic),
         peer_state.last_solve_ms,
-        solve_steps,
-        max_step_ms,
         transform_source_label(peer_state.transform_source),
     )
 }
@@ -1084,29 +1079,16 @@ fn make_alignment_debug_text(
     };
 
     let context = format!(
-        "local signal {} | remote signal {} | yaw {} | pose {}",
-        diagnostic.local_wall_samples,
-        diagnostic.remote_wall_samples,
-        diagnostic.yaw_candidate_count,
-        diagnostic.pose_candidate_count,
+        "local signal {} | remote signal {}",
+        diagnostic.local_wall_samples, diagnostic.remote_wall_samples,
     );
     match diagnostic.outcome() {
-        XrDepthAlignSolveOutcome::MissingSamples => {
-            format_alignment_debug_lines(
-                format!("AlignDbg {peer_label}: need more heightmap signal"),
-                &context,
-            )
-        }
+        XrDepthAlignSolveOutcome::MissingSamples => format_alignment_debug_lines(
+            format!("AlignDbg {peer_label}: need more heightmap signal"),
+            &context,
+        ),
         XrDepthAlignSolveOutcome::NoCandidate => {
-            format_alignment_debug_lines(
-                format!(
-                "AlignDbg {peer_label}: no candidate match{:.1}ms s{} max{}ms",
-                peer_state.last_solve_ms,
-                diagnostic.step_count,
-                diagnostic.max_step_ms,
-                ),
-                &context,
-            )
+            format_alignment_debug_lines(format!("AlignDbg {peer_label}: no candidate"), &context)
         }
         XrDepthAlignSolveOutcome::Rejected => {
             let Some(best) = diagnostic.best_solution else {
@@ -1114,42 +1096,17 @@ fn make_alignment_debug_text(
             };
             format_alignment_debug_lines(
                 format!(
-                "AlignDbg {peer_label}: reject {} | cw{:.2} cs{:.2} cr{:.2} m{} r{:.2} match{:.1}ms s{} max{}ms",
-                alignment_rejection_reason(&diagnostic, best),
-                best.confidence,
-                best.symmetry_confidence,
-                best.ranking_confidence(),
-                best.matched_samples,
-                best.residual_meters,
-                peer_state.last_solve_ms,
-                diagnostic.step_count,
-                diagnostic.max_step_ms,
+                    "AlignDbg {peer_label}: reject {}",
+                    alignment_rejection_reason(&diagnostic, best),
                 ),
                 &context,
             )
         }
         XrDepthAlignSolveOutcome::Accepted => {
-            let Some(best) = diagnostic.best_solution else {
+            if diagnostic.best_solution.is_none() {
                 return format!("AlignDbg {peer_label}: aligned | {context}");
-            };
-            format_alignment_debug_lines(
-                format!(
-                "AlignDbg {peer_label}: ok cw{:.2} cs{:.2} cr{:.2} m{} r{:.2} match{:.1}ms s{} max{}ms yaw{:.0} tx{:.2} ty{:.2} tz{:.2}",
-                best.confidence,
-                best.symmetry_confidence,
-                best.ranking_confidence(),
-                best.matched_samples,
-                best.residual_meters,
-                peer_state.last_solve_ms,
-                diagnostic.step_count,
-                diagnostic.max_step_ms,
-                best.yaw_radians.to_degrees(),
-                best.translation.x,
-                best.translation.y,
-                best.translation.z,
-                ),
-                &context,
-            )
+            }
+            format_alignment_debug_lines(format!("AlignDbg {peer_label}: aligned"), &context)
         }
     }
 }
@@ -1916,7 +1873,10 @@ impl XrPeopleDebug {
             .peers
             .values()
             .any(|peer| peer.last_solve_diagnostic.is_some());
-        let has_alignment_worker_progress = self.peers.values().any(|peer| peer.worker_progress.is_some());
+        let has_alignment_worker_progress = self
+            .peers
+            .values()
+            .any(|peer| peer.worker_progress.is_some());
         if local_scene_state != LocalSceneState::Ready
             || (!has_alignment_diagnostic && !has_alignment_worker_progress)
         {
@@ -2812,10 +2772,12 @@ mod tests {
         );
         assert!(!peer_state.queued_rerun);
 
-        assert!(state.apply_local_descriptor_update(PendingLocalDescriptorUpdate::Set {
-            frame: updated_local,
-            version: (2, 0),
-        }));
+        assert!(
+            state.apply_local_descriptor_update(PendingLocalDescriptorUpdate::Set {
+                frame: updated_local,
+                version: (2, 0),
+            })
+        );
 
         let peer_state = state.peers.get(&peer.id).unwrap();
         assert!(peer_state.matcher.is_some());
@@ -2835,7 +2797,10 @@ mod tests {
         }
 
         let peer_state = state.peers.get(&peer.id).unwrap();
-        assert_eq!(peer_state.last_solved_local_descriptor_version, Some((2, 0)));
+        assert_eq!(
+            peer_state.last_solved_local_descriptor_version,
+            Some((2, 0))
+        );
         assert_eq!(
             peer_state.last_solved_remote_descriptor_seq,
             Some(pair.remote_descriptor.seq)
@@ -2927,7 +2892,7 @@ mod tests {
         let text = make_alignment_state_text(LocalSceneState::Ready, Some((4, 9)), &peers);
         assert_eq!(
             text,
-            "AlignState 0000002a: local map yes v4/9 | remote map yes seq 7 | worker lv4/9 rv7 accepted match 1.7ms s0 max0ms | pose raw"
+            "AlignState 0000002a: local map yes v4/9 | remote map yes seq 7 | worker lv4/9 rv7 accepted match 1.7ms | pose raw"
         );
     }
 
