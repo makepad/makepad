@@ -3,9 +3,8 @@ use crate::*;
 use makepad_widgets::event::XrSyncAnchor;
 use std::{
     collections::HashMap,
-    sync::{mpsc::TryRecvError, Arc, Condvar, Mutex},
-    thread::{self, JoinHandle},
-    time::Instant,
+    sync::{mpsc::TryRecvError, Arc, Mutex},
+    time::Duration,
 };
 
 script_mod! {
@@ -19,6 +18,9 @@ script_mod! {
         }
     }
 }
+
+const XR_ALIGNMENT_CALLBACK_BUDGET_MILLIS: u64 = 40;
+const XR_ALIGNMENT_CALLBACK_MAX_STEPS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum RemoteTransformSource {
@@ -44,6 +46,7 @@ struct RemotePeerState {
     last_solve_ms: f64,
     last_solved_local_descriptor_version: Option<(u64, u64)>,
     last_solved_remote_descriptor_seq: Option<u32>,
+    worker_progress: Option<XrDepthAlignMatcherProgress>,
 }
 
 impl RemotePeerState {
@@ -63,11 +66,12 @@ impl RemotePeerState {
             last_solve_ms: 0.0,
             last_solved_local_descriptor_version: None,
             last_solved_remote_descriptor_seq: None,
+            worker_progress: None,
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct AlignmentWorkerPeerState {
     peer: XrNetPeer,
     latest_descriptor: Option<XrNetAlignmentDescriptorFrame>,
@@ -77,6 +81,10 @@ struct AlignmentWorkerPeerState {
     last_solve_ms: f64,
     last_solved_local_descriptor_version: Option<(u64, u64)>,
     last_solved_remote_descriptor_seq: Option<u32>,
+    active_local_descriptor_version: Option<(u64, u64)>,
+    active_remote_descriptor_seq: Option<u32>,
+    queued_rerun: bool,
+    matcher: Option<XrDepthAlignMatcher>,
 }
 
 impl AlignmentWorkerPeerState {
@@ -90,6 +98,10 @@ impl AlignmentWorkerPeerState {
             last_solve_ms: 0.0,
             last_solved_local_descriptor_version: None,
             last_solved_remote_descriptor_seq: None,
+            active_local_descriptor_version: None,
+            active_remote_descriptor_seq: None,
+            queued_rerun: false,
+            matcher: None,
         }
     }
 
@@ -100,6 +112,7 @@ impl AlignmentWorkerPeerState {
             last_solve_ms: self.last_solve_ms,
             last_solved_local_descriptor_version: self.last_solved_local_descriptor_version,
             last_solved_remote_descriptor_seq: self.last_solved_remote_descriptor_seq,
+            worker_progress: self.matcher.as_ref().map(XrDepthAlignMatcher::progress),
         }
     }
 }
@@ -111,6 +124,7 @@ struct AlignmentWorkerPeerResult {
     last_solve_ms: f64,
     last_solved_local_descriptor_version: Option<(u64, u64)>,
     last_solved_remote_descriptor_seq: Option<u32>,
+    worker_progress: Option<XrDepthAlignMatcherProgress>,
 }
 
 #[derive(Clone, Debug)]
@@ -139,35 +153,36 @@ enum PendingPeerDescriptorUpdate {
 
 #[derive(Default)]
 struct XrPeopleAlignmentWorkerMailbox {
-    version: u64,
-    shutdown: bool,
     pending_local_descriptor: Option<PendingLocalDescriptorUpdate>,
     pending_peer_updates: HashMap<XrNetPeerId, PendingPeerDescriptorUpdate>,
 }
 
 struct XrPeopleAlignmentWorker {
-    mailbox: Arc<(Mutex<XrPeopleAlignmentWorkerMailbox>, Condvar)>,
+    store: XrTsdfStore,
+    mailbox: Arc<Mutex<XrPeopleAlignmentWorkerMailbox>>,
     latest_result: Arc<Mutex<Option<XrPeopleAlignmentWorkerResult>>>,
-    join_handle: Option<JoinHandle<()>>,
 }
 
 impl XrPeopleAlignmentWorker {
-    fn new() -> Self {
-        let mailbox = Arc::new((
-            Mutex::new(XrPeopleAlignmentWorkerMailbox::default()),
-            Condvar::new(),
-        ));
+    fn new(store: XrTsdfStore) -> Self {
+        let mailbox = Arc::new(Mutex::new(XrPeopleAlignmentWorkerMailbox::default()));
         let latest_result = Arc::new(Mutex::new(None));
-        let mailbox_thread = mailbox.clone();
-        let result_thread = latest_result.clone();
-        let join_handle = Some(thread::spawn(move || {
-            xr_people_alignment_worker_loop(mailbox_thread, result_thread)
-        }));
+        let runtime = Arc::new(Mutex::new(AlignmentWorkerState::default()));
+        let mailbox_callback = mailbox.clone();
+        let latest_result_callback = latest_result.clone();
+        let runtime_callback = runtime.clone();
+        store.set_cooperative_step_callback(Some(Box::new(move || {
+            xr_people_alignment_worker_step(
+                &mailbox_callback,
+                &runtime_callback,
+                &latest_result_callback,
+            )
+        })));
 
         Self {
+            store,
             mailbox,
             latest_result,
-            join_handle,
         }
     }
 
@@ -211,26 +226,15 @@ impl XrPeopleAlignmentWorker {
     where
         F: FnOnce(&mut XrPeopleAlignmentWorkerMailbox),
     {
-        let (lock, wake) = &*self.mailbox;
-        if let Ok(mut mailbox) = lock.lock() {
+        if let Ok(mut mailbox) = self.mailbox.lock() {
             update(&mut mailbox);
-            mailbox.version = mailbox.version.saturating_add(1);
-            wake.notify_one();
         }
     }
 }
 
 impl Drop for XrPeopleAlignmentWorker {
     fn drop(&mut self) {
-        let (lock, wake) = &*self.mailbox;
-        if let Ok(mut mailbox) = lock.lock() {
-            mailbox.shutdown = true;
-            mailbox.version = mailbox.version.saturating_add(1);
-            wake.notify_one();
-        }
-        if let Some(join_handle) = self.join_handle.take() {
-            let _ = join_handle.join();
-        }
+        self.store.set_cooperative_step_callback(None);
     }
 }
 
@@ -290,7 +294,7 @@ impl AlignmentWorkerState {
         let local_descriptor_version = self.local_descriptor_version;
         let mut changed = false;
         for peer_state in self.peers.values_mut() {
-            changed |= refresh_alignment_worker_peer(
+            changed |= schedule_alignment_worker_peer(
                 peer_state,
                 local_descriptor.as_ref(),
                 local_descriptor_version,
@@ -305,11 +309,128 @@ impl AlignmentWorkerState {
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {
             return false;
         };
-        refresh_alignment_worker_peer(
+        schedule_alignment_worker_peer(
             peer_state,
             local_descriptor.as_ref(),
             local_descriptor_version,
         )
+    }
+
+    fn next_pending_peer_id(&self) -> Option<XrNetPeerId> {
+        self.peers
+            .iter()
+            .find_map(|(peer_id, peer_state)| peer_state.matcher.is_some().then_some(*peer_id))
+    }
+
+    fn has_pending_work(&self) -> bool {
+        self.peers
+            .values()
+            .any(|peer_state| peer_state.matcher.is_some())
+    }
+
+    fn advance_pending_alignments(
+        &mut self,
+        budget: Duration,
+        max_steps: usize,
+    ) -> AlignmentWorkerStepOutcome {
+        let started = std::time::Instant::now();
+        let mut aggregate = AlignmentWorkerStepOutcome::default();
+        let mut steps = 0usize;
+        while steps < max_steps {
+            let Some(peer_id) = self.next_pending_peer_id() else {
+                break;
+            };
+            let outcome = self.step_peer_alignment(peer_id);
+            aggregate.did_work |= outcome.did_work;
+            aggregate.completed_cycle |= outcome.completed_cycle;
+            aggregate.result_changed |= outcome.result_changed;
+            if !outcome.did_work {
+                break;
+            }
+            steps += 1;
+            if !outcome.has_more_work {
+                break;
+            }
+            if steps < max_steps && !budget.is_zero() && started.elapsed() >= budget {
+                break;
+            }
+        }
+        aggregate.has_more_work = self.has_pending_work();
+        aggregate
+    }
+
+    fn step_peer_alignment(&mut self, peer_id: XrNetPeerId) -> AlignmentWorkerStepOutcome {
+        let local_descriptor = self.local_descriptor.clone();
+        let local_descriptor_version = self.local_descriptor_version;
+        let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+            return AlignmentWorkerStepOutcome::default();
+        };
+        let previous_transform = peer_state.remote_to_local;
+        let previous_solution = peer_state.last_accepted_solution;
+        let previous_diagnostic = peer_state.last_solve_diagnostic;
+        let Some(matcher) = peer_state.matcher.as_mut() else {
+            return AlignmentWorkerStepOutcome::default();
+        };
+        let did_work = matcher.step();
+        if !did_work && !matcher.is_finished() {
+            return AlignmentWorkerStepOutcome::default();
+        }
+        if !matcher.is_finished() {
+            return AlignmentWorkerStepOutcome {
+                did_work: true,
+                has_more_work: true,
+                ..AlignmentWorkerStepOutcome::default()
+            };
+        }
+
+        let diagnostic = peer_state
+            .matcher
+            .take()
+            .and_then(|matcher| matcher.diagnostic())
+            .expect("finished matcher should produce a diagnostic");
+        peer_state.last_solved_local_descriptor_version = peer_state.active_local_descriptor_version;
+        peer_state.last_solved_remote_descriptor_seq = peer_state.active_remote_descriptor_seq;
+        peer_state.active_local_descriptor_version = None;
+        peer_state.active_remote_descriptor_seq = None;
+        peer_state.last_solve_ms = diagnostic.total_compute_ms as f64;
+        peer_state.last_solve_diagnostic = Some(diagnostic);
+
+        let previous_scored_on_current = previous_solution.and_then(|solution| {
+            let local_descriptor = local_descriptor.as_ref()?;
+            let remote_descriptor = peer_state.latest_descriptor.as_ref()?;
+            Some(xr_depth_align_rescore_remote_to_local(
+                &local_descriptor.descriptor,
+                &remote_descriptor.descriptor,
+                solution,
+            ))
+        });
+        let next_solution = choose_stable_alignment_solution(
+            peer_state.last_accepted_solution,
+            previous_scored_on_current,
+            &diagnostic,
+        );
+        peer_state.last_accepted_solution = next_solution;
+        peer_state.remote_to_local = next_solution.map(|solution| solution.remote_to_local_transform());
+        let queued_rerun = peer_state.queued_rerun;
+        peer_state.queued_rerun = false;
+        let rerun_changed = if queued_rerun {
+            schedule_alignment_worker_peer(
+                peer_state,
+                local_descriptor.as_ref(),
+                local_descriptor_version,
+            )
+        } else {
+            false
+        };
+        AlignmentWorkerStepOutcome {
+            did_work: true,
+            completed_cycle: true,
+            result_changed: previous_transform != peer_state.remote_to_local
+                || previous_solution != peer_state.last_accepted_solution
+                || previous_diagnostic != peer_state.last_solve_diagnostic
+                || rerun_changed,
+            has_more_work: self.has_pending_work(),
+        }
     }
 
     fn make_result(&self) -> XrPeopleAlignmentWorkerResult {
@@ -324,48 +445,68 @@ impl AlignmentWorkerState {
     }
 }
 
-fn xr_people_alignment_worker_loop(
-    mailbox: Arc<(Mutex<XrPeopleAlignmentWorkerMailbox>, Condvar)>,
-    latest_result: Arc<Mutex<Option<XrPeopleAlignmentWorkerResult>>>,
-) {
-    let mut seen_version = 0u64;
-    let mut state = AlignmentWorkerState::default();
+#[derive(Clone, Copy, Debug, Default)]
+struct AlignmentWorkerStepOutcome {
+    did_work: bool,
+    completed_cycle: bool,
+    result_changed: bool,
+    has_more_work: bool,
+}
 
-    loop {
-        let (local_update, peer_updates) = {
-            let (lock, wake) = &*mailbox;
-            let mut guard = match lock.lock() {
-                Ok(guard) => guard,
-                Err(_) => return,
-            };
-            while !guard.shutdown && guard.version == seen_version {
-                guard = match wake.wait(guard) {
-                    Ok(guard) => guard,
-                    Err(_) => return,
-                };
-            }
-            if guard.shutdown {
-                return;
-            }
-            seen_version = guard.version;
-            (
-                guard.pending_local_descriptor.take(),
-                std::mem::take(&mut guard.pending_peer_updates),
-            )
-        };
+fn xr_people_alignment_worker_step(
+    mailbox: &Arc<Mutex<XrPeopleAlignmentWorkerMailbox>>,
+    runtime: &Arc<Mutex<AlignmentWorkerState>>,
+    latest_result: &Arc<Mutex<Option<XrPeopleAlignmentWorkerResult>>>,
+) -> XrTsdfCooperativeStepResult {
+    let (local_update, peer_updates) = match mailbox.lock() {
+        Ok(mut mailbox) => (
+            mailbox.pending_local_descriptor.take(),
+            std::mem::take(&mut mailbox.pending_peer_updates),
+        ),
+        Err(_) => return XrTsdfCooperativeStepResult::default(),
+    };
 
-        let mut dirty = false;
-        if let Some(local_update) = local_update {
-            dirty |= state.apply_local_descriptor_update(local_update);
-        }
-        for (peer_id, update) in peer_updates {
-            dirty |= state.apply_peer_update(peer_id, update);
-        }
-        if dirty {
-            if let Ok(mut result_slot) = latest_result.lock() {
-                *result_slot = Some(state.make_result());
+    let (step_outcome, publish_result) = match runtime.lock() {
+        Ok(mut state) => {
+            let mut result_changed = false;
+            let mut did_work = false;
+            if let Some(local_update) = local_update {
+                let changed = state.apply_local_descriptor_update(local_update);
+                result_changed |= changed;
+                did_work |= changed;
             }
+            for (peer_id, update) in peer_updates {
+                let changed = state.apply_peer_update(peer_id, update);
+                result_changed |= changed;
+                did_work |= changed;
+            }
+            let mut step_outcome = state.advance_pending_alignments(
+                Duration::from_millis(XR_ALIGNMENT_CALLBACK_BUDGET_MILLIS),
+                XR_ALIGNMENT_CALLBACK_MAX_STEPS,
+            );
+            step_outcome.did_work |= did_work;
+            step_outcome.result_changed |= result_changed;
+            step_outcome.has_more_work |= state.has_pending_work();
+            let publish_result = (result_changed
+                || step_outcome.result_changed
+                || step_outcome.did_work)
+                .then(|| state.make_result());
+            (step_outcome, publish_result)
         }
+        Err(_) => return XrTsdfCooperativeStepResult::default(),
+    };
+
+    if let Some(result) = publish_result {
+        if let Ok(mut slot) = latest_result.lock() {
+            *slot = Some(result);
+        }
+        SignalToUI::set_ui_signal();
+    }
+
+    XrTsdfCooperativeStepResult {
+        did_work: step_outcome.did_work,
+        has_more_work: step_outcome.has_more_work,
+        completed_cycle: step_outcome.completed_cycle,
     }
 }
 
@@ -423,7 +564,7 @@ fn descriptor_change_score(
     }
 }
 
-fn refresh_alignment_worker_peer(
+fn schedule_alignment_worker_peer(
     peer_state: &mut AlignmentWorkerPeerState,
     local_descriptor: Option<&XrNetAlignmentDescriptorFrame>,
     local_descriptor_version: Option<(u64, u64)>,
@@ -435,6 +576,18 @@ fn refresh_alignment_worker_peer(
     ) else {
         return clear_alignment_worker_peer(peer_state);
     };
+
+    if peer_state.matcher.is_some() {
+        let solving_current_pair =
+            peer_state.active_local_descriptor_version == Some(local_descriptor_version)
+                && peer_state.active_remote_descriptor_seq == Some(remote_descriptor.seq);
+        if solving_current_pair {
+            return false;
+        }
+        let changed = !peer_state.queued_rerun;
+        peer_state.queued_rerun = true;
+        return changed;
+    }
 
     if peer_state.last_solved_local_descriptor_version == Some(local_descriptor_version)
         && peer_state.last_solved_remote_descriptor_seq == Some(remote_descriptor.seq)
@@ -451,39 +604,17 @@ fn refresh_alignment_worker_peer(
         return false;
     }
 
-    peer_state.last_solved_local_descriptor_version = Some(local_descriptor_version);
-    peer_state.last_solved_remote_descriptor_seq = Some(remote_descriptor.seq);
-
-    let previous_transform = peer_state.remote_to_local;
-    let previous_solution = peer_state.last_accepted_solution;
-    let previous_diagnostic = peer_state.last_solve_diagnostic;
-    let solve_started = Instant::now();
-    let diagnostic = xr_depth_align_analyze_remote_to_local_seeded(
+    peer_state.last_solve_diagnostic = None;
+    peer_state.last_solve_ms = 0.0;
+    peer_state.active_local_descriptor_version = Some(local_descriptor_version);
+    peer_state.active_remote_descriptor_seq = Some(remote_descriptor.seq);
+    peer_state.queued_rerun = false;
+    peer_state.matcher = Some(XrDepthAlignMatcher::new(
         &local_descriptor.descriptor,
         &remote_descriptor.descriptor,
-        previous_solution,
-    );
-    peer_state.last_solve_ms = solve_started.elapsed().as_secs_f64() * 1000.0;
-    peer_state.last_solve_diagnostic = Some(diagnostic);
-    let previous_scored_on_current = previous_solution.map(|solution| {
-        xr_depth_align_rescore_remote_to_local(
-            &local_descriptor.descriptor,
-            &remote_descriptor.descriptor,
-            solution,
-        )
-    });
-
-    let next_solution = choose_stable_alignment_solution(
         peer_state.last_accepted_solution,
-        previous_scored_on_current,
-        &diagnostic,
-    );
-    peer_state.last_accepted_solution = next_solution;
-    let next_transform = next_solution.map(|solution| solution.remote_to_local_transform());
-    peer_state.remote_to_local = next_transform;
-    previous_transform != peer_state.remote_to_local
-        || previous_solution != peer_state.last_accepted_solution
-        || previous_diagnostic != peer_state.last_solve_diagnostic
+    ));
+    true
 }
 
 fn descriptor_pair_ready_for_solve(
@@ -497,7 +628,7 @@ fn descriptor_pair_ready_for_solve(
         last_solved_remote_descriptor_seq,
     ) {
         (Some(last_local), Some(last_remote)) => {
-            local_descriptor_version != last_local && remote_descriptor_seq != last_remote
+            local_descriptor_version != last_local || remote_descriptor_seq != last_remote
         }
         _ => true,
     }
@@ -505,13 +636,19 @@ fn descriptor_pair_ready_for_solve(
 
 fn clear_alignment_worker_peer(peer_state: &mut AlignmentWorkerPeerState) -> bool {
     let changed =
-        peer_state.remote_to_local.is_some() || peer_state.last_solve_diagnostic.is_some();
+        peer_state.remote_to_local.is_some()
+            || peer_state.last_solve_diagnostic.is_some()
+            || peer_state.matcher.is_some();
     peer_state.remote_to_local = None;
     peer_state.last_accepted_solution = None;
     peer_state.last_solve_diagnostic = None;
     peer_state.last_solve_ms = 0.0;
     peer_state.last_solved_local_descriptor_version = None;
     peer_state.last_solved_remote_descriptor_seq = None;
+    peer_state.active_local_descriptor_version = None;
+    peer_state.active_remote_descriptor_seq = None;
+    peer_state.queued_rerun = false;
+    peer_state.matcher = None;
     changed
 }
 
@@ -563,14 +700,14 @@ mod descriptor_pair_tests {
     }
 
     #[test]
-    fn one_sided_descriptor_updates_wait_for_the_other_side() {
-        assert!(!descriptor_pair_ready_for_solve(
+    fn one_sided_descriptor_updates_resolve_immediately() {
+        assert!(descriptor_pair_ready_for_solve(
             Some((1, 0)),
             Some(7),
             (2, 0),
             7,
         ));
-        assert!(!descriptor_pair_ready_for_solve(
+        assert!(descriptor_pair_ready_for_solve(
             Some((1, 0)),
             Some(7),
             (1, 0),
@@ -702,6 +839,10 @@ fn solve_outcome_label(diagnostic: Option<XrDepthAlignSolveDiagnostic>) -> &'sta
     }
 }
 
+fn matcher_progress_summary(progress: XrDepthAlignMatcherProgress) -> String {
+    format!("step {}", progress.step_count)
+}
+
 fn make_alignment_state_text(
     local_scene_state: LocalSceneState,
     local_descriptor_version: Option<(u64, u64)>,
@@ -711,6 +852,7 @@ fn make_alignment_state_text(
     let local_version = descriptor_version_label(local_descriptor_version);
     let Some((peer_id, peer_state)) = peers.iter().max_by_key(|(peer_id, peer_state)| {
         (
+            peer_state.worker_progress.is_some(),
             peer_state.last_solve_diagnostic.is_some(),
             peer_state.latest_descriptor.is_some(),
             peer_state.latest_state.is_some(),
@@ -725,8 +867,22 @@ fn make_alignment_state_text(
     };
     let peer_label = format!("{:08x}", peer_id.0);
     let remote_descriptor = peer_state.latest_descriptor.as_ref();
+    if let Some(progress) = peer_state.worker_progress {
+        return format!(
+            "AlignState {peer_label}: solving {}",
+            matcher_progress_summary(progress),
+        );
+    }
+    let solve_steps = peer_state
+        .last_solve_diagnostic
+        .map(|diagnostic| diagnostic.step_count)
+        .unwrap_or_default();
+    let max_step_ms = peer_state
+        .last_solve_diagnostic
+        .map(|diagnostic| diagnostic.max_step_ms)
+        .unwrap_or_default();
     format!(
-        "AlignState {peer_label}: local map {} v{} | remote map {} seq {} | worker lv{} rv{} {} {:.1}ms | pose {}",
+        "AlignState {peer_label}: local map {} v{} | remote map {} seq {} | worker lv{} rv{} {} match {:.1}ms s{} max{}ms | pose {}",
         if local_descriptor_ready { "yes" } else { "no" },
         local_version,
         if remote_descriptor.is_some() { "yes" } else { "no" },
@@ -735,6 +891,8 @@ fn make_alignment_state_text(
         descriptor_seq_label(peer_state.last_solved_remote_descriptor_seq),
         solve_outcome_label(peer_state.last_solve_diagnostic),
         peer_state.last_solve_ms,
+        solve_steps,
+        max_step_ms,
         transform_source_label(peer_state.transform_source),
     )
 }
@@ -863,12 +1021,17 @@ fn alignment_rejection_reason(
     }
 }
 
+fn format_alignment_debug_lines(summary: String, context: &str) -> String {
+    format!("{summary} | {context}")
+}
+
 fn make_alignment_debug_text(
     local_scene_state: LocalSceneState,
     peers: &HashMap<XrNetPeerId, AlignmentWorkerPeerState>,
 ) -> String {
     let Some((peer_id, peer_state)) = peers.iter().max_by_key(|(peer_id, peer_state)| {
         (
+            peer_state.matcher.is_some(),
             peer_state.last_solve_diagnostic.is_some(),
             peer_state.latest_descriptor.is_some(),
             std::cmp::Reverse(peer_id.0),
@@ -892,9 +1055,14 @@ fn make_alignment_debug_text(
     let Some(diagnostic) = peer_state.last_solve_diagnostic else {
         if let Some(remote_descriptor) = peer_state.latest_descriptor.as_ref() {
             return format!(
-                "AlignDbg {peer_label}: remote map seq {} {} | waiting for solve",
+                "AlignDbg {peer_label}: remote map seq {} {} | {}",
                 remote_descriptor.seq,
                 descriptor_height_map_status(&remote_descriptor.descriptor),
+                if peer_state.matcher.is_some() {
+                    "solve running"
+                } else {
+                    "waiting for solve"
+                },
             );
         }
         return format!("AlignDbg {peer_label}: waiting for peer heightmap");
@@ -909,20 +1077,29 @@ fn make_alignment_debug_text(
     );
     match diagnostic.outcome() {
         XrDepthAlignSolveOutcome::MissingSamples => {
-            format!("AlignDbg {peer_label}: need more heightmap signal | {context}")
+            format_alignment_debug_lines(
+                format!("AlignDbg {peer_label}: need more heightmap signal"),
+                &context,
+            )
         }
         XrDepthAlignSolveOutcome::NoCandidate => {
-            format!(
-                "AlignDbg {peer_label}: no candidate t{:.1}ms | {context}",
+            format_alignment_debug_lines(
+                format!(
+                "AlignDbg {peer_label}: no candidate match{:.1}ms s{} max{}ms",
                 peer_state.last_solve_ms,
+                diagnostic.step_count,
+                diagnostic.max_step_ms,
+                ),
+                &context,
             )
         }
         XrDepthAlignSolveOutcome::Rejected => {
             let Some(best) = diagnostic.best_solution else {
                 return format!("AlignDbg {peer_label}: reject | {context}");
             };
-            format!(
-                "AlignDbg {peer_label}: reject {} | cw{:.2} cs{:.2} cr{:.2} m{} r{:.2} t{:.1}ms | {context}",
+            format_alignment_debug_lines(
+                format!(
+                "AlignDbg {peer_label}: reject {} | cw{:.2} cs{:.2} cr{:.2} m{} r{:.2} match{:.1}ms s{} max{}ms",
                 alignment_rejection_reason(&diagnostic, best),
                 best.confidence,
                 best.symmetry_confidence,
@@ -930,24 +1107,33 @@ fn make_alignment_debug_text(
                 best.matched_samples,
                 best.residual_meters,
                 peer_state.last_solve_ms,
+                diagnostic.step_count,
+                diagnostic.max_step_ms,
+                ),
+                &context,
             )
         }
         XrDepthAlignSolveOutcome::Accepted => {
             let Some(best) = diagnostic.best_solution else {
                 return format!("AlignDbg {peer_label}: aligned | {context}");
             };
-            format!(
-                "AlignDbg {peer_label}: ok cw{:.2} cs{:.2} cr{:.2} m{} r{:.2} t{:.1}ms yaw{:.0} tx{:.2} ty{:.2} tz{:.2} | {context}",
+            format_alignment_debug_lines(
+                format!(
+                "AlignDbg {peer_label}: ok cw{:.2} cs{:.2} cr{:.2} m{} r{:.2} match{:.1}ms s{} max{}ms yaw{:.0} tx{:.2} ty{:.2} tz{:.2}",
                 best.confidence,
                 best.symmetry_confidence,
                 best.ranking_confidence(),
                 best.matched_samples,
                 best.residual_meters,
                 peer_state.last_solve_ms,
+                diagnostic.step_count,
+                diagnostic.max_step_ms,
                 best.yaw_radians.to_degrees(),
                 best.translation.x,
                 best.translation.y,
                 best.translation.z,
+                ),
+                &context,
             )
         }
     }
@@ -1167,7 +1353,7 @@ impl XrPeopleDebug {
 
         if enabled {
             if self.auto_alignment_enabled {
-                self.alignment_worker = Some(XrPeopleAlignmentWorker::new());
+                self.alignment_worker = Some(XrPeopleAlignmentWorker::new(cx.xr_tsdf()));
             }
             self.ensure_net_node();
             if self.net_node.is_some() {
@@ -1416,6 +1602,7 @@ impl XrPeopleDebug {
                     peer_result.last_solved_local_descriptor_version;
                 peer_state.last_solved_remote_descriptor_seq =
                     peer_result.last_solved_remote_descriptor_seq;
+                peer_state.worker_progress = peer_result.worker_progress;
                 peer_state.has_descriptor =
                     peer_state.has_descriptor || peer_result.last_solve_diagnostic.is_some();
             }
@@ -1714,7 +1901,10 @@ impl XrPeopleDebug {
             .peers
             .values()
             .any(|peer| peer.last_solve_diagnostic.is_some());
-        if local_scene_state != LocalSceneState::Ready || !has_alignment_diagnostic {
+        let has_alignment_worker_progress = self.peers.values().any(|peer| peer.worker_progress.is_some());
+        if local_scene_state != LocalSceneState::Ready
+            || (!has_alignment_diagnostic && !has_alignment_worker_progress)
+        {
             let local_descriptor_text = self.local_descriptor_debug_text();
             self.last_alignment_debug_status = if local_scene_state == LocalSceneState::Ready {
                 make_pending_alignment_debug_text(&local_descriptor_text, &self.peers)
@@ -2556,6 +2746,89 @@ mod tests {
         }
     }
 
+    fn reference_dump_pair() -> XrNetAlignmentDescriptorDumpPair {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("util/dumps/align-pair-226a39e4b300-r0097-1774792873191.bin");
+        let bytes = std::fs::read(path).expect("reference dump should exist");
+        XrNetAlignmentDescriptorDumpPair::from_file_bytes(&bytes)
+            .expect("reference dump should decode")
+    }
+
+    #[test]
+    fn worker_queues_new_local_descriptor_without_interrupting_active_solver() {
+        let pair = reference_dump_pair();
+        let peer = XrNetPeer {
+            id: pair.remote_peer_id,
+            addr: "127.0.0.1:41547".parse().unwrap(),
+        };
+        let mut state = AlignmentWorkerState::default();
+        let mut updated_local = pair.local_descriptor.clone();
+        let updated_height = updated_local
+            .descriptor
+            .height_map
+            .as_mut()
+            .and_then(|height_map| {
+                height_map
+                    .heights_meters
+                    .iter_mut()
+                    .find(|height| height.is_finite())
+            })
+            .expect("reference dump should contain a finite local height sample");
+        *updated_height += 0.06;
+
+        state.apply_local_descriptor_update(PendingLocalDescriptorUpdate::Set {
+            frame: pair.local_descriptor.clone(),
+            version: (1, 0),
+        });
+        assert!(state.apply_peer_update(
+            peer.id,
+            PendingPeerDescriptorUpdate::Set {
+                peer,
+                frame: pair.remote_descriptor.clone(),
+            },
+        ));
+
+        let peer_state = state.peers.get(&peer.id).unwrap();
+        assert!(peer_state.matcher.is_some());
+        assert_eq!(peer_state.active_local_descriptor_version, Some((1, 0)));
+        assert_eq!(
+            peer_state.active_remote_descriptor_seq,
+            Some(pair.remote_descriptor.seq)
+        );
+        assert!(!peer_state.queued_rerun);
+
+        assert!(state.apply_local_descriptor_update(PendingLocalDescriptorUpdate::Set {
+            frame: updated_local,
+            version: (2, 0),
+        }));
+
+        let peer_state = state.peers.get(&peer.id).unwrap();
+        assert!(peer_state.matcher.is_some());
+        assert_eq!(peer_state.active_local_descriptor_version, Some((1, 0)));
+        assert_eq!(
+            peer_state.active_remote_descriptor_seq,
+            Some(pair.remote_descriptor.seq)
+        );
+        assert!(peer_state.queued_rerun);
+
+        let mut guard = 0usize;
+        while state.has_pending_work() && guard < 16 {
+            let outcome =
+                state.advance_pending_alignments(Duration::ZERO, XR_ALIGNMENT_CALLBACK_MAX_STEPS);
+            assert!(outcome.did_work);
+            guard += 1;
+        }
+
+        let peer_state = state.peers.get(&peer.id).unwrap();
+        assert_eq!(peer_state.last_solved_local_descriptor_version, Some((2, 0)));
+        assert_eq!(
+            peer_state.last_solved_remote_descriptor_seq,
+            Some(pair.remote_descriptor.seq)
+        );
+        assert!(peer_state.matcher.is_none());
+        assert!(!peer_state.queued_rerun);
+    }
+
     #[test]
     fn pending_alignment_debug_reports_local_descriptor_before_peer_arrives() {
         let text = make_pending_alignment_debug_text(
@@ -2564,7 +2837,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "AlignDbg: local slice 2 | desc occ 0 v 0 c 0 | waiting for peer descriptor"
+            "AlignDbg: local slice 2 | desc occ 0 v 0 c 0 | waiting for peer heightmap"
         );
     }
 
@@ -2582,7 +2855,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "AlignDbg: local slice 2 | desc occ 0 v 0 c 0 | 0000002a: remote slice 2 | remote vdesc yes | solve pending"
+            "AlignDbg: local slice 2 | desc occ 0 v 0 c 0 | 0000002a: remote map seq 7 missing | solve pending"
         );
     }
 
@@ -2597,7 +2870,7 @@ mod tests {
         let text = make_peer_scene_debug_text(true, &peers);
         assert_eq!(
             text,
-            "PeerScene 0000002a: state no | desc yes | slice 2 | vdesc yes | pose raw | solve pending"
+            "PeerMap 0000002a: state no | map yes seq 7 missing | pose raw | solve pending"
         );
     }
 
@@ -2614,7 +2887,7 @@ mod tests {
         let text = make_peer_scene_debug_text(true, &peers);
         assert_eq!(
             text,
-            "PeerScene 0000002a: state no | desc yes | slice 2 | vdesc yes | pose raw | solve pending"
+            "PeerMap 0000002a: state no | map yes seq 7 missing | pose raw | solve pending"
         );
     }
 
@@ -2639,7 +2912,7 @@ mod tests {
         let text = make_alignment_state_text(LocalSceneState::Ready, Some((4, 9)), &peers);
         assert_eq!(
             text,
-            "AlignState 0000002a: local yes v4/9 | remote yes seq 7 slice 2 vdesc yes | worker lv4/9 rv7 accepted 1.7ms | pose raw"
+            "AlignState 0000002a: local map yes v4/9 | remote map yes seq 7 | worker lv4/9 rv7 accepted match 1.7ms s0 max0ms | pose raw"
         );
     }
 
