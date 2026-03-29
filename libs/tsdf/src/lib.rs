@@ -588,6 +588,8 @@ pub fn empty_bounds() -> (Vec3f, Vec3f) {
 
 pub mod depth_integration;
 pub use depth_integration::*;
+mod height_map_codec;
+pub use height_map_codec::*;
 
 #[cfg(test)]
 #[path = "synthetic_bench.rs"]
