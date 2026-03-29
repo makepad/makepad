@@ -486,7 +486,9 @@ impl XrNetNode {
             state,
         };
         self.next_state_seq = self.next_state_seq.wrapping_add(1);
-        let _ = self.udp_outgoing_sender.send(XrNetUdpOutgoing::State(frame));
+        let _ = self
+            .udp_outgoing_sender
+            .send(XrNetUdpOutgoing::State(frame));
     }
 
     pub fn send_alignment(&mut self, anchor: XrAnchor, confidence: f32, sent_at: f64) {
@@ -866,15 +868,14 @@ fn process_data_packets(
                             .unwrap_or_else(|| {
                                 SocketAddr::new(source_addr.ip(), XR_NET_DEFAULT_SYNC_PORT)
                             });
-                        let (peer, _) =
-                            touch_udp_peer(
-                                peers,
-                                incoming_sender,
-                                sync_outgoing_sender,
-                                remote_id,
-                                source_addr,
-                                sync_addr,
-                            );
+                        let (peer, _) = touch_udp_peer(
+                            peers,
+                            incoming_sender,
+                            sync_outgoing_sender,
+                            remote_id,
+                            source_addr,
+                            sync_addr,
+                        );
                         let Some(peer_state) = peers.get_mut(&remote_id) else {
                             continue;
                         };
@@ -898,15 +899,14 @@ fn process_data_packets(
                             .unwrap_or_else(|| {
                                 SocketAddr::new(source_addr.ip(), XR_NET_DEFAULT_SYNC_PORT)
                             });
-                        let (peer, _) =
-                            touch_udp_peer(
-                                peers,
-                                incoming_sender,
-                                sync_outgoing_sender,
-                                remote_id,
-                                source_addr,
-                                sync_addr,
-                            );
+                        let (peer, _) = touch_udp_peer(
+                            peers,
+                            incoming_sender,
+                            sync_outgoing_sender,
+                            remote_id,
+                            source_addr,
+                            sync_addr,
+                        );
                         let Some(peer_state) = peers.get_mut(&remote_id) else {
                             continue;
                         };
@@ -930,15 +930,14 @@ fn process_data_packets(
                             .unwrap_or_else(|| {
                                 SocketAddr::new(source_addr.ip(), XR_NET_DEFAULT_SYNC_PORT)
                             });
-                        let (peer, _) =
-                            touch_udp_peer(
-                                peers,
-                                incoming_sender,
-                                sync_outgoing_sender,
-                                remote_id,
-                                source_addr,
-                                sync_addr,
-                            );
+                        let (peer, _) = touch_udp_peer(
+                            peers,
+                            incoming_sender,
+                            sync_outgoing_sender,
+                            remote_id,
+                            source_addr,
+                            sync_addr,
+                        );
                         let Some(peer_state) = peers.get_mut(&remote_id) else {
                             continue;
                         };

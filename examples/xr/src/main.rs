@@ -336,7 +336,7 @@ script_mod! {
                             pos: vec3(0.05, 0.20, -0.42)
                         }
 
-                        for index in 0..160 {
+                        for index in 0..80 {
                             let diffuse = #xa0a4aa
                             let color = if index % 6 == 0 {
                                 #xff6f59
@@ -1545,11 +1545,7 @@ impl App {
         } else {
             return;
         };
-        let (
-            peer_sync_status_text,
-            alignment_debug_text,
-            alignment_state_text,
-        ) = self
+        let (peer_sync_status_text, alignment_debug_text, alignment_state_text) = self
             .ui
             .widget(cx, ids!(xr_people_debug))
             .borrow::<XrPeopleDebug>()

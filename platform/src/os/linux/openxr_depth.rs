@@ -1282,9 +1282,7 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
 fn matched_height_map_publish_interval(store: &XrTsdfStore) -> Duration {
     let base = Duration::from_millis(DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS);
     let stats = store.cooperative_step_stats();
-    let cycle_micros = stats
-        .average_cycle_micros
-        .max(stats.last_cycle_micros);
+    let cycle_micros = stats.average_cycle_micros.max(stats.last_cycle_micros);
     if cycle_micros == 0 {
         base
     } else {
