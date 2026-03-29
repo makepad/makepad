@@ -10,4 +10,4 @@ license = "MIT OR Apache-2.0"
 makepad-widgets = { path = "../widgets", version = "2.0.0" }
 makepad-gltf = { path = "../libs/gltf", version = "1.0.0" }
 makepad-splat = { path = "../libs/splat", version = "1.0.0" }
-rapier3d = { path = "../libs/rapier/crates/rapier3d", default-features = false, features = ["dim3", "f32", "enhanced-determinism"] }
+rapier3d = { path = "../libs/rapier/crates/rapier3d", default-features = false, features = ["dim3", "f32"] }

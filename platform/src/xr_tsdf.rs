@@ -160,6 +160,8 @@ impl SparseTsdReadChunk {
 pub struct SparseTsdGridReadSnapshot {
     pub voxel_size: f32,
     pub chunk_edge: i32,
+    pub chunk_edge_shift: Option<u8>,
+    pub chunk_edge_mask: i32,
     pub chunk_volume: usize,
     pub active_value_count: usize,
     pub active_bounds: Option<(Vec3f, Vec3f)>,
@@ -200,13 +202,27 @@ impl SparseTsdGridReadSnapshot {
         )
     }
 
+    #[inline]
+    pub fn chunk_axis_and_local(&self, value: i32) -> (i32, usize) {
+        if let Some(shift) = self.chunk_edge_shift {
+            let mask = self.chunk_edge_mask;
+            (
+                value >> shift,
+                (value & mask.max(0)) as usize,
+            )
+        } else {
+            (
+                value.div_euclid(self.chunk_edge),
+                value.rem_euclid(self.chunk_edge) as usize,
+            )
+        }
+    }
+
+    #[inline]
     pub fn chunk_key_and_local_index_xyz(&self, x: i32, y: i32, z: i32) -> (ChunkKey, usize) {
-        let chunk_x = x.div_euclid(self.chunk_edge);
-        let chunk_y = y.div_euclid(self.chunk_edge);
-        let chunk_z = z.div_euclid(self.chunk_edge);
-        let lx = x.rem_euclid(self.chunk_edge) as usize;
-        let ly = y.rem_euclid(self.chunk_edge) as usize;
-        let lz = z.rem_euclid(self.chunk_edge) as usize;
+        let (chunk_x, lx) = self.chunk_axis_and_local(x);
+        let (chunk_y, ly) = self.chunk_axis_and_local(y);
+        let (chunk_z, lz) = self.chunk_axis_and_local(z);
         let edge = self.chunk_edge as usize;
         let local_id = lx + ly * edge + lz * edge * edge;
         (ChunkKey::new(chunk_x, chunk_y, chunk_z), local_id)
@@ -344,6 +360,7 @@ pub struct XrTsdfStore {
     surface_analysis_enabled: Arc<AtomicBool>,
     voxel_size_meters_bits: Arc<AtomicU32>,
     cooperative_step: Arc<Mutex<XrTsdfCooperativeStepSlot>>,
+    cooperative_step_stats_cache: Arc<RwLock<XrTsdfCooperativeStepStats>>,
 }
 
 impl Default for XrTsdfStore {
@@ -357,6 +374,7 @@ impl Default for XrTsdfStore {
                 XR_TSDF_DEFAULT_VOXEL_SIZE_METERS.to_bits(),
             )),
             cooperative_step: Arc::new(Mutex::new(XrTsdfCooperativeStepSlot::default())),
+            cooperative_step_stats_cache: Arc::new(RwLock::new(XrTsdfCooperativeStepStats::default())),
         }
     }
 }
@@ -380,13 +398,16 @@ impl XrTsdfStore {
                 slot.stats.average_cycle_micros = 0;
                 slot.stats.completed_cycles = 0;
             }
+            if let Ok(mut stats_cache) = self.cooperative_step_stats_cache.write() {
+                *stats_cache = slot.stats;
+            }
         }
     }
 
     pub fn cooperative_step_stats(&self) -> XrTsdfCooperativeStepStats {
-        self.cooperative_step
-            .lock()
-            .map(|slot| slot.stats)
+        self.cooperative_step_stats_cache
+            .read()
+            .map(|stats| *stats)
             .unwrap_or_default()
     }
 
@@ -473,6 +494,9 @@ impl XrTsdfStore {
         }
         if let Ok(mut slot) = self.cooperative_step.lock() {
             slot.reset_cycle();
+            if let Ok(mut stats_cache) = self.cooperative_step_stats_cache.write() {
+                *stats_cache = slot.stats;
+            }
         }
     }
 
@@ -517,6 +541,9 @@ impl XrTsdfStore {
                 ema_u64(slot.stats.average_cycle_micros, cycle_wall_micros, 1, 4);
             slot.stats.completed_cycles = slot.stats.completed_cycles.saturating_add(1);
             slot.reset_cycle();
+        }
+        if let Ok(mut stats_cache) = self.cooperative_step_stats_cache.write() {
+            *stats_cache = slot.stats;
         }
         Some(result)
     }
