@@ -716,53 +716,6 @@ fn voxel_coord_to_chunk_key(coord: VoxelCoord) -> ChunkKey {
     ChunkKey::new(coord.x, coord.y, coord.z)
 }
 
-impl SparseTsdReadChunk {
-    pub fn meshing_value(&self, id: usize, current_generation: u64) -> Option<f32> {
-        let value = self.value(id)?;
-        let confidence = self.confidence(id);
-        if confidence >= DEPTH_TSD_MIN_MESH_CONFIDENCE {
-            Some(value)
-        } else if confidence >= DEPTH_TSD_RECENT_MESH_CONFIDENCE
-            && current_generation.saturating_sub(self.observed_generation(id, current_generation))
-                <= DEPTH_TSD_RECENT_MESH_GENERATIONS
-            && value.abs() <= DEPTH_TSD_RECENT_MESH_MAX_ABS_DISTANCE
-        {
-            Some(value)
-        } else {
-            None
-        }
-    }
-}
-
-impl SparseTsdGridReadSnapshot {
-    pub fn normalized_distance(&self, coord: VoxelCoord) -> Option<f32> {
-        self.normalized_distance_xyz(coord.x, coord.y, coord.z)
-    }
-
-    pub fn meshing_distance(&self, coord: VoxelCoord, current_generation: u64) -> Option<f32> {
-        let (chunk_key, local_id) = self.chunk_key_and_id(coord);
-        let chunk = self.chunks.get(&chunk_key)?;
-        chunk.meshing_value(local_id, current_generation)
-    }
-
-    pub fn confidence(&self, coord: VoxelCoord) -> u8 {
-        self.confidence_xyz(coord.x, coord.y, coord.z)
-    }
-
-    pub fn world_to_voxel_coord(&self, point: Vec3f) -> VoxelCoord {
-        let (x, y, z) = self.world_to_voxel_xyz(point);
-        VoxelCoord::new(x, y, z)
-    }
-
-    pub fn voxel_center_world(&self, coord: VoxelCoord) -> Vec3f {
-        self.voxel_center_world_xyz(coord.x, coord.y, coord.z)
-    }
-
-    pub fn chunk_key_and_id(&self, coord: VoxelCoord) -> (ChunkKey, usize) {
-        self.chunk_key_and_local_index_xyz(coord.x, coord.y, coord.z)
-    }
-}
-
 #[derive(Debug)]
 struct DepthMeshVolume {
     generation: u64,
@@ -2806,4 +2759,269 @@ fn query_grid_bilinear_distance_at_y(
     let vx0 = v00 + (v10 - v00) * tx;
     let vx1 = v01 + (v11 - v01) * tx;
     Some(vx0 + (vx1 - vx0) * tz)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::makepad_math::CameraFov;
+    use std::{sync::Arc, time::Duration};
+
+    #[derive(Clone, Copy)]
+    struct SyntheticBox {
+        min: Vec3f,
+        max: Vec3f,
+    }
+
+    impl SyntheticBox {
+        const fn new(min: Vec3f, max: Vec3f) -> Self {
+            Self { min, max }
+        }
+
+        fn hit_distance(self, origin: Vec3f, direction: Vec3f) -> Option<f32> {
+            let mut t_min = f32::NEG_INFINITY;
+            let mut t_max = f32::INFINITY;
+            for (origin_axis, direction_axis, min_axis, max_axis) in [
+                (origin.x, direction.x, self.min.x, self.max.x),
+                (origin.y, direction.y, self.min.y, self.max.y),
+                (origin.z, direction.z, self.min.z, self.max.z),
+            ] {
+                if direction_axis.abs() <= 1.0e-6 {
+                    if origin_axis < min_axis || origin_axis > max_axis {
+                        return None;
+                    }
+                    continue;
+                }
+                let inv_direction = direction_axis.recip();
+                let t0 = (min_axis - origin_axis) * inv_direction;
+                let t1 = (max_axis - origin_axis) * inv_direction;
+                t_min = t_min.max(t0.min(t1));
+                t_max = t_max.min(t0.max(t1));
+                if t_max < t_min {
+                    return None;
+                }
+            }
+            if !t_max.is_finite() || t_max < 0.0 {
+                return None;
+            }
+            let entry = t_min.max(0.0);
+            (entry.is_finite() && entry <= t_max).then_some(entry)
+        }
+    }
+
+    fn synthetic_scene_boxes() -> Vec<SyntheticBox> {
+        vec![
+            SyntheticBox::new(vec3f(-2.60, -0.10, -5.20), vec3f(2.60, 0.0, 0.70)),
+            SyntheticBox::new(vec3f(-2.60, 2.45, -5.20), vec3f(2.60, 2.55, 0.70)),
+            SyntheticBox::new(vec3f(-2.60, 0.0, -5.20), vec3f(-2.50, 2.55, 0.70)),
+            SyntheticBox::new(vec3f(2.50, 0.0, -5.20), vec3f(2.60, 2.55, 0.70)),
+            SyntheticBox::new(vec3f(-2.60, 0.0, -5.20), vec3f(2.60, 2.55, -5.10)),
+            SyntheticBox::new(vec3f(-0.45, 0.0, -2.65), vec3f(0.45, 1.15, -1.85)),
+            SyntheticBox::new(vec3f(1.15, 0.0, -3.55), vec3f(1.85, 1.65, -2.95)),
+            SyntheticBox::new(vec3f(-1.85, 0.0, -4.20), vec3f(-1.25, 0.95, -3.55)),
+        ]
+    }
+
+    fn synthetic_camera_world(frame_index: usize, frame_count: usize) -> Vec3f {
+        let t = if frame_count <= 1 {
+            0.0
+        } else {
+            frame_index as f32 / (frame_count - 1) as f32
+        };
+        let x = (t * std::f32::consts::TAU * 1.35).sin() * 0.28;
+        let y = 1.48 + (t * std::f32::consts::TAU * 2.10).sin() * 0.03;
+        let z = 0.18 - t * 0.72;
+        vec3f(x, y, z)
+    }
+
+    fn synthetic_depth_job(
+        scene_boxes: &[SyntheticBox],
+        width: u32,
+        height: u32,
+        generation: u64,
+        voxel_size_meters: f32,
+        camera_world: Vec3f,
+    ) -> CxOpenXrDepthMeshJob {
+        let depth_proj = Mat4f::from_camera_fov(
+            &CameraFov {
+                angle_left: -0.92,
+                angle_right: 0.92,
+                angle_up: 0.72,
+                angle_down: -0.72,
+            },
+            0.05,
+            8.0,
+        );
+        let inv_depth_proj = depth_proj.invert();
+        let world_from_depth_view = Mat4f::translation(camera_world);
+        let depth_view_from_world = world_from_depth_view.invert();
+        let depth = render_synthetic_depth(
+            scene_boxes,
+            width,
+            height,
+            camera_world,
+            depth_proj,
+            inv_depth_proj,
+            world_from_depth_view,
+            depth_view_from_world,
+        );
+        CxOpenXrDepthMeshJob {
+            reset_generation: 0,
+            generation,
+            eye_index: 0,
+            width,
+            height,
+            sample_step: DEPTH_VOXEL_SAMPLE_STEP,
+            voxel_size_meters,
+            camera_world,
+            camera_forward: vec3f(0.0, 0.0, -1.0),
+            depth_proj,
+            inv_depth_proj,
+            depth_view_from_world,
+            world_from_depth_view,
+            depth,
+        }
+    }
+
+    fn render_synthetic_depth(
+        scene_boxes: &[SyntheticBox],
+        width: u32,
+        height: u32,
+        camera_world: Vec3f,
+        depth_proj: Mat4f,
+        inv_depth_proj: Mat4f,
+        world_from_depth_view: Mat4f,
+        depth_view_from_world: Mat4f,
+    ) -> Vec<u16> {
+        let mut depth = vec![0u16; width as usize * height as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let uv_x = (x as f32 + 0.5) / width as f32;
+                let uv_y = (y as f32 + 0.5) / height as f32;
+                let ndc_x = uv_x * 2.0 - 1.0;
+                let ndc_y = uv_y * 2.0 - 1.0;
+                let Some(ray_direction) =
+                    depth_ndc_to_world_ray(inv_depth_proj, world_from_depth_view, ndc_x, ndc_y)
+                else {
+                    continue;
+                };
+                let nearest = scene_boxes
+                    .iter()
+                    .filter_map(|wall| wall.hit_distance(camera_world, ray_direction))
+                    .filter(|distance| {
+                        distance.is_finite()
+                            && *distance >= DEPTH_VOXEL_MIN_DISTANCE_METERS
+                            && *distance <= DEPTH_VOXEL_MAX_DISTANCE_METERS
+                    })
+                    .min_by(|left, right| {
+                        left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                let Some(hit_distance) = nearest else {
+                    continue;
+                };
+                let world = camera_world + ray_direction.scale(hit_distance);
+                let view =
+                    depth_view_from_world.transform_vec4(vec4f(world.x, world.y, world.z, 1.0));
+                if !view.w.is_finite() || view.w.abs() < 1.0e-6 {
+                    continue;
+                }
+                let view = vec4f(view.x / view.w, view.y / view.w, view.z / view.w, 1.0);
+                let clip = depth_proj.transform_vec4(view);
+                if !clip.w.is_finite() || clip.w.abs() < 1.0e-6 {
+                    continue;
+                }
+                let ndc_z = clip.z / clip.w;
+                let raw_depth = (ndc_z * 0.5 + 0.5).clamp(
+                    DEPTH_VOXEL_MIN_DEPTH_VALUE,
+                    DEPTH_VOXEL_MAX_DEPTH_VALUE - 1.0 / u16::MAX as f32,
+                );
+                depth[y * width as usize + x] = (raw_depth * u16::MAX as f32).round() as u16;
+            }
+        }
+        depth
+    }
+
+    #[test]
+    #[ignore = "Synthetic TSDF perf benchmark; run with cargo test --release -- --ignored --nocapture"]
+    fn synthetic_depthmap_tsdf_perf_release() {
+        let scene_boxes = synthetic_scene_boxes();
+        let width = 320;
+        let height = 240;
+        let frame_count = 18usize;
+
+        for voxel_size_meters in [0.03, 0.05, 0.10] {
+            let mut worker_state = DepthPreprocessWorkerState::default();
+            let mut volume = DepthMeshVolume::new(DEPTH_VOXEL_SAMPLE_STEP, voxel_size_meters);
+            let mut previous_snapshot = None::<Arc<TsdfPublishedSnapshot>>;
+
+            let mut depth_build_total = Duration::ZERO;
+            let mut preprocess_total = Duration::ZERO;
+            let mut apply_total = Duration::ZERO;
+            let mut publish_total = Duration::ZERO;
+            let mut total_staged_samples = 0usize;
+            let mut total_reduced_samples = 0usize;
+
+            for frame_index in 0..frame_count {
+                let camera_world = synthetic_camera_world(frame_index, frame_count);
+
+                let started = Instant::now();
+                let job = synthetic_depth_job(
+                    &scene_boxes,
+                    width,
+                    height,
+                    frame_index as u64 + 1,
+                    voxel_size_meters,
+                    camera_world,
+                );
+                depth_build_total += started.elapsed();
+
+                let started = Instant::now();
+                let prepared = preprocess_depth_mesh(job, &mut worker_state)
+                    .expect("synthetic depth preprocess should succeed");
+                preprocess_total += started.elapsed();
+                total_staged_samples += worker_state.staged_tsd_samples.len();
+                total_reduced_samples += worker_state.reduced_tsd_samples.len();
+
+                let started = Instant::now();
+                apply_preprocessed_depth_mesh(
+                    prepared,
+                    &worker_state.reduced_tsd_samples,
+                    &mut volume,
+                );
+                volume.discard_obsolete_surface_state();
+                apply_total += started.elapsed();
+
+                let started = Instant::now();
+                let snapshot = volume.published_tsdf_snapshot(previous_snapshot.as_deref());
+                publish_total += started.elapsed();
+                volume.clear_published_tsdf_dirty_state();
+                previous_snapshot = Some(Arc::new(snapshot));
+            }
+
+            let snapshot =
+                previous_snapshot.expect("synthetic benchmark should publish a snapshot");
+            let frames = frame_count as f64;
+            let staged_per_frame = total_staged_samples as f64 / frames;
+            let reduced_per_frame = total_reduced_samples as f64 / frames;
+            let heap_mib = snapshot.grid.heap_bytes() as f64 / (1024.0 * 1024.0);
+            eprintln!(
+                "synthetic_tsdf voxel={:.02} frames={} build_ms/frame={:.3} preprocess_ms/frame={:.3} apply_ms/frame={:.3} publish_ms/frame={:.3} staged/frame={:.0} reduced/frame={:.0} chunks={} active_voxels={} heap_mib={:.3}",
+                voxel_size_meters,
+                frame_count,
+                depth_build_total.as_secs_f64() * 1000.0 / frames,
+                preprocess_total.as_secs_f64() * 1000.0 / frames,
+                apply_total.as_secs_f64() * 1000.0 / frames,
+                publish_total.as_secs_f64() * 1000.0 / frames,
+                staged_per_frame,
+                reduced_per_frame,
+                snapshot.grid.chunk_count(),
+                snapshot.grid.active_value_count,
+                heap_mib,
+            );
+
+            assert!(snapshot.grid.active_value_count > 0);
+            assert!(snapshot.grid.chunk_count() > 0);
+            assert!(reduced_per_frame > 256.0);
+        }
+    }
 }
