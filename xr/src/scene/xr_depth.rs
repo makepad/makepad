@@ -373,6 +373,7 @@ impl XrEnv {
         self.depth_surface_mesh_visible_request_id = 0;
         self.depth_surface_mesh_visible_chunks.clear();
         self.depth_surface_mesh_chunks.clear();
+        self.depth_surface_mesh_pending_upserts.clear();
         self.depth_surface_mesh_worker = None;
     }
 
@@ -456,27 +457,54 @@ impl XrEnv {
         self.depth_surface_mesh_update_sequence = result.update_sequence;
         self.depth_surface_mesh_snapshot_grid = Some(result.snapshot_grid);
         self.depth_surface_mesh_visible_chunks = result.visible_chunk_keys.into_iter().collect();
+        self.depth_surface_mesh_pending_upserts
+            .retain(|(request_id, _)| *request_id >= result.request_id);
     }
 
     fn remove_depth_surface_mesh_chunk(&mut self, chunk_key: ChunkKey) {
         self.depth_surface_mesh_chunks.remove(&chunk_key);
     }
 
-    fn apply_depth_surface_mesh_worker_result(
-        &mut self,
-        cx: &mut Cx2d,
-        result: XrDepthDebugMeshWorkerResult,
-    ) {
+    fn enqueue_depth_surface_mesh_upsert(&mut self, request_id: u64, chunk: DebugDepthMeshChunk) {
+        self.depth_surface_mesh_pending_upserts
+            .retain(|(queued_request_id, queued_chunk)| {
+                !(*queued_request_id == request_id && queued_chunk.chunk_key == chunk.chunk_key)
+            });
+        self.depth_surface_mesh_pending_upserts
+            .push_back((request_id, chunk));
+    }
+
+    fn apply_pending_depth_surface_mesh_upserts(&mut self, cx: &mut Cx2d) {
+        let pending_count = self.depth_surface_mesh_pending_upserts.len();
+        for _ in 0..pending_count {
+            let Some((request_id, chunk)) = self.depth_surface_mesh_pending_upserts.pop_front()
+            else {
+                break;
+            };
+            if request_id != self.depth_surface_mesh_visible_request_id {
+                continue;
+            }
+            let is_new_chunk = !self
+                .depth_surface_mesh_chunks
+                .contains_key(&chunk.chunk_key);
+            self.upsert_depth_surface_mesh_chunk(cx, chunk);
+            if is_new_chunk {
+                break;
+            }
+        }
+    }
+
+    fn apply_depth_surface_mesh_worker_result(&mut self, result: XrDepthDebugMeshWorkerResult) {
         match result {
             XrDepthDebugMeshWorkerResult::VisibleSet(result) => {
                 self.apply_depth_surface_mesh_visible_set(result);
             }
             XrDepthDebugMeshWorkerResult::ChunkUpserts { request_id, chunks } => {
-                if request_id != self.depth_surface_mesh_visible_request_id {
+                if request_id < self.depth_surface_mesh_visible_request_id {
                     return;
                 }
                 for chunk in chunks {
-                    self.upsert_depth_surface_mesh_chunk(cx, chunk);
+                    self.enqueue_depth_surface_mesh_upsert(request_id, chunk);
                 }
             }
             XrDepthDebugMeshWorkerResult::ChunkRemovals {
@@ -487,6 +515,12 @@ impl XrEnv {
                     return;
                 }
                 for chunk_key in chunk_keys {
+                    self.depth_surface_mesh_pending_upserts.retain(
+                        |(queued_request_id, queued_chunk)| {
+                            !(*queued_request_id == request_id
+                                && queued_chunk.chunk_key == chunk_key)
+                        },
+                    );
                     self.remove_depth_surface_mesh_chunk(chunk_key);
                 }
             }
@@ -499,8 +533,9 @@ impl XrEnv {
             .as_mut()
             .and_then(|worker| worker.take_next_result())
         {
-            self.apply_depth_surface_mesh_worker_result(cx, result);
+            self.apply_depth_surface_mesh_worker_result(result);
         }
+        self.apply_pending_depth_surface_mesh_upserts(cx);
     }
 
     fn sync_retained_depth_query_result(
@@ -586,7 +621,7 @@ impl XrEnv {
         if (!show_mesh || self.depth_surface_mesh_chunks.is_empty()) && query_hits.is_none() {
             return;
         }
-        self.draw_depth_mesh.base_color = vec4(0.76, 0.88, 0.98, 1.0);
+        self.draw_depth_mesh.base_color = vec4(0.60, 0.62, 0.66, 0.95);
         if show_mesh
             && !self.depth_surface_mesh_chunks.is_empty()
             && !self.depth_surface_mesh_visible_chunks.is_empty()
@@ -606,15 +641,15 @@ impl XrEnv {
             }
         }
 
-        let mesh_normal_bias = self.draw_depth_mesh.normal_bias;
-        self.draw_depth_mesh.normal_bias = mesh_normal_bias + 0.004;
+        let mesh_depth_bias = self.draw_depth_mesh.depth_bias;
+        self.draw_depth_mesh.depth_bias = mesh_depth_bias + 0.004;
         if show_query_hits {
             if let Some(geometry_id) = query_hits {
-                self.draw_depth_mesh.base_color = vec4(1.0, 0.42, 0.08, 1.0);
+                self.draw_depth_mesh.base_color = vec4(1.0, 0.42, 0.08, 0.95);
                 self.draw_depth_mesh.draw_geometry(cx, geometry_id);
             }
         }
-        self.draw_depth_mesh.normal_bias = mesh_normal_bias;
+        self.draw_depth_mesh.depth_bias = mesh_depth_bias;
     }
 }
 
