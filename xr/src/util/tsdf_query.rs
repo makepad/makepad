@@ -27,7 +27,7 @@ const TSDF_QUERY_TSDF_IMPACT_RAY_STEP_MIN: f32 = 0.02;
 const TSDF_QUERY_TSDF_IMPACT_EXTENT_SCALE: f32 = 1.20;
 const TSDF_QUERY_TSDF_IMPACT_EXTENT_MIN: f32 = 0.05;
 const TSDF_QUERY_TSDF_IMPACT_EXTENT_MAX: f32 = 0.16;
-const TSDF_QUERY_CHUNK_CACHE_SLOTS: usize = 8;
+const TSDF_QUERY_CHUNK_CACHE_SLOTS: usize = 32;
 pub(crate) const TSDF_QUERY_IMPACT_RESTITUTION: f32 = 0.38;
 
 #[derive(Clone, Copy, Debug)]
@@ -166,13 +166,24 @@ struct TsdfQueryChunkCacheEntry<'a> {
 struct TsdfQuerySampler<'a> {
     grid: &'a SparseTsdGridReadSnapshot,
     tsd_distance_meters: f32,
+    local_y_stride: usize,
+    local_z_stride: usize,
     chunk_cache: [Option<TsdfQueryChunkCacheEntry<'a>>; TSDF_QUERY_CHUNK_CACHE_SLOTS],
 }
 
 #[derive(Clone, Copy)]
+struct TsdfQueryVoxelColumn {
+    chunk_x: i32,
+    chunk_z: i32,
+    local_base: usize,
+}
+
+#[derive(Clone, Copy)]
 struct TsdfQueryBilinearColumn {
-    x0: i32,
-    z0: i32,
+    v00: TsdfQueryVoxelColumn,
+    v10: TsdfQueryVoxelColumn,
+    v01: TsdfQueryVoxelColumn,
+    v11: TsdfQueryVoxelColumn,
     tx: f32,
     tz: f32,
 }
@@ -194,9 +205,12 @@ fn tsdf_query_chunk_cache_slot(key: ChunkKey) -> usize {
 
 impl<'a> TsdfQuerySampler<'a> {
     fn new(grid: &'a SparseTsdGridReadSnapshot) -> Self {
+        let chunk_edge = grid.chunk_edge.max(1) as usize;
         Self {
             grid,
             tsd_distance_meters: depth_tsd_distance_meters(grid.voxel_size),
+            local_y_stride: chunk_edge,
+            local_z_stride: chunk_edge * chunk_edge,
             chunk_cache: [None; TSDF_QUERY_CHUNK_CACHE_SLOTS],
         }
     }
@@ -218,11 +232,25 @@ impl<'a> TsdfQuerySampler<'a> {
         Some(chunk)
     }
 
-    fn normalized_distance(&mut self, coord: TsdfVoxelCoord) -> Option<f32> {
-        let (chunk_key, local_id) = self
-            .grid
-            .chunk_key_and_local_index_xyz(coord.x, coord.y, coord.z);
-        self.chunk(chunk_key)?.value(local_id)
+    fn voxel_column(&self, x: i32, z: i32) -> TsdfQueryVoxelColumn {
+        let (chunk_x, local_x) = self.grid.chunk_axis_and_local(x);
+        let (chunk_z, local_z) = self.grid.chunk_axis_and_local(z);
+        TsdfQueryVoxelColumn {
+            chunk_x,
+            chunk_z,
+            local_base: local_x + local_z * self.local_z_stride,
+        }
+    }
+
+    fn normalized_distance_at_y(
+        &mut self,
+        column: TsdfQueryVoxelColumn,
+        y_coord: i32,
+    ) -> Option<f32> {
+        let (chunk_y, local_y) = self.grid.chunk_axis_and_local(y_coord);
+        let local_id = column.local_base + local_y * self.local_y_stride;
+        self.chunk(ChunkKey::new(column.chunk_x, chunk_y, column.chunk_z))?
+            .value(local_id)
     }
 
     fn bilinear_column(&self, sample_x: f32, sample_z: f32) -> TsdfQueryBilinearColumn {
@@ -232,8 +260,10 @@ impl<'a> TsdfQuerySampler<'a> {
         let x0 = grid_x.floor() as i32;
         let z0 = grid_z.floor() as i32;
         TsdfQueryBilinearColumn {
-            x0,
-            z0,
+            v00: self.voxel_column(x0, z0),
+            v10: self.voxel_column(x0 + 1, z0),
+            v01: self.voxel_column(x0, z0 + 1),
+            v11: self.voxel_column(x0 + 1, z0 + 1),
             tx: grid_x - x0 as f32,
             tz: grid_z - z0 as f32,
         }
@@ -244,13 +274,10 @@ impl<'a> TsdfQuerySampler<'a> {
         column: TsdfQueryBilinearColumn,
         y_coord: i32,
     ) -> Option<f32> {
-        let v00 = self.normalized_distance(TsdfVoxelCoord::new(column.x0, y_coord, column.z0))?;
-        let v10 =
-            self.normalized_distance(TsdfVoxelCoord::new(column.x0 + 1, y_coord, column.z0))?;
-        let v01 =
-            self.normalized_distance(TsdfVoxelCoord::new(column.x0, y_coord, column.z0 + 1))?;
-        let v11 =
-            self.normalized_distance(TsdfVoxelCoord::new(column.x0 + 1, y_coord, column.z0 + 1))?;
+        let v00 = self.normalized_distance_at_y(column.v00, y_coord)?;
+        let v10 = self.normalized_distance_at_y(column.v10, y_coord)?;
+        let v01 = self.normalized_distance_at_y(column.v01, y_coord)?;
+        let v11 = self.normalized_distance_at_y(column.v11, y_coord)?;
 
         let vx0 = v00 + (v10 - v00) * column.tx;
         let vx1 = v01 + (v11 - v01) * column.tx;
@@ -259,38 +286,13 @@ impl<'a> TsdfQuerySampler<'a> {
 
     fn trilinear_distance(&mut self, point: Vec3f) -> Option<f32> {
         let voxel_size = self.grid.voxel_size;
-        let grid_x = point.x / voxel_size - 0.5;
         let grid_y = point.y / voxel_size - 0.5;
-        let grid_z = point.z / voxel_size - 0.5;
-        let x0 = grid_x.floor() as i32;
         let y0 = grid_y.floor() as i32;
-        let z0 = grid_z.floor() as i32;
-        let tx = grid_x - x0 as f32;
         let ty = grid_y - y0 as f32;
-        let tz = grid_z - z0 as f32;
-
-        let sample = |sampler: &mut Self, x: i32, y: i32, z: i32| -> Option<f32> {
-            sampler
-                .normalized_distance(TsdfVoxelCoord::new(x, y, z))
-                .map(|distance| distance * sampler.tsd_distance_meters)
-        };
-
-        let s000 = sample(self, x0, y0, z0)?;
-        let s100 = sample(self, x0 + 1, y0, z0)?;
-        let s010 = sample(self, x0, y0 + 1, z0)?;
-        let s110 = sample(self, x0 + 1, y0 + 1, z0)?;
-        let s001 = sample(self, x0, y0, z0 + 1)?;
-        let s101 = sample(self, x0 + 1, y0, z0 + 1)?;
-        let s011 = sample(self, x0, y0 + 1, z0 + 1)?;
-        let s111 = sample(self, x0 + 1, y0 + 1, z0 + 1)?;
-
-        let x00 = s000 + (s100 - s000) * tx;
-        let x10 = s010 + (s110 - s010) * tx;
-        let x01 = s001 + (s101 - s001) * tx;
-        let x11 = s011 + (s111 - s011) * tx;
-        let y0_mix = x00 + (x10 - x00) * ty;
-        let y1_mix = x01 + (x11 - x01) * ty;
-        Some(y0_mix + (y1_mix - y0_mix) * tz)
+        let column = self.bilinear_column(point.x, point.z);
+        let s0 = self.bilinear_distance_at_y(column, y0)? * self.tsd_distance_meters;
+        let s1 = self.bilinear_distance_at_y(column, y0 + 1)? * self.tsd_distance_meters;
+        Some(s0 + (s1 - s0) * ty)
     }
 
     fn distance_gradient(&mut self, point: Vec3f) -> Option<Vec3f> {
@@ -1058,6 +1060,8 @@ mod tests {
             grid: Arc::new(SparseTsdGridReadSnapshot {
                 voxel_size,
                 chunk_edge,
+                chunk_edge_shift: Some(chunk_edge.trailing_zeros() as u8),
+                chunk_edge_mask: chunk_edge - 1,
                 chunk_volume: (chunk_edge as usize).pow(3),
                 active_value_count,
                 active_bounds: Some((

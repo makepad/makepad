@@ -273,6 +273,10 @@ pub struct XrEnv {
     #[rust]
     physics_compute_ms: f64,
     #[rust]
+    physics_tsdf_query_ms: f64,
+    #[rust]
+    physics_rapier_step_ms: f64,
+    #[rust]
     physics_step_dt_ms: f64,
     #[rust]
     physics_depth_query_surface_count: usize,
@@ -316,6 +320,14 @@ impl XrEnv {
 
     pub(crate) fn physics_compute_ms(&self) -> f64 {
         self.physics_compute_ms
+    }
+
+    pub(crate) fn physics_tsdf_query_ms(&self) -> f64 {
+        self.physics_tsdf_query_ms
+    }
+
+    pub(crate) fn physics_rapier_step_ms(&self) -> f64 {
+        self.physics_rapier_step_ms
     }
 
     pub(crate) fn physics_time_scale(&self) -> f32 {
@@ -699,6 +711,8 @@ impl XrEnv {
             self.depth_query_retained_hits = retained_hits;
         }
         self.physics_compute_ms = result.physics_compute_ms;
+        self.physics_tsdf_query_ms = result.physics_tsdf_query_ms;
+        self.physics_rapier_step_ms = result.physics_rapier_step_ms;
         self.physics_step_dt_ms = result.physics_step_dt_ms;
         self.physics_depth_query_surface_count = result.physics_depth_query_surface_count;
         self.physics_depth_query_vertex_count = result.physics_depth_query_vertex_count;
@@ -792,6 +806,8 @@ impl XrEnv {
             worker.request_reset(self.physics_revision);
         }
         self.physics_compute_ms = 0.0;
+        self.physics_tsdf_query_ms = 0.0;
+        self.physics_rapier_step_ms = 0.0;
         self.physics_step_dt_ms = 0.0;
         self.physics_depth_query_surface_count = 0;
         self.physics_depth_query_vertex_count = 0;

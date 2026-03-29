@@ -681,6 +681,8 @@ mod tests {
             grid: Arc::new(SparseTsdGridReadSnapshot {
                 voxel_size,
                 chunk_edge,
+                chunk_edge_shift: Some(chunk_edge.trailing_zeros() as u8),
+                chunk_edge_mask: chunk_edge - 1,
                 chunk_volume: (chunk_edge as usize).pow(3),
                 active_value_count,
                 active_bounds: Some((
