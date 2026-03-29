@@ -1,0 +1,10 @@
+[package]
+name = "makepad-tsdf"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Shared TSDF storage and integration utilities"
+
+[dependencies]
+makepad-math = { path = "../math", version = "1.0.0" }
+makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }

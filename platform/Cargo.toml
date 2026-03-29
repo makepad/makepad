@@ -18,6 +18,7 @@ makepad-network = { path = "./network", version = "1.0.0", features = ["script"]
 makepad-script = { path="./script", version="1.0.0"}
 makepad-live-reload-core = { path = "../libs/live_reload_core", version = "0.1.0" }
 makepad-zune-png = { path = "../libs/zune/zune-png", version = "0.5.1" }
+makepad-tsdf = { path = "../libs/tsdf", version = "0.1.0" }
 smallvec = { version = "1.15", path = "../libs/smallvec" }
 bitflags = { version = "2.10", path = "../libs/bitflags" }
 

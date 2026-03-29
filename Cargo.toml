@@ -35,6 +35,7 @@ workspace.members = [
     "libs/svg",
     "libs/apple_sys",
     "libs/shared_bytes",
+    "libs/tsdf",
     "platform/network",
     "libs/filesystem_watcher",
     "libs/live_reload_core",
