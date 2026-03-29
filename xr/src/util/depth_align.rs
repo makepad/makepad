@@ -263,8 +263,7 @@ struct HeightMapSampleCache {
     inv_cell_size_meters: f32,
     size_x: usize,
     size_z: usize,
-    signal_axis_x: Vec<f32>,
-    signal_axis_z: Vec<f32>,
+    signal_axes: Vec<Vec2f>,
 }
 
 fn duration_ms_u32(duration: std::time::Duration) -> u32 {
@@ -1233,8 +1232,7 @@ fn build_height_map_sample_cache(height_map: &XrDepthAlignHeightMap) -> Option<H
     if size_x < 3 || size_z < 3 || height_map.heights_meters.len() != size_x * size_z {
         return None;
     }
-    let mut signal_axis_x = vec![f32::NAN; size_x * size_z];
-    let mut signal_axis_z = vec![f32::NAN; size_x * size_z];
+    let mut signal_axes = vec![vec2f(f32::NAN, f32::NAN); size_x * size_z];
     for z in 1..size_z - 1 {
         for x in 1..size_x - 1 {
             let Some((_height, gradient)) = height_map_cell_signal(height_map, x, z) else {
@@ -1244,8 +1242,7 @@ fn build_height_map_sample_cache(height_map: &XrDepthAlignHeightMap) -> Option<H
                 continue;
             };
             let index = height_map.cell_index(x, z);
-            signal_axis_x[index] = axis.x;
-            signal_axis_z[index] = axis.z;
+            signal_axes[index] = vec2f(axis.x, axis.z);
         }
     }
     let cell_size_meters = height_map.cell_size_meters.max(1.0e-3);
@@ -1255,8 +1252,7 @@ fn build_height_map_sample_cache(height_map: &XrDepthAlignHeightMap) -> Option<H
         inv_cell_size_meters: cell_size_meters.recip(),
         size_x,
         size_z,
-        signal_axis_x,
-        signal_axis_z,
+        signal_axes,
     })
 }
 
@@ -1308,28 +1304,6 @@ fn sample_height_map_nearest(
         height_map,
         height_map.cell_index(grid_x as usize, grid_z as usize),
     )
-}
-
-fn sample_height_map_axis_nearest(
-    sample_cache: &HeightMapSampleCache,
-    world_x: f32,
-    world_z: f32,
-) -> Option<Vec2f> {
-    let grid_x = ((world_x - sample_cache.origin_x) * sample_cache.inv_cell_size_meters).round()
-        as isize;
-    let grid_z = ((world_z - sample_cache.origin_z) * sample_cache.inv_cell_size_meters).round()
-        as isize;
-    if grid_x <= 0
-        || grid_z <= 0
-        || grid_x + 1 >= sample_cache.size_x as isize
-        || grid_z + 1 >= sample_cache.size_z as isize
-    {
-        return None;
-    }
-    let index = grid_x as usize + grid_z as usize * sample_cache.size_x;
-    let axis_x = *sample_cache.signal_axis_x.get(index)?;
-    let axis_z = *sample_cache.signal_axis_z.get(index)?;
-    (axis_x.is_finite() && axis_z.is_finite()).then_some(vec2f(axis_x, axis_z))
 }
 
 fn sample_height_map_bilinear(
@@ -1405,10 +1379,10 @@ fn sample_height_map_bilinear_and_axis_fast(
     let index10 = x1 + z0 * size_x;
     let index01 = x0 + z1 * size_x;
     let index11 = x1 + z1 * size_x;
-    let h00 = unsafe { *heights.get_unchecked(index00) };
-    let h10 = unsafe { *heights.get_unchecked(index10) };
-    let h01 = unsafe { *heights.get_unchecked(index01) };
-    let h11 = unsafe { *heights.get_unchecked(index11) };
+    let h00 = heights[index00];
+    let h10 = heights[index10];
+    let h01 = heights[index01];
+    let h11 = heights[index11];
     let height = if h00.is_finite() && h10.is_finite() && h01.is_finite() && h11.is_finite() {
         let hx0 = h00 + (h10 - h00) * fx;
         let hx1 = h01 + (h11 - h01) * fx;
@@ -1419,7 +1393,7 @@ fn sample_height_map_bilinear_and_axis_fast(
         if grid_x < 0 || grid_z < 0 || grid_x >= size_x as isize || grid_z >= size_z as isize {
             return None;
         }
-        let height = unsafe { *heights.get_unchecked(grid_x as usize + grid_z as usize * size_x) };
+        let height = heights[grid_x as usize + grid_z as usize * size_x];
         if !height.is_finite() {
             return None;
         }
@@ -1437,9 +1411,8 @@ fn sample_height_map_bilinear_and_axis_fast(
             None
         } else {
             let index = grid_x as usize + grid_z as usize * size_x;
-            let axis_x = unsafe { *sample_cache.signal_axis_x.get_unchecked(index) };
-            let axis_z = unsafe { *sample_cache.signal_axis_z.get_unchecked(index) };
-            (axis_x.is_finite() && axis_z.is_finite()).then_some(vec2f(axis_x, axis_z))
+            let axis = sample_cache.signal_axes[index];
+            (axis.x.is_finite() && axis.y.is_finite()).then_some(axis)
         }
     };
 
@@ -1473,12 +1446,6 @@ fn fill_rotated_height_map_signal(
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
     rotated.clear();
     rotated.reserve(remote_signal.len());
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        fill_rotated_height_map_signal_neon(rotated, remote_signal, sin_yaw, cos_yaw);
-        return;
-    }
-    #[allow(unreachable_code)]
     fill_rotated_height_map_signal_scalar(rotated, remote_signal, sin_yaw, cos_yaw)
 }
 
@@ -1489,94 +1456,6 @@ fn fill_rotated_height_map_signal_scalar(
     cos_yaw: f32,
 ) {
     for cell in remote_signal {
-        let (point_x, point_z) =
-            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point_x, cell.point_z);
-        let (axis_x, axis_z) =
-            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.axis_x, cell.axis_z);
-        rotated.push(RotatedHeightMapSignalCell {
-            point_x,
-            point_z,
-            axis_x,
-            axis_z,
-            height: cell.height,
-            weight: cell.weight,
-        });
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn fill_rotated_height_map_signal_neon(
-    rotated: &mut Vec<RotatedHeightMapSignalCell>,
-    remote_signal: &[DenseHeightMapSignalCell],
-    sin_yaw: f32,
-    cos_yaw: f32,
-) {
-    use core::arch::aarch64::*;
-
-    let sin_v = vdupq_n_f32(sin_yaw);
-    let cos_v = vdupq_n_f32(cos_yaw);
-    let mut chunks = remote_signal.chunks_exact(4);
-    for chunk in &mut chunks {
-        let point_x = [
-            chunk[0].point_x,
-            chunk[1].point_x,
-            chunk[2].point_x,
-            chunk[3].point_x,
-        ];
-        let point_z = [
-            chunk[0].point_z,
-            chunk[1].point_z,
-            chunk[2].point_z,
-            chunk[3].point_z,
-        ];
-        let axis_x = [
-            chunk[0].axis_x,
-            chunk[1].axis_x,
-            chunk[2].axis_x,
-            chunk[3].axis_x,
-        ];
-        let axis_z = [
-            chunk[0].axis_z,
-            chunk[1].axis_z,
-            chunk[2].axis_z,
-            chunk[3].axis_z,
-        ];
-        let point_x_v = vld1q_f32(point_x.as_ptr());
-        let point_z_v = vld1q_f32(point_z.as_ptr());
-        let axis_x_v = vld1q_f32(axis_x.as_ptr());
-        let axis_z_v = vld1q_f32(axis_z.as_ptr());
-
-        let rotated_point_x_v =
-            vaddq_f32(vmulq_f32(point_x_v, cos_v), vmulq_f32(point_z_v, sin_v));
-        let rotated_point_z_v =
-            vsubq_f32(vmulq_f32(point_z_v, cos_v), vmulq_f32(point_x_v, sin_v));
-        let rotated_axis_x_v =
-            vaddq_f32(vmulq_f32(axis_x_v, cos_v), vmulq_f32(axis_z_v, sin_v));
-        let rotated_axis_z_v =
-            vsubq_f32(vmulq_f32(axis_z_v, cos_v), vmulq_f32(axis_x_v, sin_v));
-
-        let mut rotated_point_x = [0.0f32; 4];
-        let mut rotated_point_z = [0.0f32; 4];
-        let mut rotated_axis_x = [0.0f32; 4];
-        let mut rotated_axis_z = [0.0f32; 4];
-        vst1q_f32(rotated_point_x.as_mut_ptr(), rotated_point_x_v);
-        vst1q_f32(rotated_point_z.as_mut_ptr(), rotated_point_z_v);
-        vst1q_f32(rotated_axis_x.as_mut_ptr(), rotated_axis_x_v);
-        vst1q_f32(rotated_axis_z.as_mut_ptr(), rotated_axis_z_v);
-
-        for lane in 0..4 {
-            rotated.push(RotatedHeightMapSignalCell {
-                point_x: rotated_point_x[lane],
-                point_z: rotated_point_z[lane],
-                axis_x: rotated_axis_x[lane],
-                axis_z: rotated_axis_z[lane],
-                height: chunk[lane].height,
-                weight: chunk[lane].weight,
-            });
-        }
-    }
-    for cell in chunks.remainder() {
         let (point_x, point_z) =
             rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point_x, cell.point_z);
         let (axis_x, axis_z) =
@@ -1619,41 +1498,64 @@ fn score_height_map_alignment_with_stride(
     let mut residual_sum = 0.0;
     let mut matched = 0usize;
     let sample_stride = sample_stride.max(1);
-    for cell in remote_signal.iter().step_by(sample_stride) {
-        total_weight += cell.weight;
-        let (rotated_x, rotated_z) =
-            rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point_x, cell.point_z);
-        let mapped_x = rotated_x + translation.x;
-        let mapped_z = rotated_z + translation.z;
-        if mapped_remote_cutout_center.is_some_and(|(center_x, center_z)| {
-            let delta_x = mapped_x - center_x;
-            let delta_z = mapped_z - center_z;
-            delta_x * delta_x + delta_z * delta_z <= mapped_remote_cutout_radius_sq
-        }) {
-            continue;
+    if let Some(sample_cache) = local_sample_cache {
+        for cell in remote_signal.iter().step_by(sample_stride) {
+            total_weight += cell.weight;
+            let (rotated_x, rotated_z) =
+                rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point_x, cell.point_z);
+            let mapped_x = rotated_x + translation.x;
+            let mapped_z = rotated_z + translation.z;
+            if mapped_remote_cutout_center.is_some_and(|(center_x, center_z)| {
+                let delta_x = mapped_x - center_x;
+                let delta_z = mapped_z - center_z;
+                delta_x * delta_x + delta_z * delta_z <= mapped_remote_cutout_radius_sq
+            }) {
+                continue;
+            }
+            let Some((local_height, local_axis)) =
+                sample_height_map_bilinear_and_axis_fast(local_map, sample_cache, mapped_x, mapped_z)
+            else {
+                continue;
+            };
+            let diff = (local_height - cell.height).abs();
+            let height_similarity = (1.0 - diff / 0.45).clamp(0.0, 1.0);
+            let (remote_axis_x, remote_axis_z) =
+                rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.axis_x, cell.axis_z);
+            let direction_similarity = local_axis
+                .map(|local_axis| (local_axis.x * remote_axis_x + local_axis.y * remote_axis_z).clamp(0.0, 1.0))
+                .unwrap_or(0.5);
+            let similarity =
+                (height_similarity * 0.65 + direction_similarity * 0.35).clamp(0.0, 1.0);
+            support_sum += cell.weight * similarity;
+            weight_sum += cell.weight;
+            residual_sum += diff;
+            matched += 1;
         }
-        let Some(local_height) = sample_height_map_bilinear(local_map, mapped_x, mapped_z) else {
-            continue;
-        };
-        let diff = (local_height - cell.height).abs();
-        let height_similarity = (1.0 - diff / 0.45).clamp(0.0, 1.0);
-        let direction_similarity = local_sample_cache
-            .and_then(|sample_cache| sample_height_map_axis_nearest(sample_cache, mapped_x, mapped_z))
-            .map(|local_axis| {
-                let (remote_axis_x, remote_axis_z) = rotate_xz_quat_with_sin_cos(
-                    sin_yaw,
-                    cos_yaw,
-                    cell.axis_x,
-                    cell.axis_z,
-                );
-                (local_axis.x * remote_axis_x + local_axis.y * remote_axis_z).clamp(0.0, 1.0)
-            })
-            .unwrap_or(0.5);
-        let similarity = (height_similarity * 0.65 + direction_similarity * 0.35).clamp(0.0, 1.0);
-        support_sum += cell.weight * similarity;
-        weight_sum += cell.weight;
-        residual_sum += diff;
-        matched += 1;
+    } else {
+        for cell in remote_signal.iter().step_by(sample_stride) {
+            total_weight += cell.weight;
+            let (rotated_x, rotated_z) =
+                rotate_xz_quat_with_sin_cos(sin_yaw, cos_yaw, cell.point_x, cell.point_z);
+            let mapped_x = rotated_x + translation.x;
+            let mapped_z = rotated_z + translation.z;
+            if mapped_remote_cutout_center.is_some_and(|(center_x, center_z)| {
+                let delta_x = mapped_x - center_x;
+                let delta_z = mapped_z - center_z;
+                delta_x * delta_x + delta_z * delta_z <= mapped_remote_cutout_radius_sq
+            }) {
+                continue;
+            }
+            let Some(local_height) = sample_height_map_bilinear(local_map, mapped_x, mapped_z) else {
+                continue;
+            };
+            let diff = (local_height - cell.height).abs();
+            let height_similarity = (1.0 - diff / 0.45).clamp(0.0, 1.0);
+            let similarity = (height_similarity * 0.65 + 0.5 * 0.35).clamp(0.0, 1.0);
+            support_sum += cell.weight * similarity;
+            weight_sum += cell.weight;
+            residual_sum += diff;
+            matched += 1;
+        }
     }
 
     if matched < 8 || weight_sum <= 1.0e-4 || total_weight <= 1.0e-4 {
