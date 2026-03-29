@@ -10,7 +10,6 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug)]
 struct SyntheticTsdfBenchStats {
     voxel_size_meters: f32,
-    sample_step: u32,
     frame_count: usize,
     build_ms_per_frame: f64,
     preprocess_ms_per_frame: f64,
@@ -96,7 +95,6 @@ fn synthetic_depth_job(
     height: u32,
     generation: u64,
     voxel_size_meters: f32,
-    sample_step: u32,
     camera_world: Vec3f,
 ) -> DepthMeshJob {
     let depth_proj = Mat4f::from_camera_fov(
@@ -128,7 +126,6 @@ fn synthetic_depth_job(
         eye_index: 0,
         width,
         height,
-        sample_step,
         voxel_size_meters,
         camera_world,
         camera_forward: vec3f(0.0, 0.0, -1.0),
@@ -197,14 +194,13 @@ fn render_synthetic_depth(
 
 fn run_synthetic_tsdf_benchmark_case(
     voxel_size_meters: f32,
-    sample_step: u32,
     width: u32,
     height: u32,
     frame_count: usize,
 ) -> SyntheticTsdfBenchStats {
     let scene_boxes = synthetic_scene_boxes();
     let mut worker_state = DepthPreprocessWorkerState::default();
-    let mut volume = DepthMeshVolume::new(sample_step, voxel_size_meters);
+    let mut volume = DepthMeshVolume::new(voxel_size_meters);
     let mut previous_snapshot = None::<Arc<TsdfPublishedSnapshot>>;
 
     let mut depth_build_total = std::time::Duration::ZERO;
@@ -224,7 +220,6 @@ fn run_synthetic_tsdf_benchmark_case(
             height,
             frame_index as u64 + 1,
             voxel_size_meters,
-            sample_step,
             camera_world,
         );
         depth_build_total += started.elapsed();
@@ -252,7 +247,6 @@ fn run_synthetic_tsdf_benchmark_case(
     let frames = frame_count as f64;
     SyntheticTsdfBenchStats {
         voxel_size_meters,
-        sample_step,
         frame_count,
         build_ms_per_frame: depth_build_total.as_secs_f64() * 1000.0 / frames,
         preprocess_ms_per_frame: preprocess_total.as_secs_f64() * 1000.0 / frames,
@@ -274,33 +268,25 @@ fn synthetic_depthmap_tsdf_perf_release() {
     let frame_count = 6usize;
 
     for voxel_size_meters in [0.03, 0.05, 0.10] {
-        for sample_step in [1u32, 2u32] {
-            let stats = run_synthetic_tsdf_benchmark_case(
-                voxel_size_meters,
-                sample_step,
-                width,
-                height,
-                frame_count,
-            );
-            eprintln!(
-                "synthetic_tsdf voxel={:.02} sample_step={} frames={} build_ms/frame={:.3} preprocess_ms/frame={:.3} apply_ms/frame={:.3} publish_ms/frame={:.3} staged/frame={:.0} reduced/frame={:.0} chunks={} active_voxels={} heap_mib={:.3}",
-                stats.voxel_size_meters,
-                stats.sample_step,
-                stats.frame_count,
-                stats.build_ms_per_frame,
-                stats.preprocess_ms_per_frame,
-                stats.apply_ms_per_frame,
-                stats.publish_ms_per_frame,
-                stats.staged_samples_per_frame,
-                stats.reduced_samples_per_frame,
-                stats.chunk_count,
-                stats.active_voxel_count,
-                stats.heap_mib,
-            );
+        let stats =
+            run_synthetic_tsdf_benchmark_case(voxel_size_meters, width, height, frame_count);
+        eprintln!(
+            "synthetic_tsdf voxel={:.02} frames={} build_ms/frame={:.3} preprocess_ms/frame={:.3} apply_ms/frame={:.3} publish_ms/frame={:.3} staged/frame={:.0} reduced/frame={:.0} chunks={} active_voxels={} heap_mib={:.3}",
+            stats.voxel_size_meters,
+            stats.frame_count,
+            stats.build_ms_per_frame,
+            stats.preprocess_ms_per_frame,
+            stats.apply_ms_per_frame,
+            stats.publish_ms_per_frame,
+            stats.staged_samples_per_frame,
+            stats.reduced_samples_per_frame,
+            stats.chunk_count,
+            stats.active_voxel_count,
+            stats.heap_mib,
+        );
 
-            assert!(stats.active_voxel_count > 0);
-            assert!(stats.chunk_count > 0);
-            assert!(stats.reduced_samples_per_frame > 256.0);
-        }
+        assert!(stats.active_voxel_count > 0);
+        assert!(stats.chunk_count > 0);
+        assert!(stats.reduced_samples_per_frame > 256.0);
     }
 }

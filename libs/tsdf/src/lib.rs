@@ -43,21 +43,21 @@ pub struct XrTsdfState {
 pub struct SparseTsdReadChunk {
     pub values: Vec<i16>,
     pub valid_bits: Vec<u64>,
-    pub confidence: Vec<u8>,
-    pub observed_generation: Vec<u16>,
+    pub metadata: Vec<u16>,
 }
 
 impl SparseTsdReadChunk {
     const NORMALIZED_DISTANCE_ENCODE_SCALE: f32 = i16::MAX as f32;
-    const GENERATION_WRAP: u64 = u16::MAX as u64 + 1;
-    const GENERATION_MASK: u64 = u16::MAX as u64;
+    const CONFIDENCE_BITS: u16 = 6;
+    const CONFIDENCE_MASK: u16 = (1u16 << Self::CONFIDENCE_BITS) - 1;
+    const GENERATION_MASK: u16 = (1u16 << (u16::BITS as u16 - Self::CONFIDENCE_BITS)) - 1;
+    const GENERATION_WRAP: u64 = Self::GENERATION_MASK as u64 + 1;
 
     pub fn new(chunk_volume: usize) -> Self {
         Self {
             values: vec![0; chunk_volume],
             valid_bits: vec![0; Self::valid_word_count(chunk_volume)],
-            confidence: vec![0; chunk_volume],
-            observed_generation: vec![0; chunk_volume],
+            metadata: vec![0; chunk_volume],
         }
     }
 
@@ -98,17 +98,32 @@ impl SparseTsdReadChunk {
     }
 
     pub fn encode_generation_tag(generation: u64) -> u16 {
-        generation as u16
+        generation as u16 & Self::GENERATION_MASK
     }
 
     pub fn decode_generation_tag(tag: u16, current_generation: u64) -> u64 {
-        let base = current_generation & !Self::GENERATION_MASK;
+        let generation_mask = Self::GENERATION_MASK as u64;
+        let base = current_generation & !generation_mask;
         let candidate = base | tag as u64;
         if candidate > current_generation {
             candidate.saturating_sub(Self::GENERATION_WRAP)
         } else {
             candidate
         }
+    }
+
+    pub(crate) fn encode_metadata(confidence: u8, observed_generation: u64) -> u16 {
+        let confidence = confidence.min(Self::CONFIDENCE_MASK as u8) as u16;
+        let generation = Self::encode_generation_tag(observed_generation);
+        (generation << Self::CONFIDENCE_BITS) | confidence
+    }
+
+    pub(crate) fn decode_metadata_confidence(metadata: u16) -> u8 {
+        (metadata & Self::CONFIDENCE_MASK) as u8
+    }
+
+    pub(crate) fn decode_metadata_generation_tag(metadata: u16) -> u16 {
+        metadata >> Self::CONFIDENCE_BITS
     }
 
     pub fn value(&self, id: usize) -> Option<f32> {
@@ -126,33 +141,37 @@ impl SparseTsdReadChunk {
         if !Self::is_valid_index(&self.valid_bits, id) {
             0
         } else {
-            self.confidence.get(id).copied().unwrap_or(0)
+            self.metadata
+                .get(id)
+                .copied()
+                .map(Self::decode_metadata_confidence)
+                .unwrap_or(0)
         }
     }
 
     pub fn observed_generation(&self, id: usize, current_generation: u64) -> u64 {
-        let tag = self.observed_generation.get(id).copied().unwrap_or(0);
+        let tag = self
+            .metadata
+            .get(id)
+            .copied()
+            .map(Self::decode_metadata_generation_tag)
+            .unwrap_or(0);
         Self::decode_generation_tag(tag, current_generation)
     }
 
     pub fn set_value(&mut self, id: usize, value: f32, confidence: u8, observed_generation: u64) {
-        if id >= self.values.len()
-            || id >= self.confidence.len()
-            || id >= self.observed_generation.len()
-        {
+        if id >= self.values.len() || id >= self.metadata.len() {
             return;
         }
         self.values[id] = Self::encode_normalized_distance(value);
         Self::set_valid_index(&mut self.valid_bits, id);
-        self.confidence[id] = confidence;
-        self.observed_generation[id] = Self::encode_generation_tag(observed_generation);
+        self.metadata[id] = Self::encode_metadata(confidence, observed_generation);
     }
 
     pub fn heap_bytes(&self) -> u64 {
         (self.values.capacity() * std::mem::size_of::<i16>()
             + self.valid_bits.capacity() * std::mem::size_of::<u64>()
-            + self.confidence.capacity() * std::mem::size_of::<u8>()
-            + self.observed_generation.capacity() * std::mem::size_of::<u16>()) as u64
+            + self.metadata.capacity() * std::mem::size_of::<u16>()) as u64
     }
 }
 
