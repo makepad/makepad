@@ -1,4 +1,5 @@
 use crate::*;
+use makepad_lz4::{compress_bound, compress_fast_into, decompress_safe};
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
 use std::{
     collections::HashMap,
@@ -12,7 +13,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub const XR_NET_PROTOCOL_VERSION: u16 = 3;
+pub const XR_NET_PROTOCOL_VERSION: u16 = 4;
 pub const XR_NET_DEFAULT_DISCOVERY_PORT: u16 = 41546;
 pub const XR_NET_DEFAULT_DATA_PORT: u16 = 41547;
 pub const XR_NET_DEFAULT_SYNC_PORT: u16 = 41548;
@@ -24,6 +25,9 @@ const XR_NET_DEFAULT_SYNC_CONNECT_RETRY: Duration = Duration::from_millis(250);
 const XR_NET_SYNC_CONNECT_TIMEOUT: Duration = Duration::from_millis(120);
 const XR_NET_SYNC_READ_BUDGET_BYTES_PER_POLL: usize = 256 * 1024;
 const XR_NET_SYNC_WRITE_BUDGET_BYTES_PER_POLL: usize = 256 * 1024;
+const XR_NET_SYNC_LZ4_ACCELERATION: usize = 4;
+const XR_NET_SYNC_FRAME_RAW_TAG: u8 = 0;
+const XR_NET_SYNC_FRAME_LZ4_TAG: u8 = 1;
 // Alignment descriptors now carry full f32 heightmaps, so the old 256 KiB cap
 // is too small once the published map grows beyond modest extents.
 const XR_NET_SYNC_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -385,10 +389,9 @@ impl XrNetSyncConnection {
     }
 
     fn queue_packet(&mut self, packet: &XrNetSyncPacket) {
-        let payload = packet.serialize_bin();
-        if payload.len() > XR_NET_SYNC_MAX_FRAME_BYTES {
+        let Some(payload) = encode_sync_frame(packet) else {
             return;
-        }
+        };
         let frame_len = payload.len().min(u32::MAX as usize) as u32;
         self.write_buf.extend_from_slice(&frame_len.to_le_bytes());
         self.write_buf
@@ -405,6 +408,89 @@ impl XrNetSyncConnection {
     fn shutdown(&mut self) {
         let _ = self.stream.shutdown(Shutdown::Both);
     }
+}
+
+fn encode_sync_frame(packet: &XrNetSyncPacket) -> Option<Vec<u8>> {
+    let payload = packet.serialize_bin();
+    let raw_frame_len = 1 + payload.len();
+    if raw_frame_len > XR_NET_SYNC_MAX_FRAME_BYTES {
+        return None;
+    }
+
+    let bound = compress_bound(payload.len());
+    if bound != 0 {
+        let mut compressed = vec![0u8; bound];
+        if let Ok(compressed_len) =
+            compress_fast_into(&payload, &mut compressed, XR_NET_SYNC_LZ4_ACCELERATION)
+        {
+            let compressed_frame_len = 1 + 4 + compressed_len;
+            if compressed_frame_len < raw_frame_len && compressed_frame_len <= XR_NET_SYNC_MAX_FRAME_BYTES
+            {
+                let mut frame = Vec::with_capacity(compressed_frame_len);
+                frame.push(XR_NET_SYNC_FRAME_LZ4_TAG);
+                frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                frame.extend_from_slice(&compressed[..compressed_len]);
+                return Some(frame);
+            }
+        }
+    }
+
+    let mut frame = Vec::with_capacity(raw_frame_len);
+    frame.push(XR_NET_SYNC_FRAME_RAW_TAG);
+    frame.extend_from_slice(&payload);
+    Some(frame)
+}
+
+fn decode_sync_frame(frame: &[u8]) -> io::Result<XrNetSyncPacket> {
+    let Some((&tag, payload)) = frame.split_first() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "empty sync frame",
+        ));
+    };
+
+    let packet_bytes = match tag {
+        XR_NET_SYNC_FRAME_RAW_TAG => payload.to_vec(),
+        XR_NET_SYNC_FRAME_LZ4_TAG => {
+            if payload.len() < 4 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "compressed sync frame missing decoded length",
+                ));
+            }
+            let decoded_len =
+                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+            if decoded_len > XR_NET_SYNC_MAX_FRAME_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "compressed sync frame exceeded max size",
+                ));
+            }
+            let mut decoded = vec![0u8; decoded_len];
+            let actual = decompress_safe(&payload[4..], &mut decoded).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "failed to decompress sync frame",
+                )
+            })?;
+            if actual != decoded_len {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "sync frame decompressed to unexpected size",
+                ));
+            }
+            decoded
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unknown sync frame encoding",
+            ));
+        }
+    };
+
+    XrNetSyncPacket::deserialize_bin(&packet_bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "failed to decode sync packet"))
 }
 
 #[derive(Debug)]
@@ -1346,9 +1432,7 @@ fn drain_sync_packets(read_buf: &mut Vec<u8>) -> io::Result<Vec<XrNetSyncPacket>
         }
         let start = offset + 4;
         let end = start + frame_len;
-        let packet = XrNetSyncPacket::deserialize_bin(&read_buf[start..end]).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "failed to decode sync packet")
-        })?;
+        let packet = decode_sync_frame(&read_buf[start..end])?;
         packets.push(packet);
         offset = end;
     }
