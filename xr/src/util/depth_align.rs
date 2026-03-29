@@ -198,7 +198,8 @@ const XR_DEPTH_ALIGN_COARSE_SEED_RETURN_MAX_RESIDUAL_METERS: f32 = 0.32;
 const XR_DEPTH_ALIGN_COARSE_SEED_YAW_OFFSETS_RADIANS: [f32; 5] = [-0.28, -0.14, 0.0, 0.14, 0.28];
 const XR_DEPTH_ALIGN_COARSE_SEED_TRANSLATION_OFFSETS_METERS: [f32; 5] =
     [-0.48, -0.24, 0.0, 0.24, 0.48];
-const XR_DEPTH_ALIGN_FINALIST_COUNT: usize = 6;
+const XR_DEPTH_ALIGN_FINALIST_COUNT: usize = 32;
+const XR_DEPTH_ALIGN_YAW_FINALIST_COUNT: usize = 2;
 const XR_DEPTH_ALIGN_FINALIST_TRANSLATION_EPSILON_METERS: f32 = 0.18;
 const XR_DEPTH_ALIGN_FINALIST_YAW_EPSILON_RADIANS: f32 = 0.08;
 
@@ -498,6 +499,7 @@ fn xr_depth_align_analyze_remote_to_local_seeded_internal(
         let translations =
             candidate_signal_translations(&local_signal, &remote_signal, floor_y, yaw);
         sample_diagnostic.pose_candidate_count += translations.len();
+        let mut yaw_finalists = Vec::<XrDepthAlignSolution>::new();
         for translation in translations {
             let candidate = refine_and_score_alignment_candidate(
                 &local_signal_refs,
@@ -509,12 +511,46 @@ fn xr_depth_align_analyze_remote_to_local_seeded_internal(
                 yaw,
                 translation,
             );
-            push_alignment_finalist(&mut finalists, candidate);
+            push_alignment_finalist(
+                &mut yaw_finalists,
+                candidate,
+                XR_DEPTH_ALIGN_YAW_FINALIST_COUNT,
+            );
+            push_alignment_finalist(&mut finalists, candidate, XR_DEPTH_ALIGN_FINALIST_COUNT);
             if best
                 .as_ref()
                 .is_none_or(|current| alignment_solution_better(&candidate, current))
             {
                 best = Some(candidate);
+            }
+        }
+        if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
+            if remote_search_signal.len() < remote_dense_signal.len() {
+                for finalist in yaw_finalists {
+                    let (refined_yaw, mut refined_translation) = refine_height_map_alignment(
+                        local_map,
+                        remote_map,
+                        &remote_dense_signal,
+                        finalist.yaw_radians,
+                        finalist.translation,
+                    );
+                    refined_translation.y = floor_y;
+                    let candidate = score_full_alignment_solution(
+                        &local_signal_refs,
+                        &remote_signal_refs,
+                        Some(local_map),
+                        Some(remote_map),
+                        &remote_dense_signal,
+                        refined_yaw,
+                        refined_translation,
+                    );
+                    if best
+                        .as_ref()
+                        .is_none_or(|current| alignment_solution_better(&candidate, current))
+                    {
+                        best = Some(candidate);
+                    }
+                }
             }
         }
     }
@@ -1925,6 +1961,7 @@ fn alignment_solution_better(
 fn push_alignment_finalist(
     finalists: &mut Vec<XrDepthAlignSolution>,
     candidate: XrDepthAlignSolution,
+    limit: usize,
 ) {
     for existing in finalists.iter_mut() {
         let planar_delta = vec3(
@@ -1953,7 +1990,7 @@ fn push_alignment_finalist(
             std::cmp::Ordering::Equal
         }
     });
-    finalists.truncate(XR_DEPTH_ALIGN_FINALIST_COUNT);
+    finalists.truncate(limit.max(1));
 }
 
 fn align_safe_normalize(v: Vec3f) -> Option<Vec3f> {
@@ -1992,6 +2029,7 @@ fn wrap_angle(mut angle: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, path::PathBuf};
 
     #[derive(Clone, Copy, Debug, Default)]
     struct HeightMapTestArtifacts {
@@ -2297,6 +2335,407 @@ mod tests {
                 heights_meters,
             }),
         }
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct ManualPose {
+        shift_x_meters: f32,
+        shift_y_meters: f32,
+        rotation_radians: f32,
+    }
+
+    #[derive(Clone, Debug)]
+    struct RealDumpCase {
+        stem: String,
+        local: XrDepthAlignDescriptor,
+        remote: XrDepthAlignDescriptor,
+        manual_pose: ManualPose,
+    }
+
+    fn legacy_solution_is_accepted(
+        diagnostic: &XrDepthAlignSolveDiagnostic,
+        solution: XrDepthAlignSolution,
+    ) -> bool {
+        solution.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES
+            && solution.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE
+            && (!diagnostic.local_vertical_descriptor
+                || !diagnostic.remote_vertical_descriptor
+                || solution.symmetry_confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE)
+    }
+
+    fn legacy_analyze_remote_to_local(
+        local: &XrDepthAlignDescriptor,
+        remote: &XrDepthAlignDescriptor,
+    ) -> XrDepthAlignSolveDiagnostic {
+        legacy_analyze_remote_to_local_seeded(local, remote, None)
+    }
+
+    fn legacy_analyze_remote_to_local_seeded(
+        local: &XrDepthAlignDescriptor,
+        remote: &XrDepthAlignDescriptor,
+        previous_solution: Option<XrDepthAlignSolution>,
+    ) -> XrDepthAlignSolveDiagnostic {
+        let local_signal = selected_descriptor_signal_cells(local);
+        let remote_signal = selected_descriptor_signal_cells(remote);
+        let remote_dense_signal = descriptor_signal_cells(remote);
+
+        let diagnostic = XrDepthAlignSolveDiagnostic {
+            local_vertical_descriptor: local.vertical_descriptor.is_some(),
+            remote_vertical_descriptor: remote.vertical_descriptor.is_some(),
+            local_wall_samples: local_signal.len(),
+            remote_wall_samples: remote_signal.len(),
+            ..XrDepthAlignSolveDiagnostic::default()
+        };
+
+        if local_signal.len() < XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES
+            || remote_signal.len() < XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES
+        {
+            return diagnostic;
+        }
+
+        let floor_y = local.floor_y - remote.floor_y;
+        let local_map = local.height_map.as_ref();
+        let remote_map = remote.height_map.as_ref();
+        let local_histogram = build_height_map_signal_histogram(
+            &local_signal,
+            XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS,
+        );
+        let remote_histogram = build_height_map_signal_histogram(
+            &remote_signal,
+            XR_DEPTH_ALIGN_HEIGHT_MAP_HISTOGRAM_BINS,
+        );
+        let local_signal_refs = local_signal.iter().collect::<Vec<_>>();
+        let remote_signal_refs = remote_signal.iter().collect::<Vec<_>>();
+
+        let mut sample_diagnostic = diagnostic;
+        let seeded_candidate = previous_solution.map(|seed| {
+            sample_diagnostic.yaw_candidate_count += 1;
+            sample_diagnostic.pose_candidate_count += 1;
+            refine_seed_alignment_solution(
+                &local_signal_refs,
+                &remote_signal_refs,
+                local_map,
+                remote_map,
+                &remote_dense_signal,
+                floor_y,
+                seed,
+            )
+        });
+        if let (Some(seed), Some(candidate)) = (previous_solution, seeded_candidate) {
+            sample_diagnostic.best_solution = Some(candidate);
+            if seeded_alignment_lock_is_strong(
+                &sample_diagnostic,
+                candidate,
+                seed,
+                remote_signal.len(),
+                local_map,
+                remote_map,
+            ) {
+                return sample_diagnostic;
+            }
+        }
+
+        let mut best = seeded_candidate;
+        let yaw_candidates = candidate_signal_yaws(
+            &local_histogram,
+            &remote_histogram,
+            &local_signal,
+            &remote_signal,
+        );
+        sample_diagnostic.yaw_candidate_count = yaw_candidates.len();
+        for yaw in yaw_candidates {
+            let translations =
+                candidate_signal_translations(&local_signal, &remote_signal, floor_y, yaw);
+            sample_diagnostic.pose_candidate_count += translations.len();
+            for translation in translations {
+                let (mut refined_yaw, mut refined_translation) = refine_signal_alignment(
+                    &local_signal_refs,
+                    &remote_signal_refs,
+                    floor_y,
+                    yaw,
+                    translation,
+                );
+                if let (Some(local_map), Some(remote_map)) = (local_map, remote_map) {
+                    if !remote_dense_signal.is_empty() {
+                        (refined_yaw, refined_translation) = refine_height_map_alignment(
+                            local_map,
+                            remote_map,
+                            &remote_dense_signal,
+                            refined_yaw,
+                            refined_translation,
+                        );
+                        refined_translation.y = floor_y;
+                    }
+                }
+                let candidate = score_full_alignment_solution(
+                    &local_signal_refs,
+                    &remote_signal_refs,
+                    local_map,
+                    remote_map,
+                    &remote_dense_signal,
+                    refined_yaw,
+                    refined_translation,
+                );
+                if best
+                    .as_ref()
+                    .is_none_or(|current| alignment_solution_better(&candidate, current))
+                {
+                    best = Some(candidate);
+                }
+            }
+        }
+        sample_diagnostic.best_solution = best;
+        sample_diagnostic
+    }
+
+    fn real_dump_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("util/dumps")
+    }
+
+    fn load_manual_pose(path: &PathBuf) -> Option<ManualPose> {
+        let text = fs::read_to_string(path).ok()?;
+        let mut pose = ManualPose::default();
+        for line in text.lines() {
+            let (key, value) = line.split_once(':')?;
+            let value = value.trim();
+            match key.trim() {
+                "shift_x_meters" => pose.shift_x_meters = value.parse().ok()?,
+                "shift_y_meters" => pose.shift_y_meters = value.parse().ok()?,
+                "rotation_radians" => pose.rotation_radians = value.parse().ok()?,
+                _ => {}
+            }
+        }
+        Some(pose)
+    }
+
+    fn load_real_dump_cases() -> Vec<RealDumpCase> {
+        let dump_dir = real_dump_dir();
+        let mut sidecars = fs::read_dir(&dump_dir)
+            .expect("dump dir should exist")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".manual_pose.ron"))
+            })
+            .collect::<Vec<_>>();
+        sidecars.sort();
+        sidecars
+            .into_iter()
+            .filter_map(|sidecar_path| {
+                let stem = sidecar_path.file_name()?.to_str()?.strip_suffix(".manual_pose.ron")?;
+                let dump_path = dump_dir.join(format!("{stem}.bin"));
+                let bytes = fs::read(&dump_path).ok()?;
+                let pair = XrNetAlignmentDescriptorDumpPair::from_file_bytes(&bytes)?;
+                Some(RealDumpCase {
+                    stem: stem.to_string(),
+                    local: pair.local_descriptor.descriptor,
+                    remote: pair.remote_descriptor.descriptor,
+                    manual_pose: load_manual_pose(&sidecar_path)?,
+                })
+            })
+            .collect()
+    }
+
+    fn load_named_real_dump_case(name_fragment: &str) -> RealDumpCase {
+        load_real_dump_cases()
+            .into_iter()
+            .find(|case| case.stem.contains(name_fragment))
+            .unwrap_or_else(|| panic!("missing annotated dump containing {name_fragment}"))
+    }
+
+    fn manual_pose_seed(
+        local: &XrDepthAlignDescriptor,
+        remote: &XrDepthAlignDescriptor,
+        pose: ManualPose,
+    ) -> XrDepthAlignSolution {
+        XrDepthAlignSolution {
+            yaw_radians: pose.rotation_radians,
+            translation: vec3(
+                pose.shift_x_meters,
+                local.floor_y - remote.floor_y,
+                pose.shift_y_meters,
+            ),
+            confidence: 0.0,
+            symmetry_confidence: 0.0,
+            residual_meters: f32::INFINITY,
+            matched_samples: 0,
+        }
+    }
+
+    fn planar_error(solution: XrDepthAlignSolution, pose: ManualPose) -> f32 {
+        let dx = solution.translation.x - pose.shift_x_meters;
+        let dz = solution.translation.z - pose.shift_y_meters;
+        (dx * dx + dz * dz).sqrt()
+    }
+
+    fn print_case_comparison(case: &RealDumpCase) {
+        let current = xr_depth_align_analyze_remote_to_local(&case.local, &case.remote);
+        let legacy = legacy_analyze_remote_to_local(&case.local, &case.remote);
+        let manual_seed = manual_pose_seed(&case.local, &case.remote, case.manual_pose);
+        let manual_scored =
+            xr_depth_align_rescore_remote_to_local(&case.local, &case.remote, manual_seed);
+
+        let current_best = current.best_solution.expect("current solver should produce a best");
+        let legacy_best = legacy.best_solution.expect("legacy solver should produce a best");
+
+        let current_planar = planar_error(current_best, case.manual_pose);
+        let legacy_planar = planar_error(legacy_best, case.manual_pose);
+        let current_yaw = angle_error(current_best.yaw_radians, case.manual_pose.rotation_radians);
+        let legacy_yaw = angle_error(legacy_best.yaw_radians, case.manual_pose.rotation_radians);
+
+        println!("dump {}", case.stem);
+        println!(
+            "  manual: yaw {:.1} deg | translation ({:.3}, {:.3}) | rescored conf {:.3} sym {:.3} residual {:.3} matched {}",
+            case.manual_pose.rotation_radians.to_degrees(),
+            case.manual_pose.shift_x_meters,
+            case.manual_pose.shift_y_meters,
+            manual_scored.confidence,
+            manual_scored.symmetry_confidence,
+            manual_scored.residual_meters,
+            manual_scored.matched_samples,
+        );
+        println!(
+            "  current: yaw {:.1} deg | dxz {:.3} m | dyaw {:.1} deg | conf {:.3} sym {:.3} residual {:.3} matched {} | accepted {}",
+            current_best.yaw_radians.to_degrees(),
+            current_planar,
+            current_yaw.to_degrees(),
+            current_best.confidence,
+            current_best.symmetry_confidence,
+            current_best.residual_meters,
+            current_best.matched_samples,
+            current.accepted_solution().is_some(),
+        );
+        println!(
+            "  legacy:  yaw {:.1} deg | dxz {:.3} m | dyaw {:.1} deg | conf {:.3} sym {:.3} residual {:.3} matched {} | accepted {}",
+            legacy_best.yaw_radians.to_degrees(),
+            legacy_planar,
+            legacy_yaw.to_degrees(),
+            legacy_best.confidence,
+            legacy_best.symmetry_confidence,
+            legacy_best.residual_meters,
+            legacy_best.matched_samples,
+            legacy
+                .best_solution
+                .is_some_and(|solution| legacy_solution_is_accepted(&legacy, solution)),
+        );
+    }
+
+    fn print_current_case(case: &RealDumpCase) {
+        let current = xr_depth_align_analyze_remote_to_local(&case.local, &case.remote);
+        let manual_seed = manual_pose_seed(&case.local, &case.remote, case.manual_pose);
+        let manual_scored =
+            xr_depth_align_rescore_remote_to_local(&case.local, &case.remote, manual_seed);
+        let current_best = current.best_solution.expect("current solver should produce a best");
+        let current_planar = planar_error(current_best, case.manual_pose);
+        let current_yaw = angle_error(current_best.yaw_radians, case.manual_pose.rotation_radians);
+        println!("dump {}", case.stem);
+        println!(
+            "  manual: yaw {:.1} deg | translation ({:.3}, {:.3}) | rescored conf {:.3} sym {:.3} residual {:.3} matched {}",
+            case.manual_pose.rotation_radians.to_degrees(),
+            case.manual_pose.shift_x_meters,
+            case.manual_pose.shift_y_meters,
+            manual_scored.confidence,
+            manual_scored.symmetry_confidence,
+            manual_scored.residual_meters,
+            manual_scored.matched_samples,
+        );
+        println!(
+            "  current: yaw {:.1} deg | dxz {:.3} m | dyaw {:.1} deg | conf {:.3} sym {:.3} residual {:.3} matched {} | accepted {}",
+            current_best.yaw_radians.to_degrees(),
+            current_planar,
+            current_yaw.to_degrees(),
+            current_best.confidence,
+            current_best.symmetry_confidence,
+            current_best.residual_meters,
+            current_best.matched_samples,
+            current.accepted_solution().is_some(),
+        );
+    }
+
+    #[test]
+    #[ignore = "manual dump benchmark"]
+    fn print_current_real_dump_alignment_all() {
+        let cases = load_real_dump_cases();
+        assert!(!cases.is_empty(), "expected annotated dumps");
+        for case in &cases {
+            print_current_case(case);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual dump benchmark"]
+    fn print_real_dump_alignment_benchmark() {
+        let cases = load_real_dump_cases();
+        assert!(
+            !cases.is_empty(),
+            "expected at least one annotated dump in {}",
+            real_dump_dir().display()
+        );
+
+        let mut current_better = 0usize;
+        let mut legacy_better = 0usize;
+        let mut tied = 0usize;
+
+        for case in cases {
+            let current = xr_depth_align_analyze_remote_to_local(&case.local, &case.remote);
+            let legacy = legacy_analyze_remote_to_local(&case.local, &case.remote);
+
+            let current_best = current.best_solution.expect("current solver should produce a best");
+            let legacy_best = legacy.best_solution.expect("legacy solver should produce a best");
+
+            let current_planar = planar_error(current_best, case.manual_pose);
+            let legacy_planar = planar_error(legacy_best, case.manual_pose);
+            let current_yaw = angle_error(current_best.yaw_radians, case.manual_pose.rotation_radians);
+            let legacy_yaw = angle_error(legacy_best.yaw_radians, case.manual_pose.rotation_radians);
+            let current_metric = current_planar + current_yaw * 0.35;
+            let legacy_metric = legacy_planar + legacy_yaw * 0.35;
+
+            if current_metric + 1.0e-4 < legacy_metric {
+                current_better += 1;
+            } else if legacy_metric + 1.0e-4 < current_metric {
+                legacy_better += 1;
+            } else {
+                tied += 1;
+            }
+
+            print_case_comparison(&case);
+        }
+
+        println!(
+            "summary: current_better {} | legacy_better {} | tied {}",
+            current_better,
+            legacy_better,
+            tied,
+        );
+    }
+
+    #[test]
+    #[ignore = "manual dump benchmark"]
+    fn print_real_dump_alignment_benchmark_r0218() {
+        let case = load_named_real_dump_case("r0218");
+        print_case_comparison(&case);
+    }
+
+    #[test]
+    #[ignore = "manual dump benchmark"]
+    fn print_real_dump_alignment_benchmark_r0062() {
+        let case = load_named_real_dump_case("r0062");
+        print_case_comparison(&case);
+    }
+
+    #[test]
+    #[ignore = "manual dump benchmark"]
+    fn print_current_real_dump_alignment_r0218() {
+        let case = load_named_real_dump_case("r0218");
+        print_current_case(&case);
+    }
+
+    #[test]
+    #[ignore = "manual dump benchmark"]
+    fn print_current_real_dump_alignment_r0062() {
+        let case = load_named_real_dump_case("r0062");
+        print_current_case(&case);
     }
 
     #[test]
