@@ -10,7 +10,7 @@ use std::{
 };
 
 pub const DEPTH_VOXEL_EYE_INDEX: usize = 0;
-const DEPTH_TSD_CHUNK_EDGE_VOXELS: i32 = 8;
+const DEPTH_TSD_CHUNK_EDGE_VOXELS: i32 = 4;
 const DEPTH_TSD_CHUNK_VOLUME: usize = (DEPTH_TSD_CHUNK_EDGE_VOXELS as usize)
     * (DEPTH_TSD_CHUNK_EDGE_VOXELS as usize)
     * (DEPTH_TSD_CHUNK_EDGE_VOXELS as usize);
