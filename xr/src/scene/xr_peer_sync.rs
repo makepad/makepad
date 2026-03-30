@@ -22,6 +22,7 @@ script_mod! {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum XrPeerSyncAction {
     ActivityChanged(XrActivityId),
+    BodySpawn(XrBodySpawn),
     #[default]
     None,
 }
@@ -1106,11 +1107,13 @@ struct XrPeerSyncMetrics {
     tx_state_count: u64,
     tx_descriptor_count: u64,
     tx_activity_count: u64,
+    tx_body_spawn_count: u64,
     rx_join_count: u64,
     rx_leave_count: u64,
     rx_state_count: u64,
     rx_descriptor_count: u64,
     rx_activity_count: u64,
+    rx_body_spawn_count: u64,
     last_event_text: String,
 }
 
@@ -1155,6 +1158,20 @@ impl XrPeerSyncMetrics {
             XrPeerSync::peer_label(peer_id),
             activity.activity_id.to_live_id().0,
             activity.changed_tick
+        );
+    }
+
+    fn record_body_spawn_tx(&mut self, spawn_label: u64) {
+        self.tx_body_spawn_count = self.tx_body_spawn_count.saturating_add(1);
+        self.last_event_text = format!("tx spawn {:016x}", spawn_label);
+    }
+
+    fn record_body_spawn_rx(&mut self, peer_id: XrNetPeerId, spawn_label: u64) {
+        self.rx_body_spawn_count = self.rx_body_spawn_count.saturating_add(1);
+        self.last_event_text = format!(
+            "spawn {} {:016x}",
+            XrPeerSync::peer_label(peer_id),
+            spawn_label
         );
     }
 
@@ -1345,6 +1362,7 @@ struct XrPeerSyncRuntime {
     alignment_worker: Option<XrPeopleAlignmentWorker>,
     local: XrPeerSyncLocalState,
     registry: XrPeerRegistry,
+    shared_objects: XrSharedObjectRegistry,
     accepted_activity: Option<XrNetActivityState>,
     metrics: XrPeerSyncMetrics,
 }
@@ -1501,6 +1519,14 @@ impl XrPeerSync {
         Some(self.runtime.accepted_activity?.activity_id)
     }
 
+    pub fn spawnable_activity(&self) -> Option<XrActivityId> {
+        self.runtime.shared_objects.activity_id()
+    }
+
+    pub fn shared_object_count(&self) -> usize {
+        self.runtime.shared_objects.len()
+    }
+
     pub fn network_status_text(&self) -> &str {
         self.diagnostics.network_status_text()
     }
@@ -1613,12 +1639,62 @@ impl XrPeerSync {
         Some(state)
     }
 
+    pub fn set_spawnable_objects<I>(&mut self, activity_id: XrActivityId, bindings: I) -> usize
+    where
+        I: IntoIterator<Item = XrSpawnableObjectBinding>,
+    {
+        self.runtime
+            .shared_objects
+            .replace_spawnables(activity_id, bindings);
+        self.runtime.shared_objects.len()
+    }
+
+    pub fn send_local_body_spawn(
+        &mut self,
+        spawn: XrBodySpawn,
+    ) -> Option<XrNetSharedObjectControl> {
+        if !self.enabled {
+            return None;
+        }
+        self.ensure_net_node();
+        let activity_id = self.runtime.shared_objects.activity_id()?;
+        let allocation = self
+            .runtime
+            .shared_objects
+            .allocate_local_shared_object(activity_id, spawn.widget_uid)?;
+        let authority = self.runtime.shared_objects.local_peer_id()?;
+        let control = XrNetSharedObjectControl::XrSpawnObject {
+            object_id: allocation.shared_object_id,
+            epoch: 0,
+            authority,
+            fidelity: XrSharedObjectFidelity::ImpactCritical,
+            shape: XrSharedObjectShape::ActivitySpawnable {
+                activity_id,
+                spawnable_id: allocation.spawnable_object_id,
+            },
+            pose: spawn.pose,
+            linvel: spawn.linvel,
+            angvel: spawn.angvel,
+        };
+        self.runtime
+            .net_node
+            .as_mut()?
+            .send_shared_object_control(control.clone());
+        self.runtime
+            .metrics
+            .record_body_spawn_tx(allocation.shared_object_id.0);
+        Some(control)
+    }
+
     fn ensure_net_node(&mut self) {
         if self.runtime.net_node.is_some() {
             return;
         }
         match XrNetNode::new() {
             Ok(node) => {
+                self.runtime
+                    .shared_objects
+                    .set_local_peer_id(node.shared_object_peer_id());
                 self.runtime.net_node = Some(node);
                 self.runtime.local.last_sent_descriptor_signature = None;
                 self.runtime.local.last_sent_descriptor = None;
@@ -1812,6 +1888,62 @@ impl XrPeerSync {
                     }
                 }
             }
+            XrNetIncoming::BodySpawn { peer, spawn } => {
+                self.runtime
+                    .metrics
+                    .record_body_spawn_rx(peer.id, spawn.object_id.0);
+                let Some(widget_uid) = self
+                    .runtime
+                    .shared_objects
+                    .resolve_widget_uid(spawn.activity_id, spawn.object_id)
+                else {
+                    return;
+                };
+                cx.widget_action(
+                    self.widget_uid(),
+                    XrPeerSyncAction::BodySpawn(XrBodySpawn {
+                        widget_uid,
+                        pose: spawn.pose,
+                        linvel: spawn.linvel,
+                        angvel: spawn.angvel,
+                    }),
+                );
+            }
+            XrNetIncoming::SharedObjectControl { peer, control } => match control {
+                XrNetSharedObjectControl::XrSpawnObject {
+                    object_id,
+                    shape:
+                        XrSharedObjectShape::ActivitySpawnable {
+                            activity_id,
+                            spawnable_id,
+                        },
+                    pose,
+                    linvel,
+                    angvel,
+                    ..
+                } => {
+                    self.runtime
+                        .metrics
+                        .record_body_spawn_rx(peer.id, object_id.0);
+                    let Some(widget_uid) = self.runtime.shared_objects.resolve_remote_widget_uid(
+                        activity_id,
+                        object_id,
+                        spawnable_id,
+                    ) else {
+                        return;
+                    };
+                    cx.widget_action(
+                        self.widget_uid(),
+                        XrPeerSyncAction::BodySpawn(XrBodySpawn {
+                            widget_uid,
+                            pose,
+                            linvel,
+                            angvel,
+                        }),
+                    );
+                }
+                _ => {}
+            },
             XrNetIncoming::Alignment { .. } => {}
         }
     }
@@ -2043,15 +2175,17 @@ impl XrPeerSync {
             };
             let last_event = self.runtime.metrics.last_event_label();
             self.diagnostics.network_status = format!(
-                "Network: tx s{} d{} a{} | rx j{} l{} s{} d{} a{} | peers {} vis {} anchor {} | local anchor {} sync {} | last {}",
+                "Network: tx s{} d{} a{} b{} | rx j{} l{} s{} d{} a{} b{} | peers {} vis {} anchor {} | local anchor {} sync {} | objects {} | last {}",
                 self.runtime.metrics.tx_state_count,
                 self.runtime.metrics.tx_descriptor_count,
                 self.runtime.metrics.tx_activity_count,
+                self.runtime.metrics.tx_body_spawn_count,
                 self.runtime.metrics.rx_join_count,
                 self.runtime.metrics.rx_leave_count,
                 self.runtime.metrics.rx_state_count,
                 self.runtime.metrics.rx_descriptor_count,
                 self.runtime.metrics.rx_activity_count,
+                self.runtime.metrics.rx_body_spawn_count,
                 peer_count,
                 visible_count,
                 anchor_aligned_count,
@@ -2061,6 +2195,7 @@ impl XrPeerSync {
                     "no"
                 },
                 self.local_sync_status_text(),
+                self.runtime.shared_objects.len(),
                 last_event,
             );
             self.diagnostics.peer_scene_status = self.manual_peer_scene_text();
@@ -2086,15 +2221,17 @@ impl XrPeerSync {
 
         let last_event = self.runtime.metrics.last_event_label();
         self.diagnostics.network_status = format!(
-            "Network: tx state {} map {} activity {} | rx join {} leave {} state {} map {} activity {} | peers {} vis {} maps {} solved {} | local map {} signal {} | last {}",
+            "Network: tx state {} map {} activity {} spawn {} | rx join {} leave {} state {} map {} activity {} spawn {} | peers {} vis {} maps {} solved {} | local map {} signal {} | objects {} | last {}",
             self.runtime.metrics.tx_state_count,
             self.runtime.metrics.tx_descriptor_count,
             self.runtime.metrics.tx_activity_count,
+            self.runtime.metrics.tx_body_spawn_count,
             self.runtime.metrics.rx_join_count,
             self.runtime.metrics.rx_leave_count,
             self.runtime.metrics.rx_state_count,
             self.runtime.metrics.rx_descriptor_count,
             self.runtime.metrics.rx_activity_count,
+            self.runtime.metrics.rx_body_spawn_count,
             peer_count,
             visible_count,
             descriptor_count,
@@ -2105,6 +2242,7 @@ impl XrPeerSync {
                 LocalSceneState::Missing => "no",
             },
             self.runtime.local.contour_sample_count(),
+            self.runtime.shared_objects.len(),
             last_event,
         );
         self.diagnostics.peer_scene_status = make_peer_scene_debug_text(

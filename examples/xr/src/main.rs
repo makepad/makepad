@@ -678,6 +678,13 @@ impl App {
             .map(|select| select.activity_id())
     }
 
+    fn active_scene_widget(&self, cx: &mut Cx) -> Option<WidgetRef> {
+        self.ui
+            .widget(cx, ids!(scene_select))
+            .borrow::<XrSelect>()
+            .and_then(|select| select.active_child_widget_ref())
+    }
+
     fn apply_activity(&mut self, cx: &mut Cx, activity_id: XrActivityId) -> Option<WidgetRef> {
         self.ui
             .widget(cx, ids!(scene_select))
@@ -714,6 +721,35 @@ impl App {
         }
     }
 
+    fn refresh_spawnable_registry(&mut self, cx: &mut Cx, force: bool) {
+        let Some(activity_id) = self.current_activity(cx) else {
+            return;
+        };
+        let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
+        let should_refresh = force
+            || peer_sync_widget
+                .borrow::<XrPeerSync>()
+                .is_some_and(|peer_sync| peer_sync.spawnable_activity() != Some(activity_id));
+        if !should_refresh {
+            return;
+        }
+        let Some(scene_widget) = self.active_scene_widget(cx) else {
+            return;
+        };
+        let bindings = collect_scene_spawnable_objects(activity_id, &scene_widget);
+        {
+            if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+                peer_sync.set_spawnable_objects(activity_id, bindings);
+            };
+        }
+    }
+
+    fn apply_remote_body_spawn(&mut self, cx: &mut Cx, spawn: XrBodySpawn) {
+        if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
+            root.spawn_body(cx, spawn);
+        }
+    }
+
     fn refresh_debug_fields(&mut self, cx: &mut Cx) {
         let (
             surface_count,
@@ -740,8 +776,13 @@ impl App {
             .ui
             .widget(cx, ids!(xr_peer_sync))
             .borrow::<XrPeerSync>()
-            .map(|peer_sync| peer_sync.connected_peer_count())
-            .unwrap_or(0);
+            .map(|peer_sync| {
+                (
+                    peer_sync.connected_peer_count(),
+                    peer_sync.shared_object_count(),
+                )
+            })
+            .unwrap_or((0, 0));
         let tsdf_memory_mb = cx
             .xr_tsdf()
             .latest_tsdf_snapshot()
@@ -764,7 +805,9 @@ impl App {
             .map(|gpu_ms| format!("{gpu_ms:.2} ms"))
             .unwrap_or_else(|| "waiting".to_string());
         let debug_text = format!(
-            "Connected peers: {connected_peers}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nCPU frame time: {frame_cpu_ms:.2} ms\nUpdate time: {frame_update_cpu_ms:.2} ms\nDraw time: {frame_draw_cpu_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}"
+            "Connected peers: {}\nShared objects: {}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nCPU frame time: {frame_cpu_ms:.2} ms\nUpdate time: {frame_update_cpu_ms:.2} ms\nDraw time: {frame_draw_cpu_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}",
+            connected_peers.0,
+            connected_peers.1,
         );
         if self.last_debug_text != debug_text {
             self.ui
@@ -777,34 +820,73 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        let scene_select = self.ui.widget(cx, ids!(scene_select));
-        let peer_sync = self.ui.widget(cx, ids!(xr_peer_sync));
+        let scene_select_uid = self.ui.widget(cx, ids!(scene_select)).widget_uid();
+        let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
+        let peer_sync_uid = peer_sync_widget.widget_uid();
 
-        if let Some(action) = actions.find_widget_action(peer_sync.widget_uid()) {
-            if let XrPeerSyncAction::ActivityChanged(activity_id) = action.cast() {
-                if self.current_activity(cx) != Some(activity_id) {
-                    self.suppress_activity_broadcast = Some(activity_id);
-                    if self.apply_activity(cx, activity_id).is_none() {
-                        self.suppress_activity_broadcast = None;
+        let mut remote_activity = None;
+        let mut remote_body_spawns = Vec::new();
+        let mut local_activity = None;
+        let mut local_body_spawns = Vec::new();
+
+        for action in actions {
+            let Some(widget_action) = action.as_widget_action() else {
+                continue;
+            };
+            if widget_action.widget_uid == peer_sync_uid {
+                match widget_action.cast::<XrPeerSyncAction>() {
+                    XrPeerSyncAction::ActivityChanged(activity_id) => {
+                        remote_activity = Some(activity_id);
                     }
+                    XrPeerSyncAction::BodySpawn(spawn) => {
+                        remote_body_spawns.push(spawn);
+                    }
+                    XrPeerSyncAction::None => {}
                 }
-                return;
+            }
+            if widget_action.widget_uid == scene_select_uid {
+                if let XrSelectAction::ActiveChildChanged(activity_id) =
+                    widget_action.cast::<XrSelectAction>()
+                {
+                    local_activity = Some(activity_id);
+                }
+            }
+            if let Some(body_spawn) = widget_action.action.downcast_ref::<XrBodySpawn>() {
+                local_body_spawns.push(*body_spawn);
             }
         }
 
-        let Some(action) = actions.find_widget_action(scene_select.widget_uid()) else {
-            return;
-        };
-        let XrSelectAction::ActiveChildChanged(activity_id) = action.cast() else {
-            return;
-        };
-        if self.suppress_activity_broadcast == Some(activity_id) {
-            self.suppress_activity_broadcast = None;
-            return;
+        if let Some(activity_id) = remote_activity {
+            if self.current_activity(cx) != Some(activity_id) {
+                self.suppress_activity_broadcast = Some(activity_id);
+                if self.apply_activity(cx, activity_id).is_none() {
+                    self.suppress_activity_broadcast = None;
+                }
+            }
+            self.refresh_spawnable_registry(cx, true);
         }
-        if let Some(mut peer_sync) = peer_sync.borrow_mut::<XrPeerSync>() {
-            let _ = peer_sync.set_local_activity(cx, activity_id);
-        };
+
+        if let Some(activity_id) = local_activity {
+            self.refresh_spawnable_registry(cx, true);
+            if self.suppress_activity_broadcast == Some(activity_id) {
+                self.suppress_activity_broadcast = None;
+            } else if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+                let _ = peer_sync.set_local_activity(cx, activity_id);
+            }
+        }
+
+        for spawn in remote_body_spawns {
+            self.apply_remote_body_spawn(cx, spawn);
+        }
+
+        if !local_body_spawns.is_empty() {
+            self.refresh_spawnable_registry(cx, false);
+            if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+                for spawn in local_body_spawns {
+                    let _ = peer_sync.send_local_body_spawn(spawn);
+                }
+            }
+        }
     }
 }
 
@@ -822,6 +904,7 @@ impl AppMain for App {
             self.ensure_network_started(cx);
         }
         self.ensure_activity_announced(cx);
+        self.refresh_spawnable_registry(cx, false);
         self.refresh_debug_fields(cx);
     }
 }

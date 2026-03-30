@@ -1,7 +1,8 @@
 use super::{
-    XrNetActivityControl, XrNetAlignmentDescriptorFrame, XrNetAlignmentFrame, XrNetPeerId,
-    XrNetStateFrame, XR_NET_PROTOCOL_VERSION, XR_NET_SYNC_FRAME_LZ4_TAG, XR_NET_SYNC_FRAME_RAW_TAG,
-    XR_NET_SYNC_LZ4_ACCELERATION, XR_NET_SYNC_MAX_FRAME_BYTES,
+    XrNetActivityControl, XrNetAlignmentDescriptorFrame, XrNetAlignmentFrame, XrNetBodySpawn,
+    XrNetPeerId, XrNetSharedObjectControl, XrNetStateFrame, XR_NET_PROTOCOL_VERSION,
+    XR_NET_SYNC_FRAME_LZ4_TAG, XR_NET_SYNC_FRAME_RAW_TAG, XR_NET_SYNC_LZ4_ACCELERATION,
+    XR_NET_SYNC_MAX_FRAME_BYTES,
 };
 use makepad_lz4::{compress_bound, compress_fast_into, decompress_safe};
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
@@ -122,6 +123,16 @@ pub enum XrNetDataPacket {
         node_id: XrNetPeerId,
         control: XrNetActivityControl,
     },
+    BodySpawn {
+        version: u16,
+        node_id: XrNetPeerId,
+        spawn: XrNetBodySpawn,
+    },
+    SharedObjectControl {
+        version: u16,
+        node_id: XrNetPeerId,
+        control: XrNetSharedObjectControl,
+    },
     Leave(XrNetLeavePacket),
 }
 
@@ -161,6 +172,22 @@ impl XrNetDataPacket {
         }
     }
 
+    pub fn body_spawn(node_id: XrNetPeerId, spawn: XrNetBodySpawn) -> Self {
+        Self::BodySpawn {
+            version: XR_NET_PROTOCOL_VERSION,
+            node_id,
+            spawn,
+        }
+    }
+
+    pub fn shared_object_control(node_id: XrNetPeerId, control: XrNetSharedObjectControl) -> Self {
+        Self::SharedObjectControl {
+            version: XR_NET_PROTOCOL_VERSION,
+            node_id,
+            control,
+        }
+    }
+
     pub fn leave(node_id: XrNetPeerId) -> Self {
         Self::Leave(XrNetLeavePacket {
             version: XR_NET_PROTOCOL_VERSION,
@@ -181,7 +208,9 @@ impl XrNetDataPacket {
             Self::State { version, .. }
             | Self::Alignment { version, .. }
             | Self::AlignmentDescriptor { version, .. }
-            | Self::ActivityControl { version, .. } => *version,
+            | Self::ActivityControl { version, .. }
+            | Self::BodySpawn { version, .. }
+            | Self::SharedObjectControl { version, .. } => *version,
             Self::Leave(packet) => packet.version,
         }
     }
@@ -191,7 +220,9 @@ impl XrNetDataPacket {
             Self::State { node_id, .. }
             | Self::Alignment { node_id, .. }
             | Self::AlignmentDescriptor { node_id, .. }
-            | Self::ActivityControl { node_id, .. } => *node_id,
+            | Self::ActivityControl { node_id, .. }
+            | Self::BodySpawn { node_id, .. }
+            | Self::SharedObjectControl { node_id, .. } => *node_id,
             Self::Leave(packet) => packet.node_id,
         }
     }
