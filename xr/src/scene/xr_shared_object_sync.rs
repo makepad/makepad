@@ -13,6 +13,11 @@ const XR_SHARED_OBJECT_HISTORY_MAX_SAMPLES: usize = 48;
 const XR_SHARED_OBJECT_HISTORY_MAX_SECONDS: f64 = 0.5;
 const XR_SHARED_OBJECT_TAKEOVER_REQUEST_COOLDOWN_SECONDS: f64 = 0.18;
 const XR_SHARED_OBJECT_CONTACT_IMPULSE_COOLDOWN_SECONDS: f64 = 0.08;
+const XR_SHARED_OBJECT_SLEEPING_PUBLISH_INTERVAL_SECONDS: f64 = 0.25;
+const XR_SHARED_OBJECT_PUBLISH_POSITION_EPSILON_METERS: f32 = 0.001;
+const XR_SHARED_OBJECT_PUBLISH_ORIENTATION_EPSILON_DEGREES: f32 = 0.25;
+const XR_SHARED_OBJECT_PUBLISH_LINVEL_EPSILON_MPS: f32 = 0.02;
+const XR_SHARED_OBJECT_PUBLISH_ANGVEL_EPSILON_RADPS: f32 = 0.02;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct XrSpawnableObjectBinding {
@@ -91,6 +96,8 @@ struct XrLocalSharedObjectRecord {
     authority: XrPeerId,
     fidelity: XrSharedObjectFidelity,
     latest_state: Option<XrNetSharedObjectState>,
+    last_published_state: Option<XrNetSharedObjectState>,
+    last_published_at: Option<f64>,
     history: VecDeque<XrNetSharedObjectState>,
     pending_transfer: Option<XrPendingAuthorityTransfer>,
 }
@@ -726,6 +733,8 @@ impl XrSharedObjectRegistry {
                     authority: local_peer_id,
                     fidelity,
                     latest_state: Some(state),
+                    last_published_state: Some(state),
+                    last_published_at: Some(state.sent_at),
                     history: VecDeque::new(),
                     pending_transfer: None,
                 };
@@ -776,6 +785,8 @@ impl XrSharedObjectRegistry {
             record.epoch = record.epoch.wrapping_add(1);
             record.authority = local_peer_id;
             record.latest_state = None;
+            record.last_published_state = None;
+            record.last_published_at = None;
             record.history.clear();
             record.pending_transfer = None;
             return Some(XrLocalSharedObjectAllocation {
@@ -800,6 +811,8 @@ impl XrSharedObjectRegistry {
             authority: local_peer_id,
             fidelity: XrSharedObjectFidelity::ImpactCritical,
             latest_state: None,
+            last_published_state: None,
+            last_published_at: None,
             history: VecDeque::new(),
             pending_transfer: None,
         };
@@ -852,6 +865,8 @@ impl XrSharedObjectRegistry {
             authority: local_peer_id,
             fidelity: XrSharedObjectFidelity::ImpactCritical,
             latest_state: None,
+            last_published_state: None,
+            last_published_at: None,
             history: VecDeque::new(),
             pending_transfer: None,
         };
@@ -903,10 +918,39 @@ impl XrSharedObjectRegistry {
             };
             record.authority = authority;
             record.latest_state = Some(state);
-            push_shared_object_history(&mut record.history, state);
-            states.push(state);
+            if should_publish_local_shared_object_state(record, state, sent_at) {
+                states.push(state);
+            }
         }
         states
+    }
+
+    pub fn note_published_local_shared_object_states(
+        &mut self,
+        states: &[XrNetSharedObjectState],
+    ) {
+        for state in states {
+            let Some(record) = self.local_objects.get_mut(&state.object_id) else {
+                continue;
+            };
+            record.epoch = state.epoch;
+            record.authority = state.authority;
+            record.fidelity = state.fidelity;
+            record.latest_state = Some(*state);
+            record.last_published_state = Some(*state);
+            record.last_published_at = Some(state.sent_at);
+            push_shared_object_history(&mut record.history, *state);
+        }
+    }
+
+    pub fn remote_shared_object_history(
+        &self,
+        object_id: XrSharedObjectId,
+    ) -> Vec<XrNetSharedObjectState> {
+        self.remote_objects
+            .get(&object_id)
+            .map(|record| record.history.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     pub fn prune_missing_local_shared_objects(
@@ -949,6 +993,51 @@ fn push_shared_object_history(
     }) {
         history.pop_front();
     }
+}
+
+fn pose_publish_delta_exceeded(previous: Pose, next: Pose) -> bool {
+    (next.position - previous.position).length() > XR_SHARED_OBJECT_PUBLISH_POSITION_EPSILON_METERS
+        || previous.orientation.get_angle_with(next.orientation)
+            > XR_SHARED_OBJECT_PUBLISH_ORIENTATION_EPSILON_DEGREES
+}
+
+fn velocity_publish_delta_exceeded(previous: Vec3f, next: Vec3f, epsilon: f32) -> bool {
+    (next - previous).length() > epsilon
+}
+
+fn should_publish_local_shared_object_state(
+    record: &XrLocalSharedObjectRecord,
+    state: XrNetSharedObjectState,
+    sent_at: f64,
+) -> bool {
+    let Some(previous) = record.last_published_state else {
+        return true;
+    };
+    if previous.epoch != state.epoch
+        || previous.authority != state.authority
+        || previous.fidelity != state.fidelity
+        || previous.mode != state.mode
+    {
+        return true;
+    }
+    if pose_publish_delta_exceeded(previous.pose, state.pose)
+        || velocity_publish_delta_exceeded(
+            previous.linvel,
+            state.linvel,
+            XR_SHARED_OBJECT_PUBLISH_LINVEL_EPSILON_MPS,
+        )
+        || velocity_publish_delta_exceeded(
+            previous.angvel,
+            state.angvel,
+            XR_SHARED_OBJECT_PUBLISH_ANGVEL_EPSILON_RADPS,
+        )
+    {
+        return true;
+    }
+    matches!(state.mode, XrSharedObjectMode::Sleeping)
+        && record.last_published_at.is_none_or(|last_published_at| {
+            sent_at - last_published_at >= XR_SHARED_OBJECT_SLEEPING_PUBLISH_INTERVAL_SECONDS
+        })
 }
 
 fn state_seq_not_after(history_seq: u32, requested_seq: u32) -> bool {

@@ -317,6 +317,21 @@ impl XrHand {
             && extension_ratio >= 0.90)
     }
 
+    pub fn pinch_anchor_pose(&self) -> Option<Pose> {
+        let pinch_active = self.pinch_index()
+            || self.pinch_strength_index() >= Self::GRAB_ACTIVE_THRESHOLD;
+        if !pinch_active {
+            return None;
+        }
+        let palm_pose = self.tracking_pose()?;
+        let thumb_tip = self.tip_pos_checked(Self::THUMB_TIP)?;
+        let index_tip = self.tip_pos_checked(Self::INDEX_TIP)?;
+        Some(Pose::new(
+            palm_pose.orientation,
+            (thumb_tip + index_tip) * 0.5,
+        ))
+    }
+
     pub const IN_VIEW: u8 = 1 << 0;
     pub const AIM_VALID: u8 = 1 << 1;
     pub const PINCH_INDEX: u8 = 1 << 2;
@@ -522,6 +537,28 @@ mod local_event_tests {
         hand
     }
 
+    fn make_index_pinch_hand() -> XrHand {
+        let base = vec3f(0.20, 1.22, -0.22);
+        let mut hand = XrHand::default();
+        hand.flags = XrHand::IN_VIEW | XrHand::AIM_VALID | XrHand::PINCH_INDEX;
+        hand.tips_active = (1 << XrHand::THUMB_TIP) | (1 << XrHand::INDEX_TIP);
+        hand.tips[XrHand::THUMB_TIP] = 0.028;
+        hand.tips[XrHand::INDEX_TIP] = 0.034;
+        hand.pinch[XrHand::PINCH_STRENGTH_INDEX] = 220;
+        hand.joints[XrHand::CENTER] = Pose::new(Quat::default(), base + vec3f(0.0, -0.03, 0.03));
+        hand.joints[XrHand::WRIST] = Pose::new(Quat::default(), base + vec3f(0.0, -0.05, 0.08));
+        hand.joints[XrHand::THUMB_BASE] = Pose::new(Quat::default(), base + vec3f(-0.020, -0.008, -0.010));
+        hand.joints[XrHand::THUMB_KNUCKLE1] =
+            Pose::new(Quat::default(), base + vec3f(-0.010, 0.000, -0.030));
+        hand.joints[XrHand::THUMB_KNUCKLE2] =
+            Pose::new(Quat::default(), base + vec3f(0.000, 0.008, -0.040));
+        hand.joints[XrHand::INDEX_BASE] = point_pose(base + vec3f(0.008, 0.0, 0.0), -0.005);
+        hand.joints[XrHand::INDEX_KNUCKLE1] = point_pose(base + vec3f(0.010, 0.004, 0.0), -0.032);
+        hand.joints[XrHand::INDEX_KNUCKLE2] = point_pose(base + vec3f(0.012, 0.010, 0.0), -0.054);
+        hand.joints[XrHand::INDEX_KNUCKLE3] = point_pose(base + vec3f(0.013, 0.018, 0.0), -0.068);
+        hand
+    }
+
     fn make_curled_grab_hand() -> XrHand {
         let base = vec3f(0.20, 1.22, -0.22);
         let mut hand = XrHand::default();
@@ -569,6 +606,22 @@ mod local_event_tests {
         let hand = make_sparse_tracking_hand();
         assert!(hand.tracking_pose().is_some());
         assert!(hand.finger_chain_positions(XrHand::INDEX_TIP).is_none());
+    }
+
+    #[test]
+    fn pinch_anchor_pose_uses_thumb_index_midpoint_instead_of_palm_center() {
+        let hand = make_index_pinch_hand();
+        let pinch_pose = hand.pinch_anchor_pose().expect("pinch anchor should exist");
+        let palm_pose = hand.tracking_pose().expect("tracking pose should exist");
+        let thumb_tip = hand
+            .tip_pos_checked(XrHand::THUMB_TIP)
+            .expect("thumb tip should be valid");
+        let index_tip = hand
+            .tip_pos_checked(XrHand::INDEX_TIP)
+            .expect("index tip should be valid");
+        let expected_midpoint = (thumb_tip + index_tip) * 0.5;
+        assert!((pinch_pose.position - expected_midpoint).length() < 0.001);
+        assert!((pinch_pose.position - palm_pose.position).length() > 0.01);
     }
 }
 
