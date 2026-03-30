@@ -78,16 +78,6 @@ pub(crate) struct DepthQueryCollider {
     pub(crate) restitution: f32,
 }
 
-impl DepthQueryCollider {
-    pub(crate) fn vertex_count(&self) -> usize {
-        0
-    }
-
-    pub(crate) fn triangle_count(&self) -> usize {
-        0
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DepthQueryResolvedSurface {
     pub(crate) surface: DepthQuerySurfaceHit,

@@ -302,13 +302,7 @@ pub struct XrEnv {
     #[rust]
     physics_rapier_step_ms: f64,
     #[rust]
-    physics_step_dt_ms: f64,
-    #[rust]
     physics_depth_query_surface_count: usize,
-    #[rust]
-    physics_depth_query_vertex_count: usize,
-    #[rust]
-    physics_depth_query_triangle_count: usize,
     #[allow(dead_code)]
     #[rust]
     next_frame: NextFrame,
@@ -359,10 +353,6 @@ impl XrEnv {
         self.physics_time_scale
     }
 
-    pub(crate) fn physics_step_dt_ms(&self) -> f64 {
-        self.physics_step_dt_ms
-    }
-
     pub(crate) fn set_physics_time_scale(&mut self, cx: &mut Cx, scale: f32) -> f32 {
         let scale = scale.clamp(0.1, 1.0);
         if (self.physics_time_scale - scale).abs() <= f32::EPSILON {
@@ -375,14 +365,6 @@ impl XrEnv {
 
     pub(crate) fn physics_depth_query_surface_count(&self) -> usize {
         self.physics_depth_query_surface_count
-    }
-
-    pub(crate) fn physics_depth_query_vertex_count(&self) -> usize {
-        self.physics_depth_query_vertex_count
-    }
-
-    pub(crate) fn physics_depth_query_triangle_count(&self) -> usize {
-        self.physics_depth_query_triangle_count
     }
 
     fn passthrough_video_id() -> LiveId {
@@ -763,10 +745,7 @@ impl XrEnv {
         self.physics_compute_ms = result.physics_compute_ms;
         self.physics_tsdf_query_ms = result.physics_tsdf_query_ms;
         self.physics_rapier_step_ms = result.physics_rapier_step_ms;
-        self.physics_step_dt_ms = result.physics_step_dt_ms;
         self.physics_depth_query_surface_count = result.physics_depth_query_surface_count;
-        self.physics_depth_query_vertex_count = result.physics_depth_query_vertex_count;
-        self.physics_depth_query_triangle_count = result.physics_depth_query_triangle_count;
         true
     }
 
@@ -858,10 +837,7 @@ impl XrEnv {
         self.physics_compute_ms = 0.0;
         self.physics_tsdf_query_ms = 0.0;
         self.physics_rapier_step_ms = 0.0;
-        self.physics_step_dt_ms = 0.0;
         self.physics_depth_query_surface_count = 0;
-        self.physics_depth_query_vertex_count = 0;
-        self.physics_depth_query_triangle_count = 0;
         self.depth_query_retained_hits.clear();
         Rc::make_mut(&mut self.runtime_bodies).clear();
         self.scene_dirty = true;

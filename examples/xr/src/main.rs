@@ -1,32 +1,7 @@
 use makepad_widgets;
 
-use makepad_widgets::makepad_draw::DrawVector;
-use makepad_widgets::makepad_platform::{TextureFormat, TextureUpdated, XrDepthAlignHeightMap};
 use makepad_widgets::*;
 use makepad_xr::*;
-use std::{
-    io::{Read, Write},
-    net::{SocketAddr, TcpStream},
-    time::Duration,
-};
-
-const XR_ALIGNMENT_DUMP_SERVER: &str = "10.0.0.112:8332";
-const XR_ALIGNMENT_DUMP_CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
-const XR_ALIGNMENT_DUMP_IO_TIMEOUT: Duration = Duration::from_secs(2);
-const XR_SHOW_ALIGNMENT_HEIGHTMAP_PREVIEW: bool = false;
-
-#[derive(Clone, Debug)]
-enum DumpUploadResult {
-    Success {
-        pair_name: String,
-        byte_count: usize,
-        server_message: String,
-    },
-    Error {
-        pair_name: String,
-        message: String,
-    },
-}
 
 app_main!(App);
 
@@ -70,46 +45,6 @@ script_mod! {
                     .mix(self.color_disabled, self.disabled);
                 return Pal.premul(fill)
             }
-        }
-    }
-
-    let DrawHeightMap = set_type_default() do #(DrawHeightMap::script_shader(vm)){
-        ..mod.draw.DrawQuad
-        height_texture: texture_2d(float)
-        alpha: 0.96
-        uv_min: vec2(0.0, 0.0)
-        uv_max: vec2(1.0, 1.0)
-        wall_band_start: 0.72
-
-        pixel: fn() {
-            let uv = self.uv_min + (self.uv_max - self.uv_min) * self.pos
-            let sample = self.height_texture.sample(uv).x
-            if sample <= 0.00001 {
-                return #0000
-            }
-            let wall_mix = clamp(
-                (sample - self.wall_band_start) / max(1.0 - self.wall_band_start, 0.0001),
-                0.0,
-                1.0
-            )
-            let lifted = pow(sample, mix(1.28, 0.72, wall_mix))
-            let base = mix(
-                vec3(0.05, 0.13, 0.19),
-                vec3(0.16, 0.60, 0.66),
-                clamp(lifted * 1.35, 0.0, 1.0)
-            )
-            let bright = mix(base, vec3(0.98, 0.92, 0.74), clamp(pow(lifted, 1.7), 0.0, 1.0))
-            let color = mix(bright, vec3(1.0, 0.66, 0.22), wall_mix * 0.82)
-            return Pal.premul(vec4(color, self.alpha))
-        }
-    }
-
-    let AlignmentSlicePreviewBase = #(AlignmentSlicePreview::register_widget(vm))
-    let AlignmentSlicePreview = set_type_default() do AlignmentSlicePreviewBase{
-        width: Fill
-        height: Fill
-        draw_bg +: {
-            color: #x09141d
         }
     }
 
@@ -655,7 +590,7 @@ script_mod! {
                         spacing: 12
 
                         View{
-                            width: 430
+                            width: Fill{weight: 66.0}
                             height: Fill
                             flow: Down
                             spacing: 8
@@ -666,146 +601,18 @@ script_mod! {
                                 padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
                                 draw_bg.color: #x0d1824
 
-                                peer_sync_status_field := Label{
+                                debug_field := Label{
                                     width: Fill
-                                    text: "AlignSync: off"
-                                    draw_text.color: #xe8f4ff
-                                    draw_text.flow: Flow.Right{wrap: true}
-                                }
-                            }
-
-                            SolidView{
-                                width: Fill
-                                height: Fit
-                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
-                                draw_bg.color: #x0d1824
-
-                                alignment_state_field := Label{
-                                    width: Fill
-                                    text: "AlignState: off"
-                                    draw_text.color: #xfff1ab
-                                    draw_text.flow: Flow.Right{wrap: true}
-                                }
-                            }
-
-                            SolidView{
-                                width: Fill
-                                height: Fit
-                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
-                                draw_bg.color: #x0d1824
-
-                                alignment_debug_field := Label{
-                                    width: Fill
-                                    text: "AlignDbg: off"
-                                    draw_text.color: #xffd29a
-                                    draw_text.flow: Flow.Right{wrap: true}
-                                }
-                            }
-
-                            SolidView{
-                                width: Fill
-                                height: Fit
-                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
-                                draw_bg.color: #x0d1824
-
-                                physics_geom_field := Label{
-                                    width: Fill
-                                    text: "Physics geometry: waiting for frame"
-                                    draw_text.color: #xe8f4ff
-                                    draw_text.flow: Flow.Right{wrap: true}
-                                }
-                            }
-
-                            SolidView{
-                                width: Fill
-                                height: Fit
-                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
-                                draw_bg.color: #x0d1824
-
-                                physics_timing_field := Label{
-                                    width: Fill
-                                    text: "Physics compute: waiting for frame"
-                                    draw_text.color: #xe8f4ff
-                                    draw_text.flow: Flow.Right{wrap: true}
-                                }
-                            }
-
-                            SolidView{
-                                width: Fill
-                                height: Fit
-                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
-                                draw_bg.color: #x0d1824
-
-                                frame_cpu_field := Label{
-                                    width: Fill
-                                    text: "CPU frame: waiting for frame"
-                                    draw_text.color: #xe8f4ff
-                                    draw_text.flow: Flow.Right{wrap: true}
-                                }
-                            }
-
-                            SolidView{
-                                width: Fill
-                                height: Fit
-                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
-                                draw_bg.color: #x0d1824
-
-                                xr_runtime_field := Label{
-                                    width: Fill
-                                    text: "XR render scale: waiting for XR session"
+                                    text: "Connected peers: 0"
                                     draw_text.color: #xe8f4ff
                                     draw_text.flow: Flow.Right{wrap: true}
                                 }
                             }
                         }
 
-                        SolidView{
-                            width: Fill
+                        View{
+                            width: Fill{weight: 34.0}
                             height: Fill
-                            flow: Down
-                            spacing: 8
-                            padding: Inset{left: 10 right: 10 top: 10 bottom: 10}
-                            draw_bg.color: #x0d1824
-
-                            View{
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                spacing: 8
-                                align: Align{y: 0.5}
-
-                                Label{
-                                    width: Fill
-                                    text: "Projected Height Map"
-                                    draw_text.color: #x9af7c4
-                                }
-
-                                dump_alignment_pair_button := XrUiButton{
-                                    width: 108
-                                    text: "Dump Pair"
-                                }
-                            }
-
-                            SolidView{
-                                width: Fill
-                                height: Fit
-                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
-                                draw_bg.color: #x102031
-
-                                dump_status_field := Label{
-                                    width: Fill
-                                    text: "Dump: waiting for local + peer heightmaps"
-                                    draw_text.color: #xd7e7f6
-                                    draw_text.flow: Flow.Right{wrap: true}
-                                }
-                            }
-
-                            alignment_preview_panel := View{
-                                width: Fill
-                                height: Fill
-
-                                alignment_slice_preview := AlignmentSlicePreview{}
-                            }
                         }
                     }
                 }
@@ -852,653 +659,16 @@ script_mod! {
 }
 
 #[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawHeightMap {
-    #[deref]
-    draw_super: DrawQuad,
-    #[live]
-    alpha: f32,
-    #[live]
-    uv_min: Vec2f,
-    #[live]
-    uv_max: Vec2f,
-    #[live]
-    wall_band_start: f32,
-}
-
-#[derive(Script, ScriptHook, Widget)]
-pub struct AlignmentSlicePreview {
-    #[uid]
-    uid: WidgetUid,
-    #[walk]
-    walk: Walk,
-    #[redraw]
-    #[live]
-    draw_bg: DrawQuad,
-    #[redraw]
-    #[live]
-    draw_map: DrawHeightMap,
-    #[redraw]
-    #[live]
-    draw_vector: DrawVector,
-    #[rust]
-    area: Area,
-    #[rust]
-    height_texture: Option<Texture>,
-    #[rust]
-    remote_height_texture: Option<Texture>,
-    #[rust]
-    local_preview: Option<XrDepthAlignSlicePreview>,
-    #[rust]
-    remote_height_map: Option<XrDepthAlignHeightMap>,
-}
-
-impl AlignmentSlicePreview {
-    const PAD: f32 = 14.0;
-    const PANEL_GAP: f32 = 14.0;
-    const GRID_DIVISIONS: usize = 4;
-    const CUTOUT_STEPS: usize = 40;
-    const MAP_ALPHA: f32 = 0.96;
-
-    fn preview_square(rect: Rect) -> (f32, f32, f32) {
-        let rect_x = rect.pos.x as f32;
-        let rect_y = rect.pos.y as f32;
-        let rect_w = rect.size.x as f32;
-        let rect_h = rect.size.y as f32;
-        let inner = (rect_w.min(rect_h) - Self::PAD * 2.0).max(1.0);
-        let ox = rect_x + (rect_w - inner) * 0.5;
-        let oy = rect_y + (rect_h - inner) * 0.5;
-        (ox, oy, inner)
-    }
-
-    fn preview_panel_square(rect: Rect, panel_index: usize, panel_count: usize) -> (f32, f32, f32) {
-        if panel_count <= 1 {
-            return Self::preview_square(rect);
-        }
-        let rect_x = rect.pos.x as f32;
-        let rect_y = rect.pos.y as f32;
-        let rect_w = rect.size.x as f32;
-        let rect_h = rect.size.y as f32;
-        let total_gap = Self::PANEL_GAP * (panel_count.saturating_sub(1)) as f32;
-        let inner = (((rect_w - total_gap) / panel_count.max(1) as f32).min(rect_h)
-            - Self::PAD * 2.0)
-            .max(1.0);
-        let total_w = inner * panel_count as f32 + total_gap;
-        let start_x = rect_x + (rect_w - total_w) * 0.5;
-        let ox = start_x + panel_index as f32 * (inner + Self::PANEL_GAP);
-        let oy = rect_y + (rect_h - inner) * 0.5;
-        (ox, oy, inner)
-    }
-
-    fn set_remote_height_map(
-        &mut self,
-        cx: &mut Cx,
-        remote_height_map: Option<XrDepthAlignHeightMap>,
-    ) {
-        if self.remote_height_map == remote_height_map {
-            return;
-        }
-        self.remote_height_map = remote_height_map;
-        if self.remote_height_map.is_none() {
-            self.remote_height_texture = None;
-        }
-        self.area.redraw(cx);
-    }
-
-    fn set_local_preview(&mut self, cx: &mut Cx, local_preview: Option<XrDepthAlignSlicePreview>) {
-        if self.local_preview == local_preview {
-            return;
-        }
-        self.local_preview = local_preview;
-        if self.local_preview.is_none() {
-            self.height_texture = None;
-        }
-        self.area.redraw(cx);
-    }
-
-    fn height_map_extent_x(height_map: &XrDepthAlignHeightMap) -> f32 {
-        height_map.extent_x_meters()
-    }
-
-    fn height_map_extent_z(height_map: &XrDepthAlignHeightMap) -> f32 {
-        height_map.extent_z_meters()
-    }
-
-    fn preview_scale(height_map: &XrDepthAlignHeightMap, inner: f32) -> f32 {
-        inner
-            / Self::height_map_extent_x(height_map)
-                .max(Self::height_map_extent_z(height_map))
-                .max(1.0e-5)
-    }
-
-    fn height_map_draw_rect(
-        height_map: &XrDepthAlignHeightMap,
-        ox: f32,
-        oy: f32,
-        inner: f32,
-    ) -> Rect {
-        let extent_x = Self::height_map_extent_x(height_map);
-        let extent_z = Self::height_map_extent_z(height_map);
-        if extent_x <= 1.0e-5 || extent_z <= 1.0e-5 {
-            return Rect {
-                pos: dvec2(ox as f64, oy as f64),
-                size: dvec2(inner.max(1.0) as f64, inner.max(1.0) as f64),
-            };
-        }
-        let scale = Self::preview_scale(height_map, inner);
-        let draw_w = extent_x * scale;
-        let draw_h = extent_z * scale;
-        Rect {
-            pos: dvec2(
-                (ox + (inner - draw_w) * 0.5) as f64,
-                (oy + (inner - draw_h) * 0.5) as f64,
-            ),
-            size: dvec2(draw_w.max(1.0) as f64, draw_h.max(1.0) as f64),
-        }
-    }
-
-    fn height_map_preview_point(
-        height_map: &XrDepthAlignHeightMap,
-        ox: f32,
-        oy: f32,
-        inner: f32,
-        point: Vec2f,
-    ) -> (f32, f32) {
-        let rect = Self::height_map_draw_rect(height_map, ox, oy, inner);
-        let extent_x = Self::height_map_extent_x(height_map).max(1.0e-5);
-        let extent_z = Self::height_map_extent_z(height_map).max(1.0e-5);
-        let nx = ((point.x - height_map.origin_x) / extent_x).clamp(0.0, 1.0);
-        let nz = ((point.y - height_map.origin_z) / extent_z).clamp(0.0, 1.0);
-        (
-            rect.pos.x as f32 + nx * rect.size.x as f32,
-            rect.pos.y as f32 + nz * rect.size.y as f32,
-        )
-    }
-
-    fn map_preview_point(
-        preview: &XrDepthAlignSlicePreview,
-        ox: f32,
-        oy: f32,
-        inner: f32,
-        point: Vec2f,
-    ) -> (f32, f32) {
-        // The height-map texture is uploaded row-major with z increasing downward on screen,
-        // so the vector overlay must use the same orientation to line up with the image.
-        Self::height_map_preview_point(&preview.height_map, ox, oy, inner, point)
-    }
-
-    fn draw_grid(&mut self, height_map: &XrDepthAlignHeightMap, ox: f32, oy: f32, inner: f32) {
-        let rect = Self::height_map_draw_rect(height_map, ox, oy, inner);
-        let ox = rect.pos.x as f32;
-        let oy = rect.pos.y as f32;
-        let inner_w = rect.size.x as f32;
-        let inner_h = rect.size.y as f32;
-        self.draw_vector.set_color_hex(0x163042, 1.0);
-        for step in 0..=Self::GRID_DIVISIONS {
-            let t = step as f32 / Self::GRID_DIVISIONS as f32;
-            let px = ox + inner_w * t;
-            let py = oy + inner_h * t;
-            self.draw_vector.move_to(px, oy);
-            self.draw_vector.line_to(px, oy + inner_h);
-            self.draw_vector.move_to(ox, py);
-            self.draw_vector.line_to(ox + inner_w, py);
-        }
-        self.draw_vector.stroke(1.0);
-
-        self.draw_vector.set_color_hex(0x42657c, 1.0);
-        self.draw_vector.rect(ox, oy, inner_w, inner_h);
-        self.draw_vector.stroke(1.5);
-    }
-
-    fn preview_height_to_u8(height_map: &XrDepthAlignHeightMap, value: f32) -> u8 {
-        if !value.is_finite() {
-            0
-        } else {
-            let span = (height_map.top_y_meters - height_map.bottom_y_meters).max(1.0e-5);
-            let normalized = ((value - height_map.bottom_y_meters) / span).clamp(0.0, 1.0);
-            1 + (normalized * 254.0).round() as u8
-        }
-    }
-
-    fn ensure_height_texture(
-        texture_slot: &mut Option<Texture>,
-        cx: &mut Cx,
-        height_map: &XrDepthAlignHeightMap,
-    ) {
-        let map_width = height_map.size_x as usize;
-        let map_height = height_map.size_z as usize;
-        if map_width == 0
-            || map_height == 0
-            || height_map.heights_meters.len() != map_width * map_height
-        {
-            *texture_slot = None;
-            return;
-        }
-
-        let needs_recreate = texture_slot.as_ref().is_none_or(|texture| {
-            !matches!(
-                texture.get_format(cx),
-                TextureFormat::VecRu8 { width, height, .. }
-                    if *width == map_width && *height == map_height
-            )
-        });
-
-        let pixels = height_map
-            .heights_meters
-            .iter()
-            .map(|value| Self::preview_height_to_u8(height_map, *value))
-            .collect::<Vec<_>>();
-
-        if needs_recreate {
-            *texture_slot = Some(Texture::new_with_format(
-                cx,
-                TextureFormat::VecRu8 {
-                    width: map_width,
-                    height: map_height,
-                    data: Some(pixels),
-                    unpack_row_length: None,
-                    updated: TextureUpdated::Full,
-                },
-            ));
-            return;
-        }
-
-        if let Some(texture) = texture_slot.as_ref() {
-            let mut data = texture.take_vec_u8(cx);
-            if data.len() != pixels.len() {
-                data.resize(pixels.len(), 0);
-            }
-            data.copy_from_slice(&pixels);
-            texture.put_back_vec_u8(cx, data, None);
-        }
-    }
-
-    fn draw_origin_cross_for_height_map(
-        &mut self,
-        height_map: &XrDepthAlignHeightMap,
-        ox: f32,
-        oy: f32,
-        inner: f32,
-    ) {
-        if height_map.origin_x > 0.0
-            || height_map.origin_z > 0.0
-            || height_map.origin_x + Self::height_map_extent_x(height_map) < 0.0
-            || height_map.origin_z + Self::height_map_extent_z(height_map) < 0.0
-        {
-            return;
-        }
-        let (cx, cy) = Self::height_map_preview_point(height_map, ox, oy, inner, vec2f(0.0, 0.0));
-        self.draw_vector.set_color_hex(0xffcf6a, 1.0);
-        self.draw_vector.move_to(cx - 6.0, cy);
-        self.draw_vector.line_to(cx + 6.0, cy);
-        self.draw_vector.move_to(cx, cy - 6.0);
-        self.draw_vector.line_to(cx, cy + 6.0);
-        self.draw_vector.stroke(1.2);
-    }
-
-    fn draw_origin_cross(
-        &mut self,
-        preview: &XrDepthAlignSlicePreview,
-        ox: f32,
-        oy: f32,
-        inner: f32,
-    ) {
-        self.draw_origin_cross_for_height_map(&preview.height_map, ox, oy, inner);
-    }
-
-    fn draw_cutout_ring_for_height_map(
-        &mut self,
-        height_map: &XrDepthAlignHeightMap,
-        center: Vec2f,
-        radius_meters: f32,
-        ox: f32,
-        oy: f32,
-        inner: f32,
-        color_hex: u32,
-    ) {
-        let (cx, cy) = Self::height_map_preview_point(height_map, ox, oy, inner, center);
-        let radius = radius_meters * Self::preview_scale(height_map, inner);
-        self.draw_vector.set_color_hex(color_hex, 1.0);
-        for step in 0..=Self::CUTOUT_STEPS {
-            let angle = step as f32 / Self::CUTOUT_STEPS as f32 * std::f32::consts::TAU;
-            let px = cx + angle.cos() * radius;
-            let py = cy + angle.sin() * radius;
-            if step == 0 {
-                self.draw_vector.move_to(px, py);
-            } else {
-                self.draw_vector.line_to(px, py);
-            }
-        }
-        self.draw_vector.stroke(1.2);
-    }
-
-    fn draw_cutout_ring(
-        &mut self,
-        preview: &XrDepthAlignSlicePreview,
-        ox: f32,
-        oy: f32,
-        inner: f32,
-    ) {
-        let Some(center) = preview.cutout_center else {
-            return;
-        };
-        self.draw_cutout_ring_for_height_map(
-            &preview.height_map,
-            center,
-            preview.cutout_radius_meters,
-            ox,
-            oy,
-            inner,
-            0xff8d62,
-        );
-    }
-
-    fn draw_cutout_heading(
-        &mut self,
-        preview: &XrDepthAlignSlicePreview,
-        ox: f32,
-        oy: f32,
-        inner: f32,
-    ) {
-        let (Some(center), Some(forward)) = (preview.cutout_center, preview.cutout_forward) else {
-            return;
-        };
-        let forward_len = forward.length();
-        if forward_len <= 1.0e-5 {
-            return;
-        }
-        let (cx, cy) = Self::map_preview_point(preview, ox, oy, inner, center);
-        let scale = Self::preview_scale(&preview.height_map, inner);
-        let dir = vec2f(forward.x, forward.y) * forward_len.recip();
-        let start = vec2f(cx, cy) + dir * (preview.cutout_radius_meters * scale + 4.0);
-        let tip = start + dir * 28.0;
-        let side = vec2f(-dir.y, dir.x);
-        let left = tip - dir * 8.0 + side * 5.0;
-        let right = tip - dir * 8.0 - side * 5.0;
-        self.draw_vector.set_color_hex(0xffe07a, 1.0);
-        self.draw_vector.move_to(start.x, start.y);
-        self.draw_vector.line_to(tip.x, tip.y);
-        self.draw_vector.move_to(left.x, left.y);
-        self.draw_vector.line_to(tip.x, tip.y);
-        self.draw_vector.line_to(right.x, right.y);
-        self.draw_vector.stroke(1.8);
-    }
-
-    fn draw_height_map_rect(
-        &mut self,
-        cx: &mut Cx2d,
-        texture: &Texture,
-        rect: Rect,
-        alpha: f32,
-        uv_min: Vec2f,
-        uv_max: Vec2f,
-    ) {
-        self.draw_map.alpha = alpha;
-        self.draw_map.uv_min = uv_min;
-        self.draw_map.uv_max = uv_max;
-        self.draw_map.draw_vars.set_texture(0, texture);
-        self.draw_map.draw_abs(cx, rect);
-    }
-}
-
-impl Widget for AlignmentSlicePreview {
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        let rect = cx.walk_turtle(walk);
-        self.draw_bg.draw_abs(cx, rect);
-        self.area = self.draw_bg.area();
-
-        let panel_count = if self.remote_height_map.is_some() {
-            2
-        } else {
-            1
-        };
-        let (local_ox, local_oy, local_inner) = Self::preview_panel_square(rect, 0, panel_count);
-        let remote_panel =
-            (panel_count > 1).then(|| Self::preview_panel_square(rect, 1, panel_count));
-        let local_preview = self.local_preview.clone();
-        let remote_height_map = self.remote_height_map.clone();
-        if let Some(preview) = local_preview.as_ref() {
-            Self::ensure_height_texture(&mut self.height_texture, cx.cx, &preview.height_map);
-            if let Some(texture) = self.height_texture.as_ref().cloned() {
-                self.draw_height_map_rect(
-                    cx,
-                    &texture,
-                    Self::height_map_draw_rect(
-                        &preview.height_map,
-                        local_ox,
-                        local_oy,
-                        local_inner,
-                    ),
-                    Self::MAP_ALPHA,
-                    vec2f(0.0, 0.0),
-                    vec2f(1.0, 1.0),
-                );
-            } else {
-                self.draw_map.draw_vars.empty_texture(0);
-            }
-        } else {
-            self.draw_map.draw_vars.empty_texture(0);
-        }
-        if let (Some(remote_height_map), Some((remote_ox, remote_oy, remote_inner))) =
-            (remote_height_map.as_ref(), remote_panel)
-        {
-            Self::ensure_height_texture(&mut self.remote_height_texture, cx.cx, remote_height_map);
-            if let Some(texture) = self.remote_height_texture.as_ref().cloned() {
-                self.draw_height_map_rect(
-                    cx,
-                    &texture,
-                    Self::height_map_draw_rect(
-                        remote_height_map,
-                        remote_ox,
-                        remote_oy,
-                        remote_inner,
-                    ),
-                    Self::MAP_ALPHA,
-                    vec2f(0.0, 0.0),
-                    vec2f(1.0, 1.0),
-                );
-            }
-        }
-        self.draw_vector.begin();
-        if let Some(preview) = local_preview.as_ref() {
-            self.draw_grid(&preview.height_map, local_ox, local_oy, local_inner);
-            self.draw_origin_cross(preview, local_ox, local_oy, local_inner);
-            self.draw_cutout_ring(preview, local_ox, local_oy, local_inner);
-            self.draw_cutout_heading(preview, local_ox, local_oy, local_inner);
-        } else {
-            let empty_map = XrDepthAlignHeightMap::default();
-            self.draw_grid(&empty_map, local_ox, local_oy, local_inner);
-        }
-        if let Some((remote_ox, remote_oy, remote_inner)) = remote_panel {
-            if let Some(remote_height_map) = remote_height_map.as_ref() {
-                self.draw_grid(remote_height_map, remote_ox, remote_oy, remote_inner);
-                self.draw_origin_cross_for_height_map(
-                    remote_height_map,
-                    remote_ox,
-                    remote_oy,
-                    remote_inner,
-                );
-                if let Some(center) = remote_height_map.player_cutout_center {
-                    self.draw_cutout_ring_for_height_map(
-                        remote_height_map,
-                        center,
-                        remote_height_map.player_cutout_radius_meters,
-                        remote_ox,
-                        remote_oy,
-                        remote_inner,
-                        0x9ed5ff,
-                    );
-                }
-            } else {
-                let empty_map = XrDepthAlignHeightMap::default();
-                self.draw_grid(&empty_map, remote_ox, remote_oy, remote_inner);
-            }
-        }
-        self.draw_vector.end(cx);
-        DrawStep::done()
-    }
-
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if matches!(event, Event::Signal | Event::XrUpdate(_)) {
-            self.area.redraw(cx);
-        }
-    }
-}
-
-#[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
     ui: WidgetRef,
     #[rust]
     network_started: bool,
     #[rust]
-    last_physics_geometry_text: String,
-    #[rust]
-    last_physics_timing_text: String,
-    #[rust]
-    last_frame_cpu_text: String,
-    #[rust]
-    last_xr_runtime_text: String,
-    #[rust]
-    last_peer_sync_status_text: String,
-    #[rust]
-    last_alignment_state_text: String,
-    #[rust]
-    last_alignment_debug_text: String,
-    #[rust("Dump: waiting for local + peer heightmaps".to_string())]
-    last_dump_status_text: String,
-    #[rust]
-    dump_upload_results: ToUIReceiver<DumpUploadResult>,
-    #[rust(false)]
-    dump_upload_in_flight: bool,
+    last_debug_text: String,
 }
 
 impl App {
-    fn set_dump_status(&mut self, cx: &mut Cx, status: String) {
-        if self.last_dump_status_text == status {
-            return;
-        }
-        self.ui
-            .widget(cx, ids!(dump_status_field))
-            .set_text(cx, &status);
-        self.last_dump_status_text = status;
-    }
-
-    fn current_alignment_dump_pair(
-        &self,
-        cx: &mut Cx,
-    ) -> Result<XrNetAlignmentDescriptorDumpPair, String> {
-        let snapshot = cx
-            .xr_tsdf()
-            .latest_tsdf_snapshot()
-            .ok_or_else(|| "Dump: waiting for local TSDF snapshot".to_string())?;
-        let local_descriptor =
-            XrNetAlignmentDescriptorFrame::from_tsdf_snapshot(snapshot.as_ref(), 0.0)
-                .ok_or_else(|| "Dump: waiting for local published heightmap".to_string())?;
-        let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
-        let Some(peer_sync) = peer_sync_widget.borrow::<XrPeerSync>() else {
-            return Err("Dump: XR peer sync unavailable".to_string());
-        };
-        let Some((peer_id, remote_descriptor)) = peer_sync.raw_peer_alignment_descriptor()
-        else {
-            return Err(format!(
-                "Dump: waiting for peer heightmap | {} | {}",
-                peer_sync.status_text(),
-                peer_sync.peer_scene_text()
-            ));
-        };
-        if remote_descriptor.descriptor.height_map.is_none() {
-            return Err(format!(
-                "Dump: peer descriptor arrived without heightmap | {}",
-                peer_sync.peer_scene_text()
-            ));
-        }
-        Ok(XrNetAlignmentDescriptorDumpPair::new(
-            peer_id,
-            local_descriptor,
-            remote_descriptor,
-        ))
-    }
-
-    fn dump_pair_name(pair: &XrNetAlignmentDescriptorDumpPair) -> String {
-        format!(
-            "align-pair-{:08x}-r{:04}-{}",
-            pair.remote_peer_id.0, pair.remote_descriptor.seq, pair.captured_at_unix_ms
-        )
-    }
-
-    fn start_alignment_dump_upload(&mut self, cx: &mut Cx) {
-        if self.dump_upload_in_flight {
-            self.set_dump_status(cx, "Dump: upload already in flight".to_string());
-            return;
-        }
-        let pair = match self.current_alignment_dump_pair(cx) {
-            Ok(pair) => pair,
-            Err(message) => {
-                self.set_dump_status(cx, message);
-                return;
-            }
-        };
-        let pair_name = Self::dump_pair_name(&pair);
-        let file_bytes = pair.to_file_bytes();
-        let byte_count = file_bytes.len();
-        self.dump_upload_in_flight = true;
-        self.set_dump_status(
-            cx,
-            format!(
-                "Dump: uploading {pair_name} ({} KB) to {}",
-                (byte_count + 1023) / 1024,
-                XR_ALIGNMENT_DUMP_SERVER
-            ),
-        );
-        let result_tx = self.dump_upload_results.sender();
-        cx.spawn_thread(move || {
-            let result = match upload_alignment_dump(&pair_name, &file_bytes) {
-                Ok(server_message) => DumpUploadResult::Success {
-                    pair_name,
-                    byte_count,
-                    server_message,
-                },
-                Err(message) => DumpUploadResult::Error { pair_name, message },
-            };
-            let _ = result_tx.send(result);
-        });
-    }
-
-    fn handle_dump_signal(&mut self, cx: &mut Cx) {
-        let mut latest_result = None;
-        while let Ok(result) = self.dump_upload_results.try_recv() {
-            latest_result = Some(result);
-        }
-        let Some(result) = latest_result else {
-            return;
-        };
-        self.dump_upload_in_flight = false;
-        match result {
-            DumpUploadResult::Success {
-                pair_name,
-                byte_count,
-                server_message,
-            } => {
-                let suffix = if server_message.is_empty() {
-                    String::new()
-                } else {
-                    format!(" -> {server_message}")
-                };
-                self.set_dump_status(
-                    cx,
-                    format!(
-                        "Dump: uploaded {pair_name} ({} KB){suffix}",
-                        (byte_count + 1023) / 1024
-                    ),
-                );
-            }
-            DumpUploadResult::Error { pair_name, message } => {
-                self.set_dump_status(cx, format!("Dump: {pair_name} failed: {message}"));
-            }
-        }
-    }
-
     fn ensure_network_started(&mut self, cx: &mut Cx) {
         if self.network_started {
             return;
@@ -1516,28 +686,18 @@ impl App {
     fn refresh_debug_fields(&mut self, cx: &mut Cx) {
         let (
             surface_count,
-            vertex_count,
-            triangle_count,
             compute_ms,
             query_ms,
             rapier_ms,
-            physics_time_scale,
-            step_dt_ms,
-            tsdf_step_stats,
             frame_cpu_ms,
             frame_update_cpu_ms,
             frame_draw_cpu_ms,
         ) = if let Some(root) = self.ui.borrow::<XrRoot>() {
             (
                 root.physics_depth_query_surface_count(),
-                root.physics_depth_query_vertex_count(),
-                root.physics_depth_query_triangle_count(),
                 root.physics_compute_ms(),
                 root.physics_tsdf_query_ms(),
                 root.physics_rapier_step_ms(),
-                root.physics_time_scale(),
-                root.physics_step_dt_ms(),
-                cx.xr_tsdf().cooperative_step_stats(),
                 root.frame_cpu_ms(),
                 root.frame_update_cpu_ms(),
                 root.frame_draw_cpu_ms(),
@@ -1545,142 +705,21 @@ impl App {
         } else {
             return;
         };
-        let (peer_sync_status_text, alignment_debug_text, alignment_state_text) = self
+        let connected_peers = self
             .ui
             .widget(cx, ids!(xr_peer_sync))
             .borrow::<XrPeerSync>()
-            .map(|peer_sync| {
-                (
-                    peer_sync.status_text().to_string(),
-                    peer_sync.alignment_debug_text().to_string(),
-                    peer_sync.alignment_state_text().to_string(),
-                )
-            })
-            .unwrap_or_else(|| {
-                (
-                    "AlignSync: unavailable".to_string(),
-                    "AlignDbg: unavailable".to_string(),
-                    "AlignState: unavailable".to_string(),
-                )
-            });
-        self.ui
-            .widget(cx, ids!(alignment_preview_panel))
-            .set_visible(cx, XR_SHOW_ALIGNMENT_HEIGHTMAP_PREVIEW);
-        if XR_SHOW_ALIGNMENT_HEIGHTMAP_PREVIEW {
-            let remote_height_map = self
-                .ui
-                .widget(cx, ids!(xr_peer_sync))
-                .borrow::<XrPeerSync>()
-                .and_then(|peer_sync| peer_sync.raw_peer_height_map());
-            let local_slice_preview = cx
-                .xr_tsdf()
-                .latest_tsdf_snapshot()
-                .as_ref()
-                .and_then(|snapshot| tsdf_snapshot_height_map_preview(snapshot.as_ref()));
-            if let Some(mut preview) = self
-                .ui
-                .widget(cx, ids!(alignment_slice_preview))
-                .borrow_mut::<AlignmentSlicePreview>()
-            {
-                preview.set_local_preview(cx, local_slice_preview);
-                preview.set_remote_height_map(cx, remote_height_map);
-            }
-        }
-        if self.last_peer_sync_status_text != peer_sync_status_text {
-            self.ui
-                .widget(cx, ids!(peer_sync_status_field))
-                .set_text(cx, &peer_sync_status_text);
-            self.last_peer_sync_status_text = peer_sync_status_text;
-        }
-        if self.last_alignment_debug_text != alignment_debug_text {
-            self.ui
-                .widget(cx, ids!(alignment_debug_field))
-                .set_text(cx, &alignment_debug_text);
-            self.last_alignment_debug_text = alignment_debug_text;
-        }
-        if self.last_alignment_state_text != alignment_state_text {
-            self.ui
-                .widget(cx, ids!(alignment_state_field))
-                .set_text(cx, &alignment_state_text);
-            self.last_alignment_state_text = alignment_state_text;
-        }
-        let geometry_text = format!(
-            "Physics geometry: {} planes, {} vertices, {} triangles",
-            surface_count, vertex_count, triangle_count
-        );
-        if self.last_physics_geometry_text != geometry_text {
-            self.ui
-                .widget(cx, ids!(physics_geom_field))
-                .set_text(cx, &geometry_text);
-            self.last_physics_geometry_text = geometry_text;
-        }
-
-        let timing_text = if step_dt_ms > 0.0 {
-            format!(
-                "Physics compute: {:.2} ms | query {:.2} ms | rapier {:.2} ms | tick {:.2} ms ({:.0} Hz) | sim {:.2}x | TSDF step {:.2}/{:.2} ms",
-                compute_ms,
-                query_ms,
-                rapier_ms,
-                step_dt_ms,
-                1000.0 / step_dt_ms,
-                physics_time_scale,
-                tsdf_step_stats.last_step_micros as f64 / 1000.0,
-                tsdf_step_stats.average_step_micros as f64 / 1000.0,
-            )
-        } else {
-            format!(
-                "Physics compute: {:.2} ms | query {:.2} ms | rapier {:.2} ms | sim {:.2}x | TSDF step {:.2}/{:.2} ms",
-                compute_ms,
-                query_ms,
-                rapier_ms,
-                physics_time_scale,
-                tsdf_step_stats.last_step_micros as f64 / 1000.0,
-                tsdf_step_stats.average_step_micros as f64 / 1000.0,
-            )
-        };
-        if self.last_physics_timing_text != timing_text {
-            self.ui
-                .widget(cx, ids!(physics_timing_field))
-                .set_text(cx, &timing_text);
-            self.last_physics_timing_text = timing_text;
-        }
-
-        let frame_cpu_text = format!(
-            "CPU frame: {:.2} ms total | update {:.2} ms | draw {:.2} ms",
-            frame_cpu_ms, frame_update_cpu_ms, frame_draw_cpu_ms
-        );
-        if self.last_frame_cpu_text != frame_cpu_text {
-            self.ui
-                .widget(cx, ids!(frame_cpu_field))
-                .set_text(cx, &frame_cpu_text);
-            self.last_frame_cpu_text = frame_cpu_text;
-        }
-
-        let (tsdf_memory_mb, tsdf_fill_percent, tsdf_bytes_per_active_voxel) = cx
+            .map(|peer_sync| peer_sync.connected_peer_count())
+            .unwrap_or(0);
+        let tsdf_memory_mb = cx
             .xr_tsdf()
             .latest_tsdf_snapshot()
             .as_ref()
             .map(|snapshot| {
                 let grid = &snapshot.grid;
-                let heap_bytes = grid.heap_bytes() as f64;
-                let allocated_voxels = grid.chunk_count().saturating_mul(grid.chunk_volume);
-                let fill_percent = if allocated_voxels == 0 {
-                    0.0
-                } else {
-                    grid.active_value_count as f64 * 100.0 / allocated_voxels as f64
-                };
-                let bytes_per_active_voxel = if grid.active_value_count == 0 {
-                    0.0
-                } else {
-                    heap_bytes / grid.active_value_count as f64
-                };
-                (heap_bytes / 1_000_000.0, fill_percent, bytes_per_active_voxel)
+                grid.heap_bytes() as f64 / 1_000_000.0
             })
-            .unwrap_or((0.0, 0.0, 0.0));
-        let tsdf_debug_text = format!(
-            "{:.1} MB | occ {:.0}% | {:.1} B/active",
-            tsdf_memory_mb, tsdf_fill_percent, tsdf_bytes_per_active_voxel
-        );
+            .unwrap_or(0.0);
         let (depth_frames_seen, depth_frames_dropped) = cx
             .xr_tsdf()
             .state()
@@ -1689,119 +728,24 @@ impl App {
             .map(|state| (state.stats.frames_seen, state.stats.frames_dropped))
             .unwrap_or((0, 0));
         let depth_frames_kept = depth_frames_seen.saturating_sub(depth_frames_dropped);
-        let depth_drop_percent = if depth_frames_seen > 0 {
-            depth_frames_dropped as f64 * 100.0 / depth_frames_seen as f64
-        } else {
-            0.0
-        };
-        let xr_runtime_text = match (
-            cx.xr_render_scale(),
-            cx.xr_display_refresh_rate_hz(),
-            cx.xr_effective_frame_rate_hz(),
-            cx.xr_gpu_frame_time_ms(),
-        ) {
-            (Some(scale), Some(refresh_hz), Some(effective_hz), Some(gpu_ms)) => format!(
-                "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU {:.2} ms",
-                cx.xr_tsdf().voxel_size_meters() * 100.0,
-                tsdf_debug_text,
-                depth_frames_seen,
-                depth_frames_kept,
-                depth_frames_dropped,
-                depth_drop_percent,
-                scale,
-                refresh_hz,
-                effective_hz,
-                gpu_ms
-            ),
-            (Some(scale), Some(refresh_hz), Some(effective_hz), None) => format!(
-                "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU waiting",
-                cx.xr_tsdf().voxel_size_meters() * 100.0,
-                tsdf_debug_text,
-                depth_frames_seen,
-                depth_frames_kept,
-                depth_frames_dropped,
-                depth_drop_percent,
-                scale,
-                refresh_hz,
-                effective_hz
-            ),
-            (Some(scale), Some(refresh_hz), None, Some(gpu_ms)) => format!(
-                "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU {:.2} ms",
-                cx.xr_tsdf().voxel_size_meters() * 100.0,
-                tsdf_debug_text,
-                depth_frames_seen,
-                depth_frames_kept,
-                depth_frames_dropped,
-                depth_drop_percent,
-                scale,
-                refresh_hz,
-                gpu_ms
-            ),
-            (Some(scale), Some(refresh_hz), None, None) => format!(
-                "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU waiting",
-                cx.xr_tsdf().voxel_size_meters() * 100.0,
-                tsdf_debug_text,
-                depth_frames_seen,
-                depth_frames_kept,
-                depth_frames_dropped,
-                depth_drop_percent,
-                scale,
-                refresh_hz
-            ),
-            (Some(scale), None, _, Some(gpu_ms)) => {
-                format!(
-                    "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh waiting | GPU {:.2} ms",
-                    cx.xr_tsdf().voxel_size_meters() * 100.0,
-                    tsdf_debug_text,
-                    depth_frames_seen,
-                    depth_frames_kept,
-                    depth_frames_dropped,
-                    depth_drop_percent,
-                    scale,
-                    gpu_ms
-                )
-            }
-            (Some(scale), None, _, None) => {
-                format!(
-                    "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR scale: {:.2} | refresh waiting | GPU waiting",
-                    cx.xr_tsdf().voxel_size_meters() * 100.0,
-                    tsdf_debug_text,
-                    depth_frames_seen,
-                    depth_frames_kept,
-                    depth_frames_dropped,
-                    depth_drop_percent,
-                    scale
-                )
-            }
-            (None, _, _, _) => format!(
-                "Depth: {:.0} cm | TSDF {} | in {} keep {} drop {} ({:.0}%) | XR render scale: not active",
-                cx.xr_tsdf().voxel_size_meters() * 100.0,
-                tsdf_debug_text,
-                depth_frames_seen,
-                depth_frames_kept,
-                depth_frames_dropped,
-                depth_drop_percent
-            ),
-        };
-        if self.last_xr_runtime_text != xr_runtime_text {
+        let gpu_time_text = cx
+            .xr_gpu_frame_time_ms()
+            .map(|gpu_ms| format!("{gpu_ms:.2} ms"))
+            .unwrap_or_else(|| "waiting".to_string());
+        let debug_text = format!(
+            "Connected peers: {connected_peers}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nCPU frame time: {frame_cpu_ms:.2} ms\nUpdate time: {frame_update_cpu_ms:.2} ms\nDraw time: {frame_draw_cpu_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}"
+        );
+        if self.last_debug_text != debug_text {
             self.ui
-                .widget(cx, ids!(xr_runtime_field))
-                .set_text(cx, &xr_runtime_text);
-            self.last_xr_runtime_text = xr_runtime_text;
+                .widget(cx, ids!(debug_field))
+                .set_text(cx, &debug_text);
+            self.last_debug_text = debug_text;
         }
     }
 }
 
 impl MatchEvent for App {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self
-            .ui
-            .button(cx, ids!(dump_alignment_pair_button))
-            .clicked(actions)
-        {
-            self.start_alignment_dump_upload(cx);
-        }
-    }
+    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
 }
 
 impl AppMain for App {
@@ -1817,58 +761,6 @@ impl AppMain for App {
         if matches!(event, Event::Startup) {
             self.ensure_network_started(cx);
         }
-        if matches!(event, Event::Signal) {
-            self.handle_dump_signal(cx);
-        }
         self.refresh_debug_fields(cx);
-    }
-}
-
-fn upload_alignment_dump(pair_name: &str, file_bytes: &[u8]) -> Result<String, String> {
-    let socket_addr = XR_ALIGNMENT_DUMP_SERVER
-        .parse::<SocketAddr>()
-        .map_err(|error| format!("invalid dump server address: {error}"))?;
-    let mut stream = TcpStream::connect_timeout(&socket_addr, XR_ALIGNMENT_DUMP_CONNECT_TIMEOUT)
-        .map_err(|error| format!("connect failed: {error}"))?;
-    stream
-        .set_read_timeout(Some(XR_ALIGNMENT_DUMP_IO_TIMEOUT))
-        .map_err(|error| format!("set read timeout failed: {error}"))?;
-    stream
-        .set_write_timeout(Some(XR_ALIGNMENT_DUMP_IO_TIMEOUT))
-        .map_err(|error| format!("set write timeout failed: {error}"))?;
-
-    let request = format!(
-        "POST /dump/{pair_name} HTTP/1.1\r\nHost: {XR_ALIGNMENT_DUMP_SERVER}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        file_bytes.len()
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| format!("write request header failed: {error}"))?;
-    stream
-        .write_all(file_bytes)
-        .map_err(|error| format!("write request body failed: {error}"))?;
-    stream
-        .flush()
-        .map_err(|error| format!("flush failed: {error}"))?;
-
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| format!("read response failed: {error}"))?;
-    let status_line = response
-        .lines()
-        .next()
-        .map(str::trim)
-        .unwrap_or("HTTP/1.1 500 empty response");
-    let response_body = response
-        .split_once("\r\n\r\n")
-        .map(|(_, body)| body.trim().to_string())
-        .unwrap_or_default();
-    if status_line.contains(" 200 ") || status_line.contains(" 201 ") {
-        Ok(response_body)
-    } else if response_body.is_empty() {
-        Err(format!("server returned {status_line}"))
-    } else {
-        Err(format!("{status_line}: {response_body}"))
     }
 }

@@ -68,10 +68,7 @@ pub(super) struct XrPhysicsWorkerResult {
     pub(super) physics_compute_ms: f64,
     pub(super) physics_tsdf_query_ms: f64,
     pub(super) physics_rapier_step_ms: f64,
-    pub(super) physics_step_dt_ms: f64,
     pub(super) physics_depth_query_surface_count: usize,
-    pub(super) physics_depth_query_vertex_count: usize,
-    pub(super) physics_depth_query_triangle_count: usize,
 }
 
 pub(super) struct XrPhysicsWorker {
@@ -283,34 +280,25 @@ fn physics_worker_loop(
                     &depth_mesh,
                 );
                 let physics_tsdf_query_ms = tsdf_query_started.elapsed().as_secs_f64() * 1000.0;
-                let (
-                    runtime_bodies,
-                    physics_rapier_step_ms,
-                    physics_step_dt_ms,
-                    physics_depth_query_surface_count,
-                    physics_depth_query_vertex_count,
-                    physics_depth_query_triangle_count,
-                ) = if let Some(scene) = scene.as_mut() {
-                    let simulation_dt = (adaptive_step_dt * step.time_scale.clamp(0.1, 1.0))
-                        .clamp(XR_WORKER_SIMULATION_DT_MIN, XR_WORKER_SIMULATION_DT_MAX);
-                    scene.set_simulation_dt(simulation_dt);
-                    let rapier_step_started = Instant::now();
-                    scene.step();
-                    let physics_rapier_step_ms =
-                        rapier_step_started.elapsed().as_secs_f64() * 1000.0;
-                    let stats = scene.depth_query_stats();
-                    snapshot_runtime_bodies(scene, &mut runtime_bodies_scratch);
-                    (
-                        mem::take(&mut runtime_bodies_scratch),
-                        physics_rapier_step_ms,
-                        simulation_dt as f64 * 1000.0,
-                        stats.active_surface_count,
-                        stats.vertex_count,
-                        stats.triangle_count,
-                    )
-                } else {
-                    (HashMap::new(), 0.0, 0.0, 0, 0, 0)
-                };
+                let (runtime_bodies, physics_rapier_step_ms, physics_depth_query_surface_count) =
+                    if let Some(scene) = scene.as_mut() {
+                        let simulation_dt = (adaptive_step_dt * step.time_scale.clamp(0.1, 1.0))
+                            .clamp(XR_WORKER_SIMULATION_DT_MIN, XR_WORKER_SIMULATION_DT_MAX);
+                        scene.set_simulation_dt(simulation_dt);
+                        let rapier_step_started = Instant::now();
+                        scene.step();
+                        let physics_rapier_step_ms =
+                            rapier_step_started.elapsed().as_secs_f64() * 1000.0;
+                        let stats = scene.depth_query_stats();
+                        snapshot_runtime_bodies(scene, &mut runtime_bodies_scratch);
+                        (
+                            mem::take(&mut runtime_bodies_scratch),
+                            physics_rapier_step_ms,
+                            stats.surface_count,
+                        )
+                    } else {
+                        (HashMap::new(), 0.0, 0)
+                    };
                 if step.include_retained_hits {
                     snapshot_retained_hits(&retained_hits, &mut retained_hits_snapshot_scratch);
                 } else {
@@ -327,10 +315,7 @@ fn physics_worker_loop(
                         physics_compute_ms: started.elapsed().as_secs_f64() * 1000.0,
                         physics_tsdf_query_ms,
                         physics_rapier_step_ms,
-                        physics_step_dt_ms,
                         physics_depth_query_surface_count,
-                        physics_depth_query_vertex_count,
-                        physics_depth_query_triangle_count,
                     },
                 );
                 recycle_worker_buffers(
@@ -343,19 +328,13 @@ fn physics_worker_loop(
         }
 
         if should_publish {
-            let (runtime_bodies, surface_count, vertex_count, triangle_count) =
-                if let Some(scene) = scene.as_ref() {
-                    let stats = scene.depth_query_stats();
-                    snapshot_runtime_bodies(scene, &mut runtime_bodies_scratch);
-                    (
-                        mem::take(&mut runtime_bodies_scratch),
-                        stats.active_surface_count,
-                        stats.vertex_count,
-                        stats.triangle_count,
-                    )
-                } else {
-                    (HashMap::new(), 0, 0, 0)
-                };
+            let (runtime_bodies, surface_count) = if let Some(scene) = scene.as_ref() {
+                let stats = scene.depth_query_stats();
+                snapshot_runtime_bodies(scene, &mut runtime_bodies_scratch);
+                (mem::take(&mut runtime_bodies_scratch), stats.surface_count)
+            } else {
+                (HashMap::new(), 0)
+            };
             let recycled = publish_worker_result(
                 &latest_result,
                 XrPhysicsWorkerResult {
@@ -365,13 +344,7 @@ fn physics_worker_loop(
                     physics_compute_ms: 0.0,
                     physics_tsdf_query_ms: 0.0,
                     physics_rapier_step_ms: 0.0,
-                    physics_step_dt_ms: scene
-                        .as_ref()
-                        .map(|scene| scene.simulation_dt() as f64 * 1000.0)
-                        .unwrap_or(XR_WORKER_SIMULATION_DT_DEFAULT as f64 * 1000.0),
                     physics_depth_query_surface_count: surface_count,
-                    physics_depth_query_vertex_count: vertex_count,
-                    physics_depth_query_triangle_count: triangle_count,
                 },
             );
             recycle_worker_buffers(

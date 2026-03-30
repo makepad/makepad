@@ -2,9 +2,7 @@ use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
 use super::{
     scene_draw::{apply_scene_to_draw_pbr, scene_state_from_cx},
-    xr_node::{
-        xr_env_texture_from_scope, xr_passthrough_from_scope, xr_widget_world_transform, XrNode,
-    },
+    xr_node::{xr_widget_world_transform, XrDrawContext, XrNode},
 };
 
 const XR_REFRACTIVE_CAMERA_FOV_Y_DEGREES: f32 = 92.0;
@@ -96,7 +94,8 @@ impl Widget for RefractiveCube {
         let half_extents = self.half_extents();
 
         let _ = apply_scene_to_draw_pbr(&mut self.draw_pbr.draw_super, cx);
-        let passthrough = xr_passthrough_from_scope(scope);
+        let draw_context = XrDrawContext::from_scope(scope);
+        let passthrough = draw_context.passthrough();
         self.draw_pbr.source_size = passthrough.source_size;
         self.draw_pbr.camera_enabled = if passthrough.enabled { 1.0 } else { 0.0 };
         self.draw_pbr.rotation_steps = passthrough.rotation_steps;
@@ -122,7 +121,7 @@ impl Widget for RefractiveCube {
         self.draw_pbr.transmission_focus_distance = self.focus_distance;
         self.draw_pbr.set_depth_write(true);
         self.draw_pbr.set_camera_texture(passthrough.camera_texture);
-        if let Some(env_texture) = xr_env_texture_from_scope(scope) {
+        if let Some(env_texture) = draw_context.env_texture() {
             self.draw_pbr.set_env_face_textures(None);
             self.draw_pbr.set_env_texture(Some(env_texture));
             self.draw_pbr.set_env_atlas_texture(None);

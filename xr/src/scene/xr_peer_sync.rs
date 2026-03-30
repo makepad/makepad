@@ -401,11 +401,11 @@ impl AlignmentWorkerState {
         let previous_scored_on_current = previous_solution.and_then(|solution| {
             let local_descriptor = local_descriptor.as_ref()?;
             let remote_descriptor = peer_state.latest_descriptor.as_ref()?;
-            Some(xr_depth_align_rescore_remote_to_local(
-                &local_descriptor.descriptor,
-                &remote_descriptor.descriptor,
-                solution,
-            ))
+            Some(
+                local_descriptor
+                    .descriptor
+                    .rescore_remote_to_local(&remote_descriptor.descriptor, solution),
+            )
         });
         let next_solution = choose_stable_alignment_solution(
             peer_state.last_accepted_solution,
@@ -676,8 +676,7 @@ fn choose_stable_alignment_solution(
         return candidate;
     };
     let previous_on_current = previous_scored_on_current.unwrap_or(previous);
-    let previous_still_supported =
-        xr_depth_align_solution_is_accepted(diagnostic, previous_on_current);
+    let previous_still_supported = previous_on_current.is_accepted(diagnostic);
     let Some(candidate) = candidate else {
         return previous_still_supported.then_some(previous);
     };
@@ -1155,6 +1154,10 @@ impl XrPeerSync {
         }
     }
 
+    pub fn connected_peer_count(&self) -> usize {
+        self.peers.len()
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -1200,7 +1203,7 @@ impl XrPeerSync {
                 .map(|solution| solution.remote_to_local_transform())
         })?;
         let descriptor = peer_state.latest_descriptor?.descriptor;
-        xr_depth_align_transform_descriptor(&descriptor, &transform).height_map
+        descriptor.transformed(&transform).height_map
     }
 
     pub fn raw_peer_alignment_descriptor(
@@ -1364,7 +1367,7 @@ impl XrPeerSync {
             .map(|snapshot| (snapshot.generation, snapshot.update_sequence));
         let next_slice_preview = next_snapshot
             .as_ref()
-            .and_then(|snapshot| tsdf_snapshot_height_map_preview(snapshot.as_ref()));
+            .and_then(|snapshot| XrDepthAlignSlicePreview::from_tsdf_snapshot(snapshot.as_ref()));
         let next_descriptor = next_snapshot.as_ref().and_then(|snapshot| {
             XrNetAlignmentDescriptorFrame::from_tsdf_snapshot(snapshot.as_ref(), state.time)
         });
