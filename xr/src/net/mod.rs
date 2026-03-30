@@ -21,7 +21,7 @@ use self::{
     },
 };
 
-pub const XR_NET_PROTOCOL_VERSION: u16 = 5;
+pub const XR_NET_PROTOCOL_VERSION: u16 = 7;
 pub const XR_NET_DEFAULT_DISCOVERY_PORT: u16 = 41546;
 pub const XR_NET_DEFAULT_DATA_PORT: u16 = 41547;
 pub const XR_NET_DEFAULT_SYNC_PORT: u16 = 41548;
@@ -58,6 +58,54 @@ impl XrActivityId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, SerBin, DeBin)]
+pub struct XrSpawnableObjectId(pub u64);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, SerBin, DeBin)]
+pub struct XrPeerId(pub u8);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, SerBin, DeBin)]
+pub struct XrSharedObjectCounter(pub u64);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, SerBin, DeBin)]
+pub struct XrSharedObjectId(pub u64);
+
+pub const XR_SHARED_OBJECT_COUNTER_MAX: u64 = (1u64 << 56) - 1;
+
+pub fn xr_make_shared_object_id(
+    peer_id: XrPeerId,
+    counter: XrSharedObjectCounter,
+) -> Option<XrSharedObjectId> {
+    if counter.0 > XR_SHARED_OBJECT_COUNTER_MAX {
+        return None;
+    }
+    Some(XrSharedObjectId(
+        ((peer_id.0 as u64) << 56) | (counter.0 & XR_SHARED_OBJECT_COUNTER_MAX),
+    ))
+}
+
+pub fn xr_shared_object_peer_id(object_id: XrSharedObjectId) -> XrPeerId {
+    XrPeerId((object_id.0 >> 56) as u8)
+}
+
+pub fn xr_shared_object_counter(object_id: XrSharedObjectId) -> XrSharedObjectCounter {
+    XrSharedObjectCounter(object_id.0 & XR_SHARED_OBJECT_COUNTER_MAX)
+}
+
+pub fn xr_derived_peer_id_from_addr(addr: SocketAddr, fallback_seed: u64) -> XrPeerId {
+    match addr.ip() {
+        IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => {
+            let octet = ip.octets()[3];
+            if octet != 0 {
+                XrPeerId(octet)
+            } else {
+                XrPeerId((fallback_seed as u8).max(1))
+            }
+        }
+        _ => XrPeerId((fallback_seed as u8).max(1)),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct XrNetPeer {
     pub id: XrNetPeerId,
@@ -67,6 +115,10 @@ pub struct XrNetPeer {
 impl XrNetPeer {
     pub fn to_live_id(self) -> LiveId {
         self.id.to_live_id()
+    }
+
+    pub fn shared_object_peer_id(self) -> XrPeerId {
+        xr_derived_peer_id_from_addr(self.addr, self.id.0)
     }
 }
 
@@ -81,6 +133,110 @@ pub struct XrNetStateFrame {
     pub seq: u32,
     pub sent_at: f64,
     pub state: XrState,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, SerBin, DeBin)]
+pub struct XrNetBodySpawn {
+    pub activity_id: XrActivityId,
+    pub object_id: XrSpawnableObjectId,
+    pub pose: Pose,
+    pub linvel: Vec3f,
+    pub angvel: Vec3f,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SerBin, DeBin)]
+pub enum XrSharedHand {
+    LeftHand,
+    RightHand,
+    LeftController,
+    RightController,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SerBin, DeBin)]
+pub enum XrSharedObjectFidelity {
+    #[default]
+    Interpolated,
+    ContactPredictive,
+    ImpactCritical,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SerBin, DeBin)]
+pub enum XrSharedObjectMode {
+    #[default]
+    Dynamic,
+    ContactDominated {
+        authority: XrPeerId,
+        hand: XrSharedHand,
+    },
+    Sleeping,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SerBin, DeBin)]
+pub enum XrSharedObjectShape {
+    ActivitySpawnable {
+        activity_id: XrActivityId,
+        spawnable_id: XrSpawnableObjectId,
+    },
+}
+
+impl Default for XrSharedObjectShape {
+    fn default() -> Self {
+        Self::ActivitySpawnable {
+            activity_id: XrActivityId(LiveId(0)),
+            spawnable_id: XrSpawnableObjectId(0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, SerBin, DeBin)]
+pub struct XrNetSharedObjectState {
+    pub seq: u32,
+    pub sent_at: f64,
+    pub physics_tick: u32,
+    pub object_id: XrSharedObjectId,
+    pub epoch: u32,
+    pub authority: XrPeerId,
+    pub fidelity: XrSharedObjectFidelity,
+    pub mode: XrSharedObjectMode,
+    pub pose: Pose,
+    pub linvel: Vec3f,
+    pub angvel: Vec3f,
+}
+
+#[derive(Clone, Debug, PartialEq, SerBin, DeBin)]
+pub enum XrNetSharedObjectControl {
+    XrSpawnObject {
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        authority: XrPeerId,
+        fidelity: XrSharedObjectFidelity,
+        shape: XrSharedObjectShape,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    },
+    XrDespawnObject {
+        object_id: XrSharedObjectId,
+        epoch: u32,
+    },
+    XrResetObject {
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    },
+    XrClockPing {
+        seq: u32,
+        sent_at: f64,
+    },
+    XrClockPong {
+        seq: u32,
+        echoed_at: f64,
+        replied_at: f64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, SerBin, DeBin)]
@@ -275,6 +431,14 @@ pub enum XrNetIncoming {
         peer: XrNetPeer,
         control: XrNetActivityControl,
     },
+    BodySpawn {
+        peer: XrNetPeer,
+        spawn: XrNetBodySpawn,
+    },
+    SharedObjectControl {
+        peer: XrNetPeer,
+        control: XrNetSharedObjectControl,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -336,6 +500,7 @@ pub struct XrNetNode {
     next_alignment_seq: u32,
     next_alignment_descriptor_seq: u32,
     next_activity_tick: u32,
+    shared_object_peer_id: XrPeerId,
 }
 
 impl XrNetNode {
@@ -396,11 +561,16 @@ impl XrNetNode {
             next_alignment_seq: 0,
             next_alignment_descriptor_seq: 0,
             next_activity_tick: 0,
+            shared_object_peer_id: xr_derived_peer_id_from_addr(bound_sync_addr, config.node_id.0),
         })
     }
 
     pub fn node_id(&self) -> XrNetPeerId {
         self.node_id
+    }
+
+    pub fn shared_object_peer_id(&self) -> XrPeerId {
+        self.shared_object_peer_id
     }
 
     pub fn send_state(&mut self, state: XrState) {
@@ -452,6 +622,18 @@ impl XrNetNode {
             XrNetActivityControl::XrSetActivity(state),
         ));
         state
+    }
+
+    pub fn send_body_spawn(&mut self, spawn: XrNetBodySpawn) {
+        let _ = self
+            .sync_outgoing_sender
+            .send(XrNetSyncOutgoing::BodySpawn(spawn));
+    }
+
+    pub fn send_shared_object_control(&mut self, control: XrNetSharedObjectControl) {
+        let _ = self
+            .sync_outgoing_sender
+            .send(XrNetSyncOutgoing::SharedObjectControl(control));
     }
 }
 
@@ -821,6 +1003,94 @@ mod tests {
 
         let received = match event {
             XrNetIncoming::Activity { control, .. } => control.state(),
+            _ => unreachable!(),
+        };
+        assert_eq!(received, sent);
+    }
+
+    #[test]
+    fn body_spawn_is_sent_over_sync_channel() {
+        let mut left =
+            XrNetNode::with_config(localhost_config(311, 43046, 43047, 43048, vec![43056]))
+                .expect("left test client should bind");
+        let right = XrNetNode::with_config(localhost_config(312, 43056, 43057, 43058, vec![43046]))
+            .expect("right test client should bind");
+
+        let _ = left.send_activity(XrActivityId(live_id!(ico_shoot_scene)), 4.0);
+        let _ = wait_for_event(&right, |event| {
+            matches!(event, XrNetIncoming::Activity { .. })
+        })
+        .expect("sync channel should deliver an activity before body spawns");
+
+        let sent = XrNetBodySpawn {
+            activity_id: XrActivityId(live_id!(ico_shoot_scene)),
+            object_id: XrSpawnableObjectId(0xfeed_cafe_dead_beef),
+            pose: Pose::new(Quat::default(), vec3f(0.2, 1.1, -0.7)),
+            linvel: vec3f(1.0, 2.0, 3.0),
+            angvel: vec3f(-0.5, 0.0, 0.5),
+        };
+        left.send_body_spawn(sent);
+
+        let event = wait_for_event(&right, |event| {
+            matches!(event, XrNetIncoming::BodySpawn { .. })
+        })
+        .expect("body spawn should arrive over sync channel");
+
+        let received = match event {
+            XrNetIncoming::BodySpawn { spawn, .. } => spawn,
+            _ => unreachable!(),
+        };
+        assert_eq!(received, sent);
+    }
+
+    #[test]
+    fn shared_object_id_packs_peer_and_counter() {
+        let object_id = xr_make_shared_object_id(XrPeerId(42), XrSharedObjectCounter(123456))
+            .expect("counter should fit in 56 bits");
+        assert_eq!(xr_shared_object_peer_id(object_id), XrPeerId(42));
+        assert_eq!(
+            xr_shared_object_counter(object_id),
+            XrSharedObjectCounter(123456)
+        );
+    }
+
+    #[test]
+    fn shared_object_control_is_sent_over_sync_channel() {
+        let mut left =
+            XrNetNode::with_config(localhost_config(321, 43146, 43147, 43148, vec![43156]))
+                .expect("left test client should bind");
+        let right = XrNetNode::with_config(localhost_config(322, 43156, 43157, 43158, vec![43146]))
+            .expect("right test client should bind");
+
+        let _ = left.send_activity(XrActivityId(live_id!(ico_shoot_scene)), 5.0);
+        let _ = wait_for_event(&right, |event| {
+            matches!(event, XrNetIncoming::Activity { .. })
+        })
+        .expect("sync channel should be ready before shared object control");
+
+        let sent = XrNetSharedObjectControl::XrSpawnObject {
+            object_id: xr_make_shared_object_id(XrPeerId(77), XrSharedObjectCounter(9))
+                .expect("counter should fit"),
+            epoch: 0,
+            authority: XrPeerId(77),
+            fidelity: XrSharedObjectFidelity::ImpactCritical,
+            shape: XrSharedObjectShape::ActivitySpawnable {
+                activity_id: XrActivityId(live_id!(ico_shoot_scene)),
+                spawnable_id: XrSpawnableObjectId(0x44),
+            },
+            pose: Pose::new(Quat::default(), vec3f(0.0, 1.2, -0.4)),
+            linvel: vec3f(3.0, 0.0, -9.0),
+            angvel: vec3f(0.0, 0.0, 0.0),
+        };
+        left.send_shared_object_control(sent.clone());
+
+        let event = wait_for_event(&right, |event| {
+            matches!(event, XrNetIncoming::SharedObjectControl { .. })
+        })
+        .expect("shared object control should arrive over sync channel");
+
+        let received = match event {
+            XrNetIncoming::SharedObjectControl { control, .. } => control,
             _ => unreachable!(),
         };
         assert_eq!(received, sent);

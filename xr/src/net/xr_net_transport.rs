@@ -29,6 +29,8 @@ pub(super) enum XrNetSyncOutgoing {
     Alignment(XrNetAlignmentFrame),
     AlignmentDescriptor(XrNetAlignmentDescriptorFrame),
     Activity(XrNetActivityControl),
+    BodySpawn(XrNetBodySpawn),
+    SharedObjectControl(XrNetSharedObjectControl),
     Break,
 }
 
@@ -118,6 +120,12 @@ impl SyncWorkerPeerState {
             }
             XrNetDataPacket::ActivityControl { control, .. } => {
                 let _ = incoming_sender.send(XrNetIncoming::Activity { peer, control });
+            }
+            XrNetDataPacket::BodySpawn { spawn, .. } => {
+                let _ = incoming_sender.send(XrNetIncoming::BodySpawn { peer, spawn });
+            }
+            XrNetDataPacket::SharedObjectControl { control, .. } => {
+                let _ = incoming_sender.send(XrNetIncoming::SharedObjectControl { peer, control });
             }
             XrNetDataPacket::Leave(_) => {}
         }
@@ -448,6 +456,8 @@ impl XrNetUdpWorker {
                             self.remove_peer(peers, packet.node_id, XrNetLeaveReason::Explicit);
                         }
                         XrNetDataPacket::ActivityControl { .. } => {}
+                        XrNetDataPacket::BodySpawn { .. } => {}
+                        XrNetDataPacket::SharedObjectControl { .. } => {}
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
@@ -618,6 +628,22 @@ impl XrNetSyncWorker {
                 Ok(XrNetSyncOutgoing::Activity(control)) => {
                     *cached_activity = Some(control.clone());
                     let packet = XrNetDataPacket::activity_control(self.node_id, control);
+                    for peer_state in peers.values_mut() {
+                        if let Some(connection) = peer_state.sync_connection.as_mut() {
+                            connection.queue_packet(&XrNetSyncPacket::data(packet.clone()));
+                        }
+                    }
+                }
+                Ok(XrNetSyncOutgoing::BodySpawn(spawn)) => {
+                    let packet = XrNetDataPacket::body_spawn(self.node_id, spawn);
+                    for peer_state in peers.values_mut() {
+                        if let Some(connection) = peer_state.sync_connection.as_mut() {
+                            connection.queue_packet(&XrNetSyncPacket::data(packet.clone()));
+                        }
+                    }
+                }
+                Ok(XrNetSyncOutgoing::SharedObjectControl(control)) => {
+                    let packet = XrNetDataPacket::shared_object_control(self.node_id, control);
                     for peer_state in peers.values_mut() {
                         if let Some(connection) = peer_state.sync_connection.as_mut() {
                             connection.queue_packet(&XrNetSyncPacket::data(packet.clone()));

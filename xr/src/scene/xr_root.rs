@@ -509,6 +509,10 @@ pub struct XrRoot {
 }
 
 impl XrRoot {
+    pub fn spawn_body(&mut self, cx: &mut Cx, spawn: XrBodySpawn) {
+        self.env.spawn_body(cx, spawn);
+    }
+
     fn set_depth_mesh_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
         self.env.set_depth_mesh_visible(visible);
         self.env.mark_scene_dirty();
