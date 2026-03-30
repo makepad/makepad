@@ -7,7 +7,7 @@ use rapier3d::prelude::{
     Rotation as RapierRotation, SharedShape, Vector as RapierVector,
 };
 
-use crate::scene_draw::{
+use crate::util::scene_draw::{
     apply_scene_to_draw_pbr, ray_from_scene_viewport, scene_state_from_cx, SceneState3D,
 };
 

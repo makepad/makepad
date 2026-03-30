@@ -2,14 +2,14 @@
 
 use super::xr_physics::{makepad_pose, RapierScene};
 use super::*;
-use crate::depth_debug_mesh::{push_debug_depth_plane, DebugDepthMeshChunk};
-use crate::depth_debug_mesh_worker::{
-    XrDepthDebugMeshVisibleSet, XrDepthDebugMeshWorker, XrDepthDebugMeshWorkerResult,
-};
-use crate::tsdf_query::{
+use crate::algorithms::tsdf_query::{
     depth_query_might_need_impact_refresh, depth_query_plane_supports_body, evaluate_tsdf_query,
     DepthQuery, DepthQueryCollider, DepthQueryColliderGeometry, DepthQueryColliderRole,
     DepthQueryHit, DepthQueryResult, DepthQuerySupportPlane,
+};
+use crate::util::depth_debug_mesh::{push_debug_depth_plane, DebugDepthMeshChunk};
+use crate::util::depth_debug_mesh_worker::{
+    XrDepthDebugMeshVisibleSet, XrDepthDebugMeshWorker, XrDepthDebugMeshWorkerResult,
 };
 use makepad_widgets::makepad_platform::XrTsdfStore;
 

@@ -3,7 +3,7 @@ pub use makepad_widgets;
 use makepad_widgets::makepad_draw::DrawVector;
 use makepad_widgets::makepad_platform::{TextureFormat, TextureUpdated, XrDepthAlignHeightMap};
 use makepad_widgets::*;
-use makepad_xr::*;
+use makepad_xr::net::*;
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -821,7 +821,7 @@ impl App {
     }
 
     fn latest_dump_path() -> Option<PathBuf> {
-        let mut entries = fs::read_dir("xr/util/dumps")
+        let mut entries = fs::read_dir("xr/dump/dumps")
             .ok()?
             .filter_map(|entry| entry.ok())
             .filter_map(|entry| {
@@ -961,10 +961,11 @@ impl App {
 
     fn current_transformed_remote_height_map(&self) -> Option<XrDepthAlignHeightMap> {
         let loaded_dump = self.loaded_dump.as_ref()?;
-        let transformed = xr_depth_align_transform_descriptor(
-            &loaded_dump.pair.remote_descriptor.descriptor,
-            &self.pose.to_mat4(),
-        );
+        let transformed = loaded_dump
+            .pair
+            .remote_descriptor
+            .descriptor
+            .transformed(&self.pose.to_mat4());
         transformed.height_map
     }
 

@@ -1,4 +1,4 @@
-use crate::*;
+use crate::prelude::*;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},

@@ -1,4 +1,4 @@
-use crate::*;
+use crate::prelude::*;
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
 use std::{
     io,
@@ -11,9 +11,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[path = "net/xr_net_protocol.rs"]
 mod xr_net_protocol;
-#[path = "net/xr_net_transport.rs"]
 mod xr_net_transport;
 
 use self::{
@@ -204,12 +202,6 @@ impl XrNetAlignmentDescriptorDumpPair {
         }
         Self::deserialize_bin(&bytes[Self::FILE_MAGIC.len()..]).ok()
     }
-}
-
-pub fn tsdf_snapshot_height_map_preview(
-    snapshot: &TsdfPublishedSnapshot,
-) -> Option<XrDepthAlignSlicePreview> {
-    XrDepthAlignSlicePreview::from_tsdf_snapshot(snapshot)
 }
 
 #[derive(Clone, Debug)]

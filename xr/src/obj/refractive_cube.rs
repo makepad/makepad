@@ -1,9 +1,7 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::scene::{xr_widget_world_transform, XrDrawContext, XrNode};
+use makepad_widgets::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-use super::{
-    scene_draw::{apply_scene_to_draw_pbr, scene_state_from_cx},
-    xr_node::{xr_widget_world_transform, XrDrawContext, XrNode},
-};
+use crate::util::scene_draw::{apply_scene_to_draw_pbr, scene_state_from_cx};
 
 const XR_REFRACTIVE_CAMERA_FOV_Y_DEGREES: f32 = 92.0;
 const XR_REFRACTIVE_CAMERA_PROJECTION_SCALE: f32 = 0.6825;

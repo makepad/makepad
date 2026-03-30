@@ -1,5 +1,5 @@
-use crate::xr_node::{xr_widget_world_transform, XrNode};
-use crate::*;
+use super::xr_node::{xr_widget_world_transform, XrNode};
+use crate::prelude::*;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
