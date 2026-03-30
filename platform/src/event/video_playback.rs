@@ -100,6 +100,12 @@ pub struct VideoDecodingErrorEvent {
 }
 
 #[derive(Clone, Debug)]
+pub struct VideoDecodingStatusEvent {
+    pub video_id: LiveId,
+    pub status: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct TextureHandleReadyEvent {
     pub texture_id: TextureId,
     pub handle: u32,

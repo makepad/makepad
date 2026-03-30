@@ -62,6 +62,10 @@ extern "C" {
 
     pub fn AHardwareBuffer_acquire(buffer: *mut AHardwareBuffer);
     pub fn AHardwareBuffer_release(buffer: *mut AHardwareBuffer);
+    pub fn AHardwareBuffer_fromHardwareBuffer(
+        env: *mut jni_sys::JNIEnv,
+        hardwareBuffer: jni_sys::jobject,
+    ) -> *mut AHardwareBuffer;
 }
 
 pub const AHARDWAREBUFFER_USAGE_CPU_READ_RARELY: u64 = 2;

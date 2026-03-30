@@ -43,6 +43,7 @@ use {
             //TouchPoint,
             TouchUpdateEvent,
             VideoDecodingErrorEvent,
+            VideoDecodingStatusEvent,
             VideoPlaybackCompletedEvent,
             VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent,
@@ -911,6 +912,12 @@ impl Cx {
                 });
                 self.call_event_handler(&e);
             }
+            FromJavaMessage::VideoDecodingStatus { video_id, status } => {
+                self.call_event_handler(&Event::VideoDecodingStatus(VideoDecodingStatusEvent {
+                    video_id: LiveId(video_id),
+                    status,
+                }));
+            }
             FromJavaMessage::CameraPreviewSurfaceReady {
                 video_id,
                 window,
@@ -1211,23 +1218,9 @@ impl Cx {
         self.dispatch_network_runtime_events();
         self.flush_studio_run_view_frame_results();
 
-        // Native video updates (SurfaceTexture path)
-        let to_dispatch = self.get_video_updates();
-        for video_id in to_dispatch {
-            let current_position_ms = unsafe {
-                let env = attach_jni_env();
-                android_jni::to_java_get_video_position(env, video_id) as u128
-            };
-            let e = Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
-                video_id,
-                current_position_ms,
-                yuv: crate::event::video_playback::VideoYuvMetadata {
-                    enabled: false,
-                    matrix: 0.0,
-                    biplanar: false,
-                    rotation_steps: 0.0,
-                },
-            });
+        // Native video updates (SurfaceTexture path and realtime decoder path)
+        let video_events = self.get_video_updates();
+        for e in video_events {
             self.call_event_handler(&e);
         }
 
@@ -1244,18 +1237,205 @@ impl Cx {
         self.handle_platform_ops();
     }
 
-    fn get_video_updates(&mut self) -> Vec<LiveId> {
-        let mut videos_to_update = Vec::new();
+    fn get_video_updates(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
         for (live_id, surface_texture) in self.os.video_surfaces.iter_mut() {
             unsafe {
                 let env = attach_jni_env();
                 let updated = android_jni::to_java_update_tex_image(env, *surface_texture);
                 if updated {
-                    videos_to_update.push(*live_id);
+                    let current_position_ms = android_jni::to_java_get_video_position(env, *live_id) as u128;
+                    events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                        video_id: *live_id,
+                        current_position_ms,
+                        yuv: crate::event::video_playback::VideoYuvMetadata {
+                            enabled: false,
+                            matrix: 0.0,
+                            biplanar: false,
+                            rotation_steps: 0.0,
+                        },
+                    }));
                 }
             }
         }
-        videos_to_update
+        for decoder in self.os.realtime_video_decoders.values_mut() {
+            match decoder.output {
+                AndroidRealtimeVideoDecoderOutput::GlExternal => unsafe {
+                    let env = attach_jni_env();
+                    if android_jni::to_java_update_tex_image(env, decoder.decoder_ref) {
+                        events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                            video_id: decoder.video_id,
+                            current_position_ms: 0,
+                            yuv: crate::event::video_playback::VideoYuvMetadata {
+                                enabled: false,
+                                matrix: 0.0,
+                                biplanar: false,
+                                rotation_steps: 0.0,
+                            },
+                        }));
+                    }
+                },
+                #[cfg(use_vulkan)]
+                AndroidRealtimeVideoDecoderOutput::VulkanExternalHardwareBuffer { texture_id } => unsafe {
+                    if let Some((hardware_buffer, width, height)) =
+                        android_jni::to_java_acquire_h264_decoder_hardware_buffer(
+                            attach_jni_env(),
+                            decoder.decoder_ref,
+                        )
+                    {
+                        let update_result = self
+                            .os
+                            .vulkan
+                            .as_mut()
+                            .ok_or_else(|| {
+                                "Android realtime decoder hardware-buffer update requested without Vulkan backend"
+                                    .to_string()
+                            })
+                            .and_then(|vk| {
+                                vk.update_video_external_hardware_buffer_texture(
+                                    texture_id,
+                                    hardware_buffer,
+                                    width.max(1),
+                                    height.max(1),
+                                )
+                            });
+                        ndk_sys::AHardwareBuffer_release(hardware_buffer);
+                        match update_result {
+                            Ok(_) => {
+                                if !decoder.imported_first_frame {
+                                    decoder.imported_first_frame = true;
+                                    let status = format!(
+                                        "vulkan external import ok {}x{}",
+                                        width.max(1),
+                                        height.max(1)
+                                    );
+                                    crate::log!(
+                                        "android realtime decoder video_id={} status={}",
+                                        decoder.video_id.0,
+                                        status
+                                    );
+                                    events.push(Event::VideoDecodingStatus(
+                                        VideoDecodingStatusEvent {
+                                            video_id: decoder.video_id,
+                                            status,
+                                        },
+                                    ));
+                                }
+                                events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                                    video_id: decoder.video_id,
+                                    current_position_ms: 0,
+                                    yuv: crate::event::video_playback::VideoYuvMetadata {
+                                        enabled: false,
+                                        matrix: 0.0,
+                                        biplanar: false,
+                                        rotation_steps: 0.0,
+                                    },
+                                }));
+                            }
+                            Err(error) => {
+                                events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
+                                    video_id: decoder.video_id,
+                                    error: format!(
+                                        "vulkan external import failed {}x{}: {}",
+                                        width.max(1),
+                                        height.max(1),
+                                        error
+                                    ),
+                                }));
+                            }
+                        }
+                    } else if !decoder.imported_first_frame
+                        && !decoder.reported_waiting_for_hardware_buffer
+                    {
+                        decoder.reported_waiting_for_hardware_buffer = true;
+                        events.push(Event::VideoDecodingStatus(VideoDecodingStatusEvent {
+                            video_id: decoder.video_id,
+                            status: "waiting for decoder hardware buffer".to_string(),
+                        }));
+                    }
+                },
+                #[cfg(use_vulkan)]
+                AndroidRealtimeVideoDecoderOutput::VulkanRgbaHardwareBuffer { texture_id } => unsafe {
+                    if let Some((hardware_buffer, width, height)) =
+                        android_jni::to_java_acquire_h264_decoder_hardware_buffer(
+                            attach_jni_env(),
+                            decoder.decoder_ref,
+                        )
+                    {
+                        let update_result = self
+                            .os
+                            .vulkan
+                            .as_mut()
+                            .ok_or_else(|| {
+                                "Android realtime decoder hardware-buffer update requested without Vulkan backend"
+                                    .to_string()
+                            })
+                            .and_then(|vk| {
+                                vk.update_video_rgba_hardware_buffer_texture(
+                                    texture_id,
+                                    hardware_buffer,
+                                    width.max(1),
+                                    height.max(1),
+                                )
+                            });
+                        ndk_sys::AHardwareBuffer_release(hardware_buffer);
+                        match update_result {
+                            Ok(()) => {
+                                if !decoder.imported_first_frame {
+                                    decoder.imported_first_frame = true;
+                                    let status = format!(
+                                        "vulkan import ok {}x{}",
+                                        width.max(1),
+                                        height.max(1)
+                                    );
+                                    crate::log!(
+                                        "android realtime decoder video_id={} status={}",
+                                        decoder.video_id.0,
+                                        status
+                                    );
+                                    events.push(Event::VideoDecodingStatus(
+                                        VideoDecodingStatusEvent {
+                                            video_id: decoder.video_id,
+                                            status,
+                                        },
+                                    ));
+                                }
+                                events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                                    video_id: decoder.video_id,
+                                    current_position_ms: 0,
+                                    yuv: crate::event::video_playback::VideoYuvMetadata {
+                                        enabled: false,
+                                        matrix: 0.0,
+                                        biplanar: false,
+                                        rotation_steps: 0.0,
+                                    },
+                                }));
+                            }
+                            Err(error) => {
+                                events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
+                                    video_id: decoder.video_id,
+                                    error: format!(
+                                        "vulkan rgba import failed {}x{}: {}",
+                                        width.max(1),
+                                        height.max(1),
+                                        error
+                                    ),
+                                }));
+                            }
+                        }
+                    } else if !decoder.imported_first_frame
+                        && !decoder.reported_waiting_for_hardware_buffer
+                    {
+                        decoder.reported_waiting_for_hardware_buffer = true;
+                        events.push(Event::VideoDecodingStatus(VideoDecodingStatusEvent {
+                            video_id: decoder.video_id,
+                            status: "waiting for decoder hardware buffer".to_string(),
+                        }));
+                    }
+                },
+            }
+        }
+        events
     }
 
     fn poll_camera_players(&mut self) {
@@ -2373,6 +2553,12 @@ impl Cx {
                     // TODO: implement via MediaPlayer when needed
                 }
                 CxOsOp::XrStartPresenting => {
+                    crate::log!(
+                        "android xr op: XrStartPresenting in_xr_mode={} ignore_destroy={} retry_surface_after_destroy={}",
+                        self.os.in_xr_mode,
+                        self.os.ignore_destroy,
+                        self.os.xr_retry_surface_after_destroy
+                    );
                     self.os.xr_buffer_scale_requested = self
                         .os
                         .xr_buffer_scale_requested
@@ -2392,6 +2578,12 @@ impl Cx {
                     }
                 }
                 CxOsOp::XrStopPresenting => {
+                    crate::log!(
+                        "android xr op: XrStopPresenting in_xr_mode={} ignore_destroy={} retry_surface_after_destroy={}",
+                        self.os.in_xr_mode,
+                        self.os.ignore_destroy,
+                        self.os.xr_retry_surface_after_destroy
+                    );
                     #[cfg(use_vulkan)]
                     self.clear_xr_pending_surface();
                     self.os.xr_display_refresh_rate_active_hz = None;
@@ -2689,6 +2881,7 @@ impl Default for CxOs {
             camera_players: HashMap::new(),
             pending_camera_preview_windows: HashMap::new(),
             software_video_players: HashMap::new(),
+            realtime_video_decoders: HashMap::new(),
             websocket_parsers: HashMap::new(),
             openxr: CxOpenXr::default(),
             activity_thread_id: None,
@@ -2730,6 +2923,26 @@ pub(crate) struct AndroidSoftwarePlayer {
     pub yuv_matrix: f32,
 }
 
+pub(crate) enum AndroidRealtimeVideoDecoderOutput {
+    GlExternal,
+    #[cfg(use_vulkan)]
+    VulkanExternalHardwareBuffer { texture_id: TextureId },
+    #[cfg(use_vulkan)]
+    VulkanRgbaHardwareBuffer { texture_id: TextureId },
+}
+
+pub(crate) struct AndroidRealtimeVideoDecoder {
+    pub decoder_ref: jobject,
+    pub video_id: LiveId,
+    pub output: AndroidRealtimeVideoDecoderOutput,
+    pub imported_first_frame: bool,
+    pub reported_waiting_for_hardware_buffer: bool,
+}
+
+pub(crate) fn realtime_video_decoder_id(index: usize) -> LiveId {
+    LiveId::from_str_num("android_realtime_video_decoder", index as u64)
+}
+
 pub struct CxOs {
     pub first_after_resize: bool,
     pub display_size: Vec2d,
@@ -2749,6 +2962,7 @@ pub struct CxOs {
     pub(crate) camera_players: HashMap<LiveId, AndroidCameraPlayer>,
     pub(crate) pending_camera_preview_windows: HashMap<LiveId, *mut ndk_sys::ANativeWindow>,
     pub(crate) software_video_players: HashMap<LiveId, AndroidSoftwarePlayer>,
+    pub(crate) realtime_video_decoders: HashMap<usize, AndroidRealtimeVideoDecoder>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
     pub(crate) openxr: CxOpenXr,
     pub(crate) activity_thread_id: Option<u64>,

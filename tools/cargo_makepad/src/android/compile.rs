@@ -660,6 +660,7 @@ fn compile_java(
         makepad_java_classes_dir.join("VideoPlayer.java"),
         makepad_java_classes_dir.join("VideoPlayerRunnable.java"),
         makepad_java_classes_dir.join("H264Encoder.java"),
+        makepad_java_classes_dir.join("H264Decoder.java"),
         build_paths.java_file.clone(),
         build_paths.xr_file.clone(),
     ];
@@ -1410,6 +1411,21 @@ pub fn run(
             }
         } else {
             println!("Android launch intent makepad.STUDIO is not set");
+        }
+
+        for key in [
+            "MAKEPAD_XR_REMOTE_HOST",
+            "MAKEPAD_XR_REMOTE_CONTROL_PORT",
+            "MAKEPAD_XR_REMOTE_VIDEO_PORT",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                if !value.trim().is_empty() {
+                    println!("Android launch intent {key}={value}");
+                    args.push("--es".to_string());
+                    args.push(key.to_string());
+                    args.push(value);
+                }
+            }
         }
         args
     }

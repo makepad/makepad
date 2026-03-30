@@ -289,6 +289,12 @@ impl XrPermissionsFlow {
     }
 
     fn start_xr(&mut self, cx: &mut Cx) {
+        if cx.in_xr_mode() {
+            self.hidden_after_start = true;
+            self.xr_start_next_frame = None;
+            self.redraw(cx);
+            return;
+        }
         self.hidden_after_start = true;
         self.xr_start_next_frame = Some(cx.new_next_frame());
         self.redraw(cx);
@@ -296,6 +302,7 @@ impl XrPermissionsFlow {
 
     fn maybe_start_xr(&mut self, cx: &mut Cx) {
         if self.xr_permissions_ready()
+            && !cx.in_xr_mode()
             && !self.hidden_after_start
             && self.xr_start_next_frame.is_none()
         {
@@ -324,6 +331,7 @@ impl Widget for XrPermissionsFlow {
             }
             if self.button(cx, ids!(enter_mr_button)).clicked(actions)
                 && self.xr_permissions_ready()
+                && !cx.in_xr_mode()
                 && !self.hidden_after_start
                 && self.xr_start_next_frame.is_none()
             {
@@ -333,6 +341,9 @@ impl Widget for XrPermissionsFlow {
 
         match event {
             Event::Startup => {
+                if cx.in_xr_mode() {
+                    self.hidden_after_start = true;
+                }
                 self.schedule_ui_refresh(cx);
                 self.begin_permission_checks(cx);
             }

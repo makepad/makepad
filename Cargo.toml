@@ -24,6 +24,7 @@ workspace.members = [
     "examples/windows_blur",
     "examples/floating_panel",
     "examples/xr",
+    "examples/xr_remote",
 #    "examples/matrix",
     "libs/gltf",
     "libs/splat",

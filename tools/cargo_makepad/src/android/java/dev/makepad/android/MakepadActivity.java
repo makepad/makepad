@@ -638,6 +638,7 @@ public class MakepadActivity
     Handler mVideoPlaybackHandler;
     HandlerThread mVideoPlaybackThread;
     HashMap<Long, VideoPlayerRunnable> mVideoPlayerRunnables;
+    HashMap<Long, H264Decoder> mH264Decoders;
 
     // networking, make these static because of activity switching
     static HandlerThread mWebSocketsThread;
@@ -740,6 +741,7 @@ public class MakepadActivity
         mVideoPlaybackThread.start(); // TODO: only start this if its needed.
         mVideoPlaybackHandler = new Handler(mVideoPlaybackThread.getLooper());
         mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
+        mH264Decoders = new HashMap<Long, H264Decoder>();
 
 
 
@@ -964,6 +966,13 @@ public class MakepadActivity
     }
 
     private void cleanupVideoPlaybackState() {
+        if (mH264Decoders != null) {
+            ArrayList<Long> decoderIds = new ArrayList<>(mH264Decoders.keySet());
+            for (Long decoderId : decoderIds) {
+                stopH264Decoder(decoderId);
+            }
+            mH264Decoders.clear();
+        }
         if (mVideoPlayerRunnables != null) {
             ArrayList<Long> videoIds = new ArrayList<>(mVideoPlayerRunnables.keySet());
             for (Long videoId : videoIds) {
@@ -1773,6 +1782,59 @@ public class MakepadActivity
             runnable = null;
         }
         detachCameraNativePreview(videoId);
+    }
+
+    public H264Decoder prepareH264Decoder(
+        long decoderId,
+        int externalTextureHandle,
+        int widthHint,
+        int heightHint,
+        boolean useImageReader
+    ) {
+        stopH264Decoder(decoderId);
+        H264Decoder decoder = new H264Decoder(
+            this,
+            decoderId,
+            widthHint,
+            heightHint,
+            useImageReader
+        );
+        decoder.setExternalTextureHandle(externalTextureHandle);
+        if (!decoder.prepare()) {
+            decoder.stopAndCleanup();
+            return null;
+        }
+        mH264Decoders.put(decoderId, decoder);
+        return decoder;
+    }
+
+    public void queueH264DecoderPacket(
+        long decoderId,
+        byte[] data,
+        long ptsUs,
+        boolean isConfig,
+        boolean isEos
+    ) {
+        H264Decoder decoder = mH264Decoders.get(decoderId);
+        if (decoder == null) {
+            MakepadNative.onH264DecoderError(decoderId, "Unknown H264 decoder: " + decoderId);
+            return;
+        }
+        int flags = 0;
+        if (isConfig) {
+            flags |= MediaCodec.BUFFER_FLAG_CODEC_CONFIG;
+        }
+        if (isEos) {
+            flags |= MediaCodec.BUFFER_FLAG_END_OF_STREAM;
+        }
+        decoder.queuePacket(data, ptsUs, flags);
+    }
+
+    public void stopH264Decoder(long decoderId) {
+        H264Decoder decoder = mH264Decoders.remove(decoderId);
+        if (decoder != null) {
+            decoder.stopAndCleanup();
+        }
     }
     
                 

@@ -117,6 +117,10 @@ pub enum FromJavaMessage {
         video_id: u64,
         error: String,
     },
+    VideoDecodingStatus {
+        video_id: u64,
+        status: String,
+    },
     CameraPreviewSurfaceReady {
         video_id: u64,
         window: *mut ndk_sys::ANativeWindow,
@@ -252,6 +256,16 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
         get_intent_string_extra(env, activity, "makepad.STUDIO").filter(|v| !v.trim().is_empty())
     {
         std::env::set_var("STUDIO", &studio);
+    }
+
+    for key in [
+        "MAKEPAD_XR_REMOTE_HOST",
+        "MAKEPAD_XR_REMOTE_CONTROL_PORT",
+        "MAKEPAD_XR_REMOTE_VIDEO_PORT",
+    ] {
+        if let Some(value) = get_intent_string_extra(env, activity, key).filter(|v| !v.trim().is_empty()) {
+            std::env::set_var(key, value);
+        }
     }
 }
 
@@ -857,6 +871,44 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onH264EncoderErr
 ) {
     let message = jstring_to_string(env, error);
     crate::video_encode::camera_video_encoder::on_android_h264_error(encoder_id as u64, message);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onH264DecoderError(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    decoder_id: jni_sys::jlong,
+    error: jni_sys::jstring,
+) {
+    let message = jstring_to_string(env, error);
+    send_from_java_message(FromJavaMessage::VideoDecodingError {
+        video_id: super::android::realtime_video_decoder_id(decoder_id as usize).0,
+        error: message.clone(),
+    });
+    crate::error!(
+        "android h264 decoder error decoder_id={} error={}",
+        decoder_id,
+        message
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onH264DecoderStatus(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    decoder_id: jni_sys::jlong,
+    status: jni_sys::jstring,
+) {
+    let message = jstring_to_string(env, status);
+    send_from_java_message(FromJavaMessage::VideoDecodingStatus {
+        video_id: super::android::realtime_video_decoder_id(decoder_id as usize).0,
+        status: message.clone(),
+    });
+    crate::log!(
+        "android h264 decoder status decoder_id={} status={}",
+        decoder_id,
+        message
+    );
 }
 
 #[no_mangle]
@@ -1577,6 +1629,148 @@ pub unsafe fn to_java_prepare_video_playback(
     );
 
     (**env).DeleteLocalRef.unwrap()(env, video_source);
+}
+
+pub unsafe fn to_java_prepare_h264_decoder(
+    env: *mut jni_sys::JNIEnv,
+    decoder_id: u64,
+    external_texture_handle: u32,
+    width_hint: u32,
+    height_hint: u32,
+    use_image_reader: bool,
+) -> jni_sys::jobject {
+    let local_ref = ndk_utils::call_object_method!(
+        env,
+        get_activity(),
+        "prepareH264Decoder",
+        "(JIIIZ)Ldev/makepad/android/H264Decoder;",
+        decoder_id as jni_sys::jlong,
+        external_texture_handle as jni_sys::jint,
+        width_hint as jni_sys::jint,
+        height_hint as jni_sys::jint,
+        use_image_reader as jni_sys::jboolean as std::ffi::c_uint
+    );
+    if local_ref.is_null() {
+        return std::ptr::null_mut();
+    }
+    let global_ref = (**env).NewGlobalRef.unwrap()(env, local_ref);
+    (**env).DeleteLocalRef.unwrap()(env, local_ref);
+    global_ref
+}
+
+pub unsafe fn to_java_acquire_h264_decoder_hardware_buffer(
+    env: *mut jni_sys::JNIEnv,
+    video_decoder_ref: jni_sys::jobject,
+) -> Option<(*mut ndk_sys::AHardwareBuffer, u32, u32)> {
+    let buffer_obj = ndk_utils::call_object_method!(
+        env,
+        video_decoder_ref,
+        "acquireLatestHardwareBuffer",
+        "()Landroid/hardware/HardwareBuffer;"
+    );
+    if buffer_obj.is_null() {
+        return None;
+    }
+    let width = ndk_utils::call_int_method!(env, video_decoder_ref, "getWidth", "()I").max(0) as u32;
+    let height = ndk_utils::call_int_method!(env, video_decoder_ref, "getHeight", "()I").max(0) as u32;
+    let hardware_buffer = ndk_sys::AHardwareBuffer_fromHardwareBuffer(env, buffer_obj);
+    if !hardware_buffer.is_null() {
+        ndk_sys::AHardwareBuffer_acquire(hardware_buffer);
+    }
+    // Native path owns the buffer via AHardwareBuffer_acquire; release the Java wrapper so
+    // ImageReader buffer slots recycle (avoids starvation and "HardwareBuffer.close" finalizer spam).
+    ndk_utils::call_void_method!(env, buffer_obj, "close", "()V");
+    (**env).DeleteLocalRef.unwrap()(env, buffer_obj);
+    if hardware_buffer.is_null() {
+        return None;
+    }
+    Some((hardware_buffer, width, height))
+}
+
+pub unsafe fn to_java_queue_h264_decoder_packet(
+    env: *mut jni_sys::JNIEnv,
+    decoder_id: u64,
+    data: &[u8],
+    pts_us: i64,
+    is_config: bool,
+    is_eos: bool,
+) {
+    let java_body = (**env).NewByteArray.unwrap()(env, data.len() as i32);
+    if java_body.is_null() {
+        return;
+    }
+    if !data.is_empty() {
+        (**env).SetByteArrayRegion.unwrap()(
+            env,
+            java_body,
+            0,
+            data.len() as i32,
+            data.as_ptr() as *const jni_sys::jbyte,
+        );
+    }
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "queueH264DecoderPacket",
+        "(J[BJZZ)V",
+        decoder_id as jni_sys::jlong,
+        java_body,
+        pts_us as jni_sys::jlong,
+        is_config as jni_sys::jboolean as std::ffi::c_uint,
+        is_eos as jni_sys::jboolean as std::ffi::c_uint
+    );
+    (**env).DeleteLocalRef.unwrap()(env, java_body);
+}
+
+pub unsafe fn to_java_queue_h264_decoder_packet_on_ref(
+    env: *mut jni_sys::JNIEnv,
+    video_decoder_ref: jni_sys::jobject,
+    data: &[u8],
+    pts_us: i64,
+    flags: i32,
+) {
+    let java_body = (**env).NewByteArray.unwrap()(env, data.len() as i32);
+    if java_body.is_null() {
+        return;
+    }
+    if !data.is_empty() {
+        (**env).SetByteArrayRegion.unwrap()(
+            env,
+            java_body,
+            0,
+            data.len() as i32,
+            data.as_ptr() as *const jni_sys::jbyte,
+        );
+    }
+    ndk_utils::call_void_method!(
+        env,
+        video_decoder_ref,
+        "queuePacket",
+        "([BJI)V",
+        java_body,
+        pts_us as jni_sys::jlong,
+        flags as jni_sys::jint
+    );
+    (**env).DeleteLocalRef.unwrap()(env, java_body);
+}
+
+pub unsafe fn to_java_stop_h264_decoder(env: *mut jni_sys::JNIEnv, decoder_id: u64) {
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "stopH264Decoder",
+        "(J)V",
+        decoder_id as jni_sys::jlong
+    );
+}
+
+pub unsafe fn to_java_stop_h264_decoder_on_ref(env: *mut jni_sys::JNIEnv, video_decoder_ref: jni_sys::jobject) {
+    ndk_utils::call_void_method!(
+        env,
+        video_decoder_ref,
+        "stopAndCleanup",
+        "()V"
+    );
 }
 
 pub unsafe fn to_java_update_tex_image(

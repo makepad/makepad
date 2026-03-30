@@ -4,13 +4,18 @@ let RunItem = {
     on_run: nil,
     name: ""
     package_name: ""
+    remote_host: ""
     in_studio: true
 }
 
 let RunQuest = RunItem{
     on_run: fn(id){
         hub.run( 
-            {"STUDIO": hub.studio_ext(id), "MAKEPAD": "vulkan"},
+            {
+                "STUDIO": hub.studio_ext(id),
+                "MAKEPAD": "vulkan",
+                "MAKEPAD_XR_REMOTE_HOST": self.remote_host
+            },
             "cargo", 
             [
                 "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"
@@ -85,4 +90,6 @@ hub.set_run_items([
     RunStudioExt{name: "makepad-studio-ext"} 
     RunStudioRelease{name: "makepad-example-xr"}
     RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
+    RunStudioRelease{name: "makepad-example-xr-remote"}
+    RunQuest{name: "makepad-example-xr-remote-quest", run:"makepad-example-xr-remote", remote_host:"192.168.2.23"}
 ])

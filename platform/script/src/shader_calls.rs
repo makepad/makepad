@@ -1520,7 +1520,9 @@ impl ShaderFnCompiler {
 
                     match output.backend {
                         ShaderBackend::Glsl => {
-                            let sampler = ShaderSampler::default();
+                            // Must match Metal/HLSL/WGSL: Vulkan binds YCbCr samplers via
+                            // texture_sampler_indices + video_sampler_overrides (see vulkan.rs).
+                            let sampler = ShaderSampler::video();
                             let sampler_idx = output.get_or_create_sampler(sampler);
                             output.bind_texture_sampler(&texture_expr, sampler_idx);
                             if cfg!(target_os = "android") && !output.use_vulkan {
@@ -1535,7 +1537,7 @@ impl ShaderFnCompiler {
                             write!(s, "{}.sample(_s{}, {})", texture_expr, sampler_idx, coord).ok();
                         }
                         ShaderBackend::Wgsl => {
-                            let sampler = ShaderSampler::default();
+                            let sampler = ShaderSampler::video();
                             let sampler_idx = output.get_or_create_sampler(sampler);
                             output.bind_texture_sampler(&texture_expr, sampler_idx);
                             write!(

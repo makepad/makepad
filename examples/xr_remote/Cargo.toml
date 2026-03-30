@@ -1,0 +1,11 @@
+[package]
+name = "makepad-example-xr-remote"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad Quest remote MR feasibility prototype"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-xr = { path = "../../xr", version = "1.0.0" }

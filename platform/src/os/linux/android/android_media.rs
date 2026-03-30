@@ -261,6 +261,152 @@ impl CxMediaApi for Cx {
             .video_encoder_request_keyframe(index)
     }
 
+    fn video_decoder_start_box(
+        &mut self,
+        index: usize,
+        config: VideoDecoderConfig,
+        _f: VideoDecodedFrameOutputFn,
+    ) -> Result<(), VideoDecodeError> {
+        if config.codec != VideoCodec::H264 || config.expected_format != VideoBitstreamFormat::AnnexB
+        {
+            return Err(VideoDecodeError::UnsupportedCodec);
+        }
+
+        let texture_id = match config.output {
+            VideoDecodeOutput::Texture { texture_id } => texture_id,
+            _ => return Err(VideoDecodeError::UnsupportedOutput),
+        };
+
+        if texture_id == crate::texture::TextureId::default() {
+            return Err(VideoDecodeError::UnsupportedOutput);
+        }
+
+        let cx_texture = &self.textures[texture_id];
+        let (external_texture_handle, output, use_image_reader) =
+            if cx_texture.format.is_video_external() {
+                if let Some(external_texture_handle) = cx_texture.os.gl_texture {
+                    (
+                        external_texture_handle,
+                        super::android::AndroidRealtimeVideoDecoderOutput::GlExternal,
+                        false,
+                    )
+                } else {
+                    #[cfg(use_vulkan)]
+                    {
+                        (
+                            0,
+                            super::android::AndroidRealtimeVideoDecoderOutput::VulkanExternalHardwareBuffer {
+                                texture_id,
+                            },
+                            true,
+                        )
+                    }
+                    #[cfg(not(use_vulkan))]
+                    {
+                        crate::warning!(
+                            "android realtime video decoder start deferred: missing GL handle for texture {:?}",
+                            texture_id
+                        );
+                        return Err(VideoDecodeError::UnsupportedOutput);
+                    }
+                }
+            } else {
+                #[cfg(use_vulkan)]
+                {
+                    if cx_texture.format.is_video_rgba_hardware_buffer() {
+                        (
+                            0,
+                            super::android::AndroidRealtimeVideoDecoderOutput::VulkanRgbaHardwareBuffer {
+                                texture_id,
+                            },
+                            true,
+                        )
+                    } else {
+                        return Err(VideoDecodeError::UnsupportedOutput);
+                    }
+                }
+                #[cfg(not(use_vulkan))]
+                {
+                    return Err(VideoDecodeError::UnsupportedOutput);
+                }
+            };
+
+        #[cfg(not(use_vulkan))]
+        if use_image_reader {
+            return Err(VideoDecodeError::UnsupportedOutput);
+        }
+
+        self.video_decoder_stop(index);
+
+        let decoder_ref = unsafe {
+            let env = attach_jni_env();
+            to_java_prepare_h264_decoder(
+                env,
+                index as u64,
+                external_texture_handle,
+                config.width_hint.unwrap_or(16),
+                config.height_hint.unwrap_or(16),
+                use_image_reader,
+            )
+        };
+        if decoder_ref.is_null() {
+            return Err(VideoDecodeError::DecoderNotStarted);
+        }
+
+        self.os.realtime_video_decoders.insert(
+            index,
+            super::android::AndroidRealtimeVideoDecoder {
+                decoder_ref,
+                video_id: super::android::realtime_video_decoder_id(index),
+                output,
+                imported_first_frame: false,
+                reported_waiting_for_hardware_buffer: false,
+            },
+        );
+        Ok(())
+    }
+
+    fn video_decoder_push_packet(
+        &mut self,
+        index: usize,
+        packet: VideoDecoderPacketRef<'_>,
+    ) -> Result<(), VideoDecodeError> {
+        let Some(decoder) = self.os.realtime_video_decoders.get(&index) else {
+            return Err(VideoDecodeError::DecoderNotStarted);
+        };
+
+        if packet.data.is_empty() && !packet.is_config {
+            return Err(VideoDecodeError::InvalidPacket);
+        }
+
+        let pts_us = (packet.pts_ns / 1_000).min(i64::MAX as u64) as i64;
+        let mut flags = 0i32;
+        if packet.is_config {
+            flags |= 2; // MediaCodec.BUFFER_FLAG_CODEC_CONFIG
+        }
+        unsafe {
+            let env = attach_jni_env();
+            to_java_queue_h264_decoder_packet_on_ref(
+                env,
+                decoder.decoder_ref,
+                packet.data,
+                pts_us,
+                flags,
+            );
+        }
+        Ok(())
+    }
+
+    fn video_decoder_stop(&mut self, index: usize) {
+        if let Some(decoder) = self.os.realtime_video_decoders.remove(&index) {
+            unsafe {
+                let env = attach_jni_env();
+                to_java_stop_h264_decoder_on_ref(env, decoder.decoder_ref);
+                to_java_cleanup_video_decoder_ref(env, decoder.decoder_ref);
+            }
+        }
+    }
+
     fn video_capabilities(&self) -> VideoCapabilities {
         let mut codecs = Vec::new();
 
