@@ -21,7 +21,7 @@ use self::{
     },
 };
 
-pub const XR_NET_PROTOCOL_VERSION: u16 = 9;
+pub const XR_NET_PROTOCOL_VERSION: u16 = 10;
 pub const XR_NET_DEFAULT_DISCOVERY_PORT: u16 = 41546;
 pub const XR_NET_DEFAULT_DATA_PORT: u16 = 41547;
 pub const XR_NET_DEFAULT_SYNC_PORT: u16 = 41548;
@@ -36,6 +36,7 @@ const XR_NET_SYNC_WRITE_BUDGET_BYTES_PER_POLL: usize = 256 * 1024;
 const XR_NET_SYNC_LZ4_ACCELERATION: usize = 4;
 const XR_NET_SYNC_FRAME_RAW_TAG: u8 = 0;
 const XR_NET_SYNC_FRAME_LZ4_TAG: u8 = 1;
+const XR_NET_UDP_SHARED_OBJECT_STATE_BATCH_MAX_BYTES: usize = 1200;
 // Alignment descriptors now carry full f32 heightmaps, so the old 256 KiB cap
 // is too small once the published map grows beyond modest extents.
 const XR_NET_SYNC_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -681,12 +682,32 @@ impl XrNetNode {
             .send(XrNetSyncOutgoing::SharedObjectControl(control));
     }
 
-    pub fn send_shared_object_state(&mut self, mut state: XrNetSharedObjectState) {
-        state.seq = self.next_shared_object_state_seq;
-        self.next_shared_object_state_seq = self.next_shared_object_state_seq.wrapping_add(1);
+    pub fn assign_shared_object_state_seqs(
+        &mut self,
+        states: &mut [XrNetSharedObjectState],
+    ) {
+        for state in states {
+            state.seq = self.next_shared_object_state_seq;
+            self.next_shared_object_state_seq = self.next_shared_object_state_seq.wrapping_add(1);
+        }
+    }
+
+    pub fn send_shared_object_states<I>(&mut self, states: I)
+    where
+        I: IntoIterator<Item = XrNetSharedObjectState>,
+    {
+        let mut batch = states.into_iter().collect::<Vec<_>>();
+        if batch.is_empty() {
+            return;
+        }
+        self.assign_shared_object_state_seqs(&mut batch);
         let _ = self
             .udp_outgoing_sender
-            .send(XrNetUdpOutgoing::SharedObjectState(state));
+            .send(XrNetUdpOutgoing::SharedObjectStates(batch));
+    }
+
+    pub fn send_shared_object_state(&mut self, state: XrNetSharedObjectState) {
+        self.send_shared_object_states([state]);
     }
 }
 
@@ -757,6 +778,30 @@ mod tests {
             }
         }
         None
+    }
+
+    fn wait_for_matching_events<F>(
+        node: &XrNetNode,
+        expected: usize,
+        mut predicate: F,
+    ) -> Vec<XrNetIncoming>
+    where
+        F: FnMut(&XrNetIncoming) -> bool,
+    {
+        let start = Instant::now();
+        let mut matches = Vec::new();
+        while start.elapsed() < TEST_IO_TIMEOUT && matches.len() < expected {
+            match node
+                .incoming_receiver
+                .recv_timeout(Duration::from_millis(50))
+            {
+                Ok(event) if predicate(&event) => matches.push(event),
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        matches
     }
 
     fn localhost_config(
@@ -1259,6 +1304,72 @@ mod tests {
         assert_eq!(received.pose, sent.pose);
         assert_eq!(received.linvel, sent.linvel);
         assert_eq!(received.angvel, sent.angvel);
+    }
+
+    #[test]
+    fn shared_object_state_batches_roundtrip_over_udp() {
+        let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
+        let mut left =
+            XrNetNode::with_config(localhost_config(325, 43266, 43267, 43268, vec![43276]))
+                .expect("left test client should bind");
+        let right = XrNetNode::with_config(localhost_config(326, 43276, 43277, 43278, vec![43266]))
+            .expect("right test client should bind");
+
+        let _ = wait_for_event(&left, |event| matches!(event, XrNetIncoming::Join { .. }))
+            .expect("left test client should discover right before sending batched shared state");
+        let _ = wait_for_event(&right, |event| matches!(event, XrNetIncoming::Join { .. }))
+            .expect("right test client should discover left before receiving batched shared state");
+
+        let states = (0..24)
+            .map(|index| XrNetSharedObjectState {
+                seq: 0,
+                sent_at: 10.0 + index as f64 * 0.01,
+                physics_tick: 100 + index as u32,
+                object_id: xr_make_shared_object_id(
+                    XrPeerId(77),
+                    XrSharedObjectCounter(1000 + index as u64),
+                )
+                .expect("counter should fit"),
+                epoch: index as u32,
+                authority: XrPeerId(77),
+                fidelity: XrSharedObjectFidelity::ImpactCritical,
+                mode: XrSharedObjectMode::Dynamic,
+                pose: Pose::new(Quat::default(), vec3f(index as f32 * 0.01, 1.0, -0.4)),
+                linvel: vec3f(3.0 + index as f32, 0.0, -9.0),
+                angvel: vec3f(0.0, 0.1 * index as f32, 0.0),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            XrNetDataPacket::shared_object_states(XrNetPeerId(11), states.clone()).to_bytes().len()
+                > XR_NET_UDP_SHARED_OBJECT_STATE_BATCH_MAX_BYTES,
+            "test fixture should exceed the per-datagram shared-object budget to exercise batching",
+        );
+
+        left.send_shared_object_states(states.clone());
+        let received = wait_for_matching_events(&right, states.len(), |event| {
+            matches!(event, XrNetIncoming::SharedObjectState { .. })
+        });
+        assert_eq!(received.len(), states.len(), "{received:?}");
+
+        let received_states = received
+            .into_iter()
+            .map(|event| match event {
+                XrNetIncoming::SharedObjectState { state, .. } => state,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        for (received, expected) in received_states.iter().zip(states.iter()) {
+            assert_eq!(received.sent_at, expected.sent_at);
+            assert_eq!(received.physics_tick, expected.physics_tick);
+            assert_eq!(received.object_id, expected.object_id);
+            assert_eq!(received.epoch, expected.epoch);
+            assert_eq!(received.authority, expected.authority);
+            assert_eq!(received.fidelity, expected.fidelity);
+            assert_eq!(received.mode, expected.mode);
+            assert_eq!(received.pose, expected.pose);
+            assert_eq!(received.linvel, expected.linvel);
+            assert_eq!(received.angvel, expected.angvel);
+        }
     }
 
     #[test]

@@ -957,7 +957,9 @@ impl AppMain for App {
         }
         self.ensure_activity_announced(cx);
         self.refresh_spawnable_registry(cx, false);
-        if matches!(event, Event::XrUpdate(_) | Event::NextFrame(_)) {
+        if matches!(event, Event::XrUpdate(_))
+            || (matches!(event, Event::NextFrame(_)) && !cx.in_xr_mode())
+        {
             self.publish_local_shared_object_states(cx);
         }
         self.refresh_debug_fields(cx);

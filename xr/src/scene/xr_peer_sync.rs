@@ -1530,6 +1530,7 @@ impl XrPeerSync {
     const SHOW_LOCAL_DESCRIPTOR_DEBUG: bool = false;
     const CLOCK_PING_INTERVAL_SECONDS: f64 = 1.0;
     const SHARED_OBJECT_SHADOW_MAX_EXTRAPOLATION_SECONDS: f32 = 0.10;
+    const SHARED_OBJECT_SHADOW_INTERPOLATION_DELAY_SECONDS: f64 = 0.12;
     const SHARED_OBJECT_TAKEOVER_DISTANCE_METERS: f32 = 0.18;
     const SHARED_OBJECT_TAKEOVER_RELATIVE_SPEED_MAX: f32 = 2.4;
     const SHARED_OBJECT_TAKEOVER_EFFECTIVE_DELAY_SECONDS: f64 = 0.12;
@@ -1809,7 +1810,7 @@ impl XrPeerSync {
             .runtime
             .shared_objects
             .prune_missing_local_shared_objects(runtime_bodies);
-        let states = self.runtime.shared_objects.local_shared_object_states(
+        let mut states = self.runtime.shared_objects.local_shared_object_states(
             runtime_bodies,
             sent_at,
             physics_tick,
@@ -1833,8 +1834,12 @@ impl XrPeerSync {
                     epoch,
                 });
             }
-            for state in states {
-                net_node.send_shared_object_state(state);
+            if !states.is_empty() {
+                net_node.assign_shared_object_state_seqs(&mut states);
+                self.runtime
+                    .shared_objects
+                    .note_published_local_shared_object_states(&states);
+                net_node.send_shared_object_states(states);
             }
         }
         count
@@ -2124,23 +2129,20 @@ impl XrPeerSync {
                 }
             }
             XrNetIncoming::SharedObjectState { peer, state } => {
-                let Some(widget_uid) = self
+                let mut state = state;
+                if state.sent_at > 0.0 {
+                    state.sent_at = self
+                        .peer_time_to_local_time(peer.id, state.sent_at)
+                        .unwrap_or_else(|| self.current_local_time());
+                }
+                if self
                     .runtime
                     .shared_objects
                     .record_remote_shared_object_state(state)
-                else {
+                    .is_none()
+                {
                     return;
-                };
-                self.emit_remote_body_spawn(
-                    cx,
-                    peer.id,
-                    widget_uid,
-                    true,
-                    state.mode,
-                    state.pose,
-                    state.linvel,
-                    state.angvel,
-                );
+                }
             }
             XrNetIncoming::Alignment { .. } => {}
         }
@@ -2819,6 +2821,25 @@ impl XrPeerSync {
         }
     }
 
+    fn current_local_time(&self) -> f64 {
+        if self.runtime.local.state_time != 0.0 {
+            self.runtime.local.state_time
+        } else {
+            Cx::time_now()
+        }
+    }
+
+    fn shared_object_state_local_time(
+        state: XrNetSharedObjectState,
+        fallback_local_time: f64,
+    ) -> f64 {
+        if state.sent_at > 0.0 {
+            state.sent_at
+        } else {
+            fallback_local_time
+        }
+    }
+
     fn shared_object_source_peer_id(
         &self,
         snapshot: &XrRemoteSharedObjectSnapshot,
@@ -2826,21 +2847,41 @@ impl XrPeerSync {
         self.peer_id_for_authority(snapshot.state_source_authority)
     }
 
-    fn predicted_remote_shadow_state(
-        &self,
-        snapshot: &XrRemoteSharedObjectSnapshot,
-    ) -> Option<(XrNetPeerId, XrSharedObjectMode, Pose, Vec3f, Vec3f)> {
-        let latest_state = snapshot.latest_state?;
-        let peer_id = self.shared_object_source_peer_id(snapshot)?;
-        let local_sent_at = self
-            .peer_time_to_local_time(peer_id, latest_state.sent_at)
-            .unwrap_or(self.runtime.local.state_time);
-        let dt = (self.runtime.local.state_time - local_sent_at).clamp(
-            0.0,
-            Self::SHARED_OBJECT_SHADOW_MAX_EXTRAPOLATION_SECONDS as f64,
-        ) as f32;
-        Some((
-            peer_id,
+    fn predict_remote_shadow_state_from_history(
+        playback_time: f64,
+        latest_state: XrNetSharedObjectState,
+        history: &[XrNetSharedObjectState],
+        fallback_local_time: f64,
+    ) -> (XrSharedObjectMode, Pose, Vec3f, Vec3f) {
+        for samples in history.windows(2) {
+            let previous = samples[0];
+            let next = samples[1];
+            if previous.epoch != latest_state.epoch || next.epoch != latest_state.epoch {
+                continue;
+            }
+            let previous_local_sent_at =
+                Self::shared_object_state_local_time(previous, fallback_local_time);
+            let next_local_sent_at =
+                Self::shared_object_state_local_time(next, fallback_local_time);
+            if playback_time < previous_local_sent_at || playback_time > next_local_sent_at {
+                continue;
+            }
+            let interpolation = ((playback_time - previous_local_sent_at)
+                / (next_local_sent_at - previous_local_sent_at).max(f64::EPSILON))
+                .clamp(0.0, 1.0) as f32;
+            return (
+                next.mode,
+                Pose::from_lerp(previous.pose, next.pose, interpolation),
+                Vec3f::from_lerp(previous.linvel, next.linvel, interpolation),
+                Vec3f::from_lerp(previous.angvel, next.angvel, interpolation),
+            );
+        }
+
+        let local_sent_at = Self::shared_object_state_local_time(latest_state, fallback_local_time);
+        let dt = (playback_time - local_sent_at)
+            .clamp(0.0, Self::SHARED_OBJECT_SHADOW_MAX_EXTRAPOLATION_SECONDS as f64)
+            as f32;
+        (
             latest_state.mode,
             Self::predict_pose(
                 latest_state.pose,
@@ -2850,7 +2891,28 @@ impl XrPeerSync {
             ),
             latest_state.linvel,
             latest_state.angvel,
-        ))
+        )
+    }
+
+    fn predicted_remote_shadow_state(
+        &self,
+        snapshot: &XrRemoteSharedObjectSnapshot,
+    ) -> Option<(XrNetPeerId, XrSharedObjectMode, Pose, Vec3f, Vec3f)> {
+        let peer_id = self.shared_object_source_peer_id(snapshot)?;
+        let latest_state = snapshot.latest_state?;
+        let playback_time =
+            self.current_local_time() - Self::SHARED_OBJECT_SHADOW_INTERPOLATION_DELAY_SECONDS;
+        let history = self
+            .runtime
+            .shared_objects
+            .remote_shared_object_history(snapshot.object_id);
+        let (mode, pose, linvel, angvel) = Self::predict_remote_shadow_state_from_history(
+            playback_time,
+            latest_state,
+            history.as_slice(),
+            self.current_local_time(),
+        );
+        Some((peer_id, mode, pose, linvel, angvel))
     }
 
     fn emit_body_spawn_local_space(
@@ -4313,5 +4375,92 @@ mod tests {
             &peers,
         );
         assert_eq!(text, "AlignDbg: local slice 2 | desc occ 0 v 0 c 0");
+    }
+
+    fn make_shared_state(
+        sent_at: f64,
+        pose_z: f32,
+        linvel_z: f32,
+        angvel_y: f32,
+    ) -> XrNetSharedObjectState {
+        XrNetSharedObjectState {
+            seq: 1,
+            sent_at,
+            physics_tick: 1,
+            object_id: xr_make_shared_object_id(XrPeerId(9), XrSharedObjectCounter(7))
+                .expect("shared object id should pack"),
+            epoch: 0,
+            authority: XrPeerId(9),
+            fidelity: XrSharedObjectFidelity::Interpolated,
+            mode: XrSharedObjectMode::Dynamic,
+            pose: Pose::new(Quat::default(), vec3f(0.0, 0.0, pose_z)),
+            linvel: vec3f(0.0, 0.0, linvel_z),
+            angvel: vec3f(0.0, angvel_y, 0.0),
+        }
+    }
+
+    #[test]
+    fn shared_object_shadow_prediction_interpolates_between_remote_history_samples() {
+        let previous = make_shared_state(1.00, -1.0, -4.0, 0.0);
+        let next = XrNetSharedObjectState {
+            seq: 2,
+            sent_at: 1.10,
+            pose: Pose::new(
+                Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), 0.2),
+                vec3f(0.0, 0.0, -2.0),
+            ),
+            linvel: vec3f(0.0, 0.0, -6.0),
+            angvel: vec3f(0.0, 0.5, 0.0),
+            ..previous
+        };
+
+        let (mode, pose, linvel, angvel) = XrPeerSync::predict_remote_shadow_state_from_history(
+            1.05,
+            next,
+            &[previous, next],
+            1.05,
+        );
+
+        assert_eq!(mode, XrSharedObjectMode::Dynamic);
+        assert!((pose.position.z + 1.5).abs() <= 0.001, "{pose:?}");
+        assert!((linvel.z + 5.0).abs() <= 0.001, "{linvel:?}");
+        assert!((angvel.y - 0.25).abs() <= 0.001, "{angvel:?}");
+    }
+
+    #[test]
+    fn shared_object_shadow_prediction_extrapolates_latest_sample_with_clamped_horizon() {
+        let latest = make_shared_state(1.00, -1.0, -10.0, 0.0);
+
+        let (_, pose, linvel, _) = XrPeerSync::predict_remote_shadow_state_from_history(
+            1.30,
+            latest,
+            &[latest],
+            1.30,
+        );
+
+        let expected_z =
+            -1.0 + -10.0 * XrPeerSync::SHARED_OBJECT_SHADOW_MAX_EXTRAPOLATION_SECONDS;
+        assert!((pose.position.z - expected_z).abs() <= 0.001, "{pose:?}");
+        assert_eq!(linvel.z, -10.0);
+    }
+
+    #[test]
+    fn shared_object_shadow_prediction_uses_fallback_local_time_when_sample_time_is_zero() {
+        let latest = XrNetSharedObjectState {
+            sent_at: 0.0,
+            pose: Pose::new(Quat::default(), vec3f(0.0, 0.0, -1.0)),
+            linvel: vec3f(0.0, 0.0, -2.0),
+            ..make_shared_state(0.0, -1.0, -2.0, 0.0)
+        };
+
+        let (_, pose, linvel, _) = XrPeerSync::predict_remote_shadow_state_from_history(
+            2.00,
+            latest,
+            &[latest],
+            1.95,
+        );
+
+        assert!((pose.position.z + 1.10).abs() <= 0.001, "{pose:?}");
+        assert_eq!(linvel.z, -2.0);
     }
 }

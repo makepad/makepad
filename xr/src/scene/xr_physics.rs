@@ -129,8 +129,18 @@ fn rapier_pose(pose: Pose) -> RapierPose {
     )
 }
 
+fn makepad_vec3(v: RapierVector) -> Vec3f {
+    vec3f(v.x, v.y, v.z)
+}
+
+fn grab_offset_from_body_anchor(hand_pose: Pose, body_pose: Pose, body_anchor_local: Vec3f) -> Pose {
+    let mut grab_offset = Pose::multiply(&hand_pose.invert(), &body_pose);
+    grab_offset.position = grab_offset.orientation.rotate_vec3(&(body_anchor_local * -1.0));
+    grab_offset
+}
+
 fn hand_grab_pose(hand: &XrHand) -> Option<Pose> {
-    hand.tracking_pose()
+    hand.pinch_anchor_pose().or_else(|| hand.tracking_pose())
 }
 
 fn depth_query_body_user_data(widget_uid: WidgetUid) -> u128 {
@@ -845,8 +855,11 @@ impl RapierScene {
             {
                 continue;
             }
-            let body_pose = makepad_pose(body.position());
-            let distance = (body_pose.position - hand.pose.position).length();
+            let Some((distance, body_pose, body_anchor_local)) =
+                self.project_hand_anchor_to_body(cube, hand.pose)
+            else {
+                continue;
+            };
             if distance > XR_HAND_GRAB_MAX_DISTANCE {
                 continue;
             }
@@ -854,22 +867,27 @@ impl RapierScene {
                 continue;
             }
             if best_candidate
-                .map(|(best_distance, _, _)| distance < best_distance)
+                .map(|(best_distance, _, _, _)| distance < best_distance)
                 .unwrap_or(true)
             {
-                best_candidate = Some((distance, cube.body, body_pose));
+                best_candidate = Some((distance, cube.body, body_pose, body_anchor_local));
             }
         }
 
-        let Some((_, body_handle, body_pose)) = best_candidate else {
+        let Some((_, body_handle, body_pose, body_anchor_local)) = best_candidate else {
             return hand;
         };
-        hand.grab_offset = Pose::multiply(&hand.pose.invert(), &body_pose);
+        hand.grab_offset = grab_offset_from_body_anchor(hand.pose, body_pose, body_anchor_local);
         hand.held_body = Some(body_handle);
         self.release_settle_state(body_handle);
+        let target_pose = Pose::multiply(&hand.pose, &hand.grab_offset);
+        if !target_pose.is_finite() {
+            hand.held_body = None;
+            hand.grab_offset = Pose::default();
+            return hand;
+        }
         if other_held_body != Some(body_handle) {
             if let Some(body) = self.bodies.get_mut(body_handle) {
-                let target_pose = Pose::multiply(&hand.pose, &hand.grab_offset);
                 body.set_body_type(RigidBodyType::KinematicPositionBased, true);
                 body.set_position(rapier_pose(target_pose), false);
                 body.set_next_kinematic_position(rapier_pose(target_pose));
@@ -879,6 +897,28 @@ impl RapierScene {
             body.wake_up(true);
         }
         hand
+    }
+
+    fn project_hand_anchor_to_body(
+        &self,
+        cube: &PhysicsCube,
+        hand_pose: Pose,
+    ) -> Option<(f32, Pose, Vec3f)> {
+        let body = self.bodies.get(cube.body)?;
+        let collider = self.colliders.get(cube.collider)?;
+        let body_pose = makepad_pose(body.position());
+        let surface_projection =
+            collider
+                .shape()
+                .project_point(collider.position(), rapier_vec3(hand_pose.position), false);
+        let world_anchor = makepad_vec3(surface_projection.point);
+        let body_anchor_local = body_pose.invert().transform_vec3(&world_anchor);
+        let distance = (world_anchor - hand_pose.position).length();
+        (distance.is_finite() && body_anchor_local.is_finite()).then_some((
+            distance,
+            body_pose,
+            body_anchor_local,
+        ))
     }
 
     fn cube_has_hand_contact(
@@ -1343,7 +1383,16 @@ mod tests {
             .get(cube.body)
             .expect("cube body should still exist after sleeping respawn");
         assert_eq!(body.body_type(), RigidBodyType::Dynamic);
-        assert!(body.is_sleeping());
+        assert_vec3_close(
+            vec3f(body.linvel().x, body.linvel().y, body.linvel().z),
+            vec3f(0.0, 0.0, 0.0),
+            0.0001,
+        );
+        assert_vec3_close(
+            vec3f(body.angvel().x, body.angvel().y, body.angvel().z),
+            vec3f(0.0, 0.0, 0.0),
+            0.0001,
+        );
     }
 
     #[test]
@@ -1505,6 +1554,71 @@ mod tests {
             vec3f(body.linvel().x, body.linvel().y, body.linvel().z),
             release_velocity,
             0.0001,
+        );
+    }
+
+    #[test]
+    fn hand_grab_anchors_body_surface_to_hand_pose_instead_of_body_center() {
+        let mut scene = RapierScene::new(0.0);
+        let widget_uid = WidgetUid(430);
+        let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, 0.0));
+        let half_extents = vec3f(0.05, 0.05, 0.05);
+        scene.spawn_dynamic_box(
+            widget_uid,
+            pose,
+            half_extents,
+            vec3f(1.0, 1.0, 1.0),
+            1.0,
+            0.5,
+            0.0,
+        );
+        let cube = scene.cubes[0];
+        let acquire_pose = Pose::new(Quat::default(), pose.position + vec3f(0.0, 0.0, 0.11));
+        let moved_pose = Pose::new(Quat::default(), pose.position + vec3f(0.16, 0.0, 0.11));
+
+        RapierScene::sync_hand_bodies(
+            &scene.left_hand,
+            &[HandCollider::Ball {
+                center: acquire_pose.position,
+                radius: 0.09,
+            }],
+            &mut scene.bodies,
+            &mut scene.colliders,
+        );
+        scene.left_hand_grab = HandGrabState {
+            shared_hand: XrSharedHand::LeftHand,
+            pose: acquire_pose,
+            previous_pose: acquire_pose,
+            linvel: vec3f(0.0, 0.0, 0.0),
+            tracked: true,
+            gripping: true,
+            held_body: None,
+            grab_offset: Pose::default(),
+        };
+
+        scene.step();
+        assert_eq!(scene.left_hand_grab.held_body, Some(cube.body));
+
+        scene.left_hand_grab.previous_pose = scene.left_hand_grab.pose;
+        scene.left_hand_grab.pose = moved_pose;
+        scene.apply_held_body_targets();
+        scene.step();
+
+        let body = scene
+            .bodies
+            .get(cube.body)
+            .expect("cube body should exist after moving the held hand");
+        let body_pose = makepad_pose(body.position());
+        let center_distance = (body_pose.position - moved_pose.position).length();
+        assert!(
+            (center_distance - half_extents.z).abs() <= 0.012,
+            "center_distance={center_distance:?} body_pose={body_pose:?} moved_pose={moved_pose:?}"
+        );
+
+        let local_anchor = scene.left_hand_grab.grab_offset.invert().position;
+        assert!(
+            (local_anchor.z - half_extents.z).abs() <= 0.012,
+            "local_anchor={local_anchor:?} half_extents={half_extents:?}"
         );
     }
 
