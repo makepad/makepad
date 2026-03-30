@@ -19,6 +19,13 @@ script_mod! {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum XrPeerSyncAction {
+    ActivityChanged(XrActivityId),
+    #[default]
+    None,
+}
+
 const XR_ALIGNMENT_CALLBACK_BUDGET_MILLIS: u64 = 25;
 const XR_ALIGNMENT_CALLBACK_MAX_STEPS: usize = 4096;
 const XR_ALIGNMENT_PROGRESS_SIGNAL_INTERVAL_MILLIS: u64 = 100;
@@ -1098,10 +1105,12 @@ impl XrPeerSyncLocalState {
 struct XrPeerSyncMetrics {
     tx_state_count: u64,
     tx_descriptor_count: u64,
+    tx_activity_count: u64,
     rx_join_count: u64,
     rx_leave_count: u64,
     rx_state_count: u64,
     rx_descriptor_count: u64,
+    rx_activity_count: u64,
     last_event_text: String,
 }
 
@@ -1128,6 +1137,25 @@ impl XrPeerSyncMetrics {
     fn record_descriptor(&mut self, peer_id: XrNetPeerId, seq: u32) {
         self.rx_descriptor_count = self.rx_descriptor_count.saturating_add(1);
         self.last_event_text = format!("desc {} seq {}", XrPeerSync::peer_label(peer_id), seq);
+    }
+
+    fn record_activity_tx(&mut self, activity: XrNetActivityState) {
+        self.tx_activity_count = self.tx_activity_count.saturating_add(1);
+        self.last_event_text = format!(
+            "tx activity {} tick {}",
+            activity.activity_id.to_live_id().0,
+            activity.changed_tick
+        );
+    }
+
+    fn record_activity_rx(&mut self, peer_id: XrNetPeerId, activity: XrNetActivityState) {
+        self.rx_activity_count = self.rx_activity_count.saturating_add(1);
+        self.last_event_text = format!(
+            "activity {} {} tick {}",
+            XrPeerSync::peer_label(peer_id),
+            activity.activity_id.to_live_id().0,
+            activity.changed_tick
+        );
     }
 
     fn last_event_label(&self) -> &str {
@@ -1317,6 +1345,7 @@ struct XrPeerSyncRuntime {
     alignment_worker: Option<XrPeopleAlignmentWorker>,
     local: XrPeerSyncLocalState,
     registry: XrPeerRegistry,
+    accepted_activity: Option<XrNetActivityState>,
     metrics: XrPeerSyncMetrics,
 }
 
@@ -1468,6 +1497,10 @@ impl XrPeerSync {
         self.enabled
     }
 
+    pub fn current_activity(&self) -> Option<XrActivityId> {
+        Some(self.runtime.accepted_activity?.activity_id)
+    }
+
     pub fn network_status_text(&self) -> &str {
         self.diagnostics.network_status_text()
     }
@@ -1548,6 +1581,36 @@ impl XrPeerSync {
         }
         self.redraw(cx);
         self.enabled
+    }
+
+    pub fn set_local_activity(
+        &mut self,
+        _cx: &mut Cx,
+        activity_id: XrActivityId,
+    ) -> Option<XrNetActivityState> {
+        if !self.enabled {
+            return None;
+        }
+        self.ensure_net_node();
+        let changed_at = if self.runtime.local.state_time != 0.0 {
+            self.runtime.local.state_time
+        } else {
+            Cx::time_now()
+        };
+        let local_node_id = self.runtime.net_node.as_ref()?.node_id();
+        if self.runtime.accepted_activity.is_some_and(|current| {
+            current.activity_id == activity_id && current.changed_by == local_node_id
+        }) {
+            return self.runtime.accepted_activity;
+        }
+        let state = self
+            .runtime
+            .net_node
+            .as_mut()?
+            .send_activity(activity_id, changed_at);
+        self.runtime.accepted_activity = Some(state);
+        self.runtime.metrics.record_activity_tx(state);
+        Some(state)
     }
 
     fn ensure_net_node(&mut self) {
@@ -1680,7 +1743,7 @@ impl XrPeerSync {
             match result {
                 Ok(message) => {
                     received_message = true;
-                    self.handle_network_message(message);
+                    self.handle_network_message(cx, message);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -1692,6 +1755,7 @@ impl XrPeerSync {
 
         if disconnected {
             self.runtime.net_node = None;
+            self.runtime.accepted_activity = None;
             self.runtime.local.last_sent_descriptor_signature = None;
             self.runtime.local.last_sent_descriptor = None;
             self.runtime.local.last_sent_descriptor_at = None;
@@ -1701,7 +1765,7 @@ impl XrPeerSync {
         }
     }
 
-    fn handle_network_message(&mut self, message: XrNetIncoming) {
+    fn handle_network_message(&mut self, cx: &mut Cx, message: XrNetIncoming) {
         match message {
             XrNetIncoming::Join { peer } => {
                 self.runtime.metrics.record_join(peer.id);
@@ -1725,6 +1789,27 @@ impl XrPeerSync {
                 self.runtime.registry.track_descriptor(peer, frame.clone());
                 if let Some(worker) = self.runtime.alignment_worker.as_mut() {
                     worker.set_peer_descriptor(peer, frame);
+                }
+            }
+            XrNetIncoming::Activity { peer, control } => {
+                let activity = control.state();
+                self.runtime.metrics.record_activity_rx(peer.id, activity);
+                if self
+                    .runtime
+                    .accepted_activity
+                    .is_none_or(|current| activity.is_newer_than(&current))
+                {
+                    let activity_changed = self
+                        .runtime
+                        .accepted_activity
+                        .is_none_or(|current| current != activity);
+                    self.runtime.accepted_activity = Some(activity);
+                    if activity_changed {
+                        cx.widget_action(
+                            self.widget_uid(),
+                            XrPeerSyncAction::ActivityChanged(activity.activity_id),
+                        );
+                    }
                 }
             }
             XrNetIncoming::Alignment { .. } => {}
@@ -1958,13 +2043,15 @@ impl XrPeerSync {
             };
             let last_event = self.runtime.metrics.last_event_label();
             self.diagnostics.network_status = format!(
-                "Network: tx s{} d{} | rx j{} l{} s{} d{} | peers {} vis {} anchor {} | local anchor {} sync {} | last {}",
+                "Network: tx s{} d{} a{} | rx j{} l{} s{} d{} a{} | peers {} vis {} anchor {} | local anchor {} sync {} | last {}",
                 self.runtime.metrics.tx_state_count,
                 self.runtime.metrics.tx_descriptor_count,
+                self.runtime.metrics.tx_activity_count,
                 self.runtime.metrics.rx_join_count,
                 self.runtime.metrics.rx_leave_count,
                 self.runtime.metrics.rx_state_count,
                 self.runtime.metrics.rx_descriptor_count,
+                self.runtime.metrics.rx_activity_count,
                 peer_count,
                 visible_count,
                 anchor_aligned_count,
@@ -1999,13 +2086,15 @@ impl XrPeerSync {
 
         let last_event = self.runtime.metrics.last_event_label();
         self.diagnostics.network_status = format!(
-            "Network: tx state {} | tx map {} | rx join {} leave {} state {} map {} | peers {} vis {} maps {} solved {} | local map {} signal {} | last {}",
+            "Network: tx state {} map {} activity {} | rx join {} leave {} state {} map {} activity {} | peers {} vis {} maps {} solved {} | local map {} signal {} | last {}",
             self.runtime.metrics.tx_state_count,
             self.runtime.metrics.tx_descriptor_count,
+            self.runtime.metrics.tx_activity_count,
             self.runtime.metrics.rx_join_count,
             self.runtime.metrics.rx_leave_count,
             self.runtime.metrics.rx_state_count,
             self.runtime.metrics.rx_descriptor_count,
+            self.runtime.metrics.rx_activity_count,
             peer_count,
             visible_count,
             descriptor_count,

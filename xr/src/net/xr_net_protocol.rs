@@ -1,6 +1,6 @@
 use super::{
-    XrNetAlignmentDescriptorFrame, XrNetAlignmentFrame, XrNetPeerId, XrNetStateFrame,
-    XR_NET_PROTOCOL_VERSION, XR_NET_SYNC_FRAME_LZ4_TAG, XR_NET_SYNC_FRAME_RAW_TAG,
+    XrNetActivityControl, XrNetAlignmentDescriptorFrame, XrNetAlignmentFrame, XrNetPeerId,
+    XrNetStateFrame, XR_NET_PROTOCOL_VERSION, XR_NET_SYNC_FRAME_LZ4_TAG, XR_NET_SYNC_FRAME_RAW_TAG,
     XR_NET_SYNC_LZ4_ACCELERATION, XR_NET_SYNC_MAX_FRAME_BYTES,
 };
 use makepad_lz4::{compress_bound, compress_fast_into, decompress_safe};
@@ -117,6 +117,11 @@ pub enum XrNetDataPacket {
         node_id: XrNetPeerId,
         frame: XrNetAlignmentDescriptorFrame,
     },
+    ActivityControl {
+        version: u16,
+        node_id: XrNetPeerId,
+        control: XrNetActivityControl,
+    },
     Leave(XrNetLeavePacket),
 }
 
@@ -148,6 +153,14 @@ impl XrNetDataPacket {
         }
     }
 
+    pub fn activity_control(node_id: XrNetPeerId, control: XrNetActivityControl) -> Self {
+        Self::ActivityControl {
+            version: XR_NET_PROTOCOL_VERSION,
+            node_id,
+            control,
+        }
+    }
+
     pub fn leave(node_id: XrNetPeerId) -> Self {
         Self::Leave(XrNetLeavePacket {
             version: XR_NET_PROTOCOL_VERSION,
@@ -167,7 +180,8 @@ impl XrNetDataPacket {
         match self {
             Self::State { version, .. }
             | Self::Alignment { version, .. }
-            | Self::AlignmentDescriptor { version, .. } => *version,
+            | Self::AlignmentDescriptor { version, .. }
+            | Self::ActivityControl { version, .. } => *version,
             Self::Leave(packet) => packet.version,
         }
     }
@@ -176,7 +190,8 @@ impl XrNetDataPacket {
         match self {
             Self::State { node_id, .. }
             | Self::Alignment { node_id, .. }
-            | Self::AlignmentDescriptor { node_id, .. } => *node_id,
+            | Self::AlignmentDescriptor { node_id, .. }
+            | Self::ActivityControl { node_id, .. } => *node_id,
             Self::Leave(packet) => packet.node_id,
         }
     }

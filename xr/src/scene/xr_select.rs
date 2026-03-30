@@ -11,7 +11,7 @@ script_mod! {
 
 #[derive(Clone, Debug, Default)]
 pub enum XrSelectAction {
-    ActiveChildChanged(LiveId),
+    ActiveChildChanged(XrActivityId),
     #[default]
     None,
 }
@@ -39,6 +39,14 @@ pub struct XrSelect {
 impl XrSelect {
     pub fn node(&self) -> &XrNode {
         &self.node
+    }
+
+    pub fn active_child_id(&self) -> LiveId {
+        self.active_child
+    }
+
+    pub fn activity_id(&self) -> XrActivityId {
+        XrActivityId(self.active_child)
     }
 
     fn first_child_id(&self) -> Option<LiveId> {
@@ -79,12 +87,19 @@ impl XrSelect {
             self.active_child = child_id;
             self.sync_child_visibility(cx);
             cx.with_vm(|vm| self.render_child(vm, child_id));
-            cx.widget_action(self.uid, XrSelectAction::ActiveChildChanged(child_id));
+            cx.widget_action(
+                self.uid,
+                XrSelectAction::ActiveChildChanged(XrActivityId(child_id)),
+            );
             self.redraw(cx);
         } else {
             child.set_visible(cx, true);
         }
         Some(child)
+    }
+
+    pub fn set_activity(&mut self, cx: &mut Cx, activity_id: XrActivityId) -> Option<WidgetRef> {
+        self.set_active_child(cx, activity_id.to_live_id())
     }
 
     fn active_child_widget(&mut self, cx: &mut Cx) -> Option<(LiveId, WidgetRef)> {
@@ -294,5 +309,15 @@ impl XrSelectRef {
     pub fn set_active_child(&self, cx: &mut Cx, child_id: LiveId) -> Option<WidgetRef> {
         let mut inner = self.borrow_mut()?;
         inner.set_active_child(cx, child_id)
+    }
+
+    pub fn activity_id(&self) -> Option<XrActivityId> {
+        let inner = self.borrow()?;
+        Some(inner.activity_id())
+    }
+
+    pub fn set_activity(&self, cx: &mut Cx, activity_id: XrActivityId) -> Option<WidgetRef> {
+        let mut inner = self.borrow_mut()?;
+        inner.set_activity(cx, activity_id)
     }
 }
