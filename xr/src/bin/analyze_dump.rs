@@ -12,8 +12,6 @@ use std::{
 #[derive(Clone, Copy, Debug, Default)]
 struct AnalyzeOptions {
     solve: bool,
-    compress_pass: bool,
-    lossless_compress_pass: bool,
     latest_count: usize,
 }
 
@@ -266,14 +264,6 @@ fn parse_args() -> Result<(AnalyzeOptions, Vec<PathBuf>), String> {
     while let Some(arg) = args.next() {
         if arg == "--solve" {
             options.solve = true;
-            continue;
-        }
-        if arg == "--compress-pass" {
-            options.compress_pass = true;
-            continue;
-        }
-        if arg == "--lossless-compress-pass" {
-            options.lossless_compress_pass = true;
             continue;
         }
         if arg == "--latest" {
@@ -6340,45 +6330,8 @@ fn analyze_path(options: AnalyzeOptions, path: &Path) -> Result<(), String> {
 
     let mut local = pair.local_descriptor.descriptor.clone();
     let mut remote = pair.remote_descriptor.descriptor.clone();
-    if options.lossless_compress_pass {
-        local.height_map = local
-            .height_map
-            .as_ref()
-            .map(|height_map| height_map.compress_sparse_lossless().decompress())
-            .transpose()
-            .map_err(|err| format!("local lossless compression pass failed: {err}"))?;
-        remote.height_map = remote
-            .height_map
-            .as_ref()
-            .map(|height_map| height_map.compress_sparse_lossless().decompress())
-            .transpose()
-            .map_err(|err| format!("remote lossless compression pass failed: {err}"))?;
-    } else if options.compress_pass {
-        local.height_map = local
-            .height_map
-            .as_ref()
-            .map(|height_map| height_map.compress_sparse_u16().decompress())
-            .transpose()
-            .map_err(|err| format!("local compression pass failed: {err}"))?;
-        remote.height_map = remote
-            .height_map
-            .as_ref()
-            .map(|height_map| height_map.compress_sparse_u16().decompress())
-            .transpose()
-            .map_err(|err| format!("remote compression pass failed: {err}"))?;
-    }
     let local = &local;
     let remote = &remote;
-    println!(
-        "compression_pass: {}",
-        if options.lossless_compress_pass {
-            "sparse_lossless_roundtrip"
-        } else if options.compress_pass {
-            "sparse_u16_roundtrip"
-        } else {
-            "none"
-        }
-    );
     print_descriptor_stats("local", local);
     print_descriptor_stats("remote", remote);
     let manual_pose = load_manual_pose(path);
