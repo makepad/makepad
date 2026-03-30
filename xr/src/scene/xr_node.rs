@@ -1,4 +1,5 @@
-use crate::obj::{Cube, Gltf, IcoSphere, RefractiveCube, Tree};
+use crate::obj::{Cube, Gltf, IcoSphere, RefractiveCube, Shooter, Tree};
+use crate::prelude::XrSharedHand;
 use crate::scene::{XrSelect, XrView};
 use makepad_widgets::{
     makepad_derive_widget::*,
@@ -21,7 +22,7 @@ script_mod! {
     mod.widgets.XrNodeBase = #(XrNode::register_widget(vm))
     mod.widgets.XrNode = set_type_default() do mod.widgets.XrNodeBase{
         body: XrBodyKind.Disabled
-        projectile_pool: false
+        spawn_pool: false
         physics_size: vec3(0.0, 0.0, 0.0)
         density: 1.0
         friction: 0.8
@@ -57,6 +58,17 @@ pub struct XrHandInfluencePoint {
 pub struct XrRuntimeBodyState {
     pub pose: Pose,
     pub scale: Vec3f,
+    pub linvel: Vec3f,
+    pub angvel: Vec3f,
+    pub sleeping: bool,
+    pub held_by: Option<XrSharedHand>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum XrNodeAction {
+    SceneChanged,
+    #[default]
+    None,
 }
 
 #[derive(Clone, Default)]
@@ -154,7 +166,7 @@ pub struct XrNode {
     #[live]
     body: XrBodyKind,
     #[live(false)]
-    projectile_pool: bool,
+    spawn_pool: bool,
     #[live(vec3(0.0, 0.0, 0.0))]
     physics_size: Vec3f,
     #[rust]
@@ -213,8 +225,8 @@ impl XrNode {
         self.body
     }
 
-    pub fn projectile_pool(&self) -> bool {
-        self.projectile_pool
+    pub fn spawn_pool(&self) -> bool {
+        self.spawn_pool
     }
 
     pub fn set_implicit_physics_size(&mut self, size: Vec3f) {
@@ -255,35 +267,11 @@ impl XrNode {
     }
 
     fn child_world_sort_center(child: &WidgetRef) -> Option<Vec3f> {
-        if let Some(select) = child.borrow::<XrSelect>() {
-            return Some(select.node().pos());
-        }
-        if let Some(view) = child.borrow::<XrView>() {
-            return Some(view.node().pos());
-        }
-        if let Some(cube) = child.borrow::<Cube>() {
-            return Some(cube.node().pos());
-        }
-        if let Some(ico) = child.borrow::<IcoSphere>() {
-            return Some(ico.node().pos());
-        }
-        if let Some(refractive_cube) = child.borrow::<RefractiveCube>() {
-            return Some(refractive_cube.node().pos());
-        }
-        if let Some(gltf) = child.borrow::<Gltf>() {
-            return Some(gltf.node().pos());
-        }
-        if let Some(tree) = child.borrow::<Tree>() {
-            return Some(tree.node().pos());
-        }
-        if let Some(node) = child.borrow::<XrNode>() {
-            return Some(node.pos());
-        }
-        None
+        xr_widget_local_sort_center(child)
     }
 
     fn child_is_transparent(child: &WidgetRef) -> bool {
-        child.borrow::<RefractiveCube>().is_some() || child.borrow::<XrView>().is_some()
+        xr_widget_is_transparent(child)
     }
 
     fn transform_point(transform: &Mat4f, point: Vec3f) -> Vec3f {
@@ -292,38 +280,116 @@ impl XrNode {
             .to_vec3f()
     }
 
-    fn draw_list_depth(scene_state: &SceneState3D, world_pos: Vec3f) -> f32 {
-        let view_pos =
-            scene_state
-                .view
-                .transform_vec4(vec4f(world_pos.x, world_pos.y, world_pos.z, 1.0));
-        if view_pos.w.abs() > 1.0e-6 {
-            view_pos.z / view_pos.w
-        } else {
-            view_pos.z
-        }
+}
+
+pub fn xr_widget_with_scene_node<R>(
+    widget: &WidgetRef,
+    visit: impl FnOnce(&XrNode) -> R,
+) -> Option<R> {
+    if let Some(select) = widget.borrow::<XrSelect>() {
+        return Some(visit(select.node()));
+    }
+    if let Some(view) = widget.borrow::<XrView>() {
+        return Some(visit(view.node()));
+    }
+    if let Some(cube) = widget.borrow::<Cube>() {
+        return Some(visit(cube.node()));
+    }
+    if let Some(ico) = widget.borrow::<IcoSphere>() {
+        return Some(visit(ico.node()));
+    }
+    if let Some(refractive_cube) = widget.borrow::<RefractiveCube>() {
+        return Some(visit(refractive_cube.node()));
+    }
+    if let Some(gltf) = widget.borrow::<Gltf>() {
+        return Some(visit(gltf.node()));
+    }
+    if let Some(tree) = widget.borrow::<Tree>() {
+        return Some(visit(tree.node()));
+    }
+    if let Some(shooter) = widget.borrow::<Shooter>() {
+        return Some(visit(shooter.node()));
+    }
+    if let Some(node) = widget.borrow::<XrNode>() {
+        return Some(visit(&node));
+    }
+    None
+}
+
+pub fn xr_widget_children(widget: &WidgetRef, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+    if widget.borrow::<XrSelect>().is_some() || widget.borrow::<XrView>().is_some() {
+        widget.children(visit);
+        return;
+    }
+    if let Some(cube) = widget.borrow::<Cube>() {
+        cube.node().children(visit);
+        return;
+    }
+    if let Some(ico) = widget.borrow::<IcoSphere>() {
+        ico.node().children(visit);
+        return;
+    }
+    if let Some(refractive_cube) = widget.borrow::<RefractiveCube>() {
+        refractive_cube.node().children(visit);
+        return;
+    }
+    if let Some(gltf) = widget.borrow::<Gltf>() {
+        gltf.node().children(visit);
+        return;
+    }
+    if let Some(tree) = widget.borrow::<Tree>() {
+        tree.node().children(visit);
+        return;
+    }
+    if let Some(shooter) = widget.borrow::<Shooter>() {
+        shooter.node().children(visit);
+        return;
+    }
+    if let Some(node) = widget.borrow::<XrNode>() {
+        node.children(visit);
+        return;
+    }
+    widget.children(visit);
+}
+
+pub fn xr_widget_local_sort_center(widget: &WidgetRef) -> Option<Vec3f> {
+    xr_widget_with_scene_node(widget, |node| node.pos())
+}
+
+pub fn xr_widget_is_transparent(widget: &WidgetRef) -> bool {
+    widget.borrow::<RefractiveCube>().is_some() || widget.borrow::<XrView>().is_some()
+}
+
+pub fn xr_draw_list_depth(scene_state: &SceneState3D, world_pos: Vec3f) -> f32 {
+    let view_pos = scene_state
+        .view
+        .transform_vec4(vec4f(world_pos.x, world_pos.y, world_pos.z, 1.0));
+    if view_pos.w.abs() > 1.0e-6 {
+        view_pos.z / view_pos.w
+    } else {
+        view_pos.z
+    }
+}
+
+pub fn xr_sort_child_draw_order(draw_order_entries: &mut [(usize, f32, bool)]) {
+    if draw_order_entries.len() <= 1 {
+        return;
     }
 
-    fn sort_child_draw_order(draw_order_entries: &mut [(usize, f32, bool)]) {
-        if draw_order_entries.len() <= 1 {
-            return;
+    draw_order_entries.sort_by(|a, b| match (a.2, b.2) {
+        (false, true) => Ordering::Less,
+        (true, false) => Ordering::Greater,
+        (false, false) => {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
         }
-
-        draw_order_entries.sort_by(|a, b| match (a.2, b.2) {
-            (false, true) => Ordering::Less,
-            (true, false) => Ordering::Greater,
-            (false, false) => {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            }
-            (true, true) => {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            }
-        });
-    }
+        (true, true) => {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        }
+    });
 }
 
 pub fn xr_widget_world_transform(
@@ -495,6 +561,8 @@ impl Widget for XrNode {
         if call.method() == id!(render) && !result.is_err() {
             if let Some(me_obj) = call.me().as_object() {
                 self.script_apply(vm, &Apply::Reload, &mut Scope::empty(), me_obj.into());
+                vm.cx_mut()
+                    .widget_action(self.uid, XrNodeAction::SceneChanged);
                 vm.cx_mut().redraw_all();
             }
         }
@@ -550,14 +618,14 @@ impl Widget for XrNode {
                 let child_center = Self::transform_point(&world_transform, child_center);
                 draw_order_entries.push((
                     index,
-                    Self::draw_list_depth(&scene_state, child_center),
+                    xr_draw_list_depth(&scene_state, child_center),
                     Self::child_is_transparent(&child),
                 ));
             } else {
                 draw_order_entries.push((index, 0.0, false));
             }
         }
-        Self::sort_child_draw_order(&mut draw_order_entries);
+        xr_sort_child_draw_order(&mut draw_order_entries);
 
         for (index, _, _) in draw_order_entries {
             let id = self.child_order[index];

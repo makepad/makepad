@@ -27,6 +27,8 @@ const XR_WORKER_SIMULATION_DT_SMOOTHING: f32 = 0.35;
 const XR_WORKER_SIMULATION_DT_LADDER: [f32; 5] =
     [1.0 / 120.0, 1.0 / 90.0, 1.0 / 72.0, 1.0 / 60.0, 1.0 / 45.0];
 const XR_PHYSICS_WORKER_MAX_PENDING_BODY_SPAWNS: usize = 8;
+const XR_PHYSICS_WORKER_MAX_PENDING_BODY_DESPAWNS: usize = 8;
+const XR_PHYSICS_WORKER_MAX_PENDING_BODY_IMPULSES: usize = 8;
 
 #[derive(Clone)]
 struct PhysicsWorkerRebuild {
@@ -50,6 +52,18 @@ struct PhysicsWorkerBodySpawn {
     spawn: XrBodySpawn,
 }
 
+#[derive(Clone, Copy)]
+struct PhysicsWorkerBodyDespawn {
+    revision: u64,
+    widget_uid: WidgetUid,
+}
+
+#[derive(Clone, Copy)]
+struct PhysicsWorkerBodyImpulse {
+    revision: u64,
+    impulse: XrBodyImpulse,
+}
+
 #[derive(Default)]
 struct PhysicsWorkerMailbox {
     version: u64,
@@ -59,6 +73,10 @@ struct PhysicsWorkerMailbox {
     pending_step: Option<PhysicsWorkerStep>,
     pending_body_spawns:
         SmallVec<[PhysicsWorkerBodySpawn; XR_PHYSICS_WORKER_MAX_PENDING_BODY_SPAWNS]>,
+    pending_body_despawns:
+        SmallVec<[PhysicsWorkerBodyDespawn; XR_PHYSICS_WORKER_MAX_PENDING_BODY_DESPAWNS]>,
+    pending_body_impulses:
+        SmallVec<[PhysicsWorkerBodyImpulse; XR_PHYSICS_WORKER_MAX_PENDING_BODY_IMPULSES]>,
 }
 
 pub(super) struct XrPhysicsWorkerResult {
@@ -69,6 +87,9 @@ pub(super) struct XrPhysicsWorkerResult {
     pub(super) physics_tsdf_query_ms: f64,
     pub(super) physics_rapier_step_ms: f64,
     pub(super) physics_depth_query_surface_count: usize,
+    pub(super) physics_scene_body_count: usize,
+    pub(super) physics_body_spawn_apply_count: usize,
+    pub(super) physics_body_spawn_miss_count: usize,
 }
 
 pub(super) struct XrPhysicsWorker {
@@ -148,6 +169,35 @@ impl XrPhysicsWorker {
         }
     }
 
+    pub(super) fn request_body_despawn(&mut self, revision: u64, widget_uid: WidgetUid) {
+        let (lock, wake) = &*self.mailbox;
+        if let Ok(mut mailbox) = lock.lock() {
+            if mailbox.pending_body_despawns.len() < XR_PHYSICS_WORKER_MAX_PENDING_BODY_DESPAWNS {
+                mailbox
+                    .pending_body_despawns
+                    .push(PhysicsWorkerBodyDespawn {
+                        revision,
+                        widget_uid,
+                    });
+                mailbox.version = mailbox.version.saturating_add(1);
+                wake.notify_one();
+            }
+        }
+    }
+
+    pub(super) fn request_body_impulse(&mut self, revision: u64, impulse: XrBodyImpulse) {
+        let (lock, wake) = &*self.mailbox;
+        if let Ok(mut mailbox) = lock.lock() {
+            if mailbox.pending_body_impulses.len() < XR_PHYSICS_WORKER_MAX_PENDING_BODY_IMPULSES {
+                mailbox
+                    .pending_body_impulses
+                    .push(PhysicsWorkerBodyImpulse { revision, impulse });
+                mailbox.version = mailbox.version.saturating_add(1);
+                wake.notify_one();
+            }
+        }
+    }
+
     pub(super) fn request_reset(&mut self, revision: u64) {
         let (lock, wake) = &*self.mailbox;
         if let Ok(mut mailbox) = lock.lock() {
@@ -155,6 +205,8 @@ impl XrPhysicsWorker {
             mailbox.pending_rebuild = None;
             mailbox.pending_step = None;
             mailbox.pending_body_spawns.clear();
+            mailbox.pending_body_despawns.clear();
+            mailbox.pending_body_impulses.clear();
             mailbox.version = mailbox.version.saturating_add(1);
             wake.notify_one();
         }
@@ -195,9 +247,18 @@ fn physics_worker_loop(
     let mut retained_hits_snapshot_scratch = HashMap::new();
     let mut last_step_started_at: Option<Instant> = None;
     let mut adaptive_step_dt = XR_WORKER_SIMULATION_DT_DEFAULT;
+    let mut total_body_spawn_apply_count = 0usize;
+    let mut total_body_spawn_miss_count = 0usize;
 
     loop {
-        let (pending_reset_revision, pending_rebuild, pending_step, pending_body_spawns) = {
+        let (
+            pending_reset_revision,
+            pending_rebuild,
+            pending_step,
+            pending_body_spawns,
+            pending_body_despawns,
+            pending_body_impulses,
+        ) = {
             let (lock, wake) = &*mailbox;
             let mut guard = match lock.lock() {
                 Ok(guard) => guard,
@@ -219,10 +280,14 @@ fn physics_worker_loop(
                 guard.pending_rebuild.take(),
                 guard.pending_step.take(),
                 std::mem::take(&mut guard.pending_body_spawns),
+                std::mem::take(&mut guard.pending_body_despawns),
+                std::mem::take(&mut guard.pending_body_impulses),
             )
         };
 
         let mut should_publish = false;
+        let mut physics_body_spawn_apply_count = 0usize;
+        let mut physics_body_spawn_miss_count = 0usize;
 
         if let Some(reset_revision) = pending_reset_revision {
             revision = reset_revision;
@@ -254,15 +319,59 @@ fn physics_worker_loop(
                     }
                     if let Some(query_key) = scene.respawn_body(
                         body_spawn.spawn.widget_uid,
+                        body_spawn.spawn.shadow,
+                        body_spawn.spawn.mode,
                         body_spawn.spawn.pose,
                         body_spawn.spawn.linvel,
                         body_spawn.spawn.angvel,
                     ) {
                         retained_hits.remove(&query_key);
+                        physics_body_spawn_apply_count =
+                            physics_body_spawn_apply_count.saturating_add(1);
+                        total_body_spawn_apply_count =
+                            total_body_spawn_apply_count.saturating_add(1);
+                    } else {
+                        physics_body_spawn_miss_count =
+                            physics_body_spawn_miss_count.saturating_add(1);
+                        total_body_spawn_miss_count =
+                            total_body_spawn_miss_count.saturating_add(1);
                     }
                     applied_spawn = true;
                 }
                 should_publish |= applied_spawn;
+            }
+        }
+
+        if !pending_body_despawns.is_empty() {
+            if let Some(scene) = scene.as_mut() {
+                let mut applied_despawn = false;
+                for body_despawn in pending_body_despawns {
+                    if body_despawn.revision != revision {
+                        continue;
+                    }
+                    if let Some(query_key) = scene.despawn_body(body_despawn.widget_uid) {
+                        retained_hits.remove(&query_key);
+                    }
+                    applied_despawn = true;
+                }
+                should_publish |= applied_despawn;
+            }
+        }
+
+        if !pending_body_impulses.is_empty() {
+            if let Some(scene) = scene.as_mut() {
+                let mut applied_impulse = false;
+                for body_impulse in pending_body_impulses {
+                    if body_impulse.revision != revision {
+                        continue;
+                    }
+                    applied_impulse |= scene.apply_impulse(
+                        body_impulse.impulse.widget_uid,
+                        body_impulse.impulse.point,
+                        body_impulse.impulse.impulse,
+                    );
+                }
+                should_publish |= applied_impulse;
             }
         }
 
@@ -316,6 +425,12 @@ fn physics_worker_loop(
                         physics_tsdf_query_ms,
                         physics_rapier_step_ms,
                         physics_depth_query_surface_count,
+                        physics_scene_body_count: scene
+                            .as_ref()
+                            .map(|scene| scene.cubes.len())
+                            .unwrap_or(0),
+                        physics_body_spawn_apply_count: total_body_spawn_apply_count,
+                        physics_body_spawn_miss_count: total_body_spawn_miss_count,
                     },
                 );
                 recycle_worker_buffers(
@@ -345,6 +460,12 @@ fn physics_worker_loop(
                     physics_tsdf_query_ms: 0.0,
                     physics_rapier_step_ms: 0.0,
                     physics_depth_query_surface_count: surface_count,
+                    physics_scene_body_count: scene
+                        .as_ref()
+                        .map(|scene| scene.cubes.len())
+                        .unwrap_or(0),
+                    physics_body_spawn_apply_count: total_body_spawn_apply_count,
+                    physics_body_spawn_miss_count: total_body_spawn_miss_count,
                 },
             );
             recycle_worker_buffers(
@@ -385,7 +506,7 @@ fn publish_worker_result(
 fn build_scene(gravity: f32, cubes: Vec<CollectedXrCube>) -> RapierScene {
     let mut scene = RapierScene::new(gravity);
     for cube in cubes {
-        let projectile_pool = cube.projectile_pool;
+        let spawn_pool = cube.spawn_pool;
         match cube.body_kind {
             XrBodyKind::Disabled => {}
             XrBodyKind::Dynamic => {
@@ -413,8 +534,8 @@ fn build_scene(gravity: f32, cubes: Vec<CollectedXrCube>) -> RapierScene {
                         cube.restitution,
                     );
                 }
-                if projectile_pool && !scene.cubes.is_empty() {
-                    scene.register_projectile_cube(scene.cubes.len() - 1);
+                if spawn_pool && !scene.cubes.is_empty() {
+                    scene.register_spawn_pool_cube(scene.cubes.len() - 1);
                 }
             }
             XrBodyKind::Fixed => {
@@ -462,6 +583,16 @@ fn snapshot_runtime_bodies(
                 XrRuntimeBodyState {
                     pose: makepad_pose(body.position()),
                     scale: cube.scale,
+                    linvel: {
+                        let linvel = body.linvel();
+                        vec3f(linvel.x, linvel.y, linvel.z)
+                    },
+                    angvel: {
+                        let angvel = body.angvel();
+                        vec3f(angvel.x, angvel.y, angvel.z)
+                    },
+                    sleeping: body.is_sleeping(),
+                    held_by: scene.held_by_for_body(cube.body),
                 },
             );
         }

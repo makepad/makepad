@@ -445,6 +445,80 @@ fn test_char_width_base14() {
     assert!((w1 - w2).abs() < 0.01, "Courier should be monospaced");
 }
 
+#[test]
+fn test_page_inherits_media_box_and_resources() {
+    fn push_obj(pdf: &mut Vec<u8>, offsets: &mut Vec<usize>, num: usize, body: &str) {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", num).as_bytes());
+        pdf.extend_from_slice(body.as_bytes());
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![0usize];
+
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        1,
+        "<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        2,
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] /MediaBox [0 0 300 200] /Resources << /Font << /F1 4 0 R >> >> >>",
+    );
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        3,
+        "<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>",
+    );
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        4,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+
+    let content = "BT /F1 12 Tf 10 10 Td (Hello) Tj ET";
+    push_obj(
+        &mut pdf,
+        &mut offsets,
+        5,
+        &format!(
+            "<< /Length {} >>\nstream\n{}\nendstream",
+            content.len(),
+            content
+        ),
+    );
+
+    let xref_offset = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", offsets.len()).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets.iter().skip(1) {
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+            offsets.len(),
+            xref_offset
+        )
+        .as_bytes(),
+    );
+
+    let mut doc = PdfDocument::parse(&pdf).unwrap();
+    assert_eq!(doc.page_count(), 1);
+
+    let page = doc.page(0).unwrap();
+    assert_eq!(page.media_box, [0.0, 0.0, 300.0, 200.0]);
+    assert_eq!(page.crop_box, [0.0, 0.0, 300.0, 200.0]);
+    assert!(page.fonts.contains_key("F1"));
+    assert!(!page.content_data.is_empty());
+}
+
 // ============================================================
 // Stress test
 // ============================================================

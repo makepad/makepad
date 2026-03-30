@@ -67,20 +67,20 @@ impl PdfPage {
             .as_dict()
             .ok_or_else(|| PdfError::new("page object is not a dict"))?;
 
+        let inherited = collect_inherited_page_properties(doc, dict)?;
+
         // MediaBox (required, may be inherited)
-        let media_box = parse_rect(dict.get("MediaBox"))?;
-        let crop_box = dict
-            .get("CropBox")
-            .and_then(|o| parse_rect(Some(o)).ok())
-            .unwrap_or(media_box);
-        let rotate = dict.get_int("Rotate").unwrap_or(0) as i32;
+        let media_box = inherited
+            .media_box
+            .ok_or_else(|| PdfError::new("page missing MediaBox"))?;
+        let crop_box = inherited.crop_box.unwrap_or(media_box);
+        let rotate = inherited.rotate.unwrap_or(0);
 
         // Content streams
         let content_data = extract_content_data(doc, dict)?;
 
         // Resources (may be inherited from parent Pages node)
-        let resources_obj = dict.get("Resources");
-        let resources = if let Some(r) = resources_obj {
+        let resources = if let Some(r) = inherited.resources.as_ref() {
             doc.resolve(r)?
         } else {
             PdfObj::Dict(PdfDict::new())
@@ -118,8 +118,79 @@ impl PdfPage {
     }
 }
 
-fn parse_rect(obj: Option<&PdfObj>) -> PdfResult<[f64; 4]> {
-    let obj = obj.ok_or_else(|| PdfError::new("missing rectangle"))?;
+#[derive(Default)]
+struct InheritedPageProperties {
+    media_box: Option<[f64; 4]>,
+    crop_box: Option<[f64; 4]>,
+    rotate: Option<i32>,
+    resources: Option<PdfObj>,
+}
+
+fn collect_inherited_page_properties(
+    doc: &mut PdfDocument,
+    dict: &PdfDict,
+) -> PdfResult<InheritedPageProperties> {
+    let mut props = InheritedPageProperties {
+        media_box: resolve_rect_opt(doc, dict.get("MediaBox"))?,
+        crop_box: resolve_rect_opt(doc, dict.get("CropBox"))?,
+        rotate: dict.get_int("Rotate").map(|v| v as i32),
+        resources: dict.get("Resources").cloned(),
+    };
+
+    let mut parent = dict.get("Parent").cloned();
+    let mut depth = 0usize;
+
+    while let Some(parent_obj) = parent {
+        depth += 1;
+        if depth > 128 {
+            return Err(PdfError::new("page parent chain exceeded 128 levels"));
+        }
+
+        let resolved_parent = doc.resolve(&parent_obj)?;
+        let parent_dict = resolved_parent
+            .as_dict()
+            .ok_or_else(|| PdfError::new("page parent is not a dictionary"))?;
+
+        if props.media_box.is_none() {
+            props.media_box = resolve_rect_opt(doc, parent_dict.get("MediaBox"))?;
+        }
+        if props.crop_box.is_none() {
+            props.crop_box = resolve_rect_opt(doc, parent_dict.get("CropBox"))?;
+        }
+        if props.rotate.is_none() {
+            props.rotate = parent_dict.get_int("Rotate").map(|v| v as i32);
+        }
+        if props.resources.is_none() {
+            props.resources = parent_dict.get("Resources").cloned();
+        }
+
+        if props.media_box.is_some()
+            && props.crop_box.is_some()
+            && props.rotate.is_some()
+            && props.resources.is_some()
+        {
+            break;
+        }
+
+        parent = parent_dict.get("Parent").cloned();
+    }
+
+    Ok(props)
+}
+
+fn resolve_rect_opt(doc: &mut PdfDocument, obj: Option<&PdfObj>) -> PdfResult<Option<[f64; 4]>> {
+    match obj {
+        Some(obj) => Ok(Some(resolve_rect(doc, obj)?)),
+        None => Ok(None),
+    }
+}
+
+fn resolve_rect(doc: &mut PdfDocument, obj: &PdfObj) -> PdfResult<[f64; 4]> {
+    let resolved = doc.resolve(obj)?;
+    parse_rect(&resolved)
+}
+
+fn parse_rect(obj: &PdfObj) -> PdfResult<[f64; 4]> {
     let nums = obj
         .as_number_array()
         .ok_or_else(|| PdfError::new("rectangle must be a number array"))?;
