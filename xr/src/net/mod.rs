@@ -21,7 +21,7 @@ use self::{
     },
 };
 
-pub const XR_NET_PROTOCOL_VERSION: u16 = 7;
+pub const XR_NET_PROTOCOL_VERSION: u16 = 9;
 pub const XR_NET_DEFAULT_DISCOVERY_PORT: u16 = 41546;
 pub const XR_NET_DEFAULT_DATA_PORT: u16 = 41547;
 pub const XR_NET_DEFAULT_SYNC_PORT: u16 = 41548;
@@ -220,6 +220,45 @@ pub enum XrNetSharedObjectControl {
     XrDespawnObject {
         object_id: XrSharedObjectId,
         epoch: u32,
+    },
+    XrTakeoverRequest {
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        request_id: u32,
+        based_on_seq: u32,
+        based_on_tick: u32,
+        candidate_owner: XrPeerId,
+        hand: XrSharedHand,
+        hand_pose: Pose,
+        hand_linvel: Vec3f,
+    },
+    XrTakeoverAccept {
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        request_id: u32,
+        new_authority: XrPeerId,
+        effective_at: f64,
+        effective_tick: u32,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    },
+    XrTakeoverReject {
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        request_id: u32,
+        authoritative_seq: u32,
+        authoritative_tick: u32,
+    },
+    XrContactImpulse {
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        based_on_seq: u32,
+        based_on_tick: u32,
+        hand: XrSharedHand,
+        hand_pose: Pose,
+        point: Vec3f,
+        impulse: Vec3f,
     },
     XrResetObject {
         object_id: XrSharedObjectId,
@@ -439,6 +478,10 @@ pub enum XrNetIncoming {
         peer: XrNetPeer,
         control: XrNetSharedObjectControl,
     },
+    SharedObjectState {
+        peer: XrNetPeer,
+        state: XrNetSharedObjectState,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -500,6 +543,7 @@ pub struct XrNetNode {
     next_alignment_seq: u32,
     next_alignment_descriptor_seq: u32,
     next_activity_tick: u32,
+    next_shared_object_state_seq: u32,
     shared_object_peer_id: XrPeerId,
 }
 
@@ -561,6 +605,7 @@ impl XrNetNode {
             next_alignment_seq: 0,
             next_alignment_descriptor_seq: 0,
             next_activity_tick: 0,
+            next_shared_object_state_seq: 0,
             shared_object_peer_id: xr_derived_peer_id_from_addr(bound_sync_addr, config.node_id.0),
         })
     }
@@ -635,6 +680,14 @@ impl XrNetNode {
             .sync_outgoing_sender
             .send(XrNetSyncOutgoing::SharedObjectControl(control));
     }
+
+    pub fn send_shared_object_state(&mut self, mut state: XrNetSharedObjectState) {
+        state.seq = self.next_shared_object_state_seq;
+        self.next_shared_object_state_seq = self.next_shared_object_state_seq.wrapping_add(1);
+        let _ = self
+            .udp_outgoing_sender
+            .send(XrNetUdpOutgoing::SharedObjectState(state));
+    }
 }
 
 impl Drop for XrNetNode {
@@ -681,9 +734,11 @@ fn default_node_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    use makepad_lz4::{compress_bound, compress_fast_into};
+    use std::{sync::Mutex, time::Instant};
 
     const TEST_IO_TIMEOUT: Duration = Duration::from_secs(3);
+    static NET_LOOPBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn wait_for_event<F>(node: &XrNetNode, mut predicate: F) -> Option<XrNetIncoming>
     where
@@ -729,11 +784,64 @@ mod tests {
     }
 
     fn make_test_state(head_position: Vec3f) -> XrState {
+        fn make_test_hand(origin: Vec3f, aim_offset: Vec3f) -> XrHand {
+            let mut hand = XrHand::default();
+            hand.flags = XrHand::IN_VIEW | XrHand::AIM_VALID;
+            hand.tips_active = 0x1f;
+            for (index, joint) in hand.joints.iter_mut().enumerate() {
+                *joint = Pose::new(
+                    Quat::default(),
+                    origin + vec3f(index as f32 * 0.004, (index % 5) as f32 * 0.003, -0.02),
+                );
+            }
+            hand.tips = [0.026, 0.031, 0.033, 0.029, 0.027];
+            hand.aim_pose = Pose::new(Quat::default(), origin + aim_offset);
+            hand.pinch = [32, 96, 48, 12];
+            hand
+        }
+
         XrState {
             time: 1.0,
             head_pose: Pose::new(Quat::default(), head_position),
+            left_hand: make_test_hand(vec3f(-0.18, 1.34, -0.22), vec3f(0.03, 0.02, -0.08)),
+            right_hand: make_test_hand(vec3f(0.18, 1.36, -0.20), vec3f(-0.03, 0.02, -0.08)),
             ..XrState::default()
         }
+    }
+
+    #[test]
+    fn xr_state_packet_stays_within_udp_budget() {
+        let packet = XrNetDataPacket::state(
+            XrNetPeerId(99),
+            XrNetStateFrame {
+                seq: 7,
+                sent_at: 3.5,
+                state: make_test_state(vec3f(0.0, 1.6, 0.0)),
+            },
+        )
+        .to_bytes();
+        let bound = compress_bound(packet.len());
+        let mut compressed = vec![0u8; bound];
+        let compressed_len =
+            compress_fast_into(&packet, &mut compressed, XR_NET_SYNC_LZ4_ACCELERATION)
+                .expect("lz4 compression should succeed for state packet");
+
+        println!(
+            "xr_state_packet_bytes={} xr_state_packet_lz4_bytes={}",
+            packet.len(),
+            compressed_len
+        );
+
+        assert!(
+            packet.len() <= 1536,
+            "state packet grew past the current UDP budget: {} bytes",
+            packet.len()
+        );
+        assert!(
+            compressed_len <= packet.len(),
+            "lz4 should not expand the representative state packet: raw={} compressed={compressed_len}",
+            packet.len()
+        );
     }
 
     fn transform_point(mat: &Mat4f, point: Vec3f) -> Vec3f {
@@ -834,6 +942,7 @@ mod tests {
 
     #[test]
     fn peer_timeout_emits_leave_without_needing_more_packets() {
+        let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
         let config = localhost_config(1, 42646, 42647, 42648, Vec::new());
         let node = XrNetNode::with_config(config).expect("node should bind localhost test ports");
 
@@ -895,6 +1004,7 @@ mod tests {
 
     #[test]
     fn two_test_clients_align_two_cubes_via_protocol() {
+        let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
         let mut left =
             XrNetNode::with_config(localhost_config(11, 42746, 42747, 42748, vec![42756]))
                 .expect("left test client should bind");
@@ -965,6 +1075,7 @@ mod tests {
 
     #[test]
     fn cached_alignment_descriptor_is_sent_to_late_joiner() {
+        let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
         let mut left =
             XrNetNode::with_config(localhost_config(101, 42846, 42847, 42848, vec![42856]))
                 .expect("left test client should bind");
@@ -988,6 +1099,7 @@ mod tests {
 
     #[test]
     fn cached_activity_is_sent_to_late_joiner() {
+        let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
         let mut left =
             XrNetNode::with_config(localhost_config(301, 42946, 42947, 42948, vec![42956]))
                 .expect("left test client should bind");
@@ -1010,6 +1122,7 @@ mod tests {
 
     #[test]
     fn body_spawn_is_sent_over_sync_channel() {
+        let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
         let mut left =
             XrNetNode::with_config(localhost_config(311, 43046, 43047, 43048, vec![43056]))
                 .expect("left test client should bind");
@@ -1056,6 +1169,7 @@ mod tests {
 
     #[test]
     fn shared_object_control_is_sent_over_sync_channel() {
+        let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
         let mut left =
             XrNetNode::with_config(localhost_config(321, 43146, 43147, 43148, vec![43156]))
                 .expect("left test client should bind");
@@ -1094,6 +1208,123 @@ mod tests {
             _ => unreachable!(),
         };
         assert_eq!(received, sent);
+    }
+
+    #[test]
+    fn shared_object_state_is_sent_over_udp() {
+        let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
+        let mut left =
+            XrNetNode::with_config(localhost_config(323, 43246, 43247, 43248, vec![43256]))
+                .expect("left test client should bind");
+        let right = XrNetNode::with_config(localhost_config(324, 43256, 43257, 43258, vec![43246]))
+            .expect("right test client should bind");
+
+        let _ = wait_for_event(&left, |event| matches!(event, XrNetIncoming::Join { .. }))
+            .expect("left test client should discover right before sending shared state");
+        let _ = wait_for_event(&right, |event| matches!(event, XrNetIncoming::Join { .. }))
+            .expect("right test client should discover left before receiving shared state");
+
+        let sent = XrNetSharedObjectState {
+            seq: 0,
+            sent_at: 7.5,
+            physics_tick: 42,
+            object_id: xr_make_shared_object_id(XrPeerId(77), XrSharedObjectCounter(9))
+                .expect("counter should fit"),
+            epoch: 3,
+            authority: XrPeerId(77),
+            fidelity: XrSharedObjectFidelity::ImpactCritical,
+            mode: XrSharedObjectMode::Dynamic,
+            pose: Pose::new(Quat::default(), vec3f(0.0, 1.2, -0.4)),
+            linvel: vec3f(3.0, 0.0, -9.0),
+            angvel: vec3f(0.0, 0.0, 0.0),
+        };
+        left.send_shared_object_state(sent);
+
+        let event = wait_for_event(&right, |event| {
+            matches!(event, XrNetIncoming::SharedObjectState { .. })
+        })
+        .expect("shared object state should arrive over udp");
+
+        let received = match event {
+            XrNetIncoming::SharedObjectState { state, .. } => state,
+            _ => unreachable!(),
+        };
+        assert_eq!(received.sent_at, sent.sent_at);
+        assert_eq!(received.physics_tick, sent.physics_tick);
+        assert_eq!(received.object_id, sent.object_id);
+        assert_eq!(received.epoch, sent.epoch);
+        assert_eq!(received.authority, sent.authority);
+        assert_eq!(received.fidelity, sent.fidelity);
+        assert_eq!(received.mode, sent.mode);
+        assert_eq!(received.pose, sent.pose);
+        assert_eq!(received.linvel, sent.linvel);
+        assert_eq!(received.angvel, sent.angvel);
+    }
+
+    #[test]
+    fn cached_shared_object_control_is_sent_to_late_joiner() {
+        let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
+        let mut left =
+            XrNetNode::with_config(localhost_config(325, 43346, 43347, 43348, vec![43356]))
+                .expect("left test client should bind");
+
+        let _ = left.send_activity(XrActivityId(live_id!(ico_shoot_scene)), 8.0);
+        let sent = XrNetSharedObjectControl::XrSpawnObject {
+            object_id: xr_make_shared_object_id(XrPeerId(77), XrSharedObjectCounter(13))
+                .expect("counter should fit"),
+            epoch: 2,
+            authority: XrPeerId(77),
+            fidelity: XrSharedObjectFidelity::ImpactCritical,
+            shape: XrSharedObjectShape::ActivitySpawnable {
+                activity_id: XrActivityId(live_id!(ico_shoot_scene)),
+                spawnable_id: XrSpawnableObjectId(0x44),
+            },
+            pose: Pose::new(Quat::default(), vec3f(0.0, 1.2, -0.4)),
+            linvel: vec3f(3.0, 0.0, -9.0),
+            angvel: vec3f(0.0, 0.0, 0.0),
+        };
+        left.send_shared_object_control(sent.clone());
+
+        let right = XrNetNode::with_config(localhost_config(326, 43356, 43357, 43358, vec![43346]))
+            .expect("right test client should bind");
+
+        let start = Instant::now();
+        let mut received_activity = None;
+        let mut received_control = None;
+        while start.elapsed() < TEST_IO_TIMEOUT
+            && (received_activity.is_none() || received_control.is_none())
+        {
+            match right
+                .incoming_receiver
+                .recv_timeout(Duration::from_millis(50))
+            {
+                Ok(XrNetIncoming::Activity { control, .. }) => {
+                    received_activity = Some(control.state());
+                }
+                Ok(XrNetIncoming::SharedObjectControl { control, .. }) => {
+                    received_control = Some(control);
+                }
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        assert_eq!(
+            received_activity,
+            Some(XrNetActivityState {
+                activity_id: XrActivityId(live_id!(ico_shoot_scene)),
+                changed_at: 8.0,
+                changed_tick: 0,
+                changed_by: XrNetPeerId(325),
+            }),
+            "late joiner should receive the cached activity"
+        );
+        assert_eq!(
+            received_control,
+            Some(sent),
+            "late joiner should receive the cached shared object control"
+        );
     }
 
     #[test]

@@ -16,6 +16,8 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     path::PathBuf,
     rc::Rc,
+    thread,
+    time::Duration,
     time::Instant,
 };
 
@@ -51,8 +53,28 @@ impl Cx {
             cx.borrow_mut().in_makepad_studio = true;
             cx.borrow_mut().stdin_event_loop();
         } else {
-            cx.borrow_mut().headless_single_frame();
+            let draw_cycles = cx.borrow().os.draw_cycles;
+            if let Some(draw_cycles) = draw_cycles {
+                cx.borrow_mut().headless_bounded_loop(draw_cycles);
+            } else {
+                cx.borrow_mut().headless_single_frame();
+            }
         }
+    }
+
+    pub fn headless_event_loop_for_draw_cycles(cx: Rc<RefCell<Cx>>, draw_cycles: usize) {
+        cx.borrow_mut().self_ref = Some(cx.clone());
+        cx.borrow_mut().headless_bounded_loop(draw_cycles.max(1));
+    }
+
+    pub fn headless_no_draw_event_loop_for_draw_cycles(cx: Rc<RefCell<Cx>>, draw_cycles: usize) {
+        cx.borrow_mut().self_ref = Some(cx.clone());
+        {
+            let mut cx_ref = cx.borrow_mut();
+            cx_ref.os.no_draw = true;
+            cx_ref.os.no_draw_initialized = false;
+        }
+        cx.borrow_mut().headless_bounded_loop(draw_cycles.max(1));
     }
 
     fn headless_single_frame(&mut self) {
@@ -74,9 +96,82 @@ impl Cx {
             self.call_next_frame_event(time_now);
         }
         if self.need_redrawing() {
+            let _ = self.headless_process_draw_cycle(&mut windows, false, time_now);
+        }
+    }
+
+    fn headless_bounded_loop(&mut self, draw_cycles: usize) {
+        let mut windows = Vec::new();
+        self.call_event_handler(&Event::Startup);
+        let mut running = self.headless_handle_platform_ops(&mut windows, false);
+        if windows.is_empty() {
+            windows.push(HeadlessWindowState {
+                created: true,
+                width: 1280,
+                height: 720,
+                dpi_factor: 1.0,
+                frame_id: 0,
+                presentable_id: None,
+            });
+        }
+
+        let mut completed_cycles = 0usize;
+        while running && completed_cycles < draw_cycles {
+            if SignalToUI::check_and_clear_ui_signal() {
+                self.handle_script_signals();
+                self.call_event_handler(&Event::Signal);
+            }
+            if SignalToUI::check_and_clear_action_signal() {
+                self.handle_action_receiver();
+            }
+            self.dispatch_network_runtime_events();
+
+            let timer_events = self.os.stdin_timers.get_dispatch();
+            for event in timer_events {
+                self.handle_script_timer(&event);
+                self.call_event_handler(&Event::Timer(event));
+            }
+
+            running = self.headless_handle_platform_ops(&mut windows, false);
+            if !running {
+                break;
+            }
+
+            let time_now = self.os.stdin_timers.time_now();
+            if !self.new_next_frames.is_empty() {
+                self.call_next_frame_event(time_now);
+            }
+            if self.need_redrawing() {
+                let _ = self.headless_process_draw_cycle(&mut windows, false, time_now);
+            }
+            completed_cycles += 1;
+
+            if !running {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn headless_process_draw_cycle(
+        &mut self,
+        windows: &mut Vec<HeadlessWindowState>,
+        send_protocol: bool,
+        time_now: f64,
+    ) -> bool {
+        if self.os.no_draw {
             self.call_draw_event(time_now);
             self.headless_compile_shaders();
-            self.headless_emit_frames(&mut windows, false, time_now);
+            self.os.no_draw_initialized = true;
+            return false;
+        }
+        self.call_draw_event(time_now);
+        self.headless_compile_shaders();
+        if send_protocol && self.screenshot_requests.is_empty() {
+            self.headless_render_all_passes(time_now);
+            true
+        } else {
+            self.headless_emit_frames(windows, send_protocol, time_now)
         }
     }
 
@@ -111,13 +206,7 @@ impl Cx {
         if running {
             let time_now = self.seconds_since_app_start();
             if self.need_redrawing() {
-                self.call_draw_event(time_now);
-                self.headless_compile_shaders();
-                if self.screenshot_requests.is_empty() {
-                    self.headless_render_all_passes(time_now);
-                } else {
-                    let _ = self.headless_emit_frames(&mut windows, true, time_now);
-                }
+                let _ = self.headless_process_draw_cycle(&mut windows, true, time_now);
             }
         }
         write_stdout_msg(&AppToStudio::AfterStartup);
@@ -305,20 +394,17 @@ impl Cx {
                         self.call_next_frame_event(time_now);
                     }
 
-                    let mut rendered = false;
                     if self.need_redrawing() {
-                        self.call_draw_event(time_now);
-                        self.headless_compile_shaders();
-                        if self.screenshot_requests.is_empty() {
-                            self.headless_render_all_passes(time_now);
-                            rendered = true;
-                        } else {
-                            rendered = self.headless_emit_frames(&mut windows, true, time_now);
-                        }
-                    }
+                        let rendered =
+                            self.headless_process_draw_cycle(&mut windows, true, time_now);
 
-                    if rendered
-                        || !self.os.stdin_timers.timers.is_empty()
+                        if rendered
+                            || !self.os.stdin_timers.timers.is_empty()
+                            || !self.new_next_frames.is_empty()
+                        {
+                            write_stdout_msg(&AppToStudio::RequestAnimationFrame);
+                        }
+                    } else if !self.os.stdin_timers.timers.is_empty()
                         || !self.new_next_frames.is_empty()
                     {
                         write_stdout_msg(&AppToStudio::RequestAnimationFrame);
@@ -339,20 +425,17 @@ impl Cx {
                         self.call_next_frame_event(time_now);
                     }
 
-                    let mut rendered = false;
                     if self.need_redrawing() {
-                        self.call_draw_event(time_now);
-                        self.headless_compile_shaders();
-                        if self.screenshot_requests.is_empty() {
-                            self.headless_render_all_passes(time_now);
-                            rendered = true;
-                        } else {
-                            rendered = self.headless_emit_frames(&mut windows, true, time_now);
-                        }
-                    }
+                        let rendered =
+                            self.headless_process_draw_cycle(&mut windows, true, time_now);
 
-                    if rendered
-                        || !self.os.stdin_timers.timers.is_empty()
+                        if rendered
+                            || !self.os.stdin_timers.timers.is_empty()
+                            || !self.new_next_frames.is_empty()
+                        {
+                            write_stdout_msg(&AppToStudio::RequestAnimationFrame);
+                        }
+                    } else if !self.os.stdin_timers.timers.is_empty()
                         || !self.new_next_frames.is_empty()
                     {
                         write_stdout_msg(&AppToStudio::RequestAnimationFrame);
@@ -593,6 +676,8 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
+        self.os.no_draw = crate::app_main::should_disable_headless_draw_from_args();
+        self.os.draw_cycles = crate::app_main::headless_draw_cycles_from_args();
         if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
             self.package_root = Some(item.to_string());
         }

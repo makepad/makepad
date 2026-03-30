@@ -2,7 +2,7 @@ use super::{hand_is_palm_down_closed_fist, CLOSED_FIST_GESTURE};
 use crate::prelude::*;
 use makepad_widgets::event::XrSyncAnchor;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{mpsc::TryRecvError, Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -23,6 +23,8 @@ script_mod! {
 pub enum XrPeerSyncAction {
     ActivityChanged(XrActivityId),
     BodySpawn(XrBodySpawn),
+    BodyImpulse(XrBodyImpulse),
+    BodyDespawn(WidgetUid),
     #[default]
     None,
 }
@@ -37,6 +39,14 @@ enum RemoteTransformSource {
     Raw,
     Anchor,
     Descriptor,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LocalSharedHandState {
+    shared_hand: XrSharedHand,
+    pose: Pose,
+    linvel: Vec3f,
+    gripping: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +66,9 @@ struct RemotePeerState {
     last_solved_local_descriptor_version: Option<(u64, u64)>,
     last_solved_remote_descriptor_seq: Option<u32>,
     worker_progress: Option<XrDepthAlignMatcherProgress>,
+    clock_offset_seconds: Option<f64>,
+    clock_round_trip_seconds: Option<f64>,
+    last_clock_sync_at: Option<f64>,
 }
 
 impl RemotePeerState {
@@ -76,6 +89,9 @@ impl RemotePeerState {
             last_solved_local_descriptor_version: None,
             last_solved_remote_descriptor_seq: None,
             worker_progress: None,
+            clock_offset_seconds: None,
+            clock_round_trip_seconds: None,
+            last_clock_sync_at: None,
         }
     }
 }
@@ -1065,6 +1081,8 @@ struct XrPeerSyncLocalState {
     anchor_override: Option<XrAnchor>,
     sync_anchor: Option<XrSyncAnchor>,
     fist_hold_anchor: Option<XrAnchor>,
+    previous_xr_state: Option<XrState>,
+    latest_xr_state: Option<XrState>,
     descriptor: Option<XrNetAlignmentDescriptorFrame>,
     descriptor_version: Option<(u64, u64)>,
     slice_preview: Option<XrDepthAlignSlicePreview>,
@@ -1363,6 +1381,12 @@ struct XrPeerSyncRuntime {
     local: XrPeerSyncLocalState,
     registry: XrPeerRegistry,
     shared_objects: XrSharedObjectRegistry,
+    next_shared_object_physics_tick: u32,
+    next_shared_object_request_id: u32,
+    pending_shared_object_controls: Vec<(XrNetPeer, XrNetSharedObjectControl)>,
+    pending_clock_pings: VecDeque<(u32, f64)>,
+    next_clock_ping_seq: u32,
+    next_clock_ping_at: f64,
     accepted_activity: Option<XrNetActivityState>,
     metrics: XrPeerSyncMetrics,
 }
@@ -1467,6 +1491,8 @@ pub struct XrPeerSync {
     #[rust]
     enabled: bool,
     #[rust]
+    net_config_override: Option<XrNetConfig>,
+    #[rust]
     runtime: XrPeerSyncRuntime,
     #[rust]
     diagnostics: XrPeerSyncDiagnostics,
@@ -1477,9 +1503,9 @@ pub struct XrPeerSync {
 
 impl XrPeerSync {
     const HEADSET_SIZE: Vec3f = Vec3f {
-        x: 0.18,
-        y: 0.11,
-        z: 0.14,
+        x: 0.12,
+        y: 0.05,
+        z: 0.08,
     };
     const HAND_SIZE: Vec3f = Vec3f {
         x: 0.08,
@@ -1502,6 +1528,15 @@ impl XrPeerSync {
     const DESCRIPTOR_MIN_HEIGHT_METERS: f32 = 0.08;
     const DESCRIPTOR_CELL_FOOTPRINT: f32 = 0.62;
     const SHOW_LOCAL_DESCRIPTOR_DEBUG: bool = false;
+    const CLOCK_PING_INTERVAL_SECONDS: f64 = 1.0;
+    const SHARED_OBJECT_SHADOW_MAX_EXTRAPOLATION_SECONDS: f32 = 0.10;
+    const SHARED_OBJECT_TAKEOVER_DISTANCE_METERS: f32 = 0.18;
+    const SHARED_OBJECT_TAKEOVER_RELATIVE_SPEED_MAX: f32 = 2.4;
+    const SHARED_OBJECT_TAKEOVER_EFFECTIVE_DELAY_SECONDS: f64 = 0.12;
+    const SHARED_OBJECT_TAKEOVER_EFFECTIVE_TICK_OFFSET: u32 = 3;
+    const SHARED_OBJECT_IMPULSE_DISTANCE_METERS: f32 = 0.16;
+    const SHARED_OBJECT_IMPULSE_MIN_HAND_SPEED: f32 = 0.65;
+    const SHARED_OBJECT_IMPULSE_SCALE: f32 = 0.08;
 
     pub fn status_text(&self) -> &str {
         self.diagnostics.status_text()
@@ -1524,7 +1559,23 @@ impl XrPeerSync {
     }
 
     pub fn shared_object_count(&self) -> usize {
-        self.runtime.shared_objects.len()
+        self.runtime.shared_objects.active_count()
+    }
+
+    pub fn pending_shared_object_control_count(&self) -> usize {
+        self.runtime.pending_shared_object_controls.len()
+    }
+
+    pub fn tx_body_spawn_count(&self) -> u64 {
+        self.runtime.metrics.tx_body_spawn_count
+    }
+
+    pub fn rx_body_spawn_count(&self) -> u64 {
+        self.runtime.metrics.rx_body_spawn_count
+    }
+
+    pub fn last_network_event_label(&self) -> &str {
+        self.runtime.metrics.last_event_label()
     }
 
     pub fn network_status_text(&self) -> &str {
@@ -1609,6 +1660,10 @@ impl XrPeerSync {
         self.enabled
     }
 
+    pub fn set_net_config_override(&mut self, config: XrNetConfig) {
+        self.net_config_override = Some(config);
+    }
+
     pub fn set_local_activity(
         &mut self,
         _cx: &mut Cx,
@@ -1665,9 +1720,9 @@ impl XrPeerSync {
         let authority = self.runtime.shared_objects.local_peer_id()?;
         let control = XrNetSharedObjectControl::XrSpawnObject {
             object_id: allocation.shared_object_id,
-            epoch: 0,
+            epoch: allocation.epoch,
             authority,
-            fidelity: XrSharedObjectFidelity::ImpactCritical,
+            fidelity: allocation.fidelity,
             shape: XrSharedObjectShape::ActivitySpawnable {
                 activity_id,
                 spawnable_id: allocation.spawnable_object_id,
@@ -1686,11 +1741,133 @@ impl XrPeerSync {
         Some(control)
     }
 
+    pub fn publish_local_shared_object_states(
+        &mut self,
+        cx: &mut Cx,
+        runtime_bodies: &HashMap<WidgetUid, XrRuntimeBodyState>,
+    ) -> usize {
+        if !self.enabled {
+            return 0;
+        }
+        self.ensure_net_node();
+        let authority = if let Some(authority) = self.runtime.shared_objects.local_peer_id() {
+            authority
+        } else {
+            return 0;
+        };
+        let sent_at = if self.runtime.local.state_time != 0.0 {
+            self.runtime.local.state_time
+        } else {
+            Cx::time_now()
+        };
+        let physics_tick = self.runtime.next_shared_object_physics_tick;
+        self.runtime.next_shared_object_physics_tick =
+            self.runtime.next_shared_object_physics_tick.wrapping_add(1);
+        let mut action_count = self.service_scheduled_authority_transfers(cx, physics_tick);
+        action_count += self.sync_remote_shadow_bodies(cx);
+        let mut outgoing_controls = self.queue_remote_interaction_controls(runtime_bodies);
+        if let Some(activity_id) = self.runtime.shared_objects.activity_id() {
+            for (&widget_uid, body) in runtime_bodies {
+                if body.held_by.is_none() {
+                    continue;
+                }
+                if self
+                    .runtime
+                    .shared_objects
+                    .resolve_remote_shared_object_for_widget(widget_uid)
+                    .is_some()
+                {
+                    // Don't fork a second shared-object id for a remote-owned object.
+                    // Proper takeover/handoff still needs an explicit control flow.
+                    continue;
+                }
+                let Some((allocation, is_new)) = self
+                    .runtime
+                    .shared_objects
+                    .ensure_local_shared_object(activity_id, widget_uid)
+                else {
+                    continue;
+                };
+                if is_new {
+                    outgoing_controls.push(XrNetSharedObjectControl::XrSpawnObject {
+                        object_id: allocation.shared_object_id,
+                        epoch: allocation.epoch,
+                        authority,
+                        fidelity: allocation.fidelity,
+                        shape: XrSharedObjectShape::ActivitySpawnable {
+                            activity_id,
+                            spawnable_id: allocation.spawnable_object_id,
+                        },
+                        pose: body.pose,
+                        linvel: body.linvel,
+                        angvel: body.angvel,
+                    });
+                }
+            }
+        }
+        let despawns = self
+            .runtime
+            .shared_objects
+            .prune_missing_local_shared_objects(runtime_bodies);
+        let states = self.runtime.shared_objects.local_shared_object_states(
+            runtime_bodies,
+            sent_at,
+            physics_tick,
+            authority,
+        );
+        let count = action_count + outgoing_controls.len() + despawns.len() + states.len();
+        for control in &outgoing_controls {
+            if let Some(object_id) = Self::shared_object_control_object_id(control) {
+                if matches!(control, XrNetSharedObjectControl::XrSpawnObject { .. }) {
+                    self.runtime.metrics.record_body_spawn_tx(object_id.0);
+                }
+            }
+        }
+        if let Some(net_node) = self.runtime.net_node.as_mut() {
+            for control in outgoing_controls {
+                net_node.send_shared_object_control(control);
+            }
+            for (object_id, epoch, _) in despawns {
+                net_node.send_shared_object_control(XrNetSharedObjectControl::XrDespawnObject {
+                    object_id,
+                    epoch,
+                });
+            }
+            for state in states {
+                net_node.send_shared_object_state(state);
+            }
+        }
+        count
+    }
+
+    pub fn flush_pending_shared_object_controls(&mut self, cx: &mut Cx) -> usize {
+        if self.runtime.pending_shared_object_controls.is_empty() {
+            return 0;
+        }
+        let pending = std::mem::take(&mut self.runtime.pending_shared_object_controls);
+        let mut remaining = Vec::new();
+        let mut applied = 0usize;
+        for (peer, control) in pending {
+            if self.apply_shared_object_control(cx, peer, &control) {
+                applied += 1;
+            } else {
+                remaining.push((peer, control));
+            }
+        }
+        self.runtime.pending_shared_object_controls = remaining;
+        applied
+    }
+
     fn ensure_net_node(&mut self) {
         if self.runtime.net_node.is_some() {
             return;
         }
-        match XrNetNode::new() {
+        let node_result = if let Some(config) = self.net_config_override.clone() {
+            XrNetNode::with_config(config)
+        } else {
+            XrNetNode::new()
+        };
+        match node_result {
             Ok(node) => {
                 self.runtime
                     .shared_objects
@@ -1716,6 +1893,8 @@ impl XrPeerSync {
         self.runtime.local.anchor = state.anchor;
         self.runtime.local.sync_anchor = state.sync_anchor;
         self.runtime.local.fist_hold_anchor = Self::state_fist_preview_anchor(state);
+        self.runtime.local.previous_xr_state = self.runtime.local.latest_xr_state.take();
+        self.runtime.local.latest_xr_state = Some(state.clone());
         if let (Some(local_anchor), Some(override_anchor)) = (
             self.runtime.local.anchor,
             self.runtime.local.anchor_override,
@@ -1732,6 +1911,21 @@ impl XrPeerSync {
         let mut broadcast_state = state.clone();
         broadcast_state.anchor = effective_local_anchor;
         net_node.send_state(broadcast_state);
+        if state.time >= self.runtime.next_clock_ping_at {
+            let seq = self.runtime.next_clock_ping_seq;
+            self.runtime.next_clock_ping_seq = self.runtime.next_clock_ping_seq.wrapping_add(1);
+            self.runtime.next_clock_ping_at = state.time + Self::CLOCK_PING_INTERVAL_SECONDS;
+            self.runtime
+                .pending_clock_pings
+                .push_back((seq, state.time));
+            while self.runtime.pending_clock_pings.len() > 32 {
+                self.runtime.pending_clock_pings.pop_front();
+            }
+            net_node.send_shared_object_control(XrNetSharedObjectControl::XrClockPing {
+                seq,
+                sent_at: state.time,
+            });
+        }
         self.runtime.metrics.tx_state_count = self.runtime.metrics.tx_state_count.saturating_add(1);
 
         if !self.auto_alignment_enabled {
@@ -1832,6 +2026,7 @@ impl XrPeerSync {
         if disconnected {
             self.runtime.net_node = None;
             self.runtime.accepted_activity = None;
+            self.runtime.pending_shared_object_controls.clear();
             self.runtime.local.last_sent_descriptor_signature = None;
             self.runtime.local.last_sent_descriptor = None;
             self.runtime.local.last_sent_descriptor_at = None;
@@ -1849,7 +2044,17 @@ impl XrPeerSync {
             }
             XrNetIncoming::Leave { peer, .. } => {
                 self.runtime.metrics.record_leave(peer.id);
+                for widget_uid in self
+                    .runtime
+                    .shared_objects
+                    .release_remote_shared_objects_by_peer_id(peer.shared_object_peer_id())
+                {
+                    self.emit_remote_body_despawn(cx, widget_uid);
+                }
                 self.runtime.registry.track_leave(peer.id);
+                self.runtime
+                    .pending_shared_object_controls
+                    .retain(|(pending_peer, _)| pending_peer.id != peer.id);
                 if let Some(worker) = self.runtime.alignment_worker.as_mut() {
                     worker.remove_peer(peer.id);
                 }
@@ -1881,6 +2086,7 @@ impl XrPeerSync {
                         .is_none_or(|current| current != activity);
                     self.runtime.accepted_activity = Some(activity);
                     if activity_changed {
+                        self.runtime.pending_shared_object_controls.clear();
                         cx.widget_action(
                             self.widget_uid(),
                             XrPeerSyncAction::ActivityChanged(activity.activity_id),
@@ -1899,51 +2105,43 @@ impl XrPeerSync {
                 else {
                     return;
                 };
-                cx.widget_action(
-                    self.widget_uid(),
-                    XrPeerSyncAction::BodySpawn(XrBodySpawn {
-                        widget_uid,
-                        pose: spawn.pose,
-                        linvel: spawn.linvel,
-                        angvel: spawn.angvel,
-                    }),
+                self.emit_remote_body_spawn(
+                    cx,
+                    peer.id,
+                    widget_uid,
+                    true,
+                    XrSharedObjectMode::Dynamic,
+                    spawn.pose,
+                    spawn.linvel,
+                    spawn.angvel,
                 );
             }
-            XrNetIncoming::SharedObjectControl { peer, control } => match control {
-                XrNetSharedObjectControl::XrSpawnObject {
-                    object_id,
-                    shape:
-                        XrSharedObjectShape::ActivitySpawnable {
-                            activity_id,
-                            spawnable_id,
-                        },
-                    pose,
-                    linvel,
-                    angvel,
-                    ..
-                } => {
+            XrNetIncoming::SharedObjectControl { peer, control } => {
+                if !self.apply_shared_object_control(cx, peer, &control) {
                     self.runtime
-                        .metrics
-                        .record_body_spawn_rx(peer.id, object_id.0);
-                    let Some(widget_uid) = self.runtime.shared_objects.resolve_remote_widget_uid(
-                        activity_id,
-                        object_id,
-                        spawnable_id,
-                    ) else {
-                        return;
-                    };
-                    cx.widget_action(
-                        self.widget_uid(),
-                        XrPeerSyncAction::BodySpawn(XrBodySpawn {
-                            widget_uid,
-                            pose,
-                            linvel,
-                            angvel,
-                        }),
-                    );
+                        .pending_shared_object_controls
+                        .push((peer, control));
                 }
-                _ => {}
-            },
+            }
+            XrNetIncoming::SharedObjectState { peer, state } => {
+                let Some(widget_uid) = self
+                    .runtime
+                    .shared_objects
+                    .record_remote_shared_object_state(state)
+                else {
+                    return;
+                };
+                self.emit_remote_body_spawn(
+                    cx,
+                    peer.id,
+                    widget_uid,
+                    true,
+                    state.mode,
+                    state.pose,
+                    state.linvel,
+                    state.angvel,
+                );
+            }
             XrNetIncoming::Alignment { .. } => {}
         }
     }
@@ -2300,6 +2498,15 @@ impl XrPeerSync {
         peer.remote_to_local.unwrap_or_default()
     }
 
+    fn peer_remote_to_local_transform(&self, peer_id: XrNetPeerId) -> Mat4f {
+        self.runtime
+            .registry
+            .peers
+            .get(&peer_id)
+            .map(Self::peer_transform)
+            .unwrap_or_default()
+    }
+
     fn peer_alpha(peer: &RemotePeerState) -> f32 {
         match peer.transform_source {
             RemoteTransformSource::Anchor => 1.0,
@@ -2344,23 +2551,36 @@ impl XrPeerSync {
         best_point
     }
 
-    fn state_fist_preview_anchor(state: &XrState) -> Option<XrAnchor> {
-        let forward = Self::flat_forward(state.head_pose.orientation);
-        let left_point = Self::hand_fist_anchor_point(&state.left_hand, forward, true)?;
-        let right_point = Self::hand_fist_anchor_point(&state.right_hand, forward, false)?;
+    fn fist_preview_anchor(
+        head_pose: Pose,
+        left_hand: &XrHand,
+        right_hand: &XrHand,
+    ) -> Option<XrAnchor> {
+        let forward = Self::flat_forward(head_pose.orientation);
+        let left_point = Self::hand_fist_anchor_point(left_hand, forward, true)?;
+        let right_point = Self::hand_fist_anchor_point(right_hand, forward, false)?;
         Some(XrAnchor {
             left: left_point,
             right: right_point,
         })
     }
 
+    fn state_fist_preview_anchor(state: &XrState) -> Option<XrAnchor> {
+        Self::fist_preview_anchor(state.head_pose, &state.left_hand, &state.right_hand)
+    }
+
     fn state_fist_ack_anchor(state: &XrState) -> Option<XrAnchor> {
-        let preview = Self::state_fist_preview_anchor(state)?;
-        let forward = Self::flat_forward(state.head_pose.orientation);
-        let mut right = state
-            .head_pose
-            .orientation
-            .rotate_vec3(&vec3f(1.0, 0.0, 0.0));
+        Self::fist_ack_anchor(state.head_pose, &state.left_hand, &state.right_hand)
+    }
+
+    fn fist_ack_anchor(
+        head_pose: Pose,
+        left_hand: &XrHand,
+        right_hand: &XrHand,
+    ) -> Option<XrAnchor> {
+        let preview = Self::fist_preview_anchor(head_pose, left_hand, right_hand)?;
+        let forward = Self::flat_forward(head_pose.orientation);
+        let mut right = head_pose.orientation.rotate_vec3(&vec3f(1.0, 0.0, 0.0));
         right.y = 0.0;
         right = if right.length() <= 1.0e-6 {
             vec3f(1.0, 0.0, 0.0)
@@ -2370,8 +2590,8 @@ impl XrPeerSync {
 
         let left_point = preview.left;
         let right_point = preview.right;
-        let left_local = left_point - state.head_pose.position;
-        let right_local = right_point - state.head_pose.position;
+        let left_local = left_point - head_pose.position;
+        let right_local = right_point - head_pose.position;
         let left_forward = left_local.dot(forward);
         let right_forward = right_local.dot(forward);
         let left_lateral = left_local.dot(right);
@@ -2465,6 +2685,877 @@ impl XrPeerSync {
             vec3f(point.x / point.w, point.y / point.w, point.z / point.w)
         } else {
             point.to_vec3f()
+        }
+    }
+
+    fn transform_direction(transform: &Mat4f, direction: Vec3f) -> Vec3f {
+        transform
+            .transform_vec4(vec4f(direction.x, direction.y, direction.z, 0.0))
+            .to_vec3f()
+    }
+
+    fn transform_pose(transform: &Mat4f, pose: Pose) -> Pose {
+        let position = Self::transform_point(transform, pose.position);
+        let mut forward = Self::transform_direction(
+            transform,
+            pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0)),
+        );
+        let mut up = Self::transform_direction(
+            transform,
+            pose.orientation.rotate_vec3(&vec3f(0.0, 1.0, 0.0)),
+        );
+        if forward.length() <= 1.0e-6 {
+            return Pose::new(pose.orientation, position);
+        }
+        forward = forward.normalize();
+        if up.length() <= 1.0e-6 || Vec3f::cross(forward, up).length() <= 1.0e-6 {
+            up = vec3f(0.0, 1.0, 0.0);
+        } else {
+            up = up.normalize();
+        }
+        Pose::new(Quat::look_rotation(forward, up), position)
+    }
+
+    fn hand_tracking_pose(hand: &XrHand) -> Option<Pose> {
+        hand.tracking_pose()
+    }
+
+    fn local_hand_state_from_frames(
+        current: &XrState,
+        previous: Option<&XrState>,
+        shared_hand: XrSharedHand,
+    ) -> Option<LocalSharedHandState> {
+        let (hand, previous_hand) = match shared_hand {
+            XrSharedHand::LeftHand => (&current.left_hand, previous.map(|state| &state.left_hand)),
+            XrSharedHand::RightHand => {
+                (&current.right_hand, previous.map(|state| &state.right_hand))
+            }
+            _ => return None,
+        };
+        let pose = Self::hand_tracking_pose(hand)?;
+        let previous_pose = previous_hand
+            .and_then(Self::hand_tracking_pose)
+            .unwrap_or(pose);
+        let dt = previous
+            .map(|previous| (current.time - previous.time).abs())
+            .unwrap_or(0.0)
+            .max(0.0001) as f32;
+        Some(LocalSharedHandState {
+            shared_hand,
+            pose,
+            linvel: (pose.position - previous_pose.position) * (1.0 / dt),
+            gripping: hand.grab_intent(),
+        })
+    }
+
+    fn local_shared_hands(&self) -> Vec<LocalSharedHandState> {
+        let Some(current) = self.runtime.local.latest_xr_state.as_ref() else {
+            return Vec::new();
+        };
+        let previous = self.runtime.local.previous_xr_state.as_ref();
+        [XrSharedHand::LeftHand, XrSharedHand::RightHand]
+            .into_iter()
+            .filter_map(|shared_hand| {
+                Self::local_hand_state_from_frames(current, previous, shared_hand)
+            })
+            .collect()
+    }
+
+    fn shared_object_request_id(&mut self) -> u32 {
+        let request_id = self.runtime.next_shared_object_request_id;
+        self.runtime.next_shared_object_request_id =
+            self.runtime.next_shared_object_request_id.wrapping_add(1);
+        request_id
+    }
+
+    fn peer_id_for_authority(&self, authority: XrPeerId) -> Option<XrNetPeerId> {
+        self.runtime
+            .registry
+            .peers
+            .iter()
+            .find_map(|(&peer_id, peer_state)| {
+                (peer_state.peer.shared_object_peer_id() == authority).then_some(peer_id)
+            })
+    }
+
+    fn peer_time_to_local_time(&self, peer_id: XrNetPeerId, remote_time: f64) -> Option<f64> {
+        let peer_state = self.runtime.registry.peers.get(&peer_id)?;
+        Some(
+            peer_state
+                .clock_offset_seconds
+                .map(|clock_offset| remote_time - clock_offset)
+                .unwrap_or(remote_time),
+        )
+    }
+
+    fn predict_pose(pose: Pose, linvel: Vec3f, angvel: Vec3f, dt: f32) -> Pose {
+        let position = pose.position + linvel * dt;
+        let angular_speed = angvel.length();
+        let orientation = if angular_speed > 1.0e-4 {
+            let axis = angvel * (1.0 / angular_speed);
+            Quat::multiply(
+                &Quat::from_axis_angle(axis, angular_speed * dt),
+                &pose.orientation,
+            )
+        } else {
+            pose.orientation
+        };
+        Pose::new(orientation, position)
+    }
+
+    fn peer_grab_intent(&self, peer_id: XrNetPeerId, hand: XrSharedHand) -> bool {
+        let Some(peer_state) = self.runtime.registry.peers.get(&peer_id) else {
+            return false;
+        };
+        let Some(state) = peer_state.latest_state.as_ref().map(|frame| &frame.state) else {
+            return false;
+        };
+        match hand {
+            XrSharedHand::LeftHand => state.left_hand.grab_intent(),
+            XrSharedHand::RightHand => state.right_hand.grab_intent(),
+            XrSharedHand::LeftController => state.left_controller.grip >= 0.55,
+            XrSharedHand::RightController => state.right_controller.grip >= 0.55,
+            XrSharedHand::Unknown => false,
+        }
+    }
+
+    fn shared_object_source_peer_id(
+        &self,
+        snapshot: &XrRemoteSharedObjectSnapshot,
+    ) -> Option<XrNetPeerId> {
+        self.peer_id_for_authority(snapshot.state_source_authority)
+    }
+
+    fn predicted_remote_shadow_state(
+        &self,
+        snapshot: &XrRemoteSharedObjectSnapshot,
+    ) -> Option<(XrNetPeerId, XrSharedObjectMode, Pose, Vec3f, Vec3f)> {
+        let latest_state = snapshot.latest_state?;
+        let peer_id = self.shared_object_source_peer_id(snapshot)?;
+        let local_sent_at = self
+            .peer_time_to_local_time(peer_id, latest_state.sent_at)
+            .unwrap_or(self.runtime.local.state_time);
+        let dt = (self.runtime.local.state_time - local_sent_at).clamp(
+            0.0,
+            Self::SHARED_OBJECT_SHADOW_MAX_EXTRAPOLATION_SECONDS as f64,
+        ) as f32;
+        Some((
+            peer_id,
+            latest_state.mode,
+            Self::predict_pose(
+                latest_state.pose,
+                latest_state.linvel,
+                latest_state.angvel,
+                dt,
+            ),
+            latest_state.linvel,
+            latest_state.angvel,
+        ))
+    }
+
+    fn emit_body_spawn_local_space(
+        &mut self,
+        cx: &mut Cx,
+        widget_uid: WidgetUid,
+        shadow: bool,
+        mode: XrSharedObjectMode,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    ) {
+        cx.widget_action(
+            self.widget_uid(),
+            XrPeerSyncAction::BodySpawn(XrBodySpawn {
+                widget_uid,
+                shadow,
+                mode,
+                pose,
+                linvel,
+                angvel,
+            }),
+        );
+    }
+
+    fn emit_body_impulse(
+        &mut self,
+        cx: &mut Cx,
+        widget_uid: WidgetUid,
+        point: Vec3f,
+        impulse: Vec3f,
+    ) {
+        cx.widget_action(
+            self.widget_uid(),
+            XrPeerSyncAction::BodyImpulse(XrBodyImpulse {
+                widget_uid,
+                point,
+                impulse,
+            }),
+        );
+    }
+
+    fn emit_authority_space_body_spawn(
+        &mut self,
+        cx: &mut Cx,
+        source_authority: XrPeerId,
+        widget_uid: WidgetUid,
+        shadow: bool,
+        mode: XrSharedObjectMode,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    ) {
+        if self.runtime.shared_objects.local_peer_id() == Some(source_authority) {
+            self.emit_body_spawn_local_space(cx, widget_uid, shadow, mode, pose, linvel, angvel);
+        } else if let Some(peer_id) = self.peer_id_for_authority(source_authority) {
+            self.emit_remote_body_spawn(
+                cx, peer_id, widget_uid, shadow, mode, pose, linvel, angvel,
+            );
+        } else {
+            self.emit_body_spawn_local_space(cx, widget_uid, shadow, mode, pose, linvel, angvel);
+        }
+    }
+
+    fn service_scheduled_authority_transfers(&mut self, cx: &mut Cx, physics_tick: u32) -> usize {
+        let transfers = self
+            .runtime
+            .shared_objects
+            .apply_scheduled_authority_transfers(self.runtime.local.state_time, physics_tick);
+        for transfer in &transfers {
+            self.emit_authority_space_body_spawn(
+                cx,
+                transfer.source_authority,
+                transfer.widget_uid,
+                transfer.shadow,
+                XrSharedObjectMode::Dynamic,
+                transfer.pose,
+                transfer.linvel,
+                transfer.angvel,
+            );
+        }
+        transfers.len()
+    }
+
+    fn sync_remote_shadow_bodies(&mut self, cx: &mut Cx) -> usize {
+        let snapshots = self.runtime.shared_objects.remote_shared_object_snapshots();
+        let mut applied = 0usize;
+        for snapshot in snapshots {
+            let Some((peer_id, mode, pose, linvel, angvel)) =
+                self.predicted_remote_shadow_state(&snapshot)
+            else {
+                continue;
+            };
+            self.emit_remote_body_spawn(
+                cx,
+                peer_id,
+                snapshot.widget_uid,
+                true,
+                mode,
+                pose,
+                linvel,
+                angvel,
+            );
+            applied += 1;
+        }
+        applied
+    }
+
+    fn queue_remote_interaction_controls(
+        &mut self,
+        runtime_bodies: &HashMap<WidgetUid, XrRuntimeBodyState>,
+    ) -> Vec<XrNetSharedObjectControl> {
+        let local_peer_id = if let Some(peer_id) = self.runtime.shared_objects.local_peer_id() {
+            peer_id
+        } else {
+            return Vec::new();
+        };
+        let hands = self.local_shared_hands();
+        if hands.is_empty() {
+            return Vec::new();
+        }
+        let snapshots = self.runtime.shared_objects.remote_shared_object_snapshots();
+        let mut controls = Vec::new();
+        for snapshot in snapshots {
+            let Some(latest_state) = snapshot.latest_state else {
+                continue;
+            };
+            let Some((_, _, predicted_pose, predicted_linvel, _)) =
+                self.predicted_remote_shadow_state(&snapshot)
+            else {
+                continue;
+            };
+            if runtime_bodies
+                .get(&snapshot.widget_uid)
+                .is_some_and(|body| body.held_by.is_some())
+            {
+                continue;
+            }
+            for hand in &hands {
+                let distance = (predicted_pose.position - hand.pose.position).length();
+                let relative_speed = (predicted_linvel - hand.linvel).length();
+                if hand.gripping
+                    && matches!(
+                        latest_state.mode,
+                        XrSharedObjectMode::ContactDominated { .. }
+                    )
+                    && distance <= Self::SHARED_OBJECT_TAKEOVER_DISTANCE_METERS
+                    && relative_speed <= Self::SHARED_OBJECT_TAKEOVER_RELATIVE_SPEED_MAX
+                    && self.runtime.shared_objects.can_send_takeover_request(
+                        snapshot.object_id,
+                        self.runtime.local.state_time,
+                    )
+                {
+                    let request_id = self.shared_object_request_id();
+                    self.runtime.shared_objects.note_takeover_request(
+                        snapshot.object_id,
+                        request_id,
+                        self.runtime.local.state_time,
+                    );
+                    controls.push(XrNetSharedObjectControl::XrTakeoverRequest {
+                        object_id: snapshot.object_id,
+                        epoch: snapshot.epoch,
+                        request_id,
+                        based_on_seq: latest_state.seq,
+                        based_on_tick: latest_state.physics_tick,
+                        candidate_owner: local_peer_id,
+                        hand: hand.shared_hand,
+                        hand_pose: hand.pose,
+                        hand_linvel: hand.linvel,
+                    });
+                    break;
+                }
+                if !hand.gripping
+                    && matches!(
+                        latest_state.mode,
+                        XrSharedObjectMode::Dynamic | XrSharedObjectMode::Sleeping
+                    )
+                    && hand.linvel.length() >= Self::SHARED_OBJECT_IMPULSE_MIN_HAND_SPEED
+                    && distance <= Self::SHARED_OBJECT_IMPULSE_DISTANCE_METERS
+                    && self
+                        .runtime
+                        .shared_objects
+                        .can_send_contact_impulse_request(
+                            snapshot.object_id,
+                            self.runtime.local.state_time,
+                        )
+                {
+                    self.runtime.shared_objects.note_contact_impulse_request(
+                        snapshot.object_id,
+                        self.runtime.local.state_time,
+                    );
+                    controls.push(XrNetSharedObjectControl::XrContactImpulse {
+                        object_id: snapshot.object_id,
+                        epoch: snapshot.epoch,
+                        based_on_seq: latest_state.seq,
+                        based_on_tick: latest_state.physics_tick,
+                        hand: hand.shared_hand,
+                        hand_pose: hand.pose,
+                        point: hand.pose.position,
+                        impulse: hand.linvel * Self::SHARED_OBJECT_IMPULSE_SCALE,
+                    });
+                    break;
+                }
+            }
+        }
+        controls
+    }
+
+    fn emit_remote_body_spawn(
+        &mut self,
+        cx: &mut Cx,
+        peer_id: XrNetPeerId,
+        widget_uid: WidgetUid,
+        shadow: bool,
+        mode: XrSharedObjectMode,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    ) {
+        let transform = self.peer_remote_to_local_transform(peer_id);
+        cx.widget_action(
+            self.widget_uid(),
+            XrPeerSyncAction::BodySpawn(XrBodySpawn {
+                widget_uid,
+                shadow,
+                mode,
+                pose: Self::transform_pose(&transform, pose),
+                linvel: Self::transform_direction(&transform, linvel),
+                angvel: Self::transform_direction(&transform, angvel),
+            }),
+        );
+    }
+
+    fn emit_remote_body_despawn(&mut self, cx: &mut Cx, widget_uid: WidgetUid) {
+        cx.widget_action(self.widget_uid(), XrPeerSyncAction::BodyDespawn(widget_uid));
+    }
+
+    fn shared_object_control_object_id(
+        control: &XrNetSharedObjectControl,
+    ) -> Option<XrSharedObjectId> {
+        match control {
+            XrNetSharedObjectControl::XrSpawnObject { object_id, .. }
+            | XrNetSharedObjectControl::XrDespawnObject { object_id, .. }
+            | XrNetSharedObjectControl::XrTakeoverRequest { object_id, .. }
+            | XrNetSharedObjectControl::XrTakeoverAccept { object_id, .. }
+            | XrNetSharedObjectControl::XrTakeoverReject { object_id, .. }
+            | XrNetSharedObjectControl::XrContactImpulse { object_id, .. }
+            | XrNetSharedObjectControl::XrResetObject { object_id, .. } => Some(*object_id),
+            XrNetSharedObjectControl::XrClockPing { .. }
+            | XrNetSharedObjectControl::XrClockPong { .. } => None,
+        }
+    }
+
+    fn send_takeover_reject(
+        &mut self,
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        request_id: u32,
+        authoritative_state: Option<XrNetSharedObjectState>,
+    ) {
+        let authoritative_seq = authoritative_state.map(|state| state.seq).unwrap_or(0);
+        let authoritative_tick = authoritative_state
+            .map(|state| state.physics_tick)
+            .unwrap_or(self.runtime.next_shared_object_physics_tick);
+        if let Some(net_node) = self.runtime.net_node.as_mut() {
+            net_node.send_shared_object_control(XrNetSharedObjectControl::XrTakeoverReject {
+                object_id,
+                epoch,
+                request_id,
+                authoritative_seq,
+                authoritative_tick,
+            });
+        }
+    }
+
+    fn handle_takeover_request(
+        &mut self,
+        peer: XrNetPeer,
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        request_id: u32,
+        based_on_seq: u32,
+        based_on_tick: u32,
+        candidate_owner: XrPeerId,
+        hand: XrSharedHand,
+        hand_pose: Pose,
+        hand_linvel: Vec3f,
+    ) -> bool {
+        let Some(local_snapshot) = self
+            .runtime
+            .shared_objects
+            .local_shared_object_snapshot(object_id)
+        else {
+            return true;
+        };
+        let authoritative_state = self.runtime.shared_objects.find_local_state_for_request(
+            object_id,
+            epoch,
+            based_on_seq,
+            based_on_tick,
+        );
+        if epoch != local_snapshot.epoch
+            || candidate_owner != peer.shared_object_peer_id()
+            || !self.peer_grab_intent(peer.id, hand)
+        {
+            self.send_takeover_reject(object_id, epoch, request_id, authoritative_state);
+            return true;
+        }
+        let Some(authoritative_state) = authoritative_state else {
+            self.send_takeover_reject(object_id, epoch, request_id, None);
+            return true;
+        };
+        let peer_transform = self.peer_remote_to_local_transform(peer.id);
+        let local_hand_pose = Self::transform_pose(&peer_transform, hand_pose);
+        let local_hand_linvel = Self::transform_direction(&peer_transform, hand_linvel);
+        let distance = (authoritative_state.pose.position - local_hand_pose.position).length();
+        let relative_speed = (authoritative_state.linvel - local_hand_linvel).length();
+        if distance > Self::SHARED_OBJECT_TAKEOVER_DISTANCE_METERS
+            || relative_speed > Self::SHARED_OBJECT_TAKEOVER_RELATIVE_SPEED_MAX
+        {
+            self.send_takeover_reject(object_id, epoch, request_id, Some(authoritative_state));
+            return true;
+        }
+        let effective_at = (if self.runtime.local.state_time != 0.0 {
+            self.runtime.local.state_time
+        } else {
+            Cx::time_now()
+        }) + Self::SHARED_OBJECT_TAKEOVER_EFFECTIVE_DELAY_SECONDS;
+        let effective_tick = self
+            .runtime
+            .next_shared_object_physics_tick
+            .wrapping_add(Self::SHARED_OBJECT_TAKEOVER_EFFECTIVE_TICK_OFFSET);
+        let new_epoch = local_snapshot.epoch.wrapping_add(1);
+        self.runtime.shared_objects.schedule_authority_transfer(
+            object_id,
+            new_epoch,
+            local_snapshot.authority,
+            candidate_owner,
+            effective_at,
+            effective_tick,
+            request_id,
+            Some(hand),
+            authoritative_state.pose,
+            authoritative_state.linvel,
+            authoritative_state.angvel,
+        );
+        if let Some(net_node) = self.runtime.net_node.as_mut() {
+            net_node.send_shared_object_control(XrNetSharedObjectControl::XrTakeoverAccept {
+                object_id,
+                epoch: new_epoch,
+                request_id,
+                new_authority: candidate_owner,
+                effective_at,
+                effective_tick,
+                pose: authoritative_state.pose,
+                linvel: authoritative_state.linvel,
+                angvel: authoritative_state.angvel,
+            });
+        }
+        true
+    }
+
+    fn handle_takeover_accept(
+        &mut self,
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        request_id: u32,
+        source_authority: XrPeerId,
+        new_authority: XrPeerId,
+        effective_at: f64,
+        effective_tick: u32,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    ) -> bool {
+        let local_effective_at = self
+            .peer_id_for_authority(source_authority)
+            .and_then(|peer_id| self.peer_time_to_local_time(peer_id, effective_at))
+            .unwrap_or(effective_at);
+        self.runtime
+            .shared_objects
+            .clear_takeover_request(object_id, Some(request_id));
+        self.runtime.shared_objects.schedule_authority_transfer(
+            object_id,
+            epoch,
+            source_authority,
+            new_authority,
+            local_effective_at,
+            effective_tick,
+            request_id,
+            None,
+            pose,
+            linvel,
+            angvel,
+        )
+    }
+
+    fn handle_takeover_reject(&mut self, object_id: XrSharedObjectId, request_id: u32) -> bool {
+        let _ = self
+            .runtime
+            .shared_objects
+            .clear_takeover_request(object_id, Some(request_id));
+        true
+    }
+
+    fn handle_contact_impulse(
+        &mut self,
+        cx: &mut Cx,
+        peer: XrNetPeer,
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        based_on_seq: u32,
+        based_on_tick: u32,
+        hand: XrSharedHand,
+        hand_pose: Pose,
+        point: Vec3f,
+        impulse: Vec3f,
+    ) -> bool {
+        let Some(local_snapshot) = self
+            .runtime
+            .shared_objects
+            .local_shared_object_snapshot(object_id)
+        else {
+            return true;
+        };
+        if epoch != local_snapshot.epoch || self.peer_grab_intent(peer.id, hand) {
+            return true;
+        }
+        let Some(authoritative_state) = self.runtime.shared_objects.find_local_state_for_request(
+            object_id,
+            epoch,
+            based_on_seq,
+            based_on_tick,
+        ) else {
+            return true;
+        };
+        if !matches!(
+            authoritative_state.mode,
+            XrSharedObjectMode::Dynamic | XrSharedObjectMode::Sleeping
+        ) {
+            return true;
+        }
+        let peer_transform = self.peer_remote_to_local_transform(peer.id);
+        let local_hand_pose = Self::transform_pose(&peer_transform, hand_pose);
+        let local_point = Self::transform_point(&peer_transform, point);
+        let local_impulse = Self::transform_direction(&peer_transform, impulse);
+        let distance = (authoritative_state.pose.position - local_hand_pose.position).length();
+        if distance > Self::SHARED_OBJECT_IMPULSE_DISTANCE_METERS * 1.25
+            || (authoritative_state.pose.position - local_point).length()
+                > Self::SHARED_OBJECT_IMPULSE_DISTANCE_METERS * 1.5
+        {
+            return true;
+        }
+        self.emit_body_impulse(cx, local_snapshot.widget_uid, local_point, local_impulse);
+        true
+    }
+
+    fn handle_reset_object(
+        &mut self,
+        cx: &mut Cx,
+        source_authority: XrPeerId,
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    ) -> bool {
+        if let Some(remote_snapshot) = self
+            .runtime
+            .shared_objects
+            .remote_shared_object_snapshot(object_id)
+        {
+            let state = XrNetSharedObjectState {
+                seq: 0,
+                sent_at: 0.0,
+                physics_tick: 0,
+                object_id,
+                epoch,
+                authority: remote_snapshot.authority,
+                fidelity: remote_snapshot.fidelity,
+                mode: XrSharedObjectMode::Dynamic,
+                pose,
+                linvel,
+                angvel,
+            };
+            let _ = self
+                .runtime
+                .shared_objects
+                .record_remote_shared_object_state(state);
+            self.emit_authority_space_body_spawn(
+                cx,
+                source_authority,
+                remote_snapshot.widget_uid,
+                true,
+                XrSharedObjectMode::Dynamic,
+                pose,
+                linvel,
+                angvel,
+            );
+            return true;
+        }
+        false
+    }
+
+    fn apply_shared_object_control(
+        &mut self,
+        cx: &mut Cx,
+        peer: XrNetPeer,
+        control: &XrNetSharedObjectControl,
+    ) -> bool {
+        match control {
+            XrNetSharedObjectControl::XrSpawnObject {
+                object_id,
+                epoch,
+                authority,
+                fidelity,
+                shape:
+                    XrSharedObjectShape::ActivitySpawnable {
+                        activity_id,
+                        spawnable_id,
+                    },
+                pose,
+                linvel,
+                angvel,
+                ..
+            } => {
+                self.runtime
+                    .metrics
+                    .record_body_spawn_rx(peer.id, object_id.0);
+                if self
+                    .runtime
+                    .shared_objects
+                    .resolve_local_shared_object_widget(*object_id)
+                    .is_some()
+                {
+                    return true;
+                }
+                let Some(widget_uid) = self.runtime.shared_objects.register_remote_shared_object(
+                    *activity_id,
+                    *object_id,
+                    *epoch,
+                    *authority,
+                    *fidelity,
+                    *spawnable_id,
+                    *pose,
+                    *linvel,
+                    *angvel,
+                ) else {
+                    return false;
+                };
+                self.emit_remote_body_spawn(
+                    cx,
+                    peer.id,
+                    widget_uid,
+                    true,
+                    XrSharedObjectMode::Dynamic,
+                    *pose,
+                    *linvel,
+                    *angvel,
+                );
+                true
+            }
+            XrNetSharedObjectControl::XrDespawnObject { object_id, .. } => {
+                self.runtime
+                    .pending_shared_object_controls
+                    .retain(|(_, pending_control)| {
+                        Self::shared_object_control_object_id(pending_control) != Some(*object_id)
+                    });
+                if let Some(widget_uid) = self
+                    .runtime
+                    .shared_objects
+                    .release_remote_shared_object(*object_id)
+                {
+                    self.emit_remote_body_despawn(cx, widget_uid);
+                }
+                true
+            }
+            XrNetSharedObjectControl::XrTakeoverAccept {
+                object_id,
+                epoch,
+                request_id,
+                new_authority,
+                effective_at,
+                effective_tick,
+                pose,
+                linvel,
+                angvel,
+            } => self.handle_takeover_accept(
+                *object_id,
+                *epoch,
+                *request_id,
+                peer.shared_object_peer_id(),
+                *new_authority,
+                *effective_at,
+                *effective_tick,
+                *pose,
+                *linvel,
+                *angvel,
+            ),
+            XrNetSharedObjectControl::XrResetObject {
+                object_id,
+                epoch,
+                pose,
+                linvel,
+                angvel,
+            } => self.handle_reset_object(
+                cx,
+                peer.shared_object_peer_id(),
+                *object_id,
+                *epoch,
+                *pose,
+                *linvel,
+                *angvel,
+            ),
+            XrNetSharedObjectControl::XrClockPing { seq, sent_at } => {
+                let replied_at = if self.runtime.local.state_time != 0.0 {
+                    self.runtime.local.state_time
+                } else {
+                    Cx::time_now()
+                };
+                if let Some(net_node) = self.runtime.net_node.as_mut() {
+                    net_node.send_shared_object_control(XrNetSharedObjectControl::XrClockPong {
+                        seq: *seq,
+                        echoed_at: *sent_at,
+                        replied_at,
+                    });
+                }
+                true
+            }
+            XrNetSharedObjectControl::XrClockPong {
+                seq,
+                echoed_at: _,
+                replied_at,
+            } => {
+                let Some(local_sent_at) = self
+                    .runtime
+                    .pending_clock_pings
+                    .iter()
+                    .find_map(|(pending_seq, sent_at)| (*pending_seq == *seq).then_some(*sent_at))
+                else {
+                    return true;
+                };
+                let now = if self.runtime.local.state_time != 0.0 {
+                    self.runtime.local.state_time
+                } else {
+                    Cx::time_now()
+                };
+                let round_trip_seconds = (now - local_sent_at).max(0.0);
+                let midpoint = local_sent_at + round_trip_seconds * 0.5;
+                let clock_offset_seconds = *replied_at - midpoint;
+                if let Some(peer_state) = self.runtime.registry.peers.get_mut(&peer.id) {
+                    peer_state.clock_offset_seconds = Some(clock_offset_seconds);
+                    peer_state.clock_round_trip_seconds = Some(round_trip_seconds);
+                    peer_state.last_clock_sync_at = Some(now);
+                }
+                true
+            }
+            XrNetSharedObjectControl::XrTakeoverRequest {
+                object_id,
+                epoch,
+                request_id,
+                based_on_seq,
+                based_on_tick,
+                candidate_owner,
+                hand,
+                hand_pose,
+                hand_linvel,
+            } => self.handle_takeover_request(
+                peer,
+                *object_id,
+                *epoch,
+                *request_id,
+                *based_on_seq,
+                *based_on_tick,
+                *candidate_owner,
+                *hand,
+                *hand_pose,
+                *hand_linvel,
+            ),
+            XrNetSharedObjectControl::XrTakeoverReject {
+                object_id,
+                request_id,
+                ..
+            } => self.handle_takeover_reject(*object_id, *request_id),
+            XrNetSharedObjectControl::XrContactImpulse {
+                object_id,
+                epoch,
+                based_on_seq,
+                based_on_tick,
+                hand,
+                hand_pose,
+                point,
+                impulse,
+            } => self.handle_contact_impulse(
+                cx,
+                peer,
+                *object_id,
+                *epoch,
+                *based_on_seq,
+                *based_on_tick,
+                *hand,
+                *hand_pose,
+                *point,
+                *impulse,
+            ),
         }
     }
 
@@ -2720,9 +3811,14 @@ impl XrPeerSync {
                 alpha,
             );
 
-            let head_transform =
-                Mat4f::mul(&root_transform, &state_frame.state.head_pose.to_mat4());
-            self.draw_cube_at(cx, world, &head_transform, Self::HEADSET_SIZE, head_color);
+            let head_pose = state_frame.state.head_pose;
+            self.draw_cube_at(
+                cx,
+                world,
+                &Mat4f::mul(&root_transform, &head_pose.to_mat4()),
+                Self::HEADSET_SIZE,
+                head_color,
+            );
             self.draw_peer_hand(
                 cx,
                 world,

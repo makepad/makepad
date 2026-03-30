@@ -1,6 +1,7 @@
 use super::xr_node::{
-    XrBodyKind, XrDrawScopeData, XrHandInfluencePoint, XrNode, XrRuntimeBodyState,
-    XR_HAND_INFLUENCE_POINTS_PER_HAND, XR_HAND_INFLUENCE_POINT_COUNT,
+    xr_widget_children, xr_widget_with_scene_node, XrBodyKind, XrDrawScopeData,
+    XrHandInfluencePoint, XrNode, XrRuntimeBodyState, XR_HAND_INFLUENCE_POINTS_PER_HAND,
+    XR_HAND_INFLUENCE_POINT_COUNT,
 };
 use crate::prelude::*;
 use crate::util::{
@@ -190,6 +191,9 @@ const XR_HAND_PLATE_HALF_HEIGHT: f32 = 0.005;
 const XR_HAND_PLATE_HALF_DEPTH: f32 = 0.028;
 const XR_HAND_PLATE_FORWARD_OFFSET: f32 = 0.004;
 const XR_HAND_TIP_RADIUS_SCALE: f32 = 0.72;
+const XR_HAND_GRAB_MAX_DISTANCE: f32 = 0.24;
+const XR_HAND_DUAL_GRAB_MIN_SPAN: f32 = 0.035;
+const XR_HAND_GRAB_RELEASE_LINEAR_VELOCITY_SCALE: f32 = 1.0;
 const XR_BODY_LINEAR_DAMPING: f32 = 1.5;
 const XR_BODY_ANGULAR_DAMPING: f32 = 6.0;
 const XR_BODY_ADDITIONAL_SOLVER_ITERATIONS: usize = 4;
@@ -197,6 +201,7 @@ const XR_BODY_SLEEP_ANGULAR_THRESHOLD: f32 = 2.0;
 const XR_BODY_SLEEP_TIME: f32 = 0.35;
 const XR_BODY_SNAP_SLEEP_LINEAR_SPEED: f32 = 0.03;
 const XR_BODY_SNAP_SLEEP_ANGULAR_SPEED: f32 = 1.0;
+const XR_BODY_SNAP_SLEEP_SETTLE_FRAMES: u8 = 4;
 const XR_PBR_FACE_SUBDIVISIONS: usize = 1;
 const XR_PBR_CORNER_SEGMENTS: usize = 3;
 const XR_PBR_HAND_CAPSULE_SUBDIVISIONS: usize = 8;
@@ -206,7 +211,7 @@ const XR_PBR_HAND_SPHERE_SUBDIVISIONS: usize = 8;
 struct CollectedXrCube {
     uid: WidgetUid,
     body_kind: XrBodyKind,
-    projectile_pool: bool,
+    spawn_pool: bool,
     pose: Pose,
     scale: Vec3f,
     half_extents: Vec3f,
@@ -222,6 +227,9 @@ struct XrPhysicsMetrics {
     tsdf_query_ms: f64,
     rapier_step_ms: f64,
     depth_query_surface_count: usize,
+    scene_body_count: usize,
+    body_spawn_apply_count: usize,
+    body_spawn_miss_count: usize,
 }
 
 struct XrPhysicsRuntime {
@@ -231,6 +239,9 @@ struct XrPhysicsRuntime {
     scene_dirty: bool,
     revision: u64,
     metrics: XrPhysicsMetrics,
+    pending_body_spawns: Vec<XrBodySpawn>,
+    pending_body_despawns: Vec<WidgetUid>,
+    pending_body_impulses: Vec<XrBodyImpulse>,
 }
 
 impl Default for XrPhysicsRuntime {
@@ -242,6 +253,9 @@ impl Default for XrPhysicsRuntime {
             scene_dirty: true,
             revision: 0,
             metrics: XrPhysicsMetrics::default(),
+            pending_body_spawns: Vec::new(),
+            pending_body_despawns: Vec::new(),
+            pending_body_impulses: Vec::new(),
         }
     }
 }
@@ -289,6 +303,7 @@ struct XrPassthroughRuntime {
     camera_playback_requested: bool,
     camera_failed: bool,
     camera_has_frame: bool,
+    camera_choice_wait_logged: bool,
     env_face_quad: Option<Geometry>,
     env_cube: Option<XrPassthroughEnvCube>,
 }
@@ -304,6 +319,7 @@ impl Default for XrPassthroughRuntime {
             camera_playback_requested: false,
             camera_failed: false,
             camera_has_frame: false,
+            camera_choice_wait_logged: false,
             env_face_quad: None,
             env_cube: None,
         }
@@ -408,6 +424,26 @@ impl XrEnv {
 
     pub(crate) fn physics_depth_query_surface_count(&self) -> usize {
         self.world.physics.metrics.depth_query_surface_count
+    }
+
+    pub(crate) fn physics_scene_body_count(&self) -> usize {
+        self.world.physics.metrics.scene_body_count
+    }
+
+    pub(crate) fn physics_body_spawn_apply_count(&self) -> usize {
+        self.world.physics.metrics.body_spawn_apply_count
+    }
+
+    pub(crate) fn physics_body_spawn_miss_count(&self) -> usize {
+        self.world.physics.metrics.body_spawn_miss_count
+    }
+
+    pub(crate) fn physics_revision(&self) -> u64 {
+        self.world.physics.revision
+    }
+
+    pub(crate) fn runtime_bodies(&self) -> Rc<HashMap<WidgetUid, XrRuntimeBodyState>> {
+        self.world.physics.runtime_bodies.clone()
     }
 
     fn passthrough_video_id() -> LiveId {
@@ -663,39 +699,38 @@ impl XrEnv {
         if !widget.visible() {
             return;
         }
-        let Some(node) = widget.cast_inner::<XrNode>() else {
-            widget.children(&mut |_, child| {
+        let Some(()) = xr_widget_with_scene_node(widget, |node| {
+            let is_sphere = widget.borrow::<IcoSphere>().is_some();
+            let (pos, ori, scale) =
+                Self::transform_with_node(parent_pos, parent_ori, parent_scale, node);
+            let half = node.physics_half_extents();
+            let should_push = node.body_kind() != XrBodyKind::Disabled
+                && (half.x > 0.0 || half.y > 0.0 || half.z > 0.0);
+
+            if should_push {
+                cubes.push(CollectedXrCube {
+                    uid: widget.widget_uid(),
+                    body_kind: node.body_kind(),
+                    spawn_pool: node.spawn_pool(),
+                    pose: Pose::new(ori, pos),
+                    scale,
+                    half_extents: vec3f(half.x * scale.x, half.y * scale.y, half.z * scale.z),
+                    is_sphere,
+                    density: node.density(),
+                    friction: node.friction(),
+                    restitution: node.restitution(),
+                });
+            }
+
+            xr_widget_children(widget, &mut |_, child| {
+                Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes)
+            });
+        }) else {
+            xr_widget_children(widget, &mut |_, child| {
                 Self::collect_cubes_from_widget(&child, parent_pos, parent_ori, parent_scale, cubes)
             });
             return;
         };
-
-        let is_sphere = widget.borrow::<IcoSphere>().is_some();
-        let (pos, ori, scale) =
-            Self::transform_with_node(parent_pos, parent_ori, parent_scale, &node);
-        let half = node.physics_half_extents();
-        let should_push = node.body_kind() != XrBodyKind::Disabled
-            && (half.x > 0.0 || half.y > 0.0 || half.z > 0.0);
-
-        if should_push {
-            cubes.push(CollectedXrCube {
-                uid: widget.widget_uid(),
-                body_kind: node.body_kind(),
-                projectile_pool: node.projectile_pool(),
-                pose: Pose::new(ori, pos),
-                scale,
-                half_extents: vec3f(half.x * scale.x, half.y * scale.y, half.z * scale.z),
-                is_sphere,
-                density: node.density(),
-                friction: node.friction(),
-                restitution: node.restitution(),
-            });
-        }
-
-        drop(node);
-        widget.children(&mut |_, child| {
-            Self::collect_cubes_from_widget(&child, pos, ori, scale, cubes)
-        });
     }
 
     fn collect_cubes_from_children(
@@ -735,6 +770,9 @@ impl XrEnv {
             tsdf_query_ms: result.physics_tsdf_query_ms,
             rapier_step_ms: result.physics_rapier_step_ms,
             depth_query_surface_count: result.physics_depth_query_surface_count,
+            scene_body_count: result.physics_scene_body_count,
+            body_spawn_apply_count: result.physics_body_spawn_apply_count,
+            body_spawn_miss_count: result.physics_body_spawn_miss_count,
         };
         true
     }
@@ -772,16 +810,19 @@ impl XrEnv {
             self.request_physics_rebuild(cx, children);
             cx.redraw_all();
         }
+        self.flush_pending_physics_commands(cx);
     }
 
-    pub fn spawn_body(&mut self, cx: &mut Cx, spawn: XrBodySpawn) {
-        self.poll_physics_worker(cx);
-        if self.world.physics.scene_dirty || self.world.physics.worker.is_none() {
-            return;
-        }
-        let revision = self.world.physics.revision;
-        self.ensure_physics_worker(cx)
-            .request_body_spawn(revision, spawn);
+    pub fn spawn_body(&mut self, _cx: &mut Cx, spawn: XrBodySpawn) {
+        self.world.physics.pending_body_spawns.push(spawn);
+    }
+
+    pub fn despawn_body(&mut self, _cx: &mut Cx, widget_uid: WidgetUid) {
+        self.world.physics.pending_body_despawns.push(widget_uid);
+    }
+
+    pub fn apply_body_impulse(&mut self, _cx: &mut Cx, impulse: XrBodyImpulse) {
+        self.world.physics.pending_body_impulses.push(impulse);
     }
 
     pub fn mark_scene_dirty(&mut self) {
@@ -804,6 +845,7 @@ impl XrEnv {
 
     pub fn step_physics(&mut self, cx: &mut Cx) {
         self.poll_physics_worker(cx);
+        self.flush_pending_physics_commands(cx);
         let revision = self.world.physics.revision;
         let physics_time_scale = self.physics_time_scale;
         let include_retained_hits = self.depth_query_hits_visible();
@@ -830,8 +872,38 @@ impl XrEnv {
         self.world.physics.metrics = XrPhysicsMetrics::default();
         self.world.depth.query_retained_hits.clear();
         Rc::make_mut(&mut self.world.physics.runtime_bodies).clear();
+        self.world.physics.pending_body_spawns.clear();
+        self.world.physics.pending_body_despawns.clear();
+        self.world.physics.pending_body_impulses.clear();
         self.world.physics.scene_dirty = true;
         cx.redraw_all();
+    }
+
+    pub fn flush_pending_physics_commands(&mut self, cx: &mut Cx) {
+        self.poll_physics_worker(cx);
+        if self.world.physics.scene_dirty || self.world.physics.worker.is_none() {
+            return;
+        }
+        if self.world.physics.pending_body_spawns.is_empty()
+            && self.world.physics.pending_body_despawns.is_empty()
+            && self.world.physics.pending_body_impulses.is_empty()
+        {
+            return;
+        }
+        let revision = self.world.physics.revision;
+        let pending_body_spawns = std::mem::take(&mut self.world.physics.pending_body_spawns);
+        let pending_body_despawns = std::mem::take(&mut self.world.physics.pending_body_despawns);
+        let pending_body_impulses = std::mem::take(&mut self.world.physics.pending_body_impulses);
+        let worker = self.ensure_physics_worker(cx);
+        for spawn in pending_body_spawns {
+            worker.request_body_spawn(revision, spawn);
+        }
+        for widget_uid in pending_body_despawns {
+            worker.request_body_despawn(revision, widget_uid);
+        }
+        for impulse in pending_body_impulses {
+            worker.request_body_impulse(revision, impulse);
+        }
     }
 
     #[allow(dead_code)]

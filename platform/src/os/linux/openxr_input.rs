@@ -48,14 +48,20 @@ impl CxOpenXrSession {
             &self.inputs.actions,
         );
 
-        let left_hand =
-            self.inputs
-                .left_hand
-                .poll(xr, self.handle, local_space, predicted_display_time);
-        let right_hand =
-            self.inputs
-                .right_hand
-                .poll(xr, self.handle, local_space, predicted_display_time);
+        let left_hand = self.inputs.left_hand.poll(
+            xr,
+            self.handle,
+            local_space,
+            predicted_display_time,
+            &self.inputs.actions,
+        );
+        let right_hand = self.inputs.right_hand.poll(
+            xr,
+            self.handle,
+            local_space,
+            predicted_display_time,
+            &self.inputs.actions,
+        );
 
         let anchor = self
             .anchor
@@ -86,6 +92,8 @@ impl CxOpenXrSession {
 struct CxOpenXrInputActions {
     trigger_action: XrAction,
     grip_action: XrAction,
+    hand_grab_action: XrAction,
+    hand_grab_ready_action: XrAction,
     thumbstick_action: XrAction,
     click_a_action: XrAction,
     click_b_action: XrAction,
@@ -115,8 +123,11 @@ pub struct CxOpenXrInputs {
 }
 
 pub struct CxOpenXrHand {
+    path: XrPath,
     tracker: XrHandTrackerEXT,
     joint_locations: [XrHandJointLocationEXT; HAND_JOINT_COUNT_EXT],
+    grab_active: bool,
+    last_hand: XrHand,
 }
 
 impl CxOpenXrHand {
@@ -127,9 +138,10 @@ impl CxOpenXrHand {
     fn poll(
         &mut self,
         xr: &LibOpenXr,
-        _session: XrSession,
+        session: XrSession,
         local_space: XrSpace,
         time: XrTime,
+        actions: &CxOpenXrInputActions,
     ) -> XrHand {
         let mut scale = XrHandTrackingScaleFB {
             sensor_output: 1.0,
@@ -156,8 +168,15 @@ impl CxOpenXrHand {
         unsafe { (xr.xrLocateHandJointsEXT)(self.tracker, &locate_info, &mut locations) }
             .log_error("xrLocateHandJointsEXT");
         // alrighty lets convert the joints to our XrHand
-        let mut hand = XrHand::default();
-        let mut hand_in_view = false;
+        let mut hand = self.last_hand.clone();
+        hand.flags = 0;
+        hand.tips_active = 0;
+        hand.pinch = [0; 4];
+        let grasp = XrActionStateFloat::get(xr, session, actions.hand_grab_action, self.path);
+        let grasp_ready =
+            XrActionStateBoolean::get(xr, session, actions.hand_grab_ready_action, self.path);
+        let mut center_tracked = false;
+        let mut wrist_tracked = false;
         let mut s = 0;
         for i in 0..self.joint_locations.len() {
             let tracked = self.joint_locations[i]
@@ -166,6 +185,8 @@ impl CxOpenXrHand {
                 && self.joint_locations[i]
                     .location_flags
                     .contains(XrSpaceLocationFlags::POSITION_TRACKED);
+            let pose = self.joint_locations[i].pose;
+            let pose_finite = xr_pose_is_finite(pose);
             // we're going to skip the tips and only store the distance
             if i == 5 || i == 10 || i == 15 || i == 20 || i == 25 {
                 // indices
@@ -199,22 +220,42 @@ impl CxOpenXrHand {
                 pub const PINKY_TIP: usize = 25;*/
                 // only store the distance to the tip so we can fit the entire
                 // tracked quest state in a UDP packet :)
-                let d = self.joint_locations[i].pose.position
-                    - self.joint_locations[i - 1].pose.position;
                 let slot = i / 5 - 1;
-                hand.tips[slot] = d.length();
-                hand.tips_active |= if tracked { 1 << slot } else { 0 };
+                let prev_pose = self.joint_locations[i - 1].pose;
+                let prev_tracked = self.joint_locations[i - 1]
+                    .location_flags
+                    .contains(XrSpaceLocationFlags::ORIENTATION_TRACKED)
+                    && self.joint_locations[i - 1]
+                        .location_flags
+                        .contains(XrSpaceLocationFlags::POSITION_TRACKED)
+                    && xr_pose_is_finite(prev_pose);
+                if tracked && pose_finite && prev_tracked {
+                    let d = pose.position - prev_pose.position;
+                    if d.x.is_finite() && d.y.is_finite() && d.z.is_finite() {
+                        hand.tips[slot] = d.length();
+                        hand.tips_active |= 1 << slot;
+                    }
+                }
                 continue;
             }
 
-            hand.joints[s] = self.joint_locations[i].pose;
-            s += 1;
-            if tracked {
-                hand_in_view = true
+            if tracked && pose_finite {
+                hand.joints[s] = pose;
+                if s == XrHand::CENTER {
+                    center_tracked = true;
+                }
+                if s == XrHand::WRIST {
+                    wrist_tracked = true;
+                }
             }
+            s += 1;
         }
-        hand.flags |= if hand_in_view{XrHand::IN_VIEW}else{0}|
-        if aim_state.status.contains(XrHandTrackingAimFlagsFB::VALID){XrHand::AIM_VALID}else{0}|
+        let aim_pose_valid = xr_pose_is_finite(aim_state.aim_pose);
+        if aim_pose_valid {
+            hand.aim_pose = aim_state.aim_pose;
+        }
+        hand.flags |= if center_tracked && wrist_tracked{XrHand::IN_VIEW}else{0}|
+        if aim_pose_valid && aim_state.status.contains(XrHandTrackingAimFlagsFB::VALID){XrHand::AIM_VALID}else{0}|
         if aim_state.status.contains(XrHandTrackingAimFlagsFB::INDEX_PINCHING){XrHand::PINCH_INDEX}else{0}|
         if aim_state.status.contains(XrHandTrackingAimFlagsFB::MIDDLE_PINCHING){XrHand::PINCH_MIDDLE}else{0}|
         if aim_state.status.contains(XrHandTrackingAimFlagsFB::RING_PINCHING){XrHand::PINCH_RING}else{0}|
@@ -223,7 +264,16 @@ impl CxOpenXrHand {
         if aim_state.status.contains(XrHandTrackingAimFlagsFB::MENU_PRESSED){XrHand::MENU_PRESSED}else{0}|
         //if aim_state.status.contains(XrHandTrackingAimFlagsFB::SYSTEM_GESTURE){XrHand::SYSTEM_GESTURE}else{0}|
         0;
-        hand.aim_pose = aim_state.aim_pose;
+        let grab_ready = grasp_ready.is_active.as_bool() && grasp_ready.current_state.as_bool();
+        let grab_strength = if grasp.is_active.as_bool() {
+            grasp.current_state
+        } else {
+            0.0
+        };
+        self.grab_active = xr_hand_grab_active(self.grab_active, grab_ready, grab_strength);
+        if self.grab_active {
+            hand.tips_active |= XrHand::GRAB_ACTIVE;
+        }
         hand.pinch[XrHand::PINCH_STRENGTH_INDEX] =
             (aim_state.pinch_strength_index * u8::MAX as f32) as u8;
         hand.pinch[XrHand::PINCH_STRENGTH_MIDDLE] =
@@ -232,7 +282,32 @@ impl CxOpenXrHand {
             (aim_state.pinch_strength_ring * u8::MAX as f32) as u8;
         hand.pinch[XrHand::PINCH_STRENGTH_LITTLE] =
             (aim_state.pinch_strength_little * u8::MAX as f32) as u8;
+        self.last_hand = hand.clone();
         hand
+    }
+}
+
+fn xr_pose_is_finite(pose: XrPosef) -> bool {
+    pose.position.x.is_finite()
+        && pose.position.y.is_finite()
+        && pose.position.z.is_finite()
+        && pose.orientation.x.is_finite()
+        && pose.orientation.y.is_finite()
+        && pose.orientation.z.is_finite()
+        && pose.orientation.w.is_finite()
+}
+
+const XR_HAND_GRAB_ACTIVATE_THRESHOLD: f32 = 0.72;
+const XR_HAND_GRAB_RELEASE_THRESHOLD: f32 = 0.42;
+
+fn xr_hand_grab_active(previous: bool, grab_ready: bool, grab_strength: f32) -> bool {
+    if !grab_ready || !grab_strength.is_finite() {
+        return false;
+    }
+    if previous {
+        grab_strength >= XR_HAND_GRAB_RELEASE_THRESHOLD
+    } else {
+        grab_strength >= XR_HAND_GRAB_ACTIVATE_THRESHOLD
     }
 }
 
@@ -448,6 +523,22 @@ impl CxOpenXrInputs {
             "",
             &hand_paths,
         )?;
+        let hand_grab_action = XrAction::new(
+            xr,
+            action_set,
+            XrActionType::FLOAT_INPUT,
+            "hand_grab",
+            "",
+            &hand_paths,
+        )?;
+        let hand_grab_ready_action = XrAction::new(
+            xr,
+            action_set,
+            XrActionType::BOOLEAN_INPUT,
+            "hand_grab_ready",
+            "",
+            &hand_paths,
+        )?;
         let grip_action = XrAction::new(
             xr,
             action_set,
@@ -607,6 +698,11 @@ impl CxOpenXrInputs {
             xr,
             instance,
             "/interaction_profiles/meta/touch_controller_plus",
+        )?;
+        let hand_interaction_profile = XrPath::new(
+            xr,
+            instance,
+            "/interaction_profiles/ext/hand_interaction_ext",
         )?;
 
         let bindings = [
@@ -798,6 +894,33 @@ impl CxOpenXrInputs {
             )?,
         ];
 
+        let hand_bindings = [
+            XrActionSuggestedBinding::new(
+                xr,
+                instance,
+                hand_grab_action,
+                "/user/hand/left/input/grasp_ext/value",
+            )?,
+            XrActionSuggestedBinding::new(
+                xr,
+                instance,
+                hand_grab_action,
+                "/user/hand/right/input/grasp_ext/value",
+            )?,
+            XrActionSuggestedBinding::new(
+                xr,
+                instance,
+                hand_grab_ready_action,
+                "/user/hand/left/input/grasp_ext/ready_ext",
+            )?,
+            XrActionSuggestedBinding::new(
+                xr,
+                instance,
+                hand_grab_ready_action,
+                "/user/hand/right/input/grasp_ext/ready_ext",
+            )?,
+        ];
+
         let suggested_bindings = XrInteractionProfileSuggestedBinding {
             interaction_profile,
             count_suggested_bindings: bindings.len() as _,
@@ -807,6 +930,16 @@ impl CxOpenXrInputs {
 
         unsafe { (xr.xrSuggestInteractionProfileBindings)(instance, &suggested_bindings) }
             .to_result("xrSuggestInteractionProfileBindings")?;
+
+        let hand_suggested_bindings = XrInteractionProfileSuggestedBinding {
+            interaction_profile: hand_interaction_profile,
+            count_suggested_bindings: hand_bindings.len() as _,
+            suggested_bindings: hand_bindings.as_ptr(),
+            ..Default::default()
+        };
+
+        unsafe { (xr.xrSuggestInteractionProfileBindings)(instance, &hand_suggested_bindings) }
+            .to_result("xrSuggestInteractionProfileBindings hand_interaction_ext")?;
 
         let attach_info = XrSessionActionSetsAttachInfo {
             count_action_sets: 1,
@@ -826,6 +959,8 @@ impl CxOpenXrInputs {
         let actions = CxOpenXrInputActions {
             trigger_action,
             grip_action,
+            hand_grab_action,
+            hand_grab_ready_action,
             thumbstick_action,
             click_a_action,
             click_b_action,
@@ -848,12 +983,18 @@ impl CxOpenXrInputs {
             action_set,
             actions,
             left_hand: CxOpenXrHand {
+                path: left_hand_path,
                 tracker: left_hand_track,
                 joint_locations: Default::default(),
+                grab_active: false,
+                last_hand: XrHand::default(),
             },
             right_hand: CxOpenXrHand {
+                path: right_hand_path,
                 tracker: right_hand_track,
                 joint_locations: Default::default(),
+                grab_active: false,
+                last_hand: XrHand::default(),
             },
             left_controller: CxOpenXrController {
                 path: left_hand_path,
@@ -927,5 +1068,24 @@ impl CxOpenXrInputs {
         self.left_hand.destroy(xr);
         self.right_hand.destroy(xr);
         unsafe { (xr.xrDestroyActionSet)(self.action_set) }.log_error("xrDestroyActionSet");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xr_hand_grab_hysteresis_requires_stronger_activation_than_release() {
+        assert!(!xr_hand_grab_active(false, true, 0.60));
+        assert!(xr_hand_grab_active(false, true, 0.80));
+        assert!(xr_hand_grab_active(true, true, 0.50));
+        assert!(!xr_hand_grab_active(true, true, 0.30));
+    }
+
+    #[test]
+    fn xr_hand_grab_hysteresis_clears_when_grab_ready_drops() {
+        assert!(!xr_hand_grab_active(true, false, 1.0));
+        assert!(!xr_hand_grab_active(true, true, f32::NAN));
     }
 }
