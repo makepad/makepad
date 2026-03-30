@@ -16,6 +16,31 @@ pub fn should_run_stdin_loop_from_env() -> bool {
         })
 }
 
+#[cfg(headless)]
+pub(crate) fn should_disable_headless_draw_from_args() -> bool {
+    std::env::args().any(|v| v == "--no-draw")
+}
+
+#[cfg(headless)]
+pub(crate) fn headless_draw_cycles_from_args() -> Option<usize> {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix("--draws=") {
+            if let Ok(draws) = value.parse::<usize>() {
+                return Some(draws.max(1));
+            }
+        }
+        if arg == "--draws" {
+            if let Some(value) = args.next() {
+                if let Ok(draws) = value.parse::<usize>() {
+                    return Some(draws.max(1));
+                }
+            }
+        }
+    }
+    None
+}
+
 fn normalize_studio_http_from_studio_var(studio: &str) -> String {
     let studio = studio.trim().trim_end_matches('/');
     if studio.is_empty() {

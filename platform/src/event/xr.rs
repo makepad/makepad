@@ -101,6 +101,14 @@ pub struct XrHand {
 }
 
 impl XrHand {
+    pub const GRAB_ACTIVE: u8 = 1 << 5;
+    pub const GRAB_ACTIVE_THRESHOLD: f32 = 0.55;
+    const MIN_PALM_SPAN_METERS: f32 = 0.01;
+    const MAX_PALM_SPAN_METERS: f32 = 0.22;
+    const MAX_JOINT_DISTANCE_FROM_PALM_METERS: f32 = 0.28;
+    const MAX_FINGER_SEGMENT_LENGTH_METERS: f32 = 0.12;
+    const MAX_TIP_LENGTH_METERS: f32 = 0.10;
+
     pub fn in_view(&self) -> bool {
         self.flags & Self::IN_VIEW != 0
     }
@@ -159,6 +167,154 @@ impl XrHand {
     }
     pub fn pinch_strength_pinky(&self) -> f32 {
         self.pinch[Self::PINCH_STRENGTH_LITTLE] as f32 / u8::MAX as f32
+    }
+
+    pub fn grabbing(&self) -> bool {
+        self.tips_active & Self::GRAB_ACTIVE != 0
+    }
+
+    fn finite_joint_pose(&self, joint: usize) -> Option<Pose> {
+        let pose = self.joints[joint];
+        pose.is_finite().then_some(pose)
+    }
+
+    pub fn tracking_pose(&self) -> Option<Pose> {
+        if !self.in_view() {
+            return None;
+        }
+        let center = self.finite_joint_pose(Self::CENTER)?;
+        let wrist = self.finite_joint_pose(Self::WRIST)?.position;
+        let palm_span = (center.position - wrist).length();
+        if !palm_span.is_finite()
+            || !(Self::MIN_PALM_SPAN_METERS..=Self::MAX_PALM_SPAN_METERS).contains(&palm_span)
+        {
+            return None;
+        }
+        Some(Pose::new(
+            center.orientation,
+            center.position * 0.78 + wrist * 0.22,
+        ))
+    }
+
+    pub fn joint_pose_checked(&self, joint: usize) -> Option<Pose> {
+        let pose = self.finite_joint_pose(joint)?;
+        if joint == Self::CENTER || joint == Self::WRIST {
+            self.tracking_pose()?;
+            return Some(pose);
+        }
+        let palm_center = self.tracking_pose()?.position;
+        let distance = (pose.position - palm_center).length();
+        (distance.is_finite() && distance <= Self::MAX_JOINT_DISTANCE_FROM_PALM_METERS)
+            .then_some(pose)
+    }
+
+    fn joint_position_near_palm(&self, joint: usize, palm_center: Vec3f) -> Option<Vec3f> {
+        let position = self.finite_joint_pose(joint)?.position;
+        let distance = (position - palm_center).length();
+        (distance.is_finite() && distance <= Self::MAX_JOINT_DISTANCE_FROM_PALM_METERS)
+            .then_some(position)
+    }
+
+    fn tip_length_checked(&self, tip: usize) -> Option<f32> {
+        let length = self.tips[tip];
+        (length.is_finite() && (0.0..=Self::MAX_TIP_LENGTH_METERS).contains(&length))
+            .then_some(length)
+    }
+
+    pub fn tip_pos_checked(&self, tip: usize) -> Option<Vec3f> {
+        let palm_center = self.tracking_pose()?.position;
+        let knuckle = Self::END_KNUCKLES.get(tip).copied()?;
+        let knuckle_pose = self.finite_joint_pose(knuckle)?;
+        let tip_length = self.tip_length_checked(tip)?;
+        let tip_position = knuckle_pose
+            .to_mat4()
+            .transform_vec4(vec4(0.0, 0.0, -tip_length, 1.0))
+            .to_vec3f();
+        let distance = (tip_position - palm_center).length();
+        (tip_position.is_finite()
+            && distance.is_finite()
+            && distance <= Self::MAX_JOINT_DISTANCE_FROM_PALM_METERS)
+            .then_some(tip_position)
+    }
+
+    pub fn joint_chain_positions(&self, chain: &[usize]) -> Option<SmallVec<[Vec3f; 4]>> {
+        if chain.is_empty() {
+            return None;
+        }
+        let palm_center = self.tracking_pose()?.position;
+        let mut points = SmallVec::<[Vec3f; 4]>::new();
+        for &joint in chain {
+            points.push(self.joint_position_near_palm(joint, palm_center)?);
+        }
+        for pair in points.windows(2) {
+            let segment = pair[1] - pair[0];
+            let length = segment.length();
+            if !length.is_finite()
+                || length <= 0.0001
+                || length > Self::MAX_FINGER_SEGMENT_LENGTH_METERS
+            {
+                return None;
+            }
+        }
+        Some(points)
+    }
+
+    pub fn finger_chain_positions(&self, tip: usize) -> Option<SmallVec<[Vec3f; 5]>> {
+        let mut points = SmallVec::<[Vec3f; 5]>::new();
+        points.extend(self.joint_chain_positions(Self::finger_chain(tip))?);
+        let tip_position = self.tip_pos_checked(tip)?;
+        let tail_length = (tip_position - *points.last()?).length();
+        if !tail_length.is_finite()
+            || tail_length <= 0.0001
+            || tail_length > Self::MAX_FINGER_SEGMENT_LENGTH_METERS
+        {
+            return None;
+        }
+        points.push(tip_position);
+        Some(points)
+    }
+
+    fn index_grab_release_metrics(&self) -> Option<(f32, f32, f32)> {
+        let points = self.finger_chain_positions(Self::INDEX_TIP)?;
+        let [base, knuckle1, knuckle2, knuckle3, tip] = [
+            points[0], points[1], points[2], points[3], points[4],
+        ];
+        let seg0 = Self::normalized_segment_direction(base, knuckle1)?;
+        let seg1 = Self::normalized_segment_direction(knuckle1, knuckle2)?;
+        let seg2 = Self::normalized_segment_direction(knuckle2, knuckle3)?;
+        let seg3 = Self::normalized_segment_direction(knuckle3, tip)?;
+
+        let chain_length = (knuckle1 - base).length()
+            + (knuckle2 - knuckle1).length()
+            + (knuckle3 - knuckle2).length()
+            + (tip - knuckle3).length();
+        if chain_length <= 0.0001 {
+            return None;
+        }
+
+        let direct_length = (tip - base).length();
+        let segment_dots = [seg0.dot(seg1), seg1.dot(seg2), seg2.dot(seg3)];
+        let max_bend_angle_degrees = segment_dots
+            .into_iter()
+            .map(|dot| dot.clamp(-1.0, 1.0).acos().to_degrees())
+            .fold(0.0, f32::max);
+        let straightness = segment_dots.into_iter().fold(1.0, f32::min);
+        let extension_ratio = direct_length / chain_length;
+        Some((max_bend_angle_degrees, straightness, extension_ratio))
+    }
+
+    pub fn grab_intent(&self) -> bool {
+        if !self.grabbing() {
+            return false;
+        }
+        let Some((max_bend_angle_degrees, straightness, extension_ratio)) =
+            self.index_grab_release_metrics()
+        else {
+            return true;
+        };
+        !(max_bend_angle_degrees <= 36.0
+            && straightness >= 0.78
+            && extension_ratio >= 0.90)
     }
 
     pub const IN_VIEW: u8 = 1 << 0;
@@ -317,21 +473,15 @@ impl XrHand {
         if !self.tip_active(tip) {
             return None;
         }
-        let chain = Self::finger_chain(tip);
-        if chain.len() < 2 {
+        let points = self.finger_chain_positions(tip)?;
+        if points.len() < 3 {
             return None;
         }
 
         let mut directions = SmallVec::<[Vec3f; 4]>::new();
-        for pair in chain.windows(2) {
-            let a = self.joints[pair[0]].position;
-            let b = self.joints[pair[1]].position;
-            directions.push(Self::normalized_segment_direction(a, b)?);
+        for pair in points.windows(2) {
+            directions.push(Self::normalized_segment_direction(pair[0], pair[1])?);
         }
-        directions.push(Self::normalized_segment_direction(
-            self.joints[*chain.last()?].position,
-            self.tip_pos_for_index(tip),
-        )?);
 
         directions.windows(2).fold(None, |max_angle, pair| {
             let dot = pair[0].dot(pair[1]).clamp(-1.0, 1.0);
@@ -346,6 +496,79 @@ impl XrHand {
             && self
                 .finger_max_bend_angle_degrees(tip)
                 .is_some_and(|angle| angle <= max_bend_angle_degrees)
+    }
+}
+
+#[cfg(test)]
+mod local_event_tests {
+    use super::*;
+
+    fn point_pose(base: Vec3f, z: f32) -> Pose {
+        Pose::new(Quat::default(), base + vec3f(0.0, 0.0, z))
+    }
+
+    fn make_pointing_hand() -> XrHand {
+        let base = vec3f(0.20, 1.22, -0.22);
+        let mut hand = XrHand::default();
+        hand.flags = XrHand::IN_VIEW | XrHand::AIM_VALID;
+        hand.tips_active = XrHand::GRAB_ACTIVE | (1 << XrHand::INDEX_TIP);
+        hand.tips[XrHand::INDEX_TIP] = 0.038;
+        hand.joints[XrHand::CENTER] = Pose::new(Quat::default(), base + vec3f(0.0, -0.03, 0.03));
+        hand.joints[XrHand::WRIST] = Pose::new(Quat::default(), base + vec3f(0.0, -0.05, 0.08));
+        hand.joints[XrHand::INDEX_BASE] = point_pose(base, 0.0);
+        hand.joints[XrHand::INDEX_KNUCKLE1] = point_pose(base, -0.041);
+        hand.joints[XrHand::INDEX_KNUCKLE2] = point_pose(base + vec3f(0.001, 0.002, 0.0), -0.082);
+        hand.joints[XrHand::INDEX_KNUCKLE3] = point_pose(base + vec3f(0.002, 0.004, 0.0), -0.122);
+        hand
+    }
+
+    fn make_curled_grab_hand() -> XrHand {
+        let base = vec3f(0.20, 1.22, -0.22);
+        let mut hand = XrHand::default();
+        hand.flags = XrHand::IN_VIEW | XrHand::AIM_VALID;
+        hand.tips_active = XrHand::GRAB_ACTIVE | (1 << XrHand::INDEX_TIP);
+        hand.tips[XrHand::INDEX_TIP] = 0.030;
+        hand.joints[XrHand::CENTER] = Pose::new(Quat::default(), base + vec3f(0.0, -0.03, 0.03));
+        hand.joints[XrHand::WRIST] = Pose::new(Quat::default(), base + vec3f(0.0, -0.05, 0.08));
+        hand.joints[XrHand::INDEX_BASE] = point_pose(base, 0.0);
+        hand.joints[XrHand::INDEX_KNUCKLE1] = point_pose(base, -0.030);
+        hand.joints[XrHand::INDEX_KNUCKLE2] =
+            Pose::new(Quat::default(), base + vec3f(0.018, -0.012, -0.040));
+        hand.joints[XrHand::INDEX_KNUCKLE3] =
+            Pose::new(Quat::default(), base + vec3f(0.034, -0.030, -0.032));
+        hand
+    }
+
+    fn make_sparse_tracking_hand() -> XrHand {
+        let base = vec3f(0.20, 1.22, -0.22);
+        let mut hand = XrHand::default();
+        hand.flags = XrHand::IN_VIEW | XrHand::AIM_VALID;
+        hand.tips_active = XrHand::GRAB_ACTIVE;
+        hand.joints[XrHand::CENTER] = Pose::new(Quat::default(), base + vec3f(0.0, -0.03, 0.03));
+        hand.joints[XrHand::WRIST] = Pose::new(Quat::default(), base + vec3f(0.0, -0.05, 0.08));
+        hand.aim_pose = Pose::new(Quat::default(), base + vec3f(0.0, 0.0, -0.12));
+        hand
+    }
+
+    #[test]
+    fn grab_intent_releases_for_clearly_pointing_index_even_when_raw_grab_bit_is_set() {
+        let hand = make_pointing_hand();
+        assert!(hand.grabbing());
+        assert!(!hand.grab_intent());
+    }
+
+    #[test]
+    fn grab_intent_keeps_curled_hand_as_active_grab() {
+        let hand = make_curled_grab_hand();
+        assert!(hand.grabbing());
+        assert!(hand.grab_intent());
+    }
+
+    #[test]
+    fn finger_chain_positions_reject_sparse_default_joint_sample() {
+        let hand = make_sparse_tracking_hand();
+        assert!(hand.tracking_pose().is_some());
+        assert!(hand.finger_chain_positions(XrHand::INDEX_TIP).is_none());
     }
 }
 
@@ -548,8 +771,11 @@ impl XrLocalEvent {
             if !hand.tip_active(index) {
                 continue;
             }
+            let Some(tip_position) = hand.tip_pos_checked(index) else {
+                continue;
+            };
             let pos = inv
-                .transform_vec4(hand.tip_pos_for_index(index).to_vec4())
+                .transform_vec4(tip_position.to_vec4())
                 .to_vec3f();
             finger_tips.push(XrFingerTip {
                 index,

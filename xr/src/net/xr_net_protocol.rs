@@ -1,8 +1,8 @@
 use super::{
     XrNetActivityControl, XrNetAlignmentDescriptorFrame, XrNetAlignmentFrame, XrNetBodySpawn,
-    XrNetPeerId, XrNetSharedObjectControl, XrNetStateFrame, XR_NET_PROTOCOL_VERSION,
-    XR_NET_SYNC_FRAME_LZ4_TAG, XR_NET_SYNC_FRAME_RAW_TAG, XR_NET_SYNC_LZ4_ACCELERATION,
-    XR_NET_SYNC_MAX_FRAME_BYTES,
+    XrNetPeerId, XrNetSharedObjectControl, XrNetSharedObjectState, XrNetStateFrame,
+    XR_NET_PROTOCOL_VERSION, XR_NET_SYNC_FRAME_LZ4_TAG, XR_NET_SYNC_FRAME_RAW_TAG,
+    XR_NET_SYNC_LZ4_ACCELERATION, XR_NET_SYNC_MAX_FRAME_BYTES,
 };
 use makepad_lz4::{compress_bound, compress_fast_into, decompress_safe};
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
@@ -128,6 +128,11 @@ pub enum XrNetDataPacket {
         node_id: XrNetPeerId,
         spawn: XrNetBodySpawn,
     },
+    SharedObjectState {
+        version: u16,
+        node_id: XrNetPeerId,
+        state: XrNetSharedObjectState,
+    },
     SharedObjectControl {
         version: u16,
         node_id: XrNetPeerId,
@@ -180,6 +185,14 @@ impl XrNetDataPacket {
         }
     }
 
+    pub fn shared_object_state(node_id: XrNetPeerId, state: XrNetSharedObjectState) -> Self {
+        Self::SharedObjectState {
+            version: XR_NET_PROTOCOL_VERSION,
+            node_id,
+            state,
+        }
+    }
+
     pub fn shared_object_control(node_id: XrNetPeerId, control: XrNetSharedObjectControl) -> Self {
         Self::SharedObjectControl {
             version: XR_NET_PROTOCOL_VERSION,
@@ -210,6 +223,7 @@ impl XrNetDataPacket {
             | Self::AlignmentDescriptor { version, .. }
             | Self::ActivityControl { version, .. }
             | Self::BodySpawn { version, .. }
+            | Self::SharedObjectState { version, .. }
             | Self::SharedObjectControl { version, .. } => *version,
             Self::Leave(packet) => packet.version,
         }
@@ -222,6 +236,7 @@ impl XrNetDataPacket {
             | Self::AlignmentDescriptor { node_id, .. }
             | Self::ActivityControl { node_id, .. }
             | Self::BodySpawn { node_id, .. }
+            | Self::SharedObjectState { node_id, .. }
             | Self::SharedObjectControl { node_id, .. } => *node_id,
             Self::Leave(packet) => packet.node_id,
         }

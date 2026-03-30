@@ -94,10 +94,22 @@ impl DrawVars {
 
             output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
 
-            let gen_result = generate_headless_rust_shader_module(&mut output, vm, io_self);
-            let varying_total_slots = gen_result.varying_total_slots;
-            let code = CxDrawShaderCode::Combined {
-                code: gen_result.source.clone(),
+            let no_draw = vm.host.cx().os.no_draw;
+            let (varying_total_slots, code) = if no_draw {
+                (
+                    count_varying_slots(&output, vm),
+                    CxDrawShaderCode::Combined {
+                        code: format!("// makepad headless no-draw shader {:016x}", fnhash.0),
+                    },
+                )
+            } else {
+                let gen_result = generate_headless_rust_shader_module(&mut output, vm, io_self);
+                (
+                    gen_result.varying_total_slots,
+                    CxDrawShaderCode::Combined {
+                        code: gen_result.source,
+                    },
+                )
             };
 
             {
@@ -173,6 +185,21 @@ impl DrawVars {
 impl Cx {
     pub(crate) fn headless_compile_shaders(&mut self) {
         let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
+        if self.os.no_draw {
+            for shader_index in compile_set {
+                let cx_shader = &mut self.draw_shaders.shaders[shader_index];
+                if cx_shader.os_shader_id.is_some() {
+                    continue;
+                }
+                let os_shader_id = self.draw_shaders.os_shaders.len();
+                self.draw_shaders.os_shaders.push(CxOsDrawShader {
+                    load_error: Some("headless --no-draw: raster/JIT disabled".to_string()),
+                    ..Default::default()
+                });
+                cx_shader.os_shader_id = Some(os_shader_id);
+            }
+            return;
+        }
         for shader_index in compile_set {
             let cx_shader = &mut self.draw_shaders.shaders[shader_index];
             if cx_shader.os_shader_id.is_some() {
