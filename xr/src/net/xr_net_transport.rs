@@ -14,7 +14,7 @@ use std::{
 #[derive(Debug)]
 pub(super) enum XrNetUdpOutgoing {
     State(XrNetStateFrame),
-    SharedObjectState(XrNetSharedObjectState),
+    SharedObjectStates(Vec<XrNetSharedObjectState>),
     Break,
 }
 
@@ -126,6 +126,11 @@ impl SyncWorkerPeerState {
             }
             XrNetDataPacket::BodySpawn { spawn, .. } => {
                 let _ = incoming_sender.send(XrNetIncoming::BodySpawn { peer, spawn });
+            }
+            XrNetDataPacket::SharedObjectStates { states, .. } => {
+                for state in states {
+                    let _ = incoming_sender.send(XrNetIncoming::SharedObjectState { peer, state });
+                }
             }
             XrNetDataPacket::SharedObjectState { state, .. } => {
                 let _ = incoming_sender.send(XrNetIncoming::SharedObjectState { peer, state });
@@ -324,10 +329,12 @@ impl XrNetUdpWorker {
                         let _ = self.data_socket.send_to(&buf, peer.peer.addr);
                     }
                 }
-                Ok(XrNetUdpOutgoing::SharedObjectState(state)) => {
-                    let buf = XrNetDataPacket::shared_object_state(self.node_id, state).to_bytes();
-                    for peer in peers.values() {
-                        let _ = self.data_socket.send_to(&buf, peer.peer.addr);
+                Ok(XrNetUdpOutgoing::SharedObjectStates(states)) => {
+                    let packets = self.shared_object_state_packets(states);
+                    for buf in &packets {
+                        for peer in peers.values() {
+                            let _ = self.data_socket.send_to(buf, peer.peer.addr);
+                        }
                     }
                 }
                 Ok(XrNetUdpOutgoing::Break) => return true,
@@ -488,6 +495,32 @@ impl XrNetUdpWorker {
                                 .incoming_sender
                                 .send(XrNetIncoming::SharedObjectState { peer, state });
                         }
+                        XrNetDataPacket::SharedObjectStates {
+                            node_id: remote_id,
+                            states,
+                            ..
+                        } => {
+                            let sync_addr = peers
+                                .get(&remote_id)
+                                .map(|peer_state| peer_state.sync_addr)
+                                .unwrap_or_else(|| {
+                                    SocketAddr::new(source_addr.ip(), XR_NET_DEFAULT_SYNC_PORT)
+                                });
+                            let (peer, _) =
+                                self.touch_peer(peers, remote_id, source_addr, sync_addr);
+                            let Some(peer_state) = peers.get_mut(&remote_id) else {
+                                continue;
+                            };
+                            for state in states {
+                                if !accept_seq(peer_state.last_shared_object_state_seq, state.seq) {
+                                    continue;
+                                }
+                                peer_state.last_shared_object_state_seq = Some(state.seq);
+                                let _ = self
+                                    .incoming_sender
+                                    .send(XrNetIncoming::SharedObjectState { peer, state });
+                            }
+                        }
                         XrNetDataPacket::Leave(packet) => {
                             self.remove_peer(peers, packet.node_id, XrNetLeaveReason::Explicit);
                         }
@@ -540,6 +573,45 @@ impl XrNetUdpWorker {
                 peer.addr,
             );
         }
+    }
+
+    fn shared_object_state_packets(
+        &self,
+        states: Vec<XrNetSharedObjectState>,
+    ) -> Vec<Vec<u8>> {
+        let mut packets = Vec::new();
+        let mut batch = Vec::new();
+
+        for state in states {
+            batch.push(state);
+            let batch_bytes =
+                XrNetDataPacket::shared_object_states(self.node_id, batch.clone()).to_bytes();
+            if batch_bytes.len() <= XR_NET_UDP_SHARED_OBJECT_STATE_BATCH_MAX_BYTES {
+                continue;
+            }
+
+            let state = batch.pop().unwrap();
+            if !batch.is_empty() {
+                packets.push(XrNetDataPacket::shared_object_states(
+                    self.node_id,
+                    std::mem::take(&mut batch),
+                )
+                .to_bytes());
+            }
+
+            let single = XrNetDataPacket::shared_object_state(self.node_id, state).to_bytes();
+            if single.len() > XR_NET_UDP_SHARED_OBJECT_STATE_BATCH_MAX_BYTES {
+                packets.push(single);
+            } else {
+                batch.push(state);
+            }
+        }
+
+        if !batch.is_empty() {
+            packets.push(XrNetDataPacket::shared_object_states(self.node_id, batch).to_bytes());
+        }
+
+        packets
     }
 
     fn remove_peer(

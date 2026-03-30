@@ -159,6 +159,23 @@ impl Shooter {
         })
     }
 
+    fn hand_index_forward_direction(hand: &XrHand) -> Option<Vec3f> {
+        let points = hand.finger_chain_positions(XrHand::INDEX_TIP)?;
+        let [base, knuckle1, knuckle2, knuckle3, tip] =
+            [points[0], points[1], points[2], points[3], points[4]];
+
+        let seg0 = Self::normalized_segment_direction(base, knuckle1)?;
+        let seg1 = Self::normalized_segment_direction(knuckle1, knuckle2)?;
+        let seg2 = Self::normalized_segment_direction(knuckle2, knuckle3)?;
+        let seg3 = Self::normalized_segment_direction(knuckle3, tip)?;
+
+        let blended = seg0 * 0.10 + seg1 * 0.20 + seg2 * 0.30 + seg3 * 0.40;
+        if blended.length() > 0.0001 {
+            return Some(blended.normalize());
+        }
+        Self::normalized_segment_direction(base, tip)
+    }
+
     fn hand_emit_gesture_active(hand: &XrHand) -> bool {
         // Shooter owns its own firing gesture semantics. Do not couple emission to the
         // generic OpenXR hand-grab bit, which represents a broader whole-hand intent and
@@ -179,19 +196,7 @@ impl Shooter {
             return None;
         }
         let tip_position = hand.tip_pos_checked(XrHand::INDEX_TIP)?;
-        let direction = if hand.aim_valid() && hand.aim_pose.is_finite() {
-            hand.aim_pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0))
-        } else {
-            tip_position - hand.joint_pose_checked(XrHand::INDEX_KNUCKLE3)?.position
-        };
-        let direction = if direction.length() > 0.0001 {
-            direction.normalize()
-        } else {
-            hand.joint_pose_checked(XrHand::INDEX_KNUCKLE3)?
-                .orientation
-                .rotate_vec3(&vec3f(0.0, 0.0, -1.0))
-                .normalize()
-        };
+        let direction = Self::hand_index_forward_direction(hand)?;
         Some((tip_position, direction))
     }
 
@@ -356,6 +361,12 @@ mod tests {
         hand
     }
 
+    fn make_pointing_hand_with_sideways_aim_pose() -> XrHand {
+        let mut hand = make_pointing_hand();
+        hand.aim_pose.orientation = Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), 0.75);
+        hand
+    }
+
     #[test]
     fn point_gesture_is_considered_an_emit_gesture() {
         let hand = make_pointing_hand();
@@ -380,6 +391,15 @@ mod tests {
         assert!(metrics.max_bend_angle_degrees <= SHOOTER_INDEX_BEND_MAX_DEGREES);
         assert!(Shooter::hand_emit_gesture_active(&hand));
         assert!(Shooter::projectile_emitter_pose(&hand).is_some());
+    }
+
+    #[test]
+    fn projectile_direction_follows_finger_chain_not_openxr_aim_ray() {
+        let hand = make_pointing_hand_with_sideways_aim_pose();
+        let (_, direction) = Shooter::projectile_emitter_pose(&hand)
+            .expect("pointing hand should emit even if aim pose diverges");
+        assert!(direction.z < -0.9, "{direction:?}");
+        assert!(direction.x.abs() < 0.2, "{direction:?}");
     }
 
     #[test]

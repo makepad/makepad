@@ -128,6 +128,11 @@ pub enum XrNetDataPacket {
         node_id: XrNetPeerId,
         spawn: XrNetBodySpawn,
     },
+    SharedObjectStates {
+        version: u16,
+        node_id: XrNetPeerId,
+        states: Vec<XrNetSharedObjectState>,
+    },
     SharedObjectState {
         version: u16,
         node_id: XrNetPeerId,
@@ -193,6 +198,17 @@ impl XrNetDataPacket {
         }
     }
 
+    pub fn shared_object_states(
+        node_id: XrNetPeerId,
+        states: Vec<XrNetSharedObjectState>,
+    ) -> Self {
+        Self::SharedObjectStates {
+            version: XR_NET_PROTOCOL_VERSION,
+            node_id,
+            states,
+        }
+    }
+
     pub fn shared_object_control(node_id: XrNetPeerId, control: XrNetSharedObjectControl) -> Self {
         Self::SharedObjectControl {
             version: XR_NET_PROTOCOL_VERSION,
@@ -223,6 +239,7 @@ impl XrNetDataPacket {
             | Self::AlignmentDescriptor { version, .. }
             | Self::ActivityControl { version, .. }
             | Self::BodySpawn { version, .. }
+            | Self::SharedObjectStates { version, .. }
             | Self::SharedObjectState { version, .. }
             | Self::SharedObjectControl { version, .. } => *version,
             Self::Leave(packet) => packet.version,
@@ -236,6 +253,7 @@ impl XrNetDataPacket {
             | Self::AlignmentDescriptor { node_id, .. }
             | Self::ActivityControl { node_id, .. }
             | Self::BodySpawn { node_id, .. }
+            | Self::SharedObjectStates { node_id, .. }
             | Self::SharedObjectState { node_id, .. }
             | Self::SharedObjectControl { node_id, .. } => *node_id,
             Self::Leave(packet) => packet.node_id,
