@@ -1,6 +1,6 @@
-use crate::makepad_draw::*;
+use makepad_widgets::makepad_draw::*;
 
-pub use crate::makepad_draw::SceneState3D;
+pub use makepad_widgets::makepad_draw::SceneState3D;
 
 pub fn scene_state_from_cx(cx: &mut Cx3d) -> Option<SceneState3D> {
     cx.scene_state_3d()

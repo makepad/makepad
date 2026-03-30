@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_mut, unused_variables)]
 
-use makepad_xr::*;
+use makepad_widgets::*;
+use makepad_xr::{algorithms::depth_align::*, net::*};
 use std::{
     env,
     f32::consts::{PI, TAU},
@@ -228,7 +229,7 @@ fn analysis_thread_count(work_items: usize) -> usize {
 }
 
 fn latest_dump_paths(count: usize) -> Vec<PathBuf> {
-    let dump_dir = PathBuf::from("xr/util/dumps");
+    let dump_dir = PathBuf::from("xr/dump/dumps");
     let mut entries = fs::read_dir(dump_dir)
         .ok()
         .into_iter()
@@ -283,7 +284,7 @@ fn parse_args() -> Result<(AnalyzeOptions, Vec<PathBuf>), String> {
         paths = latest_dump_paths(options.latest_count);
     }
     if paths.is_empty() {
-        return Err("no dump files found in xr/util/dumps".to_string());
+        return Err("no dump files found in xr/dump/dumps".to_string());
     }
     Ok((options, paths))
 }
@@ -432,7 +433,7 @@ fn print_descriptor_stats(label: &str, descriptor: &XrDepthAlignDescriptor) {
         descriptor.vertical_descriptor.is_some()
     );
     print_height_map_stats(label, descriptor.height_map.as_ref());
-    if let Some(markers) = xr_depth_align_test_markers(descriptor) {
+    if let Some(markers) = descriptor.test_markers() {
         println!(
             "{label}: markers ({:.2}, {:.2}, {:.2}) and ({:.2}, {:.2}, {:.2})",
             markers[0].x, markers[0].y, markers[0].z, markers[1].x, markers[1].y, markers[1].z
@@ -3221,8 +3222,7 @@ fn score_focused_pose_evidence(
         seed_prior: seed_prior_factor(pose, seed_pose),
     };
     if with_runtime {
-        let rescored = xr_depth_align_rescore_remote_to_local(
-            local,
+        let rescored = local.rescore_remote_to_local(
             remote,
             XrDepthAlignSolution {
                 yaw_radians,
@@ -6458,7 +6458,7 @@ fn analyze_path(options: AnalyzeOptions, path: &Path) -> Result<(), String> {
 
     if let Some(manual_pose) = manual_pose {
         let manual_seed = manual_pose_solution(local, remote, manual_pose);
-        let manual_scored = xr_depth_align_rescore_remote_to_local(local, remote, manual_seed);
+        let manual_scored = local.rescore_remote_to_local(remote, manual_seed);
         println!(
             "manual_scored: yaw {:.3} rad ({:.1} deg) | translation ({:.3}, {:.3}, {:.3}) | conf {:.3} | sym {:.3} | residual {:.3} m | matched {} | accepted {}",
             manual_scored.yaw_radians,
@@ -6470,7 +6470,7 @@ fn analyze_path(options: AnalyzeOptions, path: &Path) -> Result<(), String> {
             manual_scored.symmetry_confidence,
             manual_scored.residual_meters,
             manual_scored.matched_samples,
-            xr_depth_align_solution_is_accepted(&diagnostic, manual_scored)
+            manual_scored.is_accepted(&diagnostic)
         );
     }
     let run_legacy_search_paths = false;

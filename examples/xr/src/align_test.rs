@@ -1,11 +1,10 @@
-use makepad_xr::{
+use makepad_widgets::{
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
     widget_async::{ScriptAsyncId, ScriptAsyncResult},
-    xr_node::xr_widget_world_transform,
-    *,
 };
+use makepad_xr::{net::*, scene::*};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -121,8 +120,10 @@ impl AlignTest {
         self.remote_markers_local = remote_descriptor
             .transformed(&ground_truth_remote_to_local)
             .test_markers();
-        self.last_solution =
-            XrNetAlignmentDescriptorFrame::solve_remote_to_local(&local_descriptor, &remote_descriptor);
+        self.last_solution = XrNetAlignmentDescriptorFrame::solve_remote_to_local(
+            &local_descriptor,
+            &remote_descriptor,
+        );
 
         let Some(solution) = self.last_solution else {
             if self.local_markers.is_none() {
