@@ -202,8 +202,8 @@ pub fn compress_fast_into(
                 && src - candidate <= MAX_DISTANCE
                 && load_u32(input, candidate) == load_u32(input, src)
             {
-                let match_len =
-                    MINMATCH + count_match(input, src + MINMATCH, candidate + MINMATCH, match_limit);
+                let match_len = MINMATCH
+                    + count_match(input, src + MINMATCH, candidate + MINMATCH, match_limit);
                 dst = emit_sequence(input, anchor, src, candidate, match_len, output, dst)?;
                 src += match_len;
                 anchor = src;
@@ -285,7 +285,11 @@ pub fn decompress_safe(input: &[u8], output: &mut [u8]) -> Result<usize, Decompr
                         copy_u64(output_ptr.add(dst), output_ptr.add(match_src));
                         copy_u64(output_ptr.add(dst + 8), output_ptr.add(match_src + 8));
                     }
-                    ptr::copy_nonoverlapping(output_ptr.add(match_src + 16), output_ptr.add(dst + 16), 2);
+                    ptr::copy_nonoverlapping(
+                        output_ptr.add(match_src + 16),
+                        output_ptr.add(dst + 16),
+                        2,
+                    );
                 }
                 dst += match_token + MINMATCH;
                 continue;
@@ -364,7 +368,11 @@ fn emit_sequence(
     dst = write_length_bytes(literal_len, RUN_MASK, output, dst)?;
 
     unsafe {
-        copy_bytes(output.as_mut_ptr().add(dst), input.as_ptr().add(anchor), literal_len);
+        copy_bytes(
+            output.as_mut_ptr().add(dst),
+            input.as_ptr().add(anchor),
+            literal_len,
+        );
     }
     dst += literal_len;
 
@@ -399,7 +407,11 @@ fn emit_last_literals(
     output[token_pos] = (lit_nibble << 4) as u8;
     dst = write_length_bytes(literal_len, RUN_MASK, output, dst)?;
     unsafe {
-        copy_bytes(output.as_mut_ptr().add(dst), input.as_ptr().add(anchor), literal_len);
+        copy_bytes(
+            output.as_mut_ptr().add(dst),
+            input.as_ptr().add(anchor),
+            literal_len,
+        );
     }
     dst += literal_len;
     Ok(dst)
@@ -448,7 +460,9 @@ fn read_length(nibble: usize, input: &[u8], src: &mut usize) -> Result<usize, De
     loop {
         let byte = *input.get(*src).ok_or(DecompressError::MalformedInput)? as usize;
         *src += 1;
-        len = len.checked_add(byte).ok_or(DecompressError::MalformedInput)?;
+        len = len
+            .checked_add(byte)
+            .ok_or(DecompressError::MalformedInput)?;
         if byte != 255 {
             return Ok(len);
         }
@@ -469,7 +483,11 @@ fn count_match(input: &[u8], a: usize, b: usize, limit: usize) -> usize {
         let remaining = (limit - a).min(limit - b);
         if remaining >= 16 {
             unsafe {
-                return count_match_aarch64(input.as_ptr().add(a), input.as_ptr().add(b), remaining);
+                return count_match_aarch64(
+                    input.as_ptr().add(a),
+                    input.as_ptr().add(b),
+                    remaining,
+                );
             }
         }
     }
@@ -498,7 +516,11 @@ fn count_match_scalar(input: &[u8], mut a: usize, mut b: usize, limit: usize) ->
 
 #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
 #[target_feature(enable = "neon")]
-unsafe fn count_match_aarch64(mut a_ptr: *const u8, mut b_ptr: *const u8, mut remaining: usize) -> usize {
+unsafe fn count_match_aarch64(
+    mut a_ptr: *const u8,
+    mut b_ptr: *const u8,
+    mut remaining: usize,
+) -> usize {
     let mut matched = 0usize;
 
     while remaining >= 16 {
@@ -513,7 +535,8 @@ unsafe fn count_match_aarch64(mut a_ptr: *const u8, mut b_ptr: *const u8, mut re
     }
 
     while remaining >= 8 {
-        let diff = ptr::read_unaligned(a_ptr as *const u64) ^ ptr::read_unaligned(b_ptr as *const u64);
+        let diff =
+            ptr::read_unaligned(a_ptr as *const u64) ^ ptr::read_unaligned(b_ptr as *const u64);
         if diff != 0 {
             return matched + (diff.trailing_zeros() as usize / 8);
         }
@@ -727,9 +750,12 @@ mod tests {
 
     #[test]
     fn decompresses_offset_three_overlap_block() {
-        let input = [0x37, b'a', b'b', b'c', 0x03, 0x00, 0x50, b'c', b'a', b'b', b'c', b'a'];
+        let input = [
+            0x37, b'a', b'b', b'c', 0x03, 0x00, 0x50, b'c', b'a', b'b', b'c', b'a',
+        ];
         let mut out = [0u8; 19];
-        let decoded = decompress_safe(&input, &mut out).expect("offset-three overlap should decode");
+        let decoded =
+            decompress_safe(&input, &mut out).expect("offset-three overlap should decode");
         assert_eq!(decoded, 19);
         assert_eq!(&out, b"abcabcabcabcabcabca");
     }
@@ -741,7 +767,8 @@ mod tests {
             b'g', b'h', b'i',
         ];
         let mut out = [0u8; 17];
-        let decoded = decompress_safe(&input, &mut out).expect("short large-offset match should decode");
+        let decoded =
+            decompress_safe(&input, &mut out).expect("short large-offset match should decode");
         assert_eq!(decoded, 17);
         assert_eq!(&out, b"abcdefghabcdefghi");
     }
@@ -779,8 +806,8 @@ mod tests {
         for case in cases {
             let compressed = compress_default(&case).expect("compression should succeed");
             let mut roundtrip = vec![0u8; case.len()];
-            let decoded =
-                decompress_safe(&compressed, &mut roundtrip).expect("compressed block should decode");
+            let decoded = decompress_safe(&compressed, &mut roundtrip)
+                .expect("compressed block should decode");
             assert_eq!(decoded, case.len());
             assert_eq!(roundtrip, case);
         }

@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct XrBodySpawn {
     pub widget_uid: WidgetUid,
     pub pose: Pose,
