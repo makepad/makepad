@@ -1,8 +1,6 @@
 use makepad_lz4::{compress_bound, compress_fast_into, decompress_safe, implementation_name};
 use makepad_xr::*;
-use makepad_xr::makepad_micro_serde::SerBin;
 use std::{
-    hint::black_box,
     env, fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -22,14 +20,6 @@ struct BenchResult {
     compressed_bytes: usize,
     compression_mbps: f64,
     decompression_mbps: f64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct HeightCodecBenchResult {
-    input_bytes: usize,
-    wire_bytes: usize,
-    encode_mbps: f64,
-    decode_mbps: f64,
 }
 
 fn latest_dump_paths(count: usize) -> Vec<PathBuf> {
@@ -137,7 +127,9 @@ fn target_raw_bytes(options: BenchOptions) -> usize {
 }
 
 fn timing_iterations(input_bytes: usize, options: BenchOptions) -> usize {
-    target_raw_bytes(options).div_ceil(input_bytes.max(1)).max(1)
+    target_raw_bytes(options)
+        .div_ceil(input_bytes.max(1))
+        .max(1)
 }
 
 fn median(samples: &mut [f64]) -> f64 {
@@ -150,7 +142,11 @@ fn median(samples: &mut [f64]) -> f64 {
     }
 }
 
-fn bench_buffer(bytes: &[u8], acceleration: usize, options: BenchOptions) -> Result<BenchResult, String> {
+fn bench_buffer(
+    bytes: &[u8],
+    acceleration: usize,
+    options: BenchOptions,
+) -> Result<BenchResult, String> {
     let bound = compress_bound(bytes.len());
     if bound == 0 {
         return Err(format!("buffer too large for lz4: {} bytes", bytes.len()));
@@ -180,7 +176,8 @@ fn bench_buffer(bytes: &[u8], acceleration: usize, options: BenchOptions) -> Res
                 return Err("compressed length changed during timing".to_string());
             }
         }
-        compression_samples.push(raw_mebibytes / compress_started.elapsed().as_secs_f64().max(1.0e-9));
+        compression_samples
+            .push(raw_mebibytes / compress_started.elapsed().as_secs_f64().max(1.0e-9));
     }
 
     let mut decoded_buf = vec![0u8; bytes.len()];
@@ -205,100 +202,6 @@ fn bench_buffer(bytes: &[u8], acceleration: usize, options: BenchOptions) -> Res
     })
 }
 
-fn bench_sparse_u16(
-    height_map: &XrDepthAlignHeightMap,
-    options: BenchOptions,
-) -> Result<HeightCodecBenchResult, String> {
-    let input_bytes = height_map.heights_meters.len() * std::mem::size_of::<f32>();
-    let iterations = timing_iterations(input_bytes, options);
-
-    let mut compressed = height_map.compress_sparse_u16();
-    let roundtrip = compressed
-        .decompress()
-        .map_err(|err| format!("sparse_u16 decode failed: {err}"))?;
-    if roundtrip.heights_meters.len() != height_map.heights_meters.len() {
-        return Err("sparse_u16 roundtrip size mismatch".to_string());
-    }
-    let wire_bytes = compressed.serialize_bin().len();
-    let raw_mebibytes = (input_bytes * iterations) as f64 / (1024.0 * 1024.0);
-    let mut encode_samples = Vec::<f64>::with_capacity(options.samples);
-    let mut decode_samples = Vec::<f64>::with_capacity(options.samples);
-
-    for _ in 0..options.samples {
-        let encode_started = Instant::now();
-        for _ in 0..iterations {
-            compressed = height_map.compress_sparse_u16();
-            black_box(&compressed);
-        }
-        encode_samples.push(raw_mebibytes / encode_started.elapsed().as_secs_f64().max(1.0e-9));
-    }
-
-    for _ in 0..options.samples {
-        let decode_started = Instant::now();
-        for _ in 0..iterations {
-            let decoded = compressed
-                .decompress()
-                .map_err(|err| format!("sparse_u16 decode failed during timing: {err}"))?;
-            black_box(decoded);
-        }
-        decode_samples.push(raw_mebibytes / decode_started.elapsed().as_secs_f64().max(1.0e-9));
-    }
-
-    Ok(HeightCodecBenchResult {
-        input_bytes,
-        wire_bytes,
-        encode_mbps: median(&mut encode_samples),
-        decode_mbps: median(&mut decode_samples),
-    })
-}
-
-fn bench_sparse_lossless(
-    height_map: &XrDepthAlignHeightMap,
-    options: BenchOptions,
-) -> Result<HeightCodecBenchResult, String> {
-    let input_bytes = height_map.heights_meters.len() * std::mem::size_of::<f32>();
-    let iterations = timing_iterations(input_bytes, options);
-
-    let mut compressed = height_map.compress_sparse_lossless();
-    let roundtrip = compressed
-        .decompress()
-        .map_err(|err| format!("sparse_lossless decode failed: {err}"))?;
-    if roundtrip.heights_meters.len() != height_map.heights_meters.len() {
-        return Err("sparse_lossless roundtrip size mismatch".to_string());
-    }
-    let wire_bytes = compressed.serialize_bin().len();
-    let raw_mebibytes = (input_bytes * iterations) as f64 / (1024.0 * 1024.0);
-    let mut encode_samples = Vec::<f64>::with_capacity(options.samples);
-    let mut decode_samples = Vec::<f64>::with_capacity(options.samples);
-
-    for _ in 0..options.samples {
-        let encode_started = Instant::now();
-        for _ in 0..iterations {
-            compressed = height_map.compress_sparse_lossless();
-            black_box(&compressed);
-        }
-        encode_samples.push(raw_mebibytes / encode_started.elapsed().as_secs_f64().max(1.0e-9));
-    }
-
-    for _ in 0..options.samples {
-        let decode_started = Instant::now();
-        for _ in 0..iterations {
-            let decoded = compressed
-                .decompress()
-                .map_err(|err| format!("sparse_lossless decode failed during timing: {err}"))?;
-            black_box(decoded);
-        }
-        decode_samples.push(raw_mebibytes / decode_started.elapsed().as_secs_f64().max(1.0e-9));
-    }
-
-    Ok(HeightCodecBenchResult {
-        input_bytes,
-        wire_bytes,
-        encode_mbps: median(&mut encode_samples),
-        decode_mbps: median(&mut decode_samples),
-    })
-}
-
 fn print_result(label: &str, result: BenchResult) {
     let ratio = result.compressed_bytes as f64 / result.input_bytes.max(1) as f64;
     let saved = 100.0 * (1.0 - ratio);
@@ -313,20 +216,6 @@ fn print_result(label: &str, result: BenchResult) {
     );
 }
 
-fn print_height_codec_result(label: &str, result: HeightCodecBenchResult) {
-    let ratio = result.wire_bytes as f64 / result.input_bytes.max(1) as f64;
-    let saved = 100.0 * (1.0 - ratio);
-    println!(
-        "{label}: {} -> {} bytes | ratio {:.3}x | saved {:.1}% | encode {:.0} MiB/s | decode {:.0} MiB/s",
-        result.input_bytes,
-        result.wire_bytes,
-        ratio,
-        saved,
-        result.encode_mbps,
-        result.decode_mbps,
-    );
-}
-
 fn bench_dump(path: &Path, options: BenchOptions) -> Result<(), String> {
     let file_bytes =
         fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -336,7 +225,10 @@ fn bench_dump(path: &Path, options: BenchOptions) -> Result<(), String> {
         "lz4_acceleration: {} | timed_mib: {} | samples: {}",
         options.acceleration, options.timed_mib, options.samples
     );
-    print_result("file", bench_buffer(&file_bytes, options.acceleration, options)?);
+    print_result(
+        "file",
+        bench_buffer(&file_bytes, options.acceleration, options)?,
+    );
 
     let Some(pair) = XrNetAlignmentDescriptorDumpPair::from_file_bytes(&file_bytes) else {
         println!();
@@ -372,19 +264,6 @@ fn bench_dump(path: &Path, options: BenchOptions) -> Result<(), String> {
     print_result(
         "combined heights",
         bench_buffer(&combined_height_bytes, options.acceleration, options)?,
-    );
-    print_height_codec_result("local sparse_u16", bench_sparse_u16(local_height_map, options)?);
-    print_height_codec_result(
-        "remote sparse_u16",
-        bench_sparse_u16(remote_height_map, options)?,
-    );
-    print_height_codec_result(
-        "local sparse_lossless",
-        bench_sparse_lossless(local_height_map, options)?,
-    );
-    print_height_codec_result(
-        "remote sparse_lossless",
-        bench_sparse_lossless(remote_height_map, options)?,
     );
     println!();
     Ok(())
