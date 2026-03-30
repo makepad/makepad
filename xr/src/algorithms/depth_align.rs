@@ -1,4 +1,4 @@
-use crate::*;
+use crate::prelude::*;
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
 use std::collections::HashMap;
 
@@ -499,72 +499,6 @@ struct HeightMapSampleCache {
 
 fn duration_ms_u32(duration: std::time::Duration) -> u32 {
     duration.as_millis().min(u32::MAX as u128) as u32
-}
-
-pub fn xr_depth_align_solution_is_accepted(
-    diagnostic: &XrDepthAlignSolveDiagnostic,
-    solution: XrDepthAlignSolution,
-) -> bool {
-    solution.is_accepted(diagnostic)
-}
-
-pub fn xr_depth_align_loopback_preview_solution() -> XrDepthAlignSolution {
-    XrDepthAlignSolution {
-        yaw_radians: 0.58,
-        translation: vec3(-0.82, 0.0, 0.67),
-        confidence: 1.0,
-        symmetry_confidence: 1.0,
-        residual_meters: 0.0,
-        matched_samples: 0,
-    }
-}
-
-pub fn xr_depth_align_build_wall_normal_histogram(
-    samples: &[XrDepthAlignSample],
-    bin_count: usize,
-) -> Vec<f32> {
-    XrDepthAlignDescriptor::build_wall_normal_histogram(samples, bin_count)
-}
-
-pub fn xr_depth_align_transform_descriptor(
-    descriptor: &XrDepthAlignDescriptor,
-    transform: &Mat4f,
-) -> XrDepthAlignDescriptor {
-    descriptor.transformed(transform)
-}
-
-pub fn xr_depth_align_test_markers(descriptor: &XrDepthAlignDescriptor) -> Option<[Vec3f; 2]> {
-    descriptor.test_markers()
-}
-
-pub fn xr_depth_align_solve_remote_to_local(
-    local: &XrDepthAlignDescriptor,
-    remote: &XrDepthAlignDescriptor,
-) -> Option<XrDepthAlignSolution> {
-    local.solve_remote_to_local(remote)
-}
-
-pub fn xr_depth_align_analyze_remote_to_local(
-    local: &XrDepthAlignDescriptor,
-    remote: &XrDepthAlignDescriptor,
-) -> XrDepthAlignSolveDiagnostic {
-    local.analyze_remote_to_local(remote)
-}
-
-pub fn xr_depth_align_analyze_remote_to_local_seeded(
-    local: &XrDepthAlignDescriptor,
-    remote: &XrDepthAlignDescriptor,
-    previous_solution: Option<XrDepthAlignSolution>,
-) -> XrDepthAlignSolveDiagnostic {
-    local.analyze_remote_to_local_seeded(remote, previous_solution)
-}
-
-pub fn xr_depth_align_rescore_remote_to_local(
-    local: &XrDepthAlignDescriptor,
-    remote: &XrDepthAlignDescriptor,
-    solution: XrDepthAlignSolution,
-) -> XrDepthAlignSolution {
-    local.rescore_remote_to_local(remote, solution)
 }
 
 const XR_DEPTH_ALIGN_HEIGHT_REFINE_PHASES: [(f32, f32); 5] = [
@@ -3480,7 +3414,7 @@ fn seeded_alignment_lock_is_strong(
     local_map: Option<&XrDepthAlignHeightMap>,
     remote_map: Option<&XrDepthAlignHeightMap>,
 ) -> bool {
-    if !xr_depth_align_solution_is_accepted(diagnostic, candidate) {
+    if !candidate.is_accepted(diagnostic) {
         return false;
     }
     if candidate.confidence < XR_DEPTH_ALIGN_SEEDED_LOCK_MIN_CONFIDENCE
@@ -3916,7 +3850,7 @@ mod tests {
                 size_z,
             );
 
-            let diagnostic = xr_depth_align_analyze_remote_to_local(&local, &remote);
+            let diagnostic = local.analyze_remote_to_local(&remote);
             let Some(solution) = diagnostic.accepted_solution() else {
                 summary.failures.push(format!(
                     "case {case_index}: no accepted solution for yaw={expected_yaw:.3} translation=({:.3},{:.3}) diag={diagnostic:?}",
@@ -3938,8 +3872,7 @@ mod tests {
 
             summary.accepted_cases += 1;
 
-            let seeded =
-                xr_depth_align_analyze_remote_to_local_seeded(&local, &remote, Some(solution));
+            let seeded = local.analyze_remote_to_local_seeded(&remote, Some(solution));
             if seeded.yaw_candidate_count == 1 && seeded.pose_candidate_count == 1 {
                 summary.seeded_reuse_cases += 1;
             }
@@ -4001,7 +3934,7 @@ mod tests {
 
     fn reference_dump_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("util/dumps/align-pair-226a39e4b300-r0097-1774792873191.bin")
+            .join("dump/dumps/align-pair-226a39e4b300-r0097-1774792873191.bin")
     }
 
     fn reference_manual_pose_path(dump_path: &Path) -> PathBuf {
@@ -4038,9 +3971,10 @@ mod tests {
             expected_translation,
         )
         .to_mat4();
-        let remote = xr_depth_align_transform_descriptor(&local, &remote_to_local.invert());
+        let remote = local.transformed(&remote_to_local.invert());
 
-        let solution = xr_depth_align_analyze_remote_to_local(&local, &remote)
+        let solution = local
+            .analyze_remote_to_local(&remote)
             .accepted_solution()
             .expect("dense solver should recover the pose");
 
@@ -4066,14 +4000,15 @@ mod tests {
             expected_translation,
         )
         .to_mat4();
-        let mut remote = xr_depth_align_transform_descriptor(&local, &remote_to_local.invert());
+        let mut remote = local.transformed(&remote_to_local.invert());
         let poisoned_floor_bias = 0.33;
         remote.floor_y += poisoned_floor_bias;
         if let Some(height_map) = &mut remote.height_map {
             height_map.floor_y_meters += poisoned_floor_bias;
         }
 
-        let solution = xr_depth_align_analyze_remote_to_local(&local, &remote)
+        let solution = local
+            .analyze_remote_to_local(&remote)
             .accepted_solution()
             .expect("dense solver should recover vertical offset from overlap");
 
@@ -4133,17 +4068,13 @@ mod tests {
             vec3(-0.52, 0.0, 0.46),
         )
         .to_mat4();
-        let first_remote =
-            xr_depth_align_transform_descriptor(&local, &first_remote_to_local.invert());
-        let first_solution = xr_depth_align_analyze_remote_to_local(&local, &first_remote)
+        let first_remote = local.transformed(&first_remote_to_local.invert());
+        let first_solution = local
+            .analyze_remote_to_local(&first_remote)
             .accepted_solution()
             .expect("expected initial alignment");
 
-        let diagnostic = xr_depth_align_analyze_remote_to_local_seeded(
-            &local,
-            &first_remote,
-            Some(first_solution),
-        );
+        let diagnostic = local.analyze_remote_to_local_seeded(&first_remote, Some(first_solution));
         let solution = diagnostic
             .accepted_solution()
             .expect("expected seeded solve to reuse the stable lock");
@@ -4168,9 +4099,9 @@ mod tests {
             vec3(0.42, 0.0, -0.34),
         )
         .to_mat4();
-        let first_remote =
-            xr_depth_align_transform_descriptor(&local, &first_remote_to_local.invert());
-        let stale_seed = xr_depth_align_analyze_remote_to_local(&local, &first_remote)
+        let first_remote = local.transformed(&first_remote_to_local.invert());
+        let stale_seed = local
+            .analyze_remote_to_local(&first_remote)
             .accepted_solution()
             .expect("expected initial alignment");
 
@@ -4181,17 +4112,12 @@ mod tests {
             resumed_translation,
         )
         .to_mat4();
-        let resumed_remote =
-            xr_depth_align_transform_descriptor(&local, &resumed_remote_to_local.invert());
-        let seeded = xr_depth_align_analyze_remote_to_local_seeded(
-            &local,
-            &resumed_remote,
-            Some(stale_seed),
-        );
+        let resumed_remote = local.transformed(&resumed_remote_to_local.invert());
+        let seeded = local.analyze_remote_to_local_seeded(&resumed_remote, Some(stale_seed));
         let seeded_solution = seeded
             .accepted_solution()
             .expect("expected seeded solve to fall back to global search");
-        let global = xr_depth_align_analyze_remote_to_local(&local, &resumed_remote);
+        let global = local.analyze_remote_to_local(&resumed_remote);
         let global_solution = global
             .accepted_solution()
             .expect("expected global solve to recover resumed pose");

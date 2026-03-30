@@ -1,4 +1,4 @@
-use crate::*;
+use crate::prelude::*;
 use makepad_platform::permission::{Permission, PermissionStatus};
 
 script_mod! {

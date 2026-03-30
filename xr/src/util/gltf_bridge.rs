@@ -1,14 +1,13 @@
-use crate::makepad_draw::shader::draw_pbr::PbrMeshHandle;
-use crate::{
+use makepad_gltf::{
+    decode_mesh_primitive, load_gltf_from_bytes, load_gltf_from_path, load_image_bytes,
+    DecodedPrimitive, GltfDocument, GltfError, GltfNode, LoadedGltf,
+};
+use makepad_widgets::{
     image_cache::{
         handle_image_cache_network_responses, load_image_from_cache, load_image_from_data_async,
         process_async_image_load, AsyncImageLoad, AsyncLoadResult, ImageError,
     },
-    makepad_draw::*,
-};
-use makepad_gltf::{
-    decode_mesh_primitive, load_gltf_from_bytes, load_gltf_from_path, load_image_bytes,
-    DecodedPrimitive, GltfDocument, GltfError, GltfNode, LoadedGltf,
+    makepad_draw::{shader::draw_pbr::PbrMeshHandle, *},
 };
 use std::{
     collections::HashMap,

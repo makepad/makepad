@@ -1,6 +1,7 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::scene::{xr_widget_world_transform, XrNode};
+use makepad_widgets::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 
-use super::{scene_draw::apply_scene_to_draw_cube, xr_node::xr_widget_world_transform, XrNode};
+use crate::util::scene_draw::apply_scene_to_draw_cube;
 
 script_mod! {
     use mod.prelude.widgets_internal.*

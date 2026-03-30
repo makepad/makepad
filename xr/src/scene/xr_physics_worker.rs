@@ -8,8 +8,8 @@ use super::{
     CollectedXrCube,
 };
 use crate::{
-    xr_node::{XrBodyKind, XrRuntimeBodyState},
-    *,
+    prelude::*,
+    scene::{XrBodyKind, XrRuntimeBodyState},
 };
 use makepad_widgets::makepad_platform::{event::XrHand, XrTsdfStore};
 use std::{

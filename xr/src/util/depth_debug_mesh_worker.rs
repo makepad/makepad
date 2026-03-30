@@ -1,8 +1,8 @@
-use crate::depth_debug_mesh::{
+use super::depth_debug_mesh::{
     debug_depth_mesh_view_plan, DebugDepthMeshChunk, DebugDepthMeshChunkSignature,
     DebugDepthMeshTriangulator,
 };
-use crate::*;
+use crate::prelude::*;
 use makepad_widgets::makepad_platform::{
     ChunkKey, SparseTsdGridReadSnapshot, TsdfPublishedSnapshot,
 };
