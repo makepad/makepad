@@ -21,7 +21,7 @@ use self::{
     },
 };
 
-pub const XR_NET_PROTOCOL_VERSION: u16 = 4;
+pub const XR_NET_PROTOCOL_VERSION: u16 = 5;
 pub const XR_NET_DEFAULT_DISCOVERY_PORT: u16 = 41546;
 pub const XR_NET_DEFAULT_DATA_PORT: u16 = 41547;
 pub const XR_NET_DEFAULT_SYNC_PORT: u16 = 41548;
@@ -49,6 +49,15 @@ impl XrNetPeerId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, SerBin, DeBin)]
+pub struct XrActivityId(pub LiveId);
+
+impl XrActivityId {
+    pub fn to_live_id(self) -> LiveId {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct XrNetPeer {
     pub id: XrNetPeerId,
@@ -72,6 +81,43 @@ pub struct XrNetStateFrame {
     pub seq: u32,
     pub sent_at: f64,
     pub state: XrState,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, SerBin, DeBin)]
+pub struct XrNetActivityState {
+    pub activity_id: XrActivityId,
+    pub changed_at: f64,
+    pub changed_tick: u32,
+    pub changed_by: XrNetPeerId,
+}
+
+impl XrNetActivityState {
+    pub fn is_newer_than(&self, other: &Self) -> bool {
+        use std::cmp::Ordering;
+
+        match self.changed_tick.cmp(&other.changed_tick) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => match self.changed_at.total_cmp(&other.changed_at) {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                Ordering::Equal => self.changed_by.0 > other.changed_by.0,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, SerBin, DeBin)]
+pub enum XrNetActivityControl {
+    XrSetActivity(XrNetActivityState),
+}
+
+impl XrNetActivityControl {
+    pub fn state(&self) -> XrNetActivityState {
+        match self {
+            Self::XrSetActivity(state) => *state,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, SerBin, DeBin)]
@@ -225,6 +271,10 @@ pub enum XrNetIncoming {
         peer: XrNetPeer,
         frame: XrNetAlignmentDescriptorFrame,
     },
+    Activity {
+        peer: XrNetPeer,
+        control: XrNetActivityControl,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -275,6 +325,7 @@ impl Default for XrNetConfig {
 
 #[derive(Debug)]
 pub struct XrNetNode {
+    node_id: XrNetPeerId,
     pub incoming_receiver: mpsc::Receiver<XrNetIncoming>,
     udp_outgoing_sender: mpsc::Sender<XrNetUdpOutgoing>,
     sync_outgoing_sender: mpsc::Sender<XrNetSyncOutgoing>,
@@ -284,6 +335,7 @@ pub struct XrNetNode {
     next_state_seq: u32,
     next_alignment_seq: u32,
     next_alignment_descriptor_seq: u32,
+    next_activity_tick: u32,
 }
 
 impl XrNetNode {
@@ -333,6 +385,7 @@ impl XrNetNode {
         ));
 
         Ok(Self {
+            node_id: config.node_id,
             incoming_receiver,
             udp_outgoing_sender,
             sync_outgoing_sender,
@@ -342,7 +395,12 @@ impl XrNetNode {
             next_state_seq: 0,
             next_alignment_seq: 0,
             next_alignment_descriptor_seq: 0,
+            next_activity_tick: 0,
         })
+    }
+
+    pub fn node_id(&self) -> XrNetPeerId {
+        self.node_id
     }
 
     pub fn send_state(&mut self, state: XrState) {
@@ -376,6 +434,24 @@ impl XrNetNode {
         let _ = self
             .sync_outgoing_sender
             .send(XrNetSyncOutgoing::AlignmentDescriptor(frame));
+    }
+
+    pub fn send_activity(
+        &mut self,
+        activity_id: XrActivityId,
+        changed_at: f64,
+    ) -> XrNetActivityState {
+        let state = XrNetActivityState {
+            activity_id,
+            changed_at,
+            changed_tick: self.next_activity_tick,
+            changed_by: self.node_id,
+        };
+        self.next_activity_tick = self.next_activity_tick.wrapping_add(1);
+        let _ = self.sync_outgoing_sender.send(XrNetSyncOutgoing::Activity(
+            XrNetActivityControl::XrSetActivity(state),
+        ));
+        state
     }
 }
 
@@ -726,6 +802,55 @@ mod tests {
             _ => unreachable!(),
         };
         assert_eq!(received.descriptor, descriptor.descriptor);
+    }
+
+    #[test]
+    fn cached_activity_is_sent_to_late_joiner() {
+        let mut left =
+            XrNetNode::with_config(localhost_config(301, 42946, 42947, 42948, vec![42956]))
+                .expect("left test client should bind");
+        let right = XrNetNode::with_config(localhost_config(302, 42956, 42957, 42958, vec![42946]))
+            .expect("right test client should bind");
+
+        let sent = left.send_activity(XrActivityId(live_id!(tree_scene)), 3.5);
+
+        let event = wait_for_event(&right, |event| {
+            matches!(event, XrNetIncoming::Activity { .. })
+        })
+        .expect("late joiner should receive cached activity");
+
+        let received = match event {
+            XrNetIncoming::Activity { control, .. } => control.state(),
+            _ => unreachable!(),
+        };
+        assert_eq!(received, sent);
+    }
+
+    #[test]
+    fn activity_order_prefers_tick_then_time_then_peer() {
+        let base = XrNetActivityState {
+            activity_id: XrActivityId(live_id!(ico_box_scene)),
+            changed_at: 10.0,
+            changed_tick: 4,
+            changed_by: XrNetPeerId(7),
+        };
+
+        assert!(XrNetActivityState {
+            changed_tick: 5,
+            ..base
+        }
+        .is_newer_than(&base));
+        assert!(XrNetActivityState {
+            changed_at: 11.0,
+            ..base
+        }
+        .is_newer_than(&base));
+        assert!(XrNetActivityState {
+            changed_by: XrNetPeerId(8),
+            ..base
+        }
+        .is_newer_than(&base));
+        assert!(!base.is_newer_than(&base));
     }
 
     #[test]

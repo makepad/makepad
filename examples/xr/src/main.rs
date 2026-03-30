@@ -666,9 +666,25 @@ pub struct App {
     network_started: bool,
     #[rust]
     last_debug_text: String,
+    #[rust]
+    suppress_activity_broadcast: Option<XrActivityId>,
 }
 
 impl App {
+    fn current_activity(&self, cx: &mut Cx) -> Option<XrActivityId> {
+        self.ui
+            .widget(cx, ids!(scene_select))
+            .borrow::<XrSelect>()
+            .map(|select| select.activity_id())
+    }
+
+    fn apply_activity(&mut self, cx: &mut Cx, activity_id: XrActivityId) -> Option<WidgetRef> {
+        self.ui
+            .widget(cx, ids!(scene_select))
+            .borrow_mut::<XrSelect>()
+            .and_then(|mut select| select.set_activity(cx, activity_id))
+    }
+
     fn ensure_network_started(&mut self, cx: &mut Cx) {
         if self.network_started {
             return;
@@ -680,6 +696,21 @@ impl App {
         {
             peer_sync.set_enabled(cx, true);
             self.network_started = true;
+        }
+    }
+
+    fn ensure_activity_announced(&mut self, cx: &mut Cx) {
+        let Some(activity_id) = self.current_activity(cx) else {
+            return;
+        };
+        if let Some(mut peer_sync) = self
+            .ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow_mut::<XrPeerSync>()
+        {
+            if peer_sync.enabled() && peer_sync.current_activity().is_none() {
+                let _ = peer_sync.set_local_activity(cx, activity_id);
+            }
         }
     }
 
@@ -745,7 +776,36 @@ impl App {
 }
 
 impl MatchEvent for App {
-    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let scene_select = self.ui.widget(cx, ids!(scene_select));
+        let peer_sync = self.ui.widget(cx, ids!(xr_peer_sync));
+
+        if let Some(action) = actions.find_widget_action(peer_sync.widget_uid()) {
+            if let XrPeerSyncAction::ActivityChanged(activity_id) = action.cast() {
+                if self.current_activity(cx) != Some(activity_id) {
+                    self.suppress_activity_broadcast = Some(activity_id);
+                    if self.apply_activity(cx, activity_id).is_none() {
+                        self.suppress_activity_broadcast = None;
+                    }
+                }
+                return;
+            }
+        }
+
+        let Some(action) = actions.find_widget_action(scene_select.widget_uid()) else {
+            return;
+        };
+        let XrSelectAction::ActiveChildChanged(activity_id) = action.cast() else {
+            return;
+        };
+        if self.suppress_activity_broadcast == Some(activity_id) {
+            self.suppress_activity_broadcast = None;
+            return;
+        }
+        if let Some(mut peer_sync) = peer_sync.borrow_mut::<XrPeerSync>() {
+            let _ = peer_sync.set_local_activity(cx, activity_id);
+        };
+    }
 }
 
 impl AppMain for App {
@@ -761,6 +821,7 @@ impl AppMain for App {
         if matches!(event, Event::Startup) {
             self.ensure_network_started(cx);
         }
+        self.ensure_activity_announced(cx);
         self.refresh_debug_fields(cx);
     }
 }
