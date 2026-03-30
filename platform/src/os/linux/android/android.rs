@@ -256,6 +256,11 @@ impl Cx {
     /// It handles all incoming messages, processes other events, and manages drawing operations.
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         self.gpu_info.performance = GpuPerformance::Tier1;
+        // Populate display_context and script heap with safe area insets
+        // BEFORE Startup, so app script_mod! definitions can use them.
+        let insets = self.os.safe_area_insets;
+        self.display_context.safe_area_insets = insets;
+        self.update_safe_inset_script_values(insets);
         self.call_event_handler(&Event::Startup);
         self.redraw_all();
 

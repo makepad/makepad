@@ -308,18 +308,7 @@ impl Window {
         self.main_draw_list.begin_always(cx);
 
         let size = cx.current_pass_size();
-
-        // Apply safe area insets as root padding so content doesn't overlap
-        // with notch/Dynamic Island, home indicator, or rounded screen corners.
-        let insets = cx.display_context.safe_area_insets;
-        let mut layout = Layout::flow_down();
-        layout.padding = Inset {
-            left: insets.left,
-            top: insets.top,
-            right: insets.right,
-            bottom: insets.bottom,
-        };
-        cx.begin_root_turtle(size, layout);
+        cx.begin_root_turtle(size, Layout::flow_down());
 
         self.overlay.begin(cx);
 
@@ -551,6 +540,10 @@ impl Widget for Window {
                     cx.display_context.screen_size = ev.new_geom.inner_size;
                     cx.display_context.safe_area_insets = ev.new_geom.safe_area_insets;
                     cx.display_context.updated_on_event_id = cx.event_id();
+
+                    // Update safe area inset values on the script heap so
+                    // Splash code can reference mod.widgets.SAFE_INSET_PAD_*.
+                    cx.update_safe_inset_script_values(ev.new_geom.safe_area_insets);
 
                     cx.widget_action(uid, WindowAction::WindowGeomChange(ev.clone()));
                     return;

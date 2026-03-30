@@ -555,6 +555,12 @@ impl Cx {
             IosEvent::Init => {
                 with_ios_app(|app| app.start_timer(0, 0.008, true));
                 self.start_studio_websocket_delayed();
+                // Populate display_context and script heap with safe area insets
+                // BEFORE Startup, so app script_mod! definitions can use them.
+                let geom = with_ios_app(|app| app.last_window_geom.clone());
+                self.display_context.screen_size = geom.inner_size;
+                self.display_context.safe_area_insets = geom.safe_area_insets;
+                self.update_safe_inset_script_values(geom.safe_area_insets);
                 self.call_event_handler(&Event::Startup);
                 self.redraw_all();
             }

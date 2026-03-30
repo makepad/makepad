@@ -424,6 +424,20 @@ impl Cx {
         self.in_draw_event
     }
 
+    /// Updates the `mod.widgets.SAFE_INSET_PAD_*` values on the script heap
+    /// so that Splash code can reference them in widget definitions.
+    pub fn update_safe_inset_script_values(&mut self, insets: crate::event::SafeAreaInsets) {
+        use makepad_script::trap::NoTrap;
+        let Some(vm) = self.script_vm.as_mut() else {
+            return;
+        };
+        let widgets = vm.heap.module(id!(widgets));
+        vm.heap.set_value(widgets, id!(SAFE_INSET_PAD_TOP).into(), insets.top.into(), NoTrap);
+        vm.heap.set_value(widgets, id!(SAFE_INSET_PAD_BOTTOM).into(), insets.bottom.into(), NoTrap);
+        vm.heap.set_value(widgets, id!(SAFE_INSET_PAD_LEFT).into(), insets.left.into(), NoTrap);
+        vm.heap.set_value(widgets, id!(SAFE_INSET_PAD_RIGHT).into(), insets.right.into(), NoTrap);
+    }
+
     pub fn xr_capabilities(&self) -> &XrCapabilities {
         &self.xr_capabilities
     }
