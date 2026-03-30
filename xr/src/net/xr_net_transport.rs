@@ -28,6 +28,7 @@ pub(super) enum XrNetSyncOutgoing {
     },
     Alignment(XrNetAlignmentFrame),
     AlignmentDescriptor(XrNetAlignmentDescriptorFrame),
+    Activity(XrNetActivityControl),
     Break,
 }
 
@@ -114,6 +115,9 @@ impl SyncWorkerPeerState {
                 }
                 self.last_alignment_descriptor_seq = Some(frame.seq);
                 let _ = incoming_sender.send(XrNetIncoming::AlignmentDescriptor { peer, frame });
+            }
+            XrNetDataPacket::ActivityControl { control, .. } => {
+                let _ = incoming_sender.send(XrNetIncoming::Activity { peer, control });
             }
             XrNetDataPacket::Leave(_) => {}
         }
@@ -443,6 +447,7 @@ impl XrNetUdpWorker {
                         XrNetDataPacket::Leave(packet) => {
                             self.remove_peer(peers, packet.node_id, XrNetLeaveReason::Explicit);
                         }
+                        XrNetDataPacket::ActivityControl { .. } => {}
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
@@ -538,12 +543,14 @@ impl XrNetSyncWorker {
         let mut pending_sync_connections = Vec::<XrNetSyncConnection>::new();
         let mut cached_alignment = None;
         let mut cached_alignment_descriptor = None;
+        let mut cached_activity = None;
 
         while self.thread_loop.load(Ordering::Relaxed) {
             let should_break = self.drain_outgoing_messages(
                 &mut peers,
                 &mut cached_alignment,
                 &mut cached_alignment_descriptor,
+                &mut cached_activity,
             );
             self.accept_connections(&mut pending_sync_connections);
             self.ensure_outbound_connections(&mut peers);
@@ -552,8 +559,14 @@ impl XrNetSyncWorker {
                 &mut peers,
                 &cached_alignment,
                 &cached_alignment_descriptor,
+                &cached_activity,
             );
-            self.process_connections(&mut peers, &cached_alignment, &cached_alignment_descriptor);
+            self.process_connections(
+                &mut peers,
+                &cached_alignment,
+                &cached_alignment_descriptor,
+                &cached_activity,
+            );
 
             if should_break {
                 break;
@@ -574,6 +587,7 @@ impl XrNetSyncWorker {
         peers: &mut HashMap<XrNetPeerId, SyncWorkerPeerState>,
         cached_alignment: &mut Option<XrNetAlignmentFrame>,
         cached_alignment_descriptor: &mut Option<XrNetAlignmentDescriptorFrame>,
+        cached_activity: &mut Option<XrNetActivityControl>,
     ) -> bool {
         loop {
             match self.outgoing_receiver.try_recv() {
@@ -595,6 +609,15 @@ impl XrNetSyncWorker {
                 Ok(XrNetSyncOutgoing::AlignmentDescriptor(frame)) => {
                     *cached_alignment_descriptor = Some(frame.clone());
                     let packet = XrNetDataPacket::alignment_descriptor(self.node_id, frame);
+                    for peer_state in peers.values_mut() {
+                        if let Some(connection) = peer_state.sync_connection.as_mut() {
+                            connection.queue_packet(&XrNetSyncPacket::data(packet.clone()));
+                        }
+                    }
+                }
+                Ok(XrNetSyncOutgoing::Activity(control)) => {
+                    *cached_activity = Some(control.clone());
+                    let packet = XrNetDataPacket::activity_control(self.node_id, control);
                     for peer_state in peers.values_mut() {
                         if let Some(connection) = peer_state.sync_connection.as_mut() {
                             connection.queue_packet(&XrNetSyncPacket::data(packet.clone()));
@@ -688,6 +711,7 @@ impl XrNetSyncWorker {
         peers: &mut HashMap<XrNetPeerId, SyncWorkerPeerState>,
         cached_alignment: &Option<XrNetAlignmentFrame>,
         cached_alignment_descriptor: &Option<XrNetAlignmentDescriptorFrame>,
+        cached_activity: &Option<XrNetActivityControl>,
     ) {
         let pending_count = pending_sync_connections.len();
         for _ in 0..pending_count {
@@ -746,6 +770,7 @@ impl XrNetSyncWorker {
                 &mut connection,
                 cached_alignment,
                 cached_alignment_descriptor,
+                cached_activity,
             );
             peer_state.sync_connection = Some(connection);
 
@@ -760,6 +785,7 @@ impl XrNetSyncWorker {
         peers: &mut HashMap<XrNetPeerId, SyncWorkerPeerState>,
         cached_alignment: &Option<XrNetAlignmentFrame>,
         cached_alignment_descriptor: &Option<XrNetAlignmentDescriptorFrame>,
+        cached_activity: &Option<XrNetActivityControl>,
     ) {
         let peer_ids = peers.keys().copied().collect::<Vec<_>>();
         for peer_id in peer_ids {
@@ -815,6 +841,7 @@ impl XrNetSyncWorker {
                     &mut connection,
                     cached_alignment,
                     cached_alignment_descriptor,
+                    cached_activity,
                 );
             }
             for data in queued_data {
@@ -829,6 +856,7 @@ impl XrNetSyncWorker {
         connection: &mut XrNetSyncConnection,
         cached_alignment: &Option<XrNetAlignmentFrame>,
         cached_alignment_descriptor: &Option<XrNetAlignmentDescriptorFrame>,
+        cached_activity: &Option<XrNetActivityControl>,
     ) {
         if let Some(frame) = cached_alignment {
             connection.queue_packet(&XrNetSyncPacket::data(XrNetDataPacket::alignment(
@@ -840,6 +868,12 @@ impl XrNetSyncWorker {
             connection.queue_packet(&XrNetSyncPacket::data(
                 XrNetDataPacket::alignment_descriptor(self.node_id, frame.clone()),
             ));
+        }
+        if let Some(control) = cached_activity {
+            connection.queue_packet(&XrNetSyncPacket::data(XrNetDataPacket::activity_control(
+                self.node_id,
+                control.clone(),
+            )));
         }
     }
 

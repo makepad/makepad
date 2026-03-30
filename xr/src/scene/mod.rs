@@ -10,6 +10,7 @@ pub mod xr_view;
 
 pub(crate) use xr_gesture::{hand_is_palm_down_closed_fist, CLOSED_FIST_GESTURE};
 
+pub use crate::net::XrActivityId;
 pub use xr_body_spawn::XrBodySpawn;
 pub use xr_env::{DrawDepthMeshBasic, XrEnv};
 pub use xr_node::{
@@ -17,7 +18,7 @@ pub use xr_node::{
     XrNode, XrPassthroughScopeData, XrRuntimeBodyState, XR_HAND_INFLUENCE_POINTS_PER_HAND,
     XR_HAND_INFLUENCE_POINT_COUNT,
 };
-pub use xr_peer_sync::XrPeerSync;
+pub use xr_peer_sync::{XrPeerSync, XrPeerSyncAction};
 pub use xr_permissions_flow::XrPermissionsFlow;
 pub use xr_root::{XrCamera, XrRoot};
 pub use xr_select::{XrSelect, XrSelectAction};
