@@ -1,11 +1,11 @@
 use super::xr_env::XrEnv;
-use super::xr_select::{XrSelect, XrSelectAction};
+use super::xr_select::XrSelectAction;
 use super::{hand_is_palm_down_closed_fist, CLOSED_FIST_GESTURE};
 use crate::prelude::*;
 use crate::util::scene_draw::{ray_from_scene_viewport, SceneState3D};
 use makepad_widgets::event::{XrFingerTip, XrSyncAnchor};
 use makepad_widgets::makepad_script::ScriptFnRef;
-use std::{cell::Cell, cmp::Ordering, rc::Rc, time::Instant};
+use std::{cell::Cell, collections::HashMap, rc::Rc, time::Instant};
 
 const DESKTOP_TOUCH_DOWN_Z: f32 = 0.0;
 const DESKTOP_TOUCH_UP_Z: f32 = 64.0;
@@ -513,6 +513,14 @@ impl XrRoot {
         self.env.spawn_body(cx, spawn);
     }
 
+    pub fn despawn_body(&mut self, cx: &mut Cx, widget_uid: WidgetUid) {
+        self.env.despawn_body(cx, widget_uid);
+    }
+
+    pub fn apply_body_impulse(&mut self, cx: &mut Cx, impulse: XrBodyImpulse) {
+        self.env.apply_body_impulse(cx, impulse);
+    }
+
     fn set_depth_mesh_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
         self.env.set_depth_mesh_visible(visible);
         self.env.mark_scene_dirty();
@@ -730,71 +738,6 @@ impl XrRoot {
         }
     }
 
-    fn child_world_sort_center(child: &WidgetRef) -> Option<Vec3f> {
-        if let Some(select) = child.borrow::<XrSelect>() {
-            return Some(select.node().pos());
-        }
-        if let Some(view) = child.borrow::<XrView>() {
-            return Some(view.node().pos());
-        }
-        if let Some(cube) = child.borrow::<Cube>() {
-            return Some(cube.node().pos());
-        }
-        if let Some(ico) = child.borrow::<IcoSphere>() {
-            return Some(ico.node().pos());
-        }
-        if let Some(refractive_cube) = child.borrow::<RefractiveCube>() {
-            return Some(refractive_cube.node().pos());
-        }
-        if let Some(gltf) = child.borrow::<Gltf>() {
-            return Some(gltf.node().pos());
-        }
-        if let Some(tree) = child.borrow::<Tree>() {
-            return Some(tree.node().pos());
-        }
-        if let Some(node) = child.borrow::<XrNode>() {
-            return Some(node.pos());
-        }
-        None
-    }
-
-    fn child_is_transparent(child: &WidgetRef) -> bool {
-        child.borrow::<RefractiveCube>().is_some() || child.borrow::<XrView>().is_some()
-    }
-
-    fn draw_list_depth(scene_state: &SceneState3D, world_pos: Vec3f) -> f32 {
-        let view_pos =
-            scene_state
-                .view
-                .transform_vec4(vec4f(world_pos.x, world_pos.y, world_pos.z, 1.0));
-        if view_pos.w.abs() > 1.0e-6 {
-            view_pos.z / view_pos.w
-        } else {
-            view_pos.z
-        }
-    }
-
-    fn sort_child_draw_order(draw_order_entries: &mut [(usize, f32, bool)]) {
-        if draw_order_entries.len() <= 1 {
-            return;
-        }
-
-        draw_order_entries.sort_by(|a, b| match (a.2, b.2) {
-            (false, true) => Ordering::Less,
-            (true, false) => Ordering::Greater,
-            (false, false) => {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            }
-            (true, true) => {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            }
-        });
-    }
-
     fn draw_3d_content(&mut self, cx: &mut Cx3d, _scope: &mut Scope, scene_state: SceneState3D) {
         self.draw_list.begin_always(cx);
         let root_transform = if cx.cx.in_xr_mode() {
@@ -817,20 +760,20 @@ impl XrRoot {
         let mut draw_order_entries = Vec::new();
         for i in 0..self.children.len() {
             let child = self.children[i].1.clone();
-            let child_center = Self::child_world_sort_center(&child)
+            let child_center = xr_widget_local_sort_center(&child)
                 .map(|center| Self::transform_point(&root_transform, center));
             if let Some(child_center) = child_center {
                 draw_order_entries.push((
                     i,
-                    Self::draw_list_depth(&scene_state, child_center),
-                    Self::child_is_transparent(&child),
+                    xr_draw_list_depth(&scene_state, child_center),
+                    xr_widget_is_transparent(&child),
                 ));
             } else {
                 draw_order_entries.push((i, 0.0, false));
             }
         }
 
-        Self::sort_child_draw_order(&mut draw_order_entries);
+        xr_sort_child_draw_order(&mut draw_order_entries);
         for (index, _, _) in draw_order_entries {
             let child = self.children[index].1.clone();
             child.draw_3d_all(cx, &mut scene_scope);
@@ -926,6 +869,26 @@ impl XrRoot {
 
     pub fn physics_depth_query_surface_count(&self) -> usize {
         self.env.physics_depth_query_surface_count()
+    }
+
+    pub fn physics_scene_body_count(&self) -> usize {
+        self.env.physics_scene_body_count()
+    }
+
+    pub fn physics_body_spawn_apply_count(&self) -> usize {
+        self.env.physics_body_spawn_apply_count()
+    }
+
+    pub fn physics_body_spawn_miss_count(&self) -> usize {
+        self.env.physics_body_spawn_miss_count()
+    }
+
+    pub fn physics_revision(&self) -> u64 {
+        self.env.physics_revision()
+    }
+
+    pub fn runtime_bodies(&self) -> Rc<HashMap<WidgetUid, XrRuntimeBodyState>> {
+        self.env.runtime_bodies()
     }
 
     pub fn frame_cpu_ms(&self) -> f64 {
@@ -1196,7 +1159,9 @@ impl Widget for XrRoot {
                     last,
                 };
                 self.runtime.last_dispatched_xr_state = Some(augmented_state.clone());
-                self.ensure_xr_content_pose(cx, &augmented_state);
+                if cx.in_xr_mode() {
+                    self.ensure_xr_content_pose(cx, &augmented_state);
+                }
                 self.runtime.last_xr_state = Some(augmented_state.clone());
                 if augmented_update.clicked_menu() {
                     self.env.reset_physics(cx);
@@ -1235,15 +1200,17 @@ impl Widget for XrRoot {
             }
             if actions.iter().any(|action| {
                 action.as_widget_action().is_some_and(|action| {
-                    matches!(
-                        action.cast::<XrSelectAction>(),
-                        XrSelectAction::ActiveChildChanged(_)
-                    )
+                    matches!(action.cast::<XrNodeAction>(), XrNodeAction::SceneChanged)
+                        || matches!(
+                            action.cast::<XrSelectAction>(),
+                            XrSelectAction::ActiveChildChanged(_)
+                        )
                 })
             }) {
                 self.env.mark_scene_dirty();
                 self.env.ensure_physics(cx, &self.children);
             }
+            self.env.flush_pending_physics_commands(cx);
         }
 
         let desktop_scene_interaction = !cx.in_xr_mode() && !self.permissions_ui_visible();

@@ -61,7 +61,7 @@ script_mod! {
             scene_select := XrSelect{
                 pos: vec3(0.0, -0.02, -0.62)
                 scale: vec3(0.5, 0.5, 0.5)
-                active_child: @ico_box_scene
+                active_child: @ico_shoot_scene
 
                 test_scene := XrNode{
                     on_render: ||{
@@ -287,7 +287,7 @@ script_mod! {
                                 #xd58cff
                             }
                             IcoSphere{
-                                projectile_pool: true
+                                spawn_pool: true
                                 density: 0.75
                                 friction: 0.48
                                 restitution: 0.04
@@ -731,6 +731,9 @@ impl App {
                 .borrow::<XrPeerSync>()
                 .is_some_and(|peer_sync| peer_sync.spawnable_activity() != Some(activity_id));
         if !should_refresh {
+            if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+                peer_sync.flush_pending_shared_object_controls(cx);
+            }
             return;
         }
         let Some(scene_widget) = self.active_scene_widget(cx) else {
@@ -740,6 +743,7 @@ impl App {
         {
             if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
                 peer_sync.set_spawnable_objects(activity_id, bindings);
+                peer_sync.flush_pending_shared_object_controls(cx);
             };
         }
     }
@@ -747,6 +751,30 @@ impl App {
     fn apply_remote_body_spawn(&mut self, cx: &mut Cx, spawn: XrBodySpawn) {
         if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
             root.spawn_body(cx, spawn);
+        }
+    }
+
+    fn apply_remote_body_despawn(&mut self, cx: &mut Cx, widget_uid: WidgetUid) {
+        if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
+            root.despawn_body(cx, widget_uid);
+        }
+    }
+
+    fn apply_body_impulse(&mut self, cx: &mut Cx, impulse: XrBodyImpulse) {
+        if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
+            root.apply_body_impulse(cx, impulse);
+        }
+    }
+
+    fn publish_local_shared_object_states(&mut self, cx: &mut Cx) {
+        let runtime_bodies = self.ui.borrow::<XrRoot>().map(|root| root.runtime_bodies());
+        let Some(runtime_bodies) = runtime_bodies else {
+            return;
+        };
+        let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
+        let maybe_peer_sync = peer_sync_widget.borrow_mut::<XrPeerSync>();
+        if let Some(mut peer_sync) = maybe_peer_sync {
+            peer_sync.publish_local_shared_object_states(cx, runtime_bodies.as_ref());
         }
     }
 
@@ -826,8 +854,11 @@ impl MatchEvent for App {
 
         let mut remote_activity = None;
         let mut remote_body_spawns = Vec::new();
+        let mut remote_body_impulses = Vec::new();
+        let mut remote_body_despawns = Vec::new();
         let mut local_activity = None;
         let mut local_body_spawns = Vec::new();
+        let mut scene_changed = false;
 
         for action in actions {
             let Some(widget_action) = action.as_widget_action() else {
@@ -840,6 +871,12 @@ impl MatchEvent for App {
                     }
                     XrPeerSyncAction::BodySpawn(spawn) => {
                         remote_body_spawns.push(spawn);
+                    }
+                    XrPeerSyncAction::BodyImpulse(impulse) => {
+                        remote_body_impulses.push(impulse);
+                    }
+                    XrPeerSyncAction::BodyDespawn(widget_uid) => {
+                        remote_body_despawns.push(widget_uid);
                     }
                     XrPeerSyncAction::None => {}
                 }
@@ -854,6 +891,13 @@ impl MatchEvent for App {
             if let Some(body_spawn) = widget_action.action.downcast_ref::<XrBodySpawn>() {
                 local_body_spawns.push(*body_spawn);
             }
+            if matches!(widget_action.cast::<XrNodeAction>(), XrNodeAction::SceneChanged) {
+                scene_changed = true;
+            }
+        }
+
+        if scene_changed {
+            self.refresh_spawnable_registry(cx, true);
         }
 
         if let Some(activity_id) = remote_activity {
@@ -875,8 +919,16 @@ impl MatchEvent for App {
             }
         }
 
+        for widget_uid in remote_body_despawns {
+            self.apply_remote_body_despawn(cx, widget_uid);
+        }
+
         for spawn in remote_body_spawns {
             self.apply_remote_body_spawn(cx, spawn);
+        }
+
+        for impulse in remote_body_impulses {
+            self.apply_body_impulse(cx, impulse);
         }
 
         if !local_body_spawns.is_empty() {
@@ -905,6 +957,9 @@ impl AppMain for App {
         }
         self.ensure_activity_announced(cx);
         self.refresh_spawnable_registry(cx, false);
+        if matches!(event, Event::XrUpdate(_) | Event::NextFrame(_)) {
+            self.publish_local_shared_object_states(cx);
+        }
         self.refresh_debug_fields(cx);
     }
 }

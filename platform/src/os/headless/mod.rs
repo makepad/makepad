@@ -64,6 +64,9 @@ pub struct CxOs {
     pub(crate) start_time: Option<Instant>,
     pub(crate) shader_jit: jit::HeadlessShaderJit,
     pub(crate) frame_dir: Option<PathBuf>,
+    pub(crate) no_draw: bool,
+    pub(crate) no_draw_initialized: bool,
+    pub(crate) draw_cycles: Option<usize>,
     pub(crate) render_pool: Option<MessageThreadPool<()>>,
     pub(crate) render_pool_threads: usize,
 }
@@ -75,6 +78,9 @@ impl Default for CxOs {
             start_time: None,
             shader_jit: Default::default(),
             frame_dir: None,
+            no_draw: false,
+            no_draw_initialized: false,
+            draw_cycles: None,
             render_pool: None,
             render_pool_threads: 0,
         }

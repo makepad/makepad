@@ -162,6 +162,10 @@ impl Pose {
             position: b.position,
         }
     }
+
+    pub fn is_finite(&self) -> bool {
+        self.orientation.is_finite() && self.position.is_finite()
+    }
 }
 
 #[repr(C)]
@@ -410,6 +414,10 @@ impl Vec3f {
             y: a.y.max(b.y),
             z: a.z.max(b.z),
         }
+    }
+
+    pub fn is_finite(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
     }
 }
 
@@ -754,6 +762,10 @@ impl Quat {
 
     pub fn length(self) -> f32 {
         self.dot(self).sqrt()
+    }
+
+    pub fn is_finite(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.z.is_finite() && self.w.is_finite()
     }
 
     pub fn normalized(&mut self) -> Quat {
