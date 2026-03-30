@@ -1,11 +1,10 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::render::GltfRenderer;
+use crate::scene::{xr_widget_world_transform, XrNode};
+use makepad_widgets::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 use std::{path::PathBuf, rc::Rc};
 
-use super::{
-    gltf_bridge::GltfRenderer,
-    scene_draw::{apply_scene_to_draw_pbr, compose_scene_node_transform, scene_state_from_cx},
-    xr_node::xr_widget_world_transform,
-    XrNode,
+use crate::util::scene_draw::{
+    apply_scene_to_draw_pbr, compose_scene_node_transform, scene_state_from_cx,
 };
 
 script_mod! {

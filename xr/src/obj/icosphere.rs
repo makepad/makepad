@@ -1,10 +1,6 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::scene::{xr_widget_world_transform, XrDrawContext, XrNode};
+use makepad_widgets::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 use std::cell::RefCell;
-
-use super::{
-    xr_node::{xr_widget_world_transform, XrDrawContext},
-    XrNode,
-};
 
 const ICO_SPHERE_PHYSICS_DIAMETER_SCALE: f32 = 0.88;
 

@@ -2,7 +2,7 @@
 
 use super::xr_depth::{DepthQuerySurfaceCollider, DepthQuerySurfaceTarget};
 use super::*;
-use crate::tsdf_query::{
+use crate::algorithms::tsdf_query::{
     depth_query_plane_supports_body, DepthQueryColliderGeometry, DepthQueryColliderRole,
 };
 use rapier3d::dynamics::CoefficientCombineRule;
@@ -678,7 +678,7 @@ impl RapierScene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tsdf_query::{DepthQueryCollider, DepthQuerySupportPlane};
+    use crate::algorithms::tsdf_query::{DepthQueryCollider, DepthQuerySupportPlane};
 
     #[test]
     fn impact_surface_enables_before_current_body_overlaps_quad() {

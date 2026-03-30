@@ -1,5 +1,5 @@
-use crate::tsdf_query::{depth_query_plane_quad, DepthQuerySupportPlane};
-use crate::*;
+use crate::algorithms::tsdf_query::{depth_query_plane_quad, DepthQuerySupportPlane};
+use crate::prelude::*;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},

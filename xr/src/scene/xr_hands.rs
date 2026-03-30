@@ -1,7 +1,7 @@
 use super::xr_physics::{capsule_pose, makepad_pose, HandCollider, HandColliderBody, RapierScene};
 use super::*;
 
-impl XrEnv {
+impl XrHandSystem {
     fn pose_point_world(pose: Pose, local: Vec3f) -> Vec3f {
         pose.to_mat4().transform_vec4(local.to_vec4()).to_vec3f()
     }
@@ -71,7 +71,7 @@ impl XrEnv {
         }
     }
 
-    fn build_hand_colliders(hand: &XrHand) -> Vec<HandCollider> {
+    pub(super) fn build_hand_colliders(&self, hand: &XrHand) -> Vec<HandCollider> {
         let mut colliders = Vec::with_capacity(XR_HAND_COLLIDER_SLOTS_PER_HAND);
         if !hand.in_view() {
             return colliders;
@@ -182,6 +182,7 @@ impl XrEnv {
 
     #[allow(dead_code)]
     pub(super) fn collect_live_hand_colliders(
+        &self,
         scene: &RapierScene,
         slots: &[HandColliderBody],
     ) -> Vec<HandCollider> {
@@ -235,6 +236,93 @@ impl XrEnv {
         colliders
     }
 
+    fn hand_influence_tip_world(&self, hand: &XrHand, tip: usize) -> Option<Vec3f> {
+        if !hand.in_view() || !hand.tip_active(tip) {
+            return None;
+        }
+        Some(match tip {
+            XrHand::THUMB_TIP => hand.tip_pos_thumb(),
+            XrHand::INDEX_TIP => hand.tip_pos_index(),
+            XrHand::MIDDLE_TIP => hand.tip_pos_middle(),
+            XrHand::RING_TIP => hand.tip_pos_ring(),
+            XrHand::LITTLE_TIP => hand.tip_pos_little(),
+            _ => hand.tip_pos_index(),
+        })
+    }
+
+    fn hand_influence_point(
+        &self,
+        pos: Vec3f,
+        gain_scale: f32,
+        radius_scale: f32,
+    ) -> XrHandInfluencePoint {
+        XrHandInfluencePoint {
+            pos,
+            gain_scale,
+            radius_scale,
+        }
+    }
+
+    fn palm_world(&self, hand: &XrHand) -> Option<Vec3f> {
+        if !hand.in_view() {
+            return None;
+        }
+        let center = hand.joints[XrHand::CENTER].position;
+        let wrist = hand.joints[XrHand::WRIST].position;
+        let thumb = hand.joints[XrHand::THUMB_BASE].position;
+        let index = hand.joints[XrHand::INDEX_BASE].position;
+        let middle = hand.joints[XrHand::MIDDLE_BASE].position;
+        let ring = hand.joints[XrHand::RING_BASE].position;
+        let little = hand.joints[XrHand::LITTLE_BASE].position;
+        Some(
+            center * 0.28
+                + wrist * 0.10
+                + thumb * 0.12
+                + index * 0.13
+                + middle * 0.18
+                + ring * 0.11
+                + little * 0.08,
+        )
+    }
+
+    fn write_influence_points(&self, hand: &XrHand, target: &mut [Option<XrHandInfluencePoint>]) {
+        debug_assert_eq!(target.len(), XR_HAND_INFLUENCE_POINTS_PER_HAND);
+        target[0] = self
+            .hand_influence_tip_world(hand, XrHand::THUMB_TIP)
+            .map(|pos| self.hand_influence_point(pos, 0.72, 0.92));
+        target[1] = self
+            .hand_influence_tip_world(hand, XrHand::INDEX_TIP)
+            .map(|pos| self.hand_influence_point(pos, 1.00, 1.00));
+        target[2] = self
+            .hand_influence_tip_world(hand, XrHand::MIDDLE_TIP)
+            .map(|pos| self.hand_influence_point(pos, 0.96, 1.00));
+        target[3] = self
+            .hand_influence_tip_world(hand, XrHand::RING_TIP)
+            .map(|pos| self.hand_influence_point(pos, 0.82, 0.94));
+        target[4] = self
+            .hand_influence_tip_world(hand, XrHand::LITTLE_TIP)
+            .map(|pos| self.hand_influence_point(pos, 0.68, 0.88));
+        target[5] = self
+            .palm_world(hand)
+            .map(|pos| self.hand_influence_point(pos, 1.30, 2.40));
+    }
+
+    pub(super) fn draw_scope_hand_influence_points(
+        &self,
+        state: Option<&XrState>,
+    ) -> [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT] {
+        let mut points = [None; XR_HAND_INFLUENCE_POINT_COUNT];
+        let Some(state) = state else {
+            return points;
+        };
+        let (left_points, right_points) = points.split_at_mut(XR_HAND_INFLUENCE_POINTS_PER_HAND);
+        self.write_influence_points(&state.left_hand, left_points);
+        self.write_influence_points(&state.right_hand, right_points);
+        points
+    }
+}
+
+impl XrEnv {
     fn draw_hand_shapes(&mut self, cx: &mut Cx2d, colliders: &[HandCollider], is_left: bool) {
         let color = if is_left {
             vec4(0.18, 0.72, 1.0, 1.0)
@@ -284,7 +372,7 @@ impl XrEnv {
         let colliders = if let Some(physics_colliders) = physics_colliders {
             physics_colliders
         } else {
-            raw_colliders = Self::build_hand_colliders(hand);
+            raw_colliders = self.world.hands.build_hand_colliders(hand);
             &raw_colliders
         };
         self.draw_hand_shapes(cx, colliders, is_left);
@@ -295,33 +383,10 @@ impl XrEnv {
         }
         self.draw_cube.end_many_instances(cx);
     }
-
-    #[allow(dead_code)]
-    pub(super) fn sync_hands(scene: Option<&mut RapierScene>, state: &XrState) {
-        if !XR_ENABLE_HAND_PHYSICS {
-            return;
-        }
-
-        let Some(scene) = scene else {
-            return;
-        };
-
-        let left = Self::build_hand_colliders(&state.left_hand);
-        let right = Self::build_hand_colliders(&state.right_hand);
-        let RapierScene {
-            bodies,
-            colliders,
-            left_hand,
-            right_hand,
-            ..
-        } = scene;
-        RapierScene::sync_hand_bodies(left_hand, &left, bodies, colliders);
-        RapierScene::sync_hand_bodies(right_hand, &right, bodies, colliders);
-    }
 }
 
 pub(super) fn build_hand_colliders_for_physics(hand: &XrHand) -> Vec<HandCollider> {
-    XrEnv::build_hand_colliders(hand)
+    XrHandSystem.build_hand_colliders(hand)
 }
 
 pub(super) fn sync_hands_on_scene(

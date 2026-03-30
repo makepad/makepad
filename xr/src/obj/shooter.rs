@@ -1,12 +1,10 @@
-use crate::{
+use crate::scene::{XrBodySpawn, XrNode};
+use makepad_widgets::{
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
     widget_async::{ScriptAsyncId, ScriptAsyncResult},
-    XrBodySpawn,
 };
-
-use super::XrNode;
 
 #[derive(Clone, Copy, Debug)]
 pub struct XrProjectileEmitterConfig {

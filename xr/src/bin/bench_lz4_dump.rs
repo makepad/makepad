@@ -1,5 +1,6 @@
 use makepad_lz4::{compress_bound, compress_fast_into, decompress_safe, implementation_name};
-use makepad_xr::*;
+use makepad_widgets::*;
+use makepad_xr::net::*;
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -23,7 +24,7 @@ struct BenchResult {
 }
 
 fn latest_dump_paths(count: usize) -> Vec<PathBuf> {
-    let dump_dir = PathBuf::from("xr/util/dumps");
+    let dump_dir = PathBuf::from("xr/dump/dumps");
     let mut entries = fs::read_dir(dump_dir)
         .ok()
         .into_iter()
@@ -109,7 +110,7 @@ fn parse_args() -> Result<(BenchOptions, Vec<PathBuf>), String> {
         paths = latest_dump_paths(options.latest_count);
     }
     if paths.is_empty() {
-        return Err("no dump files found in xr/util/dumps".to_string());
+        return Err("no dump files found in xr/dump/dumps".to_string());
     }
     Ok((options, paths))
 }
