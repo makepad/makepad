@@ -288,6 +288,13 @@ impl Cx {
                         continue;
                     }
                     self.os.openxr.logged_waiting_for_session = false;
+                    // If a script re-apply was requested (e.g., safe area insets
+                    // changed on rotation), fire LiveEdit now.
+                    if self.pending_script_reapply {
+                        self.pending_script_reapply = false;
+                        self.call_event_handler(&Event::LiveEdit);
+                        self.redraw_all();
+                    }
                     self.handle_drawing();
                 }
                 Ok(message) => {

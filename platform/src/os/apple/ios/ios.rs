@@ -573,7 +573,6 @@ impl Cx {
                 self.call_event_handler(&Event::WindowLostFocus(window_id));
             }
             IosEvent::WindowGeomChange(re) => {
-                // do this here because mac
                 let window_id = CxWindowPool::id_zero();
                 let window = &mut self.windows[window_id];
                 window.window_geom = re.new_geom.clone();
@@ -797,6 +796,14 @@ impl Cx {
             IosEvent::PermissionResult(result) => {
                 self.call_event_handler(&Event::PermissionResult(result))
             }
+        }
+
+        // If a script re-apply was requested (e.g., safe area insets changed
+        // on rotation), fire LiveEdit now that all event handlers have returned.
+        if self.pending_script_reapply {
+            self.pending_script_reapply = false;
+            self.call_event_handler(&Event::LiveEdit);
+            self.redraw_all();
         }
 
         if self.any_passes_dirty()
