@@ -871,20 +871,8 @@ impl XrRoot {
         self.env.physics_time_scale()
     }
 
-    pub fn physics_step_dt_ms(&self) -> f64 {
-        self.env.physics_step_dt_ms()
-    }
-
     pub fn physics_depth_query_surface_count(&self) -> usize {
         self.env.physics_depth_query_surface_count()
-    }
-
-    pub fn physics_depth_query_vertex_count(&self) -> usize {
-        self.env.physics_depth_query_vertex_count()
-    }
-
-    pub fn physics_depth_query_triangle_count(&self) -> usize {
-        self.env.physics_depth_query_triangle_count()
     }
 
     pub fn frame_cpu_ms(&self) -> f64 {

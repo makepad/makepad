@@ -1,4 +1,4 @@
-use crate::xr_node::{xr_widget_world_transform, XrNode};
+use crate::xr_node::{xr_widget_world_transform, XrDrawContext, XrNode};
 use crate::*;
 use makepad_widgets::{
     animator::{Animator, AnimatorImpl},
@@ -220,7 +220,8 @@ impl XrView {
     }
 
     fn event_world_transform(&self, scope: &mut Scope) -> Mat4f {
-        if let Some(runtime_body) = xr_runtime_body_from_scope(scope, self.uid) {
+        let draw_context = XrDrawContext::from_scope(scope);
+        if let Some(runtime_body) = draw_context.runtime_body(self.uid) {
             Mat4f::mul(
                 &runtime_body.pose.to_mat4(),
                 &Mat4f::nonuniform_scaled_translation(
@@ -250,7 +251,8 @@ impl XrView {
     }
 
     fn resolved_world_transform(&self, cx: &mut Cx3d, scope: &mut Scope) -> Mat4f {
-        if let Some(runtime_body) = xr_runtime_body_from_scope(scope, self.uid) {
+        let draw_context = XrDrawContext::from_scope(scope);
+        if let Some(runtime_body) = draw_context.runtime_body(self.uid) {
             Mat4f::mul(
                 &runtime_body.pose.to_mat4(),
                 &Mat4f::nonuniform_scaled_translation(

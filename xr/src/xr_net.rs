@@ -116,20 +116,20 @@ impl XrNetAlignmentDescriptorFrame {
 
     pub fn transformed(&self, transform: &Mat4f) -> Self {
         Self {
-            descriptor: xr_depth_align_transform_descriptor(&self.descriptor, transform),
+            descriptor: self.descriptor.transformed(transform),
             ..self.clone()
         }
     }
 
     pub fn test_markers(&self) -> Option<[Vec3f; 2]> {
-        xr_depth_align_test_markers(&self.descriptor)
+        self.descriptor.test_markers()
     }
 
     pub fn solve_remote_to_local(
         local: &XrNetAlignmentDescriptorFrame,
         remote: &XrNetAlignmentDescriptorFrame,
     ) -> Option<XrNetAlignmentSolution> {
-        xr_depth_align_solve_remote_to_local(&local.descriptor, &remote.descriptor)
+        local.descriptor.solve_remote_to_local(&remote.descriptor)
     }
 }
 
@@ -184,13 +184,7 @@ impl XrNetAlignmentDescriptorDumpPair {
 pub fn tsdf_snapshot_height_map_preview(
     snapshot: &TsdfPublishedSnapshot,
 ) -> Option<XrDepthAlignSlicePreview> {
-    let height_map = snapshot.height_map.clone()?;
-    Some(XrDepthAlignSlicePreview {
-        cutout_center: height_map.player_cutout_center,
-        cutout_forward: None,
-        cutout_radius_meters: height_map.player_cutout_radius_meters,
-        height_map,
-    })
+    XrDepthAlignSlicePreview::from_tsdf_snapshot(snapshot)
 }
 
 #[derive(Clone, Debug)]
@@ -424,7 +418,8 @@ fn encode_sync_frame(packet: &XrNetSyncPacket) -> Option<Vec<u8>> {
             compress_fast_into(&payload, &mut compressed, XR_NET_SYNC_LZ4_ACCELERATION)
         {
             let compressed_frame_len = 1 + 4 + compressed_len;
-            if compressed_frame_len < raw_frame_len && compressed_frame_len <= XR_NET_SYNC_MAX_FRAME_BYTES
+            if compressed_frame_len < raw_frame_len
+                && compressed_frame_len <= XR_NET_SYNC_MAX_FRAME_BYTES
             {
                 let mut frame = Vec::with_capacity(compressed_frame_len);
                 frame.push(XR_NET_SYNC_FRAME_LZ4_TAG);
