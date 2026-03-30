@@ -72,46 +72,6 @@ pub struct XrDrawScopeData {
     pub hand_influence_points: [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT],
 }
 
-pub fn xr_runtime_body_from_scope(scope: &mut Scope, uid: WidgetUid) -> Option<XrRuntimeBodyState> {
-    scope
-        .data
-        .get::<XrDrawScopeData>()
-        .and_then(|scope_data| scope_data.runtime_bodies.get(&uid).cloned())
-}
-
-pub fn xr_tracking_from_content_from_scope(scope: &mut Scope) -> Mat4f {
-    scope
-        .data
-        .get::<XrDrawScopeData>()
-        .map(|scope_data| scope_data.tracking_from_content)
-        .unwrap_or_else(Mat4f::identity)
-}
-
-pub fn xr_content_from_tracking_from_scope(scope: &mut Scope) -> Mat4f {
-    scope
-        .data
-        .get::<XrDrawScopeData>()
-        .map(|scope_data| scope_data.content_from_tracking)
-        .unwrap_or_else(Mat4f::identity)
-}
-
-pub fn xr_hand_influence_points_from_scope(
-    scope: &mut Scope,
-) -> [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT] {
-    scope
-        .data
-        .get::<XrDrawScopeData>()
-        .map(|scope_data| scope_data.hand_influence_points)
-        .unwrap_or([None; XR_HAND_INFLUENCE_POINT_COUNT])
-}
-
-pub fn xr_env_texture_from_scope(scope: &mut Scope) -> Option<Texture> {
-    scope
-        .data
-        .get::<XrDrawScopeData>()
-        .and_then(|scope_data| scope_data.env_texture.clone())
-}
-
 #[derive(Clone, Default)]
 pub struct XrPassthroughScopeData {
     pub camera_texture: Option<Texture>,
@@ -121,18 +81,79 @@ pub struct XrPassthroughScopeData {
     pub enabled: bool,
 }
 
+#[derive(Clone, Default)]
+pub struct XrDrawContext {
+    scope_data: XrDrawScopeData,
+}
+
+impl XrDrawContext {
+    pub fn from_scope(scope: &mut Scope) -> Self {
+        Self {
+            scope_data: scope
+                .data
+                .get::<XrDrawScopeData>()
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn runtime_body(&self, uid: WidgetUid) -> Option<XrRuntimeBodyState> {
+        self.scope_data.runtime_bodies.get(&uid).cloned()
+    }
+
+    pub fn tracking_from_content(&self) -> Mat4f {
+        self.scope_data.tracking_from_content
+    }
+
+    pub fn content_from_tracking(&self) -> Mat4f {
+        self.scope_data.content_from_tracking
+    }
+
+    pub fn hand_influence_points(
+        &self,
+    ) -> [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT] {
+        self.scope_data.hand_influence_points
+    }
+
+    pub fn env_texture(&self) -> Option<Texture> {
+        self.scope_data.env_texture.clone()
+    }
+
+    pub fn passthrough(&self) -> XrPassthroughScopeData {
+        XrPassthroughScopeData {
+            camera_texture: self.scope_data.camera_texture.clone(),
+            source_size: self.scope_data.camera_source_size,
+            rotation_steps: self.scope_data.camera_rotation_steps,
+            center_offset_uv: self.scope_data.camera_center_offset_uv,
+            enabled: self.scope_data.camera_enabled,
+        }
+    }
+}
+
+pub fn xr_runtime_body_from_scope(scope: &mut Scope, uid: WidgetUid) -> Option<XrRuntimeBodyState> {
+    XrDrawContext::from_scope(scope).runtime_body(uid)
+}
+
+pub fn xr_tracking_from_content_from_scope(scope: &mut Scope) -> Mat4f {
+    XrDrawContext::from_scope(scope).tracking_from_content()
+}
+
+pub fn xr_content_from_tracking_from_scope(scope: &mut Scope) -> Mat4f {
+    XrDrawContext::from_scope(scope).content_from_tracking()
+}
+
+pub fn xr_hand_influence_points_from_scope(
+    scope: &mut Scope,
+) -> [Option<XrHandInfluencePoint>; XR_HAND_INFLUENCE_POINT_COUNT] {
+    XrDrawContext::from_scope(scope).hand_influence_points()
+}
+
+pub fn xr_env_texture_from_scope(scope: &mut Scope) -> Option<Texture> {
+    XrDrawContext::from_scope(scope).env_texture()
+}
+
 pub fn xr_passthrough_from_scope(scope: &mut Scope) -> XrPassthroughScopeData {
-    scope
-        .data
-        .get::<XrDrawScopeData>()
-        .map(|scope_data| XrPassthroughScopeData {
-            camera_texture: scope_data.camera_texture.clone(),
-            source_size: scope_data.camera_source_size,
-            rotation_steps: scope_data.camera_rotation_steps,
-            center_offset_uv: scope_data.camera_center_offset_uv,
-            enabled: scope_data.camera_enabled,
-        })
-        .unwrap_or_default()
+    XrDrawContext::from_scope(scope).passthrough()
 }
 
 #[derive(Script, WidgetRef, WidgetRegister)]
@@ -336,7 +357,8 @@ pub fn xr_widget_world_transform(
     uid: WidgetUid,
     node: &XrNode,
 ) -> Mat4f {
-    if let Some(runtime_body) = xr_runtime_body_from_scope(scope, uid) {
+    let draw_context = XrDrawContext::from_scope(scope);
+    if let Some(runtime_body) = draw_context.runtime_body(uid) {
         Mat4f::mul(
             &runtime_body.pose.to_mat4(),
             &Mat4f::nonuniform_scaled_translation(
