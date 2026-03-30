@@ -42,9 +42,7 @@ struct DepthQueryBodySurfaceSet {
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct DepthQueryPhysicsStats {
-    pub(crate) active_surface_count: usize,
-    pub(crate) vertex_count: usize,
-    pub(crate) triangle_count: usize,
+    pub(crate) surface_count: usize,
 }
 
 struct RapierDepthQueryHooks;
@@ -670,9 +668,7 @@ impl RapierScene {
                 collider.set_restitution(target.collider.restitution.max(0.0));
                 collider.set_enabled(supports_body);
                 if supports_body {
-                    self.depth_query_stats.active_surface_count += 1;
-                    self.depth_query_stats.vertex_count += target.collider.vertex_count();
-                    self.depth_query_stats.triangle_count += target.collider.triangle_count();
+                    self.depth_query_stats.surface_count += 1;
                 }
             }
         }

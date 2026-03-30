@@ -26,6 +26,18 @@ pub struct XrDepthAlignSlicePreview {
     pub cutout_radius_meters: f32,
 }
 
+impl XrDepthAlignSlicePreview {
+    pub fn from_tsdf_snapshot(snapshot: &TsdfPublishedSnapshot) -> Option<Self> {
+        let height_map = snapshot.height_map.clone()?;
+        Some(Self {
+            cutout_center: height_map.player_cutout_center,
+            cutout_forward: None,
+            cutout_radius_meters: height_map.player_cutout_radius_meters,
+            height_map,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, SerBin, DeBin)]
 pub struct XrDepthAlignVerticalDescriptor {
     pub origin_x: f32,
@@ -71,6 +83,121 @@ pub struct XrDepthAlignDescriptor {
     pub height_map: Option<XrDepthAlignHeightMap>,
 }
 
+impl XrDepthAlignDescriptor {
+    pub fn build_wall_normal_histogram(
+        samples: &[XrDepthAlignSample],
+        bin_count: usize,
+    ) -> Vec<f32> {
+        let bin_count = bin_count.max(1);
+        let mut histogram = vec![0.0; bin_count];
+        for sample in samples {
+            if sample.kind != XrDepthAlignSampleKind::Wall {
+                continue;
+            }
+            let Some(axis) = xz_axis(sample.normal) else {
+                continue;
+            };
+            let angle = axis.x.atan2(-axis.z);
+            let normalized = (angle + std::f32::consts::PI) / std::f32::consts::TAU;
+            let bin = (normalized * bin_count as f32).floor() as isize;
+            histogram[bin.rem_euclid(bin_count as isize) as usize] += sample.weight.max(0.01);
+        }
+        normalize_histogram(&mut histogram);
+        histogram
+    }
+
+    pub fn transformed(&self, transform: &Mat4f) -> Self {
+        let transform_dir = |dir: Vec3f| {
+            transform
+                .transform_vec4(vec4f(dir.x, dir.y, dir.z, 0.0))
+                .to_vec3f()
+        };
+        let mut descriptor = self.clone();
+        for sample in &mut descriptor.samples {
+            sample.point = transform
+                .transform_vec4(vec4f(sample.point.x, sample.point.y, sample.point.z, 1.0))
+                .to_vec3f();
+            sample.normal =
+                align_safe_normalize(transform_dir(sample.normal)).unwrap_or(sample.normal);
+        }
+        descriptor.floor_y = transform
+            .transform_vec4(vec4f(0.0, descriptor.floor_y, 0.0, 1.0))
+            .to_vec3f()
+            .y;
+        descriptor.vertical_descriptor = descriptor
+            .vertical_descriptor
+            .as_ref()
+            .and_then(|vertical| transform_vertical_descriptor(vertical, transform));
+        descriptor.height_map = descriptor
+            .height_map
+            .as_ref()
+            .and_then(|height_map| transform_height_map(height_map, transform));
+        descriptor.wall_normal_histogram =
+            if !descriptor.samples.is_empty() && !descriptor.wall_normal_histogram.is_empty() {
+                Self::build_wall_normal_histogram(
+                    &descriptor.samples,
+                    descriptor.wall_normal_histogram.len(),
+                )
+            } else {
+                Vec::new()
+            };
+        descriptor
+    }
+
+    pub fn test_markers(&self) -> Option<[Vec3f; 2]> {
+        let signal = selected_descriptor_signal_cells(self);
+        let mut best = None::<(f32, f32, Vec3f, Vec3f)>;
+        for (index, first) in signal.iter().enumerate() {
+            for second in signal.iter().skip(index + 1) {
+                let distance = (second.point - first.point).length();
+                if distance < 0.18 {
+                    continue;
+                }
+                let weight = first.weight + second.weight;
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_distance, best_weight, _, _)| {
+                        distance > *best_distance + 1.0e-4
+                            || ((distance - *best_distance).abs() <= 1.0e-4
+                                && weight > *best_weight)
+                    })
+                {
+                    best = Some((distance, weight, first.point, second.point));
+                }
+            }
+        }
+        best.map(|(_, _, first, second)| [first, second])
+    }
+
+    pub fn solver<'a>(&'a self, remote: &'a Self) -> XrDepthAlignSolver<'a> {
+        XrDepthAlignSolver::new(self, remote)
+    }
+
+    pub fn solve_remote_to_local(&self, remote: &Self) -> Option<XrDepthAlignSolution> {
+        self.solver(remote).solve()
+    }
+
+    pub fn analyze_remote_to_local(&self, remote: &Self) -> XrDepthAlignSolveDiagnostic {
+        self.solver(remote).analyze()
+    }
+
+    pub fn analyze_remote_to_local_seeded(
+        &self,
+        remote: &Self,
+        previous_solution: Option<XrDepthAlignSolution>,
+    ) -> XrDepthAlignSolveDiagnostic {
+        self.solver(remote).analyze_seeded(previous_solution)
+    }
+
+    pub fn rescore_remote_to_local(
+        &self,
+        remote: &Self,
+        solution: XrDepthAlignSolution,
+    ) -> XrDepthAlignSolution {
+        self.solver(remote).rescore(solution)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SerBin, DeBin)]
 pub struct XrDepthAlignDebug {
     pub near_surface_voxel_count: u32,
@@ -107,6 +234,14 @@ impl XrDepthAlignSolution {
 
     pub fn ranking_confidence(&self) -> f32 {
         (self.confidence * (0.30 + 0.70 * self.symmetry_confidence.clamp(0.0, 1.0))).clamp(0.0, 1.0)
+    }
+
+    pub fn is_accepted(self, diagnostic: &XrDepthAlignSolveDiagnostic) -> bool {
+        self.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES
+            && self.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE
+            && (!diagnostic.local_vertical_descriptor
+                || !diagnostic.remote_vertical_descriptor
+                || self.symmetry_confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE)
     }
 }
 
@@ -149,7 +284,7 @@ pub struct XrDepthAlignSolveDiagnostic {
 impl XrDepthAlignSolveDiagnostic {
     pub fn accepted_solution(&self) -> Option<XrDepthAlignSolution> {
         self.best_solution
-            .filter(|solution| xr_depth_align_solution_is_accepted(self, *solution))
+            .filter(|solution| solution.is_accepted(self))
     }
 
     pub fn outcome(&self) -> XrDepthAlignSolveOutcome {
@@ -179,6 +314,87 @@ pub struct XrDepthAlignPreview {
     pub remote_sample_count: usize,
     pub remote_floor_sample_count: usize,
     pub remote_wall_sample_count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct XrDepthAlignSolver<'a> {
+    local: &'a XrDepthAlignDescriptor,
+    remote: &'a XrDepthAlignDescriptor,
+}
+
+impl<'a> XrDepthAlignSolver<'a> {
+    pub fn new(local: &'a XrDepthAlignDescriptor, remote: &'a XrDepthAlignDescriptor) -> Self {
+        Self { local, remote }
+    }
+
+    pub fn matcher(self, previous_solution: Option<XrDepthAlignSolution>) -> XrDepthAlignMatcher {
+        XrDepthAlignMatcher::new(self.local, self.remote, previous_solution)
+    }
+
+    pub fn solve(self) -> Option<XrDepthAlignSolution> {
+        self.analyze().accepted_solution()
+    }
+
+    pub fn analyze(self) -> XrDepthAlignSolveDiagnostic {
+        self.analyze_seeded(None)
+    }
+
+    pub fn analyze_seeded(
+        self,
+        previous_solution: Option<XrDepthAlignSolution>,
+    ) -> XrDepthAlignSolveDiagnostic {
+        self.matcher(previous_solution).finish()
+    }
+
+    pub fn rescore(self, solution: XrDepthAlignSolution) -> XrDepthAlignSolution {
+        let local_signal = selected_descriptor_signal_cells(self.local);
+        let remote_signal = selected_descriptor_signal_cells(self.remote);
+        let remote_dense_signal = descriptor_dense_signal_cells(self.remote);
+        let remote_flat_signal = decimate_signal_cells(
+            &descriptor_flat_surface_cells(self.remote),
+            XR_DEPTH_ALIGN_VERTICAL_OFFSET_MAX_FLAT_SAMPLES,
+        );
+        let local_sample_cache = self
+            .local
+            .height_map
+            .as_ref()
+            .and_then(build_height_map_sample_cache);
+        if local_signal.is_empty() || remote_signal.is_empty() {
+            return XrDepthAlignSolution {
+                yaw_radians: solution.yaw_radians,
+                translation: solution.translation,
+                confidence: 0.0,
+                symmetry_confidence: 0.0,
+                residual_meters: f32::INFINITY,
+                matched_samples: 0,
+            };
+        }
+        let rescored = score_signal_alignment_solution(
+            &local_signal,
+            &remote_signal,
+            solution.yaw_radians,
+            solution.translation,
+        );
+        let rescored = match (
+            self.local.height_map.as_ref(),
+            self.remote.height_map.as_ref(),
+        ) {
+            (Some(local_map), Some(remote_map)) => refine_solution_vertical_offset_from_overlap(
+                local_map,
+                remote_map,
+                &remote_flat_signal,
+                rescored,
+            ),
+            _ => rescored,
+        };
+        apply_height_map_alignment_support(
+            rescored,
+            self.local.height_map.as_ref(),
+            local_sample_cache.as_ref(),
+            self.remote.height_map.as_ref(),
+            &remote_dense_signal,
+        )
+    }
 }
 
 const XR_DEPTH_ALIGN_MIN_SIGNAL_SAMPLES: usize = 4;
@@ -289,11 +505,7 @@ pub fn xr_depth_align_solution_is_accepted(
     diagnostic: &XrDepthAlignSolveDiagnostic,
     solution: XrDepthAlignSolution,
 ) -> bool {
-    solution.matched_samples >= XR_DEPTH_ALIGN_ACCEPT_MIN_MATCHED_SAMPLES
-        && solution.confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_CONFIDENCE
-        && (!diagnostic.local_vertical_descriptor
-            || !diagnostic.remote_vertical_descriptor
-            || solution.symmetry_confidence > XR_DEPTH_ALIGN_ACCEPT_MIN_SYMMETRY_CONFIDENCE)
+    solution.is_accepted(diagnostic)
 }
 
 pub fn xr_depth_align_loopback_preview_solution() -> XrDepthAlignSolution {
@@ -311,100 +523,32 @@ pub fn xr_depth_align_build_wall_normal_histogram(
     samples: &[XrDepthAlignSample],
     bin_count: usize,
 ) -> Vec<f32> {
-    let bin_count = bin_count.max(1);
-    let mut histogram = vec![0.0; bin_count];
-    for sample in samples {
-        if sample.kind != XrDepthAlignSampleKind::Wall {
-            continue;
-        }
-        let Some(axis) = xz_axis(sample.normal) else {
-            continue;
-        };
-        let angle = axis.x.atan2(-axis.z);
-        let normalized = (angle + std::f32::consts::PI) / std::f32::consts::TAU;
-        let bin = (normalized * bin_count as f32).floor() as isize;
-        histogram[bin.rem_euclid(bin_count as isize) as usize] += sample.weight.max(0.01);
-    }
-    normalize_histogram(&mut histogram);
-    histogram
+    XrDepthAlignDescriptor::build_wall_normal_histogram(samples, bin_count)
 }
 
 pub fn xr_depth_align_transform_descriptor(
     descriptor: &XrDepthAlignDescriptor,
     transform: &Mat4f,
 ) -> XrDepthAlignDescriptor {
-    let transform_dir = |dir: Vec3f| {
-        transform
-            .transform_vec4(vec4f(dir.x, dir.y, dir.z, 0.0))
-            .to_vec3f()
-    };
-    let mut descriptor = descriptor.clone();
-    for sample in &mut descriptor.samples {
-        sample.point = transform
-            .transform_vec4(vec4f(sample.point.x, sample.point.y, sample.point.z, 1.0))
-            .to_vec3f();
-        sample.normal = align_safe_normalize(transform_dir(sample.normal)).unwrap_or(sample.normal);
-    }
-    descriptor.floor_y = transform
-        .transform_vec4(vec4f(0.0, descriptor.floor_y, 0.0, 1.0))
-        .to_vec3f()
-        .y;
-    descriptor.vertical_descriptor = descriptor
-        .vertical_descriptor
-        .as_ref()
-        .and_then(|vertical| transform_vertical_descriptor(vertical, transform));
-    descriptor.height_map = descriptor
-        .height_map
-        .as_ref()
-        .and_then(|height_map| transform_height_map(height_map, transform));
-    descriptor.wall_normal_histogram =
-        if !descriptor.samples.is_empty() && !descriptor.wall_normal_histogram.is_empty() {
-            xr_depth_align_build_wall_normal_histogram(
-                &descriptor.samples,
-                descriptor.wall_normal_histogram.len(),
-            )
-        } else {
-            Vec::new()
-        };
-    descriptor
+    descriptor.transformed(transform)
 }
 
 pub fn xr_depth_align_test_markers(descriptor: &XrDepthAlignDescriptor) -> Option<[Vec3f; 2]> {
-    let signal = selected_descriptor_signal_cells(descriptor);
-    let mut best = None::<(f32, f32, Vec3f, Vec3f)>;
-    for (index, first) in signal.iter().enumerate() {
-        for second in signal.iter().skip(index + 1) {
-            let distance = (second.point - first.point).length();
-            if distance < 0.18 {
-                continue;
-            }
-            let weight = first.weight + second.weight;
-            if best
-                .as_ref()
-                .is_none_or(|(best_distance, best_weight, _, _)| {
-                    distance > *best_distance + 1.0e-4
-                        || ((distance - *best_distance).abs() <= 1.0e-4 && weight > *best_weight)
-                })
-            {
-                best = Some((distance, weight, first.point, second.point));
-            }
-        }
-    }
-    best.map(|(_, _, first, second)| [first, second])
+    descriptor.test_markers()
 }
 
 pub fn xr_depth_align_solve_remote_to_local(
     local: &XrDepthAlignDescriptor,
     remote: &XrDepthAlignDescriptor,
 ) -> Option<XrDepthAlignSolution> {
-    xr_depth_align_analyze_remote_to_local(local, remote).accepted_solution()
+    local.solve_remote_to_local(remote)
 }
 
 pub fn xr_depth_align_analyze_remote_to_local(
     local: &XrDepthAlignDescriptor,
     remote: &XrDepthAlignDescriptor,
 ) -> XrDepthAlignSolveDiagnostic {
-    xr_depth_align_analyze_remote_to_local_seeded(local, remote, None)
+    local.analyze_remote_to_local(remote)
 }
 
 pub fn xr_depth_align_analyze_remote_to_local_seeded(
@@ -412,7 +556,7 @@ pub fn xr_depth_align_analyze_remote_to_local_seeded(
     remote: &XrDepthAlignDescriptor,
     previous_solution: Option<XrDepthAlignSolution>,
 ) -> XrDepthAlignSolveDiagnostic {
-    XrDepthAlignMatcher::new(local, remote, previous_solution).finish()
+    local.analyze_remote_to_local_seeded(remote, previous_solution)
 }
 
 pub fn xr_depth_align_rescore_remote_to_local(
@@ -420,49 +564,7 @@ pub fn xr_depth_align_rescore_remote_to_local(
     remote: &XrDepthAlignDescriptor,
     solution: XrDepthAlignSolution,
 ) -> XrDepthAlignSolution {
-    let local_signal = selected_descriptor_signal_cells(local);
-    let remote_signal = selected_descriptor_signal_cells(remote);
-    let remote_dense_signal = descriptor_dense_signal_cells(remote);
-    let remote_flat_signal = decimate_signal_cells(
-        &descriptor_flat_surface_cells(remote),
-        XR_DEPTH_ALIGN_VERTICAL_OFFSET_MAX_FLAT_SAMPLES,
-    );
-    let local_sample_cache = local
-        .height_map
-        .as_ref()
-        .and_then(build_height_map_sample_cache);
-    if local_signal.is_empty() || remote_signal.is_empty() {
-        return XrDepthAlignSolution {
-            yaw_radians: solution.yaw_radians,
-            translation: solution.translation,
-            confidence: 0.0,
-            symmetry_confidence: 0.0,
-            residual_meters: f32::INFINITY,
-            matched_samples: 0,
-        };
-    }
-    let rescored = score_signal_alignment_solution(
-        &local_signal,
-        &remote_signal,
-        solution.yaw_radians,
-        solution.translation,
-    );
-    let rescored = match (local.height_map.as_ref(), remote.height_map.as_ref()) {
-        (Some(local_map), Some(remote_map)) => refine_solution_vertical_offset_from_overlap(
-            local_map,
-            remote_map,
-            &remote_flat_signal,
-            rescored,
-        ),
-        _ => rescored,
-    };
-    apply_height_map_alignment_support(
-        rescored,
-        local.height_map.as_ref(),
-        local_sample_cache.as_ref(),
-        remote.height_map.as_ref(),
-        &remote_dense_signal,
-    )
+    local.rescore_remote_to_local(remote, solution)
 }
 
 const XR_DEPTH_ALIGN_HEIGHT_REFINE_PHASES: [(f32, f32); 5] = [

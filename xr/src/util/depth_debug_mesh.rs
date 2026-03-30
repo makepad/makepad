@@ -13,10 +13,6 @@ const XR_DEBUG_TSDF_MESH_NEAR_VISIBILITY_METERS: f32 = 1.35;
 const XR_DEBUG_TSDF_MESH_VIEW_CONE_DOT: f32 = 0.309_016_88;
 const XR_DEBUG_TSDF_MESH_CELL_STRIDE_VOXELS: i32 = 1;
 const XR_DEBUG_TSDF_MESH_CHUNK_OVERLAP_CELLS: i32 = 2;
-const XR_DEBUG_TSDF_MIN_MESH_CONFIDENCE: u8 = 3;
-const XR_DEBUG_TSDF_RECENT_MESH_CONFIDENCE: u8 = 1;
-const XR_DEBUG_TSDF_RECENT_MESH_GENERATIONS: u64 = 6;
-const XR_DEBUG_TSDF_RECENT_MESH_MAX_ABS_DISTANCE: f32 = 0.6;
 const XR_DEBUG_TSDF_DENSE_HOLE_FILL_MAX_PASSES: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -168,7 +164,11 @@ fn pack_surface_mesh_debug_vertices(mesh: &SurfaceMesh32) -> (Vec<u32>, Vec<f32>
 fn push_debug_depth_triangle(indices: &mut Vec<u32>, vertices: &mut Vec<f32>, tri: [Vec3f; 3]) {
     let base = (vertices.len() / XR_DEBUG_DEPTH_FLOATS_PER_VERTEX) as u32;
     for (corner, position) in tri.into_iter().enumerate() {
-        push_debug_depth_vertex(vertices, position, DEBUG_DEPTH_TRIANGLE_BARYCENTRICS[corner]);
+        push_debug_depth_vertex(
+            vertices,
+            position,
+            DEBUG_DEPTH_TRIANGLE_BARYCENTRICS[corner],
+        );
     }
     indices.extend_from_slice(&[base, base + 1, base + 2]);
 }
@@ -209,31 +209,16 @@ fn dense_corner_coord(base: VoxelCoord, corner: VoxelCoord, stride: i32) -> Voxe
     )
 }
 
-fn snapshot_meshing_distance(
-    grid: &SparseTsdGridReadSnapshot,
-    coord: VoxelCoord,
-    current_generation: u64,
-) -> Option<f32> {
+fn snapshot_meshing_distance(grid: &SparseTsdGridReadSnapshot, coord: VoxelCoord) -> Option<f32> {
     let (chunk_key, id) = grid.chunk_key_and_local_index_xyz(coord.x, coord.y, coord.z);
     let chunk = grid.chunks.get(&chunk_key)?;
-    let confidence = chunk.confidence(id);
-    let value = chunk.value(id)?;
-    if confidence >= XR_DEBUG_TSDF_MIN_MESH_CONFIDENCE {
-        return Some(value);
-    }
-    let observed_generation = chunk.observed_generation(id, current_generation);
-    (confidence >= XR_DEBUG_TSDF_RECENT_MESH_CONFIDENCE
-        && current_generation.saturating_sub(observed_generation)
-            <= XR_DEBUG_TSDF_RECENT_MESH_GENERATIONS
-        && value.abs() <= XR_DEBUG_TSDF_RECENT_MESH_MAX_ABS_DISTANCE)
-        .then_some(value)
+    chunk.value(id)
 }
 
 fn extract_dense_region_into(
     grid: &SparseTsdGridReadSnapshot,
     start: VoxelCoord,
     extent: VoxelCoord,
-    current_generation: u64,
     dense: &mut Vec<f32>,
 ) {
     let sx = extent.x.max(0) as usize;
@@ -245,8 +230,7 @@ fn extract_dense_region_into(
         for y in 0..extent.y.max(0) {
             for x in 0..extent.x.max(0) {
                 let coord = VoxelCoord::new(start.x + x, start.y + y, start.z + z);
-                let value = snapshot_meshing_distance(grid, coord, current_generation)
-                    .unwrap_or(f32::NEG_INFINITY);
+                let value = snapshot_meshing_distance(grid, coord).unwrap_or(f32::NEG_INFINITY);
                 dense[(x as usize) + (y as usize) * sx + (z as usize) * sx * sy] = value;
             }
         }
@@ -323,13 +307,7 @@ fn repair_dense_meshing_holes(dense: &mut Vec<f32>, scratch: &mut Vec<f32>, exte
     }
 }
 
-fn surface_net_mesh_from_dense(
-    volume: &[f32],
-    voxel_count: VoxelCoord,
-    voxel_size: f32,
-    start_coord: VoxelCoord,
-    stride: i32,
-) -> Option<SurfaceMesh32> {
+fn scaled_voxel_count(voxel_count: VoxelCoord, stride: i32) -> Option<VoxelCoord> {
     if voxel_count.x <= 1 || voxel_count.y <= 1 || voxel_count.z <= 1 {
         return None;
     }
@@ -339,9 +317,18 @@ fn surface_net_mesh_from_dense(
         voxel_count.y.div_euclid(stride),
         voxel_count.z.div_euclid(stride),
     );
-    if scaled_count.x <= 1 || scaled_count.y <= 1 || scaled_count.z <= 1 {
-        return None;
-    }
+    (scaled_count.x > 1 && scaled_count.y > 1 && scaled_count.z > 1).then_some(scaled_count)
+}
+
+fn surface_net_mesh_from_dense(
+    volume: &[f32],
+    voxel_count: VoxelCoord,
+    voxel_size: f32,
+    start_coord: VoxelCoord,
+    stride: i32,
+) -> Option<SurfaceMesh32> {
+    let stride = stride.max(1);
+    let scaled_count = scaled_voxel_count(voxel_count, stride)?;
 
     let sample_value = |coord: VoxelCoord| -> f32 {
         let raw = volume[flatten_coord(coord, voxel_count)];
@@ -448,10 +435,7 @@ fn surface_net_mesh_from_dense(
     if indices.is_empty() {
         None
     } else {
-        Some(SurfaceMesh32 {
-            positions,
-            indices,
-        })
+        Some(SurfaceMesh32 { positions, indices })
     }
 }
 
@@ -746,13 +730,7 @@ impl DebugDepthMeshTriangulator {
         }
         let start = mesh_chunk_start_coord(plan.chunk_key, layout);
         let extent = mesh_chunk_extent(layout);
-        extract_dense_region_into(
-            snapshot.grid.as_ref(),
-            start,
-            extent,
-            snapshot.generation,
-            &mut self.dense,
-        );
+        extract_dense_region_into(snapshot.grid.as_ref(), start, extent, &mut self.dense);
         repair_dense_meshing_holes(&mut self.dense, &mut self.fill_scratch, extent);
         let mesh = surface_net_mesh_from_dense(
             &self.dense,
@@ -795,6 +773,7 @@ mod tests {
         chunk_edge: i32,
         coord: VoxelCoord,
         normalized_distance: f32,
+        confidence: u8,
     ) {
         let chunk_key = ChunkKey::new(
             coord.x.div_euclid(chunk_edge),
@@ -812,10 +791,13 @@ mod tests {
                 .entry(chunk_key)
                 .or_insert_with(|| Arc::new(SparseTsdReadChunk::new(edge * edge * edge))),
         );
-        chunk.set_value(id, normalized_distance, 8, 1);
+        chunk.set_value(id, normalized_distance, confidence, 1);
     }
 
-    fn make_flat_floor_snapshot(voxel_size: f32) -> TsdfPublishedSnapshot {
+    fn make_flat_floor_snapshot_with_confidence(
+        voxel_size: f32,
+        confidence: u8,
+    ) -> TsdfPublishedSnapshot {
         let chunk_edge = 8;
         let mut chunks = HashMap::new();
         let tsd_distance_meters = depth_tsd_distance_meters(voxel_size);
@@ -830,6 +812,7 @@ mod tests {
                         chunk_edge,
                         VoxelCoord::new(x, y, z),
                         normalized,
+                        confidence,
                     );
                     active_value_count += 1;
                 }
@@ -854,6 +837,10 @@ mod tests {
             }),
             height_map: None,
         }
+    }
+
+    fn make_flat_floor_snapshot(voxel_size: f32) -> TsdfPublishedSnapshot {
+        make_flat_floor_snapshot_with_confidence(voxel_size, 8)
     }
 
     #[test]
@@ -931,5 +918,24 @@ mod tests {
         assert!(built_chunks
             .iter()
             .all(|chunk| !chunk.indices.is_empty() && !chunk.vertices.is_empty()));
+    }
+
+    #[test]
+    fn debug_depth_mesh_includes_low_confidence_valid_voxels() {
+        let snapshot = make_flat_floor_snapshot_with_confidence(0.05, 1);
+        let view_plan =
+            debug_depth_mesh_view_plan(&snapshot, Pose::new(Quat::default(), vec3f(0.0, 1.4, 0.0)));
+
+        let mut triangulator = DebugDepthMeshTriangulator::default();
+        let built_chunks: Vec<_> = view_plan
+            .visible_chunks
+            .iter()
+            .filter_map(|plan| triangulator.build_chunk(&snapshot, view_plan.layout, plan))
+            .collect();
+
+        assert!(
+            !built_chunks.is_empty(),
+            "expected triangulated visible chunks even from low-confidence valid TSDF voxels"
+        );
     }
 }

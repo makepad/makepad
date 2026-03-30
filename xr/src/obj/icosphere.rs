@@ -2,7 +2,7 @@ use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
 use std::cell::RefCell;
 
 use super::{
-    xr_node::{xr_env_texture_from_scope, xr_widget_world_transform},
+    xr_node::{xr_widget_world_transform, XrDrawContext},
     XrNode,
 };
 
@@ -258,8 +258,8 @@ impl Widget for IcoSphere {
         self.draw_ico.diffuse = self.diffuse;
         self.draw_ico.color = self.color;
         self.draw_ico.depth_clip = 1.0;
-        self.draw_ico
-            .set_env_texture(xr_env_texture_from_scope(scope));
+        let draw_context = XrDrawContext::from_scope(scope);
+        self.draw_ico.set_env_texture(draw_context.env_texture());
         self.draw_ico.draw(cx, geometry_id);
 
         self.node.draw_3d(cx, scope)
