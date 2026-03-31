@@ -17,7 +17,7 @@ pub mod render {
 
 pub(crate) mod prelude {
     pub use crate::algorithms::depth_align::*;
-    pub use crate::{net::*, obj::*, render::*, scene::*};
+    pub use crate::{net::*, render::*, scene::*};
     pub use makepad_widgets::*;
 }
 

@@ -75,6 +75,13 @@ pub struct XrCamera {
     pub viewport_rect: Option<Rect>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum XrRootAction {
+    PhysicsReset,
+    #[default]
+    None,
+}
+
 impl Default for XrCamera {
     fn default() -> Self {
         Self {
@@ -509,6 +516,11 @@ pub struct XrRoot {
 }
 
 impl XrRoot {
+    fn reset_scene_physics_and_emit_action(&mut self, cx: &mut Cx) {
+        self.env.reset_physics(cx);
+        cx.widget_action(self.widget_uid(), XrRootAction::PhysicsReset);
+    }
+
     pub fn spawn_body(&mut self, cx: &mut Cx, spawn: XrBodySpawn) {
         self.env.spawn_body(cx, spawn);
     }
@@ -1078,7 +1090,7 @@ impl Widget for XrRoot {
         }
         if method == live_id!(reset_physics) || method == live_id!(reset_scene_physics) {
             vm.with_cx_mut(|cx| {
-                self.env.reset_physics(cx);
+                self.reset_scene_physics_and_emit_action(cx);
             });
             return ScriptAsyncResult::Return(NIL);
         }
@@ -1178,7 +1190,7 @@ impl Widget for XrRoot {
                 }
                 self.runtime.last_xr_state = Some(augmented_state.clone());
                 if augmented_update.clicked_menu() {
-                    self.env.reset_physics(cx);
+                    self.reset_scene_physics_and_emit_action(cx);
                 }
                 self.env.ensure_physics(cx, &self.children);
                 self.env.step_physics(cx);

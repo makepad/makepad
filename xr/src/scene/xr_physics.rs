@@ -173,7 +173,15 @@ fn grab_offset_from_body_anchor(
 }
 
 fn hand_grab_pose(hand: &XrHand) -> Option<Pose> {
-    hand.pinch_anchor_pose().or_else(|| hand.tracking_pose())
+    let palm_pose = hand.tracking_pose()?;
+    let thumb_tip = hand.tip_pos_checked(XrHand::THUMB_TIP);
+    let index_tip = hand.tip_pos_checked(XrHand::INDEX_TIP);
+    let position = match (thumb_tip, index_tip) {
+        (Some(thumb_tip), Some(index_tip)) => (thumb_tip + index_tip) * 0.5,
+        (_, Some(index_tip)) => index_tip,
+        _ => return None,
+    };
+    Some(Pose::new(palm_pose.orientation, position))
 }
 
 fn depth_query_body_user_data(widget_uid: WidgetUid) -> u128 {
@@ -1234,8 +1242,7 @@ impl RapierScene {
             body.set_enabled(true);
             body.set_position(rapier_pose(pose), false);
             if shadow {
-                let remaining_prediction_seconds = if matches!(mode, XrSharedObjectMode::Sleeping)
-                {
+                let remaining_prediction_seconds = if matches!(mode, XrSharedObjectMode::Sleeping) {
                     0.0
                 } else {
                     XR_SHADOW_BODY_MAX_EXTRAPOLATION_SECONDS
@@ -1482,7 +1489,7 @@ mod tests {
             widget_uid,
             false,
             XrSharedObjectMode::ContactDominated {
-                authority: XrPeerId(7),
+                authority: XrNetPeerId(7),
                 hand: XrSharedHand::RightHand,
             },
             pose,
@@ -1978,5 +1985,90 @@ mod tests {
             .get(cube.body)
             .expect("cube body should still exist after sticky-grab release");
         assert_eq!(body.body_type(), RigidBodyType::Dynamic);
+    }
+
+    #[test]
+    fn hand_grab_pose_uses_index_tip_when_pinch_midpoint_is_unavailable() {
+        let mut scene = RapierScene::new(0.0);
+        let widget_uid = WidgetUid(46);
+        let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, 0.0));
+        scene.spawn_dynamic_box(
+            widget_uid,
+            pose,
+            vec3f(0.05, 0.05, 0.05),
+            vec3f(1.0, 1.0, 1.0),
+            1.0,
+            0.5,
+            0.0,
+        );
+        let cube = scene.cubes[0];
+        let hand_pose = Pose::new(Quat::default(), pose.position);
+
+        scene.left_hand_grab = HandGrabState {
+            shared_hand: XrSharedHand::LeftHand,
+            pose: hand_pose,
+            previous_pose: hand_pose,
+            linvel: vec3f(0.0, 0.0, 0.0),
+            tracked: true,
+            gripping: true,
+            held_body: Some(cube.body),
+            grab_offset: Pose::default(),
+        };
+
+        let mut hand = XrHand::default();
+        hand.flags = XrHand::IN_VIEW | XrHand::AIM_VALID;
+        hand.tips_active = XrHand::GRAB_ACTIVE | (1 << XrHand::INDEX_TIP);
+        hand.tips[XrHand::INDEX_TIP] = 0.034;
+        hand.joints[XrHand::CENTER] = Pose::new(Quat::default(), pose.position);
+        hand.joints[XrHand::WRIST] =
+            Pose::new(Quat::default(), pose.position + vec3f(0.0, -0.03, 0.05));
+        hand.joints[XrHand::INDEX_BASE] =
+            Pose::new(Quat::default(), pose.position + vec3f(0.0, 0.0, -0.010));
+        hand.joints[XrHand::INDEX_KNUCKLE1] =
+            Pose::new(Quat::default(), pose.position + vec3f(0.0, -0.005, -0.030));
+        hand.joints[XrHand::INDEX_KNUCKLE2] = Pose::new(
+            Quat::default(),
+            pose.position + vec3f(0.012, -0.018, -0.040),
+        );
+        hand.joints[XrHand::INDEX_KNUCKLE3] = Pose::new(
+            Quat::default(),
+            pose.position + vec3f(0.022, -0.032, -0.020),
+        );
+
+        assert!(
+            hand.grab_intent(),
+            "curled hand should still report grab intent"
+        );
+        assert!(
+            hand.tracking_pose().is_some(),
+            "palm tracking should still be valid for the sample"
+        );
+        assert!(
+            hand.pinch_anchor_pose().is_none(),
+            "sample must not expose a pinch anchor"
+        );
+        let index_tip = hand
+            .tip_pos_checked(XrHand::INDEX_TIP)
+            .expect("index tip should still be valid");
+        let palm_pose = hand
+            .tracking_pose()
+            .expect("tracking pose should still be valid");
+
+        scene.sync_tracked_hands(&hand, &XrHand::default());
+        scene.apply_held_body_targets();
+
+        assert_eq!(scene.left_hand_grab.held_body, Some(cube.body));
+        assert!(scene.left_hand_grab.tracked);
+        assert!(scene.left_hand_grab.gripping);
+        assert_vec3_close(scene.left_hand_grab.pose.position, index_tip, 0.0001);
+        assert!(
+            (scene.left_hand_grab.pose.position - palm_pose.position).length() > 0.01,
+            "grab pose should stay on the finger anchor, not the palm"
+        );
+        let body = scene
+            .bodies
+            .get(cube.body)
+            .expect("cube body should still exist after index-tip hold update");
+        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
     }
 }

@@ -1449,6 +1449,7 @@ struct XrPeerSyncRuntime {
     next_clock_ping_seq: u32,
     next_clock_ping_at: f64,
     accepted_activity: Option<XrNetActivityState>,
+    local_shared_object_reannounce_needed: bool,
     metrics: XrPeerSyncMetrics,
 }
 
@@ -1614,6 +1615,7 @@ impl XrPeerSync {
     const SHARED_OBJECT_IMPULSE_DISTANCE_METERS: f32 = 0.16;
     const SHARED_OBJECT_IMPULSE_MIN_HAND_SPEED: f32 = 0.65;
     const SHARED_OBJECT_IMPULSE_SCALE: f32 = 0.08;
+    const SHARED_OBJECT_BOOTSTRAP_OWNER_TAG: u64 = 0x626f6f7473747261;
 
     pub fn status_text(&self) -> &str {
         self.diagnostics.status_text()
@@ -1859,6 +1861,208 @@ impl XrPeerSync {
         Some(control)
     }
 
+    fn local_shared_object_spawn_control(
+        activity_id: XrActivityId,
+        snapshot: XrLocalSharedObjectSnapshot,
+        body: &XrRuntimeBodyState,
+    ) -> XrNetSharedObjectControl {
+        XrNetSharedObjectControl::XrSpawnObject {
+            object_id: snapshot.object_id,
+            epoch: snapshot.epoch,
+            authority: snapshot.authority,
+            fidelity: snapshot.fidelity,
+            shape: XrSharedObjectShape::ActivitySpawnable {
+                activity_id,
+                spawnable_id: snapshot.spawnable_object_id,
+            },
+            pose: body.pose,
+            linvel: body.linvel,
+            angvel: body.angvel,
+        }
+    }
+
+    fn bootstrap_owner_peer_id(
+        &self,
+        spawnable_object_id: XrSpawnableObjectId,
+    ) -> Option<XrNetPeerId> {
+        let local_node_id = self.runtime.net_node.as_ref()?.node_id();
+        let mut peer_ids = self.runtime.registry.peer_ids();
+        if peer_ids.is_empty() {
+            return None;
+        }
+        peer_ids.push(local_node_id);
+        peer_ids.sort_by_key(|peer_id| peer_id.0);
+        peer_ids.dedup_by_key(|peer_id| peer_id.0);
+        let owner_index = (Self::bootstrap_hash_u64(
+            spawnable_object_id.0,
+            Self::SHARED_OBJECT_BOOTSTRAP_OWNER_TAG,
+        ) as usize)
+            % peer_ids.len();
+        peer_ids.get(owner_index).copied()
+    }
+
+    fn bootstrap_hash_u64(hash: u64, value: u64) -> u64 {
+        (hash ^ value).wrapping_mul(0x00000100000001b3)
+    }
+
+    fn bootstrap_local_shared_scene_objects(
+        &mut self,
+        runtime_bodies: &HashMap<WidgetUid, XrRuntimeBodyState>,
+    ) -> Vec<XrNetSharedObjectControl> {
+        if self.runtime.registry.len() == 0 {
+            return Vec::new();
+        }
+        let Some(activity_id) = self.runtime.shared_objects.activity_id() else {
+            return Vec::new();
+        };
+        let Some(local_node_id) = self.runtime.net_node.as_ref().map(|node| node.node_id()) else {
+            return Vec::new();
+        };
+        let mut controls = Vec::new();
+        for (spawnable_object_id, widget_uid) in
+            self.runtime.shared_objects.bootstrap_shared_candidates()
+        {
+            if self
+                .runtime
+                .shared_objects
+                .resolve_local_shared_object_for_widget(widget_uid)
+                .is_some()
+                || self
+                    .runtime
+                    .shared_objects
+                    .resolve_remote_shared_object_for_widget(widget_uid)
+                    .is_some()
+            {
+                continue;
+            }
+            if self.bootstrap_owner_peer_id(spawnable_object_id) != Some(local_node_id) {
+                continue;
+            }
+            let Some(body) = runtime_bodies.get(&widget_uid) else {
+                continue;
+            };
+            let Some((allocation, is_new)) = self
+                .runtime
+                .shared_objects
+                .ensure_local_shared_object(activity_id, widget_uid)
+            else {
+                continue;
+            };
+            if !is_new {
+                continue;
+            }
+            controls.push(XrNetSharedObjectControl::XrSpawnObject {
+                object_id: allocation.shared_object_id,
+                epoch: allocation.epoch,
+                authority: self
+                    .runtime
+                    .shared_objects
+                    .local_peer_id()
+                    .unwrap_or_default(),
+                fidelity: allocation.fidelity,
+                shape: XrSharedObjectShape::ActivitySpawnable {
+                    activity_id,
+                    spawnable_id: allocation.spawnable_object_id,
+                },
+                pose: body.pose,
+                linvel: body.linvel,
+                angvel: body.angvel,
+            });
+        }
+        controls
+    }
+
+    fn reannounce_local_shared_objects(
+        &mut self,
+        runtime_bodies: &HashMap<WidgetUid, XrRuntimeBodyState>,
+    ) -> Vec<XrNetSharedObjectControl> {
+        if !self.runtime.local_shared_object_reannounce_needed {
+            return Vec::new();
+        }
+        let Some(activity_id) = self.runtime.shared_objects.activity_id() else {
+            return Vec::new();
+        };
+        let controls = self
+            .runtime
+            .shared_objects
+            .local_shared_object_snapshots()
+            .into_iter()
+            .filter_map(|snapshot| {
+                let body = runtime_bodies.get(&snapshot.widget_uid)?;
+                Some(Self::local_shared_object_spawn_control(
+                    activity_id,
+                    snapshot,
+                    body,
+                ))
+            })
+            .collect::<Vec<_>>();
+        self.runtime.local_shared_object_reannounce_needed = false;
+        controls
+    }
+
+    pub fn reset_local_shared_bootstrap_objects(
+        &mut self,
+        runtime_bodies: &HashMap<WidgetUid, XrRuntimeBodyState>,
+    ) -> usize {
+        if !self.enabled {
+            return 0;
+        }
+        self.ensure_net_node();
+        let Some(activity_id) = self.runtime.shared_objects.activity_id() else {
+            return 0;
+        };
+        let mut controls = Vec::new();
+        for (_, widget_uid) in self.runtime.shared_objects.bootstrap_shared_candidates() {
+            let Some(body) = runtime_bodies.get(&widget_uid) else {
+                continue;
+            };
+            let Some(allocation) = self.runtime.shared_objects.force_local_shared_object_reset(
+                activity_id,
+                widget_uid,
+                body.pose,
+                body.linvel,
+                body.angvel,
+            ) else {
+                continue;
+            };
+            let Some(snapshot) = self
+                .runtime
+                .shared_objects
+                .local_shared_object_snapshot(allocation.shared_object_id)
+            else {
+                continue;
+            };
+            controls.push(Self::local_shared_object_spawn_control(
+                activity_id,
+                snapshot,
+                body,
+            ));
+            controls.push(XrNetSharedObjectControl::XrResetObject {
+                object_id: allocation.shared_object_id,
+                epoch: allocation.epoch,
+                pose: body.pose,
+                linvel: body.linvel,
+                angvel: body.angvel,
+            });
+        }
+        let count = controls.len();
+        if let Some(net_node) = self.runtime.net_node.as_mut() {
+            for control in controls {
+                if let Some(object_id) = Self::shared_object_control_object_id(&control) {
+                    if matches!(
+                        control,
+                        XrNetSharedObjectControl::XrSpawnObject { .. }
+                            | XrNetSharedObjectControl::XrResetObject { .. }
+                    ) {
+                        self.runtime.metrics.record_body_spawn_tx(object_id.0);
+                    }
+                }
+                net_node.send_shared_object_control(control);
+            }
+        }
+        count
+    }
+
     pub fn publish_local_shared_object_states(
         &mut self,
         cx: &mut Cx,
@@ -1883,7 +2087,9 @@ impl XrPeerSync {
             self.runtime.next_shared_object_physics_tick.wrapping_add(1);
         let mut action_count = self.service_scheduled_authority_transfers(cx, physics_tick);
         action_count += self.sync_remote_shadow_bodies(cx);
-        let mut outgoing_controls = self.queue_remote_interaction_controls(runtime_bodies);
+        let mut outgoing_controls = self.reannounce_local_shared_objects(runtime_bodies);
+        outgoing_controls.extend(self.bootstrap_local_shared_scene_objects(runtime_bodies));
+        outgoing_controls.extend(self.queue_remote_interaction_controls(runtime_bodies));
         if let Some(activity_id) = self.runtime.shared_objects.activity_id() {
             for (&widget_uid, body) in runtime_bodies {
                 if body.held_by.is_none() {
@@ -1998,7 +2204,7 @@ impl XrPeerSync {
             Ok(node) => {
                 self.runtime
                     .shared_objects
-                    .set_local_peer_id(node.shared_object_peer_id());
+                    .set_local_peer_id(node.node_id());
                 self.runtime.net_node = Some(node);
                 self.runtime.local.last_sent_descriptor_signature = None;
                 self.runtime.local.last_sent_descriptor = None;
@@ -2198,13 +2404,14 @@ impl XrPeerSync {
             XrNetIncoming::Join { peer } => {
                 self.runtime.metrics.record_join(peer.id);
                 self.runtime.registry.track_join(peer);
+                self.runtime.local_shared_object_reannounce_needed = true;
             }
             XrNetIncoming::Leave { peer, .. } => {
                 self.runtime.metrics.record_leave(peer.id);
                 for widget_uid in self
                     .runtime
                     .shared_objects
-                    .release_remote_shared_objects_by_peer_id(peer.shared_object_peer_id())
+                    .release_remote_shared_objects_by_peer_id(peer.id)
                 {
                     self.emit_remote_body_despawn(cx, widget_uid);
                 }
@@ -2298,7 +2505,7 @@ impl XrPeerSync {
                 if self
                     .runtime
                     .shared_objects
-                    .record_remote_shared_object_state(peer.shared_object_peer_id(), state)
+                    .record_remote_shared_object_state(peer.id, state)
                     .is_none()
                 {
                     return;
@@ -2930,14 +3137,12 @@ impl XrPeerSync {
         request_id
     }
 
-    fn peer_id_for_authority(&self, authority: XrPeerId) -> Option<XrNetPeerId> {
+    fn peer_id_for_authority(&self, authority: XrNetPeerId) -> Option<XrNetPeerId> {
         self.runtime
             .registry
             .peers
-            .iter()
-            .find_map(|(&peer_id, peer_state)| {
-                (peer_state.peer.shared_object_peer_id() == authority).then_some(peer_id)
-            })
+            .contains_key(&authority)
+            .then_some(authority)
     }
 
     fn peer_time_to_local_time(&self, peer_id: XrNetPeerId, remote_time: f64) -> Option<f64> {
@@ -2958,10 +3163,8 @@ impl XrPeerSync {
         let translated_sent_at = self
             .peer_time_to_local_time(peer_id, state.sent_at)
             .unwrap_or(received_at_local_time);
-        state.sent_at = Self::clamp_remote_shared_object_local_time(
-            translated_sent_at,
-            received_at_local_time,
-        );
+        state.sent_at =
+            Self::clamp_remote_shared_object_local_time(translated_sent_at, received_at_local_time);
         state
     }
 
@@ -3219,7 +3422,7 @@ impl XrPeerSync {
     fn emit_authority_space_body_spawn(
         &mut self,
         cx: &mut Cx,
-        source_authority: XrPeerId,
+        source_authority: XrNetPeerId,
         widget_uid: WidgetUid,
         shadow: bool,
         mode: XrSharedObjectMode,
@@ -3514,7 +3717,7 @@ impl XrPeerSync {
         request_id: u32,
         based_on_seq: u32,
         based_on_tick: u32,
-        candidate_owner: XrPeerId,
+        candidate_owner: XrNetPeerId,
         hand: XrSharedHand,
         hand_pose: Pose,
         hand_linvel: Vec3f,
@@ -3533,7 +3736,7 @@ impl XrPeerSync {
             based_on_tick,
         );
         if epoch != local_snapshot.epoch
-            || candidate_owner != peer.shared_object_peer_id()
+            || candidate_owner != peer.id
             || !self.peer_grab_intent(peer.id, hand)
         {
             self.send_takeover_reject(object_id, epoch, request_id, authoritative_state);
@@ -3598,8 +3801,8 @@ impl XrPeerSync {
         object_id: XrSharedObjectId,
         epoch: u32,
         request_id: u32,
-        source_authority: XrPeerId,
-        new_authority: XrPeerId,
+        source_authority: XrNetPeerId,
+        new_authority: XrNetPeerId,
         effective_at: f64,
         effective_tick: u32,
         pose: Pose,
@@ -3691,65 +3894,55 @@ impl XrPeerSync {
     fn handle_reset_object(
         &mut self,
         cx: &mut Cx,
-        source_authority: XrPeerId,
+        source_authority: XrNetPeerId,
         object_id: XrSharedObjectId,
         epoch: u32,
         pose: Pose,
         linvel: Vec3f,
         angvel: Vec3f,
     ) -> bool {
-        if let Some(remote_snapshot) = self
+        let Some(activity_id) = self.runtime.shared_objects.activity_id() else {
+            return false;
+        };
+        let Some(widget_uid) = self
             .runtime
             .shared_objects
-            .remote_shared_object_snapshot(object_id)
-        {
-            let state = XrNetSharedObjectState {
-                seq: 0,
-                sent_at: 0.0,
-                physics_tick: 0,
+            .apply_remote_shared_object_reset(
+                activity_id,
+                source_authority,
                 object_id,
                 epoch,
-                authority: remote_snapshot.authority,
-                fidelity: remote_snapshot.fidelity,
-                mode: XrSharedObjectMode::Dynamic,
                 pose,
                 linvel,
                 angvel,
-            };
-            if self
-                .runtime
-                .shared_objects
-                .record_remote_shared_object_state(source_authority, state)
-                .is_none()
-            {
-                return false;
-            }
-            self.emit_authority_space_body_spawn(
-                cx,
-                source_authority,
-                remote_snapshot.widget_uid,
-                true,
+            )
+        else {
+            return false;
+        };
+        self.emit_authority_space_body_spawn(
+            cx,
+            source_authority,
+            widget_uid,
+            self.runtime.shared_objects.local_peer_id() != Some(source_authority),
+            XrSharedObjectMode::Dynamic,
+            pose,
+            linvel,
+            angvel,
+        );
+        if let Some(peer_id) = self.peer_id_for_authority(source_authority) {
+            self.note_applied_remote_shadow_state(
+                object_id,
+                peer_id,
+                None,
                 XrSharedObjectMode::Dynamic,
                 pose,
                 linvel,
                 angvel,
             );
-            if let Some(peer_id) = self.peer_id_for_authority(source_authority) {
-                self.note_applied_remote_shadow_state(
-                    object_id,
-                    peer_id,
-                    None,
-                    XrSharedObjectMode::Dynamic,
-                    pose,
-                    linvel,
-                    angvel,
-                );
-            } else {
-                self.clear_applied_remote_shadow_state(object_id);
-            }
-            return true;
+        } else {
+            self.clear_applied_remote_shadow_state(object_id);
         }
-        false
+        true
     }
 
     fn apply_shared_object_control(
@@ -3849,7 +4042,7 @@ impl XrPeerSync {
                 *object_id,
                 *epoch,
                 *request_id,
-                peer.shared_object_peer_id(),
+                peer.id,
                 *new_authority,
                 *effective_at,
                 *effective_tick,
@@ -3863,15 +4056,7 @@ impl XrPeerSync {
                 pose,
                 linvel,
                 angvel,
-            } => self.handle_reset_object(
-                cx,
-                peer.shared_object_peer_id(),
-                *object_id,
-                *epoch,
-                *pose,
-                *linvel,
-                *angvel,
-            ),
+            } => self.handle_reset_object(cx, peer.id, *object_id, *epoch, *pose, *linvel, *angvel),
             XrNetSharedObjectControl::XrClockPing { seq, sent_at } => {
                 self.runtime.metrics.record_clock_ping_rx(peer.id, *seq);
                 let replied_at = if self.runtime.local.state_time != 0.0 {
@@ -4739,10 +4924,10 @@ mod tests {
             seq: 1,
             sent_at,
             physics_tick: 1,
-            object_id: xr_make_shared_object_id(XrPeerId(9), XrSharedObjectCounter(7))
+            object_id: xr_make_shared_object_id(XrNetPeerId(9), XrSharedObjectCounter(7))
                 .expect("shared object id should pack"),
             epoch: 0,
-            authority: XrPeerId(9),
+            authority: XrNetPeerId(9),
             fidelity: XrSharedObjectFidelity::Interpolated,
             mode: XrSharedObjectMode::Dynamic,
             pose: Pose::new(Quat::default(), vec3f(0.0, 0.0, pose_z)),
@@ -4811,20 +4996,14 @@ mod tests {
     fn incoming_shared_object_state_time_is_clamped_to_local_receive_time() {
         let normalized = XrPeerSync::clamp_remote_shared_object_local_time(5.40, 5.10);
 
-        assert!(
-            (normalized - 5.10).abs() <= f64::EPSILON,
-            "{normalized:?}"
-        );
+        assert!((normalized - 5.10).abs() <= f64::EPSILON, "{normalized:?}");
     }
 
     #[test]
     fn incoming_shared_object_state_time_preserves_past_local_sample_time() {
         let normalized = XrPeerSync::clamp_remote_shared_object_local_time(5.00, 5.10);
 
-        assert!(
-            (normalized - 5.00).abs() <= f64::EPSILON,
-            "{normalized:?}"
-        );
+        assert!((normalized - 5.00).abs() <= f64::EPSILON, "{normalized:?}");
     }
 
     #[test]
