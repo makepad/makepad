@@ -286,14 +286,46 @@ fn render_box(
 ) {
     let half = scene_box.size.scale(0.5);
     let corners = [
-        vec3f(scene_box.center.x - half.x, scene_box.center.y - half.y, scene_box.center.z - half.z),
-        vec3f(scene_box.center.x + half.x, scene_box.center.y - half.y, scene_box.center.z - half.z),
-        vec3f(scene_box.center.x + half.x, scene_box.center.y + half.y, scene_box.center.z - half.z),
-        vec3f(scene_box.center.x - half.x, scene_box.center.y + half.y, scene_box.center.z - half.z),
-        vec3f(scene_box.center.x - half.x, scene_box.center.y - half.y, scene_box.center.z + half.z),
-        vec3f(scene_box.center.x + half.x, scene_box.center.y - half.y, scene_box.center.z + half.z),
-        vec3f(scene_box.center.x + half.x, scene_box.center.y + half.y, scene_box.center.z + half.z),
-        vec3f(scene_box.center.x - half.x, scene_box.center.y + half.y, scene_box.center.z + half.z),
+        vec3f(
+            scene_box.center.x - half.x,
+            scene_box.center.y - half.y,
+            scene_box.center.z - half.z,
+        ),
+        vec3f(
+            scene_box.center.x + half.x,
+            scene_box.center.y - half.y,
+            scene_box.center.z - half.z,
+        ),
+        vec3f(
+            scene_box.center.x + half.x,
+            scene_box.center.y + half.y,
+            scene_box.center.z - half.z,
+        ),
+        vec3f(
+            scene_box.center.x - half.x,
+            scene_box.center.y + half.y,
+            scene_box.center.z - half.z,
+        ),
+        vec3f(
+            scene_box.center.x - half.x,
+            scene_box.center.y - half.y,
+            scene_box.center.z + half.z,
+        ),
+        vec3f(
+            scene_box.center.x + half.x,
+            scene_box.center.y - half.y,
+            scene_box.center.z + half.z,
+        ),
+        vec3f(
+            scene_box.center.x + half.x,
+            scene_box.center.y + half.y,
+            scene_box.center.z + half.z,
+        ),
+        vec3f(
+            scene_box.center.x - half.x,
+            scene_box.center.y + half.y,
+            scene_box.center.z + half.z,
+        ),
     ];
     let faces = [
         (FACE_NORMALS[0], [1usize, 5, 6, 2]),
@@ -303,13 +335,14 @@ fn render_box(
         (FACE_NORMALS[4], [5usize, 4, 7, 6]),
         (FACE_NORMALS[5], [0usize, 1, 2, 3]),
     ];
-    let eye_pos = view.invert().transform_vec4(vec4f(0.0, 0.0, 0.0, 1.0)).to_vec3f();
+    let eye_pos = view
+        .invert()
+        .transform_vec4(vec4f(0.0, 0.0, 0.0, 1.0))
+        .to_vec3f();
     for (normal, indices) in faces {
-        let face_center = (corners[indices[0]]
-            + corners[indices[1]]
-            + corners[indices[2]]
-            + corners[indices[3]])
-            .scale(0.25);
+        let face_center =
+            (corners[indices[0]] + corners[indices[1]] + corners[indices[2]] + corners[indices[3]])
+                .scale(0.25);
         let to_eye = (eye_pos - face_center).normalize();
         if normal.dot(to_eye) <= 0.0 {
             continue;
@@ -371,7 +404,12 @@ fn render_box(
     }
 }
 
-fn project(vertex: Vec3f, view: &Mat4f, fov_y_degrees: f32, aspect: f32) -> Option<ProjectedVertex> {
+fn project(
+    vertex: Vec3f,
+    view: &Mat4f,
+    fov_y_degrees: f32,
+    aspect: f32,
+) -> Option<ProjectedVertex> {
     let view_space = view.transform_vec4(vec4f(vertex.x, vertex.y, vertex.z, 1.0));
     if view_space.z >= -0.05 {
         return None;

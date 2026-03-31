@@ -159,7 +159,11 @@ fn remote_video_texture_format(_cx: &Cx) -> TextureFormat {
 }
 
 fn xr_remote_debug_mono_eye() -> Option<XrRemoteEye> {
-    match std::env::var("XR_REMOTE_DEBUG_MONO").ok()?.to_ascii_lowercase().as_str() {
+    match std::env::var("XR_REMOTE_DEBUG_MONO")
+        .ok()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "left" => Some(XrRemoteEye::Left),
         "right" => Some(XrRemoteEye::Right),
         _ => None,
@@ -215,8 +219,7 @@ struct ClientShared {
     control_writer: Arc<Mutex<Option<TcpStream>>>,
     control_inbox: Arc<Mutex<Vec<ControlPacket>>>,
     media_inbox: Arc<Mutex<Vec<MediaChunkPacket>>>,
-    capabilities: Arc<Mutex<CapabilitiesPacket>>,
-    media_ports: Arc<Mutex<Option<ClientMediaChannelsPacket>>>,
+    media_port: Arc<Mutex<Option<u16>>>,
 }
 
 impl ClientShared {
@@ -225,39 +228,22 @@ impl ClientShared {
             control_writer: Arc::new(Mutex::new(None)),
             control_inbox: Arc::new(Mutex::new(Vec::new())),
             media_inbox: Arc::new(Mutex::new(Vec::new())),
-            capabilities: Arc::new(Mutex::new(default_capabilities())),
-            media_ports: Arc::new(Mutex::new(None)),
+            media_port: Arc::new(Mutex::new(None)),
         }
     }
 
     fn start_threads(&self) {
-        let left_socket = bind_udp_socket_any();
-        let right_socket = bind_udp_socket_any();
-        let ports = ClientMediaChannelsPacket {
-            left_port: left_socket.local_addr().map(|addr| addr.port()).unwrap_or(0),
-            right_port: right_socket.local_addr().map(|addr| addr.port()).unwrap_or(0),
-        };
-        *self.media_ports.lock().unwrap() = Some(ports.clone());
-
+        let media_socket = bind_udp_socket_any();
+        let port = media_socket
+            .local_addr()
+            .map(|addr| addr.port())
+            .unwrap_or(0);
+        *self.media_port.lock().unwrap() = Some(port);
         let media_inbox = self.media_inbox.clone();
         thread::spawn(move || {
             let mut buffer = vec![0u8; max_media_packet_bytes()];
             loop {
-                match recv_udp_packet::<MediaChunkPacket>(&left_socket, &mut buffer) {
-                    Ok(packet) => {
-                        media_inbox.lock().unwrap().push(packet);
-                        SignalToUI::set_ui_signal();
-                    }
-                    Err(_) => {}
-                }
-            }
-        });
-
-        let media_inbox = self.media_inbox.clone();
-        thread::spawn(move || {
-            let mut buffer = vec![0u8; max_media_packet_bytes()];
-            loop {
-                match recv_udp_packet::<MediaChunkPacket>(&right_socket, &mut buffer) {
+                match recv_udp_packet::<MediaChunkPacket>(&media_socket, &mut buffer) {
                     Ok(packet) => {
                         media_inbox.lock().unwrap().push(packet);
                         SignalToUI::set_ui_signal();
@@ -271,8 +257,7 @@ impl ClientShared {
         let control_addr = format!("{}:{}", host, control_port());
         let control_writer = self.control_writer.clone();
         let control_inbox = self.control_inbox.clone();
-        let capabilities = self.capabilities.clone();
-        let media_ports = self.media_ports.clone();
+        let media_port = self.media_port.clone();
         thread::spawn(move || loop {
             let mut stream = connect_with_retry(&control_addr);
             if let Ok(writer) = stream.try_clone() {
@@ -285,10 +270,11 @@ impl ClientShared {
                     protocol_version: XR_REMOTE_PROTOCOL_VERSION,
                 }),
             );
-            let advertised_capabilities = capabilities.lock().unwrap().clone();
-            let _ = send_framed(&mut stream, &ControlPacket::Capabilities(advertised_capabilities));
-            if let Some(channels) = media_ports.lock().unwrap().clone() {
-                let _ = send_framed(&mut stream, &ControlPacket::ClientMediaChannels(channels));
+            if let Some(port) = *media_port.lock().unwrap() {
+                let _ = send_framed(
+                    &mut stream,
+                    &ControlPacket::ClientMediaChannel(ClientMediaChannelPacket { port }),
+                );
             }
             let _ = send_framed(
                 &mut stream,
@@ -317,10 +303,6 @@ impl ClientShared {
         }
     }
 
-    fn set_capabilities(&self, capabilities: CapabilitiesPacket) {
-        *self.capabilities.lock().unwrap() = capabilities;
-    }
-
     fn drain_control(&self) -> Vec<ControlPacket> {
         let mut inbox = self.control_inbox.lock().unwrap();
         std::mem::take(&mut *inbox)
@@ -331,8 +313,8 @@ impl ClientShared {
         std::mem::take(&mut *inbox)
     }
 
-    fn media_ports(&self) -> Option<ClientMediaChannelsPacket> {
-        self.media_ports.lock().unwrap().clone()
+    fn media_port(&self) -> Option<u16> {
+        *self.media_port.lock().unwrap()
     }
 }
 
@@ -484,7 +466,10 @@ impl App {
     }
 
     fn decoder_video_id(eye: XrRemoteEye) -> LiveId {
-        LiveId::from_str_num("android_realtime_video_decoder", Self::decoder_slot(eye) as u64)
+        LiveId::from_str_num(
+            "android_realtime_video_decoder",
+            Self::decoder_slot(eye) as u64,
+        )
     }
 
     fn eye_state(&self, eye: XrRemoteEye) -> &ClientEyeState {
@@ -513,9 +498,6 @@ impl App {
         if self.network_started {
             return;
         }
-        let mut capabilities = default_capabilities();
-        capabilities.codecs = preferred_codecs_from_capabilities(&cx.video_capabilities(), false);
-        self.shared.set_capabilities(capabilities);
         self.shared.start_threads();
         self.xr_net = match XrNetNode::new() {
             Ok(node) => {
@@ -532,13 +514,12 @@ impl App {
             .debug_mono
             .map(|eye| format!(" mono={}", eye.label()))
             .unwrap_or_else(|| " stereo".to_string());
-        if let Some(ports) = self.shared.media_ports() {
+        if let Some(port) = self.shared.media_port() {
             self.latest_connection_text = format!(
-                "Connecting to {} tcp:{} udp:{}|{}{}",
+                "Connecting to {} tcp:{} udp:{}{}",
                 remote_host(),
                 control_port(),
-                ports.left_port,
-                ports.right_port,
+                port,
                 mode,
             );
         }
@@ -555,19 +536,19 @@ impl App {
     }
 
     fn send_remote_log(&self, cx: &Cx, level: &str, source: &str, text: impl Into<String>) {
-        self.shared.send_control(&ControlPacket::LogLine(LogLinePacket {
-            timestamp_ns: (cx.seconds_since_app_start() * 1_000_000_000.0) as u64,
-            level: level.to_string(),
-            source: source.to_string(),
-            text: text.into(),
-        }));
+        self.shared
+            .send_control(&ControlPacket::LogLine(LogLinePacket {
+                timestamp_ns: (cx.seconds_since_app_start() * 1_000_000_000.0) as u64,
+                level: level.to_string(),
+                source: source.to_string(),
+                text: text.into(),
+            }));
     }
 
     fn refresh_labels(&mut self, cx: &mut Cx) {
         self.latest_decoder_text = format!(
             "Decoder: {}\n{}\n{}",
-            self
-                .debug_mono
+            self.debug_mono
                 .map(|eye| format!("mono {}", eye.label()))
                 .unwrap_or_else(|| "stereo".to_string()),
             self.eye_debug_summary(XrRemoteEye::Left),
@@ -606,7 +587,11 @@ impl App {
             if state.status_prepared { 'P' } else { '-' },
             if state.status_configured { 'C' } else { '-' },
             if state.status_output_format { 'O' } else { '-' },
-            if state.status_first_frame_available { 'F' } else { '-' },
+            if state.status_first_frame_available {
+                'F'
+            } else {
+                '-'
+            },
             if state.status_update_ok { 'T' } else { '-' },
         );
         format!(
@@ -628,8 +613,7 @@ impl App {
         let Some(stream) = state.active_stream.as_ref() else {
             return false;
         };
-        state.decoder_texture.is_some()
-            && state.known_configs.contains_key(&stream.config_id)
+        state.decoder_texture.is_some() && state.known_configs.contains_key(&stream.config_id)
     }
 
     fn note_decoder_status(&mut self, cx: &Cx, eye: XrRemoteEye, status: &str) {
@@ -797,19 +781,11 @@ impl App {
 
     fn handle_control_packet(&mut self, cx: &mut Cx, packet: ControlPacket) {
         match packet {
-            ControlPacket::Capabilities(cap) => {
-                let codecs = cap
-                    .codecs
-                    .iter()
-                    .map(|codec| codec.label())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.latest_connection_text = format!(
-                    "Connected [{}] {}x{} @ {} fps",
-                    codecs, cap.per_eye_width, cap.per_eye_height, cap.fps
-                );
-            }
             ControlPacket::SessionConfig(config) => {
+                self.latest_connection_text = format!(
+                    "Connected {}x{} @ {} fps",
+                    config.per_eye_width, config.per_eye_height, config.fps
+                );
                 let session_changed = self
                     .active_session
                     .as_ref()
@@ -823,10 +799,8 @@ impl App {
                 let eye = config.eye;
                 let previous = self.eye_state(eye).active_stream.clone();
                 let changed = previous.as_ref() != Some(&config);
-                let bootstrap_stream = previous
-                    .as_ref()
-                    .is_none_or(|old| old.config_id == 0)
-                    && config.config_id != 0;
+                let bootstrap_stream =
+                    previous.as_ref().is_none_or(|old| old.config_id == 0) && config.config_id != 0;
                 if changed {
                     if !bootstrap_stream {
                         self.reset_eye_decoder(cx, eye);
@@ -852,7 +826,7 @@ impl App {
                 let _ = self.try_start_eye_decoder(cx, eye);
             }
             ControlPacket::Hello(_)
-            | ControlPacket::ClientMediaChannels(_)
+            | ControlPacket::ClientMediaChannel(_)
             | ControlPacket::KeyframeRequest(_)
             | ControlPacket::LogLine(_) => {}
         }
@@ -867,12 +841,7 @@ impl App {
         true
     }
 
-    fn ingest_completed_eye_frame(
-        &mut self,
-        cx: &Cx,
-        eye: XrRemoteEye,
-        frame: CompletedEyeFrame,
-    ) {
+    fn ingest_completed_eye_frame(&mut self, cx: &Cx, eye: XrRemoteEye, frame: CompletedEyeFrame) {
         if !self.media_frame_is_fresh(cx, &frame.header) {
             return;
         }
@@ -1007,9 +976,9 @@ impl App {
         let now = self.local_now_ns(cx);
         for eye in XrRemoteEye::ALL {
             let state = self.eye_state_mut(eye);
-            state.incomplete_frames.retain(|_, frame| {
-                now.saturating_sub(frame.received_at_ns) <= stale_after
-            });
+            state
+                .incomplete_frames
+                .retain(|_, frame| now.saturating_sub(frame.received_at_ns) <= stale_after);
             while state.incomplete_frames.len() > 12 {
                 let Some(first_key) = state.incomplete_frames.keys().next().copied() else {
                     break;
@@ -1199,8 +1168,14 @@ impl App {
         {
             return;
         }
-        if self.eye_state(XrRemoteEye::Left).configured_config_id.is_some()
-            && self.eye_state(XrRemoteEye::Right).configured_config_id.is_some()
+        if self
+            .eye_state(XrRemoteEye::Left)
+            .configured_config_id
+            .is_some()
+            && self
+                .eye_state(XrRemoteEye::Right)
+                .configured_config_id
+                .is_some()
             && self.ready_stereo_groups.len() > 1
         {
             let latest = self.ready_stereo_groups.pop_back();
@@ -1226,9 +1201,7 @@ impl App {
                 "quest-client",
                 format!(
                     "attempting first stereo queue group {} cfg L{} R{}",
-                    frame_group_id,
-                    left_config_id,
-                    right_config_id
+                    frame_group_id, left_config_id, right_config_id
                 ),
             );
         }
@@ -1241,25 +1214,30 @@ impl App {
                 .known_configs
                 .contains_key(&right_config_id)
         {
-            self.ready_stereo_groups.push_back((frame_group_id, left, right));
+            self.ready_stereo_groups
+                .push_back((frame_group_id, left, right));
             self.latest_stream_text = format!(
                 "Stream: stereo waiting cfg L{} R{} (ready {})",
-                left_config_id,
-                right_config_id,
-                ready_groups
+                left_config_id, right_config_id, ready_groups
             );
             return;
         }
         if let Err(err) = self.push_config_if_needed(cx, XrRemoteEye::Left, left_config_id) {
-            self.ready_stereo_groups.push_back((frame_group_id, left, right));
-            self.latest_stream_text =
-                format!("Stream: left config push failed for cfg{}: {:?}", left_config_id, err);
+            self.ready_stereo_groups
+                .push_back((frame_group_id, left, right));
+            self.latest_stream_text = format!(
+                "Stream: left config push failed for cfg{}: {:?}",
+                left_config_id, err
+            );
             return;
         }
         if let Err(err) = self.push_config_if_needed(cx, XrRemoteEye::Right, right_config_id) {
-            self.ready_stereo_groups.push_back((frame_group_id, left, right));
-            self.latest_stream_text =
-                format!("Stream: right config push failed for cfg{}: {:?}", right_config_id, err);
+            self.ready_stereo_groups
+                .push_back((frame_group_id, left, right));
+            self.latest_stream_text = format!(
+                "Stream: right config push failed for cfg{}: {:?}",
+                right_config_id, err
+            );
             return;
         }
 
@@ -1279,8 +1257,7 @@ impl App {
         {
             self.latest_stream_text = format!(
                 "Stream: left frame push failed cfg{} group {}",
-                left_config_id,
-                frame_group_id
+                left_config_id, frame_group_id
             );
             self.send_remote_log(
                 cx,
@@ -1288,11 +1265,11 @@ impl App {
                 "quest-client",
                 format!(
                     "left frame push failed cfg{} group {}",
-                    left_config_id,
-                    frame_group_id
+                    left_config_id, frame_group_id
                 ),
             );
-            self.ready_stereo_groups.push_front((frame_group_id, left, right));
+            self.ready_stereo_groups
+                .push_front((frame_group_id, left, right));
             return;
         }
         let (left_first_queued, left_first_queued_key) = {
@@ -1319,8 +1296,7 @@ impl App {
         {
             self.latest_stream_text = format!(
                 "Stream: right frame push failed cfg{} group {}",
-                right_config_id,
-                frame_group_id
+                right_config_id, frame_group_id
             );
             self.send_remote_log(
                 cx,
@@ -1328,11 +1304,11 @@ impl App {
                 "quest-client",
                 format!(
                     "right frame push failed cfg{} group {}",
-                    right_config_id,
-                    frame_group_id
+                    right_config_id, frame_group_id
                 ),
             );
-            self.ready_stereo_groups.push_front((frame_group_id, left, right));
+            self.ready_stereo_groups
+                .push_front((frame_group_id, left, right));
             return;
         }
         let (right_first_queued, right_first_queued_key) = {
@@ -1431,7 +1407,10 @@ impl App {
                 self.set_immersive_visible(cx, false);
                 return;
             }
-            let head_up = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 1.0, 0.0));
+            let head_up = state
+                .head_pose
+                .orientation
+                .rotate_vec3(&vec3f(0.0, 1.0, 0.0));
             let head_forward = state
                 .head_pose
                 .orientation
@@ -1451,9 +1430,19 @@ impl App {
                 panel_orientation,
                 state.head_pose.position + head_forward.scale(distance),
             );
-            self.set_eye_plane(cx, ids!(immersive_left), mono_pose, logical_size, pixel_scale);
-            self.ui.widget(cx, ids!(immersive_left)).set_visible(cx, true);
-            self.ui.widget(cx, ids!(immersive_right)).set_visible(cx, false);
+            self.set_eye_plane(
+                cx,
+                ids!(immersive_left),
+                mono_pose,
+                logical_size,
+                pixel_scale,
+            );
+            self.ui
+                .widget(cx, ids!(immersive_left))
+                .set_visible(cx, true);
+            self.ui
+                .widget(cx, ids!(immersive_right))
+                .set_visible(cx, false);
             return;
         }
         let left_ok = self.eye_state(XrRemoteEye::Left).decoded_updates > 0;
@@ -1477,7 +1466,10 @@ impl App {
             let immersive_right = self.surface_ref(cx, XrRemoteEye::Right);
             self.apply_eye_texture_to_surface(cx, immersive_left, texture.as_ref(), true);
             self.apply_eye_texture_to_surface(cx, immersive_right, texture.as_ref(), true);
-            let head_up = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 1.0, 0.0));
+            let head_up = state
+                .head_pose
+                .orientation
+                .rotate_vec3(&vec3f(0.0, 1.0, 0.0));
             let head_forward = state
                 .head_pose
                 .orientation
@@ -1497,14 +1489,30 @@ impl App {
                 panel_orientation,
                 state.head_pose.position + head_forward.scale(distance),
             );
-            self.set_eye_plane(cx, ids!(immersive_left), mono_pose, logical_size, pixel_scale);
-            self.ui.widget(cx, ids!(immersive_left)).set_visible(cx, true);
-            self.ui.widget(cx, ids!(immersive_right)).set_visible(cx, false);
+            self.set_eye_plane(
+                cx,
+                ids!(immersive_left),
+                mono_pose,
+                logical_size,
+                pixel_scale,
+            );
+            self.ui
+                .widget(cx, ids!(immersive_left))
+                .set_visible(cx, true);
+            self.ui
+                .widget(cx, ids!(immersive_right))
+                .set_visible(cx, false);
             return;
         }
 
-        let head_right = state.head_pose.orientation.rotate_vec3(&vec3f(1.0, 0.0, 0.0));
-        let head_up = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 1.0, 0.0));
+        let head_right = state
+            .head_pose
+            .orientation
+            .rotate_vec3(&vec3f(1.0, 0.0, 0.0));
+        let head_up = state
+            .head_pose
+            .orientation
+            .rotate_vec3(&vec3f(0.0, 1.0, 0.0));
         let head_forward = state
             .head_pose
             .orientation
@@ -1529,8 +1537,20 @@ impl App {
             panel_orientation,
             state.head_pose.position + half_ipd + head_forward.scale(distance),
         );
-        self.set_eye_plane(cx, ids!(immersive_left), left_pose, logical_size, pixel_scale);
-        self.set_eye_plane(cx, ids!(immersive_right), right_pose, logical_size, pixel_scale);
+        self.set_eye_plane(
+            cx,
+            ids!(immersive_left),
+            left_pose,
+            logical_size,
+            pixel_scale,
+        );
+        self.set_eye_plane(
+            cx,
+            ids!(immersive_right),
+            right_pose,
+            logical_size,
+            pixel_scale,
+        );
         self.set_immersive_visible(cx, true);
     }
 
@@ -1550,8 +1570,12 @@ impl App {
     }
 
     fn set_immersive_visible(&mut self, cx: &mut Cx, visible: bool) {
-        self.ui.widget(cx, ids!(immersive_left)).set_visible(cx, visible);
-        self.ui.widget(cx, ids!(immersive_right)).set_visible(cx, visible);
+        self.ui
+            .widget(cx, ids!(immersive_left))
+            .set_visible(cx, visible);
+        self.ui
+            .widget(cx, ids!(immersive_right))
+            .set_visible(cx, visible);
         if !visible {
             let left = self.ui.widget(cx, ids!(immersive_left));
             if let Some(mut view) = left.borrow_mut::<XrView>() {

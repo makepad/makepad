@@ -1416,9 +1416,7 @@ pub fn run(
         for key in [
             "MAKEPAD_XR_REMOTE_HOST",
             "MAKEPAD_XR_REMOTE_CONTROL_PORT",
-            "MAKEPAD_XR_REMOTE_VIDEO_PORT",
-            "MAKEPAD_XR_REMOTE_MEDIA_LEFT_PORT",
-            "MAKEPAD_XR_REMOTE_MEDIA_RIGHT_PORT",
+            "MAKEPAD_XR_REMOTE_MEDIA_PORT",
             "XR_REMOTE_DEBUG_MONO",
         ] {
             if let Ok(value) = std::env::var(key) {

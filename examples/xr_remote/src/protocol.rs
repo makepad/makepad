@@ -1,14 +1,11 @@
 use makepad_widgets::makepad_math::Pose;
 use makepad_widgets::makepad_platform::{
-    event::xr::XrAnchor,
-    makepad_micro_serde::*,
-    video::{VideoBitstreamFormat, VideoCapabilities, VideoCodec},
+    event::xr::XrAnchor, makepad_micro_serde::*, video::VideoCodec,
 };
 
 pub const XR_REMOTE_PROTOCOL_VERSION: u32 = 3;
 pub const XR_REMOTE_CONTROL_PORT: u16 = 44510;
-pub const XR_REMOTE_LEFT_MEDIA_PORT: u16 = 44511;
-pub const XR_REMOTE_RIGHT_MEDIA_PORT: u16 = 44512;
+pub const XR_REMOTE_MEDIA_PORT: u16 = 44511;
 pub const XR_REMOTE_STREAM_WIDTH: u32 = 1280;
 pub const XR_REMOTE_STREAM_HEIGHT: u32 = 720;
 pub const XR_REMOTE_STREAM_FPS: u32 = 72;
@@ -50,7 +47,6 @@ impl XrRemoteEye {
             Self::Right => "right",
         }
     }
-
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, SerBin, DeBin)]
@@ -72,39 +68,11 @@ impl XrRemoteCodec {
         }
     }
 
-    pub fn bitstream_format(self) -> VideoBitstreamFormat {
-        VideoBitstreamFormat::AnnexB
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::H265AnnexB => "H265",
         }
     }
-}
-
-pub fn preferred_codecs_from_capabilities(
-    capabilities: &VideoCapabilities,
-    for_encode: bool,
-) -> Vec<XrRemoteCodec> {
-    let mut preferred = Vec::new();
-    for codec in [XrRemoteCodec::H265AnnexB] {
-        let video_codec = codec.video_codec();
-        let Some(support) = capabilities.codecs.iter().find(|item| item.codec == video_codec) else {
-            continue;
-        };
-        let has_codec = if for_encode {
-            (support.encode_hardware || support.encode_software)
-                && support.encode_formats.contains(&codec.bitstream_format())
-        } else {
-            (support.decode_hardware || support.decode_software)
-                && support.decode_formats.contains(&codec.bitstream_format())
-        };
-        if has_codec {
-            preferred.push(codec);
-        }
-    }
-    preferred
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
@@ -123,8 +91,6 @@ pub struct SessionConfigPacket {
     pub ipd_meters: f32,
     pub panel_distance_meters: f32,
     pub stale_after_ns: u64,
-    pub left_media_port: u16,
-    pub right_media_port: u16,
 }
 
 impl Default for SessionConfigPacket {
@@ -134,17 +100,8 @@ impl Default for SessionConfigPacket {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, SerBin, DeBin)]
-pub struct CapabilitiesPacket {
-    pub codecs: Vec<XrRemoteCodec>,
-    pub per_eye_width: u32,
-    pub per_eye_height: u32,
-    pub fps: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, SerBin, DeBin)]
-pub struct ClientMediaChannelsPacket {
-    pub left_port: u16,
-    pub right_port: u16,
+pub struct ClientMediaChannelPacket {
+    pub port: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, SerBin, DeBin)]
@@ -219,8 +176,7 @@ pub struct LogLinePacket {
 pub enum ControlPacket {
     Hello(HelloPacket),
     SessionConfig(SessionConfigPacket),
-    Capabilities(CapabilitiesPacket),
-    ClientMediaChannels(ClientMediaChannelsPacket),
+    ClientMediaChannel(ClientMediaChannelPacket),
     StreamConfig(StreamConfigPacket),
     VideoConfig(VideoConfigPacket),
     KeyframeRequest(KeyframeRequestPacket),
@@ -237,16 +193,5 @@ pub fn default_session_config() -> SessionConfigPacket {
         ipd_meters: XR_REMOTE_IPD_METERS,
         panel_distance_meters: XR_REMOTE_IMMERSIVE_PANEL_DISTANCE_METERS,
         stale_after_ns: XR_REMOTE_FRAME_STALE_AFTER_NS,
-        left_media_port: XR_REMOTE_LEFT_MEDIA_PORT,
-        right_media_port: XR_REMOTE_RIGHT_MEDIA_PORT,
-    }
-}
-
-pub fn default_capabilities() -> CapabilitiesPacket {
-    CapabilitiesPacket {
-        codecs: vec![XrRemoteCodec::H265AnnexB],
-        per_eye_width: XR_REMOTE_STREAM_WIDTH,
-        per_eye_height: XR_REMOTE_STREAM_HEIGHT,
-        fps: XR_REMOTE_STREAM_FPS,
     }
 }

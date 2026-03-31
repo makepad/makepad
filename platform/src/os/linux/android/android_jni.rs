@@ -275,9 +275,7 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
     for key in [
         "MAKEPAD_XR_REMOTE_HOST",
         "MAKEPAD_XR_REMOTE_CONTROL_PORT",
-        "MAKEPAD_XR_REMOTE_VIDEO_PORT",
-        "MAKEPAD_XR_REMOTE_MEDIA_LEFT_PORT",
-        "MAKEPAD_XR_REMOTE_MEDIA_RIGHT_PORT",
+        "MAKEPAD_XR_REMOTE_MEDIA_PORT",
         "XR_REMOTE_DEBUG_MONO",
     ] {
         if let Some(value) = get_intent_string_extra(env, activity, key).filter(|v| !v.trim().is_empty()) {

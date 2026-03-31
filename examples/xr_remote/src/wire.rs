@@ -1,7 +1,4 @@
-use crate::protocol::{
-    XR_REMOTE_CONTROL_PORT, XR_REMOTE_LEFT_MEDIA_PORT, XR_REMOTE_MAX_MEDIA_PACKET_BYTES,
-    XR_REMOTE_RIGHT_MEDIA_PORT,
-};
+use crate::protocol::{XR_REMOTE_CONTROL_PORT, XR_REMOTE_MAX_MEDIA_PACKET_BYTES, XR_REMOTE_MEDIA_PORT};
 use makepad_widgets::makepad_platform::makepad_micro_serde::{DeBin, SerBin};
 use std::{
     io::{self, Read, Write},
@@ -22,18 +19,11 @@ pub fn control_port() -> u16 {
         .unwrap_or(XR_REMOTE_CONTROL_PORT)
 }
 
-pub fn left_media_port() -> u16 {
-    std::env::var("MAKEPAD_XR_REMOTE_MEDIA_LEFT_PORT")
+pub fn media_port() -> u16 {
+    std::env::var("MAKEPAD_XR_REMOTE_MEDIA_PORT")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(XR_REMOTE_LEFT_MEDIA_PORT)
-}
-
-pub fn right_media_port() -> u16 {
-    std::env::var("MAKEPAD_XR_REMOTE_MEDIA_RIGHT_PORT")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(XR_REMOTE_RIGHT_MEDIA_PORT)
+        .unwrap_or(XR_REMOTE_MEDIA_PORT)
 }
 
 /// Upper bound for a single framed payload; avoids hostile/corrupt length prefixes.

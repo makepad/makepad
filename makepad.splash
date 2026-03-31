@@ -6,8 +6,7 @@ let RunItem = {
     package_name: ""
     remote_host: ""
     remote_control_port: ""
-    remote_media_left_port: ""
-    remote_media_right_port: ""
+    remote_media_port: ""
     xr_remote_debug_mono: ""
     in_studio: true
 }
@@ -20,8 +19,7 @@ let RunQuest = RunItem{
                 "MAKEPAD": "vulkan",
                 "MAKEPAD_XR_REMOTE_HOST": self.remote_host,
                 "MAKEPAD_XR_REMOTE_CONTROL_PORT": self.remote_control_port,
-                "MAKEPAD_XR_REMOTE_MEDIA_LEFT_PORT": self.remote_media_left_port,
-                "MAKEPAD_XR_REMOTE_MEDIA_RIGHT_PORT": self.remote_media_right_port,
+                "MAKEPAD_XR_REMOTE_MEDIA_PORT": self.remote_media_port,
                 "XR_REMOTE_DEBUG_MONO": self.xr_remote_debug_mono
             },
             "cargo", 

@@ -84,6 +84,88 @@ script_mod! {
                             text: "Remote: waiting"
                             draw_text.color: #x97adc2
                         }
+
+                        RoundedView{
+                            width: Fill
+                            height: Fit
+                            padding: 12
+                            spacing: 10
+                            flow: Down
+                            draw_bg+: {
+                                color: #x16202b
+                                border_radius: 10.0
+                                border_size: 1.0
+                                border_color: #x273646
+                            }
+
+                            Label{
+                                text: "Outgoing Stream Preview"
+                                draw_text.color: #xe4eef7
+                                draw_text.text_style.font_size: 14.0
+                            }
+
+                            Label{
+                                text: "These are the exact pre-encode eye frames being sent to Quest."
+                                draw_text.color: #x97adc2
+                            }
+
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 10
+
+                                RoundedView{
+                                    width: Fill
+                                    height: Fit
+                                    padding: 8
+                                    spacing: 6
+                                    flow: Down
+                                    draw_bg+: {
+                                        color: #x101820
+                                        border_radius: 8.0
+                                        border_size: 1.0
+                                        border_color: #x223140
+                                    }
+
+                                    Label{
+                                        text: "Left eye"
+                                        draw_text.color: #xc4d2de
+                                    }
+
+                                    preview_left := Image{
+                                        width: Fill
+                                        height: 150
+                                        fit: ImageFit.Smallest
+                                    }
+                                }
+
+                                RoundedView{
+                                    width: Fill
+                                    height: Fit
+                                    padding: 8
+                                    spacing: 6
+                                    flow: Down
+                                    draw_bg+: {
+                                        color: #x101820
+                                        border_radius: 8.0
+                                        border_size: 1.0
+                                        border_color: #x223140
+                                    }
+
+                                    Label{
+                                        text: "Right eye"
+                                        draw_text.color: #xc4d2de
+                                    }
+
+                                    preview_right := Image{
+                                        width: Fill
+                                        height: 150
+                                        fit: ImageFit.Smallest
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -150,14 +232,6 @@ impl HostEyeShared {
     }
 
     fn clear_keyframe_request(&self) {
-        *self.require_keyframe.lock().unwrap() = false;
-    }
-
-    fn reset_stream_state(&self) {
-        *self.last_config.lock().unwrap() = None;
-        *self.current_stream_config.lock().unwrap() = None;
-        *self.current_config_id.lock().unwrap() = 0;
-        self.pending_meta.lock().unwrap().clear();
         *self.require_keyframe.lock().unwrap() = false;
     }
 
@@ -300,16 +374,15 @@ impl Default for HostShared {
 impl HostShared {
     fn new() -> Self {
         let control_writer = Arc::new(Mutex::new(None));
-        let left_socket = Arc::new(bind_udp_socket(left_media_port()));
-        let right_socket = Arc::new(bind_udp_socket(right_media_port()));
+        let media_socket = Arc::new(bind_udp_socket(media_port()));
         Self {
             control_writer,
             control_inbox: Arc::new(Mutex::new(Vec::new())),
             control_peer_ip: Arc::new(Mutex::new(None)),
             current_session_config: Arc::new(Mutex::new(None)),
             eyes: [
-                HostEyeShared::new(XrRemoteEye::Left, left_socket),
-                HostEyeShared::new(XrRemoteEye::Right, right_socket),
+                HostEyeShared::new(XrRemoteEye::Left, media_socket.clone()),
+                HostEyeShared::new(XrRemoteEye::Right, media_socket),
             ],
         }
     }
@@ -364,13 +437,6 @@ impl HostShared {
         *self.current_session_config.lock().unwrap() = session_config;
     }
 
-    fn reset_stream_state(&self) {
-        *self.current_session_config.lock().unwrap() = None;
-        for eye in XrRemoteEye::ALL {
-            self.eye_shared(eye).reset_stream_state();
-        }
-    }
-
     fn send_current_control_state(&self) {
         if let Some(session_config) = self.current_session_config.lock().unwrap().clone() {
             self.send_control(&ControlPacket::SessionConfig(session_config));
@@ -388,14 +454,13 @@ impl HostShared {
         }
     }
 
-    fn set_client_media_channels(&self, channels: ClientMediaChannelsPacket) {
+    fn set_client_media_channel(&self, channel: ClientMediaChannelPacket) {
         let Some(peer_ip) = *self.control_peer_ip.lock().unwrap() else {
             return;
         };
-        self.eye_shared(XrRemoteEye::Left)
-            .set_remote_addr(Some(SocketAddr::new(peer_ip, channels.left_port)));
-        self.eye_shared(XrRemoteEye::Right)
-            .set_remote_addr(Some(SocketAddr::new(peer_ip, channels.right_port)));
+        let remote_addr = Some(SocketAddr::new(peer_ip, channel.port));
+        self.eye_shared(XrRemoteEye::Left).set_remote_addr(remote_addr);
+        self.eye_shared(XrRemoteEye::Right).set_remote_addr(remote_addr);
         self.request_keyframe(XrRemoteEyeTarget::Both);
     }
 
@@ -955,6 +1020,8 @@ pub struct App {
     #[rust]
     eye_depth_buffers: [Vec<f32>; 2],
     #[rust]
+    preview_textures: [Option<Texture>; 2],
+    #[rust]
     network_started: bool,
     #[rust]
     encoders_started: bool,
@@ -977,12 +1044,6 @@ pub struct App {
     #[rust]
     last_media_ready: bool,
     #[rust]
-    host_supported_codecs: Vec<XrRemoteCodec>,
-    #[rust]
-    client_capabilities: Option<CapabilitiesPacket>,
-    #[rust]
-    negotiated_codec: Option<XrRemoteCodec>,
-    #[rust]
     session_config: SessionConfigPacket,
 }
 
@@ -995,6 +1056,7 @@ impl Default for App {
             frame_timer: Timer::default(),
             eye_bgra_frames: std::array::from_fn(|_| Vec::new()),
             eye_depth_buffers: std::array::from_fn(|_| Vec::new()),
+            preview_textures: std::array::from_fn(|_| None),
             network_started: false,
             encoders_started: false,
             eye_encoders: std::array::from_fn(|_| HostEyeEncoder::None),
@@ -1006,86 +1068,30 @@ impl Default for App {
             latest_remote_log_text: "Remote: waiting".to_string(),
             frame_group_counter: 0,
             last_media_ready: false,
-            host_supported_codecs: Vec::new(),
-            client_capabilities: None,
-            negotiated_codec: None,
             session_config: default_session_config(),
         }
     }
 }
 
 impl App {
-    fn refresh_host_capabilities(&mut self, cx: &mut Cx) {
-        self.host_supported_codecs = preferred_codecs_from_capabilities(&cx.video_capabilities(), true);
-    }
-
-    fn advertised_host_capabilities(&self) -> CapabilitiesPacket {
-        let mut capabilities = default_capabilities();
-        capabilities.codecs = self.host_supported_codecs.clone();
-        capabilities.per_eye_width = self.session_config.per_eye_width;
-        capabilities.per_eye_height = self.session_config.per_eye_height;
-        capabilities.fps = self.session_config.fps;
-        capabilities
-    }
-
-    fn choose_negotiated_codec(&self) -> Option<XrRemoteCodec> {
-        let client_capabilities = self.client_capabilities.as_ref()?;
-        self.host_supported_codecs
-            .iter()
-            .copied()
-            .find(|codec| client_capabilities.codecs.contains(codec))
-    }
-
     fn bump_session_id(&mut self) {
         self.session_config.session_id = self.session_config.session_id.wrapping_add(1);
         if self.session_config.session_id == 0 {
             self.session_config.session_id = 1;
         }
-        self.session_config.left_media_port = left_media_port();
-        self.session_config.right_media_port = right_media_port();
-    }
-
-    fn reset_encoder_state(&mut self) {
-        self.eye_encoders = std::array::from_fn(|_| HostEyeEncoder::None);
-        self.encoders_started = false;
-        self.shared.reset_stream_state();
-    }
-
-    fn apply_negotiated_codec(&mut self, cx: &mut Cx, codec: Option<XrRemoteCodec>) {
-        if self.negotiated_codec == codec && self.encoders_started {
-            return;
-        }
-        self.reset_encoder_state();
-        self.negotiated_codec = codec;
-        if let Some(codec) = codec {
-            self.bump_session_id();
-            self.shared.set_session_config(Some(self.session_config.clone()));
-            for eye in XrRemoteEye::ALL {
-                self.shared
-                    .eye_shared(eye)
-                    .set_stream_config(Some(default_stream_config(codec, eye)));
-            }
-            self.latest_stream_text = format!(
-                "Stream: {} {}x{} per eye @ {} fps",
-                codec.label(),
-                self.session_config.per_eye_width,
-                self.session_config.per_eye_height,
-                self.session_config.fps
-            );
-            self.ensure_encoders(cx);
-            self.shared.send_current_control_state();
-        } else {
-            self.latest_stream_text = "Stream: waiting for codec negotiation".to_string();
-        }
-        self.refresh_labels(cx);
     }
 
     fn ensure_started(&mut self, cx: &mut Cx) {
         if self.network_started {
             return;
         }
-        self.refresh_host_capabilities(cx);
+        self.bump_session_id();
         self.shared.set_session_config(Some(self.session_config.clone()));
+        for eye in XrRemoteEye::ALL {
+            self.shared
+                .eye_shared(eye)
+                .set_stream_config(Some(default_stream_config(XrRemoteCodec::H265AnnexB, eye)));
+        }
         self.shared.start_threads();
         self.xr_net = match XrNetNode::new() {
             Ok(node) => Some(node),
@@ -1098,12 +1104,13 @@ impl App {
         self.network_started = true;
         if self.xr_net.is_some() {
             self.latest_status = format!(
-                "Listening tcp://0.0.0.0:{} udp://0.0.0.0:{}|{} xr_net=ready",
+                "Listening tcp://0.0.0.0:{} udp://0.0.0.0:{} xr_net=ready",
                 control_port(),
-                left_media_port(),
-                right_media_port()
+                media_port()
             );
         }
+        self.ensure_encoders(cx);
+        self.shared.send_current_control_state();
         self.refresh_labels(cx);
     }
 
@@ -1205,11 +1212,7 @@ impl App {
         if self.encoders_started {
             return;
         }
-        let Some(codec) = self.negotiated_codec else {
-            self.latest_stream_text = "Stream: waiting for codec negotiation".to_string();
-            self.refresh_labels(cx);
-            return;
-        };
+        let codec = XrRemoteCodec::H265AnnexB;
 
         #[cfg(target_os = "macos")]
         {
@@ -1297,6 +1300,49 @@ impl App {
             .set_text(cx, &self.latest_remote_log_text);
     }
 
+    fn update_preview_texture(&mut self, cx: &mut Cx, eye: XrRemoteEye) {
+        let eye_index = eye.index();
+        let width = self.session_config.per_eye_width as usize;
+        let height = self.session_config.per_eye_height as usize;
+        let expected_len = width.saturating_mul(height).saturating_mul(4);
+        if self.eye_bgra_frames[eye_index].len() < expected_len {
+            return;
+        }
+
+        let pixels = self.eye_bgra_frames[eye_index]
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect::<Vec<u32>>();
+
+        let texture = match &self.preview_textures[eye_index] {
+            Some(texture)
+                if texture.get_format(cx).vec_width_height() == Some((width, height)) =>
+            {
+                texture.set_data_u32(cx, width, height, pixels);
+                texture.clone()
+            }
+            _ => {
+                let texture = Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        data: Some(pixels),
+                        width,
+                        height,
+                        updated: TextureUpdated::Full,
+                    },
+                );
+                self.preview_textures[eye_index] = Some(texture.clone());
+                texture
+            }
+        };
+
+        let image = match eye {
+            XrRemoteEye::Left => self.ui.image(cx, ids!(preview_left)),
+            XrRemoteEye::Right => self.ui.image(cx, ids!(preview_right)),
+        };
+        image.set_texture(cx, Some(texture));
+    }
+
     fn handle_control_packet(&mut self, cx: &mut Cx, packet: ControlPacket) {
         match packet {
             ControlPacket::Hello(hello) => {
@@ -1312,25 +1358,12 @@ impl App {
                     "Control client connected: {} ({protocol_status})",
                     hello.role
                 );
-                self.shared
-                    .send_control(&ControlPacket::Capabilities(self.advertised_host_capabilities()));
                 self.shared.send_current_control_state();
             }
-            ControlPacket::Capabilities(capabilities) => {
-                let labels = capabilities
-                    .codecs
-                    .iter()
-                    .map(|codec| codec.label())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.latest_status = format!("Client capabilities: [{labels}]");
-                self.client_capabilities = Some(capabilities);
-                self.apply_negotiated_codec(cx, self.choose_negotiated_codec());
-            }
-            ControlPacket::ClientMediaChannels(channels) => {
-                self.shared.set_client_media_channels(channels);
+            ControlPacket::ClientMediaChannel(channel) => {
+                self.shared.set_client_media_channel(channel);
                 self.shared.send_current_control_state();
-                self.latest_status = "Client media channels registered".to_string();
+                self.latest_status = "Client media port registered".to_string();
             }
             ControlPacket::KeyframeRequest(request) => {
                 self.shared.request_keyframe(request.eye);
@@ -1416,6 +1449,7 @@ impl App {
         frame_group_id: u64,
         encode_timestamp_ns: u64,
         eye: XrRemoteEye,
+        encode_enabled: bool,
         request_keyframe: bool,
     ) -> bool {
         let eye_index = eye.index();
@@ -1426,6 +1460,11 @@ impl App {
             eye,
             &self.session_config,
         );
+        self.update_preview_texture(cx, eye);
+
+        if !encode_enabled {
+            return true;
+        }
 
         let timestamp_ns = encode_timestamp_ns;
         let meta = PendingFrameMeta {
@@ -1510,19 +1549,14 @@ impl App {
     }
 
     fn push_frame(&mut self, cx: &mut Cx) {
-        if !self.encoders_started {
-            return;
+        let media_ready = self.shared.all_media_connected();
+        let encode_enabled = media_ready && self.encoders_started;
+        let using_live_tracking = self.latest_state_received;
+        if !using_live_tracking {
+            self.latest_pose_text = "Pose: preview fallback camera (waiting for xr_net tracking)"
+                .to_string();
         }
-        if !self.shared.all_media_connected() {
-            self.latest_stream_text = "Stream: waiting for dual-eye media client".to_string();
-            self.refresh_labels(cx);
-            return;
-        }
-        if !self.latest_state_received {
-            self.latest_stream_text = "Stream: waiting for xr_net tracking".to_string();
-            self.refresh_labels(cx);
-            return;
-        }
+
         let tracking = make_tracking_packet(
             self.frame_group_counter.wrapping_add(1),
             (self.latest_state.time * 1_000_000_000.0) as u64,
@@ -1531,13 +1565,18 @@ impl App {
             self.session_config.fov_y_degrees,
             self.session_config.per_eye_width,
             self.session_config.per_eye_height,
-            self.latest_state.anchor,
+            if using_live_tracking {
+                self.latest_state.anchor
+            } else {
+                None
+            },
         );
 
         let render_started_ns = (cx.seconds_since_app_start() * 1_000_000_000.0) as u64;
         let frame_group_id = self.frame_group_counter.wrapping_add(1);
-        let request_keyframe = self.shared.any_eye_requires_keyframe()
-            || frame_group_id % ((self.session_config.fps / 2).max(1) as u64) == 0;
+        let request_keyframe = encode_enabled
+            && (self.shared.any_eye_requires_keyframe()
+                || frame_group_id % ((self.session_config.fps / 2).max(1) as u64) == 0);
         let encode_timestamp_ns = render_started_ns.max(self.frame_group_counter.saturating_add(1));
         let left_ok = self.push_eye_frame(
             cx,
@@ -1545,6 +1584,7 @@ impl App {
             frame_group_id,
             encode_timestamp_ns,
             XrRemoteEye::Left,
+            encode_enabled,
             request_keyframe,
         );
         let right_ok = self.push_eye_frame(
@@ -1553,20 +1593,40 @@ impl App {
             frame_group_id,
             encode_timestamp_ns,
             XrRemoteEye::Right,
+            encode_enabled,
             request_keyframe,
         );
         let render_finished_ns = (cx.seconds_since_app_start() * 1_000_000_000.0) as u64;
         if left_ok && right_ok {
             self.frame_group_counter = frame_group_id;
         }
-        self.latest_stream_text = format!(
-            "Stream: group {} track {} render {:.1} ms cfg L{} R{}",
-            frame_group_id,
-            tracking.tracking_id,
-            (render_finished_ns.saturating_sub(render_started_ns) as f64) / 1_000_000.0,
-            self.shared.eye_shared(XrRemoteEye::Left).current_config_id(),
-            self.shared.eye_shared(XrRemoteEye::Right).current_config_id(),
-        );
+        self.ui.redraw(cx);
+        let render_ms = (render_finished_ns.saturating_sub(render_started_ns) as f64) / 1_000_000.0;
+        self.latest_stream_text = if encode_enabled {
+            format!(
+                "Stream: group {} track {} render {:.1} ms cfg L{} R{}",
+                frame_group_id,
+                tracking.tracking_id,
+                render_ms,
+                self.shared.eye_shared(XrRemoteEye::Left).current_config_id(),
+                self.shared.eye_shared(XrRemoteEye::Right).current_config_id(),
+            )
+        } else if media_ready {
+            format!(
+                "Stream: media ready, preview only (encoder unavailable) ({:.1} ms)",
+                render_ms
+            )
+        } else if using_live_tracking {
+            format!(
+                "Stream: previewing live xr_net pose, waiting for dual-eye media client ({:.1} ms)",
+                render_ms
+            )
+        } else {
+            format!(
+                "Stream: previewing fallback pose, waiting for xr_net tracking and media client ({:.1} ms)",
+                render_ms
+            )
+        };
         self.refresh_labels(cx);
     }
 }
