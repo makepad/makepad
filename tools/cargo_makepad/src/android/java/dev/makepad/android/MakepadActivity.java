@@ -620,6 +620,20 @@ class ResizingLayout
     public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
         Insets imeInsets = insets.getInsets(WindowInsets.Type.ime());
         v.setPadding(0, 0, 0, imeInsets.bottom);
+
+        // Compute safe area insets from system bars and display cutout.
+        // These are in physical pixels; convert to logical points by dividing by density.
+        float density = getResources().getDisplayMetrics().density;
+        Insets systemBarInsets = insets.getInsets(
+            WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout()
+        );
+        MakepadNative.surfaceOnSafeAreaInsets(
+            systemBarInsets.top / density,
+            systemBarInsets.right / density,
+            systemBarInsets.bottom / density,
+            systemBarInsets.left / density
+        );
+
         return insets;
     }
 }

@@ -259,6 +259,10 @@ impl IosApp {
             let () = msg_send![mtk_view_obj, setUserInteractionEnabled: YES];
             let () = msg_send![mtk_view_obj, setAutoResizeDrawable: YES];
             let () = msg_send![mtk_view_obj, setMultipleTouchEnabled: YES];
+            // UIViewAutoresizingFlexibleWidth (2) | UIViewAutoresizingFlexibleHeight (16)
+            // Ensures the view resizes with the window on rotation, which is
+            // required for safeAreaInsets to update correctly.
+            let () = msg_send![mtk_view_obj, setAutoresizingMask: 18u64];
 
             let text_input_view: ObjcId = msg_send![get_ios_class_global().text_input_view, alloc];
             let text_input_view: ObjcId = msg_send![text_input_view, initWithFrame: NSRect {
@@ -377,8 +381,9 @@ impl IosApp {
             // Store the delegate for cleanup
             self.keyboard_observer_delegate = Some(textfield_dlg);
 
-            let () = msg_send![window_obj, addSubview: mtk_view_obj];
-
+            // Don't manually addSubview — setRootViewController manages the
+            // view controller's view in the window hierarchy, which is required
+            // for proper safe area inset propagation on device rotation.
             let () = msg_send![window_obj, setRootViewController: view_ctrl_obj];
             self.view_controller = Some(view_ctrl_obj);
             let () = msg_send![window_obj, makeKeyAndVisible];
@@ -454,6 +459,24 @@ impl IosApp {
             screen_rect.size.height as f64,
         );
 
+        // Query safe area insets from the MTKView (accounts for notch/Dynamic Island,
+        // home indicator, rounded corners, etc.)
+        let safe_area_insets = with_ios_app(|app| {
+            if let Some(mtk_view) = app.mtk_view {
+                unsafe {
+                    let insets: UIEdgeInsets = msg_send![mtk_view, safeAreaInsets];
+                    crate::event::SafeAreaInsets {
+                        top: insets.top,
+                        right: insets.right,
+                        bottom: insets.bottom,
+                        left: insets.left,
+                    }
+                }
+            } else {
+                crate::event::SafeAreaInsets::default()
+            }
+        });
+
         let new_geom = WindowGeom {
             xr_is_presenting: false,
             is_topmost: false,
@@ -463,6 +486,7 @@ impl IosApp {
             outer_size: new_size,
             dpi_factor,
             position: dvec2(0.0, 0.0),
+            safe_area_insets,
         };
 
         let first_draw = with_ios_app(|app| app.first_draw);

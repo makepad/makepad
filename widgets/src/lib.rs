@@ -590,6 +590,19 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::map::view::script_mod(vm);
     crate::math_view::script_mod(vm);
 
+    // Safe area inset values (in logical points). Populated from the platform's
+    // display_context which is set before Startup on iOS/Android. On desktop
+    // platforms these remain 0.0. Updated at runtime on WindowGeomChange events.
+    {
+        use makepad_script::trap::NoTrap;
+        let insets = vm.cx().display_context.safe_area_insets;
+        let widgets = vm.module(id!(widgets));
+        vm.bx.heap.set_value(widgets, id!(SAFE_INSET_PAD_TOP).into(), insets.top.into(), NoTrap);
+        vm.bx.heap.set_value(widgets, id!(SAFE_INSET_PAD_BOTTOM).into(), insets.bottom.into(), NoTrap);
+        vm.bx.heap.set_value(widgets, id!(SAFE_INSET_PAD_LEFT).into(), insets.left.into(), NoTrap);
+        vm.bx.heap.set_value(widgets, id!(SAFE_INSET_PAD_RIGHT).into(), insets.right.into(), NoTrap);
+    }
+
     script_eval!(vm, {
         mod.prelude.widgets = {
             ..mod.prelude.widgets_header,

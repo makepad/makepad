@@ -75,6 +75,7 @@ impl Into<WindowGeom> for WWindowInfo {
             position: Vec2d { x: 0., y: 0. },
             xr_is_presenting: self.xr_is_presenting,
             can_fullscreen: self.can_fullscreen,
+            ..Default::default()
         }
     }
 }

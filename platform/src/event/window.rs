@@ -4,6 +4,17 @@ use {
     std::rc::Rc,
 };
 
+/// Safe area insets describing regions of the screen that should not contain
+/// interactive content (e.g., notch/Dynamic Island, home indicator, rounded corners).
+/// Values are in logical points (not physical pixels).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SafeAreaInsets {
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+    pub left: f64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WindowGeom {
     pub dpi_factor: f64,
@@ -14,6 +25,9 @@ pub struct WindowGeom {
     pub position: Vec2d,
     pub inner_size: Vec2d,
     pub outer_size: Vec2d,
+    /// Safe area insets for this window (non-zero on devices with notches,
+    /// rounded corners, home indicators, etc.)
+    pub safe_area_insets: SafeAreaInsets,
 }
 
 #[derive(Clone, Debug)]

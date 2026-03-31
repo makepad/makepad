@@ -281,6 +281,11 @@ impl Cx {
     /// It handles all incoming messages, processes other events, and manages drawing operations.
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         self.gpu_info.performance = GpuPerformance::Tier1;
+        // Populate display_context and script heap with safe area insets
+        // BEFORE Startup, so app script_mod! definitions can use them.
+        let insets = self.os.safe_area_insets;
+        self.display_context.safe_area_insets = insets;
+        self.update_safe_inset_script_values(insets);
         self.call_event_handler(&Event::Startup);
         self.redraw_all();
 
@@ -308,6 +313,13 @@ impl Cx {
                         continue;
                     }
                     self.os.openxr.logged_waiting_for_session = false;
+                    // If a script re-apply was requested (e.g., safe area insets
+                    // changed on rotation), fire LiveEdit now.
+                    if self.pending_script_reapply {
+                        self.pending_script_reapply = false;
+                        self.call_event_handler(&Event::LiveEdit);
+                        self.redraw_all();
+                    }
                     self.handle_drawing();
                 }
                 Ok(message) => {
@@ -529,6 +541,8 @@ impl Cx {
                     position: dvec2(0.0, 0.0),
                     inner_size: size,
                     outer_size: size,
+                    safe_area_insets: self.os.safe_area_insets,
+                    ..Default::default()
                 };
                 let new_geom = window.window_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
@@ -1081,6 +1095,26 @@ impl Cx {
                 let action = ImeAction::from_android_action_code(action_code);
                 let e = Event::ImeAction(ImeActionEvent { action });
                 self.call_event_handler(&e);
+            }
+            FromJavaMessage::SafeAreaInsets { top, right, bottom, left } => {
+                let new_insets = crate::event::SafeAreaInsets { top, right, bottom, left };
+                if self.os.safe_area_insets != new_insets {
+                    self.os.safe_area_insets = new_insets;
+                    // Update the WindowGeom with the new safe area insets
+                    let window_id = CxWindowPool::id_zero();
+                    let window = &mut self.windows[window_id];
+                    let old_geom = window.window_geom.clone();
+                    window.window_geom.safe_area_insets = new_insets;
+                    let new_geom = window.window_geom.clone();
+                    if old_geom != new_geom {
+                        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                            window_id,
+                            new_geom,
+                            old_geom,
+                        }));
+                        self.redraw_all();
+                    }
+                }
             }
             FromJavaMessage::Init(_) => {}
         }
@@ -1863,6 +1897,8 @@ impl Cx {
                         position: dvec2(0.0, 0.0),
                         inner_size: size,
                         outer_size: size,
+                        safe_area_insets: self.os.safe_area_insets,
+                        ..Default::default()
                     };
                     window.is_created = true;
                     //let ret = unsafe{ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.0, 0)};
@@ -1895,6 +1931,7 @@ impl Cx {
                         position,
                         inner_size: size,
                         outer_size: size,
+                        ..Default::default()
                     };
                     window.is_popup = true;
                     window.popup_parent = Some(parent_window_id);
@@ -2676,6 +2713,7 @@ impl Default for CxOs {
             frame_time: 0,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
+            safe_area_insets: Default::default(),
             keyboard_closed: 0.0,
             media: CxAndroidMedia::default(),
             display: None,
@@ -2734,6 +2772,7 @@ pub struct CxOs {
     pub first_after_resize: bool,
     pub display_size: Vec2d,
     pub dpi_factor: f64,
+    pub safe_area_insets: crate::event::SafeAreaInsets,
     pub keyboard_closed: f64,
     pub frame_time: i64,
     pub quit: bool,
