@@ -110,9 +110,6 @@ impl X11Cx {
             return EventFlow::Exit;
         }
 
-        //let mut paint_dirty = false;
-
-        //self.process_desktop_pre_event(&mut event);
         match event {
             XlibEvent::WindowGotFocus(window_id) => {
                 // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
@@ -122,7 +119,6 @@ impl X11Cx {
                         cx.repaint_pass(main_pass_id);
                     }
                 }
-                //paint_dirty = true;
                 cx.call_event_handler(&Event::WindowGotFocus(window_id));
             }
             XlibEvent::WindowLostFocus(window_id) => {
@@ -409,11 +405,17 @@ impl X11Cx {
             }
         }
 
-        //if self.any_passes_dirty() || self.need_redrawing() || paint_dirty {
-        EventFlow::Poll
-        //} else {
-        //    EventFlow::Wait
-        // }
+        let cx = self.cx.borrow();
+        if cx.any_passes_dirty()
+            || cx.need_redrawing()
+            || cx.new_next_frames.len() != 0
+            || cx.screenshot_requests.len() > 0
+            || cx.demo_time_repaint
+        {
+            EventFlow::Poll
+        } else {
+            EventFlow::Wait
+        }
     }
 
     pub(crate) fn handle_repaint(&mut self, opengl_windows: &mut Vec<OpenglWindow>) {
