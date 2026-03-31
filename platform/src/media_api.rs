@@ -123,6 +123,12 @@ pub trait CxMediaApi {
 
     fn video_decoder_stop(&mut self, _index: usize) {}
 
+    /// Whether the native codec instance for this slot still exists (Android: JNI/MediaCodec).
+    /// After platform teardown (e.g. XR stop), Rust may still think `decoder_started` is true.
+    fn video_decoder_slot_live(&self, _index: usize) -> bool {
+        true
+    }
+
     fn video_capabilities(&self) -> VideoCapabilities {
         VideoCapabilities::default()
     }

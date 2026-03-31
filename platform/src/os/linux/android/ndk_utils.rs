@@ -11,6 +11,7 @@ macro_rules! new_object {
         let find_class = (**$env).FindClass.unwrap();
         let get_method_id = (**$env).GetMethodID.unwrap();
         let new_object = (**$env).NewObject.unwrap();
+        let delete_local_ref = (**$env).DeleteLocalRef.unwrap();
 
         let class = std::ffi::CString::new($class).unwrap();
         let sig = std::ffi::CString::new($sig).unwrap();
@@ -18,7 +19,11 @@ macro_rules! new_object {
 
         let constructor = get_method_id($env, class, b"<init>\0".as_ptr() as _, sig.as_ptr() as _);
 
-        new_object($env, class, constructor, $($args,)*)
+        let object = new_object($env, class, constructor, $($args,)*);
+        if !class.is_null() {
+            delete_local_ref($env, class as _);
+        }
+        object
     }};
 }
 
@@ -28,6 +33,7 @@ macro_rules! call_method {
         let get_object_class = (**$env).GetObjectClass.unwrap();
         let get_method_id = (**$env).GetMethodID.unwrap();
         let call_object_method = (**$env).$fn.unwrap();
+        let delete_local_ref = (**$env).DeleteLocalRef.unwrap();
 
         let method = std::ffi::CString::new($method).unwrap();
         let sig = std::ffi::CString::new($sig).unwrap();
@@ -38,7 +44,9 @@ macro_rules! call_method {
         let method = get_method_id($env, class, method.as_ptr() as _, sig.as_ptr() as _);
         assert!(!method.is_null());
 
-        call_object_method($env, $obj, method, $($args,)*)
+        let result = call_object_method($env, $obj, method, $($args,)*);
+        delete_local_ref($env, class as _);
+        result
     }};
 }
 

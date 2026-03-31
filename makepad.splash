@@ -5,6 +5,11 @@ let RunItem = {
     name: ""
     package_name: ""
     remote_host: ""
+    remote_control_port: ""
+    remote_media_left_port: ""
+    remote_media_right_port: ""
+    xr_remote_force_h264: ""
+    xr_remote_debug_mono: ""
     in_studio: true
 }
 
@@ -14,7 +19,12 @@ let RunQuest = RunItem{
             {
                 "STUDIO": hub.studio_ext(id),
                 "MAKEPAD": "vulkan",
-                "MAKEPAD_XR_REMOTE_HOST": self.remote_host
+                "MAKEPAD_XR_REMOTE_HOST": self.remote_host,
+                "MAKEPAD_XR_REMOTE_CONTROL_PORT": self.remote_control_port,
+                "MAKEPAD_XR_REMOTE_MEDIA_LEFT_PORT": self.remote_media_left_port,
+                "MAKEPAD_XR_REMOTE_MEDIA_RIGHT_PORT": self.remote_media_right_port,
+                "XR_REMOTE_FORCE_H264": self.xr_remote_force_h264,
+                "XR_REMOTE_DEBUG_MONO": self.xr_remote_debug_mono
             },
             "cargo", 
             [
@@ -91,5 +101,11 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-xr"}
     RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
     RunStudioRelease{name: "makepad-example-xr-remote"}
-    RunQuest{name: "makepad-example-xr-remote-quest", run:"makepad-example-xr-remote", remote_host:"192.168.2.23"}
+    RunQuest{
+        name: "makepad-example-xr-remote-quest",
+        run:"makepad-example-xr-remote",
+        remote_host:"192.168.2.23",
+        xr_remote_force_h264:"1",
+        xr_remote_debug_mono:"left"
+    }
 ])

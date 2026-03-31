@@ -368,7 +368,7 @@ impl CxMediaApi for Cx {
                 video_id: super::android::realtime_video_decoder_id(index),
                 output,
                 imported_first_frame: false,
-                reported_waiting_for_hardware_buffer: false,
+                reported_waiting_for_first_frame: false,
             },
         );
         Ok(())
@@ -413,6 +413,10 @@ impl CxMediaApi for Cx {
                 to_java_cleanup_video_decoder_ref(env, decoder.decoder_ref);
             }
         }
+    }
+
+    fn video_decoder_slot_live(&self, index: usize) -> bool {
+        self.os.realtime_video_decoders.contains_key(&index)
     }
 
     fn video_capabilities(&self) -> VideoCapabilities {

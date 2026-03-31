@@ -222,6 +222,7 @@ unsafe fn get_intent_string_extra(
     activity: jni_sys::jobject,
     key: &str,
 ) -> Option<String> {
+    let delete_local_ref = (**env).DeleteLocalRef.unwrap();
     let intent =
         ndk_utils::call_object_method!(env, activity, "getIntent", "()Landroid/content/Intent;");
     if intent.is_null() {
@@ -230,6 +231,7 @@ unsafe fn get_intent_string_extra(
     let key = CString::new(key).ok()?;
     let key = ((**env).NewStringUTF.unwrap())(env, key.as_ptr());
     if key.is_null() {
+        delete_local_ref(env, intent);
         return None;
     }
     let value = ndk_utils::call_object_method!(
@@ -240,9 +242,15 @@ unsafe fn get_intent_string_extra(
         key
     );
     if value.is_null() {
+        delete_local_ref(env, key as _);
+        delete_local_ref(env, intent);
         return None;
     }
-    Some(jstring_to_string(env, value))
+    let out = jstring_to_string(env, value);
+    delete_local_ref(env, value);
+    delete_local_ref(env, key as _);
+    delete_local_ref(env, intent);
+    Some(out)
 }
 
 pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) {
@@ -262,6 +270,10 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
         "MAKEPAD_XR_REMOTE_HOST",
         "MAKEPAD_XR_REMOTE_CONTROL_PORT",
         "MAKEPAD_XR_REMOTE_VIDEO_PORT",
+        "MAKEPAD_XR_REMOTE_MEDIA_LEFT_PORT",
+        "MAKEPAD_XR_REMOTE_MEDIA_RIGHT_PORT",
+        "XR_REMOTE_FORCE_H264",
+        "XR_REMOTE_DEBUG_MONO",
     ] {
         if let Some(value) = get_intent_string_extra(env, activity, key).filter(|v| !v.trim().is_empty()) {
             std::env::set_var(key, value);
@@ -1069,6 +1081,9 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onImeEditorActio
 }
 
 unsafe fn jstring_to_string(env: *mut jni_sys::JNIEnv, java_string: jni_sys::jstring) -> String {
+    if java_string.is_null() {
+        return String::new();
+    }
     let chars = (**env).GetStringUTFChars.unwrap()(env, java_string, std::ptr::null_mut());
     let rust_string = std::ffi::CStr::from_ptr(chars)
         .to_str()
@@ -1127,19 +1142,28 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str) -> Option<Vec<u8>> {
     let get_method_id = (**env).GetMethodID.unwrap();
     let get_object_class = (**env).GetObjectClass.unwrap();
     let call_object_method = (**env).CallObjectMethod.unwrap();
+    let delete_local_ref = (**env).DeleteLocalRef.unwrap();
+    let activity = get_activity();
+    let activity_class = get_object_class(env, activity);
 
     let mid = (get_method_id)(
         env,
-        get_object_class(env, get_activity()),
+        activity_class,
         b"getAssets\0".as_ptr() as _,
         b"()Landroid/content/res/AssetManager;\0".as_ptr() as _,
     );
-    let asset_manager = (call_object_method)(env, get_activity(), mid);
+    let asset_manager = (call_object_method)(env, activity, mid);
     let mgr = ndk_sys::AAssetManager_fromJava(env, asset_manager);
     let file_path = CString::new(filepath).unwrap();
     let asset =
         ndk_sys::AAssetManager_open(mgr, file_path.as_ptr(), ndk_sys::AASSET_MODE_BUFFER as _);
     if asset.is_null() {
+        if !asset_manager.is_null() {
+            delete_local_ref(env, asset_manager);
+        }
+        if !activity_class.is_null() {
+            delete_local_ref(env, activity_class as _);
+        }
         return None;
     }
     let length = ndk_sys::AAsset_getLength64(asset);
@@ -1148,7 +1172,20 @@ pub(crate) unsafe fn to_java_load_asset(filepath: &str) -> Option<Vec<u8>> {
     buffer.resize(length as usize, 0u8);
     if ndk_sys::AAsset_read(asset, buffer.as_ptr() as *mut _, length as _) > 0 {
         ndk_sys::AAsset_close(asset);
+        if !asset_manager.is_null() {
+            delete_local_ref(env, asset_manager);
+        }
+        if !activity_class.is_null() {
+            delete_local_ref(env, activity_class as _);
+        }
         return Some(buffer);
+    }
+    ndk_sys::AAsset_close(asset);
+    if !asset_manager.is_null() {
+        delete_local_ref(env, asset_manager);
+    }
+    if !activity_class.is_null() {
+        delete_local_ref(env, activity_class as _);
     }
     return None;
 }

@@ -24,8 +24,12 @@ script_mod! {
         draw_bg +: {
             video_texture: texture_video()
             target_eye: 0.0
+            debug_mono: 0.0
 
             pixel: fn() {
+                if self.debug_mono > 0.5 {
+                    return self.video_texture.sample_video(self.pos)
+                }
                 if (self.target_eye < 0.5 && VIEW_ID != 0) || (self.target_eye >= 0.5 && VIEW_ID == 0) {
                     return #0000
                 }
@@ -81,7 +85,7 @@ script_mod! {
                 mode: mod.widgets.XrViewMode.StuckToWrist
                 show_in_non_xr: true
                 wrist_left: true
-                logical_size: vec2(360, 220)
+                logical_size: vec2(420, 320)
                 pixel_scale: 0.00034
                 dpi_factor: 1.6
                 depth_scale: 120.0
@@ -111,6 +115,33 @@ script_mod! {
                         draw_text.color: #x8fa8bd
                     }
 
+                    preview_row := SolidView{
+                        width: Fill
+                        height: 84
+                        flow: Right
+                        spacing: 8
+                        draw_bg.color: #0000
+
+                        debug_left_surface := mod.widgets.RemoteEyeSurface{
+                            width: Fill
+                            height: Fill
+                            draw_bg.target_eye: 0.0
+                            draw_bg.debug_mono: 1.0
+                        }
+
+                        debug_right_surface := mod.widgets.RemoteEyeSurface{
+                            width: Fill
+                            height: Fill
+                            draw_bg.target_eye: 1.0
+                            draw_bg.debug_mono: 1.0
+                        }
+                    }
+
+                    decoder_field := Label{
+                        text: "Decoder: waiting"
+                        draw_text.color: #x8fa8bd
+                    }
+
                     clock_field := Label{
                         text: "Clock: waiting"
                         draw_text.color: #x8fa8bd
@@ -125,6 +156,20 @@ script_mod! {
 
 fn remote_video_texture_format(_cx: &Cx) -> TextureFormat {
     TextureFormat::VideoExternal
+}
+
+fn xr_remote_force_h264() -> bool {
+    std::env::var("XR_REMOTE_FORCE_H264")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn xr_remote_debug_mono_eye() -> Option<XrRemoteEye> {
+    match std::env::var("XR_REMOTE_DEBUG_MONO").ok()?.to_ascii_lowercase().as_str() {
+        "left" => Some(XrRemoteEye::Left),
+        "right" => Some(XrRemoteEye::Right),
+        _ => None,
+    }
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -148,6 +193,13 @@ impl RemoteEyeSurface {
             Some(texture) => self.draw_bg.draw_vars.set_texture(0, texture),
             None => self.draw_bg.draw_vars.empty_texture(0),
         }
+        self.redraw(cx);
+    }
+
+    pub fn set_debug_mono(&mut self, cx: &mut Cx, enabled: bool) {
+        self.draw_bg
+            .draw_vars
+            .set_uniform(cx, id!(debug_mono), &[if enabled { 1.0 } else { 0.0 }]);
         self.redraw(cx);
     }
 }
@@ -319,13 +371,25 @@ struct ClientEyeState {
     active_stream: Option<StreamConfigPacket>,
     known_configs: BTreeMap<u32, VideoConfigPacket>,
     incomplete_frames: BTreeMap<u64, IncompleteEyeFrame>,
+    ready_frames: VecDeque<CompletedEyeFrame>,
     decoder_texture: Option<Texture>,
     decoder_started: bool,
-    last_config_pushed: u32,
+    configured_config_id: Option<u32>,
+    seen_keyframe_config_id: Option<u32>,
     media_chunks_received: u64,
+    configs_received: u64,
     completed_frames: u64,
+    frames_queued: u64,
     decoded_updates: u64,
     decoder_errors: u64,
+    latest_completed_group: u64,
+    latest_status: String,
+    last_error: String,
+    status_prepared: bool,
+    status_configured: bool,
+    status_output_format: bool,
+    status_first_frame_available: bool,
+    status_update_ok: bool,
 }
 
 impl Default for ClientEyeState {
@@ -334,13 +398,25 @@ impl Default for ClientEyeState {
             active_stream: None,
             known_configs: BTreeMap::new(),
             incomplete_frames: BTreeMap::new(),
+            ready_frames: VecDeque::new(),
             decoder_texture: None,
             decoder_started: false,
-            last_config_pushed: 0,
+            configured_config_id: None,
+            seen_keyframe_config_id: None,
             media_chunks_received: 0,
+            configs_received: 0,
             completed_frames: 0,
+            frames_queued: 0,
             decoded_updates: 0,
             decoder_errors: 0,
+            latest_completed_group: 0,
+            latest_status: "idle".to_string(),
+            last_error: "-".to_string(),
+            status_prepared: false,
+            status_configured: false,
+            status_output_format: false,
+            status_first_frame_available: false,
+            status_update_ok: false,
         }
     }
 }
@@ -359,6 +435,8 @@ pub struct App {
     latest_connection_text: String,
     #[rust]
     latest_stream_text: String,
+    #[rust]
+    latest_decoder_text: String,
     #[rust]
     latest_clock_text: String,
     #[rust]
@@ -383,10 +461,19 @@ pub struct App {
     h265_watchdog_started_at: Option<f64>,
     #[rust]
     h265_fallback_requested: bool,
+    #[rust]
+    force_h264: bool,
+    #[rust]
+    debug_mono: Option<XrRemoteEye>,
+    #[rust]
+    startup_log_sent: bool,
 }
 
 impl Default for App {
     fn default() -> Self {
+        let force_h264 = xr_remote_force_h264();
+        let debug_mono = xr_remote_debug_mono_eye()
+            .or_else(|| if force_h264 { Some(XrRemoteEye::Left) } else { None });
         Self {
             ui: WidgetRef::default(),
             shared: ClientShared::new(),
@@ -394,6 +481,7 @@ impl Default for App {
             ping_timer: Timer::default(),
             latest_connection_text: format!("Connecting to {}", remote_host()),
             latest_stream_text: "Stream: waiting".to_string(),
+            latest_decoder_text: "Decoder: waiting".to_string(),
             latest_clock_text: "Clock: waiting".to_string(),
             last_sent_time_ns: 0,
             tracking_counter: 0,
@@ -406,6 +494,9 @@ impl Default for App {
             latest_displayed_group: 0,
             h265_watchdog_started_at: None,
             h265_fallback_requested: false,
+            force_h264,
+            debug_mono,
+            startup_log_sent: false,
         }
     }
 }
@@ -437,6 +528,13 @@ impl App {
         }
     }
 
+    fn debug_surface_ref(&self, cx: &mut Cx, eye: XrRemoteEye) -> WidgetRef {
+        match eye {
+            XrRemoteEye::Left => self.ui.widget(cx, ids!(debug_left_surface)),
+            XrRemoteEye::Right => self.ui.widget(cx, ids!(debug_right_surface)),
+        }
+    }
+
     fn ensure_started(&mut self, cx: &mut Cx) {
         if self.network_started {
             return;
@@ -446,20 +544,40 @@ impl App {
         if !preferred.is_empty() {
             capabilities.codecs = preferred;
         }
+        if self.force_h264 {
+            capabilities.codecs = vec![XrRemoteCodec::H264AnnexB];
+        }
         self.shared.set_capabilities(capabilities);
         self.shared.start_threads();
         self.ping_timer = cx.start_interval(1.0);
         self.network_started = true;
+        let mode = self
+            .debug_mono
+            .map(|eye| format!(" mono={}", eye.label()))
+            .unwrap_or_else(|| " stereo".to_string());
+        let codec_hint = if self.force_h264 { " h264-only" } else { "" };
         if let Some(ports) = self.shared.media_ports() {
             self.latest_connection_text = format!(
-                "Connecting to {} tcp:{} udp:{}|{}",
+                "Connecting to {} tcp:{} udp:{}|{}{}{}",
                 remote_host(),
                 control_port(),
                 ports.left_port,
-                ports.right_port
+                ports.right_port,
+                codec_hint,
+                mode,
             );
         }
         self.refresh_labels(cx);
+    }
+
+    fn startup_mode_text(&self) -> String {
+        format!(
+            "startup mode={}{}",
+            self.debug_mono
+                .map(|eye| format!("mono-{}", eye.label()))
+                .unwrap_or_else(|| "stereo".to_string()),
+            if self.force_h264 { " h264-only" } else { "" }
+        )
     }
 
     fn send_remote_log(&self, cx: &Cx, level: &str, source: &str, text: impl Into<String>) {
@@ -472,6 +590,22 @@ impl App {
     }
 
     fn refresh_labels(&mut self, cx: &mut Cx) {
+        self.latest_decoder_text = format!(
+            "Decoder: {}\n{}\n{}",
+            self
+                .debug_mono
+                .map(|eye| format!("mono {}", eye.label()))
+                .unwrap_or_else(|| "stereo".to_string()),
+            self.eye_debug_summary(XrRemoteEye::Left),
+            self.eye_debug_summary(XrRemoteEye::Right),
+        );
+        let clock_base = self
+            .latest_clock_text
+            .split(" | group ")
+            .next()
+            .unwrap_or(&self.latest_clock_text)
+            .to_string();
+        self.latest_clock_text = format!("{clock_base} | group {}", self.latest_displayed_group);
         self.ui
             .widget(cx, ids!(connection_field))
             .set_text(cx, &self.latest_connection_text);
@@ -479,22 +613,125 @@ impl App {
             .widget(cx, ids!(stream_field))
             .set_text(cx, &self.latest_stream_text);
         self.ui
+            .widget(cx, ids!(decoder_field))
+            .set_text(cx, &self.latest_decoder_text);
+        self.ui
             .widget(cx, ids!(clock_field))
             .set_text(cx, &self.latest_clock_text);
     }
 
-    fn apply_eye_texture_to_surface(&mut self, cx: &mut Cx, eye: XrRemoteEye) {
-        let texture = self.eye_state(eye).decoder_texture.clone();
-        let surface = self.surface_ref(cx, eye);
+    fn eye_debug_summary(&self, eye: XrRemoteEye) -> String {
+        let state = self.eye_state(eye);
+        let active_config = state
+            .active_stream
+            .as_ref()
+            .map(|stream| stream.config_id.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let milestones = format!(
+            "{}{}{}{}{}",
+            if state.status_prepared { 'P' } else { '-' },
+            if state.status_configured { 'C' } else { '-' },
+            if state.status_output_format { 'O' } else { '-' },
+            if state.status_first_frame_available { 'F' } else { '-' },
+            if state.status_update_ok { 'T' } else { '-' },
+        );
+        format!(
+            "{} cfg{} ch{} cfgs{} fr{} q{} upd{} {} err:{}",
+            eye.label(),
+            active_config,
+            state.media_chunks_received,
+            state.configs_received,
+            state.completed_frames,
+            state.frames_queued,
+            state.decoded_updates,
+            milestones,
+            state.last_error
+        )
+    }
+
+    fn decoder_ready_to_start(&self, eye: XrRemoteEye) -> bool {
+        let state = self.eye_state(eye);
+        let Some(stream) = state.active_stream.as_ref() else {
+            return false;
+        };
+        state.decoder_texture.is_some()
+            && state.known_configs.contains_key(&stream.config_id)
+    }
+
+    fn note_decoder_status(&mut self, cx: &Cx, eye: XrRemoteEye, status: &str) {
+        let mut log_lines = Vec::new();
+        {
+            let state = self.eye_state_mut(eye);
+            state.latest_status = status.to_string();
+            if status.contains("decoder prepared") && !state.status_prepared {
+                state.status_prepared = true;
+                log_lines.push(format!("{} prepared", eye.label()));
+            }
+            if status.contains("configured") && !state.status_configured {
+                state.status_configured = true;
+                log_lines.push(format!("{} configured", eye.label()));
+            }
+            if status.contains("output format") && !state.status_output_format {
+                state.status_output_format = true;
+                log_lines.push(format!("{} {}", eye.label(), status));
+            }
+            if status.contains("first frame available") && !state.status_first_frame_available {
+                state.status_first_frame_available = true;
+                log_lines.push(format!("{} first frame available", eye.label()));
+            }
+            if status.contains("updateTexImage ok") && !state.status_update_ok {
+                state.status_update_ok = true;
+                log_lines.push(format!("{} updateTexImage ok", eye.label()));
+            }
+        }
+        for line in log_lines {
+            self.send_remote_log(cx, "info", "quest-client", line);
+        }
+    }
+
+    fn apply_eye_texture_to_surface(
+        &mut self,
+        cx: &mut Cx,
+        surface: WidgetRef,
+        texture: Option<&Texture>,
+        mono: bool,
+    ) {
         {
             if let Some(mut inner) = surface.borrow_mut::<RemoteEyeSurface>() {
-                inner.set_video_texture(cx, texture.as_ref());
+                inner.set_debug_mono(cx, mono);
+                inner.set_video_texture(cx, texture);
                 return;
             }
         }
         if let Some(mut inner) = surface.cast_inner_mut::<RemoteEyeSurface>() {
-            inner.set_video_texture(cx, texture.as_ref());
+            inner.set_debug_mono(cx, mono);
+            inner.set_video_texture(cx, texture);
         };
+    }
+
+    fn apply_surface_textures(&mut self, cx: &mut Cx) {
+        if let Some(eye) = self.debug_mono {
+            let texture = self.eye_state(eye).decoder_texture.clone();
+            let immersive_left = self.surface_ref(cx, XrRemoteEye::Left);
+            let immersive_right = self.surface_ref(cx, XrRemoteEye::Right);
+            let debug_left = self.debug_surface_ref(cx, XrRemoteEye::Left);
+            let debug_right = self.debug_surface_ref(cx, XrRemoteEye::Right);
+            self.apply_eye_texture_to_surface(cx, immersive_left, texture.as_ref(), true);
+            self.apply_eye_texture_to_surface(cx, immersive_right, texture.as_ref(), true);
+            self.apply_eye_texture_to_surface(cx, debug_left, texture.as_ref(), true);
+            self.apply_eye_texture_to_surface(cx, debug_right, texture.as_ref(), true);
+            return;
+        }
+        let left = self.eye_state(XrRemoteEye::Left).decoder_texture.clone();
+        let right = self.eye_state(XrRemoteEye::Right).decoder_texture.clone();
+        let immersive_left = self.surface_ref(cx, XrRemoteEye::Left);
+        let immersive_right = self.surface_ref(cx, XrRemoteEye::Right);
+        let debug_left = self.debug_surface_ref(cx, XrRemoteEye::Left);
+        let debug_right = self.debug_surface_ref(cx, XrRemoteEye::Right);
+        self.apply_eye_texture_to_surface(cx, immersive_left, left.as_ref(), false);
+        self.apply_eye_texture_to_surface(cx, immersive_right, right.as_ref(), false);
+        self.apply_eye_texture_to_surface(cx, debug_left, left.as_ref(), true);
+        self.apply_eye_texture_to_surface(cx, debug_right, right.as_ref(), true);
     }
 
     fn ensure_decoder_texture(&mut self, cx: &mut Cx, eye: XrRemoteEye) -> Option<Texture> {
@@ -503,7 +740,7 @@ impl App {
         }
         let texture = Texture::new_with_format(cx, remote_video_texture_format(cx));
         self.eye_state_mut(eye).decoder_texture = Some(texture.clone());
-        self.apply_eye_texture_to_surface(cx, eye);
+        self.apply_surface_textures(cx);
         Some(texture)
     }
 
@@ -513,11 +750,22 @@ impl App {
         }
         let state = self.eye_state_mut(eye);
         state.decoder_started = false;
-        state.last_config_pushed = 0;
+        state.configured_config_id = None;
         state.incomplete_frames.clear();
+        state.ready_frames.clear();
+        state.seen_keyframe_config_id = None;
         state.completed_frames = 0;
+        state.frames_queued = 0;
         state.decoded_updates = 0;
         state.decoder_errors = 0;
+        state.latest_completed_group = 0;
+        state.latest_status = "decoder reset".to_string();
+        state.last_error = "-".to_string();
+        state.status_prepared = false;
+        state.status_configured = false;
+        state.status_output_format = false;
+        state.status_first_frame_available = false;
+        state.status_update_ok = false;
         self.set_immersive_visible(cx, false);
     }
 
@@ -535,7 +783,15 @@ impl App {
         eye: XrRemoteEye,
     ) -> Result<bool, VideoDecodeError> {
         if self.eye_state(eye).decoder_started {
-            return Ok(true);
+            if cx.video_decoder_slot_live(Self::decoder_slot(eye)) {
+                return Ok(true);
+            }
+            let state = self.eye_state_mut(eye);
+            state.decoder_started = false;
+            state.configured_config_id = None;
+        }
+        if !self.decoder_ready_to_start(eye) {
+            return Ok(false);
         }
         let Some(stream_config) = self.eye_state(eye).active_stream.clone() else {
             return Ok(false);
@@ -555,7 +811,15 @@ impl App {
         };
         cx.video_decoder_start_box(Self::decoder_slot(eye), config, Box::new(|_| {}))?;
         self.eye_state_mut(eye).decoder_started = true;
-        self.apply_eye_texture_to_surface(cx, eye);
+        self.apply_surface_textures(cx);
+        self.push_config_if_needed(cx, eye, stream_config.config_id)?;
+        self.shared
+            .send_control(&ControlPacket::KeyframeRequest(KeyframeRequestPacket {
+                eye: match eye {
+                    XrRemoteEye::Left => XrRemoteEyeTarget::Left,
+                    XrRemoteEye::Right => XrRemoteEyeTarget::Right,
+                },
+            }));
         Ok(true)
     }
 
@@ -585,12 +849,21 @@ impl App {
             }
             ControlPacket::StreamConfig(config) => {
                 let eye = config.eye;
-                let changed = self.eye_state(eye).active_stream.as_ref() != Some(&config);
+                let previous = self.eye_state(eye).active_stream.clone();
+                let changed = previous.as_ref() != Some(&config);
+                let bootstrap_stream = previous
+                    .as_ref()
+                    .is_none_or(|old| old.config_id == 0)
+                    && config.config_id != 0;
                 if changed {
-                    self.reset_eye_decoder(cx, eye);
-                    self.eye_state_mut(eye).known_configs.clear();
+                    if !bootstrap_stream {
+                        self.reset_eye_decoder(cx, eye);
+                        self.eye_state_mut(eye).known_configs.clear();
+                    }
                     self.eye_state_mut(eye).active_stream = Some(config.clone());
-                    self.reset_stereo_sync();
+                    if !bootstrap_stream {
+                        self.reset_stereo_sync();
+                    }
                     self.ensure_decoder_texture(cx, eye);
                     let _ = self.try_start_eye_decoder(cx, eye);
                 } else {
@@ -599,9 +872,12 @@ impl App {
             }
             ControlPacket::VideoConfig(config) => {
                 let eye = config.eye;
+                let state = self.eye_state_mut(eye);
+                state.configs_received = state.configs_received.wrapping_add(1);
                 self.eye_state_mut(eye)
                     .known_configs
                     .insert(config.config_id, config);
+                let _ = self.try_start_eye_decoder(cx, eye);
             }
             ControlPacket::ClockSync(sync) => {
                 if sync.client_time_ns == 0 {
@@ -636,6 +912,17 @@ impl App {
     }
 
     fn media_frame_is_fresh(&self, cx: &Cx, header: &MediaChunkHeader) -> bool {
+        let left_decoded = self.eye_state(XrRemoteEye::Left).decoded_updates > 0;
+        let right_decoded = self.eye_state(XrRemoteEye::Right).decoded_updates > 0;
+        if self.debug_mono.is_some() {
+            if !left_decoded && !right_decoded {
+                return true;
+            }
+        } else if !left_decoded || !right_decoded {
+            // Stereo: do not PTS-gate until both decoders have produced a frame; otherwise the
+            // slower eye or async decode ordering drops valid media at ingest.
+            return true;
+        }
         let Some(session) = self.active_session.as_ref() else {
             return true;
         };
@@ -655,6 +942,38 @@ impl App {
         if !self.media_frame_is_fresh(cx, &frame.header) {
             return;
         }
+        {
+            let state = self.eye_state_mut(eye);
+            state.latest_completed_group = frame.header.frame_group_id;
+            if frame.header.is_key {
+                state.seen_keyframe_config_id = Some(frame.header.config_id);
+            }
+            if state.completed_frames == 1 {
+                self.send_remote_log(
+                    cx,
+                    "info",
+                    "quest-client",
+                    format!(
+                        "{} first complete frame cfg{} group {} bytes {}",
+                        eye.label(),
+                        frame.header.config_id,
+                        frame.header.frame_group_id,
+                        frame.bytes.len()
+                    ),
+                );
+            }
+        }
+        if let Some(selected_eye) = self.debug_mono {
+            if eye != selected_eye {
+                return;
+            }
+            let state = self.eye_state_mut(eye);
+            state.ready_frames.push_back(frame);
+            while state.ready_frames.len() > 8 {
+                let _ = state.ready_frames.pop_front();
+            }
+            return;
+        }
         let now_ns = self.local_now_ns(cx);
         let entry = self
             .pending_stereo_groups
@@ -668,12 +987,15 @@ impl App {
             XrRemoteEye::Left => entry.left = Some(frame),
             XrRemoteEye::Right => entry.right = Some(frame),
         }
+        // Reset age on each eye so prune_stale_media does not drop the pair while waiting on the
+        // other UDP path (left/right skew often exceeds the stale window).
+        entry.received_at_ns = now_ns;
         if let (Some(left), Some(right)) = (entry.left.take(), entry.right.take()) {
             let frame_group_id = left.header.frame_group_id;
             self.ready_stereo_groups
                 .push_back((frame_group_id, left, right));
             self.pending_stereo_groups.remove(&frame_group_id);
-            while self.ready_stereo_groups.len() > 2 {
+            while self.ready_stereo_groups.len() > 8 {
                 let _ = self.ready_stereo_groups.pop_front();
             }
         }
@@ -746,6 +1068,8 @@ impl App {
             .as_ref()
             .map(|session| session.stale_after_ns)
             .unwrap_or(XR_REMOTE_FRAME_STALE_AFTER_NS);
+        // Host may advertise a short window; dual UDP paths still need time to complete a group.
+        let pending_stereo_stale_after = stale_after.max(XR_REMOTE_FRAME_STALE_AFTER_NS);
         let now = self.local_now_ns(cx);
         for eye in XrRemoteEye::ALL {
             let state = self.eye_state_mut(eye);
@@ -760,7 +1084,7 @@ impl App {
             }
         }
         self.pending_stereo_groups.retain(|_, group| {
-            now.saturating_sub(group.received_at_ns) <= stale_after
+            now.saturating_sub(group.received_at_ns) <= pending_stereo_stale_after
         });
         while self.pending_stereo_groups.len() > 8 {
             let Some(first_key) = self.pending_stereo_groups.keys().next().copied() else {
@@ -776,7 +1100,7 @@ impl App {
         eye: XrRemoteEye,
         config_id: u32,
     ) -> Result<(), VideoDecodeError> {
-        if self.eye_state(eye).last_config_pushed == config_id {
+        if self.eye_state(eye).configured_config_id == Some(config_id) {
             return Ok(());
         }
         let Some(config) = self.eye_state(eye).known_configs.get(&config_id).cloned() else {
@@ -793,12 +1117,124 @@ impl App {
                 data: &config.bytes,
             },
         )?;
-        self.eye_state_mut(eye).last_config_pushed = config_id;
+        self.eye_state_mut(eye).configured_config_id = Some(config_id);
         Ok(())
     }
 
+    fn flush_mono_decoder(&mut self, cx: &mut Cx, eye: XrRemoteEye) {
+        let ready_len = self.eye_state(eye).ready_frames.len();
+        let Some(frame) = self.eye_state_mut(eye).ready_frames.pop_back() else {
+            return;
+        };
+        let frame_config_id = frame.header.config_id;
+        let frame_group_id = frame.header.frame_group_id;
+        let frame_is_key = frame.header.is_key;
+        if self.eye_state(eye).frames_queued == 0 {
+            self.send_remote_log(
+                cx,
+                "info",
+                "quest-client",
+                format!(
+                    "{} attempting first mono queue group {} cfg{}",
+                    eye.label(),
+                    frame_group_id,
+                    frame_config_id
+                ),
+            );
+        }
+        if !self
+            .eye_state(eye)
+            .known_configs
+            .contains_key(&frame_config_id)
+        {
+            self.eye_state_mut(eye).ready_frames.push_back(frame);
+            self.latest_stream_text = format!(
+                "Stream: {} waiting for cfg{} (ready {})",
+                eye.label(),
+                frame_config_id,
+                ready_len
+            );
+            return;
+        }
+        if let Err(err) = self.push_config_if_needed(cx, eye, frame_config_id) {
+            self.eye_state_mut(eye).ready_frames.push_back(frame);
+            self.latest_stream_text = format!(
+                "Stream: {} config push failed for cfg{}: {:?}",
+                eye.label(),
+                frame_config_id,
+                err
+            );
+            return;
+        }
+        if cx
+            .video_decoder_push_packet(
+                Self::decoder_slot(eye),
+                makepad_widgets::makepad_platform::video::VideoDecoderPacketRef {
+                    pts_ns: frame.header.pts_ns,
+                    dts_ns: None,
+                    is_key: frame_is_key,
+                    is_config: false,
+                    config_id: frame_config_id,
+                    data: &frame.bytes,
+                },
+            )
+            .is_err()
+        {
+            self.latest_stream_text = format!(
+                "Stream: {} frame push failed cfg{} group {}",
+                eye.label(),
+                frame_config_id,
+                frame_group_id
+            );
+            self.send_remote_log(
+                cx,
+                "warn",
+                "quest-client",
+                format!(
+                    "{} frame push failed cfg{} group {}",
+                    eye.label(),
+                    frame_config_id,
+                    frame_group_id
+                ),
+            );
+            self.eye_state_mut(eye).ready_frames.push_back(frame);
+            return;
+        }
+        let (first_queued, first_queued_key) = {
+            let state = self.eye_state_mut(eye);
+            let first_queued = state.frames_queued == 0;
+            let first_queued_key = first_queued && frame_is_key;
+            state.frames_queued = state.frames_queued.wrapping_add(1);
+            state.latest_status = format!("queued frame group {}", frame_group_id);
+            (first_queued, first_queued_key)
+        };
+        if first_queued {
+            self.send_remote_log(
+                cx,
+                "info",
+                "quest-client",
+                format!("{} first frame queued cfg{}", eye.label(), frame_config_id),
+            );
+        }
+        if first_queued_key {
+            self.send_remote_log(
+                cx,
+                "info",
+                "quest-client",
+                format!("{} first keyframe queued", eye.label()),
+            );
+        }
+        self.latest_displayed_group = frame_group_id;
+        self.latest_stream_text = format!(
+            "Stream: mono {} group {} cfg{}",
+            eye.label(),
+            frame_group_id,
+            frame_config_id
+        );
+    }
+
     fn flush_decoders(&mut self, cx: &mut Cx) {
-        for eye in XrRemoteEye::ALL {
+        if let Some(eye) = self.debug_mono {
             match self.try_start_eye_decoder(cx, eye) {
                 Ok(true) => {}
                 Ok(false) => return,
@@ -808,69 +1244,204 @@ impl App {
                     return;
                 }
             }
+            self.flush_mono_decoder(cx, eye);
+            return;
         }
-        if self.ready_stereo_groups.len() > 1 {
+        // Always try both eyes each tick. Returning on the first Ok(false) skipped the second
+        // decoder when left was not ready yet (VideoConfig/texture ordering), so right never started.
+        for eye in XrRemoteEye::ALL {
+            match self.try_start_eye_decoder(cx, eye) {
+                Ok(_) => {}
+                Err(err) => {
+                    self.latest_stream_text =
+                        format!("Stream: {} decoder start failed: {:?}", eye.label(), err);
+                    return;
+                }
+            }
+        }
+        if !XrRemoteEye::ALL
+            .into_iter()
+            .all(|eye| self.eye_state(eye).decoder_started)
+        {
+            return;
+        }
+        if self.eye_state(XrRemoteEye::Left).configured_config_id.is_some()
+            && self.eye_state(XrRemoteEye::Right).configured_config_id.is_some()
+            && self.ready_stereo_groups.len() > 1
+        {
             let latest = self.ready_stereo_groups.pop_back();
             self.ready_stereo_groups.clear();
             if let Some(latest) = latest {
                 self.ready_stereo_groups.push_back(latest);
             }
         }
-        let Some((frame_group_id, left, right)) = self.ready_stereo_groups.pop_front() else {
+        let ready_groups = self.ready_stereo_groups.len();
+        let Some((frame_group_id, left, right)) = self.ready_stereo_groups.pop_back() else {
             return;
         };
-        if !self.media_frame_is_fresh(cx, &left.header) || !self.media_frame_is_fresh(cx, &right.header) {
+        let left_config_id = left.header.config_id;
+        let right_config_id = right.header.config_id;
+        let left_is_key = left.header.is_key;
+        let right_is_key = right.header.is_key;
+        if self.eye_state(XrRemoteEye::Left).frames_queued == 0
+            && self.eye_state(XrRemoteEye::Right).frames_queued == 0
+        {
+            self.send_remote_log(
+                cx,
+                "info",
+                "quest-client",
+                format!(
+                    "attempting first stereo queue group {} cfg L{} R{}",
+                    frame_group_id,
+                    left_config_id,
+                    right_config_id
+                ),
+            );
+        }
+        if !self
+            .eye_state(XrRemoteEye::Left)
+            .known_configs
+            .contains_key(&left_config_id)
+            || !self
+                .eye_state(XrRemoteEye::Right)
+                .known_configs
+                .contains_key(&right_config_id)
+        {
+            self.ready_stereo_groups.push_back((frame_group_id, left, right));
+            self.latest_stream_text = format!(
+                "Stream: stereo waiting cfg L{} R{} (ready {})",
+                left_config_id,
+                right_config_id,
+                ready_groups
+            );
+            return;
+        }
+        if let Err(err) = self.push_config_if_needed(cx, XrRemoteEye::Left, left_config_id) {
+            self.ready_stereo_groups.push_back((frame_group_id, left, right));
+            self.latest_stream_text =
+                format!("Stream: left config push failed for cfg{}: {:?}", left_config_id, err);
+            return;
+        }
+        if let Err(err) = self.push_config_if_needed(cx, XrRemoteEye::Right, right_config_id) {
+            self.ready_stereo_groups.push_back((frame_group_id, left, right));
+            self.latest_stream_text =
+                format!("Stream: right config push failed for cfg{}: {:?}", right_config_id, err);
             return;
         }
 
-        if self.push_config_if_needed(cx, XrRemoteEye::Left, left.header.config_id).is_err()
-            || self.push_config_if_needed(cx, XrRemoteEye::Right, right.header.config_id).is_err()
-        {
-            self.ready_stereo_groups.push_front((frame_group_id, left, right));
-            return;
-        }
         if cx
             .video_decoder_push_packet(
                 Self::decoder_slot(XrRemoteEye::Left),
                 makepad_widgets::makepad_platform::video::VideoDecoderPacketRef {
                     pts_ns: left.header.pts_ns,
                     dts_ns: None,
-                    is_key: left.header.is_key,
+                    is_key: left_is_key,
                     is_config: false,
-                    config_id: left.header.config_id,
+                    config_id: left_config_id,
                     data: &left.bytes,
                 },
             )
             .is_err()
         {
+            self.latest_stream_text = format!(
+                "Stream: left frame push failed cfg{} group {}",
+                left_config_id,
+                frame_group_id
+            );
+            self.send_remote_log(
+                cx,
+                "warn",
+                "quest-client",
+                format!(
+                    "left frame push failed cfg{} group {}",
+                    left_config_id,
+                    frame_group_id
+                ),
+            );
             self.ready_stereo_groups.push_front((frame_group_id, left, right));
             return;
         }
+        let (left_first_queued, left_first_queued_key) = {
+            let state = self.eye_state_mut(XrRemoteEye::Left);
+            let first_queued = state.frames_queued == 0;
+            let first_key = first_queued && left_is_key;
+            state.frames_queued = state.frames_queued.wrapping_add(1);
+            state.latest_status = format!("queued frame group {}", frame_group_id);
+            (first_queued, first_key)
+        };
         if cx
             .video_decoder_push_packet(
                 Self::decoder_slot(XrRemoteEye::Right),
                 makepad_widgets::makepad_platform::video::VideoDecoderPacketRef {
                     pts_ns: right.header.pts_ns,
                     dts_ns: None,
-                    is_key: right.header.is_key,
+                    is_key: right_is_key,
                     is_config: false,
-                    config_id: right.header.config_id,
+                    config_id: right_config_id,
                     data: &right.bytes,
                 },
             )
             .is_err()
         {
+            self.latest_stream_text = format!(
+                "Stream: right frame push failed cfg{} group {}",
+                right_config_id,
+                frame_group_id
+            );
+            self.send_remote_log(
+                cx,
+                "warn",
+                "quest-client",
+                format!(
+                    "right frame push failed cfg{} group {}",
+                    right_config_id,
+                    frame_group_id
+                ),
+            );
             self.ready_stereo_groups.push_front((frame_group_id, left, right));
             return;
+        }
+        let (right_first_queued, right_first_queued_key) = {
+            let state = self.eye_state_mut(XrRemoteEye::Right);
+            let first_queued = state.frames_queued == 0;
+            let first_key = first_queued && right_is_key;
+            state.frames_queued = state.frames_queued.wrapping_add(1);
+            state.latest_status = format!("queued frame group {}", frame_group_id);
+            (first_queued, first_key)
+        };
+        if left_first_queued {
+            self.send_remote_log(
+                cx,
+                "info",
+                "quest-client",
+                format!("left first frame queued cfg{}", left_config_id),
+            );
+        }
+        if right_first_queued {
+            self.send_remote_log(
+                cx,
+                "info",
+                "quest-client",
+                format!("right first frame queued cfg{}", right_config_id),
+            );
+        }
+        if left_first_queued_key {
+            self.send_remote_log(cx, "info", "quest-client", "left first keyframe queued");
+        }
+        if right_first_queued_key {
+            self.send_remote_log(cx, "info", "quest-client", "right first keyframe queued");
         }
         self.latest_displayed_group = frame_group_id;
         self.latest_stream_text = format!(
             "Stream: group {} queued L{} R{}",
-            frame_group_id, left.header.config_id, right.header.config_id
+            frame_group_id, left_config_id, right_config_id
         );
     }
 
     fn maybe_request_h264_fallback(&mut self, cx: &Cx) {
+        if self.force_h264 {
+            return;
+        }
         let left_stream = self.eye_state(XrRemoteEye::Left).active_stream.as_ref();
         let right_stream = self.eye_state(XrRemoteEye::Right).active_stream.as_ref();
         let Some(left_stream) = left_stream else {
@@ -885,13 +1456,20 @@ impl App {
         {
             return;
         }
-        let left_state = self.eye_state(XrRemoteEye::Left);
-        let right_state = self.eye_state(XrRemoteEye::Right);
-        if left_state.completed_frames == 0 || right_state.completed_frames == 0 {
-            return;
-        }
-        if left_state.decoded_updates > 0 || right_state.decoded_updates > 0 {
-            return;
+        if let Some(eye) = self.debug_mono {
+            let state = self.eye_state(eye);
+            if state.completed_frames == 0 || state.decoded_updates > 0 {
+                return;
+            }
+        } else {
+            let left_state = self.eye_state(XrRemoteEye::Left);
+            let right_state = self.eye_state(XrRemoteEye::Right);
+            if left_state.completed_frames == 0 || right_state.completed_frames == 0 {
+                return;
+            }
+            if left_state.decoded_updates > 0 || right_state.decoded_updates > 0 {
+                return;
+            }
         }
         let now = cx.seconds_since_app_start();
         let started_at = self.h265_watchdog_started_at.get_or_insert(now);
@@ -932,15 +1510,88 @@ impl App {
     }
 
     fn sync_immersive_planes(&mut self, cx: &mut Cx, state: &XrState) {
-        let Some(session) = self.active_session.as_ref() else {
+        self.apply_surface_textures(cx);
+        let Some(session) = self.active_session.clone() else {
             self.set_immersive_visible(cx, false);
             return;
         };
-        let ready = self.latest_displayed_group > 0
-            && self.eye_state(XrRemoteEye::Left).decoded_updates > 0
-            && self.eye_state(XrRemoteEye::Right).decoded_updates > 0;
-        if !ready {
+        if let Some(_eye) = self.debug_mono {
+            let ready = self
+                .debug_mono
+                .is_some_and(|eye| self.eye_state(eye).decoded_updates > 0);
+            if !ready {
+                self.set_immersive_visible(cx, false);
+                return;
+            }
+            let head_up = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 1.0, 0.0));
+            let head_forward = state
+                .head_pose
+                .orientation
+                .rotate_vec3(&vec3f(0.0, 0.0, -1.0))
+                .normalize();
+            let panel_orientation = Quat::look_rotation(head_forward.scale(-1.0), head_up);
+            let distance = session.panel_distance_meters;
+            let height_m = 2.0 * distance * (session.fov_y_degrees.to_radians() * 0.5).tan();
+            let aspect = session.per_eye_width as f32 / session.per_eye_height.max(1) as f32;
+            let width_m = height_m * aspect;
+            let pixel_scale = 0.00052;
+            let logical_size = dvec2(
+                (width_m / pixel_scale.max(0.00001)) as f64,
+                (height_m / pixel_scale.max(0.00001)) as f64,
+            );
+            let mono_pose = Pose::new(
+                panel_orientation,
+                state.head_pose.position + head_forward.scale(distance),
+            );
+            self.set_eye_plane(cx, ids!(immersive_left), mono_pose, logical_size, pixel_scale);
+            self.ui.widget(cx, ids!(immersive_left)).set_visible(cx, true);
+            self.ui.widget(cx, ids!(immersive_right)).set_visible(cx, false);
+            return;
+        }
+        let left_ok = self.eye_state(XrRemoteEye::Left).decoded_updates > 0;
+        let right_ok = self.eye_state(XrRemoteEye::Right).decoded_updates > 0;
+        let has_queued_group = self.latest_displayed_group > 0;
+        if !has_queued_group || (!left_ok && !right_ok) {
             self.set_immersive_visible(cx, false);
+            return;
+        }
+
+        // One eye decoding: show a single head-locked panel with debug_mono sampling so both
+        // physical eyes see video (per-eye VIEW_ID gating would hide the other panel).
+        if !left_ok || !right_ok {
+            let eye = if left_ok {
+                XrRemoteEye::Left
+            } else {
+                XrRemoteEye::Right
+            };
+            let texture = self.eye_state(eye).decoder_texture.clone();
+            let immersive_left = self.surface_ref(cx, XrRemoteEye::Left);
+            let immersive_right = self.surface_ref(cx, XrRemoteEye::Right);
+            self.apply_eye_texture_to_surface(cx, immersive_left, texture.as_ref(), true);
+            self.apply_eye_texture_to_surface(cx, immersive_right, texture.as_ref(), true);
+            let head_up = state.head_pose.orientation.rotate_vec3(&vec3f(0.0, 1.0, 0.0));
+            let head_forward = state
+                .head_pose
+                .orientation
+                .rotate_vec3(&vec3f(0.0, 0.0, -1.0))
+                .normalize();
+            let panel_orientation = Quat::look_rotation(head_forward.scale(-1.0), head_up);
+            let distance = session.panel_distance_meters;
+            let height_m = 2.0 * distance * (session.fov_y_degrees.to_radians() * 0.5).tan();
+            let aspect = session.per_eye_width as f32 / session.per_eye_height.max(1) as f32;
+            let width_m = height_m * aspect;
+            let pixel_scale = 0.00052;
+            let logical_size = dvec2(
+                (width_m / pixel_scale.max(0.00001)) as f64,
+                (height_m / pixel_scale.max(0.00001)) as f64,
+            );
+            let mono_pose = Pose::new(
+                panel_orientation,
+                state.head_pose.position + head_forward.scale(distance),
+            );
+            self.set_eye_plane(cx, ids!(immersive_left), mono_pose, logical_size, pixel_scale);
+            self.ui.widget(cx, ids!(immersive_left)).set_visible(cx, true);
+            self.ui.widget(cx, ids!(immersive_right)).set_visible(cx, false);
             return;
         }
 
@@ -1078,21 +1729,34 @@ impl AppMain for App {
 
         if let Event::VideoTextureUpdated(ev) = event {
             if let Some(eye) = Self::eye_for_video_id(ev.video_id) {
+                let first_update = !self.eye_state(eye).status_update_ok;
                 let state = self.eye_state_mut(eye);
                 state.decoded_updates = state.decoded_updates.wrapping_add(1);
+                state.status_update_ok = true;
+                state.latest_status = "updateTexImage ok".to_string();
                 self.h265_watchdog_started_at = None;
+                if first_update {
+                    self.send_remote_log(
+                        cx,
+                        "info",
+                        "quest-client",
+                        format!("{} updateTexImage ok", eye.label()),
+                    );
+                }
                 self.latest_stream_text = format!(
                     "Stream: group {} decoded L{} R{}",
                     self.latest_displayed_group,
                     self.eye_state(XrRemoteEye::Left).decoded_updates,
                     self.eye_state(XrRemoteEye::Right).decoded_updates
                 );
+                self.apply_surface_textures(cx);
                 self.refresh_labels(cx);
             }
         }
 
         if let Event::VideoDecodingStatus(ev) = event {
             if let Some(eye) = Self::eye_for_video_id(ev.video_id) {
+                self.note_decoder_status(cx, eye, &ev.status);
                 self.latest_stream_text = format!("Stream: {} {}", eye.label(), ev.status);
                 self.refresh_labels(cx);
             }
@@ -1102,11 +1766,18 @@ impl AppMain for App {
             if let Some(eye) = Self::eye_for_video_id(ev.video_id) {
                 let state = self.eye_state_mut(eye);
                 state.decoder_errors = state.decoder_errors.wrapping_add(1);
+                state.last_error = ev.error.clone();
                 self.latest_stream_text = format!(
                     "Stream: {} decoder error {}: {}",
                     eye.label(),
                     state.decoder_errors,
                     ev.error
+                );
+                self.send_remote_log(
+                    cx,
+                    "error",
+                    "quest-client",
+                    format!("{} decoder error: {}", eye.label(), ev.error),
                 );
                 self.refresh_labels(cx);
             }
@@ -1115,6 +1786,10 @@ impl AppMain for App {
         if let Event::Signal = event {
             for packet in self.shared.drain_control() {
                 self.handle_control_packet(cx, packet);
+            }
+            if !self.startup_log_sent && self.active_session.is_some() {
+                self.send_remote_log(cx, "info", "quest-client", self.startup_mode_text());
+                self.startup_log_sent = true;
             }
             for packet in self.shared.drain_media() {
                 self.queue_media_packet(cx, packet);

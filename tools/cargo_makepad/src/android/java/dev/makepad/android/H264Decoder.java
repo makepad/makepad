@@ -18,6 +18,8 @@ import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class H264Decoder {
@@ -56,6 +58,8 @@ public class H264Decoder {
     private boolean mStatusConfiguredReported = false;
     private boolean mStatusOutputFormatReported = false;
     private boolean mStatusImageReported = false;
+    private boolean mStatusFirstFrameAvailableReported = false;
+    private boolean mStatusTexImageReported = false;
 
     /// Must exceed concurrent decoder output + mLatestImage + mHeldDecodeImage; too few causes
     /// ImageReader_JNI "Unable to acquire a buffer item" and can destabilize the codec surface.
@@ -95,17 +99,31 @@ public class H264Decoder {
         mExternalTextureHandle = textureHandle;
     }
 
+    /// Decoder work runs on a HandlerThread; JNI from that thread has triggered ART aborts
+    /// (GetObjectClass / local refs). Marshal status/error into Makepad on the Activity UI thread.
+    private void invokeNativeOnMain(Runnable r) {
+        Activity act = mActivityReference.get();
+        if (act != null && !act.isDestroyed()) {
+            act.runOnUiThread(r);
+        } else {
+            r.run();
+        }
+    }
+
     private void reportStatus(String status) {
-        MakepadNative.onH264DecoderStatus(mDecoderId, status);
+        final String s = status != null ? status : "";
+        invokeNativeOnMain(() -> MakepadNative.onH264DecoderStatus(mDecoderId, s));
+    }
+
+    private void reportError(String message) {
+        final String m = message != null ? message : "";
+        invokeNativeOnMain(() -> MakepadNative.onH264DecoderError(mDecoderId, m));
     }
 
     public boolean prepare() {
         try {
             if (!mUseImageReader && mExternalTextureHandle == 0) {
-                MakepadNative.onH264DecoderError(
-                    mDecoderId,
-                    mCodecLabel + " decoder missing external texture handle"
-                );
+                reportError(mCodecLabel + " decoder missing external texture handle");
                 return false;
             }
 
@@ -127,10 +145,7 @@ public class H264Decoder {
                         try {
                             image = reader.acquireLatestImage();
                         } catch (Throwable t) {
-                            MakepadNative.onH264DecoderError(
-                                mDecoderId,
-                                mCodecLabel + " decoder image acquire failed: " + t
-                            );
+                            reportError(mCodecLabel + " decoder image acquire failed: " + t);
                         }
                         if (image == null) {
                             return;
@@ -142,7 +157,8 @@ public class H264Decoder {
                             mHeight = image.getHeight();
                             if (!mStatusImageReported) {
                                 mStatusImageReported = true;
-                                reportStatus("imagereader image " + mWidth + "x" + mHeight);
+                                mStatusFirstFrameAvailableReported = true;
+                                reportStatus("first frame available " + mWidth + "x" + mHeight);
                             }
                             if (oldImage != null) {
                                 oldImage.close();
@@ -155,7 +171,13 @@ public class H264Decoder {
             } else {
                 mSurfaceTexture = new SurfaceTexture(mExternalTextureHandle);
                 mSurfaceTexture.setOnFrameAvailableListener(
-                    surfaceTexture -> mAvailableFrames.incrementAndGet(),
+                    surfaceTexture -> {
+                        mAvailableFrames.incrementAndGet();
+                        if (!mStatusFirstFrameAvailableReported) {
+                            mStatusFirstFrameAvailableReported = true;
+                            reportStatus("first frame available");
+                        }
+                    },
                     mDecoderHandler
                 );
                 mSurface = new Surface(mSurfaceTexture);
@@ -176,10 +198,7 @@ public class H264Decoder {
             }
             return true;
         } catch (Throwable t) {
-            MakepadNative.onH264DecoderError(
-                mDecoderId,
-                mCodecLabel + " decoder prepare failed: " + t
-            );
+            reportError(mCodecLabel + " decoder prepare failed: " + t);
             stopAndCleanup();
             return false;
         }
@@ -198,10 +217,7 @@ public class H264Decoder {
             generation = mGeneration;
         }
         if (handler == null) {
-            MakepadNative.onH264DecoderError(
-                mDecoderId,
-                mCodecLabel + " decoder queue failed: decoder handler unavailable"
-            );
+            reportError(mCodecLabel + " decoder queue failed: decoder handler unavailable");
             return;
         }
         final byte[] packetData = data.clone();
@@ -217,10 +233,7 @@ public class H264Decoder {
                 boolean isConfig = (flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
                 if (isConfig && !mStarted) {
                     if (!configureCodecFromAnnexB(data, generation)) {
-                        MakepadNative.onH264DecoderError(
-                            mDecoderId,
-                            missingParameterSetsMessage()
-                        );
+                        reportError(missingParameterSetsMessage());
                     }
                     return;
                 }
@@ -230,10 +243,7 @@ public class H264Decoder {
                 mPendingPackets.addLast(new QueuedPacket(data, ptsUs, flags));
                 pumpInputQueueLocked(generation);
             } catch (Throwable t) {
-                MakepadNative.onH264DecoderError(
-                    mDecoderId,
-                    mCodecLabel + " decoder queue failed: " + t
-                );
+                reportError(mCodecLabel + " decoder queue failed: " + t);
             }
         }
     }
@@ -291,16 +301,18 @@ public class H264Decoder {
                         MediaCodec.BufferInfo info
                     ) {
                         synchronized (mCodecLock) {
-                            if (generation != mGeneration || codec != mCodec) {
+                            if (generation != mGeneration || codec != mCodec || mStopping) {
+                                // Must always release output buffers or the codec surface / ImageReader
+                                // BufferQueue wedges ("BufferQueue has been abandoned").
+                                try {
+                                    codec.releaseOutputBuffer(index, false);
+                                } catch (Throwable ignored) {}
                                 return;
                             }
                             try {
                                 codec.releaseOutputBuffer(index, true);
                             } catch (Throwable t) {
-                                MakepadNative.onH264DecoderError(
-                                    mDecoderId,
-                                    mCodecLabel + " decoder output release failed: " + t
-                                );
+                                reportError(mCodecLabel + " decoder output release failed: " + t);
                             }
                         }
                     }
@@ -326,10 +338,7 @@ public class H264Decoder {
 
                     @Override
                     public void onError(MediaCodec codec, MediaCodec.CodecException error) {
-                        MakepadNative.onH264DecoderError(
-                            mDecoderId,
-                            mCodecLabel + " decoder codec callback error: " + error
-                        );
+                        reportError(mCodecLabel + " decoder codec callback error: " + error);
                     }
                 },
                 mDecoderHandler
@@ -378,10 +387,7 @@ public class H264Decoder {
             }
             return true;
         } catch (Throwable t) {
-            MakepadNative.onH264DecoderError(
-                mDecoderId,
-                mCodecLabel + " decoder configure failed: " + t
-            );
+            reportError(mCodecLabel + " decoder configure failed: " + t);
             stopAndCleanup();
             return false;
         }
@@ -508,8 +514,7 @@ public class H264Decoder {
                 }
                 input.clear();
                 if (packet.data.length > input.remaining()) {
-                    MakepadNative.onH264DecoderError(
-                        mDecoderId,
+                    reportError(
                         mCodecLabel + " input packet too large for codec buffer: " + packet.data.length
                     );
                     continue;
@@ -523,10 +528,7 @@ public class H264Decoder {
                     packet.flags
                 );
             } catch (Throwable t) {
-                MakepadNative.onH264DecoderError(
-                    mDecoderId,
-                    mCodecLabel + " decoder input queue failed: " + t
-                );
+                reportError(mCodecLabel + " decoder input queue failed: " + t);
                 return;
             }
         }
@@ -541,6 +543,10 @@ public class H264Decoder {
         }
         mSurfaceTexture.updateTexImage();
         mAvailableFrames.decrementAndGet();
+        if (!mStatusTexImageReported) {
+            mStatusTexImageReported = true;
+            reportStatus("updateTexImage ok");
+        }
         return true;
     }
 
@@ -572,8 +578,7 @@ public class H264Decoder {
             mHeight = image.getHeight();
             HardwareBuffer buffer = image.getHardwareBuffer();
             if (buffer == null) {
-                MakepadNative.onH264DecoderError(
-                    mDecoderId,
+                reportError(
                     mCodecLabel + " ImageReader image returned null HardwareBuffer at "
                         + mWidth
                         + "x"
@@ -590,9 +595,13 @@ public class H264Decoder {
     }
 
     public void stopAndCleanup() {
+        final Handler handler;
+        final HandlerThread thread;
         synchronized (mCodecLock) {
+            if (!mPrepared && mCodec == null && mImageReader == null && mSurfaceTexture == null) {
+                return;
+            }
             mStopping = true;
-            mPrepared = false;
             mGeneration++;
             mPendingPackets.clear();
             mAvailableInputBuffers.clear();
@@ -601,73 +610,122 @@ public class H264Decoder {
                     mDecoderHandler.removeCallbacksAndMessages(null);
                 } catch (Throwable ignored) {}
             }
+            handler = mDecoderHandler;
+            thread = mHandlerThread;
+        }
 
-            synchronized (mImageLock) {
-                if (mHeldDecodeImage != null) {
-                    try {
-                        mHeldDecodeImage.close();
-                    } catch (Throwable ignored) {}
-                    mHeldDecodeImage = null;
+        Runnable releaseAll =
+            () -> {
+                synchronized (mCodecLock) {
+                    releaseDecoderPipelineLocked();
                 }
-                if (mLatestImage != null) {
-                    try {
-                        mLatestImage.close();
-                    } catch (Throwable ignored) {}
-                    mLatestImage = null;
-                }
-            }
+            };
 
-            if (mCodec != null) {
-                try {
-                    mCodec.stop();
-                } catch (Throwable ignored) {}
-                try {
-                    mCodec.release();
-                } catch (Throwable ignored) {}
-                mCodec = null;
-            }
+        // configureCodecFromAnnexB and other codec work run on mHandlerThread. Posting + await on
+        // that same thread deadlocks the looper (runnable never runs). Never join() self.
+        final boolean onDecoderThread = thread != null && Thread.currentThread() == thread;
 
-            if (mSurface != null) {
-                try {
-                    mSurface.release();
-                } catch (Throwable ignored) {}
-                mSurface = null;
-            }
-
-            if (mImageReader != null) {
-                try {
-                    mImageReader.close();
-                } catch (Throwable ignored) {}
-                mImageReader = null;
-            }
-
-            if (mSurfaceTexture != null) {
-                try {
-                    mSurfaceTexture.release();
-                } catch (Throwable ignored) {}
-                mSurfaceTexture = null;
-            }
-
-            HandlerThread thread = mHandlerThread;
-            if (thread != null) {
+        if (handler != null && thread != null && thread.isAlive()) {
+            if (onDecoderThread) {
+                releaseAll.run();
                 thread.quitSafely();
-                if (Thread.currentThread() != thread) {
-                    try {
-                        thread.join();
-                    } catch (InterruptedException ignored) {}
+            } else {
+                CountDownLatch done = new CountDownLatch(1);
+                handler.post(
+                    () -> {
+                        try {
+                            releaseAll.run();
+                        } finally {
+                            done.countDown();
+                        }
+                    }
+                );
+                try {
+                    done.await(4, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                 }
-                mHandlerThread = null;
-                mDecoderHandler = null;
+                thread.quitSafely();
+                try {
+                    thread.join(3000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
             }
+        } else {
+            releaseAll.run();
+        }
 
+        synchronized (mCodecLock) {
+            mPrepared = false;
             mStarted = false;
+            mDecoderHandler = null;
+            mHandlerThread = null;
             mWidth = 0;
             mHeight = 0;
             mStatusPreparedReported = false;
             mStatusConfiguredReported = false;
             mStatusOutputFormatReported = false;
             mStatusImageReported = false;
+            mStatusFirstFrameAvailableReported = false;
+            mStatusTexImageReported = false;
             mStopping = false;
+        }
+    }
+
+    /// Tear down MediaCodec then Surface then ImageReader on the thread that owns codec callbacks.
+    private void releaseDecoderPipelineLocked() {
+        synchronized (mImageLock) {
+            if (mHeldDecodeImage != null) {
+                try {
+                    mHeldDecodeImage.close();
+                } catch (Throwable ignored) {}
+                mHeldDecodeImage = null;
+            }
+            if (mLatestImage != null) {
+                try {
+                    mLatestImage.close();
+                } catch (Throwable ignored) {}
+                mLatestImage = null;
+            }
+        }
+
+        if (mImageReader != null) {
+            try {
+                mImageReader.setOnImageAvailableListener(null, null);
+            } catch (Throwable ignored) {}
+        }
+
+        if (mCodec != null) {
+            try {
+                mCodec.stop();
+            } catch (Throwable ignored) {}
+            try {
+                mCodec.release();
+            } catch (Throwable ignored) {}
+            mCodec = null;
+        }
+        mStarted = false;
+
+        if (mSurface != null) {
+            try {
+                mSurface.release();
+            } catch (Throwable ignored) {}
+            mSurface = null;
+        }
+
+        if (mImageReader != null) {
+            try {
+                mImageReader.close();
+            } catch (Throwable ignored) {}
+            mImageReader = null;
+        }
+
+        if (mSurfaceTexture != null) {
+            try {
+                mSurfaceTexture.release();
+            } catch (Throwable ignored) {}
+            mSurfaceTexture = null;
         }
     }
 }

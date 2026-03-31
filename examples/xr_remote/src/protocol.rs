@@ -15,7 +15,8 @@ pub const XR_REMOTE_STREAM_FPS: u32 = 72;
 pub const XR_REMOTE_PER_EYE_FOV_Y_DEGREES: f32 = 52.0;
 pub const XR_REMOTE_IPD_METERS: f32 = 0.064;
 pub const XR_REMOTE_IMMERSIVE_PANEL_DISTANCE_METERS: f32 = 0.72;
-pub const XR_REMOTE_FRAME_STALE_AFTER_NS: u64 = 150_000_000;
+/// Partial stereo groups wait for both UDP paths; 150ms was too tight vs real skew.
+pub const XR_REMOTE_FRAME_STALE_AFTER_NS: u64 = 400_000_000;
 pub const XR_REMOTE_MEDIA_PAYLOAD_BYTES: usize = 1100;
 pub const XR_REMOTE_MAX_MEDIA_PACKET_BYTES: usize = 2048;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]

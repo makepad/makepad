@@ -215,16 +215,28 @@ impl HostEyeShared {
             return Ok(false);
         }
 
-        let chunk_count = bytes
+        let owned_bytes;
+        let frame_bytes: &[u8] = if is_key {
+            if let Some(config) = self.last_config() {
+                owned_bytes = [config.bytes.as_slice(), bytes].concat();
+                &owned_bytes
+            } else {
+                bytes
+            }
+        } else {
+            bytes
+        };
+
+        let chunk_count = frame_bytes
             .len()
             .max(1)
             .div_ceil(XR_REMOTE_MEDIA_PAYLOAD_BYTES)
             .min(u16::MAX as usize) as u16;
         for chunk_index in 0..chunk_count {
             let start = chunk_index as usize * XR_REMOTE_MEDIA_PAYLOAD_BYTES;
-            let end = (start + XR_REMOTE_MEDIA_PAYLOAD_BYTES).min(bytes.len());
+            let end = (start + XR_REMOTE_MEDIA_PAYLOAD_BYTES).min(frame_bytes.len());
             let payload = if start < end {
-                bytes[start..end].to_vec()
+                frame_bytes[start..end].to_vec()
             } else {
                 Vec::new()
             };
@@ -253,7 +265,7 @@ impl HostEyeShared {
             self.media_socket.send_to(&bytes, remote_addr)?;
             *self.sent_packets.lock().unwrap() += 1;
         }
-        *self.sent_bytes.lock().unwrap() += bytes.len() as u64;
+        *self.sent_bytes.lock().unwrap() += frame_bytes.len() as u64;
         if is_key {
             self.clear_keyframe_request();
         }
@@ -365,7 +377,9 @@ impl HostShared {
         for eye in XrRemoteEye::ALL {
             let eye_shared = self.eye_shared(eye);
             if let Some(stream_config) = eye_shared.stream_config() {
-                self.send_control(&ControlPacket::StreamConfig(stream_config));
+                if stream_config.config_id != 0 {
+                    self.send_control(&ControlPacket::StreamConfig(stream_config));
+                }
             }
             if let Some(config) = eye_shared.last_config() {
                 self.send_control(&ControlPacket::VideoConfig(config));

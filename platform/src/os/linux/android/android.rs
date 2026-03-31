@@ -1263,6 +1263,13 @@ impl Cx {
                 AndroidRealtimeVideoDecoderOutput::GlExternal => unsafe {
                     let env = attach_jni_env();
                     if android_jni::to_java_update_tex_image(env, decoder.decoder_ref) {
+                        if !decoder.imported_first_frame {
+                            decoder.imported_first_frame = true;
+                            events.push(Event::VideoDecodingStatus(VideoDecodingStatusEvent {
+                                video_id: decoder.video_id,
+                                status: "surface texture update ok".to_string(),
+                            }));
+                        }
                         events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
                             video_id: decoder.video_id,
                             current_position_ms: 0,
@@ -1272,6 +1279,14 @@ impl Cx {
                                 biplanar: false,
                                 rotation_steps: 0.0,
                             },
+                        }));
+                    } else if !decoder.imported_first_frame
+                        && !decoder.reported_waiting_for_first_frame
+                    {
+                        decoder.reported_waiting_for_first_frame = true;
+                        events.push(Event::VideoDecodingStatus(VideoDecodingStatusEvent {
+                            video_id: decoder.video_id,
+                            status: "waiting for decoder surface frame".to_string(),
                         }));
                     }
                 },
@@ -1345,9 +1360,9 @@ impl Cx {
                             }
                         }
                     } else if !decoder.imported_first_frame
-                        && !decoder.reported_waiting_for_hardware_buffer
+                        && !decoder.reported_waiting_for_first_frame
                     {
-                        decoder.reported_waiting_for_hardware_buffer = true;
+                        decoder.reported_waiting_for_first_frame = true;
                         events.push(Event::VideoDecodingStatus(VideoDecodingStatusEvent {
                             video_id: decoder.video_id,
                             status: "waiting for decoder hardware buffer".to_string(),
@@ -1424,9 +1439,9 @@ impl Cx {
                             }
                         }
                     } else if !decoder.imported_first_frame
-                        && !decoder.reported_waiting_for_hardware_buffer
+                        && !decoder.reported_waiting_for_first_frame
                     {
-                        decoder.reported_waiting_for_hardware_buffer = true;
+                        decoder.reported_waiting_for_first_frame = true;
                         events.push(Event::VideoDecodingStatus(VideoDecodingStatusEvent {
                             video_id: decoder.video_id,
                             status: "waiting for decoder hardware buffer".to_string(),
@@ -2584,6 +2599,14 @@ impl Cx {
                         self.os.ignore_destroy,
                         self.os.xr_retry_surface_after_destroy
                     );
+                    // Realtime decoders (ImageReader / SurfaceTexture) must shut down before XR tears
+                    // down swapchains and Vulkan imported textures, or Adreno logs
+                    // "BufferQueue has been abandoned" while MediaCodec still dequeues output.
+                    let decoder_indices: Vec<usize> =
+                        self.os.realtime_video_decoders.keys().copied().collect();
+                    for index in decoder_indices {
+                        self.video_decoder_stop(index);
+                    }
                     #[cfg(use_vulkan)]
                     self.clear_xr_pending_surface();
                     self.os.xr_display_refresh_rate_active_hz = None;
@@ -2936,7 +2959,7 @@ pub(crate) struct AndroidRealtimeVideoDecoder {
     pub video_id: LiveId,
     pub output: AndroidRealtimeVideoDecoderOutput,
     pub imported_first_frame: bool,
-    pub reported_waiting_for_hardware_buffer: bool,
+    pub reported_waiting_for_first_frame: bool,
 }
 
 pub(crate) fn realtime_video_decoder_id(index: usize) -> LiveId {
