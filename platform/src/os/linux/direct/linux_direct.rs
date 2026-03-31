@@ -284,6 +284,7 @@ impl Cx {
                         position: dvec2(0.0, 0.0),
                         inner_size: size,
                         outer_size: size,
+                        ..Default::default()
                     };
                     window.is_created = true;
                 }
@@ -304,6 +305,7 @@ impl Cx {
                         position,
                         inner_size: size,
                         outer_size: size,
+                        ..Default::default()
                     };
                     window.is_popup = true;
                     window.popup_parent = Some(parent_window_id);

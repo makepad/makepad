@@ -68,6 +68,12 @@ pub enum FromJavaMessage {
         keyboard_height: u32,
         is_open: bool,
     },
+    SafeAreaInsets {
+        top: f64,
+        right: f64,
+        bottom: f64,
+        left: f64,
+    },
     HttpResponse {
         request_id: u64,
         metadata_id: u64,
@@ -636,6 +642,23 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnResizeTextIME(
     send_from_java_message(FromJavaMessage::ResizeTextIME {
         keyboard_height: keyboard_height as u32,
         is_open: is_open != 0,
+    });
+}
+
+#[no_mangle]
+extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSafeAreaInsets(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jobject,
+    top: jni_sys::jfloat,
+    right: jni_sys::jfloat,
+    bottom: jni_sys::jfloat,
+    left: jni_sys::jfloat,
+) {
+    send_from_java_message(FromJavaMessage::SafeAreaInsets {
+        top: top as f64,
+        right: right as f64,
+        bottom: bottom as f64,
+        left: left as f64,
     });
 }
 

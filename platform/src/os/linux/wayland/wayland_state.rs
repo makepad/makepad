@@ -418,6 +418,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                             position: dvec2(0., 0.),
                             inner_size,
                             outer_size: inner_size,
+                            ..Default::default()
                         },
                     }));
                 }

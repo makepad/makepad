@@ -125,6 +125,10 @@ pub struct Cx {
     /// Display context for the main window, used by AdaptiveView
     pub display_context: DisplayContext,
 
+    /// When true, a script re-apply (LiveEdit) will be triggered on the next
+    /// event loop iteration to pick up changed dynamic values like safe area insets.
+    pub pending_script_reapply: bool,
+
     pub debug: Debug,
 
     #[allow(dead_code)]
@@ -431,6 +435,7 @@ impl Cx {
             performance_stats: Default::default(),
 
             display_context: Default::default(),
+            pending_script_reapply: false,
 
             widget_tree_dump_requests: Default::default(),
             widget_snapshot_requests: Default::default(),

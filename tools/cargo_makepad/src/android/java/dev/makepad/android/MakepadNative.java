@@ -29,6 +29,7 @@ public class MakepadNative {
     public native static void surfaceOnKeyUp(int keycode, int meta_state);
     public native static void surfaceOnCharacter(int character);
     public native static void surfaceOnResizeTextIME(int keyboard_height, boolean is_open);
+    public native static void surfaceOnSafeAreaInsets(float top, float right, float bottom, float left);
 
     // networking
     public native static void onHttpResponse(long id, long metadata_id, int status_code, String headers, byte[] body);

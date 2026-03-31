@@ -11,7 +11,8 @@ use {
         event::keyboard::CharOffset,
         event::xr::XrAnchor,
         event::{
-            video_playback::CameraPreviewMode, DragItem, NextFrame, Timer, Trigger, VideoSource,
+            video_playback::CameraPreviewMode, DragItem, NextFrame, Timer, Trigger,
+            VideoSource,
         },
         gpu_info::GpuInfo,
         ime::TextInputConfig,
@@ -431,6 +432,28 @@ impl std::fmt::Debug for CxOsOp {
 impl Cx {
     pub fn in_draw_event(&self) -> bool {
         self.in_draw_event
+    }
+
+    /// Updates the `mod.widgets.SAFE_INSET_PAD_*` values on the script heap
+    /// so that Splash code can reference them in widget definitions.
+    /// Requests a deferred re-application of all script/Splash widget definitions,
+    /// causing widgets to pick up updated values from the script heap.
+    /// The re-apply happens on the next event loop iteration (not synchronously),
+    /// to avoid re-entrancy issues when called from within an event handler.
+    pub fn request_script_reapply(&mut self) {
+        self.pending_script_reapply = true;
+    }
+
+    pub fn update_safe_inset_script_values(&mut self, insets: crate::event::SafeAreaInsets) {
+        use makepad_script::trap::NoTrap;
+        let Some(vm) = self.script_vm.as_mut() else {
+            return;
+        };
+        let widgets = vm.heap.module(id!(widgets));
+        vm.heap.set_value(widgets, id!(SAFE_INSET_PAD_TOP).into(), insets.top.into(), NoTrap);
+        vm.heap.set_value(widgets, id!(SAFE_INSET_PAD_BOTTOM).into(), insets.bottom.into(), NoTrap);
+        vm.heap.set_value(widgets, id!(SAFE_INSET_PAD_LEFT).into(), insets.left.into(), NoTrap);
+        vm.heap.set_value(widgets, id!(SAFE_INSET_PAD_RIGHT).into(), insets.right.into(), NoTrap);
     }
 
     pub fn xr_capabilities(&self) -> &XrCapabilities {
