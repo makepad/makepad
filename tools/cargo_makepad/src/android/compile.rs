@@ -1390,6 +1390,8 @@ pub fn run(
     )?;
 
     let cwd = std::env::current_dir().unwrap();
+    let adb = adb_path(sdk_dir);
+    let adb = adb.to_str().unwrap();
     let discovered_devices = adb_devices_list(sdk_dir)?;
     let devices = select_run_devices(android_variant, devices, &discovered_devices)?;
     // alright so how will we do multiple targets eh
@@ -1422,7 +1424,7 @@ pub fn run(
         shell_env_cap(
             &[],
             &cwd,
-            sdk_dir.join("platform-tools/adb").to_str().unwrap(),
+            adb,
             &[
                 "-s",
                 device,
@@ -1439,7 +1441,7 @@ pub fn run(
         shell_env_cap(
             &[],
             &cwd,
-            sdk_dir.join("platform-tools/adb").to_str().unwrap(),
+            adb,
             &device_args_refs,
         )?;
         #[allow(unused_assignments)]
@@ -1448,7 +1450,7 @@ pub fn run(
             if let Ok(thing) = shell_env_cap(
                 &[],
                 &cwd,
-                sdk_dir.join("platform-tools/adb").to_str().unwrap(),
+                adb,
                 &["-s", device, "shell", "pidof", &result.java_url],
             ) {
                 pid = Some(thing.trim().to_string());
@@ -1458,7 +1460,7 @@ pub fn run(
         shell_env(
             &[],
             &cwd,
-            sdk_dir.join("platform-tools/adb").to_str().unwrap(),
+            adb,
             &["-s", device, "logcat", "--pid", &pid.unwrap(), "Makepad:D *:S"],
         )?;
     } else {
@@ -1468,7 +1470,7 @@ pub fn run(
             children.push(shell_child_create(
                 &[],
                 &cwd,
-                sdk_dir.join("platform-tools/adb").to_str().unwrap(),
+                adb,
                 &[
                     "-s",
                     &device,
@@ -1491,7 +1493,7 @@ pub fn run(
             children.push(shell_child_create(
                 &[],
                 &cwd,
-                sdk_dir.join("platform-tools/adb").to_str().unwrap(),
+                adb,
                 &device_args_refs,
             )?);
         }
@@ -1508,12 +1510,9 @@ pub fn adb(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), Stri
         args_out.push(arg.as_ref());
     }
     let cwd = std::env::current_dir().unwrap();
-    shell_env(
-        &[],
-        &cwd,
-        sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-        &args_out,
-    )?;
+    let adb = adb_path(sdk_dir);
+    let adb = adb.to_str().unwrap();
+    shell_env(&[], &cwd, adb, &args_out)?;
     Ok(())
 }
 

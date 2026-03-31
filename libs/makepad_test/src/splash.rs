@@ -608,6 +608,33 @@ pub fn run_splash_suite(
     result
 }
 
+fn startup_failure_case_outcome(
+    case_name: &str,
+    artifact_dir: PathBuf,
+    started_at_ms: u64,
+    duration: Duration,
+    error: TestError,
+) -> CaseRunOutcome {
+    let duration_ms = duration_ms(duration);
+    let failure_message = error.message().to_string();
+    CaseRunOutcome {
+        report: CaseReport {
+            case_name: case_name.to_string(),
+            status: "failed".to_string(),
+            started_at_ms,
+            finished_at_ms: started_at_ms + duration_ms,
+            duration_ms,
+            artifact_dir: artifact_dir.to_string_lossy().to_string(),
+            failure_message: Some(failure_message),
+            session_apng_path: None,
+            generated_case_path: None,
+            steps: Vec::new(),
+        },
+        frame_paths: Vec::new(),
+        error: Some(error),
+    }
+}
+
 fn run_isolated_splash_suite(
     runner: &mut SplashSuiteRunner,
     package_name: &str,
@@ -648,7 +675,31 @@ fn run_isolated_splash_suite(
                 Ok(())
             }
         });
-        let mut outcome = outcome.expect("Splash isolated case outcome was not recorded");
+        let synthesized_startup_failure = outcome.is_none();
+        let mut outcome = match outcome {
+            Some(outcome) => outcome,
+            None => {
+                let error = match &result {
+                    Err(err) => err.clone(),
+                    Ok(()) => TestError::new(format!(
+                        "Splash isolated case `{case_name}` finished without recording an outcome"
+                    )),
+                };
+                startup_failure_case_outcome(
+                    case_name,
+                    case_dir.clone(),
+                    suite_started_at_ms,
+                    case_start.elapsed(),
+                    error,
+                )
+            }
+        };
+        if synthesized_startup_failure {
+            fs::create_dir_all(&case_dir)?;
+            if let Some(message) = &outcome.report.failure_message {
+                fs::write(case_dir.join("failure.txt"), message)?;
+            }
+        }
         write_case_outputs(&case_dir, &mut outcome.report, &outcome.frame_paths)?;
         case_reports.push(outcome.report);
         match result {
@@ -1370,6 +1421,7 @@ fn install_test_script_module(vm: &mut ScriptVm) {
         id_lut!(screenshot),
         script_args_def!(name = NIL),
         |vm, args| {
+            let case_artifact_dir = current_case_artifact_dir(vm);
             let name_value = script_value!(vm, args.name);
             let screenshot_name = if name_value.is_nil() {
                 None
@@ -1391,9 +1443,18 @@ fn install_test_script_module(vm: &mut ScriptVm) {
                 move |app| {
                     let screenshot_path = app.try_screenshot()?;
                     let output_path = if let Some(name) = screenshot_name {
-                        let output_path = app
-                            .artifacts_dir()
-                            .join(format!("{}.png", sanitize_path_component(&name)));
+                        let artifact_dir = case_artifact_dir
+                            .clone()
+                            .unwrap_or_else(|| app.artifacts_dir());
+                        fs::create_dir_all(&artifact_dir).map_err(|err| {
+                            TestError::new(format!(
+                                "failed to create screenshot directory {}: {}",
+                                artifact_dir.display(),
+                                err
+                            ))
+                        })?;
+                        let output_path =
+                            artifact_dir.join(format!("{}.png", sanitize_path_component(&name)));
                         fs::copy(&screenshot_path, &output_path).map_err(|err| {
                             TestError::new(format!(
                                 "failed to copy screenshot to {}: {}",
@@ -1609,6 +1670,15 @@ fn current_app(vm: &mut ScriptVm) -> Option<TestApp> {
         .unwrap()
         .current_app
         .clone()
+}
+
+fn current_case_artifact_dir(vm: &mut ScriptVm) -> Option<PathBuf> {
+    vm.host
+        .downcast_mut::<SplashSuiteHost>()
+        .unwrap()
+        .current_case
+        .as_ref()
+        .map(|case| case.artifact_dir.clone())
 }
 
 fn host_script_error(vm: &mut ScriptVm, message: impl Into<String>) -> ScriptValue {
@@ -2228,7 +2298,7 @@ mod tests {
         discover_splash_mount_root, SessionMode, SplashLaunch, SplashSuiteRunner,
         StepScreenshotPolicy,
     };
-    use crate::TestConfig;
+    use crate::{TestConfig, TestError};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -2431,6 +2501,21 @@ mod tests {
                 .join("makepad-example")
                 .join("ui__splash_case_name")
         );
+    }
+
+    #[test]
+    fn startup_failure_case_outcome_preserves_original_error() {
+        let outcome = super::startup_failure_case_outcome(
+            "smoke",
+            PathBuf::from("/tmp/example/cases/smoke"),
+            25,
+            Duration::from_millis(10),
+            TestError::new("bind failed"),
+        );
+
+        assert_eq!(outcome.report.case_name, "smoke");
+        assert_eq!(outcome.report.failure_message.as_deref(), Some("bind failed"));
+        assert_eq!(outcome.error.as_ref().map(TestError::message), Some("bind failed"));
     }
 
     #[test]
