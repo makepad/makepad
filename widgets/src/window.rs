@@ -243,9 +243,6 @@ pub enum WindowAction {
 
 impl Window {
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
-        let linux_custom_window_chrome =
-            matches!(cx.os_type(), OsType::LinuxWindow(params) if params.custom_window_chrome);
-
         match cx.os_type() {
             OsType::Windows => {
                 self.view(cx, ids!(caption_bar))
@@ -256,10 +253,14 @@ impl Window {
                 self.view(cx, ids!(caption_bar))
                     .set_visible(cx, self.show_caption_bar);
             }
-            OsType::LinuxWindow(_) => {
+            OsType::LinuxWindow(params) => {
+                // Only show the caption bar if we're drawing our own window chrome
+                // (e.g. Wayland without server-side decorations). On X11 the WM
+                // provides native decorations, so we hide the in-app caption bar.
+                let custom_chrome = params.custom_window_chrome;
                 self.view(cx, ids!(caption_bar))
-                    .set_visible(cx, self.show_caption_bar);
-                if linux_custom_window_chrome {
+                    .set_visible(cx, self.show_caption_bar && custom_chrome);
+                if custom_chrome {
                     self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
                 }
             }
