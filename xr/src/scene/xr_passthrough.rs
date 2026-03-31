@@ -63,9 +63,9 @@ impl XrPassthroughEnvCube {
     }
 }
 
-impl XrEnv {
-    pub(crate) fn passthrough_camera_center_offset_uv(&self) -> Vec2f {
-        let source_size = self.passthrough_camera_source_size;
+impl XrPassthroughRuntime {
+    pub(crate) fn camera_center_offset_uv(&self) -> Vec2f {
+        let source_size = self.camera_source_size;
         let aspect = if source_size.y > 1.0 {
             source_size.x / source_size.y
         } else {
@@ -81,9 +81,7 @@ impl XrEnv {
         )
     }
 
-    pub(super) fn pick_passthrough_camera_choice(
-        ev: &VideoInputsEvent,
-    ) -> Option<XrPassthroughCameraChoice> {
+    pub(super) fn pick_camera_choice(ev: &VideoInputsEvent) -> Option<XrPassthroughCameraChoice> {
         fn better(
             a: &makepad_widgets::makepad_platform::video::VideoFormat,
             b: &makepad_widgets::makepad_platform::video::VideoFormat,
@@ -139,63 +137,63 @@ impl XrEnv {
         })
     }
 
-    pub(super) fn reset_passthrough_camera_state(&mut self) {
-        self.passthrough_camera_playback_requested = false;
-        self.passthrough_camera_failed = false;
-        self.passthrough_camera_textures = None;
-        self.passthrough_camera_video = VideoYuvMetadata::disabled();
-        self.passthrough_camera_has_frame = false;
-        if let Some(cube) = self.passthrough_env_cube.as_mut() {
+    pub(super) fn reset_camera_state(&mut self) {
+        self.camera_playback_requested = false;
+        self.camera_failed = false;
+        self.camera_textures = None;
+        self.camera_video = VideoYuvMetadata::disabled();
+        self.camera_has_frame = false;
+        if let Some(cube) = self.env_cube.as_mut() {
             cube.reset_state();
         }
     }
 
-    pub(super) fn sync_passthrough_camera(&mut self, cx: &mut Cx) {
+    pub(super) fn sync_camera(&mut self, cx: &mut Cx, video_id: LiveId) {
         if matches!(
-            self.passthrough_camera_permission,
+            self.camera_permission,
             Some(PermissionStatus::DeniedCanRetry) | Some(PermissionStatus::DeniedPermanent)
         ) {
             crate::warning!(
                 "XR passthrough camera: sync blocked by permission state {:?}",
-                self.passthrough_camera_permission
+                self.camera_permission
             );
             return;
         }
 
-        let Some(choice) = self.passthrough_camera_choice.clone() else {
+        let Some(choice) = self.camera_choice.clone() else {
             crate::warning!("XR passthrough camera: sync waiting for camera choice");
             return;
         };
 
-        self.passthrough_camera_source_size = vec2f(choice.width as f32, choice.height as f32);
-        if self.passthrough_camera_textures.is_none() {
-            self.passthrough_camera_textures = Some(XrPassthroughCameraTextures {
+        self.camera_source_size = vec2f(choice.width as f32, choice.height as f32);
+        if self.camera_textures.is_none() {
+            self.camera_textures = Some(XrPassthroughCameraTextures {
                 camera: Texture::new_with_format(cx, TextureFormat::VideoExternal),
                 tex_y: None,
                 tex_u: None,
                 tex_v: None,
             });
         }
-        if self.passthrough_camera_failed || self.passthrough_camera_playback_requested {
+        if self.camera_failed || self.camera_playback_requested {
             return;
         }
 
         cx.prepare_headset_camera_playback(
-            Self::passthrough_video_id(),
+            video_id,
             VideoSource::Camera(choice.input_id, choice.format_id),
             CameraPreviewMode::Texture,
             0,
-            self.passthrough_camera_textures
+            self.camera_textures
                 .as_ref()
                 .map(|textures| textures.camera.texture_id())
                 .unwrap_or_default(),
             false,
             false,
         );
-        self.passthrough_camera_playback_requested = true;
+        self.camera_playback_requested = true;
     }
 
-    fn upsert_passthrough_env_face_geometry(&mut self, cx: &mut Cx2d, size: f64) -> GeometryId {
+    fn upsert_env_face_geometry(&mut self, cx: &mut Cx2d, size: f64) -> GeometryId {
         let corners = [
             [0.0f32, 0.0f32, 0.0f32],
             [size as f32, 0.0f32, 0.0f32],
@@ -216,7 +214,7 @@ impl XrEnv {
         }
         let indices = vec![0, 1, 2, 2, 3, 0];
         let geometry = self
-            .passthrough_env_face_quad
+            .env_face_quad
             .get_or_insert_with(|| Geometry::new(cx.cx.cx));
         geometry.update(cx.cx.cx, indices, vertices);
         geometry.geometry_id()
@@ -300,35 +298,29 @@ impl XrEnv {
         ranked.into_iter().map(|(face, _)| face).collect()
     }
 
-    pub fn render_passthrough_env_cube(
+    pub fn render_env_cube(
         &mut self,
+        draw_passthrough_env_face: &mut DrawPassthroughEnvFace,
         cx: &mut Cx2d,
         state: &XrState,
     ) -> Option<Texture> {
-        let source_size = self.passthrough_camera_source_size;
-        let rotation_steps = self.passthrough_camera_video.rotation_steps;
-        let camera_enabled = if self.passthrough_camera_has_frame {
-            1.0
-        } else {
-            0.0
-        };
+        let source_size = self.camera_source_size;
+        let rotation_steps = self.camera_video.rotation_steps;
+        let camera_enabled = if self.camera_has_frame { 1.0 } else { 0.0 };
         let camera_texture = self
-            .passthrough_camera_textures
+            .camera_textures
             .as_ref()
             .map(|textures| textures.camera.clone())?;
         let face_size = XR_PASSTHROUGH_ENV_FACE_SIZE as f64;
         let (_, camera_right, camera_up, camera_forward) = Self::current_head_basis(state);
-        let camera_center_offset_uv = self.passthrough_camera_center_offset_uv();
-        let geometry_id = self.upsert_passthrough_env_face_geometry(cx, face_size);
+        let camera_center_offset_uv = self.camera_center_offset_uv();
+        let geometry_id = self.upsert_env_face_geometry(cx, face_size);
         let visible_faces =
             Self::visible_env_faces(source_size, camera_right, camera_up, camera_forward);
 
-        let Self {
-            passthrough_env_cube,
-            draw_passthrough_env_face,
-            ..
-        } = self;
-        let cube = passthrough_env_cube.get_or_insert_with(|| XrPassthroughEnvCube::new(cx.cx.cx));
+        let cube = self
+            .env_cube
+            .get_or_insert_with(|| XrPassthroughEnvCube::new(cx.cx.cx));
 
         for face_index in visible_faces {
             let face = &mut cube.faces[face_index];

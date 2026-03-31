@@ -51,7 +51,7 @@ pub mod permission;
 mod texture;
 mod uniform_buffer;
 mod window;
-mod xr_depth_mesh;
+mod xr_tsdf;
 
 pub mod web_socket;
 
@@ -73,6 +73,9 @@ pub mod display_context;
 mod app_main;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
 pub use crate::cx_api::{can_play_type, CxSystemBrowser, SystemBrowserId};
+pub use crate::xr_tsdf::{
+    XrDepthAlignHeightMap, XrTsdfCooperativeStepResult, XrTsdfCooperativeStepStats,
+};
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
@@ -103,7 +106,7 @@ pub use {
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxRef, OsType},
-        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,
         draw_pass::{
@@ -216,13 +219,9 @@ pub use {
             ScriptWindowHandle, WindowBackdrop, WindowHandle, WindowIcon, WindowIconBuffer,
             WindowId, WindowVisuals,
         },
-        xr_depth_mesh::{
-            ChunkKey, XrDepthMesh, XrDepthMeshChunk, XrDepthMeshQuery,
-            XrDepthMeshQueryCollider, XrDepthMeshQueryColliderGeometry,
-            XrDepthMeshQueryColliderRole, XrDepthMeshQueryHit, XrDepthMeshQueryResolvedSurface,
-            XrDepthMeshQueryResult,
-            XrDepthMeshQuerySupportPlane, XrDepthMeshState, XrDepthMeshStats,
-            XrDepthMeshStore, XrDepthPlaneKind, XrDepthPlanePatch,
+        xr_tsdf::{
+            ChunkKey, SparseTsdGridReadSnapshot, SparseTsdReadChunk, TsdfPublishedSnapshot,
+            XrTsdfState, XrTsdfStats, XrTsdfStore,
         },
     },
     app_main::*,

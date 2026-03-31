@@ -7,6 +7,13 @@ use {
     std::{cell::Cell, rc::Rc},
 };
 
+pub const XR_TOUCH_DOWN_FRONT: f32 = 6.0;
+pub const XR_TOUCH_DOWN_BACK: f32 = -12.0;
+pub const XR_TOUCH_CAPTURE_FRONT: f32 = 11.0;
+// About 2cm behind the panel at XrView's default logical-pixel scale.
+pub const XR_TOUCH_CAPTURE_BACK: f32 = -16.0;
+pub const XR_TOUCH_REARM_FRONT: f32 = 28.0;
+
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrController {
     pub grip_pose: Pose,
@@ -402,12 +409,20 @@ impl XrAnchor {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, PartialEq)]
+pub struct XrSyncAnchor {
+    pub id: u32,
+    pub captured_at: f64,
+    pub anchor: XrAnchor,
+}
+
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrState {
     pub time: f64,
     pub head_pose: Pose,
     pub order_counter: u8,
     pub anchor: Option<XrAnchor>,
+    pub sync_anchor: Option<XrSyncAnchor>,
     pub left_controller: XrController,
     pub right_controller: XrController,
     pub left_hand: XrHand,
@@ -420,6 +435,7 @@ impl XrState {
             time: (b.time - a.time) * f as f64 + a.time,
             head_pose: Pose::from_lerp(a.head_pose, b.head_pose, f),
             anchor: b.anchor,
+            sync_anchor: b.sync_anchor,
             left_controller: b.left_controller.clone(),
             right_controller: b.right_controller.clone(),
             left_hand: b.left_hand.clone(),
@@ -487,11 +503,6 @@ impl XrUpdateEvent {
 }
 
 impl XrLocalEvent {
-    const XR_TOUCH_DOWN_FRONT: f32 = 6.0;
-    const XR_TOUCH_DOWN_BACK: f32 = -12.0;
-    const XR_TOUCH_RELEASE_FRONT: f32 = 11.0;
-    const XR_TOUCH_RELEASE_BACK: f32 = -20.0;
-    const XR_TOUCH_REARM_FRONT: f32 = 28.0;
     const XR_TOUCH_ACTIVE_FINGER_MAX_BEND_DEGREES: f32 = 70.0;
 
     fn fingertip_slot(is_left: bool, index: usize) -> usize {
@@ -519,11 +530,9 @@ impl XrLocalEvent {
     }
 
     fn tip_for_digit(&self, digit_id: DigitId) -> Option<&XrFingerTip> {
-        self.finger_tips
-            .iter()
-            .find(|tip| {
-                Self::fingertip_digit_id(self.digit_namespace, tip.is_left, tip.index) == digit_id
-            })
+        self.finger_tips.iter().find(|tip| {
+            Self::fingertip_digit_id(self.digit_namespace, tip.is_left, tip.index) == digit_id
+        })
     }
 
     fn collect_hand_tips(
@@ -559,15 +568,11 @@ impl XrLocalEvent {
     }
 
     fn tip_is_touching_for_down(tip: &XrFingerTip) -> bool {
-        tip.active
-            && tip.touch_z <= Self::XR_TOUCH_DOWN_FRONT
-            && tip.touch_z >= Self::XR_TOUCH_DOWN_BACK
+        tip.active && tip.touch_z <= XR_TOUCH_DOWN_FRONT && tip.touch_z >= XR_TOUCH_DOWN_BACK
     }
 
     fn tip_is_touching_for_capture(tip: &XrFingerTip) -> bool {
-        tip.active
-            && tip.touch_z <= Self::XR_TOUCH_RELEASE_FRONT
-            && tip.touch_z >= Self::XR_TOUCH_RELEASE_BACK
+        tip.touch_z <= XR_TOUCH_CAPTURE_FRONT && tip.touch_z >= XR_TOUCH_CAPTURE_BACK
     }
 
     pub fn from_update_event(e: &XrUpdateEvent, mat: &Mat4f) -> XrLocalEvent {
@@ -595,10 +600,10 @@ impl XrLocalEvent {
                     .iter()
                     .find(|tip| tip.is_left == is_left && tip.index == index)
                 {
-                    if tip.touch_z > Self::XR_TOUCH_REARM_FRONT {
+                    if tip.touch_z > XR_TOUCH_REARM_FRONT {
                         cx.fingers.xr_poke_unlock(digit_id);
                     }
-                    if tip.active {
+                    if tip.active || Self::tip_is_touching_for_capture(tip) {
                         cx.fingers.cycle_hover_area(digit_id);
                     } else {
                         cx.fingers.remove_hover(digit_id);
@@ -770,5 +775,39 @@ impl XrLocalEvent {
             }
         }
         return Hit::Nothing;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tip(active: bool, touch_z: f32) -> XrFingerTip {
+        XrFingerTip {
+            index: XrHand::INDEX_TIP,
+            is_left: false,
+            active,
+            interactive: true,
+            pos: vec3f(0.0, 0.0, touch_z),
+            ray_dir: vec3f(0.0, 0.0, -1.0),
+            touch_z,
+            handled: Cell::new(Area::Empty),
+        }
+    }
+
+    #[test]
+    fn xr_touch_down_still_requires_active_finger() {
+        assert!(XrLocalEvent::tip_is_touching_for_down(&tip(true, 0.0)));
+        assert!(!XrLocalEvent::tip_is_touching_for_down(&tip(false, 0.0)));
+    }
+
+    #[test]
+    fn xr_touch_capture_allows_push_through_without_active_finger() {
+        assert!(XrLocalEvent::tip_is_touching_for_capture(&tip(
+            false, -15.0
+        )));
+        assert!(!XrLocalEvent::tip_is_touching_for_capture(&tip(
+            false, -18.0
+        )));
     }
 }

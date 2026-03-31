@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
-use super::xr_depth::{
-    depth_query_plane_supports_body, DepthQuerySurfaceCollider, DepthQuerySurfaceTarget,
-};
+use super::xr_depth::{DepthQuerySurfaceCollider, DepthQuerySurfaceTarget};
 use super::*;
+use crate::tsdf_query::{
+    depth_query_plane_supports_body, DepthQueryColliderGeometry, DepthQueryColliderRole,
+};
 use rapier3d::dynamics::CoefficientCombineRule;
 use rapier3d::pipeline::{ActiveHooks, PairFilterContext, PhysicsHooks};
 use rapier3d::prelude::SolverFlags;
@@ -41,9 +42,7 @@ struct DepthQueryBodySurfaceSet {
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct DepthQueryPhysicsStats {
-    pub(crate) active_surface_count: usize,
-    pub(crate) vertex_count: usize,
-    pub(crate) triangle_count: usize,
+    pub(crate) surface_count: usize,
 }
 
 struct RapierDepthQueryHooks;
@@ -52,6 +51,7 @@ const DEPTH_QUERY_BODY_USER_DATA_TAG: u128 = 1u128 << 127;
 const DEPTH_QUERY_SURFACE_USER_DATA_TAG: u128 = 1u128 << 126;
 const DEPTH_QUERY_USER_DATA_OWNER_MASK: u128 = u64::MAX as u128;
 static RAPIER_DEPTH_QUERY_HOOKS: RapierDepthQueryHooks = RapierDepthQueryHooks;
+const XR_ENABLE_SYNTHETIC_GROUND_PLANE: bool = false;
 
 pub(crate) struct RapierScene {
     gravity: RapierVector,
@@ -105,6 +105,30 @@ fn decode_depth_query_body_owner(user_data: u128) -> Option<u64> {
 fn decode_depth_query_surface_owner(user_data: u128) -> Option<u64> {
     ((user_data & DEPTH_QUERY_SURFACE_USER_DATA_TAG) != 0)
         .then_some((user_data & DEPTH_QUERY_USER_DATA_OWNER_MASK) as u64)
+}
+
+fn depth_query_surface_target_should_enable(
+    target: DepthQuerySurfaceTarget,
+    body_position: Vec3f,
+    body_velocity: Vec3f,
+    query_radius: f32,
+    lateral_margin: f32,
+) -> bool {
+    let DepthQueryColliderGeometry::HalfSpace(plane) = target.collider.geometry;
+    match target.collider.role {
+        DepthQueryColliderRole::Support => {
+            depth_query_plane_supports_body(plane, body_position, query_radius, lateral_margin)
+        }
+        DepthQueryColliderRole::Impact => {
+            let speed = body_velocity.length();
+            let approach_speed = -body_velocity.dot(plane.normal);
+            // Impact planes are predictive: the TSDF query may place the quad ahead of the body
+            // along its current path, so requiring current-footprint overlap here makes late wall
+            // and ceiling hits tunnel through.
+            speed >= XR_DEPTH_QUERY_IMPACT_ENABLE_SPEED_MIN
+                && approach_speed >= XR_DEPTH_QUERY_IMPACT_ENABLE_APPROACH_SPEED_MIN
+        }
+    }
 }
 
 impl PhysicsHooks for RapierDepthQueryHooks {
@@ -356,14 +380,16 @@ impl RapierScene {
             right_hand: Vec::new(),
         };
 
-        // Invisible floor at XR ground level (y=0).
-        let floor = scene.bodies.insert(RigidBodyBuilder::fixed().build());
-        scene.colliders.insert_with_parent(
-            ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
-                .friction(0.9),
-            floor,
-            &mut scene.bodies,
-        );
+        if XR_ENABLE_SYNTHETIC_GROUND_PLANE {
+            // Prefer depth-derived floor support in XR; keep this only as an opt-in fallback.
+            let floor = scene.bodies.insert(RigidBodyBuilder::fixed().build());
+            scene.colliders.insert_with_parent(
+                ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
+                    .friction(0.9),
+                floor,
+                &mut scene.bodies,
+            );
+        }
         if XR_ENABLE_HAND_PHYSICS {
             scene.left_hand = scene.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND);
             scene.right_hand = scene.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND);
@@ -400,11 +426,11 @@ impl RapierScene {
         let body = self.bodies.insert(RigidBodyBuilder::fixed().build());
         let collider = self.colliders.insert_with_parent(
             ColliderBuilder::new(SharedShape::halfspace(RapierVector::new(0.0, 1.0, 0.0)))
-            .user_data(depth_query_surface_user_data(owner_widget_uid))
-            .active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS)
-            .friction(XR_DEPTH_QUERY_FRICTION)
-            .restitution(0.0)
-            .restitution_combine_rule(CoefficientCombineRule::Max),
+                .user_data(depth_query_surface_user_data(owner_widget_uid))
+                .active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS)
+                .friction(XR_DEPTH_QUERY_FRICTION)
+                .restitution(0.0)
+                .restitution_combine_rule(CoefficientCombineRule::Max),
             body,
             &mut self.bodies,
         );
@@ -425,11 +451,12 @@ impl RapierScene {
     ) -> usize {
         let surfaces = std::array::from_fn(|_| self.spawn_depth_query_surface(owner_widget_uid));
         let index = self.depth_query_surface_sets.len();
-        self.depth_query_surface_sets.push(DepthQueryBodySurfaceSet {
-            body,
-            query_radius,
-            surfaces,
-        });
+        self.depth_query_surface_sets
+            .push(DepthQueryBodySurfaceSet {
+                body,
+                query_radius,
+                surfaces,
+            });
         index
     }
 
@@ -587,7 +614,8 @@ impl RapierScene {
             body.reset_torques(false);
             body.wake_up(true);
         }
-        cube.depth_query_surface_set.map(RapierScene::depth_query_key)
+        cube.depth_query_surface_set
+            .map(RapierScene::depth_query_key)
     }
 
     pub(super) fn sync_depth_query_surface_set(
@@ -621,23 +649,14 @@ impl RapierScene {
                 continue;
             };
             if let Some(collider) = self.colliders.get_mut(surface.collider) {
-                let XrDepthMeshQueryColliderGeometry::HalfSpace(plane) = target.collider.geometry;
-                let footprint_supports_body = depth_query_plane_supports_body(
-                    plane,
+                let DepthQueryColliderGeometry::HalfSpace(plane) = target.collider.geometry;
+                let supports_body = depth_query_surface_target_should_enable(
+                    *target,
                     body_position,
+                    body_velocity,
                     surface_set.query_radius,
                     physics_edge_margin,
                 );
-                let supports_body = match target.collider.role {
-                    XrDepthMeshQueryColliderRole::Support => footprint_supports_body,
-                    XrDepthMeshQueryColliderRole::Impact => {
-                        let speed = body_velocity.length();
-                        let approach_speed = -body_velocity.dot(plane.normal);
-                        footprint_supports_body
-                            && speed >= XR_DEPTH_QUERY_IMPACT_ENABLE_SPEED_MIN
-                            && approach_speed >= XR_DEPTH_QUERY_IMPACT_ENABLE_APPROACH_SPEED_MIN
-                    }
-                };
                 if surface.fingerprint != target.collider.fingerprint {
                     collider.set_shape(SharedShape::halfspace(rapier_vec3(plane.normal)));
                     collider.set_position_wrt_parent(RapierPose::from_parts(
@@ -649,11 +668,43 @@ impl RapierScene {
                 collider.set_restitution(target.collider.restitution.max(0.0));
                 collider.set_enabled(supports_body);
                 if supports_body {
-                    self.depth_query_stats.active_surface_count += 1;
-                    self.depth_query_stats.vertex_count += target.collider.vertex_count();
-                    self.depth_query_stats.triangle_count += target.collider.triangle_count();
+                    self.depth_query_stats.surface_count += 1;
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tsdf_query::{DepthQueryCollider, DepthQuerySupportPlane};
+
+    #[test]
+    fn impact_surface_enables_before_current_body_overlaps_quad() {
+        let plane = DepthQuerySupportPlane {
+            point: vec3f(1.0, 0.0, 0.0),
+            normal: vec3f(-1.0, 0.0, 0.0),
+            tangent: vec3f(0.0, 1.0, 0.0),
+            bitangent: vec3f(0.0, 0.0, 1.0),
+            half_extent_tangent: 0.08,
+            half_extent_bitangent: 0.08,
+        };
+        let target = DepthQuerySurfaceTarget {
+            collider: DepthQueryCollider {
+                fingerprint: 1,
+                geometry: DepthQueryColliderGeometry::HalfSpace(plane),
+                role: DepthQueryColliderRole::Impact,
+                restitution: 0.38,
+            },
+        };
+
+        assert!(depth_query_surface_target_should_enable(
+            target,
+            vec3f(0.78, 0.0, 0.0),
+            vec3f(0.55, 0.0, 0.0),
+            0.05,
+            0.004,
+        ));
     }
 }

@@ -1,5 +1,5 @@
-use {super::loader::FontData, rustybuzz, rustybuzz::ttf_parser};
 use std::{cell::RefCell, fmt, rc::Rc};
+use {super::loader::FontData, rustybuzz, rustybuzz::ttf_parser};
 
 pub struct FontFace {
     parsed: Rc<ParsedFontFace>,

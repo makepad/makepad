@@ -37,6 +37,15 @@ pub enum OpenUrlInPlace {
     No,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CxThreadPriority {
+    #[default]
+    Normal,
+    Utility,
+    Background,
+    Idle,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SystemBrowserId(pub LiveId);
 
@@ -428,8 +437,8 @@ impl Cx {
         &self.xr_capabilities
     }
 
-    pub fn xr_depth_mesh(&self) -> crate::xr_depth_mesh::XrDepthMeshStore {
-        crate::xr_depth_mesh::xr_depth_mesh_store()
+    pub fn xr_tsdf(&self) -> crate::xr_tsdf::XrTsdfStore {
+        crate::xr_tsdf::xr_tsdf_store()
     }
 
     pub fn xr_render_scale(&self) -> Option<f64> {
@@ -446,6 +455,14 @@ impl Cx {
 
     pub fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
         <Self as CxOsApi>::xr_effective_frame_rate_hz(self)
+    }
+
+    pub fn set_thread_priority(priority: CxThreadPriority) {
+        #[cfg(target_os = "android")]
+        crate::os::linux::android::android::set_current_thread_priority(priority);
+
+        #[cfg(not(target_os = "android"))]
+        let _ = priority;
     }
 
     pub fn get_ref(&self) -> CxRef {

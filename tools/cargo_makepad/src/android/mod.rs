@@ -418,15 +418,33 @@ Common options:\n\
   --sdk-path=<path>\n\
   --host-os=linux-x64|windows-x64|macos-aarch64|macos-x64\n\
   --variant=default|quest\n\
-  --devices=<serial1,serial2,...>        (for run)\n\
+  --devices=<serial1,serial2,...>|all    (for run and adb-tcp)\n\
   --keep-sdk-sources\n\
 \n\
 Examples:\n\
   cargo makepad android --abi=aarch64 build -p my-app --release\n\
   cargo makepad android --abi=aarch64 run -p my-app --release\n\
+  cargo makepad android --devices=all --variant=quest run -p my-app --release\n\
   cargo makepad android adb devices -l\n\
   cargo makepad android adb-tcp\n\
   cargo makepad android --devices=<serial> adb-tcp 5555"
+}
+
+fn resolve_devices_arg(
+    sdk_dir: &std::path::Path,
+    devices: &[String],
+) -> Result<Vec<String>, String> {
+    if !devices.iter().any(|device| device == "all") {
+        return Ok(devices.to_vec());
+    }
+    if devices.len() != 1 {
+        return Err("`--devices=all` cannot be combined with explicit device serials".to_string());
+    }
+    let devices = compile::list_connected_devices(sdk_dir)?;
+    if devices.is_empty() {
+        return Err("`--devices=all` found no connected adb devices".to_string());
+    }
+    Ok(devices)
 }
 
 pub fn handle_android(mut args: &[String]) -> Result<(), String> {
@@ -507,7 +525,10 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
 
     match args[0].as_ref() {
         "adb" => compile::adb(&sdk_dir, host_os, &args[1..]),
-        "adb-tcp" => compile::adb_tcp(&sdk_dir, host_os, &devices, &args[1..]),
+        "adb-tcp" => {
+            let devices = resolve_devices_arg(&sdk_dir, &devices)?;
+            compile::adb_tcp(&sdk_dir, host_os, &devices, &args[1..])
+        }
         "java" => compile::java(&sdk_dir, host_os, &args[1..]),
         "javac" => compile::javac(&sdk_dir, host_os, &args[1..]),
         "rustup-toolchain-install" | "rustup-install-toolchain" => {
@@ -544,18 +565,21 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             )?;
             Ok(())
         }
-        "run" => compile::run(
-            &sdk_dir,
-            host_os,
-            package_name,
-            app_label,
-            &args[1..],
-            &targets,
-            &variant,
-            &config,
-            &urls,
-            devices,
-        ),
+        "run" => {
+            let devices = resolve_devices_arg(&sdk_dir, &devices)?;
+            compile::run(
+                &sdk_dir,
+                host_os,
+                package_name,
+                app_label,
+                &args[1..],
+                &targets,
+                &variant,
+                &config,
+                &urls,
+                devices,
+            )
+        }
         _ => Err(format!(
             "{} is not a valid android subcommand\n\n{}",
             args[0],

@@ -63,6 +63,10 @@ extern crate std;
 #[cfg(feature = "alloc")]
 #[cfg_attr(test, macro_use)]
 extern crate alloc;
+#[cfg(not(feature = "enhanced-determinism"))]
+extern crate foldhash;
+#[cfg(not(feature = "enhanced-determinism"))]
+extern crate hashbrown;
 
 #[cfg(feature = "serde")]
 #[macro_use]

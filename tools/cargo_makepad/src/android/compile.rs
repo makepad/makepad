@@ -1489,7 +1489,10 @@ pub fn run(
             let start_args = android_start_args(&result.java_url);
             let mut device_args = vec!["-s".to_string(), device.clone()];
             device_args.extend(start_args);
-            let device_args_refs = device_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
+            let device_args_refs = device_args
+                .iter()
+                .map(|arg| arg.as_str())
+                .collect::<Vec<_>>();
             children.push(shell_child_create(
                 &[],
                 &cwd,
@@ -1600,13 +1603,11 @@ struct AdbDeviceInfo {
 
 fn parse_adb_devices_list(output: &str) -> Vec<AdbDeviceInfo> {
     let mut devices = Vec::new();
-
     for line in output.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with("List of devices attached") {
             continue;
         }
-
         let mut parts = line.split_whitespace();
         let Some(serial) = parts.next() else {
             continue;
@@ -1643,6 +1644,19 @@ fn parse_adb_devices_list(output: &str) -> Vec<AdbDeviceInfo> {
 fn adb_devices_list(sdk_dir: &Path) -> Result<Vec<AdbDeviceInfo>, String> {
     let output = adb_cap(sdk_dir, None, &["devices", "-l"])?;
     Ok(parse_adb_devices_list(&output))
+}
+
+fn connected_device_serials(devices: &[AdbDeviceInfo]) -> Vec<String> {
+    devices
+        .iter()
+        .filter(|device| device.state == "device")
+        .map(|device| device.serial.clone())
+        .collect()
+}
+
+pub fn list_connected_devices(sdk_dir: &Path) -> Result<Vec<String>, String> {
+    let devices = adb_devices_list(sdk_dir)?;
+    Ok(connected_device_serials(&devices))
 }
 
 fn adb_device_is_quest(device: &AdbDeviceInfo) -> bool {
@@ -1832,9 +1846,26 @@ pub fn adb_tcp(
 #[cfg(test)]
 mod tests {
     use super::{
-        adb_device_is_quest, parse_adb_devices_list, parse_ip_addr_show, parse_ip_route,
-        select_run_devices, AdbDeviceInfo, AndroidVariant,
+        adb_device_is_quest, connected_device_serials, parse_adb_devices_list,
+        parse_ip_addr_show, parse_ip_route, select_run_devices, AdbDeviceInfo, AndroidVariant,
     };
+
+    #[test]
+    fn connected_device_serials_filters_ready_targets() {
+        let output = "\
+List of devices attached\n\
+emulator-5554          device product:sdk_gphone64 model:sdk_gphone64 device:emu64 transport_id:1\n\
+quest-offline          offline transport_id:2\n\
+quest-unauthorized     unauthorized usb:3\n\
+10.0.0.151:5555        device product:eureka model:Quest_3 device:eureka transport_id:4\n\
+\n";
+
+        let devices = parse_adb_devices_list(output);
+        assert_eq!(
+            connected_device_serials(&devices),
+            vec!["emulator-5554".to_string(), "10.0.0.151:5555".to_string()]
+        );
+    }
 
     #[test]
     fn parse_ip_addr_show_extracts_ipv4() {

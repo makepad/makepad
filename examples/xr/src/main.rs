@@ -271,7 +271,7 @@ script_mod! {
                             pos: vec3(0.05, 0.20, -0.42)
                         }
 
-                        for index in 0..160 {
+                        for index in 0..80 {
                             let diffuse = #xa0a4aa
                             let color = if index % 6 == 0 {
                                 #xff6f59
@@ -361,12 +361,15 @@ script_mod! {
                     }
                 }
             }
+            xr_peer_sync := XrPeerSync{
+                auto_alignment_enabled: true
+            }
 
             control_strip := XrView{
                 visible: false
                 show_in_non_xr: true
                 wrist_left: true
-                logical_size: vec2(920, 468)
+                logical_size: vec2(1220, 700)
                 pixel_scale: 0.000215
                 dpi_factor: 2.0
                 SolidView{
@@ -517,6 +520,12 @@ script_mod! {
                             draw_text.color: #xe8f4ff
                         }
 
+                        depth_resolution_3_button := XrUiButton{
+                            width: 64
+                            text: "3 cm"
+                            on_press: || ui.root.set_depth_voxel_size(0.03)
+                        }
+
                         depth_resolution_5_button := XrUiButton{
                             width: 64
                             text: "5 cm"
@@ -576,60 +585,34 @@ script_mod! {
 
                     View{
                         width: Fill
-                        height: Fit
-                        flow: Down
-                        spacing: 8
+                        height: Fill
+                        flow: Right
+                        spacing: 12
 
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
+                        View{
+                            width: Fill{weight: 66.0}
+                            height: Fill
+                            flow: Down
+                            spacing: 8
 
-                            physics_geom_field := Label{
+                            SolidView{
                                 width: Fill
-                                text: "Physics geometry: waiting for frame"
-                                draw_text.color: #xe8f4ff
+                                height: Fit
+                                padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
+                                draw_bg.color: #x0d1824
+
+                                debug_field := Label{
+                                    width: Fill
+                                    text: "Connected peers: 0"
+                                    draw_text.color: #xe8f4ff
+                                    draw_text.flow: Flow.Right{wrap: true}
+                                }
                             }
                         }
 
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            physics_timing_field := Label{
-                                width: Fill
-                                text: "Physics compute: waiting for frame"
-                                draw_text.color: #xe8f4ff
-                            }
-                        }
-
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            frame_cpu_field := Label{
-                                width: Fill
-                                text: "CPU frame: waiting for frame"
-                                draw_text.color: #xe8f4ff
-                            }
-                        }
-
-                        SolidView{
-                            width: Fill
-                            height: 32
-                            padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
-                            draw_bg.color: #x0d1824
-
-                            xr_runtime_field := Label{
-                                width: Fill
-                                text: "XR render scale: waiting for XR session"
-                                draw_text.color: #xe8f4ff
-                            }
+                        View{
+                            width: Fill{weight: 34.0}
+                            height: Fill
                         }
                     }
                 }
@@ -680,35 +663,41 @@ pub struct App {
     #[live]
     ui: WidgetRef,
     #[rust]
-    last_physics_geometry_text: String,
+    network_started: bool,
     #[rust]
-    last_physics_timing_text: String,
-    #[rust]
-    last_frame_cpu_text: String,
-    #[rust]
-    last_xr_runtime_text: String,
+    last_debug_text: String,
 }
 
 impl App {
+    fn ensure_network_started(&mut self, cx: &mut Cx) {
+        if self.network_started {
+            return;
+        }
+        if let Some(mut peer_sync) = self
+            .ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow_mut::<XrPeerSync>()
+        {
+            peer_sync.set_enabled(cx, true);
+            self.network_started = true;
+        }
+    }
+
     fn refresh_debug_fields(&mut self, cx: &mut Cx) {
         let (
             surface_count,
-            vertex_count,
-            triangle_count,
             compute_ms,
-            physics_time_scale,
-            step_dt_ms,
+            query_ms,
+            rapier_ms,
             frame_cpu_ms,
             frame_update_cpu_ms,
             frame_draw_cpu_ms,
         ) = if let Some(root) = self.ui.borrow::<XrRoot>() {
             (
                 root.physics_depth_query_surface_count(),
-                root.physics_depth_query_vertex_count(),
-                root.physics_depth_query_triangle_count(),
                 root.physics_compute_ms(),
-                root.physics_time_scale(),
-                root.physics_step_dt_ms(),
+                root.physics_tsdf_query_ms(),
+                root.physics_rapier_step_ms(),
                 root.frame_cpu_ms(),
                 root.frame_update_cpu_ms(),
                 root.frame_draw_cpu_ms(),
@@ -716,111 +705,47 @@ impl App {
         } else {
             return;
         };
-
-        let geometry_text = format!(
-            "Physics geometry: {} planes, {} vertices, {} triangles",
-            surface_count, vertex_count, triangle_count
+        let connected_peers = self
+            .ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow::<XrPeerSync>()
+            .map(|peer_sync| peer_sync.connected_peer_count())
+            .unwrap_or(0);
+        let tsdf_memory_mb = cx
+            .xr_tsdf()
+            .latest_tsdf_snapshot()
+            .as_ref()
+            .map(|snapshot| {
+                let grid = &snapshot.grid;
+                grid.heap_bytes() as f64 / 1_000_000.0
+            })
+            .unwrap_or(0.0);
+        let (depth_frames_seen, depth_frames_dropped) = cx
+            .xr_tsdf()
+            .state()
+            .read()
+            .ok()
+            .map(|state| (state.stats.frames_seen, state.stats.frames_dropped))
+            .unwrap_or((0, 0));
+        let depth_frames_kept = depth_frames_seen.saturating_sub(depth_frames_dropped);
+        let gpu_time_text = cx
+            .xr_gpu_frame_time_ms()
+            .map(|gpu_ms| format!("{gpu_ms:.2} ms"))
+            .unwrap_or_else(|| "waiting".to_string());
+        let debug_text = format!(
+            "Connected peers: {connected_peers}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nCPU frame time: {frame_cpu_ms:.2} ms\nUpdate time: {frame_update_cpu_ms:.2} ms\nDraw time: {frame_draw_cpu_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}"
         );
-        if self.last_physics_geometry_text != geometry_text {
+        if self.last_debug_text != debug_text {
             self.ui
-                .widget(cx, ids!(physics_geom_field))
-                .set_text(cx, &geometry_text);
-            self.last_physics_geometry_text = geometry_text;
-        }
-
-        let timing_text = if step_dt_ms > 0.0 {
-            format!(
-                "Physics compute: {:.2} ms | tick {:.2} ms ({:.0} Hz) | sim {:.2}x",
-                compute_ms,
-                step_dt_ms,
-                1000.0 / step_dt_ms,
-                physics_time_scale
-            )
-        } else {
-            format!(
-                "Physics compute: {:.2} ms | sim {:.2}x",
-                compute_ms, physics_time_scale
-            )
-        };
-        if self.last_physics_timing_text != timing_text {
-            self.ui
-                .widget(cx, ids!(physics_timing_field))
-                .set_text(cx, &timing_text);
-            self.last_physics_timing_text = timing_text;
-        }
-
-        let frame_cpu_text = format!(
-            "CPU frame: {:.2} ms total | update {:.2} ms | draw {:.2} ms",
-            frame_cpu_ms, frame_update_cpu_ms, frame_draw_cpu_ms
-        );
-        if self.last_frame_cpu_text != frame_cpu_text {
-            self.ui
-                .widget(cx, ids!(frame_cpu_field))
-                .set_text(cx, &frame_cpu_text);
-            self.last_frame_cpu_text = frame_cpu_text;
-        }
-
-        let xr_runtime_text = match (
-            cx.xr_render_scale(),
-            cx.xr_display_refresh_rate_hz(),
-            cx.xr_effective_frame_rate_hz(),
-            cx.xr_gpu_frame_time_ms(),
-        ) {
-            (Some(scale), Some(refresh_hz), Some(effective_hz), Some(gpu_ms)) => format!(
-                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU {:.2} ms",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
-                scale,
-                refresh_hz,
-                effective_hz,
-                gpu_ms
-            ),
-            (Some(scale), Some(refresh_hz), Some(effective_hz), None) => format!(
-                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence {:.1} Hz | GPU waiting",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
-                scale,
-                refresh_hz,
-                effective_hz
-            ),
-            (Some(scale), Some(refresh_hz), None, Some(gpu_ms)) => format!(
-                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU {:.2} ms",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
-                scale,
-                refresh_hz,
-                gpu_ms
-            ),
-            (Some(scale), Some(refresh_hz), None, None) => format!(
-                "Depth: {:.0} cm | XR scale: {:.2} | refresh {:.1} Hz | cadence waiting | GPU waiting",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0,
-                scale,
-                refresh_hz
-            ),
-            (Some(scale), None, _, Some(gpu_ms)) => {
-                format!(
-                    "Depth: {:.0} cm | XR scale: {:.2} | refresh waiting | GPU {:.2} ms",
-                    cx.xr_depth_mesh().voxel_size_meters() * 100.0,
-                    scale,
-                    gpu_ms
-                )
-            }
-            (Some(scale), None, _, None) => {
-                format!(
-                    "Depth: {:.0} cm | XR scale: {:.2} | refresh waiting | GPU waiting",
-                    cx.xr_depth_mesh().voxel_size_meters() * 100.0,
-                    scale
-                )
-            }
-            (None, _, _, _) => format!(
-                "Depth: {:.0} cm | XR render scale: not active",
-                cx.xr_depth_mesh().voxel_size_meters() * 100.0
-            ),
-        };
-        if self.last_xr_runtime_text != xr_runtime_text {
-            self.ui
-                .widget(cx, ids!(xr_runtime_field))
-                .set_text(cx, &xr_runtime_text);
-            self.last_xr_runtime_text = xr_runtime_text;
+                .widget(cx, ids!(debug_field))
+                .set_text(cx, &debug_text);
+            self.last_debug_text = debug_text;
         }
     }
+}
+
+impl MatchEvent for App {
+    fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
 }
 
 impl AppMain for App {
@@ -831,7 +756,11 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if matches!(event, Event::Startup) {
+            self.ensure_network_started(cx);
+        }
         self.refresh_debug_fields(cx);
     }
 }
