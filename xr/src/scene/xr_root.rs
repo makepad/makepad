@@ -1,6 +1,6 @@
 use super::xr_env::XrEnv;
 use super::xr_select::XrSelectAction;
-use super::{hand_is_palm_down_closed_fist, CLOSED_FIST_GESTURE};
+use super::{flat_head_forward, flat_head_right, hand_closed_fist_contact_point};
 use crate::prelude::*;
 use crate::util::scene_draw::{ray_from_scene_viewport, SceneState3D};
 use makepad_widgets::event::{XrFingerTip, XrSyncAnchor};
@@ -10,6 +10,7 @@ use std::{cell::Cell, collections::HashMap, rc::Rc, time::Instant};
 const DESKTOP_TOUCH_DOWN_Z: f32 = 0.0;
 const DESKTOP_TOUCH_UP_Z: f32 = 64.0;
 const XR_CONTENT_FORWARD_OFFSET: f32 = 0.28;
+const XR_ACTIVITY_RESET_FORWARD_OFFSET: f32 = 1.0;
 const XR_CONTENT_VERTICAL_OFFSET: f32 = -0.58;
 const FISTBUMP_FORWARD_PEAK_MIN_METERS: f32 = 0.18;
 const FISTBUMP_RETREAT_MIN_METERS: f32 = 0.04;
@@ -75,9 +76,10 @@ pub struct XrCamera {
     pub viewport_rect: Option<Rect>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum XrRootAction {
     PhysicsReset,
+    ContentPoseReset(Pose),
     #[default]
     None,
 }
@@ -266,6 +268,10 @@ struct XrContentRig {
 }
 
 impl XrContentRig {
+    fn resolved_pose(&self, state: Option<&XrState>) -> Option<Pose> {
+        self.pose.or_else(|| state.map(Self::pose_from_state))
+    }
+
     fn flat_forward(orientation: Quat) -> Vec3f {
         let mut forward = orientation.rotate_vec3(&vec3f(0.0, 0.0, -1.0));
         forward.y = 0.0;
@@ -276,14 +282,22 @@ impl XrContentRig {
         }
     }
 
-    fn pose_from_state(state: &XrState) -> Pose {
+    fn pose_from_state_with_forward_offset(state: &XrState, forward_offset: f32) -> Pose {
         let forward = Self::flat_forward(state.head_pose.orientation);
         Pose {
             position: state.head_pose.position
-                + forward.scale(XR_CONTENT_FORWARD_OFFSET)
+                + forward.scale(forward_offset)
                 + vec3f(0.0, XR_CONTENT_VERTICAL_OFFSET, 0.0),
             orientation: Quat::look_rotation(forward.scale(-1.0), vec3f(0.0, 1.0, 0.0)),
         }
+    }
+
+    fn pose_from_state(state: &XrState) -> Pose {
+        Self::pose_from_state_with_forward_offset(state, XR_CONTENT_FORWARD_OFFSET)
+    }
+
+    fn reset_pose_from_state(state: &XrState) -> Pose {
+        Self::pose_from_state_with_forward_offset(state, XR_ACTIVITY_RESET_FORWARD_OFFSET)
     }
 
     fn ensure_pose(&mut self, cx: &mut Cx, env: &mut XrEnv, state: &XrState) {
@@ -304,8 +318,7 @@ impl XrContentRig {
     }
 
     fn transform(&self, state: Option<&XrState>) -> Mat4f {
-        self.pose
-            .or_else(|| state.map(Self::pose_from_state))
+        self.resolved_pose(state)
             .map(|pose| pose.to_mat4())
             .unwrap_or_else(Mat4f::identity)
     }
@@ -319,47 +332,12 @@ struct XrSyncAnchorRuntime {
 }
 
 impl XrSyncAnchorRuntime {
-    fn hand_is_fist(hand: &XrHand, is_left: bool) -> bool {
-        hand_is_palm_down_closed_fist(hand, is_left, CLOSED_FIST_GESTURE)
-    }
-
-    fn hand_fist_anchor_point(hand: &XrHand, forward: Vec3f, is_left: bool) -> Option<Vec3f> {
-        if !Self::hand_is_fist(hand, is_left) {
-            return None;
-        }
-        let mut best_point = None;
-        let mut best_projection = f32::NEG_INFINITY;
-        for joint_index in [
-            XrHand::INDEX_KNUCKLE3,
-            XrHand::MIDDLE_KNUCKLE3,
-            XrHand::RING_KNUCKLE3,
-            XrHand::LITTLE_KNUCKLE3,
-        ] {
-            let point = hand.joints[joint_index].position;
-            let projection = point.dot(forward);
-            if projection > best_projection {
-                best_projection = projection;
-                best_point = Some(point);
-            }
-        }
-        best_point
-    }
-
     fn fistbump_pose_sample(state: &XrState) -> Option<FistbumpPoseSample> {
-        let forward = XrContentRig::flat_forward(state.head_pose.orientation);
-        let mut right = state
-            .head_pose
-            .orientation
-            .rotate_vec3(&vec3f(1.0, 0.0, 0.0));
-        right.y = 0.0;
-        right = if right.length() <= 1.0e-6 {
-            vec3f(1.0, 0.0, 0.0)
-        } else {
-            right.normalize()
-        };
+        let forward = flat_head_forward(state.head_pose.orientation);
+        let right = flat_head_right(state.head_pose.orientation);
 
-        let left_point = Self::hand_fist_anchor_point(&state.left_hand, forward, true)?;
-        let right_point = Self::hand_fist_anchor_point(&state.right_hand, forward, false)?;
+        let left_point = hand_closed_fist_contact_point(&state.left_hand, forward, true)?;
+        let right_point = hand_closed_fist_contact_point(&state.right_hand, forward, false)?;
         let left_local = left_point - state.head_pose.position;
         let right_local = right_point - state.head_pose.position;
         let left_forward = left_local.dot(forward);
@@ -521,6 +499,22 @@ impl XrRoot {
         cx.widget_action(self.widget_uid(), XrRootAction::PhysicsReset);
     }
 
+    fn apply_content_pose(&mut self, cx: &mut Cx, pose: Pose) {
+        self.content_rig.pose = Some(pose);
+        self.env.set_root_pose(cx, Some(pose));
+        self.env.reset_physics(cx);
+        cx.redraw_all();
+    }
+
+    fn reset_scene_pose_to_headset_and_emit_action(&mut self, cx: &mut Cx) {
+        let Some(state) = self.runtime.last_xr_state.as_deref() else {
+            return;
+        };
+        let pose = XrContentRig::reset_pose_from_state(state);
+        self.apply_content_pose(cx, pose);
+        cx.widget_action(self.widget_uid(), XrRootAction::ContentPoseReset(pose));
+    }
+
     pub fn spawn_body(&mut self, cx: &mut Cx, spawn: XrBodySpawn) {
         self.env.spawn_body(cx, spawn);
     }
@@ -531,6 +525,15 @@ impl XrRoot {
 
     pub fn apply_body_impulse(&mut self, cx: &mut Cx, impulse: XrBodyImpulse) {
         self.env.apply_body_impulse(cx, impulse);
+    }
+
+    pub fn set_content_pose(&mut self, cx: &mut Cx, pose: Pose) {
+        self.apply_content_pose(cx, pose);
+    }
+
+    pub fn content_pose(&self) -> Option<Pose> {
+        self.content_rig
+            .resolved_pose(self.runtime.last_xr_state.as_deref())
     }
 
     pub fn force_scene_rebuild(&mut self, cx: &mut Cx) {
@@ -1094,6 +1097,12 @@ impl Widget for XrRoot {
             });
             return ScriptAsyncResult::Return(NIL);
         }
+        if method == live_id!(reset_activity_pose) || method == live_id!(pose_activity) {
+            vm.with_cx_mut(|cx| {
+                self.reset_scene_pose_to_headset_and_emit_action(cx);
+            });
+            return ScriptAsyncResult::Return(NIL);
+        }
         if method == live_id!(set_physics_time_scale) || method == live_id!(set_sim_time_scale) {
             let mut scale = self.physics_time_scale();
             if let Some(args_obj) = args.as_object() {
@@ -1215,15 +1224,6 @@ impl Widget for XrRoot {
         }
 
         if let Event::Actions(actions) = event {
-            for action in actions {
-                let Some(widget_action) = action.as_widget_action() else {
-                    continue;
-                };
-                let Some(body_spawn) = widget_action.action.downcast_ref::<XrBodySpawn>() else {
-                    continue;
-                };
-                self.env.spawn_body(cx, *body_spawn);
-            }
             if actions.iter().any(|action| {
                 action.as_widget_action().is_some_and(|action| {
                     matches!(action.cast::<XrNodeAction>(), XrNodeAction::SceneChanged)

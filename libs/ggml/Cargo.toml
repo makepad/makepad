@@ -1,0 +1,17 @@
+[package]
+name = "makepad-ggml"
+version = "0.1.0"
+edition = "2021"
+description = "Metal-first, backend-neutral ggml runtime for Makepad"
+license = "MIT"
+
+[features]
+default = []
+metal-precompile = []
+
+[dependencies]
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+makepad-objc-sys = { path = "../objc-sys", version = "1.0.0" }
+
+[workspace]
