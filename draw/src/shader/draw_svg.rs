@@ -37,31 +37,9 @@ script_mod! {
 
         vertex: fn() {
             var pos = vec2(self.geom.x, self.geom.y);
-            // Fill fringe outer vertices (u=0, stroke_mult>1e5) have
-            // the outward normal stored in (v, stroke_dist). Expand
-            // them so the fringe is ~1px wide on screen regardless of
-            // svg_scale. We keep the edge centered like NanoVG:
-            // fill/body verts move inward by 0.5px, outer fringe verts
-            // move outward by 0.5px.
-            if self.geom.stroke_mult > 1e5 {
-                let normal = vec2(self.geom.v, self.geom.stroke_dist);
-                let nlen = length(normal);
-                if nlen > 0.0001 {
-                    let un = normal / nlen;
-                    // Convert screen px into local-space distance along un.
-                    let screen_scale = length(vec2(un.x * self.svg_scale.x, un.y * self.svg_scale.y));
-                    if screen_scale > 0.0001 {
-                        let half_px = 0.5 / screen_scale;
-                        if self.geom.u < 0.25 {
-                            // transparent outer fringe vertex
-                            pos = pos + un * half_px;
-                        } else if self.geom.u > 0.25 {
-                            // opaque edge/body vertex
-                            pos = pos - un * half_px;
-                        }
-                    }
-                }
-            }
+            // SVG fill uses pre-computed fringe (not GPU-expand), so fringe
+            // vertices already have physically offset positions. No GPU-side
+            // expansion needed.
             // Keep tessellated SVG geometry relative and apply rect_pos as the
             // final anchor so turtle alignment can move it like DrawQuad.
             let transformed_local = self.transform_svg_point(pos * self.svg_scale + self.svg_offset);

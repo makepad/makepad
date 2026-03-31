@@ -50,6 +50,21 @@ pub fn define_makepad_view_controller() -> *const Class {
         unsafe { *this.get_ivar("_prefersHomeIndicatorAutoHidden") }
     }
 
+    // Called by iOS when the safe area insets change (e.g., device rotation).
+    // At this point the view's safeAreaInsets reflect the new orientation,
+    // unlike draw_size_will_change which may fire before the update.
+    extern "C" fn view_safe_area_insets_did_change(_this: &Object, _: Sel) {
+        let should_call = IOS_APP
+            .try_with(|app| match app.try_borrow_mut() {
+                Ok(app_ref) => app_ref.is_some(),
+                Err(_) => false,
+            })
+            .unwrap_or(false);
+        if should_call {
+            IosApp::check_window_geom();
+        }
+    }
+
     unsafe {
         decl.add_method(
             sel!(prefersStatusBarHidden),
@@ -58,6 +73,10 @@ pub fn define_makepad_view_controller() -> *const Class {
         decl.add_method(
             sel!(prefersHomeIndicatorAutoHidden),
             prefers_home_indicator_auto_hidden as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(viewSafeAreaInsetsDidChange),
+            view_safe_area_insets_did_change as extern "C" fn(&Object, Sel),
         );
     }
 

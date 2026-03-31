@@ -401,11 +401,11 @@ impl AlignmentWorkerState {
         let previous_scored_on_current = previous_solution.and_then(|solution| {
             let local_descriptor = local_descriptor.as_ref()?;
             let remote_descriptor = peer_state.latest_descriptor.as_ref()?;
-            Some(xr_depth_align_rescore_remote_to_local(
-                &local_descriptor.descriptor,
-                &remote_descriptor.descriptor,
-                solution,
-            ))
+            Some(
+                local_descriptor
+                    .descriptor
+                    .rescore_remote_to_local(&remote_descriptor.descriptor, solution),
+            )
         });
         let next_solution = choose_stable_alignment_solution(
             peer_state.last_accepted_solution,
@@ -676,8 +676,7 @@ fn choose_stable_alignment_solution(
         return candidate;
     };
     let previous_on_current = previous_scored_on_current.unwrap_or(previous);
-    let previous_still_supported =
-        xr_depth_align_solution_is_accepted(diagnostic, previous_on_current);
+    let previous_still_supported = previous_on_current.is_accepted(diagnostic);
     let Some(candidate) = candidate else {
         return previous_still_supported.then_some(previous);
     };
@@ -1051,6 +1050,173 @@ fn make_alignment_debug_text(
     }
 }
 
+#[derive(Default)]
+struct XrPeerSyncLocalState {
+    state_time: f64,
+    anchor: Option<XrAnchor>,
+    anchor_override: Option<XrAnchor>,
+    sync_anchor: Option<XrSyncAnchor>,
+    fist_hold_anchor: Option<XrAnchor>,
+    descriptor: Option<XrNetAlignmentDescriptorFrame>,
+    descriptor_version: Option<(u64, u64)>,
+    slice_preview: Option<XrDepthAlignSlicePreview>,
+    last_sent_descriptor_signature: Option<(u64, u64)>,
+    last_sent_descriptor: Option<XrDepthAlignDescriptor>,
+    last_sent_descriptor_at: Option<f64>,
+}
+
+#[derive(Default)]
+struct XrPeerSyncMetrics {
+    tx_state_count: u64,
+    tx_descriptor_count: u64,
+    rx_join_count: u64,
+    rx_leave_count: u64,
+    rx_state_count: u64,
+    rx_descriptor_count: u64,
+    last_event_text: String,
+}
+
+#[derive(Default)]
+struct XrPeerRegistry {
+    peers: HashMap<XrNetPeerId, RemotePeerState>,
+    accepted_sync_ids: HashMap<XrNetPeerId, (u32, u32)>,
+}
+
+impl XrPeerRegistry {
+    fn clear(&mut self) {
+        self.peers.clear();
+        self.accepted_sync_ids.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.peers.len()
+    }
+
+    fn preferred_peer(&self) -> Option<(XrNetPeerId, RemotePeerState)> {
+        self.peers
+            .iter()
+            .max_by_key(|(peer_id, peer_state)| {
+                (
+                    peer_state.remote_to_local.is_some(),
+                    peer_state.latest_state.is_some(),
+                    std::cmp::Reverse(peer_id.0),
+                )
+            })
+            .map(|(peer_id, peer_state)| (*peer_id, peer_state.clone()))
+    }
+
+    fn apply_alignment_results(
+        &mut self,
+        peer_results: HashMap<XrNetPeerId, AlignmentWorkerPeerResult>,
+    ) {
+        for peer_state in self.peers.values_mut() {
+            peer_state.descriptor_remote_to_local = None;
+        }
+        for (peer_id, peer_result) in peer_results {
+            if let Some(peer_state) = self.peers.get_mut(&peer_id) {
+                peer_state.descriptor_remote_to_local = peer_result.remote_to_local;
+                peer_state.last_solve_diagnostic = peer_result.last_solve_diagnostic;
+                peer_state.last_solve_ms = peer_result.last_solve_ms;
+                peer_state.last_solved_local_descriptor_version =
+                    peer_result.last_solved_local_descriptor_version;
+                peer_state.last_solved_remote_descriptor_seq =
+                    peer_result.last_solved_remote_descriptor_seq;
+                peer_state.worker_progress = peer_result.worker_progress;
+                peer_state.has_descriptor =
+                    peer_state.has_descriptor || peer_result.last_solve_diagnostic.is_some();
+            }
+        }
+    }
+
+    fn refresh_transforms(
+        &mut self,
+        cx: &mut Cx,
+        local_anchor: Option<XrAnchor>,
+        local_sync_anchor: Option<XrSyncAnchor>,
+        local_fist_hold_anchor: Option<XrAnchor>,
+        local_anchor_override: &mut Option<XrAnchor>,
+        now: f64,
+    ) -> bool {
+        let mut changed = false;
+
+        for (peer_id, peer_state) in self.peers.iter_mut() {
+            peer_state.anchor_remote_to_local = None;
+            if let (Some(local_anchor), Some(state_frame)) =
+                (local_anchor, peer_state.latest_state.as_ref())
+            {
+                if let Some(remote_anchor) = state_frame.state.anchor {
+                    peer_state.anchor_remote_to_local =
+                        Some(remote_anchor.mapping_to(&local_anchor));
+                }
+            }
+
+            if peer_state.anchor_remote_to_local.is_none() {
+                if let Some(state_frame) = peer_state.latest_state.as_ref() {
+                    let remote_sync_anchor = state_frame.state.sync_anchor.filter(|_| {
+                        peer_state
+                            .last_sync_anchor_seen_at
+                            .is_some_and(|last_seen_at| {
+                                now - last_seen_at <= XrPeerSync::SYNC_MATCH_RECEIVE_WINDOW_SECONDS
+                            })
+                    });
+                    let remote_fist_hold_anchor =
+                        XrPeerSync::state_fist_ack_anchor(&state_frame.state);
+
+                    if let Some(local_sync_anchor) = local_sync_anchor {
+                        if let Some(remote_anchor) = remote_sync_anchor
+                            .map(|sync| (sync.anchor, sync.id))
+                            .or_else(|| remote_fist_hold_anchor.map(|anchor| (anchor, u32::MAX)))
+                        {
+                            let sync_ids = (local_sync_anchor.id, remote_anchor.1);
+                            if self.accepted_sync_ids.get(peer_id) != Some(&sync_ids) {
+                                self.accepted_sync_ids.insert(*peer_id, sync_ids);
+                                *local_anchor_override = Some(local_sync_anchor.anchor);
+                                cx.xr_set_local_anchor(local_sync_anchor.anchor);
+                            }
+                            peer_state.anchor_remote_to_local =
+                                Some(remote_anchor.0.mapping_to(&local_sync_anchor.anchor));
+                        }
+                    } else if let (Some(local_fist_hold_anchor), Some(remote_sync_anchor)) =
+                        (local_fist_hold_anchor, remote_sync_anchor)
+                    {
+                        let sync_ids = (u32::MAX, remote_sync_anchor.id);
+                        if self.accepted_sync_ids.get(peer_id) != Some(&sync_ids) {
+                            self.accepted_sync_ids.insert(*peer_id, sync_ids);
+                            *local_anchor_override = Some(local_fist_hold_anchor);
+                            cx.xr_set_local_anchor(local_fist_hold_anchor);
+                        }
+                        peer_state.anchor_remote_to_local = Some(
+                            remote_sync_anchor
+                                .anchor
+                                .mapping_to(&local_fist_hold_anchor),
+                        );
+                    }
+                }
+            }
+
+            let next_transform = peer_state
+                .anchor_remote_to_local
+                .or(peer_state.descriptor_remote_to_local);
+            let next_source = if peer_state.anchor_remote_to_local.is_some() {
+                RemoteTransformSource::Anchor
+            } else if peer_state.descriptor_remote_to_local.is_some() {
+                RemoteTransformSource::Descriptor
+            } else {
+                RemoteTransformSource::Raw
+            };
+            if peer_state.remote_to_local != next_transform
+                || peer_state.transform_source != next_source
+            {
+                peer_state.remote_to_local = next_transform;
+                peer_state.transform_source = next_source;
+                changed = true;
+            }
+        }
+
+        changed
+    }
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct XrPeerSync {
     #[redraw]
@@ -1075,45 +1241,11 @@ pub struct XrPeerSync {
     #[rust]
     alignment_worker: Option<XrPeopleAlignmentWorker>,
     #[rust]
-    peers: HashMap<XrNetPeerId, RemotePeerState>,
+    local: XrPeerSyncLocalState,
     #[rust]
-    local_state_time: f64,
+    registry: XrPeerRegistry,
     #[rust]
-    local_anchor: Option<XrAnchor>,
-    #[rust]
-    local_anchor_override: Option<XrAnchor>,
-    #[rust]
-    local_sync_anchor: Option<XrSyncAnchor>,
-    #[rust]
-    local_fist_hold_anchor: Option<XrAnchor>,
-    #[rust]
-    accepted_sync_ids: HashMap<XrNetPeerId, (u32, u32)>,
-    #[rust]
-    local_descriptor: Option<XrNetAlignmentDescriptorFrame>,
-    #[rust]
-    local_descriptor_version: Option<(u64, u64)>,
-    #[rust]
-    local_slice_preview: Option<XrDepthAlignSlicePreview>,
-    #[rust]
-    last_sent_descriptor_signature: Option<(u64, u64)>,
-    #[rust]
-    last_sent_descriptor: Option<XrDepthAlignDescriptor>,
-    #[rust]
-    last_sent_descriptor_at: Option<f64>,
-    #[rust]
-    tx_state_count: u64,
-    #[rust]
-    tx_descriptor_count: u64,
-    #[rust]
-    rx_join_count: u64,
-    #[rust]
-    rx_leave_count: u64,
-    #[rust]
-    rx_state_count: u64,
-    #[rust]
-    rx_descriptor_count: u64,
-    #[rust]
-    last_event_text: String,
+    metrics: XrPeerSyncMetrics,
     #[cast]
     #[deref]
     node: XrNode,
@@ -1155,6 +1287,10 @@ impl XrPeerSync {
         }
     }
 
+    pub fn connected_peer_count(&self) -> usize {
+        self.registry.len()
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -1192,7 +1328,7 @@ impl XrPeerSync {
     }
 
     pub fn aligned_peer_height_map(&self) -> Option<XrDepthAlignHeightMap> {
-        let (_, peer_state) = self.preferred_peer()?;
+        let (_, peer_state) = self.registry.preferred_peer()?;
         let transform = peer_state.descriptor_remote_to_local.or_else(|| {
             peer_state
                 .last_solve_diagnostic
@@ -1200,13 +1336,13 @@ impl XrPeerSync {
                 .map(|solution| solution.remote_to_local_transform())
         })?;
         let descriptor = peer_state.latest_descriptor?.descriptor;
-        xr_depth_align_transform_descriptor(&descriptor, &transform).height_map
+        descriptor.transformed(&transform).height_map
     }
 
     pub fn raw_peer_alignment_descriptor(
         &self,
     ) -> Option<(XrNetPeerId, XrNetAlignmentDescriptorFrame)> {
-        let (peer_id, peer_state) = self.preferred_peer()?;
+        let (peer_id, peer_state) = self.registry.preferred_peer()?;
         Some((peer_id, peer_state.latest_descriptor?))
     }
 
@@ -1216,7 +1352,7 @@ impl XrPeerSync {
     }
 
     pub fn raw_alignment_dump_pair(&self) -> Option<XrNetAlignmentDescriptorDumpPair> {
-        let local_descriptor = self.local_descriptor.clone()?;
+        let local_descriptor = self.local.descriptor.clone()?;
         let (peer_id, remote_descriptor) = self.raw_peer_alignment_descriptor()?;
         if local_descriptor.descriptor.height_map.is_none()
             || remote_descriptor.descriptor.height_map.is_none()
@@ -1231,7 +1367,7 @@ impl XrPeerSync {
     }
 
     pub fn local_slice_preview(&self) -> Option<XrDepthAlignSlicePreview> {
-        self.local_slice_preview.clone()
+        self.local.slice_preview.clone()
     }
 
     pub fn set_enabled(&mut self, cx: &mut Cx, enabled: bool) -> bool {
@@ -1242,26 +1378,9 @@ impl XrPeerSync {
         cx.xr_tsdf().set_surface_analysis_enabled(enabled);
         self.net_node = None;
         self.alignment_worker = None;
-        self.peers.clear();
-        self.local_state_time = 0.0;
-        self.local_anchor = None;
-        self.local_anchor_override = None;
-        self.local_sync_anchor = None;
-        self.local_fist_hold_anchor = None;
-        self.accepted_sync_ids.clear();
-        self.local_descriptor = None;
-        self.local_descriptor_version = None;
-        self.local_slice_preview = None;
-        self.last_sent_descriptor_signature = None;
-        self.last_sent_descriptor = None;
-        self.last_sent_descriptor_at = None;
-        self.tx_state_count = 0;
-        self.tx_descriptor_count = 0;
-        self.rx_join_count = 0;
-        self.rx_leave_count = 0;
-        self.rx_state_count = 0;
-        self.rx_descriptor_count = 0;
-        self.last_event_text.clear();
+        self.registry.clear();
+        self.local = XrPeerSyncLocalState::default();
+        self.metrics = XrPeerSyncMetrics::default();
         self.last_peer_scene_status.clear();
 
         if enabled {
@@ -1306,10 +1425,10 @@ impl XrPeerSync {
         match XrNetNode::new() {
             Ok(node) => {
                 self.net_node = Some(node);
-                self.last_sent_descriptor_signature = None;
-                self.last_sent_descriptor = None;
-                self.last_sent_descriptor_at = None;
-                self.last_event_text = "node started".to_string();
+                self.local.last_sent_descriptor_signature = None;
+                self.local.last_sent_descriptor = None;
+                self.local.last_sent_descriptor_at = None;
+                self.metrics.last_event_text = "node started".to_string();
             }
             Err(err) => {
                 self.last_status = format!("AlignSync: network bind failed ({err})");
@@ -1323,15 +1442,15 @@ impl XrPeerSync {
             return;
         }
         self.ensure_net_node();
-        self.local_state_time = state.time;
-        self.local_anchor = state.anchor;
-        self.local_sync_anchor = state.sync_anchor;
-        self.local_fist_hold_anchor = Self::state_fist_preview_anchor(state);
+        self.local.state_time = state.time;
+        self.local.anchor = state.anchor;
+        self.local.sync_anchor = state.sync_anchor;
+        self.local.fist_hold_anchor = Self::state_fist_preview_anchor(state);
         if let (Some(local_anchor), Some(override_anchor)) =
-            (self.local_anchor, self.local_anchor_override)
+            (self.local.anchor, self.local.anchor_override)
         {
             if Self::anchors_match(local_anchor, override_anchor) {
-                self.local_anchor_override = None;
+                self.local.anchor_override = None;
             }
         }
         let effective_local_anchor = self.effective_local_anchor();
@@ -1342,15 +1461,15 @@ impl XrPeerSync {
         let mut broadcast_state = state.clone();
         broadcast_state.anchor = effective_local_anchor;
         net_node.send_state(broadcast_state);
-        self.tx_state_count = self.tx_state_count.saturating_add(1);
+        self.metrics.tx_state_count = self.metrics.tx_state_count.saturating_add(1);
 
         if !self.auto_alignment_enabled {
-            self.local_descriptor = None;
-            self.local_descriptor_version = None;
-            self.local_slice_preview = None;
-            self.last_sent_descriptor_signature = None;
-            self.last_sent_descriptor = None;
-            self.last_sent_descriptor_at = None;
+            self.local.descriptor = None;
+            self.local.descriptor_version = None;
+            self.local.slice_preview = None;
+            self.local.last_sent_descriptor_signature = None;
+            self.local.last_sent_descriptor = None;
+            self.local.last_sent_descriptor_at = None;
             if let Some(worker) = self.alignment_worker.as_mut() {
                 worker.clear_local_descriptor();
             }
@@ -1364,43 +1483,46 @@ impl XrPeerSync {
             .map(|snapshot| (snapshot.generation, snapshot.update_sequence));
         let next_slice_preview = next_snapshot
             .as_ref()
-            .and_then(|snapshot| tsdf_snapshot_height_map_preview(snapshot.as_ref()));
+            .and_then(|snapshot| XrDepthAlignSlicePreview::from_tsdf_snapshot(snapshot.as_ref()));
         let next_descriptor = next_snapshot.as_ref().and_then(|snapshot| {
             XrNetAlignmentDescriptorFrame::from_tsdf_snapshot(snapshot.as_ref(), state.time)
         });
 
         if let (Some(signature), Some(frame)) = (next_signature, next_descriptor) {
             let change_score = self
+                .local
                 .last_sent_descriptor
                 .as_ref()
                 .map(|previous| descriptor_change_score(previous, &frame.descriptor))
                 .unwrap_or(1.0);
-            let should_publish = self.last_sent_descriptor_signature != Some(signature)
-                && (self.last_sent_descriptor.is_none()
+            let should_publish = self.local.last_sent_descriptor_signature != Some(signature)
+                && (self.local.last_sent_descriptor.is_none()
                     || change_score * 100.0 >= Self::DESCRIPTOR_SEND_MIN_CHANGE_PERCENT);
             if should_publish {
-                self.local_descriptor = Some(frame.clone());
-                self.local_descriptor_version = Some(signature);
-                self.local_slice_preview = next_slice_preview;
+                self.local.descriptor = Some(frame.clone());
+                self.local.descriptor_version = Some(signature);
+                self.local.slice_preview = next_slice_preview;
                 if let Some(worker) = self.alignment_worker.as_mut() {
                     worker.set_local_descriptor(frame.clone(), signature);
                 }
                 net_node.send_alignment_descriptor(frame);
-                self.last_sent_descriptor_signature = Some(signature);
-                self.last_sent_descriptor = self
-                    .local_descriptor
+                self.local.last_sent_descriptor_signature = Some(signature);
+                self.local.last_sent_descriptor = self
+                    .local
+                    .descriptor
                     .as_ref()
                     .map(|frame| frame.descriptor.clone());
-                self.last_sent_descriptor_at = Some(state.time);
-                self.tx_descriptor_count = self.tx_descriptor_count.saturating_add(1);
+                self.local.last_sent_descriptor_at = Some(state.time);
+                self.metrics.tx_descriptor_count =
+                    self.metrics.tx_descriptor_count.saturating_add(1);
             }
         } else {
-            self.local_descriptor = None;
-            self.local_descriptor_version = None;
-            self.local_slice_preview = None;
-            self.last_sent_descriptor_signature = None;
-            self.last_sent_descriptor = None;
-            self.last_sent_descriptor_at = None;
+            self.local.descriptor = None;
+            self.local.descriptor_version = None;
+            self.local.slice_preview = None;
+            self.local.last_sent_descriptor_signature = None;
+            self.local.last_sent_descriptor = None;
+            self.local.last_sent_descriptor_at = None;
             if let Some(worker) = self.alignment_worker.as_mut() {
                 worker.clear_local_descriptor();
             }
@@ -1435,9 +1557,9 @@ impl XrPeerSync {
 
         if disconnected {
             self.net_node = None;
-            self.last_sent_descriptor_signature = None;
-            self.last_sent_descriptor = None;
-            self.last_sent_descriptor_at = None;
+            self.local.last_sent_descriptor_signature = None;
+            self.local.last_sent_descriptor = None;
+            self.local.last_sent_descriptor_at = None;
             self.last_status = "AlignSync: network worker disconnected, retrying".to_string();
             self.last_network_status = "Network: worker disconnected".to_string();
         } else if received_message {
@@ -1448,39 +1570,43 @@ impl XrPeerSync {
     fn handle_network_message(&mut self, message: XrNetIncoming) {
         match message {
             XrNetIncoming::Join { peer } => {
-                self.rx_join_count = self.rx_join_count.saturating_add(1);
-                self.last_event_text = format!("join {}", Self::peer_label(peer.id));
-                self.peers
+                self.metrics.rx_join_count = self.metrics.rx_join_count.saturating_add(1);
+                self.metrics.last_event_text = format!("join {}", Self::peer_label(peer.id));
+                self.registry
+                    .peers
                     .entry(peer.id)
                     .or_insert_with(|| RemotePeerState::new(peer));
             }
             XrNetIncoming::Leave { peer, .. } => {
-                self.rx_leave_count = self.rx_leave_count.saturating_add(1);
-                self.last_event_text = format!("leave {}", Self::peer_label(peer.id));
-                self.peers.remove(&peer.id);
+                self.metrics.rx_leave_count = self.metrics.rx_leave_count.saturating_add(1);
+                self.metrics.last_event_text = format!("leave {}", Self::peer_label(peer.id));
+                self.registry.peers.remove(&peer.id);
                 if let Some(worker) = self.alignment_worker.as_mut() {
                     worker.remove_peer(peer.id);
                 }
             }
             XrNetIncoming::State { peer, frame } => {
-                self.rx_state_count = self.rx_state_count.saturating_add(1);
-                self.last_event_text =
+                self.metrics.rx_state_count = self.metrics.rx_state_count.saturating_add(1);
+                self.metrics.last_event_text =
                     format!("state {} seq {}", Self::peer_label(peer.id), frame.seq);
                 let peer_state = self
+                    .registry
                     .peers
                     .entry(peer.id)
                     .or_insert_with(|| RemotePeerState::new(peer));
                 peer_state.peer = peer;
-                peer_state.last_state_received_at = self.local_state_time;
+                peer_state.last_state_received_at = self.local.state_time;
                 peer_state.last_sync_anchor_seen_at =
-                    frame.state.sync_anchor.map(|_| self.local_state_time);
+                    frame.state.sync_anchor.map(|_| self.local.state_time);
                 peer_state.latest_state = Some(frame);
             }
             XrNetIncoming::AlignmentDescriptor { peer, frame } => {
-                self.rx_descriptor_count = self.rx_descriptor_count.saturating_add(1);
-                self.last_event_text =
+                self.metrics.rx_descriptor_count =
+                    self.metrics.rx_descriptor_count.saturating_add(1);
+                self.metrics.last_event_text =
                     format!("desc {} seq {}", Self::peer_label(peer.id), frame.seq);
                 let peer_state = self
+                    .registry
                     .peers
                     .entry(peer.id)
                     .or_insert_with(|| RemotePeerState::new(peer));
@@ -1503,11 +1629,11 @@ impl XrPeerSync {
             return;
         };
 
-        for peer_state in self.peers.values_mut() {
+        for peer_state in self.registry.peers.values_mut() {
             peer_state.descriptor_remote_to_local = None;
         }
         for (peer_id, peer_result) in result.peer_results {
-            if let Some(peer_state) = self.peers.get_mut(&peer_id) {
+            if let Some(peer_state) = self.registry.peers.get_mut(&peer_id) {
                 peer_state.descriptor_remote_to_local = peer_result.remote_to_local;
                 peer_state.last_solve_diagnostic = peer_result.last_solve_diagnostic;
                 peer_state.last_solve_ms = peer_result.last_solve_ms;
@@ -1524,19 +1650,6 @@ impl XrPeerSync {
         self.refresh_peer_transforms(cx);
     }
 
-    fn preferred_peer(&self) -> Option<(XrNetPeerId, RemotePeerState)> {
-        self.peers
-            .iter()
-            .max_by_key(|(peer_id, peer_state)| {
-                (
-                    peer_state.remote_to_local.is_some(),
-                    peer_state.latest_state.is_some(),
-                    std::cmp::Reverse(peer_id.0),
-                )
-            })
-            .map(|(peer_id, peer_state)| (*peer_id, peer_state.clone()))
-    }
-
     fn local_sync_status_text(&self) -> String {
         self.active_local_sync_anchor()
             .map(|sync| format!("armed {}", sync.id))
@@ -1544,7 +1657,7 @@ impl XrPeerSync {
     }
 
     fn manual_peer_scene_text(&self) -> String {
-        let Some((peer_id, peer_state)) = self.preferred_peer() else {
+        let Some((peer_id, peer_state)) = self.registry.preferred_peer() else {
             return "PeerScene: waiting for peer".to_string();
         };
         let state_text = if peer_state.latest_state.is_some() {
@@ -1564,7 +1677,7 @@ impl XrPeerSync {
             .and_then(|state| state.state.sync_anchor)
             .filter(|_| {
                 peer_state.last_sync_anchor_seen_at.is_some_and(|seen_at| {
-                    self.local_state_time - seen_at <= Self::SYNC_MATCH_RECEIVE_WINDOW_SECONDS
+                    self.local.state_time - seen_at <= Self::SYNC_MATCH_RECEIVE_WINDOW_SECONDS
                 })
             })
             .map(|sync| format!("yes {}", sync.id))
@@ -1586,7 +1699,7 @@ impl XrPeerSync {
             "no"
         };
         let local_sync_text = self.local_sync_status_text();
-        let Some((peer_id, peer_state)) = self.preferred_peer() else {
+        let Some((peer_id, peer_state)) = self.registry.preferred_peer() else {
             return format!(
                 "AlignState: local anchor {} | sync {} | waiting for peer",
                 local_anchor_text, local_sync_text
@@ -1604,7 +1717,7 @@ impl XrPeerSync {
             .and_then(|state| state.state.sync_anchor)
             .filter(|_| {
                 peer_state.last_sync_anchor_seen_at.is_some_and(|seen_at| {
-                    self.local_state_time - seen_at <= Self::SYNC_MATCH_RECEIVE_WINDOW_SECONDS
+                    self.local.state_time - seen_at <= Self::SYNC_MATCH_RECEIVE_WINDOW_SECONDS
                 })
             })
             .map(|sync| format!("armed {}", sync.id))
@@ -1621,8 +1734,8 @@ impl XrPeerSync {
     }
 
     fn manual_alignment_debug_text(&self) -> String {
-        let Some((peer_id, peer_state)) = self.preferred_peer() else {
-            return match (self.active_local_sync_anchor(), self.local_fist_hold_anchor) {
+        let Some((peer_id, peer_state)) = self.registry.preferred_peer() else {
+            return match (self.active_local_sync_anchor(), self.local.fist_hold_anchor) {
                 (Some(sync), _) => format!(
                     "AlignDbg: local sync {} armed | waiting for peer fistbump",
                     sync.id
@@ -1674,7 +1787,7 @@ impl XrPeerSync {
                 peer_id.0, sync.id
             );
         }
-        if self.local_fist_hold_anchor.is_some() {
+        if self.local.fist_hold_anchor.is_some() {
             return format!("AlignDbg {:08x}: local fists ready", peer_id.0);
         }
         format!("AlignDbg {:08x}: manual sync idle", peer_id.0)
@@ -1702,23 +1815,27 @@ impl XrPeerSync {
             return;
         }
 
-        let peer_count = self.peers.len();
+        let peer_count = self.registry.len();
         let visible_count = self
+            .registry
             .peers
             .values()
             .filter(|peer| peer.latest_state.is_some())
             .count();
         let descriptor_count = self
+            .registry
             .peers
             .values()
             .filter(|peer| peer.has_descriptor)
             .count();
         let aligned_count = self
+            .registry
             .peers
             .values()
             .filter(|peer| peer.latest_state.is_some() && peer.remote_to_local.is_some())
             .count();
         let anchor_aligned_count = self
+            .registry
             .peers
             .values()
             .filter(|peer| {
@@ -1736,19 +1853,19 @@ impl XrPeerSync {
                     "Peers: {peer_count} seen | {visible_count} state | {anchor_aligned_count} anchor-aligned"
                 )
             };
-            let last_event = if self.last_event_text.is_empty() {
+            let last_event = if self.metrics.last_event_text.is_empty() {
                 "none"
             } else {
-                &self.last_event_text
+                &self.metrics.last_event_text
             };
             self.last_network_status = format!(
                 "Network: tx s{} d{} | rx j{} l{} s{} d{} | peers {} vis {} anchor {} | local anchor {} sync {} | last {}",
-                self.tx_state_count,
-                self.tx_descriptor_count,
-                self.rx_join_count,
-                self.rx_leave_count,
-                self.rx_state_count,
-                self.rx_descriptor_count,
+                self.metrics.tx_state_count,
+                self.metrics.tx_descriptor_count,
+                self.metrics.rx_join_count,
+                self.metrics.rx_leave_count,
+                self.metrics.rx_state_count,
+                self.metrics.rx_descriptor_count,
                 peer_count,
                 visible_count,
                 anchor_aligned_count,
@@ -1777,19 +1894,19 @@ impl XrPeerSync {
             format!("AlignSync: peers {peer_count} | waiting for local heightmap")
         };
 
-        let last_event = if self.last_event_text.is_empty() {
+        let last_event = if self.metrics.last_event_text.is_empty() {
             "none"
         } else {
-            &self.last_event_text
+            &self.metrics.last_event_text
         };
         self.last_network_status = format!(
             "Network: tx state {} | tx map {} | rx join {} leave {} state {} map {} | peers {} vis {} maps {} solved {} | local map {} signal {} | last {}",
-            self.tx_state_count,
-            self.tx_descriptor_count,
-            self.rx_join_count,
-            self.rx_leave_count,
-            self.rx_state_count,
-            self.rx_descriptor_count,
+            self.metrics.tx_state_count,
+            self.metrics.tx_descriptor_count,
+            self.metrics.rx_join_count,
+            self.metrics.rx_leave_count,
+            self.metrics.rx_state_count,
+            self.metrics.rx_descriptor_count,
             peer_count,
             visible_count,
             descriptor_count,
@@ -1802,18 +1919,22 @@ impl XrPeerSync {
             self.local_contour_sample_count(),
             last_event,
         );
-        self.last_peer_scene_status =
-            make_peer_scene_debug_text(local_scene_state == LocalSceneState::Ready, &self.peers);
+        self.last_peer_scene_status = make_peer_scene_debug_text(
+            local_scene_state == LocalSceneState::Ready,
+            &self.registry.peers,
+        );
         self.last_alignment_state_status = make_alignment_state_text(
             local_scene_state,
-            self.local_descriptor_version,
-            &self.peers,
+            self.local.descriptor_version,
+            &self.registry.peers,
         );
         let has_alignment_diagnostic = self
+            .registry
             .peers
             .values()
             .any(|peer| peer.last_solve_diagnostic.is_some());
         let has_alignment_worker_progress = self
+            .registry
             .peers
             .values()
             .any(|peer| peer.worker_progress.is_some());
@@ -1822,7 +1943,7 @@ impl XrPeerSync {
         {
             let local_descriptor_text = self.local_descriptor_debug_text();
             self.last_alignment_debug_status = if local_scene_state == LocalSceneState::Ready {
-                make_pending_alignment_debug_text(&local_descriptor_text, &self.peers)
+                make_pending_alignment_debug_text(&local_descriptor_text, &self.registry.peers)
             } else {
                 local_descriptor_text
             };
@@ -1945,12 +2066,12 @@ impl XrPeerSync {
     }
 
     fn effective_local_anchor(&self) -> Option<XrAnchor> {
-        self.local_anchor_override.or(self.local_anchor)
+        self.local.anchor_override.or(self.local.anchor)
     }
 
     fn active_local_sync_anchor(&self) -> Option<XrSyncAnchor> {
-        self.local_sync_anchor.filter(|sync| {
-            self.local_state_time - sync.captured_at <= Self::SYNC_MATCH_ACTIVE_WINDOW_SECONDS
+        self.local.sync_anchor.filter(|sync| {
+            self.local.state_time - sync.captured_at <= Self::SYNC_MATCH_ACTIVE_WINDOW_SECONDS
         })
     }
 
@@ -1960,20 +2081,20 @@ impl XrPeerSync {
 
     fn refresh_peer_transforms(&mut self, cx: &mut Cx) {
         if let (Some(local_anchor), Some(override_anchor)) =
-            (self.local_anchor, self.local_anchor_override)
+            (self.local.anchor, self.local.anchor_override)
         {
             if Self::anchors_match(local_anchor, override_anchor) {
-                self.local_anchor_override = None;
+                self.local.anchor_override = None;
             }
         }
 
         let local_anchor = self.effective_local_anchor();
         let local_sync_anchor = self.active_local_sync_anchor();
-        let local_fist_hold_anchor = self.local_fist_hold_anchor;
-        let now = self.local_state_time;
+        let local_fist_hold_anchor = self.local.fist_hold_anchor;
+        let now = self.local.state_time;
         let mut changed = false;
 
-        for (peer_id, peer_state) in self.peers.iter_mut() {
+        for (peer_id, peer_state) in self.registry.peers.iter_mut() {
             peer_state.anchor_remote_to_local = None;
             if let (Some(local_anchor), Some(state_frame)) =
                 (local_anchor, peer_state.latest_state.as_ref())
@@ -2001,9 +2122,9 @@ impl XrPeerSync {
                             .or_else(|| remote_fist_hold_anchor.map(|anchor| (anchor, u32::MAX)))
                         {
                             let sync_ids = (local_sync_anchor.id, remote_anchor.1);
-                            if self.accepted_sync_ids.get(peer_id) != Some(&sync_ids) {
-                                self.accepted_sync_ids.insert(*peer_id, sync_ids);
-                                self.local_anchor_override = Some(local_sync_anchor.anchor);
+                            if self.registry.accepted_sync_ids.get(peer_id) != Some(&sync_ids) {
+                                self.registry.accepted_sync_ids.insert(*peer_id, sync_ids);
+                                self.local.anchor_override = Some(local_sync_anchor.anchor);
                                 cx.xr_set_local_anchor(local_sync_anchor.anchor);
                             }
                             peer_state.anchor_remote_to_local =
@@ -2013,9 +2134,9 @@ impl XrPeerSync {
                         (local_fist_hold_anchor, remote_sync_anchor)
                     {
                         let sync_ids = (u32::MAX, remote_sync_anchor.id);
-                        if self.accepted_sync_ids.get(peer_id) != Some(&sync_ids) {
-                            self.accepted_sync_ids.insert(*peer_id, sync_ids);
-                            self.local_anchor_override = Some(local_fist_hold_anchor);
+                        if self.registry.accepted_sync_ids.get(peer_id) != Some(&sync_ids) {
+                            self.registry.accepted_sync_ids.insert(*peer_id, sync_ids);
+                            self.local.anchor_override = Some(local_fist_hold_anchor);
                             cx.xr_set_local_anchor(local_fist_hold_anchor);
                         }
                         peer_state.anchor_remote_to_local = Some(
@@ -2063,7 +2184,7 @@ impl XrPeerSync {
     }
 
     fn local_scene_state(&self) -> LocalSceneState {
-        if self.local_descriptor.is_some() {
+        if self.local.descriptor.is_some() {
             LocalSceneState::Ready
         } else if self.local_contour_sample_count() != 0 {
             LocalSceneState::PublishPending
@@ -2073,7 +2194,8 @@ impl XrPeerSync {
     }
 
     fn local_contour_sample_count(&self) -> usize {
-        self.local_descriptor
+        self.local
+            .descriptor
             .as_ref()
             .map(|frame| descriptor_contour_sample_count(&frame.descriptor))
             .unwrap_or(0)
@@ -2106,7 +2228,8 @@ impl XrPeerSync {
 
     fn local_descriptor_debug_text(&self) -> String {
         let Some(descriptor) = self
-            .local_descriptor
+            .local
+            .descriptor
             .as_ref()
             .map(|frame| &frame.descriptor)
         else {
@@ -2147,7 +2270,8 @@ impl XrPeerSync {
 
     fn draw_local_descriptor(&mut self, cx: &mut Cx3d, world: &Mat4f) {
         let Some(vertical) = self
-            .local_descriptor
+            .local
+            .descriptor
             .as_ref()
             .and_then(|frame| frame.descriptor.vertical_descriptor.as_ref())
             .cloned()
@@ -2257,7 +2381,7 @@ impl XrPeerSync {
             );
             return;
         }
-        let Some(preview_anchor) = self.local_fist_hold_anchor else {
+        let Some(preview_anchor) = self.local.fist_hold_anchor else {
             return;
         };
         self.draw_anchor_markers(
@@ -2271,9 +2395,9 @@ impl XrPeerSync {
     }
 
     fn draw_remote_anchor_markers(&mut self, cx: &mut Cx3d, world: &Mat4f) {
-        let peer_ids = self.peers.keys().copied().collect::<Vec<_>>();
+        let peer_ids = self.registry.peers.keys().copied().collect::<Vec<_>>();
         for peer_id in peer_ids {
-            let Some(peer) = self.peers.get(&peer_id).cloned() else {
+            let Some(peer) = self.registry.peers.get(&peer_id).cloned() else {
                 continue;
             };
             let Some(remote_to_local) = peer.remote_to_local else {
@@ -2326,9 +2450,9 @@ impl XrPeerSync {
     }
 
     fn draw_remote_peers(&mut self, cx: &mut Cx3d, world: &Mat4f) {
-        let peer_ids = self.peers.keys().copied().collect::<Vec<_>>();
+        let peer_ids = self.registry.peers.keys().copied().collect::<Vec<_>>();
         for peer_id in peer_ids {
-            let Some(peer) = self.peers.get(&peer_id).cloned() else {
+            let Some(peer) = self.registry.peers.get(&peer_id).cloned() else {
                 continue;
             };
             let Some(state_frame) = peer.latest_state.as_ref() else {

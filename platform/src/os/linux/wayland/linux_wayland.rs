@@ -162,7 +162,6 @@ impl WaylandCx {
                         cx.repaint_pass(main_pass_id);
                     }
                 }
-                //paint_dirty = true;
                 cx.call_event_handler(&Event::WindowGotFocus(window_id));
             }
             XlibEvent::WindowLostFocus(window_id) => {
@@ -440,7 +439,17 @@ impl WaylandCx {
                 return EventFlow::Wait;
             }
         }
-        return EventFlow::Poll;
+        let cx = self.cx.borrow();
+        if cx.any_passes_dirty()
+            || cx.need_redrawing()
+            || cx.new_next_frames.len() != 0
+            || cx.screenshot_requests.len() > 0
+            || cx.demo_time_repaint
+        {
+            return EventFlow::Poll;
+        } else {
+            return EventFlow::Wait;
+        }
     }
 
     fn app_event_callback(&mut self, wayland_app: &mut WaylandApp, event: XlibEvent) -> EventFlow {

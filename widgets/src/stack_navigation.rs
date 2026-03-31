@@ -189,14 +189,17 @@ impl Widget for StackNavigationView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let parent_rect = cx.peek_walk_turtle(walk);
         let abs_pos = if self.full_screen {
             // In full screen mode, position at the offset.
+            // Use the larger of the safe area inset or the parent's y position
+            // so the view respects both mobile safe areas and desktop title bars.
+            let safe_top = cx.display_context.safe_area_insets.top;
             Vec2d {
                 x: self.offset,
-                y: 0.,
+                y: safe_top.max(parent_rect.pos.y),
             }
         } else {
-            let parent_rect = cx.peek_walk_turtle(walk);
             // Non-fullscreen: ignore offset, position at parent.
             Vec2d {
                 x: parent_rect.pos.x,
