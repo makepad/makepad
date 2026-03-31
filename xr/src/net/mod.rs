@@ -63,46 +63,23 @@ impl XrActivityId {
 pub struct XrSpawnableObjectId(pub u64);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, SerBin, DeBin)]
-pub struct XrPeerId(pub u8);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, SerBin, DeBin)]
 pub struct XrSharedObjectCounter(pub u64);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, SerBin, DeBin)]
 pub struct XrSharedObjectId(pub u64);
 
-pub const XR_SHARED_OBJECT_COUNTER_MAX: u64 = (1u64 << 56) - 1;
+impl XrSharedObjectId {
+    pub fn to_live_id(self) -> LiveId {
+        LiveId(self.0)
+    }
+}
 
 pub fn xr_make_shared_object_id(
-    peer_id: XrPeerId,
+    peer_id: XrNetPeerId,
     counter: XrSharedObjectCounter,
 ) -> Option<XrSharedObjectId> {
-    if counter.0 > XR_SHARED_OBJECT_COUNTER_MAX {
-        return None;
-    }
-    Some(XrSharedObjectId(
-        ((peer_id.0 as u64) << 56) | (counter.0 & XR_SHARED_OBJECT_COUNTER_MAX),
-    ))
-}
-
-pub fn xr_shared_object_peer_id(object_id: XrSharedObjectId) -> XrPeerId {
-    XrPeerId((object_id.0 >> 56) as u8)
-}
-
-pub fn xr_shared_object_counter(object_id: XrSharedObjectId) -> XrSharedObjectCounter {
-    XrSharedObjectCounter(object_id.0 & XR_SHARED_OBJECT_COUNTER_MAX)
-}
-
-pub fn xr_shared_object_peer_id_from_seed(seed: u64) -> XrPeerId {
-    XrPeerId((seed as u8).max(1))
-}
-
-pub fn xr_derived_peer_id_from_addr(addr: SocketAddr, fallback_seed: u64) -> XrPeerId {
-    let _ = addr;
-    // Shared-object authority ids must stay stable across bind addresses, packet source
-    // addresses, loopback, and unspecified binds. Derive them from the node id instead of the
-    // observed socket address so the sender and receiver agree on the same authority byte.
-    xr_shared_object_peer_id_from_seed(fallback_seed)
+    let live_id = peer_id.to_live_id().bytes_append(&counter.0.to_be_bytes());
+    Some(XrSharedObjectId(if live_id.0 == 0 { 1 } else { live_id.0 }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -114,10 +91,6 @@ pub struct XrNetPeer {
 impl XrNetPeer {
     pub fn to_live_id(self) -> LiveId {
         self.id.to_live_id()
-    }
-
-    pub fn shared_object_peer_id(self) -> XrPeerId {
-        xr_shared_object_peer_id_from_seed(self.id.0)
     }
 }
 
@@ -166,7 +139,7 @@ pub enum XrSharedObjectMode {
     #[default]
     Dynamic,
     ContactDominated {
-        authority: XrPeerId,
+        authority: XrNetPeerId,
         hand: XrSharedHand,
     },
     Sleeping,
@@ -196,7 +169,7 @@ pub struct XrNetSharedObjectState {
     pub physics_tick: u32,
     pub object_id: XrSharedObjectId,
     pub epoch: u32,
-    pub authority: XrPeerId,
+    pub authority: XrNetPeerId,
     pub fidelity: XrSharedObjectFidelity,
     pub mode: XrSharedObjectMode,
     pub pose: Pose,
@@ -209,7 +182,7 @@ pub enum XrNetSharedObjectControl {
     XrSpawnObject {
         object_id: XrSharedObjectId,
         epoch: u32,
-        authority: XrPeerId,
+        authority: XrNetPeerId,
         fidelity: XrSharedObjectFidelity,
         shape: XrSharedObjectShape,
         pose: Pose,
@@ -226,7 +199,7 @@ pub enum XrNetSharedObjectControl {
         request_id: u32,
         based_on_seq: u32,
         based_on_tick: u32,
-        candidate_owner: XrPeerId,
+        candidate_owner: XrNetPeerId,
         hand: XrSharedHand,
         hand_pose: Pose,
         hand_linvel: Vec3f,
@@ -235,7 +208,7 @@ pub enum XrNetSharedObjectControl {
         object_id: XrSharedObjectId,
         epoch: u32,
         request_id: u32,
-        new_authority: XrPeerId,
+        new_authority: XrNetPeerId,
         effective_at: f64,
         effective_tick: u32,
         pose: Pose,
@@ -543,7 +516,6 @@ pub struct XrNetNode {
     next_alignment_descriptor_seq: u32,
     next_activity_tick: u32,
     next_shared_object_state_seq: u32,
-    shared_object_peer_id: XrPeerId,
 }
 
 impl XrNetNode {
@@ -605,18 +577,12 @@ impl XrNetNode {
             next_alignment_descriptor_seq: 0,
             next_activity_tick: 0,
             next_shared_object_state_seq: 0,
-            shared_object_peer_id: xr_shared_object_peer_id_from_seed(config.node_id.0),
         })
     }
 
     pub fn node_id(&self) -> XrNetPeerId {
         self.node_id
     }
-
-    pub fn shared_object_peer_id(&self) -> XrPeerId {
-        self.shared_object_peer_id
-    }
-
     pub fn send_state(&mut self, state: XrState) {
         let frame = XrNetStateFrame {
             seq: self.next_state_seq,
@@ -1208,32 +1174,31 @@ mod tests {
     }
 
     #[test]
-    fn shared_object_id_packs_peer_and_counter() {
-        let object_id = xr_make_shared_object_id(XrPeerId(42), XrSharedObjectCounter(123456))
-            .expect("counter should fit in 56 bits");
-        assert_eq!(xr_shared_object_peer_id(object_id), XrPeerId(42));
+    fn shared_object_id_hashes_peer_and_counter_deterministically() {
+        let object_id = xr_make_shared_object_id(XrNetPeerId(42), XrSharedObjectCounter(123456))
+            .expect("hashed shared object id should allocate");
+        assert_ne!(object_id, XrSharedObjectId(0));
         assert_eq!(
-            xr_shared_object_counter(object_id),
-            XrSharedObjectCounter(123456)
+            object_id,
+            xr_make_shared_object_id(XrNetPeerId(42), XrSharedObjectCounter(123456))
+                .expect("same seed should hash the same way")
+        );
+        assert_ne!(
+            object_id,
+            xr_make_shared_object_id(XrNetPeerId(42), XrSharedObjectCounter(123457))
+                .expect("different counters should hash differently")
         );
     }
 
     #[test]
-    fn shared_object_peer_id_is_stable_between_unspecified_bind_and_remote_source_addr() {
+    fn shared_object_id_depends_on_net_peer_id_not_socket_addr() {
         let node_id = XrNetPeerId(0x1234);
-        let local_bind_peer_id = xr_derived_peer_id_from_addr(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), XR_NET_DEFAULT_SYNC_PORT),
-            node_id.0,
-        );
-        let remote_source_peer_id = XrNetPeer {
-            id: node_id,
-            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)), 41547),
-        }
-        .shared_object_peer_id();
+        let local_bind_id = xr_make_shared_object_id(node_id, XrSharedObjectCounter(9))
+            .expect("local bind should hash");
+        let remote_source_id = xr_make_shared_object_id(node_id, XrSharedObjectCounter(9))
+            .expect("remote source should hash");
 
-        assert_eq!(local_bind_peer_id, xr_shared_object_peer_id_from_seed(node_id.0));
-        assert_eq!(remote_source_peer_id, xr_shared_object_peer_id_from_seed(node_id.0));
-        assert_eq!(local_bind_peer_id, remote_source_peer_id);
+        assert_eq!(local_bind_id, remote_source_id);
     }
 
     #[test]
@@ -1252,10 +1217,10 @@ mod tests {
         .expect("sync channel should be ready before shared object control");
 
         let sent = XrNetSharedObjectControl::XrSpawnObject {
-            object_id: xr_make_shared_object_id(XrPeerId(77), XrSharedObjectCounter(9))
+            object_id: xr_make_shared_object_id(XrNetPeerId(77), XrSharedObjectCounter(9))
                 .expect("counter should fit"),
             epoch: 0,
-            authority: XrPeerId(77),
+            authority: XrNetPeerId(77),
             fidelity: XrSharedObjectFidelity::ImpactCritical,
             shape: XrSharedObjectShape::ActivitySpawnable {
                 activity_id: XrActivityId(live_id!(ico_shoot_scene)),
@@ -1297,10 +1262,10 @@ mod tests {
             seq: 0,
             sent_at: 7.5,
             physics_tick: 42,
-            object_id: xr_make_shared_object_id(XrPeerId(77), XrSharedObjectCounter(9))
+            object_id: xr_make_shared_object_id(XrNetPeerId(77), XrSharedObjectCounter(9))
                 .expect("counter should fit"),
             epoch: 3,
-            authority: XrPeerId(77),
+            authority: XrNetPeerId(77),
             fidelity: XrSharedObjectFidelity::ImpactCritical,
             mode: XrSharedObjectMode::Dynamic,
             pose: Pose::new(Quat::default(), vec3f(0.0, 1.2, -0.4)),
@@ -1350,12 +1315,12 @@ mod tests {
                 sent_at: 10.0 + index as f64 * 0.01,
                 physics_tick: 100 + index as u32,
                 object_id: xr_make_shared_object_id(
-                    XrPeerId(77),
+                    XrNetPeerId(77),
                     XrSharedObjectCounter(1000 + index as u64),
                 )
                 .expect("counter should fit"),
                 epoch: index as u32,
-                authority: XrPeerId(77),
+                authority: XrNetPeerId(77),
                 fidelity: XrSharedObjectFidelity::ImpactCritical,
                 mode: XrSharedObjectMode::Dynamic,
                 pose: Pose::new(Quat::default(), vec3f(index as f32 * 0.01, 1.0, -0.4)),
@@ -1407,10 +1372,10 @@ mod tests {
 
         let _ = left.send_activity(XrActivityId(live_id!(ico_shoot_scene)), 8.0);
         let sent = XrNetSharedObjectControl::XrSpawnObject {
-            object_id: xr_make_shared_object_id(XrPeerId(77), XrSharedObjectCounter(13))
+            object_id: xr_make_shared_object_id(XrNetPeerId(77), XrSharedObjectCounter(13))
                 .expect("counter should fit"),
             epoch: 2,
-            authority: XrPeerId(77),
+            authority: XrNetPeerId(77),
             fidelity: XrSharedObjectFidelity::ImpactCritical,
             shape: XrSharedObjectShape::ActivitySpawnable {
                 activity_id: XrActivityId(live_id!(ico_shoot_scene)),

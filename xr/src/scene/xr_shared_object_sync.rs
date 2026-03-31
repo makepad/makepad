@@ -24,6 +24,7 @@ pub struct XrSpawnableObjectBinding {
     pub object_id: XrSpawnableObjectId,
     pub allocation_group_id: XrSpawnableObjectId,
     pub widget_uid: WidgetUid,
+    pub bootstrap_shared: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub struct XrLocalSharedObjectSnapshot {
     pub spawnable_object_id: XrSpawnableObjectId,
     pub widget_uid: WidgetUid,
     pub epoch: u32,
-    pub authority: XrPeerId,
+    pub authority: XrNetPeerId,
     pub fidelity: XrSharedObjectFidelity,
     pub latest_state: Option<XrNetSharedObjectState>,
 }
@@ -52,8 +53,8 @@ pub struct XrRemoteSharedObjectSnapshot {
     pub spawnable_object_id: XrSpawnableObjectId,
     pub widget_uid: WidgetUid,
     pub epoch: u32,
-    pub authority: XrPeerId,
-    pub state_source_authority: XrPeerId,
+    pub authority: XrNetPeerId,
+    pub state_source_authority: XrNetPeerId,
     pub fidelity: XrSharedObjectFidelity,
     pub latest_state: Option<XrNetSharedObjectState>,
     pub pending_takeover_request_id: Option<u32>,
@@ -64,8 +65,8 @@ pub struct XrScheduledAuthorityTransfer {
     pub object_id: XrSharedObjectId,
     pub widget_uid: WidgetUid,
     pub shadow: bool,
-    pub source_authority: XrPeerId,
-    pub new_authority: XrPeerId,
+    pub source_authority: XrNetPeerId,
+    pub new_authority: XrNetPeerId,
     pub epoch: u32,
     pub request_id: u32,
     pub hand: Option<XrSharedHand>,
@@ -77,8 +78,8 @@ pub struct XrScheduledAuthorityTransfer {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct XrPendingAuthorityTransfer {
     epoch: u32,
-    source_authority: XrPeerId,
-    new_authority: XrPeerId,
+    source_authority: XrNetPeerId,
+    new_authority: XrNetPeerId,
     effective_at: f64,
     effective_tick: u32,
     request_id: u32,
@@ -93,7 +94,7 @@ struct XrLocalSharedObjectRecord {
     spawnable_object_id: XrSpawnableObjectId,
     widget_uid: WidgetUid,
     epoch: u32,
-    authority: XrPeerId,
+    authority: XrNetPeerId,
     fidelity: XrSharedObjectFidelity,
     latest_state: Option<XrNetSharedObjectState>,
     last_published_state: Option<XrNetSharedObjectState>,
@@ -107,8 +108,8 @@ struct XrRemoteSharedObjectRecord {
     spawnable_object_id: XrSpawnableObjectId,
     widget_uid: WidgetUid,
     epoch: u32,
-    authority: XrPeerId,
-    state_source_authority: XrPeerId,
+    authority: XrNetPeerId,
+    state_source_authority: XrNetPeerId,
     fidelity: XrSharedObjectFidelity,
     latest_state: Option<XrNetSharedObjectState>,
     history: VecDeque<XrNetSharedObjectState>,
@@ -121,11 +122,13 @@ struct XrRemoteSharedObjectRecord {
 #[derive(Clone, Debug, Default)]
 pub struct XrSharedObjectRegistry {
     activity_id: Option<XrActivityId>,
-    local_peer_id: Option<XrPeerId>,
+    local_peer_id: Option<XrNetPeerId>,
     next_shared_object_counter: XrSharedObjectCounter,
     object_to_widget: HashMap<XrSpawnableObjectId, WidgetUid>,
     object_to_group: HashMap<XrSpawnableObjectId, XrSpawnableObjectId>,
+    object_bootstrap_shared: HashMap<XrSpawnableObjectId, bool>,
     widget_to_object: HashMap<WidgetUid, XrSpawnableObjectId>,
+    widget_bootstrap_shared: HashMap<WidgetUid, bool>,
     group_to_widgets: HashMap<XrSpawnableObjectId, Vec<WidgetUid>>,
     local_objects: HashMap<XrSharedObjectId, XrLocalSharedObjectRecord>,
     local_shared_object_to_widget: HashMap<XrSharedObjectId, WidgetUid>,
@@ -158,15 +161,21 @@ impl XrSharedObjectRegistry {
     {
         self.object_to_widget.clear();
         self.object_to_group.clear();
+        self.object_bootstrap_shared.clear();
         self.widget_to_object.clear();
+        self.widget_bootstrap_shared.clear();
         self.group_to_widgets.clear();
         for binding in bindings {
             self.object_to_widget
                 .insert(binding.object_id, binding.widget_uid);
             self.object_to_group
                 .insert(binding.object_id, binding.allocation_group_id);
+            self.object_bootstrap_shared
+                .insert(binding.object_id, binding.bootstrap_shared);
             self.widget_to_object
                 .insert(binding.widget_uid, binding.object_id);
+            self.widget_bootstrap_shared
+                .insert(binding.widget_uid, binding.bootstrap_shared);
             self.group_to_widgets
                 .entry(binding.allocation_group_id)
                 .or_default()
@@ -213,7 +222,7 @@ impl XrSharedObjectRegistry {
 
     fn remote_state_sender_matches(
         record: &XrRemoteSharedObjectRecord,
-        sender_authority: XrPeerId,
+        sender_authority: XrNetPeerId,
         state: XrNetSharedObjectState,
     ) -> bool {
         sender_authority == record.authority
@@ -233,11 +242,11 @@ impl XrSharedObjectRegistry {
         self.local_objects.len() + self.remote_object_to_widget.len()
     }
 
-    pub fn local_peer_id(&self) -> Option<XrPeerId> {
+    pub fn local_peer_id(&self) -> Option<XrNetPeerId> {
         self.local_peer_id
     }
 
-    pub fn set_local_peer_id(&mut self, peer_id: XrPeerId) {
+    pub fn set_local_peer_id(&mut self, peer_id: XrNetPeerId) {
         self.local_peer_id = Some(peer_id);
     }
 
@@ -245,7 +254,9 @@ impl XrSharedObjectRegistry {
         self.activity_id = None;
         self.object_to_widget.clear();
         self.object_to_group.clear();
+        self.object_bootstrap_shared.clear();
         self.widget_to_object.clear();
+        self.widget_bootstrap_shared.clear();
         self.group_to_widgets.clear();
         self.clear_active_shared_objects();
     }
@@ -315,6 +326,22 @@ impl XrSharedObjectRegistry {
             .copied()
     }
 
+    pub fn bootstrap_shared_candidates(&self) -> Vec<(XrSpawnableObjectId, WidgetUid)> {
+        let mut candidates = self
+            .object_to_widget
+            .iter()
+            .filter_map(|(&object_id, &widget_uid)| {
+                self.object_bootstrap_shared
+                    .get(&object_id)
+                    .copied()
+                    .unwrap_or(false)
+                    .then_some((object_id, widget_uid))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(object_id, _)| object_id.0);
+        candidates
+    }
+
     pub fn release_remote_shared_object(
         &mut self,
         shared_object_id: XrSharedObjectId,
@@ -327,13 +354,12 @@ impl XrSharedObjectRegistry {
 
     pub fn release_remote_shared_objects_by_peer_id(
         &mut self,
-        peer_id: XrPeerId,
+        peer_id: XrNetPeerId,
     ) -> Vec<WidgetUid> {
         let object_ids = self
-            .remote_object_to_widget
-            .keys()
-            .copied()
-            .filter(|object_id| xr_shared_object_peer_id(*object_id) == peer_id)
+            .remote_objects
+            .iter()
+            .filter_map(|(&object_id, record)| (record.authority == peer_id).then_some(object_id))
             .collect::<Vec<_>>();
         let mut widgets = Vec::with_capacity(object_ids.len());
         for object_id in object_ids {
@@ -398,7 +424,7 @@ impl XrSharedObjectRegistry {
         activity_id: XrActivityId,
         shared_object_id: XrSharedObjectId,
         epoch: u32,
-        authority: XrPeerId,
+        authority: XrNetPeerId,
         fidelity: XrSharedObjectFidelity,
         spawnable_object_id: XrSpawnableObjectId,
         pose: Pose,
@@ -453,7 +479,7 @@ impl XrSharedObjectRegistry {
 
     pub fn record_remote_shared_object_state(
         &mut self,
-        sender_authority: XrPeerId,
+        sender_authority: XrNetPeerId,
         state: XrNetSharedObjectState,
     ) -> Option<WidgetUid> {
         let record = self.remote_objects.get_mut(&state.object_id)?;
@@ -483,6 +509,15 @@ impl XrSharedObjectRegistry {
             fidelity: record.fidelity,
             latest_state: record.latest_state,
         })
+    }
+
+    pub fn local_shared_object_snapshots(&self) -> Vec<XrLocalSharedObjectSnapshot> {
+        let mut object_ids = self.local_objects.keys().copied().collect::<Vec<_>>();
+        object_ids.sort_by_key(|object_id| object_id.0);
+        object_ids
+            .into_iter()
+            .filter_map(|object_id| self.local_shared_object_snapshot(object_id))
+            .collect()
     }
 
     pub fn remote_shared_object_snapshot(
@@ -614,8 +649,8 @@ impl XrSharedObjectRegistry {
         &mut self,
         object_id: XrSharedObjectId,
         epoch: u32,
-        source_authority: XrPeerId,
-        new_authority: XrPeerId,
+        source_authority: XrNetPeerId,
+        new_authority: XrNetPeerId,
         effective_at: f64,
         effective_tick: u32,
         request_id: u32,
@@ -831,6 +866,156 @@ impl XrSharedObjectRegistry {
         transfers
     }
 
+    pub fn force_local_shared_object_reset(
+        &mut self,
+        activity_id: XrActivityId,
+        widget_uid: WidgetUid,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    ) -> Option<XrLocalSharedObjectAllocation> {
+        if self.activity_id != Some(activity_id) {
+            return None;
+        }
+        let local_peer_id = self.local_peer_id?;
+        if let Some(object_id) = self.widget_to_local_shared_object.get(&widget_uid).copied() {
+            let record = self.local_objects.get_mut(&object_id)?;
+            record.epoch = record.epoch.wrapping_add(1);
+            record.authority = local_peer_id;
+            record.latest_state = Some(transfer_state(
+                object_id,
+                record.epoch,
+                local_peer_id,
+                record.fidelity,
+                pose,
+                linvel,
+                angvel,
+            ));
+            record.last_published_state = None;
+            record.last_published_at = None;
+            record.history.clear();
+            record.pending_transfer = None;
+            return Some(XrLocalSharedObjectAllocation {
+                shared_object_id: object_id,
+                spawnable_object_id: record.spawnable_object_id,
+                widget_uid: record.widget_uid,
+                epoch: record.epoch,
+                fidelity: record.fidelity,
+            });
+        }
+        if let Some(object_id) = self.remote_widget_to_object.remove(&widget_uid) {
+            self.remote_object_to_widget.remove(&object_id);
+            let remote = self.remote_objects.remove(&object_id)?;
+            self.widget_to_local_shared_object
+                .insert(widget_uid, object_id);
+            self.local_shared_object_to_widget
+                .insert(object_id, widget_uid);
+            let epoch = remote.epoch.wrapping_add(1);
+            self.local_objects.insert(
+                object_id,
+                XrLocalSharedObjectRecord {
+                    spawnable_object_id: remote.spawnable_object_id,
+                    widget_uid,
+                    epoch,
+                    authority: local_peer_id,
+                    fidelity: remote.fidelity,
+                    latest_state: Some(transfer_state(
+                        object_id,
+                        epoch,
+                        local_peer_id,
+                        remote.fidelity,
+                        pose,
+                        linvel,
+                        angvel,
+                    )),
+                    last_published_state: None,
+                    last_published_at: None,
+                    history: VecDeque::new(),
+                    pending_transfer: None,
+                },
+            );
+            return self
+                .local_shared_object_snapshot(object_id)
+                .map(|snapshot| XrLocalSharedObjectAllocation {
+                    shared_object_id: snapshot.object_id,
+                    spawnable_object_id: snapshot.spawnable_object_id,
+                    widget_uid: snapshot.widget_uid,
+                    epoch: snapshot.epoch,
+                    fidelity: snapshot.fidelity,
+                });
+        }
+        self.ensure_local_shared_object(activity_id, widget_uid)
+            .map(|(allocation, _)| allocation)
+    }
+
+    pub fn apply_remote_shared_object_reset(
+        &mut self,
+        activity_id: XrActivityId,
+        source_authority: XrNetPeerId,
+        object_id: XrSharedObjectId,
+        epoch: u32,
+        pose: Pose,
+        linvel: Vec3f,
+        angvel: Vec3f,
+    ) -> Option<WidgetUid> {
+        if self.activity_id != Some(activity_id) {
+            return None;
+        }
+        if let Some(record) = self.local_objects.remove(&object_id) {
+            self.local_shared_object_to_widget.remove(&object_id);
+            self.widget_to_local_shared_object
+                .remove(&record.widget_uid);
+            let widget_uid = record.widget_uid;
+            self.remote_widget_to_object.insert(widget_uid, object_id);
+            self.remote_object_to_widget.insert(object_id, widget_uid);
+            let state = transfer_state(
+                object_id,
+                epoch,
+                source_authority,
+                record.fidelity,
+                pose,
+                linvel,
+                angvel,
+            );
+            let mut remote_record = XrRemoteSharedObjectRecord {
+                spawnable_object_id: record.spawnable_object_id,
+                widget_uid,
+                epoch,
+                authority: source_authority,
+                state_source_authority: source_authority,
+                fidelity: record.fidelity,
+                latest_state: Some(state),
+                history: VecDeque::new(),
+                pending_takeover_request_id: None,
+                last_takeover_request_at: None,
+                last_contact_impulse_at: None,
+                pending_transfer: None,
+            };
+            push_shared_object_history(&mut remote_record.history, state);
+            self.remote_objects.insert(object_id, remote_record);
+            return Some(widget_uid);
+        }
+        let record = self.remote_objects.get_mut(&object_id)?;
+        let state = transfer_state(
+            object_id,
+            epoch,
+            source_authority,
+            record.fidelity,
+            pose,
+            linvel,
+            angvel,
+        );
+        record.epoch = epoch;
+        record.authority = source_authority;
+        record.state_source_authority = source_authority;
+        record.latest_state = Some(state);
+        record.pending_takeover_request_id = None;
+        record.pending_transfer = None;
+        record.history.clear();
+        push_shared_object_history(&mut record.history, state);
+        Some(record.widget_uid)
+    }
+
     pub fn allocate_local_shared_object(
         &mut self,
         activity_id: XrActivityId,
@@ -953,7 +1138,7 @@ impl XrSharedObjectRegistry {
         runtime_bodies: &HashMap<WidgetUid, XrRuntimeBodyState>,
         sent_at: f64,
         physics_tick: u32,
-        authority: XrPeerId,
+        authority: XrNetPeerId,
     ) -> Vec<XrNetSharedObjectState> {
         let mut states = Vec::with_capacity(self.local_objects.len());
         for (&object_id, record) in &mut self.local_objects {
@@ -1121,7 +1306,7 @@ fn transfer_is_due(
 fn transfer_state(
     object_id: XrSharedObjectId,
     epoch: u32,
-    authority: XrPeerId,
+    authority: XrNetPeerId,
     fidelity: XrSharedObjectFidelity,
     pose: Pose,
     linvel: Vec3f,
@@ -1180,6 +1365,7 @@ fn collect_widget_spawnables(
                 object_id,
                 allocation_group_id,
                 widget_uid: widget.widget_uid(),
+                bootstrap_shared: node.bootstrap_shared(),
             });
         }
         let mut child_index = 0usize;
@@ -1243,23 +1429,25 @@ mod tests {
                     object_id: XrSpawnableObjectId(11),
                     allocation_group_id: XrSpawnableObjectId(91),
                     widget_uid: WidgetUid(101),
+                    bootstrap_shared: true,
                 },
                 XrSpawnableObjectBinding {
                     object_id: XrSpawnableObjectId(12),
                     allocation_group_id: XrSpawnableObjectId(91),
                     widget_uid: WidgetUid(102),
+                    bootstrap_shared: true,
                 },
             ],
         );
 
         let left = registry.resolve_remote_widget_uid(
             activity_id,
-            xr_make_shared_object_id(XrPeerId(1), XrSharedObjectCounter(0)).unwrap(),
+            xr_make_shared_object_id(XrNetPeerId(1), XrSharedObjectCounter(0)).unwrap(),
             XrSpawnableObjectId(11),
         );
         let right = registry.resolve_remote_widget_uid(
             activity_id,
-            xr_make_shared_object_id(XrPeerId(2), XrSharedObjectCounter(0)).unwrap(),
+            xr_make_shared_object_id(XrNetPeerId(2), XrSharedObjectCounter(0)).unwrap(),
             XrSpawnableObjectId(11),
         );
 
@@ -1268,16 +1456,17 @@ mod tests {
     }
 
     #[test]
-    fn local_allocations_use_packed_shared_object_ids() {
+    fn local_allocations_use_hashed_shared_object_ids() {
         let activity_id = XrActivityId(live_id!(ico_shoot_scene));
         let mut registry = XrSharedObjectRegistry::default();
-        registry.set_local_peer_id(XrPeerId(55));
+        registry.set_local_peer_id(XrNetPeerId(55));
         registry.replace_spawnables(
             activity_id,
             [XrSpawnableObjectBinding {
                 object_id: XrSpawnableObjectId(11),
                 allocation_group_id: XrSpawnableObjectId(91),
                 widget_uid: WidgetUid(101),
+                bootstrap_shared: true,
             }],
         );
 
@@ -1285,8 +1474,9 @@ mod tests {
             .allocate_local_shared_object(activity_id, WidgetUid(101))
             .expect("local shared-object allocation should succeed");
         assert_eq!(
-            xr_shared_object_peer_id(allocation.shared_object_id),
-            XrPeerId(55)
+            allocation.shared_object_id,
+            xr_make_shared_object_id(XrNetPeerId(55), XrSharedObjectCounter(0))
+                .expect("hashed shared object id should allocate")
         );
         assert_eq!(allocation.spawnable_object_id, XrSpawnableObjectId(11));
         assert_eq!(allocation.epoch, 0);
@@ -1296,13 +1486,14 @@ mod tests {
     fn pooled_local_allocations_reuse_object_id_and_advance_epoch() {
         let activity_id = XrActivityId(live_id!(ico_shoot_scene));
         let mut registry = XrSharedObjectRegistry::default();
-        registry.set_local_peer_id(XrPeerId(55));
+        registry.set_local_peer_id(XrNetPeerId(55));
         registry.replace_spawnables(
             activity_id,
             [XrSpawnableObjectBinding {
                 object_id: XrSpawnableObjectId(11),
                 allocation_group_id: XrSpawnableObjectId(91),
                 widget_uid: WidgetUid(101),
+                bootstrap_shared: true,
             }],
         );
 
@@ -1322,13 +1513,14 @@ mod tests {
     fn prune_missing_local_shared_objects_returns_despawns() {
         let activity_id = XrActivityId(live_id!(ico_shoot_scene));
         let mut registry = XrSharedObjectRegistry::default();
-        registry.set_local_peer_id(XrPeerId(55));
+        registry.set_local_peer_id(XrNetPeerId(55));
         registry.replace_spawnables(
             activity_id,
             [XrSpawnableObjectBinding {
                 object_id: XrSpawnableObjectId(11),
                 allocation_group_id: XrSpawnableObjectId(91),
                 widget_uid: WidgetUid(101),
+                bootstrap_shared: true,
             }],
         );
         let allocation = registry
@@ -1347,23 +1539,24 @@ mod tests {
     fn scheduled_takeover_promotes_remote_object_to_local_authority() {
         let activity_id = XrActivityId(live_id!(ico_shoot_scene));
         let mut registry = XrSharedObjectRegistry::default();
-        registry.set_local_peer_id(XrPeerId(55));
+        registry.set_local_peer_id(XrNetPeerId(55));
         registry.replace_spawnables(
             activity_id,
             [XrSpawnableObjectBinding {
                 object_id: XrSpawnableObjectId(11),
                 allocation_group_id: XrSpawnableObjectId(91),
                 widget_uid: WidgetUid(101),
+                bootstrap_shared: true,
             }],
         );
 
-        let object_id = xr_make_shared_object_id(XrPeerId(7), XrSharedObjectCounter(3)).unwrap();
+        let object_id = xr_make_shared_object_id(XrNetPeerId(7), XrSharedObjectCounter(3)).unwrap();
         let widget_uid = registry
             .register_remote_shared_object(
                 activity_id,
                 object_id,
                 0,
-                XrPeerId(7),
+                XrNetPeerId(7),
                 XrSharedObjectFidelity::ImpactCritical,
                 XrSpawnableObjectId(11),
                 Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.5)),
@@ -1376,8 +1569,8 @@ mod tests {
         assert!(registry.schedule_authority_transfer(
             object_id,
             1,
-            XrPeerId(7),
-            XrPeerId(55),
+            XrNetPeerId(7),
+            XrNetPeerId(55),
             0.0,
             0,
             17,
@@ -1398,20 +1591,21 @@ mod tests {
             .expect("takeover should keep the same object id under local authority");
         assert_eq!(local.widget_uid, WidgetUid(101));
         assert_eq!(local.epoch, 1);
-        assert_eq!(local.authority, XrPeerId(55));
+        assert_eq!(local.authority, XrNetPeerId(55));
     }
 
     #[test]
     fn scheduled_handoff_demotes_local_object_to_remote_shadow() {
         let activity_id = XrActivityId(live_id!(ico_shoot_scene));
         let mut registry = XrSharedObjectRegistry::default();
-        registry.set_local_peer_id(XrPeerId(55));
+        registry.set_local_peer_id(XrNetPeerId(55));
         registry.replace_spawnables(
             activity_id,
             [XrSpawnableObjectBinding {
                 object_id: XrSpawnableObjectId(11),
                 allocation_group_id: XrSpawnableObjectId(91),
                 widget_uid: WidgetUid(101),
+                bootstrap_shared: true,
             }],
         );
 
@@ -1421,8 +1615,8 @@ mod tests {
         assert!(registry.schedule_authority_transfer(
             allocation.shared_object_id,
             allocation.epoch.wrapping_add(1),
-            XrPeerId(55),
-            XrPeerId(8),
+            XrNetPeerId(55),
+            XrNetPeerId(8),
             0.0,
             0,
             23,
@@ -1435,7 +1629,7 @@ mod tests {
 
         assert_eq!(transfers.len(), 1);
         assert!(transfers[0].shadow);
-        assert_eq!(transfers[0].source_authority, XrPeerId(55));
+        assert_eq!(transfers[0].source_authority, XrNetPeerId(55));
         assert!(registry
             .local_shared_object_snapshot(allocation.shared_object_id)
             .is_none());
@@ -1443,15 +1637,15 @@ mod tests {
             .remote_shared_object_snapshot(allocation.shared_object_id)
             .expect("handoff should preserve the object id as a remote shadow");
         assert_eq!(remote.widget_uid, WidgetUid(101));
-        assert_eq!(remote.authority, XrPeerId(8));
-        assert_eq!(remote.state_source_authority, XrPeerId(55));
+        assert_eq!(remote.authority, XrNetPeerId(8));
+        assert_eq!(remote.state_source_authority, XrNetPeerId(55));
     }
 
     #[test]
     fn replacing_spawnables_for_same_activity_preserves_active_shared_objects() {
         let activity_id = XrActivityId(live_id!(ico_shoot_scene));
         let mut registry = XrSharedObjectRegistry::default();
-        registry.set_local_peer_id(XrPeerId(55));
+        registry.set_local_peer_id(XrNetPeerId(55));
         registry.replace_spawnables(
             activity_id,
             [
@@ -1459,11 +1653,13 @@ mod tests {
                     object_id: XrSpawnableObjectId(11),
                     allocation_group_id: XrSpawnableObjectId(11),
                     widget_uid: WidgetUid(101),
+                    bootstrap_shared: true,
                 },
                 XrSpawnableObjectBinding {
                     object_id: XrSpawnableObjectId(12),
                     allocation_group_id: XrSpawnableObjectId(12),
                     widget_uid: WidgetUid(102),
+                    bootstrap_shared: true,
                 },
             ],
         );
@@ -1472,13 +1668,13 @@ mod tests {
             .allocate_local_shared_object(activity_id, WidgetUid(101))
             .expect("local shared object should allocate");
         let remote_object_id =
-            xr_make_shared_object_id(XrPeerId(7), XrSharedObjectCounter(9)).unwrap();
+            xr_make_shared_object_id(XrNetPeerId(7), XrSharedObjectCounter(9)).unwrap();
         registry
             .register_remote_shared_object(
                 activity_id,
                 remote_object_id,
                 0,
-                XrPeerId(7),
+                XrNetPeerId(7),
                 XrSharedObjectFidelity::ImpactCritical,
                 XrSpawnableObjectId(12),
                 Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.4)),
@@ -1494,11 +1690,13 @@ mod tests {
                     object_id: XrSpawnableObjectId(11),
                     allocation_group_id: XrSpawnableObjectId(11),
                     widget_uid: WidgetUid(201),
+                    bootstrap_shared: true,
                 },
                 XrSpawnableObjectBinding {
                     object_id: XrSpawnableObjectId(12),
                     allocation_group_id: XrSpawnableObjectId(12),
                     widget_uid: WidgetUid(202),
+                    bootstrap_shared: true,
                 },
             ],
         );
@@ -1529,16 +1727,17 @@ mod tests {
                 object_id: XrSpawnableObjectId(11),
                 allocation_group_id: XrSpawnableObjectId(11),
                 widget_uid: WidgetUid(101),
+                bootstrap_shared: true,
             }],
         );
 
-        let object_id = xr_make_shared_object_id(XrPeerId(7), XrSharedObjectCounter(3)).unwrap();
+        let object_id = xr_make_shared_object_id(XrNetPeerId(7), XrSharedObjectCounter(3)).unwrap();
         registry
             .register_remote_shared_object(
                 activity_id,
                 object_id,
                 0,
-                XrPeerId(7),
+                XrNetPeerId(7),
                 XrSharedObjectFidelity::ImpactCritical,
                 XrSpawnableObjectId(11),
                 Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.5)),
@@ -1553,7 +1752,7 @@ mod tests {
             physics_tick: 10,
             object_id,
             epoch: 0,
-            authority: XrPeerId(8),
+            authority: XrNetPeerId(8),
             fidelity: XrSharedObjectFidelity::ImpactCritical,
             mode: XrSharedObjectMode::Dynamic,
             pose: Pose::new(Quat::default(), vec3f(0.4, 1.0, -0.3)),
@@ -1561,27 +1760,27 @@ mod tests {
             angvel: vec3f(0.0, 0.0, 0.0),
         };
         assert!(registry
-            .record_remote_shared_object_state(XrPeerId(8), stale_state)
+            .record_remote_shared_object_state(XrNetPeerId(8), stale_state)
             .is_none());
 
         let fresh_state = XrNetSharedObjectState {
-            authority: XrPeerId(7),
+            authority: XrNetPeerId(7),
             ..stale_state
         };
         assert_eq!(
-            registry.record_remote_shared_object_state(XrPeerId(7), fresh_state),
+            registry.record_remote_shared_object_state(XrNetPeerId(7), fresh_state),
             Some(WidgetUid(101))
         );
         let snapshot = registry
             .remote_shared_object_snapshot(object_id)
             .expect("remote snapshot should still exist");
-        assert_eq!(snapshot.authority, XrPeerId(7));
-        assert_eq!(snapshot.state_source_authority, XrPeerId(7));
+        assert_eq!(snapshot.authority, XrNetPeerId(7));
+        assert_eq!(snapshot.state_source_authority, XrNetPeerId(7));
         assert_eq!(snapshot.latest_state, Some(fresh_state));
     }
 
     #[test]
-    fn remote_state_updates_accept_node_stable_authority_ids_across_real_network_addrs() {
+    fn remote_state_updates_accept_matching_net_peer_authority_ids() {
         let activity_id = XrActivityId(live_id!(ico_shoot_scene));
         let mut registry = XrSharedObjectRegistry::default();
         registry.replace_spawnables(
@@ -1590,23 +1789,23 @@ mod tests {
                 object_id: XrSpawnableObjectId(11),
                 allocation_group_id: XrSpawnableObjectId(11),
                 widget_uid: WidgetUid(101),
+                bootstrap_shared: true,
             }],
         );
 
         let sender_node_id = XrNetPeerId(0x1234);
-        let authority = xr_shared_object_peer_id_from_seed(sender_node_id.0);
         let sender_peer = XrNetPeer {
             id: sender_node_id,
             addr: "192.168.1.42:41547".parse().unwrap(),
         };
-        let object_id = xr_make_shared_object_id(authority, XrSharedObjectCounter(3))
-            .expect("shared object id should pack");
+        let object_id = xr_make_shared_object_id(sender_node_id, XrSharedObjectCounter(3))
+            .expect("shared object id should hash");
         registry
             .register_remote_shared_object(
                 activity_id,
                 object_id,
                 0,
-                authority,
+                sender_node_id,
                 XrSharedObjectFidelity::ImpactCritical,
                 XrSpawnableObjectId(11),
                 Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.5)),
@@ -1621,7 +1820,7 @@ mod tests {
             physics_tick: 10,
             object_id,
             epoch: 0,
-            authority,
+            authority: sender_node_id,
             fidelity: XrSharedObjectFidelity::ImpactCritical,
             mode: XrSharedObjectMode::Dynamic,
             pose: Pose::new(Quat::default(), vec3f(0.4, 1.0, -0.3)),
@@ -1630,9 +1829,133 @@ mod tests {
         };
 
         assert_eq!(
-            registry
-                .record_remote_shared_object_state(sender_peer.shared_object_peer_id(), updated_state),
+            registry.record_remote_shared_object_state(sender_peer.id, updated_state),
             Some(WidgetUid(101))
         );
+    }
+
+    #[test]
+    fn force_local_shared_object_reset_reclaims_remote_object_for_local_resetter() {
+        let activity_id = XrActivityId(live_id!(ico_shoot_scene));
+        let widget_uid = WidgetUid(101);
+        let mut registry = XrSharedObjectRegistry::default();
+        registry.set_local_peer_id(XrNetPeerId(55));
+        registry.replace_spawnables(
+            activity_id,
+            [XrSpawnableObjectBinding {
+                object_id: XrSpawnableObjectId(11),
+                allocation_group_id: XrSpawnableObjectId(11),
+                widget_uid,
+                bootstrap_shared: true,
+            }],
+        );
+
+        let object_id = xr_make_shared_object_id(XrNetPeerId(7), XrSharedObjectCounter(3))
+            .expect("shared object id should hash");
+        registry
+            .register_remote_shared_object(
+                activity_id,
+                object_id,
+                2,
+                XrNetPeerId(7),
+                XrSharedObjectFidelity::ImpactCritical,
+                XrSpawnableObjectId(11),
+                Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.5)),
+                vec3f(0.0, 0.0, -1.0),
+                vec3f(0.0, 0.0, 0.0),
+            )
+            .expect("remote block should bind");
+
+        let reset_pose = Pose::new(Quat::default(), vec3f(0.1, 1.2, -0.3));
+        let reset_linvel = vec3f(0.2, 0.0, -0.4);
+        let reset_angvel = vec3f(0.0, 0.1, 0.0);
+        let allocation = registry
+            .force_local_shared_object_reset(
+                activity_id,
+                widget_uid,
+                reset_pose,
+                reset_linvel,
+                reset_angvel,
+            )
+            .expect("reset should reclaim the remote object for the local peer");
+
+        assert_eq!(allocation.shared_object_id, object_id);
+        assert_eq!(allocation.epoch, 3);
+        assert!(registry.remote_shared_object_snapshot(object_id).is_none());
+
+        let local = registry
+            .local_shared_object_snapshot(object_id)
+            .expect("reset should promote the reclaimed brick into local authority");
+        assert_eq!(local.authority, XrNetPeerId(55));
+        assert_eq!(local.widget_uid, widget_uid);
+        assert_eq!(local.epoch, 3);
+        let latest_state = local
+            .latest_state
+            .expect("reclaimed local brick should carry the reset state");
+        assert_eq!(latest_state.pose, reset_pose);
+        assert_eq!(latest_state.linvel, reset_linvel);
+        assert_eq!(latest_state.angvel, reset_angvel);
+    }
+
+    #[test]
+    fn releasing_remote_shared_objects_uses_current_authority_not_allocator_peer() {
+        let activity_id = XrActivityId(live_id!(ico_shoot_scene));
+        let widget_uid = WidgetUid(101);
+        let mut registry = XrSharedObjectRegistry::default();
+        registry.set_local_peer_id(XrNetPeerId(55));
+        registry.replace_spawnables(
+            activity_id,
+            [XrSpawnableObjectBinding {
+                object_id: XrSpawnableObjectId(11),
+                allocation_group_id: XrSpawnableObjectId(11),
+                widget_uid,
+                bootstrap_shared: true,
+            }],
+        );
+
+        let object_id = xr_make_shared_object_id(XrNetPeerId(7), XrSharedObjectCounter(3))
+            .expect("shared object id should hash");
+        registry
+            .register_remote_shared_object(
+                activity_id,
+                object_id,
+                0,
+                XrNetPeerId(7),
+                XrSharedObjectFidelity::ImpactCritical,
+                XrSpawnableObjectId(11),
+                Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.5)),
+                vec3f(0.0, 0.0, -1.0),
+                vec3f(0.0, 0.0, 0.0),
+            )
+            .expect("remote block should bind");
+
+        assert!(registry.schedule_authority_transfer(
+            object_id,
+            1,
+            XrNetPeerId(7),
+            XrNetPeerId(8),
+            0.0,
+            0,
+            17,
+            None,
+            Pose::new(Quat::default(), vec3f(0.1, 1.0, -0.4)),
+            vec3f(0.0, 0.0, -0.5),
+            vec3f(0.0, 0.0, 0.0),
+        ));
+        let transfers = registry.apply_scheduled_authority_transfers(0.1, 1);
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].new_authority, XrNetPeerId(8));
+
+        assert_eq!(
+            registry.release_remote_shared_objects_by_peer_id(XrNetPeerId(7)),
+            Vec::<WidgetUid>::new()
+        );
+        assert!(registry.remote_shared_object_snapshot(object_id).is_some());
+
+        assert_eq!(
+            registry.release_remote_shared_objects_by_peer_id(XrNetPeerId(8)),
+            vec![widget_uid]
+        );
+        assert!(registry.remote_shared_object_snapshot(object_id).is_none());
     }
 }

@@ -9,6 +9,7 @@ script_mod! {
     mod.widgets.CubeBase = #(Cube::register_widget(vm))
     mod.widgets.Cube = set_type_default() do mod.widgets.CubeBase{
         body: mod.widgets.XrBodyKind.Dynamic
+        shared_object_policy: mod.widgets.XrSharedObjectPolicy.BootstrapShared
         size: vec3(0.1, 0.1, 0.1)
         color: vec4(0.82, 0.48, 0.28, 1.0)
         draw_cube +: {

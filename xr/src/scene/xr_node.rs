@@ -1,6 +1,4 @@
-use crate::obj::{Cube, Gltf, IcoSphere, RefractiveCube, Shooter, Tree};
 use crate::prelude::XrSharedHand;
-use crate::scene::{XrSelect, XrView};
 use makepad_widgets::{
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -19,9 +17,21 @@ script_mod! {
     let XrBodyKind = set_type_default() do #(XrBodyKind::script_api(vm))
     mod.widgets.XrBodyKind = XrBodyKind
 
+    let XrPhysicsShape = set_type_default() do #(XrPhysicsShape::script_api(vm))
+    mod.widgets.XrPhysicsShape = XrPhysicsShape
+
+    let XrRenderClass = set_type_default() do #(XrRenderClass::script_api(vm))
+    mod.widgets.XrRenderClass = XrRenderClass
+
+    let XrSharedObjectPolicy = set_type_default() do #(XrSharedObjectPolicy::script_api(vm))
+    mod.widgets.XrSharedObjectPolicy = XrSharedObjectPolicy
+
     mod.widgets.XrNodeBase = #(XrNode::register_widget(vm))
     mod.widgets.XrNode = set_type_default() do mod.widgets.XrNodeBase{
         body: XrBodyKind.Disabled
+        physics_shape: XrPhysicsShape.Box
+        render_class: XrRenderClass.Opaque
+        shared_object_policy: XrSharedObjectPolicy.None
         spawn_pool: false
         physics_size: vec3(0.0, 0.0, 0.0)
         density: 1.0
@@ -41,6 +51,47 @@ pub enum XrBodyKind {
 impl Default for XrBodyKind {
     fn default() -> Self {
         Self::Disabled
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]
+pub enum XrPhysicsShape {
+    #[pick]
+    Box,
+    Sphere,
+}
+
+impl Default for XrPhysicsShape {
+    fn default() -> Self {
+        Self::Box
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]
+pub enum XrRenderClass {
+    #[pick]
+    Opaque,
+    Transparent,
+}
+
+impl Default for XrRenderClass {
+    fn default() -> Self {
+        Self::Opaque
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]
+pub enum XrSharedObjectPolicy {
+    None,
+    #[pick]
+    BootstrapShared,
+    OnDemandShared,
+    PooledOnDemand,
+}
+
+impl Default for XrSharedObjectPolicy {
+    fn default() -> Self {
+        Self::None
     }
 }
 
@@ -165,6 +216,12 @@ pub struct XrNode {
     scale: Vec3f,
     #[live]
     body: XrBodyKind,
+    #[live]
+    physics_shape: XrPhysicsShape,
+    #[live]
+    render_class: XrRenderClass,
+    #[live]
+    shared_object_policy: XrSharedObjectPolicy,
     #[live(false)]
     spawn_pool: bool,
     #[live(vec3(0.0, 0.0, 0.0))]
@@ -223,6 +280,29 @@ impl XrNode {
 
     pub fn body_kind(&self) -> XrBodyKind {
         self.body
+    }
+
+    pub fn physics_shape(&self) -> XrPhysicsShape {
+        self.physics_shape
+    }
+
+    pub fn render_class(&self) -> XrRenderClass {
+        self.render_class
+    }
+
+    pub fn shared_object_policy(&self) -> XrSharedObjectPolicy {
+        self.shared_object_policy
+    }
+
+    pub fn bootstrap_shared(&self) -> bool {
+        matches!(
+            self.shared_object_policy,
+            XrSharedObjectPolicy::BootstrapShared
+        )
+    }
+
+    pub fn is_transparent(&self) -> bool {
+        matches!(self.render_class, XrRenderClass::Transparent)
     }
 
     pub fn spawn_pool(&self) -> bool {
@@ -285,69 +365,16 @@ pub fn xr_widget_with_scene_node<R>(
     widget: &WidgetRef,
     visit: impl FnOnce(&XrNode) -> R,
 ) -> Option<R> {
-    if let Some(select) = widget.borrow::<XrSelect>() {
-        return Some(visit(select.node()));
-    }
-    if let Some(view) = widget.borrow::<XrView>() {
-        return Some(visit(view.node()));
-    }
-    if let Some(cube) = widget.borrow::<Cube>() {
-        return Some(visit(cube.node()));
-    }
-    if let Some(ico) = widget.borrow::<IcoSphere>() {
-        return Some(visit(ico.node()));
-    }
-    if let Some(refractive_cube) = widget.borrow::<RefractiveCube>() {
-        return Some(visit(refractive_cube.node()));
-    }
-    if let Some(gltf) = widget.borrow::<Gltf>() {
-        return Some(visit(gltf.node()));
-    }
-    if let Some(tree) = widget.borrow::<Tree>() {
-        return Some(visit(tree.node()));
-    }
-    if let Some(shooter) = widget.borrow::<Shooter>() {
-        return Some(visit(shooter.node()));
-    }
     if let Some(node) = widget.borrow::<XrNode>() {
+        return Some(visit(&node));
+    }
+    if let Some(node) = widget.cast_inner::<XrNode>() {
         return Some(visit(&node));
     }
     None
 }
 
 pub fn xr_widget_children(widget: &WidgetRef, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
-    if widget.borrow::<XrSelect>().is_some() || widget.borrow::<XrView>().is_some() {
-        widget.children(visit);
-        return;
-    }
-    if let Some(cube) = widget.borrow::<Cube>() {
-        cube.node().children(visit);
-        return;
-    }
-    if let Some(ico) = widget.borrow::<IcoSphere>() {
-        ico.node().children(visit);
-        return;
-    }
-    if let Some(refractive_cube) = widget.borrow::<RefractiveCube>() {
-        refractive_cube.node().children(visit);
-        return;
-    }
-    if let Some(gltf) = widget.borrow::<Gltf>() {
-        gltf.node().children(visit);
-        return;
-    }
-    if let Some(tree) = widget.borrow::<Tree>() {
-        tree.node().children(visit);
-        return;
-    }
-    if let Some(shooter) = widget.borrow::<Shooter>() {
-        shooter.node().children(visit);
-        return;
-    }
-    if let Some(node) = widget.borrow::<XrNode>() {
-        node.children(visit);
-        return;
-    }
     widget.children(visit);
 }
 
@@ -356,7 +383,7 @@ pub fn xr_widget_local_sort_center(widget: &WidgetRef) -> Option<Vec3f> {
 }
 
 pub fn xr_widget_is_transparent(widget: &WidgetRef) -> bool {
-    widget.borrow::<RefractiveCube>().is_some() || widget.borrow::<XrView>().is_some()
+    xr_widget_with_scene_node(widget, |node| node.is_transparent()).unwrap_or(false)
 }
 
 pub fn xr_draw_list_depth(scene_state: &SceneState3D, world_pos: Vec3f) -> f32 {

@@ -288,6 +288,7 @@ script_mod! {
                             }
                             IcoSphere{
                                 spawn_pool: true
+                                shared_object_policy: mod.widgets.XrSharedObjectPolicy.PooledOnDemand
                                 density: 0.75
                                 friction: 0.48
                                 restitution: 0.04
@@ -307,6 +308,7 @@ script_mod! {
                             for col in 0..1 {
                                 Gltf{
                                     body: mod.widgets.XrBodyKind.Dynamic
+                                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.BootstrapShared
                                     physics_size: vec3(0.17, 0.21, 0.17)
                                     density: 0.9
                                     friction: 0.7
@@ -668,6 +670,8 @@ pub struct App {
     last_debug_text: String,
     #[rust]
     suppress_activity_broadcast: Option<XrActivityId>,
+    #[rust]
+    pending_shared_scene_reset: bool,
 }
 
 impl App {
@@ -778,6 +782,32 @@ impl App {
         }
     }
 
+    fn apply_pending_shared_scene_reset(&mut self, cx: &mut Cx) {
+        if !self.pending_shared_scene_reset {
+            return;
+        }
+        let runtime_bodies = self.ui.borrow::<XrRoot>().map(|root| root.runtime_bodies());
+        let Some(runtime_bodies) = runtime_bodies else {
+            return;
+        };
+        if runtime_bodies.is_empty() {
+            return;
+        }
+        let reset_applied = {
+            let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
+            let reset_applied = if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+                peer_sync.reset_local_shared_bootstrap_objects(runtime_bodies.as_ref());
+                true
+            } else {
+                false
+            };
+            reset_applied
+        };
+        if reset_applied {
+            self.pending_shared_scene_reset = false;
+        }
+    }
+
     fn refresh_debug_fields(&mut self, cx: &mut Cx) {
         let (
             surface_count,
@@ -848,6 +878,7 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let root_uid = self.ui.widget_uid();
         let scene_select_uid = self.ui.widget(cx, ids!(scene_select)).widget_uid();
         let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
         let peer_sync_uid = peer_sync_widget.widget_uid();
@@ -880,6 +911,11 @@ impl MatchEvent for App {
                     }
                     XrPeerSyncAction::None => {}
                 }
+            }
+            if widget_action.widget_uid == root_uid
+                && matches!(widget_action.cast::<XrRootAction>(), XrRootAction::PhysicsReset)
+            {
+                self.pending_shared_scene_reset = true;
             }
             if widget_action.widget_uid == scene_select_uid {
                 if let XrSelectAction::ActiveChildChanged(activity_id) =
@@ -957,6 +993,7 @@ impl AppMain for App {
         }
         self.ensure_activity_announced(cx);
         self.refresh_spawnable_registry(cx, false);
+        self.apply_pending_shared_scene_reset(cx);
         if matches!(event, Event::XrUpdate(_))
             || (matches!(event, Event::NextFrame(_)) && !cx.in_xr_mode())
         {
