@@ -185,6 +185,7 @@ impl Cx {
                     position: dvec2(0.0, 0.0),
                     inner_size: size,
                     outer_size: size,
+                    ..Default::default()
                 };
                 let new_geom = window.window_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
@@ -527,6 +528,7 @@ impl Cx {
                         position: dvec2(0.0, 0.0),
                         inner_size: size,
                         outer_size: size,
+                        ..Default::default()
                     };
                     window.is_created = true;
                 }

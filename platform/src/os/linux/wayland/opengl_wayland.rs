@@ -111,6 +111,7 @@ impl WaylandWindow {
             outer_size: inner_size,
             dpi_factor: 1.0,
             position: position,
+            ..Default::default()
         };
         Self {
             base_surface,
@@ -338,6 +339,7 @@ impl WaylandPopupWindow {
             outer_size: size,
             dpi_factor: 1.0,
             position,
+            ..Default::default()
         };
 
         Self {

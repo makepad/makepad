@@ -197,6 +197,7 @@ impl TvosApp {
             outer_size: new_size,
             dpi_factor,
             position: dvec2(0.0, 0.0),
+            ..Default::default()
         };
 
         if get_tvos_app_global().first_draw {

@@ -537,8 +537,20 @@ impl Widget for Window {
                     }
 
                     // Update the display context if the screen size has changed
+                    let old_insets = cx.display_context.safe_area_insets;
                     cx.display_context.screen_size = ev.new_geom.inner_size;
+                    cx.display_context.safe_area_insets = ev.new_geom.safe_area_insets;
                     cx.display_context.updated_on_event_id = cx.event_id();
+
+                    // Update safe area inset values on the script heap so
+                    // Splash code can reference mod.widgets.SAFE_INSET_PAD_*.
+                    cx.update_safe_inset_script_values(ev.new_geom.safe_area_insets);
+
+                    // If safe area insets changed (e.g., device rotation), trigger
+                    // a script re-apply so widgets pick up new values.
+                    if old_insets != ev.new_geom.safe_area_insets {
+                        cx.request_script_reapply();
+                    }
 
                     cx.widget_action(uid, WindowAction::WindowGeomChange(ev.clone()));
                     return;

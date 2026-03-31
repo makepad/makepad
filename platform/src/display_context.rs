@@ -1,3 +1,4 @@
+use crate::event::SafeAreaInsets;
 use crate::Vec2d;
 
 const DEFAULT_MIN_DESKTOP_WIDTH: f64 = 860.;
@@ -10,6 +11,9 @@ pub struct DisplayContext {
     pub updated_on_event_id: u64,
     /// The current screen size
     pub screen_size: Vec2d,
+    /// Safe area insets for the current window (non-zero on devices with notches,
+    /// rounded corners, home indicators, etc.)
+    pub safe_area_insets: SafeAreaInsets,
 }
 
 impl DisplayContext {
