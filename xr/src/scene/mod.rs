@@ -18,12 +18,12 @@ pub use xr_node::{
     xr_draw_list_depth, xr_sort_child_draw_order, xr_widget_children, xr_widget_is_transparent,
     xr_widget_local_sort_center, xr_widget_with_scene_node, xr_widget_world_transform, XrBodyKind,
     XrDrawContext, XrDrawScopeData, XrHandInfluencePoint, XrNode, XrNodeAction,
-    XrPassthroughScopeData, XrRuntimeBodyState, XR_HAND_INFLUENCE_POINTS_PER_HAND,
-    XR_HAND_INFLUENCE_POINT_COUNT,
+    XrPassthroughScopeData, XrPhysicsShape, XrRenderClass, XrRuntimeBodyState,
+    XrSharedObjectPolicy, XR_HAND_INFLUENCE_POINTS_PER_HAND, XR_HAND_INFLUENCE_POINT_COUNT,
 };
 pub use xr_peer_sync::{XrPeerSync, XrPeerSyncAction};
 pub use xr_permissions_flow::XrPermissionsFlow;
-pub use xr_root::{XrCamera, XrRoot};
+pub use xr_root::{XrCamera, XrRoot, XrRootAction};
 pub use xr_select::{XrSelect, XrSelectAction};
 pub use xr_shared_object_sync::{
     collect_scene_spawnable_objects, XrLocalSharedObjectSnapshot, XrRemoteSharedObjectSnapshot,

@@ -104,6 +104,8 @@ script_mod! {
     mod.widgets.IcoSphereBase = #(IcoSphere::register_widget(vm))
     mod.widgets.IcoSphere = set_type_default() do mod.widgets.IcoSphereBase{
         body: mod.widgets.XrBodyKind.Dynamic
+        physics_shape: mod.widgets.XrPhysicsShape.Sphere
+        shared_object_policy: mod.widgets.XrSharedObjectPolicy.BootstrapShared
         radius: 0.037
         diffuse: vec4(0.63, 0.65, 0.69, 1.0)
         color: vec4(0.95, 0.62, 0.28, 1.0)
