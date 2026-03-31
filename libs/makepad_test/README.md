@@ -1,6 +1,6 @@
 # makepad_test
 
-`makepad_test` provides UI regression tests for Makepad apps. Rust stays as the host bridge for `cargo test` and the Studio protocol; Splash is the test language for suite authoring.
+`makepad_test` provides UI regression tests for Makepad apps. Splash is the suite authoring language; Rust is only the host bridge that launches and drives the suite.
 
 ## Quick Start (Splash suite)
 
@@ -46,30 +46,6 @@ Run the curated repo UI suite on macOS (splash example only):
 tools/run_ui_tests.sh
 ```
 
-### Optional: Rust-only tests (compatibility only)
-
-Use a normal `#[test]` and `run_current_package_test` with `env!`/`module_path!()` and your test function name:
-
-```rust,ignore
-use makepad_test::{run_current_package_test, Selector, TestApp};
-
-#[test]
-fn fill_and_submit() {
-    run_current_package_test(
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_MANIFEST_DIR"),
-        module_path!(),
-        "fill_and_submit",
-        |app: TestApp| {
-            app.locator(Selector::id("input_singleline"))
-                .wait_visible()
-                .fill("hello")
-                .wait_value("hello");
-        },
-    );
-}
-```
-
 Failure-artifact capture for `run_with_config` is covered by `cargo test -p makepad-test --test artifact_capture`.
 
 ### Visible Studio mode
@@ -97,7 +73,6 @@ cargo test -p makepad-example-splash --test ui -- --test-threads=1
 
 - `run_splash_suite(...)` for Splash-authored suites (recommended for new work)
 - `run_splash_recorder(...)` for visible-mode draft Splash case generation
-- `run_current_package_test(...)` for Rust-authored current-package UI tests (compatibility path only)
 - `TestApp` for app-scoped input, waits, logs, screenshots, and raw protocol forwarding
 - `Selector` for structured snapshot matching
 - `Locator` for strict single-widget interaction and assertions
@@ -112,7 +87,7 @@ Structured selectors support:
 
 Common locator actions:
 
-- `click`, `type_text`, `fill`, `clear`
+- `click`, `hover`, `type_text`, `fill`, `clear`
 - `press_key`, `press_key_with_modifiers`
 - `scroll`, `drag_by`
 

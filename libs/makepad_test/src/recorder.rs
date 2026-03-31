@@ -31,6 +31,7 @@ impl SplashRecorderOptions {
 #[derive(Clone, Debug)]
 enum RecorderActionKind {
     Click,
+    Hover,
     Fill(String),
     Clear,
     TypeText(String),
@@ -93,6 +94,19 @@ impl SplashRecorderSession {
             selector: Some(selector),
             selector_repr: Some(selector_repr),
             inferred_wait: infer_wait(&before, &after),
+            comment: None,
+        });
+        Ok(())
+    }
+
+    pub fn hover(&mut self, selector: Selector) -> TestResult<()> {
+        let selector_repr = selector_to_splash(&selector);
+        self.app.locator(selector.clone()).try_hover()?;
+        self.actions.push(RecorderAction {
+            kind: RecorderActionKind::Hover,
+            selector: Some(selector),
+            selector_repr: Some(selector_repr),
+            inferred_wait: None,
             comment: None,
         });
         Ok(())
@@ -345,6 +359,7 @@ fn infer_wait(before: &[WidgetSnapshot], after: &[WidgetSnapshot]) -> Option<Str
 fn recorder_kind_name(kind: &RecorderActionKind) -> &'static str {
     match kind {
         RecorderActionKind::Click => "click",
+        RecorderActionKind::Hover => "hover",
         RecorderActionKind::Fill(_) => "fill",
         RecorderActionKind::Clear => "clear",
         RecorderActionKind::TypeText(_) => "type_text",
@@ -362,8 +377,10 @@ fn recorder_detail(action: &RecorderAction) -> String {
         out.push_str(selector);
     }
     match &action.kind {
-        RecorderActionKind::Click | RecorderActionKind::Clear | RecorderActionKind::PressReturn => {
-        }
+        RecorderActionKind::Click
+        | RecorderActionKind::Hover
+        | RecorderActionKind::Clear
+        | RecorderActionKind::PressReturn => {}
         RecorderActionKind::Fill(text) | RecorderActionKind::TypeText(text) => {
             out.push_str(" ");
             out.push_str(text);
@@ -421,6 +438,10 @@ fn render_action(action: &RecorderAction) -> String {
     match &action.kind {
         RecorderActionKind::Click => format!(
             "test.click({})",
+            action.selector_repr.as_deref().unwrap_or("{}")
+        ),
+        RecorderActionKind::Hover => format!(
+            "test.hover({})",
             action.selector_repr.as_deref().unwrap_or("{}")
         ),
         RecorderActionKind::Fill(text) => format!(

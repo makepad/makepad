@@ -1059,6 +1059,29 @@ fn install_test_script_module(vm: &mut ScriptVm) {
 
     vm.add_method(
         test,
+        id_lut!(hover),
+        script_args_def!(selector = NIL),
+        |vm, args| {
+            let selector =
+                match parse_selector(vm, script_value!(vm, args.selector), "test.hover selector") {
+                    Ok(selector) => selector,
+                    Err(err) => return err,
+                };
+            let detail = selector.describe();
+            let call_selector = selector.clone();
+            trace_action(
+                vm,
+                "test.hover",
+                "hover",
+                detail,
+                Some(selector),
+                move |app| app.locator(call_selector).try_hover(),
+            )
+        },
+    );
+
+    vm.add_method(
+        test,
         id_lut!(fill),
         script_args_def!(selector = NIL, text = NIL),
         |vm, args| {

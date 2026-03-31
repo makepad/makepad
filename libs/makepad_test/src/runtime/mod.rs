@@ -11,6 +11,7 @@ use makepad_studio_protocol::{
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fmt::Write;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -59,6 +60,29 @@ pub(crate) use config::{
 };
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct ScopedEnvVar {
+    name: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(name: &'static str, value: PathBuf) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, &value);
+        Self { name, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var(self.name, previous);
+        } else {
+            std::env::remove_var(self.name);
+        }
+    }
+}
 
 enum TestConnection {
     InProcess(HubConnection),
@@ -333,6 +357,21 @@ impl TestApp {
         let (x, y) = snapshot_center(target);
         let build_id = self.build_id();
         self.send_no_wait(ClientToHub::Click { build_id, x, y })?;
+        self.pace_after_action();
+        Ok(())
+    }
+
+    fn try_hover_center(&self, target: &WidgetSnapshot) -> TestResult<()> {
+        let (x, y) = snapshot_center_f64(target);
+        let now = now_seconds();
+        let mut msgs = vec![StudioToApp::MouseMove(RemoteMouseMove {
+            time: now,
+            x,
+            y,
+            modifiers: RemoteKeyModifiers::default(),
+        })];
+        msgs.extend((0..PUMP_TICKS).map(|_| StudioToApp::Tick));
+        self.try_forward(msgs)?;
         self.pace_after_action();
         Ok(())
     }
@@ -836,6 +875,18 @@ impl Locator {
         self.app.try_click_center(&target)
     }
 
+    pub fn hover(self) -> Self {
+        if let Err(err) = self.try_hover() {
+            panic_for_error(err);
+        }
+        self
+    }
+
+    pub fn try_hover(&self) -> TestResult<()> {
+        let target = self.resolve_unique_visible()?;
+        self.app.try_hover_center(&target)
+    }
+
     pub fn type_text(self, text: impl AsRef<str>) -> Self {
         if let Err(err) = self.try_type_text(text) {
             panic_for_error(err);
@@ -1064,6 +1115,8 @@ where
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+    let _headless_output_dir =
+        ScopedEnvVar::set("MAKEPAD_HEADLESS_OUT_DIR", config.headless_output_dir());
     let app = TestApp::start(config)?;
     let result = catch_unwind(AssertUnwindSafe(|| test(app.clone()).into_test_result()));
 
@@ -1086,30 +1139,6 @@ where
             app.shutdown();
             Err(err)
         }
-    }
-}
-
-pub fn run_current_package_test<F, R>(
-    package_name: &str,
-    manifest_dir: &str,
-    module_path: &str,
-    test_name: &str,
-    test: F,
-) where
-    F: FnOnce(TestApp) -> R,
-    R: IntoTestResult,
-{
-    let full_test_name = if module_path.is_empty() {
-        test_name.to_string()
-    } else {
-        format!("{module_path}::{test_name}")
-    };
-    let config = match TestConfig::current_package(manifest_dir, package_name, full_test_name) {
-        Ok(config) => config,
-        Err(err) => panic_for_error(err),
-    };
-    if let Err(err) = run_with_config(config, test) {
-        panic_for_error(err);
     }
 }
 
@@ -1284,7 +1313,12 @@ fn wait_for_builds(
         };
         match msg {
             HubToClient::Builds { builds } => return Ok(builds),
-            HubToClient::Error { message } => return Err(TestError::new(message)),
+            HubToClient::Error { message } => {
+                if should_ignore_stale_build_error(&message) {
+                    continue;
+                }
+                return Err(TestError::new(message));
+            }
             _ => {}
         }
     }
@@ -1427,7 +1461,12 @@ fn wait_for_splash_root_ready(
                 };
                 return Err(TestError::new(detail));
             }
-            HubToClient::Error { message } => return Err(TestError::new(message)),
+            HubToClient::Error { message } => {
+                if should_ignore_stale_build_error(&message) {
+                    continue;
+                }
+                return Err(TestError::new(message));
+            }
             _ => {}
         }
     }
@@ -1496,10 +1535,22 @@ fn wait_for_run_ready(
                 };
                 return Err(TestError::new(detail));
             }
-            HubToClient::Error { message } => return Err(TestError::new(message)),
+            HubToClient::Error { message } => {
+                if should_ignore_stale_build_error(&message) {
+                    continue;
+                }
+                return Err(TestError::new(message));
+            }
             _ => {}
         }
     }
+}
+
+fn should_ignore_stale_build_error(message: &str) -> bool {
+    message
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("unknown build:")
 }
 
 fn capture_failure_artifacts(app: &TestApp, failure_message: &str) {
@@ -1768,6 +1819,18 @@ mod tests {
         );
         assert_eq!(config.mount_root, PathBuf::from("/tmp/example"));
         assert_eq!(config.env.get("MAKEPAD"), Some(&"headless".to_string()));
+        let expected_headless_output_dir = PathBuf::from("/tmp/example")
+            .join("target")
+            .join("makepad_test")
+            .join("makepad-example")
+            .join("ui__test")
+            .join(".headless")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(
+            config.env.get("MAKEPAD_HEADLESS_OUT_DIR"),
+            Some(&expected_headless_output_dir)
+        );
     }
 
     #[test]

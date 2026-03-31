@@ -114,10 +114,15 @@ impl TestConfig {
             .join("makepad_test")
             .join(sanitize_path_component(&package_name))
             .join(sanitize_path_component(&test_name));
+        let headless_output_dir = artifacts_dir.join(".headless");
 
         let mut env = HashMap::new();
         if !super::visible_mode_enabled() {
             env.insert("MAKEPAD".to_string(), "headless".to_string());
+            env.insert(
+                "MAKEPAD_HEADLESS_OUT_DIR".to_string(),
+                headless_output_dir.to_string_lossy().to_string(),
+            );
         }
         env.insert("RUST_BACKTRACE".to_string(), "1".to_string());
         env.insert(
@@ -196,6 +201,10 @@ impl TestConfig {
     pub fn with_artifacts_dir(mut self, artifacts_dir: impl Into<PathBuf>) -> Self {
         self.artifacts_dir = artifacts_dir.into();
         self
+    }
+
+    pub(crate) fn headless_output_dir(&self) -> PathBuf {
+        self.artifacts_dir.join(".headless")
     }
 }
 

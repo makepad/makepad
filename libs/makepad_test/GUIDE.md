@@ -43,10 +43,6 @@ fn splash_suite() {
 
 That keeps the normal `cargo test` workflow intact while moving test authoring into Splash.
 
-### Rust-only tests (no Splash file)
-
-Use `run_current_package_test` from a normal `#[test]` — see **Optional: Rust-only tests** in [README.md](./README.md) for a full example.
-
 ## Suite Behavior
 
 `run_splash_suite(...)`:
@@ -157,7 +153,7 @@ Available host methods include:
 - `test.configure`
 - `test.case`
 - `test.fail`
-- `test.click`, `test.fill`, `test.clear`, `test.type_text`
+- `test.click`, `test.hover`, `test.fill`, `test.clear`, `test.type_text`
 - `test.press_return`, `test.press_key`, `test.scroll`, `test.drag`
 - `test.wait_visible`, `test.wait_hidden`, `test.wait_count`
 - `test.wait_text`, `test.wait_value`, `test.wait_checked`, `test.wait_enabled`
@@ -292,5 +288,3 @@ Screenshot capture is intentionally given a longer timeout than normal widget-st
 - recorder output is artifact-based, not a Studio-integrated recorder UI
 - no visual diffing yet
 - some complex widgets still need more structured state over time
-
-Rust-authored tests still work through `run_current_package_test(...)`, but the roadmap is Splash-first now.
