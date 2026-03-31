@@ -279,7 +279,6 @@ impl XrNode {
             .transform_vec4(vec4f(point.x, point.y, point.z, 1.0))
             .to_vec3f()
     }
-
 }
 
 pub fn xr_widget_with_scene_node<R>(
@@ -361,9 +360,10 @@ pub fn xr_widget_is_transparent(widget: &WidgetRef) -> bool {
 }
 
 pub fn xr_draw_list_depth(scene_state: &SceneState3D, world_pos: Vec3f) -> f32 {
-    let view_pos = scene_state
-        .view
-        .transform_vec4(vec4f(world_pos.x, world_pos.y, world_pos.z, 1.0));
+    let view_pos =
+        scene_state
+            .view
+            .transform_vec4(vec4f(world_pos.x, world_pos.y, world_pos.z, 1.0));
     if view_pos.w.abs() > 1.0e-6 {
         view_pos.z / view_pos.w
     } else {

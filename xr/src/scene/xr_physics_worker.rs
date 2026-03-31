@@ -26,7 +26,6 @@ const XR_WORKER_SIMULATION_DT_MAX: f32 = 1.0 / 45.0;
 const XR_WORKER_SIMULATION_DT_SMOOTHING: f32 = 0.35;
 const XR_WORKER_SIMULATION_DT_LADDER: [f32; 5] =
     [1.0 / 120.0, 1.0 / 90.0, 1.0 / 72.0, 1.0 / 60.0, 1.0 / 45.0];
-const XR_PHYSICS_WORKER_MAX_PENDING_BODY_SPAWNS: usize = 8;
 const XR_PHYSICS_WORKER_MAX_PENDING_BODY_DESPAWNS: usize = 8;
 const XR_PHYSICS_WORKER_MAX_PENDING_BODY_IMPULSES: usize = 8;
 
@@ -71,8 +70,7 @@ struct PhysicsWorkerMailbox {
     pending_reset_revision: Option<u64>,
     pending_rebuild: Option<PhysicsWorkerRebuild>,
     pending_step: Option<PhysicsWorkerStep>,
-    pending_body_spawns:
-        SmallVec<[PhysicsWorkerBodySpawn; XR_PHYSICS_WORKER_MAX_PENDING_BODY_SPAWNS]>,
+    pending_body_spawns: Vec<PhysicsWorkerBodySpawn>,
     pending_body_despawns:
         SmallVec<[PhysicsWorkerBodyDespawn; XR_PHYSICS_WORKER_MAX_PENDING_BODY_DESPAWNS]>,
     pending_body_impulses:
@@ -159,13 +157,20 @@ impl XrPhysicsWorker {
     pub(super) fn request_body_spawn(&mut self, revision: u64, spawn: XrBodySpawn) {
         let (lock, wake) = &*self.mailbox;
         if let Ok(mut mailbox) = lock.lock() {
-            if mailbox.pending_body_spawns.len() < XR_PHYSICS_WORKER_MAX_PENDING_BODY_SPAWNS {
+            if let Some(pending) = mailbox
+                .pending_body_spawns
+                .iter_mut()
+                .find(|pending| pending.spawn.widget_uid == spawn.widget_uid)
+            {
+                pending.revision = revision;
+                pending.spawn = spawn;
+            } else {
                 mailbox
                     .pending_body_spawns
                     .push(PhysicsWorkerBodySpawn { revision, spawn });
-                mailbox.version = mailbox.version.saturating_add(1);
-                wake.notify_one();
             }
+            mailbox.version = mailbox.version.saturating_add(1);
+            wake.notify_one();
         }
     }
 
@@ -333,8 +338,7 @@ fn physics_worker_loop(
                     } else {
                         physics_body_spawn_miss_count =
                             physics_body_spawn_miss_count.saturating_add(1);
-                        total_body_spawn_miss_count =
-                            total_body_spawn_miss_count.saturating_add(1);
+                        total_body_spawn_miss_count = total_body_spawn_miss_count.saturating_add(1);
                     }
                     applied_spawn = true;
                 }
@@ -583,14 +587,20 @@ fn snapshot_runtime_bodies(
                 XrRuntimeBodyState {
                     pose: makepad_pose(body.position()),
                     scale: cube.scale,
-                    linvel: {
-                        let linvel = body.linvel();
-                        vec3f(linvel.x, linvel.y, linvel.z)
-                    },
-                    angvel: {
-                        let angvel = body.angvel();
-                        vec3f(angvel.x, angvel.y, angvel.z)
-                    },
+                    linvel: scene
+                        .shadow_body_motion_for_body(cube.body)
+                        .map(|(linvel, _)| linvel)
+                        .unwrap_or_else(|| {
+                            let linvel = body.linvel();
+                            vec3f(linvel.x, linvel.y, linvel.z)
+                        }),
+                    angvel: scene
+                        .shadow_body_motion_for_body(cube.body)
+                        .map(|(_, angvel)| angvel)
+                        .unwrap_or_else(|| {
+                            let angvel = body.angvel();
+                            vec3f(angvel.x, angvel.y, angvel.z)
+                        }),
                     sleeping: body.is_sleeping(),
                     held_by: scene.held_by_for_body(cube.body),
                 },

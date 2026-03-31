@@ -521,6 +521,12 @@ impl XrRoot {
         self.env.apply_body_impulse(cx, impulse);
     }
 
+    pub fn force_scene_rebuild(&mut self, cx: &mut Cx) {
+        self.env.mark_scene_dirty();
+        self.env.ensure_physics(cx, &self.children);
+        cx.redraw_all();
+    }
+
     fn set_depth_mesh_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
         self.env.set_depth_mesh_visible(visible);
         self.env.mark_scene_dirty();
@@ -1111,6 +1117,14 @@ impl Widget for XrRoot {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::Draw(e) = event {
+            if !cx.in_xr_mode() {
+                for i in 0..self.children.len() {
+                    let child = self.children[i].1.clone();
+                    if child.borrow::<super::xr_peer_sync::XrPeerSync>().is_some() {
+                        child.handle_event(cx, event, scope);
+                    }
+                }
+            }
             self.handle_draw_event(cx, e, scope);
             return;
         }

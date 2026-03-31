@@ -406,10 +406,9 @@ mod tests {
     fn curled_index_finger_is_rejected() {
         let hand = make_curled_hand();
         assert!(
-            Shooter::hand_index_finger_stretch_metrics(&hand)
-                .is_some_and(|metrics| {
-                    metrics.max_bend_angle_degrees > SHOOTER_INDEX_BEND_MAX_DEGREES
-                })
+            Shooter::hand_index_finger_stretch_metrics(&hand).is_some_and(|metrics| {
+                metrics.max_bend_angle_degrees > SHOOTER_INDEX_BEND_MAX_DEGREES
+            })
         );
         assert!(!Shooter::hand_emit_gesture_active(&hand));
     }
