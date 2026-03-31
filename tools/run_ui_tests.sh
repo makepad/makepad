@@ -10,10 +10,6 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 packages=(
-  "makepad-example-text-input:examples/text_input"
-  "makepad-example-counter:examples/counter"
-  "makepad-example-todo:examples/todo"
-  "makepad-example-floating-panel:examples/floating_panel"
   "makepad-example-splash:examples/splash"
 )
 
@@ -46,10 +42,6 @@ done
 echo "  failed: ${#failed[@]}"
 for package in "${failed[@]}"; do
   case "$package" in
-    makepad-example-text-input) rel_dir="examples/text_input" ;;
-    makepad-example-counter) rel_dir="examples/counter" ;;
-    makepad-example-todo) rel_dir="examples/todo" ;;
-    makepad-example-floating-panel) rel_dir="examples/floating_panel" ;;
     makepad-example-splash) rel_dir="examples/splash" ;;
     *) rel_dir="." ;;
   esac

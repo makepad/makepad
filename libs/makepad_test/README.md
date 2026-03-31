@@ -1,8 +1,8 @@
 # makepad_test
 
-`makepad_test` provides Rust-native UI regression tests for Makepad apps. Tests live next to the package they exercise, run through normal `cargo test`, and drive the app through the existing Studio protocol in headless mode.
+`makepad_test` provides UI regression tests for Makepad apps. Splash is the suite authoring language; Rust is only the host bridge that launches and drives the suite.
 
-## Quick Start
+## Quick Start (Splash suite)
 
 Add this to the package under test:
 
@@ -11,33 +11,49 @@ Add this to the package under test:
 makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }
 ```
 
-Create an integration test:
+Author the suite in Splash (`tests/ui.splash`) and use a small Rust host (`tests/ui.rs`). In this repo, [examples/splash](../../examples/splash) is the reference layout.
 
 ```rust,ignore
-use makepad_test::{makepad_test, Selector, TestApp};
+use makepad_test::run_splash_suite;
 
-#[makepad_test]
-fn fill_and_submit(app: TestApp) {
-    app.locator(Selector::id("input_singleline"))
-        .wait_visible()
-        .fill("hello")
-        .wait_value("hello");
-    app.press_return();
-    app.locator(Selector::id("status_label"))
-        .wait_text("Returned from singleline: \"hello\"");
+const SUITE_PATH: &str = "tests/ui.splash";
+
+#[test]
+fn splash_suite() {
+    run_splash_suite(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_MANIFEST_DIR"),
+        module_path!(),
+        SUITE_PATH,
+    )
+    .unwrap();
 }
 ```
 
-Run a package-local suite with:
+Run that package’s UI integration test:
 
 ```bash
-cargo test -p makepad-example-text-input --test ui -- --test-threads=1
+cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
-Run the same test visibly inside a running Makepad Studio session with:
+Add `--show-output` to print per-case `[makepad_test] splash case …` lines (timings and summary) from `run_splash_suite`.
+
+Splash suites now run in **per-case isolated mode by default**. Each `test.case` gets a fresh app session unless the suite opts into `test.configure({ session_mode: "shared" })`. Artifacts live under a suite root with per-case directories; see [GUIDE.md](./GUIDE.md).
+
+Run the curated repo UI suite on macOS (splash example only):
 
 ```bash
-MAKEPAD_TEST_VISIBLE=1 cargo test -p makepad-example-counter --test ui -- --test-threads=1
+tools/run_ui_tests.sh
+```
+
+Failure-artifact capture for `run_with_config` is covered by `cargo test -p makepad-test --test artifact_capture`.
+
+### Visible Studio mode
+
+Run the same test visibly inside a running Makepad Studio session:
+
+```bash
+MAKEPAD_TEST_VISIBLE=1 cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
 Visible mode expects Studio to already be running at `127.0.0.1:8001`. Set
@@ -50,18 +66,13 @@ MAKEPAD_TEST_VISIBLE=1 \
 MAKEPAD_TEST_STARTUP_DELAY_MS=1000 \
 MAKEPAD_TEST_ACTION_DELAY_MS=750 \
 MAKEPAD_TEST_KEEP_OPEN_MS=3000 \
-cargo test -p makepad-example-counter --test ui -- --test-threads=1
-```
-
-Run the curated repo UI suites serially on macOS with:
-
-```bash
-tools/run_ui_tests.sh
+cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
 ## Surface Area
 
-- `#[makepad_test]` for current-package UI tests
+- `run_splash_suite(...)` for Splash-authored suites (recommended for new work)
+- `run_splash_recorder(...)` for visible-mode draft Splash case generation
 - `TestApp` for app-scoped input, waits, logs, screenshots, and raw protocol forwarding
 - `Selector` for structured snapshot matching
 - `Locator` for strict single-widget interaction and assertions
@@ -76,7 +87,7 @@ Structured selectors support:
 
 Common locator actions:
 
-- `click`, `type_text`, `fill`, `clear`
+- `click`, `hover`, `type_text`, `fill`, `clear`
 - `press_key`, `press_key_with_modifiers`
 - `scroll`, `drag_by`
 
@@ -95,11 +106,13 @@ Inspection helpers:
 
 ## Failure Artifacts
 
-Failed tests write artifacts under:
+Suites write artifacts under:
 
 ```text
-target/makepad_test/<package>/<test>/
+target/makepad_test/<package>/<suite>/
 ```
+
+Per-case artifacts live under `cases/<case>/` inside that suite directory. Each suite also writes `suite-report.json` and `index.html`.
 
 The runtime captures:
 
@@ -108,14 +121,18 @@ The runtime captures:
 - `widget-snapshot.json`
 - `widget-tree.txt` or `widget-tree-error.txt`
 - `failure-screenshot.png` or `failure-screenshot-error.txt`
+- `case-report.json`
+- `suite-report.json`
+- `index.html`
 
 ## Current Constraints
 
 - synchronous API only
-- current-package targeting only
+- default launch runs the **current Cargo package** under test; Splash suites may instead use `test.configure({ launch: "splash_run_item", ... })` to drive headless/visible Studio run items when the app is registered that way (see the splash example)
+- recorder output is artifact-based draft Splash, not a Studio-integrated UI yet
 - milestone-1 repo suite is validated on macOS first
-- no visual diffing or trace viewer yet
+- no visual diffing yet
 
 ## Guide
 
-For the full authoring model, runtime behavior, and troubleshooting notes, see [GUIDE.md](./GUIDE.md).
+For Splash `test.*` API, Rust vs Splash selectors, runtime behavior, and troubleshooting, see [GUIDE.md](./GUIDE.md).

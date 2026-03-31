@@ -182,11 +182,12 @@ impl DesktopRunList {
             return;
         };
 
-        let Some(entries) = data.mounts.get(active_mount).map(|mount| &mount.run_items) else {
+        let Some(run_items) = data.mounts.get(active_mount).map(|mount| &mount.run_items) else {
             self.draw_empty(cx, list, "Loading run targets...");
             return;
         };
 
+        let entries: Vec<_> = run_items.iter().filter(|item| item.in_studio).collect();
         if entries.is_empty() {
             self.draw_empty(cx, list, "No run items available");
             return;

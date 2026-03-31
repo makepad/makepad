@@ -318,4 +318,20 @@ mod tests {
             Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), u16::MAX))
         );
     }
+
+    #[test]
+    fn start_in_process_reports_bound_ephemeral_gateway_port() {
+        let connection = StudioHub::start_in_process(HubConfig {
+            listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            enable_in_process_gateway: true,
+            ..Default::default()
+        })
+        .expect("start in-process backend");
+
+        let studio_addr = connection
+            .studio_addr()
+            .expect("in-process backend should expose studio addr");
+        assert!(studio_addr.starts_with("127.0.0.1:"));
+        assert!(!studio_addr.ends_with(":0"), "studio addr should use the bound port");
+    }
 }

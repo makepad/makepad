@@ -242,6 +242,7 @@ struct ScriptRunControl {
 
 struct RegisteredRunItem {
     info: RunItem,
+    package_name: Option<String>,
     item: ScriptObjectRef,
 }
 
@@ -256,6 +257,7 @@ struct ScriptBuildHost {
     command_rx: Receiver<ScriptRunCommand>,
     run_items: HashMap<String, RegisteredRunItem>,
     current_run_item_name: Option<String>,
+    current_run_item_package: Option<String>,
     current_run_build_id: Option<QueryId>,
 }
 
@@ -294,7 +296,10 @@ impl ScriptBuildHost {
             program,
             args,
             env,
-            package: self.current_run_item_name.clone(),
+            package: self
+                .current_run_item_package
+                .clone()
+                .or_else(|| self.current_run_item_name.clone()),
         });
     }
 
@@ -490,8 +495,25 @@ fn parse_registered_run_item(
         ));
     }
 
+    let package_name = {
+        let value = vm.bx.heap.value(item, id!(package_name).into(), NoTrap);
+        if value.is_nil() || value.is_err() {
+            None
+        } else {
+            let package_name =
+                script_value_to_checked_string(vm, value, "hub.set_run_items item.package_name")?;
+            let package_name = package_name.trim();
+            if package_name.is_empty() {
+                None
+            } else {
+                Some(package_name.to_string())
+            }
+        }
+    };
+
     Ok(RegisteredRunItem {
         info: RunItem { name, in_studio },
+        package_name,
         item: vm.bx.heap.new_object_ref(item),
     })
 }
@@ -694,7 +716,11 @@ fn run_pending_script_commands(
         };
         match command {
             ScriptRunCommand::RunItem { name, build_id } => {
-                let Some(item) = host.run_items.get(&name).map(|item| item.item.clone()) else {
+                let Some((item, package_name)) = host
+                    .run_items
+                    .get(&name)
+                    .map(|registered| (registered.item.clone(), registered.package_name.clone()))
+                else {
                     host.emit_output(format!("unknown run item {:?}", name), true);
                     continue;
                 };
@@ -710,12 +736,14 @@ fn run_pending_script_commands(
                     continue;
                 };
                 host.current_run_item_name = Some(name.clone());
+                host.current_run_item_package = package_name;
                 host.current_run_build_id = Some(build_id);
                 let build_id_arg = (build_id.0 as f64).into();
                 let result = with_vm_and_async(host, std, script_vm, |vm| {
                     vm.call_with_self(on_run_object.into(), &[build_id_arg], item_object.into())
                 });
                 host.current_run_item_name = None;
+                host.current_run_item_package = None;
                 host.current_run_build_id = None;
                 if result.is_err() {
                     let err = with_vm_and_async(host, std, script_vm, |vm| {
@@ -781,6 +809,7 @@ fn run_script_build(
                 command_rx,
                 run_items: HashMap::new(),
                 current_run_item_name: None,
+                current_run_item_package: None,
                 current_run_build_id: None,
             };
             host.emit_output(
@@ -804,6 +833,7 @@ fn run_script_build(
         command_rx,
         run_items: HashMap::new(),
         current_run_item_name: None,
+        current_run_item_package: None,
         current_run_build_id: None,
     };
     let runtime = Arc::new(NetworkRuntime::new(NetworkConfig::default()));

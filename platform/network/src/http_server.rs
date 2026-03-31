@@ -20,6 +20,11 @@ pub struct HttpServer {
     pub post_max_size: u64,
 }
 
+pub struct StartedHttpServer {
+    pub listen_address: SocketAddr,
+    pub thread: std::thread::JoinHandle<()>,
+}
+
 #[cfg_attr(feature = "script", derive(Script, ScriptHook))]
 #[derive(Clone)]
 pub struct HttpServerResponse {
@@ -59,13 +64,14 @@ pub enum HttpServerRequest {
     },
 }
 
-pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHandle<()>> {
+pub fn start_http_server_with_addr(http_server: HttpServer) -> Option<StartedHttpServer> {
     let listener = if let Ok(listener) = TcpListener::bind(http_server.listen_address) {
         listener
     } else {
         println!("Cannot bind http server port");
         return None;
     };
+    let listen_address = listener.local_addr().ok()?;
 
     let listen_thread = {
         std::thread::spawn(move || {
@@ -105,7 +111,14 @@ pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHan
             }
         })
     };
-    Some(listen_thread)
+    Some(StartedHttpServer {
+        listen_address,
+        thread: listen_thread,
+    })
+}
+
+pub fn start_http_server(http_server: HttpServer) -> Option<std::thread::JoinHandle<()>> {
+    start_http_server_with_addr(http_server).map(|server| server.thread)
 }
 
 fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpServerHeaders) {

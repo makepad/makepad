@@ -1390,6 +1390,10 @@ pub fn run(
     )?;
 
     let cwd = std::env::current_dir().unwrap();
+    let adb = adb_path(sdk_dir);
+    let adb = adb.to_str().unwrap();
+    let discovered_devices = adb_devices_list(sdk_dir)?;
+    let devices = select_run_devices(android_variant, devices, &discovered_devices)?;
     // alright so how will we do multiple targets eh
 
     fn android_start_args(java_url: &str) -> Vec<String> {
@@ -1414,25 +1418,31 @@ pub fn run(
         args
     }
 
-    if devices.len() == 0 {
+    if devices.len() == 1 {
+        let device = &devices[0];
         println!("Uploading android application");
         shell_env_cap(
             &[],
             &cwd,
-            sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-            &["install", "-r", (result.dst_apk.to_str().unwrap())],
+            adb,
+            &[
+                "-s",
+                device,
+                "install",
+                "-r",
+                (result.dst_apk.to_str().unwrap()),
+            ],
         )?;
         println!("Starting android application");
         let start_args = android_start_args(&result.java_url);
-        let start_args_refs = start_args
-            .iter()
-            .map(|arg| arg.as_str())
-            .collect::<Vec<_>>();
+        let mut device_args = vec!["-s".to_string(), device.clone()];
+        device_args.extend(start_args);
+        let device_args_refs = device_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
         shell_env_cap(
             &[],
             &cwd,
-            sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-            &start_args_refs,
+            adb,
+            &device_args_refs,
         )?;
         #[allow(unused_assignments)]
         let mut pid = None;
@@ -1440,8 +1450,8 @@ pub fn run(
             if let Ok(thing) = shell_env_cap(
                 &[],
                 &cwd,
-                sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-                &["shell", "pidof", &result.java_url],
+                adb,
+                &["-s", device, "shell", "pidof", &result.java_url],
             ) {
                 pid = Some(thing.trim().to_string());
                 break;
@@ -1450,8 +1460,8 @@ pub fn run(
         shell_env(
             &[],
             &cwd,
-            sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-            &["logcat", "--pid", &pid.unwrap(), "Makepad:D *:S"],
+            adb,
+            &["-s", device, "logcat", "--pid", &pid.unwrap(), "Makepad:D *:S"],
         )?;
     } else {
         let mut children = Vec::new();
@@ -1460,7 +1470,7 @@ pub fn run(
             children.push(shell_child_create(
                 &[],
                 &cwd,
-                sdk_dir.join("platform-tools/adb").to_str().unwrap(),
+                adb,
                 &[
                     "-s",
                     &device,
@@ -1486,7 +1496,7 @@ pub fn run(
             children.push(shell_child_create(
                 &[],
                 &cwd,
-                sdk_dir.join("platform-tools/adb").to_str().unwrap(),
+                adb,
                 &device_args_refs,
             )?);
         }
@@ -1503,17 +1513,61 @@ pub fn adb(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), Stri
         args_out.push(arg.as_ref());
     }
     let cwd = std::env::current_dir().unwrap();
-    shell_env(
-        &[],
-        &cwd,
-        sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-        &args_out,
-    )?;
+    let adb = adb_path(sdk_dir);
+    let adb = adb.to_str().unwrap();
+    shell_env(&[], &cwd, adb, &args_out)?;
     Ok(())
 }
 
 fn adb_path(sdk_dir: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("MAKEPAD_ANDROID_ADB") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return path;
+        }
+    }
+
+    if let Some(path) = adb_path_from_env() {
+        return path;
+    }
+
+    if let Some(path) = adb_path_from_common_locations() {
+        return path;
+    }
+
     sdk_dir.join("platform-tools/adb")
+}
+
+fn adb_path_from_env() -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        for candidate in adb_binary_candidates(&dir) {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn adb_path_from_common_locations() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let candidates: &[&str] = &["/opt/homebrew/bin/adb", "/usr/local/bin/adb"];
+    #[cfg(target_os = "linux")]
+    let candidates: &[&str] = &["/usr/bin/adb", "/usr/local/bin/adb"];
+    #[cfg(target_os = "windows")]
+    let candidates: &[&str] = &["C:/Android/platform-tools/adb.exe"];
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let candidates: &[&str] = &[];
+
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|candidate| candidate.is_file())
+}
+
+fn adb_binary_candidates(dir: &Path) -> [PathBuf; 2] {
+    [dir.join("adb"), dir.join("adb.exe")]
 }
 
 fn push_serial_args<'a>(serial: Option<&'a str>, args: &[&'a str]) -> Vec<&'a str> {
@@ -1538,7 +1592,16 @@ fn adb_run(sdk_dir: &Path, serial: Option<&str>, args: &[&str]) -> Result<(), St
     shell_env(&[], &cwd, adb_path(sdk_dir).to_str().unwrap(), &args_out)
 }
 
-fn parse_adb_devices(output: &str) -> Vec<String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdbDeviceInfo {
+    serial: String,
+    state: String,
+    model: Option<String>,
+    product: Option<String>,
+    device: Option<String>,
+}
+
+fn parse_adb_devices_list(output: &str) -> Vec<AdbDeviceInfo> {
     let mut devices = Vec::new();
     for line in output.lines() {
         let line = line.trim();
@@ -1552,16 +1615,117 @@ fn parse_adb_devices(output: &str) -> Vec<String> {
         let Some(state) = parts.next() else {
             continue;
         };
-        if state == "device" {
-            devices.push(serial.to_string());
+
+        let mut model = None;
+        let mut product = None;
+        let mut device = None;
+        for part in parts {
+            if let Some(value) = part.strip_prefix("model:") {
+                model = Some(value.to_string());
+            } else if let Some(value) = part.strip_prefix("product:") {
+                product = Some(value.to_string());
+            } else if let Some(value) = part.strip_prefix("device:") {
+                device = Some(value.to_string());
+            }
         }
+
+        devices.push(AdbDeviceInfo {
+            serial: serial.to_string(),
+            state: state.to_string(),
+            model,
+            product,
+            device,
+        });
     }
+
     devices
 }
 
+fn adb_devices_list(sdk_dir: &Path) -> Result<Vec<AdbDeviceInfo>, String> {
+    let output = adb_cap(sdk_dir, None, &["devices", "-l"])?;
+    Ok(parse_adb_devices_list(&output))
+}
+
+fn connected_device_serials(devices: &[AdbDeviceInfo]) -> Vec<String> {
+    devices
+        .iter()
+        .filter(|device| device.state == "device")
+        .map(|device| device.serial.clone())
+        .collect()
+}
+
 pub fn list_connected_devices(sdk_dir: &Path) -> Result<Vec<String>, String> {
-    let output = adb_cap(sdk_dir, None, &["devices"])?;
-    Ok(parse_adb_devices(&output))
+    let devices = adb_devices_list(sdk_dir)?;
+    Ok(connected_device_serials(&devices))
+}
+
+fn adb_device_is_quest(device: &AdbDeviceInfo) -> bool {
+    [
+        device.model.as_deref(),
+        device.product.as_deref(),
+        device.device.as_deref(),
+    ]
+    .iter()
+    .flatten()
+    .any(|value| value.to_ascii_lowercase().contains("quest"))
+}
+
+fn select_run_devices(
+    variant: &AndroidVariant,
+    requested_devices: Vec<String>,
+    discovered_devices: &[AdbDeviceInfo],
+) -> Result<Vec<String>, String> {
+    if !requested_devices.is_empty() {
+        return Ok(requested_devices);
+    }
+
+    let online_devices: Vec<_> = discovered_devices
+        .iter()
+        .filter(|device| device.state == "device")
+        .collect();
+
+    if online_devices.is_empty() {
+        return Err(
+            "No online adb devices found. Connect a device or pass --devices=<serial>."
+                .to_string(),
+        );
+    }
+
+    if online_devices.len() == 1 {
+        return Ok(vec![online_devices[0].serial.clone()]);
+    }
+
+    if matches!(variant, AndroidVariant::Quest) {
+        let quest_devices: Vec<_> = online_devices
+            .iter()
+            .filter(|device| adb_device_is_quest(device))
+            .collect();
+        if quest_devices.len() == 1 {
+            return Ok(vec![quest_devices[0].serial.clone()]);
+        }
+    }
+
+    let mut details = String::new();
+    for device in online_devices {
+        let mut annotations = Vec::new();
+        if let Some(model) = &device.model {
+            annotations.push(format!("model:{model}"));
+        }
+        if let Some(product) = &device.product {
+            annotations.push(format!("product:{product}"));
+        }
+        if let Some(name) = &device.device {
+            annotations.push(format!("device:{name}"));
+        }
+        if !details.is_empty() {
+            details.push('\n');
+        }
+        details.push_str(&format!("  {} [{}]", device.serial, annotations.join(" ")));
+    }
+
+    Err(format!(
+        "Multiple adb devices are online. Pass --devices=<serial> to choose one.\n{details}"
+    ))
 }
 
 fn parse_ipv4_token(token: &str) -> Option<&str> {
@@ -1681,10 +1845,13 @@ pub fn adb_tcp(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_adb_devices, parse_ip_addr_show, parse_ip_route};
+    use super::{
+        adb_device_is_quest, connected_device_serials, parse_adb_devices_list,
+        parse_ip_addr_show, parse_ip_route, select_run_devices, AdbDeviceInfo, AndroidVariant,
+    };
 
     #[test]
-    fn parse_adb_devices_filters_ready_targets() {
+    fn connected_device_serials_filters_ready_targets() {
         let output = "\
 List of devices attached\n\
 emulator-5554          device product:sdk_gphone64 model:sdk_gphone64 device:emu64 transport_id:1\n\
@@ -1692,8 +1859,10 @@ quest-offline          offline transport_id:2\n\
 quest-unauthorized     unauthorized usb:3\n\
 10.0.0.151:5555        device product:eureka model:Quest_3 device:eureka transport_id:4\n\
 \n";
+
+        let devices = parse_adb_devices_list(output);
         assert_eq!(
-            parse_adb_devices(output),
+            connected_device_serials(&devices),
             vec!["emulator-5554".to_string(), "10.0.0.151:5555".to_string()]
         );
     }
@@ -1712,6 +1881,59 @@ quest-unauthorized     unauthorized usb:3\n\
 default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.42 metric 303\n\
 192.168.0.0/24 dev wlan0 proto kernel scope link src 192.168.0.42\n";
         assert_eq!(parse_ip_route(output), Some("192.168.0.42".to_string()));
+    }
+
+    #[test]
+    fn parse_adb_devices_list_extracts_device_metadata() {
+        let output = "\
+List of devices attached\n\
+192.168.2.120:5555     device product:eureka model:Quest_3 device:eureka transport_id:3\n\
+emulator-5554          offline product:sdk_gphone64_x86_64 model:sdk_gphone64_x86_64 device:emu64xa transport_id:4\n";
+
+        let devices = parse_adb_devices_list(output);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].serial, "192.168.2.120:5555");
+        assert_eq!(devices[0].state, "device");
+        assert_eq!(devices[0].model.as_deref(), Some("Quest_3"));
+        assert_eq!(devices[1].state, "offline");
+    }
+
+    #[test]
+    fn adb_device_is_quest_matches_quest_models() {
+        let device = AdbDeviceInfo {
+            serial: "192.168.2.120:5555".to_string(),
+            state: "device".to_string(),
+            model: Some("Quest_3".to_string()),
+            product: Some("eureka".to_string()),
+            device: Some("eureka".to_string()),
+        };
+
+        assert!(adb_device_is_quest(&device));
+    }
+
+    #[test]
+    fn select_run_devices_prefers_quest_when_multiple_devices_are_online() {
+        let devices = vec![
+            AdbDeviceInfo {
+                serial: "emulator-5554".to_string(),
+                state: "device".to_string(),
+                model: Some("sdk_gphone64_x86_64".to_string()),
+                product: Some("sdk_gphone64_x86_64".to_string()),
+                device: Some("emu64xa".to_string()),
+            },
+            AdbDeviceInfo {
+                serial: "192.168.2.120:5555".to_string(),
+                state: "device".to_string(),
+                model: Some("Quest_3".to_string()),
+                product: Some("eureka".to_string()),
+                device: Some("eureka".to_string()),
+            },
+        ];
+
+        let selected = select_run_devices(&AndroidVariant::Quest, Vec::new(), &devices)
+            .expect("quest device should be selected");
+
+        assert_eq!(selected, vec!["192.168.2.120:5555".to_string()]);
     }
 }
 

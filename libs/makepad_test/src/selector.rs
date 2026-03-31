@@ -19,6 +19,19 @@ pub struct Selector {
     window: WindowTarget,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SelectorOptions {
+    pub id: Option<String>,
+    pub widget_type: Option<String>,
+    pub raw: Option<String>,
+    pub text_exact: Option<String>,
+    pub text_contains: Option<String>,
+    pub nth: Option<usize>,
+    pub window: Option<String>,
+    pub window_index: Option<usize>,
+    pub any_window: bool,
+}
+
 impl Selector {
     pub fn all() -> Self {
         Self {
@@ -80,6 +93,28 @@ impl Selector {
         self
     }
 
+    pub(crate) fn from_options(options: SelectorOptions) -> Self {
+        let window = if options.any_window {
+            WindowTarget::Any
+        } else if let Some(window) = options.window {
+            WindowTarget::Id(window)
+        } else if let Some(index) = options.window_index {
+            WindowTarget::Index(index)
+        } else {
+            WindowTarget::Primary
+        };
+
+        Self {
+            id: options.id,
+            widget_type: options.widget_type,
+            raw: options.raw,
+            text_exact: options.text_exact,
+            text_contains: options.text_contains,
+            nth: options.nth,
+            window,
+        }
+    }
+
     pub fn as_query(&self) -> String {
         if let Some(value) = &self.raw {
             return value.clone();
@@ -128,6 +163,44 @@ impl Selector {
 
     pub(crate) fn nth_index(&self) -> Option<usize> {
         self.nth
+    }
+
+    pub(crate) fn id_value(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    pub(crate) fn widget_type_value(&self) -> Option<&str> {
+        self.widget_type.as_deref()
+    }
+
+    pub(crate) fn raw_query(&self) -> Option<&str> {
+        self.raw.as_deref()
+    }
+
+    pub(crate) fn text_exact_value(&self) -> Option<&str> {
+        self.text_exact.as_deref()
+    }
+
+    pub(crate) fn text_contains_value(&self) -> Option<&str> {
+        self.text_contains.as_deref()
+    }
+
+    pub(crate) fn any_window_enabled(&self) -> bool {
+        matches!(&self.window, WindowTarget::Any)
+    }
+
+    pub(crate) fn window_value(&self) -> Option<&str> {
+        match &self.window {
+            WindowTarget::Id(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn window_index_value(&self) -> Option<usize> {
+        match &self.window {
+            WindowTarget::Index(index) => Some(*index),
+            _ => None,
+        }
     }
 
     pub(crate) fn matches(

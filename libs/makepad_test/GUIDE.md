@@ -4,54 +4,68 @@ This guide covers how to write, run, and debug UI tests with `makepad_test`.
 
 ## Authoring Model
 
-Tests live beside the package they exercise, usually under `tests/`.
+Tests live beside the package they exercise, usually under `tests/`. Splash is the source of truth for the suite; Rust is only the `cargo test` host stub.
+
+Reference layout ([examples/splash](../../examples/splash)):
 
 ```text
-examples/text_input/
+examples/splash/
 ├── Cargo.toml
 ├── src/main.rs
-└── tests/ui.rs
+├── tests/ui.rs
+└── tests/ui.splash
 ```
 
-`#[makepad_test]` is current-package oriented by default:
-
-- `env!("CARGO_MANIFEST_DIR")` provides the mount root
-- `env!("CARGO_PKG_NAME")` provides the package to run
-
-That keeps the normal Rust workflow intact: add a dev-dependency, write `tests/*.rs`, and run `cargo test -p <package>`.
-
-## Macro Behavior
-
-`#[makepad_test]` expands to a normal `#[test]` wrapper that:
-
-1. starts `StudioHub::start_in_process`
-2. mounts the current package directory
-3. runs the current package headlessly
-4. waits for `BuildStarted` and `AppStarted`
-5. passes a `TestApp` into your test body
-6. captures failure artifacts on returned errors or panics
-
-Supported signatures:
+Rust host (`tests/ui.rs`) loads the Splash suite:
 
 ```rust
-#[makepad_test]
-fn smoke(app: TestApp) {
-    // ...
-}
+use makepad_test::run_splash_suite;
 
-#[makepad_test]
-fn smoke(app: TestApp) -> Result<(), TestError> {
-    // ...
-    Ok(())
+const SUITE_PATH: &str = "tests/ui.splash";
+
+#[test]
+fn splash_suite() {
+    run_splash_suite(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_MANIFEST_DIR"),
+        module_path!(),
+        SUITE_PATH,
+    )
+    .unwrap();
 }
 ```
 
-Unsupported:
+`run_splash_suite(...)` is current-package oriented by default:
 
-- async tests
-- methods with `self`
-- generic test functions
-- macro arguments
+- `env!("CARGO_MANIFEST_DIR")` provides the package root
+- `env!("CARGO_PKG_NAME")` provides the package to run
+- `tests/ui.splash` registers the cases and suite config with `mod.test`
+
+That keeps the normal `cargo test` workflow intact while moving test authoring into Splash.
+
+## Suite Behavior
+
+`run_splash_suite(...)`:
+
+1. loads `tests/ui.splash`
+2. installs `mod.test`
+3. collects `test.configure(...)` and `test.case(...)`
+4. starts a fresh app + hub session for each case by default
+5. executes each case in order
+6. writes per-case reports plus a suite summary
+7. captures failure artifacts on returned errors or panics
+
+**Session mode:** Cases are isolated by default. Opt into a shared process only when you need it:
+
+- `test.configure({ session_mode: "isolated" })` or omit the field for the default
+- `test.configure({ session_mode: "shared" })` to keep one app session for the whole suite
+
+**Artifact directory:** Splash suites write to `target/makepad_test/<package>/<suite>/`, where `<suite>` is `splash_suite` when `module_path!()` is empty, or `{module_path}::splash_suite` (sanitized for paths). Each case gets `cases/<case>/...`.
+
+Splash suites can either:
+
+- launch the current package, or
+- launch visible/headless Splash run items via `test.configure({ launch: "splash_run_item", ... })`
 
 ## Runtime Defaults
 
@@ -59,7 +73,7 @@ The runtime is synchronous and serial-first:
 
 - action timeout: `10s`
 - poll interval: `50ms`
-- artifacts: `target/makepad_test/<package>/<test>/`
+- artifacts: `target/makepad_test/<package>/<suite>/`
 
 The in-process runner also serializes app sessions, so UI suites should be invoked with `--test-threads=1`.
 
@@ -69,7 +83,7 @@ By default, `makepad_test` launches the app headlessly through an in-process hub
 For local debugging, you can switch the same test to a visible Studio-backed run:
 
 ```bash
-MAKEPAD_TEST_VISIBLE=1 cargo test -p makepad-example-counter --test ui -- --test-threads=1
+MAKEPAD_TEST_VISIBLE=1 cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
 Visible mode behavior:
@@ -92,7 +106,9 @@ Studio session uses a different mount name, set `MAKEPAD_TEST_STUDIO_MOUNT`.
 
 ## Selectors
 
-Selectors are snapshot-based. They match structured widget state instead of only relying on geometry query strings.
+Matching is snapshot-based: selectors describe structured widget state, not only geometry.
+
+### `Selector` in Rust (`TestApp` / `Locator`)
 
 Constructors:
 
@@ -110,57 +126,64 @@ Builder filters:
 - `.window_index(1)`
 - `.any_window()`
 
-Selectors default to the primary window. That keeps single-window tests terse while still allowing explicit multi-window targeting.
+By default, selectors target the primary window; use `.window` / `.window_index` / `.any_window` for multi-window cases.
 
-## Locators
+## Splash API
 
-`Locator` methods require exactly one visible match for interaction. That strictness is intentional: it keeps tests from silently clicking the wrong widget.
+Suites import `mod.test` and register cases by side effect:
 
-Common actions:
+```text
+use mod.test
 
-```rust
-app.locator(Selector::id("panel_input"))
-    .wait_visible()
-    .fill("hello")
-    .wait_value("hello")
-    .press_key(KeyCode::Enter);
+test.configure({
+    launch: "splash_run_item"
+    session_mode: "isolated"
+    visible_run_item: "makepad-example-splash"
+    headless_run_item: "makepad-example-splash-headless-test"
+})
+
+test.case("smoke", || {
+    test.click({id: "submit"})
+    test.wait_text({id: "status"}, "Saved")
+})
 ```
 
-Available interaction helpers:
+Available host methods include:
 
-- `click`
-- `type_text`
-- `fill`
-- `clear`
-- `press_key`
-- `press_key_with_modifiers`
-- `scroll`
-- `drag_by`
+- `test.configure`
+- `test.case`
+- `test.fail`
+- `test.click`, `test.hover`, `test.fill`, `test.clear`, `test.type_text`
+- `test.press_return`, `test.press_key`, `test.scroll`, `test.drag`
+- `test.wait_visible`, `test.wait_hidden`, `test.wait_count`
+- `test.wait_text`, `test.wait_value`, `test.wait_checked`, `test.wait_enabled`
+- `test.expect_text`, `test.expect_value`, `test.expect_checked`, `test.expect_enabled`
+- `test.snapshot`, `test.snapshots`, `test.widget_dump`, `test.screenshot`
+- `test.logs`, `test.wait_log`
 
-Available waits and assertions:
+### Recorder API
 
-- `wait_visible`
-- `wait_hidden`
-- `wait_count`
-- `wait_text` / `assert_text`
-- `wait_value` / `assert_value`
-- `wait_checked` / `assert_checked`
-- `wait_enabled` / `assert_enabled`
+For visible-mode draft generation, `run_splash_recorder(...)` starts a visible app session and writes:
 
-Inspection helpers:
+- `generated-case.splash`
+- `recording-trace.json`
+- `recording-report.html`
 
-- `snapshot()`
-- `count()`
-- `widget_snapshot()`
-- `widget_dump()`
-- `screenshot()`
-- `wait_for_log_contains(...)`
+The recorder is host-driven in v1: it records the actions executed through `SplashRecorderSession` and emits draft Splash code plus artifacts.
 
-Lower-level escape hatch:
+### Selector objects in Splash
 
-```rust
-app.forward(vec![/* StudioToApp messages */]);
-```
+Splash passes selector objects into helpers like `test.click` and `test.wait_text`. Supported fields:
+
+- `id`
+- `widget_type`
+- `raw`
+- `text_exact`
+- `text_contains`
+- `nth`
+- `window`
+- `window_index`
+- `any_window`
 
 ## Structured Widget State
 
@@ -181,14 +204,17 @@ That is enough to cover common labels, buttons, text inputs, checkboxes/toggles,
 
 ## Failure Artifacts
 
-Failed tests write to:
+Suites write to:
 
 ```text
-target/makepad_test/<package>/<test>/
+target/makepad_test/<package>/<suite>/
 ```
 
 Typical contents:
 
+- `suite-report.json`
+- `index.html`
+- `cases/<case>/case-report.json`
 - `failure.txt`
 - `logs.txt`
 - `widget-snapshot.json`
@@ -199,10 +225,22 @@ If a capture step fails, the runtime writes a `*-error.txt` file instead of sile
 
 ## Running Tests
 
-Package-local:
+Package-local (splash example in this repo):
 
 ```bash
-cargo test -p makepad-example-text-input --test ui -- --test-threads=1
+cargo test -p makepad-example-splash --test ui -- --test-threads=1
+```
+
+Per-case progress: `run_splash_suite` writes lines like `[makepad_test] splash case 1/3: …` and `… ok (12.34s)` to **stderr** for each `test.case`, plus **`splash: app ready`** (time before any case — hub, Cargo build, launch), **`splash suite: N cases ran`** (Splash bodies only), and **`splash: total`** (startup + cases + teardown). The number **`cargo test` prints at the end** (`finished in XXs`) is close to **`splash: total`** and is **not** the same as summing per-case lines — startup and teardown happen outside the case loop. Cargo hides this for passing tests unless you pass **`--show-output`** (show all test output) or **`--nocapture`** (do not capture stdout/stderr):
+
+```bash
+cargo test -p makepad-example-splash --test ui -- --test-threads=1 --show-output
+```
+
+Harness-level artifact capture (runs against a small example app path inside the `makepad-test` crate):
+
+```bash
+cargo test -p makepad-test --test artifact_capture -- --test-threads=1
 ```
 
 Curated repo suite on macOS:
@@ -211,15 +249,7 @@ Curated repo suite on macOS:
 tools/run_ui_tests.sh
 ```
 
-That runner executes:
-
-- `makepad-example-text-input`
-- `makepad-example-counter`
-- `makepad-example-todo`
-- `makepad-example-floating-panel`
-- `makepad-example-splash`
-
-and prints the artifact directory for each package.
+That runner executes `makepad-example-splash` and prints the artifact directory.
 
 ## Headless Transport
 
@@ -236,7 +266,7 @@ This keeps the test surface aligned with how Studio itself talks to Makepad apps
 
 ## Troubleshooting
 
-If a test times out or fails to resolve a widget:
+If a Splash case times out or fails to resolve a widget:
 
 1. inspect `target/makepad_test/.../logs.txt`
 2. inspect `widget-snapshot.json` for text/value/checked/selected state
@@ -246,16 +276,15 @@ If a test times out or fails to resolve a widget:
 If you need hub-level transport diagnostics:
 
 ```bash
-MAKEPAD_STUDIO_HUB_DEBUG=1 cargo test -p makepad-example-text-input --test ui -- --test-threads=1
+MAKEPAD_STUDIO_HUB_DEBUG=1 cargo test -p makepad-example-splash --test ui -- --test-threads=1
 ```
 
 Screenshot capture is intentionally given a longer timeout than normal widget-state queries because PNG encoding and transport cost more than structured snapshot requests.
 
 ## Current Limitations
 
-- current-package execution only
+- default execution targets the **current Cargo package**; optional `splash_run_item` configuration routes through Studio run items instead
 - synchronous API only
-- no visual diffing or trace viewer yet
+- recorder output is artifact-based, not a Studio-integrated recorder UI
+- no visual diffing yet
 - some complex widgets still need more structured state over time
-
-Milestone 1 is intentionally scoped around reliable Rust-local UI regression coverage first, with cross-platform expansion and richer tooling following after the harness stabilizes.
