@@ -239,6 +239,10 @@ pub enum XrNetSharedObjectControl {
         linvel: Vec3f,
         angvel: Vec3f,
     },
+    XrResetActivityPose {
+        activity_id: XrActivityId,
+        pose: Pose,
+    },
     XrClockPing {
         seq: u32,
         sent_at: f64,

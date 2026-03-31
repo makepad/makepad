@@ -5,6 +5,10 @@ use makepad_xr::scene::*;
 
 app_main!(App);
 
+const ACTIVITY_POSE_SYNC_INTERVAL_SECONDS: f64 = 0.6;
+const ACTIVITY_POSE_SYNC_POSITION_EPSILON_METERS: f32 = 0.015;
+const ACTIVITY_POSE_SYNC_ROTATION_EPSILON_DEGREES: f32 = 1.5;
+
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
@@ -624,7 +628,7 @@ script_mod! {
                 visible: false
                 mode: mod.widgets.XrViewMode.StuckToWrist
                 wrist_left: true
-                logical_size: vec2(112, 104)
+                logical_size: vec2(112, 188)
                 pixel_scale: 0.00030
                 dpi_factor: 1.6
                 depth_scale: 120.0
@@ -652,6 +656,30 @@ script_mod! {
                         draw_bg.border_radius: 12.0
                         on_press: || ui.root.reset_physics()
                     }
+
+                    wrist_pose_button := XrUiButton{
+                        width: Fill
+                        height: 40
+                        text: "Pose"
+                        draw_bg.border_radius: 12.0
+                        on_press: || ui.root.reset_activity_pose()
+                    }
+
+                    wrist_auto_align_button := XrUiButton{
+                        width: Fill
+                        height: 40
+                        text: "Auto Align"
+                        draw_bg.border_radius: 12.0
+                        on_press: || ui.xr_peer_sync.set_auto_align(true)
+                    }
+
+                    wrist_sync_status := Label{
+                        width: Fill
+                        height: Fit
+                        text: "Touch sync: idle"
+                        draw_text.color: #xe8f4ff
+                        draw_text.flow: Flow.Right{wrap: true}
+                    }
                 }
             }
 
@@ -672,9 +700,27 @@ pub struct App {
     suppress_activity_broadcast: Option<XrActivityId>,
     #[rust]
     pending_shared_scene_reset: bool,
+    #[rust]
+    last_activity_pose_sync: Option<Pose>,
+    #[rust]
+    last_activity_pose_sync_activity: Option<XrActivityId>,
+    #[rust]
+    last_activity_pose_sync_at: f64,
 }
 
 impl App {
+    fn poses_match(left: Pose, right: Pose) -> bool {
+        let translation_delta = (left.position - right.position).length();
+        let rotation_dot = left
+            .orientation
+            .dot(right.orientation)
+            .abs()
+            .clamp(0.0, 1.0);
+        let rotation_delta_degrees = (2.0 * rotation_dot.acos()).to_degrees();
+        translation_delta <= ACTIVITY_POSE_SYNC_POSITION_EPSILON_METERS
+            && rotation_delta_degrees <= ACTIVITY_POSE_SYNC_ROTATION_EPSILON_DEGREES
+    }
+
     fn current_activity(&self, cx: &mut Cx) -> Option<XrActivityId> {
         self.ui
             .widget(cx, ids!(scene_select))
@@ -721,6 +767,57 @@ impl App {
         {
             if peer_sync.enabled() && peer_sync.current_activity().is_none() {
                 let _ = peer_sync.set_local_activity(cx, activity_id);
+            }
+        }
+    }
+
+    fn sync_authoritative_activity_pose(&mut self, cx: &mut Cx) {
+        let Some(activity_id) = self.current_activity(cx) else {
+            self.last_activity_pose_sync = None;
+            self.last_activity_pose_sync_activity = None;
+            self.last_activity_pose_sync_at = 0.0;
+            return;
+        };
+
+        let should_sync = self
+            .ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow::<XrPeerSync>()
+            .is_some_and(|peer_sync| {
+                peer_sync.enabled()
+                    && peer_sync.connected_peer_count() != 0
+                    && peer_sync.local_is_activity_authority()
+            });
+        if !should_sync {
+            self.last_activity_pose_sync = None;
+            self.last_activity_pose_sync_activity = None;
+            self.last_activity_pose_sync_at = 0.0;
+            return;
+        }
+
+        let Some(content_pose) = self.ui.borrow::<XrRoot>().and_then(|root| root.content_pose()) else {
+            return;
+        };
+        let now = Cx::time_now();
+        let activity_changed = self.last_activity_pose_sync_activity != Some(activity_id);
+        let pose_changed = self
+            .last_activity_pose_sync
+            .is_none_or(|previous| !Self::poses_match(previous, content_pose));
+        let interval_elapsed = now - self.last_activity_pose_sync_at
+            >= ACTIVITY_POSE_SYNC_INTERVAL_SECONDS;
+        if !(activity_changed || pose_changed || interval_elapsed) {
+            return;
+        }
+
+        if let Some(mut peer_sync) = self
+            .ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow_mut::<XrPeerSync>()
+        {
+            if peer_sync.send_activity_pose_reset(content_pose) {
+                self.last_activity_pose_sync = Some(content_pose);
+                self.last_activity_pose_sync_activity = Some(activity_id);
+                self.last_activity_pose_sync_at = now;
             }
         }
     }
@@ -795,12 +892,13 @@ impl App {
         }
         let reset_applied = {
             let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
-            let reset_applied = if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
-                peer_sync.reset_local_shared_bootstrap_objects(runtime_bodies.as_ref());
-                true
-            } else {
-                false
-            };
+            let reset_applied =
+                if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+                    peer_sync.reset_local_shared_bootstrap_objects(runtime_bodies.as_ref());
+                    true
+                } else {
+                    false
+                };
             reset_applied
         };
         if reset_applied {
@@ -838,9 +936,22 @@ impl App {
                 (
                     peer_sync.connected_peer_count(),
                     peer_sync.shared_object_count(),
+                    peer_sync.touch_sync_status_text(),
+                    peer_sync.local_touch_signal_text(),
+                    peer_sync.alignment_debug_text().to_string(),
+                    peer_sync.alignment_state_text().to_string(),
+                    peer_sync.peer_scene_text().to_string(),
                 )
             })
-            .unwrap_or((0, 0));
+            .unwrap_or((
+                0,
+                0,
+                "Touch sync: off".to_string(),
+                "TouchRaw: off".to_string(),
+                "AlignDbg: off".to_string(),
+                "AlignState: off".to_string(),
+                "PeerMap: off".to_string(),
+            ));
         let tsdf_memory_mb = cx
             .xr_tsdf()
             .latest_tsdf_snapshot()
@@ -863,9 +974,14 @@ impl App {
             .map(|gpu_ms| format!("{gpu_ms:.2} ms"))
             .unwrap_or_else(|| "waiting".to_string());
         let debug_text = format!(
-            "Connected peers: {}\nShared objects: {}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nCPU frame time: {frame_cpu_ms:.2} ms\nUpdate time: {frame_update_cpu_ms:.2} ms\nDraw time: {frame_draw_cpu_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}",
+            "Connected peers: {}\nShared objects: {}\n{}\n{}\n{}\n{}\n{}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nCPU frame time: {frame_cpu_ms:.2} ms\nUpdate time: {frame_update_cpu_ms:.2} ms\nDraw time: {frame_draw_cpu_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}",
             connected_peers.0,
             connected_peers.1,
+            connected_peers.2,
+            connected_peers.3,
+            connected_peers.4,
+            connected_peers.5,
+            connected_peers.6,
         );
         if self.last_debug_text != debug_text {
             self.ui
@@ -873,6 +989,9 @@ impl App {
                 .set_text(cx, &debug_text);
             self.last_debug_text = debug_text;
         }
+        self.ui
+            .widget(cx, ids!(wrist_sync_status))
+            .set_text(cx, &connected_peers.2);
     }
 }
 
@@ -887,8 +1006,10 @@ impl MatchEvent for App {
         let mut remote_body_spawns = Vec::new();
         let mut remote_body_impulses = Vec::new();
         let mut remote_body_despawns = Vec::new();
+        let mut remote_activity_pose_reset = None;
         let mut local_activity = None;
         let mut local_body_spawns = Vec::new();
+        let mut local_activity_pose_reset = None;
         let mut scene_changed = false;
 
         for action in actions {
@@ -899,6 +1020,9 @@ impl MatchEvent for App {
                 match widget_action.cast::<XrPeerSyncAction>() {
                     XrPeerSyncAction::ActivityChanged(activity_id) => {
                         remote_activity = Some(activity_id);
+                    }
+                    XrPeerSyncAction::ActivityPoseReset(pose) => {
+                        remote_activity_pose_reset = Some(pose);
                     }
                     XrPeerSyncAction::BodySpawn(spawn) => {
                         remote_body_spawns.push(spawn);
@@ -913,9 +1037,16 @@ impl MatchEvent for App {
                 }
             }
             if widget_action.widget_uid == root_uid
-                && matches!(widget_action.cast::<XrRootAction>(), XrRootAction::PhysicsReset)
             {
-                self.pending_shared_scene_reset = true;
+                match widget_action.cast::<XrRootAction>() {
+                    XrRootAction::PhysicsReset => {
+                        self.pending_shared_scene_reset = true;
+                    }
+                    XrRootAction::ContentPoseReset(pose) => {
+                        local_activity_pose_reset = Some(pose);
+                    }
+                    XrRootAction::None => {}
+                }
             }
             if widget_action.widget_uid == scene_select_uid {
                 if let XrSelectAction::ActiveChildChanged(activity_id) =
@@ -927,7 +1058,10 @@ impl MatchEvent for App {
             if let Some(body_spawn) = widget_action.action.downcast_ref::<XrBodySpawn>() {
                 local_body_spawns.push(*body_spawn);
             }
-            if matches!(widget_action.cast::<XrNodeAction>(), XrNodeAction::SceneChanged) {
+            if matches!(
+                widget_action.cast::<XrNodeAction>(),
+                XrNodeAction::SceneChanged
+            ) {
                 scene_changed = true;
             }
         }
@@ -955,6 +1089,20 @@ impl MatchEvent for App {
             }
         }
 
+        if let Some(pose) = remote_activity_pose_reset {
+            if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
+                root.set_content_pose(cx, pose);
+            }
+            self.pending_shared_scene_reset = true;
+        }
+
+        if let Some(pose) = local_activity_pose_reset {
+            self.pending_shared_scene_reset = true;
+            if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+                let _ = peer_sync.send_activity_pose_reset(pose);
+            }
+        }
+
         for widget_uid in remote_body_despawns {
             self.apply_remote_body_despawn(cx, widget_uid);
         }
@@ -971,7 +1119,9 @@ impl MatchEvent for App {
             self.refresh_spawnable_registry(cx, false);
             if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
                 for spawn in local_body_spawns {
-                    let _ = peer_sync.send_local_body_spawn(spawn);
+                    if let Some(spawn) = peer_sync.send_local_body_spawn(spawn) {
+                        self.apply_remote_body_spawn(cx, spawn);
+                    }
                 }
             }
         }
@@ -992,6 +1142,7 @@ impl AppMain for App {
             self.ensure_network_started(cx);
         }
         self.ensure_activity_announced(cx);
+        self.sync_authoritative_activity_pose(cx);
         self.refresh_spawnable_registry(cx, false);
         self.apply_pending_shared_scene_reset(cx);
         if matches!(event, Event::XrUpdate(_))

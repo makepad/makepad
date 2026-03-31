@@ -47,8 +47,9 @@ const DEPTH_TSD_MAX_CONFIDENCE: u8 = 32;
 const DEPTH_TSD_STABLE_CONFIDENCE: u8 = 8;
 const DEPTH_PLAYER_CLEAR_MAX_CONFIDENCE: u8 = 2;
 const DEPTH_PLAYER_EXCLUDE_RADIUS_METERS: f32 = 0.32;
-const DEPTH_PLAYER_EXCLUDE_TOP_METERS: f32 = 0.12;
-const DEPTH_PLAYER_EXCLUDE_BOTTOM_METERS: f32 = 1.30;
+// Clear the body band below the headset while leaving floor and ceiling connected.
+const DEPTH_PLAYER_EXCLUDE_MIN_RELATIVE_Y_METERS: f32 = -0.95;
+const DEPTH_PLAYER_EXCLUDE_MAX_RELATIVE_Y_METERS: f32 = 0.0;
 const DEPTH_MESH_UPDATE_DISTANCE_METERS: f32 = 4.0;
 pub const DEPTH_PUBLISHED_HEIGHT_MAP_INTERVAL_MILLIS: u64 = 1000;
 pub const DEPTH_PROJECTED_HEIGHT_REFRESH_INTERVAL_MILLIS: u64 = 33;
@@ -2376,12 +2377,12 @@ fn refresh_visible_free_space(volume: &mut DepthMeshVolume, job: &PreparedDepthM
 fn clear_player_exclusion_volume(volume: &mut DepthMeshVolume, camera_world: Vec3f) -> usize {
     let min_world = vec3f(
         camera_world.x - DEPTH_PLAYER_EXCLUDE_RADIUS_METERS,
-        camera_world.y - DEPTH_PLAYER_EXCLUDE_BOTTOM_METERS,
+        camera_world.y + DEPTH_PLAYER_EXCLUDE_MIN_RELATIVE_Y_METERS,
         camera_world.z - DEPTH_PLAYER_EXCLUDE_RADIUS_METERS,
     );
     let max_world = vec3f(
         camera_world.x + DEPTH_PLAYER_EXCLUDE_RADIUS_METERS,
-        camera_world.y + DEPTH_PLAYER_EXCLUDE_TOP_METERS,
+        camera_world.y + DEPTH_PLAYER_EXCLUDE_MAX_RELATIVE_Y_METERS,
         camera_world.z + DEPTH_PLAYER_EXCLUDE_RADIUS_METERS,
     );
     let min_coord = volume.mesh_grid.world_to_voxel_coord(min_world);
@@ -2467,9 +2468,37 @@ fn point_inside_player_exclusion(camera_world: Vec3f, world: Vec3f) -> bool {
     let dx = world.x - camera_world.x;
     let dz = world.z - camera_world.z;
     let horizontal_sq = dx * dx + dz * dz;
+    let relative_y = world.y - camera_world.y;
     horizontal_sq <= DEPTH_PLAYER_EXCLUDE_RADIUS_METERS * DEPTH_PLAYER_EXCLUDE_RADIUS_METERS
-        && world.y <= camera_world.y + DEPTH_PLAYER_EXCLUDE_TOP_METERS
-        && world.y >= camera_world.y - DEPTH_PLAYER_EXCLUDE_BOTTOM_METERS
+        && relative_y >= DEPTH_PLAYER_EXCLUDE_MIN_RELATIVE_Y_METERS
+        && relative_y <= DEPTH_PLAYER_EXCLUDE_MAX_RELATIVE_Y_METERS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_exclusion_band_leaves_floor_and_ceiling_intact() {
+        let camera_world = vec3f(0.0, 1.6, 0.0);
+
+        assert!(point_inside_player_exclusion(
+            camera_world,
+            vec3f(0.0, 1.0, 0.0)
+        ));
+        assert!(!point_inside_player_exclusion(
+            camera_world,
+            vec3f(0.0, 0.0, 0.0)
+        ));
+        assert!(!point_inside_player_exclusion(
+            camera_world,
+            vec3f(0.0, 2.3, 0.0)
+        ));
+        assert!(!point_inside_player_exclusion(
+            camera_world,
+            vec3f(0.5, 1.0, 0.0)
+        ));
+    }
 }
 
 fn voxel_center_axis(voxel_size: f32, coord: i32) -> f32 {

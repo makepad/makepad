@@ -1,0 +1,26 @@
+[package]
+name = "makepad-voice2"
+version = "0.1.0"
+edition = "2021"
+description = "Baseline copy of makepad-voice for ggml migration"
+license = "MIT"
+
+[features]
+default = []
+metal-precompile = []
+
+[dependencies]
+makepad-ggml = { path = "../ggml" }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+makepad-objc-sys = { path = "../objc-sys", version = "1.0.0" }
+
+[workspace]
+
+[[bin]]
+name = "whisper-test"
+path = "src/bin/whisper_test.rs"
+
+[[bin]]
+name = "apple-speech-test"
+path = "src/bin/apple_speech_test.rs"

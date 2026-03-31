@@ -60,7 +60,9 @@ workspace.members = [
 
 workspace.exclude = [
     "libs/terminal_core",
+    "libs/ggml",
     "libs/voice",
+    "libs/voice2",
     "widgets/test",
     "libs/stitch",
     "libs/wasm_bridge/test",

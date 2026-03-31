@@ -9,7 +9,10 @@ pub mod xr_select;
 pub mod xr_shared_object_sync;
 pub mod xr_view;
 
-pub(crate) use xr_gesture::{hand_is_palm_down_closed_fist, CLOSED_FIST_GESTURE};
+pub(crate) use xr_gesture::{
+    flat_head_forward, flat_head_right, hand_closed_fist_contact_point,
+    hand_closed_fist_contact_point_geometry_only,
+};
 
 pub use crate::net::{XrActivityId, XrSpawnableObjectId};
 pub use xr_body_spawn::{XrBodyImpulse, XrBodySpawn};
