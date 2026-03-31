@@ -444,6 +444,19 @@ impl Cx {
         self.pending_script_reapply = true;
     }
 
+    /// Updates `mod.widgets.CAPTION_BAR_HEIGHT` on the script heap so that the
+    /// Window widget's caption bar can resize itself to match the OS titlebar.
+    /// Called on macOS whenever the window geometry changes and we have a fresh
+    /// measurement from `contentLayoutRect`.
+    pub fn update_caption_bar_height_script_value(&mut self, height: f64) {
+        use makepad_script::trap::NoTrap;
+        let Some(vm) = self.script_vm.as_mut() else {
+            return;
+        };
+        let widgets = vm.heap.module(id!(widgets));
+        vm.heap.set_value(widgets, id!(CAPTION_BAR_HEIGHT).into(), height.into(), NoTrap);
+    }
+
     pub fn update_safe_inset_script_values(&mut self, insets: crate::event::SafeAreaInsets) {
         use makepad_script::trap::NoTrap;
         let Some(vm) = self.script_vm.as_mut() else {

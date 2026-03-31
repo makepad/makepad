@@ -19,6 +19,11 @@ script_mod! {
     use mod.widgets.MenuItem
     use mod.draw.KeyCode
 
+    // Default caption bar height in logical pixels. Updated at runtime on macOS
+    // (and other platforms with native chrome buttons) via WindowGeomChange to
+    // match the measured traffic-light / chrome button geometry.
+    mod.widgets.CAPTION_BAR_HEIGHT = 27.0
+
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
@@ -32,7 +37,7 @@ script_mod! {
             flow: Right
 
             draw_bg.color: theme.color_app_caption_bar
-            height: 27
+            height: (mod.widgets.CAPTION_BAR_HEIGHT)
             caption_label := View {
                 width: Fill height: Fill
                 align: Center
@@ -595,9 +600,30 @@ impl Widget for Window {
                     // Splash code can reference mod.widgets.SAFE_INSET_PAD_*.
                     cx.update_safe_inset_script_values(ev.new_geom.safe_area_insets);
 
-                    // If safe area insets changed (e.g., device rotation), trigger
+                    // If the platform reports native chrome button geometry, derive
+                    // the default caption bar height so the buttons are vertically
+                    // centered: height = top_margin + bottom_edge = pos.y * 2 + size.y.
+                    // Only reapply scripts when the value changes (normally once at
+                    // startup, or on DPI change).
+                    let new_buttons = ev.new_geom.window_chrome_buttons;
+                    let old_buttons = ev.old_geom.window_chrome_buttons;
+                    let chrome_height = |r: Rect| (r.pos.y * 2.0 + r.size.y).ceil();
+                    if new_buttons != Rect::default() && new_buttons != old_buttons {
+                        let h = chrome_height(new_buttons);
+                        log!(
+                            "Window chrome buttons rect: pos=({:.1},{:.1}) size=({:.1}x{:.1}) \
+                             → caption bar height: {h:.1}",
+                            new_buttons.pos.x, new_buttons.pos.y,
+                            new_buttons.size.x, new_buttons.size.y,
+                        );
+                        cx.update_caption_bar_height_script_value(h);
+                    }
+
+                    // If safe area insets or chrome button geometry changed, trigger
                     // a script re-apply so widgets pick up new values.
-                    if old_insets != ev.new_geom.safe_area_insets {
+                    if old_insets != ev.new_geom.safe_area_insets
+                        || (new_buttons != Rect::default() && new_buttons != old_buttons)
+                    {
                         cx.request_script_reapply();
                     }
 
