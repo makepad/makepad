@@ -65,6 +65,94 @@ script_mod! {
                             draw_text.text_style.font_size: 22.0
                         }
 
+                        RoundedView{
+                            width: Fill
+                            height: Fit
+                            padding: 12
+                            spacing: 10
+                            flow: Down
+                            draw_bg+: {
+                                color: #x16202b
+                                border_radius: 10.0
+                                border_size: 1.0
+                                border_color: #x273646
+                            }
+
+                            Label{
+                                text: "Quest Render Mode"
+                                draw_text.color: #xe4eef7
+                                draw_text.text_style.font_size: 14.0
+                            }
+
+                            host_render := Label{
+                                text: "Render: stream-video | Scene: test-scene"
+                                draw_text.color: #x97adc2
+                            }
+
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+
+                                render_stream_button := ButtonFlat{
+                                    width: Fit
+                                    text: "Stream Video"
+                                }
+
+                                render_test_scene_button := ButtonFlat{
+                                    width: Fit
+                                    text: "Quest Test Scene"
+                                }
+
+                                render_tree_scene_button := ButtonFlat{
+                                    width: Fit
+                                    text: "Quest Tree Scene"
+                                }
+                            }
+                        }
+
+                        RoundedView{
+                            width: Fill
+                            height: Fit
+                            padding: 12
+                            spacing: 10
+                            flow: Down
+                            draw_bg+: {
+                                color: #x16202b
+                                border_radius: 10.0
+                                border_size: 1.0
+                                border_color: #x273646
+                            }
+
+                            Label{
+                                text: "Replicated Marker"
+                                draw_text.color: #xe4eef7
+                                draw_text.text_style.font_size: 14.0
+                            }
+
+                            host_marker := Label{
+                                text: "Marker: (0.42, 0.34, -0.76) scale 1.00 pulse 0.00"
+                                draw_text.color: #x97adc2
+                            }
+
+                            View{
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+
+                                marker_left_button := ButtonFlat{ width: Fit text: "Left" }
+                                marker_right_button := ButtonFlat{ width: Fit text: "Right" }
+                                marker_up_button := ButtonFlat{ width: Fit text: "Up" }
+                                marker_down_button := ButtonFlat{ width: Fit text: "Down" }
+                                marker_near_button := ButtonFlat{ width: Fit text: "Near" }
+                                marker_far_button := ButtonFlat{ width: Fit text: "Far" }
+                                marker_pulse_button := ButtonFlat{ width: Fit text: "Pulse" }
+                                marker_reset_button := ButtonFlat{ width: Fit text: "Reset" }
+                            }
+                        }
+
                         host_status := Label{
                             text: "Booting host..."
                             draw_text.color: #xc4d2de
@@ -362,6 +450,8 @@ struct HostShared {
     control_inbox: Arc<Mutex<Vec<ControlPacket>>>,
     control_peer_ip: Arc<Mutex<Option<IpAddr>>>,
     current_session_config: Arc<Mutex<Option<SessionConfigPacket>>>,
+    current_render_state: Arc<Mutex<Option<RenderStatePacket>>>,
+    current_marker_state: Arc<Mutex<Option<MarkerStatePacket>>>,
     eyes: [HostEyeShared; 2],
 }
 
@@ -380,6 +470,8 @@ impl HostShared {
             control_inbox: Arc::new(Mutex::new(Vec::new())),
             control_peer_ip: Arc::new(Mutex::new(None)),
             current_session_config: Arc::new(Mutex::new(None)),
+            current_render_state: Arc::new(Mutex::new(None)),
+            current_marker_state: Arc::new(Mutex::new(None)),
             eyes: [
                 HostEyeShared::new(XrRemoteEye::Left, media_socket.clone()),
                 HostEyeShared::new(XrRemoteEye::Right, media_socket),
@@ -437,9 +529,23 @@ impl HostShared {
         *self.current_session_config.lock().unwrap() = session_config;
     }
 
+    fn set_render_state(&self, render_state: Option<RenderStatePacket>) {
+        *self.current_render_state.lock().unwrap() = render_state;
+    }
+
+    fn set_marker_state(&self, marker_state: Option<MarkerStatePacket>) {
+        *self.current_marker_state.lock().unwrap() = marker_state;
+    }
+
     fn send_current_control_state(&self) {
         if let Some(session_config) = self.current_session_config.lock().unwrap().clone() {
             self.send_control(&ControlPacket::SessionConfig(session_config));
+        }
+        if let Some(render_state) = self.current_render_state.lock().unwrap().clone() {
+            self.send_control(&ControlPacket::RenderState(render_state));
+        }
+        if let Some(marker_state) = self.current_marker_state.lock().unwrap().clone() {
+            self.send_control(&ControlPacket::MarkerState(marker_state));
         }
         for eye in XrRemoteEye::ALL {
             let eye_shared = self.eye_shared(eye);
@@ -1038,6 +1144,10 @@ pub struct App {
     #[rust]
     latest_stream_text: String,
     #[rust]
+    latest_render_text: String,
+    #[rust]
+    latest_marker_text: String,
+    #[rust]
     latest_remote_log_text: String,
     #[rust]
     frame_group_counter: u64,
@@ -1045,6 +1155,10 @@ pub struct App {
     last_media_ready: bool,
     #[rust]
     session_config: SessionConfigPacket,
+    #[rust]
+    render_state: RenderStatePacket,
+    #[rust]
+    marker_state: MarkerStatePacket,
 }
 
 impl Default for App {
@@ -1065,20 +1179,85 @@ impl Default for App {
             latest_status: "Host idle".to_string(),
             latest_pose_text: "Pose: waiting".to_string(),
             latest_stream_text: "Stream: waiting".to_string(),
+            latest_render_text: "Render: stream-video | Scene: test-scene".to_string(),
+            latest_marker_text: "Marker: (0.42, 0.34, -0.76) scale 1.00 pulse 0.00".to_string(),
             latest_remote_log_text: "Remote: waiting".to_string(),
             frame_group_counter: 0,
             last_media_ready: false,
             session_config: default_session_config(),
+            render_state: default_render_state(),
+            marker_state: default_marker_state(),
         }
     }
 }
 
 impl App {
+    fn marker_summary(marker_state: &MarkerStatePacket) -> String {
+        format!(
+            "Marker: ({:.2}, {:.2}, {:.2}) scale {:.2} pulse {:.2}",
+            marker_state.x,
+            marker_state.y,
+            marker_state.z,
+            marker_state.scale,
+            marker_state.pulse,
+        )
+    }
+
     fn bump_session_id(&mut self) {
         self.session_config.session_id = self.session_config.session_id.wrapping_add(1);
         if self.session_config.session_id == 0 {
             self.session_config.session_id = 1;
         }
+    }
+
+    fn sync_render_state(&self) {
+        self.shared.set_render_state(Some(self.render_state.clone()));
+        self.shared.send_control(&ControlPacket::RenderState(self.render_state.clone()));
+    }
+
+    fn sync_marker_state(&self) {
+        self.shared.set_marker_state(Some(self.marker_state.clone()));
+        self.shared.send_control(&ControlPacket::MarkerState(self.marker_state.clone()));
+    }
+
+    fn set_render_state(&mut self, cx: &mut Cx, mode: XrRemoteRenderMode, scene: XrRemoteSceneId) {
+        let next = RenderStatePacket { mode, scene };
+        if self.render_state == next {
+            return;
+        }
+        self.render_state = next;
+        self.latest_render_text = format!(
+            "Render: {} | Scene: {}",
+            self.render_state.mode.label(),
+            self.render_state.scene.label()
+        );
+        self.sync_render_state();
+        self.refresh_labels(cx);
+    }
+
+    fn set_marker_state(&mut self, cx: &mut Cx, marker_state: MarkerStatePacket) {
+        if self.marker_state == marker_state {
+            return;
+        }
+        self.marker_state = marker_state;
+        self.latest_marker_text = Self::marker_summary(&self.marker_state);
+        self.sync_marker_state();
+        self.refresh_labels(cx);
+    }
+
+    fn nudge_marker(&mut self, cx: &mut Cx, dx: f32, dy: f32, dz: f32) {
+        let mut next = self.marker_state.clone();
+        next.x += dx;
+        next.y += dy;
+        next.z += dz;
+        self.set_marker_state(cx, next);
+    }
+
+    fn pulse_marker(&mut self, cx: &mut Cx) {
+        let mut next = self.marker_state.clone();
+        next.pulse = (next.pulse + 0.25).fract();
+        next.scale = 0.9 + next.pulse * 0.6;
+        self.set_marker_state(cx, next);
     }
 
     fn ensure_started(&mut self, cx: &mut Cx) {
@@ -1087,6 +1266,8 @@ impl App {
         }
         self.bump_session_id();
         self.shared.set_session_config(Some(self.session_config.clone()));
+        self.shared.set_render_state(Some(self.render_state.clone()));
+        self.shared.set_marker_state(Some(self.marker_state.clone()));
         for eye in XrRemoteEye::ALL {
             self.shared
                 .eye_shared(eye)
@@ -1290,6 +1471,12 @@ impl App {
             .widget(cx, ids!(host_status))
             .set_text(cx, &self.latest_status);
         self.ui
+            .widget(cx, ids!(host_render))
+            .set_text(cx, &self.latest_render_text);
+        self.ui
+            .widget(cx, ids!(host_marker))
+            .set_text(cx, &self.latest_marker_text);
+        self.ui
             .widget(cx, ids!(host_pose))
             .set_text(cx, &self.latest_pose_text);
         self.ui
@@ -1385,6 +1572,8 @@ impl App {
                 );
             }
             ControlPacket::SessionConfig(_)
+            | ControlPacket::RenderState(_)
+            | ControlPacket::MarkerState(_)
             | ControlPacket::StreamConfig(_)
             | ControlPacket::VideoConfig(_) => {}
         }
@@ -1631,6 +1820,57 @@ impl App {
     }
 }
 
+impl MatchEvent for App {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self
+            .ui
+            .button(cx, ids!(render_stream_button))
+            .clicked(actions)
+        {
+            let scene = self.render_state.scene;
+            self.set_render_state(cx, XrRemoteRenderMode::Stream, scene);
+        }
+        if self
+            .ui
+            .button(cx, ids!(render_test_scene_button))
+            .clicked(actions)
+        {
+            self.set_render_state(cx, XrRemoteRenderMode::LocalScene, XrRemoteSceneId::Test);
+        }
+        if self
+            .ui
+            .button(cx, ids!(render_tree_scene_button))
+            .clicked(actions)
+        {
+            self.set_render_state(cx, XrRemoteRenderMode::LocalScene, XrRemoteSceneId::Tree);
+        }
+        if self.ui.button(cx, ids!(marker_left_button)).clicked(actions) {
+            self.nudge_marker(cx, -0.08, 0.0, 0.0);
+        }
+        if self.ui.button(cx, ids!(marker_right_button)).clicked(actions) {
+            self.nudge_marker(cx, 0.08, 0.0, 0.0);
+        }
+        if self.ui.button(cx, ids!(marker_up_button)).clicked(actions) {
+            self.nudge_marker(cx, 0.0, 0.08, 0.0);
+        }
+        if self.ui.button(cx, ids!(marker_down_button)).clicked(actions) {
+            self.nudge_marker(cx, 0.0, -0.08, 0.0);
+        }
+        if self.ui.button(cx, ids!(marker_near_button)).clicked(actions) {
+            self.nudge_marker(cx, 0.0, 0.0, 0.08);
+        }
+        if self.ui.button(cx, ids!(marker_far_button)).clicked(actions) {
+            self.nudge_marker(cx, 0.0, 0.0, -0.08);
+        }
+        if self.ui.button(cx, ids!(marker_pulse_button)).clicked(actions) {
+            self.pulse_marker(cx);
+        }
+        if self.ui.button(cx, ids!(marker_reset_button)).clicked(actions) {
+            self.set_marker_state(cx, default_marker_state());
+        }
+    }
+}
+
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
@@ -1638,6 +1878,7 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if matches!(event, Event::Startup) {
             self.ensure_started(cx);

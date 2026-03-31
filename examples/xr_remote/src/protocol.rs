@@ -1,7 +1,7 @@
-use makepad_widgets::makepad_math::Pose;
 use makepad_widgets::makepad_platform::{
     event::xr::XrAnchor, makepad_micro_serde::*, video::VideoCodec,
 };
+use makepad_widgets::{live_id, makepad_live_id::LiveId, makepad_math::Pose};
 
 pub const XR_REMOTE_PROTOCOL_VERSION: u32 = 3;
 pub const XR_REMOTE_CONTROL_PORT: u16 = 44510;
@@ -54,6 +54,44 @@ pub enum XrRemoteEyeTarget {
     Left,
     Right,
     Both,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, SerBin, DeBin)]
+pub enum XrRemoteRenderMode {
+    Stream,
+    LocalScene,
+}
+
+impl XrRemoteRenderMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stream => "stream-video",
+            Self::LocalScene => "quest-local-scene",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, SerBin, DeBin)]
+pub enum XrRemoteSceneId {
+    Test,
+    Tree,
+}
+
+impl XrRemoteSceneId {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Test => "test-scene",
+            Self::Tree => "tree-scene",
+        }
+    }
+
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn live_id(self) -> makepad_widgets::makepad_live_id::LiveId {
+        match self {
+            Self::Test => live_id!(test_scene),
+            Self::Tree => live_id!(tree_scene),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, SerBin, DeBin)]
@@ -172,10 +210,39 @@ pub struct LogLinePacket {
     pub text: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, SerBin, DeBin)]
+pub struct RenderStatePacket {
+    pub mode: XrRemoteRenderMode,
+    pub scene: XrRemoteSceneId,
+}
+
+impl Default for RenderStatePacket {
+    fn default() -> Self {
+        default_render_state()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, SerBin, DeBin)]
+pub struct MarkerStatePacket {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub scale: f32,
+    pub pulse: f32,
+}
+
+impl Default for MarkerStatePacket {
+    fn default() -> Self {
+        default_marker_state()
+    }
+}
+
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum ControlPacket {
     Hello(HelloPacket),
     SessionConfig(SessionConfigPacket),
+    RenderState(RenderStatePacket),
+    MarkerState(MarkerStatePacket),
     ClientMediaChannel(ClientMediaChannelPacket),
     StreamConfig(StreamConfigPacket),
     VideoConfig(VideoConfigPacket),
@@ -193,5 +260,22 @@ pub fn default_session_config() -> SessionConfigPacket {
         ipd_meters: XR_REMOTE_IPD_METERS,
         panel_distance_meters: XR_REMOTE_IMMERSIVE_PANEL_DISTANCE_METERS,
         stale_after_ns: XR_REMOTE_FRAME_STALE_AFTER_NS,
+    }
+}
+
+pub fn default_render_state() -> RenderStatePacket {
+    RenderStatePacket {
+        mode: XrRemoteRenderMode::Stream,
+        scene: XrRemoteSceneId::Test,
+    }
+}
+
+pub fn default_marker_state() -> MarkerStatePacket {
+    MarkerStatePacket {
+        x: 0.42,
+        y: 0.34,
+        z: -0.76,
+        scale: 1.0,
+        pulse: 0.0,
     }
 }
