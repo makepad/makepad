@@ -42,9 +42,30 @@ script_mod! {
             windows_buttons := View {
                 visible: false
                 width: Fit height: Fit
-                min := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMin width: 46 height: 29}
-                max := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMax width: 46 height: 29}
-                close := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsClose width: 46 height: 29}
+                min := DesktopButton {
+                    draw_bg.button_type: DesktopButtonType.WindowsMin
+                    width: 46 height: 29
+                    draw_bg +: {
+                        color: #000, color_hover: #000, color_down: #000
+                        bg_color_hover: #E9E9E9, bg_color_down: #CCCCCC
+                    }
+                }
+                max := DesktopButton {
+                    draw_bg.button_type: DesktopButtonType.WindowsMax
+                    width: 46 height: 29
+                    draw_bg +: {
+                        color: #000, color_hover: #000, color_down: #000
+                        bg_color_hover: #E9E9E9, bg_color_down: #CCCCCC
+                    }
+                }
+                close := DesktopButton {
+                    draw_bg.button_type: DesktopButtonType.WindowsClose
+                    width: 46 height: 29
+                    draw_bg +: {
+                        color: #000, color_hover: #FFF, color_down: #FFF
+                        bg_color_hover: #E81123, bg_color_down: #F1707A
+                    }
+                }
             }
             web_fullscreen := View {
                 visible: false
@@ -252,6 +273,32 @@ impl Window {
         }
     }
 
+    /// Adjusts the caption label's left padding so that the title text appears
+    /// centered in the full caption bar width when there's enough room.
+    /// When the window is too narrow, the padding gracefully reduces to 0,
+    /// transitioning to a left-aligned title.
+    fn sync_caption_centering(&mut self, cx: &mut Cx) {
+        let bar_width = self.view(cx, ids!(caption_bar)).area().rect(cx).size.x;
+        let buttons_width = self.view(cx, ids!(windows_buttons)).area().rect(cx).size.x;
+
+        if bar_width <= 0.0 {
+            return; // No area info yet (first frame)
+        }
+
+        let fill_width = bar_width - buttons_width;
+        // At wide widths: padding = buttons_width, so the label's center
+        // aligns with the bar's center (truly centered).
+        // At narrow widths: padding shrinks toward 0, so the title
+        // shifts left to maximize the available text space.
+        let padding_left = buttons_width.min((fill_width - buttons_width).max(0.0));
+
+        let caption_label = self.view(cx, ids!(caption_label));
+        if let Some(mut inner) = caption_label.borrow_mut() {
+            inner.layout.padding.left = padding_left;
+        }
+        drop(caption_label);
+    }
+
     fn sync_caption_title(&mut self, cx: &mut Cx) {
         let title = if self.window.title.is_empty() {
             cx.windows[self.window.handle.window_id()]
@@ -269,6 +316,7 @@ impl Window {
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         self.sync_caption_bar_state(cx);
         self.sync_caption_title(cx);
+        self.sync_caption_centering(cx);
 
         if self.initialized {
             return;
