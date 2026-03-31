@@ -1,0 +1,15 @@
+[package]
+name = "makepad-llama"
+version = "0.1.0"
+edition = "2021"
+description = "Rust llama.cpp port scaffold built on makepad-ggml"
+license = "MIT"
+
+[dependencies]
+makepad-ggml = { path = "../ggml" }
+
+[workspace]
+
+[[bin]]
+name = "llama-load"
+path = "src/bin/llama_load.rs"
