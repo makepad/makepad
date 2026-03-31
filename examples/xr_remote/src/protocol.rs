@@ -1,6 +1,6 @@
 use makepad_widgets::makepad_math::Pose;
 use makepad_widgets::makepad_platform::{
-    event::xr::{XrAnchor, XrState},
+    event::xr::XrAnchor,
     makepad_micro_serde::*,
     video::{VideoBitstreamFormat, VideoCapabilities, VideoCodec},
 };
@@ -62,14 +62,12 @@ pub enum XrRemoteEyeTarget {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, SerBin, DeBin)]
 pub enum XrRemoteCodec {
-    H264AnnexB,
     H265AnnexB,
 }
 
 impl XrRemoteCodec {
     pub fn video_codec(self) -> VideoCodec {
         match self {
-            Self::H264AnnexB => VideoCodec::H264,
             Self::H265AnnexB => VideoCodec::H265,
         }
     }
@@ -80,7 +78,6 @@ impl XrRemoteCodec {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::H264AnnexB => "H264",
             Self::H265AnnexB => "H265",
         }
     }
@@ -91,7 +88,7 @@ pub fn preferred_codecs_from_capabilities(
     for_encode: bool,
 ) -> Vec<XrRemoteCodec> {
     let mut preferred = Vec::new();
-    for codec in [XrRemoteCodec::H265AnnexB, XrRemoteCodec::H264AnnexB] {
+    for codec in [XrRemoteCodec::H265AnnexB] {
         let video_codec = codec.video_codec();
         let Some(support) = capabilities.codecs.iter().find(|item| item.codec == video_codec) else {
             continue;
@@ -211,24 +208,6 @@ pub struct KeyframeRequestPacket {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub struct InputStatePacket {
-    pub version: u32,
-    pub time_ns: u64,
-    pub state: XrState,
-}
-
-#[derive(Clone, Debug, SerBin, DeBin)]
-pub struct ClockSyncPacket {
-    pub client_time_ns: u64,
-    pub server_time_ns: u64,
-}
-
-#[derive(Clone, Debug, SerBin, DeBin)]
-pub struct PingPacket {
-    pub timestamp_ns: u64,
-}
-
-#[derive(Clone, Debug, SerBin, DeBin)]
 pub struct LogLinePacket {
     pub timestamp_ns: u64,
     pub level: String,
@@ -245,10 +224,6 @@ pub enum ControlPacket {
     StreamConfig(StreamConfigPacket),
     VideoConfig(VideoConfigPacket),
     KeyframeRequest(KeyframeRequestPacket),
-    Tracking(TrackingPacket),
-    InputState(InputStatePacket),
-    ClockSync(ClockSyncPacket),
-    Ping(PingPacket),
     LogLine(LogLinePacket),
 }
 
@@ -269,7 +244,7 @@ pub fn default_session_config() -> SessionConfigPacket {
 
 pub fn default_capabilities() -> CapabilitiesPacket {
     CapabilitiesPacket {
-        codecs: vec![XrRemoteCodec::H265AnnexB, XrRemoteCodec::H264AnnexB],
+        codecs: vec![XrRemoteCodec::H265AnnexB],
         per_eye_width: XR_REMOTE_STREAM_WIDTH,
         per_eye_height: XR_REMOTE_STREAM_HEIGHT,
         fps: XR_REMOTE_STREAM_FPS,

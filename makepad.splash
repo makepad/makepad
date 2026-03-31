@@ -8,7 +8,6 @@ let RunItem = {
     remote_control_port: ""
     remote_media_left_port: ""
     remote_media_right_port: ""
-    xr_remote_force_h264: ""
     xr_remote_debug_mono: ""
     in_studio: true
 }
@@ -23,7 +22,6 @@ let RunQuest = RunItem{
                 "MAKEPAD_XR_REMOTE_CONTROL_PORT": self.remote_control_port,
                 "MAKEPAD_XR_REMOTE_MEDIA_LEFT_PORT": self.remote_media_left_port,
                 "MAKEPAD_XR_REMOTE_MEDIA_RIGHT_PORT": self.remote_media_right_port,
-                "XR_REMOTE_FORCE_H264": self.xr_remote_force_h264,
                 "XR_REMOTE_DEBUG_MONO": self.xr_remote_debug_mono
             },
             "cargo", 
@@ -105,7 +103,6 @@ hub.set_run_items([
         name: "makepad-example-xr-remote-quest",
         run:"makepad-example-xr-remote",
         remote_host:"192.168.2.23",
-        xr_remote_force_h264:"1",
         xr_remote_debug_mono:"left"
     }
 ])

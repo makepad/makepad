@@ -11,10 +11,11 @@ use makepad_widgets::makepad_platform::video::{
     CameraFrameRef,
 };
 use makepad_widgets::*;
+use makepad_xr::{XrNetIncoming, XrNetNode};
 use std::{
     collections::BTreeMap,
     net::{IpAddr, SocketAddr, TcpStream, UdpSocket},
-    sync::{Arc, Mutex},
+    sync::{mpsc::TryRecvError, Arc, Mutex},
     thread,
 };
 
@@ -946,6 +947,8 @@ pub struct App {
     #[rust]
     shared: HostShared,
     #[rust]
+    xr_net: Option<XrNetNode>,
+    #[rust]
     frame_timer: Timer,
     #[rust]
     eye_bgra_frames: [Vec<u8>; 2],
@@ -958,9 +961,9 @@ pub struct App {
     #[rust]
     eye_encoders: [HostEyeEncoder; 2],
     #[rust]
-    latest_tracking: Option<TrackingPacket>,
-    #[rust]
     latest_state: XrState,
+    #[rust]
+    latest_state_received: bool,
     #[rust]
     latest_status: String,
     #[rust]
@@ -980,8 +983,6 @@ pub struct App {
     #[rust]
     negotiated_codec: Option<XrRemoteCodec>,
     #[rust]
-    encoder_failed_h265_once: bool,
-    #[rust]
     session_config: SessionConfigPacket,
 }
 
@@ -990,14 +991,15 @@ impl Default for App {
         Self {
             ui: WidgetRef::default(),
             shared: HostShared::new(),
+            xr_net: None,
             frame_timer: Timer::default(),
             eye_bgra_frames: std::array::from_fn(|_| Vec::new()),
             eye_depth_buffers: std::array::from_fn(|_| Vec::new()),
             network_started: false,
             encoders_started: false,
             eye_encoders: std::array::from_fn(|_| HostEyeEncoder::None),
-            latest_tracking: None,
             latest_state: XrState::default(),
+            latest_state_received: false,
             latest_status: "Host idle".to_string(),
             latest_pose_text: "Pose: waiting".to_string(),
             latest_stream_text: "Stream: waiting".to_string(),
@@ -1007,7 +1009,6 @@ impl Default for App {
             host_supported_codecs: Vec::new(),
             client_capabilities: None,
             negotiated_codec: None,
-            encoder_failed_h265_once: false,
             session_config: default_session_config(),
         }
     }
@@ -1086,14 +1087,23 @@ impl App {
         self.refresh_host_capabilities(cx);
         self.shared.set_session_config(Some(self.session_config.clone()));
         self.shared.start_threads();
+        self.xr_net = match XrNetNode::new() {
+            Ok(node) => Some(node),
+            Err(err) => {
+                self.latest_status = format!("XR Net unavailable: {err}");
+                None
+            }
+        };
         self.frame_timer = cx.start_interval(1.0 / self.session_config.fps as f64);
         self.network_started = true;
-        self.latest_status = format!(
-            "Listening tcp://0.0.0.0:{} and udp://0.0.0.0:{}|{}",
-            control_port(),
-            left_media_port(),
-            right_media_port()
-        );
+        if self.xr_net.is_some() {
+            self.latest_status = format!(
+                "Listening tcp://0.0.0.0:{} udp://0.0.0.0:{}|{} xr_net=ready",
+                control_port(),
+                left_media_port(),
+                right_media_port()
+            );
+        }
         self.refresh_labels(cx);
     }
 
@@ -1221,19 +1231,8 @@ impl App {
                     return;
                 }
                 (left_vt, right_vt) => {
-                    if codec == XrRemoteCodec::H265AnnexB
-                        && !self.encoder_failed_h265_once
-                        && self.host_supported_codecs.contains(&XrRemoteCodec::H264AnnexB)
-                    {
-                        self.encoder_failed_h265_once = true;
-                        self.latest_status = format!(
-                            "VideoToolbox H265 unavailable, falling back to H264: left={left_vt:?} right={right_vt:?}"
-                        );
-                        self.apply_negotiated_codec(cx, Some(XrRemoteCodec::H264AnnexB));
-                        return;
-                    }
                     self.latest_status = format!(
-                        "Encoder unavailable: vt_left={left_vt:?} vt_right={right_vt:?}"
+                        "H265 encoder unavailable: vt_left={left_vt:?} vt_right={right_vt:?}"
                     );
                     self.latest_stream_text = "Stream: encoder unavailable".to_string();
                     self.refresh_labels(cx);
@@ -1261,19 +1260,8 @@ impl App {
             }
             let left_err = left_result.err();
             let right_err = right_result.err();
-            if codec == XrRemoteCodec::H265AnnexB
-                && !self.encoder_failed_h265_once
-                && self.host_supported_codecs.contains(&XrRemoteCodec::H264AnnexB)
-            {
-                self.encoder_failed_h265_once = true;
-                self.latest_status = format!(
-                    "H265 encoder unavailable, falling back: left={left_err:?} right={right_err:?}"
-                );
-                self.apply_negotiated_codec(cx, Some(XrRemoteCodec::H264AnnexB));
-                return;
-            }
             self.latest_status = format!(
-                "Encoder unavailable: left={left_err:?} right={right_err:?}"
+                "H265 encoder unavailable: left={left_err:?} right={right_err:?}"
             );
             self.latest_stream_text = "Stream: encoder unavailable".to_string();
             self.refresh_labels(cx);
@@ -1327,10 +1315,6 @@ impl App {
                 self.shared
                     .send_control(&ControlPacket::Capabilities(self.advertised_host_capabilities()));
                 self.shared.send_current_control_state();
-                self.shared.send_control(&ControlPacket::ClockSync(ClockSyncPacket {
-                    client_time_ns: 0,
-                    server_time_ns: (cx.seconds_since_app_start() * 1_000_000_000.0) as u64,
-                }));
             }
             ControlPacket::Capabilities(capabilities) => {
                 let labels = capabilities
@@ -1352,32 +1336,6 @@ impl App {
                 self.shared.request_keyframe(request.eye);
                 self.latest_stream_text = format!("Stream: keyframe requested {:?}", request.eye);
             }
-            ControlPacket::Tracking(tracking) => {
-                self.latest_state.head_pose = tracking.head_pose;
-                self.latest_tracking = Some(tracking.clone());
-                self.latest_pose_text = format!(
-                    "Track {} head ({:.2}, {:.2}, {:.2})",
-                    tracking.tracking_id,
-                    tracking.head_pose.position.x,
-                    tracking.head_pose.position.y,
-                    tracking.head_pose.position.z
-                );
-            }
-            ControlPacket::InputState(input) => {
-                self.latest_state = input.state;
-                self.latest_pose_text = format!(
-                    "Pose: head ({:.2}, {:.2}, {:.2})",
-                    self.latest_state.head_pose.position.x,
-                    self.latest_state.head_pose.position.y,
-                    self.latest_state.head_pose.position.z
-                );
-            }
-            ControlPacket::Ping(ping) => {
-                self.shared.send_control(&ControlPacket::ClockSync(ClockSyncPacket {
-                    client_time_ns: ping.timestamp_ns,
-                    server_time_ns: (cx.seconds_since_app_start() * 1_000_000_000.0) as u64,
-                }));
-            }
             ControlPacket::LogLine(line) => {
                 self.latest_remote_log_text = format!(
                     "Remote [{}] {}: {}",
@@ -1395,10 +1353,60 @@ impl App {
             }
             ControlPacket::SessionConfig(_)
             | ControlPacket::StreamConfig(_)
-            | ControlPacket::VideoConfig(_)
-            | ControlPacket::ClockSync(_) => {}
+            | ControlPacket::VideoConfig(_) => {}
         }
         self.refresh_labels(cx);
+    }
+
+    fn handle_xr_net_message(&mut self, message: XrNetIncoming) {
+        match message {
+            XrNetIncoming::Join { peer } => {
+                self.latest_status = format!("XR Net peer connected: {}", peer.addr);
+            }
+            XrNetIncoming::Leave { peer, .. } => {
+                self.latest_status = format!("XR Net peer left: {}", peer.addr);
+                self.latest_state_received = false;
+            }
+            XrNetIncoming::State { peer, frame } => {
+                self.latest_state = frame.state;
+                self.latest_state_received = true;
+                self.latest_pose_text = format!(
+                    "XR {} head ({:.2}, {:.2}, {:.2})",
+                    peer.addr,
+                    self.latest_state.head_pose.position.x,
+                    self.latest_state.head_pose.position.y,
+                    self.latest_state.head_pose.position.z
+                );
+            }
+            XrNetIncoming::Alignment { frame, .. } => {
+                self.latest_state.anchor = Some(frame.anchor);
+            }
+            XrNetIncoming::AlignmentDescriptor { .. } => {}
+        }
+    }
+
+    fn drain_xr_net(&mut self) {
+        let mut disconnected = false;
+        let mut queued = Vec::new();
+        if let Some(xr_net) = self.xr_net.as_mut() {
+            loop {
+                match xr_net.incoming_receiver.try_recv() {
+                    Ok(message) => queued.push(message),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        for message in queued {
+            self.handle_xr_net_message(message);
+        }
+        if disconnected {
+            self.latest_status = "XR Net disconnected".to_string();
+            self.latest_state_received = false;
+        }
     }
 
     fn push_eye_frame(
@@ -1510,11 +1518,21 @@ impl App {
             self.refresh_labels(cx);
             return;
         }
-        let Some(tracking) = self.latest_tracking.clone() else {
-            self.latest_stream_text = "Stream: waiting for predicted tracking".to_string();
+        if !self.latest_state_received {
+            self.latest_stream_text = "Stream: waiting for xr_net tracking".to_string();
             self.refresh_labels(cx);
             return;
-        };
+        }
+        let tracking = make_tracking_packet(
+            self.frame_group_counter.wrapping_add(1),
+            (self.latest_state.time * 1_000_000_000.0) as u64,
+            self.latest_state.head_pose,
+            self.session_config.ipd_meters,
+            self.session_config.fov_y_degrees,
+            self.session_config.per_eye_width,
+            self.session_config.per_eye_height,
+            self.latest_state.anchor,
+        );
 
         let render_started_ns = (cx.seconds_since_app_start() * 1_000_000_000.0) as u64;
         let frame_group_id = self.frame_group_counter.wrapping_add(1);
@@ -1565,6 +1583,7 @@ impl AppMain for App {
             self.ensure_started(cx);
             self.ensure_encoders(cx);
         }
+        self.drain_xr_net();
         if let Event::Signal = event {
             for packet in self.shared.drain_control() {
                 self.handle_control_packet(cx, packet);

@@ -1,4 +1,4 @@
-use crate::{protocol::*, scene::make_tracking_packet, wire::*};
+use crate::{protocol::*, wire::*};
 use makepad_widgets::makepad_platform::{
     makepad_live_id::LiveId,
     thread::SignalToUI,
@@ -9,7 +9,7 @@ use makepad_xr::*;
 use std::{
     collections::{BTreeMap, VecDeque},
     net::TcpStream,
-    sync::{Arc, Mutex},
+    sync::{mpsc::TryRecvError, Arc, Mutex},
     thread,
 };
 
@@ -143,7 +143,7 @@ script_mod! {
                     }
 
                     clock_field := Label{
-                        text: "Clock: waiting"
+                        text: "XR Net: waiting"
                         draw_text.color: #x8fa8bd
                     }
                 }
@@ -156,12 +156,6 @@ script_mod! {
 
 fn remote_video_texture_format(_cx: &Cx) -> TextureFormat {
     TextureFormat::VideoExternal
-}
-
-fn xr_remote_force_h264() -> bool {
-    std::env::var("XR_REMOTE_FORCE_H264")
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 fn xr_remote_debug_mono_eye() -> Option<XrRemoteEye> {
@@ -428,9 +422,9 @@ pub struct App {
     #[rust]
     shared: ClientShared,
     #[rust]
-    network_started: bool,
+    xr_net: Option<XrNetNode>,
     #[rust]
-    ping_timer: Timer,
+    network_started: bool,
     #[rust]
     latest_connection_text: String,
     #[rust]
@@ -442,13 +436,7 @@ pub struct App {
     #[rust]
     last_sent_time_ns: u64,
     #[rust]
-    tracking_counter: u64,
-    #[rust]
     active_session: Option<SessionConfigPacket>,
-    #[rust]
-    clock_offset_ns: i64,
-    #[rust]
-    clock_sync_ready: bool,
     #[rust]
     eye_states: [ClientEyeState; 2],
     #[rust]
@@ -458,12 +446,6 @@ pub struct App {
     #[rust]
     latest_displayed_group: u64,
     #[rust]
-    h265_watchdog_started_at: Option<f64>,
-    #[rust]
-    h265_fallback_requested: bool,
-    #[rust]
-    force_h264: bool,
-    #[rust]
     debug_mono: Option<XrRemoteEye>,
     #[rust]
     startup_log_sent: bool,
@@ -471,30 +453,22 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
-        let force_h264 = xr_remote_force_h264();
-        let debug_mono = xr_remote_debug_mono_eye()
-            .or_else(|| if force_h264 { Some(XrRemoteEye::Left) } else { None });
+        let debug_mono = xr_remote_debug_mono_eye();
         Self {
             ui: WidgetRef::default(),
             shared: ClientShared::new(),
+            xr_net: None,
             network_started: false,
-            ping_timer: Timer::default(),
             latest_connection_text: format!("Connecting to {}", remote_host()),
             latest_stream_text: "Stream: waiting".to_string(),
             latest_decoder_text: "Decoder: waiting".to_string(),
-            latest_clock_text: "Clock: waiting".to_string(),
+            latest_clock_text: "XR Net: waiting".to_string(),
             last_sent_time_ns: 0,
-            tracking_counter: 0,
             active_session: None,
-            clock_offset_ns: 0,
-            clock_sync_ready: false,
             eye_states: std::array::from_fn(|_| ClientEyeState::default()),
             pending_stereo_groups: BTreeMap::new(),
             ready_stereo_groups: VecDeque::new(),
             latest_displayed_group: 0,
-            h265_watchdog_started_at: None,
-            h265_fallback_requested: false,
-            force_h264,
             debug_mono,
             startup_log_sent: false,
         }
@@ -540,30 +514,31 @@ impl App {
             return;
         }
         let mut capabilities = default_capabilities();
-        let preferred = preferred_codecs_from_capabilities(&cx.video_capabilities(), false);
-        if !preferred.is_empty() {
-            capabilities.codecs = preferred;
-        }
-        if self.force_h264 {
-            capabilities.codecs = vec![XrRemoteCodec::H264AnnexB];
-        }
+        capabilities.codecs = preferred_codecs_from_capabilities(&cx.video_capabilities(), false);
         self.shared.set_capabilities(capabilities);
         self.shared.start_threads();
-        self.ping_timer = cx.start_interval(1.0);
+        self.xr_net = match XrNetNode::new() {
+            Ok(node) => {
+                self.latest_clock_text = "XR Net: ready".to_string();
+                Some(node)
+            }
+            Err(err) => {
+                self.latest_clock_text = format!("XR Net unavailable: {err}");
+                None
+            }
+        };
         self.network_started = true;
         let mode = self
             .debug_mono
             .map(|eye| format!(" mono={}", eye.label()))
             .unwrap_or_else(|| " stereo".to_string());
-        let codec_hint = if self.force_h264 { " h264-only" } else { "" };
         if let Some(ports) = self.shared.media_ports() {
             self.latest_connection_text = format!(
-                "Connecting to {} tcp:{} udp:{}|{}{}{}",
+                "Connecting to {} tcp:{} udp:{}|{}{}",
                 remote_host(),
                 control_port(),
                 ports.left_port,
                 ports.right_port,
-                codec_hint,
                 mode,
             );
         }
@@ -572,11 +547,10 @@ impl App {
 
     fn startup_mode_text(&self) -> String {
         format!(
-            "startup mode={}{}",
+            "startup mode={}",
             self.debug_mono
                 .map(|eye| format!("mono-{}", eye.label()))
                 .unwrap_or_else(|| "stereo".to_string()),
-            if self.force_h264 { " h264-only" } else { "" }
         )
     }
 
@@ -773,8 +747,6 @@ impl App {
         self.pending_stereo_groups.clear();
         self.ready_stereo_groups.clear();
         self.latest_displayed_group = 0;
-        self.h265_watchdog_started_at = None;
-        self.h265_fallback_requested = false;
     }
 
     fn try_start_eye_decoder(
@@ -879,58 +851,20 @@ impl App {
                     .insert(config.config_id, config);
                 let _ = self.try_start_eye_decoder(cx, eye);
             }
-            ControlPacket::ClockSync(sync) => {
-                if sync.client_time_ns == 0 {
-                    self.latest_clock_text = "Clock: awaiting ping".to_string();
-                    self.refresh_labels(cx);
-                    return;
-                }
-                self.clock_offset_ns = sync.server_time_ns as i64 - sync.client_time_ns as i64;
-                self.clock_sync_ready = true;
-                self.latest_clock_text = format!(
-                    "Clock offset {} ms",
-                    (self.clock_offset_ns as f64 / 1_000_000.0).round()
-                );
-            }
-            ControlPacket::Ping(_)
-            | ControlPacket::Hello(_)
+            ControlPacket::Hello(_)
             | ControlPacket::ClientMediaChannels(_)
             | ControlPacket::KeyframeRequest(_)
-            | ControlPacket::Tracking(_)
-            | ControlPacket::InputState(_)
             | ControlPacket::LogLine(_) => {}
         }
         self.refresh_labels(cx);
-    }
-
-    fn server_now_ns(&self, cx: &Cx) -> i64 {
-        (cx.seconds_since_app_start() * 1_000_000_000.0) as i64 + self.clock_offset_ns
     }
 
     fn local_now_ns(&self, cx: &Cx) -> u64 {
         (cx.seconds_since_app_start() * 1_000_000_000.0) as u64
     }
 
-    fn media_frame_is_fresh(&self, cx: &Cx, header: &MediaChunkHeader) -> bool {
-        let left_decoded = self.eye_state(XrRemoteEye::Left).decoded_updates > 0;
-        let right_decoded = self.eye_state(XrRemoteEye::Right).decoded_updates > 0;
-        if self.debug_mono.is_some() {
-            if !left_decoded && !right_decoded {
-                return true;
-            }
-        } else if !left_decoded || !right_decoded {
-            // Stereo: do not PTS-gate until both decoders have produced a frame; otherwise the
-            // slower eye or async decode ordering drops valid media at ingest.
-            return true;
-        }
-        let Some(session) = self.active_session.as_ref() else {
-            return true;
-        };
-        if !self.clock_sync_ready {
-            return true;
-        }
-        let slack_ns = session.stale_after_ns.saturating_mul(8).max(1_000_000_000);
-        self.server_now_ns(cx).saturating_sub(header.pts_ns as i64) <= slack_ns as i64
+    fn media_frame_is_fresh(&self, _cx: &Cx, _header: &MediaChunkHeader) -> bool {
+        true
     }
 
     fn ingest_completed_eye_frame(
@@ -1438,75 +1372,49 @@ impl App {
         );
     }
 
-    fn maybe_request_h264_fallback(&mut self, cx: &Cx) {
-        if self.force_h264 {
+    fn drain_xr_net(&mut self) {
+        let mut latest_status = None;
+        let mut disconnected = false;
+        if let Some(xr_net) = self.xr_net.as_mut() {
+            loop {
+                match xr_net.incoming_receiver.try_recv() {
+                    Ok(XrNetIncoming::Join { peer }) => {
+                        latest_status = Some(format!("XR Net: connected {}", peer.addr));
+                    }
+                    Ok(XrNetIncoming::Leave { peer, .. }) => {
+                        latest_status = Some(format!("XR Net: peer left {}", peer.addr));
+                    }
+                    Ok(XrNetIncoming::State { .. })
+                    | Ok(XrNetIncoming::Alignment { .. })
+                    | Ok(XrNetIncoming::AlignmentDescriptor { .. }) => {}
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if disconnected {
+            self.latest_clock_text = "XR Net: disconnected".to_string();
+        } else if let Some(status) = latest_status {
+            self.latest_clock_text = status;
+        }
+    }
+
+    fn send_state(&mut self, state: &XrState) {
+        let predicted_display_time_ns = (state.time * 1_000_000_000.0) as u64;
+        if predicted_display_time_ns == self.last_sent_time_ns {
             return;
         }
-        let left_stream = self.eye_state(XrRemoteEye::Left).active_stream.as_ref();
-        let right_stream = self.eye_state(XrRemoteEye::Right).active_stream.as_ref();
-        let Some(left_stream) = left_stream else {
+        self.last_sent_time_ns = predicted_display_time_ns;
+        let Some(xr_net) = self.xr_net.as_mut() else {
             return;
         };
-        let Some(right_stream) = right_stream else {
-            return;
-        };
-        if left_stream.codec != XrRemoteCodec::H265AnnexB
-            || right_stream.codec != XrRemoteCodec::H265AnnexB
-            || self.h265_fallback_requested
-        {
-            return;
+        xr_net.send_state(state.clone());
+        if let Some(anchor) = state.anchor {
+            xr_net.send_alignment(anchor, 1.0, state.time);
         }
-        if let Some(eye) = self.debug_mono {
-            let state = self.eye_state(eye);
-            if state.completed_frames == 0 || state.decoded_updates > 0 {
-                return;
-            }
-        } else {
-            let left_state = self.eye_state(XrRemoteEye::Left);
-            let right_state = self.eye_state(XrRemoteEye::Right);
-            if left_state.completed_frames == 0 || right_state.completed_frames == 0 {
-                return;
-            }
-            if left_state.decoded_updates > 0 || right_state.decoded_updates > 0 {
-                return;
-            }
-        }
-        let now = cx.seconds_since_app_start();
-        let started_at = self.h265_watchdog_started_at.get_or_insert(now);
-        if now - *started_at < 2.0 {
-            return;
-        }
-        let mut fallback = default_capabilities();
-        fallback.codecs = vec![XrRemoteCodec::H264AnnexB];
-        fallback.per_eye_width = self
-            .active_session
-            .as_ref()
-            .map(|session| session.per_eye_width)
-            .unwrap_or(XR_REMOTE_STREAM_WIDTH);
-        fallback.per_eye_height = self
-            .active_session
-            .as_ref()
-            .map(|session| session.per_eye_height)
-            .unwrap_or(XR_REMOTE_STREAM_HEIGHT);
-        fallback.fps = self
-            .active_session
-            .as_ref()
-            .map(|session| session.fps)
-            .unwrap_or(XR_REMOTE_STREAM_FPS);
-        self.shared.set_capabilities(fallback.clone());
-        self.shared.send_control(&ControlPacket::Capabilities(fallback));
-        self.shared.send_control(&ControlPacket::KeyframeRequest(KeyframeRequestPacket {
-            eye: XrRemoteEyeTarget::Both,
-        }));
-        self.h265_fallback_requested = true;
-        self.latest_stream_text =
-            "Stream: H265 stalled on Quest, requesting H264 fallback".to_string();
-        self.send_remote_log(
-            cx,
-            "warn",
-            "quest-client",
-            "Dual-eye H265 produced no frames, requesting H264 fallback",
-        );
     }
 
     fn sync_immersive_planes(&mut self, cx: &mut Cx, state: &XrState) {
@@ -1656,31 +1564,6 @@ impl App {
         }
     }
 
-    fn send_state(&mut self, state: &XrState, session: &SessionConfigPacket) {
-        let predicted_display_time_ns = (state.time * 1_000_000_000.0) as u64;
-        if predicted_display_time_ns == self.last_sent_time_ns {
-            return;
-        }
-        self.last_sent_time_ns = predicted_display_time_ns;
-        self.tracking_counter = self.tracking_counter.wrapping_add(1);
-        let tracking = make_tracking_packet(
-            self.tracking_counter,
-            predicted_display_time_ns,
-            state.head_pose,
-            session.ipd_meters,
-            session.fov_y_degrees,
-            session.per_eye_width,
-            session.per_eye_height,
-            state.anchor,
-        );
-        self.shared.send_control(&ControlPacket::Tracking(tracking));
-        self.shared.send_control(&ControlPacket::InputState(InputStatePacket {
-            version: 1,
-            time_ns: predicted_display_time_ns,
-            state: state.clone(),
-        }));
-    }
-
     fn eye_for_video_id(video_id: LiveId) -> Option<XrRemoteEye> {
         if video_id == Self::decoder_video_id(XrRemoteEye::Left) {
             Some(XrRemoteEye::Left)
@@ -1704,6 +1587,7 @@ impl AppMain for App {
         if matches!(event, Event::Startup) {
             self.ensure_started(cx);
         }
+        self.drain_xr_net();
 
         if let Event::TextureHandleReady(ev) = event {
             for eye in XrRemoteEye::ALL {
@@ -1719,11 +1603,7 @@ impl AppMain for App {
         }
 
         if let Event::XrUpdate(update) = event {
-            let session = self
-                .active_session
-                .clone()
-                .unwrap_or_else(default_session_config);
-            self.send_state(update.state.as_ref(), &session);
+            self.send_state(update.state.as_ref());
             self.sync_immersive_planes(cx, update.state.as_ref());
         }
 
@@ -1734,7 +1614,6 @@ impl AppMain for App {
                 state.decoded_updates = state.decoded_updates.wrapping_add(1);
                 state.status_update_ok = true;
                 state.latest_status = "updateTexImage ok".to_string();
-                self.h265_watchdog_started_at = None;
                 if first_update {
                     self.send_remote_log(
                         cx,
@@ -1796,16 +1675,7 @@ impl AppMain for App {
             }
             self.prune_stale_media(cx);
             self.flush_decoders(cx);
-            self.maybe_request_h264_fallback(cx);
             self.refresh_labels(cx);
-        }
-
-        if self.ping_timer.is_event(event).is_some() {
-            self.maybe_request_h264_fallback(cx);
-            self.shared
-                .send_control(&ControlPacket::Ping(PingPacket {
-                    timestamp_ns: (cx.seconds_since_app_start() * 1_000_000_000.0) as u64,
-                }));
         }
     }
 }

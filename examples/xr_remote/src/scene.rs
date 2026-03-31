@@ -1,9 +1,7 @@
 use crate::protocol::{
     default_session_config, EyeViewPacket, SessionConfigPacket, StreamConfigPacket, TrackingPacket,
-    XrRemoteCodec, XrRemoteEye,
+    XrRemoteCodec, XrRemoteEye, XR_REMOTE_PROTOCOL_VERSION,
 };
-#[cfg(target_os = "android")]
-use crate::protocol::XR_REMOTE_PROTOCOL_VERSION;
 use makepad_widgets::makepad_math::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -213,7 +211,6 @@ pub fn eye_view(tracking: &TrackingPacket, eye: XrRemoteEye) -> &EyeViewPacket {
     }
 }
 
-#[cfg(target_os = "android")]
 pub fn make_tracking_packet(
     tracking_id: u64,
     predicted_display_time_ns: u64,

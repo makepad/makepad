@@ -1419,7 +1419,6 @@ pub fn run(
             "MAKEPAD_XR_REMOTE_VIDEO_PORT",
             "MAKEPAD_XR_REMOTE_MEDIA_LEFT_PORT",
             "MAKEPAD_XR_REMOTE_MEDIA_RIGHT_PORT",
-            "XR_REMOTE_FORCE_H264",
             "XR_REMOTE_DEBUG_MONO",
         ] {
             if let Ok(value) = std::env::var(key) {
