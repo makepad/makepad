@@ -62,6 +62,14 @@ impl HandGrabState {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ShadowBodyMotion {
+    pose: Pose,
+    linvel: Vec3f,
+    angvel: Vec3f,
+    remaining_prediction_seconds: f32,
+}
+
 struct DepthQueryBodySurfaceSet {
     owner_widget_uid: WidgetUid,
     body: RigidBodyHandle,
@@ -89,6 +97,9 @@ const DEPTH_QUERY_USER_DATA_OWNER_MASK: u128 = u64::MAX as u128;
 static RAPIER_DEPTH_QUERY_HOOKS: RapierDepthQueryHooks = RapierDepthQueryHooks;
 const XR_ENABLE_SYNTHETIC_GROUND_PLANE: bool = false;
 const DEPTH_QUERY_SURFACE_IMPACT_ROLE_TAG: u128 = 1u128 << 125;
+// Keep shadow extrapolation aligned with XrPeerSync so remote bodies do not drift forever
+// when UDP state stalls.
+const XR_SHADOW_BODY_MAX_EXTRAPOLATION_SECONDS: f32 = 0.10;
 
 pub(crate) struct RapierScene {
     gravity: RapierVector,
@@ -111,6 +122,7 @@ pub(crate) struct RapierScene {
     pub(super) right_hand: Vec<HandColliderBody>,
     left_hand_grab: HandGrabState,
     right_hand_grab: HandGrabState,
+    shadow_body_motion: HashMap<RigidBodyHandle, ShadowBodyMotion>,
     settle_frame_counts: HashMap<RigidBodyHandle, u8>,
 }
 
@@ -133,9 +145,30 @@ fn makepad_vec3(v: RapierVector) -> Vec3f {
     vec3f(v.x, v.y, v.z)
 }
 
-fn grab_offset_from_body_anchor(hand_pose: Pose, body_pose: Pose, body_anchor_local: Vec3f) -> Pose {
+fn predict_pose(pose: Pose, linvel: Vec3f, angvel: Vec3f, dt: f32) -> Pose {
+    let position = pose.position + linvel * dt;
+    let angular_speed = angvel.length();
+    let orientation = if angular_speed > 1.0e-4 {
+        let axis = angvel * (1.0 / angular_speed);
+        Quat::multiply(
+            &Quat::from_axis_angle(axis, angular_speed * dt),
+            &pose.orientation,
+        )
+    } else {
+        pose.orientation
+    };
+    Pose::new(orientation, position)
+}
+
+fn grab_offset_from_body_anchor(
+    hand_pose: Pose,
+    body_pose: Pose,
+    body_anchor_local: Vec3f,
+) -> Pose {
     let mut grab_offset = Pose::multiply(&hand_pose.invert(), &body_pose);
-    grab_offset.position = grab_offset.orientation.rotate_vec3(&(body_anchor_local * -1.0));
+    grab_offset.position = grab_offset
+        .orientation
+        .rotate_vec3(&(body_anchor_local * -1.0));
     grab_offset
 }
 
@@ -474,6 +507,7 @@ impl RapierScene {
             right_hand: Vec::new(),
             left_hand_grab: HandGrabState::new(XrSharedHand::LeftHand),
             right_hand_grab: HandGrabState::new(XrSharedHand::RightHand),
+            shadow_body_motion: HashMap::new(),
             settle_frame_counts: HashMap::new(),
         };
 
@@ -636,6 +670,7 @@ impl RapierScene {
 
     pub(crate) fn step(&mut self) {
         self.apply_held_body_targets();
+        self.apply_shadow_body_targets();
         self.pipeline.step(
             self.gravity,
             &self.integration_parameters,
@@ -652,6 +687,48 @@ impl RapierScene {
         );
         self.acquire_hand_grabs();
         self.settle_resting_bodies();
+    }
+
+    fn apply_shadow_body_targets(&mut self) {
+        let dt = self
+            .integration_parameters
+            .dt
+            .clamp(0.0, XR_SHADOW_BODY_MAX_EXTRAPOLATION_SECONDS);
+        let shadow_bodies = self
+            .shadow_body_motion
+            .iter()
+            .map(|(&body_handle, &motion)| (body_handle, motion))
+            .collect::<Vec<_>>();
+        let mut stale = Vec::new();
+        for (body_handle, mut motion) in shadow_bodies {
+            if self.held_by_for_body(body_handle).is_some() {
+                continue;
+            }
+            let Some(body) = self.bodies.get_mut(body_handle) else {
+                stale.push(body_handle);
+                continue;
+            };
+            if !body.is_enabled() {
+                stale.push(body_handle);
+                continue;
+            }
+            if body.body_type() != RigidBodyType::KinematicPositionBased {
+                stale.push(body_handle);
+                continue;
+            }
+            let advance_dt = dt.min(motion.remaining_prediction_seconds.max(0.0));
+            if advance_dt > 0.0 {
+                motion.pose = predict_pose(motion.pose, motion.linvel, motion.angvel, advance_dt);
+                motion.remaining_prediction_seconds =
+                    (motion.remaining_prediction_seconds - advance_dt).max(0.0);
+            }
+            body.set_next_kinematic_position(rapier_pose(motion.pose));
+            body.wake_up(true);
+            self.shadow_body_motion.insert(body_handle, motion);
+        }
+        for body_handle in stale {
+            self.shadow_body_motion.remove(&body_handle);
+        }
     }
 
     fn apply_held_body_targets(&mut self) {
@@ -843,6 +920,9 @@ impl RapierScene {
                 continue;
             }
             let shared_candidate = other_held_body == Some(cube.body);
+            if self.shadow_body_motion.contains_key(&cube.body) {
+                continue;
+            }
             let Some(body) = self.bodies.get(cube.body) else {
                 continue;
             };
@@ -907,10 +987,11 @@ impl RapierScene {
         let body = self.bodies.get(cube.body)?;
         let collider = self.colliders.get(cube.collider)?;
         let body_pose = makepad_pose(body.position());
-        let surface_projection =
-            collider
-                .shape()
-                .project_point(collider.position(), rapier_vec3(hand_pose.position), false);
+        let surface_projection = collider.shape().project_point(
+            collider.position(),
+            rapier_vec3(hand_pose.position),
+            false,
+        );
         let world_anchor = makepad_vec3(surface_projection.point);
         let body_anchor_local = body_pose.invert().transform_vec3(&world_anchor);
         let distance = (world_anchor - hand_pose.position).length();
@@ -975,6 +1056,7 @@ impl RapierScene {
         linvel: Vec3f,
         angvel: Vec3f,
     ) {
+        self.shadow_body_motion.remove(&body_handle);
         self.release_settle_state(body_handle);
         let Some(body) = self.bodies.get_mut(body_handle) else {
             return;
@@ -1005,6 +1087,22 @@ impl RapierScene {
         } else {
             None
         }
+    }
+
+    pub(crate) fn shadow_body_motion_for_body(
+        &self,
+        body_handle: RigidBodyHandle,
+    ) -> Option<(Vec3f, Vec3f)> {
+        let motion = self.shadow_body_motion.get(&body_handle)?;
+        if motion.remaining_prediction_seconds > 0.0 {
+            Some((motion.linvel, motion.angvel))
+        } else {
+            Some((vec3f(0.0, 0.0, 0.0), vec3f(0.0, 0.0, 0.0)))
+        }
+    }
+
+    pub(crate) fn is_shadow_body(&self, body_handle: RigidBodyHandle) -> bool {
+        self.shadow_body_motion.contains_key(&body_handle)
     }
 
     fn settle_resting_bodies(&mut self) {
@@ -1055,9 +1153,9 @@ impl RapierScene {
 
             let linvel_sq = linvel.x * linvel.x + linvel.y * linvel.y + linvel.z * linvel.z;
             let angvel_sq = angvel.x * angvel.x + angvel.y * angvel.y + angvel.z * angvel.z;
-            let allow_settle =
-                (!contact_state.has_depth_query_contact || contact_state.has_support_contact)
-                    && !has_hand_contact;
+            let allow_settle = (!contact_state.has_depth_query_contact
+                || contact_state.has_support_contact)
+                && !has_hand_contact;
             if allow_settle && linvel_sq <= linear_speed_sq && angvel_sq <= angular_speed_sq {
                 let frames = self
                     .settle_frame_counts
@@ -1105,6 +1203,7 @@ impl RapierScene {
             return;
         };
         self.spawn_pool_cube_indices.push(cube_index);
+        self.shadow_body_motion.remove(&cube.body);
         if let Some(body) = self.bodies.get_mut(cube.body) {
             body.set_enabled(false);
             body.set_linvel(RapierVector::ZERO, false);
@@ -1129,16 +1228,32 @@ impl RapierScene {
             .find(|cube| cube.widget_uid == widget_uid)
             .copied()?;
         self.clear_held_body(cube.body);
+        self.shadow_body_motion.remove(&cube.body);
         self.release_settle_state(cube.body);
         if let Some(body) = self.bodies.get_mut(cube.body) {
             body.set_enabled(true);
             body.set_position(rapier_pose(pose), false);
             if shadow {
+                let remaining_prediction_seconds = if matches!(mode, XrSharedObjectMode::Sleeping)
+                {
+                    0.0
+                } else {
+                    XR_SHADOW_BODY_MAX_EXTRAPOLATION_SECONDS
+                };
                 body.set_body_type(RigidBodyType::KinematicPositionBased, true);
                 body.set_next_kinematic_position(rapier_pose(pose));
                 body.set_linvel(RapierVector::ZERO, false);
                 body.set_angvel(RapierVector::ZERO, false);
                 body.wake_up(true);
+                self.shadow_body_motion.insert(
+                    cube.body,
+                    ShadowBodyMotion {
+                        pose,
+                        linvel,
+                        angvel,
+                        remaining_prediction_seconds,
+                    },
+                );
             } else {
                 match mode {
                     XrSharedObjectMode::ContactDominated { .. } => {
@@ -1183,6 +1298,9 @@ impl RapierScene {
             return false;
         };
         self.release_settle_state(cube.body);
+        if self.shadow_body_motion.contains_key(&cube.body) {
+            return false;
+        }
         let Some(body) = self.bodies.get_mut(cube.body) else {
             return false;
         };
@@ -1201,6 +1319,7 @@ impl RapierScene {
             .find(|cube| cube.widget_uid == widget_uid)
             .copied()?;
         self.clear_held_body(cube.body);
+        self.shadow_body_motion.remove(&cube.body);
         self.release_settle_state(cube.body);
         if let Some(body) = self.bodies.get_mut(cube.body) {
             body.set_enabled(false);
@@ -1221,6 +1340,14 @@ impl RapierScene {
         let Some(surface_set) = self.depth_query_surface_sets.get_mut(set_index) else {
             return;
         };
+        if self.shadow_body_motion.contains_key(&surface_set.body) {
+            for surface in &surface_set.surfaces {
+                if let Some(collider) = self.colliders.get_mut(surface.collider) {
+                    collider.set_enabled(false);
+                }
+            }
+            return;
+        }
         let body_position = self
             .bodies
             .get(surface_set.body)
@@ -1346,10 +1473,9 @@ mod tests {
             .get(cube.body)
             .expect("spawned cube body should exist");
         assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
-        assert_vec3_close(
-            vec3f(body.linvel().x, body.linvel().y, body.linvel().z),
-            vec3f(0.0, 0.0, 0.0),
-            0.0001,
+        assert_eq!(
+            scene.shadow_body_motion_for_body(cube.body),
+            Some((vec3f(1.0, 2.0, 3.0), vec3f(4.0, 5.0, 6.0)))
         );
 
         scene.respawn_body(
@@ -1396,6 +1522,105 @@ mod tests {
     }
 
     #[test]
+    fn shadow_respawn_keeps_projecting_motion_between_corrections() {
+        let mut scene = RapierScene::new(0.0);
+        let widget_uid = WidgetUid(410);
+        let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.2));
+        scene.spawn_dynamic_box(
+            widget_uid,
+            pose,
+            vec3f(0.05, 0.05, 0.05),
+            vec3f(1.0, 1.0, 1.0),
+            1.0,
+            0.5,
+            0.0,
+        );
+        let cube = scene.cubes[0];
+
+        scene.respawn_body(
+            widget_uid,
+            true,
+            XrSharedObjectMode::Dynamic,
+            pose,
+            vec3f(0.0, 0.0, -1.5),
+            vec3f(0.0, 0.0, 0.0),
+        );
+        scene.step();
+
+        let body = scene
+            .bodies
+            .get(cube.body)
+            .expect("shadow body should exist after a step");
+        let stepped_pose = makepad_pose(body.position());
+        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+        assert!(
+            stepped_pose.position.z < pose.position.z - 0.0001,
+            "shadow body should keep moving forward between network corrections: {stepped_pose:?}"
+        );
+        assert_eq!(
+            scene
+                .shadow_body_motion_for_body(cube.body)
+                .map(|(linvel, _)| linvel)
+                .unwrap_or_default(),
+            vec3f(0.0, 0.0, -1.5)
+        );
+    }
+
+    #[test]
+    fn shadow_dynamic_body_ignores_local_wall_until_extrapolation_runs_out() {
+        let mut scene = RapierScene::new(0.0);
+        let projectile_uid = WidgetUid(411);
+        let wall_uid = WidgetUid(412);
+        let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.2));
+        scene.spawn_dynamic_sphere(
+            projectile_uid,
+            pose,
+            0.05,
+            vec3f(1.0, 1.0, 1.0),
+            1.0,
+            0.0,
+            0.95,
+        );
+        scene.spawn_fixed_box(
+            wall_uid,
+            Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.55)),
+            vec3f(1.0, 1.0, 0.05),
+            vec3f(1.0, 1.0, 1.0),
+            0.0,
+            0.95,
+        );
+        let cube = scene.cubes[0];
+
+        scene.respawn_body(
+            projectile_uid,
+            true,
+            XrSharedObjectMode::Dynamic,
+            pose,
+            vec3f(0.0, 0.0, -2.0),
+            vec3f(0.0, 0.0, 0.0),
+        );
+        for _ in 0..30 {
+            scene.step();
+        }
+
+        let body = scene
+            .bodies
+            .get(cube.body)
+            .expect("shadow projectile should still exist after stepping");
+        assert!(
+            makepad_pose(body.position()).position.z <= -0.39,
+            "shadow projectile should keep dead-reckoning forward instead of locally bouncing on observer-only walls: {:?}",
+            makepad_pose(body.position()).position
+        );
+        assert!(
+            makepad_pose(body.position()).position.z >= -0.45,
+            "shadow projectile should stop near the extrapolation horizon when no fresh authority samples arrive: {:?}",
+            makepad_pose(body.position()).position
+        );
+        assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
+    }
+
+    #[test]
     fn apply_impulse_only_affects_dynamic_enabled_bodies() {
         let mut scene = RapierScene::new(0.0);
         let widget_uid = WidgetUid(42);
@@ -1411,11 +1636,7 @@ mod tests {
         );
         let cube = scene.cubes[0];
 
-        assert!(scene.apply_impulse(
-            widget_uid,
-            pose.position,
-            vec3f(0.0, 0.0, -1.0),
-        ));
+        assert!(scene.apply_impulse(widget_uid, pose.position, vec3f(0.0, 0.0, -1.0),));
         let body = scene
             .bodies
             .get(cube.body)
@@ -1447,15 +1668,7 @@ mod tests {
         let mut scene = RapierScene::new(0.0);
         let widget_uid = WidgetUid(420);
         let pose = Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.4));
-        scene.spawn_dynamic_sphere(
-            widget_uid,
-            pose,
-            0.04,
-            vec3f(1.0, 1.0, 1.0),
-            1.0,
-            0.5,
-            0.0,
-        );
+        scene.spawn_dynamic_sphere(widget_uid, pose, 0.04, vec3f(1.0, 1.0, 1.0), 1.0, 0.5, 0.0);
         scene.register_spawn_pool_cube(0);
 
         let cube = scene.cubes[0];
@@ -1478,7 +1691,10 @@ mod tests {
             .bodies
             .get(cube.body)
             .expect("projectile body should still exist after respawn");
-        assert!(body.is_enabled(), "respawn should re-enable the pooled body");
+        assert!(
+            body.is_enabled(),
+            "respawn should re-enable the pooled body"
+        );
         assert_eq!(body.body_type(), RigidBodyType::Dynamic);
 
         scene.step();
@@ -1537,7 +1753,10 @@ mod tests {
             .get(cube.body)
             .expect("cube body should exist after grab");
         assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
-        assert_eq!(scene.held_by_for_body(cube.body), Some(XrSharedHand::LeftHand));
+        assert_eq!(
+            scene.held_by_for_body(cube.body),
+            Some(XrSharedHand::LeftHand)
+        );
 
         let release_velocity = vec3f(0.6, 0.0, -0.4);
         scene.left_hand_grab.linvel = release_velocity;
@@ -1701,7 +1920,10 @@ mod tests {
             .get(cube.body)
             .expect("cube body should still exist after primary hand drops");
         assert_eq!(body.body_type(), RigidBodyType::KinematicPositionBased);
-        assert_eq!(scene.held_by_for_body(cube.body), Some(XrSharedHand::RightHand));
+        assert_eq!(
+            scene.held_by_for_body(cube.body),
+            Some(XrSharedHand::RightHand)
+        );
     }
 
     #[test]

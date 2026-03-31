@@ -93,18 +93,16 @@ pub fn xr_shared_object_counter(object_id: XrSharedObjectId) -> XrSharedObjectCo
     XrSharedObjectCounter(object_id.0 & XR_SHARED_OBJECT_COUNTER_MAX)
 }
 
+pub fn xr_shared_object_peer_id_from_seed(seed: u64) -> XrPeerId {
+    XrPeerId((seed as u8).max(1))
+}
+
 pub fn xr_derived_peer_id_from_addr(addr: SocketAddr, fallback_seed: u64) -> XrPeerId {
-    match addr.ip() {
-        IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => {
-            let octet = ip.octets()[3];
-            if octet != 0 {
-                XrPeerId(octet)
-            } else {
-                XrPeerId((fallback_seed as u8).max(1))
-            }
-        }
-        _ => XrPeerId((fallback_seed as u8).max(1)),
-    }
+    let _ = addr;
+    // Shared-object authority ids must stay stable across bind addresses, packet source
+    // addresses, loopback, and unspecified binds. Derive them from the node id instead of the
+    // observed socket address so the sender and receiver agree on the same authority byte.
+    xr_shared_object_peer_id_from_seed(fallback_seed)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -119,7 +117,7 @@ impl XrNetPeer {
     }
 
     pub fn shared_object_peer_id(self) -> XrPeerId {
-        xr_derived_peer_id_from_addr(self.addr, self.id.0)
+        xr_shared_object_peer_id_from_seed(self.id.0)
     }
 }
 
@@ -607,7 +605,7 @@ impl XrNetNode {
             next_alignment_descriptor_seq: 0,
             next_activity_tick: 0,
             next_shared_object_state_seq: 0,
-            shared_object_peer_id: xr_derived_peer_id_from_addr(bound_sync_addr, config.node_id.0),
+            shared_object_peer_id: xr_shared_object_peer_id_from_seed(config.node_id.0),
         })
     }
 
@@ -682,10 +680,7 @@ impl XrNetNode {
             .send(XrNetSyncOutgoing::SharedObjectControl(control));
     }
 
-    pub fn assign_shared_object_state_seqs(
-        &mut self,
-        states: &mut [XrNetSharedObjectState],
-    ) {
+    pub fn assign_shared_object_state_seqs(&mut self, states: &mut [XrNetSharedObjectState]) {
         for state in states {
             state.seq = self.next_shared_object_state_seq;
             self.next_shared_object_state_seq = self.next_shared_object_state_seq.wrapping_add(1);
@@ -701,6 +696,17 @@ impl XrNetNode {
             return;
         }
         self.assign_shared_object_state_seqs(&mut batch);
+        self.send_prepared_shared_object_states(batch);
+    }
+
+    pub fn send_prepared_shared_object_states<I>(&mut self, states: I)
+    where
+        I: IntoIterator<Item = XrNetSharedObjectState>,
+    {
+        let batch = states.into_iter().collect::<Vec<_>>();
+        if batch.is_empty() {
+            return;
+        }
         let _ = self
             .udp_outgoing_sender
             .send(XrNetUdpOutgoing::SharedObjectStates(batch));
@@ -1213,6 +1219,24 @@ mod tests {
     }
 
     #[test]
+    fn shared_object_peer_id_is_stable_between_unspecified_bind_and_remote_source_addr() {
+        let node_id = XrNetPeerId(0x1234);
+        let local_bind_peer_id = xr_derived_peer_id_from_addr(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), XR_NET_DEFAULT_SYNC_PORT),
+            node_id.0,
+        );
+        let remote_source_peer_id = XrNetPeer {
+            id: node_id,
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)), 41547),
+        }
+        .shared_object_peer_id();
+
+        assert_eq!(local_bind_peer_id, xr_shared_object_peer_id_from_seed(node_id.0));
+        assert_eq!(remote_source_peer_id, xr_shared_object_peer_id_from_seed(node_id.0));
+        assert_eq!(local_bind_peer_id, remote_source_peer_id);
+    }
+
+    #[test]
     fn shared_object_control_is_sent_over_sync_channel() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
         let mut left =
@@ -1340,7 +1364,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            XrNetDataPacket::shared_object_states(XrNetPeerId(11), states.clone()).to_bytes().len()
+            XrNetDataPacket::shared_object_states(XrNetPeerId(11), states.clone())
+                .to_bytes()
+                .len()
                 > XR_NET_UDP_SHARED_OBJECT_STATE_BATCH_MAX_BYTES,
             "test fixture should exceed the per-datagram shared-object budget to exercise batching",
         );

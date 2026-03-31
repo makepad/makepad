@@ -575,10 +575,7 @@ impl XrNetUdpWorker {
         }
     }
 
-    fn shared_object_state_packets(
-        &self,
-        states: Vec<XrNetSharedObjectState>,
-    ) -> Vec<Vec<u8>> {
+    fn shared_object_state_packets(&self, states: Vec<XrNetSharedObjectState>) -> Vec<Vec<u8>> {
         let mut packets = Vec::new();
         let mut batch = Vec::new();
 
@@ -592,11 +589,10 @@ impl XrNetUdpWorker {
 
             let state = batch.pop().unwrap();
             if !batch.is_empty() {
-                packets.push(XrNetDataPacket::shared_object_states(
-                    self.node_id,
-                    std::mem::take(&mut batch),
-                )
-                .to_bytes());
+                packets.push(
+                    XrNetDataPacket::shared_object_states(self.node_id, std::mem::take(&mut batch))
+                        .to_bytes(),
+                );
             }
 
             let single = XrNetDataPacket::shared_object_state(self.node_id, state).to_bytes();
