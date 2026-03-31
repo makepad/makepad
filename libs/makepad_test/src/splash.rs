@@ -56,6 +56,7 @@ struct SplashSuiteHost {
     suite_path: PathBuf,
     options: Option<SplashSuiteOptions>,
     cases: HashMap<String, SplashCase>,
+    case_order: Vec<String>,
     current_app: Option<TestApp>,
     last_error_message: Option<String>,
     current_case: Option<RunningCase>,
@@ -67,6 +68,7 @@ impl SplashSuiteHost {
             suite_path,
             options: None,
             cases: HashMap::new(),
+            case_order: Vec::new(),
             current_app: None,
             last_error_message: None,
             current_case: None,
@@ -91,8 +93,11 @@ impl SplashSuiteHost {
                 self.suite_path.display()
             )));
         }
-        self.cases
-            .insert(name.clone(), SplashCase { name, function });
+        self.cases.insert(
+            name.clone(),
+            SplashCase { name: name.clone(), function },
+        );
+        self.case_order.push(name);
         Ok(())
     }
 
@@ -512,9 +517,7 @@ impl SplashSuiteRunner {
     }
 
     fn case_names(&self) -> Vec<String> {
-        let mut names: Vec<_> = self.host.cases.keys().cloned().collect();
-        names.sort();
-        names
+        self.host.case_order.clone()
     }
 
     fn session_mode(&self) -> SessionMode {
@@ -2252,6 +2255,22 @@ mod tests {
 
         assert_eq!(runner.case_names(), vec!["smoke".to_string()]);
         assert!(runner.options().is_none());
+    }
+
+    #[test]
+    fn preserves_case_declaration_order() {
+        let runner = SplashSuiteRunner::load_from_source(
+            PathBuf::from("/tmp/example"),
+            PathBuf::from("/tmp/example/tests/ui.splash"),
+            "use mod.test\ntest.case(\"z_last\", || {})\ntest.case(\"a_first\", || {})\n"
+                .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            runner.case_names(),
+            vec!["z_last".to_string(), "a_first".to_string()]
+        );
     }
 
     #[test]

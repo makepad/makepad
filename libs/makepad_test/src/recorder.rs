@@ -1,6 +1,6 @@
 use crate::error::{TestError, TestResult};
 use crate::report::{render_suite_report_html, CaseReport, StepEvidence, SuiteReport, TraceStep};
-use crate::runtime::{run_with_config, TestApp, TestConfig};
+use crate::runtime::{run_with_config, StepScreenshotPolicy, TestApp, TestConfig, TestLaunch};
 use crate::selector::Selector;
 use makepad_micro_serde::*;
 use makepad_studio_protocol::{KeyCode, KeyModifiers, WidgetSnapshot};
@@ -61,15 +61,22 @@ struct RecorderAction {
 
 pub struct SplashRecorderSession {
     app: TestApp,
+    config: TestConfig,
     options: SplashRecorderOptions,
     artifact_dir: PathBuf,
     actions: Vec<RecorderAction>,
 }
 
 impl SplashRecorderSession {
-    fn new(app: TestApp, options: SplashRecorderOptions, artifact_dir: PathBuf) -> Self {
+    fn new(
+        app: TestApp,
+        config: TestConfig,
+        options: SplashRecorderOptions,
+        artifact_dir: PathBuf,
+    ) -> Self {
         Self {
             app,
+            config,
             options,
             artifact_dir,
             actions: Vec::new(),
@@ -203,7 +210,8 @@ impl SplashRecorderSession {
 
     fn finish(self) -> TestResult<SplashRecorderOutput> {
         fs::create_dir_all(&self.artifact_dir)?;
-        let generated_case = render_generated_case(&self.options.case_name, &self.actions);
+        let generated_case =
+            render_generated_case(&self.config, &self.options.case_name, &self.actions);
         let generated_case_path = self.artifact_dir.join("generated-case.splash");
         fs::write(&generated_case_path, generated_case)?;
 
@@ -283,9 +291,10 @@ where
     }
     let artifact_dir = config.artifacts_dir.join("recorder");
     config = config.with_artifacts_dir(artifact_dir.clone());
+    let session_config = config.clone();
     let mut output = None;
     run_with_config(config, |app| {
-        let mut session = SplashRecorderSession::new(app, options, artifact_dir);
+        let mut session = SplashRecorderSession::new(app, session_config, options, artifact_dir);
         record(&mut session)?;
         output = Some(session.finish()?);
         Ok::<(), TestError>(())
@@ -378,9 +387,17 @@ fn recorder_detail(action: &RecorderAction) -> String {
     out.trim().to_string()
 }
 
-fn render_generated_case(case_name: &str, actions: &[RecorderAction]) -> String {
+fn render_generated_case(
+    config: &TestConfig,
+    case_name: &str,
+    actions: &[RecorderAction],
+) -> String {
     let mut out = String::new();
     out.push_str("use mod.test\n\n");
+    if let Some(config_block) = render_suite_config(config) {
+        out.push_str(&config_block);
+        out.push('\n');
+    }
     let _ =
         std::fmt::Write::write_fmt(&mut out, format_args!("test.case({:?}, || {{\n", case_name));
     for action in actions {
@@ -422,7 +439,11 @@ fn render_action(action: &RecorderAction) -> String {
             modifiers,
         } => format!(
             "test.press_key({{key: {:?} shift: {} control: {} alt: {} logo: {}}})",
-            key_code, modifiers.shift, modifiers.control, modifiers.alt, modifiers.logo
+            format!("{:?}", key_code),
+            modifiers.shift,
+            modifiers.control,
+            modifiers.alt,
+            modifiers.logo
         ),
         RecorderActionKind::Scroll { sx, sy } => format!(
             "test.scroll({}, {}, {})",
@@ -441,21 +462,29 @@ fn render_action(action: &RecorderAction) -> String {
 }
 
 fn selector_to_splash(selector: &Selector) -> String {
-    if let Some(raw) = selector.raw_query() {
-        return format!("{{raw: {:?}}}", raw);
-    }
-    if let Some(id) = selector.id_value() {
-        return format!("{{id: {:?}}}", id);
-    }
     let mut fields = Vec::new();
-    if let Some(widget_type) = selector.widget_type_value() {
-        fields.push(format!("widget_type: {:?}", widget_type));
+    if let Some(raw) = selector.raw_query() {
+        fields.push(format!("raw: {:?}", raw));
+    } else {
+        if let Some(id) = selector.id_value() {
+            fields.push(format!("id: {:?}", id));
+        }
+        if let Some(widget_type) = selector.widget_type_value() {
+            fields.push(format!("widget_type: {:?}", widget_type));
+        }
+        if let Some(text_exact) = selector.text_exact_value() {
+            fields.push(format!("text_exact: {:?}", text_exact));
+        }
+        if let Some(text_contains) = selector.text_contains_value() {
+            fields.push(format!("text_contains: {:?}", text_contains));
+        }
     }
-    if let Some(text_exact) = selector.text_exact_value() {
-        fields.push(format!("text_exact: {:?}", text_exact));
-    }
-    if let Some(text_contains) = selector.text_contains_value() {
-        fields.push(format!("text_contains: {:?}", text_contains));
+    if selector.any_window_enabled() {
+        fields.push("any_window: true".to_string());
+    } else if let Some(window) = selector.window_value() {
+        fields.push(format!("window: {:?}", window));
+    } else if let Some(window_index) = selector.window_index_value() {
+        fields.push(format!("window_index: {}", window_index));
     }
     if let Some(nth) = selector.nth_index() {
         fields.push(format!("nth: {}", nth));
@@ -468,26 +497,130 @@ fn selector_to_splash(selector: &Selector) -> String {
 }
 
 fn selector_from_snapshot(snapshot: &WidgetSnapshot) -> String {
+    let mut fields = Vec::new();
     if !snapshot.id.is_empty() {
-        return format!("{{id: {:?}}}", snapshot.id);
-    }
-    if !snapshot.widget_type.is_empty() && snapshot.text.as_deref().is_some() {
-        return format!(
-            "{{widget_type: {:?} text_exact: {:?}}}",
-            snapshot.widget_type,
+        fields.push(format!("id: {:?}", snapshot.id));
+    } else if !snapshot.widget_type.is_empty() && snapshot.text.as_deref().is_some() {
+        fields.push(format!("widget_type: {:?}", snapshot.widget_type));
+        fields.push(format!(
+            "text_exact: {:?}",
             snapshot.text.as_deref().unwrap_or_default()
-        );
+        ));
+    } else if let Some(text) = &snapshot.text {
+        fields.push(format!("raw: {:?}", text));
+    } else {
+        fields.push("raw: \"*\"".to_string());
     }
-    if let Some(text) = &snapshot.text {
-        return format!("{{raw: {:?}}}", text);
+    if !snapshot.window_id.is_empty() {
+        fields.push(format!("window: {:?}", snapshot.window_id));
+    } else if snapshot.window_index != 0 {
+        fields.push(format!("window_index: {}", snapshot.window_index));
     }
-    "{raw: \"*\"}".to_string()
+    format!("{{{}}}", fields.join(" "))
+}
+
+fn render_suite_config(config: &TestConfig) -> Option<String> {
+    let baseline = match &config.launch {
+        TestLaunch::CurrentPackage => TestConfig::current_package(
+            config.manifest_dir.clone(),
+            config.package_name.clone(),
+            config.test_name.clone(),
+        )
+        .ok()?,
+        TestLaunch::SplashRunItem(target) => TestConfig::splash_run_item(
+            config.mount_root.clone(),
+            config.manifest_dir.clone(),
+            config.package_name.clone(),
+            config.test_name.clone(),
+            target.visible_run_item.clone(),
+            target.headless_run_item.clone(),
+        )
+        .ok()?,
+    };
+
+    let mut fields = Vec::new();
+    if let TestLaunch::SplashRunItem(target) = &config.launch {
+        fields.push("launch: \"splash_run_item\"".to_string());
+        fields.push(format!("visible_run_item: {:?}", target.visible_run_item));
+        fields.push(format!("headless_run_item: {:?}", target.headless_run_item));
+    }
+    push_duration_field(
+        &mut fields,
+        "startup_timeout_ms",
+        config.startup_timeout,
+        baseline.startup_timeout,
+    );
+    push_duration_field(
+        &mut fields,
+        "action_timeout_ms",
+        config.action_timeout,
+        baseline.action_timeout,
+    );
+    push_duration_field(
+        &mut fields,
+        "poll_interval_ms",
+        config.poll_interval,
+        baseline.poll_interval,
+    );
+    push_duration_field(
+        &mut fields,
+        "startup_delay_ms",
+        config.startup_pause,
+        baseline.startup_pause,
+    );
+    push_duration_field(
+        &mut fields,
+        "action_delay_ms",
+        config.action_delay,
+        baseline.action_delay,
+    );
+    push_duration_field(
+        &mut fields,
+        "keep_open_ms",
+        config.keep_open,
+        baseline.keep_open,
+    );
+    if config.step_screenshot_policy != baseline.step_screenshot_policy {
+        fields.push(format!(
+            "step_screenshots: {:?}",
+            step_screenshot_policy_name(config.step_screenshot_policy)
+        ));
+    }
+
+    if fields.is_empty() {
+        None
+    } else {
+        Some(format!("test.configure({{{}}})", fields.join(" ")))
+    }
+}
+
+fn push_duration_field(
+    fields: &mut Vec<String>,
+    name: &str,
+    value: std::time::Duration,
+    baseline: std::time::Duration,
+) {
+    if value != baseline {
+        fields.push(format!("{name}: {}", value.as_millis()));
+    }
+}
+
+fn step_screenshot_policy_name(policy: StepScreenshotPolicy) -> &'static str {
+    match policy {
+        StepScreenshotPolicy::All => "all",
+        StepScreenshotPolicy::None => "none",
+        StepScreenshotPolicy::Failures => "failures",
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_wait, render_generated_case, selector_from_snapshot};
-    use makepad_studio_protocol::WidgetSnapshot;
+    use super::{
+        infer_wait, render_generated_case, selector_from_snapshot, selector_to_splash,
+        RecorderAction, RecorderActionKind,
+    };
+    use crate::{Selector, TestConfig};
+    use makepad_studio_protocol::{KeyCode, KeyModifiers, WidgetSnapshot};
 
     fn snapshot(id: &str, widget_type: &str, text: Option<&str>) -> WidgetSnapshot {
         WidgetSnapshot {
@@ -511,6 +644,26 @@ mod tests {
     }
 
     #[test]
+    fn selector_generation_preserves_window_scope() {
+        let mut widget = snapshot("submit", "Button", Some("Submit"));
+        widget.window_id = "dialog".to_string();
+        let selector = selector_from_snapshot(&widget);
+        assert_eq!(selector, "{id: \"submit\" window: \"dialog\"}");
+    }
+
+    #[test]
+    fn selector_to_splash_preserves_any_window_and_window_ids() {
+        assert_eq!(
+            selector_to_splash(&Selector::id("submit").any_window()),
+            "{id: \"submit\" any_window: true}"
+        );
+        assert_eq!(
+            selector_to_splash(&Selector::id("submit").window("dialog")),
+            "{id: \"submit\" window: \"dialog\"}"
+        );
+    }
+
+    #[test]
     fn inferred_wait_prefers_text_delta() {
         let before = vec![snapshot("status", "Label", Some("Before"))];
         let after = vec![snapshot("status", "Label", Some("After"))];
@@ -521,7 +674,40 @@ mod tests {
 
     #[test]
     fn generated_case_contains_actions_and_waits() {
-        let case = render_generated_case("smoke", &[]);
+        let config =
+            TestConfig::current_package("/tmp/example", "makepad-example", "ui::recording")
+                .unwrap();
+        let case = render_generated_case(&config, "smoke", &[]);
         assert!(case.contains("test.case(\"smoke\""));
+    }
+
+    #[test]
+    fn generated_case_emits_launch_config_and_quoted_keys() {
+        let config = TestConfig::splash_run_item(
+            "/tmp/repo",
+            "/tmp/repo/examples/splash",
+            "makepad-example-splash",
+            "ui::recording",
+            "visible-run-item",
+            "headless-run-item",
+        )
+        .unwrap();
+        let actions = vec![RecorderAction {
+            kind: RecorderActionKind::PressKey {
+                key_code: KeyCode::ArrowDown,
+                modifiers: KeyModifiers::default(),
+            },
+            selector: None,
+            selector_repr: None,
+            inferred_wait: None,
+            comment: None,
+        }];
+
+        let case = render_generated_case(&config, "smoke", &actions);
+
+        assert!(case.contains("test.configure({launch: \"splash_run_item\""));
+        assert!(case.contains("visible_run_item: \"visible-run-item\""));
+        assert!(case.contains("headless_run_item: \"headless-run-item\""));
+        assert!(case.contains("key: \"ArrowDown\""));
     }
 }

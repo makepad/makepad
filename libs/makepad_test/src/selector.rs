@@ -185,6 +185,24 @@ impl Selector {
         self.text_contains.as_deref()
     }
 
+    pub(crate) fn any_window_enabled(&self) -> bool {
+        matches!(&self.window, WindowTarget::Any)
+    }
+
+    pub(crate) fn window_value(&self) -> Option<&str> {
+        match &self.window {
+            WindowTarget::Id(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn window_index_value(&self) -> Option<usize> {
+        match &self.window {
+            WindowTarget::Index(index) => Some(*index),
+            _ => None,
+        }
+    }
+
     pub(crate) fn matches(
         &self,
         widget: &WidgetSnapshot,

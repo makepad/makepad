@@ -52,10 +52,11 @@ fn env_duration_ms(name: &str) -> Duration {
 
 mod config;
 
-pub(crate) use config::sanitize_path_component;
-pub(crate) use config::StepScreenshotPolicy;
 pub use config::TestConfig;
-use config::{SplashLaunchTarget, TestLaunch, POLL_INTERVAL};
+use config::POLL_INTERVAL;
+pub(crate) use config::{
+    sanitize_path_component, SplashLaunchTarget, StepScreenshotPolicy, TestLaunch,
+};
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 

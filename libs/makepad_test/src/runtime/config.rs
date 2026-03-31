@@ -29,15 +29,15 @@ impl StepScreenshotPolicy {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct SplashLaunchTarget {
-    pub(super) root_package: String,
-    pub(super) visible_run_item: String,
-    pub(super) headless_run_item: String,
-    pub(super) child_package: String,
+pub(crate) struct SplashLaunchTarget {
+    pub(crate) root_package: String,
+    pub(crate) visible_run_item: String,
+    pub(crate) headless_run_item: String,
+    pub(crate) child_package: String,
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum TestLaunch {
+pub(crate) enum TestLaunch {
     CurrentPackage,
     SplashRunItem(SplashLaunchTarget),
 }
@@ -94,7 +94,7 @@ pub struct TestConfig {
     pub action_delay: Duration,
     pub keep_open: Duration,
     pub(crate) step_screenshot_policy: StepScreenshotPolicy,
-    pub(super) launch: TestLaunch,
+    pub(crate) launch: TestLaunch,
 }
 
 impl TestConfig {
