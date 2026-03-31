@@ -1,6 +1,7 @@
 use crate::protocol::{
-    default_session_config, EyeViewPacket, SessionConfigPacket, StreamConfigPacket, TrackingPacket,
-    XrRemoteCodec, XrRemoteEye, XR_REMOTE_PROTOCOL_VERSION,
+    default_session_config, EyeViewPacket, MarkerStatePacket, RenderStatePacket,
+    SessionConfigPacket, StreamConfigPacket, TrackingPacket, XrRemoteCodec, XrRemoteEye,
+    XrRemoteRenderMode, XrRemoteSceneId, XR_REMOTE_PROTOCOL_VERSION,
 };
 use makepad_widgets::makepad_math::*;
 
@@ -24,7 +25,7 @@ const LIGHT_DIR: Vec3f = Vec3f {
     y: 0.8,
     z: -0.45,
 };
-const SCENE_BOXES: [SceneBox; 8] = [
+const TEST_SCENE_BOXES: [SceneBox; 8] = [
     SceneBox {
         center: Vec3f {
             x: 0.42,
@@ -131,6 +132,113 @@ const SCENE_BOXES: [SceneBox; 8] = [
     },
 ];
 
+const TREE_SCENE_BOXES: [SceneBox; 8] = [
+    SceneBox {
+        center: Vec3f {
+            x: 0.05,
+            y: -0.06,
+            z: -0.10,
+        },
+        size: Vec3f {
+            x: 1.45,
+            y: 0.08,
+            z: 0.44,
+        },
+        color: [0x2b, 0x36, 0x43, 0xff],
+    },
+    SceneBox {
+        center: Vec3f {
+            x: 0.05,
+            y: 0.18,
+            z: -0.10,
+        },
+        size: Vec3f {
+            x: 0.10,
+            y: 0.54,
+            z: 0.10,
+        },
+        color: [0x79, 0x56, 0x34, 0xff],
+    },
+    SceneBox {
+        center: Vec3f {
+            x: -0.03,
+            y: 0.42,
+            z: -0.10,
+        },
+        size: Vec3f {
+            x: 0.28,
+            y: 0.06,
+            z: 0.06,
+        },
+        color: [0x7e, 0x5b, 0x39, 0xff],
+    },
+    SceneBox {
+        center: Vec3f {
+            x: 0.15,
+            y: 0.34,
+            z: -0.02,
+        },
+        size: Vec3f {
+            x: 0.22,
+            y: 0.06,
+            z: 0.06,
+        },
+        color: [0x7a, 0x58, 0x37, 0xff],
+    },
+    SceneBox {
+        center: Vec3f {
+            x: 0.02,
+            y: 0.58,
+            z: -0.10,
+        },
+        size: Vec3f {
+            x: 0.34,
+            y: 0.20,
+            z: 0.34,
+        },
+        color: [0x2d, 0x5b, 0x2a, 0xff],
+    },
+    SceneBox {
+        center: Vec3f {
+            x: -0.12,
+            y: 0.46,
+            z: -0.08,
+        },
+        size: Vec3f {
+            x: 0.22,
+            y: 0.16,
+            z: 0.22,
+        },
+        color: [0x2d, 0x5e, 0x2b, 0xff],
+    },
+    SceneBox {
+        center: Vec3f {
+            x: 0.18,
+            y: 0.48,
+            z: -0.04,
+        },
+        size: Vec3f {
+            x: 0.20,
+            y: 0.16,
+            z: 0.20,
+        },
+        color: [0x31, 0x68, 0x2f, 0xff],
+    },
+    SceneBox {
+        center: Vec3f {
+            x: 0.04,
+            y: 0.70,
+            z: -0.14,
+        },
+        size: Vec3f {
+            x: 0.20,
+            y: 0.14,
+            z: 0.20,
+        },
+        color: [0x3a, 0x74, 0x36, 0xff],
+    },
+];
+
 const FACE_NORMALS: [Vec3f; 6] = [
     Vec3f {
         x: 1.0,
@@ -182,6 +290,8 @@ pub fn render_eye_scene(
     tracking: &TrackingPacket,
     eye: XrRemoteEye,
     session: &SessionConfigPacket,
+    render_state: &RenderStatePacket,
+    marker_state: &MarkerStatePacket,
 ) {
     let width = session.per_eye_width as usize;
     let height = session.per_eye_height as usize;
@@ -201,7 +311,21 @@ pub fn render_eye_scene(
         width,
         height,
         eye_view(tracking, eye),
+        scene_boxes(render_state),
     );
+    if render_state.mode == XrRemoteRenderMode::LocalScene {
+        render_eye(
+            output,
+            depth,
+            width,
+            0,
+            0,
+            width,
+            height,
+            eye_view(tracking, eye),
+            &[marker_box(marker_state)],
+        );
+    }
 }
 
 pub fn eye_view(tracking: &TrackingPacket, eye: XrRemoteEye) -> &EyeViewPacket {
@@ -252,9 +376,10 @@ fn render_eye(
     viewport_width: usize,
     viewport_height: usize,
     eye: &EyeViewPacket,
+    boxes: &[SceneBox],
 ) {
     let view = eye.pose.to_mat4().invert();
-    for scene_box in SCENE_BOXES {
+    for scene_box in boxes {
         render_box(
             output,
             depth,
@@ -266,8 +391,33 @@ fn render_eye(
             &view,
             eye.fov_y_degrees,
             eye.aspect,
-            scene_box,
+            *scene_box,
         );
+    }
+}
+
+fn scene_boxes(render_state: &RenderStatePacket) -> &'static [SceneBox] {
+    match (render_state.mode, render_state.scene) {
+        (XrRemoteRenderMode::LocalScene, XrRemoteSceneId::Tree) => &TREE_SCENE_BOXES,
+        _ => &TEST_SCENE_BOXES,
+    }
+}
+
+fn marker_box(marker_state: &MarkerStatePacket) -> SceneBox {
+    let pulse = marker_state.pulse.clamp(0.0, 1.0);
+    SceneBox {
+        center: vec3f(marker_state.x, marker_state.y, marker_state.z),
+        size: vec3f(
+            0.18 * marker_state.scale.max(0.2),
+            0.18 * marker_state.scale.max(0.2),
+            0.18 * marker_state.scale.max(0.2),
+        ),
+        color: [
+            0xff,
+            (0x8c as f32 + 0x4b as f32 * pulse).clamp(0.0, 255.0) as u8,
+            (0x2f as f32 + 0x64 as f32 * (1.0 - pulse)).clamp(0.0, 255.0) as u8,
+            0xff,
+        ],
     }
 }
 

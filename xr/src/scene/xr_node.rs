@@ -234,6 +234,22 @@ impl XrNode {
         self.scale
     }
 
+    pub fn set_pos(&mut self, cx: &mut Cx, pos: Vec3f) {
+        if self.pos == pos {
+            return;
+        }
+        self.pos = pos;
+        self.redraw(cx);
+    }
+
+    pub fn set_scale(&mut self, cx: &mut Cx, scale: Vec3f) {
+        if self.scale == scale {
+            return;
+        }
+        self.scale = scale;
+        self.redraw(cx);
+    }
+
     pub fn body_kind(&self) -> XrBodyKind {
         self.body
     }

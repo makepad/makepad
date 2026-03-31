@@ -4,8 +4,9 @@ use makepad_widgets::*;
 
 #[cfg(target_os = "android")]
 mod client;
-mod scene;
 mod protocol;
+mod scene;
+mod shared_scene;
 mod wire;
 
 #[cfg(not(target_os = "android"))]

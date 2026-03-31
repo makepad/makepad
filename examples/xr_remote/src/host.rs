@@ -1,14 +1,14 @@
-use crate::{protocol::*, scene::*, wire::*};
+use crate::{protocol::*, scene::*, shared_scene::*, wire::*};
 use makepad_widgets::makepad_micro_serde::SerBin;
-use makepad_widgets::makepad_platform::{
-    event::xr::XrState,
-    thread::SignalToUI,
-    video::{CameraFrameLayout, VideoEncodeSource, VideoEncoderConfig, VideoQueuePolicy},
-};
 #[cfg(not(target_os = "macos"))]
 use makepad_widgets::makepad_platform::video::{
     convert_bgra_8888_to_i420, CameraColorMatrix, CameraFrameOwned, CameraFramePlaneRef,
     CameraFrameRef,
+};
+use makepad_widgets::makepad_platform::{
+    event::xr::XrState,
+    thread::SignalToUI,
+    video::{CameraFrameLayout, VideoEncodeSource, VideoEncoderConfig, VideoQueuePolicy},
 };
 use makepad_widgets::*;
 use makepad_xr::{XrNetIncoming, XrNetNode};
@@ -21,24 +21,23 @@ use std::{
 
 #[cfg(target_os = "macos")]
 use makepad_widgets::makepad_platform::os::apple::apple_sys::{
-    CFArrayGetCount, CFArrayGetValueAtIndex, CFDictionaryContainsKey, CFDictionaryCreate,
-    CFNumberCreate, CFRelease, CMBlockBufferCopyDataBytes, CMBlockBufferGetDataLength,
-    CMFormatDescriptionGetMediaSubType, CMSampleBufferDataIsReady, CMSampleBufferGetDataBuffer,
-    CMSampleBufferGetFormatDescription, CMSampleBufferGetPresentationTimeStamp,
-    CMSampleBufferGetSampleAttachmentsArray, CMTimeGetSeconds, CMTimeMakeWithSeconds,
-    CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+    kCFBooleanFalse, kCFBooleanTrue, kCFNumberSInt32Type, kCMSampleAttachmentKey_NotSync,
+    kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC, kCVPixelFormatType_32BGRA,
+    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
+    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_RealTime, kVTEncodeFrameOptionKey_ForceKeyFrame, CFArrayGetCount,
+    CFArrayGetValueAtIndex, CFDictionaryContainsKey, CFDictionaryCreate, CFNumberCreate, CFRelease,
+    CMBlockBufferCopyDataBytes, CMBlockBufferGetDataLength, CMFormatDescriptionGetMediaSubType,
+    CMSampleBufferDataIsReady, CMSampleBufferGetDataBuffer, CMSampleBufferGetFormatDescription,
+    CMSampleBufferGetPresentationTimeStamp, CMSampleBufferGetSampleAttachmentsArray,
+    CMTimeGetSeconds, CMTimeMakeWithSeconds, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
     CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, CVImageBufferRef, CVPixelBufferCreate,
     CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
     CVPixelBufferRef, CVPixelBufferRelease, CVPixelBufferUnlockBaseAddress, OSStatus,
-    VTCompressionSessionCompleteFrames, VTCompressionSessionCreate, VTCompressionSessionEncodeFrame,
-    VTCompressionSessionInvalidate, VTCompressionSessionPrepareToEncodeFrames,
-    VTCompressionSessionRef, VTEncodeInfoFlags, VTSessionSetProperty, kCFBooleanFalse,
-    kCFBooleanTrue, kCFNumberSInt32Type, kCMSampleAttachmentKey_NotSync, kCMTimeInvalid,
-    kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
-    kCVPixelFormatType_32BGRA, kVTCompressionPropertyKey_AllowFrameReordering,
-    kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ExpectedFrameRate,
-    kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_RealTime,
-    kVTEncodeFrameOptionKey_ForceKeyFrame,
+    VTCompressionSessionCompleteFrames, VTCompressionSessionCreate,
+    VTCompressionSessionEncodeFrame, VTCompressionSessionInvalidate,
+    VTCompressionSessionPrepareToEncodeFrames, VTCompressionSessionRef, VTEncodeInfoFlags,
+    VTSessionSetProperty,
 };
 #[cfg(target_os = "macos")]
 use std::{ffi::c_void, ptr, slice};
@@ -65,7 +64,7 @@ script_mod! {
                             draw_text.text_style.font_size: 22.0
                         }
 
-                        RoundedView{
+                        stream_preview_panel := RoundedView{
                             width: Fill
                             height: Fit
                             padding: 12
@@ -186,13 +185,13 @@ script_mod! {
                                 border_color: #x273646
                             }
 
-                            Label{
+                            preview_title := Label{
                                 text: "Outgoing Stream Preview"
                                 draw_text.color: #xe4eef7
                                 draw_text.text_style.font_size: 14.0
                             }
 
-                            Label{
+                            preview_caption := Label{
                                 text: "These are the exact pre-encode eye frames being sent to Quest."
                                 draw_text.color: #x97adc2
                             }
@@ -253,6 +252,34 @@ script_mod! {
                                     }
                                 }
                             }
+                        }
+
+                        quest_monitor_panel := RoundedView{
+                            visible: false
+                            width: Fill
+                            height: 360
+                            padding: 12
+                            spacing: 10
+                            flow: Down
+                            draw_bg+: {
+                                color: #x16202b
+                                border_radius: 10.0
+                                border_size: 1.0
+                                border_color: #x273646
+                            }
+
+                            Label{
+                                text: "Quest Local Scene Monitor"
+                                draw_text.color: #xe4eef7
+                                draw_text.text_style.font_size: 14.0
+                            }
+
+                            Label{
+                                text: "This is the same shared XR scene graph Quest renders locally. Drag to orbit and use the wheel to zoom."
+                                draw_text.color: #x97adc2
+                            }
+
+                            quest_scene_monitor := mod.widgets.XrRemoteDesktopMonitor{}
                         }
                     }
                 }
@@ -565,8 +592,10 @@ impl HostShared {
             return;
         };
         let remote_addr = Some(SocketAddr::new(peer_ip, channel.port));
-        self.eye_shared(XrRemoteEye::Left).set_remote_addr(remote_addr);
-        self.eye_shared(XrRemoteEye::Right).set_remote_addr(remote_addr);
+        self.eye_shared(XrRemoteEye::Left)
+            .set_remote_addr(remote_addr);
+        self.eye_shared(XrRemoteEye::Right)
+            .set_remote_addr(remote_addr);
         self.request_keyframe(XrRemoteEyeTarget::Both);
     }
 
@@ -647,8 +676,12 @@ mod mac_vt_h264 {
             eye: XrRemoteEye,
         ) -> Result<Self, String> {
             let codec_type = match config.codec {
-                makepad_widgets::makepad_platform::video::VideoCodec::H264 => kCMVideoCodecType_H264,
-                makepad_widgets::makepad_platform::video::VideoCodec::H265 => kCMVideoCodecType_HEVC,
+                makepad_widgets::makepad_platform::video::VideoCodec::H264 => {
+                    kCMVideoCodecType_H264
+                }
+                makepad_widgets::makepad_platform::video::VideoCodec::H265 => {
+                    kCMVideoCodecType_HEVC
+                }
                 other => return Err(format!("unsupported vt codec: {other:?}")),
             };
             unsafe {
@@ -678,9 +711,11 @@ mod mac_vt_h264 {
                     return Err(format!("VTCompressionSessionCreate failed: {status}"));
                 }
 
-                if let Err(err) =
-                    set_bool_property(session, kVTCompressionPropertyKey_RealTime, config.latency_realtime)
-                {
+                if let Err(err) = set_bool_property(
+                    session,
+                    kVTCompressionPropertyKey_RealTime,
+                    config.latency_realtime,
+                ) {
                     VTCompressionSessionInvalidate(session);
                     CFRelease(session);
                     drop(Box::from_raw(state));
@@ -732,7 +767,9 @@ mod mac_vt_h264 {
                     VTCompressionSessionInvalidate(session);
                     CFRelease(session);
                     drop(Box::from_raw(state));
-                    return Err(format!("VTCompressionSessionPrepareToEncodeFrames failed: {status}"));
+                    return Err(format!(
+                        "VTCompressionSessionPrepareToEncodeFrames failed: {status}"
+                    ));
                 }
 
                 Ok(Self {
@@ -773,7 +810,9 @@ mod mac_vt_h264 {
                 let lock_status = CVPixelBufferLockBaseAddress(pixel_buffer, 0);
                 if lock_status != 0 {
                     CVPixelBufferRelease(pixel_buffer);
-                    return Err(format!("CVPixelBufferLockBaseAddress failed: {lock_status}"));
+                    return Err(format!(
+                        "CVPixelBufferLockBaseAddress failed: {lock_status}"
+                    ));
                 }
 
                 let dst = CVPixelBufferGetBaseAddress(pixel_buffer) as *mut u8;
@@ -840,8 +879,11 @@ mod mac_vt_h264 {
         key: makepad_widgets::makepad_platform::os::apple::apple_sys::CFStringRef,
         value: i32,
     ) -> Result<(), String> {
-        let number =
-            CFNumberCreate(ptr::null(), kCFNumberSInt32Type, &value as *const _ as *const c_void);
+        let number = CFNumberCreate(
+            ptr::null(),
+            kCFNumberSInt32Type,
+            &value as *const _ as *const c_void,
+        );
         if number.is_null() {
             return Err("CFNumberCreate failed".to_string());
         }
@@ -858,7 +900,11 @@ mod mac_vt_h264 {
         key: makepad_widgets::makepad_platform::os::apple::apple_sys::CFStringRef,
         value: bool,
     ) -> Result<(), String> {
-        let bool_ref = if value { kCFBooleanTrue } else { kCFBooleanFalse };
+        let bool_ref = if value {
+            kCFBooleanTrue
+        } else {
+            kCFBooleanFalse
+        };
         let status = VTSessionSetProperty(session, key, bool_ref);
         if status != 0 {
             return Err(format!("VTSessionSetProperty failed: {status}"));
@@ -917,12 +963,8 @@ mod mac_vt_h264 {
             return;
         }
         let mut avcc = vec![0u8; data_len as usize];
-        if CMBlockBufferCopyDataBytes(
-            data_buffer,
-            0,
-            data_len,
-            avcc.as_mut_ptr() as *mut c_void,
-        ) != 0
+        if CMBlockBufferCopyDataBytes(data_buffer, 0, data_len, avcc.as_mut_ptr() as *mut c_void)
+            != 0
         {
             return;
         }
@@ -930,9 +972,9 @@ mod mac_vt_h264 {
         let Some(annexb) = avcc_to_annexb(&avcc, nal_header_len) else {
             return;
         };
-        let pts_ns =
-            (CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample_buffer)) * 1_000_000_000.0)
-                .max(0.0) as u64;
+        let pts_ns = (CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample_buffer))
+            * 1_000_000_000.0)
+            .max(0.0) as u64;
         let is_key = sample_is_keyframe(sample_buffer);
 
         let mut state = state_mutex.lock().unwrap();
@@ -963,9 +1005,10 @@ mod mac_vt_h264 {
         else {
             return;
         };
-        if let Err(err) = state
-            .eye_shared
-            .send_media_frame(meta, state.config_id.max(1), is_key, &annexb)
+        if let Err(err) =
+            state
+                .eye_shared
+                .send_media_frame(meta, state.config_id.max(1), is_key, &annexb)
         {
             crate::log!(
                 "xr_remote host: {} vt send failed: {}",
@@ -1195,11 +1238,7 @@ impl App {
     fn marker_summary(marker_state: &MarkerStatePacket) -> String {
         format!(
             "Marker: ({:.2}, {:.2}, {:.2}) scale {:.2} pulse {:.2}",
-            marker_state.x,
-            marker_state.y,
-            marker_state.z,
-            marker_state.scale,
-            marker_state.pulse,
+            marker_state.x, marker_state.y, marker_state.z, marker_state.scale, marker_state.pulse,
         )
     }
 
@@ -1211,13 +1250,17 @@ impl App {
     }
 
     fn sync_render_state(&self) {
-        self.shared.set_render_state(Some(self.render_state.clone()));
-        self.shared.send_control(&ControlPacket::RenderState(self.render_state.clone()));
+        self.shared
+            .set_render_state(Some(self.render_state.clone()));
+        self.shared
+            .send_control(&ControlPacket::RenderState(self.render_state.clone()));
     }
 
     fn sync_marker_state(&self) {
-        self.shared.set_marker_state(Some(self.marker_state.clone()));
-        self.shared.send_control(&ControlPacket::MarkerState(self.marker_state.clone()));
+        self.shared
+            .set_marker_state(Some(self.marker_state.clone()));
+        self.shared
+            .send_control(&ControlPacket::MarkerState(self.marker_state.clone()));
     }
 
     fn set_render_state(&mut self, cx: &mut Cx, mode: XrRemoteRenderMode, scene: XrRemoteSceneId) {
@@ -1265,9 +1308,12 @@ impl App {
             return;
         }
         self.bump_session_id();
-        self.shared.set_session_config(Some(self.session_config.clone()));
-        self.shared.set_render_state(Some(self.render_state.clone()));
-        self.shared.set_marker_state(Some(self.marker_state.clone()));
+        self.shared
+            .set_session_config(Some(self.session_config.clone()));
+        self.shared
+            .set_render_state(Some(self.render_state.clone()));
+        self.shared
+            .set_marker_state(Some(self.marker_state.clone()));
         for eye in XrRemoteEye::ALL {
             self.shared
                 .eye_shared(eye)
@@ -1365,11 +1411,7 @@ impl App {
                     packet.is_key,
                     packet.data,
                 ) {
-                    crate::log!(
-                        "xr_remote host: {} udp send failed: {}",
-                        eye.label(),
-                        err
-                    );
+                    crate::log!("xr_remote host: {} udp send failed: {}", eye.label(), err);
                 }
             },
         )?;
@@ -1444,9 +1486,8 @@ impl App {
             }
             let left_err = left_result.err();
             let right_err = right_result.err();
-            self.latest_status = format!(
-                "H265 encoder unavailable: left={left_err:?} right={right_err:?}"
-            );
+            self.latest_status =
+                format!("H265 encoder unavailable: left={left_err:?} right={right_err:?}");
             self.latest_stream_text = "Stream: encoder unavailable".to_string();
             self.refresh_labels(cx);
         }
@@ -1485,6 +1526,43 @@ impl App {
         self.ui
             .widget(cx, ids!(host_remote_log))
             .set_text(cx, &self.latest_remote_log_text);
+        self.ui
+            .widget(cx, ids!(preview_title))
+            .set_text(cx, self.preview_title());
+        self.ui
+            .widget(cx, ids!(preview_caption))
+            .set_text(cx, self.preview_caption());
+        let local_scene_mode = self.render_state.mode == XrRemoteRenderMode::LocalScene;
+        self.ui
+            .widget(cx, ids!(stream_preview_panel))
+            .set_visible(cx, !local_scene_mode);
+        self.ui
+            .widget(cx, ids!(quest_monitor_panel))
+            .set_visible(cx, local_scene_mode);
+        apply_scene_content_state(
+            self.ui.widget(cx, ids!(quest_scene_monitor.scene_content)),
+            cx,
+            &self.render_state,
+            &self.marker_state,
+        );
+    }
+
+    fn preview_title(&self) -> &'static str {
+        match self.render_state.mode {
+            XrRemoteRenderMode::Stream => "Outgoing Stream Preview",
+            XrRemoteRenderMode::LocalScene => "Quest Local Scene Preview",
+        }
+    }
+
+    fn preview_caption(&self) -> &'static str {
+        match self.render_state.mode {
+            XrRemoteRenderMode::Stream => {
+                "These are the exact pre-encode eye frames being sent to Quest."
+            }
+            XrRemoteRenderMode::LocalScene => {
+                "This is the host-side expected view of the scene Quest renders locally."
+            }
+        }
     }
 
     fn update_preview_texture(&mut self, cx: &mut Cx, eye: XrRemoteEye) {
@@ -1502,9 +1580,7 @@ impl App {
             .collect::<Vec<u32>>();
 
         let texture = match &self.preview_textures[eye_index] {
-            Some(texture)
-                if texture.get_format(cx).vec_width_height() == Some((width, height)) =>
-            {
+            Some(texture) if texture.get_format(cx).vec_width_height() == Some((width, height)) => {
                 texture.set_data_u32(cx, width, height, pixels);
                 texture.clone()
             }
@@ -1557,12 +1633,8 @@ impl App {
                 self.latest_stream_text = format!("Stream: keyframe requested {:?}", request.eye);
             }
             ControlPacket::LogLine(line) => {
-                self.latest_remote_log_text = format!(
-                    "Remote [{}] {}: {}",
-                    line.level,
-                    line.source,
-                    line.text
-                );
+                self.latest_remote_log_text =
+                    format!("Remote [{}] {}: {}", line.level, line.source, line.text);
                 crate::log!(
                     "xr_remote remote-log [{}] {} @{}ns: {}",
                     line.level,
@@ -1648,6 +1720,8 @@ impl App {
             tracking,
             eye,
             &self.session_config,
+            &self.render_state,
+            &self.marker_state,
         );
         self.update_preview_texture(cx, eye);
 
@@ -1663,7 +1737,9 @@ impl App {
             tracking_id: tracking.tracking_id,
             pts_ns: timestamp_ns,
         };
-        self.shared.eye_shared(eye).queue_pending_meta(timestamp_ns, meta);
+        self.shared
+            .eye_shared(eye)
+            .queue_pending_meta(timestamp_ns, meta);
 
         #[cfg(not(target_os = "macos"))]
         {
@@ -1739,11 +1815,13 @@ impl App {
 
     fn push_frame(&mut self, cx: &mut Cx) {
         let media_ready = self.shared.all_media_connected();
-        let encode_enabled = media_ready && self.encoders_started;
+        let encode_enabled = media_ready
+            && self.encoders_started
+            && self.render_state.mode == XrRemoteRenderMode::Stream;
         let using_live_tracking = self.latest_state_received;
         if !using_live_tracking {
-            self.latest_pose_text = "Pose: preview fallback camera (waiting for xr_net tracking)"
-                .to_string();
+            self.latest_pose_text =
+                "Pose: preview fallback camera (waiting for xr_net tracking)".to_string();
         }
 
         let tracking = make_tracking_packet(
@@ -1791,14 +1869,23 @@ impl App {
         }
         self.ui.redraw(cx);
         let render_ms = (render_finished_ns.saturating_sub(render_started_ns) as f64) / 1_000_000.0;
-        self.latest_stream_text = if encode_enabled {
+        self.latest_stream_text = if self.render_state.mode == XrRemoteRenderMode::LocalScene {
+            format!(
+                "Quest local scene: desktop monitor active, video streaming idle ({:.1} ms)",
+                render_ms
+            )
+        } else if encode_enabled {
             format!(
                 "Stream: group {} track {} render {:.1} ms cfg L{} R{}",
                 frame_group_id,
                 tracking.tracking_id,
                 render_ms,
-                self.shared.eye_shared(XrRemoteEye::Left).current_config_id(),
-                self.shared.eye_shared(XrRemoteEye::Right).current_config_id(),
+                self.shared
+                    .eye_shared(XrRemoteEye::Left)
+                    .current_config_id(),
+                self.shared
+                    .eye_shared(XrRemoteEye::Right)
+                    .current_config_id(),
             )
         } else if media_ready {
             format!(
@@ -1844,28 +1931,52 @@ impl MatchEvent for App {
         {
             self.set_render_state(cx, XrRemoteRenderMode::LocalScene, XrRemoteSceneId::Tree);
         }
-        if self.ui.button(cx, ids!(marker_left_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(marker_left_button))
+            .clicked(actions)
+        {
             self.nudge_marker(cx, -0.08, 0.0, 0.0);
         }
-        if self.ui.button(cx, ids!(marker_right_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(marker_right_button))
+            .clicked(actions)
+        {
             self.nudge_marker(cx, 0.08, 0.0, 0.0);
         }
         if self.ui.button(cx, ids!(marker_up_button)).clicked(actions) {
             self.nudge_marker(cx, 0.0, 0.08, 0.0);
         }
-        if self.ui.button(cx, ids!(marker_down_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(marker_down_button))
+            .clicked(actions)
+        {
             self.nudge_marker(cx, 0.0, -0.08, 0.0);
         }
-        if self.ui.button(cx, ids!(marker_near_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(marker_near_button))
+            .clicked(actions)
+        {
             self.nudge_marker(cx, 0.0, 0.0, 0.08);
         }
         if self.ui.button(cx, ids!(marker_far_button)).clicked(actions) {
             self.nudge_marker(cx, 0.0, 0.0, -0.08);
         }
-        if self.ui.button(cx, ids!(marker_pulse_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(marker_pulse_button))
+            .clicked(actions)
+        {
             self.pulse_marker(cx);
         }
-        if self.ui.button(cx, ids!(marker_reset_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(marker_reset_button))
+            .clicked(actions)
+        {
             self.set_marker_state(cx, default_marker_state());
         }
     }
@@ -1874,6 +1985,8 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
+        makepad_xr::script_mod(vm);
+        crate::shared_scene::script_mod(vm);
         self::script_mod(vm)
     }
 

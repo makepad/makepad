@@ -50,6 +50,26 @@ impl Cube {
     pub fn node(&self) -> &XrNode {
         &self.node
     }
+
+    pub fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        self.node.set_visible(cx, visible);
+    }
+
+    pub fn set_pos(&mut self, cx: &mut Cx, pos: Vec3f) {
+        self.node.set_pos(cx, pos);
+    }
+
+    pub fn set_scale(&mut self, cx: &mut Cx, scale: Vec3f) {
+        self.node.set_scale(cx, scale);
+    }
+
+    pub fn set_color(&mut self, cx: &mut Cx, color: Vec4f) {
+        if self.color == color {
+            return;
+        }
+        self.color = color;
+        self.redraw(cx);
+    }
 }
 
 impl ScriptHook for Cube {

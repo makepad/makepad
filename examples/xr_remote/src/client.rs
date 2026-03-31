@@ -1,4 +1,4 @@
-use crate::{protocol::*, wire::*};
+use crate::{protocol::*, shared_scene::*, wire::*};
 use makepad_widgets::makepad_platform::{
     makepad_live_id::LiveId,
     thread::SignalToUI,
@@ -16,23 +16,6 @@ use std::{
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
-
-    let Platform = Cube{
-        body: mod.widgets.XrBodyKind.Fixed
-        size: vec3(1.45, 0.08, 0.44)
-        corner_radius: 0.022
-        roughness: 0.82
-        metallic: 0.0
-        color: #x2b3643
-    }
-
-    let TestPedestal = Cube{
-        body: mod.widgets.XrBodyKind.Fixed
-        size: vec3(0.28, 0.18, 0.28)
-        corner_radius: 0.026
-        roughness: 0.18
-        metallic: 0.04
-    }
 
     mod.widgets.RemoteEyeSurfaceBase = #(RemoteEyeSurface::register_widget(vm))
     mod.widgets.RemoteEyeSurface = set_type_default() do mod.widgets.RemoteEyeSurfaceBase{
@@ -64,116 +47,7 @@ script_mod! {
             env.env_cube: false
             env.depth_mesh: false
 
-            local_scene_select := XrSelect{
-                visible: false
-                pos: vec3(0.0, -0.02, -0.62)
-                scale: vec3(0.5, 0.5, 0.5)
-                active_child: @test_scene
-
-                test_scene := XrNode{
-                    on_render: ||{
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(1.65, 0.08, 1.18)
-                            corner_radius: 0.04
-                            roughness: 0.92
-                            metallic: 0.0
-                            color: #x243444
-                            pos: vec3(0.42, -0.22, -0.72)
-                        }
-
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.18, 0.72, 1.16)
-                            corner_radius: 0.04
-                            roughness: 0.88
-                            metallic: 0.0
-                            color: #x1c2733
-                            pos: vec3(1.20, 0.10, -0.72)
-                        }
-
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(1.62, 0.72, 0.18)
-                            corner_radius: 0.04
-                            roughness: 0.88
-                            metallic: 0.0
-                            color: #x1a2430
-                            pos: vec3(0.42, 0.10, -1.22)
-                        }
-
-                        TestPedestal{
-                            pos: vec3(0.05, -0.05, -0.76)
-                            color: #xff6a4d
-                        }
-
-                        TestPedestal{
-                            pos: vec3(0.42, 0.02, -0.76)
-                            color: #x58d68d
-                            size: vec3(0.24, 0.32, 0.24)
-                        }
-
-                        TestPedestal{
-                            pos: vec3(0.78, -0.01, -0.76)
-                            color: #x68a8ff
-                            size: vec3(0.24, 0.26, 0.24)
-                        }
-
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.24, 0.24, 0.24)
-                            corner_radius: 0.024
-                            roughness: 0.12
-                            metallic: 0.02
-                            color: #xffff7a
-                            pos: vec3(0.42, 0.34, -0.76)
-                        }
-
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.16, 0.82, 0.16)
-                            corner_radius: 0.03
-                            roughness: 0.22
-                            metallic: 0.04
-                            color: #xff8a54
-                            pos: vec3(0.42, 0.34, -1.02)
-                        }
-                    }
-                }
-
-                tree_scene := XrNode{
-                    on_render: ||{
-                        Platform{pos: vec3(0.05, -0.06, -0.10)}
-                        fractal_tree := FractalTree{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            physics_size: vec3(0.34, 0.92, 0.34)
-                            pos: vec3(0.05, -0.02, -0.10)
-                            scale: vec3(0.72, 0.72, 0.72)
-                            child_scale: 0.57735026
-                            length_scale_0: 0.60
-                            length_scale_1: 1.78
-                            length_scale_2: 1.88
-                            length_scale_3: 0.97
-                            length_scale_4: 1.03
-                            length_scale_rest: 1.08
-                            branch_split_angle: 0.58
-                            branch_yaw_step: 2.0943952
-                            branch_yaw_phase_step: 1.0471976
-                        }
-                    }
-                }
-            }
-
-            replicated_marker := Cube{
-                visible: false
-                body: mod.widgets.XrBodyKind.Fixed
-                size: vec3(0.18, 0.18, 0.18)
-                corner_radius: 0.024
-                roughness: 0.10
-                metallic: 0.03
-                color: #xffff7a
-                pos: vec3(0.42, 0.34, -0.76)
-            }
+            scene_content := mod.widgets.XrRemoteSharedScene{}
 
             immersive_left := XrView{
                 visible: false
@@ -592,36 +466,13 @@ impl Default for App {
 }
 
 impl App {
-    fn marker_color(&self) -> Vec4f {
-        let pulse = self.marker_state.pulse.clamp(0.0, 1.0);
-        vec4f(
-            1.0,
-            0.55 + 0.35 * pulse,
-            0.18 + 0.45 * (1.0 - pulse),
-            1.0,
-        )
-    }
-
     fn apply_marker_state(&mut self, cx: &mut Cx) {
-        let visible = self.render_state.mode == XrRemoteRenderMode::LocalScene;
-        let position = vec3f(
-            self.marker_state.x,
-            self.marker_state.y,
-            self.marker_state.z,
+        apply_scene_content_state(
+            self.ui.widget(cx, ids!(scene_content)),
+            cx,
+            &self.render_state,
+            &self.marker_state,
         );
-        let scale = vec3f(
-            self.marker_state.scale,
-            self.marker_state.scale,
-            self.marker_state.scale,
-        );
-        let color = self.marker_color();
-        let marker = self.ui.widget(cx, ids!(replicated_marker));
-        script_apply_eval!(cx, marker, {
-            visible: #(visible)
-            pos: #(position)
-            scale: #(scale)
-            color: #(color)
-        });
     }
 
     fn decoder_slot(eye: XrRemoteEye) -> usize {
@@ -884,16 +735,12 @@ impl App {
 
     fn apply_render_state(&mut self, cx: &mut Cx) {
         let local_scene_visible = self.render_state.mode == XrRemoteRenderMode::LocalScene;
-        self.ui
-            .widget(cx, ids!(local_scene_select))
-            .set_visible(cx, local_scene_visible);
-        if let Some(mut select) = self
-            .ui
-            .widget(cx, ids!(local_scene_select))
-            .borrow_mut::<XrSelect>()
-        {
-            let _ = select.set_active_child(cx, self.render_state.scene.live_id());
-        }
+        apply_scene_content_state(
+            self.ui.widget(cx, ids!(scene_content)),
+            cx,
+            &self.render_state,
+            &self.marker_state,
+        );
         if local_scene_visible {
             self.set_immersive_visible(cx, false);
             self.latest_stream_text = format!(
@@ -1825,6 +1672,7 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
         makepad_xr::script_mod(vm);
+        crate::shared_scene::script_mod(vm);
         self::script_mod(vm)
     }
 
