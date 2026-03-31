@@ -26,11 +26,22 @@ script_mod! {
             color_hover: uniform(theme.color_label_inner_hover)
             color_down: uniform(theme.color_label_inner_down)
 
+            bg_color: uniform(#00000000)
+            bg_color_hover: uniform(#00000000)
+            bg_color_down: uniform(#00000000)
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.aa = sdf.aa * 3.0
                 let sz = 4.5
                 let c = self.rect_size * vec2(0.5, 0.5)
+
+                // Draw background
+                let bg = self.bg_color
+                    .mix(self.bg_color_hover, self.hover)
+                    .mix(self.bg_color_down, self.down);
+                sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
+                sdf.fill(bg);
 
                 let color = self.color
                     .mix(self.color_hover, self.hover)
