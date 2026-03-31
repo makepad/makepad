@@ -198,10 +198,7 @@ impl XrNetDataPacket {
         }
     }
 
-    pub fn shared_object_states(
-        node_id: XrNetPeerId,
-        states: Vec<XrNetSharedObjectState>,
-    ) -> Self {
+    pub fn shared_object_states(node_id: XrNetPeerId, states: Vec<XrNetSharedObjectState>) -> Self {
         Self::SharedObjectStates {
             version: XR_NET_PROTOCOL_VERSION,
             node_id,

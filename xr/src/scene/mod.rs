@@ -16,8 +16,8 @@ pub use xr_body_spawn::{XrBodyImpulse, XrBodySpawn};
 pub use xr_env::{DrawDepthMeshBasic, XrEnv};
 pub use xr_node::{
     xr_draw_list_depth, xr_sort_child_draw_order, xr_widget_children, xr_widget_is_transparent,
-    xr_widget_local_sort_center, xr_widget_with_scene_node, xr_widget_world_transform,
-    XrBodyKind, XrDrawContext, XrDrawScopeData, XrHandInfluencePoint, XrNode, XrNodeAction,
+    xr_widget_local_sort_center, xr_widget_with_scene_node, xr_widget_world_transform, XrBodyKind,
+    XrDrawContext, XrDrawScopeData, XrHandInfluencePoint, XrNode, XrNodeAction,
     XrPassthroughScopeData, XrRuntimeBodyState, XR_HAND_INFLUENCE_POINTS_PER_HAND,
     XR_HAND_INFLUENCE_POINT_COUNT,
 };

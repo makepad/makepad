@@ -95,7 +95,7 @@ impl Cx {
         if !self.new_next_frames.is_empty() {
             self.call_next_frame_event(time_now);
         }
-        if self.need_redrawing() {
+        if self.os.no_draw || self.need_redrawing() {
             let _ = self.headless_process_draw_cycle(&mut windows, false, time_now);
         }
     }
@@ -141,7 +141,7 @@ impl Cx {
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(time_now);
             }
-            if self.need_redrawing() {
+            if self.os.no_draw || self.need_redrawing() {
                 let _ = self.headless_process_draw_cycle(&mut windows, false, time_now);
             }
             completed_cycles += 1;
@@ -161,7 +161,6 @@ impl Cx {
     ) -> bool {
         if self.os.no_draw {
             self.call_draw_event(time_now);
-            self.headless_compile_shaders();
             self.os.no_draw_initialized = true;
             return false;
         }
@@ -205,7 +204,7 @@ impl Cx {
         let mut running = self.headless_handle_platform_ops(&mut windows, true);
         if running {
             let time_now = self.seconds_since_app_start();
-            if self.need_redrawing() {
+            if self.os.no_draw || self.need_redrawing() {
                 let _ = self.headless_process_draw_cycle(&mut windows, true, time_now);
             }
         }
@@ -394,7 +393,7 @@ impl Cx {
                         self.call_next_frame_event(time_now);
                     }
 
-                    if self.need_redrawing() {
+                    if self.os.no_draw || self.need_redrawing() {
                         let rendered =
                             self.headless_process_draw_cycle(&mut windows, true, time_now);
 
@@ -425,7 +424,7 @@ impl Cx {
                         self.call_next_frame_event(time_now);
                     }
 
-                    if self.need_redrawing() {
+                    if self.os.no_draw || self.need_redrawing() {
                         let rendered =
                             self.headless_process_draw_cycle(&mut windows, true, time_now);
 
