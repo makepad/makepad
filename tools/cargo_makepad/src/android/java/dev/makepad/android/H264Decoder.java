@@ -24,6 +24,8 @@ public class H264Decoder {
     private final long mDecoderId;
     private final WeakReference<Activity> mActivityReference;
     private final boolean mUseImageReader;
+    private final String mCodecMime;
+    private final String mCodecLabel;
 
     private MediaCodec mCodec;
     private SurfaceTexture mSurfaceTexture;
@@ -74,12 +76,16 @@ public class H264Decoder {
     public H264Decoder(
         Activity activity,
         long decoderId,
+        String codecMime,
+        String codecLabel,
         int widthHint,
         int heightHint,
         boolean useImageReader
     ) {
         mActivityReference = new WeakReference<>(activity);
         mDecoderId = decoderId;
+        mCodecMime = codecMime;
+        mCodecLabel = codecLabel;
         mWidthHint = Math.max(16, widthHint);
         mHeightHint = Math.max(16, heightHint);
         mUseImageReader = useImageReader;
@@ -96,11 +102,14 @@ public class H264Decoder {
     public boolean prepare() {
         try {
             if (!mUseImageReader && mExternalTextureHandle == 0) {
-                MakepadNative.onH264DecoderError(mDecoderId, "Missing external texture handle");
+                MakepadNative.onH264DecoderError(
+                    mDecoderId,
+                    mCodecLabel + " decoder missing external texture handle"
+                );
                 return false;
             }
 
-            mHandlerThread = new HandlerThread("H264DecoderSurfaceTexture");
+            mHandlerThread = new HandlerThread(mCodecLabel + "DecoderSurfaceTexture");
             mHandlerThread.start();
             mDecoderHandler = new Handler(mHandlerThread.getLooper());
 
@@ -120,7 +129,7 @@ public class H264Decoder {
                         } catch (Throwable t) {
                             MakepadNative.onH264DecoderError(
                                 mDecoderId,
-                                "H264 decoder image acquire failed: " + t
+                                mCodecLabel + " decoder image acquire failed: " + t
                             );
                         }
                         if (image == null) {
@@ -167,7 +176,10 @@ public class H264Decoder {
             }
             return true;
         } catch (Throwable t) {
-            MakepadNative.onH264DecoderError(mDecoderId, "H264 decoder prepare failed: " + t);
+            MakepadNative.onH264DecoderError(
+                mDecoderId,
+                mCodecLabel + " decoder prepare failed: " + t
+            );
             stopAndCleanup();
             return false;
         }
@@ -188,7 +200,7 @@ public class H264Decoder {
         if (handler == null) {
             MakepadNative.onH264DecoderError(
                 mDecoderId,
-                "H264 decoder queue failed: decoder handler unavailable"
+                mCodecLabel + " decoder queue failed: decoder handler unavailable"
             );
             return;
         }
@@ -205,7 +217,10 @@ public class H264Decoder {
                 boolean isConfig = (flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
                 if (isConfig && !mStarted) {
                     if (!configureCodecFromAnnexB(data, generation)) {
-                        MakepadNative.onH264DecoderError(mDecoderId, "Missing SPS/PPS in H264 config");
+                        MakepadNative.onH264DecoderError(
+                            mDecoderId,
+                            missingParameterSetsMessage()
+                        );
                     }
                     return;
                 }
@@ -215,7 +230,10 @@ public class H264Decoder {
                 mPendingPackets.addLast(new QueuedPacket(data, ptsUs, flags));
                 pumpInputQueueLocked(generation);
             } catch (Throwable t) {
-                MakepadNative.onH264DecoderError(mDecoderId, "H264 decoder queue failed: " + t);
+                MakepadNative.onH264DecoderError(
+                    mDecoderId,
+                    mCodecLabel + " decoder queue failed: " + t
+                );
             }
         }
     }
@@ -225,22 +243,29 @@ public class H264Decoder {
             List<byte[]> nals = splitAnnexBNals(data);
             byte[] sps = null;
             byte[] pps = null;
+            byte[] vps = null;
             for (byte[] nal : nals) {
                 if (nal.length == 0) {
                     continue;
                 }
-                int nalType = nal[0] & 0x1F;
-                if (nalType == 7 && sps == null) {
+                int nalType = nalUnitType(nal);
+                if (isHevc() && nalType == 32 && vps == null) {
+                    vps = nal;
+                } else if (isHevc() && nalType == 33 && sps == null) {
                     sps = nal;
-                } else if (nalType == 8 && pps == null) {
+                } else if (isHevc() && nalType == 34 && pps == null) {
+                    pps = nal;
+                } else if (!isHevc() && nalType == 7 && sps == null) {
+                    sps = nal;
+                } else if (!isHevc() && nalType == 8 && pps == null) {
                     pps = nal;
                 }
             }
-            if (sps == null || pps == null) {
+            if ((isHevc() && (vps == null || sps == null || pps == null)) || sps == null || pps == null) {
                 return false;
             }
 
-            mCodec = MediaCodec.createDecoderByType("video/avc");
+            mCodec = MediaCodec.createDecoderByType(mCodecMime);
             mCodec.setCallback(
                 new MediaCodec.Callback() {
                     @Override
@@ -274,7 +299,7 @@ public class H264Decoder {
                             } catch (Throwable t) {
                                 MakepadNative.onH264DecoderError(
                                     mDecoderId,
-                                    "H264 decoder output release failed: " + t
+                                    mCodecLabel + " decoder output release failed: " + t
                                 );
                             }
                         }
@@ -303,15 +328,28 @@ public class H264Decoder {
                     public void onError(MediaCodec codec, MediaCodec.CodecException error) {
                         MakepadNative.onH264DecoderError(
                             mDecoderId,
-                            "H264 decoder codec callback error: " + error
+                            mCodecLabel + " decoder codec callback error: " + error
                         );
                     }
                 },
                 mDecoderHandler
             );
-            MediaFormat format = MediaFormat.createVideoFormat("video/avc", mWidthHint, mHeightHint);
-            format.setByteBuffer("csd-0", ByteBuffer.wrap(withStartCode(sps)));
-            format.setByteBuffer("csd-1", ByteBuffer.wrap(withStartCode(pps)));
+            MediaFormat format = MediaFormat.createVideoFormat(mCodecMime, mWidthHint, mHeightHint);
+            if (isHevc()) {
+                format.setByteBuffer(
+                    "csd-0",
+                    ByteBuffer.wrap(
+                        concatByteArrays(
+                            withStartCode(vps),
+                            withStartCode(sps),
+                            withStartCode(pps)
+                        )
+                    )
+                );
+            } else {
+                format.setByteBuffer("csd-0", ByteBuffer.wrap(withStartCode(sps)));
+                format.setByteBuffer("csd-1", ByteBuffer.wrap(withStartCode(pps)));
+            }
             if (Build.VERSION.SDK_INT >= 30) {
                 format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
             } else {
@@ -325,23 +363,49 @@ public class H264Decoder {
             mStarted = true;
             if (!mStatusConfiguredReported) {
                 mStatusConfiguredReported = true;
+                String details =
+                    isHevc()
+                        ? " vps=" + vps.length + " sps=" + sps.length + " pps=" + pps.length
+                        : " sps=" + sps.length + " pps=" + pps.length;
                 reportStatus(
-                    "codec configured from annexb "
+                    mCodecLabel
+                        + " codec configured from annexb "
                         + mWidthHint
                         + "x"
                         + mHeightHint
-                        + " sps="
-                        + sps.length
-                        + " pps="
-                        + pps.length
+                        + details
                 );
             }
             return true;
         } catch (Throwable t) {
-            MakepadNative.onH264DecoderError(mDecoderId, "H264 decoder configure failed: " + t);
+            MakepadNative.onH264DecoderError(
+                mDecoderId,
+                mCodecLabel + " decoder configure failed: " + t
+            );
             stopAndCleanup();
             return false;
         }
+    }
+
+    private boolean isHevc() {
+        return "video/hevc".equalsIgnoreCase(mCodecMime);
+    }
+
+    private int nalUnitType(byte[] nal) {
+        if (nal.length == 0) {
+            return -1;
+        }
+        if (isHevc()) {
+            return (nal[0] & 0x7E) >> 1;
+        }
+        return nal[0] & 0x1F;
+    }
+
+    private String missingParameterSetsMessage() {
+        if (isHevc()) {
+            return "Missing VPS/SPS/PPS in " + mCodecLabel + " config";
+        }
+        return "Missing SPS/PPS in " + mCodecLabel + " config";
     }
 
     private static List<byte[]> splitAnnexBNals(byte[] data) {
@@ -404,6 +468,25 @@ public class H264Decoder {
         return out;
     }
 
+    private static byte[] concatByteArrays(byte[]... arrays) {
+        int total = 0;
+        for (byte[] array : arrays) {
+            if (array != null) {
+                total += array.length;
+            }
+        }
+        byte[] out = new byte[total];
+        int offset = 0;
+        for (byte[] array : arrays) {
+            if (array == null || array.length == 0) {
+                continue;
+            }
+            System.arraycopy(array, 0, out, offset, array.length);
+            offset += array.length;
+        }
+        return out;
+    }
+
     private void pumpInputQueueLocked(int generation) {
         if (generation != mGeneration || mStopping || !mStarted || mCodec == null) {
             return;
@@ -427,7 +510,7 @@ public class H264Decoder {
                 if (packet.data.length > input.remaining()) {
                     MakepadNative.onH264DecoderError(
                         mDecoderId,
-                        "Input packet too large for codec buffer: " + packet.data.length
+                        mCodecLabel + " input packet too large for codec buffer: " + packet.data.length
                     );
                     continue;
                 }
@@ -440,7 +523,10 @@ public class H264Decoder {
                     packet.flags
                 );
             } catch (Throwable t) {
-                MakepadNative.onH264DecoderError(mDecoderId, "H264 decoder input queue failed: " + t);
+                MakepadNative.onH264DecoderError(
+                    mDecoderId,
+                    mCodecLabel + " decoder input queue failed: " + t
+                );
                 return;
             }
         }
@@ -488,7 +574,7 @@ public class H264Decoder {
             if (buffer == null) {
                 MakepadNative.onH264DecoderError(
                     mDecoderId,
-                    "ImageReader image returned null HardwareBuffer at "
+                    mCodecLabel + " ImageReader image returned null HardwareBuffer at "
                         + mWidth
                         + "x"
                         + mHeight

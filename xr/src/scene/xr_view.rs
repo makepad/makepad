@@ -451,6 +451,25 @@ impl XrView {
         true
     }
 
+    pub fn set_world_pose_override(&mut self, cx: &mut Cx, pose: Option<Pose>) {
+        self.world_pose_override = pose;
+        self.node.set_visible(cx, pose.is_some() || self.show_in_non_xr);
+        self.redraw(cx);
+    }
+
+    pub fn set_panel_metrics(
+        &mut self,
+        cx: &mut Cx,
+        logical_size: Vec2d,
+        pixel_scale: f32,
+        dpi_factor: f64,
+    ) {
+        self.logical_size = logical_size;
+        self.pixel_scale = pixel_scale.max(0.00001);
+        self.dpi_factor = dpi_factor.max(0.1);
+        self.redraw(cx);
+    }
+
     fn panel_matrix(&self, world_transform: Mat4f) -> Mat4f {
         let scale = self.pixel_scale.max(0.00001) * self.dpi_factor.max(1.0) as f32;
         let logical_size = self.resolved_logical_size();

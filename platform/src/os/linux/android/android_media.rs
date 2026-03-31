@@ -267,10 +267,16 @@ impl CxMediaApi for Cx {
         config: VideoDecoderConfig,
         _f: VideoDecodedFrameOutputFn,
     ) -> Result<(), VideoDecodeError> {
-        if config.codec != VideoCodec::H264 || config.expected_format != VideoBitstreamFormat::AnnexB
+        if !matches!(config.codec, VideoCodec::H264 | VideoCodec::H265)
+            || config.expected_format != VideoBitstreamFormat::AnnexB
         {
             return Err(VideoDecodeError::UnsupportedCodec);
         }
+        let (codec_mime, codec_label) = match config.codec {
+            VideoCodec::H264 => ("video/avc", "H264"),
+            VideoCodec::H265 => ("video/hevc", "H265"),
+            _ => return Err(VideoDecodeError::UnsupportedCodec),
+        };
 
         let texture_id = match config.output {
             VideoDecodeOutput::Texture { texture_id } => texture_id,
@@ -340,9 +346,11 @@ impl CxMediaApi for Cx {
 
         let decoder_ref = unsafe {
             let env = attach_jni_env();
-            to_java_prepare_h264_decoder(
+            to_java_prepare_video_decoder(
                 env,
                 index as u64,
+                codec_mime,
+                codec_label,
                 external_texture_handle,
                 config.width_hint.unwrap_or(16),
                 config.height_hint.unwrap_or(16),
@@ -386,7 +394,7 @@ impl CxMediaApi for Cx {
         }
         unsafe {
             let env = attach_jni_env();
-            to_java_queue_h264_decoder_packet_on_ref(
+            to_java_queue_video_decoder_packet_on_ref(
                 env,
                 decoder.decoder_ref,
                 packet.data,
@@ -401,7 +409,7 @@ impl CxMediaApi for Cx {
         if let Some(decoder) = self.os.realtime_video_decoders.remove(&index) {
             unsafe {
                 let env = attach_jni_env();
-                to_java_stop_h264_decoder_on_ref(env, decoder.decoder_ref);
+                to_java_stop_video_decoder_on_ref(env, decoder.decoder_ref);
                 to_java_cleanup_video_decoder_ref(env, decoder.decoder_ref);
             }
         }
@@ -410,50 +418,57 @@ impl CxMediaApi for Cx {
     fn video_capabilities(&self) -> VideoCapabilities {
         let mut codecs = Vec::new();
 
-        if let Some(probe) = unsafe { to_java_query_h264_codec_support() } {
-            let encode_available = probe.encode_hardware || probe.encode_software;
-            let decode_available = probe.decode_hardware || probe.decode_software;
-            codecs.push(VideoCodecSupport {
-                codec: VideoCodec::H264,
-                encode_hardware: probe.encode_hardware,
-                encode_software: probe.encode_software,
-                decode_hardware: probe.decode_hardware,
-                decode_software: probe.decode_software,
-                encode_formats: if encode_available {
-                    vec![VideoBitstreamFormat::AnnexB]
-                } else {
-                    Vec::new()
-                },
-                decode_formats: if decode_available {
-                    vec![VideoBitstreamFormat::AnnexB, VideoBitstreamFormat::Avcc]
-                } else {
-                    Vec::new()
-                },
-                supports_camera_source: encode_available,
-                supports_texture_source: encode_available,
-                supports_cpu_frames_source: encode_available,
-                supports_keyframe_request: encode_available,
-                supports_dynamic_resolution: false,
-                width_alignment: if probe.width_alignment > 0 {
-                    Some(probe.width_alignment)
-                } else {
-                    Some(2)
-                },
-                height_alignment: if probe.height_alignment > 0 {
-                    Some(probe.height_alignment)
-                } else {
-                    Some(2)
-                },
-                max_width: (probe.max_width > 0).then_some(probe.max_width),
-                max_height: (probe.max_height > 0).then_some(probe.max_height),
-                max_fps: (probe.max_fps > 0).then_some(probe.max_fps),
-                max_bitrate: (probe.max_bitrate > 0).then_some(probe.max_bitrate),
-            });
-        } else {
-            codecs.push(VideoCodecSupport::unsupported(VideoCodec::H264));
+        for (codec, mime) in [
+            (VideoCodec::H264, "video/avc"),
+            (VideoCodec::H265, "video/hevc"),
+        ] {
+            if let Some(probe) = unsafe { to_java_query_video_codec_support(mime) } {
+                let encode_available = probe.encode_hardware || probe.encode_software;
+                let decode_available = probe.decode_hardware || probe.decode_software;
+                codecs.push(VideoCodecSupport {
+                    codec,
+                    encode_hardware: probe.encode_hardware,
+                    encode_software: probe.encode_software,
+                    decode_hardware: probe.decode_hardware,
+                    decode_software: probe.decode_software,
+                    encode_formats: if encode_available {
+                        vec![VideoBitstreamFormat::AnnexB]
+                    } else {
+                        Vec::new()
+                    },
+                    decode_formats: if decode_available {
+                        if codec == VideoCodec::H264 {
+                            vec![VideoBitstreamFormat::AnnexB, VideoBitstreamFormat::Avcc]
+                        } else {
+                            vec![VideoBitstreamFormat::AnnexB]
+                        }
+                    } else {
+                        Vec::new()
+                    },
+                    supports_camera_source: encode_available,
+                    supports_texture_source: encode_available,
+                    supports_cpu_frames_source: encode_available,
+                    supports_keyframe_request: encode_available,
+                    supports_dynamic_resolution: false,
+                    width_alignment: if probe.width_alignment > 0 {
+                        Some(probe.width_alignment)
+                    } else {
+                        Some(2)
+                    },
+                    height_alignment: if probe.height_alignment > 0 {
+                        Some(probe.height_alignment)
+                    } else {
+                        Some(2)
+                    },
+                    max_width: (probe.max_width > 0).then_some(probe.max_width),
+                    max_height: (probe.max_height > 0).then_some(probe.max_height),
+                    max_fps: (probe.max_fps > 0).then_some(probe.max_fps),
+                    max_bitrate: (probe.max_bitrate > 0).then_some(probe.max_bitrate),
+                });
+            } else {
+                codecs.push(VideoCodecSupport::unsupported(codec));
+            }
         }
-
-        codecs.push(VideoCodecSupport::unsupported(VideoCodec::H265));
         crate::merge_video_capabilities(
             VideoCapabilities { codecs },
             crate::media_video_capabilities(),

@@ -231,6 +231,7 @@ pub type CMFormatDescriptionRef = ObjcId;
 pub const kCMPixelFormat_422YpCbCr8: u32 = four_char_as_u32("2vuy");
 pub const kCMPixelFormat_422YpCbCr8_yuvs: u32 = four_char_as_u32("yuvs");
 pub const kCMVideoCodecType_H264: u32 = four_char_as_u32("avc1");
+pub const kCMVideoCodecType_HEVC: u32 = four_char_as_u32("hvc1");
 pub const kCMVideoCodecType_JPEG: u32 = four_char_as_u32("jpeg");
 pub const kCMVideoCodecType_JPEG_OpenDML: u32 = four_char_as_u32("dmb1");
 pub const kCMPixelFormat_8IndexedGray_WhiteIsZero: u32 = 0x00000028;
@@ -355,6 +356,15 @@ extern "C" {
     ) -> OSStatus;
 
     pub fn CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+        videoDesc: CMFormatDescriptionRef,
+        parameterSetIndex: usize,
+        parameterSetPointerOut: *mut *const u8,
+        parameterSetSizeOut: *mut usize,
+        parameterSetCountOut: *mut usize,
+        nalUnitHeaderLengthOut: *mut i32,
+    ) -> OSStatus;
+
+    pub fn CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
         videoDesc: CMFormatDescriptionRef,
         parameterSetIndex: usize,
         parameterSetPointerOut: *mut *const u8,

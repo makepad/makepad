@@ -79,25 +79,28 @@ impl CxAppleMedia {
 }
 
 #[derive(Default, Clone, Copy)]
-struct AppleH264Probe {
+struct AppleCodecProbe {
     encode_hardware: bool,
     encode_software: bool,
     decode_hardware: bool,
     decode_software: bool,
 }
 
-fn probe_apple_h264() -> AppleH264Probe {
+fn probe_apple_codec(codec: VideoCodec) -> AppleCodecProbe {
     unsafe {
-        let mut probe = AppleH264Probe::default();
-
-        probe.encode_hardware = VTIsHardwareEncodeSupported(kCMVideoCodecType_H264) == YES;
+        let codec_type = match codec {
+            VideoCodec::H264 => kCMVideoCodecType_H264,
+            VideoCodec::H265 => kCMVideoCodecType_HEVC,
+            _ => return AppleCodecProbe::default(),
+        };
+        let mut probe = AppleCodecProbe::default();
 
         let mut enc: VTCompressionSessionRef = std::ptr::null_mut();
         let enc_status = VTCompressionSessionCreate(
             std::ptr::null(),
             64,
             64,
-            kCMVideoCodecType_H264,
+            codec_type,
             std::ptr::null(),
             std::ptr::null(),
             std::ptr::null_mut(),
@@ -110,9 +113,13 @@ fn probe_apple_h264() -> AppleH264Probe {
             VTCompressionSessionInvalidate(enc);
             CFRelease(enc as *const std::ffi::c_void);
         }
-        probe.encode_software = encode_available && !probe.encode_hardware;
+        probe.encode_hardware = false;
+        probe.encode_software = encode_available;
+        probe.decode_hardware = false;
 
-        probe.decode_hardware = VTIsHardwareDecodeSupported(kCMVideoCodecType_H264) == YES;
+        if codec != VideoCodec::H264 {
+            return probe;
+        }
 
         // Baseline 64x64 SPS/PPS probe stream.
         let sps: [u8; 23] = [
@@ -156,7 +163,7 @@ fn probe_apple_h264() -> AppleH264Probe {
             CFRelease(format_desc as *const std::ffi::c_void);
         }
 
-        probe.decode_software = decode_available && !probe.decode_hardware;
+        probe.decode_software = decode_available;
         probe
     }
 }
@@ -315,7 +322,7 @@ impl CxMediaApi for Cx {
     fn video_capabilities(&self) -> VideoCapabilities {
         let mut codecs = Vec::new();
 
-        let probe = probe_apple_h264();
+        let probe = probe_apple_codec(VideoCodec::H264);
         let encode_available = probe.encode_hardware || probe.encode_software;
         let decode_available = probe.decode_hardware || probe.decode_software;
         codecs.push(VideoCodecSupport {
@@ -347,7 +354,37 @@ impl CxMediaApi for Cx {
             max_bitrate: None,
         });
 
-        codecs.push(VideoCodecSupport::unsupported(VideoCodec::H265));
+        let probe = probe_apple_codec(VideoCodec::H265);
+        let encode_available = probe.encode_hardware || probe.encode_software;
+        let decode_available = probe.decode_hardware || probe.decode_software;
+        codecs.push(VideoCodecSupport {
+            codec: VideoCodec::H265,
+            encode_hardware: probe.encode_hardware,
+            encode_software: probe.encode_software,
+            decode_hardware: probe.decode_hardware,
+            decode_software: probe.decode_software,
+            encode_formats: if encode_available {
+                vec![VideoBitstreamFormat::AnnexB]
+            } else {
+                Vec::new()
+            },
+            decode_formats: if decode_available {
+                vec![VideoBitstreamFormat::AnnexB]
+            } else {
+                Vec::new()
+            },
+            supports_camera_source: encode_available,
+            supports_texture_source: encode_available,
+            supports_cpu_frames_source: encode_available,
+            supports_keyframe_request: false,
+            supports_dynamic_resolution: false,
+            width_alignment: Some(2),
+            height_alignment: Some(2),
+            max_width: None,
+            max_height: None,
+            max_fps: None,
+            max_bitrate: None,
+        });
         crate::merge_video_capabilities(
             VideoCapabilities { codecs },
             crate::media_video_capabilities(),

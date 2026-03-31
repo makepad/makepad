@@ -1526,7 +1526,7 @@ pub unsafe fn to_java_detach_camera_preview(video_id: LiveId) {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct AndroidH264CodecProbe {
+pub struct AndroidVideoCodecProbe {
     pub encode_hardware: bool,
     pub encode_software: bool,
     pub decode_hardware: bool,
@@ -1539,10 +1539,20 @@ pub struct AndroidH264CodecProbe {
     pub height_alignment: u32,
 }
 
-pub unsafe fn to_java_query_h264_codec_support() -> Option<AndroidH264CodecProbe> {
+pub unsafe fn to_java_query_video_codec_support(
+    codec_mime: &str,
+) -> Option<AndroidVideoCodecProbe> {
     let env = attach_jni_env();
-    let result =
-        ndk_utils::call_object_method!(env, get_activity(), "queryH264CodecSupport", "()[I");
+    let mime = CString::new(codec_mime).unwrap();
+    let mime = ((**env).NewStringUTF.unwrap())(env, mime.as_ptr());
+    let result = ndk_utils::call_object_method!(
+        env,
+        get_activity(),
+        "queryCodecSupport",
+        "(Ljava/lang/String;)[I",
+        mime
+    );
+    (**env).DeleteLocalRef.unwrap()(env, mime);
     if result.is_null() {
         return None;
     }
@@ -1560,7 +1570,7 @@ pub unsafe fn to_java_query_h264_codec_support() -> Option<AndroidH264CodecProbe
     }
 
     let vals = std::slice::from_raw_parts(elems as *const i32, length as usize);
-    let probe = AndroidH264CodecProbe {
+    let probe = AndroidVideoCodecProbe {
         encode_hardware: vals[0] != 0,
         encode_software: vals[1] != 0,
         decode_hardware: vals[2] != 0,
@@ -1631,25 +1641,35 @@ pub unsafe fn to_java_prepare_video_playback(
     (**env).DeleteLocalRef.unwrap()(env, video_source);
 }
 
-pub unsafe fn to_java_prepare_h264_decoder(
+pub unsafe fn to_java_prepare_video_decoder(
     env: *mut jni_sys::JNIEnv,
     decoder_id: u64,
+    codec_mime: &str,
+    codec_label: &str,
     external_texture_handle: u32,
     width_hint: u32,
     height_hint: u32,
     use_image_reader: bool,
 ) -> jni_sys::jobject {
+    let codec_mime = CString::new(codec_mime).unwrap();
+    let codec_mime = ((**env).NewStringUTF.unwrap())(env, codec_mime.as_ptr());
+    let codec_label = CString::new(codec_label).unwrap();
+    let codec_label = ((**env).NewStringUTF.unwrap())(env, codec_label.as_ptr());
     let local_ref = ndk_utils::call_object_method!(
         env,
         get_activity(),
-        "prepareH264Decoder",
-        "(JIIIZ)Ldev/makepad/android/H264Decoder;",
+        "prepareVideoDecoder",
+        "(JLjava/lang/String;Ljava/lang/String;IIIZ)Ldev/makepad/android/H264Decoder;",
         decoder_id as jni_sys::jlong,
+        codec_mime,
+        codec_label,
         external_texture_handle as jni_sys::jint,
         width_hint as jni_sys::jint,
         height_hint as jni_sys::jint,
         use_image_reader as jni_sys::jboolean as std::ffi::c_uint
     );
+    (**env).DeleteLocalRef.unwrap()(env, codec_mime);
+    (**env).DeleteLocalRef.unwrap()(env, codec_label);
     if local_ref.is_null() {
         return std::ptr::null_mut();
     }
@@ -1687,7 +1707,7 @@ pub unsafe fn to_java_acquire_h264_decoder_hardware_buffer(
     Some((hardware_buffer, width, height))
 }
 
-pub unsafe fn to_java_queue_h264_decoder_packet(
+pub unsafe fn to_java_queue_video_decoder_packet(
     env: *mut jni_sys::JNIEnv,
     decoder_id: u64,
     data: &[u8],
@@ -1711,7 +1731,7 @@ pub unsafe fn to_java_queue_h264_decoder_packet(
     ndk_utils::call_void_method!(
         env,
         get_activity(),
-        "queueH264DecoderPacket",
+        "queueVideoDecoderPacket",
         "(J[BJZZ)V",
         decoder_id as jni_sys::jlong,
         java_body,
@@ -1722,7 +1742,7 @@ pub unsafe fn to_java_queue_h264_decoder_packet(
     (**env).DeleteLocalRef.unwrap()(env, java_body);
 }
 
-pub unsafe fn to_java_queue_h264_decoder_packet_on_ref(
+pub unsafe fn to_java_queue_video_decoder_packet_on_ref(
     env: *mut jni_sys::JNIEnv,
     video_decoder_ref: jni_sys::jobject,
     data: &[u8],
@@ -1754,17 +1774,20 @@ pub unsafe fn to_java_queue_h264_decoder_packet_on_ref(
     (**env).DeleteLocalRef.unwrap()(env, java_body);
 }
 
-pub unsafe fn to_java_stop_h264_decoder(env: *mut jni_sys::JNIEnv, decoder_id: u64) {
+pub unsafe fn to_java_stop_video_decoder(env: *mut jni_sys::JNIEnv, decoder_id: u64) {
     ndk_utils::call_void_method!(
         env,
         get_activity(),
-        "stopH264Decoder",
+        "stopVideoDecoder",
         "(J)V",
         decoder_id as jni_sys::jlong
     );
 }
 
-pub unsafe fn to_java_stop_h264_decoder_on_ref(env: *mut jni_sys::JNIEnv, video_decoder_ref: jni_sys::jobject) {
+pub unsafe fn to_java_stop_video_decoder_on_ref(
+    env: *mut jni_sys::JNIEnv,
+    video_decoder_ref: jni_sys::jobject,
+) {
     ndk_utils::call_void_method!(
         env,
         video_decoder_ref,

@@ -1,8 +1,11 @@
-use crate::protocol::{XR_REMOTE_CONTROL_PORT, XR_REMOTE_VIDEO_PORT};
+use crate::protocol::{
+    XR_REMOTE_CONTROL_PORT, XR_REMOTE_LEFT_MEDIA_PORT, XR_REMOTE_MAX_MEDIA_PACKET_BYTES,
+    XR_REMOTE_RIGHT_MEDIA_PORT,
+};
 use makepad_widgets::makepad_platform::makepad_micro_serde::{DeBin, SerBin};
 use std::{
     io::{self, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UdpSocket},
     thread,
     time::Duration,
 };
@@ -19,15 +22,21 @@ pub fn control_port() -> u16 {
         .unwrap_or(XR_REMOTE_CONTROL_PORT)
 }
 
-pub fn video_port() -> u16 {
-    std::env::var("MAKEPAD_XR_REMOTE_VIDEO_PORT")
+pub fn left_media_port() -> u16 {
+    std::env::var("MAKEPAD_XR_REMOTE_MEDIA_LEFT_PORT")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(XR_REMOTE_VIDEO_PORT)
+        .unwrap_or(XR_REMOTE_LEFT_MEDIA_PORT)
 }
 
-/// Upper bound for a single framed payload (H.264 access units are far smaller; avoids OOM if the
-/// length prefix is corrupt or hostile).
+pub fn right_media_port() -> u16 {
+    std::env::var("MAKEPAD_XR_REMOTE_MEDIA_RIGHT_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(XR_REMOTE_RIGHT_MEDIA_PORT)
+}
+
+/// Upper bound for a single framed payload; avoids hostile/corrupt length prefixes.
 pub const MAX_FRAMED_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 
 pub fn send_framed<T: SerBin>(stream: &mut TcpStream, packet: &T) -> io::Result<()> {
@@ -55,6 +64,17 @@ pub fn recv_framed<T: DeBin>(stream: &mut TcpStream) -> io::Result<T> {
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn recv_udp_packet<T: DeBin>(socket: &UdpSocket, buffer: &mut [u8]) -> io::Result<T> {
+    let (len, _) = socket.recv_from(buffer)?;
+    T::deserialize_bin(&buffer[..len])
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid udp packet"))
+}
+
+pub fn max_media_packet_bytes() -> usize {
+    XR_REMOTE_MAX_MEDIA_PACKET_BYTES
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub fn connect_with_retry(addr: &str) -> TcpStream {
     loop {
         match TcpStream::connect(addr) {
@@ -77,4 +97,18 @@ pub fn bind_listener(port: u16) -> TcpListener {
     });
     let _ = listener.set_nonblocking(false);
     listener
+}
+
+pub fn bind_udp_socket(port: u16) -> UdpSocket {
+    let addr = format!("0.0.0.0:{port}");
+    let socket = UdpSocket::bind(&addr).unwrap_or_else(|err| {
+        panic!("xr_remote failed to bind udp {addr}: {err}");
+    });
+    let _ = socket.set_nonblocking(false);
+    socket
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn bind_udp_socket_any() -> UdpSocket {
+    bind_udp_socket(0)
 }

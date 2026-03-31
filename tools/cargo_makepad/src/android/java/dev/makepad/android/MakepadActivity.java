@@ -969,7 +969,7 @@ public class MakepadActivity
         if (mH264Decoders != null) {
             ArrayList<Long> decoderIds = new ArrayList<>(mH264Decoders.keySet());
             for (Long decoderId : decoderIds) {
-                stopH264Decoder(decoderId);
+                stopVideoDecoder(decoderId);
             }
             mH264Decoders.clear();
         }
@@ -1630,7 +1630,7 @@ public class MakepadActivity
         return !codecLooksSoftware(info);
     }
 
-    public int[] queryH264CodecSupport() {
+    public int[] queryCodecSupport(String mimeType) {
         boolean encHw = false;
         boolean encSw = false;
         boolean decHw = false;
@@ -1646,14 +1646,14 @@ public class MakepadActivity
             MediaCodecList list = new MediaCodecList(MediaCodecList.ALL_CODECS);
             for (MediaCodecInfo info : list.getCodecInfos()) {
                 String[] types = info.getSupportedTypes();
-                boolean supportsAvc = false;
+                boolean supportsCodec = false;
                 for (String t : types) {
-                    if ("video/avc".equalsIgnoreCase(t)) {
-                        supportsAvc = true;
+                    if (mimeType.equalsIgnoreCase(t)) {
+                        supportsCodec = true;
                         break;
                     }
                 }
-                if (!supportsAvc) {
+                if (!supportsCodec) {
                     continue;
                 }
 
@@ -1677,7 +1677,7 @@ public class MakepadActivity
                 }
 
                 try {
-                    MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType("video/avc");
+                    MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(mimeType);
                     if (caps != null && caps.getVideoCapabilities() != null) {
                         MediaCodecInfo.VideoCapabilities vc = caps.getVideoCapabilities();
                         maxWidth = Math.max(maxWidth, vc.getSupportedWidths().getUpper().intValue());
@@ -1784,17 +1784,21 @@ public class MakepadActivity
         detachCameraNativePreview(videoId);
     }
 
-    public H264Decoder prepareH264Decoder(
+    public H264Decoder prepareVideoDecoder(
         long decoderId,
+        String codecMime,
+        String codecLabel,
         int externalTextureHandle,
         int widthHint,
         int heightHint,
         boolean useImageReader
     ) {
-        stopH264Decoder(decoderId);
+        stopVideoDecoder(decoderId);
         H264Decoder decoder = new H264Decoder(
             this,
             decoderId,
+            codecMime,
+            codecLabel,
             widthHint,
             heightHint,
             useImageReader
@@ -1808,7 +1812,7 @@ public class MakepadActivity
         return decoder;
     }
 
-    public void queueH264DecoderPacket(
+    public void queueVideoDecoderPacket(
         long decoderId,
         byte[] data,
         long ptsUs,
@@ -1830,7 +1834,7 @@ public class MakepadActivity
         decoder.queuePacket(data, ptsUs, flags);
     }
 
-    public void stopH264Decoder(long decoderId) {
+    public void stopVideoDecoder(long decoderId) {
         H264Decoder decoder = mH264Decoders.remove(decoderId);
         if (decoder != null) {
             decoder.stopAndCleanup();
