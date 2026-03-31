@@ -40,6 +40,7 @@ script_mod! {
     mod.widgets.XrViewBase = #(XrView::register_widget(vm))
     mod.widgets.XrView = set_type_default() do mod.widgets.XrViewBase{
         mode: XrViewMode.World
+        render_class: XrRenderClass.Transparent
         wrist_left: true
         show_in_non_xr: false
         fit_size: false
@@ -194,10 +195,6 @@ impl XrView {
     const WRIST_PANEL_FACE_CULL_DOT: f32 = 0.0;
     const ARM_PANEL_MENU_SIDE_OFFSET: f32 = 0.15;
     const ARM_PANEL_MENU_BACK_OFFSET: f32 = 0.10;
-
-    pub(crate) fn node(&self) -> &XrNode {
-        &self.node
-    }
 
     fn scaled_pose_matrix(&self, pose: Pose) -> Mat4f {
         Mat4f::mul(
@@ -845,6 +842,23 @@ impl WidgetNode for XrView {
     fn widget_uid(&self) -> WidgetUid {
         self.uid
     }
+
+    fn cast_inner_any(&self, type_id: std::any::TypeId) -> Option<&dyn std::any::Any> {
+        if type_id == std::any::TypeId::of::<XrNode>() {
+            Some(&self.node)
+        } else {
+            None
+        }
+    }
+
+    fn cast_inner_any_mut(&mut self, type_id: std::any::TypeId) -> Option<&mut dyn std::any::Any> {
+        if type_id == std::any::TypeId::of::<XrNode>() {
+            Some(&mut self.node)
+        } else {
+            None
+        }
+    }
+
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
     }
