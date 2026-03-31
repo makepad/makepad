@@ -41,17 +41,13 @@ impl XrHandSystem {
             return;
         };
         for segment in points.windows(2) {
-            Self::append_capsule_collider(
-                colliders,
-                segment[0],
-                segment[1],
-                radius,
-            );
+            Self::append_capsule_collider(colliders, segment[0], segment[1], radius);
         }
         if hand.tip_active(tip_index) {
-            if let (Some(end_joint), Some(tip_world)) =
-                (points.last().copied(), Self::hand_tip_world(hand, tip_index))
-            {
+            if let (Some(end_joint), Some(tip_world)) = (
+                points.last().copied(),
+                Self::hand_tip_world(hand, tip_index),
+            ) {
                 Self::append_capsule_collider(colliders, end_joint, tip_world, radius * 0.85);
             }
         }
