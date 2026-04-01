@@ -21,8 +21,8 @@ use makepad_llama::{
     qwen35moe_attention_decode_spec, qwen35moe_delta_net_recurrent_decode_spec,
     qwen35moe_first_attention_block_spec, qwen35moe_first_recurrent_block_spec,
     qwen35moe_hybrid_decode_spec, qwen35moe_recurrent_block_layout, AttentionRopeSpec,
-    HybridCacheLayout, HybridCacheShape, HybridCacheTypes, LlamaModel, LlamaVocab,
-    LogitsProbeInput,
+    HybridCacheLayout, HybridCacheShape, HybridCacheTypes, LlamaModel, LlamaSession,
+    LlamaSessionConfig, LlamaVocab, LogitsProbeInput,
 };
 
 const DEFAULT_PROMPT: &str = "The capital of France is";
@@ -502,52 +502,18 @@ fn run_rust_hybrid_decode(
         return Err("upstream prompt produced no tokens".into());
     }
 
-    let plan = model.execution_plan()?;
-    let cache_shape = HybridCacheShape {
-        n_ctx_seq: u32::try_from(token_ids.len())?,
-        n_seq_max: 1,
-    };
-    let cache_types = HybridCacheTypes {
-        attention_k_type: TensorType::F16,
-        attention_v_type: TensorType::F16,
-        recurrent_r_type: TensorType::F32,
-        recurrent_s_type: TensorType::F32,
-    };
-    let extra_bytes = plan
-        .hybrid_cache
-        .as_ref()
-        .map(|template| HybridCacheLayout::new(template.materialize(cache_shape, cache_types)))
-        .transpose()?
-        .map_or(0, |layout| layout.total_bytes);
-    let extra_bytes = extra_bytes.saturating_add(256 << 20);
-    let mut loaded = plan
-        .full_weights
-        .allocate_and_load_with_extra(&model.gguf, extra_bytes)?;
-    let spec = qwen35moe_hybrid_decode_spec(
+    let mut session = LlamaSession::from_model(
         model,
-        cache_shape.n_ctx_seq,
-        cache_shape.n_seq_max,
-        cache_types.attention_k_type,
-        cache_types.attention_v_type,
-        cache_types.recurrent_r_type,
-        cache_types.recurrent_s_type,
+        LlamaSessionConfig {
+            max_context: Some(u32::try_from(token_ids.len())?),
+            ..LlamaSessionConfig::default()
+        },
     )?;
-    let compiled = compile_hybrid_decode_metal(&mut loaded, &spec, 1)?;
-
-    let mut final_logits = None;
-    for (position, token_id) in token_ids.iter().copied().enumerate() {
-        let position_i32 = i32::try_from(position)?;
-        let run = execute_hybrid_decode_graph_metal_cached(
-            &compiled,
-            &mut loaded,
-            LogitsProbeInput::TokenIds(std::slice::from_ref(&token_id)),
-            &[position_i32],
-            position + 1,
-        )?;
-        final_logits = Some(run.logits);
-    }
-
-    final_logits.ok_or_else(|| "hybrid decode did not produce logits".into())
+    session.append_tokens(token_ids)?;
+    session
+        .last_logits()
+        .map(|logits| logits.to_vec())
+        .ok_or_else(|| "session did not produce logits".into())
 }
 
 fn run_rust_hybrid_decode_batched(

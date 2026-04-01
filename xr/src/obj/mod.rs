@@ -14,7 +14,7 @@ pub use icosphere::{DrawIcoSolid, IcoSphere};
 pub use physics_view::PhysicsWorld3D;
 pub use refractive_cube::RefractiveCube;
 pub use shooter::{Shooter, XrProjectileEmitterConfig};
-pub use tank::Tank;
+pub use tank::{tank_drive_impulses, TankDriveConfig};
 pub use tree::{
     CpuPythagoreanTree, DrawTreeBranches, DrawTreeLeaves, Tree, PYTHAGOREAN_TREE_ROOT_DROP,
 };

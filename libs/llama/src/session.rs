@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use makepad_ggml::backend::metal::MetalBuffer;
 use makepad_ggml::TensorType;
 
 use crate::error::{LlamaError, Result};
@@ -8,9 +9,11 @@ use crate::model::LlamaModel;
 use crate::plan::ModelExecutionPlan;
 use crate::qwen35moe_runtime::qwen35moe_hybrid_decode_spec;
 use crate::runtime::{
-    compile_hybrid_decode_metal, execute_hybrid_decode_graph_metal_cached,
-    CompiledHybridDecodeMetal, HybridCacheLayout, HybridCacheShape, HybridCacheTypes,
-    HybridDecodeRun, HybridDecodeSpec, LogitsProbeInput,
+    allocate_hybrid_shared_cache_tensors, compile_hybrid_prompt_processing_metal_with_shared_state,
+    compile_hybrid_token_generation_metal_with_shared_state, create_metal_context_buffer,
+    execute_hybrid_decode_graph_metal_cached_logits_only, CompiledHybridDecodeMetal,
+    HybridCacheLayout, HybridCacheShape, HybridCacheTypes, HybridDecodeRun, HybridDecodeSpec,
+    HybridSharedCacheTensorIds, LogitsProbeInput,
 };
 use crate::vocab::LlamaVocab;
 use crate::weights::LoadedGgufWeights;
@@ -59,6 +62,39 @@ pub struct LlamaGeneration {
     pub stop_reason: LlamaStopReason,
 }
 
+struct SessionGraphSet {
+    shared_cache: HybridSharedCacheTensorIds,
+    shared_main_buffer: MetalBuffer,
+    token_generation: CompiledHybridDecodeMetal,
+    prompt_processing_by_batch: BTreeMap<usize, CompiledHybridDecodeMetal>,
+}
+
+impl SessionGraphSet {
+    fn graph_for_batch(&self, batch_size: usize) -> Option<&CompiledHybridDecodeMetal> {
+        if batch_size == 1 {
+            Some(&self.token_generation)
+        } else {
+            self.prompt_processing_by_batch.get(&batch_size)
+        }
+    }
+
+    fn has_batch(&self, batch_size: usize) -> bool {
+        batch_size == 1 || self.prompt_processing_by_batch.contains_key(&batch_size)
+    }
+
+    fn insert_prompt_processing_graph(
+        &mut self,
+        batch_size: usize,
+        compiled: CompiledHybridDecodeMetal,
+    ) {
+        if batch_size == 1 {
+            self.token_generation = compiled;
+        } else {
+            self.prompt_processing_by_batch.insert(batch_size, compiled);
+        }
+    }
+}
+
 pub struct LlamaSession {
     model: LlamaModel,
     vocab: LlamaVocab,
@@ -68,7 +104,7 @@ pub struct LlamaSession {
     max_context: usize,
     context_extra_bytes: usize,
     weights: LoadedGgufWeights,
-    compiled_by_batch: BTreeMap<usize, CompiledHybridDecodeMetal>,
+    graphs: SessionGraphSet,
     token_ids: Vec<i32>,
     last_run: Option<HybridDecodeRun>,
 }
@@ -119,14 +155,14 @@ impl LlamaSession {
     }
 
     pub fn reset(&mut self) -> Result<()> {
-        let (weights, compiled_by_batch) = build_runtime_state(
+        let (weights, graphs) = build_runtime_state(
             &self.model,
             &self.plan,
             &self.spec,
             self.context_extra_bytes,
         )?;
         self.weights = weights;
-        self.compiled_by_batch = compiled_by_batch;
+        self.graphs = graphs;
         self.token_ids.clear();
         self.last_run = None;
         Ok(())
@@ -220,8 +256,7 @@ impl LlamaSession {
             config.recurrent_r_type,
             config.recurrent_s_type,
         )?;
-        let (weights, compiled_by_batch) =
-            build_runtime_state(&model, &plan, &spec, context_extra_bytes)?;
+        let (weights, graphs) = build_runtime_state(&model, &plan, &spec, context_extra_bytes)?;
 
         Ok(Self {
             model,
@@ -233,7 +268,7 @@ impl LlamaSession {
                 .map_err(|_| LlamaError::format("session max_context does not fit in usize"))?,
             context_extra_bytes,
             weights,
-            compiled_by_batch,
+            graphs,
             token_ids: Vec::new(),
             last_run: None,
         })
@@ -272,6 +307,11 @@ impl LlamaSession {
 
     fn append_token_batch(&mut self, token_ids: &[i32]) -> Result<()> {
         let batch_size = token_ids.len();
+        if batch_size > 1 {
+            return Err(LlamaError::unsupported(
+                "multi-token prompt processing is not wired to shared cache state yet; use prefill_batch_size=1 until the prompt-processing graph family shares the same KV/recurrent tensors as token generation".to_string(),
+            ));
+        }
         self.ensure_compiled_batch(batch_size)?;
         let start = self.token_ids.len();
         let positions = (start..start + batch_size)
@@ -285,10 +325,10 @@ impl LlamaSession {
             .ok_or_else(|| LlamaError::format("overflow computing session cache length"))?;
         let run = {
             let compiled = self
-                .compiled_by_batch
-                .get(&batch_size)
+                .graphs
+                .graph_for_batch(batch_size)
                 .ok_or_else(|| LlamaError::format("compiled batch graph was not cached"))?;
-            execute_hybrid_decode_graph_metal_cached(
+            execute_hybrid_decode_graph_metal_cached_logits_only(
                 compiled,
                 &mut self.weights,
                 LogitsProbeInput::TokenIds(token_ids),
@@ -302,11 +342,23 @@ impl LlamaSession {
     }
 
     fn ensure_compiled_batch(&mut self, batch_size: usize) -> Result<()> {
-        if self.compiled_by_batch.contains_key(&batch_size) {
+        if self.graphs.has_batch(batch_size) {
             return Ok(());
         }
-        let compiled = compile_hybrid_decode_metal(&mut self.weights, &self.spec, batch_size)?;
-        self.compiled_by_batch.insert(batch_size, compiled);
+        if batch_size > 1 {
+            return Err(LlamaError::unsupported(
+                "prompt-processing graphs for batch_size>1 are not enabled until they share cache tensors with token-generation graphs".to_string(),
+            ));
+        }
+        let compiled = compile_hybrid_prompt_processing_metal_with_shared_state(
+            &mut self.weights,
+            &self.spec,
+            &self.graphs.shared_cache,
+            &self.graphs.shared_main_buffer,
+            batch_size,
+        )?;
+        self.graphs
+            .insert_prompt_processing_graph(batch_size, compiled);
         Ok(())
     }
 }
@@ -326,16 +378,28 @@ fn build_runtime_state(
     plan: &ModelExecutionPlan,
     spec: &HybridDecodeSpec,
     context_extra_bytes: usize,
-) -> Result<(
-    LoadedGgufWeights,
-    BTreeMap<usize, CompiledHybridDecodeMetal>,
-)> {
+) -> Result<(LoadedGgufWeights, SessionGraphSet)> {
     let mut weights = plan
         .full_weights
         .allocate_and_load_with_extra(&model.gguf, context_extra_bytes)?;
-    let mut compiled_by_batch = BTreeMap::new();
-    compiled_by_batch.insert(1, compile_hybrid_decode_metal(&mut weights, spec, 1)?);
-    Ok((weights, compiled_by_batch))
+    let shared_cache =
+        allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, spec)?;
+    let shared_main_buffer = create_metal_context_buffer(&weights.ctx)?;
+    let token_generation = compile_hybrid_token_generation_metal_with_shared_state(
+        &mut weights,
+        spec,
+        &shared_cache,
+        &shared_main_buffer,
+    )?;
+    Ok((
+        weights,
+        SessionGraphSet {
+            shared_cache,
+            shared_main_buffer,
+            token_generation,
+            prompt_processing_by_batch: BTreeMap::new(),
+        },
+    ))
 }
 
 fn argmax_token_id(logits: &[f32]) -> Result<i32> {
@@ -353,7 +417,7 @@ fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDecodeRun> {
         return Ok(run);
     }
 
-    if run.hidden.len() < run.hidden_size {
+    if run.hidden_size > 0 && run.hidden.len() < run.hidden_size {
         return Err(LlamaError::format(format!(
             "hybrid decode hidden length mismatch: got {}, need at least {}",
             run.hidden.len(),
@@ -376,8 +440,13 @@ fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDecodeRun> {
     } else {
         run.n_tokens
     };
-    let hidden_start = run.hidden.len() - run.hidden_size;
     let logits_start = run.logits.len() - run.vocab_size;
+    let hidden = if run.hidden_size > 0 {
+        let hidden_start = run.hidden.len() - run.hidden_size;
+        run.hidden[hidden_start..].to_vec()
+    } else {
+        Vec::new()
+    };
     let selected_experts = run
         .selected_experts
         .into_iter()
@@ -393,7 +462,7 @@ fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDecodeRun> {
         .collect();
 
     Ok(HybridDecodeRun {
-        hidden: run.hidden[hidden_start..].to_vec(),
+        hidden,
         logits: run.logits[logits_start..].to_vec(),
         n_tokens: 1,
         hidden_size: run.hidden_size,

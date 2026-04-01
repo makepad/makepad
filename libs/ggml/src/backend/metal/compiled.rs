@@ -696,20 +696,38 @@ pub fn prepare_graph(
     })
 }
 
-pub fn compile_prepared_graph(
+pub fn create_context_main_buffer(
     runtime: &MetalRuntime,
     ctx: &Context,
+    storage: BufferStorageMode,
+) -> Result<super::MetalBuffer, String> {
+    let main_bytes = collect_main_buffer_bytes(ctx, ctx.mem_size())?;
+    runtime.create_buffer_with_bytes(&main_bytes, storage)
+}
+
+fn compile_prepared_graph_from_buffers(
+    runtime: &MetalRuntime,
     prepared: &MetalPreparedGraph,
-    main_storage: BufferStorageMode,
-    tail_storage: BufferStorageMode,
+    main_buffer: super::MetalBuffer,
+    tail_buffer: Option<super::MetalBuffer>,
 ) -> Result<MetalCompiledGraph, String> {
-    let main_bytes = collect_main_buffer_bytes(ctx, prepared.main_buffer_size)?;
-    let main_buffer = runtime.create_buffer_with_bytes(&main_bytes, main_storage)?;
-    let tail_buffer = if prepared.tail_buffer_size > 0 {
-        Some(runtime.create_buffer(prepared.tail_buffer_size, tail_storage)?)
-    } else {
-        None
-    };
+    if main_buffer.size_bytes() < prepared.main_buffer_size {
+        return Err(format!(
+            "shared Metal main buffer is too small: got {}, need at least {}",
+            main_buffer.size_bytes(),
+            prepared.main_buffer_size
+        ));
+    }
+
+    if let Some(buffer) = &tail_buffer {
+        if buffer.size_bytes() < prepared.tail_buffer_size {
+            return Err(format!(
+                "shared Metal tail buffer is too small: got {}, need at least {}",
+                buffer.size_bytes(),
+                prepared.tail_buffer_size
+            ));
+        }
+    }
 
     let mut nodes = Vec::with_capacity(prepared.nodes.len());
     for node in &prepared.nodes {
@@ -742,6 +760,38 @@ pub fn compile_prepared_graph(
     })
 }
 
+pub fn compile_prepared_graph(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    prepared: &MetalPreparedGraph,
+    main_storage: BufferStorageMode,
+    tail_storage: BufferStorageMode,
+) -> Result<MetalCompiledGraph, String> {
+    let main_bytes = collect_main_buffer_bytes(ctx, prepared.main_buffer_size)?;
+    let main_buffer = runtime.create_buffer_with_bytes(&main_bytes, main_storage)?;
+    let tail_buffer = if prepared.tail_buffer_size > 0 {
+        Some(runtime.create_buffer(prepared.tail_buffer_size, tail_storage)?)
+    } else {
+        None
+    };
+
+    compile_prepared_graph_from_buffers(runtime, prepared, main_buffer, tail_buffer)
+}
+
+pub fn compile_prepared_graph_with_main_buffer(
+    runtime: &MetalRuntime,
+    prepared: &MetalPreparedGraph,
+    main_buffer: &super::MetalBuffer,
+    tail_storage: BufferStorageMode,
+) -> Result<MetalCompiledGraph, String> {
+    let tail_buffer = if prepared.tail_buffer_size > 0 {
+        Some(runtime.create_buffer(prepared.tail_buffer_size, tail_storage)?)
+    } else {
+        None
+    };
+    compile_prepared_graph_from_buffers(runtime, prepared, main_buffer.clone(), tail_buffer)
+}
+
 pub fn compile_graph_session(
     ctx: &Context,
     prepared: &MetalPreparedGraph,
@@ -761,6 +811,17 @@ impl MetalGraphSession {
         tail_storage: BufferStorageMode,
     ) -> Result<Self, String> {
         let compiled = compile_prepared_graph(&runtime, ctx, prepared, main_storage, tail_storage)?;
+        Ok(Self { runtime, compiled })
+    }
+
+    pub fn from_runtime_with_main_buffer(
+        runtime: MetalRuntime,
+        prepared: &MetalPreparedGraph,
+        main_buffer: &super::MetalBuffer,
+        tail_storage: BufferStorageMode,
+    ) -> Result<Self, String> {
+        let compiled =
+            compile_prepared_graph_with_main_buffer(&runtime, prepared, main_buffer, tail_storage)?;
         Ok(Self { runtime, compiled })
     }
 
@@ -789,28 +850,38 @@ pub fn execute_compiled_graph(
     inputs: &[MetalGraphTensorWrite<'_>],
     outputs: &[TensorId],
 ) -> Result<MetalGraphExecution, String> {
-    for input in inputs {
-        let binding = binding(compiled, input.tensor_id)?;
-        let tensor = ctx
-            .tensor(input.tensor_id)
-            .ok_or_else(|| format!("input references invalid tensor {}", input.tensor_id))?;
-        if input.bytes.len() != tensor.nbytes() {
-            return Err(format!(
-                "input '{}' byte length mismatch: got {}, expected {}",
-                tensor.name().unwrap_or("<unnamed>"),
-                input.bytes.len(),
-                tensor.nbytes()
-            ));
+    runtime.begin_command_batch()?;
+    let execute_result = (|| -> Result<(), String> {
+        for input in inputs {
+            let binding = binding(compiled, input.tensor_id)?;
+            let tensor = ctx
+                .tensor(input.tensor_id)
+                .ok_or_else(|| format!("input references invalid tensor {}", input.tensor_id))?;
+            if input.bytes.len() != tensor.nbytes() {
+                return Err(format!(
+                    "input '{}' byte length mismatch: got {}, expected {}",
+                    tensor.name().unwrap_or("<unnamed>"),
+                    input.bytes.len(),
+                    tensor.nbytes()
+                ));
+            }
+            runtime.write_buffer(&compiled.main_buffer, binding.offset_bytes, input.bytes)?;
         }
-        runtime.write_buffer(&compiled.main_buffer, binding.offset_bytes, input.bytes)?;
-    }
 
-    for node in &compiled.nodes {
-        let tensor = ctx
-            .tensor(node.node_id)
-            .ok_or_else(|| format!("compiled graph references invalid tensor {}", node.node_id))?;
-        execute_node(runtime, ctx, compiled, tensor, node)?;
+        for node in &compiled.nodes {
+            let tensor = ctx.tensor(node.node_id).ok_or_else(|| {
+                format!("compiled graph references invalid tensor {}", node.node_id)
+            })?;
+            execute_node(runtime, ctx, compiled, tensor, node)?;
+        }
+        Ok(())
+    })();
+
+    if let Err(err) = execute_result {
+        let _ = runtime.discard_command_batch();
+        return Err(err);
     }
+    runtime.end_command_batch()?;
 
     let mut execution = MetalGraphExecution::default();
     for &tensor_id in outputs {
