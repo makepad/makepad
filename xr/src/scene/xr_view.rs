@@ -1,4 +1,4 @@
-use super::xr_node::{xr_widget_world_transform, XrDrawContext, XrNode};
+use super::xr_node::{xr_widget_world_transform, XrDrawContext, XrNode, XrRuntimeBodyState};
 use crate::prelude::*;
 use makepad_widgets::{
     animator::{Animator, AnimatorImpl},
@@ -7,7 +7,7 @@ use makepad_widgets::{
         XR_TOUCH_DOWN_FRONT,
     },
 };
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 script_mod! {
     use mod.pod.*
@@ -106,9 +106,16 @@ struct XrPanelRayHit {
     touch_z: f32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct XrViewEventScopeData {
     pub content_transform: Mat4f,
+    pub runtime_bodies: Rc<HashMap<WidgetUid, XrRuntimeBodyState>>,
+}
+
+impl XrViewEventScopeData {
+    pub fn runtime_body(&self, uid: WidgetUid) -> Option<XrRuntimeBodyState> {
+        self.runtime_bodies.get(&uid).cloned()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]

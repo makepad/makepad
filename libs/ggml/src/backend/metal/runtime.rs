@@ -166,6 +166,18 @@ mod imp {
         pub fn wait_idle(&self) -> MetalResult<()> {
             Err("Metal runtime is unavailable on this target".to_string())
         }
+
+        pub fn begin_command_batch(&self) -> MetalResult<()> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
+
+        pub fn end_command_batch(&self) -> MetalResult<()> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
+
+        pub fn discard_command_batch(&self) -> MetalResult<()> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
     }
 
     impl Default for MetalRuntime {
@@ -479,6 +491,7 @@ mod imp {
         command_queue: StrongId,
         library: StrongId,
         pipeline_cache: HashMap<String, MetalPipeline>,
+        active_command_buffer: Option<StrongId>,
         last_command_buffer: Option<StrongId>,
     }
 
@@ -546,6 +559,7 @@ mod imp {
                     command_queue,
                     library,
                     pipeline_cache: HashMap::new(),
+                    active_command_buffer: None,
                     last_command_buffer: None,
                 }),
                 info,
@@ -704,6 +718,18 @@ mod imp {
 
         pub fn wait_idle(&self) -> MetalResult<()> {
             self.ctx.borrow().wait_queue_idle()
+        }
+
+        pub fn begin_command_batch(&self) -> MetalResult<()> {
+            self.ctx.borrow_mut().begin_command_batch()
+        }
+
+        pub fn end_command_batch(&self) -> MetalResult<()> {
+            self.ctx.borrow_mut().end_command_batch()
+        }
+
+        pub fn discard_command_batch(&self) -> MetalResult<()> {
+            self.ctx.borrow_mut().discard_command_batch()
         }
     }
 
@@ -870,6 +896,38 @@ mod imp {
             usize::try_from(len_u64).map_err(|_| format!("buffer length too large: {}", len_u64))
         }
 
+        fn new_command_buffer(&self) -> MetalResult<StrongId> {
+            let command_buffer_obj: ObjcId =
+                unsafe { msg_send![self.command_queue.as_id(), commandBuffer] };
+            unsafe { StrongId::from_unowned(command_buffer_obj) }
+                .ok_or_else(|| "commandBuffer returned nil".to_string())
+        }
+
+        fn begin_command_batch(&mut self) -> MetalResult<()> {
+            if self.active_command_buffer.is_some() {
+                return Err("Metal command batch is already active".to_string());
+            }
+            self.active_command_buffer = Some(self.new_command_buffer()?);
+            Ok(())
+        }
+
+        fn end_command_batch(&mut self) -> MetalResult<()> {
+            let command_buffer = self
+                .active_command_buffer
+                .take()
+                .ok_or_else(|| "Metal command batch is not active".to_string())?;
+            unsafe {
+                let _: () = msg_send![command_buffer.as_id(), commit];
+            }
+            self.last_command_buffer = Some(command_buffer);
+            Ok(())
+        }
+
+        fn discard_command_batch(&mut self) -> MetalResult<()> {
+            self.active_command_buffer = None;
+            Ok(())
+        }
+
         fn copy_between_buffers(
             &self,
             src_buffer: ObjcId,
@@ -901,10 +959,12 @@ mod imp {
                 ));
             }
 
-            let command_buffer_obj: ObjcId =
-                unsafe { msg_send![self.command_queue.as_id(), commandBuffer] };
-            let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
-                .ok_or_else(|| "commandBuffer returned nil".to_string())?;
+            let (command_buffer, commit_when_done) =
+                if let Some(command_buffer) = self.active_command_buffer.as_ref() {
+                    (command_buffer.clone(), false)
+                } else {
+                    (self.new_command_buffer()?, true)
+                };
 
             let blit_encoder_obj: ObjcId =
                 unsafe { msg_send![command_buffer.as_id(), blitCommandEncoder] };
@@ -921,17 +981,21 @@ mod imp {
                     size: len_bytes as u64
                 ];
                 let _: () = msg_send![blit_encoder.as_id(), endEncoding];
-                let _: () = msg_send![command_buffer.as_id(), commit];
-                let _: () = msg_send![command_buffer.as_id(), waitUntilCompleted];
+                if commit_when_done {
+                    let _: () = msg_send![command_buffer.as_id(), commit];
+                    let _: () = msg_send![command_buffer.as_id(), waitUntilCompleted];
+                }
             }
 
-            let status: u64 = unsafe { msg_send![command_buffer.as_id(), status] };
-            if status == 5 {
-                let error: ObjcId = unsafe { msg_send![command_buffer.as_id(), error] };
-                return Err(format!(
-                    "Metal command buffer error (buffer copy): {}",
-                    ns_error_to_string(error)
-                ));
+            if commit_when_done {
+                let status: u64 = unsafe { msg_send![command_buffer.as_id(), status] };
+                if status == 5 {
+                    let error: ObjcId = unsafe { msg_send![command_buffer.as_id(), error] };
+                    return Err(format!(
+                        "Metal command buffer error (buffer copy): {}",
+                        ns_error_to_string(error)
+                    ));
+                }
             }
 
             Ok(())
@@ -1146,10 +1210,12 @@ mod imp {
             threadgroups: MetalSize,
             threads_per_threadgroup: MetalSize,
         ) -> MetalResult<()> {
-            let command_buffer_obj: ObjcId =
-                unsafe { msg_send![self.command_queue.as_id(), commandBuffer] };
-            let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
-                .ok_or_else(|| "commandBuffer returned nil".to_string())?;
+            let (command_buffer, commit_when_done) =
+                if let Some(command_buffer) = self.active_command_buffer.as_ref() {
+                    (command_buffer.clone(), false)
+                } else {
+                    (self.new_command_buffer()?, true)
+                };
             let encoder_obj: ObjcId =
                 unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
             let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
@@ -1199,14 +1265,23 @@ mod imp {
                     threadsPerThreadgroup: tpg
                 ];
                 let _: () = msg_send![encoder.as_id(), endEncoding];
-                let _: () = msg_send![command_buffer.as_id(), commit];
+                if commit_when_done {
+                    let _: () = msg_send![command_buffer.as_id(), commit];
+                }
             }
 
-            self.last_command_buffer = Some(command_buffer);
+            if commit_when_done {
+                self.last_command_buffer = Some(command_buffer);
+            }
             Ok(())
         }
 
         fn wait_queue_idle(&self) -> MetalResult<()> {
+            if self.active_command_buffer.is_some() {
+                return Err(
+                    "cannot wait for Metal queue idle while a command batch is active".to_string(),
+                );
+            }
             if let Some(command_buffer) = self.last_command_buffer.as_ref() {
                 unsafe {
                     let _: () = msg_send![command_buffer.as_id(), waitUntilCompleted];

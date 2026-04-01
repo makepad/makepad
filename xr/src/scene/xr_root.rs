@@ -52,6 +52,8 @@ script_mod! {
 pub struct XrCamera {
     #[live(28.0)]
     pub fov_y: f32,
+    #[live(vec3(0.0, -0.10, -1.30))]
+    pub desktop_target: Vec3f,
     #[live(3.4)]
     pub distance: f32,
     #[live(0.05)]
@@ -89,6 +91,7 @@ impl Default for XrCamera {
             distance: 3.4,
             near: 0.05,
             far: 200.0,
+            desktop_target: vec3f(0.0, -0.10, -1.30),
             distance_min: 0.25,
             distance_max: 30.0,
             wheel_zoom_step: 0.08,
@@ -118,7 +121,7 @@ impl XrCamera {
             -yaw.cos() * pitch.cos(),
         )
         .normalize();
-        let target = vec3f(0.0, -0.10, -1.30);
+        let target = self.desktop_target;
         let camera_pos = target - forward * distance;
         let view = Mat4f::look_at(camera_pos, target, vec3f(0.0, 1.0, 0.0));
         let projection = Mat4f::perspective(
@@ -1274,6 +1277,7 @@ impl Widget for XrRoot {
                 self.env.step_physics(cx);
                 let mut event_scope_data = super::xr_view::XrViewEventScopeData {
                     content_transform: self.xr_content_transform(Some(&augmented_update.state)),
+                    runtime_bodies: self.env.runtime_bodies(),
                 };
                 let mut event_scope = Scope::with_data(&mut event_scope_data);
                 let augmented_event = Event::XrUpdate(augmented_update);

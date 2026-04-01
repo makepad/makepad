@@ -1,6 +1,7 @@
 use makepad_widgets;
 
 use makepad_widgets::*;
+use makepad_xr::obj::tank::{tank_drive_impulses, TankDriveConfig};
 use makepad_xr::scene::*;
 
 app_main!(App);
@@ -56,8 +57,9 @@ script_mod! {
         ui:  XrRoot{
             window.inner_size: vec2(1400, 900)
             pass.clear_color: #x0b1118
-            camera.fov_y: 52.0
-            camera.distance: 1.8
+            camera.fov_y: 38.0
+            camera.desktop_target: vec3(0.05, 0.10, -0.72)
+            camera.distance: 1.85
             env.gravity: 9.8
             env.env_cube: true
             env.depth_mesh: false
@@ -315,58 +317,47 @@ script_mod! {
                             color: #x283544
                         }
 
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.14, 0.12, 0.14)
-                            corner_radius: 0.02
-                            roughness: 0.78
-                            metallic: 0.02
-                            color: #x516579
-                            pos: vec3(-0.34, 0.00, -0.26)
-                        }
+                        tank_root := XrNode{
+                            body: mod.widgets.XrBodyKind.Dynamic
+                            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                            physics_size: vec3(0.58, 0.30, 0.82)
+                            density: 1.7
+                            friction: 1.35
+                            restitution: 0.02
+                            pos: vec3(0.06, 0.08, -0.02)
+                            rot: vec3(0.0, 0.64, 0.0)
 
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.18, 0.10, 0.18)
-                            corner_radius: 0.02
-                            roughness: 0.78
-                            metallic: 0.02
-                            color: #x516579
-                            pos: vec3(0.34, -0.01, -0.32)
-                        }
+                            hull_block := Cube{
+                                body: mod.widgets.XrBodyKind.Disabled
+                                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                                size: vec3(0.56, 0.18, 0.82)
+                                corner_radius: 0.03
+                                roughness: 0.58
+                                metallic: 0.03
+                                color: #x6a8337
+                            }
 
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.54, 0.08, 0.12)
-                            corner_radius: 0.018
-                            roughness: 0.82
-                            metallic: 0.0
-                            color: #x1f2b37
-                            pos: vec3(0.05, -0.02, -0.48)
-                        }
+                            turret_block := Cube{
+                                body: mod.widgets.XrBodyKind.Disabled
+                                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                                pos: vec3(0.0, 0.16, -0.03)
+                                size: vec3(0.24, 0.14, 0.34)
+                                corner_radius: 0.026
+                                roughness: 0.44
+                                metallic: 0.02
+                                color: #x8ca853
+                            }
 
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.12, 0.16, 0.42)
-                            corner_radius: 0.018
-                            roughness: 0.80
-                            metallic: 0.0
-                            color: #x202f3d
-                            pos: vec3(-0.48, 0.02, -0.02)
-                        }
-
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.12, 0.16, 0.42)
-                            corner_radius: 0.018
-                            roughness: 0.80
-                            metallic: 0.0
-                            color: #x202f3d
-                            pos: vec3(0.58, 0.02, -0.02)
-                        }
-
-                        Tank{
-                            pos: vec3(0.05, 0.03, -0.10)
+                            barrel_block := Cube{
+                                body: mod.widgets.XrBodyKind.Disabled
+                                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                                pos: vec3(0.0, 0.16, -0.47)
+                                size: vec3(0.05, 0.05, 0.56)
+                                corner_radius: 0.02
+                                roughness: 0.30
+                                metallic: 0.06
+                                color: #x24291c
+                            }
                         }
                     }
                 }
@@ -440,6 +431,7 @@ script_mod! {
             control_strip := XrView{
                 visible: false
                 show_in_non_xr: true
+                pos: vec3(0.05, 0.44, -0.78)
                 wrist_left: true
                 logical_size: vec2(1220, 700)
                 pixel_scale: 0.000215
@@ -580,7 +572,7 @@ script_mod! {
 
                         scene_status := Label{
                             width: Fill
-                            text: "Default scene: tank mode. Drive with the right thumbstick in head-relative screen direction, and grab the tank directly with your hands."
+                            text: "Default scene: tank mode. Right stick up/down drives forward and reverse, right stick left/right turns in tank space. On desktop, a connected gamepad right stick mirrors that input."
                             draw_text.color: #xe8f4ff
                         }
                     }
@@ -771,6 +763,10 @@ pub struct App {
     last_activity_pose_sync_activity: Option<XrActivityId>,
     #[rust]
     last_activity_pose_sync_at: f64,
+    #[rust]
+    tank_drive: TankDriveConfig,
+    #[rust]
+    last_desktop_tank_drive_at: Option<f64>,
 }
 
 impl App {
@@ -930,6 +926,76 @@ impl App {
         if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
             root.apply_body_impulse(cx, impulse);
         }
+    }
+
+    fn desktop_gamepad_tank_stick(&mut self, cx: &mut Cx) -> Option<Vec2f> {
+        let mut best_stick = None;
+        let mut best_magnitude = 0.0f32;
+        for state in cx.game_input_states() {
+            let GameInputState::Gamepad(gamepad) = state else {
+                continue;
+            };
+            let stick = vec2f(gamepad.right_stick.x as f32, gamepad.right_stick.y as f32);
+            let magnitude = stick.length();
+            if magnitude > best_magnitude {
+                best_stick = Some(stick);
+                best_magnitude = magnitude;
+            }
+        }
+        best_stick
+    }
+
+    fn drive_tank_with_controller(
+        &mut self,
+        cx: &mut Cx,
+        controller: &XrController,
+        dt: f32,
+    ) {
+        let tank_widget = self.ui.widget(cx, ids!(tank_root));
+        if tank_widget.borrow::<XrNode>().is_none() {
+            return;
+        }
+        let tank_widget_uid = tank_widget.widget_uid();
+        let runtime_bodies = self.ui.borrow::<XrRoot>().map(|root| root.runtime_bodies());
+        let Some(runtime_bodies) = runtime_bodies else {
+            return;
+        };
+        let Some(body) = runtime_bodies.get(&tank_widget_uid).cloned() else {
+            return;
+        };
+        let impulses = tank_drive_impulses(
+            tank_widget_uid,
+            body.pose,
+            body.linvel,
+            body.held_by,
+            controller,
+            dt,
+            self.tank_drive,
+        );
+        for impulse in impulses {
+            self.apply_body_impulse(cx, impulse);
+        }
+    }
+
+    fn drive_tank_for_update(&mut self, cx: &mut Cx, update: &XrUpdateEvent) {
+        let dt = (update.state.time - update.last.time) as f32;
+        self.drive_tank_with_controller(cx, &update.state.right_controller, dt);
+    }
+
+    fn drive_tank_for_desktop_frame(&mut self, cx: &mut Cx, event: &NextFrameEvent) {
+        let dt = self
+            .last_desktop_tank_drive_at
+            .map(|last| (event.time - last) as f32)
+            .unwrap_or(1.0 / 60.0);
+        self.last_desktop_tank_drive_at = Some(event.time);
+        let Some(stick) = self.desktop_gamepad_tank_stick(cx) else {
+            return;
+        };
+        let controller = XrController {
+            stick,
+            ..XrController::default()
+        };
+        self.drive_tank_with_controller(cx, &controller, dt);
     }
 
     fn publish_local_shared_object_states(&mut self, cx: &mut Cx) {
@@ -1210,6 +1276,16 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
+        if let Event::XrUpdate(update) = event {
+            self.last_desktop_tank_drive_at = None;
+            self.drive_tank_for_update(cx, update);
+        } else if let Event::NextFrame(next_frame) = event {
+            if !cx.in_xr_mode() {
+                self.drive_tank_for_desktop_frame(cx, next_frame);
+            } else {
+                self.last_desktop_tank_drive_at = None;
+            }
+        }
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if matches!(event, Event::Startup) {
             self.ensure_network_started(cx);
