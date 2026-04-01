@@ -1430,7 +1430,7 @@ script_mod! {
 
         right_split := DockSplitter{
             axis: SplitterAxis.Vertical
-            align: SplitterAlign.FromB(250.0)
+            align: SplitterAlign.FromB(120.0)
             a: @center_tabs
             b: @bottom_tabs
         }
@@ -1445,7 +1445,7 @@ script_mod! {
         // Center panel - content widgets
         center_tabs := DockTabs{
             tabs: [@bigtext_tab, @math_tab, @vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
-            selected: 3
+            selected: 1
             closable: true
         }
 

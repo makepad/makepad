@@ -574,8 +574,49 @@ impl App {
         }
     }
 
-    pub(super) fn terminal_tab_title(path: &str) -> String {
+    pub(super) fn default_terminal_tab_title(path: &str) -> String {
         path.rsplit('/').next().unwrap_or("terminal").to_string()
+    }
+
+    pub(super) fn terminal_tab_title(&self, path: &str) -> String {
+        self.data
+            .terminal_title_by_path
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| Self::default_terminal_tab_title(path))
+    }
+
+    pub(super) fn apply_terminal_tab_title(&mut self, cx: &mut Cx, path: &str, title: String) {
+        self.data
+            .terminal_title_by_path
+            .insert(path.to_string(), title.clone());
+        let Some((mount, tab_id)) = Self::mount_from_virtual_path(path).and_then(|mount| {
+            self.mount_state(mount)
+                .and_then(|state| state.terminal_path_to_tab.get(path).copied())
+                .map(|tab_id| (mount.to_string(), tab_id))
+        }) else {
+            return;
+        };
+        if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+            dock.set_tab_title(cx, tab_id, title);
+            dock.redraw_tab(cx, tab_id);
+        }
+    }
+
+    pub(super) fn reset_terminal_tab_title(&mut self, cx: &mut Cx, path: &str) {
+        self.data.terminal_title_by_path.remove(path);
+        let title = Self::default_terminal_tab_title(path);
+        let Some((mount, tab_id)) = Self::mount_from_virtual_path(path).and_then(|mount| {
+            self.mount_state(mount)
+                .and_then(|state| state.terminal_path_to_tab.get(path).copied())
+                .map(|tab_id| (mount.to_string(), tab_id))
+        }) else {
+            return;
+        };
+        if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
+            dock.set_tab_title(cx, tab_id, title);
+            dock.redraw_tab(cx, tab_id);
+        }
     }
 
     pub(super) fn terminal_tab_mount_path(&self, tab_id: LiveId) -> Option<(String, String)> {
@@ -795,6 +836,10 @@ impl App {
             .mount_state(mount)
             .map(|mount| mount.terminal_files.clone())
             .unwrap_or_default();
+        let titles: HashMap<String, String> = files
+            .iter()
+            .map(|path| (path.clone(), self.terminal_tab_title(path)))
+            .collect();
 
         let Some(dock) = self.mount_workspace_dock(cx, mount) else {
             return;
@@ -812,10 +857,14 @@ impl App {
         dock.set_tab_title(cx, id!(terminal_first), String::new());
 
         for path in files.iter() {
+            let title = titles
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| Self::default_terminal_tab_title(path));
             // If a valid tab already exists for this path, just update its title.
             if let Some(existing) = path_to_tab.get(path).copied() {
                 if dock.find_tab_bar_of_tab(existing).is_some() {
-                    dock.set_tab_title(cx, existing, Self::terminal_tab_title(path));
+                    dock.set_tab_title(cx, existing, title);
                     continue;
                 }
                 path_to_tab.remove(path);
@@ -833,7 +882,7 @@ impl App {
                     tab_bar,
                     tab_id,
                     id!(TerminalPane),
-                    Self::terminal_tab_title(path),
+                    title,
                     id!(TerminalCloseableTab),
                     Some(pos.saturating_sub(1)),
                 )

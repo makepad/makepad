@@ -29,9 +29,7 @@ impl LoadedGgufWeights {
 }
 
 impl GgufWeightLayout {
-    pub fn from_tensors(
-        tensors: impl IntoIterator<Item = GgufTensorInfo>,
-    ) -> Result<Self> {
+    pub fn from_tensors(tensors: impl IntoIterator<Item = GgufTensorInfo>) -> Result<Self> {
         let mut dedup = BTreeMap::new();
         for tensor in tensors {
             dedup.entry(tensor.name.clone()).or_insert(tensor);
@@ -39,7 +37,10 @@ impl GgufWeightLayout {
 
         let tensors = dedup.into_values().collect::<Vec<_>>();
         let total_bytes = padded_total_bytes(&tensors)?;
-        Ok(Self { tensors, total_bytes })
+        Ok(Self {
+            tensors,
+            total_bytes,
+        })
     }
 
     pub fn allocate_context(&self) -> Result<LoadedGgufWeights> {
@@ -73,9 +74,9 @@ impl GgufWeightLayout {
     ) -> Result<LoadedGgufWeights> {
         let mut loaded = self.allocate_context_with_extra(extra_bytes)?;
         for tensor in &self.tensors {
-            let tensor_id = loaded
-                .tensor_id(&tensor.name)
-                .ok_or_else(|| LlamaError::format(format!("missing loaded tensor '{}'", tensor.name)))?;
+            let tensor_id = loaded.tensor_id(&tensor.name).ok_or_else(|| {
+                LlamaError::format(format!("missing loaded tensor '{}'", tensor.name))
+            })?;
             let dst = loaded
                 .ctx
                 .tensor_data_mut(tensor_id)

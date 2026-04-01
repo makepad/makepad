@@ -237,11 +237,7 @@ impl TensorLayout {
             return Err(format!("invalid tensor rank {}", rank));
         }
         if extents.len() != rank {
-            return Err(format!(
-                "rank {} but got {} extents",
-                rank,
-                extents.len()
-            ));
+            return Err(format!("rank {} but got {} extents", rank, extents.len()));
         }
         if strides_bytes.len() != rank {
             return Err(format!(
@@ -471,8 +467,7 @@ impl Tensor {
 
     pub fn is_contiguously_allocated(&self) -> bool {
         self.nbytes()
-            == (self.nelements() as usize)
-                * ggml_type_size_for_type(self.desc.ty)
+            == (self.nelements() as usize) * ggml_type_size_for_type(self.desc.ty)
                 / ggml_blck_size_for_type(self.desc.ty)
     }
 
@@ -516,8 +511,14 @@ impl Tensor {
 
     pub fn op_desc(&self) -> &'static str {
         match self.op {
-            Op::Unary => self.unary_op().map(UnaryOp::name).unwrap_or_else(|| self.op.name()),
-            Op::Glu => self.glu_op().map(GluOp::name).unwrap_or_else(|| self.op.name()),
+            Op::Unary => self
+                .unary_op()
+                .map(UnaryOp::name)
+                .unwrap_or_else(|| self.op.name()),
+            Op::Glu => self
+                .glu_op()
+                .map(GluOp::name)
+                .unwrap_or_else(|| self.op.name()),
             op => op.name(),
         }
     }

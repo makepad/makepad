@@ -5,6 +5,7 @@ pub mod algorithms;
 pub mod net;
 pub mod obj;
 pub mod scene;
+pub mod sync;
 mod util;
 
 pub mod render {
@@ -30,12 +31,13 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     obj::physics_view::script_mod(vm);
     obj::refractive_cube::script_mod(vm);
     obj::shooter::script_mod(vm);
+    obj::tank::script_mod(vm);
 
     util::passthrough_env::script_mod(vm);
     obj::tree::script_mod(vm);
     obj::view_splat::script_mod(vm);
     scene::xr_env::script_mod(vm);
-    scene::xr_peer_sync::script_mod(vm);
+    sync::xr_peer_sync::script_mod(vm);
     scene::xr_select::script_mod(vm);
     scene::xr_view::script_mod(vm);
     scene::xr_root::script_mod(vm)

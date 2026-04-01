@@ -176,8 +176,10 @@ impl Qwen35MoeTensors {
                 }),
             };
 
-            let ffn_gate_up_exps = optional_tensor(model, &layer_name(index, "ffn_gate_up_exps", "weight"));
-            let ffn_gate_exps = optional_tensor(model, &layer_name(index, "ffn_gate_exps", "weight"));
+            let ffn_gate_up_exps =
+                optional_tensor(model, &layer_name(index, "ffn_gate_up_exps", "weight"));
+            let ffn_gate_exps =
+                optional_tensor(model, &layer_name(index, "ffn_gate_exps", "weight"));
             let ffn_up_exps = optional_tensor(model, &layer_name(index, "ffn_up_exps", "weight"));
             if ffn_gate_up_exps.is_none() && (ffn_gate_exps.is_none() || ffn_up_exps.is_none()) {
                 return Err(LlamaError::format(format!(
@@ -194,7 +196,10 @@ impl Qwen35MoeTensors {
                 attention,
                 recurrent,
                 moe: Qwen35MoeMoeTensors {
-                    ffn_gate_inp: required_tensor(model, &layer_name(index, "ffn_gate_inp", "weight"))?,
+                    ffn_gate_inp: required_tensor(
+                        model,
+                        &layer_name(index, "ffn_gate_inp", "weight"),
+                    )?,
                     ffn_gate_up_exps,
                     ffn_gate_exps,
                     ffn_up_exps,

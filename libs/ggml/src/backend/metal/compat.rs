@@ -7,23 +7,11 @@ pub fn is_available() -> bool {
     cfg!(target_os = "macos")
 }
 
-pub fn try_matmul_nn_f32(
-    a: &[f32],
-    b: &[f32],
-    m: usize,
-    k: usize,
-    n: usize,
-) -> Option<Vec<f32>> {
+pub fn try_matmul_nn_f32(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Option<Vec<f32>> {
     imp::try_matmul_nn_f32(a, b, m, k, n)
 }
 
-pub fn try_matmul_nt_f32(
-    a: &[f32],
-    bt: &[f32],
-    m: usize,
-    k: usize,
-    n: usize,
-) -> Option<Vec<f32>> {
+pub fn try_matmul_nt_f32(a: &[f32], bt: &[f32], m: usize, k: usize, n: usize) -> Option<Vec<f32>> {
     imp::try_matmul_nt_f32(a, bt, m, k, n)
 }
 
@@ -116,21 +104,11 @@ pub fn try_flash_attn_f32_cross_kv_cache(
     imp::try_flash_attn_f32_cross_kv_cache(layer, q, k_cross, v_cross, n_q, n_kv, n_head, d, scale)
 }
 
-pub fn try_add_f32(
-    a: &[f32],
-    a_shape: &[usize],
-    b: &[f32],
-    b_shape: &[usize],
-) -> Option<Vec<f32>> {
+pub fn try_add_f32(a: &[f32], a_shape: &[usize], b: &[f32], b_shape: &[usize]) -> Option<Vec<f32>> {
     imp::try_add_f32(a, a_shape, b, b_shape)
 }
 
-pub fn try_mul_f32(
-    a: &[f32],
-    a_shape: &[usize],
-    b: &[f32],
-    b_shape: &[usize],
-) -> Option<Vec<f32>> {
+pub fn try_mul_f32(a: &[f32], a_shape: &[usize], b: &[f32], b_shape: &[usize]) -> Option<Vec<f32>> {
     imp::try_mul_f32(a, a_shape, b, b_shape)
 }
 
@@ -964,21 +942,30 @@ mod imp {
         // iterate without rebuilding the Rust crate every edit.
         let mut src = read_text_with_fallback(
             &[
-                concat!(env!("CARGO_MANIFEST_DIR"), "/src/backend/metal/ggml/ggml-metal.metal"),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/backend/metal/ggml/ggml-metal.metal"
+                ),
                 "libs/ggml/src/backend/metal/ggml/ggml-metal.metal",
             ],
             _GGML_METAL_SOURCE_RAW,
         );
         let common_h = read_text_with_fallback(
             &[
-                concat!(env!("CARGO_MANIFEST_DIR"), "/src/backend/metal/ggml/ggml-common.h"),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/backend/metal/ggml/ggml-common.h"
+                ),
                 "libs/ggml/src/backend/metal/ggml/ggml-common.h",
             ],
             _GGML_COMMON_H,
         );
         let impl_h = read_text_with_fallback(
             &[
-                concat!(env!("CARGO_MANIFEST_DIR"), "/src/backend/metal/ggml/ggml-metal-impl.h"),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/backend/metal/ggml/ggml-metal-impl.h"
+                ),
                 "libs/ggml/src/backend/metal/ggml/ggml-metal-impl.h",
             ],
             _GGML_METAL_IMPL_H,
@@ -5645,7 +5632,10 @@ mod imp {
             for &row in row_indices {
                 let row_ok = usize::try_from(row).ok().is_some_and(|row| row < n_rows);
                 if !row_ok {
-                    return Err(format!("get_rows row index {} is out of range {}", row, n_rows));
+                    return Err(format!(
+                        "get_rows row index {} is out of range {}",
+                        row, n_rows
+                    ));
                 }
             }
 
@@ -5663,7 +5653,8 @@ mod imp {
 
             let src_buf = self.new_buffer_with_bytes(src)?;
             let idx_buf = self.new_buffer_with_bytes(idx_bytes)?;
-            let dst_buf = self.new_buffer_with_length(dst_shape.numel * std::mem::size_of::<f32>())?;
+            let dst_buf =
+                self.new_buffer_with_length(dst_shape.numel * std::mem::size_of::<f32>())?;
             self.dispatch_get_rows_ggml(
                 src_ggml_type,
                 src_buf.as_id(),
@@ -5829,9 +5820,9 @@ mod imp {
                     Ok(()) => ("mul_mm", Ok(())),
                     Err(e) => ("mul_mv", {
                         eprintln!(
-                                "[ggml][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
-                                src0, e
-                            );
+                            "[ggml][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
+                            src0, e
+                        );
                         self.dispatch_mul_mv(
                             src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01,
                             nb10, nb11, ne0, ne1,
@@ -6490,5 +6481,4 @@ mod imp {
             )
         })
     }
-
 }

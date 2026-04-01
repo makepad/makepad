@@ -1,6 +1,6 @@
-pub mod core;
-pub mod context;
 pub mod backend;
+pub mod context;
+pub mod core;
 pub mod graph;
 pub mod op;
 pub mod plan;
@@ -8,6 +8,11 @@ pub mod quant;
 pub mod runtime;
 pub mod tensor;
 
+pub use backend::{
+    Backend, BackendBuffer, BackendBufferType, BackendBufferUsage, BackendDeviceCaps,
+    BackendDeviceProps, BackendDeviceType, BackendEvent, BackendGraphPlan,
+};
+pub use backend::{BackendCapabilities, BackendInfo, BackendKind};
 pub use context::Context;
 pub use core::{
     ggml_pad, InitParams, LogLevel, ObjectType, PoolOp, ScaleMode, SortOrder, Status, TensorFlag,
@@ -16,11 +21,6 @@ pub use core::{
     GGML_MAX_SRC, GGML_MEM_ALIGN, GGML_MROPE_SECTIONS, GGML_QNT_VERSION, GGML_QNT_VERSION_FACTOR,
     GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_NEOX, GGML_ROPE_TYPE_NORMAL,
     GGML_ROPE_TYPE_VISION, GGML_SCALE_FLAG_ALIGN_CORNERS, GGML_SCALE_FLAG_ANTIALIAS,
-};
-pub use backend::{BackendCapabilities, BackendInfo, BackendKind};
-pub use backend::{
-    Backend, BackendBuffer, BackendBufferType, BackendBufferUsage, BackendDeviceCaps,
-    BackendDeviceProps, BackendDeviceType, BackendEvent, BackendGraphPlan,
 };
 pub use graph::{Graph, GraphEvalOrder, NodeId};
 pub use op::{

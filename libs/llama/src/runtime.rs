@@ -6,8 +6,8 @@ use makepad_ggml::{
         try_rms_norm_mul_f32, BufferStorageMode, MetalCompiledGraph, MetalDeviceFeatures,
         MetalGraphSession, MetalGraphTensorWrite, MetalPreparedGraph, MetalRuntime,
     },
-    f16_to_f32, f32_to_f16, ggml_row_size_for_type, BufferUsage, Context, Graph, Op, Tensor, TensorId,
-    TensorLayout, TensorType, UnaryOp, GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE,
+    f16_to_f32, f32_to_f16, ggml_row_size_for_type, BufferUsage, Context, Graph, Op, Prec, Tensor,
+    TensorId, TensorLayout, TensorType, UnaryOp, GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE,
 };
 
 use crate::error::{LlamaError, Result};
@@ -84,10 +84,7 @@ impl CompiledLogitsProbeMetal {
 
 pub enum LogitsProbeInput<'a> {
     TokenIds(&'a [i32]),
-    EmbeddingsF32 {
-        data: &'a [f32],
-        n_tokens: usize,
-    },
+    EmbeddingsF32 { data: &'a [f32], n_tokens: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -100,9 +97,7 @@ pub struct LogitsProbeRun {
 #[derive(Clone, Debug)]
 pub enum AttentionQueryLayout {
     Plain,
-    InterleavedQueryGate {
-        gate_activation: UnaryOp,
-    },
+    InterleavedQueryGate { gate_activation: UnaryOp },
 }
 
 #[derive(Clone, Debug)]
@@ -131,7 +126,8 @@ fn rope_position_tensor_len(rope: &AttentionRopeSpec, n_tokens: usize) -> Result
     let n_positions = n_tokens
         .checked_mul(rope_position_component_count(rope))
         .ok_or_else(|| LlamaError::format("overflow computing rope position tensor length"))?;
-    i64::try_from(n_positions).map_err(|_| LlamaError::format("rope position length does not fit in i64"))
+    i64::try_from(n_positions)
+        .map_err(|_| LlamaError::format("rope position length does not fit in i64"))
 }
 
 fn encode_rope_positions(
@@ -184,6 +180,118 @@ fn causal_mask_f16_bytes(n_tokens: usize) -> Vec<u8> {
         }
     }
     bytes
+}
+
+fn causal_mask_f32_bytes(n_tokens: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(n_tokens * n_tokens * std::mem::size_of::<f32>());
+    for query in 0..n_tokens {
+        for key in 0..n_tokens {
+            let value = if key > query { f32::NEG_INFINITY } else { 0.0 };
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes
+}
+
+fn position_causal_mask_f16_bytes(key_count: usize, positions: &[i32]) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(
+        positions
+            .len()
+            .checked_mul(key_count)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<u16>()))
+            .ok_or_else(|| LlamaError::format("overflow computing attention decode mask bytes"))?,
+    );
+    let zero = f32_to_f16(0.0);
+    let neg_inf = f32_to_f16(f32::NEG_INFINITY);
+    for &position in positions {
+        let position = usize::try_from(position)
+            .map_err(|_| LlamaError::format(format!("negative attention position {}", position)))?;
+        if position >= key_count {
+            return Err(LlamaError::format(format!(
+                "attention position {} exceeds key_count {}",
+                position, key_count
+            )));
+        }
+        for key in 0..key_count {
+            let value = if key > position { neg_inf } else { zero };
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
+fn position_causal_mask_f32_bytes(key_count: usize, positions: &[i32]) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(
+        positions
+            .len()
+            .checked_mul(key_count)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| LlamaError::format("overflow computing attention decode mask bytes"))?,
+    );
+    for &position in positions {
+        let position = usize::try_from(position)
+            .map_err(|_| LlamaError::format(format!("negative attention position {}", position)))?;
+        if position >= key_count {
+            return Err(LlamaError::format(format!(
+                "attention position {} exceeds key_count {}",
+                position, key_count
+            )));
+        }
+        for key in 0..key_count {
+            let value = if key > position {
+                f32::NEG_INFINITY
+            } else {
+                0.0
+            };
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
+fn should_use_flash_attention(n_tokens: usize) -> bool {
+    n_tokens == 1
+}
+
+fn attention_mask_tensor_type(n_tokens: usize) -> TensorType {
+    if should_use_flash_attention(n_tokens) {
+        TensorType::F16
+    } else {
+        TensorType::F32
+    }
+}
+
+fn attention_mask_bytes_for_tensor(
+    ctx: &Context,
+    tensor_id: TensorId,
+    n_tokens: usize,
+) -> Result<Vec<u8>> {
+    let tensor = require_tensor(ctx, tensor_id)?;
+    match tensor.desc.ty {
+        TensorType::F16 => Ok(causal_mask_f16_bytes(n_tokens)),
+        TensorType::F32 => Ok(causal_mask_f32_bytes(n_tokens)),
+        other => Err(LlamaError::unsupported(format!(
+            "unsupported attention block mask tensor type {}",
+            other.name()
+        ))),
+    }
+}
+
+fn position_attention_mask_bytes_for_tensor(
+    ctx: &Context,
+    tensor_id: TensorId,
+    key_count: usize,
+    positions: &[i32],
+) -> Result<Vec<u8>> {
+    let tensor = require_tensor(ctx, tensor_id)?;
+    match tensor.desc.ty {
+        TensorType::F16 => position_causal_mask_f16_bytes(key_count, positions),
+        TensorType::F32 => position_causal_mask_f32_bytes(key_count, positions),
+        other => Err(LlamaError::unsupported(format!(
+            "unsupported attention decode mask tensor type {}",
+            other.name()
+        ))),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -278,6 +386,7 @@ pub struct AttentionDecodeGraph {
     pub input_primary: TensorId,
     pub input_positions: TensorId,
     pub input_rope_positions: Option<TensorId>,
+    pub input_mask: Option<TensorId>,
     pub k_cache: TensorId,
     pub v_cache: TensorId,
     pub k_cache_view: TensorId,
@@ -464,11 +573,7 @@ impl CompiledMoeFfnMetal {
         &self.block
     }
 
-    pub fn execute(
-        &self,
-        ctx: &Context,
-        input: LogitsProbeInput<'_>,
-    ) -> Result<MoeFfnRun> {
+    pub fn execute(&self, ctx: &Context, input: LogitsProbeInput<'_>) -> Result<MoeFfnRun> {
         execute_prepared_moe_ffn_metal(
             self.session.runtime(),
             ctx,
@@ -515,6 +620,7 @@ pub struct HybridDecodeSpec {
 #[derive(Clone, Debug)]
 pub struct HybridAttentionCacheView {
     pub layer_index: u32,
+    pub input_mask: Option<TensorId>,
     pub k_cache_view: TensorId,
     pub v_cache_view: TensorId,
     pub k_head_dim: i64,
@@ -765,7 +871,9 @@ pub fn build_logits_probe_graph(
     mark_input(ctx, output_ids)?;
 
     let input_embed = match &spec.input {
-        ProbeInputKind::TokenIds { token_embedding_name } => {
+        ProbeInputKind::TokenIds {
+            token_embedding_name,
+        } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
             ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
                 .map_err(LlamaError::format)?
@@ -869,7 +977,9 @@ pub fn execute_prepared_logits_probe_metal(
     output_ids: &[i32],
 ) -> Result<LogitsProbeRun> {
     if output_ids.is_empty() {
-        return Err(LlamaError::format("logits probe requires at least one output id"));
+        return Err(LlamaError::format(
+            "logits probe requires at least one output id",
+        ));
     }
 
     let input_primary = match (&spec.input, input) {
@@ -978,6 +1088,97 @@ pub fn execute_logits_probe_graph_metal_cached(
     compiled.execute(&weights.ctx, input, output_ids)
 }
 
+fn build_attention_mha_output(
+    ctx: &mut Context,
+    q: TensorId,
+    k: TensorId,
+    v: TensorId,
+    input_mask: Option<TensorId>,
+    q_head_dim: u32,
+    n_tokens: usize,
+    prefix: &str,
+) -> Result<TensorId> {
+    if should_use_flash_attention(n_tokens) {
+        let attn = ctx
+            .flash_attn_ext(
+                q,
+                k,
+                v,
+                input_mask,
+                1.0f32 / (q_head_dim as f32).sqrt(),
+                0.0,
+                0.0,
+                BufferUsage::Activations,
+            )
+            .map_err(LlamaError::format)?;
+        ctx.flash_attn_ext_set_prec(attn, Prec::F32)
+            .map_err(LlamaError::format)?;
+        let attn_tensor = require_tensor(ctx, attn)?.clone();
+        let attn = ctx
+            .reshape(
+                attn,
+                &[
+                    attn_tensor.ne[0] * attn_tensor.ne[1],
+                    attn_tensor.ne[2] * attn_tensor.ne[3],
+                ],
+            )
+            .map_err(LlamaError::format)?;
+        ctx.set_tensor_name(attn, format!("{prefix}.attn_flat"))
+            .map_err(LlamaError::format)?;
+        return Ok(attn);
+    }
+
+    let mut kq = ctx
+        .mul_mat(k, q, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(kq, format!("{prefix}.kq"))
+        .map_err(LlamaError::format)?;
+    kq = ctx
+        .scale(
+            kq,
+            1.0f32 / (q_head_dim as f32).sqrt(),
+            BufferUsage::Activations,
+        )
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(kq, format!("{prefix}.kq_scaled"))
+        .map_err(LlamaError::format)?;
+    if let Some(input_mask) = input_mask {
+        kq = ctx
+            .binary_like_a(Op::Add, kq, input_mask, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        ctx.set_tensor_name(kq, format!("{prefix}.kq_masked"))
+            .map_err(LlamaError::format)?;
+    }
+    kq = ctx
+        .soft_max(kq, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(kq, format!("{prefix}.kq_soft_max"))
+        .map_err(LlamaError::format)?;
+
+    let v_transposed = ctx.transpose(v).map_err(LlamaError::format)?;
+    let v_for_matmul = ctx.cont(v_transposed).map_err(LlamaError::format)?;
+    ctx.set_tensor_name(v_for_matmul, format!("{prefix}.v_cont"))
+        .map_err(LlamaError::format)?;
+
+    let kqv = ctx
+        .mul_mat(v_for_matmul, kq, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(kqv, format!("{prefix}.kqv"))
+        .map_err(LlamaError::format)?;
+    let attn = ctx.permute(kqv, [0, 2, 1, 3]).map_err(LlamaError::format)?;
+    let attn_tensor = require_tensor(ctx, attn)?.clone();
+    let attn = ctx
+        .cont_2d(
+            attn,
+            attn_tensor.ne[0] * attn_tensor.ne[1],
+            attn_tensor.ne[2] * attn_tensor.ne[3],
+        )
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(attn, format!("{prefix}.attn_flat"))
+        .map_err(LlamaError::format)?;
+    Ok(attn)
+}
+
 pub fn build_attention_block_graph(
     ctx: &mut Context,
     tensor_ids: &BTreeMap<String, TensorId>,
@@ -1035,7 +1236,7 @@ pub fn build_attention_block_graph(
         let mask = ctx
             .new_named_tensor(
                 "attn.kq_mask",
-                TensorType::F16,
+                attention_mask_tensor_type(n_tokens),
                 4,
                 &[n_tokens as i64, n_tokens as i64, 1, 1],
                 BufferUsage::Activations,
@@ -1048,7 +1249,9 @@ pub fn build_attention_block_graph(
     };
 
     let input_embed = match &spec.input {
-        ProbeInputKind::TokenIds { token_embedding_name } => {
+        ProbeInputKind::TokenIds {
+            token_embedding_name,
+        } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
             ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
                 .map_err(LlamaError::format)?
@@ -1139,7 +1342,8 @@ pub fn build_attention_block_graph(
             let gate = ctx
                 .unary(gate_cont, gate_activation, BufferUsage::Activations)
                 .map_err(LlamaError::format)?;
-            ctx.set_tensor_name(gate, "attn.gate").map_err(LlamaError::format)?;
+            ctx.set_tensor_name(gate, "attn.gate")
+                .map_err(LlamaError::format)?;
             (q, Some(gate))
         }
     };
@@ -1243,7 +1447,9 @@ pub fn build_attention_block_graph(
 
     if let Some(rope) = &spec.rope {
         let positions = input_positions.ok_or_else(|| {
-            LlamaError::format("attention block rope was requested without an input positions tensor")
+            LlamaError::format(
+                "attention block rope was requested without an input positions tensor",
+            )
         })?;
         q_states = ctx
             .rope_multi(
@@ -1379,29 +1585,16 @@ pub fn build_attention_block_graph(
     ctx.set_tensor_name(v_attn, "attn.v_attn")
         .map_err(LlamaError::format)?;
 
-    let attn = ctx
-        .flash_attn_ext(
-            q_attn,
-            k_attn,
-            v_attn,
-            input_mask,
-            1.0f32 / (spec.q_head_dim as f32).sqrt(),
-            0.0,
-            0.0,
-            BufferUsage::Activations,
-        )
-        .map_err(LlamaError::format)?;
-    let mut attn = ctx
-        .reshape(
-            attn,
-            &[
-                i64::from(spec.v_head_dim) * i64::from(spec.q_head_count),
-                n_tokens as i64,
-            ],
-        )
-        .map_err(LlamaError::format)?;
-    ctx.set_tensor_name(attn, "attn.attn_flat")
-        .map_err(LlamaError::format)?;
+    let mut attn = build_attention_mha_output(
+        ctx,
+        q_attn,
+        k_attn,
+        v_attn,
+        input_mask,
+        spec.q_head_dim,
+        n_tokens,
+        "attn",
+    )?;
 
     if let Some(gate) = gate {
         attn = ctx
@@ -1420,7 +1613,12 @@ pub fn build_attention_block_graph(
 
     if spec.residual {
         result_output = ctx
-            .binary_like_a(Op::Add, result_output, input_embed, BufferUsage::Activations)
+            .binary_like_a(
+                Op::Add,
+                result_output,
+                input_embed,
+                BufferUsage::Activations,
+            )
             .map_err(LlamaError::format)?;
         ctx.set_tensor_name(result_output, "attn.output_residual")
             .map_err(LlamaError::format)?;
@@ -1525,7 +1723,9 @@ pub fn execute_prepared_attention_block_metal(
             }
             let expected = (*hidden_size as usize)
                 .checked_mul(n_tokens)
-                .ok_or_else(|| LlamaError::format("overflow computing attention embedding input size"))?;
+                .ok_or_else(|| {
+                    LlamaError::format("overflow computing attention embedding input size")
+                })?;
             if data.len() != expected {
                 return Err(LlamaError::format(format!(
                     "attention embedding input length mismatch: got {}, expected {}",
@@ -1560,40 +1760,34 @@ pub fn execute_prepared_attention_block_metal(
     if let Some(input_positions) = block.input_positions {
         writes.push(MetalGraphTensorWrite {
             tensor_id: input_positions,
-            bytes: i32_slice_as_bytes(
-                rope_positions
-                    .as_deref()
-                    .ok_or_else(|| LlamaError::format("attention block rope positions were not prepared"))?,
-            ),
+            bytes: i32_slice_as_bytes(rope_positions.as_deref().ok_or_else(|| {
+                LlamaError::format("attention block rope positions were not prepared")
+            })?),
         });
     } else if !positions.is_empty() {
         return Err(LlamaError::format(
             "attention block received positions for a graph that does not use rope",
         ));
     }
-    let mask_bytes = block.input_mask.map(|_| causal_mask_f16_bytes(n_tokens));
+    let mask_bytes = block
+        .input_mask
+        .map(|input_mask| attention_mask_bytes_for_tensor(ctx, input_mask, n_tokens))
+        .transpose()?;
     if let Some(input_mask) = block.input_mask {
         writes.push(MetalGraphTensorWrite {
             tensor_id: input_mask,
-            bytes: mask_bytes
-                .as_deref()
-                .ok_or_else(|| LlamaError::format("attention block causal mask was not prepared"))?,
+            bytes: mask_bytes.as_deref().ok_or_else(|| {
+                LlamaError::format("attention block causal mask was not prepared")
+            })?,
         });
     }
 
-    let execution = execute_compiled_graph(
-        runtime,
-        ctx,
-        compiled,
-        &writes,
-        &[block.result_output],
-    )
-    .map_err(LlamaError::format)?;
+    let execution = execute_compiled_graph(runtime, ctx, compiled, &writes, &[block.result_output])
+        .map_err(LlamaError::format)?;
 
-    let result_bytes = execution
-        .outputs
-        .get(&block.result_output)
-        .ok_or_else(|| LlamaError::format("compiled attention block did not produce result bytes"))?;
+    let result_bytes = execution.outputs.get(&block.result_output).ok_or_else(|| {
+        LlamaError::format("compiled attention block did not produce result bytes")
+    })?;
     let hidden = f32_bytes_to_vec(result_bytes)?;
     let output = ctx
         .tensor(block.result_output)
@@ -1627,6 +1821,7 @@ pub fn execute_attention_block_graph_metal_cached(
 
 #[derive(Clone, Debug)]
 struct BuiltAttentionDecode {
+    input_mask: Option<TensorId>,
     k_cache: TensorId,
     v_cache: TensorId,
     k_cache_view: TensorId,
@@ -1832,6 +2027,22 @@ fn build_attention_decode_from_hidden(
     ctx.set_tensor_name(v_states, format!("{prefix}.v_states"))
         .map_err(LlamaError::format)?;
 
+    let input_mask = if block.causal {
+        let mask = ctx
+            .new_named_tensor(
+                format!("{prefix}.kq_mask"),
+                attention_mask_tensor_type(n_tokens),
+                4,
+                &[i64::from(spec.cache.max_context), n_tokens_i64, 1, 1],
+                BufferUsage::Activations,
+            )
+            .map_err(LlamaError::format)?;
+        mark_input(ctx, mask)?;
+        Some(mask)
+    } else {
+        None
+    };
+
     if let Some(rope) = &block.rope {
         let rope_positions = input_rope_positions.ok_or_else(|| {
             LlamaError::format("attention decode rope requested without a rope position tensor")
@@ -1995,32 +2206,21 @@ fn build_attention_decode_from_hidden(
     ctx.set_tensor_name(v_cache_view, format!("{prefix}.v_cache_view"))
         .map_err(LlamaError::format)?;
 
-    let q_attn = ctx.permute(q_states, [0, 2, 1, 3]).map_err(LlamaError::format)?;
+    let q_attn = ctx
+        .permute(q_states, [0, 2, 1, 3])
+        .map_err(LlamaError::format)?;
     ctx.set_tensor_name(q_attn, format!("{prefix}.q_attn"))
         .map_err(LlamaError::format)?;
-    let attn = ctx
-        .flash_attn_ext(
-            q_attn,
-            k_cache_view,
-            v_cache_view,
-            None,
-            1.0f32 / (block.q_head_dim as f32).sqrt(),
-            0.0,
-            0.0,
-            BufferUsage::Activations,
-        )
-        .map_err(LlamaError::format)?;
-    let mut attn = ctx
-        .reshape(
-            attn,
-            &[
-                i64::from(block.v_head_dim) * i64::from(block.q_head_count),
-                n_tokens_i64,
-            ],
-        )
-        .map_err(LlamaError::format)?;
-    ctx.set_tensor_name(attn, format!("{prefix}.attn_flat"))
-        .map_err(LlamaError::format)?;
+    let mut attn = build_attention_mha_output(
+        ctx,
+        q_attn,
+        k_cache_view,
+        v_cache_view,
+        input_mask,
+        block.q_head_dim,
+        n_tokens,
+        prefix,
+    )?;
 
     if let Some(gate) = gate {
         attn = ctx
@@ -2039,13 +2239,19 @@ fn build_attention_decode_from_hidden(
 
     if block.residual {
         result_output = ctx
-            .binary_like_a(Op::Add, result_output, input_embed, BufferUsage::Activations)
+            .binary_like_a(
+                Op::Add,
+                result_output,
+                input_embed,
+                BufferUsage::Activations,
+            )
             .map_err(LlamaError::format)?;
         ctx.set_tensor_name(result_output, format!("{prefix}.output_residual"))
             .map_err(LlamaError::format)?;
     }
 
     Ok(BuiltAttentionDecode {
+        input_mask,
         k_cache,
         v_cache,
         k_cache_view,
@@ -2119,7 +2325,9 @@ pub fn build_attention_decode_graph(
     };
 
     let input_embed = match &block.input {
-        ProbeInputKind::TokenIds { token_embedding_name } => {
+        ProbeInputKind::TokenIds {
+            token_embedding_name,
+        } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
             ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
                 .map_err(LlamaError::format)?
@@ -2151,6 +2359,7 @@ pub fn build_attention_decode_graph(
         input_primary,
         input_positions,
         input_rope_positions,
+        input_mask: built.input_mask,
         k_cache: built.k_cache,
         v_cache: built.v_cache,
         k_cache_view: built.k_cache_view,
@@ -2227,17 +2436,13 @@ pub fn execute_prepared_attention_decode_metal(
             cache_tokens, max_context
         )));
     }
-    if positions
-        .iter()
-        .copied()
-        .any(|pos| {
-            pos < 0
-                || usize::try_from(pos)
-                    .ok()
-                    .map(|pos| pos >= cache_tokens)
-                    .unwrap_or(true)
-        })
-    {
+    if positions.iter().copied().any(|pos| {
+        pos < 0
+            || usize::try_from(pos)
+                .ok()
+                .map(|pos| pos >= cache_tokens)
+                .unwrap_or(true)
+    }) {
         return Err(LlamaError::format(format!(
             "attention decode positions {:?} exceed cache_tokens {}",
             positions, cache_tokens
@@ -2275,9 +2480,11 @@ pub fn execute_prepared_attention_decode_metal(
                     positions.len()
                 )));
             }
-            let expected = (*hidden_size as usize).checked_mul(n_tokens).ok_or_else(|| {
-                LlamaError::format("overflow computing attention decode embedding size")
-            })?;
+            let expected = (*hidden_size as usize)
+                .checked_mul(n_tokens)
+                .ok_or_else(|| {
+                    LlamaError::format("overflow computing attention decode embedding size")
+                })?;
             if data.len() != expected {
                 return Err(LlamaError::format(format!(
                     "attention decode embedding input length mismatch: got {}, expected {}",
@@ -2315,6 +2522,9 @@ pub fn execute_prepared_attention_decode_metal(
         i64::from(spec.block.kv_head_count),
         i64::from(spec.cache.max_sequences),
     )?;
+    if let Some(input_mask) = decode.input_mask {
+        configure_attention_mask_view(ctx, input_mask, cache_tokens, positions.len())?;
+    }
 
     let rope_positions = spec
         .block
@@ -2335,20 +2545,36 @@ pub fn execute_prepared_attention_decode_metal(
     if let Some(input_rope_positions) = decode.input_rope_positions {
         writes.push(MetalGraphTensorWrite {
             tensor_id: input_rope_positions,
-            bytes: i32_slice_as_bytes(
-                rope_positions
-                    .as_deref()
-                    .ok_or_else(|| LlamaError::format("attention decode rope positions were not prepared"))?,
-            ),
+            bytes: i32_slice_as_bytes(rope_positions.as_deref().ok_or_else(|| {
+                LlamaError::format("attention decode rope positions were not prepared")
+            })?),
+        });
+    }
+    let mask_bytes = decode
+        .input_mask
+        .map(|input_mask| {
+            position_attention_mask_bytes_for_tensor(ctx, input_mask, cache_tokens, positions)
+        })
+        .transpose()?;
+    if let Some(input_mask) = decode.input_mask {
+        writes.push(MetalGraphTensorWrite {
+            tensor_id: input_mask,
+            bytes: mask_bytes.as_deref().ok_or_else(|| {
+                LlamaError::format("attention decode causal mask was not prepared")
+            })?,
         });
     }
 
-    let execution = execute_compiled_graph(runtime, ctx, compiled, &writes, &[decode.result_output])
-        .map_err(LlamaError::format)?;
+    let execution =
+        execute_compiled_graph(runtime, ctx, compiled, &writes, &[decode.result_output])
+            .map_err(LlamaError::format)?;
 
-    let result_bytes = execution.outputs.get(&decode.result_output).ok_or_else(|| {
-        LlamaError::format("compiled attention decode did not produce result bytes")
-    })?;
+    let result_bytes = execution
+        .outputs
+        .get(&decode.result_output)
+        .ok_or_else(|| {
+            LlamaError::format("compiled attention decode did not produce result bytes")
+        })?;
     let hidden = f32_bytes_to_vec(result_bytes)?;
     let output = ctx
         .tensor(decode.result_output)
@@ -2442,7 +2668,10 @@ fn build_delta_net_recurrent_decode_from_hidden(
         .mul_mat(beta_weight, input_norm, BufferUsage::Activations)
         .map_err(LlamaError::format)?;
     beta = ctx
-        .reshape(beta, &[1, i64::from(block.value_head_count), n_tokens_i64, n_seqs])
+        .reshape(
+            beta,
+            &[1, i64::from(block.value_head_count), n_tokens_i64, n_seqs],
+        )
         .map_err(LlamaError::format)?;
     beta = ctx
         .unary(beta, UnaryOp::Sigmoid, BufferUsage::Activations)
@@ -2455,7 +2684,10 @@ fn build_delta_net_recurrent_decode_from_hidden(
         .mul_mat(alpha_weight, input_norm, BufferUsage::Activations)
         .map_err(LlamaError::format)?;
     alpha = ctx
-        .reshape(alpha, &[i64::from(block.value_head_count), n_tokens_i64, n_seqs])
+        .reshape(
+            alpha,
+            &[i64::from(block.value_head_count), n_tokens_i64, n_seqs],
+        )
         .map_err(LlamaError::format)?;
     let dt_bias = require_tensor_id(tensor_ids, &block.dt_bias_name)?;
     alpha = ctx
@@ -2469,15 +2701,17 @@ fn build_delta_net_recurrent_decode_from_hidden(
         .binary_like_a(Op::Mul, alpha, ssm_a, BufferUsage::Activations)
         .map_err(LlamaError::format)?;
     gate = ctx
-        .reshape(gate, &[1, i64::from(block.value_head_count), n_tokens_i64, n_seqs])
+        .reshape(
+            gate,
+            &[1, i64::from(block.value_head_count), n_tokens_i64, n_seqs],
+        )
         .map_err(LlamaError::format)?;
     ctx.set_tensor_name(gate, format!("{prefix}.gate"))
         .map_err(LlamaError::format)?;
 
     let conv_kernel_id = require_tensor_id(tensor_ids, &block.conv_kernel_name)?;
     let conv_kernel = require_tensor(ctx, conv_kernel_id)?;
-    let conv_prefix = conv_kernel
-        .ne[0]
+    let conv_prefix = conv_kernel.ne[0]
         .checked_sub(1)
         .ok_or_else(|| LlamaError::format("delta-net conv kernel size underflow"))?;
     if conv_kernel.ne[1] != qkv_dim {
@@ -2600,6 +2834,8 @@ fn build_delta_net_recurrent_decode_from_hidden(
             0,
         )
         .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(q_conv, format!("{prefix}.q_conv"))
+        .map_err(LlamaError::format)?;
     let k_conv = ctx
         .view_4d(
             conv_output,
@@ -2612,6 +2848,8 @@ fn build_delta_net_recurrent_decode_from_hidden(
             row_size(conv_output_tensor.desc.ty, qkv_dim * n_tokens_i64)?,
             row_size(conv_output_tensor.desc.ty, qk_heads_width)?,
         )
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(k_conv, format!("{prefix}.k_conv"))
         .map_err(LlamaError::format)?;
     let v_conv = ctx
         .view_4d(
@@ -2626,16 +2864,30 @@ fn build_delta_net_recurrent_decode_from_hidden(
             row_size(conv_output_tensor.desc.ty, qk_heads_width * 2)?,
         )
         .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(v_conv, format!("{prefix}.v_conv"))
+        .map_err(LlamaError::format)?;
 
     let q_conv = ctx
         .l2_norm_eps(q_conv, block.rms_epsilon, BufferUsage::Activations)
         .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(q_conv, format!("{prefix}.q_conv_predelta"))
+        .map_err(LlamaError::format)?;
     let k_conv = ctx
         .l2_norm_eps(k_conv, block.rms_epsilon, BufferUsage::Activations)
         .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(k_conv, format!("{prefix}.k_conv_predelta"))
+        .map_err(LlamaError::format)?;
 
     let delta = ctx
-        .gated_delta_net(q_conv, k_conv, v_conv, gate, beta, state, BufferUsage::Activations)
+        .gated_delta_net(
+            q_conv,
+            k_conv,
+            v_conv,
+            gate,
+            beta,
+            state,
+            BufferUsage::Activations,
+        )
         .map_err(LlamaError::format)?;
     ctx.set_tensor_name(delta, format!("{prefix}.delta"))
         .map_err(LlamaError::format)?;
@@ -2728,7 +2980,12 @@ fn build_delta_net_recurrent_decode_from_hidden(
         .map_err(LlamaError::format)?;
     if block.residual {
         result_output = ctx
-            .binary_like_a(Op::Add, result_output, input_embed, BufferUsage::Activations)
+            .binary_like_a(
+                Op::Add,
+                result_output,
+                input_embed,
+                BufferUsage::Activations,
+            )
             .map_err(LlamaError::format)?;
     }
     ctx.set_tensor_name(result_output, format!("{prefix}.output"))
@@ -2798,7 +3055,9 @@ pub fn build_delta_net_recurrent_decode_graph(
     mark_input(ctx, input_primary)?;
 
     let input_embed = match &block.input {
-        ProbeInputKind::TokenIds { token_embedding_name } => {
+        ProbeInputKind::TokenIds {
+            token_embedding_name,
+        } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
             ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
                 .map_err(LlamaError::format)?
@@ -2904,9 +3163,11 @@ pub fn execute_prepared_delta_net_recurrent_decode_metal(
                     input_type.name()
                 )));
             }
-            let expected = (*hidden_size as usize).checked_mul(n_tokens).ok_or_else(|| {
-                LlamaError::format("overflow computing delta-net embedding input size")
-            })?;
+            let expected = (*hidden_size as usize)
+                .checked_mul(n_tokens)
+                .ok_or_else(|| {
+                    LlamaError::format("overflow computing delta-net embedding input size")
+                })?;
             if data.len() != expected {
                 return Err(LlamaError::format(format!(
                     "delta-net recurrent embedding input length mismatch: got {}, expected {}",
@@ -2940,9 +3201,12 @@ pub fn execute_prepared_delta_net_recurrent_decode_metal(
     )
     .map_err(LlamaError::format)?;
 
-    let result_bytes = execution.outputs.get(&decode.result_output).ok_or_else(|| {
-        LlamaError::format("compiled delta-net recurrent decode did not produce result bytes")
-    })?;
+    let result_bytes = execution
+        .outputs
+        .get(&decode.result_output)
+        .ok_or_else(|| {
+            LlamaError::format("compiled delta-net recurrent decode did not produce result bytes")
+        })?;
     let hidden = f32_bytes_to_vec(result_bytes)?;
     let output = ctx
         .tensor(decode.result_output)
@@ -3069,7 +3333,12 @@ fn build_moe_ffn_from_hidden(
             .sum_rows(weights, BufferUsage::Activations)
             .map_err(LlamaError::format)?;
         weights_sum = ctx
-            .clamp(weights_sum, 6.103_515_6e-5, f32::INFINITY, BufferUsage::Activations)
+            .clamp(
+                weights_sum,
+                6.103_515_6e-5,
+                f32::INFINITY,
+                BufferUsage::Activations,
+            )
             .map_err(LlamaError::format)?;
         weights = ctx
             .binary_like_a(Op::Div, weights, weights_sum, BufferUsage::Activations)
@@ -3115,7 +3384,12 @@ fn build_moe_ffn_from_hidden(
     let (gate, up) = if let Some(merged_name) = &spec.merged_gate_up_proj_name {
         let merged_weight = require_tensor_id(tensor_ids, merged_name)?;
         let gate_up = ctx
-            .mul_mat_id(merged_weight, input_3d, selected_experts, BufferUsage::Activations)
+            .mul_mat_id(
+                merged_weight,
+                input_3d,
+                selected_experts,
+                BufferUsage::Activations,
+            )
             .map_err(LlamaError::format)?;
         ctx.set_tensor_name(gate_up, format!("{prefix}.gate_up"))
             .map_err(LlamaError::format)?;
@@ -3152,21 +3426,33 @@ fn build_moe_ffn_from_hidden(
                 usize::try_from(ff_width)
                     .ok()
                     .and_then(|ff_width| ff_width.checked_mul(gate_up_tensor.nb[0]))
-                    .ok_or_else(|| LlamaError::format("overflow computing merged gate/up offset"))?,
+                    .ok_or_else(|| {
+                        LlamaError::format("overflow computing merged gate/up offset")
+                    })?,
             )
             .map_err(LlamaError::format)?;
         (Some(gate), up)
     } else {
         let up_weight = require_tensor_id(tensor_ids, &spec.up_proj_name)?;
         let up = ctx
-            .mul_mat_id(up_weight, input_3d, selected_experts, BufferUsage::Activations)
+            .mul_mat_id(
+                up_weight,
+                input_3d,
+                selected_experts,
+                BufferUsage::Activations,
+            )
             .map_err(LlamaError::format)?;
         ctx.set_tensor_name(up, format!("{prefix}.up"))
             .map_err(LlamaError::format)?;
         let gate = if let Some(name) = &spec.gate_proj_name {
             let gate_weight = require_tensor_id(tensor_ids, name)?;
             let gate = ctx
-                .mul_mat_id(gate_weight, input_3d, selected_experts, BufferUsage::Activations)
+                .mul_mat_id(
+                    gate_weight,
+                    input_3d,
+                    selected_experts,
+                    BufferUsage::Activations,
+                )
                 .map_err(LlamaError::format)?;
             ctx.set_tensor_name(gate, format!("{prefix}.gate"))
                 .map_err(LlamaError::format)?;
@@ -3194,7 +3480,12 @@ fn build_moe_ffn_from_hidden(
 
     let down_weight = require_tensor_id(tensor_ids, &spec.down_proj_name)?;
     let experts = ctx
-        .mul_mat_id(down_weight, activated, selected_experts, BufferUsage::Activations)
+        .mul_mat_id(
+            down_weight,
+            activated,
+            selected_experts,
+            BufferUsage::Activations,
+        )
         .map_err(LlamaError::format)?;
     ctx.set_tensor_name(experts, format!("{prefix}.down"))
         .map_err(LlamaError::format)?;
@@ -3245,15 +3536,24 @@ fn build_moe_ffn_from_hidden(
         .map_err(LlamaError::format)?;
 
     let result_output = if let Some(shared) = &spec.shared_expert {
-        let mut shared_out =
-            build_dense_gated_ffn(ctx, tensor_ids, input_hidden, &shared.ffn, &format!("{prefix}.shared"))?;
+        let mut shared_out = build_dense_gated_ffn(
+            ctx,
+            tensor_ids,
+            input_hidden,
+            &shared.ffn,
+            &format!("{prefix}.shared"),
+        )?;
         if let Some(output_gate_name) = &shared.output_gate_name {
             let gate_weight = require_tensor_id(tensor_ids, output_gate_name)?;
             let gate = ctx
                 .mul_mat(gate_weight, input_hidden, BufferUsage::Activations)
                 .map_err(LlamaError::format)?;
             let gate = ctx
-                .unary(gate, shared.output_gate_activation, BufferUsage::Activations)
+                .unary(
+                    gate,
+                    shared.output_gate_activation,
+                    BufferUsage::Activations,
+                )
                 .map_err(LlamaError::format)?;
             shared_out = ctx
                 .binary_like_a(Op::Mul, shared_out, gate, BufferUsage::Activations)
@@ -3280,7 +3580,9 @@ pub fn build_moe_ffn_graph(
     n_tokens: usize,
 ) -> Result<MoeFfnGraph> {
     if n_tokens == 0 {
-        return Err(LlamaError::format("moe ffn graph requires at least one token"));
+        return Err(LlamaError::format(
+            "moe ffn graph requires at least one token",
+        ));
     }
     if spec.expert_used_count == 0 {
         return Err(LlamaError::format(
@@ -3320,7 +3622,9 @@ pub fn build_moe_ffn_graph(
     mark_input(ctx, input_primary)?;
 
     let input_embed = match &spec.input {
-        ProbeInputKind::TokenIds { token_embedding_name } => {
+        ProbeInputKind::TokenIds {
+            token_embedding_name,
+        } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
             ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
                 .map_err(LlamaError::format)?
@@ -3566,16 +3870,18 @@ pub fn build_hybrid_decode_graph(
                 "hybrid_decode.inp_rope_pos",
                 TensorType::I32,
                 1,
-                &[i64::try_from(
-                    n_tokens
-                        .checked_mul(rope_position_components)
-                        .ok_or_else(|| {
+                &[
+                    i64::try_from(n_tokens.checked_mul(rope_position_components).ok_or_else(
+                        || {
                             LlamaError::format(
                                 "overflow computing hybrid decode rope position length",
                             )
-                        })?,
-                )
-                .map_err(|_| LlamaError::format("hybrid rope position length does not fit in i64"))?],
+                        },
+                    )?)
+                    .map_err(|_| {
+                        LlamaError::format("hybrid rope position length does not fit in i64")
+                    })?,
+                ],
                 BufferUsage::Activations,
             )
             .map_err(LlamaError::format)?;
@@ -3586,7 +3892,9 @@ pub fn build_hybrid_decode_graph(
     };
 
     let mut hidden = match &spec.input {
-        ProbeInputKind::TokenIds { token_embedding_name } => {
+        ProbeInputKind::TokenIds {
+            token_embedding_name,
+        } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
             ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
                 .map_err(LlamaError::format)?
@@ -3626,6 +3934,7 @@ pub fn build_hybrid_decode_graph(
                 )?;
                 attention_cache_views.push(HybridAttentionCacheView {
                     layer_index: *layer_index,
+                    input_mask: attn.input_mask,
                     k_cache_view: attn.k_cache_view,
                     v_cache_view: attn.v_cache_view,
                     k_head_dim: i64::from(decode.block.k_head_dim),
@@ -3651,11 +3960,17 @@ pub fn build_hybrid_decode_graph(
                 moe_selected_experts.push(HybridMoeSelection {
                     layer_index: *layer_index,
                     selected_experts: moe.selected_experts,
-                    expert_used_count: usize::try_from(ffn.expert_used_count)
-                        .map_err(|_| LlamaError::format("expert_used_count does not fit in usize"))?,
+                    expert_used_count: usize::try_from(ffn.expert_used_count).map_err(|_| {
+                        LlamaError::format("expert_used_count does not fit in usize")
+                    })?,
                 });
                 hidden = ctx
-                    .binary_like_a(Op::Add, moe.result_output, residual, BufferUsage::Activations)
+                    .binary_like_a(
+                        Op::Add,
+                        moe.result_output,
+                        residual,
+                        BufferUsage::Activations,
+                    )
                     .map_err(LlamaError::format)?;
                 ctx.set_tensor_name(hidden, format!("{prefix}.post_moe"))
                     .map_err(LlamaError::format)?;
@@ -3688,11 +4003,17 @@ pub fn build_hybrid_decode_graph(
                 moe_selected_experts.push(HybridMoeSelection {
                     layer_index: *layer_index,
                     selected_experts: moe.selected_experts,
-                    expert_used_count: usize::try_from(ffn.expert_used_count)
-                        .map_err(|_| LlamaError::format("expert_used_count does not fit in usize"))?,
+                    expert_used_count: usize::try_from(ffn.expert_used_count).map_err(|_| {
+                        LlamaError::format("expert_used_count does not fit in usize")
+                    })?,
                 });
                 hidden = ctx
-                    .binary_like_a(Op::Add, moe.result_output, residual, BufferUsage::Activations)
+                    .binary_like_a(
+                        Op::Add,
+                        moe.result_output,
+                        residual,
+                        BufferUsage::Activations,
+                    )
                     .map_err(LlamaError::format)?;
                 ctx.set_tensor_name(hidden, format!("{prefix}.post_moe"))
                     .map_err(LlamaError::format)?;
@@ -3863,7 +4184,9 @@ pub fn execute_prepared_hybrid_decode_metal(
             }
             let expected = (*hidden_size as usize)
                 .checked_mul(n_tokens)
-                .ok_or_else(|| LlamaError::format("overflow computing hybrid decode embedding size"))?;
+                .ok_or_else(|| {
+                    LlamaError::format("overflow computing hybrid decode embedding size")
+                })?;
             if data.len() != expected {
                 return Err(LlamaError::format(format!(
                     "hybrid decode embedding input length mismatch: got {}, expected {}",
@@ -3902,6 +4225,9 @@ pub fn execute_prepared_hybrid_decode_metal(
             cache_view.kv_head_count,
             cache_view.max_sequences,
         )?;
+        if let Some(input_mask) = cache_view.input_mask {
+            configure_attention_mask_view(ctx, input_mask, cache_tokens, positions.len())?;
+        }
     }
 
     let mut writes = vec![MetalGraphTensorWrite {
@@ -3934,16 +4260,48 @@ pub fn execute_prepared_hybrid_decode_metal(
     if let Some(input_rope_positions) = decode.input_rope_positions {
         writes.push(MetalGraphTensorWrite {
             tensor_id: input_rope_positions,
-            bytes: i32_slice_as_bytes(
-                hybrid_rope_positions
-                    .as_deref()
-                    .ok_or_else(|| LlamaError::format("hybrid decode rope positions were not prepared"))?,
-            ),
+            bytes: i32_slice_as_bytes(hybrid_rope_positions.as_deref().ok_or_else(|| {
+                LlamaError::format("hybrid decode rope positions were not prepared")
+            })?),
         });
+    }
+    let attention_mask_bytes = decode
+        .attention_cache_views
+        .iter()
+        .filter_map(|cache_view| {
+            cache_view.input_mask.map(|input_mask| {
+                position_attention_mask_bytes_for_tensor(ctx, input_mask, cache_tokens, positions)
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut attention_mask_index = 0usize;
+    for cache_view in &decode.attention_cache_views {
+        if cache_view.input_mask.is_some() {
+            let bytes = attention_mask_bytes
+                .get(attention_mask_index)
+                .ok_or_else(|| {
+                    LlamaError::format("hybrid decode mask storage is unexpectedly empty")
+                })?;
+            attention_mask_index += 1;
+            writes.push(MetalGraphTensorWrite {
+                tensor_id: cache_view.input_mask.ok_or_else(|| {
+                    LlamaError::format(format!(
+                        "hybrid decode attention layer {} lost its input mask",
+                        cache_view.layer_index
+                    ))
+                })?,
+                bytes,
+            });
+        }
     }
 
     let mut outputs = vec![decode.result_hidden, decode.result_logits];
-    outputs.extend(decode.moe_selected_experts.iter().map(|sel| sel.selected_experts));
+    outputs.extend(
+        decode
+            .moe_selected_experts
+            .iter()
+            .map(|sel| sel.selected_experts),
+    );
     let execution = execute_compiled_graph(runtime, ctx, compiled, &writes, &outputs)
         .map_err(LlamaError::format)?;
 
@@ -4021,17 +4379,27 @@ pub fn execute_logits_probe_metal(
     output_ids: &[i32],
 ) -> Result<LogitsProbeRun> {
     if output_ids.is_empty() {
-        return Err(LlamaError::format("logits probe requires at least one output id"));
+        return Err(LlamaError::format(
+            "logits probe requires at least one output id",
+        ));
     }
 
     let input_embed = match (&spec.input, input) {
-        (ProbeInputKind::TokenIds { token_embedding_name }, LogitsProbeInput::TokenIds(token_ids)) => {
+        (
+            ProbeInputKind::TokenIds {
+                token_embedding_name,
+            },
+            LogitsProbeInput::TokenIds(token_ids),
+        ) => {
             let token_embd_id = weights.require_tensor_id(token_embedding_name)?;
             let token_embd = require_tensor(&weights.ctx, token_embd_id)?;
             let hidden_size = ne_usize(token_embd, 0)?;
             let vocab_size = ne_usize(token_embd, 1)?;
             try_get_rows_ggml_bytes(
-                weights.ctx.tensor_data(token_embd_id).map_err(LlamaError::format)?,
+                weights
+                    .ctx
+                    .tensor_data(token_embd_id)
+                    .map_err(LlamaError::format)?,
                 token_embd.desc.ty.ggml_type(),
                 hidden_size,
                 vocab_size,
@@ -4082,7 +4450,9 @@ pub fn execute_logits_probe_metal(
     };
 
     let hidden_size = match &spec.input {
-        ProbeInputKind::TokenIds { token_embedding_name } => {
+        ProbeInputKind::TokenIds {
+            token_embedding_name,
+        } => {
             let token_embd_id = weights.require_tensor_id(token_embedding_name)?;
             let token_embd = require_tensor(&weights.ctx, token_embd_id)?;
             ne_usize(token_embd, 0)?
@@ -4129,7 +4499,10 @@ pub fn execute_logits_probe_metal(
     let vocab_size = ne_usize(output, 1)?;
     let logits = try_matmul_nt_ggml_bytes(
         &normed,
-        weights.ctx.tensor_data(output_id).map_err(LlamaError::format)?,
+        weights
+            .ctx
+            .tensor_data(output_id)
+            .map_err(LlamaError::format)?,
         output.desc.ty.ggml_type(),
         output_ids.len(),
         hidden_size,
@@ -4228,10 +4601,43 @@ fn configure_attention_cache_view(
         4,
         &[
             ne0,
-            i64::try_from(ne1)
-                .map_err(|_| LlamaError::format(format!("cache length {} does not fit in i64", ne1)))?,
+            i64::try_from(ne1).map_err(|_| {
+                LlamaError::format(format!("cache length {} does not fit in i64", ne1))
+            })?,
             ne2,
             ne3,
+        ],
+        &strides,
+    )
+    .map_err(LlamaError::format)?;
+    ctx.set_tensor_layout(tensor_id, layout)
+        .map_err(LlamaError::format)
+}
+
+fn configure_attention_mask_view(
+    ctx: &mut Context,
+    tensor_id: TensorId,
+    key_count: usize,
+    query_count: usize,
+) -> Result<()> {
+    let tensor = ctx
+        .tensor(tensor_id)
+        .ok_or_else(|| LlamaError::format(format!("invalid tensor id {}", tensor_id)))?;
+    let strides = tensor.nb;
+    let layout = TensorLayout::from_parts(
+        4,
+        &[
+            i64::try_from(key_count).map_err(|_| {
+                LlamaError::format(format!("mask key count {} does not fit in i64", key_count))
+            })?,
+            i64::try_from(query_count).map_err(|_| {
+                LlamaError::format(format!(
+                    "mask query count {} does not fit in i64",
+                    query_count
+                ))
+            })?,
+            tensor.ne[2],
+            tensor.ne[3],
         ],
         &strides,
     )
@@ -4277,10 +4683,7 @@ fn mark_output(ctx: &mut Context, id: TensorId) -> Result<()> {
     Ok(())
 }
 
-fn require_tensor_id(
-    tensor_ids: &BTreeMap<String, TensorId>,
-    name: &str,
-) -> Result<TensorId> {
+fn require_tensor_id(tensor_ids: &BTreeMap<String, TensorId>, name: &str) -> Result<TensorId> {
     tensor_ids
         .get(name)
         .copied()
@@ -4333,21 +4736,11 @@ fn read_tensor_as_f32(weights: &LoadedGgufWeights, id: TensorId) -> Result<Vec<f
 }
 
 fn f32_slice_as_bytes(slice: &[f32]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            slice.as_ptr() as *const u8,
-            std::mem::size_of_val(slice),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
 }
 
 fn i32_slice_as_bytes(slice: &[i32]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            slice.as_ptr() as *const u8,
-            std::mem::size_of_val(slice),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
 }
 
 fn f32_bytes_to_vec(bytes: &[u8]) -> Result<Vec<f32>> {
@@ -4359,7 +4752,8 @@ fn f32_bytes_to_vec(bytes: &[u8]) -> Result<Vec<f32>> {
         )));
     }
 
-    bytes.chunks_exact(4)
+    bytes
+        .chunks_exact(4)
         .map(|chunk| Ok(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])))
         .collect()
 }

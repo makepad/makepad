@@ -4,14 +4,16 @@ use crate::context::Context;
 use crate::core::{ggml_pad, GGML_MEM_ALIGN};
 use crate::graph::{Graph, NodeId};
 use crate::op::Op;
-use crate::tensor::{ggml_blck_size_for_type, ggml_type_size_for_type, BufferUsage, Tensor, TensorId, TensorType};
+use crate::tensor::{
+    ggml_blck_size_for_type, ggml_type_size_for_type, BufferUsage, Tensor, TensorId, TensorType,
+};
 
+use super::selector::FC_SSM_CONV;
 use super::{
     build_graph_plan, BufferStorageMode, FunctionConstantValue, MetalBufferBindingRef,
     MetalDeviceFeatures, MetalGraphNodePlan, MetalPipeline, MetalRuntime, MetalSize,
     MetalStageKind,
 };
-use super::selector::FC_SSM_CONV;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -825,7 +827,10 @@ pub fn execute_compiled_graph(
     Ok(execution)
 }
 
-fn prepared_node_from_plan(plan: &MetalGraphNodePlan, tail_offset_bytes: usize) -> MetalPreparedNode {
+fn prepared_node_from_plan(
+    plan: &MetalGraphNodePlan,
+    tail_offset_bytes: usize,
+) -> MetalPreparedNode {
     MetalPreparedNode {
         node_id: plan.node_id,
         tail_offset_bytes,
@@ -878,9 +883,12 @@ fn resolve_tensor_offset(tensors: &[Tensor], tensor: &Tensor) -> Result<usize, S
         let src_id = tensor
             .view_src
             .ok_or_else(|| format!("view tensor {} is missing view source", tensor.id))?;
-        let src = tensors
-            .get(src_id)
-            .ok_or_else(|| format!("tensor {} references invalid view source {}", tensor.id, src_id))?;
+        let src = tensors.get(src_id).ok_or_else(|| {
+            format!(
+                "tensor {} references invalid view source {}",
+                tensor.id, src_id
+            )
+        })?;
         let src_offset = resolve_tensor_offset(tensors, src)?;
         return src_offset
             .checked_add(tensor.view_offs)
@@ -898,8 +906,7 @@ fn collect_main_buffer_bytes(ctx: &Context, len: usize) -> Result<Vec<u8>, Strin
     if used > len {
         return Err(format!(
             "context memory image ({}) exceeds prepared main buffer size ({})",
-            used,
-            len
+            used, len
         ));
     }
     let mut bytes = vec![0u8; len.max(1)];
@@ -1165,8 +1172,9 @@ fn dispatch_set_rows(
         .ok_or_else(|| format!("set_rows src1 {} is invalid", src1_id))?;
 
     let nk0 = i32::try_from(
-        src0.ne[0] / i64::try_from(ggml_blck_size_for_type(tensor.desc.ty))
-            .map_err(|_| "set_rows block size exceeds i64".to_string())?,
+        src0.ne[0]
+            / i64::try_from(ggml_blck_size_for_type(tensor.desc.ty))
+                .map_err(|_| "set_rows block size exceeds i64".to_string())?,
     )
     .map_err(|_| "set_rows nk0 exceeds i32".to_string())?;
     let ne01 = i32_dim(src0, 1)?;
@@ -1786,20 +1794,16 @@ fn dispatch_mul_mat(
             ne00,
             ne02: 1,
             nb01: u64::try_from(src0.nb[1]).map_err(|_| "mul_mm nb01 exceeds u64".to_string())?,
-            nb02: u64::try_from(src0.nb[1])
-                .map_err(|_| "mul_mm nb02 exceeds u64".to_string())?
+            nb02: u64::try_from(src0.nb[1]).map_err(|_| "mul_mm nb02 exceeds u64".to_string())?
                 * ne01 as u64,
-            nb03: u64::try_from(src0.nb[1])
-                .map_err(|_| "mul_mm nb03 exceeds u64".to_string())?
+            nb03: u64::try_from(src0.nb[1]).map_err(|_| "mul_mm nb03 exceeds u64".to_string())?
                 * ne01 as u64,
             ne12,
             nb10: u64::try_from(src1.nb[0]).map_err(|_| "mul_mm nb10 exceeds u64".to_string())?,
             nb11: u64::try_from(src1.nb[1]).map_err(|_| "mul_mm nb11 exceeds u64".to_string())?,
-            nb12: u64::try_from(src1.nb[1])
-                .map_err(|_| "mul_mm nb12 exceeds u64".to_string())?
+            nb12: u64::try_from(src1.nb[1]).map_err(|_| "mul_mm nb12 exceeds u64".to_string())?
                 * ne1 as u64,
-            nb13: u64::try_from(src1.nb[1])
-                .map_err(|_| "mul_mm nb13 exceeds u64".to_string())?
+            nb13: u64::try_from(src1.nb[1]).map_err(|_| "mul_mm nb13 exceeds u64".to_string())?
                 * ne1 as u64,
             ne0,
             ne1,
@@ -1836,15 +1840,34 @@ fn dispatch_mul_mat(
         let ne0 = i32_dim(tensor, 0)?;
         let ne1 = i32_dim(tensor, 1)?;
         let nsg = constant_i16(&stage.descriptor.constants, 601)? as i32;
-        let nxpsg = constant_i16(&stage.descriptor.constants, 602)? as i32;
+        let nxpsg = stage
+            .descriptor
+            .constants
+            .iter()
+            .find(|constant| constant.idx == 602)
+            .and_then(|constant| match constant.value {
+                FunctionConstantValue::Int16(value) => Some(i32::from(value)),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                if ne00 % 256 == 0 && ne11 < 3 {
+                    16
+                } else if ne00 % 128 == 0 {
+                    8
+                } else {
+                    4
+                }
+            });
         let r1ptg = parse_trailing_i32(base, "_r1_")?;
         let r0ptg = nxpsg * nsg;
         let args = KArgsMulMvExt {
             ne00,
             ne01,
             ne02: 1,
-            nb00: u64::try_from(src0.nb[0]).map_err(|_| "mul_mv_ext nb00 exceeds u64".to_string())?,
-            nb01: u64::try_from(src0.nb[1]).map_err(|_| "mul_mv_ext nb01 exceeds u64".to_string())?,
+            nb00: u64::try_from(src0.nb[0])
+                .map_err(|_| "mul_mv_ext nb00 exceeds u64".to_string())?,
+            nb01: u64::try_from(src0.nb[1])
+                .map_err(|_| "mul_mv_ext nb01 exceeds u64".to_string())?,
             nb02: u64::try_from(src0.nb[1])
                 .map_err(|_| "mul_mv_ext nb02 exceeds u64".to_string())?
                 * ne01 as u64,
@@ -1854,8 +1877,10 @@ fn dispatch_mul_mat(
             ne10,
             ne11,
             ne12: 1,
-            nb10: u64::try_from(src1.nb[0]).map_err(|_| "mul_mv_ext nb10 exceeds u64".to_string())?,
-            nb11: u64::try_from(src1.nb[1]).map_err(|_| "mul_mv_ext nb11 exceeds u64".to_string())?,
+            nb10: u64::try_from(src1.nb[0])
+                .map_err(|_| "mul_mv_ext nb10 exceeds u64".to_string())?,
+            nb11: u64::try_from(src1.nb[1])
+                .map_err(|_| "mul_mv_ext nb11 exceeds u64".to_string())?,
             nb12: u64::try_from(src1.nb[1])
                 .map_err(|_| "mul_mv_ext nb12 exceeds u64".to_string())?
                 * ne11 as u64,
@@ -1902,22 +1927,18 @@ fn dispatch_mul_mat(
             ne02: 1,
             nb00: u64::try_from(src0.nb[0]).map_err(|_| "mul_mv nb00 exceeds u64".to_string())?,
             nb01: u64::try_from(src0.nb[1]).map_err(|_| "mul_mv nb01 exceeds u64".to_string())?,
-            nb02: u64::try_from(src0.nb[1])
-                .map_err(|_| "mul_mv nb02 exceeds u64".to_string())?
+            nb02: u64::try_from(src0.nb[1]).map_err(|_| "mul_mv nb02 exceeds u64".to_string())?
                 * ne01 as u64,
-            nb03: u64::try_from(src0.nb[1])
-                .map_err(|_| "mul_mv nb03 exceeds u64".to_string())?
+            nb03: u64::try_from(src0.nb[1]).map_err(|_| "mul_mv nb03 exceeds u64".to_string())?
                 * ne01 as u64,
             ne10,
             ne11,
             ne12: 1,
             nb10: u64::try_from(src1.nb[0]).map_err(|_| "mul_mv nb10 exceeds u64".to_string())?,
             nb11: u64::try_from(src1.nb[1]).map_err(|_| "mul_mv nb11 exceeds u64".to_string())?,
-            nb12: u64::try_from(src1.nb[1])
-                .map_err(|_| "mul_mv nb12 exceeds u64".to_string())?
+            nb12: u64::try_from(src1.nb[1]).map_err(|_| "mul_mv nb12 exceeds u64".to_string())?
                 * ne11 as u64,
-            nb13: u64::try_from(src1.nb[1])
-                .map_err(|_| "mul_mv nb13 exceeds u64".to_string())?
+            nb13: u64::try_from(src1.nb[1]).map_err(|_| "mul_mv nb13 exceeds u64".to_string())?
                 * ne11 as u64,
             ne0,
             ne1,
@@ -2000,11 +2021,14 @@ fn dispatch_mul_mat_id(
             ne02: i32_dim(src0, 2)?,
             ne10: i32_dim(src1, 0)?,
             ne11: i32_dim(src1, 1)?,
-            nb11: u64::try_from(src1.nb[1]).map_err(|_| "mul_mm_id_map0 nb11 exceeds u64".to_string())?,
-            nb12: u64::try_from(src1.nb[2]).map_err(|_| "mul_mm_id_map0 nb12 exceeds u64".to_string())?,
+            nb11: u64::try_from(src1.nb[1])
+                .map_err(|_| "mul_mm_id_map0 nb11 exceeds u64".to_string())?,
+            nb12: u64::try_from(src1.nb[2])
+                .map_err(|_| "mul_mm_id_map0 nb12 exceeds u64".to_string())?,
             ne21: i32_dim(src2, 1)?,
             ne20: i32_dim(src2, 0)?,
-            nb21: u64::try_from(src2.nb[1]).map_err(|_| "mul_mm_id_map0 nb21 exceeds u64".to_string())?,
+            nb21: u64::try_from(src2.nb[1])
+                .map_err(|_| "mul_mm_id_map0 nb21 exceeds u64".to_string())?,
         };
 
         runtime.dispatch_compute(
@@ -2031,14 +2055,21 @@ fn dispatch_mul_mat_id(
         let args = KArgsMulMmId {
             ne00: i32_dim(src0, 0)?,
             ne02: i32_dim(src0, 2)?,
-            nb01: u64::try_from(src0.nb[1]).map_err(|_| "mul_mm_id nb01 exceeds u64".to_string())?,
-            nb02: u64::try_from(src0.nb[2]).map_err(|_| "mul_mm_id nb02 exceeds u64".to_string())?,
-            nb03: u64::try_from(src0.nb[3]).map_err(|_| "mul_mm_id nb03 exceeds u64".to_string())?,
+            nb01: u64::try_from(src0.nb[1])
+                .map_err(|_| "mul_mm_id nb01 exceeds u64".to_string())?,
+            nb02: u64::try_from(src0.nb[2])
+                .map_err(|_| "mul_mm_id nb02 exceeds u64".to_string())?,
+            nb03: u64::try_from(src0.nb[3])
+                .map_err(|_| "mul_mm_id nb03 exceeds u64".to_string())?,
             ne11: i32_dim(src1, 1)?,
-            nb10: u64::try_from(src1.nb[0]).map_err(|_| "mul_mm_id nb10 exceeds u64".to_string())?,
-            nb11: u64::try_from(src1.nb[1]).map_err(|_| "mul_mm_id nb11 exceeds u64".to_string())?,
-            nb12: u64::try_from(src1.nb[2]).map_err(|_| "mul_mm_id nb12 exceeds u64".to_string())?,
-            nb13: u64::try_from(src1.nb[3]).map_err(|_| "mul_mm_id nb13 exceeds u64".to_string())?,
+            nb10: u64::try_from(src1.nb[0])
+                .map_err(|_| "mul_mm_id nb10 exceeds u64".to_string())?,
+            nb11: u64::try_from(src1.nb[1])
+                .map_err(|_| "mul_mm_id nb11 exceeds u64".to_string())?,
+            nb12: u64::try_from(src1.nb[2])
+                .map_err(|_| "mul_mm_id nb12 exceeds u64".to_string())?,
+            nb13: u64::try_from(src1.nb[3])
+                .map_err(|_| "mul_mm_id nb13 exceeds u64".to_string())?,
             ne20: i32_dim(src2, 0)?,
             ne21: i32_dim(src2, 1)?,
             ne0: i32_dim(tensor, 0)?,
@@ -2075,23 +2106,31 @@ fn dispatch_mul_mat_id(
         let args = KArgsMulMvId {
             nei0: i32_dim(src2, 0)?,
             nei1: i32_dim(src2, 1)?,
-            nbi1: u64::try_from(src2.nb[1]).map_err(|_| "mul_mv_id nbi1 exceeds u64".to_string())?,
+            nbi1: u64::try_from(src2.nb[1])
+                .map_err(|_| "mul_mv_id nbi1 exceeds u64".to_string())?,
             ne00: i32_dim(src0, 0)?,
             ne01: i32_dim(src0, 1)?,
             ne02: i32_dim(src0, 2)?,
-            nb00: u64::try_from(src0.nb[0]).map_err(|_| "mul_mv_id nb00 exceeds u64".to_string())?,
-            nb01: u64::try_from(src0.nb[1]).map_err(|_| "mul_mv_id nb01 exceeds u64".to_string())?,
-            nb02: u64::try_from(src0.nb[2]).map_err(|_| "mul_mv_id nb02 exceeds u64".to_string())?,
+            nb00: u64::try_from(src0.nb[0])
+                .map_err(|_| "mul_mv_id nb00 exceeds u64".to_string())?,
+            nb01: u64::try_from(src0.nb[1])
+                .map_err(|_| "mul_mv_id nb01 exceeds u64".to_string())?,
+            nb02: u64::try_from(src0.nb[2])
+                .map_err(|_| "mul_mv_id nb02 exceeds u64".to_string())?,
             ne10: i32_dim(src1, 0)?,
             ne11: i32_dim(src1, 1)?,
             ne12: i32_dim(src1, 2)?,
             ne13: i32_dim(src1, 3)?,
-            nb10: u64::try_from(src1.nb[0]).map_err(|_| "mul_mv_id nb10 exceeds u64".to_string())?,
-            nb11: u64::try_from(src1.nb[1]).map_err(|_| "mul_mv_id nb11 exceeds u64".to_string())?,
-            nb12: u64::try_from(src1.nb[2]).map_err(|_| "mul_mv_id nb12 exceeds u64".to_string())?,
+            nb10: u64::try_from(src1.nb[0])
+                .map_err(|_| "mul_mv_id nb10 exceeds u64".to_string())?,
+            nb11: u64::try_from(src1.nb[1])
+                .map_err(|_| "mul_mv_id nb11 exceeds u64".to_string())?,
+            nb12: u64::try_from(src1.nb[2])
+                .map_err(|_| "mul_mv_id nb12 exceeds u64".to_string())?,
             ne0: i32_dim(tensor, 0)?,
             ne1: i32_dim(tensor, 1)?,
-            nb1: u64::try_from(tensor.nb[1]).map_err(|_| "mul_mv_id nb1 exceeds u64".to_string())?,
+            nb1: u64::try_from(tensor.nb[1])
+                .map_err(|_| "mul_mv_id nb1 exceeds u64".to_string())?,
             nr0: stage.pipeline.nr0,
         };
 
@@ -2157,7 +2196,8 @@ fn dispatch_argsort_like(
 
     let mut nth = 1_i32;
     while nth < src0.ne[0] as i32
-        && 2 * nth <= i32::try_from(main_stage.pipeline.max_threads_per_threadgroup).unwrap_or(i32::MAX)
+        && 2 * nth
+            <= i32::try_from(main_stage.pipeline.max_threads_per_threadgroup).unwrap_or(i32::MAX)
     {
         nth *= 2;
     }
@@ -2184,32 +2224,36 @@ fn dispatch_argsort_like(
     let src_nb1 = u64::try_from(src0.nb[1]).map_err(|_| "argsort nb01 exceeds u64".to_string())?;
     let src_nb2 = u64::try_from(src0.nb[2]).map_err(|_| "argsort nb02 exceeds u64".to_string())?;
     let src_nb3 = u64::try_from(src0.nb[3]).map_err(|_| "argsort nb03 exceeds u64".to_string())?;
-    let dst_nb1 = u64::try_from(tensor.nb[1]).map_err(|_| "argsort dst nb1 exceeds u64".to_string())?;
-    let dst_nb2 = u64::try_from(tensor.nb[2]).map_err(|_| "argsort dst nb2 exceeds u64".to_string())?;
-    let dst_nb3 = u64::try_from(tensor.nb[3]).map_err(|_| "argsort dst nb3 exceeds u64".to_string())?;
+    let dst_nb1 =
+        u64::try_from(tensor.nb[1]).map_err(|_| "argsort dst nb1 exceeds u64".to_string())?;
+    let dst_nb2 =
+        u64::try_from(tensor.nb[2]).map_err(|_| "argsort dst nb2 exceeds u64".to_string())?;
+    let dst_nb3 =
+        u64::try_from(tensor.nb[3]).map_err(|_| "argsort dst nb3 exceeds u64".to_string())?;
     let tmp_row_bytes = ggml_type_size_for_type(TensorType::I32)
         * usize::try_from(src0.ne[0]).map_err(|_| "argsort temp row bytes overflow".to_string())?;
 
     for i03 in 0..src0.ne[3] {
         for i02 in 0..src0.ne[2] {
             for i01 in 0..src0.ne[1] {
-                let row_index = usize::try_from(
-                    i01 + src0.ne[1] * (i02 + src0.ne[2] * i03),
-                )
-                .map_err(|_| "argsort row index overflow".to_string())?;
+                let row_index = usize::try_from(i01 + src0.ne[1] * (i02 + src0.ne[2] * i03))
+                    .map_err(|_| "argsort row index overflow".to_string())?;
                 let src_row_offset = usize::try_from(
                     i01 * src0.nb[1] as i64 + i02 * src0.nb[2] as i64 + i03 * src0.nb[3] as i64,
                 )
                 .map_err(|_| "argsort src row offset overflow".to_string())?;
                 let dst_row_offset = usize::try_from(
-                    i01 * tensor.nb[1] as i64 + i02 * tensor.nb[2] as i64 + i03 * tensor.nb[3] as i64,
+                    i01 * tensor.nb[1] as i64
+                        + i02 * tensor.nb[2] as i64
+                        + i03 * tensor.nb[3] as i64,
                 )
                 .map_err(|_| "argsort dst row offset overflow".to_string())?;
                 let tmp_row_offset = row_index
                     .checked_mul(tmp_row_bytes)
                     .ok_or_else(|| "argsort temp row offset overflow".to_string())?;
 
-                let mut dst_binding = buffer_ref_with_offset(compiled, 2, tensor.id, dst_row_offset)?;
+                let mut dst_binding =
+                    buffer_ref_with_offset(compiled, 2, tensor.id, dst_row_offset)?;
                 let mut tmp_binding = tail_node_buffer_ref(compiled, node, 3, tmp_row_offset)?;
                 let mut merge_passes = 0usize;
                 let mut parity_len = block_top_k;
@@ -2226,7 +2270,8 @@ fn dispatch_argsort_like(
                     ne01: 1,
                     ne02: 1,
                     ne03: 1,
-                    nb00: u64::try_from(src0.nb[0]).map_err(|_| "argsort nb00 exceeds u64".to_string())?,
+                    nb00: u64::try_from(src0.nb[0])
+                        .map_err(|_| "argsort nb00 exceeds u64".to_string())?,
                     nb01: src_nb1,
                     nb02: src_nb2,
                     nb03: src_nb3,
@@ -2281,7 +2326,8 @@ fn dispatch_argsort_like(
                         ne01: 1,
                         ne02: 1,
                         ne03: 1,
-                        nb00: u64::try_from(src0.nb[0]).map_err(|_| "argsort_merge nb00 exceeds u64".to_string())?,
+                        nb00: u64::try_from(src0.nb[0])
+                            .map_err(|_| "argsort_merge nb00 exceeds u64".to_string())?,
                         nb01: src_nb1,
                         nb02: src_nb2,
                         nb03: src_nb3,
@@ -2301,7 +2347,10 @@ fn dispatch_argsort_like(
                             ),
                         )
                     } else {
-                        std::cmp::min(512_u64, merge_stage.pipeline.max_threads_per_threadgroup.max(1))
+                        std::cmp::min(
+                            512_u64,
+                            merge_stage.pipeline.max_threads_per_threadgroup.max(1),
+                        )
                     };
 
                     runtime.dispatch_compute(
@@ -2314,7 +2363,9 @@ fn dispatch_argsort_like(
                                 offset_bytes: binding(compiled, src0_id)?
                                     .offset_bytes
                                     .checked_add(src_row_offset)
-                                    .ok_or_else(|| "argsort src binding offset overflow".to_string())?,
+                                    .ok_or_else(|| {
+                                        "argsort src binding offset overflow".to_string()
+                                    })?,
                             },
                             MetalBufferBindingRef {
                                 index: 2,
@@ -2662,11 +2713,10 @@ fn dispatch_flash_attn_ext(
             q.desc.ty.name()
         ));
     }
-    if !flash_attn_supported_head_dim(usize::try_from(q.ne[0]).map_err(|_| "flash_attn head dim overflow".to_string())?) {
-        return Err(format!(
-            "unsupported flash_attn_ext head dim {}",
-            q.ne[0]
-        ));
+    if !flash_attn_supported_head_dim(
+        usize::try_from(q.ne[0]).map_err(|_| "flash_attn head dim overflow".to_string())?,
+    ) {
+        return Err(format!("unsupported flash_attn_ext head dim {}", q.ne[0]));
     }
     if k.desc.ty != v.desc.ty {
         return Err(format!(
@@ -2689,13 +2739,21 @@ fn dispatch_flash_attn_ext(
     let has_scap = logit_softcap != 0.0;
 
     if !flash_attn_ext_use_vec(q) {
-        return Err("flash_attn_ext compiled executor currently only supports the Metal vec path".to_string());
+        return Err(
+            "flash_attn_ext compiled executor currently only supports the Metal vec path"
+                .to_string(),
+        );
     }
 
     let stage_main = node
         .stages
         .iter()
-        .find(|stage| stage.descriptor.base_name.starts_with("kernel_flash_attn_ext_vec_"))
+        .find(|stage| {
+            stage
+                .descriptor
+                .base_name
+                .starts_with("kernel_flash_attn_ext_vec_")
+        })
         .ok_or_else(|| "flash_attn_ext is missing vec main stage".to_string())?;
     let stage_reduce = node
         .stages
@@ -2714,7 +2772,8 @@ fn dispatch_flash_attn_ext(
     let has_kvpad = k_shape.ne[1] % OP_FLASH_ATTN_EXT_VEC_NCPSG != 0;
     let nsg = flash_attn_ext_vec_nsg(k);
     let nwg = 32_i32;
-    let n_head = usize::try_from(q_shape.ne[2]).map_err(|_| "flash_attn n_head overflow".to_string())?;
+    let n_head =
+        usize::try_from(q_shape.ne[2]).map_err(|_| "flash_attn n_head overflow".to_string())?;
     let n_head_log2 = if n_head <= 1 {
         1_i32
     } else {
@@ -2740,7 +2799,8 @@ fn dispatch_flash_attn_ext(
         .map_err(|_| "flash_attn ns20 overflow".to_string())?;
 
     if has_kvpad {
-        let stage_pad = stage_pad.ok_or_else(|| "flash_attn_ext is missing vec pad stage".to_string())?;
+        let stage_pad =
+            stage_pad.ok_or_else(|| "flash_attn_ext is missing vec pad stage".to_string())?;
         let pad_ncpsg = constant_i32(&stage_pad.descriptor.constants, FC_FLASH_ATTN_EXT_PAD + 25)?;
         let args = KArgsFlashAttnExtPad {
             ne11: k_shape.ne[1],
@@ -2838,7 +2898,8 @@ fn dispatch_flash_attn_ext(
         ],
         &[(0, stage_main.pipeline.smem_bytes)],
         MetalSize {
-            width: ((q_shape.ne[1] + OP_FLASH_ATTN_EXT_VEC_NQPSG - 1) / OP_FLASH_ATTN_EXT_VEC_NQPSG) as u64,
+            width: ((q_shape.ne[1] + OP_FLASH_ATTN_EXT_VEC_NQPSG - 1) / OP_FLASH_ATTN_EXT_VEC_NQPSG)
+                as u64,
             height: q_shape.ne[2] as u64,
             depth: (q_shape.ne[3] * nwg) as u64,
         },
@@ -2851,8 +2912,12 @@ fn dispatch_flash_attn_ext(
 
     let args_reduce = KArgsFlashAttnExtVecReduce {
         nrows: i32::try_from(
-            usize::try_from(dst_shape.ne[1]).map_err(|_| "flash_attn reduce ne1 overflow".to_string())?
-                .checked_mul(usize::try_from(dst_shape.ne[2]).map_err(|_| "flash_attn reduce ne2 overflow".to_string())?)
+            usize::try_from(dst_shape.ne[1])
+                .map_err(|_| "flash_attn reduce ne1 overflow".to_string())?
+                .checked_mul(
+                    usize::try_from(dst_shape.ne[2])
+                        .map_err(|_| "flash_attn reduce ne2 overflow".to_string())?,
+                )
                 .and_then(|v| v.checked_mul(usize::try_from(dst_shape.ne[3]).ok()?))
                 .ok_or_else(|| "flash_attn reduce nrows overflow".to_string())?,
         )
@@ -3124,13 +3189,27 @@ fn shape4(tensor: &Tensor) -> Result<Shape4, String> {
     let mut ne = [1i32; 4];
     let mut nb = [0u64; 4];
     for i in 0..4 {
-        ne[i] = i32::try_from(tensor.ne[i])
-            .map_err(|_| format!("tensor '{}' ne[{}] exceeds i32", tensor.name().unwrap_or("<unnamed>"), i))?;
-        nb[i] = u64::try_from(tensor.nb[i])
-            .map_err(|_| format!("tensor '{}' nb[{}] exceeds u64", tensor.name().unwrap_or("<unnamed>"), i))?;
+        ne[i] = i32::try_from(tensor.ne[i]).map_err(|_| {
+            format!(
+                "tensor '{}' ne[{}] exceeds i32",
+                tensor.name().unwrap_or("<unnamed>"),
+                i
+            )
+        })?;
+        nb[i] = u64::try_from(tensor.nb[i]).map_err(|_| {
+            format!(
+                "tensor '{}' nb[{}] exceeds u64",
+                tensor.name().unwrap_or("<unnamed>"),
+                i
+            )
+        })?;
     }
-    let numel = usize::try_from(tensor.nelements())
-        .map_err(|_| format!("tensor '{}' numel exceeds usize", tensor.name().unwrap_or("<unnamed>")))?;
+    let numel = usize::try_from(tensor.nelements()).map_err(|_| {
+        format!(
+            "tensor '{}' numel exceeds usize",
+            tensor.name().unwrap_or("<unnamed>")
+        )
+    })?;
     Ok(Shape4 { ne, nb, numel })
 }
 
@@ -3140,7 +3219,10 @@ fn nrows(shape: &Shape4) -> usize {
         .saturating_mul(shape.ne[3] as usize)
 }
 
-fn binding(compiled: &MetalCompiledGraph, tensor_id: TensorId) -> Result<&MetalTensorBinding, String> {
+fn binding(
+    compiled: &MetalCompiledGraph,
+    tensor_id: TensorId,
+) -> Result<&MetalTensorBinding, String> {
     compiled
         .bindings
         .get(&tensor_id)
@@ -3288,7 +3370,10 @@ fn constant_i32(constants: &[super::FunctionConstant], idx: i32) -> Result<i32, 
 }
 
 fn flash_attn_supported_head_dim(d: usize) -> bool {
-    matches!(d, 32 | 40 | 48 | 64 | 72 | 80 | 96 | 112 | 128 | 192 | 256 | 576)
+    matches!(
+        d,
+        32 | 40 | 48 | 64 | 72 | 80 | 96 | 112 | 128 | 192 | 256 | 576
+    )
 }
 
 fn flash_attn_ext_use_vec(q: &Tensor) -> bool {
@@ -3322,20 +3407,32 @@ fn flash_attn_ext_extra_pad_bytes(
     } else {
         64
     };
-    Ok(usize::try_from(ncpsg).map_err(|_| "flash_attn ncpsg overflow".to_string())?
-        * (k.nb[1]
-            * usize::try_from(k.ne[2] * k.ne[3]).map_err(|_| "flash_attn k dims overflow".to_string())?
-            + v.nb[1]
-                * usize::try_from(v.ne[2] * v.ne[3]).map_err(|_| "flash_attn v dims overflow".to_string())?
-            + mask_bytes))
+    Ok(
+        usize::try_from(ncpsg).map_err(|_| "flash_attn ncpsg overflow".to_string())?
+            * (k.nb[1]
+                * usize::try_from(k.ne[2] * k.ne[3])
+                    .map_err(|_| "flash_attn k dims overflow".to_string())?
+                + v.nb[1]
+                    * usize::try_from(v.ne[2] * v.ne[3])
+                        .map_err(|_| "flash_attn v dims overflow".to_string())?
+                + mask_bytes),
+    )
 }
 
 fn flash_attn_ext_extra_blk_bytes(q: &Tensor, mask: Option<&Tensor>) -> Result<usize, String> {
     let Some(mask) = mask else {
         return Ok(0);
     };
-    let nqptg = if flash_attn_ext_use_vec(q) { 1_i64 } else { 8_i64 };
-    let ncpsg = if flash_attn_ext_use_vec(q) { 32_i64 } else { 64_i64 };
+    let nqptg = if flash_attn_ext_use_vec(q) {
+        1_i64
+    } else {
+        8_i64
+    };
+    let ncpsg = if flash_attn_ext_use_vec(q) {
+        32_i64
+    } else {
+        64_i64
+    };
     let ne1 = (q.ne[1] + nqptg - 1) / nqptg;
     let ne0 = (mask.ne[0] + ncpsg - 1) / ncpsg;
     let bytes = usize::try_from(ne0 * ne1 * mask.ne[2] * mask.ne[3])
@@ -3357,16 +3454,25 @@ fn mul_mat_id_extra_tpe_bytes(src0: &Tensor) -> Result<usize, String> {
 }
 
 fn default_flash_mask_shape(q: &Shape4, k: &Shape4) -> Result<Shape4, String> {
-    let nb31 = (u64::try_from(k.ne[1]).map_err(|_| "flash_attn default mask ne1 overflow".to_string())?)
-        .checked_mul(ggml_type_size_for_type(TensorType::F16) as u64)
-        .ok_or_else(|| "flash_attn default mask nb31 overflow".to_string())?;
+    let nb31 = (u64::try_from(k.ne[1])
+        .map_err(|_| "flash_attn default mask ne1 overflow".to_string())?)
+    .checked_mul(ggml_type_size_for_type(TensorType::F16) as u64)
+    .ok_or_else(|| "flash_attn default mask nb31 overflow".to_string())?;
     let nb32 = nb31
-        .checked_mul(u64::try_from(q.ne[1]).map_err(|_| "flash_attn default mask q overflow".to_string())?)
+        .checked_mul(
+            u64::try_from(q.ne[1]).map_err(|_| "flash_attn default mask q overflow".to_string())?,
+        )
         .ok_or_else(|| "flash_attn default mask nb32 overflow".to_string())?;
     Ok(Shape4 {
         ne: [k.ne[1], q.ne[1], 1, 1],
-        nb: [ggml_type_size_for_type(TensorType::F16) as u64, nb31, nb32, nb32],
-        numel: usize::try_from(k.ne[1]).unwrap_or(0)
+        nb: [
+            ggml_type_size_for_type(TensorType::F16) as u64,
+            nb31,
+            nb32,
+            nb32,
+        ],
+        numel: usize::try_from(k.ne[1])
+            .unwrap_or(0)
             .saturating_mul(usize::try_from(q.ne[1]).unwrap_or(0)),
     })
 }
@@ -3382,12 +3488,7 @@ fn parse_trailing_i32(value: &str, marker: &str) -> Result<i32, String> {
 }
 
 fn bytes_of<T>(value: &T) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            value as *const T as *const u8,
-            std::mem::size_of::<T>(),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) }
 }
 
 #[cfg(test)]
@@ -3514,8 +3615,10 @@ mod tests {
 
         let src_values = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let pos_values = vec![0_i32, 1_i32];
-        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values)).unwrap();
-        ctx.write_tensor_data(pos, &i32s_to_bytes(&pos_values)).unwrap();
+        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values))
+            .unwrap();
+        ctx.write_tensor_data(pos, &i32s_to_bytes(&pos_values))
+            .unwrap();
 
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, rope).unwrap();
@@ -3563,7 +3666,13 @@ mod tests {
         let n_tokens = 2_i64;
 
         let src_full = full_ctx
-            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .new_tensor_3d(
+                TensorType::F32,
+                d,
+                n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let pos_full = full_ctx
             .new_tensor_1d(TensorType::I32, n_tokens, BufferUsage::Activations)
@@ -3596,7 +3705,9 @@ mod tests {
             .unwrap();
 
         let mut full_graph = Graph::new();
-        full_graph.build_forward_expand(&full_ctx, rope_full).unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, rope_full)
+            .unwrap();
 
         let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
         let full_session = MetalGraphSession::from_runtime(
@@ -3662,7 +3773,9 @@ mod tests {
             .unwrap();
 
         let mut step_graph = Graph::new();
-        step_graph.build_forward_expand(&step_ctx, rope_step).unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, rope_step)
+            .unwrap();
 
         let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
         let step_session = MetalGraphSession::from_runtime(
@@ -3705,7 +3818,13 @@ mod tests {
         let n_tokens = 2_i64;
 
         let src_full = full_ctx
-            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .new_tensor_3d(
+                TensorType::F32,
+                d,
+                n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let pos_full = full_ctx
             .new_tensor_1d(TensorType::I32, n_tokens, BufferUsage::Activations)
@@ -3738,7 +3857,9 @@ mod tests {
             .unwrap();
 
         let mut full_graph = Graph::new();
-        full_graph.build_forward_expand(&full_ctx, rope_full).unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, rope_full)
+            .unwrap();
 
         let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
         let full_session = MetalGraphSession::from_runtime(
@@ -3804,7 +3925,9 @@ mod tests {
             .unwrap();
 
         let mut step_graph = Graph::new();
-        step_graph.build_forward_expand(&step_ctx, rope_step).unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, rope_step)
+            .unwrap();
 
         let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
         let step_session = MetalGraphSession::from_runtime(
@@ -3848,7 +3971,13 @@ mod tests {
         let eps = 1.0e-6f32;
 
         let src_full = full_ctx
-            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .new_tensor_3d(
+                TensorType::F32,
+                d,
+                n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let weight = full_ctx
             .new_tensor_2d(TensorType::F32, d, n_head, BufferUsage::Weights)
@@ -3870,7 +3999,9 @@ mod tests {
             .unwrap();
 
         let mut full_graph = Graph::new();
-        full_graph.build_forward_expand(&full_ctx, scaled_full).unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, scaled_full)
+            .unwrap();
 
         let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
         let full_session = MetalGraphSession::from_runtime(
@@ -3881,7 +4012,9 @@ mod tests {
             BufferStorageMode::Shared,
         )
         .unwrap();
-        let full_execution = full_session.execute(&full_ctx, &[], &[scaled_full]).unwrap();
+        let full_execution = full_session
+            .execute(&full_ctx, &[], &[scaled_full])
+            .unwrap();
         let full_values = bytes_to_f32s(full_execution.outputs.get(&scaled_full).unwrap());
         let token_width = (d * n_head) as usize;
         let full_last_token = full_values[full_values.len() - token_width..].to_vec();
@@ -3924,7 +4057,9 @@ mod tests {
             .unwrap();
 
         let mut step_graph = Graph::new();
-        step_graph.build_forward_expand(&step_ctx, scaled_step).unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, scaled_step)
+            .unwrap();
 
         let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
         let step_session = MetalGraphSession::from_runtime(
@@ -3935,7 +4070,9 @@ mod tests {
             BufferStorageMode::Shared,
         )
         .unwrap();
-        let step_execution = step_session.execute(&step_ctx, &[], &[scaled_step]).unwrap();
+        let step_execution = step_session
+            .execute(&step_ctx, &[], &[scaled_step])
+            .unwrap();
         let step_values = bytes_to_f32s(step_execution.outputs.get(&scaled_step).unwrap());
 
         assert_eq!(step_values.len(), full_last_token.len());
@@ -4010,7 +4147,14 @@ mod tests {
 
         let execution = session.execute(&ctx, &[], &[attn]).unwrap();
         let actual = bytes_to_f32s(execution.outputs.get(&attn).unwrap());
-        let expected = cpu_flash_attn_f32(&q_values, &k_values, &v_values, d as usize, n_q as usize, n_kv as usize);
+        let expected = cpu_flash_attn_f32(
+            &q_values,
+            &k_values,
+            &v_values,
+            d as usize,
+            n_q as usize,
+            n_kv as usize,
+        );
 
         assert_eq!(actual.len(), expected.len());
         for (a, e) in actual.iter().zip(expected.iter()) {
@@ -4059,8 +4203,12 @@ mod tests {
             .new_tensor_1d(TensorType::I32, 1, BufferUsage::Activations)
             .unwrap();
 
-        let k_written = ctx.set_rows(k_cache, k_cur, rows, BufferUsage::State).unwrap();
-        let v_written = ctx.set_rows(v_cache, v_cur, rows, BufferUsage::State).unwrap();
+        let k_written = ctx
+            .set_rows(k_cache, k_cur, rows, BufferUsage::State)
+            .unwrap();
+        let v_written = ctx
+            .set_rows(v_cache, v_cur, rows, BufferUsage::State)
+            .unwrap();
 
         let k_view = ctx
             .view_4d(
@@ -4113,10 +4261,14 @@ mod tests {
         v_cache_values[..d as usize].copy_from_slice(&v0_values);
 
         ctx.write_tensor_data(q, &f32s_to_bytes(&q_values)).unwrap();
-        ctx.write_tensor_data(k_cache, &f32s_to_bytes(&k_cache_values)).unwrap();
-        ctx.write_tensor_data(v_cache, &f32s_to_bytes(&v_cache_values)).unwrap();
-        ctx.write_tensor_data(k_cur, &f32s_to_bytes(&k1_values)).unwrap();
-        ctx.write_tensor_data(v_cur, &f32s_to_bytes(&v1_values)).unwrap();
+        ctx.write_tensor_data(k_cache, &f32s_to_bytes(&k_cache_values))
+            .unwrap();
+        ctx.write_tensor_data(v_cache, &f32s_to_bytes(&v_cache_values))
+            .unwrap();
+        ctx.write_tensor_data(k_cur, &f32s_to_bytes(&k1_values))
+            .unwrap();
+        ctx.write_tensor_data(v_cur, &f32s_to_bytes(&v1_values))
+            .unwrap();
         ctx.write_tensor_data(rows, &i32s_to_bytes(&[1])).unwrap();
 
         let mut graph = Graph::new();
@@ -4138,8 +4290,14 @@ mod tests {
         expected_k.extend_from_slice(&k1_values);
         let mut expected_v = v0_values.clone();
         expected_v.extend_from_slice(&v1_values);
-        let expected =
-            cpu_flash_attn_f32(&q_values, &expected_k, &expected_v, d as usize, 1, n_kv as usize);
+        let expected = cpu_flash_attn_f32(
+            &q_values,
+            &expected_k,
+            &expected_v,
+            d as usize,
+            1,
+            n_kv as usize,
+        );
 
         assert_eq!(actual.len(), expected.len());
         for (a, e) in actual.iter().zip(expected.iter()) {
@@ -4175,16 +4333,28 @@ mod tests {
             .new_tensor_4d(TensorType::F32, d, n_head, n_q, 1, BufferUsage::Activations)
             .unwrap();
         let k_base = full_ctx
-            .new_tensor_4d(TensorType::F32, d, n_kv_head, n_kv, 1, BufferUsage::Activations)
+            .new_tensor_4d(
+                TensorType::F32,
+                d,
+                n_kv_head,
+                n_kv,
+                1,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let v_base = full_ctx
-            .new_tensor_4d(TensorType::F32, d, n_kv_head, n_kv, 1, BufferUsage::Activations)
+            .new_tensor_4d(
+                TensorType::F32,
+                d,
+                n_kv_head,
+                n_kv,
+                1,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let q_full = full_ctx.permute(q_base, [0, 2, 1, 3]).unwrap();
         let k_full = full_ctx.permute(k_base, [0, 2, 1, 3]).unwrap();
-        let v_full = full_ctx
-            .permute(v_base, [0, 2, 1, 3])
-            .unwrap();
+        let v_full = full_ctx.permute(v_base, [0, 2, 1, 3]).unwrap();
         let full_attn = full_ctx
             .flash_attn_ext(
                 q_full,
@@ -4198,12 +4368,9 @@ mod tests {
             )
             .unwrap();
 
-        let q_base_values =
-            patterned_f32s((d * n_q * n_head) as usize, -0.2, 0.004);
-        let k_base_values =
-            patterned_f32s((d * n_kv * n_kv_head) as usize, 0.15, -0.006);
-        let v_base_values =
-            patterned_f32s((d * n_kv * n_kv_head) as usize, -0.05, 0.008);
+        let q_base_values = patterned_f32s((d * n_q * n_head) as usize, -0.2, 0.004);
+        let k_base_values = patterned_f32s((d * n_kv * n_kv_head) as usize, 0.15, -0.006);
+        let v_base_values = patterned_f32s((d * n_kv * n_kv_head) as usize, -0.05, 0.008);
 
         full_ctx
             .write_tensor_data(q_base, &f32s_to_bytes(&q_base_values))
@@ -4216,7 +4383,9 @@ mod tests {
             .unwrap();
 
         let mut full_graph = Graph::new();
-        full_graph.build_forward_expand(&full_ctx, full_attn).unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, full_attn)
+            .unwrap();
 
         let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
         let full_session = MetalGraphSession::from_runtime(
@@ -4242,22 +4411,10 @@ mod tests {
             .new_tensor_4d(TensorType::F32, d, 1, n_head, 1, BufferUsage::Activations)
             .unwrap();
         let k_cache = decode_ctx
-            .new_tensor_3d(
-                TensorType::F32,
-                d * n_kv_head,
-                n_kv,
-                1,
-                BufferUsage::State,
-            )
+            .new_tensor_3d(TensorType::F32, d * n_kv_head, n_kv, 1, BufferUsage::State)
             .unwrap();
         let v_cache = decode_ctx
-            .new_tensor_3d(
-                TensorType::F32,
-                d * n_kv_head,
-                n_kv,
-                1,
-                BufferUsage::State,
-            )
+            .new_tensor_3d(TensorType::F32, d * n_kv_head, n_kv, 1, BufferUsage::State)
             .unwrap();
         let k_cur = decode_ctx
             .new_tensor_2d(TensorType::F32, d * n_kv_head, 1, BufferUsage::Activations)
@@ -4317,8 +4474,7 @@ mod tests {
         let q_step_values = {
             let mut values = Vec::with_capacity(last_token_width);
             for head in 0..(n_head as usize) {
-                let base_offset =
-                    (d as usize) * (n_head as usize) + head * (d as usize);
+                let base_offset = (d as usize) * (n_head as usize) + head * (d as usize);
                 values.extend_from_slice(&q_base_values[base_offset..base_offset + d as usize]);
             }
             values
@@ -4334,8 +4490,7 @@ mod tests {
         let token1_k = {
             let mut values = Vec::with_capacity((d * n_kv_head) as usize);
             for head in 0..(n_kv_head as usize) {
-                let base_offset =
-                    (d as usize) * (n_kv_head as usize) + head * (d as usize);
+                let base_offset = (d as usize) * (n_kv_head as usize) + head * (d as usize);
                 values.extend_from_slice(&k_base_values[base_offset..base_offset + d as usize]);
             }
             values
@@ -4351,8 +4506,7 @@ mod tests {
         let token1_v = {
             let mut values = Vec::with_capacity((d * n_kv_head) as usize);
             for head in 0..(n_kv_head as usize) {
-                let base_offset =
-                    (d as usize) * (n_kv_head as usize) + head * (d as usize);
+                let base_offset = (d as usize) * (n_kv_head as usize) + head * (d as usize);
                 values.extend_from_slice(&v_base_values[base_offset..base_offset + d as usize]);
             }
             values
@@ -4377,7 +4531,9 @@ mod tests {
         decode_ctx
             .write_tensor_data(v_cur, &f32s_to_bytes(&token1_v))
             .unwrap();
-        decode_ctx.write_tensor_data(rows, &i32s_to_bytes(&[1])).unwrap();
+        decode_ctx
+            .write_tensor_data(rows, &i32s_to_bytes(&[1]))
+            .unwrap();
 
         let mut decode_graph = Graph::new();
         decode_graph
@@ -4398,7 +4554,9 @@ mod tests {
             BufferStorageMode::Shared,
         )
         .unwrap();
-        let decode_execution = decode_session.execute(&decode_ctx, &[], &[decode_attn]).unwrap();
+        let decode_execution = decode_session
+            .execute(&decode_ctx, &[], &[decode_attn])
+            .unwrap();
         let decode_values = bytes_to_f32s(decode_execution.outputs.get(&decode_attn).unwrap());
 
         assert_eq!(decode_values.len(), full_last_token.len());
@@ -4436,7 +4594,8 @@ mod tests {
             .unwrap();
         let out = ctx.set_rows(dst, src, rows, BufferUsage::State).unwrap();
 
-        ctx.write_tensor_data(dst, &f32s_to_bytes(&[0.0f32; 16])).unwrap();
+        ctx.write_tensor_data(dst, &f32s_to_bytes(&[0.0f32; 16]))
+            .unwrap();
         ctx.write_tensor_data(
             src,
             &f32s_to_bytes(&[
@@ -4445,7 +4604,8 @@ mod tests {
             ]),
         )
         .unwrap();
-        ctx.write_tensor_data(rows, &i32s_to_bytes(&[1, 3])).unwrap();
+        ctx.write_tensor_data(rows, &i32s_to_bytes(&[1, 3]))
+            .unwrap();
 
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, out).unwrap();
@@ -4492,8 +4652,12 @@ mod tests {
         let b = ctx
             .new_tensor_2d(TensorType::F32, 8, 2, BufferUsage::Activations)
             .unwrap();
-        let add = ctx.binary_like_a(Op::Add, a, b, BufferUsage::Activations).unwrap();
-        let out = ctx.unary(add, crate::op::UnaryOp::Sigmoid, BufferUsage::Activations).unwrap();
+        let add = ctx
+            .binary_like_a(Op::Add, a, b, BufferUsage::Activations)
+            .unwrap();
+        let out = ctx
+            .unary(add, crate::op::UnaryOp::Sigmoid, BufferUsage::Activations)
+            .unwrap();
 
         let a_values = patterned_f32s(16, -0.3, 0.07);
         let b_values = patterned_f32s(16, 0.15, -0.05);
@@ -4741,7 +4905,9 @@ mod tests {
         let ids = ctx
             .new_tensor_2d(TensorType::I32, 2, 2, BufferUsage::Activations)
             .unwrap();
-        let out = ctx.add_id(src0, bias, ids, BufferUsage::Activations).unwrap();
+        let out = ctx
+            .add_id(src0, bias, ids, BufferUsage::Activations)
+            .unwrap();
 
         let src0_values = vec![
             0.5, 0.7, 0.9, 1.1, //
@@ -4756,9 +4922,12 @@ mod tests {
             3.0, 3.1, 3.2, 3.3,
         ];
         let ids_values = vec![2, 1, 0, 3];
-        ctx.write_tensor_data(src0, &f32s_to_bytes(&src0_values)).unwrap();
-        ctx.write_tensor_data(bias, &f32s_to_bytes(&bias_values)).unwrap();
-        ctx.write_tensor_data(ids, &i32s_to_bytes(&ids_values)).unwrap();
+        ctx.write_tensor_data(src0, &f32s_to_bytes(&src0_values))
+            .unwrap();
+        ctx.write_tensor_data(bias, &f32s_to_bytes(&bias_values))
+            .unwrap();
+        ctx.write_tensor_data(ids, &i32s_to_bytes(&ids_values))
+            .unwrap();
 
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, out).unwrap();
@@ -4820,9 +4989,12 @@ mod tests {
             -0.3, 0.5, -0.6, 0.7,
         ];
         let ids_values = vec![1, 3, 0, 2];
-        ctx.write_tensor_data(experts, &f32s_to_bytes(&expert_values)).unwrap();
-        ctx.write_tensor_data(input, &f32s_to_bytes(&input_values)).unwrap();
-        ctx.write_tensor_data(ids, &i32s_to_bytes(&ids_values)).unwrap();
+        ctx.write_tensor_data(experts, &f32s_to_bytes(&expert_values))
+            .unwrap();
+        ctx.write_tensor_data(input, &f32s_to_bytes(&input_values))
+            .unwrap();
+        ctx.write_tensor_data(ids, &i32s_to_bytes(&ids_values))
+            .unwrap();
 
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, out).unwrap();
@@ -4839,13 +5011,191 @@ mod tests {
 
         let execution = session.execute(&ctx, &[], &[out]).unwrap();
         let actual = bytes_to_f32s(execution.outputs.get(&out).unwrap());
-        let expected = cpu_mul_mat_id_f32(&expert_values, &input_values, &ids_values, 4, 3, 4, 2, 2);
+        let expected =
+            cpu_mul_mat_id_f32(&expert_values, &input_values, &ids_values, 4, 3, 4, 2, 2);
 
         assert_eq!(actual.len(), expected.len());
         for (a, e) in actual.iter().zip(expected.iter()) {
             assert!(
                 (a - e).abs() < 1.0e-5,
                 "mul_mat_id output mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_gated_delta_net_graph_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 22,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let s_v = 32_i64;
+        let h_k = 1_i64;
+        let h_v = 2_i64;
+        let n_tokens = 1_i64;
+        let n_seqs = 1_i64;
+
+        let q = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                s_v,
+                h_k,
+                n_tokens,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let k = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                s_v,
+                h_k,
+                n_tokens,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let v = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                s_v,
+                h_v,
+                n_tokens,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let g = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                1,
+                h_v,
+                n_tokens,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let beta = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                1,
+                h_v,
+                n_tokens,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let state = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                s_v,
+                s_v,
+                h_v,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let result = ctx
+            .gated_delta_net(q, k, v, g, beta, state, BufferUsage::Activations)
+            .unwrap();
+
+        let output = ctx
+            .view_4d(
+                result,
+                s_v,
+                h_v,
+                n_tokens,
+                n_seqs,
+                ggml_row_size_for_type(TensorType::F32, s_v).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, s_v * h_v).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, s_v * h_v * n_tokens).unwrap(),
+                0,
+            )
+            .unwrap();
+        let new_state = ctx
+            .view_4d(
+                result,
+                s_v,
+                s_v,
+                h_v,
+                n_seqs,
+                ggml_row_size_for_type(TensorType::F32, s_v).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, s_v * s_v).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, s_v * s_v * h_v).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, s_v * h_v * n_tokens * n_seqs).unwrap(),
+            )
+            .unwrap();
+
+        let q_values = patterned_f32s((s_v * h_k * n_tokens * n_seqs) as usize, -0.2, 0.01);
+        let k_values = patterned_f32s((s_v * h_k * n_tokens * n_seqs) as usize, 0.15, -0.008);
+        let v_values = patterned_f32s((s_v * h_v * n_tokens * n_seqs) as usize, 0.05, 0.006);
+        let g_values = vec![-0.3, 0.2];
+        let beta_values = vec![0.7, 0.4];
+        let state_values = patterned_f32s((s_v * s_v * h_v * n_seqs) as usize, -0.05, 0.0005);
+        ctx.write_tensor_data(q, &f32s_to_bytes(&q_values)).unwrap();
+        ctx.write_tensor_data(k, &f32s_to_bytes(&k_values)).unwrap();
+        ctx.write_tensor_data(v, &f32s_to_bytes(&v_values)).unwrap();
+        ctx.write_tensor_data(g, &f32s_to_bytes(&g_values)).unwrap();
+        ctx.write_tensor_data(beta, &f32s_to_bytes(&beta_values))
+            .unwrap();
+        ctx.write_tensor_data(state, &f32s_to_bytes(&state_values))
+            .unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, output).unwrap();
+        graph.build_forward_expand(&ctx, new_state).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+
+        let execution = session.execute(&ctx, &[], &[output, new_state]).unwrap();
+        let actual_output = bytes_to_f32s(execution.outputs.get(&output).unwrap());
+        let actual_state = bytes_to_f32s(execution.outputs.get(&new_state).unwrap());
+        let (expected_output, expected_state) = cpu_gated_delta_net_f32(
+            &q_values,
+            &k_values,
+            &v_values,
+            &g_values,
+            &beta_values,
+            &state_values,
+            s_v as usize,
+            h_k as usize,
+            h_v as usize,
+            n_tokens as usize,
+            n_seqs as usize,
+        );
+
+        assert_eq!(actual_output.len(), expected_output.len());
+        for (a, e) in actual_output.iter().zip(expected_output.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-4,
+                "gated_delta_net output mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+
+        assert_eq!(actual_state.len(), expected_state.len());
+        for (a, e) in actual_state.iter().zip(expected_state.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-4,
+                "gated_delta_net state mismatch: actual={} expected={}",
                 a,
                 e
             );
@@ -4951,7 +5301,8 @@ mod tests {
         let mut out = Vec::with_capacity((values.len() / row_len) * k);
         for row in 0..(values.len() / row_len) {
             let mut indices = (0..row_len).collect::<Vec<_>>();
-            indices.sort_by(|&a, &b| values[row * row_len + b].total_cmp(&values[row * row_len + a]));
+            indices
+                .sort_by(|&a, &b| values[row * row_len + b].total_cmp(&values[row * row_len + a]));
             out.extend(indices.into_iter().take(k).map(|idx| idx as i32));
         }
         out
@@ -4961,7 +5312,8 @@ mod tests {
         let mut out = Vec::with_capacity(values.len());
         for row in 0..(values.len() / row_len) {
             let mut indices = (0..row_len).collect::<Vec<_>>();
-            indices.sort_by(|&a, &b| values[row * row_len + a].total_cmp(&values[row * row_len + b]));
+            indices
+                .sort_by(|&a, &b| values[row * row_len + a].total_cmp(&values[row * row_len + b]));
             out.extend(indices.into_iter().map(|idx| idx as i32));
         }
         out
@@ -5019,6 +5371,95 @@ mod tests {
         out
     }
 
+    fn cpu_gated_delta_net_f32(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: &[f32],
+        beta: &[f32],
+        state: &[f32],
+        s_v: usize,
+        h_k: usize,
+        h_v: usize,
+        n_tokens: usize,
+        n_seqs: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        assert_eq!(q.len(), s_v * h_k * n_tokens * n_seqs);
+        assert_eq!(k.len(), s_v * h_k * n_tokens * n_seqs);
+        assert_eq!(v.len(), s_v * h_v * n_tokens * n_seqs);
+        assert_eq!(beta.len(), h_v * n_tokens * n_seqs);
+        assert_eq!(state.len(), s_v * s_v * h_v * n_seqs);
+        assert!(
+            g.len() == h_v * n_tokens * n_seqs || g.len() == s_v * h_v * n_tokens * n_seqs,
+            "gate tensor must be scalar or per-channel"
+        );
+
+        let kda = g.len() == s_v * h_v * n_tokens * n_seqs;
+        let scale = 1.0f32 / (s_v as f32).sqrt();
+        let mut attn_out = vec![0.0f32; s_v * h_v * n_tokens * n_seqs];
+        let mut state_out = state.to_vec();
+        let mut delta = vec![0.0f32; s_v];
+
+        for seq in 0..n_seqs {
+            for head in 0..h_v {
+                let q_head = head % h_k;
+                let k_head = head % h_k;
+                let state_base = (seq * h_v + head) * s_v * s_v;
+
+                for token in 0..n_tokens {
+                    let q_base = ((seq * n_tokens + token) * h_k + q_head) * s_v;
+                    let k_base = ((seq * n_tokens + token) * h_k + k_head) * s_v;
+                    let v_base = ((seq * n_tokens + token) * h_v + head) * s_v;
+                    let beta_idx = (seq * n_tokens + token) * h_v + head;
+                    let beta_val = beta[beta_idx];
+
+                    if kda {
+                        let g_base = ((seq * n_tokens + token) * h_v + head) * s_v;
+                        for row in 0..s_v {
+                            let row_base = state_base + row * s_v;
+                            for col in 0..s_v {
+                                state_out[row_base + col] *= g[g_base + col].exp();
+                            }
+                        }
+                    } else {
+                        let g_exp = g[beta_idx].exp();
+                        for idx in 0..(s_v * s_v) {
+                            state_out[state_base + idx] *= g_exp;
+                        }
+                    }
+
+                    for row in 0..s_v {
+                        let row_base = state_base + row * s_v;
+                        let mut sum = 0.0f32;
+                        for col in 0..s_v {
+                            sum += state_out[row_base + col] * k[k_base + col];
+                        }
+                        delta[row] = (v[v_base + row] - sum) * beta_val;
+                    }
+
+                    for row in 0..s_v {
+                        let row_base = state_base + row * s_v;
+                        for col in 0..s_v {
+                            state_out[row_base + col] += k[k_base + col] * delta[row];
+                        }
+                    }
+
+                    let out_base = ((seq * n_tokens + token) * h_v + head) * s_v;
+                    for row in 0..s_v {
+                        let row_base = state_base + row * s_v;
+                        let mut sum = 0.0f32;
+                        for col in 0..s_v {
+                            sum += state_out[row_base + col] * q[q_base + col];
+                        }
+                        attn_out[out_base + row] = sum * scale;
+                    }
+                }
+            }
+        }
+
+        (attn_out, state_out)
+    }
+
     fn cpu_flash_attn_f32(
         q: &[f32],
         k: &[f32],
@@ -5039,10 +5480,7 @@ mod tests {
                 }
                 scores[ik] = dot / (d as f32).sqrt();
             }
-            let max_score = scores
-                .iter()
-                .copied()
-                .fold(f32::NEG_INFINITY, f32::max);
+            let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let mut sum = 0.0f32;
             for score in &mut scores {
                 *score = (*score - max_score).exp();

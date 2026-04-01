@@ -65,7 +65,7 @@ script_mod! {
             scene_select := XrSelect{
                 pos: vec3(0.0, -0.02, -0.62)
                 scale: vec3(0.5, 0.5, 0.5)
-                active_child: @ico_shoot_scene
+                active_child: @tanks_scene
 
                 test_scene := XrNode{
                     on_render: ||{
@@ -305,6 +305,72 @@ script_mod! {
                     }
                 }
 
+                tanks_scene := XrNode{
+                    pos: vec3(0.0, -0.16, 0.0)
+                    scale: vec3(0.62, 0.62, 0.62)
+                    on_render: ||{
+                        Platform{
+                            pos: vec3(0.05, -0.06, -0.10)
+                            size: vec3(1.60, 0.08, 1.10)
+                            color: #x283544
+                        }
+
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.14, 0.12, 0.14)
+                            corner_radius: 0.02
+                            roughness: 0.78
+                            metallic: 0.02
+                            color: #x516579
+                            pos: vec3(-0.34, 0.00, -0.26)
+                        }
+
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.18, 0.10, 0.18)
+                            corner_radius: 0.02
+                            roughness: 0.78
+                            metallic: 0.02
+                            color: #x516579
+                            pos: vec3(0.34, -0.01, -0.32)
+                        }
+
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.54, 0.08, 0.12)
+                            corner_radius: 0.018
+                            roughness: 0.82
+                            metallic: 0.0
+                            color: #x1f2b37
+                            pos: vec3(0.05, -0.02, -0.48)
+                        }
+
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.12, 0.16, 0.42)
+                            corner_radius: 0.018
+                            roughness: 0.80
+                            metallic: 0.0
+                            color: #x202f3d
+                            pos: vec3(-0.48, 0.02, -0.02)
+                        }
+
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.12, 0.16, 0.42)
+                            corner_radius: 0.018
+                            roughness: 0.80
+                            metallic: 0.0
+                            color: #x202f3d
+                            pos: vec3(0.58, 0.02, -0.02)
+                        }
+
+                        Tank{
+                            pos: vec3(0.05, 0.03, -0.10)
+                        }
+                    }
+                }
+
                 helmet_scene := XrNode{
                     on_render: ||{
                         Platform{pos: vec3(0.05, -0.06, -0.10)}
@@ -430,6 +496,12 @@ script_mod! {
                             on_press: || ui.scene_select.ico_shoot_scene()
                         }
 
+                        tanks_scene_button := XrUiButton{
+                            width: 72
+                            text: "Tanks"
+                            on_press: || ui.scene_select.tanks_scene()
+                        }
+
                         block_scene_button := XrUiButton{
                             width: 88
                             text: "Blocks"
@@ -508,7 +580,7 @@ script_mod! {
 
                         scene_status := Label{
                             width: Fill
-                            text: "Default scene: 160 faceted icosahedra with sphere colliders. Shooter mode fires pooled icos from the main index fingertip."
+                            text: "Default scene: tank mode. Drive with the right thumbstick in head-relative screen direction, and grab the tank directly with your hands."
                             draw_text.color: #xe8f4ff
                         }
                     }
