@@ -142,6 +142,20 @@ pub fn try_layer_norm_f32(x: &[f32], shape: &[usize], eps: f32) -> Option<Vec<f3
     imp::try_layer_norm_f32(x, shape, eps)
 }
 
+pub fn try_rms_norm_f32(x: &[f32], shape: &[usize], eps: f32) -> Option<Vec<f32>> {
+    imp::try_rms_norm_f32(x, shape, eps)
+}
+
+pub fn try_rms_norm_mul_f32(
+    x: &[f32],
+    x_shape: &[usize],
+    mul: &[f32],
+    mul_shape: &[usize],
+    eps: f32,
+) -> Option<Vec<f32>> {
+    imp::try_rms_norm_mul_f32(x, x_shape, mul, mul_shape, eps)
+}
+
 pub fn try_layer_norm_mul_add_f32(
     x: &[f32],
     x_shape: &[usize],
@@ -152,6 +166,16 @@ pub fn try_layer_norm_mul_add_f32(
     eps: f32,
 ) -> Option<Vec<f32>> {
     imp::try_layer_norm_mul_add_f32(x, x_shape, mul, mul_shape, add, add_shape, eps)
+}
+
+pub fn try_get_rows_ggml_bytes(
+    src: &[u8],
+    src_ggml_type: u32,
+    n_cols: usize,
+    n_rows: usize,
+    row_indices: &[i32],
+) -> Option<Vec<f32>> {
+    imp::try_get_rows_ggml_bytes(src, src_ggml_type, n_cols, n_rows, row_indices)
 }
 
 pub fn try_im2col_1d_f32(
@@ -300,6 +324,20 @@ mod imp {
         None
     }
 
+    pub(super) fn try_rms_norm_f32(_x: &[f32], _shape: &[usize], _eps: f32) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_rms_norm_mul_f32(
+        _x: &[f32],
+        _x_shape: &[usize],
+        _mul: &[f32],
+        _mul_shape: &[usize],
+        _eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
     pub(super) fn try_layer_norm_mul_add_f32(
         _x: &[f32],
         _x_shape: &[usize],
@@ -308,6 +346,16 @@ mod imp {
         _add: &[f32],
         _add_shape: &[usize],
         _eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_get_rows_ggml_bytes(
+        _src: &[u8],
+        _src_ggml_type: u32,
+        _n_cols: usize,
+        _n_rows: usize,
+        _row_indices: &[i32],
     ) -> Option<Vec<f32>> {
         None
     }
@@ -327,8 +375,10 @@ mod imp {
 #[cfg(target_os = "macos")]
 mod imp {
     use crate::quant::{
-        block_size, f32_to_f16, GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q4_1,
-        GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q8_0,
+        block_elements, block_size, f32_to_f16, ggml_type_name, GGML_TYPE_BF16, GGML_TYPE_F16,
+        GGML_TYPE_F32, GGML_TYPE_I32, GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, GGML_TYPE_Q4_0,
+        GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K,
+        GGML_TYPE_Q6_K, GGML_TYPE_Q8_0,
     };
     use makepad_objc_sys::runtime::{nil, ObjcId, Object, YES};
     use makepad_objc_sys::{class, msg_send, sel, sel_impl};
@@ -394,6 +444,16 @@ mod imp {
 
     const N_R0_Q8_0: i32 = 2;
     const N_SG_Q8_0: i32 = 4;
+    const N_R0_Q2_K: i32 = 4;
+    const N_SG_Q2_K: i32 = 2;
+    const N_R0_Q3_K: i32 = 2;
+    const N_SG_Q3_K: i32 = 2;
+    const N_R0_Q4_K: i32 = 2;
+    const N_SG_Q4_K: i32 = 2;
+    const N_R0_Q5_K: i32 = 1;
+    const N_SG_Q5_K: i32 = 2;
+    const N_R0_Q6_K: i32 = 2;
+    const N_SG_Q6_K: i32 = 2;
 
     const _GGML_METAL_SOURCE_RAW: &str = include_str!("ggml/ggml-metal.metal");
     const _GGML_COMMON_H: &str = include_str!("ggml/ggml-common.h");
@@ -428,11 +488,17 @@ mod imp {
     enum Src0Type {
         F32,
         F16,
+        BF16,
         Q4_0,
         Q4_1,
         Q5_0,
         Q5_1,
         Q8_0,
+        Q2_K,
+        Q3_K,
+        Q4_K,
+        Q5_K,
+        Q6_K,
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -726,6 +792,23 @@ mod imp {
 
     #[repr(C)]
     #[derive(Copy, Clone)]
+    struct KArgsGetRows {
+        ne00t: i32,
+        ne00: i32,
+        nb01: u64,
+        nb02: u64,
+        nb03: u64,
+        ne10: i32,
+        nb10: u64,
+        nb11: u64,
+        nb12: u64,
+        nb1: u64,
+        nb2: u64,
+        nb3: u64,
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
     struct KArgsIm2Col {
         ofs0: u64,
         ofs1: u64,
@@ -910,11 +993,17 @@ mod imp {
         match t {
             GGML_TYPE_F32 => Some(Src0Type::F32),
             GGML_TYPE_F16 => Some(Src0Type::F16),
+            GGML_TYPE_BF16 => Some(Src0Type::BF16),
             GGML_TYPE_Q4_0 => Some(Src0Type::Q4_0),
             GGML_TYPE_Q4_1 => Some(Src0Type::Q4_1),
             GGML_TYPE_Q5_0 => Some(Src0Type::Q5_0),
             GGML_TYPE_Q5_1 => Some(Src0Type::Q5_1),
             GGML_TYPE_Q8_0 => Some(Src0Type::Q8_0),
+            GGML_TYPE_Q2_K => Some(Src0Type::Q2_K),
+            GGML_TYPE_Q3_K => Some(Src0Type::Q3_K),
+            GGML_TYPE_Q4_K => Some(Src0Type::Q4_K),
+            GGML_TYPE_Q5_K => Some(Src0Type::Q5_K),
+            GGML_TYPE_Q6_K => Some(Src0Type::Q6_K),
             _ => None,
         }
     }
@@ -923,11 +1012,17 @@ mod imp {
         match t {
             Src0Type::F32 => "f32",
             Src0Type::F16 => "f16",
+            Src0Type::BF16 => "bf16",
             Src0Type::Q4_0 => "q4_0",
             Src0Type::Q4_1 => "q4_1",
             Src0Type::Q5_0 => "q5_0",
             Src0Type::Q5_1 => "q5_1",
             Src0Type::Q8_0 => "q8_0",
+            Src0Type::Q2_K => "q2_K",
+            Src0Type::Q3_K => "q3_K",
+            Src0Type::Q4_K => "q4_K",
+            Src0Type::Q5_K => "q5_K",
+            Src0Type::Q6_K => "q6_K",
         }
     }
 
@@ -943,23 +1038,43 @@ mod imp {
                     .ok_or_else(|| "overflow computing f16 row bytes".to_string())?,
                 2,
             )),
-            Src0Type::Q4_0 | Src0Type::Q4_1 | Src0Type::Q5_0 | Src0Type::Q5_1 | Src0Type::Q8_0 => {
-                if k % 32 != 0 {
-                    return Err(format!(
-                        "quantized kernel requires K multiple of 32, got {}",
-                        k
-                    ));
-                }
+            Src0Type::BF16 => Ok((
+                k.checked_mul(2)
+                    .ok_or_else(|| "overflow computing bf16 row bytes".to_string())?,
+                2,
+            )),
+            Src0Type::Q4_0
+            | Src0Type::Q4_1
+            | Src0Type::Q5_0
+            | Src0Type::Q5_1
+            | Src0Type::Q8_0
+            | Src0Type::Q2_K
+            | Src0Type::Q3_K
+            | Src0Type::Q4_K
+            | Src0Type::Q5_K
+            | Src0Type::Q6_K => {
                 let ggml_type = match t {
                     Src0Type::Q4_0 => GGML_TYPE_Q4_0,
                     Src0Type::Q4_1 => GGML_TYPE_Q4_1,
                     Src0Type::Q5_0 => GGML_TYPE_Q5_0,
                     Src0Type::Q5_1 => GGML_TYPE_Q5_1,
                     Src0Type::Q8_0 => GGML_TYPE_Q8_0,
+                    Src0Type::Q2_K => GGML_TYPE_Q2_K,
+                    Src0Type::Q3_K => GGML_TYPE_Q3_K,
+                    Src0Type::Q4_K => GGML_TYPE_Q4_K,
+                    Src0Type::Q5_K => GGML_TYPE_Q5_K,
+                    Src0Type::Q6_K => GGML_TYPE_Q6_K,
                     _ => unreachable!(),
                 };
+                let blck = block_elements(ggml_type);
+                if k % blck != 0 {
+                    return Err(format!(
+                        "quantized kernel requires K multiple of {}, got {}",
+                        blck, k
+                    ));
+                }
                 let bs = block_size(ggml_type);
-                let row = (k / 32)
+                let row = (k / blck)
                     .checked_mul(bs)
                     .ok_or_else(|| "overflow computing quantized row bytes".to_string())?;
                 Ok((row, bs as u64))
@@ -1177,11 +1292,17 @@ mod imp {
             src0,
             Src0Type::F32
                 | Src0Type::F16
+                | Src0Type::BF16
                 | Src0Type::Q4_0
                 | Src0Type::Q4_1
                 | Src0Type::Q5_0
                 | Src0Type::Q5_1
                 | Src0Type::Q8_0
+                | Src0Type::Q2_K
+                | Src0Type::Q3_K
+                | Src0Type::Q4_K
+                | Src0Type::Q5_K
+                | Src0Type::Q6_K
         )
     }
 
@@ -2431,7 +2552,7 @@ mod imp {
             }
 
             let (nsg, nr0, nr1, smem, suffix) = match src0 {
-                Src0Type::F32 | Src0Type::F16 => {
+                Src0Type::F32 | Src0Type::F16 | Src0Type::BF16 => {
                     if ne00 < 32 {
                         (1, 32, 1, 0usize, "_short")
                     } else {
@@ -2453,6 +2574,11 @@ mod imp {
                     32usize * std::mem::size_of::<f32>() * N_R0_Q8_0 as usize,
                     "",
                 ),
+                Src0Type::Q2_K => (N_SG_Q2_K, N_R0_Q2_K, 1, 0usize, ""),
+                Src0Type::Q3_K => (N_SG_Q3_K, N_R0_Q3_K, 1, 0usize, ""),
+                Src0Type::Q4_K => (N_SG_Q4_K, N_R0_Q4_K, 1, 0usize, ""),
+                Src0Type::Q5_K => (N_SG_Q5_K, N_R0_Q5_K, 1, 0usize, ""),
+                Src0Type::Q6_K => (N_SG_Q6_K, N_R0_Q6_K, 1, 0usize, ""),
             };
 
             let base = format!("kernel_mul_mv_{}_{}{}", src0_type_name(src0), "f32", suffix);
@@ -2508,7 +2634,10 @@ mod imp {
                     ];
                 }
 
-                let tg_x = if matches!(src0, Src0Type::F32 | Src0Type::F16 | Src0Type::Q8_0) {
+                let tg_x = if matches!(
+                    src0,
+                    Src0Type::F32 | Src0Type::F16 | Src0Type::BF16 | Src0Type::Q8_0
+                ) {
                     (ne01 + pn0 - 1) / pn0
                 } else {
                     (ne01 + pn0 * pnsg - 1) / (pn0 * pnsg)
@@ -2974,6 +3103,179 @@ mod imp {
             self.end_command_encoder(encoder_handles)
         }
 
+        #[allow(clippy::too_many_arguments)]
+        fn dispatch_rms_norm_f32(
+            &mut self,
+            src0_id: ObjcId,
+            src1_0_id: ObjcId,
+            src1_1_id: ObjcId,
+            dst_id: ObjcId,
+            src0_shape: &Shape4,
+            src1_0_shape: &Shape4,
+            src1_1_shape: &Shape4,
+            eps: f32,
+            n_fuse: i32,
+        ) -> Result<(), String> {
+            if src0_shape.ne[0] <= 0 {
+                return Err("rms_norm ne0 must be positive".to_string());
+            }
+
+            let is_c4 = src0_shape.ne[0] % 4 == 0;
+            let suffix = if is_c4 { "_4" } else { "" };
+            let base = match n_fuse {
+                1 => format!("kernel_rms_norm_f32{}", suffix),
+                2 => format!("kernel_rms_norm_mul_f32{}", suffix),
+                3 => format!("kernel_rms_norm_mul_add_f32{}", suffix),
+                _ => return Err(format!("unsupported rms_norm fuse level: {}", n_fuse)),
+            };
+
+            let (pipeline, pipeline_smem, _nr0, _nr1, _nsg) =
+                self.get_or_compile_cached_pipeline(base.clone(), &base, &[], 32 * 4, 0, 0, 0)?;
+
+            let ne00_t = if is_c4 {
+                src0_shape.ne[0] / 4
+            } else {
+                src0_shape.ne[0]
+            };
+            let args = KArgsNorm {
+                ne00: src0_shape.ne[0],
+                ne00_t,
+                nb1: src0_shape.nb[1],
+                nb2: src0_shape.nb[2],
+                nb3: src0_shape.nb[3],
+                eps,
+                nef1: [src0_shape.ne[1], src1_0_shape.ne[1], src1_1_shape.ne[1]],
+                nef2: [src0_shape.ne[2], src1_0_shape.ne[2], src1_1_shape.ne[2]],
+                nef3: [src0_shape.ne[3], src1_0_shape.ne[3], src1_1_shape.ne[3]],
+                nbf1: [src0_shape.nb[1], src1_0_shape.nb[1], src1_1_shape.nb[1]],
+                nbf2: [src0_shape.nb[2], src1_0_shape.nb[2], src1_1_shape.nb[2]],
+                nbf3: [src0_shape.nb[3], src1_0_shape.nb[3], src1_1_shape.nb[3]],
+            };
+
+            let mut nth = 32u64;
+            let nth_max = Self::pipeline_max_threads(pipeline).max(1u64);
+            while nth < args.ne00_t as u64 && nth < nth_max {
+                nth *= 2;
+            }
+            nth = std::cmp::min(nth, nth_max);
+            nth = std::cmp::min(nth, args.ne00_t.max(1) as u64);
+
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
+            unsafe {
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
+                let _: () = msg_send![
+                    encoder,
+                    setBytes: &args as *const KArgsNorm as *const c_void
+                    length: std::mem::size_of::<KArgsNorm>() as u64
+                    atIndex: 0u64
+                ];
+                let _: () = msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: src1_0_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: src1_1_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 4u64];
+                let _: () = msg_send![
+                    encoder,
+                    setThreadgroupMemoryLength: pipeline_smem as u64
+                    atIndex: 0u64
+                ];
+
+                let tgs = MTLSize {
+                    width: src0_shape.ne[1] as u64,
+                    height: src0_shape.ne[2] as u64,
+                    depth: src0_shape.ne[3] as u64,
+                };
+                let tpg = MTLSize {
+                    width: nth,
+                    height: 1,
+                    depth: 1,
+                };
+                let _: () = msg_send![
+                    encoder,
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
+            }
+
+            self.end_command_encoder(encoder_handles)
+        }
+
+        fn dispatch_get_rows_ggml(
+            &mut self,
+            src0_ggml_type: u32,
+            src0_id: ObjcId,
+            src0_shape: &Shape4,
+            src1_id: ObjcId,
+            src1_shape: &Shape4,
+            dst_id: ObjcId,
+            dst_shape: &Shape4,
+        ) -> Result<(), String> {
+            let base = format!("kernel_get_rows_{}", ggml_type_name(src0_ggml_type));
+            let (pipeline, _smem, _nr0, _nr1, _nsg) =
+                self.get_or_compile_cached_pipeline(base.clone(), &base, &[], 0, 0, 0, 0)?;
+
+            let is_quantized = !matches!(
+                src0_ggml_type,
+                GGML_TYPE_F32 | GGML_TYPE_F16 | GGML_TYPE_BF16 | GGML_TYPE_I32
+            );
+            let ne00t = if is_quantized {
+                src0_shape.ne[0] / 16
+            } else {
+                src0_shape.ne[0]
+            };
+            let args = KArgsGetRows {
+                ne00t,
+                ne00: src0_shape.ne[0],
+                nb01: src0_shape.nb[1],
+                nb02: src0_shape.nb[2],
+                nb03: src0_shape.nb[3],
+                ne10: src1_shape.ne[0],
+                nb10: src1_shape.nb[0],
+                nb11: src1_shape.nb[1],
+                nb12: src1_shape.nb[2],
+                nb1: dst_shape.nb[1],
+                nb2: dst_shape.nb[2],
+                nb3: dst_shape.nb[3],
+            };
+
+            let nth = std::cmp::min(
+                args.ne00t.max(1) as u64,
+                Self::pipeline_max_threads(pipeline).max(1),
+            );
+            let nw0 = ((args.ne00t.max(1) as u64) + nth - 1) / nth;
+
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
+            unsafe {
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
+                let _: () = msg_send![
+                    encoder,
+                    setBytes: &args as *const KArgsGetRows as *const c_void
+                    length: std::mem::size_of::<KArgsGetRows>() as u64
+                    atIndex: 0u64
+                ];
+                let _: () = msg_send![encoder, setBuffer: src0_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: src1_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+
+                let tgs = MTLSize {
+                    width: nw0 * (src1_shape.ne[0] as u64),
+                    height: src1_shape.ne[1] as u64,
+                    depth: src1_shape.ne[2] as u64,
+                };
+                let tpg = MTLSize {
+                    width: nth,
+                    height: 1,
+                    depth: 1,
+                };
+                let _: () = msg_send![
+                    encoder,
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
+            }
+
+            self.end_command_encoder(encoder_handles)
+        }
+
         fn dispatch_im2col_1d_f32(
             &mut self,
             src_id: ObjcId,
@@ -3322,8 +3624,8 @@ mod imp {
             let n_head_log2 = if n_head <= 1 {
                 1i32
             } else {
-                let p = (usize::BITS - 1) - (n_head as u32).leading_zeros();
-                (1u32 << p) as i32
+                let p = (usize::BITS - 1) - n_head.leading_zeros();
+                (1usize << p) as i32
             };
             let m0 = (2.0f32).powf(-(max_bias) / (n_head_log2 as f32));
             let m1 = (2.0f32).powf(-(max_bias / 2.0) / (n_head_log2 as f32));
@@ -3662,8 +3964,8 @@ mod imp {
             let n_head_log2 = if n_head <= 1 {
                 1i32
             } else {
-                let p = (usize::BITS - 1) - (n_head as u32).leading_zeros();
-                (1u32 << p) as i32
+                let p = (usize::BITS - 1) - n_head.leading_zeros();
+                (1usize << p) as i32
             };
             let m0 = (2.0f32).powf(-(max_bias) / (n_head_log2 as f32));
             let m1 = (2.0f32).powf(-(max_bias / 2.0) / (n_head_log2 as f32));
@@ -5118,6 +5420,113 @@ mod imp {
             self.read_f32_buffer(dst_buf.as_id(), s.numel)
         }
 
+        fn rms_norm_f32(
+            &mut self,
+            x: &[f32],
+            x_shape: &[usize],
+            eps: f32,
+        ) -> Result<Vec<f32>, String> {
+            let s = shape4_from_row_major(x_shape, 4)?;
+            if x.len() != s.numel {
+                return Err(format!(
+                    "rms_norm len mismatch: got {}, expected {}",
+                    x.len(),
+                    s.numel
+                ));
+            }
+
+            let x_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    x.as_ptr() as *const u8,
+                    x.len() * std::mem::size_of::<f32>(),
+                )
+            };
+
+            let x_buf = self.new_buffer_with_bytes(x_bytes)?;
+            let dst_buf = self.new_buffer_with_length(s.numel * std::mem::size_of::<f32>())?;
+            self.dispatch_rms_norm_f32(
+                x_buf.as_id(),
+                x_buf.as_id(),
+                x_buf.as_id(),
+                dst_buf.as_id(),
+                &s,
+                &s,
+                &s,
+                eps,
+                1,
+            )?;
+            self.read_f32_buffer(dst_buf.as_id(), s.numel)
+        }
+
+        fn rms_norm_mul_f32(
+            &mut self,
+            x: &[f32],
+            x_shape: &[usize],
+            mul: &[f32],
+            mul_shape: &[usize],
+            eps: f32,
+        ) -> Result<Vec<f32>, String> {
+            let x_s = shape4_from_row_major(x_shape, 4)?;
+            let m_s = shape4_from_row_major(mul_shape, 4)?;
+
+            if x.len() != x_s.numel {
+                return Err(format!(
+                    "rms_norm src len mismatch: got {}, expected {}",
+                    x.len(),
+                    x_s.numel
+                ));
+            }
+            if mul.len() != m_s.numel {
+                return Err(format!(
+                    "rms_norm mul len mismatch: got {}, expected {}",
+                    mul.len(),
+                    m_s.numel
+                ));
+            }
+
+            if m_s.ne[0] != x_s.ne[0] {
+                return Err(format!(
+                    "rms_norm fuse ne0 mismatch: x={} mul={}",
+                    x_s.ne[0], m_s.ne[0]
+                ));
+            }
+            for d in 1..4 {
+                if m_s.ne[d] != 1 && m_s.ne[d] != x_s.ne[d] {
+                    return Err("rms_norm fuse broadcast mismatch".to_string());
+                }
+            }
+
+            let x_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    x.as_ptr() as *const u8,
+                    x.len() * std::mem::size_of::<f32>(),
+                )
+            };
+            let mul_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    mul.as_ptr() as *const u8,
+                    mul.len() * std::mem::size_of::<f32>(),
+                )
+            };
+
+            let x_buf = self.new_buffer_with_bytes(x_bytes)?;
+            let mul_buf = self.new_buffer_with_bytes(mul_bytes)?;
+            let dst_buf = self.new_buffer_with_length(x_s.numel * std::mem::size_of::<f32>())?;
+
+            self.dispatch_rms_norm_f32(
+                x_buf.as_id(),
+                mul_buf.as_id(),
+                x_buf.as_id(),
+                dst_buf.as_id(),
+                &x_s,
+                &m_s,
+                &x_s,
+                eps,
+                2,
+            )?;
+            self.read_f32_buffer(dst_buf.as_id(), x_s.numel)
+        }
+
         #[allow(clippy::too_many_arguments)]
         fn norm_mul_add_f32(
             &mut self,
@@ -5205,6 +5614,66 @@ mod imp {
                 3,
             )?;
             self.read_f32_buffer(dst_buf.as_id(), x_s.numel)
+        }
+
+        fn get_rows_ggml_bytes(
+            &mut self,
+            src: &[u8],
+            src_ggml_type: u32,
+            n_cols: usize,
+            n_rows: usize,
+            row_indices: &[i32],
+        ) -> Result<Vec<f32>, String> {
+            if row_indices.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let src_ty = src0_type_from_ggml(src_ggml_type)
+                .ok_or_else(|| format!("unsupported ggml type for get_rows: {}", src_ggml_type))?;
+            let (row_bytes, elem_or_block) = src0_layout_bytes_per_row(src_ty, n_cols)?;
+            let expected_src = n_rows
+                .checked_mul(row_bytes)
+                .ok_or_else(|| "overflow computing get_rows source bytes".to_string())?;
+            if src.len() != expected_src {
+                return Err(format!(
+                    "get_rows source len mismatch: got {}, expected {}",
+                    src.len(),
+                    expected_src
+                ));
+            }
+
+            for &row in row_indices {
+                let row_ok = usize::try_from(row).ok().is_some_and(|row| row < n_rows);
+                if !row_ok {
+                    return Err(format!("get_rows row index {} is out of range {}", row, n_rows));
+                }
+            }
+
+            let src_shape = shape4_from_row_major(&[n_cols, n_rows], elem_or_block)?;
+            let idx_shape =
+                shape4_from_row_major(&[row_indices.len()], std::mem::size_of::<i32>() as u64)?;
+            let dst_shape = shape4_from_row_major(&[n_cols, row_indices.len()], 4)?;
+
+            let idx_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    row_indices.as_ptr() as *const u8,
+                    row_indices.len() * std::mem::size_of::<i32>(),
+                )
+            };
+
+            let src_buf = self.new_buffer_with_bytes(src)?;
+            let idx_buf = self.new_buffer_with_bytes(idx_bytes)?;
+            let dst_buf = self.new_buffer_with_length(dst_shape.numel * std::mem::size_of::<f32>())?;
+            self.dispatch_get_rows_ggml(
+                src_ggml_type,
+                src_buf.as_id(),
+                &src_shape,
+                idx_buf.as_id(),
+                &idx_shape,
+                dst_buf.as_id(),
+                &dst_shape,
+            )?;
+            self.read_f32_buffer(dst_buf.as_id(), dst_shape.numel)
         }
 
         fn im2col_1d_f32(
@@ -5547,11 +6016,17 @@ mod imp {
             let tag = match bt_ggml_type {
                 GGML_TYPE_F32 => 2u8,
                 GGML_TYPE_F16 => 3u8,
+                GGML_TYPE_BF16 => 9u8,
                 GGML_TYPE_Q4_0 => 4u8,
                 GGML_TYPE_Q4_1 => 5u8,
                 GGML_TYPE_Q5_0 => 6u8,
                 GGML_TYPE_Q5_1 => 7u8,
                 GGML_TYPE_Q8_0 => 8u8,
+                GGML_TYPE_Q2_K => 10u8,
+                GGML_TYPE_Q3_K => 11u8,
+                GGML_TYPE_Q4_K => 12u8,
+                GGML_TYPE_Q5_K => 13u8,
+                GGML_TYPE_Q6_K => 14u8,
                 _ => 0u8,
             };
             let (dst, mr, nr) =
@@ -5580,11 +6055,17 @@ mod imp {
             let tag = match bt_ggml_type {
                 GGML_TYPE_F32 => 2u8,
                 GGML_TYPE_F16 => 3u8,
+                GGML_TYPE_BF16 => 9u8,
                 GGML_TYPE_Q4_0 => 4u8,
                 GGML_TYPE_Q4_1 => 5u8,
                 GGML_TYPE_Q5_0 => 6u8,
                 GGML_TYPE_Q5_1 => 7u8,
                 GGML_TYPE_Q8_0 => 8u8,
+                GGML_TYPE_Q2_K => 10u8,
+                GGML_TYPE_Q3_K => 11u8,
+                GGML_TYPE_Q4_K => 12u8,
+                GGML_TYPE_Q5_K => 13u8,
+                GGML_TYPE_Q6_K => 14u8,
                 _ => 0u8,
             };
 
@@ -5797,6 +6278,20 @@ mod imp {
         with_context(|ctx| ctx.norm_f32(x, shape, eps))
     }
 
+    pub(super) fn try_rms_norm_f32(x: &[f32], shape: &[usize], eps: f32) -> Option<Vec<f32>> {
+        with_context(|ctx| ctx.rms_norm_f32(x, shape, eps))
+    }
+
+    pub(super) fn try_rms_norm_mul_f32(
+        x: &[f32],
+        x_shape: &[usize],
+        mul: &[f32],
+        mul_shape: &[usize],
+        eps: f32,
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| ctx.rms_norm_mul_f32(x, x_shape, mul, mul_shape, eps))
+    }
+
     pub(super) fn try_layer_norm_mul_add_f32(
         x: &[f32],
         x_shape: &[usize],
@@ -5807,6 +6302,16 @@ mod imp {
         eps: f32,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| ctx.norm_mul_add_f32(x, x_shape, mul, mul_shape, add, add_shape, eps))
+    }
+
+    pub(super) fn try_get_rows_ggml_bytes(
+        src: &[u8],
+        src_ggml_type: u32,
+        n_cols: usize,
+        n_rows: usize,
+        row_indices: &[i32],
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| ctx.get_rows_ggml_bytes(src, src_ggml_type, n_cols, n_rows, row_indices))
     }
 
     pub(super) fn try_im2col_1d_f32(

@@ -1,5 +1,9 @@
 use crate::error::{LlamaError, Result};
 use crate::gguf::{GgufArray, GgufFile, GgufString, GgufTensorInfo, GgufValue};
+use crate::plan::ModelExecutionPlan;
+use crate::qwen35moe::Qwen35MoeTensors;
+use crate::qwen35moe_runtime::qwen35moe_execution_plan;
+use crate::weights::GgufWeightLayout;
 use std::path::Path;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,30 +153,37 @@ impl LlamaModel {
         })
     }
 
-    pub fn validate_qwen35moe_layout(&self) -> Result<()> {
-        let config = self.require_qwen35moe()?;
+    pub fn qwen35moe_tensors(&self) -> Result<Qwen35MoeTensors> {
+        Qwen35MoeTensors::from_model(self)
+    }
 
-        let expected_last_block = config
-            .block_count
-            .checked_sub(1)
-            .ok_or_else(|| LlamaError::format("qwen35moe.block_count is zero"))?;
-        let required_tensors = [
-            "output.weight",
-            "output_norm.weight",
-            "token_embd.weight",
-            "blk.0.attn_norm.weight",
-            "blk.0.post_attention_norm.weight",
-            "blk.0.ffn_gate_exps.weight",
-        ];
+    pub fn qwen35moe_weight_layout(&self) -> Result<GgufWeightLayout> {
+        self.qwen35moe_tensors()?.weight_layout()
+    }
 
-        for name in required_tensors {
-            self.gguf.require_tensor(name)?;
+    pub fn execution_plan(&self) -> Result<ModelExecutionPlan> {
+        match self.architecture {
+            LlamaArchitecture::Qwen35Moe => qwen35moe_execution_plan(self),
+            _ => Err(LlamaError::unsupported(format!(
+                "execution plan builder is not implemented for architecture '{}'",
+                self.architecture.name()
+            ))),
         }
+    }
 
-        let last_dense = format!("blk.{}.post_attention_norm.weight", expected_last_block);
-        self.gguf.require_tensor(&last_dense)?;
-
+    pub fn validate_layout(&self) -> Result<()> {
+        let plan = self.execution_plan()?;
+        if plan.inventory.layers.is_empty() {
+            return Err(LlamaError::format(format!(
+                "model '{}' produced an empty layer inventory",
+                self.architecture.name()
+            )));
+        }
         Ok(())
+    }
+
+    pub fn validate_qwen35moe_layout(&self) -> Result<()> {
+        self.validate_layout()
     }
 }
 

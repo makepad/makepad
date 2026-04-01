@@ -13,3 +13,7 @@ makepad-ggml = { path = "../ggml" }
 [[bin]]
 name = "llama-load"
 path = "src/bin/llama_load.rs"
+
+[[bin]]
+name = "llama-compare"
+path = "src/bin/llama_compare.rs"

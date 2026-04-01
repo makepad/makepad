@@ -1,6 +1,8 @@
-use super::{flat_head_forward, flat_head_right, hand_closed_fist_contact_point_geometry_only};
+use super::{
+    arm_pair_metrics, flat_head_forward, hand_closed_fist_contact_point_geometry_only,
+};
 use crate::prelude::*;
-use makepad_widgets::event::{XrFingerFistDebug, XrSyncAnchor};
+use makepad_widgets::event::{XrSyncAnchor, XrSyncAnchorExtrema};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{mpsc::TryRecvError, Arc, Mutex},
@@ -50,12 +52,45 @@ struct LocalSharedHandState {
     gripping: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TimedRemoteSyncAnchor {
+    sync: XrSyncAnchor,
+    first_seen_at_local_time: f64,
+    last_seen_at_local_time: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimedLocalSyncAnchor {
+    sync: XrSyncAnchor,
+    last_seen_at_local_time: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct XrSyncAnchorAccumulator {
+    sum_left: Vec3f,
+    sum_right: Vec3f,
+    sample_count: u32,
+}
+
+impl XrSyncAnchorAccumulator {
+    fn push(&mut self, anchor: XrAnchor) -> XrAnchor {
+        self.sum_left += anchor.left;
+        self.sum_right += anchor.right;
+        self.sample_count = self.sample_count.saturating_add(1);
+        XrAnchor {
+            left: self.sum_left / self.sample_count as f32,
+            right: self.sum_right / self.sample_count as f32,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct RemotePeerState {
     peer: XrNetPeer,
     latest_state: Option<XrNetStateFrame>,
     last_state_received_at: f64,
     last_sync_anchor_seen_at: Option<f64>,
+    recent_sync_anchors: VecDeque<TimedRemoteSyncAnchor>,
     last_fist_hold_anchor: Option<XrAnchor>,
     last_fist_hold_seen_at: Option<f64>,
     remote_activity_pose: Option<Pose>,
@@ -83,6 +118,7 @@ impl RemotePeerState {
             latest_state: None,
             last_state_received_at: 0.0,
             last_sync_anchor_seen_at: None,
+            recent_sync_anchors: VecDeque::new(),
             last_fist_hold_anchor: None,
             last_fist_hold_seen_at: None,
             remote_activity_pose: None,
@@ -827,6 +863,13 @@ fn bool_digit(value: bool) -> char {
     }
 }
 
+fn sync_extrema_label(extrema: XrSyncAnchorExtrema) -> &'static str {
+    match extrema {
+        XrSyncAnchorExtrema::Low => "low",
+        XrSyncAnchorExtrema::High => "high",
+    }
+}
+
 fn option_f32_text(value: Option<f32>, decimals: usize) -> String {
     value
         .map(|value| format!("{value:.decimals$}"))
@@ -843,42 +886,52 @@ fn finger_name(index: usize) -> &'static str {
     }
 }
 
-fn finger_pass_bits_text(fingers: &[XrFingerFistDebug; 4]) -> String {
+fn finger_pass_bits_text(fingers: &[Option<f32>; 4]) -> String {
     fingers
         .iter()
-        .map(|finger| bool_digit(finger.passes))
+        .map(|finger| {
+            bool_digit(finger.is_some_and(|bend| bend <= XrHand::OPEN_MAX_FINGER_BEND_DEGREES))
+        })
         .collect()
 }
 
-fn finger_bends_text(fingers: &[XrFingerFistDebug; 4]) -> String {
+fn finger_bends_text(fingers: &[Option<f32>; 4]) -> String {
     fingers
         .iter()
-        .map(|finger| option_f32_text(finger.bend_degrees, 0))
+        .map(|finger| option_f32_text(*finger, 0))
         .collect::<Vec<_>>()
         .join("/")
 }
 
-fn finger_extensions_text(fingers: &[XrFingerFistDebug; 4]) -> String {
-    fingers
+fn average_bend_text(fingers: &[Option<f32>; 4]) -> String {
+    let bends = fingers
         .iter()
-        .map(|finger| option_f32_text(finger.forward_extension_ratio, 2))
-        .collect::<Vec<_>>()
-        .join("/")
+        .copied()
+        .collect::<Option<Vec<_>>>()
+        .map(|bends| bends.into_iter().sum::<f32>() / fingers.len() as f32);
+    option_f32_text(bends, 0)
 }
 
-fn fist_fail_reason(fingers: &[XrFingerFistDebug; 4]) -> String {
+fn open_fail_reason(fingers: &[Option<f32>; 4]) -> String {
     let mut reasons = Vec::new();
     for (index, finger) in fingers.iter().enumerate() {
-        if finger.bend_degrees.is_none() {
+        if finger.is_none() {
             reasons.push(format!("{}:bend?", finger_name(index)));
-        } else if !finger.bend_ok {
+        } else if finger.is_some_and(|bend| bend > XrHand::OPEN_MAX_FINGER_BEND_DEGREES) {
             reasons.push(format!("{}:bend", finger_name(index)));
         }
-        if finger.forward_extension_ratio.is_none() {
-            reasons.push(format!("{}:ext?", finger_name(index)));
-        } else if !finger.extension_ok {
-            reasons.push(format!("{}:ext", finger_name(index)));
+    }
+    if let Some(average_bend) = fingers
+        .iter()
+        .copied()
+        .collect::<Option<Vec<_>>>()
+        .map(|bends| bends.into_iter().sum::<f32>() / fingers.len() as f32)
+    {
+        if average_bend > XrHand::OPEN_MAX_AVERAGE_FINGER_BEND_DEGREES {
+            reasons.push("avg".to_string());
         }
+    } else {
+        reasons.push("avg?".to_string());
     }
     if reasons.is_empty() {
         "ok".to_string()
@@ -1157,6 +1210,10 @@ struct XrPeerSyncLocalState {
     anchor: Option<XrAnchor>,
     anchor_override: Option<XrAnchor>,
     sync_anchor: Option<XrSyncAnchor>,
+    last_sync_anchor_seen_at: Option<f64>,
+    recent_sync_anchors: VecDeque<TimedLocalSyncAnchor>,
+    sync_anchor_accumulator: Option<XrSyncAnchorAccumulator>,
+    last_sync_match_at: Option<f64>,
     fist_hold_anchor: Option<XrAnchor>,
     last_fist_hold_seen_at: Option<f64>,
     previous_xr_state: Option<XrState>,
@@ -1170,13 +1227,59 @@ struct XrPeerSyncLocalState {
 }
 
 impl XrPeerSyncLocalState {
+    fn record_sync_anchor(&mut self, sync_anchor: XrSyncAnchor) {
+        self.last_sync_anchor_seen_at = Some(self.state_time);
+        if let Some(recent) = self
+            .recent_sync_anchors
+            .back_mut()
+            .filter(|recent| recent.sync.id == sync_anchor.id)
+        {
+            recent.last_seen_at_local_time = self.state_time;
+            return;
+        }
+        self.recent_sync_anchors.push_back(TimedLocalSyncAnchor {
+            sync: sync_anchor,
+            last_seen_at_local_time: self.state_time,
+        });
+    }
+
+    fn prune_recent_sync_anchors(&mut self) {
+        while self.recent_sync_anchors.front().is_some_and(|sync| {
+            self.state_time - sync.last_seen_at_local_time > XrPeerSync::SYNC_SAMPLE_HISTORY_SECONDS
+        }) {
+            self.recent_sync_anchors.pop_front();
+        }
+    }
+
+    fn record_matched_sync_anchor(&mut self, anchor: XrAnchor, now: f64) -> XrAnchor {
+        if self
+            .last_sync_match_at
+            .is_some_and(|last| now - last > XrPeerSync::SYNC_SAMPLE_SESSION_RESET_SECONDS)
+        {
+            self.sync_anchor_accumulator = None;
+        }
+        let mut accumulator = self.sync_anchor_accumulator.unwrap_or_default();
+        let averaged_anchor = accumulator.push(anchor);
+        self.sync_anchor_accumulator = Some(accumulator);
+        self.last_sync_match_at = Some(now);
+        averaged_anchor
+    }
+
+    fn matched_sync_sample_count(&self) -> u32 {
+        self.sync_anchor_accumulator
+            .map(|accumulator| accumulator.sample_count)
+            .unwrap_or(0)
+    }
+
     fn effective_anchor(&self) -> Option<XrAnchor> {
         self.anchor_override.or(self.anchor)
     }
 
     fn active_sync_anchor(&self) -> Option<XrSyncAnchor> {
-        self.sync_anchor.filter(|sync| {
-            self.state_time - sync.captured_at <= XrPeerSync::SYNC_MATCH_ACTIVE_WINDOW_SECONDS
+        self.sync_anchor.filter(|_| {
+            self.last_sync_anchor_seen_at.is_some_and(|seen_at| {
+                self.state_time - seen_at <= XrPeerSync::SYNC_MATCH_ACTIVE_WINDOW_SECONDS
+            })
         })
     }
 
@@ -1343,7 +1446,8 @@ impl XrPeerSyncMetrics {
 #[derive(Default)]
 struct XrPeerRegistry {
     peers: HashMap<XrNetPeerId, RemotePeerState>,
-    accepted_sync_ids: HashMap<XrNetPeerId, (u32, u32)>,
+    accepted_local_sync_ids: HashMap<u32, f64>,
+    accepted_remote_sync_ids: HashMap<(XrNetPeerId, u32), f64>,
 }
 
 impl XrPeerRegistry {
@@ -1390,7 +1494,8 @@ impl XrPeerRegistry {
 
     fn track_leave(&mut self, peer_id: XrNetPeerId) {
         self.peers.remove(&peer_id);
-        self.accepted_sync_ids.remove(&peer_id);
+        self.accepted_remote_sync_ids
+            .retain(|(accepted_peer_id, _), _| *accepted_peer_id != peer_id);
     }
 
     fn clear_remote_activity_poses(&mut self) {
@@ -1408,7 +1513,22 @@ impl XrPeerRegistry {
         let fresh_fist_hold_anchor = XrPeerSync::state_fist_ack_anchor(&frame.state);
         peer_state.peer = peer;
         peer_state.last_state_received_at = local_state_time;
-        peer_state.last_sync_anchor_seen_at = frame.state.sync_anchor.map(|_| local_state_time);
+        if let Some(sync_anchor) = frame.state.sync_anchor {
+            peer_state.last_sync_anchor_seen_at = Some(local_state_time);
+            if let Some(recent_sync) = peer_state
+                .recent_sync_anchors
+                .back_mut()
+                .filter(|recent_sync| recent_sync.sync.id == sync_anchor.id)
+            {
+                recent_sync.last_seen_at_local_time = local_state_time;
+            } else {
+                peer_state.recent_sync_anchors.push_back(TimedRemoteSyncAnchor {
+                    sync: sync_anchor,
+                    first_seen_at_local_time: local_state_time,
+                    last_seen_at_local_time: local_state_time,
+                });
+            }
+        }
         if let Some(anchor) = fresh_fist_hold_anchor {
             peer_state.last_fist_hold_anchor = Some(anchor);
             peer_state.last_fist_hold_seen_at = Some(local_state_time);
@@ -1417,6 +1537,13 @@ impl XrPeerRegistry {
         }) {
             peer_state.last_fist_hold_anchor = None;
             peer_state.last_fist_hold_seen_at = None;
+            peer_state.recent_sync_anchors.clear();
+        }
+        while peer_state.recent_sync_anchors.front().is_some_and(|recent_sync| {
+            local_state_time - recent_sync.last_seen_at_local_time
+                > XrPeerSync::SYNC_SAMPLE_HISTORY_SECONDS
+        }) {
+            peer_state.recent_sync_anchors.pop_front();
         }
         peer_state.latest_state = Some(frame);
     }
@@ -1454,61 +1581,110 @@ impl XrPeerRegistry {
         }
     }
 
+    fn prune_accepted_sync_ids(&mut self, now: f64) {
+        self.accepted_local_sync_ids.retain(|_, accepted_at| {
+            now - *accepted_at <= XrPeerSync::SYNC_SAMPLE_HISTORY_SECONDS
+        });
+        self.accepted_remote_sync_ids.retain(|_, accepted_at| {
+            now - *accepted_at <= XrPeerSync::SYNC_SAMPLE_HISTORY_SECONDS
+        });
+    }
+
+    fn translated_remote_sync_time(
+        peer_state: &RemotePeerState,
+        remote_sync: &TimedRemoteSyncAnchor,
+    ) -> f64 {
+        peer_state
+            .clock_offset_seconds
+            .map(|clock_offset| remote_sync.sync.captured_at - clock_offset)
+            .unwrap_or(remote_sync.first_seen_at_local_time)
+    }
+
+    fn best_sync_match(
+        peer_id: XrNetPeerId,
+        peer_state: &RemotePeerState,
+        accepted_local_sync_ids: &HashMap<u32, f64>,
+        accepted_remote_sync_ids: &HashMap<(XrNetPeerId, u32), f64>,
+        local: &XrPeerSyncLocalState,
+        now: f64,
+    ) -> Option<(XrSyncAnchor, TimedRemoteSyncAnchor)> {
+        if !XrPeerSync::remote_state_is_recent(peer_state, now)
+            || local.fist_hold_anchor.is_none()
+            || XrPeerSync::recent_remote_fist_hold_anchor(peer_state, now).is_none()
+        {
+            return None;
+        }
+
+        let mut best_match = None;
+        let mut best_dt = f64::MAX;
+        for local_sync in local.recent_sync_anchors.iter().rev() {
+            if accepted_local_sync_ids.contains_key(&local_sync.sync.id) {
+                continue;
+            }
+            for remote_sync in peer_state.recent_sync_anchors.iter().rev() {
+                if accepted_remote_sync_ids.contains_key(&(peer_id, remote_sync.sync.id))
+                    // Box-sync extrema are based on the left/right vertical split.
+                    // The remote anchor is mirrored before use, so a matching
+                    // physical pose arrives with the opposite extrema polarity.
+                    || local_sync.sync.extrema == remote_sync.sync.extrema
+                {
+                    continue;
+                }
+                let remote_sync_local_time =
+                    Self::translated_remote_sync_time(peer_state, remote_sync);
+                let dt = (local_sync.sync.captured_at - remote_sync_local_time).abs();
+                if dt > XrPeerSync::SYNC_SAMPLE_PAIR_WINDOW_SECONDS || dt >= best_dt {
+                    continue;
+                }
+                best_match = Some((local_sync.sync, *remote_sync));
+                best_dt = dt;
+            }
+        }
+        best_match
+    }
+
     fn refresh_transforms(
         &mut self,
         cx: &mut Cx,
-        local_anchor: Option<XrAnchor>,
-        local_sync_anchor: Option<XrSyncAnchor>,
-        local_fist_hold_anchor: Option<XrAnchor>,
-        local_anchor_override: &mut Option<XrAnchor>,
+        local: &mut XrPeerSyncLocalState,
         recent_anchor_confirmation: &mut Option<XrRecentAnchorConfirmation>,
         now: f64,
     ) -> bool {
         let mut changed = false;
+        self.prune_accepted_sync_ids(now);
 
         for (peer_id, peer_state) in self.peers.iter_mut() {
             peer_state.anchor_remote_to_local = None;
-            let remote_sync_anchor = XrPeerSync::recent_remote_sync_anchor(peer_state, now);
-            let remote_fist_hold_anchor = XrPeerSync::recent_remote_fist_hold_anchor(peer_state, now);
-
-            if peer_state.latest_state.is_some() {
-                if let Some(local_sync_anchor) = local_sync_anchor {
-                    if let Some(remote_anchor) = remote_sync_anchor
-                        .map(|sync| (sync.anchor, sync.id))
-                        .or_else(|| remote_fist_hold_anchor.map(|anchor| (anchor, u32::MAX)))
-                    {
-                        let sync_ids = (local_sync_anchor.id, remote_anchor.1);
-                        if self.accepted_sync_ids.get(peer_id) != Some(&sync_ids) {
-                            self.accepted_sync_ids.insert(*peer_id, sync_ids);
-                            *local_anchor_override = None;
-                            cx.xr_set_local_anchor(local_sync_anchor.anchor);
-                            *recent_anchor_confirmation = Some(XrRecentAnchorConfirmation {
-                                anchor: local_sync_anchor.anchor,
-                                visible_until: now + XrPeerSync::ANCHOR_CONFIRMATION_SECONDS,
-                            });
-                            changed = true;
-                        }
-                    }
-                } else if let (Some(local_fist_hold_anchor), Some(remote_sync_anchor)) =
-                    (local_fist_hold_anchor, remote_sync_anchor)
-                {
-                    let sync_ids = (u32::MAX, remote_sync_anchor.id);
-                    if self.accepted_sync_ids.get(peer_id) != Some(&sync_ids) {
-                        self.accepted_sync_ids.insert(*peer_id, sync_ids);
-                        *local_anchor_override = None;
-                        cx.xr_set_local_anchor(local_fist_hold_anchor);
-                        *recent_anchor_confirmation = Some(XrRecentAnchorConfirmation {
-                            anchor: local_fist_hold_anchor,
-                            visible_until: now + XrPeerSync::ANCHOR_CONFIRMATION_SECONDS,
-                        });
-                        changed = true;
-                    }
-                }
+            if let Some((local_sync_anchor, remote_sync_anchor)) = {
+                let accepted_local_sync_ids = &self.accepted_local_sync_ids;
+                let accepted_remote_sync_ids = &self.accepted_remote_sync_ids;
+                Self::best_sync_match(
+                    *peer_id,
+                    peer_state,
+                    accepted_local_sync_ids,
+                    accepted_remote_sync_ids,
+                    local,
+                    now,
+                )
+            } {
+                self.accepted_local_sync_ids
+                    .insert(local_sync_anchor.id, now);
+                self.accepted_remote_sync_ids
+                    .insert((*peer_id, remote_sync_anchor.sync.id), now);
+                let averaged_anchor = local.record_matched_sync_anchor(local_sync_anchor.anchor, now);
+                local.anchor_override = Some(averaged_anchor);
+                cx.xr_set_local_anchor(averaged_anchor);
+                *recent_anchor_confirmation = Some(XrRecentAnchorConfirmation {
+                    anchor: averaged_anchor,
+                    visible_until: now + XrPeerSync::ANCHOR_CONFIRMATION_SECONDS,
+                });
+                changed = true;
             }
 
             if peer_state.anchor_remote_to_local.is_none() {
+                let effective_local_anchor = local.effective_anchor();
                 if let (Some(local_anchor), Some(state_frame)) =
-                    (local_anchor, peer_state.latest_state.as_ref())
+                    (effective_local_anchor, peer_state.latest_state.as_ref())
                 {
                     if let Some(remote_anchor) = state_frame.state.anchor {
                         peer_state.anchor_remote_to_local =
@@ -1713,7 +1889,11 @@ impl XrPeerSync {
     const REMOTE_HAND_JOINT_SIZE: f32 = 0.016;
     const ANCHOR_MARKER_SIZE: f32 = 0.060;
     const ANCHOR_CONFIRMATION_SECONDS: f64 = 2.0;
+    const LOCAL_SYNC_SAMPLE_PREVIEW_SECONDS: f64 = 1.0;
     const SYNC_MATCH_RECEIVE_WINDOW_SECONDS: f64 = 0.45;
+    const SYNC_SAMPLE_PAIR_WINDOW_SECONDS: f64 = 0.10;
+    const SYNC_SAMPLE_HISTORY_SECONDS: f64 = 1.5;
+    const SYNC_SAMPLE_SESSION_RESET_SECONDS: f64 = 1.0;
     // Fraction of heightmap cells that must change by at least 5 cm before we republish.
     const DESCRIPTOR_SEND_MIN_CHANGE_PERCENT: f32 = 4.0;
     const SYNC_MATCH_ACTIVE_WINDOW_SECONDS: f64 = 1.35;
@@ -1724,6 +1904,7 @@ impl XrPeerSync {
     const FIST_ACK_MAX_HAND_GAP_METERS: f32 = 0.78;
     const FIST_ACK_MIN_CHEST_DISTANCE_METERS: f32 = 0.10;
     const FIST_ACK_MAX_CHEST_DISTANCE_METERS: f32 = 1.05;
+    const FIST_ACK_MAX_ARM_ELEVATION_DEGREES: f32 = 60.0;
     const DESCRIPTOR_MAX_HEIGHT_METERS: f32 = 2.00;
     const DESCRIPTOR_MIN_HEIGHT_METERS: f32 = 0.08;
     const DESCRIPTOR_CELL_FOOTPRINT: f32 = 0.62;
@@ -1851,10 +2032,11 @@ impl XrPeerSync {
         if !self.enabled {
             return "Touch sync: off".to_string();
         }
-        if self.auto_alignment_enabled {
+        let manual_status = self.manual_touch_sync_status_text();
+        if self.auto_alignment_enabled && manual_status == "Touch sync: idle" {
             return "Touch sync: auto align on".to_string();
         }
-        self.manual_touch_sync_status_text()
+        manual_status
     }
 
     pub fn local_touch_signal_text(&self) -> String {
@@ -1864,42 +2046,72 @@ impl XrPeerSync {
         let Some(state) = self.runtime.local.latest_xr_state.as_ref() else {
             return "TouchRaw: waiting for local XR".to_string();
         };
+        Self::touch_signal_text_for_state("TouchRaw", "TouchLF", "TouchRF", state)
+    }
+
+    pub fn remote_touch_signal_text(&self) -> String {
+        if !self.enabled {
+            return "TouchPeer: off".to_string();
+        }
+        let Some((peer_id, peer_state)) = self.runtime.registry.preferred_peer() else {
+            return "TouchPeer: waiting for peer".to_string();
+        };
+        let Some(state_frame) = peer_state.latest_state.as_ref() else {
+            return format!("TouchPeer {:08x}: waiting for peer XR", peer_id.0);
+        };
+        Self::touch_signal_text_for_state(
+            &format!("TouchPeer {:08x}", peer_id.0),
+            "TouchPLF",
+            "TouchPRF",
+            &state_frame.state,
+        )
+    }
+
+    fn touch_signal_text_for_state(
+        header_label: &str,
+        left_label: &str,
+        right_label: &str,
+        state: &XrState,
+    ) -> String {
         let left_fingers = [
-            state.left_hand.finger_fist_debug(XrHand::INDEX_TIP),
-            state.left_hand.finger_fist_debug(XrHand::MIDDLE_TIP),
-            state.left_hand.finger_fist_debug(XrHand::RING_TIP),
-            state.left_hand.finger_fist_debug(XrHand::LITTLE_TIP),
+            state.left_hand.finger_bend_degrees(XrHand::INDEX_TIP),
+            state.left_hand.finger_bend_degrees(XrHand::MIDDLE_TIP),
+            state.left_hand.finger_bend_degrees(XrHand::RING_TIP),
+            state.left_hand.finger_bend_degrees(XrHand::LITTLE_TIP),
         ];
         let right_fingers = [
-            state.right_hand.finger_fist_debug(XrHand::INDEX_TIP),
-            state.right_hand.finger_fist_debug(XrHand::MIDDLE_TIP),
-            state.right_hand.finger_fist_debug(XrHand::RING_TIP),
-            state.right_hand.finger_fist_debug(XrHand::LITTLE_TIP),
+            state.right_hand.finger_bend_degrees(XrHand::INDEX_TIP),
+            state.right_hand.finger_bend_degrees(XrHand::MIDDLE_TIP),
+            state.right_hand.finger_bend_degrees(XrHand::RING_TIP),
+            state.right_hand.finger_bend_degrees(XrHand::LITTLE_TIP),
         ];
-        let left_fist = state.left_hand.is_fist();
-        let right_fist = state.right_hand.is_fist();
-        let left_down = state.left_hand.is_palm_down(true);
-        let right_down = state.right_hand.is_palm_down(false);
+        let left_open = state.left_hand.is_open();
+        let right_open = state.right_hand.is_open();
+        let left_up = state.left_hand.is_upright_for_box_sync();
+        let right_up = state.right_hand.is_upright_for_box_sync();
         let arms_out = Self::state_arm_corridor_ready(state);
-        let left_pose_ready = left_fist && left_down;
-        let right_pose_ready = right_fist && right_down;
+        let left_pose_ready = left_open && left_up;
+        let right_pose_ready = right_open && right_up;
         let ready = left_pose_ready && right_pose_ready && arms_out;
         format!(
-            "TouchRaw: fist L{} R{} | down L{} R{} | arms {} | ready {}\nTouchLF: pass {} | bend {} | ext {} | why {}\nTouchRF: pass {} | bend {} | ext {} | why {}",
-            bool_digit(left_fist),
-            bool_digit(right_fist),
-            bool_digit(left_down),
-            bool_digit(right_down),
+            "{}: open L{} R{} | up L{} R{} | arms {} | ready {}\n{}: pass {} | bend {} | avg {} | why {}\n{}: pass {} | bend {} | avg {} | why {}",
+            header_label,
+            bool_digit(left_open),
+            bool_digit(right_open),
+            bool_digit(left_up),
+            bool_digit(right_up),
             bool_digit(arms_out),
             bool_digit(ready),
+            left_label,
             finger_pass_bits_text(&left_fingers),
             finger_bends_text(&left_fingers),
-            finger_extensions_text(&left_fingers),
-            fist_fail_reason(&left_fingers),
+            average_bend_text(&left_fingers),
+            open_fail_reason(&left_fingers),
+            right_label,
             finger_pass_bits_text(&right_fingers),
             finger_bends_text(&right_fingers),
-            finger_extensions_text(&right_fingers),
-            fist_fail_reason(&right_fingers),
+            average_bend_text(&right_fingers),
+            open_fail_reason(&right_fingers),
         )
     }
 
@@ -2274,11 +2486,34 @@ impl XrPeerSync {
         let Some(activity_id) = self.runtime.shared_objects.activity_id() else {
             return 0;
         };
+        let Some(local_node_id) = self.runtime.net_node.as_ref().map(|node| node.node_id()) else {
+            return 0;
+        };
         let mut controls = Vec::new();
-        for (_, widget_uid) in self.runtime.shared_objects.bootstrap_shared_candidates() {
+        for (spawnable_object_id, widget_uid) in
+            self.runtime.shared_objects.bootstrap_shared_candidates()
+        {
             let Some(body) = runtime_bodies.get(&widget_uid) else {
                 continue;
             };
+            let has_local_object = self
+                .runtime
+                .shared_objects
+                .resolve_local_shared_object_for_widget(widget_uid)
+                .is_some();
+            if self
+                .runtime
+                .shared_objects
+                .resolve_remote_shared_object_for_widget(widget_uid)
+                .is_some()
+            {
+                continue;
+            }
+            if !has_local_object
+                && self.bootstrap_owner_peer_id(spawnable_object_id) != Some(local_node_id)
+            {
+                continue;
+            }
             let Some(allocation) = self.runtime.shared_objects.force_local_shared_object_reset(
                 activity_id,
                 widget_uid,
@@ -2496,6 +2731,10 @@ impl XrPeerSync {
         }
         self.runtime.local.anchor = state.anchor;
         self.runtime.local.sync_anchor = state.sync_anchor;
+        if let Some(sync_anchor) = state.sync_anchor {
+            self.runtime.local.record_sync_anchor(sync_anchor);
+        }
+        self.runtime.local.prune_recent_sync_anchors();
         let fresh_fist_hold_anchor = Self::state_fist_ack_anchor(state);
         if let Some(anchor) = fresh_fist_hold_anchor {
             self.runtime.local.fist_hold_anchor = Some(anchor);
@@ -2508,6 +2747,8 @@ impl XrPeerSync {
         {
             self.runtime.local.fist_hold_anchor = None;
             self.runtime.local.last_fist_hold_seen_at = None;
+            self.runtime.local.sync_anchor_accumulator = None;
+            self.runtime.local.last_sync_match_at = None;
         }
         self.runtime.local.previous_xr_state = self.runtime.local.latest_xr_state.take();
         self.runtime.local.latest_xr_state = Some(state.clone());
@@ -2818,7 +3059,7 @@ impl XrPeerSync {
         self.runtime
             .local
             .active_sync_anchor()
-            .map(|sync| format!("armed {}", sync.id))
+            .map(|sync| format!("armed {} {}", sync_extrema_label(sync.extrema), sync.id))
             .unwrap_or_else(|| "idle".to_string())
     }
 
@@ -2873,15 +3114,12 @@ impl XrPeerSync {
             return None;
         }
         peer_state
-            .latest_state
-            .as_ref()?
-            .state
-            .sync_anchor
-            .filter(|_| {
-                peer_state
-                    .last_sync_anchor_seen_at
-                    .is_some_and(|seen_at| now - seen_at <= Self::SYNC_MATCH_RECEIVE_WINDOW_SECONDS)
+            .recent_sync_anchors
+            .back()
+            .filter(|recent_sync| {
+                now - recent_sync.last_seen_at_local_time <= Self::SYNC_MATCH_RECEIVE_WINDOW_SECONDS
             })
+            .map(|recent_sync| recent_sync.sync)
     }
 
     fn recent_remote_fist_hold_anchor(peer_state: &RemotePeerState, now: f64) -> Option<XrAnchor> {
@@ -2898,11 +3136,14 @@ impl XrPeerSync {
     fn manual_touch_sync_status_text(&self) -> String {
         let local_sync_pending = self.runtime.local.active_sync_anchor().is_some();
         let local_fists_ready = self.runtime.local.fist_hold_anchor.is_some();
+        let matched_sample_count = self.runtime.local.matched_sync_sample_count();
         let Some((_, peer_state)) = self.runtime.registry.preferred_peer() else {
             return if local_sync_pending {
-                "Touch sync: fistbump pending".to_string()
+                "Touch sync: box sample armed".to_string()
             } else if local_fists_ready {
-                "Touch sync: hold both fists".to_string()
+                "Touch sync: hold both hands open".to_string()
+            } else if matched_sample_count != 0 {
+                format!("Touch sync: stored {matched_sample_count} samples")
             } else {
                 "Touch sync: idle".to_string()
             };
@@ -2925,16 +3166,16 @@ impl XrPeerSync {
             };
         }
         if local_sync_pending || remote_sync_pending {
-            return "Touch sync: fistbump pending".to_string();
+            return format!("Touch sync: box sampling {matched_sample_count}");
         }
         if local_fists_ready && remote_fists_ready {
             return "Touch sync: both players ready".to_string();
         }
         if remote_fists_ready {
-            return "Touch sync: remote fists ready".to_string();
+            return "Touch sync: remote open hands ready".to_string();
         }
         if local_fists_ready {
-            return "Touch sync: hold both fists".to_string();
+            return "Touch sync: hold both hands open".to_string();
         }
         "Touch sync: idle".to_string()
     }
@@ -2955,7 +3196,7 @@ impl XrPeerSync {
             .map(|_| "yes")
             .unwrap_or("no");
         let sync_text = Self::recent_remote_sync_anchor(&peer_state, self.runtime.local.state_time)
-            .map(|sync| format!("yes {}", sync.id))
+            .map(|sync| format!("yes {} {}", sync_extrema_label(sync.extrema), sync.id))
             .unwrap_or_else(|| "no".to_string());
         format!(
             "PeerScene {:08x}: state {} | anchor {} | sync {} | pose {}",
@@ -2988,15 +3229,16 @@ impl XrPeerSync {
             .unwrap_or("no");
         let remote_sync_text =
             Self::recent_remote_sync_anchor(&peer_state, self.runtime.local.state_time)
-                .map(|sync| format!("armed {}", sync.id))
+                .map(|sync| format!("armed {} {}", sync_extrema_label(sync.extrema), sync.id))
                 .unwrap_or_else(|| "idle".to_string());
         format!(
-            "AlignState {:08x}: local anchor {} | local sync {} | remote anchor {} | remote sync {} | pose {}",
+            "AlignState {:08x}: local anchor {} | local sync {} | remote anchor {} | remote sync {} | samples {} | pose {}",
             peer_id.0,
             local_anchor_text,
             local_sync_text,
             remote_anchor_text,
             remote_sync_text,
+            self.runtime.local.matched_sync_sample_count(),
             transform_source_label(peer_state.transform_source),
         )
     }
@@ -3007,10 +3249,11 @@ impl XrPeerSync {
         let Some((peer_id, peer_state)) = self.runtime.registry.preferred_peer() else {
             return match (local_sync, local_fist_hold) {
                 (Some(sync), _) => format!(
-                    "AlignDbg: fistbump pending | local bump {} | waiting for peer touch",
+                    "AlignDbg: box sample {} {} armed | waiting for peer sample",
+                    sync_extrema_label(sync.extrema),
                     sync.id
                 ),
-                (None, Some(_)) => "AlignDbg: local double-fists ready".to_string(),
+                (None, Some(_)) => "AlignDbg: local double-open-hands ready".to_string(),
                 _ => "AlignDbg: manual sync idle".to_string(),
             };
         };
@@ -3023,11 +3266,18 @@ impl XrPeerSync {
             {
                 if let Some(sync) = local_sync {
                     return format!(
-                        "AlignDbg {:08x}: sync matched local {} -> local anchor requested",
-                        peer_id.0, sync.id
+                        "AlignDbg {:08x}: matched {} {} -> averaged anchor applied ({} samples)",
+                        peer_id.0,
+                        sync_extrema_label(sync.extrema),
+                        sync.id,
+                        self.runtime.local.matched_sync_sample_count()
                     );
                 }
-                return format!("AlignDbg {:08x}: manual local anchor requested", peer_id.0);
+                return format!(
+                    "AlignDbg {:08x}: averaged anchor active ({} samples)",
+                    peer_id.0,
+                    self.runtime.local.matched_sync_sample_count()
+                );
             }
             if peer_state
                 .latest_state
@@ -3038,32 +3288,38 @@ impl XrPeerSync {
             }
             if let Some(sync) = local_sync {
                 return format!(
-                    "AlignDbg {:08x}: sync matched local {} -> persistent anchor requested",
-                    peer_id.0, sync.id
+                    "AlignDbg {:08x}: matched {} {} -> persistent anchor requested",
+                    peer_id.0,
+                    sync_extrema_label(sync.extrema),
+                    sync.id
                 );
             }
             return format!("AlignDbg {:08x}: anchor transform active", peer_id.0);
         }
         if let Some(sync) = remote_sync {
             return format!(
-                "AlignDbg {:08x}: fistbump pending | remote bump {} seen | hold both fists or perform local bump",
-                peer_id.0, sync.id
+                "AlignDbg {:08x}: remote {} sample {} seen | match your box extrema in 100ms",
+                peer_id.0,
+                sync_extrema_label(sync.extrema),
+                sync.id
             );
         }
         if remote_fist_hold.is_some() {
             return format!(
-                "AlignDbg {:08x}: remote double-fists ready | perform local bump",
+                "AlignDbg {:08x}: remote double-open-hands ready | start box motion",
                 peer_id.0
             );
         }
         if let Some(sync) = local_sync {
             return format!(
-                "AlignDbg {:08x}: fistbump pending | local bump {} | waiting for remote sync or fists",
-                peer_id.0, sync.id
+                "AlignDbg {:08x}: local {} sample {} armed | waiting for matching remote extrema",
+                peer_id.0,
+                sync_extrema_label(sync.extrema),
+                sync.id
             );
         }
         if local_fist_hold.is_some() {
-            return format!("AlignDbg {:08x}: local double-fists ready", peer_id.0);
+            return format!("AlignDbg {:08x}: local double-open-hands ready", peer_id.0);
         }
         format!("AlignDbg {:08x}: manual sync idle", peer_id.0)
     }
@@ -3282,27 +3538,28 @@ impl XrPeerSync {
         let (Some(left_pose), Some(right_pose)) = (left_pose, right_pose) else {
             return false;
         };
-        let forward = flat_head_forward(head_pose.orientation);
-        let right = flat_head_right(head_pose.orientation);
-        let left_local = left_pose.position - head_pose.position;
-        let right_local = right_pose.position - head_pose.position;
-        let left_forward = left_local.dot(forward);
-        let right_forward = right_local.dot(forward);
-        let left_lateral = left_local.dot(right);
-        let right_lateral = right_local.dot(right);
-        let hand_gap = (right_pose.position - left_pose.position).length();
-        if left_lateral >= right_lateral
+        let Some(metrics) = arm_pair_metrics(head_pose, left_pose.position, right_pose.position)
+        else {
+            return false;
+        };
+        if metrics.left_lateral >= metrics.right_lateral
+            || metrics.hand_gap < Self::FIST_ACK_MIN_HAND_GAP_METERS
+            || metrics.hand_gap > Self::FIST_ACK_MAX_HAND_GAP_METERS
+            || metrics.left_forward < Self::FIST_ACK_MIN_CHEST_DISTANCE_METERS
+            || metrics.left_forward > Self::FIST_ACK_MAX_CHEST_DISTANCE_METERS
+            || metrics.right_forward < Self::FIST_ACK_MIN_CHEST_DISTANCE_METERS
+            || metrics.right_forward > Self::FIST_ACK_MAX_CHEST_DISTANCE_METERS
+            || metrics.left_elevation_degrees > Self::FIST_ACK_MAX_ARM_ELEVATION_DEGREES
+            || metrics.right_elevation_degrees > Self::FIST_ACK_MAX_ARM_ELEVATION_DEGREES
             || (left_pose.position.y - right_pose.position.y).abs()
-                > Self::FIST_ACK_MAX_VERTICAL_DELTA_METERS
-            || (left_forward - right_forward).abs() > Self::FIST_ACK_MAX_DEPTH_DELTA_METERS
-            || hand_gap < Self::FIST_ACK_MIN_HAND_GAP_METERS
-            || hand_gap > Self::FIST_ACK_MAX_HAND_GAP_METERS
+                > Self::FIST_ACK_MAX_VERTICAL_DELTA_METERS * 2.0
+            || (metrics.left_forward - metrics.right_forward).abs()
+                > Self::FIST_ACK_MAX_DEPTH_DELTA_METERS * 2.0
         {
             return false;
         }
-        let forward_distance = (left_forward + right_forward) * 0.5;
         (Self::FIST_ACK_MIN_CHEST_DISTANCE_METERS..=Self::FIST_ACK_MAX_CHEST_DISTANCE_METERS)
-            .contains(&forward_distance)
+            .contains(&metrics.average_forward_distance)
     }
 
     fn state_fist_ack_anchor(state: &XrState) -> Option<XrAnchor> {
@@ -3315,27 +3572,26 @@ impl XrPeerSync {
         right_hand: &XrHand,
     ) -> Option<XrAnchor> {
         let forward = flat_head_forward(head_pose.orientation);
-        let right = flat_head_right(head_pose.orientation);
         let left_point = hand_closed_fist_contact_point_geometry_only(left_hand, forward, true)?;
         let right_point = hand_closed_fist_contact_point_geometry_only(right_hand, forward, false)?;
-        let left_local = left_point - head_pose.position;
-        let right_local = right_point - head_pose.position;
-        let left_forward = left_local.dot(forward);
-        let right_forward = right_local.dot(forward);
-        let left_lateral = left_local.dot(right);
-        let right_lateral = right_local.dot(right);
-        let hand_gap = (right_point - left_point).length();
-        if left_lateral >= right_lateral
-            || (left_point.y - right_point.y).abs() > Self::FIST_ACK_MAX_VERTICAL_DELTA_METERS
-            || (left_forward - right_forward).abs() > Self::FIST_ACK_MAX_DEPTH_DELTA_METERS
-            || hand_gap < Self::FIST_ACK_MIN_HAND_GAP_METERS
-            || hand_gap > Self::FIST_ACK_MAX_HAND_GAP_METERS
+        let metrics = arm_pair_metrics(head_pose, left_point, right_point)?;
+        if metrics.left_lateral >= metrics.right_lateral
+            || metrics.hand_gap < Self::FIST_ACK_MIN_HAND_GAP_METERS
+            || metrics.hand_gap > Self::FIST_ACK_MAX_HAND_GAP_METERS
+            || metrics.left_forward < Self::FIST_ACK_MIN_CHEST_DISTANCE_METERS
+            || metrics.left_forward > Self::FIST_ACK_MAX_CHEST_DISTANCE_METERS
+            || metrics.right_forward < Self::FIST_ACK_MIN_CHEST_DISTANCE_METERS
+            || metrics.right_forward > Self::FIST_ACK_MAX_CHEST_DISTANCE_METERS
+            || metrics.left_elevation_degrees > Self::FIST_ACK_MAX_ARM_ELEVATION_DEGREES
+            || metrics.right_elevation_degrees > Self::FIST_ACK_MAX_ARM_ELEVATION_DEGREES
+            || (left_point.y - right_point.y).abs() > Self::FIST_ACK_MAX_VERTICAL_DELTA_METERS * 2.0
+            || (metrics.left_forward - metrics.right_forward).abs()
+                > Self::FIST_ACK_MAX_DEPTH_DELTA_METERS * 2.0
         {
             return None;
         }
-        let forward_distance = (left_forward + right_forward) * 0.5;
         if !(Self::FIST_ACK_MIN_CHEST_DISTANCE_METERS..=Self::FIST_ACK_MAX_CHEST_DISTANCE_METERS)
-            .contains(&forward_distance)
+            .contains(&metrics.average_forward_distance)
         {
             return None;
         }
@@ -3359,18 +3615,12 @@ impl XrPeerSync {
             }
         }
 
-        let local_anchor = self.runtime.local.effective_anchor();
-        let local_sync_anchor = self.runtime.local.active_sync_anchor();
-        let local_fist_hold_anchor = self.runtime.local.fist_hold_anchor;
         let now = self.runtime.local.state_time;
         let changed = {
             let (registry, local) = (&mut self.runtime.registry, &mut self.runtime.local);
             registry.refresh_transforms(
                 cx,
-                local_anchor,
-                local_sync_anchor,
-                local_fist_hold_anchor,
-                &mut local.anchor_override,
+                local,
                 &mut self.runtime.recent_anchor_confirmation,
                 now,
             )
@@ -3404,6 +3654,13 @@ impl XrPeerSync {
             vec3f(point.x / point.w, point.y / point.w, point.z / point.w)
         } else {
             point.to_vec3f()
+        }
+    }
+
+    fn transform_anchor(transform: &Mat4f, anchor: XrAnchor) -> XrAnchor {
+        XrAnchor {
+            left: Self::transform_point(transform, anchor.left),
+            right: Self::transform_point(transform, anchor.right),
         }
     }
 
@@ -3698,15 +3955,18 @@ impl XrPeerSync {
         previous: &XrAppliedRemoteShadowState,
         now: f64,
         peer_id: XrNetPeerId,
-        state_seq: Option<u32>,
+        _state_seq: Option<u32>,
         mode: XrSharedObjectMode,
         pose: Pose,
         linvel: Vec3f,
         angvel: Vec3f,
     ) -> bool {
-        if previous.peer_id != peer_id || previous.mode != mode || previous.state_seq != state_seq {
+        if previous.peer_id != peer_id || previous.mode != mode {
             return true;
         }
+        // Advancing authoritative seqs happen continuously during active motion.
+        // Don't force a full shadow respawn just because a fresher packet arrived;
+        // only correct when the predicted body has drifted materially.
         let expected_pose = Self::predict_pose(
             previous.pose,
             previous.linvel,
@@ -4661,27 +4921,75 @@ impl XrPeerSync {
             cx,
             world,
             confirmation.anchor,
-            Self::ANCHOR_MARKER_SIZE,
-            vec4f(1.0, 0.15, 0.10, 0.96),
-            vec4f(0.18, 0.46, 1.0, 0.96),
+            Self::ANCHOR_MARKER_SIZE * 0.5,
+            vec4f(1.0, 0.08, 0.08, 1.0),
+            vec4f(1.0, 0.08, 0.08, 1.0),
         );
     }
 
     fn draw_pending_sync_anchor_preview(&mut self, cx: &mut Cx3d, world: &Mat4f) {
-        if self.runtime.recent_anchor_confirmation.is_some() {
-            return;
+        let now = self.runtime.local.state_time;
+        let recent_local_sync_anchors: Vec<TimedLocalSyncAnchor> =
+            self.runtime.local.recent_sync_anchors.iter().copied().collect();
+        for recent_sync in recent_local_sync_anchors.iter().rev() {
+            let age = now - recent_sync.last_seen_at_local_time;
+            if !(0.0..=Self::LOCAL_SYNC_SAMPLE_PREVIEW_SECONDS).contains(&age) {
+                continue;
+            }
+            let fade = (1.0 - age as f32 / Self::LOCAL_SYNC_SAMPLE_PREVIEW_SECONDS as f32)
+                .clamp(0.18, 1.0);
+            let (left_color, right_color) = match recent_sync.sync.extrema {
+                XrSyncAnchorExtrema::High => (
+                    vec4f(1.0, 0.86, 0.44, 0.94 * fade),
+                    vec4f(0.44, 1.0, 0.90, 0.94 * fade),
+                ),
+                XrSyncAnchorExtrema::Low => (
+                    vec4f(1.0, 0.46, 0.40, 0.94 * fade),
+                    vec4f(0.40, 0.70, 1.0, 0.94 * fade),
+                ),
+            };
+            self.draw_anchor_markers(
+                cx,
+                world,
+                recent_sync.sync.anchor,
+                Self::ANCHOR_MARKER_SIZE,
+                left_color,
+                right_color,
+            );
         }
-        let Some(sync_anchor) = self.runtime.local.active_sync_anchor() else {
+
+        let Some((peer_id, peer_state)) = self.runtime.registry.preferred_peer() else {
             return;
         };
-        self.draw_anchor_markers(
-            cx,
-            world,
-            sync_anchor.anchor,
-            Self::ANCHOR_MARKER_SIZE,
-            vec4f(1.0, 0.72, 0.18, 0.88),
-            vec4f(0.18, 0.96, 0.82, 0.88),
-        );
+        let peer_transform = self.peer_remote_to_local_transform(peer_id);
+        let recent_remote_sync_anchors: Vec<TimedRemoteSyncAnchor> =
+            peer_state.recent_sync_anchors.iter().copied().collect();
+        for recent_sync in recent_remote_sync_anchors.iter().rev() {
+            let age = now - recent_sync.last_seen_at_local_time;
+            if !(0.0..=Self::LOCAL_SYNC_SAMPLE_PREVIEW_SECONDS).contains(&age) {
+                continue;
+            }
+            let fade = (1.0 - age as f32 / Self::LOCAL_SYNC_SAMPLE_PREVIEW_SECONDS as f32)
+                .clamp(0.18, 1.0);
+            let (left_color, right_color) = match recent_sync.sync.extrema {
+                XrSyncAnchorExtrema::High => (
+                    vec4f(1.0, 0.72, 0.18, 0.80 * fade),
+                    vec4f(0.18, 0.96, 0.82, 0.80 * fade),
+                ),
+                XrSyncAnchorExtrema::Low => (
+                    vec4f(1.0, 0.32, 0.26, 0.80 * fade),
+                    vec4f(0.26, 0.58, 1.0, 0.80 * fade),
+                ),
+            };
+            self.draw_anchor_markers(
+                cx,
+                world,
+                Self::transform_anchor(&peer_transform, recent_sync.sync.anchor.mirrored()),
+                Self::ANCHOR_MARKER_SIZE,
+                left_color,
+                right_color,
+            );
+        }
     }
 
     fn draw_peer_joint_cube(
@@ -5245,6 +5553,70 @@ mod tests {
         }
     }
 
+    fn make_sync_anchor(
+        id: u32,
+        captured_at: f64,
+        extrema: XrSyncAnchorExtrema,
+        anchor: XrAnchor,
+    ) -> XrSyncAnchor {
+        XrSyncAnchor {
+            id,
+            captured_at,
+            extrema,
+            anchor,
+        }
+    }
+
+    fn make_local_sync_state(
+        now: f64,
+        anchor: Option<XrAnchor>,
+        sync_anchor: Option<XrSyncAnchor>,
+        fist_hold_anchor: Option<XrAnchor>,
+    ) -> XrPeerSyncLocalState {
+        let mut local = XrPeerSyncLocalState {
+            state_time: now,
+            anchor,
+            sync_anchor,
+            fist_hold_anchor,
+            ..XrPeerSyncLocalState::default()
+        };
+        if let Some(sync_anchor) = sync_anchor {
+            local.record_sync_anchor(sync_anchor);
+        }
+        local
+    }
+
+    #[test]
+    fn local_sync_anchor_activity_uses_seen_time_not_capture_time() {
+        let sync_anchor = make_sync_anchor(
+            7,
+            10.0,
+            XrSyncAnchorExtrema::High,
+            XrAnchor {
+                left: vec3f(-0.12, 1.1, -0.4),
+                right: vec3f(0.14, 1.1, -0.4),
+            },
+        );
+        let mut local = make_local_sync_state(11.2, None, Some(sync_anchor), None);
+
+        assert_eq!(local.active_sync_anchor(), Some(sync_anchor));
+
+        local.state_time = 12.7;
+        assert_eq!(local.active_sync_anchor(), None);
+    }
+
+    fn pose(position: Vec3f) -> Pose {
+        Pose::new(Quat::default(), position)
+    }
+
+    fn make_tracking_hand(position: Vec3f) -> XrHand {
+        let mut hand = XrHand::default();
+        hand.flags = XrHand::IN_VIEW | XrHand::AIM_VALID;
+        hand.joints[XrHand::CENTER] = pose(position);
+        hand.joints[XrHand::WRIST] = pose(position + vec3f(0.0, -0.040, 0.030));
+        hand
+    }
+
     fn reference_dump_pair() -> XrNetAlignmentDescriptorDumpPair {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("dump/dumps/align-pair-226a39e4b300-r0097-1774792873191.bin");
@@ -5472,6 +5844,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn arm_corridor_allows_opposing_vertical_wiggle_within_angle_budget() {
+        let head_pose = Pose::new(Quat::default(), vec3f(0.0, 1.60, 0.0));
+        let left_hand = make_tracking_hand(vec3f(-0.18, 1.40, -0.40));
+        let right_hand = make_tracking_hand(vec3f(0.18, 1.75, -0.40));
+
+        assert!(XrPeerSync::arm_corridor_ready(
+            head_pose,
+            &left_hand,
+            &right_hand
+        ));
+    }
+
     fn make_remote_touch_anchor(local_anchor: XrAnchor, remote_to_local: Mat4f) -> XrAnchor {
         let local_to_remote = remote_to_local.invert();
         XrAnchor {
@@ -5534,17 +5919,10 @@ mod tests {
             .descriptor_remote_to_local = Some(descriptor_remote_to_local);
 
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut local_anchor_override = None;
+        let mut local = make_local_sync_state(10.1, Some(local_anchor), None, None);
         let mut recent_anchor_confirmation = None;
-        let changed = registry.refresh_transforms(
-            &mut cx,
-            Some(local_anchor),
-            None,
-            None,
-            &mut local_anchor_override,
-            &mut recent_anchor_confirmation,
-            10.1,
-        );
+        let changed =
+            registry.refresh_transforms(&mut cx, &mut local, &mut recent_anchor_confirmation, 10.1);
 
         assert!(changed);
         let peer_state = registry.peers.get(&peer.id).expect("peer state should exist");
@@ -5552,6 +5930,7 @@ mod tests {
             .anchor_remote_to_local
             .expect("persistent anchors should resolve");
         assert_touch_anchor_mapping_matches(solved_anchor, remote_anchor, local_anchor);
+        assert_eq!(local.anchor_override, None);
         let mut expected = descriptor_remote_to_local;
         expected.v[13] = solved_anchor.v[13];
         assert_eq!(peer_state.remote_to_local, Some(expected));
@@ -5583,17 +5962,10 @@ mod tests {
             .descriptor_remote_to_local = Some(descriptor_remote_to_local);
 
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut local_anchor_override = None;
+        let mut local = make_local_sync_state(10.1, None, None, None);
         let mut recent_anchor_confirmation = None;
-        let changed = registry.refresh_transforms(
-            &mut cx,
-            None,
-            None,
-            None,
-            &mut local_anchor_override,
-            &mut recent_anchor_confirmation,
-            10.1,
-        );
+        let changed =
+            registry.refresh_transforms(&mut cx, &mut local, &mut recent_anchor_confirmation, 10.1);
 
         assert!(changed);
         let peer_state = registry.peers.get(&peer.id).expect("peer state should exist");
@@ -5603,7 +5975,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_touch_sync_requests_local_anchor_without_overriding_saved_anchor_mapping() {
+    fn matched_box_sync_sample_updates_local_anchor_average_immediately() {
         let mut registry = XrPeerRegistry::default();
         let peer = make_peer(0x2a);
         let saved_local_anchor = XrAnchor {
@@ -5632,40 +6004,45 @@ mod tests {
             make_state_frame(XrState {
                 time: 1.0,
                 anchor: Some(saved_remote_anchor),
-                sync_anchor: Some(XrSyncAnchor {
-                    id: 41,
-                    captured_at: 1.0,
-                    anchor: fresh_remote_anchor,
-                }),
+                sync_anchor: Some(make_sync_anchor(
+                    41,
+                    1.0,
+                    XrSyncAnchorExtrema::Low,
+                    fresh_remote_anchor,
+                )),
                 ..XrState::default()
             }),
             10.0,
         );
+        {
+            let peer_state = registry.peers.get_mut(&peer.id).expect("peer state should exist");
+            peer_state.last_fist_hold_anchor = Some(fresh_remote_anchor);
+            peer_state.last_fist_hold_seen_at = Some(10.0);
+        }
 
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut local_anchor_override = None;
-        let mut recent_anchor_confirmation = None;
-        let changed = registry.refresh_transforms(
-            &mut cx,
-            Some(saved_local_anchor),
-            Some(XrSyncAnchor {
-                id: 7,
-                captured_at: 10.0,
-                anchor: fresh_local_anchor,
-            }),
-            None,
-            &mut local_anchor_override,
-            &mut recent_anchor_confirmation,
+        let local_sync = make_sync_anchor(7, 10.02, XrSyncAnchorExtrema::High, fresh_local_anchor);
+        let mut local = make_local_sync_state(
             10.1,
+            Some(saved_local_anchor),
+            Some(local_sync),
+            Some(fresh_local_anchor),
         );
+        let mut recent_anchor_confirmation = None;
+        let changed =
+            registry.refresh_transforms(&mut cx, &mut local, &mut recent_anchor_confirmation, 10.1);
 
         assert!(changed);
         let peer_state = registry.peers.get(&peer.id).expect("peer state should exist");
         let solved = peer_state
             .anchor_remote_to_local
-            .expect("saved anchors should continue driving mapping until backend updates");
-        assert_touch_anchor_mapping_matches(solved, saved_remote_anchor, saved_local_anchor);
-        assert_eq!(local_anchor_override, None);
+            .expect("live override should update the active anchor mapping immediately");
+        assert_eq!(
+            solved,
+            saved_remote_anchor.mirrored().mapping_to(&fresh_local_anchor)
+        );
+        assert_eq!(local.anchor_override, Some(fresh_local_anchor));
+        assert_eq!(local.matched_sync_sample_count(), 1);
         assert_eq!(
             recent_anchor_confirmation.map(|confirmation| confirmation.anchor),
             Some(fresh_local_anchor)
@@ -5673,73 +6050,62 @@ mod tests {
     }
 
     #[test]
-    fn remote_bump_requests_local_anchor_without_immediate_transform_override() {
+    fn box_sync_requires_both_sides_to_remain_in_box_pose() {
         let mut registry = XrPeerRegistry::default();
         let peer = make_peer(0x2a);
-        let saved_local_anchor = XrAnchor {
-            left: vec3f(-0.21, 1.02, -0.26),
-            right: vec3f(0.24, 1.02, -0.27),
-        };
-        let local_hold_anchor = XrAnchor {
+        let local_sync_anchor = XrAnchor {
             left: vec3f(-0.16, 1.14, -0.58),
             right: vec3f(0.14, 1.13, -0.55),
         };
-        let saved_remote_to_local = Pose::new(
-            Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), 0.27),
-            vec3f(-0.37, 0.01, 0.19),
-        )
-        .to_mat4();
-        let fresh_remote_to_local = Pose::new(
-            Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), -0.49),
-            vec3f(0.29, 0.03, -0.22),
-        )
-        .to_mat4();
-        let saved_remote_anchor = make_remote_touch_anchor(saved_local_anchor, saved_remote_to_local);
-        let fresh_remote_anchor = make_remote_touch_anchor(local_hold_anchor, fresh_remote_to_local);
+        let remote_sync_anchor = XrAnchor {
+            left: vec3f(0.12, 1.14, -0.54),
+            right: vec3f(-0.11, 1.13, -0.53),
+        };
 
         registry.track_state(
             peer,
             make_state_frame(XrState {
                 time: 1.0,
-                anchor: Some(saved_remote_anchor),
-                sync_anchor: Some(XrSyncAnchor {
-                    id: 99,
-                    captured_at: 1.0,
-                    anchor: fresh_remote_anchor,
-                }),
+                sync_anchor: Some(make_sync_anchor(
+                    99,
+                    1.0,
+                    XrSyncAnchorExtrema::Low,
+                    remote_sync_anchor,
+                )),
                 ..XrState::default()
             }),
             10.0,
         );
+        {
+            let peer_state = registry.peers.get_mut(&peer.id).expect("peer state should exist");
+            peer_state.last_fist_hold_anchor = Some(remote_sync_anchor);
+            peer_state.last_fist_hold_seen_at = Some(10.0);
+        }
 
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut local_anchor_override = None;
-        let mut recent_anchor_confirmation = None;
-        let changed = registry.refresh_transforms(
-            &mut cx,
-            Some(saved_local_anchor),
-            None,
-            Some(local_hold_anchor),
-            &mut local_anchor_override,
-            &mut recent_anchor_confirmation,
+        let mut local = make_local_sync_state(
             10.1,
+            None,
+            Some(make_sync_anchor(
+                7,
+                10.02,
+                XrSyncAnchorExtrema::Low,
+                local_sync_anchor,
+            )),
+            None,
         );
+        let mut recent_anchor_confirmation = None;
+        let changed =
+            registry.refresh_transforms(&mut cx, &mut local, &mut recent_anchor_confirmation, 10.1);
 
-        assert!(changed);
-        let peer_state = registry.peers.get(&peer.id).expect("peer state should exist");
-        let solved = peer_state
-            .anchor_remote_to_local
-            .expect("saved anchors should continue driving mapping until backend updates");
-        assert_touch_anchor_mapping_matches(solved, saved_remote_anchor, saved_local_anchor);
-        assert_eq!(local_anchor_override, None);
-        assert_eq!(
-            recent_anchor_confirmation.map(|confirmation| confirmation.anchor),
-            Some(local_hold_anchor)
-        );
+        assert!(!changed);
+        assert_eq!(local.anchor_override, None);
+        assert_eq!(recent_anchor_confirmation, None);
+        assert_eq!(local.matched_sync_sample_count(), 0);
     }
 
     #[test]
-    fn touch_sync_without_backend_anchor_only_requests_local_anchor() {
+    fn box_sync_without_backend_anchor_updates_local_override_but_not_transform() {
         let mut registry = XrPeerRegistry::default();
         let peer = make_peer(0x2a);
         let fresh_local_anchor = XrAnchor {
@@ -5755,38 +6121,43 @@ mod tests {
             peer,
             make_state_frame(XrState {
                 time: 1.0,
-                sync_anchor: Some(XrSyncAnchor {
-                    id: 41,
-                    captured_at: 1.0,
-                    anchor: fresh_remote_anchor,
-                }),
+                sync_anchor: Some(make_sync_anchor(
+                    41,
+                    1.0,
+                    XrSyncAnchorExtrema::High,
+                    fresh_remote_anchor,
+                )),
                 ..XrState::default()
             }),
             10.0,
         );
+        {
+            let peer_state = registry.peers.get_mut(&peer.id).expect("peer state should exist");
+            peer_state.last_fist_hold_anchor = Some(fresh_remote_anchor);
+            peer_state.last_fist_hold_seen_at = Some(10.0);
+        }
 
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut local_anchor_override = None;
-        let mut recent_anchor_confirmation = None;
-        let changed = registry.refresh_transforms(
-            &mut cx,
-            None,
-            Some(XrSyncAnchor {
-                id: 7,
-                captured_at: 10.0,
-                anchor: fresh_local_anchor,
-            }),
-            None,
-            &mut local_anchor_override,
-            &mut recent_anchor_confirmation,
+        let mut local = make_local_sync_state(
             10.1,
+            None,
+            Some(make_sync_anchor(
+                7,
+                10.03,
+                XrSyncAnchorExtrema::Low,
+                fresh_local_anchor,
+            )),
+            Some(fresh_local_anchor),
         );
+        let mut recent_anchor_confirmation = None;
+        let changed =
+            registry.refresh_transforms(&mut cx, &mut local, &mut recent_anchor_confirmation, 10.1);
 
         assert!(changed);
         let peer_state = registry.peers.get(&peer.id).expect("peer state should exist");
         assert_eq!(peer_state.anchor_remote_to_local, None);
         assert_eq!(peer_state.remote_to_local, None);
-        assert_eq!(local_anchor_override, None);
+        assert_eq!(local.anchor_override, Some(fresh_local_anchor));
         assert_eq!(
             recent_anchor_confirmation.map(|confirmation| confirmation.anchor),
             Some(fresh_local_anchor)
@@ -5795,22 +6166,22 @@ mod tests {
 
     #[test]
     fn recent_remote_sync_anchor_requires_recent_receive_time() {
-        let sync_anchor = XrSyncAnchor {
-            id: 42,
-            captured_at: 1.25,
-            anchor: XrAnchor {
+        let sync_anchor = make_sync_anchor(
+            42,
+            1.25,
+            XrSyncAnchorExtrema::High,
+            XrAnchor {
                 left: vec3f(-0.1, 1.0, -0.3),
                 right: vec3f(0.1, 1.0, -0.3),
             },
-        };
+        );
         let mut peer = RemotePeerState::new(make_peer(0x2a));
-        peer.latest_state = Some(make_state_frame(XrState {
-            time: 1.25,
-            sync_anchor: Some(sync_anchor),
-            ..XrState::default()
-        }));
         peer.last_state_received_at = 10.0;
-        peer.last_sync_anchor_seen_at = Some(10.0);
+        peer.recent_sync_anchors.push_back(TimedRemoteSyncAnchor {
+            sync: sync_anchor,
+            first_seen_at_local_time: 10.0,
+            last_seen_at_local_time: 10.0,
+        });
 
         assert_eq!(
             XrPeerSync::recent_remote_sync_anchor(&peer, 10.2),
@@ -5912,7 +6283,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_object_shadow_reapplies_when_authority_advances_state_seq() {
+    fn shared_object_shadow_does_not_reapply_for_seq_only_advance_on_predicted_path() {
         let previous = XrAppliedRemoteShadowState {
             peer_id: XrNetPeerId(42),
             applied_at_local_time: 10.0,
@@ -5924,7 +6295,7 @@ mod tests {
         };
 
         assert!(
-            XrPeerSync::should_reapply_remote_shadow_state(
+            !XrPeerSync::should_reapply_remote_shadow_state(
                 &previous,
                 10.04,
                 XrNetPeerId(42),
@@ -5934,7 +6305,7 @@ mod tests {
                 vec3f(0.0, 0.0, -4.0),
                 vec3f(0.0, 0.0, 0.0),
             ),
-            "a newer authoritative shared-object seq must force a correction even when the local shadow stays near the predicted path"
+            "a newer authoritative shared-object seq should not force a correction when the local shadow remains on the predicted path"
         );
     }
 }
