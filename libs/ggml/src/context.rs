@@ -115,11 +115,7 @@ impl Context {
             return Err(format!("invalid tensor rank {}", n_dims));
         }
         if ne.len() != n_dims {
-            return Err(format!(
-                "rank {} but got {} extents",
-                n_dims,
-                ne.len()
-            ));
+            return Err(format!("rank {} but got {} extents", n_dims, ne.len()));
         }
 
         let layout = TensorLayout::for_ggml(ty, ne)?;
@@ -193,7 +189,11 @@ impl Context {
         let tensor = self
             .tensor(src)
             .ok_or_else(|| format!("invalid tensor id {}", src))?;
-        let desc = TensorDesc::new(tensor.desc.ty, tensor.desc.layout.clone(), tensor.desc.usage);
+        let desc = TensorDesc::new(
+            tensor.desc.ty,
+            tensor.desc.layout.clone(),
+            tensor.desc.usage,
+        );
         self.push_tensor(Tensor::from_desc(self.tensors.len(), desc), true)
     }
 
@@ -203,7 +203,11 @@ impl Context {
             .ok_or_else(|| format!("invalid tensor id {}", src))?;
         let mut view = Tensor::from_desc(
             self.tensors.len(),
-            TensorDesc::new(tensor.desc.ty, tensor.desc.layout.clone(), tensor.desc.usage),
+            TensorDesc::new(
+                tensor.desc.ty,
+                tensor.desc.layout.clone(),
+                tensor.desc.usage,
+            ),
         );
         view.view_src = Some(src);
         view.view_offs = 0;
@@ -212,11 +216,7 @@ impl Context {
         self.push_tensor(view, false)
     }
 
-    pub fn set_tensor_name(
-        &mut self,
-        id: TensorId,
-        name: impl Into<String>,
-    ) -> Result<(), String> {
+    pub fn set_tensor_name(&mut self, id: TensorId, name: impl Into<String>) -> Result<(), String> {
         let existing = self
             .tensor(id)
             .ok_or_else(|| format!("invalid tensor id {}", id))?
@@ -238,11 +238,7 @@ impl Context {
         Ok(())
     }
 
-    pub fn set_tensor_layout(
-        &mut self,
-        id: TensorId,
-        layout: TensorLayout,
-    ) -> Result<(), String> {
+    pub fn set_tensor_layout(&mut self, id: TensorId, layout: TensorLayout) -> Result<(), String> {
         let tensor = self
             .tensor_mut(id)
             .ok_or_else(|| format!("invalid tensor id {}", id))?;
@@ -262,9 +258,12 @@ impl Context {
         let end = offset
             .checked_add(tensor.nbytes())
             .ok_or_else(|| format!("tensor {} byte range overflow", id))?;
-        self.mem_buffer
-            .get(offset..end)
-            .ok_or_else(|| format!("tensor {} byte range [{}..{}) is out of bounds", id, offset, end))
+        self.mem_buffer.get(offset..end).ok_or_else(|| {
+            format!(
+                "tensor {} byte range [{}..{}) is out of bounds",
+                id, offset, end
+            )
+        })
     }
 
     pub fn tensor_data_mut(&mut self, id: TensorId) -> Result<&mut [u8], String> {
@@ -277,9 +276,12 @@ impl Context {
         let end = offset
             .checked_add(tensor.nbytes())
             .ok_or_else(|| format!("tensor {} byte range overflow", id))?;
-        self.mem_buffer
-            .get_mut(offset..end)
-            .ok_or_else(|| format!("tensor {} byte range [{}..{}) is out of bounds", id, offset, end))
+        self.mem_buffer.get_mut(offset..end).ok_or_else(|| {
+            format!(
+                "tensor {} byte range [{}..{}) is out of bounds",
+                id, offset, end
+            )
+        })
     }
 
     pub fn write_tensor_data(&mut self, id: TensorId, bytes: &[u8]) -> Result<(), String> {
@@ -310,10 +312,7 @@ impl Context {
             .desc
             .usage;
         let layout = TensorLayout::from_parts(extents.len(), extents, strides_bytes)?;
-        let mut tensor = Tensor::from_desc(
-            self.tensors.len(),
-            TensorDesc::new(ty, layout, usage),
-        );
+        let mut tensor = Tensor::from_desc(self.tensors.len(), TensorDesc::new(ty, layout, usage));
         tensor.op = Op::View;
         tensor.view_src = Some(src);
         tensor.view_offs = offset_bytes;
@@ -523,12 +522,7 @@ impl Context {
         Ok(id)
     }
 
-    pub fn glu(
-        &mut self,
-        a: TensorId,
-        glu: GluOp,
-        usage: BufferUsage,
-    ) -> Result<TensorId, String> {
+    pub fn glu(&mut self, a: TensorId, glu: GluOp, usage: BufferUsage) -> Result<TensorId, String> {
         let src = self
             .tensor(a)
             .ok_or_else(|| format!("invalid tensor id {}", a))?;
@@ -758,11 +752,7 @@ impl Context {
         Ok(id)
     }
 
-    pub fn reshape(
-        &mut self,
-        src: TensorId,
-        extents: &[i64],
-    ) -> Result<TensorId, String> {
+    pub fn reshape(&mut self, src: TensorId, extents: &[i64]) -> Result<TensorId, String> {
         let tensor = self
             .tensor(src)
             .ok_or_else(|| format!("invalid tensor id {}", src))?;
@@ -938,11 +928,7 @@ impl Context {
             .desc
             .ty;
         let layout = TensorLayout::for_ggml(ty, &[ne0, ne1, ne2, ne3])?;
-        self.new_op_tensor(
-            TensorDesc::new(ty, layout, usage),
-            Op::Repeat,
-            &[src],
-        )
+        self.new_op_tensor(TensorDesc::new(ty, layout, usage), Op::Repeat, &[src])
     }
 
     pub fn sum_rows(&mut self, src: TensorId, usage: BufferUsage) -> Result<TensorId, String> {
@@ -1012,7 +998,12 @@ impl Context {
         let rows_tensor = self
             .tensor(rows)
             .ok_or_else(|| format!("invalid tensor id {}", rows))?;
-        let ne = [tensor.ne[0], rows_tensor.ne[0], rows_tensor.ne[1], rows_tensor.ne[2]];
+        let ne = [
+            tensor.ne[0],
+            rows_tensor.ne[0],
+            rows_tensor.ne[1],
+            rows_tensor.ne[2],
+        ];
         let ty = if tensor.desc.ty == TensorType::I32 {
             TensorType::I32
         } else {
@@ -1128,7 +1119,12 @@ impl Context {
             }
         }
 
-        let ne = [v_tensor.ne[0], q_tensor.ne[2], q_tensor.ne[1], q_tensor.ne[3]];
+        let ne = [
+            v_tensor.ne[0],
+            q_tensor.ne[2],
+            q_tensor.ne[1],
+            q_tensor.ne[3],
+        ];
         let layout = TensorLayout::for_ggml(TensorType::F32, &ne)?;
         let mut srcs = vec![q, k, v];
         if let Some(mask) = mask {
@@ -1237,19 +1233,7 @@ impl Context {
         usage: BufferUsage,
     ) -> Result<TensorId, String> {
         self.rope_ext(
-            src,
-            positions,
-            None,
-            n_dims,
-            mode,
-            0,
-            10_000.0,
-            1.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            usage,
+            src, positions, None, n_dims, mode, 0, 10_000.0, 1.0, 0.0, 1.0, 0.0, 0.0, usage,
         )
     }
 
@@ -1261,18 +1245,7 @@ impl Context {
         mode: i32,
     ) -> Result<TensorId, String> {
         self.rope_ext_inplace(
-            src,
-            positions,
-            None,
-            n_dims,
-            mode,
-            0,
-            10_000.0,
-            1.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
+            src, positions, None, n_dims, mode, 0, 10_000.0, 1.0, 0.0, 1.0, 0.0, 0.0,
         )
     }
 
@@ -1440,11 +1413,7 @@ impl Context {
         )
     }
 
-    pub fn argsort(
-        &mut self,
-        src: TensorId,
-        usage: BufferUsage,
-    ) -> Result<TensorId, String> {
+    pub fn argsort(&mut self, src: TensorId, usage: BufferUsage) -> Result<TensorId, String> {
         let tensor = self
             .tensor(src)
             .ok_or_else(|| format!("invalid tensor id {}", src))?;
@@ -1456,12 +1425,7 @@ impl Context {
         )
     }
 
-    pub fn top_k(
-        &mut self,
-        src: TensorId,
-        k: i64,
-        usage: BufferUsage,
-    ) -> Result<TensorId, String> {
+    pub fn top_k(&mut self, src: TensorId, k: i64, usage: BufferUsage) -> Result<TensorId, String> {
         let tensor = self
             .tensor(src)
             .ok_or_else(|| format!("invalid tensor id {}", src))?;
@@ -1494,8 +1458,7 @@ impl Context {
         }
         let d_conv = c_tensor.ne[0];
         let d_inner = c_tensor.ne[1];
-        let n_t = sx_tensor
-            .ne[0]
+        let n_t = sx_tensor.ne[0]
             .checked_sub(d_conv)
             .and_then(|v| v.checked_add(1))
             .ok_or_else(|| "ssm_conv token extent underflow".to_string())?;
@@ -1670,7 +1633,11 @@ impl Context {
         tensor.set_op_param_f32(8, attn_factor);
         tensor.set_op_param_f32(9, beta_fast);
         tensor.set_op_param_f32(10, beta_slow);
-        for (i, section) in sections.unwrap_or([0; GGML_MROPE_SECTIONS]).into_iter().enumerate() {
+        for (i, section) in sections
+            .unwrap_or([0; GGML_MROPE_SECTIONS])
+            .into_iter()
+            .enumerate()
+        {
             tensor.set_op_param_i32(11 + i, section);
         }
 
@@ -1733,11 +1700,22 @@ mod tests {
         });
 
         let tensor = ctx
-            .new_named_tensor("weights.test", TensorType::F32, 2, &[4, 2], BufferUsage::Weights)
+            .new_named_tensor(
+                "weights.test",
+                TensorType::F32,
+                2,
+                &[4, 2],
+                BufferUsage::Weights,
+            )
             .unwrap();
-        ctx.write_tensor_data(tensor, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-            17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32])
-            .unwrap();
+        ctx.write_tensor_data(
+            tensor,
+            &[
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32,
+            ],
+        )
+        .unwrap();
 
         assert_eq!(ctx.get_tensor("weights.test"), Some(tensor));
         assert_eq!(ctx.tensor_data(tensor).unwrap()[0], 1);
@@ -1761,7 +1739,10 @@ mod tests {
         let out = ctx.mul_mat(a, b, BufferUsage::Activations).unwrap();
 
         assert!(ctx.tensor(out).unwrap().data_offset.is_some());
-        assert_eq!(ctx.tensor_data(out).unwrap().len(), ctx.tensor(out).unwrap().nbytes());
+        assert_eq!(
+            ctx.tensor_data(out).unwrap().len(),
+            ctx.tensor(out).unwrap().nbytes()
+        );
     }
 
     #[test]
@@ -1904,7 +1885,10 @@ mod tests {
         assert_eq!(tensor.src[1], Some(pos));
         assert_eq!(tensor.src[2], Some(freq));
         assert_eq!(tensor.op_param_i32(1), 64);
-        assert_eq!(tensor.op_param_i32(2), GGML_ROPE_TYPE_MROPE | GGML_ROPE_TYPE_IMROPE);
+        assert_eq!(
+            tensor.op_param_i32(2),
+            GGML_ROPE_TYPE_MROPE | GGML_ROPE_TYPE_IMROPE
+        );
         assert_eq!(tensor.op_param_i32(4), 262_144);
         assert_eq!(tensor.op_param_i32(11), 11);
         assert_eq!(tensor.op_param_i32(12), 11);

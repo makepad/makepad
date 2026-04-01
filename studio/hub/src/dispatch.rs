@@ -222,6 +222,7 @@ struct TerminalSession {
     applied_rows: u16,
     // Monotonic frame sequence to let clients drop stale frames.
     frame_seq: u64,
+    bell_pending: bool,
     subscribers: HashMap<ClientId, TerminalClientViewport>,
 }
 
@@ -1392,6 +1393,7 @@ impl HubCore {
                         client_id,
                         HubToClient::TerminalOpened { path: path.clone() },
                     );
+                    self.send_terminal_title_to_client(client_id, &path);
                     self.send_terminal_viewport_for_client(
                         client_id,
                         &path,
@@ -1448,6 +1450,7 @@ impl HubCore {
                                 applied_cols: cols,
                                 applied_rows: rows,
                                 frame_seq: 0,
+                                bell_pending: false,
                                 subscribers: HashMap::new(),
                             },
                         );
@@ -1468,8 +1471,9 @@ impl HubCore {
                 }
             }
             ClientToHub::TerminalInput { path, data } => {
-                if let Err(err) = self.terminal_manager.send_input(&path, data) {
-                    self.send_ui_error(client_id, err);
+                match self.terminal_manager.send_input(&path, data) {
+                    Ok(()) => self.set_terminal_bell_state(&path, false),
+                    Err(err) => self.send_ui_error(client_id, err),
                 }
             }
             ClientToHub::TerminalViewportRequest {
@@ -3016,12 +3020,14 @@ impl HubCore {
         self.mount_suppress_fs_until
             .insert(mount, Instant::now() + Duration::from_millis(750));
         let mut force_bottom_for_sticky = true;
+        let mut bell_rang = false;
         if let Some(session) = self.terminal_sessions.get_mut(&path) {
             let old_total_rows = {
                 let screen = session.terminal.screen();
                 screen.scrollback_len() + screen.used_rows()
             };
             session.terminal.process_bytes(&data);
+            bell_rang = session.terminal.take_bell();
             let outbound = session.terminal.take_outbound();
             if !outbound.is_empty() {
                 let _ = self.terminal_manager.send_input(&path, outbound);
@@ -3034,6 +3040,9 @@ impl HubCore {
             // TUI redraw bursts mostly rewrite in-place and should not force a
             // viewport jump during rapid resize sequences.
             force_bottom_for_sticky = new_total_rows > old_total_rows;
+        }
+        if bell_rang {
+            self.set_terminal_bell_state(&path, true);
         }
         self.push_terminal_frame_updates(&path, force_bottom_for_sticky);
         // Persist terminal history off the dispatch thread so fs I/O cannot
@@ -3140,6 +3149,36 @@ impl HubCore {
             return;
         }
         self.push_terminal_frame_updates(path, false);
+    }
+
+    fn send_terminal_title_to_client(&mut self, client_id: ClientId, path: &str) {
+        let Some(session) = self.terminal_sessions.get(path) else {
+            return;
+        };
+        if !session.bell_pending {
+            return;
+        }
+        self.send_ui_reply(
+            client_id,
+            HubToClient::TerminalTitle {
+                path: path.to_string(),
+                title: Self::terminal_tab_title(path, true),
+            },
+        );
+    }
+
+    fn set_terminal_bell_state(&mut self, path: &str, bell_pending: bool) {
+        let Some(session) = self.terminal_sessions.get_mut(path) else {
+            return;
+        };
+        if session.bell_pending == bell_pending {
+            return;
+        }
+        session.bell_pending = bell_pending;
+        self.broadcast_ui_message(HubToClient::TerminalTitle {
+            path: path.to_string(),
+            title: Self::terminal_tab_title(path, bell_pending),
+        });
     }
 
     fn push_terminal_frame_updates(&mut self, path: &str, force_bottom_for_sticky: bool) {
@@ -3305,6 +3344,15 @@ impl HubCore {
                     },
                 );
             }
+        }
+    }
+
+    fn terminal_tab_title(path: &str, bell_pending: bool) -> String {
+        let title = path.rsplit('/').next().unwrap_or("terminal");
+        if bell_pending {
+            format!("@ {}", title)
+        } else {
+            title.to_string()
         }
     }
 

@@ -53,6 +53,7 @@ pub struct Terminal {
     pub cursor_color: Option<Rgb>,
     pub title: String,
 
+    bell_pending: bool,
     parser: Parser,
     actions_buf: Vec<Action>,
     outbound: Vec<u8>,
@@ -76,6 +77,7 @@ impl Terminal {
             default_bg: Rgb::new(0x1d, 0x1f, 0x21),
             cursor_color: None,
             title: String::new(),
+            bell_pending: false,
             parser: Parser::new(),
             actions_buf: Vec::with_capacity(64),
             outbound: Vec::with_capacity(64),
@@ -126,6 +128,10 @@ impl Terminal {
         std::mem::take(&mut self.outbound)
     }
 
+    pub fn take_bell(&mut self) -> bool {
+        std::mem::take(&mut self.bell_pending)
+    }
+
     fn push_outbound(&mut self, bytes: &[u8]) {
         self.outbound.extend_from_slice(bytes);
     }
@@ -161,6 +167,7 @@ impl Terminal {
         match byte {
             0x07 => {
                 // BEL — bell/notification
+                self.bell_pending = true;
             }
             0x08 => {
                 // BS — backspace
@@ -1139,6 +1146,22 @@ mod tests {
     }
 
     #[test]
+    fn bell_sets_pending_flag() {
+        let mut terminal = Terminal::new(80, 24);
+        terminal.process_bytes(b"\x07");
+        assert!(terminal.take_bell());
+        assert!(!terminal.take_bell());
+    }
+
+    #[test]
+    fn osc_bel_terminator_does_not_ring_bell() {
+        let mut terminal = Terminal::new(80, 24);
+        terminal.process_bytes(b"\x1b]2;build log\x07");
+        assert_eq!(terminal.title, "build log");
+        assert!(!terminal.take_bell());
+    }
+
+    #[test]
     fn dcs_with_c1_st_terminator_does_not_block_following_output() {
         let mut terminal = Terminal::new(80, 24);
         terminal.process_bytes(b"\x1bP=1s\x9c");
@@ -1631,8 +1654,14 @@ mod tests {
 
         let before_row_0 = grid_row_text(&t, 0);
         let before_row_1 = grid_row_text(&t, 1);
-        assert!(!before_row_0.is_empty(), "expected first prompt row to have text");
-        assert!(!before_row_1.is_empty(), "expected wrapped continuation row to have text");
+        assert!(
+            !before_row_0.is_empty(),
+            "expected first prompt row to have text"
+        );
+        assert!(
+            !before_row_1.is_empty(),
+            "expected wrapped continuation row to have text"
+        );
         assert!(
             t.screen().grid.line_wrapped[0],
             "expected prompt to wrap before resize"

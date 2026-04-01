@@ -1984,6 +1984,12 @@ pub fn main() {
                 let ucount = self.u_count
                 let uflags = self.u_flags
                 let utime = self.uniforms.time
+                let bits_u = asuint(utime)
+                let bits_i = asint(utime)
+                let shifted_left = u32(1) << u32(3)
+                let shifted_bits = (bits_u >> u32(31)) | (bits_u & u32(7))
+                let back_from_u = asfloat(bits_u)
+                let back_from_i = asfloat(bits_i)
 
                 // ---- Texture sampling ----
                 let diffuse = self.tex_diffuse.sample(uv)
@@ -2033,6 +2039,8 @@ pub fn main() {
             }
         }
         shader.test_compile_draw(shader_all_features)
+        assert(shader.test_compile_draw_contains(shader_all_features, "<< uint(3)"))
+        assert(shader.test_compile_draw_contains(shader_all_features, ">> uint(31)"))
 
     };
 

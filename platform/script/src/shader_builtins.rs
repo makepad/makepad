@@ -557,6 +557,84 @@ pub fn define_shader_builtins(
         |_vm, _args| ScriptValue::NIL,
     );
 
+    // Bitcast helpers for shader code. These are primarily intended for shader use,
+    // but we provide scalar runtime behavior so expressions can still evaluate.
+    native.add_method(
+        heap,
+        math,
+        id_lut!(asuint),
+        script_args!(x = 0.0),
+        |vm, args| {
+            let x_val = vm
+                .bx
+                .heap
+                .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+            if let Some(v) = x_val.as_u32() {
+                return ScriptValue::from_u32(v);
+            }
+            if let Some(v) = x_val.as_i32() {
+                return ScriptValue::from_u32(v as u32);
+            }
+            if let Some(v) = x_val.as_f32() {
+                return ScriptValue::from_u32(v.to_bits());
+            }
+            if let Some(v) = x_val.as_f16() {
+                return ScriptValue::from_u32(v.to_bits());
+            }
+            let f = vm.bx.heap.cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
+            ScriptValue::from_u32(f.to_bits())
+        },
+    );
+    native.add_method(
+        heap,
+        math,
+        id_lut!(asint),
+        script_args!(x = 0.0),
+        |vm, args| {
+            let x_val = vm
+                .bx
+                .heap
+                .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+            if let Some(v) = x_val.as_i32() {
+                return ScriptValue::from_i32(v);
+            }
+            if let Some(v) = x_val.as_u32() {
+                return ScriptValue::from_i32(v as i32);
+            }
+            if let Some(v) = x_val.as_f32() {
+                return ScriptValue::from_i32(v.to_bits() as i32);
+            }
+            if let Some(v) = x_val.as_f16() {
+                return ScriptValue::from_i32(v.to_bits() as i32);
+            }
+            let f = vm.bx.heap.cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
+            ScriptValue::from_i32(f.to_bits() as i32)
+        },
+    );
+    native.add_method(
+        heap,
+        math,
+        id_lut!(asfloat),
+        script_args!(x = 0.0),
+        |vm, args| {
+            let x_val = vm
+                .bx
+                .heap
+                .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+            if let Some(v) = x_val.as_f32() {
+                return ScriptValue::from_f32(v);
+            }
+            if let Some(v) = x_val.as_u32() {
+                return ScriptValue::from_f32(f32::from_bits(v));
+            }
+            if let Some(v) = x_val.as_i32() {
+                return ScriptValue::from_f32(f32::from_bits(v as u32));
+            }
+            let f = vm.bx.heap.cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
+            ScriptValue::from_f32(f)
+        },
+    );
+
     // 2 argument functions - support f64, Vec2f, Vec3f, Vec4f, Color
     native.add_method(
         heap,
@@ -1026,6 +1104,69 @@ pub fn type_table_builtin(
     let is_any_int = |t| is_int(t) || is_vec_int(t);
 
     match name {
+        id!(asuint) => {
+            if args.len() != 1 {
+                script_err_invalid_args!(
+                    trap,
+                    "shader builtin 'asuint' requires 1 arg, got {}",
+                    args.len()
+                );
+                return builtins.pod_void;
+            }
+            return match args[0] {
+                t if t == f32_t || t == f16_t || t == u32_t => u32_t,
+                t => {
+                    script_err_type_mismatch!(
+                        trap,
+                        "shader builtin 'asuint' requires scalar float arg, got {}",
+                        fmt_ty(t)
+                    );
+                    builtins.pod_void
+                }
+            };
+        }
+        id!(asint) => {
+            if args.len() != 1 {
+                script_err_invalid_args!(
+                    trap,
+                    "shader builtin 'asint' requires 1 arg, got {}",
+                    args.len()
+                );
+                return builtins.pod_void;
+            }
+            return match args[0] {
+                t if t == f32_t || t == f16_t || t == i32_t => i32_t,
+                t => {
+                    script_err_type_mismatch!(
+                        trap,
+                        "shader builtin 'asint' requires scalar float arg, got {}",
+                        fmt_ty(t)
+                    );
+                    builtins.pod_void
+                }
+            };
+        }
+        id!(asfloat) => {
+            if args.len() != 1 {
+                script_err_invalid_args!(
+                    trap,
+                    "shader builtin 'asfloat' requires 1 arg, got {}",
+                    args.len()
+                );
+                return builtins.pod_void;
+            }
+            return match args[0] {
+                t if t == u32_t || t == i32_t || t == f32_t => f32_t,
+                t => {
+                    script_err_type_mismatch!(
+                        trap,
+                        "shader builtin 'asfloat' requires scalar int arg, got {}",
+                        fmt_ty(t)
+                    );
+                    builtins.pod_void
+                }
+            };
+        }
         // Float only 1 argument
         id!(acos)
         | id!(acosh)

@@ -117,11 +117,7 @@ impl Graph {
             .and_then(|index| self.grad_accs.get(index).copied().flatten())
     }
 
-    pub fn build_forward_expand(
-        &mut self,
-        ctx: &Context,
-        tensor: TensorId,
-    ) -> Result<(), String> {
+    pub fn build_forward_expand(&mut self, ctx: &Context, tensor: TensorId) -> Result<(), String> {
         let mut visited = HashSet::new();
         self.build_forward_expand_impl(ctx, tensor, &mut visited)
     }

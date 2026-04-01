@@ -5,7 +5,7 @@ use crate::{
     svg::{self, SvgDefs, SvgDocument, SvgNode, SvgPaint, SvgStyle, SvgUse, Transform2d},
     turtle::*,
 };
-use makepad_svg::path::{PathCmd, VectorPath};
+use makepad_svg::path::{FillRule, PathCmd, VectorPath};
 
 script_mod! {
     use mod.pod.*
@@ -206,9 +206,7 @@ impl DrawSvgGlyph {
         self.draw_super.clear_shapes();
         self.draw_super.begin_shape();
         emit_nodes_fill_only(&mut self.draw_super, &doc.root, &doc.defs, &base_xf);
-        // DrawGlyph's one-axis band acceleration can miss intersections when
-        // sampling the transposed axis. For SVG icons we favor correctness.
-        self.cached_shape = self.draw_super.commit_shape(Some(0));
+        self.cached_shape = self.draw_super.commit_shape(None);
         self.cache_valid = true;
     }
 
@@ -301,6 +299,7 @@ fn emit_nodes_fill_only(
                 let xf = path.transform.then(parent_xf);
                 if let Some(color) = resolve_fill_color(&path.style, defs) {
                     dg.set_color_vec4(color);
+                    dg.set_even_odd_fill(matches!(path.style.fill_rule, FillRule::EvenOdd));
                     emit_transformed_path(dg, &path.path, &xf);
                     dg.fill_layer();
                 }
@@ -309,6 +308,7 @@ fn emit_nodes_fill_only(
                 let xf = rect.transform.then(parent_xf);
                 if let Some(color) = resolve_fill_color(&rect.style, defs) {
                     dg.set_color_vec4(color);
+                    dg.set_even_odd_fill(matches!(rect.style.fill_rule, FillRule::EvenOdd));
                     let mut path = VectorPath::new();
                     let r = rect.rx.max(rect.ry);
                     if r > 0.0 {
@@ -324,6 +324,7 @@ fn emit_nodes_fill_only(
                 let xf = circle.transform.then(parent_xf);
                 if let Some(color) = resolve_fill_color(&circle.style, defs) {
                     dg.set_color_vec4(color);
+                    dg.set_even_odd_fill(matches!(circle.style.fill_rule, FillRule::EvenOdd));
                     let mut path = VectorPath::new();
                     path.circle(circle.cx, circle.cy, circle.r);
                     emit_transformed_path(dg, &path, &xf);
@@ -334,6 +335,7 @@ fn emit_nodes_fill_only(
                 let xf = ellipse.transform.then(parent_xf);
                 if let Some(color) = resolve_fill_color(&ellipse.style, defs) {
                     dg.set_color_vec4(color);
+                    dg.set_even_odd_fill(matches!(ellipse.style.fill_rule, FillRule::EvenOdd));
                     let mut path = VectorPath::new();
                     path.ellipse(ellipse.cx, ellipse.cy, ellipse.rx, ellipse.ry);
                     emit_transformed_path(dg, &path, &xf);
@@ -344,6 +346,7 @@ fn emit_nodes_fill_only(
                 let xf = poly.transform.then(parent_xf);
                 if let Some(color) = resolve_fill_color(&poly.style, defs) {
                     dg.set_color_vec4(color);
+                    dg.set_even_odd_fill(matches!(poly.style.fill_rule, FillRule::EvenOdd));
                     emit_points(dg, &poly.points, false, &xf);
                     dg.fill_layer();
                 }
@@ -352,6 +355,7 @@ fn emit_nodes_fill_only(
                 let xf = poly.transform.then(parent_xf);
                 if let Some(color) = resolve_fill_color(&poly.style, defs) {
                     dg.set_color_vec4(color);
+                    dg.set_even_odd_fill(matches!(poly.style.fill_rule, FillRule::EvenOdd));
                     emit_points(dg, &poly.points, true, &xf);
                     dg.fill_layer();
                 }

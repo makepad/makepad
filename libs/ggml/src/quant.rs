@@ -544,39 +544,15 @@ pub fn block_size(ggml_type: u32) -> usize {
 /// Number of dequantized elements represented by one storage block.
 pub fn block_elements(ggml_type: u32) -> usize {
     match ggml_type {
-        GGML_TYPE_F32
-        | GGML_TYPE_F16
-        | GGML_TYPE_I8
-        | GGML_TYPE_I16
-        | GGML_TYPE_I32
-        | GGML_TYPE_I64
-        | GGML_TYPE_F64
-        | GGML_TYPE_BF16 => 1,
-        GGML_TYPE_Q4_0
-        | GGML_TYPE_Q4_1
-        | GGML_TYPE_Q5_0
-        | GGML_TYPE_Q5_1
-        | GGML_TYPE_Q8_0
-        | GGML_TYPE_Q8_1
-        | GGML_TYPE_MXFP4
-        | GGML_TYPE_IQ4_NL => QK,
+        GGML_TYPE_F32 | GGML_TYPE_F16 | GGML_TYPE_I8 | GGML_TYPE_I16 | GGML_TYPE_I32
+        | GGML_TYPE_I64 | GGML_TYPE_F64 | GGML_TYPE_BF16 => 1,
+        GGML_TYPE_Q4_0 | GGML_TYPE_Q4_1 | GGML_TYPE_Q5_0 | GGML_TYPE_Q5_1 | GGML_TYPE_Q8_0
+        | GGML_TYPE_Q8_1 | GGML_TYPE_MXFP4 | GGML_TYPE_IQ4_NL => QK,
         GGML_TYPE_NVFP4 => QK_NVFP4,
-        GGML_TYPE_Q2_K
-        | GGML_TYPE_Q3_K
-        | GGML_TYPE_Q4_K
-        | GGML_TYPE_Q5_K
-        | GGML_TYPE_Q6_K
-        | GGML_TYPE_Q8_K
-        | GGML_TYPE_IQ2_XXS
-        | GGML_TYPE_IQ2_XS
-        | GGML_TYPE_IQ3_XXS
-        | GGML_TYPE_IQ1_S
-        | GGML_TYPE_IQ3_S
-        | GGML_TYPE_IQ2_S
-        | GGML_TYPE_IQ4_XS
-        | GGML_TYPE_IQ1_M
-        | GGML_TYPE_TQ1_0
-        | GGML_TYPE_TQ2_0 => QK_K,
+        GGML_TYPE_Q2_K | GGML_TYPE_Q3_K | GGML_TYPE_Q4_K | GGML_TYPE_Q5_K | GGML_TYPE_Q6_K
+        | GGML_TYPE_Q8_K | GGML_TYPE_IQ2_XXS | GGML_TYPE_IQ2_XS | GGML_TYPE_IQ3_XXS
+        | GGML_TYPE_IQ1_S | GGML_TYPE_IQ3_S | GGML_TYPE_IQ2_S | GGML_TYPE_IQ4_XS
+        | GGML_TYPE_IQ1_M | GGML_TYPE_TQ1_0 | GGML_TYPE_TQ2_0 => QK_K,
         _ => panic!("unsupported ggml type {}", ggml_type),
     }
 }
