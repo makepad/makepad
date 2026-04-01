@@ -289,11 +289,8 @@ impl Window {
         if let Some(h) = height {
             let caption_bar = self.view(cx, ids!(caption_bar));
             if let Some(mut bar) = caption_bar.borrow_mut() {
-                log!("sync_caption_bar_height: setting walk.height to {h:.1} (was {:?})", bar.walk.height);
                 bar.walk.height = Size::Fixed(h);
-            } else {
-                log!("sync_caption_bar_height: borrow_mut() returned None");
-            };
+            }
             drop(caption_bar);
         }
     }
@@ -629,12 +626,6 @@ impl Widget for Window {
                     if new_buttons != Rect::default() {
                         let h = (new_buttons.pos.y * 2.0 + new_buttons.size.y).ceil();
                         if self.system_caption_bar_height != Some(h) {
-                            log!(
-                                "Window chrome buttons rect: pos=({:.1},{:.1}) size=({:.1}x{:.1}) \
-                                 → caption bar height: {h:.1}",
-                                new_buttons.pos.x, new_buttons.pos.y,
-                                new_buttons.size.x, new_buttons.size.y,
-                            );
                             self.system_caption_bar_height = Some(h);
                             self.view(cx, ids!(caption_bar)).redraw(cx);
                         }
@@ -654,19 +645,17 @@ impl Widget for Window {
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
                     if self.view(cx, ids!(caption_bar)).visible() {
-                        let size = self.window.get_inner_size(cx);
+                        let caption_rect = self.view(cx, ids!(caption_bar)).area().rect(cx);
+                        let buttons_rect = self.view(cx, ids!(windows_buttons)).area().rect(cx);
 
-                        if dq.abs.y < 25. {
-                            if dq.abs.x < size.x - 250.0 {
-                                dq.response.set(WindowDragQueryResponse::Caption);
-                            } else {
+                        if caption_rect.contains(dq.abs) {
+                            if buttons_rect.size != Vec2d::default() && buttons_rect.contains(dq.abs) {
                                 dq.response.set(WindowDragQueryResponse::Client);
+                            } else {
+                                dq.response.set(WindowDragQueryResponse::Caption);
                             }
                             cx.set_cursor(MouseCursor::Default);
                         }
-                        /*
-                        if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
-                        }*/
                     }
                 }
                 true

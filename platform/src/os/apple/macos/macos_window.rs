@@ -599,13 +599,6 @@ impl MacosWindow {
             let (t1, l1, r1, b1) = ns_to_rect(miniaturize);
             let (t2, l2, r2, b2) = ns_to_rect(zoom);
 
-            crate::log!(
-                "macOS traffic lights (top left right bottom): \
-                 close=({t0:.1},{l0:.1},{r0:.1},{b0:.1}) \
-                 miniaturize=({t1:.1},{l1:.1},{r1:.1},{b1:.1}) \
-                 zoom=({t2:.1},{l2:.1},{r2:.1},{b2:.1})"
-            );
-
             let top  = t0.min(t1).min(t2);
             let left = l0.min(l1).min(l2);
             let right  = r0.max(r1).max(r2);
@@ -615,12 +608,6 @@ impl MacosWindow {
                 pos: Vec2d { x: left, y: top },
                 size: Vec2d { x: right - left, y: bottom - top },
             };
-
-            crate::log!(
-                "macOS window_chrome_buttons bounding rect: pos=({:.1},{:.1}) size=({:.1},{:.1}), caption/title bar height={:.1}",
-                rect.pos.x, rect.pos.y, rect.size.x, rect.size.y,
-                2.0 * rect.pos.y + rect.size.y,
-            );
 
             Some(rect)
         }
