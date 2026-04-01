@@ -19,11 +19,6 @@ script_mod! {
     use mod.widgets.MenuItem
     use mod.draw.KeyCode
 
-    // Default caption bar height in logical pixels. Updated at runtime on macOS
-    // (and other platforms with native chrome buttons) via WindowGeomChange to
-    // match the measured traffic-light / chrome button geometry.
-    mod.widgets.CAPTION_BAR_HEIGHT = 27.0
-
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
@@ -37,7 +32,7 @@ script_mod! {
             flow: Right
 
             draw_bg.color: theme.color_app_caption_bar
-            height: (mod.widgets.CAPTION_BAR_HEIGHT)
+            height: 27.0
             caption_label := View {
                 width: Fill height: Fill
                 align: Center
@@ -222,6 +217,10 @@ pub struct Window {
     show_performance_view: bool,
     #[rust]
     has_focus: bool,
+    /// Caption bar height derived from window chrome button geometry at runtime.
+    /// `None` means use the DSL default.
+    #[rust]
+    caption_bar_height_override: Option<f64>,
     #[deref]
     view: View,
 
@@ -279,6 +278,19 @@ impl Window {
         }
     }
 
+    fn sync_caption_bar_height(&mut self, cx: &mut Cx) {
+        if let Some(h) = self.caption_bar_height_override {
+            let caption_bar = self.view(cx, ids!(caption_bar));
+            if let Some(mut bar) = caption_bar.borrow_mut() {
+                log!("sync_caption_bar_height: setting walk.height to {h:.1} (was {:?})", bar.walk.height);
+                bar.walk.height = Size::Fixed(h);
+            } else {
+                log!("sync_caption_bar_height: borrow_mut() returned None");
+            };
+            drop(caption_bar);
+        }
+    }
+
     /// Adjusts the caption label's left padding so that the title text appears
     /// centered in the full caption bar width when there's enough room.
     /// When the window is too narrow, the padding gracefully reduces to 0,
@@ -321,6 +333,7 @@ impl Window {
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         self.sync_caption_bar_state(cx);
+        self.sync_caption_bar_height(cx);
         self.sync_caption_title(cx);
         self.sync_caption_centering(cx);
 
@@ -601,29 +614,28 @@ impl Widget for Window {
                     cx.update_safe_inset_script_values(ev.new_geom.safe_area_insets);
 
                     // If the platform reports native chrome button geometry, derive
-                    // the default caption bar height so the buttons are vertically
-                    // centered: height = top_margin + bottom_edge = pos.y * 2 + size.y.
-                    // Only reapply scripts when the value changes (normally once at
-                    // startup, or on DPI change).
+                    // the caption bar height so the buttons are vertically centered:
+                    // height = top_margin * 2 + button_height = pos.y * 2 + size.y.
+                    // If the platform reports native chrome button geometry, derive
+                    // the caption bar height so the buttons are vertically centered.
                     let new_buttons = ev.new_geom.window_chrome_buttons;
-                    let old_buttons = ev.old_geom.window_chrome_buttons;
-                    let chrome_height = |r: Rect| (r.pos.y * 2.0 + r.size.y).ceil();
-                    if new_buttons != Rect::default() && new_buttons != old_buttons {
-                        let h = chrome_height(new_buttons);
-                        log!(
-                            "Window chrome buttons rect: pos=({:.1},{:.1}) size=({:.1}x{:.1}) \
-                             → caption bar height: {h:.1}",
-                            new_buttons.pos.x, new_buttons.pos.y,
-                            new_buttons.size.x, new_buttons.size.y,
-                        );
-                        cx.update_caption_bar_height_script_value(h);
+                    if new_buttons != Rect::default() {
+                        let h = (new_buttons.pos.y * 2.0 + new_buttons.size.y).ceil();
+                        if self.caption_bar_height_override != Some(h) {
+                            log!(
+                                "Window chrome buttons rect: pos=({:.1},{:.1}) size=({:.1}x{:.1}) \
+                                 → caption bar height: {h:.1}",
+                                new_buttons.pos.x, new_buttons.pos.y,
+                                new_buttons.size.x, new_buttons.size.y,
+                            );
+                            self.caption_bar_height_override = Some(h);
+                            self.view(cx, ids!(caption_bar)).redraw(cx);
+                        }
                     }
 
-                    // If safe area insets or chrome button geometry changed, trigger
-                    // a script re-apply so widgets pick up new values.
-                    if old_insets != ev.new_geom.safe_area_insets
-                        || (new_buttons != Rect::default() && new_buttons != old_buttons)
-                    {
+                    // If safe area insets changed, trigger a script re-apply
+                    // so widgets pick up new values.
+                    if old_insets != ev.new_geom.safe_area_insets {
                         cx.request_script_reapply();
                     }
 
