@@ -32,7 +32,10 @@ script_mod! {
             flow: Right
 
             draw_bg.color: theme.color_app_caption_bar
-            height: 27
+            // Note: by default, the caption bar height is calculated at runtime
+            // based on window chrome button geometry to ensure the buttons are vertically centered.
+            // If you want to override this height with a fixed value, set the `caption_bar_height_override` on the Window itself.
+            height: Fit
             caption_label := View {
                 width: Fill height: Fill
                 align: Center
@@ -217,6 +220,11 @@ pub struct Window {
     show_performance_view: bool,
     #[rust]
     has_focus: bool,
+    /// The calculated value of the caption bar height, a value that will result in
+    /// the window chrome buttons being nicely vertically centered within the caption bar.
+    /// `None` means no geometry has been reported by the platform yet.
+    #[rust]
+    system_caption_bar_height: Option<f64>,
     #[deref]
     view: View,
 
@@ -274,6 +282,19 @@ impl Window {
         }
     }
 
+    fn sync_caption_bar_height(&mut self, cx: &mut Cx) {
+        // Explicit DSL override takes priority, then system-calculated.
+        let height = self.window.caption_bar_height_override
+            .or(self.system_caption_bar_height);
+        if let Some(h) = height {
+            let caption_bar = self.view(cx, ids!(caption_bar));
+            if let Some(mut bar) = caption_bar.borrow_mut() {
+                bar.walk.height = Size::Fixed(h);
+            }
+            drop(caption_bar);
+        }
+    }
+
     /// Adjusts the caption label's left padding so that the title text appears
     /// centered in the full caption bar width when there's enough room.
     /// When the window is too narrow, the padding gracefully reduces to 0,
@@ -316,6 +337,7 @@ impl Window {
 
     fn ensure_initialized(&mut self, cx: &mut Cx) {
         self.sync_caption_bar_state(cx);
+        self.sync_caption_bar_height(cx);
         self.sync_caption_title(cx);
         self.sync_caption_centering(cx);
 
@@ -595,8 +617,22 @@ impl Widget for Window {
                     // Splash code can reference mod.widgets.SAFE_INSET_PAD_*.
                     cx.update_safe_inset_script_values(ev.new_geom.safe_area_insets);
 
-                    // If safe area insets changed (e.g., device rotation), trigger
-                    // a script re-apply so widgets pick up new values.
+                    // If the platform reports native chrome button geometry, derive
+                    // the caption bar height so the buttons are vertically centered:
+                    // height = top_margin * 2 + button_height = pos.y * 2 + size.y.
+                    // If the platform reports native chrome button geometry, derive
+                    // the caption bar height so the buttons are vertically centered.
+                    let new_buttons = ev.new_geom.window_chrome_buttons;
+                    if new_buttons != Rect::default() {
+                        let h = (new_buttons.pos.y * 2.0 + new_buttons.size.y).ceil();
+                        if self.system_caption_bar_height != Some(h) {
+                            self.system_caption_bar_height = Some(h);
+                            self.view(cx, ids!(caption_bar)).redraw(cx);
+                        }
+                    }
+
+                    // If safe area insets changed, trigger a script re-apply
+                    // so widgets pick up new values.
                     if old_insets != ev.new_geom.safe_area_insets {
                         cx.request_script_reapply();
                     }
@@ -609,19 +645,17 @@ impl Widget for Window {
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
                     if self.view(cx, ids!(caption_bar)).visible() {
-                        let size = self.window.get_inner_size(cx);
+                        let caption_rect = self.view(cx, ids!(caption_bar)).area().rect(cx);
+                        let buttons_rect = self.view(cx, ids!(windows_buttons)).area().rect(cx);
 
-                        if dq.abs.y < 25. {
-                            if dq.abs.x < size.x - 250.0 {
-                                dq.response.set(WindowDragQueryResponse::Caption);
-                            } else {
+                        if caption_rect.contains(dq.abs) {
+                            if buttons_rect.size != Vec2d::default() && buttons_rect.contains(dq.abs) {
                                 dq.response.set(WindowDragQueryResponse::Client);
+                            } else {
+                                dq.response.set(WindowDragQueryResponse::Caption);
                             }
                             cx.set_cursor(MouseCursor::Default);
                         }
-                        /*
-                        if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
-                        }*/
                     }
                 }
                 true

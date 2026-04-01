@@ -7,7 +7,7 @@ use {
             WindowClosedEvent, WindowDragQueryEvent, WindowDragQueryResponse, WindowGeom,
             WindowGeomChangeEvent,
         },
-        makepad_math::Vec2d,
+        makepad_math::{Rect, Vec2d},
         os::{
             apple::apple_sys::*,
             apple::apple_util::str_to_nsstring,
@@ -561,6 +561,58 @@ impl MacosWindow {
         with_macos_app(|app| app.time_now())
     }
 
+    /// Returns the bounding box of all three macOS traffic-light buttons
+    /// (close / miniaturize / zoom) in Makepad's coordinate system
+    /// (top-left origin, Y increases downward).
+    ///
+    /// Returns `None` if any button is missing (e.g., borderless popup windows).
+    pub fn traffic_lights_geom(&self) -> Option<Rect> {
+        unsafe {
+            let close: ObjcId = msg_send![self.window, standardWindowButton: 0u64];
+            let miniaturize: ObjcId = msg_send![self.window, standardWindowButton: 1u64];
+            let zoom: ObjcId = msg_send![self.window, standardWindowButton: 2u64];
+            if close.is_null() || miniaturize.is_null() || zoom.is_null() {
+                return None;
+            }
+            let content_view: ObjcId = msg_send![self.window, contentView];
+            let content_frame: NSRect = msg_send![content_view, frame];
+            let h = content_frame.size.height;
+
+            // Convert a button's NSRect from its superview's coord space to the
+            // content view's coord space, then flip to Makepad's top-left origin.
+            let ns_to_rect = |btn: ObjcId| -> (f64, f64, f64, f64) {
+                let superview: ObjcId = msg_send![btn, superview];
+                let ns_frame: NSRect = msg_send![btn, frame];
+                let ns_frame: NSRect = msg_send![
+                    content_view,
+                    convertRect: ns_frame
+                    fromView: superview
+                ];
+                let top = h - (ns_frame.origin.y + ns_frame.size.height);
+                let left = ns_frame.origin.x;
+                let right = ns_frame.origin.x + ns_frame.size.width;
+                let bottom = h - ns_frame.origin.y;
+                (top, left, right, bottom)
+            };
+
+            let (t0, l0, r0, b0) = ns_to_rect(close);
+            let (t1, l1, r1, b1) = ns_to_rect(miniaturize);
+            let (t2, l2, r2, b2) = ns_to_rect(zoom);
+
+            let top  = t0.min(t1).min(t2);
+            let left = l0.min(l1).min(l2);
+            let right  = r0.max(r1).max(r2);
+            let bottom = b0.max(b1).max(b2);
+
+            let rect = Rect {
+                pos: Vec2d { x: left, y: top },
+                size: Vec2d { x: right - left, y: bottom - top },
+            };
+
+            Some(rect)
+        }
+    }
+
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
             xr_is_presenting: false,
@@ -571,6 +623,7 @@ impl MacosWindow {
             outer_size: self.get_outer_size(),
             dpi_factor: self.get_dpi_factor(),
             position: self.get_position(),
+            window_chrome_buttons: self.traffic_lights_geom().unwrap_or_default(),
             ..Default::default()
         }
     }
