@@ -94,6 +94,8 @@ pub struct BottomPanelAnimation {
     start_time: Option<f64>,
 }
 
+const STUDIO_CAPTION_CONTROL_GAP: f64 = 12.0;
+
 fn parse_path_line_column_token(token: &str) -> Option<(String, usize, usize)> {
     let cleaned = token.trim_matches(|c| matches!(c, '"' | '\'' | '(' | ')' | ',' | ';'));
     let (path_and_line, column_str) = cleaned.rsplit_once(':')?;
@@ -121,6 +123,27 @@ fn path_to_virtual(path: &Path) -> String {
     }
 }
 
+fn caption_bar_control_insets(window_geom: &WindowGeom) -> (f64, f64) {
+    let mut left = STUDIO_CAPTION_CONTROL_GAP;
+    let mut right = STUDIO_CAPTION_CONTROL_GAP;
+    let buttons = window_geom.window_chrome_buttons;
+
+    if buttons.size.x > 0.0 && buttons.size.y > 0.0 {
+        let buttons_midpoint = buttons.pos.x + buttons.size.x * 0.5;
+        let window_midpoint = window_geom.inner_size.x * 0.5;
+
+        if buttons_midpoint <= window_midpoint {
+            left = buttons.pos.x + buttons.size.x + STUDIO_CAPTION_CONTROL_GAP;
+        } else {
+            let trailing_inset =
+                (window_geom.inner_size.x - (buttons.pos.x + buttons.size.x)).max(0.0);
+            right = trailing_inset + STUDIO_CAPTION_CONTROL_GAP;
+        }
+    }
+
+    (left, right)
+}
+
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -141,9 +164,55 @@ pub struct App {
     pub bottom_panel_animation_next_frame: NextFrame,
 }
 
+impl App {
+    fn sync_caption_bar_controls(&mut self, cx: &mut Cx, window_geom: &WindowGeom) {
+        let (left_margin, right_margin) = caption_bar_control_insets(window_geom);
+
+        let left_controls = self.ui.view(cx, ids!(left_controls));
+        let left_changed = if let Some(mut view) = left_controls.borrow_mut() {
+            if view.walk.margin.left != left_margin {
+                view.walk.margin.left = left_margin;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if left_changed {
+            left_controls.redraw(cx);
+        }
+
+        let right_caption_tools = self.ui.view(cx, ids!(right_caption_tools));
+        let right_changed = if let Some(mut view) = right_caption_tools.borrow_mut() {
+            if view.walk.margin.right != right_margin {
+                view.walk.margin.right = right_margin;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if right_changed {
+            right_caption_tools.redraw(cx);
+        }
+    }
+
+    fn sync_main_window_caption_bar_controls(&mut self, cx: &mut Cx) {
+        let main_window = self.ui.window(cx, ids!(main_window));
+        let Some(window_id) = main_window.window_id() else {
+            return;
+        };
+        let window_geom = cx.windows[window_id].window_geom.clone();
+        self.sync_caption_bar_controls(cx, &window_geom);
+    }
+}
+
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         self.set_current_file_label(cx, None);
+        self.sync_main_window_caption_bar_controls(cx);
         self.start_backend(cx);
         self.load_state(cx, 0);
         for mount in self.data.mounts.keys().cloned().collect::<Vec<_>>() {
@@ -247,6 +316,13 @@ impl MatchEvent for App {
 
         for action in actions {
             if let Some(action) = action.as_widget_action() {
+                if let WindowAction::WindowGeomChange(ce) = action.cast() {
+                    let main_window = self.ui.window(cx, ids!(main_window));
+                    if Some(ce.window_id) == main_window.window_id() {
+                        self.sync_caption_bar_controls(cx, &ce.new_geom);
+                    }
+                }
+
                 match action.cast() {
                     DockAction::TabWasPressed(tab_id) => {
                         if let Some(mount) = self.data.tab_to_mount.get(&tab_id).cloned() {
@@ -363,6 +439,13 @@ impl AppMain for App {
             }
         }
 
+        if let Event::WindowGeomChange(ce) = event {
+            let main_window = self.ui.window(cx, ids!(main_window));
+            if Some(ce.window_id) == main_window.window_id() {
+                self.sync_caption_bar_controls(cx, &ce.new_geom);
+            }
+        }
+
         if let Event::WindowDragQuery(dq) = event {
             let main_window = self.ui.window(cx, ids!(main_window));
             if Some(dq.window_id) == main_window.window_id() {
@@ -384,5 +467,50 @@ impl AppMain for App {
         }
         self.refresh_run_view_targets(cx);
         self.save_state_if_needed(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window_geom(inner_width: f64, buttons: Rect) -> WindowGeom {
+        WindowGeom {
+            inner_size: dvec2(inner_width, 600.0),
+            window_chrome_buttons: buttons,
+            ..WindowGeom::default()
+        }
+    }
+
+    #[test]
+    fn caption_bar_control_insets_default_to_small_edge_gap() {
+        assert_eq!(
+            caption_bar_control_insets(&window_geom(800.0, Rect::default())),
+            (STUDIO_CAPTION_CONTROL_GAP, STUDIO_CAPTION_CONTROL_GAP)
+        );
+    }
+
+    #[test]
+    fn caption_bar_control_insets_reserve_left_side_for_macos_chrome() {
+        let buttons = Rect {
+            pos: dvec2(14.0, 6.0),
+            size: dvec2(54.0, 14.0),
+        };
+        assert_eq!(
+            caption_bar_control_insets(&window_geom(800.0, buttons)),
+            (80.0, STUDIO_CAPTION_CONTROL_GAP)
+        );
+    }
+
+    #[test]
+    fn caption_bar_control_insets_keep_right_gap_for_windows_style_chrome() {
+        let buttons = Rect {
+            pos: dvec2(662.0, 0.0),
+            size: dvec2(138.0, 29.0),
+        };
+        assert_eq!(
+            caption_bar_control_insets(&window_geom(800.0, buttons)),
+            (STUDIO_CAPTION_CONTROL_GAP, STUDIO_CAPTION_CONTROL_GAP)
+        );
     }
 }
