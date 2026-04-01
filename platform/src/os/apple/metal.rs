@@ -1809,6 +1809,79 @@ fn texture_pixel_to_mtl_pixel(pix: &TexturePixel) -> MTLPixelFormat {
     }
 }
 impl CxTexture {
+    /// Read back the BGRA pixel data from a render texture.
+    /// Creates a Shared staging texture, blits from the (Private) source,
+    /// waits for the GPU to finish, then reads the staging texture.
+    /// Returns (width, height, bgra_bytes) or None if the texture is not ready.
+    pub fn read_back_to_bgra(&self) -> Option<(usize, usize, Vec<u8>)> {
+        let alloc = self.alloc.as_ref()?;
+        let texture = self.os.texture.as_ref()?;
+        if alloc.width == 0 || alloc.height == 0 {
+            return None;
+        }
+        let w = alloc.width;
+        let h = alloc.height;
+
+        unsafe {
+            let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+
+            // Get the Metal device from the source texture.
+            let device: ObjcId = msg_send![texture.as_id(), device];
+
+            // Create a Shared staging texture for CPU readback.
+            let descriptor: ObjcId = msg_send![class!(MTLTextureDescriptor), new];
+            let _: () = msg_send![descriptor, setTextureType: MTLTextureType::D2];
+            let _: () = msg_send![descriptor, setWidth: w as u64];
+            let _: () = msg_send![descriptor, setHeight: h as u64];
+            let _: () = msg_send![descriptor, setDepth: 1u64];
+            let _: () = msg_send![descriptor, setStorageMode: MTLStorageMode::Shared];
+            let _: () = msg_send![descriptor, setUsage: MTLTextureUsage::ShaderRead];
+            let _: () = msg_send![descriptor, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+            let staging: ObjcId = msg_send![device, newTextureWithDescriptor: descriptor];
+            let _: () = msg_send![descriptor, release];
+
+            // Create a one-shot command buffer to blit from source → staging.
+            let queue: ObjcId = msg_send![device, newCommandQueue];
+            let cmd_buf: ObjcId = msg_send![queue, commandBuffer];
+            let blit_enc: ObjcId = msg_send![cmd_buf, blitCommandEncoder];
+            let _: () = msg_send![blit_enc, copyFromTexture: texture.as_id() toTexture: staging];
+            #[cfg(target_os = "macos")]
+            {
+                let _: () =
+                    msg_send![blit_enc, synchronizeTexture: staging slice: 0u64 level: 0u64];
+            }
+            let _: () = msg_send![blit_enc, endEncoding];
+            let _: () = msg_send![cmd_buf, commit];
+            let _: () = msg_send![cmd_buf, waitUntilCompleted];
+
+            // Read pixels from the Shared staging texture.
+            let mut buf = vec![0u8; w * h * 4];
+            let region = MTLRegion {
+                origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                size: MTLSize {
+                    width: w as u64,
+                    height: h as u64,
+                    depth: 1,
+                },
+            };
+            let _: () = msg_send![
+                staging,
+                getBytes: buf.as_mut_ptr()
+                bytesPerRow: (w * 4) as u64
+                bytesPerImage: (w * h * 4) as u64
+                fromRegion: region
+                mipmapLevel: 0
+                slice: 0
+            ];
+
+            let _: () = msg_send![staging, release];
+            let _: () = msg_send![queue, release];
+            let _: () = msg_send![pool, release];
+
+            Some((w, h, buf))
+        }
+    }
+
     /*
     pub fn copy_to_system_ram(
         &self,

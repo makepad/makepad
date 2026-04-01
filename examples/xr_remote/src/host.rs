@@ -1,4 +1,7 @@
-use crate::{protocol::*, scene::*, shared_scene::*, wire::*};
+use crate::{gpu_capture::GpuCapture, protocol::*, scene::*, shared_scene::*, wire::*};
+use makepad_widgets::makepad_draw::{
+    cx_3d::Cx3d, cx_draw::CxDraw, draw_list_2d::DrawListExt, scene_3d::SceneState3D,
+};
 use makepad_widgets::makepad_micro_serde::SerBin;
 #[cfg(not(target_os = "macos"))]
 use makepad_widgets::makepad_platform::video::{
@@ -9,6 +12,7 @@ use makepad_widgets::makepad_platform::{
     event::xr::XrState,
     thread::SignalToUI,
     video::{CameraFrameLayout, VideoEncodeSource, VideoEncoderConfig, VideoQueuePolicy},
+    DrawEvent,
 };
 use makepad_widgets::*;
 use makepad_xr::{XrNetIncoming, XrNetNode};
@@ -50,6 +54,7 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(920, 620)
                 body +: {
+                    gpu_scene := mod.widgets.XrRemoteSharedScene{}
                     SolidView{
                         width: Fill
                         height: Fill
@@ -108,6 +113,16 @@ script_mod! {
                                     width: Fit
                                     text: "Quest Tree Scene"
                                 }
+
+                                gpu_toggle_button := ButtonFlat{
+                                    width: Fit
+                                    text: "GPU Pipeline"
+                                }
+                            }
+
+                            host_pipeline := Label{
+                                text: "Pipeline: CPU (software rasterizer)"
+                                draw_text.color: #x97adc2
                             }
                         }
 
@@ -1177,6 +1192,12 @@ pub struct App {
     #[rust]
     eye_encoders: [HostEyeEncoder; 2],
     #[rust]
+    gpu_capture: GpuCapture,
+    #[rust]
+    gpu_encoders_started: bool,
+    #[rust]
+    use_gpu_pipeline: bool,
+    #[rust]
     latest_state: XrState,
     #[rust]
     latest_state_received: bool,
@@ -1192,6 +1213,8 @@ pub struct App {
     latest_marker_text: String,
     #[rust]
     latest_remote_log_text: String,
+    #[rust]
+    latest_pipeline_text: String,
     #[rust]
     frame_group_counter: u64,
     #[rust]
@@ -1217,6 +1240,9 @@ impl Default for App {
             network_started: false,
             encoders_started: false,
             eye_encoders: std::array::from_fn(|_| HostEyeEncoder::None),
+            gpu_capture: GpuCapture::new(),
+            gpu_encoders_started: false,
+            use_gpu_pipeline: false,
             latest_state: XrState::default(),
             latest_state_received: false,
             latest_status: "Host idle".to_string(),
@@ -1225,6 +1251,7 @@ impl Default for App {
             latest_render_text: "Render: stream-video | Scene: test-scene".to_string(),
             latest_marker_text: "Marker: (0.42, 0.34, -0.76) scale 1.00 pulse 0.00".to_string(),
             latest_remote_log_text: "Remote: waiting".to_string(),
+            latest_pipeline_text: "Pipeline: CPU (software rasterizer)".to_string(),
             frame_group_counter: 0,
             last_media_ready: false,
             session_config: default_session_config(),
@@ -1493,6 +1520,286 @@ impl App {
         }
     }
 
+    // --- GPU-based encoding path ---
+
+    #[cfg(not(target_os = "macos"))]
+    const GPU_LEFT_ENCODER_SLOT: usize = 2;
+    #[cfg(not(target_os = "macos"))]
+    const GPU_RIGHT_ENCODER_SLOT: usize = 3;
+
+    #[cfg(not(target_os = "macos"))]
+    fn gpu_encoder_slot(eye: XrRemoteEye) -> usize {
+        match eye {
+            XrRemoteEye::Left => Self::GPU_LEFT_ENCODER_SLOT,
+            XrRemoteEye::Right => Self::GPU_RIGHT_ENCODER_SLOT,
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn gpu_encoder_config_for_eye(
+        &self,
+        codec: XrRemoteCodec,
+        eye: XrRemoteEye,
+    ) -> VideoEncoderConfig {
+        let texture_id = self
+            .gpu_capture
+            .eye_target(eye)
+            .map(|t| t.texture_id())
+            .unwrap_or_default();
+        VideoEncoderConfig {
+            codec: codec.video_codec(),
+            source: VideoEncodeSource::Texture { texture_id },
+            width: self.session_config.per_eye_width,
+            height: self.session_config.per_eye_height,
+            fps_num: self.session_config.fps,
+            fps_den: 1,
+            target_bitrate: 6_000_000,
+            keyint: 2,
+            latency_realtime: true,
+            codec_mode: 8,
+            queue_policy: VideoQueuePolicy::LatestWins,
+            queue_capacity: 2,
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn ensure_gpu_encoders(&mut self, cx: &mut Cx) {
+        if self.gpu_encoders_started {
+            return;
+        }
+        self.gpu_capture.ensure_targets(cx);
+        let codec = XrRemoteCodec::H265AnnexB;
+        let mut ok = true;
+        for eye in XrRemoteEye::ALL {
+            let host_shared = self.shared.clone();
+            let eye_shared = self.shared.eye_shared(eye);
+            let config = self.gpu_encoder_config_for_eye(codec, eye);
+            match cx.video_encoder_output_try(Self::gpu_encoder_slot(eye), config, move |packet| {
+                if packet.codec != codec.video_codec()
+                    || packet.format
+                        != makepad_widgets::makepad_platform::video::VideoBitstreamFormat::AnnexB
+                {
+                    return;
+                }
+                if packet.is_config {
+                    let config = VideoConfigPacket {
+                        eye,
+                        config_id: packet.config_id,
+                        bytes: packet.data.to_vec(),
+                    };
+                    if let Some(stream_config) = eye_shared.replace_config(config.clone()) {
+                        host_shared.send_control(&ControlPacket::StreamConfig(stream_config));
+                    }
+                    host_shared.send_control(&ControlPacket::VideoConfig(config));
+                    return;
+                }
+                if packet.is_eos {
+                    return;
+                }
+                let Some(meta) = eye_shared.take_pending_meta(packet.pts_ns) else {
+                    return;
+                };
+                if let Err(err) = eye_shared.send_media_frame(
+                    meta,
+                    packet.config_id.max(eye_shared.current_config_id()),
+                    packet.is_key,
+                    packet.data,
+                ) {
+                    crate::log!(
+                        "xr_remote host: {} gpu udp send failed: {}",
+                        eye.label(),
+                        err
+                    );
+                }
+            }) {
+                Ok(()) => {}
+                Err(err) => {
+                    self.latest_status = format!("GPU encoder {} failed: {:?}", eye.label(), err);
+                    ok = false;
+                }
+            }
+        }
+        if ok {
+            self.gpu_encoders_started = true;
+            self.latest_stream_text = format!(
+                "Stream: GPU {} dual-eye {}x{} @ {} fps",
+                codec.label(),
+                self.session_config.per_eye_width,
+                self.session_config.per_eye_height,
+                self.session_config.fps
+            );
+            self.shared.send_current_control_state();
+        }
+        self.refresh_labels(cx);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn push_gpu_eye_frame(
+        &mut self,
+        cx: &mut Cx,
+        eye: XrRemoteEye,
+        timestamp_ns: u64,
+        frame_group_id: u64,
+        tracking_id: u64,
+        request_keyframe: bool,
+    ) -> bool {
+        let meta = PendingFrameMeta {
+            session_id: self.session_config.session_id,
+            frame_group_id,
+            frame_id: frame_group_id,
+            tracking_id,
+            pts_ns: timestamp_ns,
+        };
+        self.shared
+            .eye_shared(eye)
+            .queue_pending_meta(timestamp_ns, meta);
+        if request_keyframe {
+            let _ = cx.video_encoder_request_keyframe(Self::gpu_encoder_slot(eye));
+        }
+        match cx.video_encoder_capture_texture_frame(Self::gpu_encoder_slot(eye), timestamp_ns) {
+            Ok(()) => true,
+            Err(err) => {
+                crate::log!(
+                    "xr_remote host: {} gpu capture failed: {:?}",
+                    eye.label(),
+                    err
+                );
+                false
+            }
+        }
+    }
+
+    fn try_start_gpu_pipeline(&mut self, cx: &mut Cx) {
+        if self.use_gpu_pipeline {
+            return;
+        }
+        self.gpu_capture.ensure_targets(cx);
+
+        // On macOS, the platform encoder API doesn't support texture-source
+        // encoding (CodecUnavailable). Instead, use the existing Mac VT encoder
+        // with GPU texture readback.
+        #[cfg(target_os = "macos")]
+        {
+            if self.encoders_started {
+                self.use_gpu_pipeline = true;
+                self.latest_pipeline_text = format!(
+                    "Pipeline: GPU readback (offscreen {}x{})",
+                    self.gpu_capture.width, self.gpu_capture.height
+                );
+                crate::log!("xr_remote host: GPU readback pipeline active (Mac VT encoder)");
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            if !self.gpu_encoders_started {
+                self.ensure_gpu_encoders(cx);
+            }
+            if self.gpu_encoders_started {
+                self.use_gpu_pipeline = true;
+                self.latest_pipeline_text = format!(
+                    "Pipeline: GPU (offscreen {}x{})",
+                    self.gpu_capture.width, self.gpu_capture.height
+                );
+                crate::log!("xr_remote host: GPU capture pipeline active");
+            }
+        }
+    }
+
+    fn render_offscreen_eyes(&mut self, cx: &mut Cx, draw_event: &DrawEvent) {
+        if !self.use_gpu_pipeline {
+            return;
+        }
+
+        // Get the GPU scene widget and update its state before creating CxDraw.
+        let gpu_scene = self.ui.widget(cx, ids!(gpu_scene));
+        apply_scene_content_state(
+            gpu_scene.clone(),
+            cx,
+            &self.render_state,
+            &self.marker_state,
+        );
+
+        // Build tracking data for per-eye camera matrices.
+        let tracking = make_tracking_packet(
+            self.frame_group_counter.wrapping_add(1),
+            (self.latest_state.time * 1_000_000_000.0) as u64,
+            self.latest_state.head_pose,
+            self.session_config.ipd_meters,
+            self.session_config.fov_y_degrees,
+            self.session_config.per_eye_width,
+            self.session_config.per_eye_height,
+            if self.latest_state_received {
+                self.latest_state.anchor
+            } else {
+                None
+            },
+        );
+
+        let width = self.gpu_capture.width;
+        let height = self.gpu_capture.height;
+        let viewport_rect = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(width as f64, height as f64),
+        };
+        let time = cx.seconds_since_app_start();
+        let eye_packets = [&tracking.left_eye, &tracking.right_eye];
+        let eye_states: [SceneState3D; 2] = [
+            Self::build_eye_scene_state(eye_packets[0], viewport_rect, time),
+            Self::build_eye_scene_state(eye_packets[1], viewport_rect, time),
+        ];
+
+        let mut cx_draw = CxDraw::new(cx, draw_event);
+        for eye_idx in 0..2 {
+            let scene_state = eye_states[eye_idx];
+            if let Some(target) = &mut self.gpu_capture.eyes[eye_idx] {
+                cx_draw.begin_pass(&target.pass, Some(1.0));
+
+                // Write per-eye camera matrices into the pass uniforms.
+                {
+                    let pass_id = target.pass.draw_pass_id();
+                    let camera_inv = scene_state.view.invert();
+                    let pu = &mut cx_draw.cx.passes[pass_id].pass_uniforms;
+                    pu.camera_projection = scene_state.projection;
+                    pu.camera_projection_r = scene_state.projection;
+                    pu.camera_view = scene_state.view;
+                    pu.camera_view_r = scene_state.view;
+                    pu.depth_projection = scene_state.projection;
+                    pu.depth_projection_r = scene_state.projection;
+                    pu.depth_view = scene_state.view;
+                    pu.depth_view_r = scene_state.view;
+                    pu.camera_inv = camera_inv;
+                    pu.camera_inv_r = camera_inv;
+                    pu.time = time as f32;
+                }
+
+                // Draw 3D scene content into the offscreen pass.
+                {
+                    let mut cx3d = Cx3d::new(&mut cx_draw);
+                    target.draw_list.begin_always(&mut cx3d);
+                    cx3d.begin_scene_3d(scene_state);
+                    gpu_scene.draw_3d_all(&mut cx3d, &mut Scope::empty());
+                    cx3d.end_scene_3d();
+                    target.draw_list.end(&mut cx3d);
+                }
+
+                cx_draw.end_pass(&target.pass);
+            }
+        }
+    }
+
+    fn build_eye_scene_state(eye: &EyeViewPacket, viewport_rect: Rect, time: f64) -> SceneState3D {
+        let view = eye.pose.to_mat4().invert();
+        let projection = Mat4f::perspective(eye.fov_y_degrees, eye.aspect, 0.05, 200.0);
+        SceneState3D {
+            time,
+            camera_pos: eye.pose.position,
+            view,
+            projection,
+            viewport_rect,
+        }
+    }
+
     fn refresh_labels(&mut self, cx: &mut Cx) {
         let (left_connected, left_packets, left_bytes) =
             self.shared.eye_shared(XrRemoteEye::Left).debug_counters();
@@ -1526,6 +1833,9 @@ impl App {
         self.ui
             .widget(cx, ids!(host_remote_log))
             .set_text(cx, &self.latest_remote_log_text);
+        self.ui
+            .widget(cx, ids!(host_pipeline))
+            .set_text(cx, &self.latest_pipeline_text);
         self.ui
             .widget(cx, ids!(preview_title))
             .set_text(cx, self.preview_title());
@@ -1604,6 +1914,19 @@ impl App {
             XrRemoteEye::Right => self.ui.image(cx, ids!(preview_right)),
         };
         image.set_texture(cx, Some(texture));
+    }
+
+    fn update_gpu_preview_textures(&mut self, cx: &mut Cx) {
+        for eye in XrRemoteEye::ALL {
+            if let Some(target) = self.gpu_capture.eye_target(eye) {
+                let texture = target.texture();
+                let image = match eye {
+                    XrRemoteEye::Left => self.ui.image(cx, ids!(preview_left)),
+                    XrRemoteEye::Right => self.ui.image(cx, ids!(preview_right)),
+                };
+                image.set_texture(cx, Some(texture));
+            }
+        }
     }
 
     fn handle_control_packet(&mut self, cx: &mut Cx, packet: ControlPacket) {
@@ -1712,17 +2035,20 @@ impl App {
         eye: XrRemoteEye,
         encode_enabled: bool,
         request_keyframe: bool,
+        skip_rasterize: bool,
     ) -> bool {
         let eye_index = eye.index();
-        render_eye_scene(
-            &mut self.eye_bgra_frames[eye_index],
-            &mut self.eye_depth_buffers[eye_index],
-            tracking,
-            eye,
-            &self.session_config,
-            &self.render_state,
-            &self.marker_state,
-        );
+        if !skip_rasterize {
+            render_eye_scene(
+                &mut self.eye_bgra_frames[eye_index],
+                &mut self.eye_depth_buffers[eye_index],
+                tracking,
+                eye,
+                &self.session_config,
+                &self.render_state,
+                &self.marker_state,
+            );
+        }
         self.update_preview_texture(cx, eye);
 
         if !encode_enabled {
@@ -1813,11 +2139,38 @@ impl App {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn read_gpu_texture_to_bgra(&mut self, cx: &mut Cx, eye: XrRemoteEye) {
+        let Some(target) = self.gpu_capture.eye_target(eye) else {
+            return;
+        };
+        let texture_id = target.texture_id();
+        let cx_texture = &cx.textures[texture_id];
+        if let Some((_w, _h, bgra)) = cx_texture.read_back_to_bgra() {
+            self.eye_bgra_frames[eye.index()] = bgra;
+        }
+    }
+
     fn push_frame(&mut self, cx: &mut Cx) {
         let media_ready = self.shared.all_media_connected();
-        let encode_enabled = media_ready
+        #[cfg(not(target_os = "macos"))]
+        let gpu_platform_encode_enabled = media_ready
+            && self.use_gpu_pipeline
+            && self.gpu_encoders_started
+            && self.render_state.mode == XrRemoteRenderMode::Stream;
+        #[cfg(target_os = "macos")]
+        let gpu_platform_encode_enabled = false;
+        let gpu_readback_encode_enabled = media_ready
+            && self.use_gpu_pipeline
+            && !self.gpu_encoders_started
             && self.encoders_started
             && self.render_state.mode == XrRemoteRenderMode::Stream;
+        let cpu_encode_enabled = media_ready
+            && !self.use_gpu_pipeline
+            && self.encoders_started
+            && self.render_state.mode == XrRemoteRenderMode::Stream;
+        let encode_enabled =
+            gpu_platform_encode_enabled || gpu_readback_encode_enabled || cpu_encode_enabled;
         let using_live_tracking = self.latest_state_received;
         if !using_live_tracking {
             self.latest_pose_text =
@@ -1845,24 +2198,87 @@ impl App {
             && (self.shared.any_eye_requires_keyframe()
                 || frame_group_id % ((self.session_config.fps / 2).max(1) as u64) == 0);
         let encode_timestamp_ns = render_started_ns.max(self.frame_group_counter.saturating_add(1));
-        let left_ok = self.push_eye_frame(
-            cx,
-            &tracking,
-            frame_group_id,
-            encode_timestamp_ns,
-            XrRemoteEye::Left,
-            encode_enabled,
-            request_keyframe,
-        );
-        let right_ok = self.push_eye_frame(
-            cx,
-            &tracking,
-            frame_group_id,
-            encode_timestamp_ns,
-            XrRemoteEye::Right,
-            encode_enabled,
-            request_keyframe,
-        );
+
+        let (left_ok, right_ok) = if gpu_platform_encode_enabled {
+            #[cfg(not(target_os = "macos"))]
+            {
+                // GPU path: capture from offscreen render textures via platform encoder
+                self.update_gpu_preview_textures(cx);
+                let left_ok = self.push_gpu_eye_frame(
+                    cx,
+                    XrRemoteEye::Left,
+                    encode_timestamp_ns,
+                    frame_group_id,
+                    tracking.tracking_id,
+                    request_keyframe,
+                );
+                let right_ok = self.push_gpu_eye_frame(
+                    cx,
+                    XrRemoteEye::Right,
+                    encode_timestamp_ns,
+                    frame_group_id,
+                    tracking.tracking_id,
+                    request_keyframe,
+                );
+                (left_ok, right_ok)
+            }
+            #[cfg(target_os = "macos")]
+            {
+                (false, false)
+            }
+        } else if gpu_readback_encode_enabled {
+            // GPU readback path: read texture pixels back to CPU, encode with existing encoder
+            #[cfg(target_os = "macos")]
+            {
+                self.read_gpu_texture_to_bgra(cx, XrRemoteEye::Left);
+                self.read_gpu_texture_to_bgra(cx, XrRemoteEye::Right);
+            }
+            self.update_gpu_preview_textures(cx);
+            let left_ok = self.push_eye_frame(
+                cx,
+                &tracking,
+                frame_group_id,
+                encode_timestamp_ns,
+                XrRemoteEye::Left,
+                true,
+                request_keyframe,
+                true, // skip rasterize — GPU data already in buffer
+            );
+            let right_ok = self.push_eye_frame(
+                cx,
+                &tracking,
+                frame_group_id,
+                encode_timestamp_ns,
+                XrRemoteEye::Right,
+                true,
+                request_keyframe,
+                true, // skip rasterize — GPU data already in buffer
+            );
+            (left_ok, right_ok)
+        } else {
+            // CPU path: software rasterize + encode via VT/platform encoder
+            let left_ok = self.push_eye_frame(
+                cx,
+                &tracking,
+                frame_group_id,
+                encode_timestamp_ns,
+                XrRemoteEye::Left,
+                cpu_encode_enabled,
+                request_keyframe,
+                false,
+            );
+            let right_ok = self.push_eye_frame(
+                cx,
+                &tracking,
+                frame_group_id,
+                encode_timestamp_ns,
+                XrRemoteEye::Right,
+                cpu_encode_enabled,
+                request_keyframe,
+                false,
+            );
+            (left_ok, right_ok)
+        };
         let render_finished_ns = (cx.seconds_since_app_start() * 1_000_000_000.0) as u64;
         if left_ok && right_ok {
             self.frame_group_counter = frame_group_id;
@@ -1931,6 +2347,25 @@ impl MatchEvent for App {
         {
             self.set_render_state(cx, XrRemoteRenderMode::LocalScene, XrRemoteSceneId::Tree);
         }
+        if self.ui.button(cx, ids!(gpu_toggle_button)).clicked(actions) {
+            if self.use_gpu_pipeline {
+                // Switch to CPU pipeline
+                self.use_gpu_pipeline = false;
+                self.latest_pipeline_text = "Pipeline: CPU (software rasterizer)".to_string();
+                crate::log!("xr_remote host: switched to CPU pipeline");
+            } else {
+                // Try to start GPU pipeline
+                self.try_start_gpu_pipeline(cx);
+                if !self.use_gpu_pipeline {
+                    self.latest_pipeline_text =
+                        "Pipeline: GPU unavailable, staying on CPU".to_string();
+                    crate::log!("xr_remote host: GPU pipeline unavailable");
+                } else {
+                    crate::log!("xr_remote host: switched to GPU pipeline");
+                }
+            }
+            self.refresh_labels(cx);
+        }
         if self
             .ui
             .button(cx, ids!(marker_left_button))
@@ -1996,6 +2431,13 @@ impl AppMain for App {
         if matches!(event, Event::Startup) {
             self.ensure_started(cx);
             self.ensure_encoders(cx);
+            self.try_start_gpu_pipeline(cx);
+        }
+        // Render offscreen eye passes during the draw cycle so Metal
+        // allocates and clears the render textures. The next frame timer
+        // tick will capture from these textures for encoding.
+        if let Event::Draw(draw_event) = event {
+            self.render_offscreen_eyes(cx, draw_event);
         }
         self.drain_xr_net();
         if let Event::Signal = event {
