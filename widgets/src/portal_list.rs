@@ -1,7 +1,7 @@
 use {
     crate::{
         animator::AnimatorImpl,
-        event::TouchState,
+        event::{TouchState, TAP_COUNT_DISTANCE},
         makepad_derive_widget::*,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
@@ -39,6 +39,11 @@ enum ScrollState {
     Stopped,
     Drag {
         samples: Vec<ScrollSample>,
+        /// The initial touch position along the scroll axis at FingerDown.
+        initial_abs: f64,
+        /// Whether this drag has exceeded the minimum threshold to be treated
+        /// as scroll rather than a tap. Until committed, no scroll deltas are applied.
+        committed: bool,
     },
     Flick {
         delta: f64,
@@ -375,6 +380,22 @@ pub struct PortalList {
     grab_key_focus: bool,
     #[live(true)]
     drag_scrolling: bool,
+    /// The minimum distance (in pixels) a finger/mouse must move before a drag is
+    /// "committed" and treated as a scroll gesture rather than a tap/click.
+    /// This prevents accidental micro-scrolling when tapping interactive items.
+    /// Defaults to `TAP_COUNT_DISTANCE`, keeping it consistent with the
+    /// platform's tap-vs-drag distinction.
+    #[rust(TAP_COUNT_DISTANCE)]
+    drag_scroll_threshold: f64,
+
+    /// Whether the current gesture should be suppressed from child widgets.
+    /// Set when either:
+    /// - A drag scroll commits (finger moves past threshold), or
+    /// - A finger-down/click occurs while a scroll animation was in progress
+    ///   (the tap-to-stop-scroll gesture).
+    /// Cleared on the next finger-down that arrives when not scrolling.
+    #[rust]
+    suppress_child_events: bool,
 
     #[rust]
     first_id: usize,
@@ -1679,7 +1700,36 @@ impl Widget for PortalList {
         // Hover events (FingerHoverIn/Out/Over) are ALWAYS passed through so interactive items
         // can properly show/hide their hover states.
         let mut pass_through_to_children = true;
-        if self.selectable {
+
+        // Suppress all interaction events to children when:
+        // - A committed drag scroll is active (finger/mouse moved past threshold), or
+        // - The current gesture started as a tap-to-stop-scroll (user tapped while
+        //   a flick animation was in progress).
+        // Hover events are not suppressed so widgets can still update their hover state.
+        //
+        // For down events (MouseDown/TouchStart), we also check whether the scroll
+        // is currently animating. This is needed because `suppress_child_events` is
+        // set in hit processing which runs *after* child event forwarding.
+        let is_scroll_animating = matches!(
+            self.scroll_state,
+            ScrollState::Flick { .. }
+                | ScrollState::Pulldown { .. }
+                | ScrollState::ScrollingTo { .. }
+                | ScrollState::Tailing { .. }
+        );
+        if self.suppress_child_events || is_scroll_animating {
+            match event {
+                Event::TouchUpdate(_) | Event::MouseDown(_)
+                | Event::MouseMove(_) | Event::MouseUp(_) => {
+                    pass_through_to_children = false;
+                }
+                _ => {}
+            }
+        }
+
+        // The selectable logic can only further restrict pass-through, never override
+        // the drag-scroll suppression above.
+        if self.selectable && pass_through_to_children {
             match event {
                 // Always pass hover events through for proper hover state management
                 Event::MouseMove(_) => {
@@ -1977,10 +2027,16 @@ impl Widget for PortalList {
                     }
                     self.tail_range = false;
                     self.was_scrolling = match &self.scroll_state {
-                        ScrollState::Drag { samples } => samples.len() > 1,
+                        ScrollState::Drag { samples, .. } => samples.len() > 1,
                         ScrollState::Stopped => false,
                         _ => true,
                     };
+
+                    // If the list was animating (flick, pulldown, etc.) when the user
+                    // tapped/clicked, suppress forwarding this entire gesture to children.
+                    // The tap should only stop the scroll, not activate a child widget.
+                    // If the list was NOT scrolling, clear any previous suppression.
+                    self.suppress_child_events = self.was_scrolling;
 
                     // Handle selection when selectable, but not if clicking on interactive items
                     let on_interactive = self.point_hits_interactive_item(cx, fe.abs);
@@ -2000,12 +2056,23 @@ impl Widget for PortalList {
                             });
                             self.update_item_selections(cx);
                         }
-                    } else if self.drag_scrolling && fe.is_primary_hit() && !on_interactive {
+                    } else if self.drag_scrolling && fe.is_primary_hit() {
+                        // Always enter drag state to enable drag-to-scroll even over
+                        // interactive widgets (buttons, links, etc.). The drag threshold
+                        // prevents micro-scrolling during taps/clicks, and child widgets
+                        // use `was_tap()` to distinguish taps from drags on FingerUp.
+                        let initial = fe.abs.index(vi);
                         self.scroll_state = ScrollState::Drag {
                             samples: vec![ScrollSample {
-                                abs: fe.abs.index(vi),
+                                abs: initial,
                                 time: fe.time,
                             }],
+                            initial_abs: initial,
+                            // When on interactive items, require a drag threshold before
+                            // committing to scroll (for both touch and mouse).
+                            // For non-interactive areas, commit immediately since
+                            // there's no ambiguity.
+                            committed: !on_interactive,
                         };
                     }
                 }
@@ -2030,8 +2097,35 @@ impl Widget for PortalList {
                         if !self.point_hits_interactive_item(cx, e.abs) {
                             cx.set_cursor(MouseCursor::Default);
                         }
-                        if let ScrollState::Drag { samples } = &mut self.scroll_state {
+                        if let ScrollState::Drag {
+                            samples,
+                            initial_abs,
+                            committed,
+                        } = &mut self.scroll_state
+                        {
                             let new_abs = e.abs.index(vi);
+
+                            // Check if the drag threshold has been exceeded.
+                            if !*committed {
+                                if (new_abs - *initial_abs).abs()
+                                    >= self.drag_scroll_threshold
+                                {
+                                    *committed = true;
+                                    self.suppress_child_events = true;
+                                } else {
+                                    // Still under threshold — track samples but don't scroll.
+                                    samples.push(ScrollSample {
+                                        abs: new_abs,
+                                        time: e.time,
+                                    });
+                                    if samples.len() > 4 {
+                                        samples.remove(0);
+                                    }
+                                    // Don't apply scroll delta yet.
+                                    return;
+                                }
+                            }
+
                             let old_sample = *samples.last().unwrap();
                             samples.push(ScrollSample {
                                 abs: new_abs,
@@ -2062,36 +2156,50 @@ impl Widget for PortalList {
                         }
                     }
 
-                    if let ScrollState::Drag { samples } = &mut self.scroll_state {
-                        let mut last = None;
-                        let mut scaled_delta = 0.0;
-                        let mut total_delta = 0.0;
-                        for sample in samples.iter().rev() {
-                            if last.is_none() {
-                                last = Some(sample);
-                            } else {
-                                total_delta += last.unwrap().abs - sample.abs;
-                                scaled_delta += (last.unwrap().abs - sample.abs)
-                                    / (last.unwrap().time - sample.time);
-                            }
-                        }
-                        scaled_delta *= self.flick_scroll_scaling;
-                        if self.first_id == self.range_start && self.first_scroll > 0.0 {
-                            self.scroll_state = ScrollState::Pulldown {
-                                next_frame: cx.new_next_frame(),
-                            };
-                        } else if total_delta.abs() > 10.0
-                            && scaled_delta.abs() > self.flick_scroll_minimum
-                        {
-                            self.scroll_state = ScrollState::Flick {
-                                delta: scaled_delta
-                                    .min(self.flick_scroll_maximum)
-                                    .max(-self.flick_scroll_maximum),
-                                next_frame: cx.new_next_frame(),
-                            };
-                        } else {
+                    // Always clear touch drag scrolling active flag on finger up.
+                    self.suppress_child_events = false;
+
+                    if let ScrollState::Drag {
+                        samples, committed, ..
+                    } = &mut self.scroll_state
+                    {
+                        // If the drag was never committed (finger didn't move past
+                        // threshold), just stop — this was a tap, not a scroll.
+                        if !*committed {
                             self.was_scrolling = false;
                             self.scroll_state = ScrollState::Stopped;
+                        } else {
+                            let mut last = None;
+                            let mut scaled_delta = 0.0;
+                            let mut total_delta = 0.0;
+                            for sample in samples.iter().rev() {
+                                if last.is_none() {
+                                    last = Some(sample);
+                                } else {
+                                    total_delta += last.unwrap().abs - sample.abs;
+                                    scaled_delta += (last.unwrap().abs - sample.abs)
+                                        / (last.unwrap().time - sample.time);
+                                }
+                            }
+                            scaled_delta *= self.flick_scroll_scaling;
+                            if self.first_id == self.range_start && self.first_scroll > 0.0
+                            {
+                                self.scroll_state = ScrollState::Pulldown {
+                                    next_frame: cx.new_next_frame(),
+                                };
+                            } else if total_delta.abs() > 10.0
+                                && scaled_delta.abs() > self.flick_scroll_minimum
+                            {
+                                self.scroll_state = ScrollState::Flick {
+                                    delta: scaled_delta
+                                        .min(self.flick_scroll_maximum)
+                                        .max(-self.flick_scroll_maximum),
+                                    next_frame: cx.new_next_frame(),
+                                };
+                            } else {
+                                self.was_scrolling = false;
+                                self.scroll_state = ScrollState::Stopped;
+                            }
                         }
                     }
                 }
@@ -2228,7 +2336,7 @@ impl PortalListRef {
 
         match &inner.scroll_state {
             ScrollState::Stopped => {}
-            ScrollState::Drag { samples } => {
+            ScrollState::Drag { samples, .. } => {
                 state = "Drag";
                 drag_samples = samples.len();
             }
