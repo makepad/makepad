@@ -5,6 +5,20 @@ mod imp {
     pub type MetalResult<T> = Result<T, String>;
 
     #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub struct MetalSize {
+        pub width: u64,
+        pub height: u64,
+        pub depth: u64,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct MetalBufferBindingRef<'a> {
+        pub index: u64,
+        pub buffer: &'a MetalBuffer,
+        pub offset_bytes: usize,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
     pub enum BufferStorageMode {
         Shared,
         Private,
@@ -115,6 +129,36 @@ mod imp {
             Err("Metal runtime is unavailable on this target".to_string())
         }
 
+        pub fn read_buffer_range(
+            &self,
+            _buffer: &MetalBuffer,
+            _offset_bytes: usize,
+            _len_bytes: usize,
+        ) -> MetalResult<Vec<u8>> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
+
+        pub fn write_buffer(
+            &self,
+            _buffer: &MetalBuffer,
+            _offset_bytes: usize,
+            _bytes: &[u8],
+        ) -> MetalResult<()> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
+
+        pub fn dispatch_compute(
+            &self,
+            _pipeline: &MetalPipeline,
+            _args_bytes: &[u8],
+            _buffers: &[MetalBufferBindingRef<'_>],
+            _threadgroup_memory_lengths: &[(u64, usize)],
+            _threadgroups: MetalSize,
+            _threads_per_threadgroup: MetalSize,
+        ) -> MetalResult<()> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
+
         pub fn wait_idle(&self) -> MetalResult<()> {
             Err("Metal runtime is unavailable on this target".to_string())
         }
@@ -147,6 +191,20 @@ mod imp {
 
     pub type MetalResult<T> = Result<T, String>;
 
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub struct MetalSize {
+        pub width: u64,
+        pub height: u64,
+        pub depth: u64,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct MetalBufferBindingRef<'a> {
+        pub index: u64,
+        pub buffer: &'a MetalBuffer,
+        pub offset_bytes: usize,
+    }
+
     const UTF8_ENCODING: u64 = 4;
     const MTL_RESOURCE_STORAGE_MODE_SHARED: u64 = 0;
     const MTL_RESOURCE_OPTIONS_STORAGE_MODE_PRIVATE: u64 = 32;
@@ -172,6 +230,14 @@ mod imp {
 
     #[link(name = "Foundation", kind = "framework")]
     extern "C" {}
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct MTLSize {
+        width: u64,
+        height: u64,
+        depth: u64,
+    }
 
     #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
     pub enum BufferStorageMode {
@@ -566,6 +632,57 @@ mod imp {
             ctx.read_buffer_bytes(buffer.as_id(), len_bytes)
         }
 
+        pub fn read_buffer_range(
+            &self,
+            buffer: &MetalBuffer,
+            offset_bytes: usize,
+            len_bytes: usize,
+        ) -> MetalResult<Vec<u8>> {
+            let ctx = self.ctx.borrow();
+            if offset_bytes > buffer.size_bytes || len_bytes > buffer.size_bytes.saturating_sub(offset_bytes) {
+                return Err(format!(
+                    "requested read of {} bytes at offset {} exceeds buffer size {}",
+                    len_bytes, offset_bytes, buffer.size_bytes
+                ));
+            }
+            ctx.read_buffer_bytes_range(buffer.as_id(), offset_bytes, len_bytes)
+        }
+
+        pub fn write_buffer(
+            &self,
+            buffer: &MetalBuffer,
+            offset_bytes: usize,
+            bytes: &[u8],
+        ) -> MetalResult<()> {
+            let ctx = self.ctx.borrow();
+            if offset_bytes > buffer.size_bytes || bytes.len() > buffer.size_bytes.saturating_sub(offset_bytes) {
+                return Err(format!(
+                    "requested write of {} bytes at offset {} exceeds buffer size {}",
+                    bytes.len(), offset_bytes, buffer.size_bytes
+                ));
+            }
+            ctx.write_buffer_bytes(buffer.as_id(), offset_bytes, bytes)
+        }
+
+        pub fn dispatch_compute(
+            &self,
+            pipeline: &MetalPipeline,
+            args_bytes: &[u8],
+            buffers: &[MetalBufferBindingRef<'_>],
+            threadgroup_memory_lengths: &[(u64, usize)],
+            threadgroups: MetalSize,
+            threads_per_threadgroup: MetalSize,
+        ) -> MetalResult<()> {
+            self.ctx.borrow_mut().dispatch_compute(
+                pipeline,
+                args_bytes,
+                buffers,
+                threadgroup_memory_lengths,
+                threadgroups,
+                threads_per_threadgroup,
+            )
+        }
+
         pub fn wait_idle(&self) -> MetalResult<()> {
             self.ctx.borrow().wait_queue_idle()
         }
@@ -736,13 +853,28 @@ mod imp {
             dst_buffer: ObjcId,
             len_bytes: usize,
         ) -> MetalResult<()> {
+            self.copy_between_buffers_ranges(src_buffer, 0, dst_buffer, 0, len_bytes)
+        }
+
+        fn copy_between_buffers_ranges(
+            &self,
+            src_buffer: ObjcId,
+            src_offset: usize,
+            dst_buffer: ObjcId,
+            dst_offset: usize,
+            len_bytes: usize,
+        ) -> MetalResult<()> {
             let len_bytes = len_bytes.max(1);
             let src_len = self.buffer_length_bytes(src_buffer)?;
             let dst_len = self.buffer_length_bytes(dst_buffer)?;
-            if len_bytes > src_len || len_bytes > dst_len {
+            if src_offset > src_len
+                || dst_offset > dst_len
+                || len_bytes > src_len.saturating_sub(src_offset)
+                || len_bytes > dst_len.saturating_sub(dst_offset)
+            {
                 return Err(format!(
-                    "buffer copy exceeds bounds: len={}, src_len={}, dst_len={}",
-                    len_bytes, src_len, dst_len
+                    "buffer copy exceeds bounds: src_offset={}, dst_offset={}, len={}, src_len={}, dst_len={}",
+                    src_offset, dst_offset, len_bytes, src_len, dst_len
                 ));
             }
 
@@ -760,9 +892,9 @@ mod imp {
                 let _: () = msg_send![
                     blit_encoder.as_id(),
                     copyFromBuffer: src_buffer
-                    sourceOffset: 0u64
+                    sourceOffset: src_offset as u64
                     toBuffer: dst_buffer
-                    destinationOffset: 0u64
+                    destinationOffset: dst_offset as u64
                     size: len_bytes as u64
                 ];
                 let _: () = msg_send![blit_encoder.as_id(), endEncoding];
@@ -792,25 +924,48 @@ mod imp {
             Ok(dst)
         }
 
-        fn read_buffer_bytes(&self, buffer: ObjcId, len_bytes: usize) -> MetalResult<Vec<u8>> {
-            self.wait_queue_idle()?;
-            let readable = {
-                let storage_mode: u64 = unsafe { msg_send![buffer, storageMode] };
-                if storage_mode == MTL_STORAGE_MODE_PRIVATE {
-                    self.copy_buffer_to_shared_staging(buffer, len_bytes)?
-                } else {
-                    unsafe { StrongId::from_unowned(buffer) }
-                        .ok_or_else(|| "buffer handle became invalid".to_string())?
-                }
-            };
+        fn copy_buffer_range_to_shared_staging(
+            &self,
+            src_buffer: ObjcId,
+            src_offset: usize,
+            len_bytes: usize,
+        ) -> MetalResult<StrongId> {
+            let dst = self.new_buffer_with_length(len_bytes.max(1))?;
+            self.copy_between_buffers_ranges(src_buffer, src_offset, dst.as_id(), 0, len_bytes)?;
+            Ok(dst)
+        }
 
-            let cap = self.buffer_length_bytes(readable.as_id())?;
-            if len_bytes > cap {
+        fn read_buffer_bytes(&self, buffer: ObjcId, len_bytes: usize) -> MetalResult<Vec<u8>> {
+            self.read_buffer_bytes_range(buffer, 0, len_bytes)
+        }
+
+        fn read_buffer_bytes_range(
+            &self,
+            buffer: ObjcId,
+            offset_bytes: usize,
+            len_bytes: usize,
+        ) -> MetalResult<Vec<u8>> {
+            self.wait_queue_idle()?;
+            let cap = self.buffer_length_bytes(buffer)?;
+            if offset_bytes > cap || len_bytes > cap.saturating_sub(offset_bytes) {
                 return Err(format!(
-                    "requested read of {} bytes exceeds readable buffer size {}",
-                    len_bytes, cap
+                    "requested read of {} bytes at offset {} exceeds buffer size {}",
+                    len_bytes, offset_bytes, cap
                 ));
             }
+
+            let (readable, readable_offset) = {
+                let storage_mode: u64 = unsafe { msg_send![buffer, storageMode] };
+                if storage_mode == MTL_STORAGE_MODE_PRIVATE {
+                    (self.copy_buffer_range_to_shared_staging(buffer, offset_bytes, len_bytes)?, 0usize)
+                } else {
+                    (
+                        unsafe { StrongId::from_unowned(buffer) }
+                            .ok_or_else(|| "buffer handle became invalid".to_string())?,
+                        offset_bytes,
+                    )
+                }
+            };
 
             let ptr: *const u8 = unsafe { msg_send![readable.as_id(), contents] };
             if ptr.is_null() {
@@ -819,9 +974,42 @@ mod imp {
 
             let mut out = vec![0u8; len_bytes];
             unsafe {
-                std::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), len_bytes);
+                std::ptr::copy_nonoverlapping(ptr.add(readable_offset), out.as_mut_ptr(), len_bytes);
             }
             Ok(out)
+        }
+
+        fn write_buffer_bytes(
+            &self,
+            buffer: ObjcId,
+            offset_bytes: usize,
+            bytes: &[u8],
+        ) -> MetalResult<()> {
+            let cap = self.buffer_length_bytes(buffer)?;
+            if offset_bytes > cap || bytes.len() > cap.saturating_sub(offset_bytes) {
+                return Err(format!(
+                    "requested write of {} bytes at offset {} exceeds buffer size {}",
+                    bytes.len(),
+                    offset_bytes,
+                    cap
+                ));
+            }
+
+            let storage_mode: u64 = unsafe { msg_send![buffer, storageMode] };
+            if storage_mode == MTL_STORAGE_MODE_PRIVATE {
+                let staging = self.new_buffer_with_bytes(bytes)?;
+                self.copy_between_buffers_ranges(staging.as_id(), 0, buffer, offset_bytes, bytes.len())?;
+                return Ok(());
+            }
+
+            let ptr: *mut u8 = unsafe { msg_send![buffer, contents] };
+            if ptr.is_null() {
+                return Err("buffer contents returned null".to_string());
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(offset_bytes), bytes.len());
+            }
+            Ok(())
         }
 
         fn compile_pipeline(
@@ -911,6 +1099,74 @@ mod imp {
 
         fn pipeline_max_threads(pipeline: ObjcId) -> u64 {
             unsafe { msg_send![pipeline, maxTotalThreadsPerThreadgroup] }
+        }
+
+        fn dispatch_compute(
+            &mut self,
+            pipeline: &MetalPipeline,
+            args_bytes: &[u8],
+            buffers: &[MetalBufferBindingRef<'_>],
+            threadgroup_memory_lengths: &[(u64, usize)],
+            threadgroups: MetalSize,
+            threads_per_threadgroup: MetalSize,
+        ) -> MetalResult<()> {
+            let command_buffer_obj: ObjcId =
+                unsafe { msg_send![self.command_queue.as_id(), commandBuffer] };
+            let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
+                .ok_or_else(|| "commandBuffer returned nil".to_string())?;
+            let encoder_obj: ObjcId = unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
+            let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
+                .ok_or_else(|| "computeCommandEncoder returned nil".to_string())?;
+
+            unsafe {
+                let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline.as_id()];
+                if !args_bytes.is_empty() {
+                    let _: () = msg_send![
+                        encoder.as_id(),
+                        setBytes: args_bytes.as_ptr() as *const c_void
+                        length: args_bytes.len() as u64
+                        atIndex: 0u64
+                    ];
+                }
+
+                for binding in buffers {
+                    let _: () = msg_send![
+                        encoder.as_id(),
+                        setBuffer: binding.buffer.as_id()
+                        offset: binding.offset_bytes as u64
+                        atIndex: binding.index
+                    ];
+                }
+
+                for &(index, length) in threadgroup_memory_lengths {
+                    let _: () = msg_send![
+                        encoder.as_id(),
+                        setThreadgroupMemoryLength: length as u64
+                        atIndex: index
+                    ];
+                }
+
+                let tgs = MTLSize {
+                    width: threadgroups.width,
+                    height: threadgroups.height,
+                    depth: threadgroups.depth,
+                };
+                let tpg = MTLSize {
+                    width: threads_per_threadgroup.width,
+                    height: threads_per_threadgroup.height,
+                    depth: threads_per_threadgroup.depth,
+                };
+                let _: () = msg_send![
+                    encoder.as_id(),
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
+                let _: () = msg_send![encoder.as_id(), endEncoding];
+                let _: () = msg_send![command_buffer.as_id(), commit];
+            }
+
+            self.last_command_buffer = Some(command_buffer);
+            Ok(())
         }
 
         fn wait_queue_idle(&self) -> MetalResult<()> {

@@ -120,11 +120,15 @@ pub struct XrPalmDownDebug {
 impl XrHand {
     pub const GRAB_ACTIVE: u8 = 1 << 5;
     pub const GRAB_ACTIVE_THRESHOLD: f32 = 0.55;
-    pub const FIST_MIN_FINGER_BEND_DEGREES: f32 = 72.0;
-    pub const FIST_MAX_FINGER_FORWARD_EXTENSION_RATIO: f32 = 1.70;
-    pub const PALM_DOWN_MAX_BACK_OF_HAND_UP_ANGLE_DEGREES: f32 = 70.0;
-    pub const PALM_DOWN_MAX_ALONG_HAND_VERTICAL_DEGREES: f32 = 45.0;
-    pub const PALM_DOWN_MAX_ACROSS_HAND_VERTICAL_DEGREES: f32 = 45.0;
+    pub const FIST_MIN_FINGER_BEND_DEGREES: f32 = 40.0;
+    pub const FIST_MAX_FINGER_FORWARD_EXTENSION_RATIO: f32 = 1.80;
+    pub const OPEN_MAX_FINGER_BEND_DEGREES: f32 = 30.0;
+    pub const OPEN_MAX_AVERAGE_FINGER_BEND_DEGREES: f32 = 17.0;
+    pub const OPEN_SYNC_MAX_UP_ANGLE_DEGREES: f32 = 60.0;
+    pub const OPEN_SYNC_MAX_ACROSS_VERTICAL_DEGREES: f32 = 80.0;
+    pub const PALM_DOWN_MAX_BACK_OF_HAND_UP_ANGLE_DEGREES: f32 = 95.0;
+    pub const PALM_DOWN_MAX_ALONG_HAND_VERTICAL_DEGREES: f32 = 70.0;
+    pub const PALM_DOWN_MAX_ACROSS_HAND_VERTICAL_DEGREES: f32 = 70.0;
     const MIN_PALM_SPAN_METERS: f32 = 0.01;
     const MAX_PALM_SPAN_METERS: f32 = 0.22;
     const MAX_JOINT_DISTANCE_FROM_PALM_METERS: f32 = 0.28;
@@ -347,6 +351,11 @@ impl XrHand {
         Some(max_angle)
     }
 
+    pub fn finger_bend_degrees(&self, tip: usize) -> Option<f32> {
+        self.finger_max_bend_angle_degrees_joint_only(tip)
+            .map(|bend| bend.max(0.0))
+    }
+
     fn finger_base_joint(tip: usize) -> Option<usize> {
         match tip {
             Self::INDEX_TIP => Some(Self::INDEX_BASE),
@@ -413,7 +422,7 @@ impl XrHand {
         else {
             return XrFingerFistDebug::default();
         };
-        let bend_degrees = self.finger_max_bend_angle_degrees_joint_only(tip);
+        let bend_degrees = self.finger_bend_degrees(tip);
         let forward_extension_ratio =
             self.finger_end_joint_position(tip)
                 .and_then(|end_position| {
@@ -450,6 +459,53 @@ impl XrHand {
         ]
         .into_iter()
         .all(|tip| self.finger_passes_fist_gate(tip))
+    }
+
+    pub fn average_open_finger_bend_degrees(&self) -> Option<f32> {
+        let bends = [
+            self.finger_bend_degrees(Self::INDEX_TIP)?,
+            self.finger_bend_degrees(Self::MIDDLE_TIP)?,
+            self.finger_bend_degrees(Self::RING_TIP)?,
+            self.finger_bend_degrees(Self::LITTLE_TIP)?,
+        ];
+        Some(bends.into_iter().sum::<f32>() / bends.len() as f32)
+    }
+
+    pub fn is_open(&self) -> bool {
+        if !self.in_view() {
+            return false;
+        }
+        let bends = [
+            self.finger_bend_degrees(Self::INDEX_TIP),
+            self.finger_bend_degrees(Self::MIDDLE_TIP),
+            self.finger_bend_degrees(Self::RING_TIP),
+            self.finger_bend_degrees(Self::LITTLE_TIP),
+        ];
+        if !bends.iter().all(|bend| {
+            bend.is_some_and(|bend| bend <= Self::OPEN_MAX_FINGER_BEND_DEGREES)
+        }) {
+            return false;
+        }
+        self.average_open_finger_bend_degrees().is_some_and(|average| {
+            average <= Self::OPEN_MAX_AVERAGE_FINGER_BEND_DEGREES
+        })
+    }
+
+    pub fn along_hand_up_angle_degrees(&self) -> Option<f32> {
+        let along_hand = self.fist_along_direction()?;
+        let up = vec3f(0.0, 1.0, 0.0);
+        Some(along_hand.dot(up).clamp(-1.0, 1.0).acos().to_degrees())
+    }
+
+    pub fn is_upright_for_box_sync(&self) -> bool {
+        self.along_hand_up_angle_degrees().is_some_and(|up_angle| {
+            self.fist_across_direction()
+                .and_then(Self::axis_vertical_degrees)
+                .is_some_and(|across_vertical| {
+                    up_angle <= Self::OPEN_SYNC_MAX_UP_ANGLE_DEGREES
+                        && across_vertical <= Self::OPEN_SYNC_MAX_ACROSS_VERTICAL_DEGREES
+                })
+        })
     }
 
     pub fn palm_down_debug(&self, is_left: bool) -> XrPalmDownDebug {
@@ -898,9 +954,17 @@ impl XrAnchor {
 }
 
 #[derive(Clone, Copy, Debug, Default, SerBin, DeBin, PartialEq)]
+pub enum XrSyncAnchorExtrema {
+    #[default]
+    Low,
+    High,
+}
+
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, PartialEq)]
 pub struct XrSyncAnchor {
     pub id: u32,
     pub captured_at: f64,
+    pub extrema: XrSyncAnchorExtrema,
     pub anchor: XrAnchor,
 }
 

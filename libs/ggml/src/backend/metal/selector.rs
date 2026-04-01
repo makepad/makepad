@@ -19,14 +19,14 @@ const FC_FLASH_ATTN_EXT_VEC_REDUCE: i32 = 500;
 const FC_MUL_MV: i32 = 600;
 const FC_MUL_MM: i32 = 700;
 const FC_ROPE: i32 = 800;
-const FC_SSM_CONV: i32 = 900;
+pub(super) const FC_SSM_CONV: i32 = 900;
 const FC_SOLVE_TRI: i32 = 1000;
 const FC_COUNT_EQUAL: i32 = 1100;
 const FC_UNARY: i32 = 1200;
 const FC_BIN: i32 = 1300;
 const FC_SUM_ROWS: i32 = 1400;
 const FC_UPSCALE: i32 = 1500;
-const FC_GATED_DELTA_NET: i32 = 1600;
+pub(super) const FC_GATED_DELTA_NET: i32 = 1600;
 
 const OP_FLASH_ATTN_EXT_NQPSG: i32 = 8;
 const OP_FLASH_ATTN_EXT_NCPSG: i32 = 64;
@@ -238,6 +238,9 @@ pub fn build_graph_plan(
         let op = tensors
             .get(node_id)
             .ok_or_else(|| format!("graph references invalid tensor {}", node_id))?;
+        if is_metadata_only_op(op.op) {
+            continue;
+        }
         let program = build_program(tensors, op, features)?;
         total_output_tail_bytes = total_output_tail_bytes
             .checked_add(program.resources.output_tail_bytes)
@@ -249,6 +252,10 @@ pub fn build_graph_plan(
         nodes,
         total_output_tail_bytes,
     })
+}
+
+fn is_metadata_only_op(op: Op) -> bool {
+    matches!(op, Op::View | Op::Reshape | Op::Permute | Op::Transpose)
 }
 
 fn program_concat() -> Result<MetalOpProgram, String> {
@@ -311,10 +318,9 @@ fn program_get_rows(tensors: &[Tensor], op: &Tensor) -> Result<MetalOpProgram, S
 
 fn program_set_rows(tensors: &[Tensor], op: &Tensor) -> Result<MetalOpProgram, String> {
     let idx = src(tensors, op, 1)?;
-    let dst = src(tensors, op, 0)?;
     let base = format!(
         "kernel_set_rows_{}_{}",
-        dst.desc.ty.name(),
+        op.desc.ty.name(),
         idx.desc.ty.name()
     );
     Ok(program_with_stage(stage_simple(
@@ -1340,7 +1346,11 @@ fn program_flash_attn_ext(tensors: &[Tensor], op: &Tensor) -> Result<MetalOpProg
                 i32_const(FC_FLASH_ATTN_EXT_VEC + 22, nsg),
                 i32_const(FC_FLASH_ATTN_EXT_VEC + 23, nwg),
             ],
-            0,
+            flash_attn_vec_smem_bytes(
+                usize::try_from(dk).map_err(|_| "flash_attn dk overflow".to_string())?,
+                usize::try_from(dv).map_err(|_| "flash_attn dv overflow".to_string())?,
+                nsg,
+            ),
             0,
             0,
             nsg,
@@ -1448,7 +1458,11 @@ fn program_flash_attn_ext(tensors: &[Tensor], op: &Tensor) -> Result<MetalOpProg
                 i32_const(FC_FLASH_ATTN_EXT + 21, i32::try_from(ns20).map_err(|_| "flash_attn ns20 overflow".to_string())?),
                 i32_const(FC_FLASH_ATTN_EXT + 22, nsg),
             ],
-            0,
+            flash_attn_smem_bytes(
+                usize::try_from(dk).map_err(|_| "flash_attn dk overflow".to_string())?,
+                usize::try_from(dv).map_err(|_| "flash_attn dv overflow".to_string())?,
+                nsg,
+            ),
             0,
             0,
             nsg,
@@ -1715,6 +1729,32 @@ fn flash_attn_ext_use_vec(q: &Tensor) -> bool {
     q.ne[1] < 20 && q.ne[0] % 32 == 0
 }
 
+fn pad_to(v: usize, align: usize) -> usize {
+    if align == 0 {
+        return v;
+    }
+    let rem = v % align;
+    if rem == 0 {
+        v
+    } else {
+        v + (align - rem)
+    }
+}
+
+fn flash_attn_smem_bytes(dk: usize, dv: usize, _nsg: i32) -> usize {
+    let nqptg = OP_FLASH_ATTN_EXT_NQPSG as usize;
+    let ncpsg = OP_FLASH_ATTN_EXT_NCPSG as usize;
+    let words = nqptg.saturating_mul(dk + 2 * pad_to(dv, 64) + 2 * (2 * ncpsg));
+    pad_to(words.saturating_mul(std::mem::size_of::<f32>() / 2), 16)
+}
+
+fn flash_attn_vec_smem_bytes(dk: usize, dv: usize, nsg: i32) -> usize {
+    let ncpsg = OP_FLASH_ATTN_EXT_VEC_NCPSG as usize;
+    let words =
+        (pad_to(dk, 128) + 4 * ncpsg + 2 * pad_to(dv, 128)).saturating_mul(nsg.max(1) as usize);
+    pad_to(words.saturating_mul(std::mem::size_of::<f32>() / 2), 16)
+}
+
 fn flash_attn_ext_extra_pad(
     q: &Tensor,
     k: &Tensor,
@@ -1796,7 +1836,11 @@ mod tests {
     use crate::tensor::{BufferUsage, TensorDesc, TensorLayout};
 
     fn ctx() -> Context {
-        Context::new(InitParams::default())
+        Context::new(InitParams {
+            mem_size: 0,
+            mem_buffer: None,
+            no_alloc: true,
+        })
     }
 
     fn tensor(ctx: &mut Context, ty: TensorType, ne: &[i64]) -> usize {
@@ -1944,5 +1988,20 @@ mod tests {
         let plan = build_graph_plan(&ctx, &graph, MetalDeviceFeatures::default()).unwrap();
         assert_eq!(plan.nodes.len(), 1);
         assert_eq!(plan.total_output_tail_bytes, ctx.tensor(dst).unwrap().nbytes());
+    }
+
+    #[test]
+    fn graph_plan_skips_metadata_only_nodes() {
+        let mut ctx = ctx();
+        let src = tensor(&mut ctx, TensorType::F32, &[16, 8, 1, 1]);
+        let view = ctx.view(src, TensorType::F32, &[8, 8], &[4, 64], 32).unwrap();
+        let cont = ctx.cont(view).unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, cont).unwrap();
+
+        let plan = build_graph_plan(&ctx, &graph, MetalDeviceFeatures::default()).unwrap();
+        assert_eq!(plan.nodes.len(), 1);
+        assert_eq!(plan.nodes[0].node_id, cont);
     }
 }
