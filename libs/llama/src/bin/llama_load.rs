@@ -429,6 +429,7 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             &mut hybrid_decode_loaded.ctx,
             &hybrid_decode_loaded.tensor_ids,
             &hybrid_decode_spec,
+            None,
             1,
             MetalDeviceFeatures::default(),
         )

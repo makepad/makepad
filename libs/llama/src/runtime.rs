@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 
 use makepad_ggml::{
     backend::metal::{
-        execute_compiled_graph, prepare_graph, try_get_rows_ggml_bytes, try_matmul_nt_ggml_bytes,
-        try_rms_norm_mul_f32, BufferStorageMode, MetalCompiledGraph, MetalDeviceFeatures,
-        MetalGraphSession, MetalGraphTensorWrite, MetalPreparedGraph, MetalRuntime,
+        create_context_main_buffer, execute_compiled_graph, prepare_graph, try_get_rows_ggml_bytes,
+        try_matmul_nt_ggml_bytes, try_rms_norm_mul_f32, BufferStorageMode, MetalBuffer,
+        MetalCompiledGraph, MetalDeviceFeatures, MetalGraphSession, MetalGraphTensorWrite,
+        MetalPreparedGraph, MetalRuntime,
     },
     f16_to_f32, f32_to_f16, ggml_row_size_for_type, BufferUsage, Context, Graph, Op, Prec, Tensor,
     TensorId, TensorLayout, TensorType, UnaryOp, GGML_ROPE_TYPE_IMROPE, GGML_ROPE_TYPE_MROPE,
@@ -631,6 +632,24 @@ pub struct HybridAttentionCacheView {
 }
 
 #[derive(Clone, Debug)]
+pub struct HybridAttentionCacheIds {
+    pub k_cache: TensorId,
+    pub v_cache: TensorId,
+}
+
+#[derive(Clone, Debug)]
+pub struct HybridRecurrentCacheIds {
+    pub r_cache: TensorId,
+    pub s_cache: TensorId,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct HybridSharedCacheTensorIds {
+    pub attention: BTreeMap<u32, HybridAttentionCacheIds>,
+    pub recurrent: BTreeMap<u32, HybridRecurrentCacheIds>,
+}
+
+#[derive(Clone, Debug)]
 pub struct HybridMoeSelection {
     pub layer_index: u32,
     pub selected_experts: TensorId,
@@ -681,6 +700,27 @@ impl CompiledHybridDecodeMetal {
             input,
             positions,
             cache_tokens,
+            HybridDecodeOutputConfig::FULL,
+        )
+    }
+
+    pub fn execute_logits_only(
+        &self,
+        ctx: &mut Context,
+        input: LogitsProbeInput<'_>,
+        positions: &[i32],
+        cache_tokens: usize,
+    ) -> Result<HybridDecodeRun> {
+        execute_prepared_hybrid_decode_metal(
+            self.session.runtime(),
+            ctx,
+            &self.spec,
+            &self.decode,
+            self.session.compiled(),
+            input,
+            positions,
+            cache_tokens,
+            HybridDecodeOutputConfig::LOGITS_ONLY,
         )
     }
 }
@@ -693,6 +733,30 @@ pub struct HybridDecodeRun {
     pub hidden_size: usize,
     pub vocab_size: usize,
     pub selected_experts: Vec<(u32, Vec<i32>)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HybridDecodeOutputConfig {
+    pub capture_hidden: bool,
+    pub capture_selected_experts: bool,
+}
+
+impl HybridDecodeOutputConfig {
+    pub const FULL: Self = Self {
+        capture_hidden: true,
+        capture_selected_experts: true,
+    };
+
+    pub const LOGITS_ONLY: Self = Self {
+        capture_hidden: false,
+        capture_selected_experts: false,
+    };
+}
+
+impl Default for HybridDecodeOutputConfig {
+    fn default() -> Self {
+        Self::FULL
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1833,6 +1897,7 @@ fn build_attention_decode_from_hidden(
     ctx: &mut Context,
     tensor_ids: &BTreeMap<String, TensorId>,
     spec: &AttentionDecodeSpec,
+    shared_cache: Option<&HybridAttentionCacheIds>,
     input_embed: TensorId,
     input_positions: TensorId,
     input_rope_positions: Option<TensorId>,
@@ -2135,32 +2200,37 @@ fn build_attention_decode_from_hidden(
     ctx.set_tensor_name(q_states, format!("{prefix}.q_states_4d"))
         .map_err(LlamaError::format)?;
 
-    let k_cache = ctx
-        .new_named_tensor(
-            format!("{prefix}.k_cache"),
-            spec.cache.k_type,
-            3,
-            &[
-                k_merged_width,
-                i64::from(spec.cache.max_context),
-                i64::from(spec.cache.max_sequences),
-            ],
-            BufferUsage::State,
-        )
-        .map_err(LlamaError::format)?;
-    let v_cache = ctx
-        .new_named_tensor(
-            format!("{prefix}.v_cache"),
-            spec.cache.v_type,
-            3,
-            &[
-                v_merged_width,
-                i64::from(spec.cache.max_context),
-                i64::from(spec.cache.max_sequences),
-            ],
-            BufferUsage::State,
-        )
-        .map_err(LlamaError::format)?;
+    let (k_cache, v_cache) = if let Some(shared_cache) = shared_cache {
+        (shared_cache.k_cache, shared_cache.v_cache)
+    } else {
+        let k_cache = ctx
+            .new_named_tensor(
+                format!("{prefix}.k_cache"),
+                spec.cache.k_type,
+                3,
+                &[
+                    k_merged_width,
+                    i64::from(spec.cache.max_context),
+                    i64::from(spec.cache.max_sequences),
+                ],
+                BufferUsage::State,
+            )
+            .map_err(LlamaError::format)?;
+        let v_cache = ctx
+            .new_named_tensor(
+                format!("{prefix}.v_cache"),
+                spec.cache.v_type,
+                3,
+                &[
+                    v_merged_width,
+                    i64::from(spec.cache.max_context),
+                    i64::from(spec.cache.max_sequences),
+                ],
+                BufferUsage::State,
+            )
+            .map_err(LlamaError::format)?;
+        (k_cache, v_cache)
+    };
 
     let k_cache_written = ctx
         .set_rows(k_cache, k_store, input_positions, BufferUsage::State)
@@ -2340,6 +2410,7 @@ pub fn build_attention_decode_graph(
         ctx,
         tensor_ids,
         spec,
+        None,
         input_embed,
         input_positions,
         input_rope_positions,
@@ -2622,6 +2693,7 @@ fn build_delta_net_recurrent_decode_from_hidden(
     ctx: &mut Context,
     tensor_ids: &BTreeMap<String, TensorId>,
     spec: &DeltaNetRecurrentDecodeSpec,
+    shared_cache: Option<&HybridRecurrentCacheIds>,
     input_embed: TensorId,
     n_tokens: usize,
     prefix: &str,
@@ -2729,24 +2801,29 @@ fn build_delta_net_recurrent_decode_from_hidden(
         .and_then(|v| v.checked_mul(i64::from(block.value_head_count)))
         .ok_or_else(|| LlamaError::format("overflow computing recurrent-s width"))?;
 
-    let r_cache = ctx
-        .new_named_tensor(
-            format!("{prefix}.r_cache"),
-            spec.cache.r_type,
-            2,
-            &[r_width, n_seqs],
-            BufferUsage::State,
-        )
-        .map_err(LlamaError::format)?;
-    let s_cache = ctx
-        .new_named_tensor(
-            format!("{prefix}.s_cache"),
-            spec.cache.s_type,
-            2,
-            &[s_width, n_seqs],
-            BufferUsage::State,
-        )
-        .map_err(LlamaError::format)?;
+    let (r_cache, s_cache) = if let Some(shared_cache) = shared_cache {
+        (shared_cache.r_cache, shared_cache.s_cache)
+    } else {
+        let r_cache = ctx
+            .new_named_tensor(
+                format!("{prefix}.r_cache"),
+                spec.cache.r_type,
+                2,
+                &[r_width, n_seqs],
+                BufferUsage::State,
+            )
+            .map_err(LlamaError::format)?;
+        let s_cache = ctx
+            .new_named_tensor(
+                format!("{prefix}.s_cache"),
+                spec.cache.s_type,
+                2,
+                &[s_width, n_seqs],
+                BufferUsage::State,
+            )
+            .map_err(LlamaError::format)?;
+        (r_cache, s_cache)
+    };
 
     let conv_states = ctx
         .view_3d(
@@ -3070,6 +3147,7 @@ pub fn build_delta_net_recurrent_decode_graph(
         ctx,
         tensor_ids,
         spec,
+        None,
         input_embed,
         n_tokens,
         "recur_decode",
@@ -3798,10 +3876,117 @@ pub fn execute_moe_ffn_graph_metal_cached(
     compiled.execute(&weights.ctx, input)
 }
 
+pub fn allocate_hybrid_shared_cache_tensors(
+    ctx: &mut Context,
+    tensor_ids: &BTreeMap<String, TensorId>,
+    spec: &HybridDecodeSpec,
+) -> Result<HybridSharedCacheTensorIds> {
+    let mut shared = HybridSharedCacheTensorIds::default();
+
+    for layer in &spec.layers {
+        match layer {
+            HybridLayerSpec::Attention {
+                layer_index,
+                decode,
+                ..
+            } => {
+                let k_width =
+                    i64::from(decode.block.k_head_dim) * i64::from(decode.block.kv_head_count);
+                let v_width =
+                    i64::from(decode.block.v_head_dim) * i64::from(decode.block.kv_head_count);
+                let k_cache = ctx
+                    .new_named_tensor(
+                        format!("hybrid_cache.layer{layer_index}.k_cache"),
+                        decode.cache.k_type,
+                        3,
+                        &[
+                            k_width,
+                            i64::from(decode.cache.max_context),
+                            i64::from(decode.cache.max_sequences),
+                        ],
+                        BufferUsage::State,
+                    )
+                    .map_err(LlamaError::format)?;
+                let v_cache = ctx
+                    .new_named_tensor(
+                        format!("hybrid_cache.layer{layer_index}.v_cache"),
+                        decode.cache.v_type,
+                        3,
+                        &[
+                            v_width,
+                            i64::from(decode.cache.max_context),
+                            i64::from(decode.cache.max_sequences),
+                        ],
+                        BufferUsage::State,
+                    )
+                    .map_err(LlamaError::format)?;
+                shared
+                    .attention
+                    .insert(*layer_index, HybridAttentionCacheIds { k_cache, v_cache });
+            }
+            HybridLayerSpec::Recurrent {
+                layer_index,
+                decode,
+                ..
+            } => {
+                let conv_kernel_id = require_tensor_id(tensor_ids, &decode.block.conv_kernel_name)?;
+                let conv_kernel = require_tensor(ctx, conv_kernel_id)?;
+                let conv_prefix = conv_kernel.ne[0]
+                    .checked_sub(1)
+                    .ok_or_else(|| LlamaError::format("delta-net conv kernel size underflow"))?;
+                let qkv_dim = i64::from(decode.block.key_head_dim)
+                    .checked_mul(i64::from(decode.block.key_head_count))
+                    .and_then(|v| v.checked_mul(2))
+                    .and_then(|v| {
+                        v.checked_add(
+                            i64::from(decode.block.value_head_dim)
+                                * i64::from(decode.block.value_head_count),
+                        )
+                    })
+                    .ok_or_else(|| LlamaError::format("overflow computing shared qkv width"))?;
+                let r_width = conv_prefix.checked_mul(qkv_dim).ok_or_else(|| {
+                    LlamaError::format("overflow computing shared recurrent-r width")
+                })?;
+                let s_width = i64::from(decode.block.value_head_dim)
+                    .checked_mul(i64::from(decode.block.value_head_dim))
+                    .and_then(|v| v.checked_mul(i64::from(decode.block.value_head_count)))
+                    .ok_or_else(|| {
+                        LlamaError::format("overflow computing shared recurrent-s width")
+                    })?;
+                let n_seqs = i64::from(decode.cache.max_sequences);
+                let r_cache = ctx
+                    .new_named_tensor(
+                        format!("hybrid_cache.layer{layer_index}.r_cache"),
+                        decode.cache.r_type,
+                        2,
+                        &[r_width, n_seqs],
+                        BufferUsage::State,
+                    )
+                    .map_err(LlamaError::format)?;
+                let s_cache = ctx
+                    .new_named_tensor(
+                        format!("hybrid_cache.layer{layer_index}.s_cache"),
+                        decode.cache.s_type,
+                        2,
+                        &[s_width, n_seqs],
+                        BufferUsage::State,
+                    )
+                    .map_err(LlamaError::format)?;
+                shared
+                    .recurrent
+                    .insert(*layer_index, HybridRecurrentCacheIds { r_cache, s_cache });
+            }
+        }
+    }
+
+    Ok(shared)
+}
+
 pub fn build_hybrid_decode_graph(
     ctx: &mut Context,
     tensor_ids: &BTreeMap<String, TensorId>,
     spec: &HybridDecodeSpec,
+    shared_cache: Option<&HybridSharedCacheTensorIds>,
     n_tokens: usize,
 ) -> Result<HybridDecodeGraph> {
     if n_tokens == 0 {
@@ -3926,6 +4111,7 @@ pub fn build_hybrid_decode_graph(
                     ctx,
                     tensor_ids,
                     decode,
+                    shared_cache.and_then(|cache| cache.attention.get(layer_index)),
                     hidden,
                     positions,
                     input_rope_positions,
@@ -3985,6 +4171,7 @@ pub fn build_hybrid_decode_graph(
                     ctx,
                     tensor_ids,
                     decode,
+                    shared_cache.and_then(|cache| cache.recurrent.get(layer_index)),
                     hidden,
                     n_tokens,
                     &format!("{prefix}.recur"),
@@ -4072,17 +4259,26 @@ pub fn prepare_hybrid_decode_graph(
     ctx: &mut Context,
     tensor_ids: &BTreeMap<String, TensorId>,
     spec: &HybridDecodeSpec,
+    shared_cache: Option<&HybridSharedCacheTensorIds>,
     n_tokens: usize,
     features: MetalDeviceFeatures,
 ) -> Result<(HybridDecodeGraph, MetalPreparedGraph)> {
-    let decode = build_hybrid_decode_graph(ctx, tensor_ids, spec, n_tokens)?;
+    let decode = build_hybrid_decode_graph(ctx, tensor_ids, spec, shared_cache, n_tokens)?;
     let prepared = prepare_graph(ctx, &decode.graph, features).map_err(LlamaError::format)?;
     Ok((decode, prepared))
 }
 
-pub fn compile_hybrid_decode_metal(
+pub fn create_metal_context_buffer(ctx: &Context) -> Result<MetalBuffer> {
+    let runtime = MetalRuntime::new().map_err(LlamaError::unsupported)?;
+    create_context_main_buffer(&runtime, ctx, BufferStorageMode::Private)
+        .map_err(LlamaError::format)
+}
+
+fn compile_hybrid_decode_metal_impl(
     weights: &mut LoadedGgufWeights,
     spec: &HybridDecodeSpec,
+    shared_cache: Option<&HybridSharedCacheTensorIds>,
+    shared_main_buffer: Option<&MetalBuffer>,
     n_tokens: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
     let runtime = MetalRuntime::new().map_err(LlamaError::unsupported)?;
@@ -4090,16 +4286,26 @@ pub fn compile_hybrid_decode_metal(
         &mut weights.ctx,
         &weights.tensor_ids,
         spec,
+        shared_cache,
         n_tokens,
         runtime.features(),
     )?;
-    let session = MetalGraphSession::from_runtime(
-        runtime,
-        &weights.ctx,
-        &prepared,
-        BufferStorageMode::Private,
-        BufferStorageMode::Private,
-    )
+    let session = if let Some(main_buffer) = shared_main_buffer {
+        MetalGraphSession::from_runtime_with_main_buffer(
+            runtime,
+            &prepared,
+            main_buffer,
+            BufferStorageMode::Private,
+        )
+    } else {
+        MetalGraphSession::from_runtime(
+            runtime,
+            &weights.ctx,
+            &prepared,
+            BufferStorageMode::Private,
+            BufferStorageMode::Private,
+        )
+    }
     .map_err(LlamaError::format)?;
 
     Ok(CompiledHybridDecodeMetal {
@@ -4107,6 +4313,76 @@ pub fn compile_hybrid_decode_metal(
         decode,
         session,
     })
+}
+
+pub fn compile_hybrid_decode_metal(
+    weights: &mut LoadedGgufWeights,
+    spec: &HybridDecodeSpec,
+    n_tokens: usize,
+) -> Result<CompiledHybridDecodeMetal> {
+    compile_hybrid_decode_metal_impl(weights, spec, None, None, n_tokens)
+}
+
+pub fn compile_hybrid_decode_metal_with_shared_state(
+    weights: &mut LoadedGgufWeights,
+    spec: &HybridDecodeSpec,
+    shared_cache: &HybridSharedCacheTensorIds,
+    shared_main_buffer: &MetalBuffer,
+    n_tokens: usize,
+) -> Result<CompiledHybridDecodeMetal> {
+    compile_hybrid_decode_metal_impl(
+        weights,
+        spec,
+        Some(shared_cache),
+        Some(shared_main_buffer),
+        n_tokens,
+    )
+}
+
+pub fn compile_hybrid_prompt_processing_metal(
+    weights: &mut LoadedGgufWeights,
+    spec: &HybridDecodeSpec,
+    n_tokens: usize,
+) -> Result<CompiledHybridDecodeMetal> {
+    compile_hybrid_decode_metal(weights, spec, n_tokens)
+}
+
+pub fn compile_hybrid_prompt_processing_metal_with_shared_state(
+    weights: &mut LoadedGgufWeights,
+    spec: &HybridDecodeSpec,
+    shared_cache: &HybridSharedCacheTensorIds,
+    shared_main_buffer: &MetalBuffer,
+    n_tokens: usize,
+) -> Result<CompiledHybridDecodeMetal> {
+    compile_hybrid_decode_metal_with_shared_state(
+        weights,
+        spec,
+        shared_cache,
+        shared_main_buffer,
+        n_tokens,
+    )
+}
+
+pub fn compile_hybrid_token_generation_metal(
+    weights: &mut LoadedGgufWeights,
+    spec: &HybridDecodeSpec,
+) -> Result<CompiledHybridDecodeMetal> {
+    compile_hybrid_decode_metal(weights, spec, 1)
+}
+
+pub fn compile_hybrid_token_generation_metal_with_shared_state(
+    weights: &mut LoadedGgufWeights,
+    spec: &HybridDecodeSpec,
+    shared_cache: &HybridSharedCacheTensorIds,
+    shared_main_buffer: &MetalBuffer,
+) -> Result<CompiledHybridDecodeMetal> {
+    compile_hybrid_decode_metal_with_shared_state(
+        weights,
+        spec,
+        shared_cache,
+        shared_main_buffer,
+        1,
+    )
 }
 
 pub fn execute_prepared_hybrid_decode_metal(
@@ -4118,6 +4394,7 @@ pub fn execute_prepared_hybrid_decode_metal(
     input: LogitsProbeInput<'_>,
     positions: &[i32],
     cache_tokens: usize,
+    output_config: HybridDecodeOutputConfig,
 ) -> Result<HybridDecodeRun> {
     if decode.input_positions.is_some() {
         if positions.is_empty() {
@@ -4295,57 +4572,78 @@ pub fn execute_prepared_hybrid_decode_metal(
         }
     }
 
-    let mut outputs = vec![decode.result_hidden, decode.result_logits];
-    outputs.extend(
-        decode
-            .moe_selected_experts
-            .iter()
-            .map(|sel| sel.selected_experts),
-    );
+    let mut outputs = vec![decode.result_logits];
+    if output_config.capture_hidden {
+        outputs.push(decode.result_hidden);
+    }
+    if output_config.capture_selected_experts {
+        outputs.extend(
+            decode
+                .moe_selected_experts
+                .iter()
+                .map(|sel| sel.selected_experts),
+        );
+    }
     let execution = execute_compiled_graph(runtime, ctx, compiled, &writes, &outputs)
         .map_err(LlamaError::format)?;
 
-    let hidden = execution
-        .outputs
-        .get(&decode.result_hidden)
-        .ok_or_else(|| LlamaError::format("hybrid decode did not produce hidden bytes"))?;
-    let hidden = f32_bytes_to_vec(hidden)?;
     let logits = execution
         .outputs
         .get(&decode.result_logits)
         .ok_or_else(|| LlamaError::format("hybrid decode did not produce logits bytes"))?;
     let logits = f32_bytes_to_vec(logits)?;
-    let hidden_tensor = ctx
-        .tensor(decode.result_hidden)
-        .ok_or_else(|| LlamaError::format("hybrid decode result_hidden tensor is invalid"))?;
     let logits_tensor = ctx
         .tensor(decode.result_logits)
         .ok_or_else(|| LlamaError::format("hybrid decode result_logits tensor is invalid"))?;
+    let vocab_size = ne_usize(logits_tensor, 0)?;
+    let n_tokens = logits
+        .len()
+        .checked_div(vocab_size.max(1))
+        .ok_or_else(|| LlamaError::format("invalid hybrid decode logits shape"))?;
 
-    let mut selected_experts = Vec::with_capacity(decode.moe_selected_experts.len());
-    for selection in &decode.moe_selected_experts {
-        let bytes = execution
+    let (hidden, hidden_size) = if output_config.capture_hidden {
+        let hidden = execution
             .outputs
-            .get(&selection.selected_experts)
-            .ok_or_else(|| {
-                LlamaError::format(format!(
-                    "hybrid decode did not produce selected experts for layer {}",
-                    selection.layer_index
-                ))
-            })?;
-        let experts = bytes
-            .chunks_exact(std::mem::size_of::<i32>())
-            .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
-            .collect::<Vec<_>>();
-        selected_experts.push((selection.layer_index, experts));
-    }
+            .get(&decode.result_hidden)
+            .ok_or_else(|| LlamaError::format("hybrid decode did not produce hidden bytes"))?;
+        let hidden = f32_bytes_to_vec(hidden)?;
+        let hidden_tensor = ctx
+            .tensor(decode.result_hidden)
+            .ok_or_else(|| LlamaError::format("hybrid decode result_hidden tensor is invalid"))?;
+        (hidden, ne_usize(hidden_tensor, 0)?)
+    } else {
+        (Vec::new(), 0)
+    };
+
+    let selected_experts = if output_config.capture_selected_experts {
+        let mut selected_experts = Vec::with_capacity(decode.moe_selected_experts.len());
+        for selection in &decode.moe_selected_experts {
+            let bytes = execution
+                .outputs
+                .get(&selection.selected_experts)
+                .ok_or_else(|| {
+                    LlamaError::format(format!(
+                        "hybrid decode did not produce selected experts for layer {}",
+                        selection.layer_index
+                    ))
+                })?;
+            let experts = bytes
+                .chunks_exact(std::mem::size_of::<i32>())
+                .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            selected_experts.push((selection.layer_index, experts));
+        }
+        selected_experts
+    } else {
+        Vec::new()
+    };
 
     Ok(HybridDecodeRun {
         hidden,
         logits,
-        n_tokens: ne_usize(hidden_tensor, 1)?,
-        hidden_size: ne_usize(hidden_tensor, 0)?,
-        vocab_size: ne_usize(logits_tensor, 0)?,
+        n_tokens,
+        hidden_size,
+        vocab_size,
         selected_experts,
     })
 }
@@ -4370,6 +4668,16 @@ pub fn execute_hybrid_decode_graph_metal_cached(
     cache_tokens: usize,
 ) -> Result<HybridDecodeRun> {
     compiled.execute(&mut weights.ctx, input, positions, cache_tokens)
+}
+
+pub fn execute_hybrid_decode_graph_metal_cached_logits_only(
+    compiled: &CompiledHybridDecodeMetal,
+    weights: &mut LoadedGgufWeights,
+    input: LogitsProbeInput<'_>,
+    positions: &[i32],
+    cache_tokens: usize,
+) -> Result<HybridDecodeRun> {
+    compiled.execute_logits_only(&mut weights.ctx, input, positions, cache_tokens)
 }
 
 pub fn execute_logits_probe_metal(
@@ -4623,9 +4931,8 @@ fn configure_attention_mask_view(
     let tensor = ctx
         .tensor(tensor_id)
         .ok_or_else(|| LlamaError::format(format!("invalid tensor id {}", tensor_id)))?;
-    let strides = tensor.nb;
-    let layout = TensorLayout::from_parts(
-        4,
+    let layout = TensorLayout::for_ggml(
+        tensor.desc.ty,
         &[
             i64::try_from(key_count).map_err(|_| {
                 LlamaError::format(format!("mask key count {} does not fit in i64", key_count))
@@ -4639,7 +4946,6 @@ fn configure_attention_mask_view(
             tensor.ne[2],
             tensor.ne[3],
         ],
-        &strides,
     )
     .map_err(LlamaError::format)?;
     ctx.set_tensor_layout(tensor_id, layout)
