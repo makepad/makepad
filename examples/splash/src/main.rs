@@ -1,5 +1,11 @@
 use makepad_widgets::animator::Animate;
 use makepad_widgets::file_tree::FileTree;
+use makepad_widgets::shader::draw_glyph::GlyphShapeId;
+use makepad_widgets::text::{
+    font_family::FontFamilyId,
+    glyph_outline::Command as OutlineCommand,
+    layouter::{LaidoutGlyph, LaidoutText},
+};
 use makepad_widgets::*;
 use std::path::Path;
 
@@ -7,6 +13,7 @@ app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
+    use mod.text.*
     use mod.widgets.*
     let TestDraw = #(TestDraw::register_widget(vm)) {
         width: 250
@@ -20,6 +27,29 @@ script_mod! {
             }
         }
         draw_text.color: #0f0
+    }
+
+    let VarGlyphLabel = #(VarGlyphLabel::register_widget(vm)) {
+        width: Fit
+        height: Fit
+        color: #fff
+        draw_glyph +: {
+            aa_pad_px: 1.0
+        }
+        draw_text +: {
+            text_style: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{
+                        res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                        asc: 0.0
+                        desc: 0.0
+                        weight: 400.0
+                    }
+                }
+                font_size: 18.0
+                line_spacing: 1.2
+            }
+        }
     }
 
     // ===========================================
@@ -717,6 +747,185 @@ script_mod! {
     // ===========================================
     // MATH VIEW TAB - LaTeX math rendering
     // ===========================================
+
+    let TabVarTtf = SolidView{
+        width: Fill height: Fill
+        draw_bg.color: #333
+        ScrollYView{
+            width: Fill height: Fill flow: Down padding: 15 spacing: 12
+
+            Label{text: "VarTtf - JetBrains Mono Variable" draw_text.color: #fff draw_text.text_style.font_size: 13}
+            Label{text: "Atlas text uses small 10px samples to stay on the SDF path. Glyph samples use the DrawGlyph backend." draw_text.color: #888 draw_text.text_style.font_size: 10}
+
+            Hr{}
+
+            Label{text: "Atlas Backend (SDF)" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+
+            Label{text: "Weight 200" draw_text.color: #777 draw_text.text_style.font_size: 9}
+            Label{
+                text: "fn atlas_demo() -> mono_200 { 0123456789 }"
+                draw_text.color: #fff
+                draw_text +: {
+                    text_style: TextStyle{
+                        font_family: FontFamily{
+                            latin := FontMember{
+                                res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                                asc: 0.0
+                                desc: 0.0
+                                weight: 200.0
+                            }
+                        }
+                        font_size: 10.0
+                        line_spacing: 1.2
+                    }
+                }
+            }
+
+            Label{text: "Weight 400" draw_text.color: #777 draw_text.text_style.font_size: 9}
+            Label{
+                text: "fn atlas_demo() -> mono_400 { 0123456789 }"
+                draw_text.color: #fff
+                draw_text +: {
+                    text_style: TextStyle{
+                        font_family: FontFamily{
+                            latin := FontMember{
+                                res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                                asc: 0.0
+                                desc: 0.0
+                                weight: 400.0
+                            }
+                        }
+                        font_size: 10.0
+                        line_spacing: 1.2
+                    }
+                }
+            }
+
+            Label{text: "Weight 700" draw_text.color: #777 draw_text.text_style.font_size: 9}
+            Label{
+                text: "fn atlas_demo() -> mono_700 { 0123456789 }"
+                draw_text.color: #fff
+                draw_text +: {
+                    text_style: TextStyle{
+                        font_family: FontFamily{
+                            latin := FontMember{
+                                res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                                asc: 0.0
+                                desc: 0.0
+                                weight: 700.0
+                            }
+                        }
+                        font_size: 10.0
+                        line_spacing: 1.2
+                    }
+                }
+            }
+
+            Label{text: "Weight 900" draw_text.color: #777 draw_text.text_style.font_size: 9}
+            Label{
+                text: "fn atlas_demo() -> mono_900 { 0123456789 }"
+                draw_text.color: #fff
+                draw_text +: {
+                    text_style: TextStyle{
+                        font_family: FontFamily{
+                            latin := FontMember{
+                                res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                                asc: 0.0
+                                desc: 0.0
+                                weight: 900.0
+                            }
+                        }
+                        font_size: 10.0
+                        line_spacing: 1.2
+                    }
+                }
+            }
+
+            Hr{}
+
+            Label{text: "Glyph Backend (DrawGlyph)" draw_text.color: #aaa draw_text.text_style.font_size: 10}
+
+            Label{text: "Weight 200" draw_text.color: #777 draw_text.text_style.font_size: 9}
+            VarGlyphLabel{
+                text: "fn glyph_demo() -> mono_200 { 0123456789 }"
+                color: #fff
+                draw_text +: {
+                    text_style: TextStyle{
+                        font_family: FontFamily{
+                            latin := FontMember{
+                                res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                                asc: 0.0
+                                desc: 0.0
+                                weight: 200.0
+                            }
+                        }
+                        font_size: 18.0
+                        line_spacing: 1.2
+                    }
+                }
+            }
+
+            Label{text: "Weight 400" draw_text.color: #777 draw_text.text_style.font_size: 9}
+            VarGlyphLabel{
+                text: "fn glyph_demo() -> mono_400 { 0123456789 }"
+                color: #fff
+                draw_text +: {
+                    text_style: TextStyle{
+                        font_family: FontFamily{
+                            latin := FontMember{
+                                res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                                asc: 0.0
+                                desc: 0.0
+                                weight: 400.0
+                            }
+                        }
+                        font_size: 18.0
+                        line_spacing: 1.2
+                    }
+                }
+            }
+
+            Label{text: "Weight 700" draw_text.color: #777 draw_text.text_style.font_size: 9}
+            VarGlyphLabel{
+                text: "fn glyph_demo() -> mono_700 { 0123456789 }"
+                color: #fff
+                draw_text +: {
+                    text_style: TextStyle{
+                        font_family: FontFamily{
+                            latin := FontMember{
+                                res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                                asc: 0.0
+                                desc: 0.0
+                                weight: 700.0
+                            }
+                        }
+                        font_size: 18.0
+                        line_spacing: 1.2
+                    }
+                }
+            }
+
+            Label{text: "Weight 900" draw_text.color: #777 draw_text.text_style.font_size: 9}
+            VarGlyphLabel{
+                text: "fn glyph_demo() -> mono_900 { 0123456789 }"
+                color: #fff
+                draw_text +: {
+                    text_style: TextStyle{
+                        font_family: FontFamily{
+                            latin := FontMember{
+                                res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                                asc: 0.0
+                                desc: 0.0
+                                weight: 900.0
+                            }
+                        }
+                        font_size: 18.0
+                        line_spacing: 1.2
+                    }
+                }
+            }
+        }
+    }
 
     let TabMathView = SolidView{
         width: Fill height: Fill
@@ -1444,8 +1653,8 @@ script_mod! {
 
         // Center panel - content widgets
         center_tabs := DockTabs{
-            tabs: [@bigtext_tab, @math_tab, @vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
-            selected: 1
+            tabs: [@varttf_tab, @bigtext_tab, @math_tab, @vector_tab, @media_tab, @markup_tab, @buttons_tab, @modal_tab, @lists_tab]
+            selected: 0
             closable: true
         }
 
@@ -1469,6 +1678,11 @@ script_mod! {
             kind: @TabSelectionTest        }
 
         // Individual tabs
+        varttf_tab := DockTab{
+            name: "VarTtf"
+            template: @CloseableTab
+            kind: @TabVarTtf        }
+
         bigtext_tab := DockTab{
             name: "BigText"
             template: @CloseableTab
@@ -1555,6 +1769,7 @@ script_mod! {
             kind: @TabModal        }
 
         // Content templates by widget type
+        TabVarTtf := TabVarTtf{}
         TabBigText := TabBigText{}
         TabMathView := TabMathView{}
         TabVector := TabVector{}
@@ -1862,6 +2077,35 @@ pub struct TestDraw {
     area: Area,
 }
 
+#[derive(Script, ScriptHook, Widget)]
+pub struct VarGlyphLabel {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_glyph: DrawGlyph,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    text: String,
+    #[live]
+    color: Vec4,
+    #[rust]
+    old_text: String,
+    #[rust]
+    old_font_size: f32,
+    #[rust]
+    old_font_family_id: Option<FontFamilyId>,
+    #[rust]
+    shape_id: Option<GlyphShapeId>,
+    #[rust]
+    size: Vec2f,
+}
+
 impl Widget for TestDraw {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
@@ -1886,6 +2130,140 @@ impl Widget for TestDraw {
     }
 
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+}
+
+impl Widget for VarGlyphLabel {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, mut walk: Walk) -> DrawStep {
+        self.rebuild_shape(cx);
+        walk.width = Size::Fixed(self.size.x as f64);
+        walk.height = Size::Fixed(self.size.y as f64);
+        let bounds = cx.walk_turtle(walk);
+
+        let Some(shape_id) = self.shape_id else {
+            return DrawStep::done();
+        };
+        let (shape_origin, shape_size, mut layers) = {
+            let Some(shape) = self.draw_glyph.shape(shape_id) else {
+                return DrawStep::done();
+            };
+            (shape.origin, shape.size, shape.layers.clone())
+        };
+
+        for layer in &mut layers {
+            layer.color = vec4(
+                self.color.x,
+                self.color.y,
+                self.color.z,
+                self.color.w * layer.color.w,
+            );
+        }
+
+        self.draw_glyph.draw_layers_abs(
+            cx,
+            rect(
+                bounds.pos.x + shape_origin.x as f64,
+                bounds.pos.y + shape_origin.y as f64,
+                shape_size.x as f64,
+                shape_size.y as f64,
+            ),
+            &layers,
+        );
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+}
+
+impl VarGlyphLabel {
+    fn rebuild_shape(&mut self, cx: &mut Cx2d) {
+        let font_family_id = self.draw_text.text_style.font_family_id();
+        let font_size = self.draw_text.text_style.font_size;
+        if self.text == self.old_text
+            && self.old_font_family_id == Some(font_family_id)
+            && self.old_font_size.to_bits() == font_size.to_bits()
+        {
+            return;
+        }
+
+        self.old_text = self.text.clone();
+        self.old_font_family_id = Some(font_family_id);
+        self.old_font_size = font_size;
+        self.shape_id = None;
+        self.size = vec2(0.0, 0.0);
+        self.draw_glyph.clear_shapes();
+
+        if self.text.is_empty() {
+            return;
+        }
+
+        let laidout = self
+            .draw_text
+            .layout(cx.cx.cx, 0.0, 0.0, None, false, Align::default(), &self.text);
+        self.size = vec2(laidout.size_in_lpxs.width, laidout.size_in_lpxs.height);
+        self.shape_id = build_laidout_text_shape(&mut self.draw_glyph, laidout.as_ref());
+    }
+}
+
+fn build_laidout_text_shape(dg: &mut DrawGlyph, laidout: &LaidoutText) -> Option<GlyphShapeId> {
+    dg.begin_shape();
+    dg.set_color(1.0, 1.0, 1.0, 1.0);
+
+    for row in &laidout.rows {
+        for glyph in &row.glyphs {
+            append_laidout_glyph_outline(dg, glyph, row.origin_in_lpxs.x, row.origin_in_lpxs.y);
+        }
+    }
+
+    dg.fill_layer();
+    dg.commit_shape(None)
+}
+
+fn append_laidout_glyph_outline(
+    dg: &mut DrawGlyph,
+    glyph: &LaidoutGlyph,
+    row_origin_x: f32,
+    row_origin_y: f32,
+) {
+    let font = glyph.font.as_ref();
+    let Some(outline) = font.glyph_outline(glyph.id) else {
+        return;
+    };
+
+    let glyph_x = row_origin_x + glyph.origin_in_lpxs.x + glyph.offset_in_lpxs();
+    let glyph_y = row_origin_y;
+    let font_scale = glyph.font_size_in_lpxs / font.units_per_em();
+
+    for command in outline.commands() {
+        match command {
+            OutlineCommand::MoveTo(p) => {
+                dg.move_to(glyph_x + p.x * font_scale, glyph_y - p.y * font_scale);
+            }
+            OutlineCommand::LineTo(p) => {
+                dg.line_to(glyph_x + p.x * font_scale, glyph_y - p.y * font_scale);
+            }
+            OutlineCommand::QuadTo(c, p) => {
+                dg.quad_to(
+                    glyph_x + c.x * font_scale,
+                    glyph_y - c.y * font_scale,
+                    glyph_x + p.x * font_scale,
+                    glyph_y - p.y * font_scale,
+                );
+            }
+            OutlineCommand::CurveTo(c1, c2, p) => {
+                dg.bezier_to(
+                    glyph_x + c1.x * font_scale,
+                    glyph_y - c1.y * font_scale,
+                    glyph_x + c2.x * font_scale,
+                    glyph_y - c2.y * font_scale,
+                    glyph_x + p.x * font_scale,
+                    glyph_y - p.y * font_scale,
+                );
+            }
+            OutlineCommand::Close => {
+                dg.close();
+            }
+        }
+    }
 }
 
 // NewsListTest widget demonstrating PortalList usage
