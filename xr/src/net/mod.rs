@@ -21,7 +21,7 @@ use self::{
     },
 };
 
-pub const XR_NET_PROTOCOL_VERSION: u16 = 10;
+pub const XR_NET_PROTOCOL_VERSION: u16 = 11;
 pub const XR_NET_DEFAULT_DISCOVERY_PORT: u16 = 41546;
 pub const XR_NET_DEFAULT_DATA_PORT: u16 = 41547;
 pub const XR_NET_DEFAULT_SYNC_PORT: u16 = 41548;

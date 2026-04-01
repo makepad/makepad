@@ -433,6 +433,43 @@ impl GgufFile {
         Ok(out)
     }
 
+    pub fn read_tensor_bytes(&self, name: &str) -> Result<Vec<u8>> {
+        let tensor = self.require_tensor(name)?;
+        let len = usize::try_from(tensor.size_bytes).map_err(|_| {
+            LlamaError::format(format!(
+                "tensor '{}' size {} does not fit in usize",
+                name, tensor.size_bytes
+            ))
+        })?;
+        let mut out = vec![0u8; len];
+        self.read_tensor_into(name, &mut out)?;
+        Ok(out)
+    }
+
+    pub fn read_tensor_into(&self, name: &str, dst: &mut [u8]) -> Result<()> {
+        let tensor = self.require_tensor(name)?;
+        let expected = usize::try_from(tensor.size_bytes).map_err(|_| {
+            LlamaError::format(format!(
+                "tensor '{}' size {} does not fit in usize",
+                name, tensor.size_bytes
+            ))
+        })?;
+        if dst.len() != expected {
+            return Err(LlamaError::format(format!(
+                "tensor '{}' byte length mismatch: dst={} expected={}",
+                name,
+                dst.len(),
+                expected
+            )));
+        }
+
+        let mut file = File::open(&self.path)?;
+        let start = tensor.absolute_offset(self.data_offset)?;
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(dst)?;
+        Ok(())
+    }
+
     pub fn tensor_summary(&self, name: &str) -> Result<String> {
         let tensor = self.require_tensor(name)?;
         Ok(format!(

@@ -10,7 +10,7 @@ pub mod xr_shared_object_sync;
 pub mod xr_view;
 
 pub(crate) use xr_gesture::{
-    flat_head_forward, flat_head_right, hand_closed_fist_contact_point,
+    arm_pair_metrics, flat_head_forward, hand_closed_fist_contact_point,
     hand_closed_fist_contact_point_geometry_only,
 };
 

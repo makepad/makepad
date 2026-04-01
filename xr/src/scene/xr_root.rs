@@ -1,9 +1,9 @@
 use super::xr_env::XrEnv;
 use super::xr_select::XrSelectAction;
-use super::{flat_head_forward, flat_head_right, hand_closed_fist_contact_point};
+use super::{arm_pair_metrics, flat_head_forward, hand_closed_fist_contact_point};
 use crate::prelude::*;
 use crate::util::scene_draw::{ray_from_scene_viewport, SceneState3D};
-use makepad_widgets::event::{XrFingerTip, XrSyncAnchor};
+use makepad_widgets::event::{XrFingerTip, XrSyncAnchor, XrSyncAnchorExtrema};
 use makepad_widgets::makepad_script::ScriptFnRef;
 use std::{cell::Cell, collections::HashMap, rc::Rc, time::Instant};
 
@@ -12,18 +12,16 @@ const DESKTOP_TOUCH_UP_Z: f32 = 64.0;
 const XR_CONTENT_FORWARD_OFFSET: f32 = 0.28;
 const XR_ACTIVITY_RESET_FORWARD_OFFSET: f32 = 1.0;
 const XR_CONTENT_VERTICAL_OFFSET: f32 = -0.58;
-const FISTBUMP_FORWARD_PEAK_MIN_METERS: f32 = 0.18;
-const FISTBUMP_RETREAT_MIN_METERS: f32 = 0.04;
-const FISTBUMP_MAX_WINDOW_SECONDS: f64 = 2.2;
-const FISTBUMP_MIN_ACTIVE_SECONDS: f64 = 0.14;
-const FISTBUMP_BROADCAST_SECONDS: f64 = 1.1;
-const FISTBUMP_COOLDOWN_SECONDS: f64 = 0.85;
-const FISTBUMP_MAX_VERTICAL_DELTA_METERS: f32 = 0.22;
-const FISTBUMP_MAX_DEPTH_DELTA_METERS: f32 = 0.22;
-const FISTBUMP_MIN_HAND_GAP_METERS: f32 = 0.06;
-const FISTBUMP_MAX_HAND_GAP_METERS: f32 = 0.78;
-const FISTBUMP_MIN_CHEST_DISTANCE_METERS: f32 = 0.10;
-const FISTBUMP_MAX_CHEST_DISTANCE_METERS: f32 = 1.05;
+const SYNC_BOX_BROADCAST_SECONDS: f64 = 1.1;
+const SYNC_BOX_DIRECTION_DEADZONE_METERS: f32 = 0.006;
+const SYNC_BOX_REVERSAL_MIN_TRAVEL_METERS: f32 = 0.05;
+const SYNC_BOX_MAX_VERTICAL_DELTA_METERS: f32 = 0.22;
+const SYNC_BOX_MAX_DEPTH_DELTA_METERS: f32 = 0.22;
+const SYNC_BOX_MIN_HAND_GAP_METERS: f32 = 0.06;
+const SYNC_BOX_MAX_HAND_GAP_METERS: f32 = 0.78;
+const SYNC_BOX_MIN_CHEST_DISTANCE_METERS: f32 = 0.10;
+const SYNC_BOX_MAX_CHEST_DISTANCE_METERS: f32 = 1.05;
+const SYNC_BOX_MAX_ARM_ELEVATION_DEGREES: f32 = 60.0;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -217,16 +215,23 @@ impl XrCamera {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct FistbumpPoseSample {
+struct BoxSyncPoseSample {
     anchor: XrAnchor,
-    forward_distance: f32,
+    captured_at: f64,
+    vertical_split: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoxSyncMotionDirection {
+    Rising,
+    Falling,
 }
 
 #[derive(Clone, Debug, Default)]
-struct FistbumpGestureDetector {
-    started_at: Option<f64>,
-    peak_sample: Option<FistbumpPoseSample>,
-    cooldown_until: f64,
+struct BoxSyncGestureDetector {
+    previous_sample: Option<BoxSyncPoseSample>,
+    direction: Option<BoxSyncMotionDirection>,
+    extreme_sample: Option<BoxSyncPoseSample>,
 }
 
 #[derive(Default)]
@@ -326,107 +331,170 @@ impl XrContentRig {
 
 #[derive(Clone, Debug, Default)]
 struct XrSyncAnchorRuntime {
-    detector: FistbumpGestureDetector,
+    detector: BoxSyncGestureDetector,
     pending_sync_anchor: Option<XrSyncAnchor>,
+    pending_sync_anchor_emitted_at: Option<f64>,
     next_sync_anchor_id: u32,
 }
 
 impl XrSyncAnchorRuntime {
-    fn fistbump_pose_sample(state: &XrState) -> Option<FistbumpPoseSample> {
+    fn box_sync_pose_sample(state: &XrState) -> Option<BoxSyncPoseSample> {
         let forward = flat_head_forward(state.head_pose.orientation);
-        let right = flat_head_right(state.head_pose.orientation);
-
         let left_point = hand_closed_fist_contact_point(&state.left_hand, forward, true)?;
         let right_point = hand_closed_fist_contact_point(&state.right_hand, forward, false)?;
-        let left_local = left_point - state.head_pose.position;
-        let right_local = right_point - state.head_pose.position;
-        let left_forward = left_local.dot(forward);
-        let right_forward = right_local.dot(forward);
-        let left_lateral = left_local.dot(right);
-        let right_lateral = right_local.dot(right);
-        let hand_gap = (right_point - left_point).length();
-        if left_lateral >= right_lateral
-            || (left_point.y - right_point.y).abs() > FISTBUMP_MAX_VERTICAL_DELTA_METERS
-            || (left_forward - right_forward).abs() > FISTBUMP_MAX_DEPTH_DELTA_METERS
-            || hand_gap < FISTBUMP_MIN_HAND_GAP_METERS
-            || hand_gap > FISTBUMP_MAX_HAND_GAP_METERS
+        let metrics = arm_pair_metrics(state.head_pose, left_point, right_point)?;
+        if metrics.left_lateral >= metrics.right_lateral
+            || metrics.hand_gap < SYNC_BOX_MIN_HAND_GAP_METERS
+            || metrics.hand_gap > SYNC_BOX_MAX_HAND_GAP_METERS
+            || metrics.left_forward < SYNC_BOX_MIN_CHEST_DISTANCE_METERS
+            || metrics.left_forward > SYNC_BOX_MAX_CHEST_DISTANCE_METERS
+            || metrics.right_forward < SYNC_BOX_MIN_CHEST_DISTANCE_METERS
+            || metrics.right_forward > SYNC_BOX_MAX_CHEST_DISTANCE_METERS
+            || metrics.left_elevation_degrees > SYNC_BOX_MAX_ARM_ELEVATION_DEGREES
+            || metrics.right_elevation_degrees > SYNC_BOX_MAX_ARM_ELEVATION_DEGREES
+            || (left_point.y - right_point.y).abs() > SYNC_BOX_MAX_VERTICAL_DELTA_METERS * 2.0
+            || (metrics.left_forward - metrics.right_forward).abs()
+                > SYNC_BOX_MAX_DEPTH_DELTA_METERS * 2.0
         {
             return None;
         }
-        let forward_distance = (left_forward + right_forward) * 0.5;
-        if !(FISTBUMP_MIN_CHEST_DISTANCE_METERS..=FISTBUMP_MAX_CHEST_DISTANCE_METERS)
-            .contains(&forward_distance)
+        if !(SYNC_BOX_MIN_CHEST_DISTANCE_METERS..=SYNC_BOX_MAX_CHEST_DISTANCE_METERS)
+            .contains(&metrics.average_forward_distance)
         {
             return None;
         }
-        Some(FistbumpPoseSample {
+        Some(BoxSyncPoseSample {
             anchor: XrAnchor {
                 left: left_point,
                 right: right_point,
             },
-            forward_distance,
+            captured_at: state.time,
+            // Opposing-hand wiggles keep the midpoint almost fixed, so track the
+            // vertical split between hands instead of the average hand height.
+            vertical_split: left_point.y - right_point.y,
         })
     }
 
+    fn update_detector_sample(
+        &mut self,
+        sample: Option<BoxSyncPoseSample>,
+    ) -> Option<XrSyncAnchor> {
+        let Some(sample) = sample else {
+            self.detector.previous_sample = None;
+            self.detector.direction = None;
+            self.detector.extreme_sample = None;
+            return None;
+        };
+        let Some(previous_sample) = self.detector.previous_sample else {
+            self.detector.previous_sample = Some(sample);
+            self.detector.extreme_sample = Some(sample);
+            return None;
+        };
+
+        match self.detector.direction {
+            None => {
+                let phase_delta = sample.vertical_split - previous_sample.vertical_split;
+                if phase_delta.abs() < SYNC_BOX_DIRECTION_DEADZONE_METERS {
+                    return None;
+                }
+                let next_direction = if phase_delta > 0.0 {
+                    BoxSyncMotionDirection::Rising
+                } else {
+                    BoxSyncMotionDirection::Falling
+                };
+                self.detector.direction = Some(next_direction);
+                self.detector.extreme_sample =
+                    Some(Self::more_extreme_sample(previous_sample, sample, next_direction));
+                self.detector.previous_sample = Some(sample);
+                None
+            }
+            Some(current_direction) => {
+                let extreme_sample = self.detector.extreme_sample.unwrap_or(previous_sample);
+                let continues_current_direction = match current_direction {
+                    BoxSyncMotionDirection::Rising => {
+                        sample.vertical_split >= extreme_sample.vertical_split
+                    }
+                    BoxSyncMotionDirection::Falling => {
+                        sample.vertical_split <= extreme_sample.vertical_split
+                    }
+                };
+
+                if continues_current_direction {
+                    self.detector.extreme_sample = Some(Self::more_extreme_sample(
+                        extreme_sample,
+                        sample,
+                        current_direction,
+                    ));
+                    self.detector.previous_sample = Some(sample);
+                    return None;
+                }
+
+                let retreat = (sample.vertical_split - extreme_sample.vertical_split).abs();
+                if retreat < SYNC_BOX_REVERSAL_MIN_TRAVEL_METERS {
+                    self.detector.previous_sample = Some(sample);
+                    return None;
+                }
+
+                let emitted = Some(XrSyncAnchor {
+                    id: self.next_sync_anchor_id,
+                    captured_at: extreme_sample.captured_at,
+                    extrema: match current_direction {
+                        BoxSyncMotionDirection::Rising => XrSyncAnchorExtrema::High,
+                        BoxSyncMotionDirection::Falling => XrSyncAnchorExtrema::Low,
+                    },
+                    anchor: extreme_sample.anchor,
+                });
+                self.next_sync_anchor_id = self.next_sync_anchor_id.wrapping_add(1);
+                self.detector.direction = Some(match current_direction {
+                    BoxSyncMotionDirection::Rising => BoxSyncMotionDirection::Falling,
+                    BoxSyncMotionDirection::Falling => BoxSyncMotionDirection::Rising,
+                });
+                self.detector.extreme_sample = Some(sample);
+                self.detector.previous_sample = Some(sample);
+                emitted
+            }
+        }
+    }
+
+    fn more_extreme_sample(
+        a: BoxSyncPoseSample,
+        b: BoxSyncPoseSample,
+        direction: BoxSyncMotionDirection,
+    ) -> BoxSyncPoseSample {
+        match direction {
+            BoxSyncMotionDirection::Rising => {
+                if b.vertical_split >= a.vertical_split {
+                    b
+                } else {
+                    a
+                }
+            }
+            BoxSyncMotionDirection::Falling => {
+                if b.vertical_split <= a.vertical_split {
+                    b
+                } else {
+                    a
+                }
+            }
+        }
+    }
+
     fn update_detector(&mut self, state: &XrState) -> Option<XrSyncAnchor> {
-        let time = state.time;
-        if time < self.detector.cooldown_until {
-            return None;
-        }
-
-        let Some(sample) = Self::fistbump_pose_sample(state) else {
-            self.detector.started_at = None;
-            self.detector.peak_sample = None;
-            return None;
-        };
-
-        let started_at = self.detector.started_at.unwrap_or(time);
-        if time - started_at > FISTBUMP_MAX_WINDOW_SECONDS {
-            self.detector.started_at = Some(time);
-            self.detector.peak_sample = Some(sample);
-            return None;
-        }
-
-        self.detector.started_at = Some(started_at);
-        if self
-            .detector
-            .peak_sample
-            .is_none_or(|peak| sample.forward_distance >= peak.forward_distance)
-        {
-            self.detector.peak_sample = Some(sample);
-        }
-
-        let Some(peak_sample) = self.detector.peak_sample else {
-            return None;
-        };
-        let retreat = peak_sample.forward_distance - sample.forward_distance;
-        if time - started_at < FISTBUMP_MIN_ACTIVE_SECONDS
-            || peak_sample.forward_distance < FISTBUMP_FORWARD_PEAK_MIN_METERS
-            || retreat < FISTBUMP_RETREAT_MIN_METERS
-        {
-            return None;
-        }
-
-        let sync_anchor = XrSyncAnchor {
-            id: self.next_sync_anchor_id,
-            captured_at: time,
-            anchor: peak_sample.anchor,
-        };
-        self.next_sync_anchor_id = self.next_sync_anchor_id.wrapping_add(1);
-        self.detector.started_at = None;
-        self.detector.peak_sample = None;
-        self.detector.cooldown_until = time + FISTBUMP_COOLDOWN_SECONDS;
-        Some(sync_anchor)
+        self.update_detector_sample(Self::box_sync_pose_sample(state))
     }
 
     fn current_sync_anchor(&mut self, state_time: f64) -> Option<XrSyncAnchor> {
-        let Some(sync_anchor) = self.pending_sync_anchor else {
+        let (Some(sync_anchor), Some(emitted_at)) = (
+            self.pending_sync_anchor,
+            self.pending_sync_anchor_emitted_at,
+        ) else {
             return None;
         };
-        if state_time - sync_anchor.captured_at <= FISTBUMP_BROADCAST_SECONDS {
+        if state_time - emitted_at <= SYNC_BOX_BROADCAST_SECONDS {
             Some(sync_anchor)
         } else {
             self.pending_sync_anchor = None;
+            self.pending_sync_anchor_emitted_at = None;
             None
         }
     }
@@ -434,6 +502,7 @@ impl XrSyncAnchorRuntime {
     fn augment_state(&mut self, state: &XrState) -> Rc<XrState> {
         if let Some(sync_anchor) = self.update_detector(state) {
             self.pending_sync_anchor = Some(sync_anchor);
+            self.pending_sync_anchor_emitted_at = Some(state.time);
         }
         let mut augmented = state.clone();
         augmented.sync_anchor = self.current_sync_anchor(state.time);
@@ -1308,5 +1377,52 @@ impl Widget for XrRoot {
 
         cx.end_pass(&self.pass.handle);
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(captured_at: f64, vertical_split: f32) -> BoxSyncPoseSample {
+        BoxSyncPoseSample {
+            anchor: XrAnchor {
+                left: vec3f(-0.1, vertical_split * 0.5, -0.4),
+                right: vec3f(0.1, -vertical_split * 0.5, -0.4),
+            },
+            captured_at,
+            vertical_split,
+        }
+    }
+
+    #[test]
+    fn box_sync_detector_emits_every_full_reversal_extrema() {
+        let mut runtime = XrSyncAnchorRuntime::default();
+        let mut emitted = Vec::new();
+        let samples = [
+            sample(0.00, 0.00),
+            sample(0.10, 0.03),
+            sample(0.20, 0.06),
+            sample(0.30, 0.03),
+            sample(0.40, 0.00),
+            sample(0.50, -0.03),
+            sample(0.60, -0.06),
+            sample(0.70, -0.03),
+            sample(0.80, 0.00),
+            sample(0.90, 0.03),
+            sample(1.00, 0.06),
+        ];
+
+        for sample in samples {
+            if let Some(sync_anchor) = runtime.update_detector_sample(Some(sample)) {
+                emitted.push(sync_anchor);
+            }
+        }
+
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted[0].extrema, XrSyncAnchorExtrema::High);
+        assert_eq!(emitted[0].captured_at, 0.20);
+        assert_eq!(emitted[1].extrema, XrSyncAnchorExtrema::Low);
+        assert_eq!(emitted[1].captured_at, 0.60);
     }
 }
