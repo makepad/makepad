@@ -19,7 +19,12 @@ use {
         turtle::*,
         turtle::{Align, Walk},
     },
-    std::{cell::RefCell, rc::Rc},
+    std::{
+        cell::RefCell,
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+        rc::Rc,
+    },
 };
 
 script_mod! {
@@ -816,6 +821,9 @@ pub struct FontMember {
     pub asc: f32,
     #[live]
     pub desc: f32,
+    /// Positive values map to the OpenType `wght` axis. `0.0` keeps the font default.
+    #[live(0.0)]
+    pub weight: f32,
 }
 
 #[derive(Debug, Clone, Script, PartialEq)]
@@ -831,6 +839,7 @@ pub struct FontMemberDef {
     handle: ScriptHandle,
     asc: f32,
     desc: f32,
+    weight: f32,
 }
 
 impl FontFamily {
@@ -845,7 +854,7 @@ impl FontFamily {
             if !font_member_is_needed_for_text(cx, member.handle, text) {
                 continue;
             }
-            let font_id: FontId = (member.handle.index() as u64).into();
+            let font_id = font_member_font_id(member);
 
             if !fonts.is_font_known(font_id) {
                 let font_data = cx.get_resource_font_bytes(member.handle);
@@ -858,6 +867,7 @@ impl FontFamily {
                             index: 0,
                             ascender_fudge_in_ems: member.asc,
                             descender_fudge_in_ems: member.desc,
+                            weight: font_member_weight(member),
                             variations: Vec::new(),
                         },
                     );
@@ -949,6 +959,23 @@ fn is_emoji_fallback_font_path(path: &str) -> bool {
 
 fn resource_basename(path: &str) -> Option<&str> {
     path.rsplit(['/', '\\']).next()
+}
+
+fn font_member_weight(member: &FontMemberDef) -> Option<f32> {
+    if member.weight.is_finite() && member.weight > 0.0 {
+        Some(member.weight)
+    } else {
+        None
+    }
+}
+
+fn font_member_font_id(member: &FontMemberDef) -> FontId {
+    let mut hasher = DefaultHasher::new();
+    member.handle.index().hash(&mut hasher);
+    member.asc.to_bits().hash(&mut hasher);
+    member.desc.to_bits().hash(&mut hasher);
+    member.weight.to_bits().hash(&mut hasher);
+    FontId::from(hasher.finish())
 }
 
 fn text_has_cjk(text: &str) -> bool {
@@ -1044,6 +1071,7 @@ impl ScriptHook for FontFamily {
                     handle: handle_ref.as_handle(),
                     asc: member.asc,
                     desc: member.desc,
+                    weight: member.weight,
                 });
             }
         }
