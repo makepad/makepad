@@ -326,6 +326,65 @@ fn terminal_large_paste_keeps_session_alive() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
+fn terminal_bell_sets_title_badge_until_next_input() {
+    let dir = makepad_studio_hub::test_support::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+
+    let config = HubConfig {
+        mounts: vec![MountConfig {
+            name: "repo".to_string(),
+            path: dir.path().to_path_buf(),
+        }],
+        ..Default::default()
+    };
+    let mut connection = StudioHub::start_in_process(config).expect("start in-process backend");
+
+    let path = "repo/.makepad/bell.term".to_string();
+    let _ = connection.send(ClientToHub::TerminalOpen {
+        path: path.clone(),
+        cols: 120,
+        rows: 30,
+        env: std::collections::HashMap::new(),
+    });
+    let opened = wait_for_message(
+        &connection,
+        Duration::from_secs(4),
+        |msg| matches!(msg, HubToClient::TerminalOpened { path: p, .. } if p == &path),
+    );
+    assert!(opened.is_some(), "did not receive TerminalOpened");
+    request_terminal_viewport(&mut connection, &path, 120, 30, usize::MAX);
+
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: b"printf '\\a'\n".to_vec(),
+    });
+    let bell = wait_for_message(
+        &connection,
+        Duration::from_secs(6),
+        |msg| matches!(msg, HubToClient::TerminalTitle { path: p, title } if p == &path && title == "@ bell.term"),
+    );
+    assert!(bell.is_some(), "did not observe terminal bell title");
+
+    let _ = connection.send(ClientToHub::TerminalInput {
+        path: path.clone(),
+        data: b":\n".to_vec(),
+    });
+    let cleared = wait_for_message(
+        &connection,
+        Duration::from_secs(6),
+        |msg| matches!(msg, HubToClient::TerminalTitle { path: p, title } if p == &path && title == "bell.term"),
+    );
+    assert!(
+        cleared.is_some(),
+        "did not observe terminal title clearing after input"
+    );
+
+    let _ = connection.send(ClientToHub::TerminalClose { path });
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
 fn terminal_resize_delivers_sigwinch_with_updated_stty_size() {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     use std::os::unix::fs::PermissionsExt;

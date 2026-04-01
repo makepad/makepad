@@ -17,3 +17,7 @@ path = "src/bin/llama_load.rs"
 [[bin]]
 name = "llama-compare"
 path = "src/bin/llama_compare.rs"
+
+[[bin]]
+name = "llama-generate"
+path = "src/bin/llama_generate.rs"

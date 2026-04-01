@@ -1105,8 +1105,8 @@ impl ShaderFnCompiler {
             Opcode::MOD => self.handle_arithmetic(vm, output, opargs, "%", false),
             Opcode::ADD => self.handle_arithmetic(vm, output, opargs, "+", false),
             Opcode::SUB => self.handle_arithmetic(vm, output, opargs, "-", false),
-            Opcode::SHL => self.handle_arithmetic(vm, output, opargs, ">>", true),
-            Opcode::SHR => self.handle_arithmetic(vm, output, opargs, "<<", true),
+            Opcode::SHL => self.handle_arithmetic(vm, output, opargs, "<<", true),
+            Opcode::SHR => self.handle_arithmetic(vm, output, opargs, ">>", true),
             Opcode::AND => self.handle_arithmetic(vm, output, opargs, "&", true),
             Opcode::OR => self.handle_arithmetic(vm, output, opargs, "|", true),
             Opcode::XOR => self.handle_arithmetic(vm, output, opargs, "^", true),
@@ -1138,10 +1138,10 @@ impl ShaderFnCompiler {
                 self.handle_arithmetic_assign(vm, output, opargs, "^=", true);
             }
             Opcode::ASSIGN_SHL => {
-                self.handle_arithmetic_assign(vm, output, opargs, ">>=", true);
+                self.handle_arithmetic_assign(vm, output, opargs, "<<=", true);
             }
             Opcode::ASSIGN_SHR => {
-                self.handle_arithmetic_assign(vm, output, opargs, "<<=", true);
+                self.handle_arithmetic_assign(vm, output, opargs, ">>=", true);
             }
             Opcode::ASSIGN_IFNIL => {
                 script_err_not_impl!(self.trap, "ASSIGN_IFNIL: null-coalescing assignment `x ??= default` not supported in shaders");
@@ -1173,10 +1173,10 @@ impl ShaderFnCompiler {
                 self.handle_arithmetic_field_assign(vm, output, opargs, "^=", true);
             }
             Opcode::ASSIGN_FIELD_SHL => {
-                self.handle_arithmetic_field_assign(vm, output, opargs, ">>=", true);
+                self.handle_arithmetic_field_assign(vm, output, opargs, "<<=", true);
             }
             Opcode::ASSIGN_FIELD_SHR => {
-                self.handle_arithmetic_field_assign(vm, output, opargs, "<<=", true);
+                self.handle_arithmetic_field_assign(vm, output, opargs, ">>=", true);
             }
             Opcode::ASSIGN_FIELD_IFNIL => {
                 script_err_not_impl!(self.trap, "ASSIGN_FIELD_IFNIL: null-coalescing field assignment `obj.x ??= default` not supported in shaders");
@@ -1208,10 +1208,10 @@ impl ShaderFnCompiler {
                 self.handle_arithmetic_index_assign(vm, output, opargs, "^=", true);
             }
             Opcode::ASSIGN_INDEX_SHL => {
-                self.handle_arithmetic_index_assign(vm, output, opargs, ">>=", true);
+                self.handle_arithmetic_index_assign(vm, output, opargs, "<<=", true);
             }
             Opcode::ASSIGN_INDEX_SHR => {
-                self.handle_arithmetic_index_assign(vm, output, opargs, "<<=", true);
+                self.handle_arithmetic_index_assign(vm, output, opargs, ">>=", true);
             }
             Opcode::ASSIGN_INDEX_IFNIL => {
                 script_err_not_impl!(self.trap, "ASSIGN_INDEX_IFNIL: null-coalescing index assignment `arr[i] ??= default` not supported in shaders");

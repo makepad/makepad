@@ -141,6 +141,7 @@ pub struct AppData {
     pub terminal_frame_id_by_path: HashMap<String, u64>,
     pub terminal_viewport_request_by_path: HashMap<String, (u16, u16, usize)>,
     pub terminal_open_paths: HashSet<String>,
+    pub terminal_title_by_path: HashMap<String, String>,
     pub file_filter_mount_by_query: HashMap<QueryId, String>,
     pub pending_stop_all_mount: Option<String>,
     pub pending_log_jumps: HashMap<String, (usize, usize)>,

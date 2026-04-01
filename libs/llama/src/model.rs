@@ -76,10 +76,7 @@ impl Qwen35MoeConfig {
             attention_key_length: required_u32(gguf, "qwen35moe.attention.key_length")?,
             attention_value_length: required_u32(gguf, "qwen35moe.attention.value_length")?,
             rope_dimension_count: required_u32(gguf, "qwen35moe.rope.dimension_count")?,
-            rope_dimension_sections: required_u32_array(
-                gguf,
-                "qwen35moe.rope.dimension_sections",
-            )?,
+            rope_dimension_sections: required_u32_array(gguf, "qwen35moe.rope.dimension_sections")?,
             rope_freq_base: required_f32(gguf, "qwen35moe.rope.freq_base")?,
             attention_layer_norm_rms_epsilon: required_f32(
                 gguf,
@@ -87,10 +84,7 @@ impl Qwen35MoeConfig {
             )?,
             expert_count: required_u32(gguf, "qwen35moe.expert_count")?,
             expert_used_count: required_u32(gguf, "qwen35moe.expert_used_count")?,
-            expert_feed_forward_length: required_u32(
-                gguf,
-                "qwen35moe.expert_feed_forward_length",
-            )?,
+            expert_feed_forward_length: required_u32(gguf, "qwen35moe.expert_feed_forward_length")?,
             expert_shared_feed_forward_length: required_u32(
                 gguf,
                 "qwen35moe.expert_shared_feed_forward_length",

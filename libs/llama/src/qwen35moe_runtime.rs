@@ -13,9 +13,8 @@ use crate::runtime::{
     AttentionBlockSpec, AttentionDecodeSpec, AttentionKvCacheSpec, AttentionQueryLayout,
     AttentionRopeSpec, DeltaNetRecurrentBlockSpec, DeltaNetRecurrentDecodeSpec,
     DeltaNetRecurrentStateSpec, DenseGatedFfnSpec, ExpertGatingFunc, HybridCacheShape,
-    HybridCacheSpec, HybridCacheTemplate, HybridCacheTypes, HybridDecodeSpec,
-    HybridLayerSpec, LogitsProbeSpec, MoeFfnSpec, MoeSharedExpertSpec, ProbeInputKind,
-    RmsNormSpec,
+    HybridCacheSpec, HybridCacheTemplate, HybridCacheTypes, HybridDecodeSpec, HybridLayerSpec,
+    LogitsProbeSpec, MoeFfnSpec, MoeSharedExpertSpec, ProbeInputKind, RmsNormSpec,
 };
 use crate::weights::GgufWeightLayout;
 
@@ -76,7 +75,9 @@ impl Qwen35MoeDims {
                 2_u64
                     .checked_mul(u64::from(self.ssm_group_count))
                     .and_then(|v| v.checked_mul(u64::from(self.ssm_state_size)))
-                    .ok_or_else(|| LlamaError::format("overflow computing qwen35moe conv channels"))?,
+                    .ok_or_else(|| {
+                        LlamaError::format("overflow computing qwen35moe conv channels")
+                    })?,
             )
             .ok_or_else(|| LlamaError::format("overflow computing qwen35moe conv channels"))?;
         conv_prefix
@@ -203,7 +204,10 @@ pub fn qwen35moe_first_attention_block_spec(
         .iter()
         .find(|layer| layer.kind == Qwen35MoeLayerKind::Attention)
         .ok_or_else(|| LlamaError::format("qwen35moe model has no attention layers"))?;
-    Ok((layer.index, qwen35moe_attention_block_spec(model, layer.index)?))
+    Ok((
+        layer.index,
+        qwen35moe_attention_block_spec(model, layer.index)?,
+    ))
 }
 
 pub fn qwen35moe_attention_decode_spec(
@@ -288,7 +292,10 @@ pub fn qwen35moe_first_recurrent_block_spec(
         .iter()
         .find(|layer| layer.kind == Qwen35MoeLayerKind::Recurrent)
         .ok_or_else(|| LlamaError::format("qwen35moe model has no recurrent layers"))?;
-    Ok((layer.index, qwen35moe_recurrent_block_spec(model, layer.index)?))
+    Ok((
+        layer.index,
+        qwen35moe_recurrent_block_spec(model, layer.index)?,
+    ))
 }
 
 pub fn qwen35moe_delta_net_recurrent_decode_spec(
@@ -428,10 +435,7 @@ pub fn qwen35moe_recurrent_block_layout(
     ])
 }
 
-pub fn qwen35moe_moe_ffn_layout(
-    model: &LlamaModel,
-    layer_index: u32,
-) -> Result<GgufWeightLayout> {
+pub fn qwen35moe_moe_ffn_layout(model: &LlamaModel, layer_index: u32) -> Result<GgufWeightLayout> {
     let tensors = model.qwen35moe_tensors()?;
     let layer = tensors
         .layers
@@ -631,21 +635,13 @@ fn qwen35moe_inventory(tensors: &Qwen35MoeTensors) -> ModelTensorInventory {
                     "attn_gate.scale",
                     &recurrent.scales.wqkv_gate,
                 );
-                insert_optional_tensor(
-                    &mut entries,
-                    "ssm_out.scale",
-                    &recurrent.scales.ssm_out,
-                );
+                insert_optional_tensor(&mut entries, "ssm_out.scale", &recurrent.scales.ssm_out);
                 insert_optional_tensor(
                     &mut entries,
                     "ssm_alpha.scale",
                     &recurrent.scales.ssm_alpha,
                 );
-                insert_optional_tensor(
-                    &mut entries,
-                    "ssm_beta.scale",
-                    &recurrent.scales.ssm_beta,
-                );
+                insert_optional_tensor(&mut entries, "ssm_beta.scale", &recurrent.scales.ssm_beta);
             }
 
             insert_tensor(&mut entries, "ffn_gate_inp", &layer.moe.ffn_gate_inp);
@@ -654,14 +650,14 @@ fn qwen35moe_inventory(tensors: &Qwen35MoeTensors) -> ModelTensorInventory {
                 "ffn_gate_up_exps",
                 &layer.moe.ffn_gate_up_exps,
             );
-            insert_optional_tensor(
-                &mut entries,
-                "ffn_gate_exps",
-                &layer.moe.ffn_gate_exps,
-            );
+            insert_optional_tensor(&mut entries, "ffn_gate_exps", &layer.moe.ffn_gate_exps);
             insert_optional_tensor(&mut entries, "ffn_up_exps", &layer.moe.ffn_up_exps);
             insert_tensor(&mut entries, "ffn_down_exps", &layer.moe.ffn_down_exps);
-            insert_tensor(&mut entries, "ffn_gate_inp_shexp", &layer.moe.ffn_gate_inp_shexp);
+            insert_tensor(
+                &mut entries,
+                "ffn_gate_inp_shexp",
+                &layer.moe.ffn_gate_inp_shexp,
+            );
             insert_tensor(&mut entries, "ffn_gate_shexp", &layer.moe.ffn_gate_shexp);
             insert_tensor(&mut entries, "ffn_up_shexp", &layer.moe.ffn_up_shexp);
             insert_tensor(&mut entries, "ffn_down_shexp", &layer.moe.ffn_down_shexp);

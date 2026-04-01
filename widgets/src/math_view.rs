@@ -19,12 +19,7 @@ script_mod! {
         font_size: 11.0
         baseline_offset: -2.0
         draw_glyph +: {
-            aa_2x2: 1.0
-            aa_4x4: 1.0
             aa_pad_px: 1.0
-            axis_relief: 0.65
-            stem_darken: 0.25
-            stem_darken_max: 0.025
         }
         draw_text +: {
             text_style: TextStyle{
@@ -277,7 +272,7 @@ fn build_glyph_shape(
         }
     }
     dg.fill_layer();
-    dg.commit_shape(Some(0))
+    dg.commit_shape(None)
 }
 
 fn build_rule_shape(
@@ -293,7 +288,7 @@ fn build_rect_shape(dg: &mut DrawGlyph, x: f32, y: f32, w: f32, h: f32) -> Optio
     dg.set_color(1.0, 1.0, 1.0, 1.0);
     dg.rect(x, y, w, h);
     dg.fill_layer();
-    dg.commit_shape(Some(0))
+    dg.commit_shape(None)
 }
 
 fn push_component(dg: &DrawGlyph, shape_id: GlyphShapeId, components: &mut Vec<MathComponent>) {

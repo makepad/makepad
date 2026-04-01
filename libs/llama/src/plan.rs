@@ -53,7 +53,10 @@ impl ModelTensorInventory {
     }
 
     pub fn count_layers_with_role(&self, role: ModelLayerRole) -> usize {
-        self.layers.iter().filter(|layer| layer.role == role).count()
+        self.layers
+            .iter()
+            .filter(|layer| layer.role == role)
+            .count()
     }
 
     pub fn unique_tensors(&self) -> Vec<GgufTensorInfo> {

@@ -1098,6 +1098,119 @@ impl ShaderFnCompiler {
             return;
         }
 
+        if name == id!(asuint) || name == id!(asint) || name == id!(asfloat) {
+            let mut concrete_args = Vec::new();
+            let mut formatted_args = Vec::new();
+            for (ty, s) in args {
+                concrete_args.push(ty.make_concrete(builtins).unwrap_or(builtins.pod_void));
+                formatted_args.push(s);
+            }
+
+            let arg = formatted_args.first().cloned().unwrap_or_default();
+            let arg_ty = concrete_args.first().copied().unwrap_or(builtins.pod_void);
+            let mut out = self.stack.new_string();
+            match name {
+                id!(asuint) => match output.backend {
+                    ShaderBackend::Glsl => {
+                        if arg_ty == builtins.pod_u32 {
+                            write!(out, "{arg}").ok();
+                        } else {
+                            write!(out, "floatBitsToUint({arg})").ok();
+                        }
+                    }
+                    ShaderBackend::Wgsl => {
+                        if arg_ty == builtins.pod_u32 {
+                            write!(out, "{arg}").ok();
+                        } else {
+                            write!(out, "bitcast<u32>({arg})").ok();
+                        }
+                    }
+                    ShaderBackend::Hlsl => {
+                        write!(out, "asuint({arg})").ok();
+                    }
+                    ShaderBackend::Metal => {
+                        write!(out, "as_type<uint>({arg})").ok();
+                    }
+                    ShaderBackend::Rust => {
+                        if arg_ty == builtins.pod_u32 {
+                            write!(out, "{arg}").ok();
+                        } else {
+                            write!(out, "({arg}).to_bits()").ok();
+                        }
+                    }
+                },
+                id!(asint) => match output.backend {
+                    ShaderBackend::Glsl => {
+                        if arg_ty == builtins.pod_i32 {
+                            write!(out, "{arg}").ok();
+                        } else {
+                            write!(out, "floatBitsToInt({arg})").ok();
+                        }
+                    }
+                    ShaderBackend::Wgsl => {
+                        if arg_ty == builtins.pod_i32 {
+                            write!(out, "{arg}").ok();
+                        } else {
+                            write!(out, "bitcast<i32>({arg})").ok();
+                        }
+                    }
+                    ShaderBackend::Hlsl => {
+                        write!(out, "asint({arg})").ok();
+                    }
+                    ShaderBackend::Metal => {
+                        write!(out, "as_type<int>({arg})").ok();
+                    }
+                    ShaderBackend::Rust => {
+                        if arg_ty == builtins.pod_i32 {
+                            write!(out, "{arg}").ok();
+                        } else {
+                            write!(out, "(({arg}).to_bits() as i32)").ok();
+                        }
+                    }
+                },
+                id!(asfloat) => match output.backend {
+                    ShaderBackend::Glsl => {
+                        if arg_ty == builtins.pod_f32 || arg_ty == builtins.pod_f16 {
+                            write!(out, "{arg}").ok();
+                        } else if arg_ty == builtins.pod_i32 {
+                            write!(out, "intBitsToFloat({arg})").ok();
+                        } else {
+                            write!(out, "uintBitsToFloat({arg})").ok();
+                        }
+                    }
+                    ShaderBackend::Wgsl => {
+                        if arg_ty == builtins.pod_f32 || arg_ty == builtins.pod_f16 {
+                            write!(out, "{arg}").ok();
+                        } else {
+                            write!(out, "bitcast<f32>({arg})").ok();
+                        }
+                    }
+                    ShaderBackend::Hlsl => {
+                        write!(out, "asfloat({arg})").ok();
+                    }
+                    ShaderBackend::Metal => {
+                        write!(out, "as_type<float>({arg})").ok();
+                    }
+                    ShaderBackend::Rust => {
+                        if arg_ty == builtins.pod_f32 || arg_ty == builtins.pod_f16 {
+                            write!(out, "{arg}").ok();
+                        } else {
+                            write!(out, "f32::from_bits(({arg}) as u32)").ok();
+                        }
+                    }
+                },
+                _ => {}
+            }
+
+            for s in formatted_args {
+                self.stack.free_string(s);
+            }
+
+            let ret = type_table_builtin(name, &concrete_args, builtins, self.trap.pass());
+            self.stack.push(self.trap.pass(), ShaderType::Pod(ret), out);
+            return;
+        }
+
         // Check if any arg is a float type - if so, abstract ints should be floats
         let has_float = args.iter().any(|(ty, _)| match ty {
             ShaderType::Pod(pt) => vm.bx.heap.pod_types[pt.index as usize].ty.is_float_type(),
