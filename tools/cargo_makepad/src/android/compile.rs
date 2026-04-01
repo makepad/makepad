@@ -1420,7 +1420,12 @@ pub fn run(
             &[],
             &cwd,
             sdk_dir.join("platform-tools/adb").to_str().unwrap(),
-            &["install", "-r", (result.dst_apk.to_str().unwrap())],
+            &[
+                "install",
+                "--no-incremental",
+                "-r",
+                (result.dst_apk.to_str().unwrap()),
+            ],
         )?;
         println!("Starting android application");
         let start_args = android_start_args(&result.java_url);
@@ -1465,6 +1470,7 @@ pub fn run(
                     "-s",
                     &device,
                     "install",
+                    "--no-incremental",
                     "-r",
                     (result.dst_apk.to_str().unwrap()),
                 ],
