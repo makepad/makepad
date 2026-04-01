@@ -4,6 +4,7 @@ pub mod icosphere;
 pub mod physics_view;
 pub mod refractive_cube;
 pub mod shooter;
+pub mod tank;
 pub mod tree;
 pub mod view_splat;
 
@@ -13,6 +14,7 @@ pub use icosphere::{DrawIcoSolid, IcoSphere};
 pub use physics_view::PhysicsWorld3D;
 pub use refractive_cube::RefractiveCube;
 pub use shooter::{Shooter, XrProjectileEmitterConfig};
+pub use tank::Tank;
 pub use tree::{
     CpuPythagoreanTree, DrawTreeBranches, DrawTreeLeaves, Tree, PYTHAGOREAN_TREE_ROOT_DROP,
 };

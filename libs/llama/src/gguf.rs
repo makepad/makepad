@@ -495,7 +495,9 @@ fn align_up(value: u64, alignment: u64) -> Result<u64> {
 
 fn ggml_tensor_size_bytes(tensor_type: TensorType, dimensions: &[u64]) -> Result<u64> {
     if dimensions.is_empty() {
-        return Err(LlamaError::format("tensor must have at least one dimension"));
+        return Err(LlamaError::format(
+            "tensor must have at least one dimension",
+        ));
     }
 
     let block_elems = block_elements(tensor_type.ggml_type()) as u64;
@@ -508,12 +510,10 @@ fn ggml_tensor_size_bytes(tensor_type: TensorType, dimensions: &[u64]) -> Result
         .checked_mul(block_bytes)
         .ok_or_else(|| LlamaError::format("overflow computing row size"))?;
 
-    dimensions[1..]
-        .iter()
-        .try_fold(row_size, |acc, &dim| {
-            acc.checked_mul(dim)
-                .ok_or_else(|| LlamaError::format("overflow computing tensor size"))
-        })
+    dimensions[1..].iter().try_fold(row_size, |acc, &dim| {
+        acc.checked_mul(dim)
+            .ok_or_else(|| LlamaError::format("overflow computing tensor size"))
+    })
 }
 
 fn read_value(reader: &mut impl Read, value_type: GgufType) -> Result<GgufValue> {
@@ -533,7 +533,9 @@ fn read_value(reader: &mut impl Read, value_type: GgufType) -> Result<GgufValue>
                 LlamaError::format(format!("invalid gguf array type {}", array_type_raw))
             })?;
             if array_type == GgufType::Array {
-                return Err(LlamaError::unsupported("nested gguf arrays are not supported"));
+                return Err(LlamaError::unsupported(
+                    "nested gguf arrays are not supported",
+                ));
             }
             let count = read_u64(reader)?;
             if count > GGUF_MAX_ARRAY_ELEMENTS {
@@ -565,7 +567,9 @@ fn read_array(reader: &mut impl Read, array_type: GgufType, count: usize) -> Res
         GgufType::Int64 => GgufArray::Int64(read_n(reader, count, read_i64)?),
         GgufType::Float64 => GgufArray::Float64(read_n(reader, count, read_f64)?),
         GgufType::Array => {
-            return Err(LlamaError::unsupported("nested gguf arrays are not supported"))
+            return Err(LlamaError::unsupported(
+                "nested gguf arrays are not supported",
+            ))
         }
     })
 }

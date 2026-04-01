@@ -394,4 +394,93 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             NIL
         },
     );
+
+    native.add_method(
+        heap,
+        shader,
+        id_lut!(test_compile_draw_contains),
+        script_args!(io_self = NIL, needle = NIL),
+        |vm, args| {
+            let io_self = script_value!(vm, args.io_self);
+            let needle_val = script_value!(vm, args.needle);
+            let Some(needle) = vm.bx.heap.string_with(needle_val, |_heap, s| s.to_string()) else {
+                return ScriptValue::from_bool(false);
+            };
+
+            if let Some(io_self) = io_self.as_object() {
+                let mut output = ShaderOutput::default();
+                output.backend = ShaderBackend::Metal;
+                output.use_vulkan = false;
+
+                output.pre_collect_rust_instance_io(vm, io_self);
+                output.pre_collect_shader_io(vm, io_self);
+
+                if let Some(fnobj) = vm
+                    .bx
+                    .heap
+                    .object_method(
+                        io_self,
+                        id!(vertex).into(),
+                        vm.bx.threads.cur_ref().trap.pass(),
+                    )
+                    .as_object()
+                {
+                    output.mode = ShaderMode::Vertex;
+                    ShaderFnCompiler::compile_shader_def(
+                        vm,
+                        &mut output,
+                        NoTrap,
+                        id!(vertex),
+                        fnobj,
+                        ShaderType::IoSelf(io_self),
+                        vec![],
+                    );
+                }
+                if let Some(fnobj) = vm
+                    .bx
+                    .heap
+                    .object_method(
+                        io_self,
+                        id!(fragment).into(),
+                        vm.bx.threads.cur_ref().trap.pass(),
+                    )
+                    .as_object()
+                {
+                    output.mode = ShaderMode::Fragment;
+                    ShaderFnCompiler::compile_shader_def(
+                        vm,
+                        &mut output,
+                        NoTrap,
+                        id!(fragment),
+                        fnobj,
+                        ShaderType::IoSelf(io_self),
+                        vec![],
+                    );
+                }
+
+                output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
+
+                let mut out = String::new();
+                output.create_struct_defs(vm, &mut out);
+                output.metal_create_instance_struct(vm, &mut out);
+                output.metal_create_uniform_struct(vm, &mut out);
+                output.metal_create_scope_uniform_struct(vm, &mut out);
+                output.metal_create_io_struct(vm, &mut out);
+                output.metal_create_varying_struct(vm, &mut out);
+                output.metal_create_vertex_buffer_struct(vm, &mut out);
+                output.metal_create_sampler_decls(&mut out);
+                output.metal_create_helpers(&mut out);
+                output.create_functions(&mut out);
+                output.metal_create_io_vertex_struct(vm, &mut out);
+                output.metal_create_io_framebuffer_struct(vm, &mut out);
+                output.metal_create_io_fragment_struct(vm, &mut out);
+                output.metal_create_vertex_fn(vm, &mut out);
+                output.metal_create_fragment_main_fn(vm, &mut out);
+
+                return ScriptValue::from_bool(out.contains(&needle));
+            }
+
+            ScriptValue::from_bool(false)
+        },
+    );
 }

@@ -9,22 +9,21 @@ use makepad_ggml::{
 };
 use makepad_llama::{
     compile_attention_block_metal, compile_attention_decode_metal,
-    compile_delta_net_recurrent_decode_metal, compile_logits_probe_metal,
-    compile_hybrid_decode_metal, compile_moe_ffn_metal,
-    execute_attention_block_graph_metal_cached, execute_attention_decode_graph_metal_cached,
+    compile_delta_net_recurrent_decode_metal, compile_hybrid_decode_metal,
+    compile_logits_probe_metal, compile_moe_ffn_metal, execute_attention_block_graph_metal_cached,
+    execute_attention_decode_graph_metal_cached,
     execute_delta_net_recurrent_decode_graph_metal_cached,
-    execute_hybrid_decode_graph_metal_cached,
-    execute_moe_ffn_graph_metal_cached,
-    execute_logits_probe_graph_metal, execute_logits_probe_graph_metal_cached,
-    execute_logits_probe_metal, prepare_attention_block_graph, prepare_attention_decode_graph,
-    prepare_delta_net_recurrent_decode_graph, prepare_hybrid_decode_graph,
-    prepare_logits_probe_graph, prepare_moe_ffn_graph,
+    execute_hybrid_decode_graph_metal_cached, execute_logits_probe_graph_metal,
+    execute_logits_probe_graph_metal_cached, execute_logits_probe_metal,
+    execute_moe_ffn_graph_metal_cached, prepare_attention_block_graph,
+    prepare_attention_decode_graph, prepare_delta_net_recurrent_decode_graph,
+    prepare_hybrid_decode_graph, prepare_logits_probe_graph, prepare_moe_ffn_graph,
     qwen35moe_attention_block_layout, qwen35moe_attention_decode_spec,
     qwen35moe_delta_net_recurrent_decode_spec, qwen35moe_first_attention_block_spec,
     qwen35moe_first_moe_ffn_spec, qwen35moe_first_recurrent_block_spec,
-    qwen35moe_hybrid_decode_spec, qwen35moe_moe_ffn_layout, qwen35moe_recurrent_block_layout, GraphBatch,
-    HybridCacheLayout, HybridCacheShape, HybridCacheTypes, LlamaModel, LogitsProbeInput,
-    ModelLayerRole,
+    qwen35moe_hybrid_decode_spec, qwen35moe_moe_ffn_layout, qwen35moe_recurrent_block_layout,
+    GraphBatch, HybridCacheLayout, HybridCacheShape, HybridCacheTypes, LlamaModel,
+    LogitsProbeInput, ModelLayerRole,
 };
 
 fn main() {
@@ -85,20 +84,24 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let recurrent_layout = qwen35moe_recurrent_block_layout(&model, recurrent_layer)?;
     let probe_layout = qwen35moe_probe_layout(&qwen35moe)?;
     let probe_loaded = probe_layout.allocate_and_load(&model.gguf)?;
-    let cache_layout = plan.hybrid_cache.as_ref().map(|template| {
-        HybridCacheLayout::new(template.materialize(
-            HybridCacheShape {
-                n_ctx_seq: 4096,
-                n_seq_max: 8,
-            },
-            HybridCacheTypes {
-                attention_k_type: TensorType::F16,
-                attention_v_type: TensorType::F16,
-                recurrent_r_type: TensorType::F32,
-                recurrent_s_type: TensorType::F32,
-            },
-        ))
-    }).transpose()?;
+    let cache_layout = plan
+        .hybrid_cache
+        .as_ref()
+        .map(|template| {
+            HybridCacheLayout::new(template.materialize(
+                HybridCacheShape {
+                    n_ctx_seq: 4096,
+                    n_seq_max: 8,
+                },
+                HybridCacheTypes {
+                    attention_k_type: TensorType::F16,
+                    attention_v_type: TensorType::F16,
+                    recurrent_r_type: TensorType::F32,
+                    recurrent_s_type: TensorType::F32,
+                },
+            ))
+        })
+        .transpose()?;
     let hybrid_decode_cache_layout = plan
         .hybrid_cache
         .as_ref()
@@ -132,7 +135,8 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         MetalDeviceFeatures::default(),
     )
     .map_err(|err| std::io::Error::other(format!("prepare_logits_probe_graph: {err}")))?;
-    let mut attention_loaded = attention_layout.allocate_and_load_with_extra(&model.gguf, 32 << 20)?;
+    let mut attention_loaded =
+        attention_layout.allocate_and_load_with_extra(&model.gguf, 32 << 20)?;
     let (attention_graph, attention_prepared) = prepare_attention_block_graph(
         &mut attention_loaded.ctx,
         &attention_loaded.tensor_ids,
@@ -219,8 +223,14 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             cfg.full_attention_interval
         );
     }
-    println!("qwen35moe.unique_tensors: {}", qwen35moe.unique_tensor_count());
-    println!("qwen35moe.total_tensor_bytes: {}", qwen35moe.total_tensor_bytes());
+    println!(
+        "qwen35moe.unique_tensors: {}",
+        qwen35moe.unique_tensor_count()
+    );
+    println!(
+        "qwen35moe.total_tensor_bytes: {}",
+        qwen35moe.total_tensor_bytes()
+    );
     println!("qwen35moe.layout_total_bytes: {}", layout.total_bytes);
     println!(
         "execution.inventory_unique_tensors: {}",
@@ -230,17 +240,25 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         "execution.inventory_total_tensor_bytes: {}",
         plan.inventory.total_tensor_bytes()
     );
-    println!("execution.full_weight_bytes: {}", plan.full_weights.total_bytes);
+    println!(
+        "execution.full_weight_bytes: {}",
+        plan.full_weights.total_bytes
+    );
     println!("execution.layer_count: {}", plan.layer_count());
     println!(
         "execution.attention_layers: {}",
-        plan.inventory.count_layers_with_role(ModelLayerRole::Attention)
+        plan.inventory
+            .count_layers_with_role(ModelLayerRole::Attention)
     );
     println!(
         "execution.recurrent_layers: {}",
-        plan.inventory.count_layers_with_role(ModelLayerRole::Recurrent)
+        plan.inventory
+            .count_layers_with_role(ModelLayerRole::Recurrent)
     );
-    println!("qwen35moe.probe_layout_total_bytes: {}", probe_layout.total_bytes);
+    println!(
+        "qwen35moe.probe_layout_total_bytes: {}",
+        probe_layout.total_bytes
+    );
     println!("qwen35moe.probe_tensors: {}", probe_loaded.tensor_ids.len());
     println!("qwen35moe.attention_block_layer: {}", attention_layer);
     println!(
@@ -387,7 +405,9 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "tensor.sample: {}",
-        model.gguf.tensor_summary("blk.39.post_attention_norm.weight")?
+        model
+            .gguf
+            .tensor_summary("blk.39.post_attention_norm.weight")?
     );
 
     if metal_available() {
@@ -487,7 +507,11 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        match compile_attention_decode_metal(&mut attention_decode_loaded, &attention_decode_spec, 1) {
+        match compile_attention_decode_metal(
+            &mut attention_decode_loaded,
+            &attention_decode_spec,
+            1,
+        ) {
             Ok(compiled) => {
                 println!("attention_decode_compiled.ok: true");
                 match execute_attention_decode_graph_metal_cached(
@@ -636,10 +660,7 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             println!("hybrid_decode.step0.logit0: {}", first);
                         }
                         if let Some((layer, experts)) = run.selected_experts.first() {
-                            println!(
-                                "hybrid_decode.step0.layer{}_experts: {:?}",
-                                layer, experts
-                            );
+                            println!("hybrid_decode.step0.layer{}_experts: {:?}", layer, experts);
                         }
                     }
                     Err(err) => {
@@ -671,10 +692,7 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             println!("hybrid_decode.step1.logit0: {}", first);
                         }
                         if let Some((layer, experts)) = run.selected_experts.first() {
-                            println!(
-                                "hybrid_decode.step1.layer{}_experts: {:?}",
-                                layer, experts
-                            );
+                            println!("hybrid_decode.step1.layer{}_experts: {:?}", layer, experts);
                         }
                         let bench_started = Instant::now();
                         let mut bench_last_hidden0 = None;
@@ -813,7 +831,9 @@ fn qwen35moe_probe_layout(
         .layers
         .iter()
         .find_map(|layer| layer.attention.as_ref().map(|attention| (layer, attention)))
-        .ok_or_else(|| std::io::Error::other("qwen35moe probe could not find an attention layer"))?;
+        .ok_or_else(|| {
+            std::io::Error::other("qwen35moe probe could not find an attention layer")
+        })?;
 
     Ok(makepad_llama::GgufWeightLayout::from_tensors(vec![
         qwen35moe.globals.output_norm.clone(),
@@ -858,7 +878,12 @@ fn dump_recurrent_debug(
         .ok_or_else(|| std::io::Error::other("missing recur_decode.inp_tokens"))?;
     let output_ids = tensor_names
         .iter()
-        .filter_map(|name| loaded.ctx.get_tensor(name).map(|id| ((*name).to_string(), id)))
+        .filter_map(|name| {
+            loaded
+                .ctx
+                .get_tensor(name)
+                .map(|id| ((*name).to_string(), id))
+        })
         .collect::<Vec<_>>();
 
     let execution = execute_compiled_graph(

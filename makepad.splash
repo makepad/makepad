@@ -78,6 +78,7 @@ let RunStudioExt = RunItem{
 hub.set_run_items([
     RunStudioRelease{name: "makepad-example-browser"}
     RunStudioRelease{name: "makepad-example-charts"}
+    RunStudioRelease{name: "makepad-example-splash"}
     RunAndroid{name: "makepad-example-pdf"}
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-example-todo"}

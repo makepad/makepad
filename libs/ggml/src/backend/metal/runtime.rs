@@ -125,7 +125,11 @@ mod imp {
             Err("Metal runtime is unavailable on this target".to_string())
         }
 
-        pub fn read_buffer(&self, _buffer: &MetalBuffer, _len_bytes: usize) -> MetalResult<Vec<u8>> {
+        pub fn read_buffer(
+            &self,
+            _buffer: &MetalBuffer,
+            _len_bytes: usize,
+        ) -> MetalResult<Vec<u8>> {
             Err("Metal runtime is unavailable on this target".to_string())
         }
 
@@ -396,21 +400,30 @@ mod imp {
     fn build_ggml_source() -> String {
         let mut src = read_text_with_fallback(
             &[
-                concat!(env!("CARGO_MANIFEST_DIR"), "/src/backend/metal/ggml/ggml-metal.metal"),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/backend/metal/ggml/ggml-metal.metal"
+                ),
                 "libs/ggml/src/backend/metal/ggml/ggml-metal.metal",
             ],
             GGML_METAL_SOURCE_RAW,
         );
         let common_h = read_text_with_fallback(
             &[
-                concat!(env!("CARGO_MANIFEST_DIR"), "/src/backend/metal/ggml/ggml-common.h"),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/backend/metal/ggml/ggml-common.h"
+                ),
                 "libs/ggml/src/backend/metal/ggml/ggml-common.h",
             ],
             GGML_COMMON_H,
         );
         let impl_h = read_text_with_fallback(
             &[
-                concat!(env!("CARGO_MANIFEST_DIR"), "/src/backend/metal/ggml/ggml-metal-impl.h"),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/backend/metal/ggml/ggml-metal-impl.h"
+                ),
                 "libs/ggml/src/backend/metal/ggml/ggml-metal-impl.h",
             ],
             GGML_METAL_IMPL_H,
@@ -639,7 +652,9 @@ mod imp {
             len_bytes: usize,
         ) -> MetalResult<Vec<u8>> {
             let ctx = self.ctx.borrow();
-            if offset_bytes > buffer.size_bytes || len_bytes > buffer.size_bytes.saturating_sub(offset_bytes) {
+            if offset_bytes > buffer.size_bytes
+                || len_bytes > buffer.size_bytes.saturating_sub(offset_bytes)
+            {
                 return Err(format!(
                     "requested read of {} bytes at offset {} exceeds buffer size {}",
                     len_bytes, offset_bytes, buffer.size_bytes
@@ -655,10 +670,14 @@ mod imp {
             bytes: &[u8],
         ) -> MetalResult<()> {
             let ctx = self.ctx.borrow();
-            if offset_bytes > buffer.size_bytes || bytes.len() > buffer.size_bytes.saturating_sub(offset_bytes) {
+            if offset_bytes > buffer.size_bytes
+                || bytes.len() > buffer.size_bytes.saturating_sub(offset_bytes)
+            {
                 return Err(format!(
                     "requested write of {} bytes at offset {} exceeds buffer size {}",
-                    bytes.len(), offset_bytes, buffer.size_bytes
+                    bytes.len(),
+                    offset_bytes,
+                    buffer.size_bytes
                 ));
             }
             ctx.write_buffer_bytes(buffer.as_id(), offset_bytes, bytes)
@@ -761,8 +780,10 @@ mod imp {
                     unsafe { msg_send![class!(NSMutableDictionary), dictionary] };
                 if !prep_obj.is_null() {
                     if features.has_bfloat {
-                        let key = unsafe { StrongId::from_owned(str_to_nsstring_owned("GGML_METAL_HAS_BF16")) }
-                            .ok_or_else(|| "failed to build metal macro key".to_string())?;
+                        let key = unsafe {
+                            StrongId::from_owned(str_to_nsstring_owned("GGML_METAL_HAS_BF16"))
+                        }
+                        .ok_or_else(|| "failed to build metal macro key".to_string())?;
                         let val = unsafe { StrongId::from_owned(str_to_nsstring_owned("1")) }
                             .ok_or_else(|| "failed to build metal macro value".to_string())?;
                         unsafe {
@@ -771,9 +792,10 @@ mod imp {
                         }
                     }
                     if features.has_tensor {
-                        let key =
-                            unsafe { StrongId::from_owned(str_to_nsstring_owned("GGML_METAL_HAS_TENSOR")) }
-                                .ok_or_else(|| "failed to build metal macro key".to_string())?;
+                        let key = unsafe {
+                            StrongId::from_owned(str_to_nsstring_owned("GGML_METAL_HAS_TENSOR"))
+                        }
+                        .ok_or_else(|| "failed to build metal macro key".to_string())?;
                         let val = unsafe { StrongId::from_owned(str_to_nsstring_owned("1")) }
                             .ok_or_else(|| "failed to build metal macro value".to_string())?;
                         unsafe {
@@ -838,8 +860,9 @@ mod imp {
                     options: MTL_RESOURCE_OPTIONS_STORAGE_MODE_PRIVATE
                 ]
             };
-            unsafe { StrongId::from_owned(obj) }
-                .ok_or_else(|| format!("newBufferWithLength(private) failed for {} bytes", byte_len))
+            unsafe { StrongId::from_owned(obj) }.ok_or_else(|| {
+                format!("newBufferWithLength(private) failed for {} bytes", byte_len)
+            })
         }
 
         fn buffer_length_bytes(&self, buffer: ObjcId) -> MetalResult<usize> {
@@ -957,7 +980,10 @@ mod imp {
             let (readable, readable_offset) = {
                 let storage_mode: u64 = unsafe { msg_send![buffer, storageMode] };
                 if storage_mode == MTL_STORAGE_MODE_PRIVATE {
-                    (self.copy_buffer_range_to_shared_staging(buffer, offset_bytes, len_bytes)?, 0usize)
+                    (
+                        self.copy_buffer_range_to_shared_staging(buffer, offset_bytes, len_bytes)?,
+                        0usize,
+                    )
                 } else {
                     (
                         unsafe { StrongId::from_unowned(buffer) }
@@ -974,7 +1000,11 @@ mod imp {
 
             let mut out = vec![0u8; len_bytes];
             unsafe {
-                std::ptr::copy_nonoverlapping(ptr.add(readable_offset), out.as_mut_ptr(), len_bytes);
+                std::ptr::copy_nonoverlapping(
+                    ptr.add(readable_offset),
+                    out.as_mut_ptr(),
+                    len_bytes,
+                );
             }
             Ok(out)
         }
@@ -998,7 +1028,13 @@ mod imp {
             let storage_mode: u64 = unsafe { msg_send![buffer, storageMode] };
             if storage_mode == MTL_STORAGE_MODE_PRIVATE {
                 let staging = self.new_buffer_with_bytes(bytes)?;
-                self.copy_between_buffers_ranges(staging.as_id(), 0, buffer, offset_bytes, bytes.len())?;
+                self.copy_between_buffers_ranges(
+                    staging.as_id(),
+                    0,
+                    buffer,
+                    offset_bytes,
+                    bytes.len(),
+                )?;
                 return Ok(());
             }
 
@@ -1114,7 +1150,8 @@ mod imp {
                 unsafe { msg_send![self.command_queue.as_id(), commandBuffer] };
             let command_buffer = unsafe { StrongId::from_unowned(command_buffer_obj) }
                 .ok_or_else(|| "commandBuffer returned nil".to_string())?;
-            let encoder_obj: ObjcId = unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
+            let encoder_obj: ObjcId =
+                unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
             let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
                 .ok_or_else(|| "computeCommandEncoder returned nil".to_string())?;
 
