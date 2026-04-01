@@ -841,19 +841,30 @@ impl Win32Window {
     }
 
     pub fn get_window_geom(&self) -> WindowGeom {
+        // Three caption buttons (minimize / maximize / close), each 46 × 29 logical px,
+        // right-aligned at the top of the caption bar.
+        const BUTTON_W: f64 = 46.0;
+        const BUTTON_H: f64 = 29.0;
+        const BUTTON_COUNT: f64 = 3.0;
+        const BUTTONS_W: f64 = BUTTON_W * BUTTON_COUNT;
+        let inner_size = if self.get_is_maximized() {
+            self.get_outer_size()
+        } else {
+            self.get_inner_size()
+        };
         WindowGeom {
             xr_is_presenting: false,
             can_fullscreen: false,
             is_topmost: self.get_is_topmost(),
             is_fullscreen: self.get_is_maximized(),
-            inner_size: if self.get_is_maximized() {
-                self.get_outer_size()
-            } else {
-                self.get_inner_size()
-            },
+            inner_size,
             outer_size: self.get_outer_size(),
             dpi_factor: self.get_dpi_factor(),
             position: self.get_position(),
+            window_chrome_buttons: Rect {
+                pos: Vec2d { x: inner_size.x - BUTTONS_W, y: 0.0 },
+                size: Vec2d { x: BUTTONS_W, y: BUTTON_H },
+            },
             ..Default::default()
         }
     }
