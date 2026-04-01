@@ -393,6 +393,13 @@ pub struct ScriptWindowHandle {
     pub backdrop_intensity: f32,
     #[live(MacosWindowConfig::default())]
     pub macos: MacosWindowConfig,
+    /// Optionally override the caption bar height.
+    /// * If `None` (the default), the caption bar's height is based on a system-calculated height
+    ///   derived from window chrome button geometry, which will make the window chrome buttons
+    ///   nicely vertically centered within the caption bar on all platforms.
+    /// * If `Some(value)`, the caption bar height is overridden with the specified fixed value.
+    #[live]
+    pub caption_bar_height_override: Option<f64>,
 }
 
 impl std::ops::Deref for ScriptWindowHandle {
@@ -859,6 +866,7 @@ mod tests {
             backdrop: WindowBackdrop::Blur,
             backdrop_intensity: 0.5,
             macos: MacosWindowConfig::floating_panel(),
+            caption_bar_height_override: None,
         };
 
         script_window.on_after_apply(&mut vm, &Apply::New, &mut Scope::empty(), NIL);

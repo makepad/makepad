@@ -32,7 +32,10 @@ script_mod! {
             flow: Right
 
             draw_bg.color: theme.color_app_caption_bar
-            height: 27.0
+            // Note: by default, the caption bar height is calculated at runtime
+            // based on window chrome button geometry to ensure the buttons are vertically centered.
+            // If you want to override this height with a fixed value, set the `caption_bar_height_override` on the Window itself.
+            height: Fit
             caption_label := View {
                 width: Fill height: Fill
                 align: Center
@@ -217,10 +220,11 @@ pub struct Window {
     show_performance_view: bool,
     #[rust]
     has_focus: bool,
-    /// Caption bar height derived from window chrome button geometry at runtime.
-    /// `None` means use the DSL default.
+    /// The calculated value of the caption bar height, a value that will result in
+    /// the window chrome buttons being nicely vertically centered within the caption bar.
+    /// `None` means no geometry has been reported by the platform yet.
     #[rust]
-    caption_bar_height_override: Option<f64>,
+    system_caption_bar_height: Option<f64>,
     #[deref]
     view: View,
 
@@ -279,7 +283,10 @@ impl Window {
     }
 
     fn sync_caption_bar_height(&mut self, cx: &mut Cx) {
-        if let Some(h) = self.caption_bar_height_override {
+        // Explicit DSL override takes priority, then system-calculated.
+        let height = self.window.caption_bar_height_override
+            .or(self.system_caption_bar_height);
+        if let Some(h) = height {
             let caption_bar = self.view(cx, ids!(caption_bar));
             if let Some(mut bar) = caption_bar.borrow_mut() {
                 log!("sync_caption_bar_height: setting walk.height to {h:.1} (was {:?})", bar.walk.height);
@@ -621,14 +628,14 @@ impl Widget for Window {
                     let new_buttons = ev.new_geom.window_chrome_buttons;
                     if new_buttons != Rect::default() {
                         let h = (new_buttons.pos.y * 2.0 + new_buttons.size.y).ceil();
-                        if self.caption_bar_height_override != Some(h) {
+                        if self.system_caption_bar_height != Some(h) {
                             log!(
                                 "Window chrome buttons rect: pos=({:.1},{:.1}) size=({:.1}x{:.1}) \
                                  → caption bar height: {h:.1}",
                                 new_buttons.pos.x, new_buttons.pos.y,
                                 new_buttons.size.x, new_buttons.size.y,
                             );
-                            self.caption_bar_height_override = Some(h);
+                            self.system_caption_bar_height = Some(h);
                             self.view(cx, ids!(caption_bar)).redraw(cx);
                         }
                     }
