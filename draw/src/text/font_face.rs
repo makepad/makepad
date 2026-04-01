@@ -4,6 +4,9 @@ use {super::loader::FontData, rustybuzz, rustybuzz::ttf_parser};
 pub struct FontFace {
     parsed: Rc<ParsedFontFace>,
     variations: Vec<rustybuzz::Variation>,
+    /// Cached `ttf_parser::Face` with the current variations applied.
+    /// Invalidated when `set_variations` is called.
+    cached_ttf_face: RefCell<Option<ttf_parser::Face<'static>>>,
     /// Cached `rustybuzz::Face` built from the parsed `ttf_parser::Face`.
     /// Invalidated when `set_variations` is called, since variations affect
     /// the rustybuzz shaping tables.
@@ -25,6 +28,7 @@ impl Clone for FontFace {
         Self {
             parsed: self.parsed.clone(),
             variations: self.variations.clone(),
+            cached_ttf_face: RefCell::new(None),
             cached_rb_face: RefCell::new(None),
         }
     }
@@ -67,12 +71,29 @@ impl FontFace {
         Some(Self {
             parsed: Rc::new(parsed),
             variations: Vec::new(),
+            cached_ttf_face: RefCell::new(None),
             cached_rb_face: RefCell::new(None),
         })
     }
 
     pub fn with_ttf_parser_face<R>(&self, f: impl FnOnce(&ttf_parser::Face<'_>) -> R) -> R {
-        f(&self.parsed.face)
+        if self.variations.is_empty() {
+            return f(&self.parsed.face);
+        }
+
+        {
+            let mut ttf_cache = self.cached_ttf_face.borrow_mut();
+            if ttf_cache.is_none() {
+                let mut face = self.parsed.face.clone();
+                for variation in &self.variations {
+                    let _ = face.set_variation(variation.tag, variation.value);
+                }
+                *ttf_cache = Some(face);
+            }
+        }
+
+        let ttf_cache = self.cached_ttf_face.borrow();
+        f(ttf_cache.as_ref().unwrap())
     }
 
     pub fn with_rustybuzz_face<R>(&self, f: impl FnOnce(&rustybuzz::Face<'_>) -> R) -> R {
@@ -102,6 +123,7 @@ impl FontFace {
                 tag: ttf_parser::Tag::from_bytes(&tag.to_be_bytes()),
                 value,
             }));
+        *self.cached_ttf_face.borrow_mut() = None;
         // Invalidate the cached rustybuzz face since variations affect shaping.
         *self.cached_rb_face.borrow_mut() = None;
     }
