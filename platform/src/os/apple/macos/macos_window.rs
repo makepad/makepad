@@ -604,6 +604,15 @@ impl MacosWindow {
             let right  = r0.max(r1).max(r2);
             let bottom = b0.max(b1).max(b2);
 
+            // During a fullscreen transition the content view resizes before
+            // the buttons' superview repositions, so the Y-flip can place the
+            // buttons near the bottom of the view.  Traffic-light buttons are
+            // always near the top of the window, so discard bogus geometry
+            // where they appear in the lower half of the content area.
+            if top > h * 0.5 {
+                return None;
+            }
+
             let rect = Rect {
                 pos: Vec2d { x: left, y: top },
                 size: Vec2d { x: right - left, y: bottom - top },
