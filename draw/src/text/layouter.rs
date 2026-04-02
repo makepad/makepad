@@ -426,13 +426,16 @@ impl Fitter {
         font_size_in_lpxs: f32,
         segment_kind: SegmentKind,
     ) -> Self {
-        let lens: Vec<_> = match segment_kind {
+        let mut lens: Vec<_> = match segment_kind {
             SegmentKind::Word => text
                 .split_word_bounds()
                 .map(|segment| segment.len())
                 .collect(),
             SegmentKind::Grapheme => text.graphemes(true).map(|segment| segment.len()).collect(),
         };
+        if matches!(segment_kind, SegmentKind::Word) {
+            merge_segments_for_line_breaking(&text, &mut lens);
+        }
         let widths_in_lpxs: Vec<_> = lens
             .iter()
             .copied()
@@ -513,6 +516,88 @@ impl Fitter {
 enum SegmentKind {
     Word,
     Grapheme,
+}
+
+/// Merges word-boundary segments to prevent line breaks at typographically
+/// incorrect positions, following standard line-breaking conventions
+/// (UAX#14 / CSS Text Module Level 3).
+///
+/// Trailing/closing punctuation (`.` `,` `;` `)` etc.) is merged into the
+/// preceding segment so it won't wrap to a new line by itself. Opening
+/// punctuation (`(` `[` etc.) is merged into the following segment so it
+/// won't be stranded at the end of a line.
+fn merge_segments_for_line_breaking(text: &str, lens: &mut Vec<usize>) {
+    // Pass 1: Merge "no-break-before" segments (trailing/closing punctuation)
+    // into the preceding segment.
+    if lens.len() >= 2 {
+        let mut i = 1;
+        let mut byte_offset = lens[0];
+        while i < lens.len() {
+            let seg_end = byte_offset + lens[i];
+            let seg_text = &text[byte_offset..seg_end];
+            if seg_text.chars().all(is_no_break_before_char) {
+                lens[i - 1] += lens[i];
+                lens.remove(i);
+            } else {
+                i += 1;
+            }
+            byte_offset = seg_end;
+        }
+    }
+
+    // Pass 2: Merge "no-break-after" segments (opening punctuation)
+    // into the following segment.
+    if lens.len() >= 2 {
+        let mut i = 0;
+        let mut byte_offset = 0;
+        while i + 1 < lens.len() {
+            let seg_end = byte_offset + lens[i];
+            let seg_text = &text[byte_offset..seg_end];
+            if seg_text.chars().all(is_no_break_after_char) {
+                lens[i + 1] = lens[i] + lens[i + 1];
+                lens.remove(i);
+            } else {
+                byte_offset = seg_end;
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Characters before which a line break should not occur (UAX#14 classes
+/// CL, CP, EX, IS and common typographic conventions).
+fn is_no_break_before_char(c: char) -> bool {
+    matches!(
+        c,
+        // IS: Infix Numeric Separator
+        '.' | ',' | ':' | ';'
+        // EX: Exclamation / Interrogation
+        | '!' | '?'
+        // CP: Close Parenthesis, CL: Close Punctuation
+        | ')' | ']' | '}'
+        // CL: Closing quotation marks
+        | '\u{2019}' // '
+        | '\u{201D}' // \u{201d}
+        | '\u{203A}' // ›
+        | '\u{00BB}' // »
+        // Other common no-break-before characters
+        | '\u{2026}' // …
+        | '%'
+        | '\u{00B0}' // °
+    )
+}
+
+/// Characters after which a line break should not occur (UAX#14 class OP).
+fn is_no_break_after_char(c: char) -> bool {
+    matches!(
+        c,
+        '(' | '[' | '{'
+        // Opening quotation marks
+        | '\u{2018}' // '
+        | '\u{201C}' // \u{201c}
+        | '\u{2039}' // ‹
+        | '\u{00AB}' // «
+    )
 }
 
 pub trait LayoutParams {
@@ -984,7 +1069,8 @@ impl LaidoutGlyph {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_text_atlas_size_value, Size};
+    use super::{merge_segments_for_line_breaking, parse_text_atlas_size_value, Size};
+    use unicode_segmentation::UnicodeSegmentation;
 
     #[test]
     fn parses_text_atlas_size_from_env_value() {
@@ -1003,5 +1089,81 @@ mod tests {
         assert_eq!(parse_text_atlas_size_value(""), None);
         assert_eq!(parse_text_atlas_size_value("64"), None);
         assert_eq!(parse_text_atlas_size_value("bogus"), None);
+    }
+
+    /// Helper: split text by word bounds and return segment lengths,
+    /// then apply merging, then reconstruct the segment strings.
+    fn merged_segments(text: &str) -> Vec<String> {
+        let mut lens: Vec<usize> = text
+            .split_word_bounds()
+            .map(|s| s.len())
+            .collect();
+        merge_segments_for_line_breaking(text, &mut lens);
+        let mut result = Vec::new();
+        let mut offset = 0;
+        for len in &lens {
+            result.push(text[offset..offset + len].to_string());
+            offset += len;
+        }
+        result
+    }
+
+    #[test]
+    fn trailing_punctuation_merges_into_preceding_word() {
+        assert_eq!(merged_segments("Hello."), vec!["Hello."]);
+        assert_eq!(merged_segments("Hello,"), vec!["Hello,"]);
+        assert_eq!(merged_segments("Hello;"), vec!["Hello;"]);
+        assert_eq!(merged_segments("Hello!"), vec!["Hello!"]);
+        assert_eq!(merged_segments("Hello?"), vec!["Hello?"]);
+    }
+
+    #[test]
+    fn multiple_trailing_punctuation_marks_merge() {
+        assert_eq!(merged_segments("end.)"), vec!["end.)"]);
+        assert_eq!(merged_segments("end...)"), vec!["end...)"]);
+    }
+
+    #[test]
+    fn punctuation_between_words_merges_correctly() {
+        assert_eq!(
+            merged_segments("Hello, world."),
+            vec!["Hello,", " ", "world."]
+        );
+    }
+
+    #[test]
+    fn opening_punctuation_merges_into_following_word() {
+        assert_eq!(
+            merged_segments("say (hello) now"),
+            vec!["say", " ", "(hello)", " ", "now"]
+        );
+    }
+
+    #[test]
+    fn consecutive_trailing_punctuation_chains_merge() {
+        // ")" and ":" are both no-break-before, so they chain-merge
+        // into the preceding word.
+        assert_eq!(
+            merged_segments("(News Hello): world"),
+            vec!["(News", " ", "Hello):", " ", "world"]
+        );
+    }
+
+    #[test]
+    fn no_merge_for_plain_words() {
+        assert_eq!(
+            merged_segments("hello world"),
+            vec!["hello", " ", "world"]
+        );
+    }
+
+    #[test]
+    fn single_word_no_change() {
+        assert_eq!(merged_segments("hello"), vec!["hello"]);
+    }
+
+    #[test]
+    fn empty_text() {
+        assert_eq!(merged_segments(""), Vec::<String>::new());
     }
 }
