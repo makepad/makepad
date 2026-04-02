@@ -251,7 +251,6 @@ fn run_upstream_completion(args: &Args) -> Result<String, Box<dyn std::error::Er
         .arg("--simple-io")
         .arg("--no-display-prompt")
         .arg("--no-warmup")
-        .arg("--log-disable")
         .arg("--seed")
         .arg("0")
         .arg("--temp")

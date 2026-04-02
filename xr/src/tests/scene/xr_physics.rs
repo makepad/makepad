@@ -542,6 +542,354 @@ mod tests {
     }
 
     #[test]
+    fn car_control_steers_four_wheel_vehicle_off_centerline() {
+        let mut scene = RapierScene::new(9.81);
+        scene.set_simulation_dt(1.0 / 240.0);
+        scene.spawn_fixed_box(
+            WidgetUid(4207),
+            Pose::new(Quat::default(), vec3f(0.0, -0.05, 0.0)),
+            vec3f(4.0, 0.05, 4.0),
+            vec3f(1.0, 1.0, 1.0),
+            1.0,
+            0.0,
+        );
+
+        let widget_uid = WidgetUid(4208);
+        scene.spawn_dynamic_box_with_support(
+            widget_uid,
+            Pose::new(Quat::default(), vec3f(0.0, 0.18, 0.0)),
+            vec3f(0.145, 0.045, 0.205),
+            vec3f(1.0, 1.0, 1.0),
+            120.0,
+            1.35,
+            0.02,
+            XrDepthQuerySupportRig::FourWheels,
+        );
+        let cube = scene
+            .cubes
+            .iter()
+            .find(|cube| cube.widget_uid == widget_uid)
+            .copied()
+            .expect("four-wheel vehicle should exist");
+        let vehicle_index = scene
+            .vehicle_index_for_widget_uid(widget_uid)
+            .expect("four-wheel cube should have a vehicle controller");
+        let mut max_abs_x = 0.0_f32;
+        let mut max_abs_forward_x = 0.0_f32;
+        let mut saw_front_contact = false;
+
+        for _ in 0..45 {
+            scene.clear_car_controls();
+            scene.apply_car_control(XrCarControl {
+                widget_uid,
+                steer: 0.0,
+                throttle: 1.0,
+                brake: 0.0,
+            });
+            scene.step();
+            let body = scene
+                .bodies
+                .get(cube.body)
+                .expect("four-wheel body should exist during steering warmup");
+            let pose = makepad_pose(body.position());
+            let forward = pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, 1.0));
+            max_abs_x = max_abs_x.max(pose.position.x.abs());
+            max_abs_forward_x = max_abs_forward_x.max(forward.x.abs());
+        }
+        for _ in 0..120 {
+            scene.clear_car_controls();
+            scene.apply_car_control(XrCarControl {
+                widget_uid,
+                steer: 0.9,
+                throttle: 1.0,
+                brake: 0.0,
+            });
+            scene.step();
+            let body = scene
+                .bodies
+                .get(cube.body)
+                .expect("steered four-wheel body should still exist during steering");
+            let pose = makepad_pose(body.position());
+            let forward = pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, 1.0));
+            max_abs_x = max_abs_x.max(pose.position.x.abs());
+            max_abs_forward_x = max_abs_forward_x.max(forward.x.abs());
+            let wheels = scene.vehicles[vehicle_index].controller.wheels();
+            saw_front_contact |= wheels
+                .get(0)
+                .map(|wheel| wheel.raycast_info().is_in_contact)
+                .unwrap_or(false)
+                || wheels
+                    .get(2)
+                    .map(|wheel| wheel.raycast_info().is_in_contact)
+                    .unwrap_or(false);
+        }
+
+        let body = scene
+            .bodies
+            .get(cube.body)
+            .expect("steered four-wheel body should still exist");
+        let pose = makepad_pose(body.position());
+        let forward = pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, 1.0));
+        let wheel_summary = scene.vehicles[vehicle_index]
+            .controller
+            .wheels()
+            .iter()
+            .enumerate()
+            .map(|(index, wheel)| {
+                format!(
+                    "{index}:contact={} steer={:.3} side={:.3} fwd={:.3} susp={:.3}",
+                    wheel.raycast_info().is_in_contact,
+                    wheel.steering,
+                    wheel.side_impulse,
+                    wheel.forward_impulse,
+                    wheel.wheel_suspension_force,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            max_abs_x > 0.05 || max_abs_forward_x > 0.08,
+            "steering should move the vehicle off the centerline or rotate its forward axis: pos={:?} forward={:?} max_abs_x={:.3} max_abs_forward_x={:.3} saw_front_contact={} wheels={}",
+            pose.position,
+            forward
+            ,
+            max_abs_x,
+            max_abs_forward_x,
+            saw_front_contact,
+            wheel_summary,
+        );
+    }
+
+    #[test]
+    fn four_wheel_vehicle_rides_on_wheels_instead_of_bottoming_out_on_flat_floor() {
+        let mut scene = RapierScene::new(9.81);
+        scene.set_simulation_dt(1.0 / 240.0);
+        let floor_uid = WidgetUid(4209);
+        scene.spawn_fixed_box(
+            floor_uid,
+            Pose::new(Quat::default(), vec3f(0.0, -0.05, 0.0)),
+            vec3f(4.0, 0.05, 4.0),
+            vec3f(1.0, 1.0, 1.0),
+            1.0,
+            0.0,
+        );
+
+        let widget_uid = WidgetUid(4210);
+        scene.spawn_dynamic_box_with_support(
+            widget_uid,
+            Pose::new(Quat::default(), vec3f(0.0, 0.18, 0.0)),
+            vec3f(0.145, 0.045, 0.205),
+            vec3f(1.0, 1.0, 1.0),
+            120.0,
+            1.35,
+            0.02,
+            XrDepthQuerySupportRig::FourWheels,
+        );
+
+        let cube = scene
+            .cubes
+            .iter()
+            .find(|cube| cube.widget_uid == widget_uid)
+            .copied()
+            .expect("four-wheel vehicle should exist");
+        let floor = scene
+            .cubes
+            .iter()
+            .find(|cube| cube.widget_uid == floor_uid)
+            .copied()
+            .expect("flat floor should exist");
+        let vehicle_index = scene
+            .vehicle_index_for_widget_uid(widget_uid)
+            .expect("four-wheel cube should have a vehicle controller");
+
+        for _ in 0..90 {
+            scene.step();
+        }
+
+        let deepest_wheel_bottom_below_floor = scene.vehicles[vehicle_index]
+            .controller
+            .wheels()
+            .iter()
+            .filter(|wheel| wheel.raycast_info().is_in_contact)
+            .map(|wheel| 0.0 - (wheel.center().y - wheel.radius))
+            .fold(0.0, f32::max);
+        let front_wheels_in_contact = scene.vehicles[vehicle_index]
+            .controller
+            .wheels()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index == 0 || *index == 2)
+            .all(|(_, wheel)| wheel.raycast_info().is_in_contact);
+        let chassis_contact_debug = scene
+            .narrow_phase
+            .contact_pairs_with(cube.collider)
+            .filter(|pair| {
+                pair.has_any_active_contact()
+                    && ((pair.collider1 == cube.collider && pair.collider2 == floor.collider)
+                        || (pair.collider2 == cube.collider && pair.collider1 == floor.collider))
+            })
+            .flat_map(|pair| {
+                pair.manifolds.iter().map(|manifold| {
+                    (
+                        manifold.data.normal,
+                        manifold
+                            .data
+                            .solver_contacts
+                            .iter()
+                            .map(|contact| (contact.point, contact.dist))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let deepest_chassis_penetration = chassis_contact_debug
+            .iter()
+            .flat_map(|(_, contacts)| contacts.iter().map(|(_, dist)| (-*dist).max(0.0)))
+            .fold(0.0, f32::max);
+        let chassis_pose = scene
+            .bodies
+            .get(cube.body)
+            .map(|body| makepad_pose(body.position()))
+            .expect("four-wheel body should still exist after settling");
+
+        assert!(
+            deepest_wheel_bottom_below_floor < 0.01,
+            "resting wheel bottoms should stay at or above the floor top instead of sinking through it: deepest_wheel_bottom_below_floor={deepest_wheel_bottom_below_floor:.4} wheels={:?}",
+            scene.vehicles[vehicle_index]
+                .controller
+                .wheels()
+                .iter()
+                .map(|wheel| (
+                    wheel.center().y,
+                    wheel.radius,
+                    wheel.raycast_info().contact_point_ws.y,
+                    wheel.raycast_info().suspension_length,
+                ))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            front_wheels_in_contact,
+            "front wheels should still have floor contact while the vehicle is resting on a flat floor"
+        );
+        assert!(
+            deepest_chassis_penetration < 0.001,
+            "the chassis collider should not meaningfully support the vehicle on a flat floor once the wheels settle: deepest_chassis_penetration={deepest_chassis_penetration:.6} pose={:?} chassis_contact_debug={:?}",
+            chassis_pose,
+            chassis_contact_debug,
+        );
+    }
+
+    #[test]
+    fn scaled_four_wheel_vehicle_keeps_suspension_clearance_on_plate_top() {
+        let mut scene = RapierScene::new(9.81);
+        scene.set_simulation_dt(1.0 / 240.0);
+
+        let scene_scale = vec3f(0.62, 0.62, 0.62);
+        let plate_half_extents = vec3f(1.612 * 0.5, 0.08 * 0.5, 1.612 * 0.5);
+        let plate_pose = Pose::new(
+            Quat::default(),
+            vec3f(0.0, -0.16 + -0.06 * scene_scale.y, 0.0),
+        );
+        let plate_half_extents_world = vec3f(
+            plate_half_extents.x * scene_scale.x,
+            plate_half_extents.y * scene_scale.y,
+            plate_half_extents.z * scene_scale.z,
+        );
+        let plate_top_y = plate_pose.position.y + plate_half_extents_world.y;
+        let floor_uid = WidgetUid(4211);
+        scene.spawn_fixed_box(
+            floor_uid,
+            plate_pose,
+            plate_half_extents_world,
+            vec3f(1.0, 1.0, 1.0),
+            1.8,
+            0.0,
+        );
+
+        let chassis_half_extents = vec3f(
+            0.29 * 0.5 * scene_scale.x,
+            0.09 * 0.5 * scene_scale.y,
+            0.41 * 0.5 * scene_scale.z,
+        );
+        let support_radius = four_wheel_support_radius(chassis_half_extents);
+        let support_rest_length = (support_radius * XR_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(0.018, 0.072);
+        let widget_uid = WidgetUid(4212);
+        scene.spawn_dynamic_box_with_support(
+            widget_uid,
+            Pose::new(
+                Quat::default(),
+                vec3f(
+                    0.0,
+                    plate_top_y + chassis_half_extents.y + support_rest_length + support_radius + 0.03,
+                    0.0,
+                ),
+            ),
+            chassis_half_extents,
+            vec3f(1.0, 1.0, 1.0),
+            120.0,
+            1.35,
+            0.02,
+            XrDepthQuerySupportRig::FourWheels,
+        );
+
+        let vehicle_index = scene
+            .vehicle_index_for_widget_uid(widget_uid)
+            .expect("scaled four-wheel cube should have a vehicle controller");
+
+        for _ in 0..120 {
+            scene.step();
+        }
+
+        let vehicle = &scene.vehicles[vehicle_index];
+        let wheel_debug = vehicle
+            .controller
+            .wheels()
+            .iter()
+            .map(|wheel| {
+                (
+                    wheel.raycast_info().is_in_contact,
+                    wheel.raycast_info().hard_point_ws.y,
+                    wheel.raycast_info().contact_point_ws.y,
+                    wheel.raycast_info().suspension_length,
+                )
+            })
+            .collect::<Vec<_>>();
+        let min_suspension_length = vehicle
+            .controller
+            .wheels()
+            .iter()
+            .map(|wheel| wheel.raycast_info().suspension_length)
+            .fold(f32::INFINITY, f32::min);
+        let deepest_contact_below_top = vehicle
+            .controller
+            .wheels()
+            .iter()
+            .filter(|wheel| wheel.raycast_info().is_in_contact)
+            .map(|wheel| plate_top_y - wheel.raycast_info().contact_point_ws.y)
+            .fold(0.0, f32::max);
+        let deepest_visual_bottom_below_top = vehicle
+            .controller
+            .wheels()
+            .iter()
+            .filter(|wheel| wheel.raycast_info().is_in_contact)
+            .map(|wheel| plate_top_y - (wheel.center().y - wheel.radius))
+            .fold(0.0, f32::max);
+
+        assert!(
+            min_suspension_length > 0.01,
+            "scaled XR vehicle suspension should keep a non-zero ride height instead of collapsing flat: min_suspension_length={min_suspension_length:.4} wheels={wheel_debug:?}",
+        );
+        assert!(
+            deepest_contact_below_top < 0.01,
+            "scaled XR vehicle wheels should contact the plate near its top surface instead of sinking through it: deepest_contact_below_top={deepest_contact_below_top:.4} plate_top_y={plate_top_y:.4} wheels={wheel_debug:?}"
+        );
+        assert!(
+            deepest_visual_bottom_below_top < 0.01,
+            "scaled XR vehicle wheel visuals should stay on top of the plate instead of sinking through it: deepest_visual_bottom_below_top={deepest_visual_bottom_below_top:.4} plate_top_y={plate_top_y:.4} wheels={wheel_debug:?}"
+        );
+    }
+
+    #[test]
     fn spawn_pool_respawn_reenables_body_and_survives_a_step() {
         let mut scene = RapierScene::new(0.0);
         let widget_uid = WidgetUid(420);
