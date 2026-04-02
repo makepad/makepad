@@ -650,6 +650,95 @@ mod tests {
     }
 
     #[test]
+    fn four_wheel_vehicle_body_depth_query_planes_provide_hybrid_catch_support() {
+        let mut scene = RapierScene::new(9.81);
+        scene.set_simulation_dt(1.0 / 240.0);
+
+        let widget_uid = WidgetUid(42023);
+        scene.spawn_dynamic_box_with_support(
+            widget_uid,
+            Pose::new(Quat::default(), vec3f(0.0, 0.18, 0.0)),
+            vec3f(0.145, 0.045, 0.205),
+            vec3f(1.0, 1.0, 1.0),
+            120.0,
+            1.35,
+            0.02,
+            XrDepthQuerySupportRig::FourWheels,
+        );
+        let cube = scene
+            .cubes
+            .iter()
+            .find(|cube| cube.widget_uid == widget_uid)
+            .copied()
+            .expect("four-wheel vehicle should exist");
+        assert!(
+            scene.cube_depth_query_sources(cube)[0].is_some(),
+            "four-wheel vehicles should expose a chassis depth-query source for the hybrid catch path"
+        );
+
+        for frame in 0..180 {
+            scene.sync_vehicle_query_sources_pre_step();
+            let query_sources = scene.cube_depth_query_sources(cube);
+            for (slot, source) in query_sources.into_iter().enumerate() {
+                let Some(source) = source else {
+                    continue;
+                };
+                if slot == 0 {
+                    let Some(body) = scene.bodies.get(source.body) else {
+                        continue;
+                    };
+                    let query_pose = makepad_pose(body.position());
+                    let plane = DepthQuerySupportPlane {
+                        point: vec3f(query_pose.position.x, 0.0, query_pose.position.z),
+                        normal: vec3f(0.0, 1.0, 0.0),
+                        tangent: vec3f(1.0, 0.0, 0.0),
+                        bitangent: vec3f(0.0, 0.0, 1.0),
+                        half_extent_tangent: (source.query_radius * 2.0).max(0.24),
+                        half_extent_bitangent: (source.query_radius * 2.0).max(0.24),
+                    };
+                    scene.sync_depth_query_surface_set(
+                        source.set_index,
+                        &[
+                            Some(DepthQuerySurfaceTarget {
+                                collider: DepthQueryCollider {
+                                    fingerprint: 30_000,
+                                    geometry: DepthQueryColliderGeometry::HalfSpace(plane),
+                                    role: DepthQueryColliderRole::Support,
+                                    restitution: 0.0,
+                                },
+                            }),
+                            None,
+                        ],
+                    );
+                } else {
+                    scene.sync_depth_query_surface_set(source.set_index, &[None, None]);
+                }
+            }
+            scene.step();
+
+            let body = scene
+                .bodies
+                .get(cube.body)
+                .expect("four-wheel body should still exist during body-catch support test");
+            let position = makepad_pose(body.position()).position;
+            assert!(
+                position.y > -0.18,
+                "body depth-query support should stop the chassis from falling through even without wheel support planes; frame={frame} position={position:?}"
+            );
+        }
+
+        let body = scene
+            .bodies
+            .get(cube.body)
+            .expect("four-wheel body should still exist after body-catch support test");
+        let position = makepad_pose(body.position()).position;
+        assert!(
+            position.y > -0.05,
+            "body depth-query support should keep the chassis near the injected floor plane: {position:?}"
+        );
+    }
+
+    #[test]
     fn car_control_drives_four_wheel_vehicle_forward() {
         let mut scene = RapierScene::new(9.81);
         scene.set_simulation_dt(1.0 / 240.0);
