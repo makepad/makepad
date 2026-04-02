@@ -542,6 +542,22 @@ impl XrEnv {
         self.world.physics.metrics.body_spawn_miss_count
     }
 
+    pub(crate) fn depth_mesh_chunk_count(&self) -> usize {
+        self.world.depth.mesh_chunks.len()
+    }
+
+    pub(crate) fn recycled_depth_mesh_geometry_count(&self) -> usize {
+        self.world.depth.recycled_mesh_geometries.len()
+    }
+
+    pub(crate) fn depth_mesh_pending_upsert_count(&self) -> usize {
+        self.world.depth.pending_upserts.len()
+    }
+
+    pub(crate) fn depth_query_retained_hit_count(&self) -> usize {
+        self.world.depth.query_retained_hits.len()
+    }
+
     pub(crate) fn physics_revision(&self) -> u64 {
         self.world.physics.revision
     }

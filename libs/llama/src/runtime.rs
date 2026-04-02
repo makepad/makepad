@@ -2929,18 +2929,21 @@ pub fn execute_prepared_attention_decode_metal(
     let mask_bytes = decode
         .input_mask
         .map(|input_mask| {
-            position_attention_mask_bytes_for_tensor(
+            let key_count = attention_mask_write_key_count(
                 ctx,
                 input_mask,
-                attention_mask_write_key_count(
-                    ctx,
-                    input_mask,
-                    spec.block.q_head_dim,
-                    cache_tokens,
-                    positions.len(),
-                )?,
+                spec.block.q_head_dim,
+                cache_tokens,
+                positions.len(),
+            )?;
+            let bytes = position_attention_mask_bytes_for_tensor(
+                ctx,
+                input_mask,
+                key_count,
                 positions,
-            )
+            )?;
+            debug_attention_mask_tensor(ctx, input_mask, key_count, positions, bytes.len());
+            Ok::<Vec<u8>, LlamaError>(bytes)
         })
         .transpose()?;
     if let Some(input_mask) = decode.input_mask {
@@ -6493,18 +6496,21 @@ pub fn execute_prepared_hybrid_decode_metal(
     let mut attention_mask_bytes = Vec::new();
     for cache_view in &decode.attention_cache_views {
         if let Some(input_mask) = cache_view.input_mask {
-            attention_mask_bytes.push(position_attention_mask_bytes_for_tensor(
+            let key_count = attention_mask_write_key_count(
                 ctx,
                 input_mask,
-                attention_mask_write_key_count(
-                    ctx,
-                    input_mask,
-                    cache_view.k_head_dim as u32,
-                    cache_tokens,
-                    positions.len(),
-                )?,
+                cache_view.k_head_dim as u32,
+                cache_tokens,
+                positions.len(),
+            )?;
+            let bytes = position_attention_mask_bytes_for_tensor(
+                ctx,
+                input_mask,
+                key_count,
                 positions,
-            )?);
+            )?;
+            debug_attention_mask_tensor(ctx, input_mask, key_count, positions, bytes.len());
+            attention_mask_bytes.push(bytes);
         }
     }
     let mut attention_mask_index = 0usize;
@@ -6993,6 +6999,31 @@ fn attention_mask_write_key_count(
     }
     let tensor = require_tensor(ctx, tensor_id)?;
     ne_usize(tensor, 0)
+}
+
+fn debug_attention_mask_tensor(
+    ctx: &Context,
+    tensor_id: TensorId,
+    key_count: usize,
+    positions: &[i32],
+    bytes_len: usize,
+) {
+    if std::env::var_os("LLAMA_DEBUG_MASKS").is_none() {
+        return;
+    }
+    if let Some(tensor) = ctx.tensor(tensor_id) {
+        eprintln!(
+            "LLAMA_DEBUG_MASKS name={} ty={} ne={:?} nb={:?} key_count={} query_count={} bytes_len={} nbytes={}",
+            tensor.name().unwrap_or("<unnamed>"),
+            tensor.desc.ty.name(),
+            tensor.ne,
+            tensor.nb,
+            key_count,
+            positions.len(),
+            bytes_len,
+            tensor.nbytes(),
+        );
+    }
 }
 
 fn row_size(ty: TensorType, ne: i64) -> Result<usize> {
