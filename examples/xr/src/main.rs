@@ -45,6 +45,7 @@ const TANK_BODY_VISUAL_SUSPENSION_RESPONSE: f32 = 0.0;
 const TANK_BODY_VISUAL_AXLE_CLEARANCE_SCALE: f32 = 0.42;
 const TANK_BODY_VISUAL_LIFT_MIN_METERS: f32 = 0.0;
 const TANK_BODY_VISUAL_LIFT_MAX_METERS: f32 = 0.300;
+const DEBUG_PANEL_REFRESH_INTERVAL_SECONDS: f64 = 0.25;
 const TANK_SCENE_STATUS_TEXT: &str =
     "Tank mode: left stick steers, right trigger accelerates, left trigger reverses, right stick aims the turret, A/X fire shells, B resets the tank, and controller grip picks the tank up.";
 
@@ -944,6 +945,10 @@ pub struct App {
     network_started: bool,
     #[rust]
     last_debug_text: String,
+    #[rust]
+    last_debug_publish_at: f64,
+    #[rust]
+    last_wrist_perf_text: String,
     #[rust]
     suppress_activity_broadcast: Option<XrActivityId>,
     #[rust]
@@ -2176,6 +2181,24 @@ impl App {
             frame_cpu_ms,
             frame_update_cpu_ms,
             frame_draw_cpu_ms,
+            draw_setup_cpu_ms,
+            draw_env_prepare_cpu_ms,
+            draw_sort_cpu_ms,
+            draw_children_cpu_ms,
+            draw_child_count,
+            draw_transparent_child_count,
+            draw_runtime_body_count,
+            draw_geometry_pool_slots,
+            draw_geometry_pool_live,
+            draw_draw_list_pool_slots,
+            draw_draw_list_pool_live,
+            draw_texture_pool_slots,
+            draw_texture_pool_live,
+            draw_depth_mesh_chunk_count,
+            draw_recycled_depth_mesh_geometry_count,
+            draw_depth_mesh_pending_upsert_count,
+            draw_depth_query_retained_hit_count,
+            draw_top_children_text,
             xr_frame_cpu_ms,
             xr_render_cpu_ms,
             xr_depth_readback_cpu_ms,
@@ -2189,6 +2212,24 @@ impl App {
                 root.frame_cpu_ms(),
                 root.frame_update_cpu_ms(),
                 root.frame_draw_cpu_ms(),
+                root.draw_setup_cpu_ms(),
+                root.draw_env_prepare_cpu_ms(),
+                root.draw_sort_cpu_ms(),
+                root.draw_children_cpu_ms(),
+                root.draw_child_count(),
+                root.draw_transparent_child_count(),
+                root.draw_runtime_body_count(),
+                root.draw_geometry_pool_slots(),
+                root.draw_geometry_pool_live(),
+                root.draw_draw_list_pool_slots(),
+                root.draw_draw_list_pool_live(),
+                root.draw_texture_pool_slots(),
+                root.draw_texture_pool_live(),
+                root.draw_depth_mesh_chunk_count(),
+                root.draw_recycled_depth_mesh_geometry_count(),
+                root.draw_depth_mesh_pending_upsert_count(),
+                root.draw_depth_query_retained_hit_count(),
+                root.draw_top_children_text().to_string(),
                 cx.xr_frame_cpu_time_ms(),
                 cx.xr_render_cpu_time_ms(),
                 cx.xr_depth_readback_cpu_time_ms(),
@@ -2223,136 +2264,145 @@ impl App {
                 "AlignState: off".to_string(),
                 "PeerMap: off".to_string(),
             ));
-        let tsdf_memory_mb = cx
-            .xr_tsdf()
-            .latest_tsdf_snapshot()
-            .as_ref()
-            .map(|snapshot| {
-                let grid = &snapshot.grid;
-                grid.heap_bytes() as f64 / 1_000_000.0
-            })
-            .unwrap_or(0.0);
-        let (depth_frames_seen, depth_frames_dropped) = cx
-            .xr_tsdf()
-            .state()
-            .read()
-            .ok()
-            .map(|state| (state.stats.frames_seen, state.stats.frames_dropped))
-            .unwrap_or((0, 0));
-        let depth_frames_kept = depth_frames_seen.saturating_sub(depth_frames_dropped);
-        let gpu_time_text = cx
-            .xr_gpu_frame_time_ms()
-            .map(|gpu_ms| format!("{gpu_ms:.2} ms"))
-            .unwrap_or_else(|| "waiting".to_string());
-        let xr_frame_cpu_text = xr_frame_cpu_ms
-            .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
-            .unwrap_or_else(|| "waiting".to_string());
-        let xr_render_cpu_text = xr_render_cpu_ms
-            .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
-            .unwrap_or_else(|| "waiting".to_string());
-        let xr_depth_readback_cpu_text = xr_depth_readback_cpu_ms
-            .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
-            .unwrap_or_else(|| "waiting".to_string());
-        let xr_begin_chain = xr_frame_cpu_breakdown
-            .map(|cpu| {
-                format!(
-                    "wait {:.2} > begin {:.2} > loc-space {:.2} > loc-views {:.2} > acq {:.2} > wait-img {:.2} > acq-depth {:.2}",
-                    cpu.wait_frame_ms,
-                    cpu.begin_frame_ms,
-                    cpu.locate_space_ms,
-                    cpu.locate_views_ms,
-                    cpu.acquire_swapchain_ms,
-                    cpu.wait_swapchain_ms,
-                    cpu.acquire_depth_ms,
-                )
-            })
-            .unwrap_or_else(|| "waiting".to_string());
-        let xr_work_chain = xr_frame_cpu_breakdown
-            .map(|cpu| {
-                format!(
-                    "prep {:.2} > xr {:.2} > next {:.2} > draw {:.2} > shaders {:.2} > repaint {:.2} > readback {:.2} > end {:.2} > resize {:.2} > total {:.2}",
-                    cpu.update_prepare_ms,
-                    cpu.update_dispatch_ms,
-                    cpu.next_frame_ms,
-                    cpu.draw_event_ms,
-                    cpu.compile_shaders_ms,
-                    cpu.repaint_ms,
-                    cpu.depth_readback_ms,
-                    cpu.end_frame_ms,
-                    cpu.resize_projection_ms,
-                    cpu.total_ms,
-                )
-            })
-            .unwrap_or_else(|| "waiting".to_string());
-        let bytes_to_mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
-        let xr_repaint_chain = xr_frame_cpu_breakdown
-            .map(|cpu| {
-                format!(
-                    "wait-fence {:.2} > prep-tex {:.2} > record {:.2} > submit {:.2}",
-                    cpu.repaint_wait_inflight_ms,
-                    cpu.repaint_prepare_textures_ms,
-                    cpu.repaint_record_draw_ms,
-                    cpu.repaint_submit_ms,
-                )
-            })
-            .unwrap_or_else(|| "waiting".to_string());
-        let xr_repaint_uploads = xr_frame_cpu_breakdown
-            .map(|cpu| {
-                format!(
-                    "tex {:.2} MB/{} > packet {:.2} MB/{} > geom {:.2} MB > desc {}",
-                    bytes_to_mb(cpu.repaint_texture_upload_bytes),
-                    cpu.repaint_texture_upload_count,
-                    bytes_to_mb(cpu.repaint_packet_buffer_bytes),
-                    cpu.repaint_packet_buffer_count,
-                    bytes_to_mb(cpu.repaint_geometry_upload_bytes),
-                    cpu.repaint_descriptor_set_count,
-                )
-            })
-            .unwrap_or_else(|| "waiting".to_string());
-        let xr_repaint_draw = xr_frame_cpu_breakdown
-            .map(|cpu| {
-                format!(
-                    "items {} > calls {} > packets {} > instances {} > indices {}",
-                    cpu.repaint_draw_items,
-                    cpu.repaint_draw_calls,
-                    cpu.repaint_packets,
-                    cpu.repaint_instances,
-                    cpu.repaint_indices,
-                )
-            })
-            .unwrap_or_else(|| "waiting".to_string());
-        let mut gamepad_count = 0usize;
-        for state in cx.game_input_states() {
-            let GameInputState::Gamepad(_gamepad) = state else {
-                continue;
-            };
-            gamepad_count += 1;
-        }
-        let debug_text = format!(
-            "OpenXR frame CPU: {xr_frame_cpu_text}\nOpenXR begin chain: {xr_begin_chain}\nOpenXR work chain: {xr_work_chain}\nOpenXR repaint chain: {xr_repaint_chain}\nOpenXR repaint uploads: {xr_repaint_uploads}\nOpenXR repaint draw: {xr_repaint_draw}\nVulkan XR render CPU: {xr_render_cpu_text}\nDepth readback CPU: {xr_depth_readback_cpu_text}\nUI frame CPU: {frame_cpu_ms:.2} ms\nUI update time: {frame_update_cpu_ms:.2} ms\nUI draw time: {frame_draw_cpu_ms:.2} ms\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}\nGamepads: {gamepad_count}\nConnected peers: {}\nShared objects: {}\n{}\n{}\n{}\n{}\n{}\n{}",
-            connected_peers.0,
-            connected_peers.1,
-            connected_peers.2,
-            connected_peers.3,
-            connected_peers.4,
-            connected_peers.5,
-            connected_peers.6,
-            connected_peers.7,
-        );
-        if self.last_debug_text != debug_text {
-            self.ui
-                .widget(cx, ids!(debug_field))
-                .set_text(cx, &debug_text);
-            self.last_debug_text = debug_text;
+        let now = Cx::time_now();
+        let publish_debug = self.last_debug_publish_at == 0.0
+            || now - self.last_debug_publish_at >= DEBUG_PANEL_REFRESH_INTERVAL_SECONDS;
+        if publish_debug {
+            let tsdf_memory_mb = cx
+                .xr_tsdf()
+                .latest_tsdf_snapshot()
+                .as_ref()
+                .map(|snapshot| {
+                    let grid = &snapshot.grid;
+                    grid.heap_bytes() as f64 / 1_000_000.0
+                })
+                .unwrap_or(0.0);
+            let (depth_frames_seen, depth_frames_dropped) = cx
+                .xr_tsdf()
+                .state()
+                .read()
+                .ok()
+                .map(|state| (state.stats.frames_seen, state.stats.frames_dropped))
+                .unwrap_or((0, 0));
+            let depth_frames_kept = depth_frames_seen.saturating_sub(depth_frames_dropped);
+            let gpu_time_text = cx
+                .xr_gpu_frame_time_ms()
+                .map(|gpu_ms| format!("{gpu_ms:.2} ms"))
+                .unwrap_or_else(|| "waiting".to_string());
+            let xr_frame_cpu_text = xr_frame_cpu_ms
+                .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
+                .unwrap_or_else(|| "waiting".to_string());
+            let xr_render_cpu_text = xr_render_cpu_ms
+                .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
+                .unwrap_or_else(|| "waiting".to_string());
+            let xr_depth_readback_cpu_text = xr_depth_readback_cpu_ms
+                .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
+                .unwrap_or_else(|| "waiting".to_string());
+            let xr_begin_chain = xr_frame_cpu_breakdown
+                .map(|cpu| {
+                    format!(
+                        "wait {:.2} > begin {:.2} > loc-space {:.2} > loc-views {:.2} > acq {:.2} > wait-img {:.2} > acq-depth {:.2}",
+                        cpu.wait_frame_ms,
+                        cpu.begin_frame_ms,
+                        cpu.locate_space_ms,
+                        cpu.locate_views_ms,
+                        cpu.acquire_swapchain_ms,
+                        cpu.wait_swapchain_ms,
+                        cpu.acquire_depth_ms,
+                    )
+                })
+                .unwrap_or_else(|| "waiting".to_string());
+            let xr_work_chain = xr_frame_cpu_breakdown
+                .map(|cpu| {
+                    format!(
+                        "prep {:.2} > xr {:.2} > next {:.2} > draw {:.2} > shaders {:.2} > repaint {:.2} > readback {:.2} > end {:.2} > resize {:.2} > total {:.2}",
+                        cpu.update_prepare_ms,
+                        cpu.update_dispatch_ms,
+                        cpu.next_frame_ms,
+                        cpu.draw_event_ms,
+                        cpu.compile_shaders_ms,
+                        cpu.repaint_ms,
+                        cpu.depth_readback_ms,
+                        cpu.end_frame_ms,
+                        cpu.resize_projection_ms,
+                        cpu.total_ms,
+                    )
+                })
+                .unwrap_or_else(|| "waiting".to_string());
+            let bytes_to_mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+            let xr_repaint_chain = xr_frame_cpu_breakdown
+                .map(|cpu| {
+                    format!(
+                        "wait-fence {:.2} > prep-tex {:.2} > record {:.2} > submit {:.2}",
+                        cpu.repaint_wait_inflight_ms,
+                        cpu.repaint_prepare_textures_ms,
+                        cpu.repaint_record_draw_ms,
+                        cpu.repaint_submit_ms,
+                    )
+                })
+                .unwrap_or_else(|| "waiting".to_string());
+            let xr_repaint_uploads = xr_frame_cpu_breakdown
+                .map(|cpu| {
+                    format!(
+                        "tex {:.2} MB/{} > packet {:.2} MB/{} > geom {:.2} MB > desc {}",
+                        bytes_to_mb(cpu.repaint_texture_upload_bytes),
+                        cpu.repaint_texture_upload_count,
+                        bytes_to_mb(cpu.repaint_packet_buffer_bytes),
+                        cpu.repaint_packet_buffer_count,
+                        bytes_to_mb(cpu.repaint_geometry_upload_bytes),
+                        cpu.repaint_descriptor_set_count,
+                    )
+                })
+                .unwrap_or_else(|| "waiting".to_string());
+            let xr_repaint_draw = xr_frame_cpu_breakdown
+                .map(|cpu| {
+                    format!(
+                        "items {} > calls {} > packets {} > instances {} > indices {}",
+                        cpu.repaint_draw_items,
+                        cpu.repaint_draw_calls,
+                        cpu.repaint_packets,
+                        cpu.repaint_instances,
+                        cpu.repaint_indices,
+                    )
+                })
+                .unwrap_or_else(|| "waiting".to_string());
+            let mut gamepad_count = 0usize;
+            for state in cx.game_input_states() {
+                let GameInputState::Gamepad(_gamepad) = state else {
+                    continue;
+                };
+                gamepad_count += 1;
+            }
+            let debug_text = format!(
+                "OpenXR frame CPU: {xr_frame_cpu_text}\nOpenXR begin chain: {xr_begin_chain}\nOpenXR work chain: {xr_work_chain}\nOpenXR repaint chain: {xr_repaint_chain}\nOpenXR repaint uploads: {xr_repaint_uploads}\nOpenXR repaint draw: {xr_repaint_draw}\nVulkan XR render CPU: {xr_render_cpu_text}\nDepth readback CPU: {xr_depth_readback_cpu_text}\nUI frame CPU: {frame_cpu_ms:.2} ms\nUI update time: {frame_update_cpu_ms:.2} ms\nUI draw time: {frame_draw_cpu_ms:.2} ms\nUI draw chain: setup {draw_setup_cpu_ms:.2} > env {draw_env_prepare_cpu_ms:.2} > sort {draw_sort_cpu_ms:.2} > children {draw_children_cpu_ms:.2}\nUI top children: {draw_top_children_text}\nUI draw state: children {draw_child_count}/{draw_transparent_child_count} runtime-bodies {draw_runtime_body_count}\nUI pool state: geom {draw_geometry_pool_live}/{draw_geometry_pool_slots} > lists {draw_draw_list_pool_live}/{draw_draw_list_pool_slots} > tex {draw_texture_pool_live}/{draw_texture_pool_slots}\nUI depth state: chunks {draw_depth_mesh_chunk_count} recycled-geoms {draw_recycled_depth_mesh_geometry_count} pending-upserts {draw_depth_mesh_pending_upsert_count} retained-hits {draw_depth_query_retained_hit_count}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}\nGamepads: {gamepad_count}\nConnected peers: {}\nShared objects: {}\n{}\n{}\n{}\n{}\n{}\n{}",
+                connected_peers.0,
+                connected_peers.1,
+                connected_peers.2,
+                connected_peers.3,
+                connected_peers.4,
+                connected_peers.5,
+                connected_peers.6,
+                connected_peers.7,
+            );
+            if self.last_debug_text != debug_text {
+                self.ui
+                    .widget(cx, ids!(debug_field))
+                    .set_text(cx, &debug_text);
+                self.last_debug_text = debug_text;
+            }
+            self.last_debug_publish_at = now;
         }
         let wrist_perf_text = format!(
             "P:{:.1} X:{:.1}",
             compute_ms + query_ms + rapier_ms,
             xr_frame_cpu_ms.unwrap_or(frame_cpu_ms),
         );
-        self.ui
-            .widget(cx, ids!(wrist_sync_status))
-            .set_text(cx, &wrist_perf_text);
+        if self.last_wrist_perf_text != wrist_perf_text {
+            self.ui
+                .widget(cx, ids!(wrist_sync_status))
+                .set_text(cx, &wrist_perf_text);
+            self.last_wrist_perf_text = wrist_perf_text;
+        }
     }
 }
 

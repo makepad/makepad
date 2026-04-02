@@ -23,6 +23,7 @@ const SYNC_BOX_MIN_CHEST_DISTANCE_METERS: f32 = 0.10;
 const SYNC_BOX_MAX_CHEST_DISTANCE_METERS: f32 = 1.05;
 const SYNC_BOX_MAX_ARM_ELEVATION_DEGREES: f32 = 60.0;
 const XR_FIXED_DEPTH_VOXEL_SIZE_METERS: f32 = 0.02;
+const XR_ROOT_TOP_CHILD_DRAW_METRIC_COUNT: usize = 4;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -253,6 +254,24 @@ struct XrRootFrameMetrics {
     last_frame_update_cpu_ms: f64,
     last_frame_draw_cpu_ms: f64,
     last_frame_cpu_ms: f64,
+    last_draw_setup_cpu_ms: f64,
+    last_draw_env_prepare_cpu_ms: f64,
+    last_draw_sort_cpu_ms: f64,
+    last_draw_children_cpu_ms: f64,
+    last_draw_child_count: usize,
+    last_draw_transparent_child_count: usize,
+    last_draw_runtime_body_count: usize,
+    last_draw_geometry_pool_slots: usize,
+    last_draw_geometry_pool_live: usize,
+    last_draw_draw_list_pool_slots: usize,
+    last_draw_draw_list_pool_live: usize,
+    last_draw_texture_pool_slots: usize,
+    last_draw_texture_pool_live: usize,
+    last_draw_depth_mesh_chunk_count: usize,
+    last_draw_recycled_depth_mesh_geometry_count: usize,
+    last_draw_depth_mesh_pending_upsert_count: usize,
+    last_draw_depth_query_retained_hit_count: usize,
+    last_draw_top_children_text: String,
 }
 
 impl XrRootFrameMetrics {
@@ -570,6 +589,16 @@ pub struct XrRoot {
 }
 
 impl XrRoot {
+    fn debug_live_id_label(id: LiveId) -> String {
+        if id == LiveId(0) {
+            return "-".to_string();
+        }
+        id.as_string(|name| {
+            name.map(str::to_owned)
+                .unwrap_or_else(|| format!("{:x}", id.0))
+        })
+    }
+
     fn reset_scene_physics_and_emit_action(&mut self, cx: &mut Cx) {
         self.env.reset_physics(cx);
         cx.widget_action(self.widget_uid(), XrRootAction::PhysicsReset);
@@ -857,6 +886,7 @@ impl XrRoot {
     }
 
     fn draw_3d_content(&mut self, cx: &mut Cx3d, _scope: &mut Scope, scene_state: SceneState3D) {
+        let setup_started = Instant::now();
         self.draw_list.begin_always(cx);
         let root_transform = if cx.cx.in_xr_mode() {
             self.xr_content_transform(self.runtime.last_xr_state.as_deref())
@@ -866,15 +896,35 @@ impl XrRoot {
 
         cx.begin_scene_3d(scene_state);
         let previous_world = cx.set_scene_world_transform_3d(root_transform);
+        self.frame_metrics.last_draw_setup_cpu_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
 
+        let env_prepare_started = Instant::now();
         let mut draw_scope = {
             let cx2d = &mut Cx2d::new(cx.cx);
             self.env.prepare_and_draw(cx2d)
         };
+        self.frame_metrics.last_draw_env_prepare_cpu_ms =
+            env_prepare_started.elapsed().as_secs_f64() * 1000.0;
         draw_scope.tracking_from_content = root_transform;
         draw_scope.content_from_tracking = root_transform.invert();
+        self.frame_metrics.last_draw_runtime_body_count = draw_scope.runtime_bodies.len();
+        self.frame_metrics.last_draw_geometry_pool_slots = cx.cx.geometry_pool_slot_count();
+        self.frame_metrics.last_draw_geometry_pool_live = cx.cx.geometry_pool_live_count();
+        self.frame_metrics.last_draw_draw_list_pool_slots = cx.cx.draw_list_pool_slot_count();
+        self.frame_metrics.last_draw_draw_list_pool_live = cx.cx.draw_list_pool_live_count();
+        self.frame_metrics.last_draw_texture_pool_slots = cx.cx.texture_pool_slot_count();
+        self.frame_metrics.last_draw_texture_pool_live = cx.cx.texture_pool_live_count();
+        self.frame_metrics.last_draw_depth_mesh_chunk_count = self.env.depth_mesh_chunk_count();
+        self.frame_metrics
+            .last_draw_recycled_depth_mesh_geometry_count =
+            self.env.recycled_depth_mesh_geometry_count();
+        self.frame_metrics.last_draw_depth_mesh_pending_upsert_count =
+            self.env.depth_mesh_pending_upsert_count();
+        self.frame_metrics.last_draw_depth_query_retained_hit_count =
+            self.env.depth_query_retained_hit_count();
 
         let mut scene_scope = Scope::with_data(&mut draw_scope);
+        let sort_started = Instant::now();
         let mut draw_order_entries = Vec::new();
         for i in 0..self.children.len() {
             let child = self.children[i].1.clone();
@@ -892,10 +942,35 @@ impl XrRoot {
         }
 
         xr_sort_child_draw_order(&mut draw_order_entries);
+        self.frame_metrics.last_draw_sort_cpu_ms = sort_started.elapsed().as_secs_f64() * 1000.0;
+        self.frame_metrics.last_draw_child_count = draw_order_entries.len();
+        self.frame_metrics.last_draw_transparent_child_count = draw_order_entries
+            .iter()
+            .filter(|(_, _, transparent)| *transparent)
+            .count();
+        let children_draw_started = Instant::now();
+        let mut child_timings = Vec::with_capacity(draw_order_entries.len());
         for (index, _, _) in draw_order_entries {
+            let child_id = self.children[index].0;
             let child = self.children[index].1.clone();
+            let child_started = Instant::now();
             child.draw_3d_all(cx, &mut scene_scope);
+            child_timings.push((child_id, child_started.elapsed().as_secs_f64() * 1000.0));
         }
+        self.frame_metrics.last_draw_children_cpu_ms =
+            children_draw_started.elapsed().as_secs_f64() * 1000.0;
+        child_timings.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        self.frame_metrics.last_draw_top_children_text = child_timings
+            .into_iter()
+            .take(XR_ROOT_TOP_CHILD_DRAW_METRIC_COUNT)
+            .map(|(id, cpu_ms)| format!("{} {:.2}", Self::debug_live_id_label(id), cpu_ms))
+            .collect::<Vec<_>>()
+            .join(" > ");
         if let Some(previous_world) = previous_world {
             let _ = cx.set_scene_world_transform_3d(previous_world);
         }
@@ -1037,6 +1112,79 @@ impl XrRoot {
 
     pub fn frame_draw_cpu_ms(&self) -> f64 {
         self.frame_metrics.last_frame_draw_cpu_ms
+    }
+
+    pub fn draw_setup_cpu_ms(&self) -> f64 {
+        self.frame_metrics.last_draw_setup_cpu_ms
+    }
+
+    pub fn draw_env_prepare_cpu_ms(&self) -> f64 {
+        self.frame_metrics.last_draw_env_prepare_cpu_ms
+    }
+
+    pub fn draw_sort_cpu_ms(&self) -> f64 {
+        self.frame_metrics.last_draw_sort_cpu_ms
+    }
+
+    pub fn draw_children_cpu_ms(&self) -> f64 {
+        self.frame_metrics.last_draw_children_cpu_ms
+    }
+
+    pub fn draw_child_count(&self) -> usize {
+        self.frame_metrics.last_draw_child_count
+    }
+
+    pub fn draw_transparent_child_count(&self) -> usize {
+        self.frame_metrics.last_draw_transparent_child_count
+    }
+
+    pub fn draw_runtime_body_count(&self) -> usize {
+        self.frame_metrics.last_draw_runtime_body_count
+    }
+
+    pub fn draw_geometry_pool_slots(&self) -> usize {
+        self.frame_metrics.last_draw_geometry_pool_slots
+    }
+
+    pub fn draw_geometry_pool_live(&self) -> usize {
+        self.frame_metrics.last_draw_geometry_pool_live
+    }
+
+    pub fn draw_draw_list_pool_slots(&self) -> usize {
+        self.frame_metrics.last_draw_draw_list_pool_slots
+    }
+
+    pub fn draw_draw_list_pool_live(&self) -> usize {
+        self.frame_metrics.last_draw_draw_list_pool_live
+    }
+
+    pub fn draw_texture_pool_slots(&self) -> usize {
+        self.frame_metrics.last_draw_texture_pool_slots
+    }
+
+    pub fn draw_texture_pool_live(&self) -> usize {
+        self.frame_metrics.last_draw_texture_pool_live
+    }
+
+    pub fn draw_depth_mesh_chunk_count(&self) -> usize {
+        self.frame_metrics.last_draw_depth_mesh_chunk_count
+    }
+
+    pub fn draw_recycled_depth_mesh_geometry_count(&self) -> usize {
+        self.frame_metrics
+            .last_draw_recycled_depth_mesh_geometry_count
+    }
+
+    pub fn draw_depth_mesh_pending_upsert_count(&self) -> usize {
+        self.frame_metrics.last_draw_depth_mesh_pending_upsert_count
+    }
+
+    pub fn draw_depth_query_retained_hit_count(&self) -> usize {
+        self.frame_metrics.last_draw_depth_query_retained_hit_count
+    }
+
+    pub fn draw_top_children_text(&self) -> &str {
+        &self.frame_metrics.last_draw_top_children_text
     }
 }
 
