@@ -1,8 +1,81 @@
 mod tests {
     use super::*;
+    use super::super::xr_depth::sync_depth_query_surfaces_with_store;
     use crate::algorithms::tsdf_query::{
         DepthQueryCollider, DepthQueryColliderGeometry, DepthQuerySupportPlane,
     };
+    use makepad_widgets::makepad_platform::{
+        ChunkKey, SparseTsdGridReadSnapshot, SparseTsdReadChunk, TsdfPublishedSnapshot,
+        XrTsdfStore,
+    };
+    use std::{collections::HashMap, sync::Arc};
+
+    fn set_normalized_distance(
+        chunks: &mut HashMap<ChunkKey, Arc<SparseTsdReadChunk>>,
+        chunk_edge: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        normalized_distance: f32,
+    ) {
+        let cx = x.div_euclid(chunk_edge);
+        let cy = y.div_euclid(chunk_edge);
+        let cz = z.div_euclid(chunk_edge);
+        let lx = x.rem_euclid(chunk_edge) as usize;
+        let ly = y.rem_euclid(chunk_edge) as usize;
+        let lz = z.rem_euclid(chunk_edge) as usize;
+        let edge = chunk_edge as usize;
+        let id = lx + ly * edge + lz * edge * edge;
+        let chunk = Arc::make_mut(
+            chunks
+                .entry(ChunkKey::new(cx, cy, cz))
+                .or_insert_with(|| Arc::new(SparseTsdReadChunk::new(edge * edge * edge))),
+        );
+        chunk.set_value(id, normalized_distance, 8, 1);
+    }
+
+    fn make_flat_floor_snapshot(voxel_size: f32) -> TsdfPublishedSnapshot {
+        let chunk_edge = 8;
+        let mut chunks = HashMap::new();
+        let tsd_distance_meters = voxel_size * 2.0;
+        let mut active_value_count = 0usize;
+        for z in -6..=6 {
+            for y in -6..=6 {
+                for x in -6..=6 {
+                    let world_y = (y as f32 + 0.5) * voxel_size;
+                    let normalized = (world_y / tsd_distance_meters).clamp(-1.0, 1.0);
+                    set_normalized_distance(
+                        &mut chunks,
+                        chunk_edge,
+                        x,
+                        y,
+                        z,
+                        normalized,
+                    );
+                    active_value_count += 1;
+                }
+            }
+        }
+        TsdfPublishedSnapshot {
+            generation: 1,
+            latest_topology_generation: 1,
+            update_sequence: 1,
+            grid: Arc::new(SparseTsdGridReadSnapshot {
+                voxel_size,
+                chunk_edge,
+                chunk_edge_shift: Some(chunk_edge.trailing_zeros() as u8),
+                chunk_edge_mask: chunk_edge - 1,
+                chunk_volume: (chunk_edge as usize).pow(3),
+                active_value_count,
+                active_bounds: Some((
+                    vec3f(-6.0 * voxel_size, -6.0 * voxel_size, -6.0 * voxel_size),
+                    vec3f(7.0 * voxel_size, 7.0 * voxel_size, 7.0 * voxel_size),
+                )),
+                chunks,
+            }),
+            height_map: None,
+        }
+    }
 
     fn assert_vec3_close(actual: Vec3f, expected: Vec3f, tolerance: f32) {
         assert!(
@@ -405,7 +478,10 @@ mod tests {
             .flatten()
             .count();
 
-        assert_eq!(support_count, 4, "four-wheel cars should spawn four wheel markers");
+        assert_eq!(
+            support_count, 4,
+            "four-wheel cars should spawn four wheel markers"
+        );
         assert_eq!(
             scene.vehicles[vehicle_index].wheels.len(),
             4,
@@ -414,6 +490,162 @@ mod tests {
         assert_eq!(
             query_source_count, 4,
             "four-wheel cars should expose one TSDF query source per wheel"
+        );
+    }
+
+    #[test]
+    fn four_wheel_vehicle_stays_supported_by_depth_query_floor_planes() {
+        let mut scene = RapierScene::new(9.81);
+        scene.set_simulation_dt(1.0 / 240.0);
+
+        let widget_uid = WidgetUid(42021);
+        scene.spawn_dynamic_box_with_support(
+            widget_uid,
+            Pose::new(Quat::default(), vec3f(0.0, 0.18, 0.0)),
+            vec3f(0.145, 0.045, 0.205),
+            vec3f(1.0, 1.0, 1.0),
+            120.0,
+            1.35,
+            0.02,
+            XrDepthQuerySupportRig::FourWheels,
+        );
+        let cube = scene
+            .cubes
+            .iter()
+            .find(|cube| cube.widget_uid == widget_uid)
+            .copied()
+            .expect("four-wheel vehicle should exist");
+        let vehicle_index = scene
+            .vehicle_index_for_widget_uid(widget_uid)
+            .expect("four-wheel cube should have a vehicle controller");
+
+        for frame in 0..180 {
+            scene.sync_vehicle_query_sources_pre_step();
+            let query_sources = scene.cube_depth_query_sources(cube);
+            for (slot, source) in query_sources.into_iter().flatten().enumerate() {
+                let Some(body) = scene.bodies.get(source.body) else {
+                    continue;
+                };
+                let query_pose = makepad_pose(body.position());
+                let plane = DepthQuerySupportPlane {
+                    point: vec3f(query_pose.position.x, 0.0, query_pose.position.z),
+                    normal: vec3f(0.0, 1.0, 0.0),
+                    tangent: vec3f(1.0, 0.0, 0.0),
+                    bitangent: vec3f(0.0, 0.0, 1.0),
+                    half_extent_tangent: (source.query_radius * 2.0).max(0.24),
+                    half_extent_bitangent: (source.query_radius * 2.0).max(0.24),
+                };
+                scene.sync_depth_query_surface_set(
+                    source.set_index,
+                    &[
+                        Some(DepthQuerySurfaceTarget {
+                            collider: DepthQueryCollider {
+                                fingerprint: 10_000 + slot as u64,
+                                geometry: DepthQueryColliderGeometry::HalfSpace(plane),
+                                role: DepthQueryColliderRole::Support,
+                                restitution: 0.0,
+                            },
+                        }),
+                        None,
+                    ],
+                );
+            }
+            scene.step();
+
+            let body = scene
+                .bodies
+                .get(cube.body)
+                .expect("four-wheel body should still exist during depth support test");
+            let position = makepad_pose(body.position()).position;
+            assert!(
+                position.y > -0.18,
+                "depth-query wheel support should stop the chassis from falling through the floor plane; frame={frame} position={position:?}"
+            );
+        }
+
+        let body = scene
+            .bodies
+            .get(cube.body)
+            .expect("four-wheel body should still exist after depth support test");
+        let position = makepad_pose(body.position()).position;
+        let wheel_contact_count = scene.vehicles[vehicle_index]
+            .controller
+            .wheels()
+            .iter()
+            .filter(|wheel| wheel.raycast_info().is_in_contact)
+            .count();
+        assert!(
+            position.y > -0.05,
+            "depth-query wheel support should keep the chassis near the injected floor planes: {position:?}"
+        );
+        assert!(
+            wheel_contact_count >= 2,
+            "depth-query wheel support should leave multiple wheels in contact, got {wheel_contact_count}"
+        );
+    }
+
+    #[test]
+    fn four_wheel_vehicle_stays_supported_by_flat_tsdf_floor() {
+        let mut scene = RapierScene::new(9.81);
+        scene.set_simulation_dt(1.0 / 240.0);
+        let mut retained_hits = HashMap::new();
+        let depth_mesh = XrTsdfStore::default();
+        depth_mesh.publish_tsdf_snapshot(make_flat_floor_snapshot(0.05));
+
+        let widget_uid = WidgetUid(42022);
+        scene.spawn_dynamic_box_with_support(
+            widget_uid,
+            Pose::new(Quat::default(), vec3f(0.0, 0.18, 0.0)),
+            vec3f(0.145, 0.045, 0.205),
+            vec3f(1.0, 1.0, 1.0),
+            120.0,
+            1.35,
+            0.02,
+            XrDepthQuerySupportRig::FourWheels,
+        );
+        let cube = scene
+            .cubes
+            .iter()
+            .find(|cube| cube.widget_uid == widget_uid)
+            .copied()
+            .expect("four-wheel vehicle should exist");
+        let vehicle_index = scene
+            .vehicle_index_for_widget_uid(widget_uid)
+            .expect("four-wheel cube should have a vehicle controller");
+
+        for frame in 0..180 {
+            scene.sync_vehicle_query_sources_pre_step();
+            sync_depth_query_surfaces_with_store(&mut retained_hits, Some(&mut scene), &depth_mesh);
+            scene.step();
+            let body = scene
+                .bodies
+                .get(cube.body)
+                .expect("four-wheel body should still exist during TSDF support test");
+            let position = makepad_pose(body.position()).position;
+            assert!(
+                position.y > -0.18,
+                "flat-floor TSDF support should stop the chassis from falling through; frame={frame} position={position:?}"
+            );
+        }
+
+        let body = scene
+            .bodies
+            .get(cube.body)
+            .expect("four-wheel body should still exist after TSDF support test");
+        let position = makepad_pose(body.position()).position;
+        let wheel_contact_count = scene.vehicles[vehicle_index]
+            .controller
+            .wheels()
+            .iter()
+            .filter(|wheel| wheel.raycast_info().is_in_contact)
+            .count();
+        assert!(
+            position.y > -0.05,
+            "flat-floor TSDF support should keep the chassis near the floor: {position:?}"
+        );
+        assert!(
+            wheel_contact_count >= 2,
+            "flat-floor TSDF support should leave multiple wheels in contact, got {wheel_contact_count}"
         );
     }
 
@@ -812,7 +1044,8 @@ mod tests {
             0.41 * 0.5 * scene_scale.z,
         );
         let support_radius = four_wheel_support_radius(chassis_half_extents);
-        let support_rest_length = (support_radius * XR_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(0.018, 0.072);
+        let support_rest_length =
+            (support_radius * XR_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(0.018, 0.072);
         let widget_uid = WidgetUid(4212);
         scene.spawn_dynamic_box_with_support(
             widget_uid,
@@ -820,7 +1053,11 @@ mod tests {
                 Quat::default(),
                 vec3f(
                     0.0,
-                    plate_top_y + chassis_half_extents.y + support_rest_length + support_radius + 0.03,
+                    plate_top_y
+                        + chassis_half_extents.y
+                        + support_rest_length
+                        + support_radius
+                        + 0.03,
                     0.0,
                 ),
             ),
@@ -886,6 +1123,247 @@ mod tests {
         assert!(
             deepest_visual_bottom_below_top < 0.01,
             "scaled XR vehicle wheel visuals should stay on top of the plate instead of sinking through it: deepest_visual_bottom_below_top={deepest_visual_bottom_below_top:.4} plate_top_y={plate_top_y:.4} wheels={wheel_debug:?}"
+        );
+    }
+
+    #[test]
+    fn four_wheel_vehicle_support_pose_axes_match_controller_wheel_axes() {
+        let mut scene = RapierScene::new(9.81);
+        scene.set_simulation_dt(1.0 / 240.0);
+        scene.spawn_fixed_box(
+            WidgetUid(4213),
+            Pose::new(Quat::default(), vec3f(0.0, -0.05, 0.0)),
+            vec3f(4.0, 0.05, 4.0),
+            vec3f(1.0, 1.0, 1.0),
+            1.0,
+            0.0,
+        );
+
+        let widget_uid = WidgetUid(4214);
+        scene.spawn_dynamic_box_with_support(
+            widget_uid,
+            Pose::new(Quat::default(), vec3f(0.0, 0.20, 0.0)),
+            vec3f(0.145, 0.045, 0.205),
+            vec3f(1.0, 1.0, 1.0),
+            120.0,
+            1.35,
+            0.02,
+            XrDepthQuerySupportRig::FourWheels,
+        );
+        let cube = scene
+            .cubes
+            .iter()
+            .find(|cube| cube.widget_uid == widget_uid)
+            .copied()
+            .expect("four-wheel vehicle should exist");
+        let vehicle_index = scene
+            .vehicle_index_for_widget_uid(widget_uid)
+            .expect("four-wheel cube should have a vehicle controller");
+
+        for _ in 0..40 {
+            scene.clear_car_controls();
+            scene.apply_car_control(XrCarControl {
+                widget_uid,
+                steer: 0.0,
+                throttle: 1.0,
+                brake: 0.0,
+            });
+            scene.step();
+        }
+        for _ in 0..80 {
+            scene.clear_car_controls();
+            scene.apply_car_control(XrCarControl {
+                widget_uid,
+                steer: 0.7,
+                throttle: 1.0,
+                brake: 0.0,
+            });
+            scene.step();
+        }
+
+        let owner_pose = scene
+            .bodies
+            .get(cube.body)
+            .map(|body| makepad_pose(body.position()))
+            .expect("vehicle body should still exist");
+        let owner_inverse = owner_pose.orientation.invert();
+        let local_pose = scene.cube_linked_support_local_poses(cube)[0]
+            .expect("front-left wheel support pose should exist");
+        let wheel = &scene.vehicles[vehicle_index].controller.wheels()[0];
+
+        let expected_axle_local =
+            owner_inverse.rotate_vec3(&makepad_vec3(wheel.axle()).normalize());
+        let actual_axle_local = local_pose
+            .orientation
+            .rotate_vec3(&vec3f(-1.0, 0.0, 0.0))
+            .normalize();
+
+        assert_vec3_close(actual_axle_local, expected_axle_local, 0.04);
+    }
+
+    #[test]
+    fn four_wheel_vehicle_keeps_moving_when_one_side_climbs_a_ramp() {
+        let mut scene = RapierScene::new(9.81);
+        scene.set_simulation_dt(1.0 / 240.0);
+        scene.spawn_fixed_box(
+            WidgetUid(4215),
+            Pose::new(Quat::default(), vec3f(0.0, -0.05, 0.0)),
+            vec3f(4.0, 0.05, 4.0),
+            vec3f(1.0, 1.0, 1.0),
+            1.8,
+            0.0,
+        );
+
+        let ramp_half_extents = vec3f(0.12, 0.02, 0.55);
+        let ramp_angle = 0.24;
+        let ramp_bottom_offset =
+            ramp_half_extents.y * ramp_angle.cos() + ramp_half_extents.z * ramp_angle.sin();
+        scene.spawn_fixed_box(
+            WidgetUid(4216),
+            Pose::new(
+                Quat::from_axis_angle(vec3f(1.0, 0.0, 0.0), ramp_angle),
+                vec3f(-0.16, ramp_bottom_offset, 0.45),
+            ),
+            ramp_half_extents,
+            vec3f(1.0, 1.0, 1.0),
+            1.8,
+            0.0,
+        );
+
+        let widget_uid = WidgetUid(4217);
+        scene.spawn_dynamic_box_with_support(
+            widget_uid,
+            Pose::new(Quat::default(), vec3f(0.0, 0.20, -0.55)),
+            vec3f(0.145, 0.045, 0.205),
+            vec3f(1.0, 1.0, 1.0),
+            120.0,
+            1.35,
+            0.02,
+            XrDepthQuerySupportRig::FourWheels,
+        );
+        let cube = scene
+            .cubes
+            .iter()
+            .find(|cube| cube.widget_uid == widget_uid)
+            .copied()
+            .expect("four-wheel vehicle should exist");
+        let start_position = scene
+            .bodies
+            .get(cube.body)
+            .map(|body| makepad_pose(body.position()).position)
+            .expect("four-wheel body should exist at spawn");
+        let vehicle_index = scene
+            .vehicle_index_for_widget_uid(widget_uid)
+            .expect("four-wheel cube should have a vehicle controller");
+        let mut max_left_contact_y = 0.0_f32;
+
+        for _ in 0..220 {
+            scene.clear_car_controls();
+            scene.apply_car_control(XrCarControl {
+                widget_uid,
+                steer: 0.0,
+                throttle: 1.0,
+                brake: 0.0,
+            });
+            scene.step();
+            let body = scene
+                .bodies
+                .get(cube.body)
+                .expect("four-wheel body should still exist while climbing");
+            let _pose = makepad_pose(body.position());
+            for wheel in scene.vehicles[vehicle_index]
+                .controller
+                .wheels()
+                .iter()
+                .take(2)
+            {
+                if wheel.raycast_info().is_in_contact {
+                    max_left_contact_y =
+                        max_left_contact_y.max(wheel.raycast_info().contact_point_ws.y);
+                }
+            }
+        }
+
+        let end_position = scene
+            .bodies
+            .get(cube.body)
+            .map(|body| makepad_pose(body.position()).position)
+            .expect("four-wheel body should still exist after climbing");
+
+        assert!(
+            end_position.z > start_position.z + 0.45,
+            "single-side ramp contact should not stall the vehicle; start={start_position:?} end={end_position:?}"
+        );
+        assert!(
+            max_left_contact_y > 0.04,
+            "single-side ramp contact should let the climbing-side wheels reach elevated support instead of skimming flat ground; max_left_contact_y={max_left_contact_y:.3} end={end_position:?}",
+        );
+    }
+
+    #[test]
+    fn four_wheel_vehicle_resists_stalling_on_a_low_hump() {
+        let mut scene = RapierScene::new(9.81);
+        scene.set_simulation_dt(1.0 / 240.0);
+        scene.spawn_fixed_box(
+            WidgetUid(4218),
+            Pose::new(Quat::default(), vec3f(0.0, -0.05, 0.0)),
+            vec3f(4.0, 0.05, 4.0),
+            vec3f(1.0, 1.0, 1.0),
+            1.8,
+            0.0,
+        );
+        scene.spawn_fixed_box(
+            WidgetUid(4219),
+            Pose::new(Quat::default(), vec3f(0.0, 0.030, 0.38)),
+            vec3f(0.26, 0.030, 0.065),
+            vec3f(1.0, 1.0, 1.0),
+            1.8,
+            0.0,
+        );
+
+        let widget_uid = WidgetUid(4220);
+        scene.spawn_dynamic_box_with_support(
+            widget_uid,
+            Pose::new(Quat::default(), vec3f(0.0, 0.22, -0.55)),
+            vec3f(0.145, 0.045, 0.205),
+            vec3f(1.0, 1.0, 1.0),
+            120.0,
+            1.35,
+            0.02,
+            XrDepthQuerySupportRig::FourWheels,
+        );
+        let cube = scene
+            .cubes
+            .iter()
+            .find(|cube| cube.widget_uid == widget_uid)
+            .copied()
+            .expect("four-wheel vehicle should exist");
+        let start_position = scene
+            .bodies
+            .get(cube.body)
+            .map(|body| makepad_pose(body.position()).position)
+            .expect("four-wheel body should exist at spawn");
+
+        for _ in 0..260 {
+            scene.clear_car_controls();
+            scene.apply_car_control(XrCarControl {
+                widget_uid,
+                steer: 0.0,
+                throttle: 1.0,
+                brake: 0.0,
+            });
+            scene.step();
+        }
+
+        let end_position = scene
+            .bodies
+            .get(cube.body)
+            .map(|body| makepad_pose(body.position()).position)
+            .expect("four-wheel body should still exist after the hump");
+
+        assert!(
+            end_position.z > start_position.z + 0.70,
+            "low humps should not pin the chassis before the vehicle can crawl over them; start={start_position:?} end={end_position:?}"
         );
     }
 
