@@ -5,7 +5,7 @@ use crate::prelude::*;
 use crate::util::scene_draw::{ray_from_scene_viewport, SceneState3D};
 use makepad_widgets::event::{XrFingerTip, XrSyncAnchor, XrSyncAnchorExtrema};
 use makepad_widgets::makepad_script::ScriptFnRef;
-use std::{cell::Cell, collections::HashMap, rc::Rc, time::Instant};
+use std::{cell::Cell, collections::HashMap, fmt::Write as _, rc::Rc, time::Instant};
 
 const DESKTOP_TOUCH_DOWN_Z: f32 = 0.0;
 const DESKTOP_TOUCH_UP_Z: f32 = 64.0;
@@ -271,7 +271,8 @@ struct XrRootFrameMetrics {
     last_draw_recycled_depth_mesh_geometry_count: usize,
     last_draw_depth_mesh_pending_upsert_count: usize,
     last_draw_depth_query_retained_hit_count: usize,
-    last_draw_top_children_text: String,
+    last_draw_top_children: [(LiveId, f64); XR_ROOT_TOP_CHILD_DRAW_METRIC_COUNT],
+    last_draw_top_child_count: usize,
 }
 
 impl XrRootFrameMetrics {
@@ -589,14 +590,18 @@ pub struct XrRoot {
 }
 
 impl XrRoot {
-    fn debug_live_id_label(id: LiveId) -> String {
+    fn write_debug_live_id_label(out: &mut String, id: LiveId) {
         if id == LiveId(0) {
-            return "-".to_string();
+            out.push('-');
+            return;
         }
         id.as_string(|name| {
-            name.map(str::to_owned)
-                .unwrap_or_else(|| format!("{:x}", id.0))
-        })
+            if let Some(name) = name {
+                out.push_str(name);
+            } else {
+                let _ = write!(out, "{:x}", id.0);
+            }
+        });
     }
 
     fn reset_scene_physics_and_emit_action(&mut self, cx: &mut Cx) {
@@ -965,12 +970,20 @@ impl XrRoot {
                 .partial_cmp(&left.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        self.frame_metrics.last_draw_top_children_text = child_timings
+        self.frame_metrics.last_draw_top_child_count = 0;
+        for (slot_index, (id, cpu_ms)) in child_timings
             .into_iter()
             .take(XR_ROOT_TOP_CHILD_DRAW_METRIC_COUNT)
-            .map(|(id, cpu_ms)| format!("{} {:.2}", Self::debug_live_id_label(id), cpu_ms))
-            .collect::<Vec<_>>()
-            .join(" > ");
+            .enumerate()
+        {
+            self.frame_metrics.last_draw_top_children[slot_index] = (id, cpu_ms);
+            self.frame_metrics.last_draw_top_child_count = slot_index + 1;
+        }
+        for slot_index in
+            self.frame_metrics.last_draw_top_child_count..XR_ROOT_TOP_CHILD_DRAW_METRIC_COUNT
+        {
+            self.frame_metrics.last_draw_top_children[slot_index] = (LiveId(0), 0.0);
+        }
         if let Some(previous_world) = previous_world {
             let _ = cx.set_scene_world_transform_3d(previous_world);
         }
@@ -1183,8 +1196,21 @@ impl XrRoot {
         self.frame_metrics.last_draw_depth_query_retained_hit_count
     }
 
-    pub fn draw_top_children_text(&self) -> &str {
-        &self.frame_metrics.last_draw_top_children_text
+    pub fn write_draw_top_children_text(&self, out: &mut String) {
+        out.clear();
+        for (index, (id, cpu_ms)) in self
+            .frame_metrics
+            .last_draw_top_children
+            .iter()
+            .take(self.frame_metrics.last_draw_top_child_count)
+            .enumerate()
+        {
+            if index != 0 {
+                out.push_str(" > ");
+            }
+            Self::write_debug_live_id_label(out, *id);
+            let _ = write!(out, " {:.2}", cpu_ms);
+        }
     }
 }
 

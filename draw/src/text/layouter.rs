@@ -28,6 +28,9 @@ use {
 
 const LPXS_PER_INCH: f32 = 96.0;
 const PTS_PER_INCH: f32 = 72.0;
+const LAYOUT_CACHE_MAX_TEXT_LEN: usize = 512;
+const LAYOUT_CACHE_MULTILINE_TEXT_LEN: usize = 192;
+const LAYOUT_CACHE_MULTILINE_LINE_COUNT: usize = 4;
 
 #[derive(Debug)]
 pub struct Layouter {
@@ -38,6 +41,24 @@ pub struct Layouter {
 }
 
 impl Layouter {
+    fn should_cache_text(text: &str) -> bool {
+        if text.len() > LAYOUT_CACHE_MAX_TEXT_LEN {
+            return false;
+        }
+        if text.len() > LAYOUT_CACHE_MULTILINE_TEXT_LEN {
+            let line_count = text
+                .as_bytes()
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count()
+                + 1;
+            if line_count >= LAYOUT_CACHE_MULTILINE_LINE_COUNT {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn new(settings: Settings) -> Self {
         Self {
             loader: Loader::new(settings.loader),
@@ -85,7 +106,7 @@ impl Layouter {
     }
 
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
-        if self.cache_size == 0 {
+        if self.cache_size == 0 || !Self::should_cache_text(params.text()) {
             return Rc::new(self.layout(params.to_owned()));
         }
         if let Some(result) = self.cached_results.get(&params as &dyn LayoutParams) {
@@ -1069,7 +1090,11 @@ impl LaidoutGlyph {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_segments_for_line_breaking, parse_text_atlas_size_value, Size};
+    use super::{
+        merge_segments_for_line_breaking, parse_text_atlas_size_value, Layouter, Size,
+        LAYOUT_CACHE_MAX_TEXT_LEN,
+        LAYOUT_CACHE_MULTILINE_LINE_COUNT, LAYOUT_CACHE_MULTILINE_TEXT_LEN,
+    };
     use unicode_segmentation::UnicodeSegmentation;
 
     #[test]
@@ -1165,5 +1190,20 @@ mod tests {
     #[test]
     fn empty_text() {
         assert_eq!(merged_segments(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn skips_layout_cache_for_large_or_multiline_debug_text() {
+        assert!(Layouter::should_cache_text("fps 90.0"));
+        assert!(!Layouter::should_cache_text(
+            &"x".repeat(LAYOUT_CACHE_MAX_TEXT_LEN + 1)
+        ));
+
+        let multiline = (0..LAYOUT_CACHE_MULTILINE_LINE_COUNT)
+            .map(|index| format!("line {index}: {}", "metric ".repeat(8)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(multiline.len() > LAYOUT_CACHE_MULTILINE_TEXT_LEN);
+        assert!(!Layouter::should_cache_text(&multiline));
     }
 }
