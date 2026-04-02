@@ -624,6 +624,9 @@ impl TextInput {
 
     pub fn set_is_multiline(&mut self, cx: &mut Cx, is_multiline: bool) {
         self.is_multiline = is_multiline;
+        if !is_multiline {
+            self.scroll_y = 0.0;
+        }
         self.laidout_text = None;
         self.draw_bg.redraw(cx);
     }
@@ -1529,8 +1532,8 @@ impl Widget for TextInput {
                 if !e.handled_y.get() && bg_rect.contains(e.abs) {
                     if let Some(laidout_text) = self.laidout_text.as_ref() {
                         let visible_height = bg_rect.size.y
-                            - self.layout.padding.top as f64
-                            - self.layout.padding.bottom as f64;
+                            - self.layout.padding.top
+                            - self.layout.padding.bottom;
                         let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
                         let max_scroll_y = (laidout_text_height - visible_height).max(0.0);
                         if max_scroll_y > 0.0 {
@@ -1548,25 +1551,20 @@ impl Widget for TextInput {
             }
 
             // Handle clicking/dragging on the scrollbar handle itself.
-            // Only sync scroll_y from the ScrollBar when the user is actively
-            // dragging the handle (area is captured). Otherwise, next_frame
-            // callbacks from draw_scroll_bar's clamping would overwrite scroll_y
-            // with a potentially different max, causing scroll to get stuck.
-            let scrollbar_captured = self.scroll_bar.is_area_captured(cx);
+            // We pass an empty callback because we sync scroll_y from the ScrollBar
+            // below, only when the scrollbar has actually captured the finger.
             self.scroll_bar.handle_event_with(
                 cx,
                 event,
                 &mut |_, _| {},
             );
 
-            if scrollbar_captured {
+            // If the scrollbar has captured the finger (user is dragging the handle),
+            // sync scroll_y from the ScrollBar (which is the source of truth during
+            // drag) and prevent the text input from also processing finger events.
+            if self.scroll_bar.is_area_captured(cx) {
                 self.scroll_y = self.scroll_bar.get_scroll_pos();
                 self.draw_bg.redraw(cx);
-            }
-
-            // If the scrollbar captured the finger, don't let the text input
-            // also process finger events (which would move the cursor).
-            if self.scroll_bar.is_area_captured(cx) {
                 return;
             }
         }
