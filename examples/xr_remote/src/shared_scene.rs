@@ -1,3 +1,10 @@
+//! Shared local-scene widgets for host preview and Quest local-scene mode.
+//!
+//! The test/tree scene content here intentionally mirrors the same scenes in
+//! `examples/xr/src/main.rs`; if either side changes, update `scene.rs` too so
+//! the streamed fallback renderer and the local widget scene stay visually in
+//! sync.
+
 use crate::protocol::{MarkerStatePacket, RenderStatePacket, XrRemoteRenderMode};
 use makepad_widgets::*;
 use makepad_xr::*;

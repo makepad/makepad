@@ -1,12 +1,14 @@
 use crate::protocol::*;
 use makepad_widgets::makepad_platform::{
-    DrawPass, DrawPassClearColor, Texture, TextureFormat, TextureId, TextureSize,
+    DrawPass, DrawPassClearColor, DrawPassClearDepth, Texture, TextureFormat, TextureId,
+    TextureSize,
 };
 use makepad_widgets::*;
 
 pub struct EyeRenderTarget {
     pub pass: DrawPass,
     pub color_texture: Texture,
+    _depth_texture: Texture,
     pub draw_list: DrawList,
 }
 
@@ -23,16 +25,28 @@ impl EyeRenderTarget {
                 initial: true,
             },
         );
+        let depth_texture = Texture::new_with_format(
+            cx,
+            TextureFormat::DepthD32 {
+                size: TextureSize::Fixed {
+                    width: width as usize,
+                    height: height as usize,
+                },
+                initial: true,
+            },
+        );
         pass.set_size(cx, dvec2(width as f64, height as f64));
         pass.set_color_texture(
             cx,
             &color_texture,
             DrawPassClearColor::ClearWith(vec4(0.02, 0.03, 0.06, 1.0)),
         );
+        pass.set_depth_texture(cx, &depth_texture, DrawPassClearDepth::ClearWith(1.0));
 
         EyeRenderTarget {
             pass,
             color_texture,
+            _depth_texture: depth_texture,
             draw_list: DrawList::new(cx),
         }
     }

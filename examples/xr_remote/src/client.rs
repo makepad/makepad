@@ -11,6 +11,7 @@ use std::{
     net::TcpStream,
     sync::{mpsc::TryRecvError, Arc, Mutex},
     thread,
+    time::Duration,
 };
 
 script_mod! {
@@ -222,15 +223,20 @@ struct ClientShared {
     control_inbox: Arc<Mutex<Vec<ControlPacket>>>,
     media_inbox: Arc<Mutex<Vec<MediaChunkPacket>>>,
     media_port: Arc<Mutex<Option<u16>>>,
+    control_host: Arc<Mutex<Option<String>>>,
+    control_host_locked: bool,
 }
 
 impl ClientShared {
     fn new() -> Self {
+        let configured_host = configured_remote_host();
         Self {
             control_writer: Arc::new(Mutex::new(None)),
             control_inbox: Arc::new(Mutex::new(Vec::new())),
             media_inbox: Arc::new(Mutex::new(Vec::new())),
             media_port: Arc::new(Mutex::new(None)),
+            control_host: Arc::new(Mutex::new(configured_host.clone())),
+            control_host_locked: configured_host.is_some(),
         }
     }
 
@@ -255,13 +261,27 @@ impl ClientShared {
             }
         });
 
-        let host = remote_host();
-        let control_addr = format!("{}:{}", host, control_port());
         let control_writer = self.control_writer.clone();
         let control_inbox = self.control_inbox.clone();
         let media_port = self.media_port.clone();
+        let control_host = self.control_host.clone();
         thread::spawn(move || loop {
-            let mut stream = connect_with_retry(&control_addr);
+            let Some(host) = control_host.lock().unwrap().clone() else {
+                thread::sleep(Duration::from_millis(250));
+                continue;
+            };
+            let control_addr = format!("{}:{}", host, control_port());
+            let mut stream = match TcpStream::connect(&control_addr) {
+                Ok(stream) => {
+                    let _ = stream.set_nodelay(true);
+                    stream
+                }
+                Err(err) => {
+                    eprintln!("xr_remote connect retry addr={control_addr} err={err}");
+                    thread::sleep(Duration::from_millis(1000));
+                    continue;
+                }
+            };
             if let Ok(writer) = stream.try_clone() {
                 *control_writer.lock().unwrap() = Some(writer);
             }
@@ -317,6 +337,27 @@ impl ClientShared {
 
     fn media_port(&self) -> Option<u16> {
         *self.media_port.lock().unwrap()
+    }
+
+    fn control_host(&self) -> Option<String> {
+        self.control_host.lock().unwrap().clone()
+    }
+
+    fn set_discovered_host(&self, host: &str) -> bool {
+        if self.control_host_locked {
+            return false;
+        }
+        let host = host.trim();
+        if host.is_empty() {
+            return false;
+        }
+        let mut guard = self.control_host.lock().unwrap();
+        if guard.as_deref() == Some(host) {
+            return false;
+        }
+        *guard = Some(host.to_string());
+        SignalToUI::set_ui_signal();
+        true
     }
 }
 
@@ -442,12 +483,13 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         let debug_mono = xr_remote_debug_mono_eye();
+        let initial_host = configured_remote_host();
         Self {
             ui: WidgetRef::default(),
             shared: ClientShared::new(),
             xr_net: None,
             network_started: false,
-            latest_connection_text: format!("Connecting to {}", remote_host()),
+            latest_connection_text: initial_connection_text(initial_host.as_deref()),
             latest_stream_text: "Stream: waiting".to_string(),
             latest_decoder_text: "Decoder: waiting".to_string(),
             latest_clock_text: "XR Net: waiting".to_string(),
@@ -466,6 +508,21 @@ impl Default for App {
 }
 
 impl App {
+    fn refresh_connection_text(&mut self) {
+        let mode = self
+            .debug_mono
+            .map(|eye| format!(" mono={}", eye.label()))
+            .unwrap_or_else(|| " stereo".to_string());
+        self.latest_connection_text = match (self.shared.control_host(), self.shared.media_port()) {
+            (Some(host), Some(port)) => {
+                format!("Connecting to {} tcp:{} udp:{}{}", host, control_port(), port, mode)
+            }
+            (Some(host), None) => format!("Connecting to {} tcp:{}{}", host, control_port(), mode),
+            (None, Some(port)) => format!("Waiting for XR host discovery udp:{}{}", port, mode),
+            (None, None) => "Waiting for XR host discovery".to_string(),
+        };
+    }
+
     fn apply_marker_state(&mut self, cx: &mut Cx) {
         apply_scene_content_state(
             self.ui.widget(cx, ids!(scene_content)),
@@ -527,19 +584,7 @@ impl App {
             }
         };
         self.network_started = true;
-        let mode = self
-            .debug_mono
-            .map(|eye| format!(" mono={}", eye.label()))
-            .unwrap_or_else(|| " stereo".to_string());
-        if let Some(port) = self.shared.media_port() {
-            self.latest_connection_text = format!(
-                "Connecting to {} tcp:{} udp:{}{}",
-                remote_host(),
-                control_port(),
-                port,
-                mode,
-            );
-        }
+        self.refresh_connection_text();
         self.apply_render_state(cx);
         self.refresh_labels(cx);
     }
@@ -1414,6 +1459,11 @@ impl App {
             loop {
                 match xr_net.incoming_receiver.try_recv() {
                     Ok(XrNetIncoming::Join { peer }) => {
+                        let discovered_host = peer.addr.ip().to_string();
+                        let updated = self.shared.set_discovered_host(&discovered_host);
+                        if updated {
+                            self.refresh_connection_text();
+                        }
                         latest_status = Some(format!("XR Net: connected {}", peer.addr));
                     }
                     Ok(XrNetIncoming::Leave { peer, .. }) => {
@@ -1665,6 +1715,20 @@ impl App {
         } else {
             None
         }
+    }
+}
+
+fn configured_remote_host() -> Option<String> {
+    std::env::var("MAKEPAD_XR_REMOTE_HOST")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn initial_connection_text(host: Option<&str>) -> String {
+    match host {
+        Some(host) => format!("Connecting to {}", host),
+        None => "Waiting for XR host discovery".to_string(),
     }
 }
 
