@@ -567,6 +567,30 @@ impl Cx {
         <Self as CxOsApi>::xr_effective_frame_rate_hz(self)
     }
 
+    pub fn geometry_pool_slot_count(&self) -> usize {
+        self.geometries.0.slot_count()
+    }
+
+    pub fn geometry_pool_live_count(&self) -> usize {
+        self.geometries.0.live_count()
+    }
+
+    pub fn draw_list_pool_slot_count(&self) -> usize {
+        self.draw_lists.0.slot_count()
+    }
+
+    pub fn draw_list_pool_live_count(&self) -> usize {
+        self.draw_lists.0.live_count()
+    }
+
+    pub fn texture_pool_slot_count(&self) -> usize {
+        self.textures.0.slot_count()
+    }
+
+    pub fn texture_pool_live_count(&self) -> usize {
+        self.textures.0.live_count()
+    }
+
     pub fn set_thread_priority(priority: CxThreadPriority) {
         #[cfg(target_os = "android")]
         crate::os::linux::android::android::set_current_thread_priority(priority);
