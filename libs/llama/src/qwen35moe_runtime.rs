@@ -13,8 +13,8 @@ use crate::runtime::{
     AttentionBlockSpec, AttentionDecodeSpec, AttentionKvCacheSpec, AttentionQueryLayout,
     AttentionRopeSpec, DeltaNetRecurrentBlockSpec, DeltaNetRecurrentDecodeSpec,
     DeltaNetRecurrentStateSpec, DenseGatedFfnSpec, ExpertGatingFunc, HybridCacheShape,
-    HybridCacheSpec, HybridCacheTemplate, HybridCacheTypes, HybridDecodeSpec, HybridLayerSpec,
-    LogitsProbeSpec, MoeFfnSpec, MoeSharedExpertSpec, ProbeInputKind, RmsNormSpec,
+    HybridCacheSpec, HybridCacheTemplate, HybridCacheTypes, HybridDecodeSpec, HybridLayerFfnSpec,
+    HybridLayerSpec, LogitsProbeSpec, MoeFfnSpec, MoeSharedExpertSpec, ProbeInputKind, RmsNormSpec,
 };
 use crate::weights::GgufWeightLayout;
 
@@ -154,12 +154,16 @@ pub fn qwen35moe_attention_block_spec(
         },
         input_norm_name: layer.attn_norm.name.clone(),
         q_proj_name: attention.wq.name.clone(),
+        q_proj_scale_name: attention.scales.wq.as_ref().map(|t| t.name.clone()),
         q_layout: AttentionQueryLayout::InterleavedQueryGate {
             gate_activation: UnaryOp::Sigmoid,
         },
         k_proj_name: attention.wk.name.clone(),
+        k_proj_scale_name: attention.scales.wk.as_ref().map(|t| t.name.clone()),
         v_proj_name: attention.wv.name.clone(),
+        v_proj_scale_name: attention.scales.wv.as_ref().map(|t| t.name.clone()),
         output_proj_name: attention.wo.name.clone(),
+        output_proj_scale_name: attention.scales.wo.as_ref().map(|t| t.name.clone()),
         q_norm_name: Some(attention.attn_q_norm.name.clone()),
         k_norm_name: Some(attention.attn_k_norm.name.clone()),
         q_head_dim: dims.attention_key_length,
@@ -264,16 +268,22 @@ pub fn qwen35moe_recurrent_block_spec(
         input: ProbeInputKind::TokenIds {
             token_embedding_name: tensors.globals.token_embd.name.clone(),
         },
+        embedding_length: dims.embedding_length,
         input_norm_name: layer.attn_norm.name.clone(),
         qkv_proj_name: recurrent.wqkv.name.clone(),
+        qkv_proj_scale_name: recurrent.scales.wqkv.as_ref().map(|t| t.name.clone()),
         z_proj_name: recurrent.wqkv_gate.name.clone(),
+        z_proj_scale_name: recurrent.scales.wqkv_gate.as_ref().map(|t| t.name.clone()),
         beta_proj_name: recurrent.ssm_beta.name.clone(),
+        beta_proj_scale_name: recurrent.scales.ssm_beta.as_ref().map(|t| t.name.clone()),
         alpha_proj_name: recurrent.ssm_alpha.name.clone(),
+        alpha_proj_scale_name: recurrent.scales.ssm_alpha.as_ref().map(|t| t.name.clone()),
         dt_bias_name: recurrent.ssm_dt.name.clone(),
         a_name: recurrent.ssm_a.name.clone(),
         conv_kernel_name: recurrent.ssm_conv1d.name.clone(),
         norm_name: recurrent.ssm_norm.name.clone(),
         output_proj_name: recurrent.ssm_out.name.clone(),
+        output_proj_scale_name: recurrent.scales.ssm_out.as_ref().map(|t| t.name.clone()),
         key_head_dim: dims.ssm_state_size,
         key_head_count: dims.ssm_group_count,
         value_head_dim,
@@ -342,19 +352,55 @@ pub fn qwen35moe_moe_ffn_spec(model: &LlamaModel, layer_index: u32) -> Result<Mo
         weight_scale: 1.0,
         merged_gate_up_proj_name: layer.moe.ffn_gate_up_exps.as_ref().map(|t| t.name.clone()),
         gate_proj_name: layer.moe.ffn_gate_exps.as_ref().map(|t| t.name.clone()),
+        gate_proj_scale_name: layer
+            .moe
+            .scales
+            .ffn_gate_exps
+            .as_ref()
+            .map(|t| t.name.clone()),
         up_proj_name: layer
             .moe
             .ffn_up_exps
             .as_ref()
             .map(|t| t.name.clone())
             .unwrap_or_default(),
+        up_proj_scale_name: layer
+            .moe
+            .scales
+            .ffn_up_exps
+            .as_ref()
+            .map(|t| t.name.clone()),
         down_proj_name: layer.moe.ffn_down_exps.name.clone(),
+        down_proj_scale_name: layer
+            .moe
+            .scales
+            .ffn_down_exps
+            .as_ref()
+            .map(|t| t.name.clone()),
         activation: UnaryOp::Silu,
         shared_expert: Some(MoeSharedExpertSpec {
             ffn: DenseGatedFfnSpec {
                 gate_proj_name: layer.moe.ffn_gate_shexp.name.clone(),
                 up_proj_name: layer.moe.ffn_up_shexp.name.clone(),
                 down_proj_name: layer.moe.ffn_down_shexp.name.clone(),
+                gate_proj_scale_name: layer
+                    .moe
+                    .scales
+                    .ffn_gate_shexp
+                    .as_ref()
+                    .map(|t| t.name.clone()),
+                up_proj_scale_name: layer
+                    .moe
+                    .scales
+                    .ffn_up_shexp
+                    .as_ref()
+                    .map(|t| t.name.clone()),
+                down_proj_scale_name: layer
+                    .moe
+                    .scales
+                    .ffn_down_shexp
+                    .as_ref()
+                    .map(|t| t.name.clone()),
                 gate_activation: UnaryOp::Silu,
             },
             output_gate_name: Some(layer.moe.ffn_gate_inp_shexp.name.clone()),
@@ -390,7 +436,7 @@ pub fn qwen35moe_attention_block_layout(
         ))
     })?;
 
-    GgufWeightLayout::from_tensors(vec![
+    let mut weights = vec![
         tensors.globals.token_embd.clone(),
         layer.attn_norm.clone(),
         attention.wq.clone(),
@@ -399,7 +445,12 @@ pub fn qwen35moe_attention_block_layout(
         attention.wo.clone(),
         attention.attn_q_norm.clone(),
         attention.attn_k_norm.clone(),
-    ])
+    ];
+    weights.extend(attention.scales.wq.iter().cloned());
+    weights.extend(attention.scales.wk.iter().cloned());
+    weights.extend(attention.scales.wv.iter().cloned());
+    weights.extend(attention.scales.wo.iter().cloned());
+    GgufWeightLayout::from_tensors(weights)
 }
 
 pub fn qwen35moe_recurrent_block_layout(
@@ -420,7 +471,7 @@ pub fn qwen35moe_recurrent_block_layout(
         ))
     })?;
 
-    GgufWeightLayout::from_tensors(vec![
+    let mut weights = vec![
         tensors.globals.token_embd.clone(),
         layer.attn_norm.clone(),
         recurrent.wqkv.clone(),
@@ -432,7 +483,13 @@ pub fn qwen35moe_recurrent_block_layout(
         recurrent.ssm_alpha.clone(),
         recurrent.ssm_norm.clone(),
         recurrent.ssm_out.clone(),
-    ])
+    ];
+    weights.extend(recurrent.scales.wqkv.iter().cloned());
+    weights.extend(recurrent.scales.wqkv_gate.iter().cloned());
+    weights.extend(recurrent.scales.ssm_out.iter().cloned());
+    weights.extend(recurrent.scales.ssm_alpha.iter().cloned());
+    weights.extend(recurrent.scales.ssm_beta.iter().cloned());
+    GgufWeightLayout::from_tensors(weights)
 }
 
 pub fn qwen35moe_moe_ffn_layout(model: &LlamaModel, layer_index: u32) -> Result<GgufWeightLayout> {
@@ -459,6 +516,24 @@ pub fn qwen35moe_moe_ffn_layout(model: &LlamaModel, layer_index: u32) -> Result<
         weights.push(tensor.clone());
     }
     if let Some(tensor) = &layer.moe.ffn_up_exps {
+        weights.push(tensor.clone());
+    }
+    if let Some(tensor) = &layer.moe.scales.ffn_gate_exps {
+        weights.push(tensor.clone());
+    }
+    if let Some(tensor) = &layer.moe.scales.ffn_up_exps {
+        weights.push(tensor.clone());
+    }
+    if let Some(tensor) = &layer.moe.scales.ffn_down_exps {
+        weights.push(tensor.clone());
+    }
+    if let Some(tensor) = &layer.moe.scales.ffn_gate_shexp {
+        weights.push(tensor.clone());
+    }
+    if let Some(tensor) = &layer.moe.scales.ffn_up_shexp {
+        weights.push(tensor.clone());
+    }
+    if let Some(tensor) = &layer.moe.scales.ffn_down_shexp {
         weights.push(tensor.clone());
     }
 
@@ -529,7 +604,7 @@ pub fn qwen35moe_hybrid_decode_spec(
 
     let mut layers = Vec::with_capacity(tensors.layers.len());
     for layer in &tensors.layers {
-        let ffn = qwen35moe_moe_ffn_spec(model, layer.index)?;
+        let ffn = HybridLayerFfnSpec::Moe(qwen35moe_moe_ffn_spec(model, layer.index)?);
         match layer.kind {
             Qwen35MoeLayerKind::Attention => layers.push(HybridLayerSpec::Attention {
                 layer_index: layer.index,

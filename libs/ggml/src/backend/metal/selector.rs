@@ -445,7 +445,9 @@ fn program_cumsum(tensors: &[Tensor], op: &Tensor) -> Result<MetalOpProgram, Str
                 &format!("kernel_cumsum_add_{ty}"),
             ),
         ],
-        resources: MetalOpResources::default(),
+        resources: MetalOpResources {
+            output_tail_bytes: op.nbytes(),
+        },
     })
 }
 
@@ -1973,6 +1975,21 @@ mod tests {
         op.op = Op::Argsort;
         op.src[0] = Some(src);
         op.set_op_param_i32(0, SortOrder::Desc as i32);
+
+        let program = build_program(&tensors, &op, MetalDeviceFeatures::default()).unwrap();
+        assert_eq!(program.stages.len(), 2);
+        assert_eq!(program.resources.output_tail_bytes, op.nbytes());
+    }
+
+    #[test]
+    fn cumsum_selector_adds_temp_tail() {
+        let mut ctx = ctx();
+        let src = tensor(&mut ctx, TensorType::F32, &[257, 4, 1, 1]);
+        let dst = tensor(&mut ctx, TensorType::F32, &[257, 4, 1, 1]);
+        let tensors = ctx.tensors().to_vec();
+        let mut op = tensors[dst].clone();
+        op.op = Op::CumSum;
+        op.src[0] = Some(src);
 
         let program = build_program(&tensors, &op, MetalDeviceFeatures::default()).unwrap();
         assert_eq!(program.stages.len(), 2);

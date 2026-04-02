@@ -186,4 +186,39 @@ mod tests {
             "expected triangulated visible chunks even from low-confidence valid TSDF voxels"
         );
     }
+
+    #[test]
+    fn debug_depth_mesh_focus_cube_plan_limits_chunks_to_focus_volume() {
+        let snapshot = make_flat_floor_snapshot(0.05);
+        let focus_center = vec3f(0.12, 0.0, -0.08);
+        let focus_plan = debug_depth_mesh_focus_cube_plan(&snapshot, focus_center, 1.0);
+
+        assert!(
+            !focus_plan.visible_chunks.is_empty(),
+            "expected at least one visible chunk in the focus cube plan"
+        );
+
+        let cube_half_extent = vec3f(0.5, 0.5, 0.5);
+        let cube_min = focus_center - cube_half_extent;
+        let cube_max = focus_center + cube_half_extent;
+        for chunk in &focus_plan.visible_chunks {
+            let (world_min, world_max) = mesh_chunk_world_bounds(
+                snapshot.grid.voxel_size,
+                chunk.chunk_key,
+                focus_plan.layout,
+            );
+            assert!(
+                aabb_intersects(world_min, world_max, cube_min, cube_max),
+                "focus chunk {:?} should intersect the 1m focus cube",
+                chunk.chunk_key
+            );
+        }
+
+        let head_plan =
+            debug_depth_mesh_view_plan(&snapshot, Pose::new(Quat::default(), vec3f(0.0, 1.4, 0.0)));
+        assert!(
+            focus_plan.visible_chunks.len() <= head_plan.visible_chunks.len(),
+            "focus cube mode should not expand the visible chunk set beyond the head-view plan"
+        );
+    }
 }

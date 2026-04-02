@@ -34,6 +34,7 @@ pub struct GamepadState {
 
     pub select: f32,
     pub start: f32,
+    pub home: f32,
     pub left_thumb: f32,
     pub right_thumb: f32,
 

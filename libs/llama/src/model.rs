@@ -1,8 +1,13 @@
+use makepad_ggml::TensorType;
+
 use crate::error::{LlamaError, Result};
 use crate::gguf::{GgufArray, GgufFile, GgufString, GgufTensorInfo, GgufValue};
 use crate::plan::ModelExecutionPlan;
+use crate::qwen35::Qwen35Tensors;
+use crate::qwen35_runtime::{qwen35_execution_plan, qwen35_hybrid_decode_spec};
 use crate::qwen35moe::Qwen35MoeTensors;
-use crate::qwen35moe_runtime::qwen35moe_execution_plan;
+use crate::qwen35moe_runtime::{qwen35moe_execution_plan, qwen35moe_hybrid_decode_spec};
+use crate::runtime::HybridDecodeSpec;
 use crate::weights::GgufWeightLayout;
 use std::path::Path;
 
@@ -38,6 +43,56 @@ pub struct ModelGeneral {
     pub name: Option<String>,
     pub file_type: Option<u32>,
     pub quantization_version: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Qwen35Config {
+    pub block_count: u32,
+    pub context_length: u32,
+    pub embedding_length: u32,
+    pub feed_forward_length: u32,
+    pub attention_head_count: u32,
+    pub attention_head_count_kv: u32,
+    pub attention_key_length: u32,
+    pub attention_value_length: u32,
+    pub rope_dimension_count: u32,
+    pub rope_dimension_sections: Vec<u32>,
+    pub rope_freq_base: f32,
+    pub attention_layer_norm_rms_epsilon: f32,
+    pub ssm_conv_kernel: u32,
+    pub ssm_state_size: u32,
+    pub ssm_group_count: u32,
+    pub ssm_time_step_rank: u32,
+    pub ssm_inner_size: u32,
+    pub full_attention_interval: u32,
+}
+
+impl Qwen35Config {
+    pub fn from_gguf(gguf: &GgufFile) -> Result<Self> {
+        Ok(Self {
+            block_count: required_u32(gguf, "qwen35.block_count")?,
+            context_length: required_u32(gguf, "qwen35.context_length")?,
+            embedding_length: required_u32(gguf, "qwen35.embedding_length")?,
+            feed_forward_length: required_u32(gguf, "qwen35.feed_forward_length")?,
+            attention_head_count: required_u32(gguf, "qwen35.attention.head_count")?,
+            attention_head_count_kv: required_u32(gguf, "qwen35.attention.head_count_kv")?,
+            attention_key_length: required_u32(gguf, "qwen35.attention.key_length")?,
+            attention_value_length: required_u32(gguf, "qwen35.attention.value_length")?,
+            rope_dimension_count: required_u32(gguf, "qwen35.rope.dimension_count")?,
+            rope_dimension_sections: required_u32_array(gguf, "qwen35.rope.dimension_sections")?,
+            rope_freq_base: required_f32(gguf, "qwen35.rope.freq_base")?,
+            attention_layer_norm_rms_epsilon: required_f32(
+                gguf,
+                "qwen35.attention.layer_norm_rms_epsilon",
+            )?,
+            ssm_conv_kernel: required_u32(gguf, "qwen35.ssm.conv_kernel")?,
+            ssm_state_size: required_u32(gguf, "qwen35.ssm.state_size")?,
+            ssm_group_count: required_u32(gguf, "qwen35.ssm.group_count")?,
+            ssm_time_step_rank: required_u32(gguf, "qwen35.ssm.time_step_rank")?,
+            ssm_inner_size: required_u32(gguf, "qwen35.ssm.inner_size")?,
+            full_attention_interval: required_u32(gguf, "qwen35.full_attention_interval")?,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +159,7 @@ pub struct LlamaModel {
     pub gguf: GgufFile,
     pub architecture: LlamaArchitecture,
     pub general: ModelGeneral,
+    pub qwen35: Option<Qwen35Config>,
     pub qwen35moe: Option<Qwen35MoeConfig>,
 }
 
@@ -121,6 +177,10 @@ impl LlamaModel {
             quantization_version: optional_u32(&gguf, "general.quantization_version"),
         };
 
+        let qwen35 = match architecture_kind {
+            LlamaArchitecture::Qwen35 => Some(Qwen35Config::from_gguf(&gguf)?),
+            _ => None,
+        };
         let qwen35moe = match architecture_kind {
             LlamaArchitecture::Qwen35Moe => Some(Qwen35MoeConfig::from_gguf(&gguf)?),
             _ => None,
@@ -130,6 +190,7 @@ impl LlamaModel {
             gguf,
             architecture: architecture_kind,
             general,
+            qwen35,
             qwen35moe,
         })
     }
@@ -155,8 +216,72 @@ impl LlamaModel {
         self.qwen35moe_tensors()?.weight_layout()
     }
 
+    pub fn require_qwen35(&self) -> Result<&Qwen35Config> {
+        self.qwen35.as_ref().ok_or_else(|| {
+            LlamaError::unsupported(format!(
+                "model architecture '{}' is not qwen35",
+                self.architecture.name()
+            ))
+        })
+    }
+
+    pub fn qwen35_tensors(&self) -> Result<Qwen35Tensors> {
+        Qwen35Tensors::from_model(self)
+    }
+
+    pub fn qwen35_weight_layout(&self) -> Result<GgufWeightLayout> {
+        self.qwen35_tensors()?.weight_layout()
+    }
+
+    pub fn context_length(&self) -> Result<u32> {
+        match self.architecture {
+            LlamaArchitecture::Qwen35 => Ok(self.require_qwen35()?.context_length),
+            LlamaArchitecture::Qwen35Moe => Ok(self.require_qwen35moe()?.context_length),
+            _ => Err(LlamaError::unsupported(format!(
+                "context length is not implemented for architecture '{}'",
+                self.architecture.name()
+            ))),
+        }
+    }
+
+    pub fn hybrid_decode_spec(
+        &self,
+        max_context: u32,
+        max_sequences: u32,
+        attention_k_type: TensorType,
+        attention_v_type: TensorType,
+        recurrent_r_type: TensorType,
+        recurrent_s_type: TensorType,
+    ) -> Result<HybridDecodeSpec> {
+        match self.architecture {
+            LlamaArchitecture::Qwen35 => qwen35_hybrid_decode_spec(
+                self,
+                max_context,
+                max_sequences,
+                attention_k_type,
+                attention_v_type,
+                recurrent_r_type,
+                recurrent_s_type,
+            ),
+            LlamaArchitecture::Qwen35Moe => qwen35moe_hybrid_decode_spec(
+                self,
+                max_context,
+                max_sequences,
+                attention_k_type,
+                attention_v_type,
+                recurrent_r_type,
+                recurrent_s_type,
+            ),
+            _ => Err(LlamaError::unsupported(format!(
+                "hybrid decode spec is not implemented for architecture '{}'",
+                self.architecture.name()
+            ))),
+        }
+    }
+
     pub fn execution_plan(&self) -> Result<ModelExecutionPlan> {
         match self.architecture {
+            LlamaArchitecture::Qwen35 => qwen35_execution_plan(self),
             LlamaArchitecture::Qwen35Moe => qwen35moe_execution_plan(self),
             _ => Err(LlamaError::unsupported(format!(
                 "execution plan builder is not implemented for architecture '{}'",

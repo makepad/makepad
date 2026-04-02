@@ -166,6 +166,45 @@ impl XrPeerSync {
         self.runtime.shared_objects.active_count()
     }
 
+    pub fn local_peer_id(&self) -> Option<XrNetPeerId> {
+        self.runtime.shared_objects.local_peer_id()
+    }
+
+    pub fn widget_is_local_shared_object(&self, widget_uid: WidgetUid) -> bool {
+        self.runtime
+            .shared_objects
+            .resolve_local_shared_object_for_widget(widget_uid)
+            .is_some()
+    }
+
+    pub fn widget_is_remote_shared_object(&self, widget_uid: WidgetUid) -> bool {
+        self.runtime
+            .shared_objects
+            .resolve_remote_shared_object_for_widget(widget_uid)
+            .is_some()
+    }
+
+    pub fn shared_object_authority_for_widget(
+        &self,
+        widget_uid: WidgetUid,
+    ) -> Option<XrNetPeerId> {
+        let local_object_id = self
+            .runtime
+            .shared_objects
+            .resolve_local_shared_object_for_widget(widget_uid);
+        if let Some(object_id) = local_object_id {
+            return self
+                .runtime
+                .shared_objects
+                .local_shared_object_snapshot(object_id)
+                .map(|snapshot| snapshot.authority);
+        }
+        self.runtime
+            .shared_objects
+            .remote_shared_object_snapshot_for_widget(widget_uid)
+            .map(|snapshot| snapshot.authority)
+    }
+
     pub fn pending_shared_object_control_count(&self) -> usize {
         self.runtime.pending_shared_object_controls.len()
     }

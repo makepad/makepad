@@ -1,7 +1,13 @@
 use super::xr_physics::{capsule_pose, makepad_pose, HandCollider, HandColliderBody, RapierScene};
 use super::*;
+use makepad_widgets::makepad_platform::event::XrController;
 
 impl XrHandSystem {
+    fn controller_grip_pose(controller: &XrController) -> Option<Pose> {
+        let pose = controller.grip_pose;
+        (controller.active() && pose.is_finite()).then_some(pose)
+    }
+
     fn pose_point_world(pose: Pose, local: Vec3f) -> Vec3f {
         pose.to_mat4().transform_vec4(local.to_vec4()).to_vec3f()
     }
@@ -66,8 +72,16 @@ impl XrHandSystem {
         }
     }
 
-    pub(super) fn build_hand_colliders(&self, hand: &XrHand) -> Vec<HandCollider> {
+    pub(super) fn build_hand_colliders(
+        &self,
+        hand: &XrHand,
+        controller: &XrController,
+    ) -> Vec<HandCollider> {
         let mut colliders = Vec::with_capacity(XR_HAND_COLLIDER_SLOTS_PER_HAND);
+        if let Some(grip_pose) = Self::controller_grip_pose(controller) {
+            Self::append_box_collider(&mut colliders, grip_pose, vec3f(0.032, 0.030, 0.055));
+            return colliders;
+        }
         if !hand.in_view() {
             return colliders;
         }
@@ -359,7 +373,10 @@ impl XrEnv {
         let colliders = if let Some(physics_colliders) = physics_colliders {
             physics_colliders
         } else {
-            raw_colliders = self.world.hands.build_hand_colliders(hand);
+            raw_colliders = self
+                .world
+                .hands
+                .build_hand_colliders(hand, &XrController::default());
             &raw_colliders
         };
         self.draw_hand_shapes(cx, colliders, is_left);
@@ -372,14 +389,19 @@ impl XrEnv {
     }
 }
 
-pub(super) fn build_hand_colliders_for_physics(hand: &XrHand) -> Vec<HandCollider> {
-    XrHandSystem.build_hand_colliders(hand)
+pub(super) fn build_hand_colliders_for_physics(
+    hand: &XrHand,
+    controller: &XrController,
+) -> Vec<HandCollider> {
+    XrHandSystem.build_hand_colliders(hand, controller)
 }
 
 pub(super) fn sync_hands_on_scene(
     scene: Option<&mut RapierScene>,
     left_hand: &XrHand,
     right_hand: &XrHand,
+    left_controller: &XrController,
+    right_controller: &XrController,
 ) {
     if !XR_ENABLE_HAND_PHYSICS {
         return;
@@ -389,8 +411,8 @@ pub(super) fn sync_hands_on_scene(
         return;
     };
 
-    let left = build_hand_colliders_for_physics(left_hand);
-    let right = build_hand_colliders_for_physics(right_hand);
+    let left = build_hand_colliders_for_physics(left_hand, left_controller);
+    let right = build_hand_colliders_for_physics(right_hand, right_controller);
     let RapierScene {
         bodies,
         colliders,
@@ -400,5 +422,5 @@ pub(super) fn sync_hands_on_scene(
     } = scene;
     RapierScene::sync_hand_bodies(left_slots, &left, bodies, colliders);
     RapierScene::sync_hand_bodies(right_slots, &right, bodies, colliders);
-    scene.sync_tracked_hands(left_hand, right_hand);
+    scene.sync_tracked_hands(left_hand, right_hand, left_controller, right_controller);
 }

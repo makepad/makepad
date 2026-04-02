@@ -1,25 +1,27 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use makepad_ggml::backend::metal::MetalBuffer;
+use makepad_ggml::backend::metal::{MetalBuffer, MetalRuntime};
 use makepad_ggml::TensorType;
 
 use crate::error::{LlamaError, Result};
 use crate::model::LlamaModel;
 use crate::plan::ModelExecutionPlan;
-use crate::qwen35moe_runtime::qwen35moe_hybrid_decode_spec;
 use crate::runtime::{
-    allocate_hybrid_shared_cache_tensors, compile_hybrid_prompt_processing_metal_with_shared_state,
-    compile_hybrid_token_generation_metal_with_shared_state, create_metal_context_buffer,
-    execute_hybrid_decode_graph_metal_cached_logits_only, CompiledHybridDecodeMetal,
-    HybridCacheLayout, HybridCacheShape, HybridCacheTypes, HybridDecodeRun, HybridDecodeSpec,
-    HybridSharedCacheTensorIds, LogitsProbeInput,
+    allocate_hybrid_shared_cache_tensors,
+    compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs,
+    create_metal_context_buffer_with_runtime, reserve_hybrid_decode_main_buffer_size,
+    CompiledHybridDecodeMetal, HybridCacheLayout, HybridCacheShape, HybridCacheTypes,
+    HybridDecodeBatchLayout, HybridDecodeRun, HybridDecodeSpec, HybridSharedCacheTensorIds,
+    LogitsProbeInput,
 };
 use crate::vocab::LlamaVocab;
 use crate::weights::LoadedGgufWeights;
 
 const DEFAULT_EXTRA_ACTIVATION_BYTES: usize = 512 << 20;
 const DEFAULT_PREFILL_BATCH_SIZE: usize = 1;
+const GRAPH_RESERVE_RETRY_BYTES: usize = 64 << 20;
+const MAX_GRAPH_RESERVE_RETRIES: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LlamaSessionConfig {
@@ -62,36 +64,55 @@ pub struct LlamaGeneration {
     pub stop_reason: LlamaStopReason,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct SessionGraphParams {
+    n_tokens: usize,
+    n_outputs: usize,
+}
+
+impl SessionGraphParams {
+    fn new(n_tokens: usize, n_outputs: usize) -> Self {
+        Self {
+            n_tokens,
+            n_outputs,
+        }
+    }
+
+    fn greedy(n_tokens: usize) -> Self {
+        Self::new(n_tokens, 1)
+    }
+
+    fn token_generation() -> Self {
+        Self::greedy(1)
+    }
+}
+
 struct SessionGraphSet {
+    shared_runtime: MetalRuntime,
     shared_cache: HybridSharedCacheTensorIds,
     shared_main_buffer: MetalBuffer,
-    token_generation: CompiledHybridDecodeMetal,
-    prompt_processing_by_batch: BTreeMap<usize, CompiledHybridDecodeMetal>,
+    compiled_by_params: BTreeMap<SessionGraphParams, CompiledHybridDecodeMetal>,
 }
 
 impl SessionGraphSet {
-    fn graph_for_batch(&self, batch_size: usize) -> Option<&CompiledHybridDecodeMetal> {
-        if batch_size == 1 {
-            Some(&self.token_generation)
-        } else {
-            self.prompt_processing_by_batch.get(&batch_size)
-        }
-    }
-
-    fn has_batch(&self, batch_size: usize) -> bool {
-        batch_size == 1 || self.prompt_processing_by_batch.contains_key(&batch_size)
-    }
-
-    fn insert_prompt_processing_graph(
+    fn graph_for_mut(
         &mut self,
-        batch_size: usize,
-        compiled: CompiledHybridDecodeMetal,
-    ) {
-        if batch_size == 1 {
-            self.token_generation = compiled;
-        } else {
-            self.prompt_processing_by_batch.insert(batch_size, compiled);
-        }
+        params: SessionGraphParams,
+    ) -> Option<&mut CompiledHybridDecodeMetal> {
+        self.compiled_by_params.get_mut(&params)
+    }
+
+    fn has_graph(&self, params: SessionGraphParams) -> bool {
+        self.compiled_by_params.contains_key(&params)
+    }
+
+    fn insert_graph(&mut self, params: SessionGraphParams, compiled: CompiledHybridDecodeMetal) {
+        self.compiled_by_params.insert(params, compiled);
+    }
+
+    fn evict_prompt_graphs_except(&mut self, keep: SessionGraphParams) {
+        self.compiled_by_params
+            .retain(|params, _| params.n_tokens == 1 || *params == keep);
     }
 }
 
@@ -160,6 +181,7 @@ impl LlamaSession {
             &self.plan,
             &self.spec,
             self.context_extra_bytes,
+            prompt_batch_capacity(self.config.prefill_batch_size, self.max_context),
         )?;
         self.weights = weights;
         self.graphs = graphs;
@@ -247,8 +269,7 @@ impl LlamaSession {
         let context_extra_bytes = cache_bytes
             .checked_add(config.extra_activation_bytes)
             .ok_or_else(|| LlamaError::format("overflow computing session activation bytes"))?;
-        let spec = qwen35moe_hybrid_decode_spec(
-            &model,
+        let spec = model.hybrid_decode_spec(
             cache_shape.n_ctx_seq,
             cache_shape.n_seq_max,
             config.attention_k_type,
@@ -256,7 +277,15 @@ impl LlamaSession {
             config.recurrent_r_type,
             config.recurrent_s_type,
         )?;
-        let (weights, graphs) = build_runtime_state(&model, &plan, &spec, context_extra_bytes)?;
+        let max_context_usize = usize::try_from(max_context)
+            .map_err(|_| LlamaError::format("session max_context does not fit in usize"))?;
+        let (weights, graphs) = build_runtime_state(
+            &model,
+            &plan,
+            &spec,
+            context_extra_bytes,
+            prompt_batch_capacity(config.prefill_batch_size, max_context_usize),
+        )?;
 
         Ok(Self {
             model,
@@ -264,8 +293,7 @@ impl LlamaSession {
             plan,
             spec,
             config,
-            max_context: usize::try_from(max_context)
-                .map_err(|_| LlamaError::format("session max_context does not fit in usize"))?,
+            max_context: max_context_usize,
             context_extra_bytes,
             weights,
             graphs,
@@ -307,12 +335,8 @@ impl LlamaSession {
 
     fn append_token_batch(&mut self, token_ids: &[i32]) -> Result<()> {
         let batch_size = token_ids.len();
-        if batch_size > 1 {
-            return Err(LlamaError::unsupported(
-                "multi-token prompt processing is not wired to shared cache state yet; use prefill_batch_size=1 until the prompt-processing graph family shares the same KV/recurrent tensors as token generation".to_string(),
-            ));
-        }
-        self.ensure_compiled_batch(batch_size)?;
+        let graph_params = SessionGraphParams::greedy(batch_size);
+        self.ensure_compiled_graph(graph_params)?;
         let start = self.token_ids.len();
         let positions = (start..start + batch_size)
             .map(|position| {
@@ -326,47 +350,80 @@ impl LlamaSession {
         let run = {
             let compiled = self
                 .graphs
-                .graph_for_batch(batch_size)
-                .ok_or_else(|| LlamaError::format("compiled batch graph was not cached"))?;
-            execute_hybrid_decode_graph_metal_cached_logits_only(
-                compiled,
-                &mut self.weights,
-                LogitsProbeInput::TokenIds(token_ids),
+                .graph_for_mut(graph_params)
+                .ok_or_else(|| LlamaError::format("compiled graph params were not cached"))?;
+            let output_ids = [i32::try_from(batch_size - 1)
+                .map_err(|_| LlamaError::format("session output id does not fit in i32"))?];
+            let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
                 &positions,
                 cache_tokens,
-            )?
+                &output_ids,
+            )?;
+            if compiled.decode().input_recurrent_state_rows.is_none() {
+                layout.recurrent_state_rows.clear();
+            }
+            compiled
+                .execute_logits_only_with_layout(LogitsProbeInput::TokenIds(token_ids), &layout)?
         };
         self.token_ids.extend_from_slice(token_ids);
         self.last_run = Some(collapse_last_token_run(run)?);
         Ok(())
     }
 
-    fn ensure_compiled_batch(&mut self, batch_size: usize) -> Result<()> {
-        if self.graphs.has_batch(batch_size) {
+    fn ensure_compiled_graph(&mut self, params: SessionGraphParams) -> Result<()> {
+        if self.graphs.has_graph(params) {
             return Ok(());
         }
-        if batch_size > 1 {
-            return Err(LlamaError::unsupported(
-                "prompt-processing graphs for batch_size>1 are not enabled until they share cache tensors with token-generation graphs".to_string(),
-            ));
+        for attempt in 0..=MAX_GRAPH_RESERVE_RETRIES {
+            if params.n_tokens > 1 {
+                self.graphs.evict_prompt_graphs_except(params);
+            }
+            match compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
+                &mut self.weights,
+                &self.spec,
+                &self.graphs.shared_runtime,
+                &self.graphs.shared_cache,
+                &self.graphs.shared_main_buffer,
+                params.n_tokens,
+                params.n_outputs,
+            ) {
+                Ok(compiled) => {
+                    self.graphs.insert_graph(params, compiled);
+                    return Ok(());
+                }
+                Err(err)
+                    if attempt < MAX_GRAPH_RESERVE_RETRIES
+                        && should_retry_graph_reserve(&err)
+                        && self.token_ids.is_empty()
+                        && self.last_run.is_none() =>
+                {
+                    self.context_extra_bytes = self
+                        .context_extra_bytes
+                        .checked_add(GRAPH_RESERVE_RETRY_BYTES)
+                        .ok_or_else(|| {
+                            LlamaError::format("overflow growing session activation reserve")
+                        })?;
+                    let (weights, graphs) = build_runtime_state(
+                        &self.model,
+                        &self.plan,
+                        &self.spec,
+                        self.context_extra_bytes,
+                        prompt_batch_capacity(self.config.prefill_batch_size, self.max_context),
+                    )?;
+                    self.weights = weights;
+                    self.graphs = graphs;
+                }
+                Err(err) => return Err(err),
+            }
         }
-        let compiled = compile_hybrid_prompt_processing_metal_with_shared_state(
-            &mut self.weights,
-            &self.spec,
-            &self.graphs.shared_cache,
-            &self.graphs.shared_main_buffer,
-            batch_size,
-        )?;
-        self.graphs
-            .insert_prompt_processing_graph(batch_size, compiled);
-        Ok(())
+        Err(LlamaError::format(
+            "session graph reserve retry loop exhausted unexpectedly",
+        ))
     }
 }
 
 fn resolve_max_context(model: &LlamaModel, config: LlamaSessionConfig) -> Result<u32> {
-    let max_context = config
-        .max_context
-        .unwrap_or(model.require_qwen35moe()?.context_length);
+    let max_context = config.max_context.unwrap_or(model.context_length()?);
     if max_context == 0 {
         return Err(LlamaError::format("session max_context must be at least 1"));
     }
@@ -378,28 +435,107 @@ fn build_runtime_state(
     plan: &ModelExecutionPlan,
     spec: &HybridDecodeSpec,
     context_extra_bytes: usize,
+    prompt_batch_capacity: usize,
 ) -> Result<(LoadedGgufWeights, SessionGraphSet)> {
-    let mut weights = plan
-        .full_weights
-        .allocate_and_load_with_extra(&model.gguf, context_extra_bytes)?;
-    let shared_cache =
-        allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, spec)?;
-    let shared_main_buffer = create_metal_context_buffer(&weights.ctx)?;
-    let token_generation = compile_hybrid_token_generation_metal_with_shared_state(
-        &mut weights,
-        spec,
-        &shared_cache,
-        &shared_main_buffer,
-    )?;
-    Ok((
-        weights,
-        SessionGraphSet {
-            shared_cache,
-            shared_main_buffer,
-            token_generation,
-            prompt_processing_by_batch: BTreeMap::new(),
-        },
+    let mut extra_bytes = context_extra_bytes;
+    for attempt in 0..=MAX_GRAPH_RESERVE_RETRIES {
+        let mut weights = plan
+            .full_weights
+            .allocate_and_load_with_extra(&model.gguf, extra_bytes)?;
+        let shared_runtime = MetalRuntime::new().map_err(LlamaError::unsupported)?;
+        let shared_cache =
+            allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, spec)?;
+        let prompt_batch_capacity = prompt_batch_capacity.max(1);
+        let mut required_main_buffer_size = reserve_hybrid_decode_main_buffer_size(
+            &weights,
+            spec,
+            Some(&shared_cache),
+            1,
+            1,
+            shared_runtime.features(),
+        )?;
+        if prompt_batch_capacity > 1 {
+            required_main_buffer_size =
+                required_main_buffer_size.max(reserve_hybrid_decode_main_buffer_size(
+                    &weights,
+                    spec,
+                    Some(&shared_cache),
+                    prompt_batch_capacity,
+                    1,
+                    shared_runtime.features(),
+                )?);
+        }
+        if required_main_buffer_size > weights.ctx.mem_size() {
+            if attempt < MAX_GRAPH_RESERVE_RETRIES {
+                extra_bytes = extra_bytes
+                    .checked_add(required_main_buffer_size - weights.ctx.mem_size())
+                    .ok_or_else(|| {
+                        LlamaError::format("overflow growing session activation reserve")
+                    })?;
+                continue;
+            }
+            return Err(LlamaError::format(format!(
+                "shared Metal main buffer reserve is too small: got {}, need at least {}",
+                weights.ctx.mem_size(),
+                required_main_buffer_size
+            )));
+        }
+        let shared_main_buffer =
+            create_metal_context_buffer_with_runtime(&shared_runtime, &weights.ctx)?;
+        let mut compiled_by_params = BTreeMap::new();
+        let build_result = (|| {
+            let token_generation =
+                compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
+                    &mut weights,
+                    spec,
+                    &shared_runtime,
+                    &shared_cache,
+                    &shared_main_buffer,
+                    1,
+                    1,
+                )?;
+            compiled_by_params.insert(SessionGraphParams::token_generation(), token_generation);
+            Ok::<(), LlamaError>(())
+        })();
+        match build_result {
+            Ok(()) => {
+                return Ok((
+                    weights,
+                    SessionGraphSet {
+                        shared_runtime,
+                        shared_cache,
+                        shared_main_buffer,
+                        compiled_by_params,
+                    },
+                ));
+            }
+            Err(err) if attempt < MAX_GRAPH_RESERVE_RETRIES && should_retry_graph_reserve(&err) => {
+                extra_bytes = extra_bytes
+                    .checked_add(GRAPH_RESERVE_RETRY_BYTES)
+                    .ok_or_else(|| {
+                        LlamaError::format("overflow growing session activation reserve")
+                    })?;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(LlamaError::format(
+        "session graph reserve retry loop exhausted unexpectedly",
     ))
+}
+
+fn should_retry_graph_reserve(err: &LlamaError) -> bool {
+    match err {
+        LlamaError::Format(msg) => {
+            msg.contains("context out of memory allocating")
+                || msg.contains("shared Metal main buffer is too small")
+        }
+        LlamaError::Io(_) | LlamaError::Unsupported(_) => false,
+    }
+}
+
+fn prompt_batch_capacity(prefill_batch_size: usize, max_context: usize) -> usize {
+    prefill_batch_size.max(1).min(max_context.max(1))
 }
 
 fn argmax_token_id(logits: &[f32]) -> Result<i32> {

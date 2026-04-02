@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-const OPEN_HAND_SYNC_FORWARD_OFFSET_METERS: f32 = 0.040;
+const OPEN_HAND_SYNC_PALM_OFFSET_METERS: f32 = 0.020;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct XrArmPairMetrics {
@@ -72,13 +72,20 @@ pub(crate) fn arm_pair_metrics(
 pub(crate) fn hand_closed_fist_contact_point(
     hand: &XrHand,
     forward: Vec3f,
-    _is_left: bool,
+    is_left: bool,
 ) -> Option<Vec3f> {
     if !(hand.is_open() && hand.is_upright_for_box_sync()) {
         return None;
     }
-    hand.tracking_pose()
-        .map(|pose| pose.position + forward.scale(OPEN_HAND_SYNC_FORWARD_OFFSET_METERS))
+    let pose = hand.tracking_pose()?;
+    let offset_direction = hand_palm_surface_direction(hand, is_left).unwrap_or_else(|| {
+        if forward.length() > 1.0e-5 {
+            forward.normalize()
+        } else {
+            vec3f(0.0, 0.0, -1.0)
+        }
+    });
+    Some(pose.position + offset_direction.scale(OPEN_HAND_SYNC_PALM_OFFSET_METERS))
 }
 
 pub(crate) fn hand_closed_fist_contact_point_geometry_only(
@@ -87,6 +94,30 @@ pub(crate) fn hand_closed_fist_contact_point_geometry_only(
     is_left: bool,
 ) -> Option<Vec3f> {
     hand_closed_fist_contact_point(hand, forward, is_left)
+}
+
+fn hand_palm_surface_direction(hand: &XrHand, is_left: bool) -> Option<Vec3f> {
+    let center = hand.joint_pose_checked(XrHand::CENTER)?.position;
+    let wrist = hand.joint_pose_checked(XrHand::WRIST)?.position;
+    let along_hand = center - wrist;
+    if along_hand.length() <= 1.0e-5 {
+        return None;
+    }
+    let across_hand = if is_left {
+        hand.joint_pose_checked(XrHand::INDEX_BASE)?.position
+            - hand.joint_pose_checked(XrHand::LITTLE_BASE)?.position
+    } else {
+        hand.joint_pose_checked(XrHand::LITTLE_BASE)?.position
+            - hand.joint_pose_checked(XrHand::INDEX_BASE)?.position
+    };
+    if across_hand.length() <= 1.0e-5 {
+        return None;
+    }
+    let back_of_hand = Vec3f::cross(across_hand.normalize(), along_hand.normalize());
+    if back_of_hand.length() <= 1.0e-5 {
+        return None;
+    }
+    Some(back_of_hand.normalize().scale(-1.0))
 }
 
 #[cfg(test)]

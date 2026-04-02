@@ -1209,16 +1209,20 @@ pub struct __CFString {
 pub type CFStringRef = *const __CFString;
 pub type CFTypeRef = *const c_void;
 pub type CFArrayRef = *const c_void;
+pub type CFSetRef = *const c_void;
 pub type CFDictionaryRef = *const c_void;
 pub type CFAllocatorRef = *const c_void;
 pub type CFNumberRef = *const c_void;
 pub type CFBooleanRef = *const c_void;
 pub type CFDataRef = *const c_void;
 pub type CFErrorRef = *const c_void;
+pub type CFRunLoopRef = *mut c_void;
 pub type CFIndex = isize;
 pub type Boolean = u8;
+pub type CFTypeID = usize;
 
 pub const kCFNumberSInt32Type: i32 = 3;
+pub const kCFNumberSInt64Type: i32 = 4;
 
 // CORE AUDIO
 
@@ -1738,6 +1742,47 @@ extern "C" {
     pub static GCExtendedGamepad: ObjcId;
 }
 
+#[cfg(target_os = "macos")]
+pub type IOOptionBits = u32;
+#[cfg(target_os = "macos")]
+pub type IOReturn = i32;
+#[cfg(target_os = "macos")]
+pub type IOHIDManagerRef = *mut c_void;
+#[cfg(target_os = "macos")]
+pub type IOHIDDeviceRef = *mut c_void;
+#[cfg(target_os = "macos")]
+pub type IOHIDValueRef = *mut c_void;
+#[cfg(target_os = "macos")]
+pub type IOHIDElementRef = *mut c_void;
+#[cfg(target_os = "macos")]
+pub type IOHIDReportType = u32;
+
+#[cfg(target_os = "macos")]
+pub type IOHIDCallback = Option<
+    unsafe extern "C" fn(context: *mut c_void, result: IOReturn, sender: *mut c_void),
+>;
+#[cfg(target_os = "macos")]
+pub type IOHIDDeviceCallback = Option<
+    unsafe extern "C" fn(
+        context: *mut c_void,
+        result: IOReturn,
+        sender: *mut c_void,
+        device: IOHIDDeviceRef,
+    ),
+>;
+#[cfg(target_os = "macos")]
+pub type IOHIDReportCallback = Option<
+    unsafe extern "C" fn(
+        context: *mut c_void,
+        result: IOReturn,
+        sender: *mut c_void,
+        report_type: IOHIDReportType,
+        report_id: u32,
+        report: *mut u8,
+        report_length: CFIndex,
+    ),
+>;
+
 // Game Controller Framework (GCController)
 
 #[link(name = "GameController", kind = "framework")]
@@ -1782,8 +1827,11 @@ extern "C" {
 extern "C" {
     pub static kCFBooleanTrue: CFBooleanRef;
     pub static kCFBooleanFalse: CFBooleanRef;
+    #[cfg(target_os = "macos")]
+    pub static kCFRunLoopDefaultMode: CFStringRef;
 
     pub fn CFRelease(cf: *const c_void);
+    pub fn CFRetain(cf: *const c_void) -> *const c_void;
     pub fn CFArrayCreate(
         allocator: CFAllocatorRef,
         values: *const *const c_void,
@@ -1792,6 +1840,8 @@ extern "C" {
     ) -> CFArrayRef;
     pub fn CFArrayGetCount(theArray: CFArrayRef) -> isize;
     pub fn CFArrayGetValueAtIndex(theArray: CFArrayRef, idx: isize) -> *const c_void;
+    pub fn CFSetGetCount(theSet: CFSetRef) -> isize;
+    pub fn CFSetGetValues(theSet: CFSetRef, values: *mut *const c_void);
     pub fn CFDictionaryContainsKey(theDict: CFDictionaryRef, key: *const c_void) -> u8;
     pub fn CFDictionaryGetValue(theDict: CFDictionaryRef, key: *const c_void) -> *const c_void;
     pub fn CFDictionaryCreate(
@@ -1810,6 +1860,11 @@ extern "C" {
         theType: i32,
         valuePtr: *const c_void,
     ) -> CFNumberRef;
+    pub fn CFNumberGetValue(
+        number: CFNumberRef,
+        theType: i32,
+        valuePtr: *mut c_void,
+    ) -> Boolean;
     pub fn CFStringCreateWithBytes(
         alloc: CFAllocatorRef,
         bytes: *const u8,
@@ -1817,6 +1872,59 @@ extern "C" {
         encoding: u32,
         isExternalRepresentation: Boolean,
     ) -> CFStringRef;
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopGetCurrent() -> CFRunLoopRef;
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopRun();
+    #[cfg(target_os = "macos")]
+    pub fn CFRunLoopStop(rl: CFRunLoopRef);
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    pub fn IOHIDManagerCreate(
+        allocator: CFAllocatorRef,
+        options: IOOptionBits,
+    ) -> IOHIDManagerRef;
+    pub fn IOHIDManagerOpen(manager: IOHIDManagerRef, options: IOOptionBits) -> IOReturn;
+    pub fn IOHIDManagerClose(manager: IOHIDManagerRef, options: IOOptionBits) -> IOReturn;
+    pub fn IOHIDManagerScheduleWithRunLoop(
+        manager: IOHIDManagerRef,
+        run_loop: CFRunLoopRef,
+        run_loop_mode: CFStringRef,
+    );
+    pub fn IOHIDManagerUnscheduleFromRunLoop(
+        manager: IOHIDManagerRef,
+        run_loop: CFRunLoopRef,
+        run_loop_mode: CFStringRef,
+    );
+    pub fn IOHIDManagerSetDeviceMatchingMultiple(
+        manager: IOHIDManagerRef,
+        multiple: CFArrayRef,
+    );
+    pub fn IOHIDManagerCopyDevices(manager: IOHIDManagerRef) -> CFSetRef;
+    pub fn IOHIDManagerRegisterDeviceMatchingCallback(
+        manager: IOHIDManagerRef,
+        callback: IOHIDDeviceCallback,
+        context: *mut c_void,
+    );
+    pub fn IOHIDManagerRegisterDeviceRemovalCallback(
+        manager: IOHIDManagerRef,
+        callback: IOHIDDeviceCallback,
+        context: *mut c_void,
+    );
+
+    pub fn IOHIDDeviceOpen(device: IOHIDDeviceRef, options: IOOptionBits) -> IOReturn;
+    pub fn IOHIDDeviceClose(device: IOHIDDeviceRef, options: IOOptionBits) -> IOReturn;
+    pub fn IOHIDDeviceGetProperty(device: IOHIDDeviceRef, key: CFStringRef) -> CFTypeRef;
+    pub fn IOHIDDeviceRegisterInputReportCallback(
+        device: IOHIDDeviceRef,
+        report: *mut u8,
+        report_length: CFIndex,
+        callback: IOHIDReportCallback,
+        context: *mut c_void,
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
