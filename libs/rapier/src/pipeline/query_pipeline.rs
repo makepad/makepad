@@ -1,5 +1,8 @@
+use crate::dynamics::IntegrationParameters;
 use crate::dynamics::RigidBodyHandle;
-use crate::geometry::{Aabb, Collider, ColliderHandle, PointProjection, Ray, RayIntersection};
+use crate::geometry::{
+    Aabb, BroadPhasePairEvent, Collider, ColliderHandle, PointProjection, Ray, RayIntersection,
+};
 use crate::geometry::{BroadPhaseBvh, InteractionGroups};
 use crate::math::{Pose, Real, Vector};
 use crate::{dynamics::RigidBodySet, geometry::ColliderSet};
@@ -166,6 +169,38 @@ impl BroadPhaseBvh {
             filter,
         }
     }
+}
+
+/// Refreshes the broad-phase query view after direct collider edits, without advancing physics.
+///
+/// This is useful when application code mutates collider transforms/shapes/enabled state and then
+/// needs to run scene queries in the same frame before the main [`PhysicsPipeline`] step.
+pub fn sync_query_pipeline_after_collider_user_changes(
+    integration_parameters: &IntegrationParameters,
+    broad_phase: &mut BroadPhaseBvh,
+    bodies: &mut RigidBodySet,
+    colliders: &mut ColliderSet,
+    broad_phase_events: &mut Vec<BroadPhasePairEvent>,
+) {
+    let modified_colliders = colliders.take_modified();
+    if modified_colliders.is_empty() {
+        return;
+    }
+    super::user_changes::handle_user_changes_to_colliders(
+        bodies,
+        colliders,
+        &modified_colliders[..],
+    );
+    broad_phase_events.clear();
+    broad_phase.update(
+        integration_parameters,
+        colliders,
+        bodies,
+        &modified_colliders[..],
+        &[],
+        broad_phase_events,
+    );
+    colliders.set_modified(modified_colliders);
 }
 
 impl<'a> QueryPipeline<'a> {

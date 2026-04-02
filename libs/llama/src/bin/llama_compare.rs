@@ -64,6 +64,7 @@ enum AttentionDecodeSequenceInput<'a> {
 }
 
 struct AttentionDecodeSequenceRun {
+    result_output: Vec<f32>,
     last_hidden: Vec<f32>,
     k_cache_bytes: Vec<u8>,
     v_cache_bytes: Vec<u8>,
@@ -637,14 +638,57 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             attention_decode_batch_check.hidden_stats.cosine_similarity
         );
         println!(
+            "attention_decode_batch.layer{}._result_output_max_abs_diff: {:.9}",
+            attention_decode_batch_check.layer_index,
+            attention_decode_batch_check.result_output_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_batch.layer{}._result_output_token0_max_abs_diff: {:.9}",
+            attention_decode_batch_check.layer_index,
+            attention_decode_batch_check
+                .first_token_result_output_stats
+                .max_abs_diff
+        );
+        println!(
+            "attention_decode_batch.layer{}._result_output_token1_max_abs_diff: {:.9}",
+            attention_decode_batch_check.layer_index,
+            attention_decode_batch_check
+                .last_token_result_output_stats
+                .max_abs_diff
+        );
+        println!(
             "attention_decode_batch.layer{}._k_cache_max_abs_diff: {:.9}",
             attention_decode_batch_check.layer_index,
             attention_decode_batch_check.k_cache_stats.max_abs_diff
         );
         println!(
+            "attention_decode_batch.layer{}._step0_k_cache_row_max_abs_diff: {:.9}",
+            attention_decode_batch_check.layer_index,
+            attention_decode_batch_check.step0_k_cache_row_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_batch.layer{}._step0_k_cache_tail_zero_max_abs_diff: {:.9}",
+            attention_decode_batch_check.layer_index,
+            attention_decode_batch_check
+                .step0_k_cache_tail_zero_stats
+                .max_abs_diff
+        );
+        println!(
             "attention_decode_batch.layer{}._v_cache_max_abs_diff: {:.9}",
             attention_decode_batch_check.layer_index,
             attention_decode_batch_check.v_cache_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_batch.layer{}._step0_v_cache_row_max_abs_diff: {:.9}",
+            attention_decode_batch_check.layer_index,
+            attention_decode_batch_check.step0_v_cache_row_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_batch.layer{}._step0_v_cache_tail_zero_max_abs_diff: {:.9}",
+            attention_decode_batch_check.layer_index,
+            attention_decode_batch_check
+                .step0_v_cache_tail_zero_stats
+                .max_abs_diff
         );
         println!(
             "recurrent_cache.layer{}._same_top1: {}",
@@ -736,16 +780,66 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 attention_hidden_layer7.hidden_stats.max_abs_diff
             );
             println!(
+                "attention_hidden.layer{}._input_layer{}._result_output_max_abs_diff: {:.9}",
+                attention_hidden_layer7.layer_index,
+                attention_hidden_layer7.source_layer_index,
+                attention_hidden_layer7.result_output_stats.max_abs_diff
+            );
+            println!(
+                "attention_hidden.layer{}._input_layer{}._result_output_token0_max_abs_diff: {:.9}",
+                attention_hidden_layer7.layer_index,
+                attention_hidden_layer7.source_layer_index,
+                attention_hidden_layer7
+                    .first_token_result_output_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_hidden.layer{}._input_layer{}._result_output_token1_max_abs_diff: {:.9}",
+                attention_hidden_layer7.layer_index,
+                attention_hidden_layer7.source_layer_index,
+                attention_hidden_layer7
+                    .last_token_result_output_stats
+                    .max_abs_diff
+            );
+            println!(
                 "attention_hidden.layer{}._input_layer{}._k_cache_max_abs_diff: {:.9}",
                 attention_hidden_layer7.layer_index,
                 attention_hidden_layer7.source_layer_index,
                 attention_hidden_layer7.k_cache_stats.max_abs_diff
+            );
+            println!(
+                "attention_hidden.layer{}._input_layer{}._step0_k_cache_row_max_abs_diff: {:.9}",
+                attention_hidden_layer7.layer_index,
+                attention_hidden_layer7.source_layer_index,
+                attention_hidden_layer7.step0_k_cache_row_stats.max_abs_diff
+            );
+            println!(
+                "attention_hidden.layer{}._input_layer{}._step0_k_cache_tail_zero_max_abs_diff: {:.9}",
+                attention_hidden_layer7.layer_index,
+                attention_hidden_layer7.source_layer_index,
+                attention_hidden_layer7
+                    .step0_k_cache_tail_zero_stats
+                    .max_abs_diff
             );
         println!(
             "attention_hidden.layer{}._input_layer{}._v_cache_max_abs_diff: {:.9}",
             attention_hidden_layer7.layer_index,
             attention_hidden_layer7.source_layer_index,
             attention_hidden_layer7.v_cache_stats.max_abs_diff
+        );
+        println!(
+            "attention_hidden.layer{}._input_layer{}._step0_v_cache_row_max_abs_diff: {:.9}",
+            attention_hidden_layer7.layer_index,
+            attention_hidden_layer7.source_layer_index,
+            attention_hidden_layer7.step0_v_cache_row_stats.max_abs_diff
+        );
+        println!(
+            "attention_hidden.layer{}._input_layer{}._step0_v_cache_tail_zero_max_abs_diff: {:.9}",
+            attention_hidden_layer7.layer_index,
+            attention_hidden_layer7.source_layer_index,
+            attention_hidden_layer7
+                .step0_v_cache_tail_zero_stats
+                .max_abs_diff
         );
         let attention_tensor_check =
             attention_cache_tensor_check(&model, &upstream.token_ids[..2])?;
@@ -896,6 +990,72 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "attention_decode_batched_tensor.layer{}._result_output_max_abs_diff: {:.9}",
             attention_decode_batched_tensor_check.layer_index,
             attention_decode_batched_tensor_check
+                .result_output_stats
+                .max_abs_diff
+        );
+        let attention_decode_stepwise_tensor_check =
+            attention_decode_stepwise_tensor_check(&model, &upstream.token_ids[..2])?;
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._q_proj_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check.q_proj_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._q_pre_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check.q_pre_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._q_norm_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check.q_norm_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._k_norm_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check.k_norm_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._q_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check.q_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._k_store_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check.k_store_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._v_store_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check.v_store_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._k_cache_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check.k_cache_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._v_cache_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check.v_cache_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._attn_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check.attn_stats.max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._output_proj_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check
+                .output_proj_stats
+                .max_abs_diff
+        );
+        println!(
+            "attention_decode_stepwise_tensor.layer{}._result_output_max_abs_diff: {:.9}",
+            attention_decode_stepwise_tensor_check.layer_index,
+            attention_decode_stepwise_tensor_check
                 .result_output_stats
                 .max_abs_diff
         );
@@ -2870,6 +3030,13 @@ struct AttentionCacheSelfCheck {
 struct AttentionDecodeBatchSelfCheck {
     layer_index: u32,
     hidden_stats: LogitComparison,
+    result_output_stats: LogitComparison,
+    first_token_result_output_stats: LogitComparison,
+    last_token_result_output_stats: LogitComparison,
+    step0_k_cache_row_stats: LogitComparison,
+    step0_v_cache_row_stats: LogitComparison,
+    step0_k_cache_tail_zero_stats: LogitComparison,
+    step0_v_cache_tail_zero_stats: LogitComparison,
     k_cache_stats: LogitComparison,
     v_cache_stats: LogitComparison,
 }
@@ -2886,6 +3053,13 @@ struct AttentionFromHiddenBatchSelfCheck {
     source_layer_index: u32,
     layer_index: u32,
     hidden_stats: LogitComparison,
+    result_output_stats: LogitComparison,
+    first_token_result_output_stats: LogitComparison,
+    last_token_result_output_stats: LogitComparison,
+    step0_k_cache_row_stats: LogitComparison,
+    step0_v_cache_row_stats: LogitComparison,
+    step0_k_cache_tail_zero_stats: LogitComparison,
+    step0_v_cache_tail_zero_stats: LogitComparison,
     k_cache_stats: LogitComparison,
     v_cache_stats: LogitComparison,
 }
@@ -2923,6 +3097,22 @@ struct AttentionDecodeBatchedTensorCheck {
     v_cache_stats: LogitComparison,
     k_cache_view_stats: LogitComparison,
     v_cache_view_stats: LogitComparison,
+    attn_stats: LogitComparison,
+    output_proj_stats: LogitComparison,
+    result_output_stats: LogitComparison,
+}
+
+struct AttentionDecodeStepwiseTensorCheck {
+    layer_index: u32,
+    q_proj_stats: LogitComparison,
+    q_pre_stats: LogitComparison,
+    q_norm_stats: LogitComparison,
+    k_norm_stats: LogitComparison,
+    q_stats: LogitComparison,
+    k_store_stats: LogitComparison,
+    v_store_stats: LogitComparison,
+    k_cache_stats: LogitComparison,
+    v_cache_stats: LogitComparison,
     attn_stats: LogitComparison,
     output_proj_stats: LogitComparison,
     result_output_stats: LogitComparison,
@@ -5201,29 +5391,6 @@ fn run_attention_decode_with_result_checkpoint(
             key_count,
             features,
         )?;
-        let result_output_id = add_hidden_token_checkpoint_by_any_name(
-            &mut loaded.ctx,
-            &["attn_decode.output_residual", "attn_decode.output_proj"],
-            "attn_decode.result_output_ck",
-        )?;
-        decode_graph
-            .graph
-            .build_forward_expand(&loaded.ctx, result_output_id)?;
-        decode_graph
-            .graph
-            .build_forward_expand(&loaded.ctx, decode_graph.k_cache)?;
-        decode_graph
-            .graph
-            .build_forward_expand(&loaded.ctx, decode_graph.v_cache)?;
-        let prepared = prepare_graph(&loaded.ctx, &decode_graph.graph, features)?;
-        let session = MetalGraphSession::from_runtime(
-            runtime,
-            &loaded.ctx,
-            &prepared,
-            BufferStorageMode::Shared,
-            BufferStorageMode::Shared,
-        )?;
-
         let zero_k_cache = vec![0u8; loaded.ctx.tensor_data(decode_graph.k_cache)?.len()];
         let zero_v_cache = vec![0u8; loaded.ctx.tensor_data(decode_graph.v_cache)?.len()];
         loaded
@@ -5238,6 +5405,46 @@ fn run_attention_decode_with_result_checkpoint(
         if let Some(bytes) = previous_v_cache {
             loaded.ctx.write_tensor_data(decode_graph.v_cache, bytes)?;
         }
+        let result_output_id = add_contiguous_checkpoint_by_any_name(
+            &mut loaded.ctx,
+            &["attn_decode.output_residual", "attn_decode.output_proj"],
+            "attn_decode.result_output_ck",
+        )?;
+        let k_cache_view_id = add_contiguous_checkpoint(
+            &mut loaded.ctx,
+            decode_graph.k_cache_view,
+            "attn_decode.k_cache_view_ck",
+        )?;
+        let v_cache_view_id = add_contiguous_checkpoint(
+            &mut loaded.ctx,
+            decode_graph.v_cache_view,
+            "attn_decode.v_cache_view_ck",
+        )?;
+        let last_hidden_id = add_hidden_token_checkpoint_by_any_name(
+            &mut loaded.ctx,
+            &["attn_decode.output_residual", "attn_decode.output_proj"],
+            "attn_decode.last_hidden_ck",
+        )?;
+        decode_graph
+            .graph
+            .build_forward_expand(&loaded.ctx, result_output_id)?;
+        decode_graph
+            .graph
+            .build_forward_expand(&loaded.ctx, last_hidden_id)?;
+        decode_graph
+            .graph
+            .build_forward_expand(&loaded.ctx, k_cache_view_id)?;
+        decode_graph
+            .graph
+            .build_forward_expand(&loaded.ctx, v_cache_view_id)?;
+        let prepared = prepare_graph(&loaded.ctx, &decode_graph.graph, features)?;
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &loaded.ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )?;
 
         let rope_positions = spec
             .block
@@ -5294,17 +5501,60 @@ fn run_attention_decode_with_result_checkpoint(
         let execution = session.execute(
             &loaded.ctx,
             &writes,
-            &[result_output_id, decode_graph.k_cache, decode_graph.v_cache],
+            &[
+                result_output_id,
+                last_hidden_id,
+                k_cache_view_id,
+                v_cache_view_id,
+            ],
         )?;
+        let result_output = bytes_to_f32s(
+            execution
+                .outputs
+                .get(&result_output_id)
+                .ok_or("missing attention decode result_output checkpoint output")?,
+        );
+        if result_output.is_empty() {
+            return Err("attention decode result_output checkpoint was empty".into());
+        }
+        let mut k_cache_bytes = vec![0u8; loaded.ctx.tensor_data(decode_graph.k_cache)?.len()];
+        let exported_k_cache_view = execution
+            .outputs
+            .get(&k_cache_view_id)
+            .ok_or("missing attention decode k_cache_view checkpoint output")?;
+        if exported_k_cache_view.len() > k_cache_bytes.len() {
+            return Err(format!(
+                "attention decode exported k_cache_view size {} exceeds cache buffer size {}",
+                exported_k_cache_view.len(),
+                k_cache_bytes.len()
+            )
+            .into());
+        }
+        k_cache_bytes[..exported_k_cache_view.len()].copy_from_slice(exported_k_cache_view);
+        let mut v_cache_bytes = vec![0u8; loaded.ctx.tensor_data(decode_graph.v_cache)?.len()];
+        let exported_v_cache_view = execution
+            .outputs
+            .get(&v_cache_view_id)
+            .ok_or("missing attention decode v_cache_view checkpoint output")?;
+        if exported_v_cache_view.len() > v_cache_bytes.len() {
+            return Err(format!(
+                "attention decode exported v_cache_view size {} exceeds cache buffer size {}",
+                exported_v_cache_view.len(),
+                v_cache_bytes.len()
+            )
+            .into());
+        }
+        v_cache_bytes[..exported_v_cache_view.len()].copy_from_slice(exported_v_cache_view);
         Ok(AttentionDecodeSequenceRun {
+            result_output,
             last_hidden: bytes_to_f32s(
                 execution
                     .outputs
-                    .get(&result_output_id)
-                    .ok_or("missing attention decode result_output checkpoint output")?,
+                    .get(&last_hidden_id)
+                    .ok_or("missing attention decode last_hidden checkpoint output")?,
             ),
-            k_cache_bytes: loaded.ctx.tensor_data(decode_graph.k_cache)?.to_vec(),
-            v_cache_bytes: loaded.ctx.tensor_data(decode_graph.v_cache)?.to_vec(),
+            k_cache_bytes,
+            v_cache_bytes,
         })
 }
 
@@ -5345,21 +5595,34 @@ fn run_attention_decode_sequence_exact(
         }
     }
 
+    let stable_key_count = usize::try_from(spec.cache.max_context)?;
+    if positions.iter().copied().any(|position| {
+        position < 0
+            || usize::try_from(position)
+                .ok()
+                .map(|position| position >= stable_key_count)
+                .unwrap_or(true)
+    }) {
+        return Err(format!(
+            "attention decode step sequence positions {:?} exceed stable key_count {}",
+            positions, stable_key_count
+        )
+        .into());
+    }
+
     let mut previous_k_cache = None;
     let mut previous_v_cache = None;
+    let mut result_output = Vec::new();
     let mut last_hidden = None;
 
     for token_index in 0..positions.len() {
-        let key_count = usize::try_from(positions[token_index])?
-            .checked_add(1)
-            .ok_or("overflow computing attention decode key_count")?;
         let run = match &input {
             AttentionDecodeSequenceInput::TokenIds(token_ids) => run_attention_decode_with_result_checkpoint(
                 model,
                 layout,
                 spec,
                 &positions[token_index..token_index + 1],
-                key_count,
+                stable_key_count,
                 AttentionDecodeSequenceInput::TokenIds(std::slice::from_ref(&token_ids[token_index])),
                 previous_k_cache.as_deref(),
                 previous_v_cache.as_deref(),
@@ -5376,7 +5639,7 @@ fn run_attention_decode_sequence_exact(
                     layout,
                     spec,
                     &positions[token_index..token_index + 1],
-                    key_count,
+                    stable_key_count,
                     AttentionDecodeSequenceInput::EmbeddingsF32 {
                         data: &data[start..end],
                         hidden_size: *hidden_size,
@@ -5387,12 +5650,14 @@ fn run_attention_decode_sequence_exact(
             }
         };
 
+        result_output.extend_from_slice(&run.result_output);
         last_hidden = Some(run.last_hidden);
         previous_k_cache = Some(run.k_cache_bytes);
         previous_v_cache = Some(run.v_cache_bytes);
     }
 
     Ok(AttentionDecodeSequenceRun {
+        result_output,
         last_hidden: last_hidden.ok_or("attention decode step sequence produced no output")?,
         k_cache_bytes: previous_k_cache
             .ok_or("attention decode step sequence produced no k cache state")?,
@@ -5442,6 +5707,16 @@ fn attention_decode_batch_self_check(
     let positions = (0..token_ids.len())
         .map(i32::try_from)
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let step0_run = run_attention_decode_with_result_checkpoint(
+        model,
+        &layout,
+        &spec,
+        &positions[..1],
+        1,
+        AttentionDecodeSequenceInput::TokenIds(&token_ids[..1]),
+        None,
+        None,
+    )?;
 
     let batched_run = run_attention_decode_with_result_checkpoint(
         model,
@@ -5456,6 +5731,14 @@ fn attention_decode_batch_self_check(
     let batched_last_hidden = batched_run.last_hidden.as_slice();
     let batched_k_cache = bytes_to_f32s(&batched_run.k_cache_bytes);
     let batched_v_cache = bytes_to_f32s(&batched_run.v_cache_bytes);
+    let step0_k_cache = bytes_to_f32s(&step0_run.k_cache_bytes);
+    let step0_v_cache = bytes_to_f32s(&step0_run.v_cache_bytes);
+    let k_row_width = usize::try_from(spec.block.k_head_dim)?
+        .checked_mul(usize::try_from(spec.block.kv_head_count)?)
+        .ok_or("overflow computing attention decode k row width")?;
+    let v_row_width = usize::try_from(spec.block.v_head_dim)?
+        .checked_mul(usize::try_from(spec.block.kv_head_count)?)
+        .ok_or("overflow computing attention decode v row width")?;
 
     let step_run = run_attention_decode_sequence_exact(
         model,
@@ -5464,6 +5747,28 @@ fn attention_decode_batch_self_check(
         &positions,
         AttentionDecodeSequenceInput::TokenIds(token_ids),
     )?;
+    let batched_result_output = batched_run.result_output.as_slice();
+    let step_result_output = step_run.result_output.as_slice();
+    if batched_result_output.len() != step_result_output.len() {
+        return Err(format!(
+            "attention decode batch result_output length mismatch: {} vs {}",
+            batched_result_output.len(),
+            step_result_output.len()
+        )
+        .into());
+    }
+    let hidden_size = step_result_output
+        .len()
+        .checked_div(token_ids.len())
+        .ok_or("attention decode batch hidden width division failed")?;
+    if hidden_size == 0 || hidden_size * token_ids.len() != step_result_output.len() {
+        return Err(format!(
+            "unexpected attention decode batch result_output length {} for {} tokens",
+            step_result_output.len(),
+            token_ids.len()
+        )
+        .into());
+    }
     let step_last_hidden = step_run.last_hidden;
     let step_k_cache = bytes_to_f32s(&step_run.k_cache_bytes);
     let step_v_cache = bytes_to_f32s(&step_run.v_cache_bytes);
@@ -5471,6 +5776,43 @@ fn attention_decode_batch_self_check(
     Ok(AttentionDecodeBatchSelfCheck {
         layer_index,
         hidden_stats: compare_logits(batched_last_hidden, &step_last_hidden),
+        result_output_stats: compare_logits(batched_result_output, step_result_output),
+        first_token_result_output_stats: compare_logits(
+            token_slice(batched_result_output, hidden_size, 0)?,
+            token_slice(step_result_output, hidden_size, 0)?,
+        ),
+        last_token_result_output_stats: compare_logits(
+            token_slice(batched_result_output, hidden_size, token_ids.len() - 1)?,
+            token_slice(step_result_output, hidden_size, token_ids.len() - 1)?,
+        ),
+        step0_k_cache_row_stats: compare_logits(
+            step0_k_cache
+                .get(..k_row_width)
+                .ok_or("step0 k_cache row slice was out of range")?,
+            batched_k_cache
+                .get(..k_row_width)
+                .ok_or("batched k_cache row slice was out of range")?,
+        ),
+        step0_v_cache_row_stats: compare_logits(
+            step0_v_cache
+                .get(..v_row_width)
+                .ok_or("step0 v_cache row slice was out of range")?,
+            batched_v_cache
+                .get(..v_row_width)
+                .ok_or("batched v_cache row slice was out of range")?,
+        ),
+        step0_k_cache_tail_zero_stats: compare_logits(
+            step0_k_cache
+                .get(k_row_width..)
+                .ok_or("step0 k_cache tail slice was out of range")?,
+            &vec![0.0; step0_k_cache.len().saturating_sub(k_row_width)],
+        ),
+        step0_v_cache_tail_zero_stats: compare_logits(
+            step0_v_cache
+                .get(v_row_width..)
+                .ok_or("step0 v_cache tail slice was out of range")?,
+            &vec![0.0; step0_v_cache.len().saturating_sub(v_row_width)],
+        ),
         k_cache_stats: compare_logits(&batched_k_cache, &step_k_cache),
         v_cache_stats: compare_logits(&batched_v_cache, &step_v_cache),
     })
@@ -5655,6 +5997,19 @@ fn attention_from_hidden_batch_self_check(
         input_type: TensorType::F32,
     };
     let layout = qwen35_attention_block_layout(model, layer_index)?;
+    let step0_run = run_attention_decode_with_result_checkpoint(
+        model,
+        &layout,
+        &spec,
+        &positions[..1],
+        1,
+        AttentionDecodeSequenceInput::EmbeddingsF32 {
+            data: &hidden_input[..hidden_size],
+            hidden_size,
+        },
+        None,
+        None,
+    )?;
 
     let full_run = run_attention_decode_with_result_checkpoint(
         model,
@@ -5672,6 +6027,14 @@ fn attention_from_hidden_batch_self_check(
     let full_last_hidden = full_run.last_hidden;
     let full_k_cache = bytes_to_f32s(&full_run.k_cache_bytes);
     let full_v_cache = bytes_to_f32s(&full_run.v_cache_bytes);
+    let step0_k_cache = bytes_to_f32s(&step0_run.k_cache_bytes);
+    let step0_v_cache = bytes_to_f32s(&step0_run.v_cache_bytes);
+    let k_row_width = usize::try_from(spec.block.k_head_dim)?
+        .checked_mul(usize::try_from(spec.block.kv_head_count)?)
+        .ok_or("overflow computing attention hidden k row width")?;
+    let v_row_width = usize::try_from(spec.block.v_head_dim)?
+        .checked_mul(usize::try_from(spec.block.kv_head_count)?)
+        .ok_or("overflow computing attention hidden v row width")?;
 
     let step_run = run_attention_decode_sequence_exact(
         model,
@@ -5683,6 +6046,28 @@ fn attention_from_hidden_batch_self_check(
             hidden_size,
         },
     )?;
+    let full_result_output = full_run.result_output.as_slice();
+    let step_result_output = step_run.result_output.as_slice();
+    if full_result_output.len() != step_result_output.len() {
+        return Err(format!(
+            "attention hidden batch result_output length mismatch: {} vs {}",
+            full_result_output.len(),
+            step_result_output.len()
+        )
+        .into());
+    }
+    let row_width = step_result_output
+        .len()
+        .checked_div(token_ids.len())
+        .ok_or("attention hidden batch hidden width division failed")?;
+    if row_width == 0 || row_width * token_ids.len() != step_result_output.len() {
+        return Err(format!(
+            "unexpected attention hidden batch result_output length {} for {} tokens",
+            step_result_output.len(),
+            token_ids.len()
+        )
+        .into());
+    }
     let step_last_hidden = step_run.last_hidden;
     let step_k_cache = bytes_to_f32s(&step_run.k_cache_bytes);
     let step_v_cache = bytes_to_f32s(&step_run.v_cache_bytes);
@@ -5691,6 +6076,43 @@ fn attention_from_hidden_batch_self_check(
         source_layer_index,
         layer_index,
         hidden_stats: compare_logits(&full_last_hidden, &step_last_hidden),
+        result_output_stats: compare_logits(full_result_output, step_result_output),
+        first_token_result_output_stats: compare_logits(
+            token_slice(full_result_output, row_width, 0)?,
+            token_slice(step_result_output, row_width, 0)?,
+        ),
+        last_token_result_output_stats: compare_logits(
+            token_slice(full_result_output, row_width, token_ids.len() - 1)?,
+            token_slice(step_result_output, row_width, token_ids.len() - 1)?,
+        ),
+        step0_k_cache_row_stats: compare_logits(
+            step0_k_cache
+                .get(..k_row_width)
+                .ok_or("attention hidden step0 k_cache row slice was out of range")?,
+            full_k_cache
+                .get(..k_row_width)
+                .ok_or("attention hidden full k_cache row slice was out of range")?,
+        ),
+        step0_v_cache_row_stats: compare_logits(
+            step0_v_cache
+                .get(..v_row_width)
+                .ok_or("attention hidden step0 v_cache row slice was out of range")?,
+            full_v_cache
+                .get(..v_row_width)
+                .ok_or("attention hidden full v_cache row slice was out of range")?,
+        ),
+        step0_k_cache_tail_zero_stats: compare_logits(
+            step0_k_cache
+                .get(k_row_width..)
+                .ok_or("attention hidden step0 k_cache tail slice was out of range")?,
+            &vec![0.0; step0_k_cache.len().saturating_sub(k_row_width)],
+        ),
+        step0_v_cache_tail_zero_stats: compare_logits(
+            step0_v_cache
+                .get(v_row_width..)
+                .ok_or("attention hidden step0 v_cache tail slice was out of range")?,
+            &vec![0.0; step0_v_cache.len().saturating_sub(v_row_width)],
+        ),
         k_cache_stats: compare_logits(&full_k_cache, &step_k_cache),
         v_cache_stats: compare_logits(&full_v_cache, &step_v_cache),
     })
@@ -5787,6 +6209,13 @@ fn attention_from_hidden_first_step_capacity_check(
         source_layer_index,
         layer_index,
         hidden_stats: compare_logits(&wide_run.hidden, &small_run.hidden),
+        result_output_stats: compare_logits(&wide_run.hidden, &small_run.hidden),
+        first_token_result_output_stats: compare_logits(&wide_run.hidden, &small_run.hidden),
+        last_token_result_output_stats: compare_logits(&wide_run.hidden, &small_run.hidden),
+        step0_k_cache_row_stats: compare_logits(&wide_k_cache, &small_k_cache),
+        step0_v_cache_row_stats: compare_logits(&wide_v_cache, &small_v_cache),
+        step0_k_cache_tail_zero_stats: compare_logits(&wide_k_cache, &small_k_cache),
+        step0_v_cache_tail_zero_stats: compare_logits(&wide_v_cache, &small_v_cache),
         k_cache_stats: compare_logits(&wide_k_cache, &small_k_cache),
         v_cache_stats: compare_logits(&wide_v_cache, &small_v_cache),
     })
@@ -7042,6 +7471,511 @@ fn attention_cache_tensor_check(
     })
 }
 
+fn attention_decode_stepwise_tensor_check(
+    model: &LlamaModel,
+    token_ids: &[i32],
+) -> Result<AttentionDecodeStepwiseTensorCheck, Box<dyn std::error::Error>> {
+    let (layer_index, block_spec, layout, decode_spec) = match &model.architecture {
+        LlamaArchitecture::Qwen35 => {
+            let (layer_index, block_spec) = qwen35_first_attention_block_spec(model)?;
+            let layout = qwen35_attention_block_layout(model, layer_index)?;
+            let decode_spec = qwen35_attention_decode_spec(
+                model,
+                layer_index,
+                u32::try_from(token_ids.len())?,
+                1,
+                TensorType::F32,
+                TensorType::F32,
+            )?;
+            (layer_index, block_spec, layout, decode_spec)
+        }
+        LlamaArchitecture::Qwen35Moe => {
+            let (layer_index, block_spec) = qwen35moe_first_attention_block_spec(model)?;
+            let layout = qwen35moe_attention_block_layout(model, layer_index)?;
+            let decode_spec = qwen35moe_attention_decode_spec(
+                model,
+                layer_index,
+                u32::try_from(token_ids.len())?,
+                1,
+                TensorType::F32,
+                TensorType::F32,
+            )?;
+            (layer_index, block_spec, layout, decode_spec)
+        }
+        other => {
+            return Err(format!(
+                "attention decode stepwise tensor check is not implemented for architecture {}",
+                other.name()
+            )
+            .into())
+        }
+    };
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let rope_positions = block_spec
+        .rope
+        .as_ref()
+        .map(|rope| encode_rope_positions(rope, &positions, token_ids.len()))
+        .transpose()?;
+
+    let mut full_loaded =
+        layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
+    let full_runtime = MetalRuntime::new()?;
+    let full_features = full_runtime.features();
+    let (mut full_block, _) = prepare_attention_block_graph(
+        &mut full_loaded.ctx,
+        &full_loaded.tensor_ids,
+        &block_spec,
+        token_ids.len(),
+        full_features,
+    )?;
+    let full_q_proj_id =
+        add_contiguous_checkpoint_by_name(&mut full_loaded.ctx, "attn.q_proj", "attn.q_proj_ck")?;
+    let full_q_pre_id = add_contiguous_checkpoint_by_name(
+        &mut full_loaded.ctx,
+        "attn.q_pre_store",
+        "attn.q_pre_ck",
+    )?;
+    let full_q_norm_id = add_contiguous_checkpoint_by_name(
+        &mut full_loaded.ctx,
+        "attn.q_norm_store",
+        "attn.q_norm_ck",
+    )?;
+    let full_k_norm_id = add_contiguous_checkpoint_by_name(
+        &mut full_loaded.ctx,
+        "attn.k_norm_store",
+        "attn.k_norm_ck",
+    )?;
+    let full_q_id =
+        add_contiguous_checkpoint_by_name(&mut full_loaded.ctx, "attn.q_store", "attn.q_ck")?;
+    let full_k_id =
+        add_contiguous_checkpoint_by_name(&mut full_loaded.ctx, "attn.k_store", "attn.k_ck")?;
+    let full_v_id =
+        add_contiguous_checkpoint_by_name(&mut full_loaded.ctx, "attn.v_store", "attn.v_ck")?;
+    let full_attn_id = add_contiguous_checkpoint_by_name(
+        &mut full_loaded.ctx,
+        "attn.attn_flat",
+        "attn.attn_ck",
+    )?;
+    let full_output_proj_id = add_contiguous_checkpoint_by_name(
+        &mut full_loaded.ctx,
+        "attn.output_proj",
+        "attn.output_proj_ck",
+    )?;
+    let full_result_output_id = add_contiguous_checkpoint_by_any_name(
+        &mut full_loaded.ctx,
+        &["attn.output_residual", "attn.output_proj"],
+        "attn.result_output_ck",
+    )?;
+    for tensor_id in [
+        full_q_proj_id,
+        full_q_pre_id,
+        full_q_norm_id,
+        full_k_norm_id,
+        full_q_id,
+        full_k_id,
+        full_v_id,
+        full_attn_id,
+        full_output_proj_id,
+        full_result_output_id,
+    ] {
+        full_block
+            .graph
+            .build_forward_expand(&full_loaded.ctx, tensor_id)?;
+    }
+    let full_prepared = prepare_graph(&full_loaded.ctx, &full_block.graph, full_features)?;
+    let full_session = MetalGraphSession::from_runtime(
+        full_runtime,
+        &full_loaded.ctx,
+        &full_prepared,
+        BufferStorageMode::Shared,
+        BufferStorageMode::Shared,
+    )?;
+    let full_token_bytes = i32s_to_bytes(token_ids);
+    let full_pos_bytes = rope_positions.as_deref().map(i32s_to_bytes);
+    let full_mask_bytes = full_block
+        .input_mask
+        .map(|input_mask| {
+            causal_mask_bytes_for_tensor(&full_loaded.ctx, input_mask, token_ids.len())
+        })
+        .transpose()?;
+    let mut full_writes = vec![MetalGraphTensorWrite {
+        tensor_id: full_block.input_primary,
+        bytes: &full_token_bytes,
+    }];
+    if let Some(input_positions) = full_block.input_positions {
+        full_writes.push(MetalGraphTensorWrite {
+            tensor_id: input_positions,
+            bytes: full_pos_bytes
+                .as_deref()
+                .ok_or("missing full attention rope positions")?,
+        });
+    }
+    if let Some(input_mask) = full_block.input_mask {
+        full_writes.push(MetalGraphTensorWrite {
+            tensor_id: input_mask,
+            bytes: full_mask_bytes
+                .as_deref()
+                .ok_or("missing full attention mask")?,
+        });
+    }
+    let full_execution = full_session.execute(
+        &full_loaded.ctx,
+        &full_writes,
+        &[
+            full_q_proj_id,
+            full_q_pre_id,
+            full_q_norm_id,
+            full_k_norm_id,
+            full_q_id,
+            full_k_id,
+            full_v_id,
+            full_attn_id,
+            full_output_proj_id,
+            full_result_output_id,
+        ],
+    )?;
+    let full_q_proj = bytes_to_f32s(
+        full_execution
+            .outputs
+            .get(&full_q_proj_id)
+            .ok_or("missing full q_proj output")?,
+    );
+    let full_q_pre = bytes_to_f32s(
+        full_execution
+            .outputs
+            .get(&full_q_pre_id)
+            .ok_or("missing full q_pre output")?,
+    );
+    let full_q_norm = bytes_to_f32s(
+        full_execution
+            .outputs
+            .get(&full_q_norm_id)
+            .ok_or("missing full q_norm output")?,
+    );
+    let full_k_norm = bytes_to_f32s(
+        full_execution
+            .outputs
+            .get(&full_k_norm_id)
+            .ok_or("missing full k_norm output")?,
+    );
+    let full_q = bytes_to_f32s(
+        full_execution
+            .outputs
+            .get(&full_q_id)
+            .ok_or("missing full q output")?,
+    );
+    let full_k = bytes_to_f32s(
+        full_execution
+            .outputs
+            .get(&full_k_id)
+            .ok_or("missing full k output")?,
+    );
+    let full_v = bytes_to_f32s(
+        full_execution
+            .outputs
+            .get(&full_v_id)
+            .ok_or("missing full v output")?,
+    );
+    let full_attn = bytes_to_f32s(
+        full_execution
+            .outputs
+            .get(&full_attn_id)
+            .ok_or("missing full attn output")?,
+    );
+    let full_output_proj = bytes_to_f32s(
+        full_execution
+            .outputs
+            .get(&full_output_proj_id)
+            .ok_or("missing full output_proj output")?,
+    );
+    let full_result_output = bytes_to_f32s(
+        full_execution
+            .outputs
+            .get(&full_result_output_id)
+            .ok_or("missing full result_output output")?,
+    );
+
+    let q_proj_row_width = full_q_proj.len() / token_ids.len();
+    let q_pre_row_width = full_q_pre.len() / token_ids.len();
+    let q_norm_row_width = full_q_norm.len() / token_ids.len();
+    let k_norm_row_width = full_k_norm.len() / token_ids.len();
+    let q_row_width = full_q.len() / token_ids.len();
+    let k_row_width = full_k.len() / token_ids.len();
+    let v_row_width = full_v.len() / token_ids.len();
+    let attn_row_width = full_attn.len() / token_ids.len();
+    let output_proj_row_width = full_output_proj.len() / token_ids.len();
+    let result_output_row_width = full_result_output.len() / token_ids.len();
+    let stable_key_count = usize::try_from(decode_spec.cache.max_context)?;
+
+    let step0_run = run_attention_decode_with_result_checkpoint(
+        model,
+        &layout,
+        &decode_spec,
+        &positions[..1],
+        stable_key_count,
+        AttentionDecodeSequenceInput::TokenIds(&token_ids[..1]),
+        None,
+        None,
+    )?;
+
+    let mut decode_loaded =
+        layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
+    let decode_runtime = MetalRuntime::new()?;
+    let decode_features = decode_runtime.features();
+    let decode_key_count = stable_key_count;
+    let (mut decode_graph, _) = prepare_attention_decode_graph_with_key_count(
+        &mut decode_loaded.ctx,
+        &decode_loaded.tensor_ids,
+        &decode_spec,
+        1,
+        decode_key_count,
+        decode_features,
+    )?;
+    decode_loaded
+        .ctx
+        .write_tensor_data(decode_graph.k_cache, &step0_run.k_cache_bytes)?;
+    decode_loaded
+        .ctx
+        .write_tensor_data(decode_graph.v_cache, &step0_run.v_cache_bytes)?;
+
+    let decode_rope_positions = decode_spec
+        .block
+        .rope
+        .as_ref()
+        .map(|rope| encode_rope_positions(rope, &[positions[1]], 1))
+        .transpose()?;
+    let decode_q_proj_id = add_contiguous_checkpoint_by_name(
+        &mut decode_loaded.ctx,
+        "attn_decode.q_proj",
+        "attn_decode.stepwise.q_proj_ck",
+    )?;
+    let decode_q_pre_id = add_contiguous_checkpoint_by_name(
+        &mut decode_loaded.ctx,
+        "attn_decode.q_pre_store",
+        "attn_decode.stepwise.q_pre_ck",
+    )?;
+    let decode_q_norm_id = add_contiguous_checkpoint_by_name(
+        &mut decode_loaded.ctx,
+        "attn_decode.q_norm_store",
+        "attn_decode.stepwise.q_norm_ck",
+    )?;
+    let decode_k_norm_id = add_contiguous_checkpoint_by_name(
+        &mut decode_loaded.ctx,
+        "attn_decode.k_norm_store",
+        "attn_decode.stepwise.k_norm_ck",
+    )?;
+    let decode_q_id = add_contiguous_checkpoint_by_name(
+        &mut decode_loaded.ctx,
+        "attn_decode.q_store",
+        "attn_decode.stepwise.q_ck",
+    )?;
+    let decode_k_id = add_contiguous_checkpoint_by_name(
+        &mut decode_loaded.ctx,
+        "attn_decode.k_store",
+        "attn_decode.stepwise.k_ck",
+    )?;
+    let decode_v_id = add_contiguous_checkpoint_by_name(
+        &mut decode_loaded.ctx,
+        "attn_decode.v_store",
+        "attn_decode.stepwise.v_ck",
+    )?;
+    let decode_attn_id = add_contiguous_checkpoint_by_name(
+        &mut decode_loaded.ctx,
+        "attn_decode.attn_flat",
+        "attn_decode.stepwise.attn_ck",
+    )?;
+    let decode_output_proj_id = add_contiguous_checkpoint_by_name(
+        &mut decode_loaded.ctx,
+        "attn_decode.output_proj",
+        "attn_decode.stepwise.output_proj_ck",
+    )?;
+    let decode_result_output_id = add_contiguous_checkpoint_by_any_name(
+        &mut decode_loaded.ctx,
+        &["attn_decode.output_residual", "attn_decode.output_proj"],
+        "attn_decode.stepwise.result_output_ck",
+    )?;
+    for tensor_id in [
+        decode_q_proj_id,
+        decode_q_pre_id,
+        decode_q_norm_id,
+        decode_k_norm_id,
+        decode_q_id,
+        decode_k_id,
+        decode_v_id,
+        decode_graph.k_cache,
+        decode_graph.v_cache,
+        decode_attn_id,
+        decode_output_proj_id,
+        decode_result_output_id,
+    ] {
+        decode_graph
+            .graph
+            .build_forward_expand(&decode_loaded.ctx, tensor_id)?;
+    }
+    let decode_prepared = prepare_graph(&decode_loaded.ctx, &decode_graph.graph, decode_features)?;
+    let decode_session = MetalGraphSession::from_runtime(
+        decode_runtime,
+        &decode_loaded.ctx,
+        &decode_prepared,
+        BufferStorageMode::Shared,
+        BufferStorageMode::Shared,
+    )?;
+    let decode_token_bytes = i32s_to_bytes(&[token_ids[1]]);
+    let decode_pos_bytes = i32s_to_bytes(&[positions[1]]);
+    let decode_rope_bytes = decode_rope_positions.as_deref().map(i32s_to_bytes);
+    let decode_mask_bytes = decode_graph
+        .input_mask
+        .map(|input_mask| {
+            position_attention_mask_bytes_for_tensor(
+                &decode_loaded.ctx,
+                input_mask,
+                decode_key_count,
+                &[positions[1]],
+            )
+        })
+        .transpose()?;
+    let mut decode_writes = vec![
+        MetalGraphTensorWrite {
+            tensor_id: decode_graph.input_primary,
+            bytes: &decode_token_bytes,
+        },
+        MetalGraphTensorWrite {
+            tensor_id: decode_graph.input_write_indices,
+            bytes: &decode_pos_bytes,
+        },
+    ];
+    if let Some(input_mask) = decode_graph.input_mask {
+        decode_writes.push(MetalGraphTensorWrite {
+            tensor_id: input_mask,
+            bytes: decode_mask_bytes
+                .as_deref()
+                .ok_or("missing stepwise decode attention mask")?,
+        });
+    }
+    if let Some(input_rope_positions) = decode_graph.input_rope_positions {
+        decode_writes.push(MetalGraphTensorWrite {
+            tensor_id: input_rope_positions,
+            bytes: decode_rope_bytes
+                .as_deref()
+                .ok_or("missing stepwise decode rope positions")?,
+        });
+    }
+    let decode_execution = decode_session.execute(
+        &decode_loaded.ctx,
+        &decode_writes,
+        &[
+            decode_q_proj_id,
+            decode_q_pre_id,
+            decode_q_norm_id,
+            decode_k_norm_id,
+            decode_q_id,
+            decode_k_id,
+            decode_v_id,
+            decode_graph.k_cache,
+            decode_graph.v_cache,
+            decode_attn_id,
+            decode_output_proj_id,
+            decode_result_output_id,
+        ],
+    )?;
+    let decode_q_proj = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_q_proj_id)
+            .ok_or("missing stepwise decode q_proj output")?,
+    );
+    let decode_q_pre = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_q_pre_id)
+            .ok_or("missing stepwise decode q_pre output")?,
+    );
+    let decode_q_norm = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_q_norm_id)
+            .ok_or("missing stepwise decode q_norm output")?,
+    );
+    let decode_k_norm = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_k_norm_id)
+            .ok_or("missing stepwise decode k_norm output")?,
+    );
+    let decode_q = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_q_id)
+            .ok_or("missing stepwise decode q output")?,
+    );
+    let decode_k = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_k_id)
+            .ok_or("missing stepwise decode k output")?,
+    );
+    let decode_v = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_v_id)
+            .ok_or("missing stepwise decode v output")?,
+    );
+    let decode_k_cache = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_graph.k_cache)
+            .ok_or("missing stepwise decode k_cache output")?,
+    );
+    let decode_v_cache = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_graph.v_cache)
+            .ok_or("missing stepwise decode v_cache output")?,
+    );
+    let decode_attn = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_attn_id)
+            .ok_or("missing stepwise decode attn output")?,
+    );
+    let decode_output_proj = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_output_proj_id)
+            .ok_or("missing stepwise decode output_proj output")?,
+    );
+    let decode_result_output = bytes_to_f32s(
+        decode_execution
+            .outputs
+            .get(&decode_result_output_id)
+            .ok_or("missing stepwise decode result_output output")?,
+    );
+
+    Ok(AttentionDecodeStepwiseTensorCheck {
+        layer_index,
+        q_proj_stats: compare_logits(&decode_q_proj, &full_q_proj[q_proj_row_width..]),
+        q_pre_stats: compare_logits(&decode_q_pre, &full_q_pre[q_pre_row_width..]),
+        q_norm_stats: compare_logits(&decode_q_norm, &full_q_norm[q_norm_row_width..]),
+        k_norm_stats: compare_logits(&decode_k_norm, &full_k_norm[k_norm_row_width..]),
+        q_stats: compare_logits(&decode_q, &full_q[q_row_width..]),
+        k_store_stats: compare_logits(&decode_k, &full_k[k_row_width..]),
+        v_store_stats: compare_logits(&decode_v, &full_v[v_row_width..]),
+        k_cache_stats: compare_logits(&decode_k_cache[..full_k.len()], &full_k),
+        v_cache_stats: compare_logits(&decode_v_cache[..full_v.len()], &full_v),
+        attn_stats: compare_logits(&decode_attn, &full_attn[attn_row_width..]),
+        output_proj_stats: compare_logits(
+            &decode_output_proj,
+            &full_output_proj[output_proj_row_width..],
+        ),
+        result_output_stats: compare_logits(
+            &decode_result_output,
+            &full_result_output[result_output_row_width..],
+        ),
+    })
+}
+
 fn attention_decode_batched_tensor_check(
     model: &LlamaModel,
     token_ids: &[i32],
@@ -7882,6 +8816,25 @@ fn last_token_slice(
         .checked_sub(hidden_size)
         .ok_or("value buffer shorter than hidden size")?;
     Ok(&values[start..])
+}
+
+fn token_slice<'a>(
+    values: &'a [f32],
+    hidden_size: usize,
+    token_index: usize,
+) -> Result<&'a [f32], Box<dyn std::error::Error>> {
+    if hidden_size == 0 {
+        return Err("hidden_size was zero".into());
+    }
+    let start = token_index
+        .checked_mul(hidden_size)
+        .ok_or("token slice start overflow")?;
+    let end = start
+        .checked_add(hidden_size)
+        .ok_or("token slice end overflow")?;
+    values
+        .get(start..end)
+        .ok_or_else(|| "token slice was out of range".into())
 }
 
 fn output_last_token_slice(

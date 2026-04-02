@@ -729,8 +729,11 @@ impl RapierScene {
     ) {
         let body = self.spawn_dynamic_body(pose);
         let query_radius = half_extents.length().max(0.0005);
-        let depth_query_filter_key = matches!(depth_query_support, XrDepthQuerySupportRig::Body)
-            .then(|| self.allocate_depth_query_filter_key());
+        let depth_query_filter_key = matches!(
+            depth_query_support,
+            XrDepthQuerySupportRig::Body | XrDepthQuerySupportRig::FourWheels
+        )
+        .then(|| self.allocate_depth_query_filter_key());
         let collider_half_extents =
             if matches!(depth_query_support, XrDepthQuerySupportRig::FourWheels) {
                 four_wheel_chassis_collider_half_extents(half_extents)
@@ -761,7 +764,10 @@ impl RapierScene {
             .colliders
             .insert_with_parent(collider_builder, body, &mut self.bodies);
         let depth_query_surface_set = if XR_ENABLE_DEPTH_QUERY_PHYSICS
-            && matches!(depth_query_support, XrDepthQuerySupportRig::Body)
+            && matches!(
+                depth_query_support,
+                XrDepthQuerySupportRig::Body | XrDepthQuerySupportRig::FourWheels
+            )
         {
             Some(
                 self.spawn_depth_query_surface_set(
