@@ -49,6 +49,13 @@ impl Cube {
         )
     }
 
+    pub fn set_color(&mut self, cx: &mut Cx, color: Vec4f) {
+        if self.color != color {
+            self.color = color;
+            self.node.redraw(cx);
+        }
+    }
+
     pub fn node(&self) -> &XrNode {
         &self.node
     }

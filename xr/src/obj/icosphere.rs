@@ -222,6 +222,14 @@ impl IcoSphere {
     pub fn node(&self) -> &XrNode {
         &self.node
     }
+
+    pub fn set_pos(&mut self, cx: &mut Cx, pos: Vec3f) {
+        self.node.set_pos(cx, pos);
+    }
+
+    pub fn set_rot(&mut self, cx: &mut Cx, rot: Vec3f) {
+        self.node.set_rot(cx, rot);
+    }
 }
 
 impl ScriptHook for IcoSphere {

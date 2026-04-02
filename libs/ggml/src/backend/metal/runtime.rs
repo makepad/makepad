@@ -80,6 +80,7 @@ mod imp {
         pub max_threads_per_threadgroup: u64,
     }
 
+    #[derive(Clone)]
     pub struct MetalRuntime {
         info: BackendInfo,
         features: MetalDeviceFeatures,
@@ -204,6 +205,7 @@ mod imp {
     use std::collections::HashMap;
     use std::ffi::{c_char, c_void, CStr};
     use std::ptr::NonNull;
+    use std::rc::Rc;
 
     pub type MetalResult<T> = Result<T, String>;
 
@@ -495,8 +497,9 @@ mod imp {
         last_command_buffer: Option<StrongId>,
     }
 
+    #[derive(Clone)]
     pub struct MetalRuntime {
-        ctx: RefCell<MetalContext>,
+        ctx: Rc<RefCell<MetalContext>>,
         info: BackendInfo,
         features: MetalDeviceFeatures,
     }
@@ -554,14 +557,14 @@ mod imp {
             };
 
             Ok(Self {
-                ctx: RefCell::new(MetalContext {
+                ctx: Rc::new(RefCell::new(MetalContext {
                     device,
                     command_queue,
                     library,
                     pipeline_cache: HashMap::new(),
                     active_command_buffer: None,
                     last_command_buffer: None,
-                }),
+                })),
                 info,
                 features,
             })

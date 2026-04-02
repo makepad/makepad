@@ -406,8 +406,11 @@ impl XrSyncAnchorRuntime {
                     BoxSyncMotionDirection::Falling
                 };
                 self.detector.direction = Some(next_direction);
-                self.detector.extreme_sample =
-                    Some(Self::more_extreme_sample(previous_sample, sample, next_direction));
+                self.detector.extreme_sample = Some(Self::more_extreme_sample(
+                    previous_sample,
+                    sample,
+                    next_direction,
+                ));
                 self.detector.previous_sample = Some(sample);
                 None
             }
@@ -599,6 +602,18 @@ impl XrRoot {
         self.env.apply_body_impulse(cx, impulse);
     }
 
+    pub fn apply_body_wrench(&mut self, cx: &mut Cx, wrench: XrBodyWrench) {
+        self.env.apply_body_wrench(cx, wrench);
+    }
+
+    pub fn apply_body_drive(&mut self, cx: &mut Cx, drive: XrBodyDrive) {
+        self.env.apply_body_drive(cx, drive);
+    }
+
+    pub fn apply_car_control(&mut self, cx: &mut Cx, control: XrCarControl) {
+        self.env.apply_car_control(cx, control);
+    }
+
     pub fn set_content_pose(&mut self, cx: &mut Cx, pose: Pose) {
         self.apply_content_pose(cx, pose);
     }
@@ -626,6 +641,12 @@ impl XrRoot {
         self.env.set_depth_query_hits_visible(visible);
         cx.redraw_all();
         visible
+    }
+
+    fn set_depth_mesh_focus_cube_enabled(&mut self, cx: &mut Cx, enabled: bool) -> bool {
+        self.env.set_depth_mesh_focus_cube_enabled(enabled);
+        cx.redraw_all();
+        enabled
     }
 
     fn set_depth_voxel_size(&mut self, cx: &mut Cx, voxel_size_meters: f32) -> f32 {
@@ -932,16 +953,30 @@ impl XrRoot {
         self.env.depth_query_hits_visible()
     }
 
+    pub fn depth_mesh_focus_cube_enabled(&self) -> bool {
+        self.env.depth_mesh_focus_cube_enabled()
+    }
+
     pub fn toggle_depth_mesh_visible(&mut self, cx: &mut Cx) -> bool {
         let visible = self.env.toggle_depth_mesh_visible();
         cx.redraw_all();
         visible
     }
 
+    pub fn toggle_depth_mesh_focus_cube(&mut self, cx: &mut Cx) -> bool {
+        let enabled = self.env.toggle_depth_mesh_focus_cube();
+        cx.redraw_all();
+        enabled
+    }
+
     pub fn toggle_depth_query_hits_visible(&mut self, cx: &mut Cx) -> bool {
         let visible = self.env.toggle_depth_query_hits_visible();
         cx.redraw_all();
         visible
+    }
+
+    pub fn set_depth_mesh_focus_point(&mut self, point: Option<Vec3f>) {
+        self.env.set_depth_mesh_focus_point(point);
     }
 
     pub fn physics_compute_ms(&self) -> f64 {
@@ -982,6 +1017,10 @@ impl XrRoot {
 
     pub fn runtime_bodies(&self) -> Rc<HashMap<WidgetUid, XrRuntimeBodyState>> {
         self.env.runtime_bodies()
+    }
+
+    pub fn runtime_contacts(&self) -> Rc<Vec<(WidgetUid, WidgetUid)>> {
+        self.env.runtime_contacts()
     }
 
     pub fn frame_cpu_ms(&self) -> f64 {
@@ -1097,6 +1136,32 @@ impl Widget for XrRoot {
         }
         if method == live_id!(depth_mesh_visible) {
             return ScriptAsyncResult::Return(ScriptValue::from_bool(self.depth_mesh_visible()));
+        }
+        if method == live_id!(set_depth_mesh_focus_cube) {
+            let mut enabled = self.depth_mesh_focus_cube_enabled();
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                enabled = vm
+                    .bx
+                    .heap
+                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+            }
+            vm.with_cx_mut(|cx| {
+                enabled = self.set_depth_mesh_focus_cube_enabled(cx, enabled);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(enabled));
+        }
+        if method == live_id!(toggle_depth_mesh_focus_cube) {
+            let mut enabled = self.depth_mesh_focus_cube_enabled();
+            vm.with_cx_mut(|cx| {
+                enabled = self.toggle_depth_mesh_focus_cube(cx);
+            });
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(enabled));
+        }
+        if method == live_id!(depth_mesh_focus_cube_enabled) {
+            return ScriptAsyncResult::Return(ScriptValue::from_bool(
+                self.depth_mesh_focus_cube_enabled(),
+            ));
         }
         if method == live_id!(set_depth_query_hits) {
             let mut visible = self.depth_query_hits_visible();

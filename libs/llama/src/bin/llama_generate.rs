@@ -16,6 +16,7 @@ struct Args {
     model_path: PathBuf,
     prompt: String,
     max_new_tokens: usize,
+    prefill_batch_size: usize,
     tokenize_bin: PathBuf,
     upstream_completion_bin: PathBuf,
     no_bos: bool,
@@ -53,6 +54,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &args.model_path,
         LlamaSessionConfig {
             max_context: Some(u32::try_from(max_context)?),
+            prefill_batch_size: args.prefill_batch_size,
             ..LlamaSessionConfig::default()
         },
     )?;
@@ -89,6 +91,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!("stop.reason: {}", stop_reason_name(generation.stop_reason));
+    eprintln!("prefill.batch_size: {}", args.prefill_batch_size);
     eprintln!("prompt.tokens: {}", prompt_token_ids.len());
     eprintln!("generated.tokens: {}", generation.token_ids.len());
     eprintln!("prefill.seconds: {:.3}", prefill_elapsed.as_secs_f64());
@@ -125,6 +128,7 @@ fn parse_args(
     let mut prompt = None;
     let mut prompt_parts = Vec::new();
     let mut max_new_tokens = DEFAULT_MAX_NEW_TOKENS;
+    let mut prefill_batch_size = 1usize;
     let mut tokenize_bin = PathBuf::from(DEFAULT_TOKENIZE_BIN);
     let mut upstream_completion_bin = PathBuf::from(DEFAULT_UPSTREAM_COMPLETION_BIN);
     let mut no_bos = false;
@@ -141,6 +145,10 @@ fn parse_args(
             "--max-new-tokens" => {
                 let value = args.next().ok_or("--max-new-tokens requires a value")?;
                 max_new_tokens = value.to_string_lossy().parse()?;
+            }
+            "--prefill-batch-size" => {
+                let value = args.next().ok_or("--prefill-batch-size requires a value")?;
+                prefill_batch_size = value.to_string_lossy().parse()?;
             }
             "--prompt" => {
                 let value = args.next().ok_or("--prompt requires a value")?;
@@ -190,6 +198,7 @@ fn parse_args(
         model_path,
         prompt,
         max_new_tokens,
+        prefill_batch_size,
         tokenize_bin,
         upstream_completion_bin,
         no_bos,
@@ -201,7 +210,7 @@ fn parse_args(
 
 fn print_usage() {
     eprintln!(
-        "usage: llama-generate <model.gguf> [--max-new-tokens N] [--tokenize-bin PATH] [--upstream-completion-bin PATH] [--no-bos] [--dump-token-ids] [--no-stream] [--verify-upstream] [--prompt TEXT | prompt words ...]"
+        "usage: llama-generate <model.gguf> [--max-new-tokens N] [--prefill-batch-size N] [--tokenize-bin PATH] [--upstream-completion-bin PATH] [--no-bos] [--dump-token-ids] [--no-stream] [--verify-upstream] [--prompt TEXT | prompt words ...]"
     );
 }
 

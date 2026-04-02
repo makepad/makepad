@@ -3,7 +3,7 @@
 use crate::dynamics::{RigidBody, RigidBodyHandle, RigidBodySet};
 use crate::geometry::{ColliderHandle, ColliderSet, Ray};
 use crate::math::{Real, Vector, VectorExt, rotation_from_angle};
-use crate::pipeline::QueryPipeline;
+use crate::pipeline::QueryFilter;
 use crate::prelude::QueryPipelineMut;
 use crate::utils::{CrossProduct, DotProduct};
 
@@ -325,14 +325,31 @@ impl DynamicRayCastVehicleController {
         wheel.wheel_direction_ws = chassis_transform.rotation * wheel.direction_cs;
         wheel.wheel_axle_ws = chassis_transform.rotation * wheel.axle_cs;
     }
-    fn ray_cast(&mut self, queries: &QueryPipeline, chassis: &RigidBody, wheel_id: usize) {
+    fn ray_cast<F>(
+        &mut self,
+        queries: &QueryPipelineMut,
+        chassis: &RigidBody,
+        wheel_id: usize,
+        wheel_query_filter: &F,
+    ) where
+        F: Fn(usize, ColliderHandle, &crate::geometry::Collider) -> bool,
+    {
         let wheel = &mut self.wheels[wheel_id];
         let raylen = wheel.suspension_rest_length + wheel.radius;
         let rayvector = wheel.wheel_direction_ws * raylen;
         let source = wheel.raycast_info.hard_point_ws;
         wheel.raycast_info.contact_point_ws = source + rayvector;
         let ray = Ray::new(source, rayvector);
-        let hit = queries.cast_ray_and_get_normal(&ray, 1.0, true);
+        let base_filter = queries.filter;
+        let predicate = |handle, collider: &crate::geometry::Collider| {
+            base_filter.test(&*queries.bodies, handle, collider)
+                && wheel_query_filter(wheel_id, handle, collider)
+        };
+        let filter = QueryFilter::new().predicate(&predicate);
+        let hit = queries
+            .as_ref()
+            .with_filter(filter)
+            .cast_ray_and_get_normal(&ray, 1.0, true);
 
         wheel.raycast_info.ground_object = None;
 
@@ -400,6 +417,19 @@ impl DynamicRayCastVehicleController {
 
     /// Updates the vehicle’s velocity based on its suspension, engine force, and brake.
     pub fn update_vehicle(&mut self, dt: Real, queries: QueryPipelineMut) {
+        self.update_vehicle_with_filter(dt, queries, |_, _, _| true);
+    }
+
+    /// Updates the vehicle’s velocity based on its suspension, engine force, and brake,
+    /// with an additional per-wheel collider filter applied to wheel ray casts.
+    pub fn update_vehicle_with_filter<F>(
+        &mut self,
+        dt: Real,
+        queries: QueryPipelineMut,
+        wheel_query_filter: F,
+    ) where
+        F: Fn(usize, ColliderHandle, &crate::geometry::Collider) -> bool,
+    {
         let num_wheels = self.wheels.len();
         let chassis = &queries.bodies[self.chassis];
 
@@ -420,7 +450,7 @@ impl DynamicRayCastVehicleController {
         //
 
         for wheel_id in 0..self.wheels.len() {
-            self.ray_cast(&queries.as_ref(), chassis, wheel_id);
+            self.ray_cast(&queries, chassis, wheel_id, &wheel_query_filter);
         }
 
         let chassis_mass = chassis.mass();

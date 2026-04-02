@@ -1,14 +1,53 @@
 use makepad_widgets;
 
 use makepad_widgets::*;
-use makepad_xr::obj::tank::{tank_drive_impulses, TankDriveConfig};
+use makepad_xr::net::{XrNetPeerId, XrSharedHand, XrSharedObjectMode};
+use makepad_xr::obj::car::{car_drive_command, CarDriveConfig};
+use makepad_xr::obj::cube::Cube;
+use makepad_xr::obj::tank::{tank_stick_axes, TankDriveConfig};
+use makepad_xr::obj::IcoSphere;
 use makepad_xr::scene::*;
+use std::collections::HashSet;
 
 app_main!(App);
 
 const ACTIVITY_POSE_SYNC_INTERVAL_SECONDS: f64 = 0.6;
 const ACTIVITY_POSE_SYNC_POSITION_EPSILON_METERS: f32 = 0.015;
 const ACTIVITY_POSE_SYNC_ROTATION_EPSILON_DEGREES: f32 = 1.5;
+const TANK_TURRET_YAW_SPEED_RADPS: f32 = 1.5;
+const TANK_TURRET_PITCH_SPEED_RADPS: f32 = 4.2;
+const TANK_TURRET_PITCH_MIN_RAD: f32 = -0.35;
+const TANK_TURRET_PITCH_MAX_RAD: f32 = 0.55;
+const TANK_PROJECTILE_RATE_HZ: f32 = 10.0;
+const TANK_PROJECTILE_SPEED_MPS: f32 = 7.5;
+const TANK_PROJECTILE_RADIUS_METERS: f32 = 0.024;
+const TANK_PROJECTILE_MAX_EMITS_PER_UPDATE: usize = 2;
+const TANK_HIT_FLASH_SECONDS: f64 = 0.35;
+const TANK_SPAWN_RING_RADIUS_METERS: f32 = 0.06;
+const TANK_WHEEL_COUNT: usize = 4;
+const TANK_WHEEL_RADIUS_METERS: f32 = 0.066;
+const TANK_WHEEL_LATERAL_OFFSET_METERS: f32 = 0.112;
+const TANK_WHEEL_VERTICAL_OFFSET_METERS: f32 = -(0.045 + TANK_WHEEL_RADIUS_METERS * 0.58);
+const TANK_WHEEL_FRONT_OFFSET_METERS: f32 = 0.140;
+const TANK_WHEEL_BACK_OFFSET_METERS: f32 = -0.140;
+const TANK_BODY_HALF_WIDTH_METERS: f32 = 0.145;
+const TANK_BODY_HALF_HEIGHT_METERS: f32 = 0.045;
+const TANK_BODY_HALF_DEPTH_METERS: f32 = 0.205;
+const TANK_PLATE_TOP_LOCAL_Y_METERS: f32 = -0.02;
+const TANK_FOUR_WHEEL_RADIUS_SCALE: f32 = 1.52;
+const TANK_FOUR_WHEEL_REST_LENGTH_SCALE: f32 = 0.58;
+const TANK_FOUR_WHEEL_RADIUS_MIN_METERS: f32 = 0.024;
+const TANK_FOUR_WHEEL_RADIUS_MAX_METERS: f32 = 0.078;
+const TANK_FOUR_WHEEL_REST_LENGTH_MIN_METERS: f32 = 0.010;
+const TANK_FOUR_WHEEL_REST_LENGTH_MAX_METERS: f32 = 0.040;
+const TANK_SPAWN_SUSPENSION_PRELOAD_WORLD_METERS: f32 = 0.004;
+const TANK_SPAWN_EXTRA_CLEARANCE_WORLD_METERS: f32 = 0.030;
+const TANK_BODY_VISUAL_REST_LIFT_METERS: f32 = 0.0;
+const TANK_BODY_VISUAL_SUSPENSION_RESPONSE: f32 = 0.45;
+const TANK_BODY_VISUAL_LIFT_MIN_METERS: f32 = -0.008;
+const TANK_BODY_VISUAL_LIFT_MAX_METERS: f32 = 0.016;
+const TANK_SCENE_STATUS_TEXT: &str =
+    "Tank mode: right stick drives, left stick aims the turret, triggers fire shells, B resets the tank, and controller grip picks the tank up.";
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -36,6 +75,102 @@ script_mod! {
         corner_radius: 0.026
         roughness: 0.18
         metallic: 0.04
+    }
+
+    let TankSlot = XrNode{
+        body: mod.widgets.XrBodyKind.Dynamic
+        depth_query_support: mod.widgets.XrDepthQuerySupportRig.FourWheels
+        shared_object_policy: mod.widgets.XrSharedObjectPolicy.PooledOnDemand
+        spawn_pool: true
+        physics_size: vec3(0.29, 0.09, 0.41)
+        density: 120.0
+        friction: 1.35
+        restitution: 0.02
+        pos: vec3(-12.0, -12.0, 0.0)
+        rot: vec3(0.0, 0.0, 0.0)
+
+        tank_body_mount := XrNode{
+            body: mod.widgets.XrBodyKind.Disabled
+            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+            pos: vec3(0.0, 0.0, 0.0)
+
+            hull_block := Cube{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                size: vec3(0.28, 0.09, 0.41)
+                corner_radius: 0.03
+                roughness: 0.58
+                metallic: 0.03
+                color: #x6a8337
+            }
+
+            tank_turret_yaw := XrNode{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                pos: vec3(0.0, 0.08, 0.015)
+                turret_block := Cube{
+                    body: mod.widgets.XrBodyKind.Disabled
+                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                    size: vec3(0.12, 0.07, 0.17)
+                    corner_radius: 0.026
+                    roughness: 0.44
+                    metallic: 0.02
+                    color: #x8ca853
+                }
+
+                tank_barrel_pitch := XrNode{
+                    body: mod.widgets.XrBodyKind.Disabled
+                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                    pos: vec3(0.0, 0.0, 0.08)
+                    barrel_block := Cube{
+                        body: mod.widgets.XrBodyKind.Disabled
+                        shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                        pos: vec3(0.0, 0.0, 0.14)
+                        size: vec3(0.025, 0.025, 0.28)
+                        corner_radius: 0.02
+                        roughness: 0.30
+                        metallic: 0.06
+                        color: #x24291c
+                    }
+                }
+            }
+        }
+
+        tank_wheel_0 := IcoSphere{
+            body: mod.widgets.XrBodyKind.Disabled
+            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+            radius: 0.066
+            diffuse: #xc4c7ce
+            color: #x18212b
+            pos: vec3(-0.112, -0.083, 0.140)
+        }
+
+        tank_wheel_1 := IcoSphere{
+            body: mod.widgets.XrBodyKind.Disabled
+            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+            radius: 0.066
+            diffuse: #xc4c7ce
+            color: #x18212b
+            pos: vec3(-0.112, -0.083, -0.140)
+        }
+
+        tank_wheel_2 := IcoSphere{
+            body: mod.widgets.XrBodyKind.Disabled
+            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+            radius: 0.066
+            diffuse: #xc4c7ce
+            color: #x18212b
+            pos: vec3(0.112, -0.083, 0.140)
+        }
+
+        tank_wheel_3 := IcoSphere{
+            body: mod.widgets.XrBodyKind.Disabled
+            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+            radius: 0.066
+            diffuse: #xc4c7ce
+            color: #x18212b
+            pos: vec3(0.112, -0.083, -0.140)
+        }
     }
 
     let XrUiButton = mod.widgets.ButtonFlat{
@@ -312,51 +447,50 @@ script_mod! {
                     scale: vec3(0.62, 0.62, 0.62)
                     on_render: ||{
                         Platform{
-                            pos: vec3(0.05, -0.06, -0.10)
-                            size: vec3(1.60, 0.08, 1.10)
+                            pos: vec3(0.0, -0.06, 0.0)
+                            size: vec3(1.612, 0.08, 1.612)
+                            friction: 1.8
                             color: #x283544
                         }
 
-                        tank_root := XrNode{
-                            body: mod.widgets.XrBodyKind.Dynamic
+                        Cube{
+                            body: mod.widgets.XrBodyKind.Fixed
+                            size: vec3(0.34, 0.05, 0.46)
+                            corner_radius: 0.018
+                            roughness: 0.78
+                            metallic: 0.0
+                            friction: 1.6
+                            color: #x4b5f72
+                            pos: vec3(0.30, 0.01, -0.06)
+                            rot: vec3(0.24, 0.0, 0.0)
+                        }
+
+                        tank_slots := XrNode{
+                            body: mod.widgets.XrBodyKind.Disabled
                             shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
-                            physics_size: vec3(0.58, 0.30, 0.82)
-                            density: 1.7
-                            friction: 1.35
-                            restitution: 0.02
-                            pos: vec3(0.06, 0.08, -0.02)
-                            rot: vec3(0.0, 0.64, 0.0)
-
-                            hull_block := Cube{
-                                body: mod.widgets.XrBodyKind.Disabled
-                                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
-                                size: vec3(0.56, 0.18, 0.82)
-                                corner_radius: 0.03
-                                roughness: 0.58
-                                metallic: 0.03
-                                color: #x6a8337
+                            for index in 0..8 {
+                                TankSlot{
+                                    pos: vec3(-14.0 - index * 0.7, -8.0, 0.0)
+                                }
                             }
+                        }
 
-                            turret_block := Cube{
-                                body: mod.widgets.XrBodyKind.Disabled
-                                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
-                                pos: vec3(0.0, 0.16, -0.03)
-                                size: vec3(0.24, 0.14, 0.34)
-                                corner_radius: 0.026
-                                roughness: 0.44
-                                metallic: 0.02
-                                color: #x8ca853
-                            }
-
-                            barrel_block := Cube{
-                                body: mod.widgets.XrBodyKind.Disabled
-                                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
-                                pos: vec3(0.0, 0.16, -0.47)
-                                size: vec3(0.05, 0.05, 0.56)
-                                corner_radius: 0.02
-                                roughness: 0.30
-                                metallic: 0.06
-                                color: #x24291c
+                        tank_projectiles := XrNode{
+                            body: mod.widgets.XrBodyKind.Disabled
+                            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                            for index in 0..48 {
+                                IcoSphere{
+                                    spawn_pool: true
+                                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.PooledOnDemand
+                                    gravity_scale: 1.0
+                                    density: 0.65
+                                    friction: 0.08
+                                    restitution: 0.01
+                                    radius: 0.024
+                                    diffuse: #xa0a4aa
+                                    color: #xffc857
+                                    pos: vec3(-12.0, -12.0 - index * 0.01, 0.0)
+                                }
                             }
                         }
                     }
@@ -570,9 +704,15 @@ script_mod! {
                             on_press: || ui.root.set_depth_query_hits(!ui.root.depth_query_hits_visible())
                         }
 
+                        tank_depth_mesh_mode_button := XrUiButton{
+                            width: 154
+                            text: "Tank TSDF Mode"
+                            on_press: || ui.root.toggle_depth_mesh_focus_cube()
+                        }
+
                         scene_status := Label{
                             width: Fill
-                            text: "Default scene: tank mode. Right stick up/down drives forward and reverse, right stick left/right turns in tank space. On desktop, a connected gamepad right stick mirrors that input."
+                            text: "Default scene: tank mode. Right stick drives, left stick aims the turret, triggers fire shells, B resets the tank, and controller grip picks the tank up."
                             draw_text.color: #xe8f4ff
                         }
                     }
@@ -766,10 +906,253 @@ pub struct App {
     #[rust]
     tank_drive: TankDriveConfig,
     #[rust]
+    car_drive: CarDriveConfig,
+    #[rust]
+    tank_turret_yaw: f32,
+    #[rust]
+    tank_turret_pitch: f32,
+    #[rust]
+    tank_pool_uids: Vec<WidgetUid>,
+    #[rust]
+    tank_spawn_requested: bool,
+    #[rust]
+    primary_tank_widget_uid: Option<WidgetUid>,
+    #[rust]
+    tank_projectile_pool_uids: Vec<WidgetUid>,
+    #[rust]
+    tank_projectile_cursor: usize,
+    #[rust]
+    tank_projectile_next_emit_at: Option<f64>,
+    #[rust]
+    tank_active_hit_projectiles: HashSet<WidgetUid>,
+    #[rust]
+    tank_hit_flash_until: f64,
+    #[rust]
     last_desktop_tank_drive_at: Option<f64>,
+    #[rust]
+    last_logged_gamepad_count: Option<usize>,
+    #[rust]
+    last_logged_desktop_stick_bucket: Option<(i8, i8)>,
+    #[rust]
+    last_desktop_tank_reset_pressed: bool,
+    #[rust]
+    desktop_tank_drive_armed: bool,
+    #[rust]
+    tank_debug_motion_log_frames_remaining: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DesktopTankInput {
+    left_stick: Vec2f,
+    right_stick: Vec2f,
+    left_trigger: f32,
+    right_trigger: f32,
+    b: f32,
 }
 
 impl App {
+    fn tank_support_world_metrics(&self, cx: &mut Cx) -> (f32, f32) {
+        let scene_scale = self
+            .tank_scene_spawn_basis(cx)
+            .map(|(_, _, scale)| scale)
+            .unwrap_or(vec3f(1.0, 1.0, 1.0));
+        let half_extents = vec3f(
+            TANK_BODY_HALF_WIDTH_METERS * scene_scale.x,
+            TANK_BODY_HALF_HEIGHT_METERS * scene_scale.y,
+            TANK_BODY_HALF_DEPTH_METERS * scene_scale.z,
+        );
+        let support_base = half_extents
+            .x
+            .min(half_extents.y)
+            .min(half_extents.z)
+            .max(0.0005);
+        let radius = (support_base * TANK_FOUR_WHEEL_RADIUS_SCALE)
+            .clamp(TANK_FOUR_WHEEL_RADIUS_MIN_METERS, TANK_FOUR_WHEEL_RADIUS_MAX_METERS);
+        let rest_length = (radius * TANK_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(
+            TANK_FOUR_WHEEL_REST_LENGTH_MIN_METERS,
+            TANK_FOUR_WHEEL_REST_LENGTH_MAX_METERS,
+        );
+        (radius, rest_length)
+    }
+
+    fn tank_spawn_support_clearance_meters(&self, cx: &mut Cx) -> f32 {
+        let scene_scale_y = self
+            .tank_scene_spawn_basis(cx)
+            .map(|(_, _, scale)| scale.y.abs())
+            .filter(|scale| *scale > 1.0e-4)
+            .unwrap_or(1.0);
+        let (support_radius_world, support_rest_world) = self.tank_support_world_metrics(cx);
+        let support_radius_local = support_radius_world / scene_scale_y;
+        let support_rest_local = support_rest_world / scene_scale_y;
+        let preload_local = TANK_SPAWN_SUSPENSION_PRELOAD_WORLD_METERS / scene_scale_y;
+        let extra_clearance_local = TANK_SPAWN_EXTRA_CLEARANCE_WORLD_METERS / scene_scale_y;
+        TANK_PLATE_TOP_LOCAL_Y_METERS
+            + TANK_BODY_HALF_HEIGHT_METERS
+            + support_rest_local
+            + support_radius_local
+            + extra_clearance_local
+            - preload_local
+    }
+
+    fn desktop_tank_input_is_neutral(input: DesktopTankInput) -> bool {
+        input.right_stick.length() <= 0.16
+            && input.left_stick.length() <= 0.16
+            && input.left_trigger <= 0.08
+            && input.right_trigger <= 0.08
+            && input.b <= 0.5
+    }
+
+    fn tank_wheel_widget_ref(
+        &self,
+        cx: &mut Cx,
+        tank_widget: &WidgetRef,
+        index: usize,
+    ) -> WidgetRef {
+        match index {
+            0 => tank_widget.widget(cx, ids!(tank_wheel_0)),
+            1 => tank_widget.widget(cx, ids!(tank_wheel_1)),
+            2 => tank_widget.widget(cx, ids!(tank_wheel_2)),
+            3 => tank_widget.widget(cx, ids!(tank_wheel_3)),
+            _ => WidgetRef::default(),
+        }
+    }
+
+    fn default_tank_wheel_local_pose(index: usize) -> Option<Pose> {
+        let x = if index < 2 {
+            -TANK_WHEEL_LATERAL_OFFSET_METERS
+        } else {
+            TANK_WHEEL_LATERAL_OFFSET_METERS
+        };
+        let z = match index % 2 {
+            0 => TANK_WHEEL_FRONT_OFFSET_METERS,
+            1 => TANK_WHEEL_BACK_OFFSET_METERS,
+            _ => return None,
+        };
+        Some(Pose::new(
+            Quat::default(),
+            vec3f(x, TANK_WHEEL_VERTICAL_OFFSET_METERS, z),
+        ))
+    }
+
+    fn sync_tank_wheel_widgets(
+        &self,
+        cx: &mut Cx,
+        tank_widget: &WidgetRef,
+        tank_body: &XrRuntimeBodyState,
+    ) {
+        for index in 0..TANK_WHEEL_COUNT {
+            let Some(local_pose) = tank_body.linked_support_local_poses[index]
+                .or_else(|| Self::default_tank_wheel_local_pose(index))
+            else {
+                continue;
+            };
+            let position = local_pose.position;
+            if let Some(mut wheel) = self
+                .tank_wheel_widget_ref(cx, tank_widget, index)
+                .borrow_mut::<IcoSphere>()
+            {
+                wheel.set_pos(cx, position);
+                wheel.set_rot(cx, Self::quat_to_rot(local_pose.orientation));
+            }
+        }
+    }
+
+    fn tank_body_visual_lift(tank_body: &XrRuntimeBodyState) -> f32 {
+        let mut wheel_y_sum = 0.0;
+        let mut wheel_count = 0.0;
+        for index in 0..TANK_WHEEL_COUNT {
+            if let Some(local_pose) = tank_body.linked_support_local_poses[index]
+                .or_else(|| Self::default_tank_wheel_local_pose(index))
+            {
+                wheel_y_sum += local_pose.position.y;
+                wheel_count += 1.0;
+            }
+        }
+        let average_wheel_y = if wheel_count > 0.0 {
+            wheel_y_sum / wheel_count
+        } else {
+            TANK_WHEEL_VERTICAL_OFFSET_METERS
+        };
+        (TANK_BODY_VISUAL_REST_LIFT_METERS
+            + (TANK_WHEEL_VERTICAL_OFFSET_METERS - average_wheel_y)
+                * TANK_BODY_VISUAL_SUSPENSION_RESPONSE)
+            .clamp(
+                TANK_BODY_VISUAL_LIFT_MIN_METERS,
+                TANK_BODY_VISUAL_LIFT_MAX_METERS,
+            )
+    }
+
+    fn rotation_quat(rot: Vec3f) -> Quat {
+        let x = Quat::from_axis_angle(vec3f(1.0, 0.0, 0.0), rot.x);
+        let y = Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), rot.y);
+        let z = Quat::from_axis_angle(vec3f(0.0, 0.0, 1.0), rot.z);
+        Quat::multiply(&z, &Quat::multiply(&y, &x))
+    }
+
+    fn quat_to_rot(quat: Quat) -> Vec3f {
+        let sinr_cosp = 2.0 * (quat.w * quat.x + quat.y * quat.z);
+        let cosr_cosp = 1.0 - 2.0 * (quat.x * quat.x + quat.y * quat.y);
+        let roll = sinr_cosp.atan2(cosr_cosp);
+
+        let sinp = (2.0 * (quat.w * quat.y - quat.z * quat.x)).clamp(-1.0, 1.0);
+        let pitch = sinp.asin();
+
+        let siny_cosp = 2.0 * (quat.w * quat.z + quat.x * quat.y);
+        let cosy_cosp = 1.0 - 2.0 * (quat.y * quat.y + quat.z * quat.z);
+        let yaw = siny_cosp.atan2(cosy_cosp);
+        vec3f(roll, pitch, yaw)
+    }
+
+    fn transform_basis_with_node(
+        parent_pos: Vec3f,
+        parent_ori: Quat,
+        parent_scale: Vec3f,
+        node: &XrNode,
+    ) -> (Vec3f, Quat, Vec3f) {
+        let local_pos = vec3f(
+            node.pos().x * parent_scale.x,
+            node.pos().y * parent_scale.y,
+            node.pos().z * parent_scale.z,
+        );
+        let rotated_pos = parent_ori.rotate_vec3(&local_pos);
+        let orientation = Quat::multiply(&Self::rotation_quat(node.rot()), &parent_ori);
+        let scale = vec3f(
+            parent_scale.x * node.scale().x,
+            parent_scale.y * node.scale().y,
+            parent_scale.z * node.scale().z,
+        );
+        (parent_pos + rotated_pos, orientation, scale)
+    }
+
+    fn transform_pose_with_basis(
+        parent_pos: Vec3f,
+        parent_ori: Quat,
+        parent_scale: Vec3f,
+        local_pose: Pose,
+    ) -> Pose {
+        let scaled_pos = vec3f(
+            local_pose.position.x * parent_scale.x,
+            local_pose.position.y * parent_scale.y,
+            local_pose.position.z * parent_scale.z,
+        );
+        Pose::new(
+            Quat::multiply(&local_pose.orientation, &parent_ori),
+            parent_pos + parent_ori.rotate_vec3(&scaled_pos),
+        )
+    }
+
+    fn tank_scene_spawn_basis(&self, cx: &mut Cx) -> Option<(Vec3f, Quat, Vec3f)> {
+        let scene_select = self.ui.widget(cx, ids!(scene_select));
+        let (select_pos, select_ori, select_scale) =
+            xr_widget_with_scene_node(&scene_select, |node| {
+                (node.pos(), Self::rotation_quat(node.rot()), node.scale())
+            })?;
+        let tanks_scene = scene_select.widget(cx, ids!(tanks_scene));
+        xr_widget_with_scene_node(&tanks_scene, |node| {
+            Self::transform_basis_with_node(select_pos, select_ori, select_scale, node)
+        })
+    }
+
     fn poses_match(left: Pose, right: Pose) -> bool {
         let translation_delta = (left.position - right.position).length();
         let rotation_dot = left
@@ -856,7 +1239,11 @@ impl App {
             return;
         }
 
-        let Some(content_pose) = self.ui.borrow::<XrRoot>().and_then(|root| root.content_pose()) else {
+        let Some(content_pose) = self
+            .ui
+            .borrow::<XrRoot>()
+            .and_then(|root| root.content_pose())
+        else {
             return;
         };
         let now = Cx::time_now();
@@ -864,8 +1251,8 @@ impl App {
         let pose_changed = self
             .last_activity_pose_sync
             .is_none_or(|previous| !Self::poses_match(previous, content_pose));
-        let interval_elapsed = now - self.last_activity_pose_sync_at
-            >= ACTIVITY_POSE_SYNC_INTERVAL_SECONDS;
+        let interval_elapsed =
+            now - self.last_activity_pose_sync_at >= ACTIVITY_POSE_SYNC_INTERVAL_SECONDS;
         if !(activity_changed || pose_changed || interval_elapsed) {
             return;
         }
@@ -928,58 +1315,670 @@ impl App {
         }
     }
 
-    fn desktop_gamepad_tank_stick(&mut self, cx: &mut Cx) -> Option<Vec2f> {
-        let mut best_stick = None;
-        let mut best_magnitude = 0.0f32;
+    fn apply_car_control(&mut self, cx: &mut Cx, control: XrCarControl) {
+        if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
+            root.apply_car_control(cx, control);
+        }
+    }
+
+    fn is_tanks_scene_active(&self, cx: &mut Cx) -> bool {
+        self.current_activity(cx) == Some(XrActivityId(live_id!(tanks_scene)))
+    }
+
+    fn stick_log_bucket(stick: Vec2f) -> Option<(i8, i8)> {
+        if stick.length() <= 0.12 {
+            None
+        } else {
+            Some((
+                (stick.x * 10.0).round().clamp(-10.0, 10.0) as i8,
+                (stick.y * 10.0).round().clamp(-10.0, 10.0) as i8,
+            ))
+        }
+    }
+
+    fn collect_spawn_pool_widget_uids(widget: &WidgetRef, pool_uids: &mut Vec<WidgetUid>) {
+        if !widget.visible() {
+            return;
+        }
+        xr_widget_with_scene_node(widget, |node| {
+            if node.spawn_pool() {
+                pool_uids.push(widget.widget_uid());
+            }
+        });
+        xr_widget_children(widget, &mut |_, child| {
+            Self::collect_spawn_pool_widget_uids(&child, pool_uids)
+        });
+    }
+
+    fn find_widget_by_uid(widget: &WidgetRef, target: WidgetUid) -> Option<WidgetRef> {
+        if widget.widget_uid() == target {
+            return Some(widget.clone());
+        }
+        let mut found = None;
+        xr_widget_children(widget, &mut |_, child| {
+            if found.is_none() {
+                found = Self::find_widget_by_uid(&child, target);
+            }
+        });
+        found
+    }
+
+    fn peer_sync_local_peer_id(&self, cx: &mut Cx) -> Option<XrNetPeerId> {
+        self.ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow::<XrPeerSync>()
+            .and_then(|peer_sync| peer_sync.local_peer_id())
+    }
+
+    fn shared_object_authority_for_widget(
+        &self,
+        cx: &mut Cx,
+        widget_uid: WidgetUid,
+    ) -> Option<XrNetPeerId> {
+        self.ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow::<XrPeerSync>()
+            .and_then(|peer_sync| peer_sync.shared_object_authority_for_widget(widget_uid))
+    }
+
+    fn widget_is_local_shared_object(&self, cx: &mut Cx, widget_uid: WidgetUid) -> bool {
+        self.ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow::<XrPeerSync>()
+            .is_some_and(|peer_sync| peer_sync.widget_is_local_shared_object(widget_uid))
+    }
+
+    fn refresh_tank_pool(&mut self, cx: &mut Cx) {
+        self.tank_pool_uids.clear();
+        let tank_slots = self.ui.widget(cx, ids!(tank_slots));
+        if tank_slots.borrow::<XrNode>().is_none() {
+            return;
+        }
+        Self::collect_spawn_pool_widget_uids(&tank_slots, &mut self.tank_pool_uids);
+    }
+
+    fn local_tank_widget_uid(&mut self, cx: &mut Cx) -> Option<WidgetUid> {
+        if self.tank_pool_uids.is_empty() {
+            self.refresh_tank_pool(cx);
+        }
+        if let Some(primary) = self.primary_tank_widget_uid {
+            if self.widget_is_local_shared_object(cx, primary) {
+                return Some(primary);
+            }
+            let has_any_local_shared = self
+                .tank_pool_uids
+                .iter()
+                .copied()
+                .any(|widget_uid| self.widget_is_local_shared_object(cx, widget_uid));
+            if !has_any_local_shared && self.tank_body_state_for_uid(cx, primary).is_some() {
+                return Some(primary);
+            }
+        }
+        self.tank_pool_uids
+            .iter()
+            .copied()
+            .find(|widget_uid| self.widget_is_local_shared_object(cx, *widget_uid))
+    }
+
+    fn tank_body_state_for_uid(
+        &self,
+        _cx: &mut Cx,
+        tank_widget_uid: WidgetUid,
+    ) -> Option<XrRuntimeBodyState> {
+        let runtime_bodies = self
+            .ui
+            .borrow::<XrRoot>()
+            .map(|root| root.runtime_bodies())?;
+        runtime_bodies.get(&tank_widget_uid).cloned()
+    }
+
+    fn local_tank_body_state(&mut self, cx: &mut Cx) -> Option<(WidgetUid, XrRuntimeBodyState)> {
+        let tank_widget_uid = self.local_tank_widget_uid(cx)?;
+        self.tank_body_state_for_uid(cx, tank_widget_uid)
+            .map(|body| (tank_widget_uid, body))
+    }
+
+    fn tank_widget_ref(&mut self, cx: &mut Cx, widget_uid: WidgetUid) -> Option<WidgetRef> {
+        let tank_slots = self.ui.widget(cx, ids!(tank_slots));
+        if tank_slots.borrow::<XrNode>().is_none() {
+            return None;
+        }
+        Self::find_widget_by_uid(&tank_slots, widget_uid)
+    }
+
+    fn emit_local_shared_body_spawn(&mut self, cx: &mut Cx, spawn: XrBodySpawn) -> WidgetUid {
+        let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
+        if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+            if let Some(spawn) = peer_sync.send_local_body_spawn(spawn) {
+                let widget_uid = spawn.widget_uid;
+                self.apply_remote_body_spawn(cx, spawn);
+                return widget_uid;
+            }
+        }
+        let widget_uid = spawn.widget_uid;
+        self.apply_remote_body_spawn(cx, spawn);
+        widget_uid
+    }
+
+    fn emit_local_shared_body_spawn_exact(&mut self, cx: &mut Cx, spawn: XrBodySpawn) -> WidgetUid {
+        let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
+        if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+            if let Some(spawn) = peer_sync.send_local_body_spawn_exact(spawn) {
+                let widget_uid = spawn.widget_uid;
+                self.apply_remote_body_spawn(cx, spawn);
+                return widget_uid;
+            }
+        }
+        let widget_uid = spawn.widget_uid;
+        self.apply_remote_body_spawn(cx, spawn);
+        widget_uid
+    }
+
+    fn tank_spawn_pose(&self, cx: &mut Cx) -> Pose {
+        let support_clearance = self.tank_spawn_support_clearance_meters(cx);
+        let peer_id = self.peer_sync_local_peer_id(cx).unwrap_or_default();
+        let hash = peer_id
+            .0
+            .wrapping_mul(0x9e37_79b9)
+            .wrapping_add(0x7f4a_7c15);
+        let angle = ((hash & 1023) as f32 / 1024.0) * std::f32::consts::TAU;
+        let radius =
+            TANK_SPAWN_RING_RADIUS_METERS + (((hash >> 10) & 63) as f32 / 63.0 - 0.5) * 0.015;
+        let local_pose = Pose::new(
+            Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), angle + std::f32::consts::PI),
+            vec3f(
+                angle.cos() * radius,
+                support_clearance,
+                angle.sin() * radius,
+            ),
+        );
+        if let Some((scene_pos, scene_ori, scene_scale)) = self.tank_scene_spawn_basis(cx) {
+            Self::transform_pose_with_basis(scene_pos, scene_ori, scene_scale, local_pose)
+        } else {
+            local_pose
+        }
+    }
+
+    fn tank_reset_pose_from_controller(&self, cx: &mut Cx, controller: &XrController) -> Pose {
+        let support_clearance = self.tank_spawn_support_clearance_meters(cx);
+        let pose = controller.grip_pose;
+        if !controller.active() || !pose.is_finite() {
+            return self.tank_spawn_pose(cx);
+        }
+        let mut forward = pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, 1.0));
+        forward.y = 0.0;
+        let yaw = if forward.length() > 1.0e-4 {
+            forward = forward.normalize();
+            forward.x.atan2(forward.z)
+        } else {
+            0.0
+        };
+        Pose::new(
+            Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), yaw),
+            pose.position + vec3f(0.0, support_clearance, 0.0),
+        )
+    }
+
+    fn ensure_local_tank_spawned(&mut self, cx: &mut Cx) {
+        if !self.is_tanks_scene_active(cx) {
+            self.tank_active_hit_projectiles.clear();
+            self.tank_spawn_requested = false;
+            self.tank_debug_motion_log_frames_remaining = 0;
+            return;
+        }
+        if let Some((widget_uid, _)) = self.local_tank_body_state(cx) {
+            if self.tank_spawn_requested {
+                crate::log!("tank debug: local tank materialized uid={widget_uid:?}");
+                self.tank_debug_motion_log_frames_remaining = 90;
+            }
+            self.primary_tank_widget_uid = Some(widget_uid);
+            self.tank_spawn_requested = false;
+            return;
+        }
+        let scene_ready = self
+            .ui
+            .borrow::<XrRoot>()
+            .is_some_and(|root| root.physics_scene_body_count() > 0);
+        if !scene_ready || self.tank_spawn_requested {
+            return;
+        }
+        if self.tank_pool_uids.is_empty() {
+            self.refresh_tank_pool(cx);
+        }
+        let Some(widget_uid) = self
+            .primary_tank_widget_uid
+            .or_else(|| self.tank_pool_uids.first().copied())
+        else {
+            return;
+        };
+        let spawn_pose = self.tank_spawn_pose(cx);
+        crate::log!(
+            "tank debug: requesting local tank spawn uid={widget_uid:?} pos=({:.3}, {:.3}, {:.3})",
+            spawn_pose.position.x,
+            spawn_pose.position.y,
+            spawn_pose.position.z
+        );
+        let widget_uid = self.emit_local_shared_body_spawn_exact(
+            cx,
+            XrBodySpawn {
+                widget_uid,
+                shadow: false,
+                mode: XrSharedObjectMode::Dynamic,
+                pose: spawn_pose,
+                linvel: vec3f(0.0, 0.0, 0.0),
+                angvel: vec3f(0.0, 0.0, 0.0),
+            },
+        );
+        self.tank_spawn_requested = true;
+        self.primary_tank_widget_uid = Some(widget_uid);
+    }
+
+    fn sync_tank_depth_mesh_focus(&mut self, cx: &mut Cx) {
+        let focus_point = if self.is_tanks_scene_active(cx) {
+            self.local_tank_body_state(cx)
+                .map(|(_, body)| body.pose.position)
+                .filter(|position| position.is_finite())
+        } else {
+            None
+        };
+        if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
+            root.set_depth_mesh_focus_point(focus_point);
+        }
+    }
+
+    fn reset_local_tank(&mut self, cx: &mut Cx) -> bool {
+        let spawn_pose = self.tank_spawn_pose(cx);
+        self.reset_local_tank_at_pose(cx, spawn_pose)
+    }
+
+    fn reset_local_tank_at_pose(&mut self, cx: &mut Cx, spawn_pose: Pose) -> bool {
+        if !self.is_tanks_scene_active(cx) {
+            return false;
+        }
+        if self.tank_pool_uids.is_empty() {
+            self.refresh_tank_pool(cx);
+        }
+        let Some(widget_uid) = self
+            .local_tank_widget_uid(cx)
+            .or(self.primary_tank_widget_uid)
+            .or_else(|| self.tank_pool_uids.first().copied())
+        else {
+            return false;
+        };
+        self.tank_turret_yaw = 0.0;
+        self.tank_turret_pitch = 0.0;
+        self.tank_projectile_next_emit_at = None;
+        self.tank_active_hit_projectiles.clear();
+        self.tank_hit_flash_until = 0.0;
+        self.tank_debug_motion_log_frames_remaining = 90;
+        let widget_uid = self.emit_local_shared_body_spawn_exact(
+            cx,
+            XrBodySpawn {
+                widget_uid,
+                shadow: false,
+                mode: XrSharedObjectMode::Dynamic,
+                pose: spawn_pose,
+                linvel: vec3f(0.0, 0.0, 0.0),
+                angvel: vec3f(0.0, 0.0, 0.0),
+            },
+        );
+        self.tank_spawn_requested = true;
+        self.primary_tank_widget_uid = Some(widget_uid);
+        cx.redraw_all();
+        true
+    }
+
+    fn refresh_tank_projectile_pool(&mut self, cx: &mut Cx) {
+        self.tank_projectile_pool_uids.clear();
+        let projectile_root = self.ui.widget(cx, ids!(tank_projectiles));
+        if projectile_root.borrow::<XrNode>().is_none() {
+            self.tank_projectile_cursor = 0;
+            return;
+        }
+        Self::collect_spawn_pool_widget_uids(&projectile_root, &mut self.tank_projectile_pool_uids);
+        if self.tank_projectile_pool_uids.is_empty() {
+            self.tank_projectile_cursor = 0;
+        } else {
+            self.tank_projectile_cursor %= self.tank_projectile_pool_uids.len();
+        }
+    }
+
+    fn next_tank_projectile_widget_uid(&mut self, cx: &mut Cx) -> Option<WidgetUid> {
+        if self.tank_projectile_pool_uids.is_empty() {
+            self.refresh_tank_projectile_pool(cx);
+        }
+        let len = self.tank_projectile_pool_uids.len();
+        if len == 0 {
+            return None;
+        }
+        let widget_uid = self.tank_projectile_pool_uids[self.tank_projectile_cursor % len];
+        self.tank_projectile_cursor = (self.tank_projectile_cursor + 1) % len;
+        Some(widget_uid)
+    }
+
+    fn sync_local_tank_widgets(&mut self, cx: &mut Cx, now: f64) {
+        let Some((tank_widget_uid, tank_body)) = self.local_tank_body_state(cx) else {
+            self.ui
+                .widget(cx, ids!(scene_status))
+                .set_text(cx, TANK_SCENE_STATUS_TEXT);
+            return;
+        };
+        let Some(tank_widget) = self.tank_widget_ref(cx, tank_widget_uid) else {
+            return;
+        };
+        if let Some(mut body_mount) = tank_widget
+            .widget(cx, ids!(tank_body_mount))
+            .borrow_mut::<XrNode>()
+        {
+            body_mount.set_pos(
+                cx,
+                vec3f(0.0, Self::tank_body_visual_lift(&tank_body), 0.0),
+            );
+        }
+        if let Some(mut turret) = tank_widget
+            .widget(cx, ids!(tank_turret_yaw))
+            .borrow_mut::<XrNode>()
+        {
+            turret.set_rot(cx, vec3f(0.0, self.tank_turret_yaw, 0.0));
+        }
+        if let Some(mut barrel) = tank_widget
+            .widget(cx, ids!(tank_barrel_pitch))
+            .borrow_mut::<XrNode>()
+        {
+            barrel.set_rot(cx, vec3f(self.tank_turret_pitch, 0.0, 0.0));
+        }
+        if let Some(mut hull) = tank_widget
+            .widget(cx, ids!(hull_block))
+            .borrow_mut::<Cube>()
+        {
+            let color = if now < self.tank_hit_flash_until {
+                vec4f(0.98, 0.36, 0.26, 1.0)
+            } else {
+                vec4f(0.4157, 0.5137, 0.2157, 1.0)
+            };
+            hull.set_color(cx, color);
+        }
+        self.sync_tank_wheel_widgets(cx, &tank_widget, &tank_body);
+        if self.tank_debug_motion_log_frames_remaining > 0 {
+            self.tank_debug_motion_log_frames_remaining -= 1;
+            if self.tank_debug_motion_log_frames_remaining % 6 == 0 {
+                let wheel_summary = tank_body
+                    .linked_support_local_poses
+                    .iter()
+                    .take(TANK_WHEEL_COUNT)
+                    .enumerate()
+                    .map(|(index, pose)| match pose {
+                        Some(pose) => format!(
+                            "{index}:({:.3},{:.3},{:.3})",
+                            pose.position.x, pose.position.y, pose.position.z
+                        ),
+                        None => format!("{index}:(none)"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                crate::log!(
+                    "tank debug: runtime pose=({:.3}, {:.3}, {:.3}) linvel=({:.3}, {:.3}, {:.3}) angvel=({:.3}, {:.3}, {:.3}) sleeping={} wheels={}",
+                    tank_body.pose.position.x,
+                    tank_body.pose.position.y,
+                    tank_body.pose.position.z,
+                    tank_body.linvel.x,
+                    tank_body.linvel.y,
+                    tank_body.linvel.z,
+                    tank_body.angvel.x,
+                    tank_body.angvel.y,
+                    tank_body.angvel.z,
+                    tank_body.sleeping,
+                    wheel_summary,
+                );
+            }
+        }
+        let status = if now < self.tank_hit_flash_until {
+            format!("Tank hit by a remote shell. {TANK_SCENE_STATUS_TEXT}")
+        } else {
+            TANK_SCENE_STATUS_TEXT.to_string()
+        };
+        self.ui.widget(cx, ids!(scene_status)).set_text(cx, &status);
+    }
+
+    fn update_tank_turret_with_controller(
+        &mut self,
+        cx: &mut Cx,
+        controller: &XrController,
+        dt: f32,
+    ) {
+        if self.local_tank_body_state(cx).is_none() {
+            return;
+        }
+        let (pitch_input, yaw_input) = tank_stick_axes(controller.stick, self.tank_drive);
+        let dt = dt.clamp(1.0 / 240.0, 0.1);
+        self.tank_turret_yaw = (self.tank_turret_yaw
+            + yaw_input * TANK_TURRET_YAW_SPEED_RADPS * dt)
+            .rem_euclid(std::f32::consts::TAU);
+        self.tank_turret_pitch = (self.tank_turret_pitch
+            + pitch_input * TANK_TURRET_PITCH_SPEED_RADPS * dt)
+            .clamp(TANK_TURRET_PITCH_MIN_RAD, TANK_TURRET_PITCH_MAX_RAD);
+    }
+
+    fn detect_local_tank_hits(&mut self, cx: &mut Cx, now: f64) {
+        let Some(local_tank_widget_uid) = self.local_tank_widget_uid(cx) else {
+            self.tank_active_hit_projectiles.clear();
+            return;
+        };
+        let Some(local_authority) =
+            self.shared_object_authority_for_widget(cx, local_tank_widget_uid)
+        else {
+            self.tank_active_hit_projectiles.clear();
+            return;
+        };
+        if self.tank_projectile_pool_uids.is_empty() {
+            self.refresh_tank_projectile_pool(cx);
+        }
+        let projectile_pool: HashSet<WidgetUid> =
+            self.tank_projectile_pool_uids.iter().copied().collect();
+        let runtime_contacts = self
+            .ui
+            .borrow::<XrRoot>()
+            .map(|root| root.runtime_contacts());
+        let Some(runtime_contacts) = runtime_contacts else {
+            return;
+        };
+        let mut active_projectiles = HashSet::new();
+        for &(left, right) in runtime_contacts.iter() {
+            let projectile_uid =
+                if left == local_tank_widget_uid && projectile_pool.contains(&right) {
+                    Some(right)
+                } else if right == local_tank_widget_uid && projectile_pool.contains(&left) {
+                    Some(left)
+                } else {
+                    None
+                };
+            let Some(projectile_uid) = projectile_uid else {
+                continue;
+            };
+            let Some(projectile_authority) =
+                self.shared_object_authority_for_widget(cx, projectile_uid)
+            else {
+                continue;
+            };
+            if projectile_authority == local_authority {
+                continue;
+            }
+            if self.tank_active_hit_projectiles.insert(projectile_uid) {
+                self.tank_hit_flash_until = now + TANK_HIT_FLASH_SECONDS;
+                crate::log!(
+                    "tank hit: local authority {:08x} hit by projectile {:016x} from {:08x}",
+                    local_authority.0,
+                    projectile_uid.0,
+                    projectile_authority.0
+                );
+            }
+            active_projectiles.insert(projectile_uid);
+        }
+        self.tank_active_hit_projectiles = active_projectiles;
+    }
+
+    fn emit_tank_projectiles(&mut self, cx: &mut Cx, now: f64, fire_active: bool) {
+        if !fire_active {
+            self.tank_projectile_next_emit_at = None;
+            return;
+        }
+        let Some((_, tank_body)) = self.local_tank_body_state(cx) else {
+            self.tank_projectile_next_emit_at = None;
+            return;
+        };
+
+        let interval = (1.0 / TANK_PROJECTILE_RATE_HZ).clamp(0.01, 10.0) as f64;
+        let tank_orientation = tank_body.pose.orientation;
+        let turret_orientation = Quat::multiply(
+            &Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), self.tank_turret_yaw),
+            &tank_orientation,
+        );
+        let barrel_orientation = Quat::multiply(
+            &Quat::from_axis_angle(vec3f(1.0, 0.0, 0.0), self.tank_turret_pitch),
+            &turret_orientation,
+        );
+        let tank_position = tank_body.pose.position;
+        let tank_scale = tank_body.scale;
+        let scale_local = |offset: Vec3f| {
+            vec3f(
+                offset.x * tank_scale.x,
+                offset.y * tank_scale.y,
+                offset.z * tank_scale.z,
+            )
+        };
+        let turret_mount =
+            tank_position + tank_orientation.rotate_vec3(&scale_local(vec3f(0.0, 0.08, 0.015)));
+        let barrel_pivot =
+            turret_mount + turret_orientation.rotate_vec3(&scale_local(vec3f(0.0, 0.0, 0.08)));
+        let barrel_tip =
+            barrel_pivot + barrel_orientation.rotate_vec3(&scale_local(vec3f(0.0, 0.0, 0.28)));
+        let direction = barrel_orientation
+            .rotate_vec3(&vec3f(0.0, 0.0, 1.0))
+            .normalize();
+        let projectile_radius = TANK_PROJECTILE_RADIUS_METERS
+            * tank_scale.x.min(tank_scale.y).min(tank_scale.z).max(0.0001);
+        let mut next_emit_at = self.tank_projectile_next_emit_at.unwrap_or(now);
+        let mut emitted = 0usize;
+
+        while now >= next_emit_at && emitted < TANK_PROJECTILE_MAX_EMITS_PER_UPDATE {
+            let Some(widget_uid) = self.next_tank_projectile_widget_uid(cx) else {
+                self.tank_projectile_next_emit_at = None;
+                return;
+            };
+            let _ = self.emit_local_shared_body_spawn(
+                cx,
+                XrBodySpawn {
+                    widget_uid,
+                    shadow: false,
+                    mode: XrSharedObjectMode::Dynamic,
+                    pose: Pose::new(
+                        barrel_orientation,
+                        barrel_tip + direction * projectile_radius,
+                    ),
+                    linvel: tank_body.linvel + direction * TANK_PROJECTILE_SPEED_MPS,
+                    angvel: vec3f(0.0, 0.0, 0.0),
+                },
+            );
+            cx.redraw_all();
+            next_emit_at += interval;
+            emitted += 1;
+        }
+
+        self.tank_projectile_next_emit_at = Some(next_emit_at);
+    }
+
+    fn desktop_gamepad_tank_input(&mut self, cx: &mut Cx) -> (usize, Option<DesktopTankInput>) {
+        let mut gamepad_count = 0usize;
+        let mut best_input = None;
+        let mut best_score = 0.0f32;
         for state in cx.game_input_states() {
             let GameInputState::Gamepad(gamepad) = state else {
                 continue;
             };
-            let stick = vec2f(gamepad.right_stick.x as f32, gamepad.right_stick.y as f32);
-            let magnitude = stick.length();
-            if magnitude > best_magnitude {
-                best_stick = Some(stick);
-                best_magnitude = magnitude;
+            gamepad_count += 1;
+            let input = DesktopTankInput {
+                left_stick: vec2f(gamepad.left_stick.x as f32, gamepad.left_stick.y as f32),
+                right_stick: vec2f(gamepad.right_stick.x as f32, gamepad.right_stick.y as f32),
+                left_trigger: gamepad.left_trigger as f32,
+                right_trigger: gamepad.right_trigger as f32,
+                b: gamepad.b as f32,
+            };
+            let score = input.right_stick.length() * 2.0
+                + input.left_stick.length()
+                + input.left_trigger.max(input.right_trigger)
+                + input.b;
+            if score > best_score {
+                best_input = Some(input);
+                best_score = score;
             }
         }
-        best_stick
+        (gamepad_count, best_input)
     }
 
     fn drive_tank_with_controller(
         &mut self,
         cx: &mut Cx,
         controller: &XrController,
-        dt: f32,
-    ) {
-        let tank_widget = self.ui.widget(cx, ids!(tank_root));
-        if tank_widget.borrow::<XrNode>().is_none() {
-            return;
-        }
-        let tank_widget_uid = tank_widget.widget_uid();
-        let runtime_bodies = self.ui.borrow::<XrRoot>().map(|root| root.runtime_bodies());
-        let Some(runtime_bodies) = runtime_bodies else {
-            return;
+    ) -> Option<(bool, bool, bool, bool, Option<XrSharedHand>, Vec3f, Vec3f)> {
+        let Some((tank_widget_uid, body)) = self.local_tank_body_state(cx) else {
+            return None;
         };
-        let Some(body) = runtime_bodies.get(&tank_widget_uid).cloned() else {
-            return;
-        };
-        let impulses = tank_drive_impulses(
+        let control = car_drive_command(
             tank_widget_uid,
-            body.pose,
-            body.linvel,
             body.held_by,
             controller,
-            dt,
-            self.tank_drive,
+            self.car_drive,
         );
-        for impulse in impulses {
-            self.apply_body_impulse(cx, impulse);
+        let forced_dynamic =
+            control.is_some() && body.held_by.is_none() && (!body.dynamic_body || body.shadowed);
+        if forced_dynamic {
+            let widget_uid = self.emit_local_shared_body_spawn_exact(
+                cx,
+                XrBodySpawn {
+                    widget_uid: tank_widget_uid,
+                    shadow: false,
+                    mode: XrSharedObjectMode::Dynamic,
+                    pose: body.pose,
+                    linvel: body.linvel,
+                    angvel: body.angvel,
+                },
+            );
+            self.primary_tank_widget_uid = Some(widget_uid);
+            self.tank_spawn_requested = true;
         }
+        let applied = control.is_some();
+        if let Some(control) = control {
+            self.apply_car_control(cx, control);
+        }
+        Some((
+            applied,
+            forced_dynamic,
+            body.dynamic_body,
+            body.shadowed,
+            body.held_by,
+            body.linvel,
+            body.angvel,
+        ))
     }
 
     fn drive_tank_for_update(&mut self, cx: &mut Cx, update: &XrUpdateEvent) {
-        let dt = (update.state.time - update.last.time) as f32;
-        self.drive_tank_with_controller(cx, &update.state.right_controller, dt);
+        if update.clicked_b() {
+            let spawn_pose =
+                self.tank_reset_pose_from_controller(cx, &update.state.right_controller);
+            self.reset_local_tank_at_pose(cx, spawn_pose);
+            self.sync_local_tank_widgets(cx, update.state.time);
+            return;
+        }
+        let dt = (update.state.time - update.last.time).clamp(1.0 / 240.0, 0.1) as f32;
+        let _ = self.drive_tank_with_controller(cx, &update.state.right_controller);
+        self.update_tank_turret_with_controller(cx, &update.state.left_controller, dt);
+        self.emit_tank_projectiles(
+            cx,
+            update.state.time,
+            update.state.left_controller.triggered() || update.state.right_controller.triggered(),
+        );
+        self.detect_local_tank_hits(cx, update.state.time);
+        self.sync_local_tank_widgets(cx, update.state.time);
     }
 
     fn drive_tank_for_desktop_frame(&mut self, cx: &mut Cx, event: &NextFrameEvent) {
@@ -988,14 +1987,111 @@ impl App {
             .map(|last| (event.time - last) as f32)
             .unwrap_or(1.0 / 60.0);
         self.last_desktop_tank_drive_at = Some(event.time);
-        let Some(stick) = self.desktop_gamepad_tank_stick(cx) else {
+        let (gamepad_count, best_input) = self.desktop_gamepad_tank_input(cx);
+        if self.last_logged_gamepad_count != Some(gamepad_count) {
+            crate::log!("tank debug: desktop gamepads={gamepad_count}");
+            self.last_logged_gamepad_count = Some(gamepad_count);
+        }
+        let stick_bucket = best_input
+            .map(|input| input.right_stick)
+            .and_then(Self::stick_log_bucket);
+        let should_log_stick = stick_bucket != self.last_logged_desktop_stick_bucket;
+        self.last_logged_desktop_stick_bucket = stick_bucket;
+        let Some(input) = best_input else {
+            self.last_desktop_tank_reset_pressed = false;
+            self.desktop_tank_drive_armed = false;
+            self.emit_tank_projectiles(cx, event.time, false);
+            self.detect_local_tank_hits(cx, event.time);
+            self.sync_local_tank_widgets(cx, event.time);
             return;
         };
-        let controller = XrController {
-            stick,
+        if !self.desktop_tank_drive_armed {
+            if Self::desktop_tank_input_is_neutral(input) {
+                self.desktop_tank_drive_armed = true;
+            } else {
+                self.last_desktop_tank_reset_pressed = false;
+                self.emit_tank_projectiles(cx, event.time, false);
+                self.detect_local_tank_hits(cx, event.time);
+                self.sync_local_tank_widgets(cx, event.time);
+                return;
+            }
+        }
+        let reset_pressed = input.b > 0.5;
+        let reset_clicked = reset_pressed && !self.last_desktop_tank_reset_pressed;
+        self.last_desktop_tank_reset_pressed = reset_pressed;
+        if reset_clicked {
+            self.reset_local_tank(cx);
+            self.desktop_tank_drive_armed = false;
+            self.sync_local_tank_widgets(cx, event.time);
+            return;
+        }
+        let right_controller = XrController {
+            stick: input.right_stick,
+            trigger: input.right_trigger,
             ..XrController::default()
         };
-        self.drive_tank_with_controller(cx, &controller, dt);
+        let left_controller = XrController {
+            stick: input.left_stick,
+            trigger: input.left_trigger,
+            ..XrController::default()
+        };
+        let outcome = self.drive_tank_with_controller(cx, &right_controller);
+        self.update_tank_turret_with_controller(cx, &left_controller, dt);
+        self.emit_tank_projectiles(
+            cx,
+            event.time,
+            left_controller.triggered() || right_controller.triggered(),
+        );
+        self.detect_local_tank_hits(cx, event.time);
+        self.sync_local_tank_widgets(cx, event.time);
+        if should_log_stick {
+            match outcome {
+                Some((
+                    applied,
+                    forced_dynamic,
+                    dynamic_body,
+                    shadowed,
+                    held_by,
+                    linvel,
+                    angvel,
+                )) => {
+                    crate::log!(
+                        "tank debug: desktop sticks rs=({:.2}, {:.2}) ls=({:.2}, {:.2}) trig=({:.2}, {:.2}) dt={:.3} drive={} forced_dynamic={} dynamic_body={} shadowed={} sleeping={} held_by={:?} linvel=({:.2}, {:.2}, {:.2}) angvel=({:.2}, {:.2}, {:.2})",
+                        input.right_stick.x,
+                        input.right_stick.y,
+                        input.left_stick.x,
+                        input.left_stick.y,
+                        input.left_trigger,
+                        input.right_trigger,
+                        dt,
+                        applied,
+                        forced_dynamic,
+                        dynamic_body,
+                        shadowed,
+                        self.local_tank_body_state(cx)
+                            .map(|(_, body)| body.sleeping)
+                            .unwrap_or(false),
+                        held_by,
+                        linvel.x,
+                        linvel.y,
+                        linvel.z,
+                        angvel.x,
+                        angvel.y,
+                        angvel.z
+                    );
+                }
+                None => {
+                    crate::log!(
+                        "tank debug: desktop sticks rs=({:.2}, {:.2}) ls=({:.2}, {:.2}) dt={:.3} but no tank runtime body was available",
+                        input.right_stick.x,
+                        input.right_stick.y,
+                        input.left_stick.x,
+                        input.left_stick.y,
+                        dt
+                    );
+                }
+            }
+        }
     }
 
     fn publish_local_shared_object_states(&mut self, cx: &mut Cx) {
@@ -1106,8 +2202,38 @@ impl App {
             .xr_gpu_frame_time_ms()
             .map(|gpu_ms| format!("{gpu_ms:.2} ms"))
             .unwrap_or_else(|| "waiting".to_string());
+        let tank_runtime_state = self.local_tank_body_state(cx).map(|(_, body)| body);
+        let mut gamepad_count = 0usize;
+        let mut strongest_stick = vec2f(0.0, 0.0);
+        let mut strongest_stick_len = 0.0f32;
+        for state in cx.game_input_states() {
+            let GameInputState::Gamepad(gamepad) = state else {
+                continue;
+            };
+            gamepad_count += 1;
+            let stick = vec2f(gamepad.right_stick.x as f32, gamepad.right_stick.y as f32);
+            let stick_len = stick.length();
+            if stick_len > strongest_stick_len {
+                strongest_stick = stick;
+                strongest_stick_len = stick_len;
+            }
+        }
+        let tank_runtime_text = tank_runtime_state
+            .map(|body| {
+                format!(
+                    "Tank body: dynamic={} shadowed={} sleeping={} held={:?} linvel=({:.2}, {:.2}, {:.2})",
+                    body.dynamic_body,
+                    body.shadowed,
+                    body.sleeping,
+                    body.held_by,
+                    body.linvel.x,
+                    body.linvel.y,
+                    body.linvel.z
+                )
+            })
+            .unwrap_or_else(|| "Tank body: unavailable".to_string());
         let debug_text = format!(
-            "Connected peers: {}\nShared objects: {}\n{}\n{}\n{}\n{}\n{}\n{}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nCPU frame time: {frame_cpu_ms:.2} ms\nUpdate time: {frame_update_cpu_ms:.2} ms\nDraw time: {frame_draw_cpu_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}",
+            "Connected peers: {}\nShared objects: {}\n{}\n{}\n{}\n{}\n{}\n{}\nGamepads: {gamepad_count}\nTank GP Right Stick: ({:.2}, {:.2})\n{tank_runtime_text}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nCPU frame time: {frame_cpu_ms:.2} ms\nUpdate time: {frame_update_cpu_ms:.2} ms\nDraw time: {frame_draw_cpu_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}",
             connected_peers.0,
             connected_peers.1,
             connected_peers.2,
@@ -1116,6 +2242,8 @@ impl App {
             connected_peers.5,
             connected_peers.6,
             connected_peers.7,
+            strongest_stick.x,
+            strongest_stick.y,
         );
         if self.last_debug_text != debug_text {
             self.ui
@@ -1175,8 +2303,7 @@ impl MatchEvent for App {
                     XrPeerSyncAction::None => {}
                 }
             }
-            if widget_action.widget_uid == root_uid
-            {
+            if widget_action.widget_uid == root_uid {
                 match widget_action.cast::<XrRootAction>() {
                     XrRootAction::PhysicsReset => {
                         self.pending_shared_scene_reset = true;
@@ -1275,6 +2402,10 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::GameInputConnected(ev) = event {
+            crate::log!("tank debug: game input event: {:?}", ev);
+            self.desktop_tank_drive_armed = false;
+        }
         self.match_event(cx, event);
         if let Event::XrUpdate(update) = event {
             self.last_desktop_tank_drive_at = None;
@@ -1294,6 +2425,8 @@ impl AppMain for App {
         self.sync_authoritative_activity_pose(cx);
         self.refresh_spawnable_registry(cx, false);
         self.apply_pending_shared_scene_reset(cx);
+        self.ensure_local_tank_spawned(cx);
+        self.sync_tank_depth_mesh_focus(cx);
         if matches!(event, Event::XrUpdate(_))
             || (matches!(event, Event::NextFrame(_)) && !cx.in_xr_mode())
         {

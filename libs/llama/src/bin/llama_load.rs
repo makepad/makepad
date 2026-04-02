@@ -630,7 +630,7 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         let hybrid_compile_started = Instant::now();
         match compile_hybrid_decode_metal(&mut hybrid_decode_loaded, &hybrid_decode_spec, 1) {
-            Ok(compiled) => {
+            Ok(mut compiled) => {
                 println!("hybrid_decode_compiled.ok: true");
                 println!(
                     "hybrid_decode.compile_ms: {}",
@@ -638,8 +638,7 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 let step0_started = Instant::now();
                 match execute_hybrid_decode_graph_metal_cached(
-                    &compiled,
-                    &mut hybrid_decode_loaded,
+                    &mut compiled,
                     LogitsProbeInput::TokenIds(&[0_i32]),
                     &[0_i32],
                     1,
@@ -670,8 +669,7 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let step1_started = Instant::now();
                 match execute_hybrid_decode_graph_metal_cached(
-                    &compiled,
-                    &mut hybrid_decode_loaded,
+                    &mut compiled,
                     LogitsProbeInput::TokenIds(&[1_i32]),
                     &[1_i32],
                     2,
@@ -701,8 +699,7 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                         let mut bench_steps = 0usize;
                         for step in 2_i32..8_i32 {
                             let run = execute_hybrid_decode_graph_metal_cached(
-                                &compiled,
-                                &mut hybrid_decode_loaded,
+                                &mut compiled,
                                 LogitsProbeInput::TokenIds(&[step]),
                                 &[step],
                                 usize::try_from(step + 1).unwrap(),

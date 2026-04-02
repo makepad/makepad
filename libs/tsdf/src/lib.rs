@@ -327,6 +327,16 @@ pub struct TsdfPublishedSnapshot {
     pub height_map: Option<XrDepthAlignHeightMap>,
 }
 
+impl TsdfPublishedSnapshot {
+    pub fn lowest_y_meters(&self) -> Option<f32> {
+        self.height_map
+            .as_ref()
+            .map(|height_map| height_map.bottom_y_meters)
+            .or_else(|| self.grid.active_bounds.map(|(min, _)| min.y))
+            .filter(|value| value.is_finite())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct XrTsdfCooperativeStepResult {
     pub did_work: bool,

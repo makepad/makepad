@@ -20,6 +20,32 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target = env::var("TARGET").unwrap();
 
+    if target_os == "macos" {
+        let command_line_plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>dev.makepad.stdin-loop</string>
+    <key>CFBundleName</key>
+    <string>MakepadStdinLoop</string>
+    <key>CFBundleDisplayName</key>
+    <string>MakepadStdinLoop</string>
+    <key>GCSupportsControllerUserInteraction</key>
+    <true/>
+    <key>GCSupportedGameControllers</key>
+    <array>
+        <dict>
+            <key>ProfileName</key>
+            <string>ExtendedGamepad</string>
+        </dict>
+    </array>
+</dict>
+</plist>
+"#;
+        std::fs::write(path.join("Info.plist"), command_line_plist).unwrap();
+    }
+
     let icon_vars = [
         "MAKEPAD_APP_ICON_32",
         "MAKEPAD_APP_ICON_64",
