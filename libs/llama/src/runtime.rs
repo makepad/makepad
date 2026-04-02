@@ -2873,8 +2873,34 @@ pub fn execute_prepared_attention_decode_metal(
     };
 
     if should_reconfigure_attention_views(spec.block.q_head_dim, positions.len()) {
-        if decode.graph_key_count != cache_tokens {
-            if decode.graph_key_count != max_context {
+        let needs_reconfigure = attention_cache_view_needs_reconfigure(
+            ctx,
+            decode.k_cache_view,
+            i64::from(spec.block.k_head_dim),
+            cache_tokens,
+            i64::from(spec.block.kv_head_count),
+            i64::from(spec.cache.max_sequences),
+        )? || attention_cache_view_needs_reconfigure(
+            ctx,
+            decode.v_cache_view,
+            i64::from(spec.block.v_head_dim),
+            cache_tokens,
+            i64::from(spec.block.kv_head_count),
+            i64::from(spec.cache.max_sequences),
+        )? || decode
+            .input_mask
+            .map(|input_mask| {
+                attention_mask_view_needs_reconfigure(
+                    ctx,
+                    input_mask,
+                    cache_tokens,
+                    positions.len(),
+                )
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if needs_reconfigure {
+            if cache_tokens != decode.graph_key_count && decode.graph_key_count != max_context {
                 return Err(LlamaError::format(format!(
                     "attention decode graph key_count {} does not match cache_tokens {}",
                     decode.graph_key_count, cache_tokens
@@ -2942,7 +2968,6 @@ pub fn execute_prepared_attention_decode_metal(
                 key_count,
                 positions,
             )?;
-            debug_attention_mask_tensor(ctx, input_mask, key_count, positions, bytes.len());
             Ok::<Vec<u8>, LlamaError>(bytes)
         })
         .transpose()?;
@@ -6418,8 +6443,36 @@ pub fn execute_prepared_hybrid_decode_metal(
 
     for cache_view in &decode.attention_cache_views {
         if should_reconfigure_attention_views(cache_view.k_head_dim as u32, positions.len()) {
-            if cache_view.graph_key_count != cache_tokens {
-                if cache_view.graph_key_count != cache_view.max_context {
+            let needs_reconfigure = attention_cache_view_needs_reconfigure(
+                ctx,
+                cache_view.k_cache_view,
+                cache_view.k_head_dim,
+                cache_tokens,
+                cache_view.kv_head_count,
+                cache_view.max_sequences,
+            )? || attention_cache_view_needs_reconfigure(
+                ctx,
+                cache_view.v_cache_view,
+                cache_view.v_head_dim,
+                cache_tokens,
+                cache_view.kv_head_count,
+                cache_view.max_sequences,
+            )? || cache_view
+                .input_mask
+                .map(|input_mask| {
+                    attention_mask_view_needs_reconfigure(
+                        ctx,
+                        input_mask,
+                        cache_tokens,
+                        positions.len(),
+                    )
+                })
+                .transpose()?
+                .unwrap_or(false);
+            if needs_reconfigure {
+                if cache_tokens != cache_view.graph_key_count
+                    && cache_view.graph_key_count != cache_view.max_context
+                {
                     return Err(LlamaError::format(format!(
                         "hybrid decode graph key_count {} does not match cache_tokens {} for attention layer {}",
                         cache_view.graph_key_count, cache_tokens, cache_view.layer_index
@@ -6509,7 +6562,6 @@ pub fn execute_prepared_hybrid_decode_metal(
                 key_count,
                 positions,
             )?;
-            debug_attention_mask_tensor(ctx, input_mask, key_count, positions, bytes.len());
             attention_mask_bytes.push(bytes);
         }
     }
@@ -7001,29 +7053,38 @@ fn attention_mask_write_key_count(
     ne_usize(tensor, 0)
 }
 
-fn debug_attention_mask_tensor(
+fn attention_cache_view_needs_reconfigure(
+    ctx: &Context,
+    tensor_id: TensorId,
+    ne0: i64,
+    ne1: usize,
+    ne2: i64,
+    ne3: i64,
+) -> Result<bool> {
+    let tensor = require_tensor(ctx, tensor_id)?;
+    let expected_ne1 = i64::try_from(ne1)
+        .map_err(|_| LlamaError::format(format!("cache length {} does not fit in i64", ne1)))?;
+    Ok(tensor.ne != [ne0, ne2, expected_ne1, ne3])
+}
+
+fn attention_mask_view_needs_reconfigure(
     ctx: &Context,
     tensor_id: TensorId,
     key_count: usize,
-    positions: &[i32],
-    bytes_len: usize,
-) {
-    if std::env::var_os("LLAMA_DEBUG_MASKS").is_none() {
-        return;
-    }
-    if let Some(tensor) = ctx.tensor(tensor_id) {
-        eprintln!(
-            "LLAMA_DEBUG_MASKS name={} ty={} ne={:?} nb={:?} key_count={} query_count={} bytes_len={} nbytes={}",
-            tensor.name().unwrap_or("<unnamed>"),
-            tensor.desc.ty.name(),
-            tensor.ne,
-            tensor.nb,
-            key_count,
-            positions.len(),
-            bytes_len,
-            tensor.nbytes(),
-        );
-    }
+    query_count: usize,
+) -> Result<bool> {
+    let tensor = require_tensor(ctx, tensor_id)?;
+    Ok(tensor.ne[0]
+        != i64::try_from(key_count).map_err(|_| {
+            LlamaError::format(format!("mask key count {} does not fit in i64", key_count))
+        })?
+        || tensor.ne[1]
+            != i64::try_from(query_count).map_err(|_| {
+                LlamaError::format(format!(
+                    "mask query count {} does not fit in i64",
+                    query_count
+                ))
+            })?)
 }
 
 fn row_size(ty: TensorType, ne: i64) -> Result<usize> {
