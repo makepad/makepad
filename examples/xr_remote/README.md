@@ -42,3 +42,61 @@ cargo check -p makepad-example-xr-remote
 ```
 
 Both checks should stay green when editing the shared-scene parity files.
+
+
+## Shell + adb offload proof (Quest ↔ Mac host)
+
+Fresh shell/adb-only validation on 2026-04-02 confirmed that the Quest client can
+reconnect to the Mac host at `192.168.2.23` without passing
+`MAKEPAD_XR_REMOTE_HOST` manually.
+
+### Host-side commands
+
+```sh
+cargo run --release -p makepad-example-xr-remote
+lsof -nP -p <host-pid> | egrep 'UDP \*:44511|TCP \*:44510|TCP \*:41548|UDP \*:4154[67]'
+```
+
+Observed host evidence from the release run:
+
+- `xr_remote host: GPU readback pipeline active (Mac VT encoder)`
+- `xr_remote host: dual-eye media client connected, forcing keyframe`
+- `xr_remote remote-log [info] quest-client ... startup mode=stereo`
+- `xr_remote remote-log [info] quest-client ... left/right first complete frame cfg1`
+- `xr_remote remote-log [info] quest-client ... left/right prepared`
+- `xr_remote remote-log [info] quest-client ... left/right configured`
+
+Observed host sockets during the same run:
+
+- `UDP *:44511`
+- `TCP *:44510 (LISTEN)`
+- `UDP *:41546`
+- `UDP *:41547`
+- `TCP *:41548 (LISTEN)`
+- `TCP 192.168.2.23:41548->192.168.2.120:<ephemeral> (ESTABLISHED)`
+
+### Quest-side commands
+
+```sh
+adb -s 192.168.2.120:5555 logcat -c
+adb -s 192.168.2.120:5555 shell am force-stop dev.makepad.makepad_example_xr_remote
+adb -s 192.168.2.120:5555 shell am start -W -n   dev.makepad.makepad_example_xr_remote/.MakepadAppXr
+adb -s 192.168.2.120:5555 shell netstat -tn | grep 192.168.2.23
+adb -s 192.168.2.120:5555 logcat -d | rg 'makepad_example_xr_remote|VrRuntimeService|UseScenePermissionRssdk'
+```
+
+Observed Quest evidence from the relaunch:
+
+- `Starting: Intent { cmp=dev.makepad.makepad_example_xr_remote/.MakepadAppXr }`
+- `pid_after_start=19016`
+- `192.168.2.120:56480 -> 192.168.2.23:41548 ESTABLISHED`
+- `VrRuntimeService: RuntimeIPC: IPC_SYSTEM_EVENT_CLIENT_CONNECTED_EXT`
+- `UseScenePermissionRssdk(..., true) -> ALLOWED`
+
+### Current warnings seen during relaunch
+
+These did **not** prevent the host-rendered path from connecting, but they are the
+main follow-up items still visible in shell/adb logs:
+
+- `Package ... is retrieving an HzOS SDK Manager (VolumetricWindowManager), but the client's manifest does not specify a minimum HzOS SDK version`
+- `ACameraManager: openCamera ... cannot open camera "50" from background`
