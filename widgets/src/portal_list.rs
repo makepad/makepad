@@ -1252,45 +1252,35 @@ impl PortalList {
         self.visible_items
     }
 
-    /// Computes the top position of `target_id` relative to the viewport using
-    /// `first_id`, `first_scroll`, and the height tree. Returns `None` if the
-    /// height tree is not available.
+    /// Computes the top position of `target_id` relative to the viewport top
+    /// using `first_id`, `first_scroll`, and the height tree.
+    ///
+    /// Returns `None` if the height tree is not yet available (before the first draw).
+    /// A return value of `0.0` means the item's top is exactly at the viewport top;
+    /// negative means it is above the viewport, positive means below.
     fn item_top_from_height_tree(&self, target_id: usize) -> Option<f64> {
         let tree = self.height_tree.as_ref()?;
         let first_idx = self.first_id.saturating_sub(self.range_start);
         let target_idx = target_id.saturating_sub(self.range_start);
+
+        let prefix = |i: usize| if i > 0 { tree.prefix_sum(i - 1) } else { 0.0 };
+
         if target_id >= self.first_id {
-            // Target is at or after first_id: sum heights from first_id to target_id-1.
-            let height_between = if target_idx > 0 {
-                tree.prefix_sum(target_idx - 1)
-            } else {
-                0.0
-            } - if first_idx > 0 {
-                tree.prefix_sum(first_idx - 1)
-            } else {
-                0.0
-            };
-            Some(self.first_scroll + height_between)
+            Some(self.first_scroll + prefix(target_idx) - prefix(first_idx))
         } else {
-            // Target is before first_id: subtract heights from target_id to first_id-1.
-            let height_between = if first_idx > 0 {
-                tree.prefix_sum(first_idx - 1)
-            } else {
-                0.0
-            } - if target_idx > 0 {
-                tree.prefix_sum(target_idx - 1)
-            } else {
-                0.0
-            };
-            Some(self.first_scroll - height_between)
+            Some(self.first_scroll - (prefix(first_idx) - prefix(target_idx)))
         }
     }
 
-    /// Initiates a smooth scrolling animation to the specified target item in the list.
+    /// Initiates a smooth scrolling animation to the specified target item.
     ///
-    /// If the target item is already fully visible within the viewport, no scrolling occurs.
-    /// Otherwise, the list scrolls until the target item's top edge is positioned at
-    /// `top_offset` pixels below the top of the viewport.
+    /// If the target item's top is already visible within the viewport, no scrolling
+    /// occurs and [`PortalListAction::SmoothScrollReached`] is emitted immediately.
+    ///
+    /// Otherwise, the list animates until the target item's top edge is positioned at
+    /// `top_offset` pixels below the viewport's top edge. A value of `0.0` places the
+    /// item flush with the viewport top; `20.0` leaves a 20 px margin. Negative values
+    /// are clamped to `0.0`.
     pub fn smooth_scroll_to(
         &mut self,
         cx: &mut Cx,
@@ -1313,23 +1303,9 @@ impl PortalList {
         let vi = self.vec_index;
         let viewport_size = self.area.rect(cx).size.index(vi);
         let item_top = self.item_top_from_height_tree(target_id);
-        let item_rect_pos = self.items.get(&target_id).map(|item| {
-            let item_rect = item.widget.area().rect(cx);
-            let self_rect = self.area.rect(cx);
-            (item_rect.pos.index(vi) - self_rect.pos.index(vi), item_rect.size.index(vi))
-        });
-        eprintln!(
-            "[smooth_scroll_to] target_id={target_id} first_id={} first_scroll={:.2} \
-             viewport_size={viewport_size:.2} item_top_from_tree={item_top:?} \
-             item_rect_pos={item_rect_pos:?} in_items={} top_offset={top_offset} \
-             range_start={} range_end={}",
-            self.first_id, self.first_scroll, self.items.contains_key(&target_id),
-            self.range_start, self.range_end,
-        );
         if viewport_size > 0.0 {
             if let Some(item_top) = item_top {
                 if item_top >= 0.0 && item_top < viewport_size {
-                    eprintln!("[smooth_scroll_to] SKIPPING — item_top {item_top:.2} is within viewport");
                     cx.widget_action(self.widget_uid(), PortalListAction::SmoothScrollReached);
                     return;
                 }
@@ -1932,19 +1908,11 @@ impl Widget for PortalList {
                         }
                     }
 
-                    // Fallback: if the list has hit the end, the target is as
-                    // visible as it can get.
-                    if self.at_end && target_id > self.first_id {
+                    // Fallback: if we're scrolling down and the list has hit
+                    // the end, the target is as visible as it can get.
+                    if scrolling_down && self.at_end && target_id > self.first_id {
                         target_reached = true;
                     }
-
-                    eprintln!(
-                        "[scroll_anim] target_id={target_id} first_id={} first_scroll={:.2} \
-                         item_top={item_top:?} top_offset={top_offset} delta={delta_val:.2} \
-                         scrolling_down={scrolling_down} target_reached={target_reached} \
-                         at_end={} range_start={}",
-                        self.first_id, self.first_scroll, self.at_end, self.range_start,
-                    );
 
                     if !target_reached {
                         // Overshoot protection: if first_id has scrolled past
@@ -2594,11 +2562,9 @@ impl PortalListRef {
         false
     }
 
-    /// Initiates a smooth scrolling animation to the specified target item in the list.
+    /// Initiates a smooth scrolling animation to the specified target item.
     ///
-    /// If the target item is already fully visible within the viewport, no scrolling occurs.
-    /// Otherwise, the list scrolls until the target item's top edge is positioned at
-    /// `top_offset` pixels below the top of the viewport.
+    /// See [`PortalList::smooth_scroll_to()`] for full documentation.
     pub fn smooth_scroll_to(
         &self,
         cx: &mut Cx,
