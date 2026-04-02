@@ -811,6 +811,8 @@ fn snapshot_runtime_bodies(
                     shadowed: scene.is_shadow_body(cube.body),
                     held_by: scene.held_by_for_body(cube.body),
                     linked_support_local_poses: scene.cube_linked_support_local_poses(*cube),
+                    linked_support_spin_angles: scene.cube_linked_support_spin_angles(*cube),
+                    linked_support_steer_angles: scene.cube_linked_support_steer_angles(*cube),
                 },
             );
         }

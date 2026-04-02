@@ -136,6 +136,8 @@ pub struct XrRuntimeBodyState {
     pub shadowed: bool,
     pub held_by: Option<XrSharedHand>,
     pub linked_support_local_poses: [Option<Pose>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
+    pub linked_support_spin_angles: [Option<f32>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
+    pub linked_support_steer_angles: [Option<f32>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
 }
 
 #[derive(Clone, Copy, Debug, Default)]

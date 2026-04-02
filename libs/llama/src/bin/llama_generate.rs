@@ -281,7 +281,16 @@ fn run_upstream_completion(args: &Args) -> Result<String, Box<dyn std::error::Er
 
     let output = command.output()?;
     ensure_success("llama-completion", &output)?;
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(normalize_upstream_completion_stdout(
+        &String::from_utf8(output.stdout)?,
+    ))
+}
+
+fn normalize_upstream_completion_stdout(stdout: &str) -> String {
+    stdout
+        .strip_suffix("\n\n")
+        .unwrap_or(stdout)
+        .to_owned()
 }
 
 fn ensure_success(name: &str, output: &Output) -> Result<(), Box<dyn std::error::Error>> {
@@ -388,5 +397,23 @@ fn tok_per_second(token_count: usize, seconds: f64) -> f64 {
         token_count as f64 / seconds
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_upstream_completion_stdout;
+
+    #[test]
+    fn strips_cli_trailing_newlines_from_upstream_completion() {
+        assert_eq!(
+            normalize_upstream_completion_stdout("hello\n\n"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn leaves_non_terminated_output_unchanged() {
+        assert_eq!(normalize_upstream_completion_stdout("hello"), "hello");
     }
 }

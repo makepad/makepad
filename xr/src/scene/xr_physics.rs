@@ -14,17 +14,17 @@ use std::collections::{HashMap, HashSet};
 const XR_MAX_LINKED_SUPPORT_BODIES_PER_CUBE: usize = XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT;
 pub(super) const XR_MAX_DEPTH_QUERY_KEYS_PER_CUBE: usize =
     XR_MAX_LINKED_SUPPORT_BODIES_PER_CUBE + 1;
-const XR_FOUR_WHEEL_FRONT_BACK_FRACTION: f32 = 0.92;
-const XR_FOUR_WHEEL_LATERAL_FRACTION: f32 = 0.78;
-const XR_FOUR_WHEEL_RADIUS_SCALE: f32 = 2.60;
-const XR_FOUR_WHEEL_REST_LENGTH_SCALE: f32 = 0.70;
+const XR_FOUR_WHEEL_FRONT_BACK_FRACTION: f32 = 0.97;
+const XR_FOUR_WHEEL_LATERAL_FRACTION: f32 = 0.92;
+const XR_FOUR_WHEEL_RADIUS_SCALE: f32 = 3.20;
+const XR_FOUR_WHEEL_REST_LENGTH_SCALE: f32 = 0.50;
 const XR_FOUR_WHEEL_TRAVEL_SCALE: f32 = 0.50;
-const XR_FOUR_WHEEL_MIN_SUSPENSION_LENGTH_FRACTION: f32 = 0.35;
+const XR_FOUR_WHEEL_MIN_SUSPENSION_LENGTH_FRACTION: f32 = 0.0;
 const XR_FOUR_WHEEL_CHASSIS_WIDTH_SCALE: f32 = 0.85;
 const XR_FOUR_WHEEL_CHASSIS_HEIGHT_SCALE: f32 = 0.70;
 const XR_FOUR_WHEEL_CHASSIS_DEPTH_SCALE: f32 = 0.85;
-const XR_FOUR_WHEEL_CHASSIS_UP_OFFSET_SCALE: f32 = 0.23;
-const XR_FOUR_WHEEL_MIN_CHASSIS_CLEARANCE_FRACTION: f32 = 0.10;
+const XR_FOUR_WHEEL_CHASSIS_UP_OFFSET_SCALE: f32 = 0.20;
+const XR_FOUR_WHEEL_MIN_CHASSIS_CLEARANCE_FRACTION: f32 = 0.0;
 const XR_CAR_MASS_KG: f32 = 500.0;
 const XR_CAR_MAX_STEER_DEG: f32 = 40.0;
 const XR_CAR_STEER_SMOOTHING_FACTOR: f32 = 0.1;
@@ -192,6 +192,7 @@ struct LinkedSupportBody {
     query_radius: f32,
     depth_query_surface_set: Option<usize>,
     spin_angle: f32,
+    steer_angle: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -407,7 +408,7 @@ fn sphere_support_radius(half_extents: Vec3f) -> f32 {
 }
 
 fn four_wheel_support_radius(half_extents: Vec3f) -> f32 {
-    (sphere_support_radius(half_extents) * XR_FOUR_WHEEL_RADIUS_SCALE).clamp(0.036, 0.128)
+    (sphere_support_radius(half_extents) * XR_FOUR_WHEEL_RADIUS_SCALE).clamp(0.036, 0.160)
 }
 
 fn four_wheel_support_specs(
@@ -415,38 +416,33 @@ fn four_wheel_support_specs(
 ) -> [Option<SupportMarkerSpec>; XR_MAX_LINKED_SUPPORT_BODIES_PER_CUBE] {
     let radius = four_wheel_support_radius(half_extents);
     let lateral = (half_extents.x * XR_FOUR_WHEEL_LATERAL_FRACTION).max(radius * 0.75);
-    let rest_length = (radius * XR_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(0.018, 0.072);
+    let rest_length = (radius * XR_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(0.024, 0.110);
     let min_length_floor = (rest_length * XR_FOUR_WHEEL_MIN_SUSPENSION_LENGTH_FRACTION)
-        .max(0.004)
-        .min(rest_length);
-    let travel = (radius * XR_FOUR_WHEEL_TRAVEL_SCALE)
-        .clamp(0.010, 0.052)
-        .min((rest_length - min_length_floor).max(0.0));
+        .max(0.004);
+    let travel = (radius * XR_FOUR_WHEEL_TRAVEL_SCALE).clamp(0.018, 0.090);
     let min_length = (rest_length - travel).max(min_length_floor);
     let max_length = rest_length + travel;
-    let hardpoint_y = four_wheel_chassis_collider_bottom_y(half_extents)
-        + radius
-        + min_length
-        + four_wheel_min_chassis_clearance(radius);
+    let local_wheel_center_y = -half_extents.y;
     let front = half_extents.z * XR_FOUR_WHEEL_FRONT_BACK_FRACTION;
     let back = -half_extents.z * XR_FOUR_WHEEL_FRONT_BACK_FRACTION;
     let positions = [
-        vec3f(-lateral, hardpoint_y, front),
-        vec3f(-lateral, hardpoint_y, back),
-        vec3f(lateral, hardpoint_y, front),
-        vec3f(lateral, hardpoint_y, back),
+        vec3f(-lateral, local_wheel_center_y, front),
+        vec3f(-lateral, local_wheel_center_y, back),
+        vec3f(lateral, local_wheel_center_y, front),
+        vec3f(lateral, local_wheel_center_y, back),
     ];
     std::array::from_fn(|index| {
-        positions.get(index).copied().map(|anchor_local_position| {
-            SupportMarkerSpec {
-                anchor_local_position,
-                local_position: anchor_local_position - vec3f(0.0, rest_length, 0.0),
+        positions
+            .get(index)
+            .copied()
+            .map(|anchor_local_position| SupportMarkerSpec {
+                anchor_local_position: anchor_local_position + vec3f(0.0, rest_length, 0.0),
+                local_position: anchor_local_position,
                 radius,
                 rest_length,
                 min_length,
                 max_length,
-            }
-        })
+            })
     })
 }
 
@@ -478,7 +474,11 @@ fn four_wheel_chassis_collider_half_extents(half_extents: Vec3f) -> Vec3f {
 }
 
 fn four_wheel_chassis_collider_translation(half_extents: Vec3f) -> Vec3f {
-    vec3f(0.0, half_extents.y * XR_FOUR_WHEEL_CHASSIS_UP_OFFSET_SCALE, 0.0)
+    vec3f(
+        0.0,
+        half_extents.y * XR_FOUR_WHEEL_CHASSIS_UP_OFFSET_SCALE,
+        0.0,
+    )
 }
 
 fn four_wheel_chassis_collider_bottom_y(half_extents: Vec3f) -> f32 {
@@ -488,7 +488,7 @@ fn four_wheel_chassis_collider_bottom_y(half_extents: Vec3f) -> f32 {
 }
 
 fn four_wheel_min_chassis_clearance(radius: f32) -> f32 {
-    (radius * XR_FOUR_WHEEL_MIN_CHASSIS_CLEARANCE_FRACTION).clamp(0.006, 0.014)
+    (radius * XR_FOUR_WHEEL_MIN_CHASSIS_CLEARANCE_FRACTION).clamp(0.018, 0.040)
 }
 
 fn linked_support_world_linvel(
@@ -680,6 +680,7 @@ impl RapierScene {
             query_radius: spec.radius,
             depth_query_surface_set,
             spin_angle: 0.0,
+            steer_angle: 0.0,
         });
         index
     }
@@ -730,29 +731,32 @@ impl RapierScene {
         let query_radius = half_extents.length().max(0.0005);
         let depth_query_filter_key = matches!(depth_query_support, XrDepthQuerySupportRig::Body)
             .then(|| self.allocate_depth_query_filter_key());
-        let collider_half_extents = if matches!(depth_query_support, XrDepthQuerySupportRig::FourWheels)
-        {
-            four_wheel_chassis_collider_half_extents(half_extents)
-        } else {
-            half_extents
-        };
-        let collider_translation = if matches!(depth_query_support, XrDepthQuerySupportRig::FourWheels)
-        {
-            four_wheel_chassis_collider_translation(half_extents)
-        } else {
-            vec3f(0.0, 0.0, 0.0)
-        };
-        let collider_builder =
-            ColliderBuilder::cuboid(
-                collider_half_extents.x,
-                collider_half_extents.y,
-                collider_half_extents.z,
-            )
-                .translation(rapier_vec3(collider_translation))
-                .user_data(depth_query_filter_key.map(depth_query_body_user_data).unwrap_or(0))
-                .density(density.max(0.0))
-                .friction(friction.max(0.0))
-                .restitution(restitution.max(0.0));
+        let collider_half_extents =
+            if matches!(depth_query_support, XrDepthQuerySupportRig::FourWheels) {
+                four_wheel_chassis_collider_half_extents(half_extents)
+            } else {
+                half_extents
+            };
+        let collider_translation =
+            if matches!(depth_query_support, XrDepthQuerySupportRig::FourWheels) {
+                four_wheel_chassis_collider_translation(half_extents)
+            } else {
+                vec3f(0.0, 0.0, 0.0)
+            };
+        let collider_builder = ColliderBuilder::cuboid(
+            collider_half_extents.x,
+            collider_half_extents.y,
+            collider_half_extents.z,
+        )
+        .translation(rapier_vec3(collider_translation))
+        .user_data(
+            depth_query_filter_key
+                .map(depth_query_body_user_data)
+                .unwrap_or(0),
+        )
+        .density(density.max(0.0))
+        .friction(friction.max(0.0))
+        .restitution(restitution.max(0.0));
         let collider = self
             .colliders
             .insert_with_parent(collider_builder, body, &mut self.bodies);
@@ -1082,7 +1086,10 @@ impl RapierScene {
         controller.index_forward_axis = 2;
 
         let mut wheels = Vec::new();
-        for (slot, spec) in four_wheel_support_specs(half_extents).into_iter().enumerate() {
+        for (slot, spec) in four_wheel_support_specs(half_extents)
+            .into_iter()
+            .enumerate()
+        {
             let (Some(spec), Some(support_index)) = (spec, linked_support_bodies[slot]) else {
                 continue;
             };
@@ -1163,11 +1170,7 @@ impl RapierScene {
         true
     }
 
-    fn sync_vehicle_support_bodies(
-        &mut self,
-        vehicle_index: usize,
-        prefer_controller_pose: bool,
-    ) {
+    fn sync_vehicle_support_bodies(&mut self, vehicle_index: usize, prefer_controller_pose: bool) {
         let Some(vehicle) = self.vehicles.get(vehicle_index) else {
             return;
         };
@@ -1182,7 +1185,10 @@ impl RapierScene {
             .iter()
             .enumerate()
             .filter_map(|(wheel_index, runtime)| {
-                let support = self.linked_support_bodies.get(runtime.support_index).copied()?;
+                let support = self
+                    .linked_support_bodies
+                    .get(runtime.support_index)
+                    .copied()?;
                 let wheel = vehicle.controller.wheels().get(wheel_index)?;
                 Some((wheel_index, *runtime, support, *wheel))
             })
@@ -1191,15 +1197,18 @@ impl RapierScene {
         for (_wheel_index, wheel_runtime, mut support, wheel) in wheel_states {
             let wheel_center = makepad_vec3(wheel.center());
             let hard_point = makepad_vec3(wheel.raycast_info().hard_point_ws);
-            let has_controller_pose =
-                prefer_controller_pose && (wheel_center.length() > 1.0e-6 || hard_point.length() > 1.0e-6);
+            let has_controller_pose = prefer_controller_pose
+                && (wheel_center.length() > 1.0e-6 || hard_point.length() > 1.0e-6);
             let support_pose = if has_controller_pose {
-                let local_orientation = Quat::multiply(
-                    &Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), wheel.steering),
-                    &Quat::from_axis_angle(vec3f(-1.0, 0.0, 0.0), wheel.rotation),
-                );
+                // Match the rest of the XR transform stack:
+                // world = owner * (steer * spin_about_local_axle).
+                let steering_orientation =
+                    Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), wheel.steering);
+                let spin_orientation =
+                    Quat::from_axis_angle(vec3f(-1.0, 0.0, 0.0), -wheel.rotation);
+                let local_orientation = Quat::multiply(&spin_orientation, &steering_orientation);
                 Pose::new(
-                    Quat::multiply(&owner_pose.orientation, &local_orientation),
+                    Quat::multiply(&local_orientation, &owner_pose.orientation),
                     wheel_center,
                 )
             } else {
@@ -1214,6 +1223,7 @@ impl RapierScene {
                 support.rest_length
             };
             support.spin_angle = wheel.rotation;
+            support.steer_angle = wheel.steering;
             self.linked_support_bodies[wheel_runtime.support_index] = support;
             if let Some(body) = self.bodies.get_mut(support.body) {
                 body.set_enabled(true);
@@ -1363,7 +1373,8 @@ impl RapierScene {
                     let Some(wheel_runtime) = vehicle.wheels.get(wheel_slot) else {
                         return false;
                     };
-                    let Some(support) = self.linked_support_bodies.get(wheel_runtime.support_index) else {
+                    let Some(support) = self.linked_support_bodies.get(wheel_runtime.support_index)
+                    else {
                         return false;
                     };
                     wheel_query_accepts_collider(
@@ -2107,6 +2118,34 @@ impl RapierScene {
             local_poses[slot] = Some(local_pose);
         }
         local_poses
+    }
+
+    pub(crate) fn cube_linked_support_spin_angles(
+        &self,
+        cube: PhysicsCube,
+    ) -> [Option<f32>; XR_MAX_LINKED_SUPPORT_BODIES_PER_CUBE] {
+        let mut spin_angles = [None; XR_MAX_LINKED_SUPPORT_BODIES_PER_CUBE];
+        for (slot, support_index) in cube.linked_support_bodies.iter().flatten().enumerate() {
+            spin_angles[slot] = self
+                .linked_support_bodies
+                .get(*support_index)
+                .map(|support| support.spin_angle);
+        }
+        spin_angles
+    }
+
+    pub(crate) fn cube_linked_support_steer_angles(
+        &self,
+        cube: PhysicsCube,
+    ) -> [Option<f32>; XR_MAX_LINKED_SUPPORT_BODIES_PER_CUBE] {
+        let mut steer_angles = [None; XR_MAX_LINKED_SUPPORT_BODIES_PER_CUBE];
+        for (slot, support_index) in cube.linked_support_bodies.iter().flatten().enumerate() {
+            steer_angles[slot] = self
+                .linked_support_bodies
+                .get(*support_index)
+                .map(|support| support.steer_angle);
+        }
+        steer_angles
     }
 
     fn disable_cube_linked_support_bodies(&mut self, cube: PhysicsCube) {
