@@ -549,7 +549,11 @@ impl PortalList {
     }
 
     fn end(&mut self, cx: &mut Cx2d) {
-        self.at_end = false;
+        // Note: we intentionally do NOT reset `at_end` here. It is explicitly
+        // set to true or false in every code path below. If the draw cycle
+        // doesn't reach the calculation (e.g., draw_state isn't End, or list
+        // is empty), we preserve the previous value rather than introducing
+        // a spurious `false` that would cause downstream consumers to flicker.
         self.not_filling_viewport = false;
 
         let vi = self.vec_index;
@@ -569,15 +573,25 @@ impl PortalList {
 
                 let mut last_pos = self.first_scroll;
                 let mut last_item_pos = None;
+                let mut last_drawn_index = None;
                 for i in first_index..list.len() {
                     let item = &list[i];
                     last_pos += item.size.index(vi);
                     if item.index < self.range_end {
                         last_item_pos = Some(last_pos);
+                        last_drawn_index = Some(item.index);
                     } else {
                         break;
                     }
                 }
+                // Whether the very last item in the range was actually drawn.
+                // The draw loop can stop early when it encounters a zero-size
+                // item (e.g., an empty placeholder widget), which would leave
+                // `last_item_pos` far short of the viewport bottom. Without
+                // this guard, `at_end` could become a false positive whenever
+                // a zero-size item appears in the middle of the visible range.
+                let drew_last_item = last_drawn_index
+                    == Some(self.range_end.saturating_sub(1));
 
                 if list[0].index == self.range_start {
                     let mut total = 0.0;
@@ -591,6 +605,10 @@ impl PortalList {
                 }
 
                 if list.first().unwrap().index == self.range_start && first_pos > 0.0 {
+                    // We're at the top of the list with a gap above the first item.
+                    // We're also at the end if all content fits in the viewport.
+                    self.at_end = self.not_filling_viewport && drew_last_item;
+
                     let min = if let ScrollState::Stopped = self.scroll_state {
                         0.0
                     } else {
@@ -612,15 +630,19 @@ impl PortalList {
                 } else {
                     let shift = if let Some(last_item_pos) = last_item_pos {
                         if self.align_top_when_empty && self.not_filling_viewport {
+                            // All items fit in the viewport without filling it.
+                            self.at_end = drew_last_item;
                             -first_pos
                         } else {
                             let ret = viewport.size.index(vi) - last_item_pos;
-                            if ret >= 0.0 {
-                                self.at_end = true;
-                            }
+                            // Use a 1px tolerance for floating-point accumulation
+                            // errors across item sizes, and require that the last
+                            // item in the range was actually drawn.
+                            self.at_end = ret >= -1.0 && drew_last_item;
                             ret.max(0.0)
                         }
                     } else {
+                        self.at_end = false;
                         0.0
                     };
 
@@ -1943,16 +1965,15 @@ impl Widget for PortalList {
                     self.detect_tail_in_draw = true;
                     self.was_scrolling = false;
                     self.scroll_state = ScrollState::Stopped;
-                    let prev_first_id = self.first_id;
-                    let prev_first_scroll = self.first_scroll;
                     // For mouse wheel: clip to top and don't transition to pulldown
                     // (pulldown/overscroll is only for touch drag/flick)
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true, false);
-                    if self.first_id != prev_first_id
-                        || (self.first_scroll - prev_first_scroll).abs() > f64::EPSILON
-                    {
-                        self.at_end = false;
-                    }
+                    // Note: we intentionally do NOT reset `at_end` here.
+                    // `at_end` is authoritatively recalculated each draw cycle
+                    // in `end()`, and the redraw is already triggered below.
+                    // Eagerly resetting it here would create a stale `false` value
+                    // visible to any code that checks `is_at_end()` in response
+                    // to the Scroll action before the next draw completes.
                     cx.widget_action(uid, PortalListAction::Scroll);
                     self.area.redraw(cx);
                 }
