@@ -229,6 +229,15 @@ impl MatchEvent for App {
             lbl.set_text(cx, &format!("{} {}", self.counter, txt));
         }
 
+        if let Some(is_multiline) = self
+            .ui
+            .check_box(cx, ids!(multiline_toggle))
+            .changed(actions)
+        {
+            let ti = self.ui.text_input(cx, ids!(multiline_toggleable));
+            ti.set_is_multiline(cx, is_multiline);
+        }
+
         if self.ui.button(cx, ids!(basicbutton)).clicked(&actions) {
             log!("BASIC BUTTON CLICKED {}", self.counter);
             self.counter += 1;
