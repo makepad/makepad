@@ -24,16 +24,9 @@ script_mod! {
         height: Fill
         draw_bg +: {
             video_texture: texture_video()
-            target_eye: 0.0
             debug_mono: 0.0
 
             pixel: fn() {
-                if self.debug_mono > 0.5 {
-                    return self.video_texture.sample_video(self.pos)
-                }
-                if (self.target_eye < 0.5 && VIEW_ID != 0) || (self.target_eye >= 0.5 && VIEW_ID == 0) {
-                    return #0000
-                }
                 return self.video_texture.sample_video(self.pos)
             }
         }
@@ -62,7 +55,6 @@ script_mod! {
                     height: Fill
                     draw_bg.color: #0000
                     remote_left_surface := mod.widgets.RemoteEyeSurface{
-                        draw_bg.target_eye: 0.0
                     }
                 }
             }
@@ -79,7 +71,6 @@ script_mod! {
                     height: Fill
                     draw_bg.color: #0000
                     remote_right_surface := mod.widgets.RemoteEyeSurface{
-                        draw_bg.target_eye: 1.0
                     }
                 }
             }
@@ -128,14 +119,12 @@ script_mod! {
                         debug_left_surface := mod.widgets.RemoteEyeSurface{
                             width: Fill
                             height: Fill
-                            draw_bg.target_eye: 0.0
                             draw_bg.debug_mono: 1.0
                         }
 
                         debug_right_surface := mod.widgets.RemoteEyeSurface{
                             width: Fill
                             height: Fill
-                            draw_bg.target_eye: 1.0
                             draw_bg.debug_mono: 1.0
                         }
                     }
@@ -1455,15 +1444,12 @@ impl App {
     fn drain_xr_net(&mut self) {
         let mut latest_status = None;
         let mut disconnected = false;
+        let mut discovered_host = None;
         if let Some(xr_net) = self.xr_net.as_mut() {
             loop {
                 match xr_net.incoming_receiver.try_recv() {
                     Ok(XrNetIncoming::Join { peer }) => {
-                        let discovered_host = peer.addr.ip().to_string();
-                        let updated = self.shared.set_discovered_host(&discovered_host);
-                        if updated {
-                            self.refresh_connection_text();
-                        }
+                        discovered_host = Some(peer.addr.ip().to_string());
                         latest_status = Some(format!("XR Net: connected {}", peer.addr));
                     }
                     Ok(XrNetIncoming::Leave { peer, .. }) => {
@@ -1478,6 +1464,11 @@ impl App {
                         break;
                     }
                 }
+            }
+        }
+        if let Some(host) = discovered_host {
+            if self.shared.set_discovered_host(&host) {
+                self.refresh_connection_text();
             }
         }
         if disconnected {
