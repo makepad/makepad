@@ -585,11 +585,11 @@ impl PortalList {
                     }
                 }
                 // Whether the very last item in the range was actually drawn.
-                // This is needed because the draw loop can stop early when it
-                // encounters a zero-size item (e.g., Empty widgets used to hide
-                // threaded replies), which causes `last_item_pos` to be far
-                // short of the viewport bottom even though we're nowhere near
-                // the end of the list.
+                // The draw loop can stop early when it encounters a zero-size
+                // item (e.g., an empty placeholder widget), which would leave
+                // `last_item_pos` far short of the viewport bottom. Without
+                // this guard, `at_end` could become a false positive whenever
+                // a zero-size item appears in the middle of the visible range.
                 let drew_last_item = last_drawn_index
                     == Some(self.range_end.saturating_sub(1));
 
@@ -606,9 +606,7 @@ impl PortalList {
 
                 if list.first().unwrap().index == self.range_start && first_pos > 0.0 {
                     // We're at the top of the list with a gap above the first item.
-                    // We're also at the end if all content fits within the viewport
-                    // AND the last item in the range was actually drawn (otherwise
-                    // the total may be incomplete due to the draw loop stopping early).
+                    // We're also at the end if all content fits in the viewport.
                     self.at_end = self.not_filling_viewport && drew_last_item;
 
                     let min = if let ScrollState::Stopped = self.scroll_state {
@@ -632,23 +630,14 @@ impl PortalList {
                 } else {
                     let shift = if let Some(last_item_pos) = last_item_pos {
                         if self.align_top_when_empty && self.not_filling_viewport {
-                            // All items are visible and don't fill the viewport,
-                            // so we are at the end of the list — but only if
-                            // we actually drew the last item in the range.
+                            // All items fit in the viewport without filling it.
                             self.at_end = drew_last_item;
                             -first_pos
                         } else {
                             let ret = viewport.size.index(vi) - last_item_pos;
-                            // Use a 1-pixel tolerance to account for floating-point
-                            // accumulation errors across item sizes. Without this,
-                            // sub-pixel layout changes (e.g., hover state redraws)
-                            // can cause `at_end` to flicker to false.
-                            //
-                            // We also require that the very last item in the range
-                            // was actually drawn. Without this, zero-size items
-                            // (like Empty widgets) can cause the draw loop to stop
-                            // early, leaving `last_item_pos` far short of the
-                            // viewport bottom and producing a false `at_end = true`.
+                            // Use a 1px tolerance for floating-point accumulation
+                            // errors across item sizes, and require that the last
+                            // item in the range was actually drawn.
                             self.at_end = ret >= -1.0 && drew_last_item;
                             ret.max(0.0)
                         }
