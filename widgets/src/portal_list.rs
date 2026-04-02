@@ -56,6 +56,9 @@ enum ScrollState {
         target_id: usize,
         delta: f64,
         next_frame: NextFrame,
+        /// Pixel offset from the top of the viewport where the target item's
+        /// top edge should end up once scrolling completes.
+        top_offset: f64,
     },
     Tailing {
         next_frame: NextFrame,
@@ -1249,13 +1252,52 @@ impl PortalList {
         self.visible_items
     }
 
+    /// Computes the top position of `target_id` relative to the viewport using
+    /// `first_id`, `first_scroll`, and the height tree. Returns `None` if the
+    /// height tree is not available.
+    fn item_top_from_height_tree(&self, target_id: usize) -> Option<f64> {
+        let tree = self.height_tree.as_ref()?;
+        let first_idx = self.first_id.saturating_sub(self.range_start);
+        let target_idx = target_id.saturating_sub(self.range_start);
+        if target_id >= self.first_id {
+            // Target is at or after first_id: sum heights from first_id to target_id-1.
+            let height_between = if target_idx > 0 {
+                tree.prefix_sum(target_idx - 1)
+            } else {
+                0.0
+            } - if first_idx > 0 {
+                tree.prefix_sum(first_idx - 1)
+            } else {
+                0.0
+            };
+            Some(self.first_scroll + height_between)
+        } else {
+            // Target is before first_id: subtract heights from target_id to first_id-1.
+            let height_between = if first_idx > 0 {
+                tree.prefix_sum(first_idx - 1)
+            } else {
+                0.0
+            } - if target_idx > 0 {
+                tree.prefix_sum(target_idx - 1)
+            } else {
+                0.0
+            };
+            Some(self.first_scroll - height_between)
+        }
+    }
+
     /// Initiates a smooth scrolling animation to the specified target item in the list.
+    ///
+    /// If the target item is already fully visible within the viewport, no scrolling occurs.
+    /// Otherwise, the list scrolls until the target item's top edge is positioned at
+    /// `top_offset` pixels below the top of the viewport.
     pub fn smooth_scroll_to(
         &mut self,
         cx: &mut Cx,
         target_id: usize,
         speed: f64,
         max_items_to_show: Option<usize>,
+        top_offset: f64,
     ) {
         if self.items.is_empty() {
             return;
@@ -1264,15 +1306,54 @@ impl PortalList {
             return;
         }
 
+        // Check if the target item's top is already visible in the viewport.
+        // Compute the target's top position relative to viewport using first_id,
+        // first_scroll, and the height_tree — this avoids relying on widget rects
+        // which may be clipped for partially-visible items.
+        let vi = self.vec_index;
+        let viewport_size = self.area.rect(cx).size.index(vi);
+        let item_top = self.item_top_from_height_tree(target_id);
+        let item_rect_pos = self.items.get(&target_id).map(|item| {
+            let item_rect = item.widget.area().rect(cx);
+            let self_rect = self.area.rect(cx);
+            (item_rect.pos.index(vi) - self_rect.pos.index(vi), item_rect.size.index(vi))
+        });
+        eprintln!(
+            "[smooth_scroll_to] target_id={target_id} first_id={} first_scroll={:.2} \
+             viewport_size={viewport_size:.2} item_top_from_tree={item_top:?} \
+             item_rect_pos={item_rect_pos:?} in_items={} top_offset={top_offset} \
+             range_start={} range_end={}",
+            self.first_id, self.first_scroll, self.items.contains_key(&target_id),
+            self.range_start, self.range_end,
+        );
+        if viewport_size > 0.0 {
+            if let Some(item_top) = item_top {
+                if item_top >= 0.0 && item_top < viewport_size {
+                    eprintln!("[smooth_scroll_to] SKIPPING — item_top {item_top:.2} is within viewport");
+                    cx.widget_action(self.widget_uid(), PortalListAction::SmoothScrollReached);
+                    return;
+                }
+            }
+        }
+
         let max_items_to_show = max_items_to_show.unwrap_or(SMOOTH_SCROLL_MAXIMUM_WINDOW);
-        let scroll_direction: f64;
+
+        // Determine scroll direction from the item's actual pixel position
+        // relative to the viewport, not from index comparison alone.
+        // When first_scroll is very negative, items with target_id > first_id
+        // can still be above the viewport.
+        let scroll_direction: f64 = if let Some(item_top) = item_top {
+            if item_top < 0.0 { 1.0 } else { -1.0 }
+        } else {
+            // Height tree unavailable; fall back to index comparison.
+            if target_id > self.first_id { -1.0 } else { 1.0 }
+        };
+
         let starting_id: Option<usize>;
         if target_id > self.first_id {
-            scroll_direction = -1.0;
             starting_id = ((target_id.saturating_sub(self.first_id)) > max_items_to_show)
                 .then_some(target_id.saturating_sub(max_items_to_show));
         } else {
-            scroll_direction = 1.0;
             starting_id = ((self.first_id.saturating_sub(target_id)) > max_items_to_show)
                 .then_some(target_id + max_items_to_show);
         }
@@ -1284,6 +1365,7 @@ impl PortalList {
             target_id,
             delta: speed.abs() * scroll_direction,
             next_frame: cx.new_next_frame(),
+            top_offset,
         };
     }
 
@@ -1298,7 +1380,7 @@ impl PortalList {
             return;
         }
         let speed = speed * self.range_end as f64;
-        self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show);
+        self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show, 0.0);
     }
 
     /// Returns whether this PortalList is currently filling the viewport.
@@ -1813,25 +1895,70 @@ impl Widget for PortalList {
                 target_id,
                 delta,
                 next_frame,
+                top_offset,
             } => {
                 if next_frame.is_event(event).is_some() {
+                    // Copy values out of the borrow so we can call &self methods.
                     let target_id = *target_id;
+                    let delta_val = *delta;
+                    let top_offset = *top_offset;
+                    let scrolling_down = delta_val < 0.0;
 
-                    let distance_to_target = target_id as isize - self.first_id as isize;
-                    let target_passed = distance_to_target.signum() == delta.signum() as isize;
-                    if target_passed {
-                        self.first_id = target_id;
-                        self.area.redraw(cx);
+                    // Check if the target item has reached (or passed) the
+                    // desired position using the height tree for accuracy.
+                    let vi = self.vec_index;
+                    let viewport_size = self.area.rect(cx).size.index(vi);
+                    let item_top = self.item_top_from_height_tree(target_id);
+                    let mut target_reached = false;
+
+                    if let Some(item_top) = item_top {
+                        // Clamp: the item must at least reach the viewport (top >= 0).
+                        let effective_target = top_offset.max(0.0);
+                        if scrolling_down {
+                            target_reached = item_top <= effective_target;
+                        } else {
+                            target_reached = item_top >= effective_target;
+                        }
+
+                        // For boundary conditions (e.g., near list start/end), the
+                        // effective_target may not be reachable. Consider it reached
+                        // if the item's top is visible and we're at a list boundary.
+                        if !target_reached
+                            && item_top >= 0.0
+                            && item_top < viewport_size
+                            && (self.first_id == self.range_start || self.at_end)
+                        {
+                            target_reached = true;
+                        }
                     }
 
-                    let distance_to_target = target_id as isize - self.first_id as isize;
-                    let target_visible_at_end = self.at_end && target_id > self.first_id;
-                    let target_reached = distance_to_target == 0 || target_visible_at_end;
+                    // Fallback: if the list has hit the end, the target is as
+                    // visible as it can get.
+                    if self.at_end && target_id > self.first_id {
+                        target_reached = true;
+                    }
+
+                    eprintln!(
+                        "[scroll_anim] target_id={target_id} first_id={} first_scroll={:.2} \
+                         item_top={item_top:?} top_offset={top_offset} delta={delta_val:.2} \
+                         scrolling_down={scrolling_down} target_reached={target_reached} \
+                         at_end={} range_start={}",
+                        self.first_id, self.first_scroll, self.at_end, self.range_start,
+                    );
 
                     if !target_reached {
-                        *next_frame = cx.new_next_frame();
-                        let delta = *delta;
-                        self.delta_top_scroll(cx, delta, true, false);
+                        // Overshoot protection: if first_id has scrolled past
+                        // target_id, snap it back so the item gets drawn.
+                        let distance_to_target = target_id as isize - self.first_id as isize;
+                        let overshot = distance_to_target.signum() == delta_val.signum() as isize;
+                        if overshot {
+                            self.first_id = target_id;
+                        }
+
+                        if let ScrollState::ScrollingTo { next_frame, .. } = &mut self.scroll_state {
+                            *next_frame = cx.new_next_frame();
+                        }
+                        self.delta_top_scroll(cx, delta_val, true, false);
                         cx.widget_action(uid, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
@@ -2468,17 +2595,22 @@ impl PortalListRef {
     }
 
     /// Initiates a smooth scrolling animation to the specified target item in the list.
+    ///
+    /// If the target item is already fully visible within the viewport, no scrolling occurs.
+    /// Otherwise, the list scrolls until the target item's top edge is positioned at
+    /// `top_offset` pixels below the top of the viewport.
     pub fn smooth_scroll_to(
         &self,
         cx: &mut Cx,
         target_id: usize,
         speed: f64,
         max_items_to_show: Option<usize>,
+        top_offset: f64,
     ) {
         let Some(mut inner) = self.borrow_mut() else {
             return;
         };
-        inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show);
+        inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show, top_offset);
     }
 
     /// Returns the ID of the item that is currently being smoothly scrolled to, if any.
