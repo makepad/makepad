@@ -258,8 +258,11 @@ impl Window {
                 self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
             }
             OsType::Macos => {
+                // In macOS fullscreen, the OS provides its own auto-hiding
+                // toolbar with traffic-light buttons, so hide our caption bar.
+                let is_fullscreen = self.window.handle.is_fullscreen(cx);
                 self.view(cx, ids!(caption_bar))
-                    .set_visible(cx, self.show_caption_bar);
+                    .set_visible(cx, self.show_caption_bar && !is_fullscreen);
             }
             OsType::LinuxWindow(params) => {
                 // Only show the caption bar if we're drawing our own window chrome
@@ -620,8 +623,6 @@ impl Widget for Window {
                     // If the platform reports native chrome button geometry, derive
                     // the caption bar height so the buttons are vertically centered:
                     // height = top_margin * 2 + button_height = pos.y * 2 + size.y.
-                    // If the platform reports native chrome button geometry, derive
-                    // the caption bar height so the buttons are vertically centered.
                     let new_buttons = ev.new_geom.window_chrome_buttons;
                     if new_buttons != Rect::default() {
                         let h = (new_buttons.pos.y * 2.0 + new_buttons.size.y).ceil();

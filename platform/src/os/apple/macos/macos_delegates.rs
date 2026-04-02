@@ -218,26 +218,38 @@ pub fn define_macos_window_delegate() -> *const Class {
         //WindowDelegate::emit_event(state, WindowEvent::HoveredFileCancelled);
     }
 
-    // Invoked when entered fullscreen
-    extern "C" fn window_did_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+    // Fullscreen lifecycle: set `is_fullscreen` in the `will` callbacks so the
+    // widget layer can show/hide the caption bar at the START of the animation,
+    // not after it finishes.  The `did` callbacks fire a second change event so
+    // the final geometry (after the animation) is also picked up.
+
+    extern "C" fn window_will_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
         let cw = get_cocoa_window(this);
         cw.is_fullscreen = true;
         cw.send_change_event();
     }
 
-    // Invoked when before enter fullscreen
-    extern "C" fn window_will_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
-        let _cw = get_cocoa_window(this);
+    extern "C" fn window_did_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+        let cw = get_cocoa_window(this);
+        cw.send_change_event();
     }
 
-    // Invoked when exited fullscreen
-    extern "C" fn window_did_exit_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+    extern "C" fn window_will_exit_fullscreen(this: &Object, _: Sel, _: ObjcId) {
         let cw = get_cocoa_window(this);
         cw.is_fullscreen = false;
         cw.send_change_event();
     }
 
-    extern "C" fn window_did_fail_to_enter_fullscreen(_this: &Object, _: Sel, _: ObjcId) {}
+    extern "C" fn window_did_exit_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+        let cw = get_cocoa_window(this);
+        cw.send_change_event();
+    }
+
+    extern "C" fn window_did_fail_to_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+        let cw = get_cocoa_window(this);
+        cw.is_fullscreen = false;
+        cw.send_change_event();
+    }
 
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("RenderWindowDelegate", superclass).unwrap();
@@ -316,6 +328,10 @@ pub fn define_macos_window_delegate() -> *const Class {
         decl.add_method(
             sel!(windowWillEnterFullScreen:),
             window_will_enter_fullscreen as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(windowWillExitFullScreen:),
+            window_will_exit_fullscreen as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
             sel!(windowDidExitFullScreen:),
