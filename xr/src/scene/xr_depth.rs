@@ -377,6 +377,39 @@ impl XrEnv {
 }
 
 impl XrDepthRuntime {
+    const SURFACE_MESH_UPSERTS_PER_FRAME: usize = 2;
+
+    fn alloc_surface_mesh_geometry(&mut self, cx: &mut Cx2d) -> Geometry {
+        self.recycled_mesh_geometries
+            .pop()
+            .unwrap_or_else(|| Geometry::new(cx.cx.cx))
+    }
+
+    fn recycle_surface_mesh_geometry(&mut self, geometry: Geometry) {
+        self.recycled_mesh_geometries.push(geometry);
+    }
+
+    fn clear_surface_mesh_chunks(&mut self) {
+        let recycled = self
+            .mesh_chunks
+            .drain()
+            .map(|(_, (geometry, _))| geometry)
+            .collect::<Vec<_>>();
+        self.recycled_mesh_geometries.extend(recycled);
+    }
+
+    fn recycle_hidden_surface_mesh_chunks(&mut self) {
+        let removed_keys = self
+            .mesh_chunks
+            .keys()
+            .copied()
+            .filter(|chunk_key| !self.visible_chunks.contains(chunk_key))
+            .collect::<Vec<_>>();
+        for chunk_key in removed_keys {
+            self.remove_surface_mesh_chunk(chunk_key);
+        }
+    }
+
     pub(super) fn clear_surface_mesh(&mut self) {
         self.surface_mesh_generation = 0;
         self.surface_mesh_update_sequence = 0;
@@ -387,7 +420,7 @@ impl XrDepthRuntime {
         self.snapshot_grid = None;
         self.visible_request_id = 0;
         self.visible_chunks.clear();
-        self.mesh_chunks.clear();
+        self.clear_surface_mesh_chunks();
         self.pending_upserts.clear();
         self.surface_mesh_worker = None;
     }
@@ -452,7 +485,7 @@ impl XrDepthRuntime {
                 fingerprint: chunk.fingerprint,
             };
         } else {
-            let geometry = Geometry::new(cx.cx.cx);
+            let geometry = self.alloc_surface_mesh_geometry(cx);
             geometry.update(cx.cx.cx, chunk.indices, chunk.vertices);
             let handle = DepthSurfaceMeshChunkHandle {
                 geometry_id: geometry.geometry_id(),
@@ -466,29 +499,31 @@ impl XrDepthRuntime {
         if result.request_id < self.visible_request_id {
             return;
         }
+        let visible_chunks: HashSet<_> = result.visible_chunk_keys.into_iter().collect();
         self.visible_request_id = result.request_id;
         self.surface_mesh_generation = result.generation;
         self.surface_mesh_update_sequence = result.update_sequence;
         self.snapshot_grid = Some(result.snapshot_grid);
-        self.visible_chunks = result.visible_chunk_keys.into_iter().collect();
-        self.pending_upserts
-            .retain(|(request_id, _)| *request_id >= result.request_id);
+        self.visible_chunks = visible_chunks;
+        self.recycle_hidden_surface_mesh_chunks();
+        self.pending_upserts.clear();
     }
 
     fn remove_surface_mesh_chunk(&mut self, chunk_key: ChunkKey) {
-        self.mesh_chunks.remove(&chunk_key);
+        if let Some((geometry, _)) = self.mesh_chunks.remove(&chunk_key) {
+            self.recycle_surface_mesh_geometry(geometry);
+        }
     }
 
     fn enqueue_surface_mesh_upsert(&mut self, request_id: u64, chunk: DebugDepthMeshChunk) {
-        self.pending_upserts
-            .retain(|(queued_request_id, queued_chunk)| {
-                !(*queued_request_id == request_id && queued_chunk.chunk_key == chunk.chunk_key)
-            });
         self.pending_upserts.push_back((request_id, chunk));
     }
 
     fn apply_pending_surface_mesh_upserts(&mut self, cx: &mut Cx2d) {
-        let pending_count = self.pending_upserts.len();
+        let pending_count = self
+            .pending_upserts
+            .len()
+            .min(Self::SURFACE_MESH_UPSERTS_PER_FRAME);
         for _ in 0..pending_count {
             let Some((request_id, chunk)) = self.pending_upserts.pop_front() else {
                 break;
@@ -496,11 +531,7 @@ impl XrDepthRuntime {
             if request_id != self.visible_request_id {
                 continue;
             }
-            let is_new_chunk = !self.mesh_chunks.contains_key(&chunk.chunk_key);
             self.upsert_surface_mesh_chunk(cx, chunk);
-            if is_new_chunk {
-                break;
-            }
         }
     }
 
@@ -567,6 +598,7 @@ impl XrDepthRuntime {
         }
         draw_depth_mesh.base_color = vec4(0.60, 0.62, 0.66, 0.95);
         if show_mesh && !self.mesh_chunks.is_empty() && !self.visible_chunks.is_empty() {
+            draw_depth_mesh.set_focus_fade(cx, self.focus_point);
             let mut chunk_handles: Vec<_> = self
                 .visible_chunks
                 .iter()
@@ -586,6 +618,7 @@ impl XrDepthRuntime {
         draw_depth_mesh.depth_bias = mesh_depth_bias + 0.004;
         if show_query_hits {
             if let Some(geometry_id) = query_hits {
+                draw_depth_mesh.set_focus_fade(cx, None);
                 draw_depth_mesh.base_color = vec4(1.0, 0.42, 0.08, 0.95);
                 draw_depth_mesh.draw_geometry(cx, geometry_id);
             }

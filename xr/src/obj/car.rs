@@ -45,8 +45,16 @@ pub fn car_drive_command(
 
 pub fn car_stick_axes(stick: Vec2f, config: CarDriveConfig) -> (f32, f32) {
     (
-        deadzone_scaled_axis(-stick.y, config.stick_deadzone, config.stick_response_exponent),
-        deadzone_scaled_axis(stick.x, config.stick_deadzone, config.stick_response_exponent),
+        deadzone_scaled_axis(
+            -stick.y,
+            config.stick_deadzone,
+            config.stick_response_exponent,
+        ),
+        deadzone_scaled_axis(
+            stick.x,
+            config.stick_deadzone,
+            config.stick_response_exponent,
+        ),
     )
 }
 

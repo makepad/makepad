@@ -136,10 +136,10 @@ impl XrPeerSync {
             XrSharedHand::LeftHand,
             XrSharedHand::RightHand,
         ]
-            .into_iter()
-            .filter_map(|shared_hand| {
-                Self::local_hand_state_from_frames(current, previous, shared_hand)
-            })
-            .collect()
+        .into_iter()
+        .filter_map(|shared_hand| {
+            Self::local_hand_state_from_frames(current, previous, shared_hand)
+        })
+        .collect()
     }
 }

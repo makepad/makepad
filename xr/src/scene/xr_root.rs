@@ -22,6 +22,7 @@ const SYNC_BOX_MAX_HAND_GAP_METERS: f32 = 0.78;
 const SYNC_BOX_MIN_CHEST_DISTANCE_METERS: f32 = 0.10;
 const SYNC_BOX_MAX_CHEST_DISTANCE_METERS: f32 = 1.05;
 const SYNC_BOX_MAX_ARM_ELEVATION_DEGREES: f32 = 60.0;
+const XR_FIXED_DEPTH_VOXEL_SIZE_METERS: f32 = 0.02;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -650,7 +651,10 @@ impl XrRoot {
     }
 
     fn set_depth_voxel_size(&mut self, cx: &mut Cx, voxel_size_meters: f32) -> f32 {
-        let voxel_size_meters = cx.xr_tsdf().set_voxel_size_meters(voxel_size_meters);
+        let _ = voxel_size_meters;
+        let voxel_size_meters = cx
+            .xr_tsdf()
+            .set_voxel_size_meters(XR_FIXED_DEPTH_VOXEL_SIZE_METERS);
         self.env.reset_physics(cx);
         voxel_size_meters
     }

@@ -25,8 +25,12 @@ use std::{
     sync::Arc,
 };
 
-const XR_DEPTH_MESH_FOCUS_CUBE_SIZE_METERS: f32 = 1.0;
-const XR_DEPTH_MESH_FOCUS_GRID_METERS: f32 = 0.10;
+const XR_DEPTH_MESH_FOCUS_CUBE_SIZE_METERS: f32 = 0.96;
+const XR_DEPTH_MESH_FOCUS_GRID_METERS: f32 = 0.32;
+const XR_DEPTH_MESH_FOCUS_FADE_NEAR_METERS: f32 = 0.16;
+const XR_DEPTH_MESH_FOCUS_FADE_FAR_METERS: f32 = 0.82;
+const XR_DEPTH_MESH_FOCUS_FADE_FAR_ALPHA: f32 = 0.12;
+const XR_DEPTH_MESH_FOCUS_FADE_FAR_COLOR_SCALE: f32 = 0.28;
 
 #[path = "xr_depth.rs"]
 mod xr_depth;
@@ -63,8 +67,15 @@ script_mod! {
         draw_pass: uniform_buffer(draw.DrawPassUniforms)
         draw_list: uniform_buffer(draw.DrawListUniforms)
         geom: vertex_buffer(geom.DepthMeshVertex, geom.DepthMeshGeom)
+        u_focus_fade_enabled: uniform(float(0.0))
+        u_focus_fade_world: uniform(vec3(0.0, 0.0, 0.0))
+        u_focus_fade_near_m: uniform(float(0.16))
+        u_focus_fade_far_m: uniform(float(0.82))
+        u_focus_fade_far_alpha: uniform(float(0.12))
+        u_focus_fade_far_color_scale: uniform(float(0.28))
 
         v_barycentric: varying(vec3f)
+        v_world_pos: varying(vec3f)
 
         edge_distance_px: fn(bary: vec3f) -> f32 {
             let bary_fw = vec3(
@@ -88,6 +99,20 @@ script_mod! {
             return clamp(inner * outer, 0.0, 1.0)
         }
 
+        focus_fade_scales: fn(world_pos: vec3f) -> vec2f {
+            if self.u_focus_fade_enabled <= 0.5 {
+                return vec2(1.0, 1.0)
+            }
+            let fade_far = max(self.u_focus_fade_far_m, self.u_focus_fade_near_m + 0.0001);
+            let focus_delta = world_pos - self.u_focus_fade_world;
+            let dist = length(focus_delta);
+            let near_mix = 1.0 - smoothstep(self.u_focus_fade_near_m, fade_far, dist);
+            return vec2(
+                mix(self.u_focus_fade_far_color_scale, 1.0, near_mix),
+                mix(self.u_focus_fade_far_alpha, 1.0, near_mix)
+            )
+        }
+
         vertex: fn() {
             let world = vec4(
                 self.geom.pos.x,
@@ -102,15 +127,18 @@ script_mod! {
                 self.geom.barycentric.y,
                 self.geom.barycentric.z
             );
+            self.v_world_pos = vec3(world.x, world.y, world.z);
             self.vertex_pos = self.draw_pass.camera_projection * biased_view;
         }
 
         pixel: fn() {
-            let wire_alpha = self.base_color.w * self.wire_band_alpha(self.v_barycentric);
+            let fade = self.focus_fade_scales(self.v_world_pos);
+            let wire_alpha = self.base_color.w * self.wire_band_alpha(self.v_barycentric) * fade.y;
+            let color_alpha = wire_alpha * fade.x;
             return vec4(
-                self.base_color.x * wire_alpha,
-                self.base_color.y * wire_alpha,
-                self.base_color.z * wire_alpha,
+                self.base_color.x * color_alpha,
+                self.base_color.y * color_alpha,
+                self.base_color.z * color_alpha,
                 wire_alpha
             );
         }
@@ -294,6 +322,7 @@ struct XrDepthRuntime {
     visible_request_id: u64,
     visible_chunks: HashSet<ChunkKey>,
     mesh_chunks: HashMap<ChunkKey, (Geometry, DepthSurfaceMeshChunkHandle)>,
+    recycled_mesh_geometries: Vec<Geometry>,
     pending_upserts: VecDeque<(u64, DebugDepthMeshChunk)>,
     query_hit_geometry: Option<Geometry>,
     surface_mesh_worker: Option<XrDepthDebugMeshWorker>,
@@ -315,6 +344,7 @@ impl Default for XrDepthRuntime {
             visible_request_id: 0,
             visible_chunks: HashSet::new(),
             mesh_chunks: HashMap::new(),
+            recycled_mesh_geometries: Vec::new(),
             pending_upserts: VecDeque::new(),
             query_hit_geometry: None,
             surface_mesh_worker: None,
@@ -428,6 +458,9 @@ impl XrEnv {
     #[allow(dead_code)]
     pub(crate) fn set_depth_mesh_visible(&mut self, visible: bool) {
         self.depth_mesh = visible;
+        if !visible {
+            self.world.depth.clear_surface_mesh();
+        }
     }
 
     #[allow(dead_code)]
@@ -456,6 +489,9 @@ impl XrEnv {
 
     pub(crate) fn toggle_depth_mesh_visible(&mut self) -> bool {
         self.depth_mesh = !self.depth_mesh;
+        if !self.depth_mesh {
+            self.world.depth.clear_surface_mesh();
+        }
         self.depth_mesh
     }
 
@@ -1093,9 +1129,6 @@ impl XrEnv {
                 self.prepare_depth_mesh(cx, state);
                 let show_depth_mesh = self.depth_mesh_visible();
                 let show_depth_query_hits = self.depth_query_hits_visible();
-                if show_depth_mesh {
-                    self.world.depth.poll_surface_mesh_worker(cx);
-                }
                 self.world.depth.draw_surface_mesh(
                     &mut self.draw_depth_mesh,
                     cx,
@@ -1159,6 +1192,40 @@ pub struct DrawDepthMeshBasic {
 }
 
 impl DrawDepthMeshBasic {
+    fn set_focus_fade(&mut self, cx: &mut Cx2d, focus_point: Option<Vec3f>) {
+        let (enabled, focus_point) = match focus_point.filter(|point| point.is_finite()) {
+            Some(point) => (1.0, point),
+            None => (0.0, vec3f(0.0, 0.0, 0.0)),
+        };
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(u_focus_fade_enabled), &[enabled]);
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_focus_fade_world),
+            &[focus_point.x, focus_point.y, focus_point.z],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_focus_fade_near_m),
+            &[XR_DEPTH_MESH_FOCUS_FADE_NEAR_METERS],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_focus_fade_far_m),
+            &[XR_DEPTH_MESH_FOCUS_FADE_FAR_METERS],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_focus_fade_far_alpha),
+            &[XR_DEPTH_MESH_FOCUS_FADE_FAR_ALPHA],
+        );
+        self.draw_vars.set_uniform(
+            cx.cx,
+            live_id!(u_focus_fade_far_color_scale),
+            &[XR_DEPTH_MESH_FOCUS_FADE_FAR_COLOR_SCALE],
+        );
+    }
+
     fn draw_geometry(&mut self, cx: &mut Cx2d, geometry_id: GeometryId) {
         self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         self.draw_vars.geometry_id = Some(geometry_id);

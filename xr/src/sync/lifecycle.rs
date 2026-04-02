@@ -60,7 +60,9 @@ impl XrPeerSync {
         };
         match node_result {
             Ok(node) => {
-                self.runtime.shared_objects.set_local_peer_id(node.node_id());
+                self.runtime
+                    .shared_objects
+                    .set_local_peer_id(node.node_id());
                 self.runtime.net_node = Some(node);
                 self.runtime.local.last_sent_descriptor_signature = None;
                 self.runtime.local.last_sent_descriptor = None;
@@ -228,7 +230,9 @@ impl XrPeerSync {
         let seq = self.runtime.next_clock_ping_seq;
         self.runtime.next_clock_ping_seq = self.runtime.next_clock_ping_seq.wrapping_add(1);
         self.runtime.next_clock_ping_at = local_time + Self::CLOCK_PING_INTERVAL_SECONDS;
-        self.runtime.pending_clock_pings.push_back((seq, local_time));
+        self.runtime
+            .pending_clock_pings
+            .push_back((seq, local_time));
         while self.runtime.pending_clock_pings.len() > 32 {
             self.runtime.pending_clock_pings.pop_front();
         }
@@ -457,7 +461,10 @@ impl XrPeerSync {
             return;
         }
         peer_state.last_emitted_local_activity_pose = Some(local_pose);
-        cx.widget_action(self.widget_uid(), XrPeerSyncAction::ActivityPoseReset(local_pose));
+        cx.widget_action(
+            self.widget_uid(),
+            XrPeerSyncAction::ActivityPoseReset(local_pose),
+        );
     }
 
     pub(super) fn remote_state_is_recent(peer_state: &RemotePeerState, now: f64) -> bool {
@@ -928,7 +935,11 @@ impl XrPeerSync {
         Self::fist_ack_anchor(state.head_pose, &state.left_hand, &state.right_hand)
     }
 
-    fn fist_ack_anchor(head_pose: Pose, left_hand: &XrHand, right_hand: &XrHand) -> Option<XrAnchor> {
+    fn fist_ack_anchor(
+        head_pose: Pose,
+        left_hand: &XrHand,
+        right_hand: &XrHand,
+    ) -> Option<XrAnchor> {
         let forward = flat_head_forward(head_pose.orientation);
         let left_point = hand_closed_fist_contact_point_geometry_only(left_hand, forward, true)?;
         let right_point = hand_closed_fist_contact_point_geometry_only(right_hand, forward, false)?;

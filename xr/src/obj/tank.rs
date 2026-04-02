@@ -56,11 +56,7 @@ pub fn tank_drive_command(
 }
 
 pub fn tank_stick_axes(stick: Vec2f, config: TankDriveConfig) -> (f32, f32) {
-    stick_deadzone_scaled_axes(
-        stick,
-        config.stick_deadzone,
-        config.stick_response_exponent,
-    )
+    stick_deadzone_scaled_axes(stick, config.stick_deadzone, config.stick_response_exponent)
 }
 
 fn stick_deadzone_scaled_axes(stick: Vec2f, deadzone: f32, exponent: f32) -> (f32, f32) {
