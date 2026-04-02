@@ -9,7 +9,7 @@ use crate::model::LlamaModel;
 use crate::plan::ModelExecutionPlan;
 use crate::runtime::{
     allocate_hybrid_shared_cache_tensors,
-    compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs,
+    compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count,
     create_metal_context_buffer_with_runtime, reserve_hybrid_decode_main_buffer_size,
     CompiledHybridDecodeMetal, HybridCacheLayout, HybridCacheShape, HybridCacheTypes,
     HybridDecodeBatchLayout, HybridDecodeRun, HybridDecodeSpec, HybridSharedCacheTensorIds,
@@ -68,22 +68,24 @@ pub struct LlamaGeneration {
 struct SessionGraphParams {
     n_tokens: usize,
     n_outputs: usize,
+    attention_key_count: usize,
 }
 
 impl SessionGraphParams {
-    fn new(n_tokens: usize, n_outputs: usize) -> Self {
+    fn new(n_tokens: usize, n_outputs: usize, attention_key_count: usize) -> Self {
         Self {
             n_tokens,
             n_outputs,
+            attention_key_count,
         }
     }
 
-    fn greedy(n_tokens: usize) -> Self {
-        Self::new(n_tokens, 1)
+    fn greedy(n_tokens: usize, attention_key_count: usize) -> Self {
+        Self::new(n_tokens, 1, attention_key_count)
     }
 
-    fn token_generation() -> Self {
-        Self::greedy(1)
+    fn token_generation(attention_key_count: usize) -> Self {
+        Self::greedy(1, attention_key_count)
     }
 }
 
@@ -110,9 +112,8 @@ impl SessionGraphSet {
         self.compiled_by_params.insert(params, compiled);
     }
 
-    fn evict_prompt_graphs_except(&mut self, keep: SessionGraphParams) {
-        self.compiled_by_params
-            .retain(|params, _| params.n_tokens == 1 || *params == keep);
+    fn evict_graphs_except(&mut self, keep: SessionGraphParams) {
+        self.compiled_by_params.retain(|params, _| *params == keep);
     }
 }
 
@@ -335,8 +336,6 @@ impl LlamaSession {
 
     fn append_token_batch(&mut self, token_ids: &[i32]) -> Result<()> {
         let batch_size = token_ids.len();
-        let graph_params = SessionGraphParams::greedy(batch_size);
-        self.ensure_compiled_graph(graph_params)?;
         let start = self.token_ids.len();
         let positions = (start..start + batch_size)
             .map(|position| {
@@ -347,6 +346,8 @@ impl LlamaSession {
         let cache_tokens = start
             .checked_add(batch_size)
             .ok_or_else(|| LlamaError::format("overflow computing session cache length"))?;
+        let graph_params = SessionGraphParams::greedy(batch_size, cache_tokens);
+        self.ensure_compiled_graph(graph_params)?;
         let run = {
             let compiled = self
                 .graphs
@@ -375,10 +376,8 @@ impl LlamaSession {
             return Ok(());
         }
         for attempt in 0..=MAX_GRAPH_RESERVE_RETRIES {
-            if params.n_tokens > 1 {
-                self.graphs.evict_prompt_graphs_except(params);
-            }
-            match compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
+            self.graphs.evict_graphs_except(params);
+            match compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
                 &mut self.weights,
                 &self.spec,
                 &self.graphs.shared_runtime,
@@ -386,6 +385,7 @@ impl LlamaSession {
                 &self.graphs.shared_main_buffer,
                 params.n_tokens,
                 params.n_outputs,
+                params.attention_key_count,
             ) {
                 Ok(compiled) => {
                     self.graphs.insert_graph(params, compiled);
@@ -485,7 +485,7 @@ fn build_runtime_state(
         let mut compiled_by_params = BTreeMap::new();
         let build_result = (|| {
             let token_generation =
-                compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
+                compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
                     &mut weights,
                     spec,
                     &shared_runtime,
@@ -493,8 +493,9 @@ fn build_runtime_state(
                     &shared_main_buffer,
                     1,
                     1,
+                    1,
                 )?;
-            compiled_by_params.insert(SessionGraphParams::token_generation(), token_generation);
+            compiled_by_params.insert(SessionGraphParams::token_generation(1), token_generation);
             Ok::<(), LlamaError>(())
         })();
         match build_result {

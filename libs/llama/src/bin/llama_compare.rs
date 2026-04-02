@@ -17,23 +17,23 @@ use makepad_ggml::{
 use makepad_llama::{
     allocate_hybrid_shared_cache_tensors, build_delta_net_recurrent_decode_graph,
     build_hybrid_decode_graph_with_outputs, build_moe_ffn_graph, compile_attention_block_metal,
-    compile_attention_decode_metal, compile_delta_net_recurrent_decode_metal,
-    compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs,
+    compile_attention_decode_metal_with_key_count, compile_delta_net_recurrent_decode_metal,
+    compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count,
     create_metal_context_buffer_with_runtime, execute_attention_block_graph_metal_cached,
     execute_attention_decode_graph_metal_cached,
     execute_delta_net_recurrent_decode_graph_metal_cached, prepare_attention_block_graph,
-    prepare_attention_decode_graph, qwen35_attention_block_layout, qwen35_attention_decode_spec,
-    qwen35_delta_net_recurrent_decode_spec,
+    prepare_attention_decode_graph_with_key_count, qwen35_attention_block_layout,
+    qwen35_attention_decode_spec, qwen35_delta_net_recurrent_decode_spec,
     qwen35_first_attention_block_spec, qwen35_first_recurrent_block_spec,
-    qwen35_recurrent_block_spec,
-    qwen35_recurrent_block_layout, qwen35moe_attention_block_layout,
+    qwen35_recurrent_block_layout, qwen35_recurrent_block_spec, qwen35moe_attention_block_layout,
     qwen35moe_attention_block_spec, qwen35moe_attention_decode_spec,
     qwen35moe_delta_net_recurrent_decode_spec, qwen35moe_first_attention_block_spec,
     qwen35moe_first_recurrent_block_spec, qwen35moe_moe_ffn_layout, qwen35moe_moe_ffn_spec,
-    qwen35moe_recurrent_block_layout, AttentionRopeSpec, HybridDecodeBatchLayout,
-    HybridDecodeGraph, HybridDecodeSpec, HybridLayerSpec, HybridSharedCacheTensorIds,
-    LlamaArchitecture, LlamaError, LlamaModel, LlamaSession, LlamaSessionConfig, LlamaVocab,
-    LoadedGgufWeights, LogitsProbeInput, ProbeInputKind, Qwen35MoeLayerKind,
+    qwen35moe_recurrent_block_layout, AttentionDecodeSpec, AttentionRopeSpec, GgufWeightLayout,
+    HybridDecodeBatchLayout, HybridDecodeGraph, HybridDecodeSpec, HybridLayerSpec,
+    HybridSharedCacheTensorIds, LlamaArchitecture, LlamaError, LlamaModel, LlamaSession,
+    LlamaSessionConfig, LlamaVocab, LoadedGgufWeights, LogitsProbeInput, ProbeInputKind,
+    Qwen35MoeLayerKind,
 };
 
 const DEFAULT_PROMPT: &str = "The capital of France is";
@@ -56,6 +56,17 @@ struct UpstreamReference {
     logits: Vec<f32>,
     step_logits: Vec<Vec<f32>>,
     output_dir: PathBuf,
+}
+
+enum AttentionDecodeSequenceInput<'a> {
+    TokenIds(&'a [i32]),
+    EmbeddingsF32 { data: &'a [f32], hidden_size: usize },
+}
+
+struct AttentionDecodeSequenceRun {
+    last_hidden: Vec<f32>,
+    k_cache_bytes: Vec<u8>,
+    v_cache_bytes: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +106,7 @@ struct HybridCheckpointSession {
     spec: HybridDecodeSpec,
     decode: HybridDecodeGraph,
     session: MetalGraphSession,
+    shared_cache: HybridSharedCacheTensorIds,
     checkpoints: Vec<HybridCheckpointTensor>,
 }
 
@@ -151,7 +163,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("input.token_count: {}", upstream.token_ids.len());
     println!("input.tokens: {:?}", upstream.token_ids);
     println!("input.token_pieces: {:?}", input_token_labels);
-    println!("upstream.step.output_dir: {}", upstream.output_dir.display());
+    println!(
+        "upstream.step.output_dir: {}",
+        upstream.output_dir.display()
+    );
     println!(
         "upstream.batched.output_dir: {}",
         upstream_batched.output_dir.display()
@@ -267,7 +282,233 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .map(|index| index.to_string())
             .unwrap_or_else(|| "none".to_owned())
     );
-    let upstream_step_saved_final_stats = compare_logits(&upstream.logits, upstream_step_final_logits);
+    if matches!(model.architecture, LlamaArchitecture::Qwen35) && upstream.token_ids.len() > 1 {
+        let step0_capacity_diff = compare_hybrid_first_step_capacity_checkpoints(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+        )?;
+        println!(
+            "step0.capacity.checkpoint.input_embed_max_abs_diff: {:.9}",
+            step0_capacity_diff.checkpoints.input_embed.max_abs_diff
+        );
+        for layer in &step0_capacity_diff.checkpoints.layers {
+            println!(
+                "step0.capacity.layer{}._attn_residual_max_abs_diff: {:.9}",
+                layer.layer_index, layer.attn_residual.max_abs_diff
+            );
+            if let Some(attn_post_norm) = &layer.attn_post_norm {
+                println!(
+                    "step0.capacity.layer{}._attn_post_norm_max_abs_diff: {:.9}",
+                    layer.layer_index, attn_post_norm.max_abs_diff
+                );
+            }
+            println!(
+                "step0.capacity.layer{}._ffn_out_max_abs_diff: {:.9}",
+                layer.layer_index, layer.ffn_out.max_abs_diff
+            );
+            println!(
+                "step0.capacity.layer{}._post_ffn_max_abs_diff: {:.9}",
+                layer.layer_index, layer.post_ffn.max_abs_diff
+            );
+        }
+        println!(
+            "step0.capacity.checkpoint.result_norm_max_abs_diff: {:.9}",
+            step0_capacity_diff.checkpoints.result_norm.max_abs_diff
+        );
+        println!(
+            "step0.capacity.checkpoint.result_logits_max_abs_diff: {:.9}",
+            step0_capacity_diff.checkpoints.result_logits.max_abs_diff
+        );
+        println!(
+            "step0.capacity.cache.attn_k_max_abs_diff: {:.9}{}",
+            step0_capacity_diff.cache.attention_k.max_abs_diff,
+            format_layer_suffix(step0_capacity_diff.cache.attention_k.layer_index)
+        );
+        println!(
+            "step0.capacity.cache.attn_v_max_abs_diff: {:.9}{}",
+            step0_capacity_diff.cache.attention_v.max_abs_diff,
+            format_layer_suffix(step0_capacity_diff.cache.attention_v.layer_index)
+        );
+        println!(
+            "step0.capacity.cache.recurrent_r_max_abs_diff: {:.9}{}",
+            step0_capacity_diff.cache.recurrent_r.max_abs_diff,
+            format_layer_suffix(step0_capacity_diff.cache.recurrent_r.layer_index)
+        );
+        println!(
+            "step0.capacity.cache.recurrent_s_max_abs_diff: {:.9}{}",
+            step0_capacity_diff.cache.recurrent_s.max_abs_diff,
+            format_layer_suffix(step0_capacity_diff.cache.recurrent_s.layer_index)
+        );
+        let step0_shared_cache_diff = compare_hybrid_first_step_shared_cache_checkpoints(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+        )?;
+        println!(
+            "step0.shared_cache.checkpoint.input_embed_max_abs_diff: {:.9}",
+            step0_shared_cache_diff.input_embed.max_abs_diff
+        );
+        for layer in &step0_shared_cache_diff.layers {
+            println!(
+                "step0.shared_cache.layer{}._attn_residual_max_abs_diff: {:.9}",
+                layer.layer_index, layer.attn_residual.max_abs_diff
+            );
+            if let Some(attn_post_norm) = &layer.attn_post_norm {
+                println!(
+                    "step0.shared_cache.layer{}._attn_post_norm_max_abs_diff: {:.9}",
+                    layer.layer_index, attn_post_norm.max_abs_diff
+                );
+            }
+            println!(
+                "step0.shared_cache.layer{}._ffn_out_max_abs_diff: {:.9}",
+                layer.layer_index, layer.ffn_out.max_abs_diff
+            );
+            println!(
+                "step0.shared_cache.layer{}._post_ffn_max_abs_diff: {:.9}",
+                layer.layer_index, layer.post_ffn.max_abs_diff
+            );
+        }
+        println!(
+            "step0.shared_cache.checkpoint.result_norm_max_abs_diff: {:.9}",
+            step0_shared_cache_diff.result_norm.max_abs_diff
+        );
+        println!(
+            "step0.shared_cache.checkpoint.result_logits_max_abs_diff: {:.9}",
+            step0_shared_cache_diff.result_logits.max_abs_diff
+        );
+        let (first_attention_layer, _) = qwen35_first_attention_block_spec(&model)?;
+        let layer_prefix = format!("hybrid_decode.layer{first_attention_layer}.attn");
+        let step0_first_attn_input_norm = compare_hybrid_first_step_capacity_tensor(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+            &[&format!("{layer_prefix}.input_norm")],
+            "step0.layer_first.attn.input_norm",
+            false,
+        )?;
+        let step0_first_attn_q_store = compare_hybrid_first_step_capacity_tensor(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+            &[&format!("{layer_prefix}.q_store")],
+            "step0.layer_first.attn.q_store",
+            false,
+        )?;
+        let step0_first_attn_k_store = compare_hybrid_first_step_capacity_tensor(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+            &[&format!("{layer_prefix}.k_store")],
+            "step0.layer_first.attn.k_store",
+            false,
+        )?;
+        let step0_first_attn_v_store = compare_hybrid_first_step_capacity_tensor(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+            &[&format!("{layer_prefix}.v_store")],
+            "step0.layer_first.attn.v_store",
+            false,
+        )?;
+        let step0_first_attn_k_cache_view = compare_hybrid_first_step_capacity_tensor(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+            &[&format!("{layer_prefix}.k_cache_view")],
+            "step0.layer_first.attn.k_cache_view",
+            false,
+        )?;
+        let step0_first_attn_v_cache_view = compare_hybrid_first_step_capacity_tensor(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+            &[&format!("{layer_prefix}.v_cache_view")],
+            "step0.layer_first.attn.v_cache_view",
+            false,
+        )?;
+        let step0_first_attn_attn_flat = compare_hybrid_first_step_capacity_tensor(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+            &[&format!("{layer_prefix}.attn_flat")],
+            "step0.layer_first.attn.attn_flat",
+            false,
+        )?;
+        let step0_first_attn_mask = compare_hybrid_first_step_capacity_tensor(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+            &[&format!("{layer_prefix}.kq_mask")],
+            "step0.layer_first.attn.kq_mask",
+            false,
+        )?;
+        let step0_first_attn_output_proj = compare_hybrid_first_step_capacity_tensor(
+            &model,
+            upstream.token_ids[0],
+            u32::try_from(upstream.token_ids.len())?,
+            &[&format!("{layer_prefix}.output_proj")],
+            "step0.layer_first.attn.output_proj",
+            false,
+        )?;
+        println!(
+            "step0.first_attn.layer{}._input_norm_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_input_norm.max_abs_diff
+        );
+        println!(
+            "step0.first_attn.layer{}._q_store_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_q_store.max_abs_diff
+        );
+        println!(
+            "step0.first_attn.layer{}._k_store_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_k_store.max_abs_diff
+        );
+        println!(
+            "step0.first_attn.layer{}._v_store_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_v_store.max_abs_diff
+        );
+        println!(
+            "step0.first_attn.layer{}._k_cache_view_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_k_cache_view.max_abs_diff
+        );
+        println!(
+            "step0.first_attn.layer{}._v_cache_view_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_v_cache_view.max_abs_diff
+        );
+        println!(
+            "step0.first_attn.layer{}._kq_mask_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_mask.max_abs_diff
+        );
+        println!(
+            "step0.first_attn.layer{}._attn_flat_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_attn_flat.max_abs_diff
+        );
+        println!(
+            "step0.first_attn.layer{}._output_proj_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_output_proj.max_abs_diff
+        );
+        let step0_first_attn_standalone = attention_from_hidden_first_step_capacity_check(
+            &model,
+            upstream.token_ids[0],
+            first_attention_layer.saturating_sub(1),
+            first_attention_layer,
+            u32::try_from(upstream.token_ids.len())?,
+        )?;
+        println!(
+            "step0.first_attn_standalone.layer{}._hidden_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_standalone.hidden_stats.max_abs_diff
+        );
+        println!(
+            "step0.first_attn_standalone.layer{}._k_cache_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_standalone.k_cache_stats.max_abs_diff
+        );
+        println!(
+            "step0.first_attn_standalone.layer{}._v_cache_max_abs_diff: {:.9}",
+            first_attention_layer, step0_first_attn_standalone.v_cache_stats.max_abs_diff
+        );
+    }
+    let upstream_step_saved_final_stats =
+        compare_logits(&upstream.logits, upstream_step_final_logits);
     println!(
         "upstream.step.saved_final_vs_last_step.max_abs_diff: {:.9}",
         upstream_step_saved_final_stats.max_abs_diff
@@ -575,7 +816,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "upstream.batched.next.top{}: {:?}",
         args.top_k,
-        describe_top_k(&top_k_logits(&upstream_batched.logits, args.top_k), vocab.as_ref())
+        describe_top_k(
+            &top_k_logits(&upstream_batched.logits, args.top_k),
+            vocab.as_ref()
+        )
     );
     println!(
         "rust.next.top{}: {:?}",
@@ -1478,7 +1722,8 @@ fn run_shared_hybrid_graph(
     cache_tokens: usize,
     output_ids: &[i32],
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let mut compiled = compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
+    let mut compiled =
+        compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
         &mut env.weights,
         &env.spec,
         &env.shared_runtime,
@@ -1486,6 +1731,7 @@ fn run_shared_hybrid_graph(
         &env.shared_main_buffer,
         token_ids.len(),
         output_ids.len(),
+        cache_tokens,
     )?;
     let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
         positions,
@@ -1645,12 +1891,8 @@ fn compare_shared_hybrid_split_vs_full_cache_state(
     let max_context = u32::try_from(total_tokens)?;
 
     let split_snapshot = {
-        let mut split_env = build_shared_hybrid_debug_env(
-            model,
-            max_context,
-            attention_k_type,
-            attention_v_type,
-        )?;
+        let mut split_env =
+            build_shared_hybrid_debug_env(model, max_context, attention_k_type, attention_v_type)?;
         let split_prompt_positions = (0..prompt_token_ids.len())
             .map(i32::try_from)
             .collect::<Result<Vec<_>, _>>()?;
@@ -1674,12 +1916,8 @@ fn compare_shared_hybrid_split_vs_full_cache_state(
         capture_shared_hybrid_cache_snapshot(&split_env, total_tokens)?
     };
 
-    let mut full_env = build_shared_hybrid_debug_env(
-        model,
-        max_context,
-        attention_k_type,
-        attention_v_type,
-    )?;
+    let mut full_env =
+        build_shared_hybrid_debug_env(model, max_context, attention_k_type, attention_v_type)?;
     let mut full_token_ids = prompt_token_ids.to_vec();
     full_token_ids.push(continue_token_id);
     let full_positions = (0..full_token_ids.len())
@@ -1774,6 +2012,15 @@ fn build_hybrid_checkpoint_session(
     max_context: u32,
     n_tokens: usize,
 ) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
+    build_hybrid_checkpoint_session_with_shared_cache(model, max_context, n_tokens, true)
+}
+
+fn build_hybrid_checkpoint_session_with_shared_cache(
+    model: &LlamaModel,
+    max_context: u32,
+    n_tokens: usize,
+    use_shared_cache: bool,
+) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
     let plan = model.execution_plan()?;
     let mut weights = plan
         .full_weights
@@ -1786,13 +2033,16 @@ fn build_hybrid_checkpoint_session(
         TensorType::F32,
         TensorType::F32,
     )?;
-    let shared_cache =
-        allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, &spec)?;
+    let shared_cache = if use_shared_cache {
+        allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, &spec)?
+    } else {
+        HybridSharedCacheTensorIds::default()
+    };
     let mut decode = build_hybrid_decode_graph_with_outputs(
         &mut weights.ctx,
         &weights.tensor_ids,
         &spec,
-        Some(&shared_cache),
+        use_shared_cache.then_some(&shared_cache),
         n_tokens,
         1,
     )?;
@@ -1893,6 +2143,7 @@ fn build_hybrid_checkpoint_session(
         spec,
         decode,
         session,
+        shared_cache,
         checkpoints,
     })
 }
@@ -1951,11 +2202,63 @@ fn build_single_hybrid_capture_session(
         spec,
         decode,
         session,
+        shared_cache,
         checkpoints: vec![HybridCheckpointTensor {
             label: label.to_owned(),
             tensor_id,
         }],
     })
+}
+
+fn compare_hybrid_first_step_capacity_tensor(
+    model: &LlamaModel,
+    token_id: i32,
+    max_context: u32,
+    source_names: &[&str],
+    label: &str,
+    capture_last_hidden_token: bool,
+) -> Result<LogitComparison, Box<dyn std::error::Error>> {
+    if max_context <= 1 {
+        return Err("first-step tensor compare requires max_context > 1".into());
+    }
+
+    let token_ids = [token_id];
+    let positions = [0_i32];
+    let output_ids = [0_i32];
+
+    let mut reference_session = build_single_hybrid_capture_session(
+        model,
+        1,
+        1,
+        source_names,
+        label,
+        capture_last_hidden_token,
+    )?;
+    let reference_outputs = execute_hybrid_checkpoint_session(
+        &mut reference_session,
+        &token_ids,
+        &positions,
+        1,
+        &output_ids,
+    )?;
+
+    let mut wide_session = build_single_hybrid_capture_session(
+        model,
+        max_context,
+        1,
+        source_names,
+        label,
+        capture_last_hidden_token,
+    )?;
+    let wide_outputs = execute_hybrid_checkpoint_session(
+        &mut wide_session,
+        &token_ids,
+        &positions,
+        1,
+        &output_ids,
+    )?;
+
+    compare_named_checkpoint(&wide_outputs, &reference_outputs, label)
 }
 
 fn execute_hybrid_checkpoint_session(
@@ -1965,8 +2268,11 @@ fn execute_hybrid_checkpoint_session(
     cache_tokens: usize,
     output_ids: &[i32],
 ) -> Result<BTreeMap<String, Vec<f32>>, Box<dyn std::error::Error>> {
-    let mut layout =
-        HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(positions, cache_tokens, output_ids)?;
+    let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
+        positions,
+        cache_tokens,
+        output_ids,
+    )?;
     if session.decode.input_recurrent_state_rows.is_none() {
         layout.recurrent_state_rows.clear();
     }
@@ -2026,7 +2332,9 @@ fn execute_hybrid_checkpoint_session(
     } else {
         None
     };
-    let rope_position_bytes = rope_positions.as_ref().map(|positions| i32s_to_bytes(positions));
+    let rope_position_bytes = rope_positions
+        .as_ref()
+        .map(|positions| i32s_to_bytes(positions));
 
     let mut attention_mask_bytes = Vec::new();
     for cache_view in &session.decode.attention_cache_views {
@@ -2115,6 +2423,51 @@ fn execute_hybrid_checkpoint_session(
     Ok(outputs)
 }
 
+fn capture_checkpoint_session_cache_snapshot(
+    session: &HybridCheckpointSession,
+    cache_tokens: usize,
+) -> Result<HybridCacheSnapshot, Box<dyn std::error::Error>> {
+    let runtime = session.session.runtime();
+    let main_buffer = &session.session.compiled().main_buffer;
+    let mut snapshot = HybridCacheSnapshot::default();
+
+    for (&layer_index, ids) in &session.shared_cache.attention {
+        snapshot.attention_k.insert(
+            layer_index,
+            read_attention_cache_prefix_values_f32(
+                runtime,
+                main_buffer,
+                &session.weights.ctx,
+                ids.k_cache,
+                cache_tokens,
+            )?,
+        );
+        snapshot.attention_v.insert(
+            layer_index,
+            read_attention_cache_prefix_values_f32(
+                runtime,
+                main_buffer,
+                &session.weights.ctx,
+                ids.v_cache,
+                cache_tokens,
+            )?,
+        );
+    }
+
+    for (&layer_index, ids) in &session.shared_cache.recurrent {
+        snapshot.recurrent_r.insert(
+            layer_index,
+            read_full_tensor_values_f32(runtime, main_buffer, &session.weights.ctx, ids.r_cache)?,
+        );
+        snapshot.recurrent_s.insert(
+            layer_index,
+            read_full_tensor_values_f32(runtime, main_buffer, &session.weights.ctx, ids.s_cache)?,
+        );
+    }
+
+    Ok(snapshot)
+}
+
 fn compare_hybrid_prompt_split_checkpoints(
     model: &LlamaModel,
     prompt_token_ids: &[i32],
@@ -2184,6 +2537,219 @@ fn compare_hybrid_prompt_split_checkpoints(
     })
 }
 
+fn compare_hybrid_first_step_capacity_checkpoints(
+    model: &LlamaModel,
+    token_id: i32,
+    max_context: u32,
+) -> Result<HybridCheckpointAndCacheDiff, Box<dyn std::error::Error>> {
+    if max_context <= 1 {
+        return Err("first-step capacity compare requires max_context > 1".into());
+    }
+
+    let token_ids = [token_id];
+    let positions = [0_i32];
+    let output_ids = [0_i32];
+
+    let mut reference_session = build_hybrid_checkpoint_session(model, 1, 1)?;
+    let reference_outputs = execute_hybrid_checkpoint_session(
+        &mut reference_session,
+        &token_ids,
+        &positions,
+        1,
+        &output_ids,
+    )?;
+    let reference_cache = capture_checkpoint_session_cache_snapshot(&reference_session, 1)?;
+
+    let mut wide_session = build_hybrid_checkpoint_session(model, max_context, 1)?;
+    let wide_outputs = execute_hybrid_checkpoint_session(
+        &mut wide_session,
+        &token_ids,
+        &positions,
+        1,
+        &output_ids,
+    )?;
+    let wide_cache = capture_checkpoint_session_cache_snapshot(&wide_session, 1)?;
+
+    let mut layers = Vec::with_capacity(reference_session.spec.layers.len());
+    for layer in &reference_session.spec.layers {
+        let layer_index = match layer {
+            HybridLayerSpec::Attention { layer_index, .. }
+            | HybridLayerSpec::Recurrent { layer_index, .. } => *layer_index,
+        };
+        layers.push(HybridSplitLayerCheckpointDiff {
+            layer_index,
+            attn_residual: compare_named_checkpoint(
+                &wide_outputs,
+                &reference_outputs,
+                &format!("layer{layer_index}.attn_residual"),
+            )?,
+            attn_post_norm: compare_optional_named_checkpoint(
+                &wide_outputs,
+                &reference_outputs,
+                &format!("layer{layer_index}.attn_post_norm"),
+            )?,
+            ffn_out: compare_named_checkpoint(
+                &wide_outputs,
+                &reference_outputs,
+                &format!("layer{layer_index}.ffn_out"),
+            )?,
+            post_ffn: compare_named_checkpoint(
+                &wide_outputs,
+                &reference_outputs,
+                &format!("layer{layer_index}.post_ffn"),
+            )?,
+        });
+    }
+
+    let mut cache = HybridCacheDiffSummary::default();
+    for (&layer_index, reference_values) in &reference_cache.attention_k {
+        let wide_values = wide_cache
+            .attention_k
+            .get(&layer_index)
+            .ok_or_else(|| format!("wide attention-k snapshot missing layer {}", layer_index))?;
+        update_layer_diff_summary(
+            &mut cache.attention_k,
+            layer_index,
+            compare_logits(wide_values, reference_values),
+        );
+    }
+    for (&layer_index, reference_values) in &reference_cache.attention_v {
+        let wide_values = wide_cache
+            .attention_v
+            .get(&layer_index)
+            .ok_or_else(|| format!("wide attention-v snapshot missing layer {}", layer_index))?;
+        update_layer_diff_summary(
+            &mut cache.attention_v,
+            layer_index,
+            compare_logits(wide_values, reference_values),
+        );
+    }
+    for (&layer_index, reference_values) in &reference_cache.recurrent_r {
+        let wide_values = wide_cache
+            .recurrent_r
+            .get(&layer_index)
+            .ok_or_else(|| format!("wide recurrent-r snapshot missing layer {}", layer_index))?;
+        update_layer_diff_summary(
+            &mut cache.recurrent_r,
+            layer_index,
+            compare_logits(wide_values, reference_values),
+        );
+    }
+    for (&layer_index, reference_values) in &reference_cache.recurrent_s {
+        let wide_values = wide_cache
+            .recurrent_s
+            .get(&layer_index)
+            .ok_or_else(|| format!("wide recurrent-s snapshot missing layer {}", layer_index))?;
+        update_layer_diff_summary(
+            &mut cache.recurrent_s,
+            layer_index,
+            compare_logits(wide_values, reference_values),
+        );
+    }
+
+    Ok(HybridCheckpointAndCacheDiff {
+        checkpoints: HybridSplitCheckpointDiff {
+            input_embed: compare_named_checkpoint(
+                &wide_outputs,
+                &reference_outputs,
+                "model.input_embed",
+            )?,
+            result_norm: compare_named_checkpoint(
+                &wide_outputs,
+                &reference_outputs,
+                "model.result_norm",
+            )?,
+            result_logits: compare_named_checkpoint(
+                &wide_outputs,
+                &reference_outputs,
+                "model.result_logits",
+            )?,
+            layers,
+        },
+        cache,
+    })
+}
+
+fn compare_hybrid_first_step_shared_cache_checkpoints(
+    model: &LlamaModel,
+    token_id: i32,
+    max_context: u32,
+) -> Result<HybridSplitCheckpointDiff, Box<dyn std::error::Error>> {
+    let token_ids = [token_id];
+    let positions = [0_i32];
+    let output_ids = [0_i32];
+
+    let mut internal_session =
+        build_hybrid_checkpoint_session_with_shared_cache(model, max_context, 1, false)?;
+    let internal_outputs = execute_hybrid_checkpoint_session(
+        &mut internal_session,
+        &token_ids,
+        &positions,
+        1,
+        &output_ids,
+    )?;
+
+    let mut shared_session =
+        build_hybrid_checkpoint_session_with_shared_cache(model, max_context, 1, true)?;
+    let shared_outputs = execute_hybrid_checkpoint_session(
+        &mut shared_session,
+        &token_ids,
+        &positions,
+        1,
+        &output_ids,
+    )?;
+
+    let mut layers = Vec::with_capacity(shared_session.spec.layers.len());
+    for layer in &shared_session.spec.layers {
+        let layer_index = match layer {
+            HybridLayerSpec::Attention { layer_index, .. }
+            | HybridLayerSpec::Recurrent { layer_index, .. } => *layer_index,
+        };
+        layers.push(HybridSplitLayerCheckpointDiff {
+            layer_index,
+            attn_residual: compare_named_checkpoint(
+                &shared_outputs,
+                &internal_outputs,
+                &format!("layer{layer_index}.attn_residual"),
+            )?,
+            attn_post_norm: compare_optional_named_checkpoint(
+                &shared_outputs,
+                &internal_outputs,
+                &format!("layer{layer_index}.attn_post_norm"),
+            )?,
+            ffn_out: compare_named_checkpoint(
+                &shared_outputs,
+                &internal_outputs,
+                &format!("layer{layer_index}.ffn_out"),
+            )?,
+            post_ffn: compare_named_checkpoint(
+                &shared_outputs,
+                &internal_outputs,
+                &format!("layer{layer_index}.post_ffn"),
+            )?,
+        });
+    }
+
+    Ok(HybridSplitCheckpointDiff {
+        input_embed: compare_named_checkpoint(
+            &shared_outputs,
+            &internal_outputs,
+            "model.input_embed",
+        )?,
+        result_norm: compare_named_checkpoint(
+            &shared_outputs,
+            &internal_outputs,
+            "model.result_norm",
+        )?,
+        result_logits: compare_named_checkpoint(
+            &shared_outputs,
+            &internal_outputs,
+            "model.result_logits",
+        )?,
+        layers,
+    })
+}
+
 fn compare_named_checkpoint(
     lhs: &BTreeMap<String, Vec<f32>>,
     rhs: &BTreeMap<String, Vec<f32>>,
@@ -2244,16 +2810,7 @@ fn compare_configure_attention_cache_view(
     let tensor = ctx
         .tensor(tensor_id)
         .ok_or_else(|| format!("invalid attention cache view tensor {tensor_id}"))?;
-    let layout = TensorLayout::from_parts(
-        4,
-        &[
-            ne0,
-            ne2,
-            i64::try_from(ne1)?,
-            ne3,
-        ],
-        &tensor.nb,
-    )?;
+    let layout = TensorLayout::from_parts(4, &[ne0, ne2, i64::try_from(ne1)?, ne3], &tensor.nb)?;
     ctx.set_tensor_layout(tensor_id, layout)?;
     Ok(())
 }
@@ -2402,6 +2959,11 @@ struct HybridSplitCheckpointDiff {
     result_norm: LogitComparison,
     result_logits: LogitComparison,
     layers: Vec<HybridSplitLayerCheckpointDiff>,
+}
+
+struct HybridCheckpointAndCacheDiff {
+    checkpoints: HybridSplitCheckpointDiff,
+    cache: HybridCacheDiffSummary,
 }
 
 struct TensorPreview {
@@ -3518,7 +4080,9 @@ fn attention_cache_self_check(
             (layer_index, block_spec, layout, decode_spec)
         }
         LlamaArchitecture::Unknown(name) => {
-            return Err(format!("unsupported architecture for attention self-check: {name}").into());
+            return Err(
+                format!("unsupported architecture for attention self-check: {name}").into(),
+            );
         }
     };
     let positions = (0..token_ids.len())
@@ -3536,22 +4100,14 @@ fn attention_cache_self_check(
         &positions,
     )?;
 
-    let mut decode_loaded =
-        layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
-    let compiled_decode = compile_attention_decode_metal(&mut decode_loaded, &decode_spec, 1)?;
-    let mut decode_last_hidden = None;
-    for (position, token_id) in token_ids.iter().copied().enumerate() {
-        let run = execute_attention_decode_graph_metal_cached(
-            &compiled_decode,
-            &mut decode_loaded,
-            LogitsProbeInput::TokenIds(std::slice::from_ref(&token_id)),
-            &[i32::try_from(position)?],
-            position + 1,
-        )?;
-        decode_last_hidden = Some(run.hidden);
-    }
-    let decode_last_hidden =
-        decode_last_hidden.ok_or("attention decode self-check did not produce hidden output")?;
+    let decode_run = run_attention_decode_sequence_exact(
+        model,
+        &layout,
+        &decode_spec,
+        &positions,
+        AttentionDecodeSequenceInput::TokenIds(token_ids),
+    )?;
+    let decode_last_hidden = decode_run.last_hidden;
     let hidden_size = decode_last_hidden.len();
     let full_last_hidden = full_run
         .hidden
@@ -3609,7 +4165,9 @@ fn recurrent_cache_self_check(
             (layer_index, layout, spec)
         }
         LlamaArchitecture::Unknown(name) => {
-            return Err(format!("unsupported architecture for recurrent self-check: {name}").into());
+            return Err(
+                format!("unsupported architecture for recurrent self-check: {name}").into(),
+            );
         }
     };
 
@@ -4464,7 +5022,10 @@ fn recurrent_step_cpu_check(
     let (layer_index, block_spec, layout, spec) = match &model.architecture {
         LlamaArchitecture::Qwen35 => {
             let (layer_index, block_spec) = if let Some(layer_index) = requested_layer_index {
-                (layer_index, qwen35_recurrent_block_spec(model, layer_index)?)
+                (
+                    layer_index,
+                    qwen35_recurrent_block_spec(model, layer_index)?,
+                )
             } else {
                 qwen35_first_recurrent_block_spec(model)?
             };
@@ -4480,7 +5041,9 @@ fn recurrent_step_cpu_check(
         }
         LlamaArchitecture::Qwen35Moe => {
             if requested_layer_index.is_some() {
-                return Err("explicit recurrent layer checks are not implemented for qwen35moe".into());
+                return Err(
+                    "explicit recurrent layer checks are not implemented for qwen35moe".into(),
+                );
             }
             let (layer_index, block_spec) = qwen35moe_first_recurrent_block_spec(model)?;
             let layout = qwen35moe_recurrent_block_layout(model, layer_index)?;
@@ -4713,6 +5276,116 @@ fn recurrent_step_cpu_check(
     })
 }
 
+fn run_attention_decode_sequence_exact(
+    model: &LlamaModel,
+    layout: &GgufWeightLayout,
+    spec: &AttentionDecodeSpec,
+    positions: &[i32],
+    input: AttentionDecodeSequenceInput<'_>,
+) -> Result<AttentionDecodeSequenceRun, Box<dyn std::error::Error>> {
+    if positions.is_empty() {
+        return Err("attention decode step sequence requires at least one token".into());
+    }
+
+    match &input {
+        AttentionDecodeSequenceInput::TokenIds(token_ids) => {
+            if token_ids.len() != positions.len() {
+                return Err(format!(
+                    "attention decode token/position length mismatch: {} vs {}",
+                    token_ids.len(),
+                    positions.len()
+                )
+                .into());
+            }
+        }
+        AttentionDecodeSequenceInput::EmbeddingsF32 { data, hidden_size } => {
+            let expected = hidden_size
+                .checked_mul(positions.len())
+                .ok_or("overflow computing attention decode embedding length")?;
+            if data.len() != expected {
+                return Err(format!(
+                    "attention decode embedding length mismatch: got {}, expected {}",
+                    data.len(),
+                    expected
+                )
+                .into());
+            }
+        }
+    }
+
+    let mut previous_k_cache = None;
+    let mut previous_v_cache = None;
+    let mut last_hidden = None;
+
+    for token_index in 0..positions.len() {
+        let key_count = usize::try_from(positions[token_index])?
+            .checked_add(1)
+            .ok_or("overflow computing attention decode key_count")?;
+        let mut loaded =
+            layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
+        let compiled =
+            compile_attention_decode_metal_with_key_count(&mut loaded, spec, 1, key_count)?;
+        let decode = compiled.decode();
+
+        let zero_k_cache = vec![0u8; loaded.ctx.tensor_data(decode.k_cache)?.len()];
+        let zero_v_cache = vec![0u8; loaded.ctx.tensor_data(decode.v_cache)?.len()];
+        loaded
+            .ctx
+            .write_tensor_data(decode.k_cache, &zero_k_cache)?;
+        loaded
+            .ctx
+            .write_tensor_data(decode.v_cache, &zero_v_cache)?;
+        if let Some(bytes) = previous_k_cache.as_deref() {
+            loaded.ctx.write_tensor_data(decode.k_cache, bytes)?;
+        }
+        if let Some(bytes) = previous_v_cache.as_deref() {
+            loaded.ctx.write_tensor_data(decode.v_cache, bytes)?;
+        }
+
+        let run = match &input {
+            AttentionDecodeSequenceInput::TokenIds(token_ids) => {
+                execute_attention_decode_graph_metal_cached(
+                    &compiled,
+                    &mut loaded,
+                    LogitsProbeInput::TokenIds(std::slice::from_ref(&token_ids[token_index])),
+                    &positions[token_index..token_index + 1],
+                    key_count,
+                )?
+            }
+            AttentionDecodeSequenceInput::EmbeddingsF32 { data, hidden_size } => {
+                let start = token_index
+                    .checked_mul(*hidden_size)
+                    .ok_or("overflow computing attention embedding token start")?;
+                let end = start
+                    .checked_add(*hidden_size)
+                    .ok_or("overflow computing attention embedding token end")?;
+                execute_attention_decode_graph_metal_cached(
+                    &compiled,
+                    &mut loaded,
+                    LogitsProbeInput::EmbeddingsF32 {
+                        data: &data[start..end],
+                        n_tokens: 1,
+                    },
+                    &positions[token_index..token_index + 1],
+                    key_count,
+                )?
+            }
+        };
+
+        last_hidden = Some(run.hidden);
+        previous_k_cache = Some(loaded.ctx.tensor_data(decode.k_cache)?.to_vec());
+        previous_v_cache = Some(loaded.ctx.tensor_data(decode.v_cache)?.to_vec());
+    }
+
+    Ok(AttentionDecodeSequenceRun {
+        last_hidden: last_hidden.ok_or("attention decode step sequence produced no output")?,
+        k_cache_bytes: previous_k_cache
+            .ok_or("attention decode step sequence produced no k cache state")?,
+        v_cache_bytes: previous_v_cache
+            .ok_or("attention decode step sequence produced no v cache state")?,
+    })
+}
+
 fn attention_decode_batch_self_check(
     model: &LlamaModel,
     token_ids: &[i32],
@@ -4745,10 +5418,10 @@ fn attention_decode_batch_self_check(
             (layer_index, layout, spec)
         }
         LlamaArchitecture::Unknown(name) => {
-            return Err(
-                format!("unsupported architecture for attention decode batch self-check: {name}")
-                    .into(),
-            );
+            return Err(format!(
+                "unsupported architecture for attention decode batch self-check: {name}"
+            )
+            .into());
         }
     };
     let positions = (0..token_ids.len())
@@ -4757,8 +5430,12 @@ fn attention_decode_batch_self_check(
 
     let mut batched_loaded =
         layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
-    let batched_compiled =
-        compile_attention_decode_metal(&mut batched_loaded, &spec, token_ids.len())?;
+    let batched_compiled = compile_attention_decode_metal_with_key_count(
+        &mut batched_loaded,
+        &spec,
+        token_ids.len(),
+        token_ids.len(),
+    )?;
     let batched_run = execute_attention_decode_graph_metal_cached(
         &batched_compiled,
         &mut batched_loaded,
@@ -4770,24 +5447,16 @@ fn attention_decode_batch_self_check(
     let batched_k_cache = read_tensor_f32s(&batched_loaded.ctx, "attn_decode.k_cache")?;
     let batched_v_cache = read_tensor_f32s(&batched_loaded.ctx, "attn_decode.v_cache")?;
 
-    let mut step_loaded =
-        layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
-    let step_compiled = compile_attention_decode_metal(&mut step_loaded, &spec, 1)?;
-    let mut step_last_hidden = None;
-    for (position, token_id) in token_ids.iter().copied().enumerate() {
-        let run = execute_attention_decode_graph_metal_cached(
-            &step_compiled,
-            &mut step_loaded,
-            LogitsProbeInput::TokenIds(std::slice::from_ref(&token_id)),
-            &[i32::try_from(position)?],
-            position + 1,
-        )?;
-        step_last_hidden = Some(run.hidden);
-    }
-    let step_last_hidden = step_last_hidden
-        .ok_or("attention decode batch self-check did not produce hidden output")?;
-    let step_k_cache = read_tensor_f32s(&step_loaded.ctx, "attn_decode.k_cache")?;
-    let step_v_cache = read_tensor_f32s(&step_loaded.ctx, "attn_decode.v_cache")?;
+    let step_run = run_attention_decode_sequence_exact(
+        model,
+        &layout,
+        &spec,
+        &positions,
+        AttentionDecodeSequenceInput::TokenIds(token_ids),
+    )?;
+    let step_last_hidden = step_run.last_hidden;
+    let step_k_cache = bytes_to_f32s(&step_run.k_cache_bytes);
+    let step_v_cache = bytes_to_f32s(&step_run.v_cache_bytes);
 
     Ok(AttentionDecodeBatchSelfCheck {
         layer_index,
@@ -4848,8 +5517,13 @@ fn recurrent_from_hidden_batch_self_check(
         .into());
     }
 
-    let mut spec =
-        qwen35_delta_net_recurrent_decode_spec(model, layer_index, 1, TensorType::F32, TensorType::F32)?;
+    let mut spec = qwen35_delta_net_recurrent_decode_spec(
+        model,
+        layer_index,
+        1,
+        TensorType::F32,
+        TensorType::F32,
+    )?;
     spec.block.input = ProbeInputKind::Embeddings {
         hidden_size: u32::try_from(hidden_size)?,
         input_type: TensorType::F32,
@@ -4958,8 +5632,14 @@ fn attention_from_hidden_batch_self_check(
         .into());
     }
 
-    let mut spec =
-        qwen35_attention_decode_spec(model, layer_index, max_context, 1, TensorType::F32, TensorType::F32)?;
+    let mut spec = qwen35_attention_decode_spec(
+        model,
+        layer_index,
+        max_context,
+        1,
+        TensorType::F32,
+        TensorType::F32,
+    )?;
     spec.block.input = ProbeInputKind::Embeddings {
         hidden_size: u32::try_from(hidden_size)?,
         input_type: TensorType::F32,
@@ -4968,7 +5648,12 @@ fn attention_from_hidden_batch_self_check(
 
     let mut full_loaded =
         layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
-    let full_compiled = compile_attention_decode_metal(&mut full_loaded, &spec, token_ids.len())?;
+    let full_compiled = compile_attention_decode_metal_with_key_count(
+        &mut full_loaded,
+        &spec,
+        token_ids.len(),
+        token_ids.len(),
+    )?;
     let full_run = execute_attention_decode_graph_metal_cached(
         &full_compiled,
         &mut full_loaded,
@@ -4983,33 +5668,19 @@ fn attention_from_hidden_batch_self_check(
     let full_k_cache = read_tensor_f32s(&full_loaded.ctx, "attn_decode.k_cache")?;
     let full_v_cache = read_tensor_f32s(&full_loaded.ctx, "attn_decode.v_cache")?;
 
-    let mut step_loaded =
-        layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
-    let step_compiled = compile_attention_decode_metal(&mut step_loaded, &spec, 1)?;
-    let mut step_last_hidden = None;
-    for token_index in 0..token_ids.len() {
-        let start = token_index
-            .checked_mul(hidden_size)
-            .ok_or("overflow computing attention hidden token start")?;
-        let end = start
-            .checked_add(hidden_size)
-            .ok_or("overflow computing attention hidden token end")?;
-        let run = execute_attention_decode_graph_metal_cached(
-            &step_compiled,
-            &mut step_loaded,
-            LogitsProbeInput::EmbeddingsF32 {
-                data: &hidden_input[start..end],
-                n_tokens: 1,
-            },
-            &[i32::try_from(token_index)?],
-            token_index + 1,
-        )?;
-        step_last_hidden = Some(run.hidden);
-    }
-    let step_last_hidden =
-        step_last_hidden.ok_or("attention hidden self-check did not produce output")?;
-    let step_k_cache = read_tensor_f32s(&step_loaded.ctx, "attn_decode.k_cache")?;
-    let step_v_cache = read_tensor_f32s(&step_loaded.ctx, "attn_decode.v_cache")?;
+    let step_run = run_attention_decode_sequence_exact(
+        model,
+        &layout,
+        &spec,
+        &positions,
+        AttentionDecodeSequenceInput::EmbeddingsF32 {
+            data: hidden_input,
+            hidden_size,
+        },
+    )?;
+    let step_last_hidden = step_run.last_hidden;
+    let step_k_cache = bytes_to_f32s(&step_run.k_cache_bytes);
+    let step_v_cache = bytes_to_f32s(&step_run.v_cache_bytes);
 
     Ok(AttentionFromHiddenBatchSelfCheck {
         source_layer_index,
@@ -5017,6 +5688,102 @@ fn attention_from_hidden_batch_self_check(
         hidden_stats: compare_logits(&full_last_hidden, &step_last_hidden),
         k_cache_stats: compare_logits(&full_k_cache, &step_k_cache),
         v_cache_stats: compare_logits(&full_v_cache, &step_v_cache),
+    })
+}
+
+fn attention_from_hidden_first_step_capacity_check(
+    model: &LlamaModel,
+    token_id: i32,
+    source_layer_index: u32,
+    layer_index: u32,
+    max_context: u32,
+) -> Result<AttentionFromHiddenBatchSelfCheck, Box<dyn std::error::Error>> {
+    if max_context <= 1 {
+        return Err("attention first-step capacity check requires max_context > 1".into());
+    }
+    if model.architecture != LlamaArchitecture::Qwen35 {
+        return Err("attention first-step capacity check is only implemented for qwen35".into());
+    }
+
+    let hidden_size = usize::try_from(model.require_qwen35()?.embedding_length)?;
+    let source_name = format!("hybrid_decode.layer{source_layer_index}.post_ffn");
+    let label = format!("layer{source_layer_index}.post_ffn.step0");
+    let mut capture_session =
+        build_single_hybrid_capture_session(model, 1, 1, &[source_name.as_str()], &label, false)?;
+    let captured =
+        execute_hybrid_checkpoint_session(&mut capture_session, &[token_id], &[0], 1, &[0])?;
+    let hidden_input = captured
+        .get(&label)
+        .ok_or_else(|| format!("missing captured tensor '{label}'"))?;
+    if hidden_input.len() != hidden_size {
+        return Err(format!(
+            "captured hidden input length mismatch: got {}, expected {}",
+            hidden_input.len(),
+            hidden_size
+        )
+        .into());
+    }
+
+    let mut spec_small =
+        qwen35_attention_decode_spec(model, layer_index, 1, 1, TensorType::F32, TensorType::F32)?;
+    spec_small.block.input = ProbeInputKind::Embeddings {
+        hidden_size: u32::try_from(hidden_size)?,
+        input_type: TensorType::F32,
+    };
+    let mut spec_wide = qwen35_attention_decode_spec(
+        model,
+        layer_index,
+        max_context,
+        1,
+        TensorType::F32,
+        TensorType::F32,
+    )?;
+    spec_wide.block.input = ProbeInputKind::Embeddings {
+        hidden_size: u32::try_from(hidden_size)?,
+        input_type: TensorType::F32,
+    };
+    let layout = qwen35_attention_block_layout(model, layer_index)?;
+
+    let mut small_loaded =
+        layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
+    let small_compiled =
+        compile_attention_decode_metal_with_key_count(&mut small_loaded, &spec_small, 1, 1)?;
+    let small_run = execute_attention_decode_graph_metal_cached(
+        &small_compiled,
+        &mut small_loaded,
+        LogitsProbeInput::EmbeddingsF32 {
+            data: hidden_input,
+            n_tokens: 1,
+        },
+        &[0],
+        1,
+    )?;
+    let small_k_cache = read_tensor_f32s(&small_loaded.ctx, "attn_decode.k_cache")?;
+    let small_v_cache = read_tensor_f32s(&small_loaded.ctx, "attn_decode.v_cache")?;
+
+    let mut wide_loaded =
+        layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
+    let wide_compiled =
+        compile_attention_decode_metal_with_key_count(&mut wide_loaded, &spec_wide, 1, 1)?;
+    let wide_run = execute_attention_decode_graph_metal_cached(
+        &wide_compiled,
+        &mut wide_loaded,
+        LogitsProbeInput::EmbeddingsF32 {
+            data: hidden_input,
+            n_tokens: 1,
+        },
+        &[0],
+        1,
+    )?;
+    let wide_k_cache = read_tensor_f32s(&wide_loaded.ctx, "attn_decode.k_cache")?;
+    let wide_v_cache = read_tensor_f32s(&wide_loaded.ctx, "attn_decode.v_cache")?;
+
+    Ok(AttentionFromHiddenBatchSelfCheck {
+        source_layer_index,
+        layer_index,
+        hidden_stats: compare_logits(&wide_run.hidden, &small_run.hidden),
+        k_cache_stats: compare_logits(&wide_k_cache, &small_k_cache),
+        v_cache_stats: compare_logits(&wide_v_cache, &small_v_cache),
     })
 }
 
@@ -5881,11 +6648,15 @@ fn attention_cache_tensor_check(
         layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
     let decode_runtime = MetalRuntime::new()?;
     let decode_features = decode_runtime.features();
-    let (mut decode_graph, _) = prepare_attention_decode_graph(
+    let decode_key_count = usize::try_from(positions[1])?
+        .checked_add(1)
+        .ok_or("overflow computing decode key_count")?;
+    let (mut decode_graph, _) = prepare_attention_decode_graph_with_key_count(
         &mut decode_loaded.ctx,
         &decode_loaded.tensor_ids,
         &decode_spec,
         1,
+        decode_key_count,
         decode_features,
     )?;
     let decode_rope_positions = decode_spec
@@ -6021,6 +6792,17 @@ fn attention_cache_tensor_check(
     )?;
     let decode_token_bytes = i32s_to_bytes(&[token_ids[1]]);
     let decode_pos_bytes = i32s_to_bytes(&[positions[1]]);
+    let decode_mask_bytes = decode_graph
+        .input_mask
+        .map(|input_mask| {
+            position_attention_mask_bytes_for_tensor(
+                &decode_loaded.ctx,
+                input_mask,
+                decode_key_count,
+                &[positions[1]],
+            )
+        })
+        .transpose()?;
     let decode_rope_pos_bytes = decode_rope_positions.as_deref().map(i32s_to_bytes);
     let decode_outputs = [
         decode_q_cont_id,
@@ -6045,6 +6827,18 @@ fn attention_cache_tensor_check(
         },
     ];
     let mut decode_writes = decode_writes.to_vec();
+    decode_writes.push(MetalGraphTensorWrite {
+        tensor_id: decode_graph.input_positions,
+        bytes: &decode_pos_bytes,
+    });
+    if let Some(input_mask) = decode_graph.input_mask {
+        decode_writes.push(MetalGraphTensorWrite {
+            tensor_id: input_mask,
+            bytes: decode_mask_bytes
+                .as_deref()
+                .ok_or("missing decode attention mask")?,
+        });
+    }
     if let Some(input_rope_positions) = decode_graph.input_rope_positions {
         decode_writes.push(MetalGraphTensorWrite {
             tensor_id: input_rope_positions,
