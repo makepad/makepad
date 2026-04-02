@@ -1,4 +1,4 @@
-use crate::{gpu_capture::GpuCapture, protocol::*, scene::*, shared_scene::*, wire::*};
+use crate::{gpu_capture::GpuCapture, host_scene::*, protocol::*, scene::*, wire::*};
 use makepad_widgets::makepad_draw::{
     cx_3d::Cx3d, cx_draw::CxDraw, draw_list_2d::DrawListExt, scene_3d::SceneState3D,
 };
@@ -54,7 +54,7 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(920, 620)
                 body +: {
-                    gpu_scene := mod.widgets.XrRemoteSharedScene{}
+                    gpu_scene := mod.widgets.XrRemoteHostScene{}
                     SolidView{
                         width: Fill
                         height: Fill
@@ -83,13 +83,13 @@ script_mod! {
                             }
 
                             Label{
-                                text: "Quest Render Mode"
+                                text: "Host Stream Scene"
                                 draw_text.color: #xe4eef7
                                 draw_text.text_style.font_size: 14.0
                             }
 
                             host_render := Label{
-                                text: "Render: stream-video | Scene: test-scene"
+                                text: "Scene: test-scene"
                                 draw_text.color: #x97adc2
                             }
 
@@ -99,19 +99,14 @@ script_mod! {
                                 flow: Right
                                 spacing: 8
 
-                                render_stream_button := ButtonFlat{
+                                scene_test_button := ButtonFlat{
                                     width: Fit
-                                    text: "Stream Video"
+                                    text: "Test Scene"
                                 }
 
-                                render_test_scene_button := ButtonFlat{
+                                scene_tree_button := ButtonFlat{
                                     width: Fit
-                                    text: "Quest Test Scene"
-                                }
-
-                                render_tree_scene_button := ButtonFlat{
-                                    width: Fit
-                                    text: "Quest Tree Scene"
+                                    text: "Tree Scene"
                                 }
 
                                 gpu_toggle_button := ButtonFlat{
@@ -123,47 +118,6 @@ script_mod! {
                             host_pipeline := Label{
                                 text: "Pipeline: CPU (software rasterizer)"
                                 draw_text.color: #x97adc2
-                            }
-                        }
-
-                        RoundedView{
-                            width: Fill
-                            height: Fit
-                            padding: 12
-                            spacing: 10
-                            flow: Down
-                            draw_bg+: {
-                                color: #x16202b
-                                border_radius: 10.0
-                                border_size: 1.0
-                                border_color: #x273646
-                            }
-
-                            Label{
-                                text: "Replicated Marker"
-                                draw_text.color: #xe4eef7
-                                draw_text.text_style.font_size: 14.0
-                            }
-
-                            host_marker := Label{
-                                text: "Marker: (0.42, 0.34, -0.76) scale 1.00 pulse 0.00"
-                                draw_text.color: #x97adc2
-                            }
-
-                            View{
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                spacing: 8
-
-                                marker_left_button := ButtonFlat{ width: Fit text: "Left" }
-                                marker_right_button := ButtonFlat{ width: Fit text: "Right" }
-                                marker_up_button := ButtonFlat{ width: Fit text: "Up" }
-                                marker_down_button := ButtonFlat{ width: Fit text: "Down" }
-                                marker_near_button := ButtonFlat{ width: Fit text: "Near" }
-                                marker_far_button := ButtonFlat{ width: Fit text: "Far" }
-                                marker_pulse_button := ButtonFlat{ width: Fit text: "Pulse" }
-                                marker_reset_button := ButtonFlat{ width: Fit text: "Reset" }
                             }
                         }
 
@@ -269,33 +223,6 @@ script_mod! {
                             }
                         }
 
-                        quest_monitor_panel := RoundedView{
-                            visible: false
-                            width: Fill
-                            height: 360
-                            padding: 12
-                            spacing: 10
-                            flow: Down
-                            draw_bg+: {
-                                color: #x16202b
-                                border_radius: 10.0
-                                border_size: 1.0
-                                border_color: #x273646
-                            }
-
-                            Label{
-                                text: "Quest Local Scene Monitor"
-                                draw_text.color: #xe4eef7
-                                draw_text.text_style.font_size: 14.0
-                            }
-
-                            Label{
-                                text: "This is the same shared XR scene graph Quest renders locally. Drag to orbit and use the wheel to zoom."
-                                draw_text.color: #x97adc2
-                            }
-
-                            quest_scene_monitor := mod.widgets.XrRemoteDesktopMonitor{}
-                        }
                     }
                 }
             }
@@ -493,7 +420,6 @@ struct HostShared {
     control_peer_ip: Arc<Mutex<Option<IpAddr>>>,
     current_session_config: Arc<Mutex<Option<SessionConfigPacket>>>,
     current_render_state: Arc<Mutex<Option<RenderStatePacket>>>,
-    current_marker_state: Arc<Mutex<Option<MarkerStatePacket>>>,
     eyes: [HostEyeShared; 2],
 }
 
@@ -513,7 +439,6 @@ impl HostShared {
             control_peer_ip: Arc::new(Mutex::new(None)),
             current_session_config: Arc::new(Mutex::new(None)),
             current_render_state: Arc::new(Mutex::new(None)),
-            current_marker_state: Arc::new(Mutex::new(None)),
             eyes: [
                 HostEyeShared::new(XrRemoteEye::Left, media_socket.clone()),
                 HostEyeShared::new(XrRemoteEye::Right, media_socket),
@@ -575,19 +500,12 @@ impl HostShared {
         *self.current_render_state.lock().unwrap() = render_state;
     }
 
-    fn set_marker_state(&self, marker_state: Option<MarkerStatePacket>) {
-        *self.current_marker_state.lock().unwrap() = marker_state;
-    }
-
     fn send_current_control_state(&self) {
         if let Some(session_config) = self.current_session_config.lock().unwrap().clone() {
             self.send_control(&ControlPacket::SessionConfig(session_config));
         }
         if let Some(render_state) = self.current_render_state.lock().unwrap().clone() {
             self.send_control(&ControlPacket::RenderState(render_state));
-        }
-        if let Some(marker_state) = self.current_marker_state.lock().unwrap().clone() {
-            self.send_control(&ControlPacket::MarkerState(marker_state));
         }
         for eye in XrRemoteEye::ALL {
             let eye_shared = self.eye_shared(eye);
@@ -1210,7 +1128,6 @@ pub struct App {
     #[rust]
     latest_render_text: String,
     #[rust]
-    latest_marker_text: String,
     #[rust]
     latest_remote_log_text: String,
     #[rust]
@@ -1223,8 +1140,6 @@ pub struct App {
     session_config: SessionConfigPacket,
     #[rust]
     render_state: RenderStatePacket,
-    #[rust]
-    marker_state: MarkerStatePacket,
 }
 
 impl Default for App {
@@ -1248,27 +1163,18 @@ impl Default for App {
             latest_status: "Host idle".to_string(),
             latest_pose_text: "Pose: waiting".to_string(),
             latest_stream_text: "Stream: waiting".to_string(),
-            latest_render_text: "Render: stream-video | Scene: test-scene".to_string(),
-            latest_marker_text: "Marker: (0.42, 0.34, -0.76) scale 1.00 pulse 0.00".to_string(),
+            latest_render_text: "Scene: test-scene".to_string(),
             latest_remote_log_text: "Remote: waiting".to_string(),
             latest_pipeline_text: "Pipeline: CPU (software rasterizer)".to_string(),
             frame_group_counter: 0,
             last_media_ready: false,
             session_config: default_session_config(),
             render_state: default_render_state(),
-            marker_state: default_marker_state(),
         }
     }
 }
 
 impl App {
-    fn marker_summary(marker_state: &MarkerStatePacket) -> String {
-        format!(
-            "Marker: ({:.2}, {:.2}, {:.2}) scale {:.2} pulse {:.2}",
-            marker_state.x, marker_state.y, marker_state.z, marker_state.scale, marker_state.pulse,
-        )
-    }
-
     fn bump_session_id(&mut self) {
         self.session_config.session_id = self.session_config.session_id.wrapping_add(1);
         if self.session_config.session_id == 0 {
@@ -1283,51 +1189,15 @@ impl App {
             .send_control(&ControlPacket::RenderState(self.render_state.clone()));
     }
 
-    fn sync_marker_state(&self) {
-        self.shared
-            .set_marker_state(Some(self.marker_state.clone()));
-        self.shared
-            .send_control(&ControlPacket::MarkerState(self.marker_state.clone()));
-    }
-
-    fn set_render_state(&mut self, cx: &mut Cx, mode: XrRemoteRenderMode, scene: XrRemoteSceneId) {
-        let next = RenderStatePacket { mode, scene };
+    fn set_scene(&mut self, cx: &mut Cx, scene: XrRemoteSceneId) {
+        let next = RenderStatePacket { scene };
         if self.render_state == next {
             return;
         }
         self.render_state = next;
-        self.latest_render_text = format!(
-            "Render: {} | Scene: {}",
-            self.render_state.mode.label(),
-            self.render_state.scene.label()
-        );
+        self.latest_render_text = format!("Scene: {}", self.render_state.scene.label());
         self.sync_render_state();
         self.refresh_labels(cx);
-    }
-
-    fn set_marker_state(&mut self, cx: &mut Cx, marker_state: MarkerStatePacket) {
-        if self.marker_state == marker_state {
-            return;
-        }
-        self.marker_state = marker_state;
-        self.latest_marker_text = Self::marker_summary(&self.marker_state);
-        self.sync_marker_state();
-        self.refresh_labels(cx);
-    }
-
-    fn nudge_marker(&mut self, cx: &mut Cx, dx: f32, dy: f32, dz: f32) {
-        let mut next = self.marker_state.clone();
-        next.x += dx;
-        next.y += dy;
-        next.z += dz;
-        self.set_marker_state(cx, next);
-    }
-
-    fn pulse_marker(&mut self, cx: &mut Cx) {
-        let mut next = self.marker_state.clone();
-        next.pulse = (next.pulse + 0.25).fract();
-        next.scale = 0.9 + next.pulse * 0.6;
-        self.set_marker_state(cx, next);
     }
 
     fn ensure_started(&mut self, cx: &mut Cx) {
@@ -1339,8 +1209,6 @@ impl App {
             .set_session_config(Some(self.session_config.clone()));
         self.shared
             .set_render_state(Some(self.render_state.clone()));
-        self.shared
-            .set_marker_state(Some(self.marker_state.clone()));
         for eye in XrRemoteEye::ALL {
             self.shared
                 .eye_shared(eye)
@@ -1713,12 +1581,7 @@ impl App {
 
         // Get the GPU scene widget and update its state before creating CxDraw.
         let gpu_scene = self.ui.widget(cx, ids!(gpu_scene));
-        apply_scene_content_state(
-            gpu_scene.clone(),
-            cx,
-            &self.render_state,
-            &self.marker_state,
-        );
+        apply_host_scene_state(gpu_scene.clone(), cx, &self.render_state);
 
         // Build tracking data for per-eye camera matrices.
         let tracking = make_tracking_packet(
@@ -1822,9 +1685,6 @@ impl App {
             .widget(cx, ids!(host_render))
             .set_text(cx, &self.latest_render_text);
         self.ui
-            .widget(cx, ids!(host_marker))
-            .set_text(cx, &self.latest_marker_text);
-        self.ui
             .widget(cx, ids!(host_pose))
             .set_text(cx, &self.latest_pose_text);
         self.ui
@@ -1836,43 +1696,6 @@ impl App {
         self.ui
             .widget(cx, ids!(host_pipeline))
             .set_text(cx, &self.latest_pipeline_text);
-        self.ui
-            .widget(cx, ids!(preview_title))
-            .set_text(cx, self.preview_title());
-        self.ui
-            .widget(cx, ids!(preview_caption))
-            .set_text(cx, self.preview_caption());
-        let local_scene_mode = self.render_state.mode == XrRemoteRenderMode::LocalScene;
-        self.ui
-            .widget(cx, ids!(stream_preview_panel))
-            .set_visible(cx, !local_scene_mode);
-        self.ui
-            .widget(cx, ids!(quest_monitor_panel))
-            .set_visible(cx, local_scene_mode);
-        apply_scene_content_state(
-            self.ui.widget(cx, ids!(quest_scene_monitor.scene_content)),
-            cx,
-            &self.render_state,
-            &self.marker_state,
-        );
-    }
-
-    fn preview_title(&self) -> &'static str {
-        match self.render_state.mode {
-            XrRemoteRenderMode::Stream => "Outgoing Stream Preview",
-            XrRemoteRenderMode::LocalScene => "Quest Local Scene Preview",
-        }
-    }
-
-    fn preview_caption(&self) -> &'static str {
-        match self.render_state.mode {
-            XrRemoteRenderMode::Stream => {
-                "These are the exact pre-encode eye frames being sent to Quest."
-            }
-            XrRemoteRenderMode::LocalScene => {
-                "This is the host-side expected view of the scene Quest renders locally."
-            }
-        }
     }
 
     fn update_preview_texture(&mut self, cx: &mut Cx, eye: XrRemoteEye) {
@@ -1968,7 +1791,6 @@ impl App {
             }
             ControlPacket::SessionConfig(_)
             | ControlPacket::RenderState(_)
-            | ControlPacket::MarkerState(_)
             | ControlPacket::StreamConfig(_)
             | ControlPacket::VideoConfig(_) => {}
         }
@@ -2046,7 +1868,6 @@ impl App {
                 eye,
                 &self.session_config,
                 &self.render_state,
-                &self.marker_state,
             );
         }
         self.update_preview_texture(cx, eye);
@@ -2156,19 +1977,16 @@ impl App {
         #[cfg(not(target_os = "macos"))]
         let gpu_platform_encode_enabled = media_ready
             && self.use_gpu_pipeline
-            && self.gpu_encoders_started
-            && self.render_state.mode == XrRemoteRenderMode::Stream;
+            && self.gpu_encoders_started;
         #[cfg(target_os = "macos")]
         let gpu_platform_encode_enabled = false;
         let gpu_readback_encode_enabled = media_ready
             && self.use_gpu_pipeline
             && !self.gpu_encoders_started
-            && self.encoders_started
-            && self.render_state.mode == XrRemoteRenderMode::Stream;
+            && self.encoders_started;
         let cpu_encode_enabled = media_ready
             && !self.use_gpu_pipeline
-            && self.encoders_started
-            && self.render_state.mode == XrRemoteRenderMode::Stream;
+            && self.encoders_started;
         let encode_enabled =
             gpu_platform_encode_enabled || gpu_readback_encode_enabled || cpu_encode_enabled;
         let using_live_tracking = self.latest_state_received;
@@ -2285,12 +2103,7 @@ impl App {
         }
         self.ui.redraw(cx);
         let render_ms = (render_finished_ns.saturating_sub(render_started_ns) as f64) / 1_000_000.0;
-        self.latest_stream_text = if self.render_state.mode == XrRemoteRenderMode::LocalScene {
-            format!(
-                "Quest local scene: desktop monitor active, video streaming idle ({:.1} ms)",
-                render_ms
-            )
-        } else if encode_enabled {
+        self.latest_stream_text = if encode_enabled {
             format!(
                 "Stream: group {} track {} render {:.1} ms cfg L{} R{}",
                 frame_group_id,
@@ -2327,25 +2140,17 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self
             .ui
-            .button(cx, ids!(render_stream_button))
+            .button(cx, ids!(scene_test_button))
             .clicked(actions)
         {
-            let scene = self.render_state.scene;
-            self.set_render_state(cx, XrRemoteRenderMode::Stream, scene);
+            self.set_scene(cx, XrRemoteSceneId::Test);
         }
         if self
             .ui
-            .button(cx, ids!(render_test_scene_button))
+            .button(cx, ids!(scene_tree_button))
             .clicked(actions)
         {
-            self.set_render_state(cx, XrRemoteRenderMode::LocalScene, XrRemoteSceneId::Test);
-        }
-        if self
-            .ui
-            .button(cx, ids!(render_tree_scene_button))
-            .clicked(actions)
-        {
-            self.set_render_state(cx, XrRemoteRenderMode::LocalScene, XrRemoteSceneId::Tree);
+            self.set_scene(cx, XrRemoteSceneId::Tree);
         }
         if self.ui.button(cx, ids!(gpu_toggle_button)).clicked(actions) {
             if self.use_gpu_pipeline {
@@ -2366,54 +2171,6 @@ impl MatchEvent for App {
             }
             self.refresh_labels(cx);
         }
-        if self
-            .ui
-            .button(cx, ids!(marker_left_button))
-            .clicked(actions)
-        {
-            self.nudge_marker(cx, -0.08, 0.0, 0.0);
-        }
-        if self
-            .ui
-            .button(cx, ids!(marker_right_button))
-            .clicked(actions)
-        {
-            self.nudge_marker(cx, 0.08, 0.0, 0.0);
-        }
-        if self.ui.button(cx, ids!(marker_up_button)).clicked(actions) {
-            self.nudge_marker(cx, 0.0, 0.08, 0.0);
-        }
-        if self
-            .ui
-            .button(cx, ids!(marker_down_button))
-            .clicked(actions)
-        {
-            self.nudge_marker(cx, 0.0, -0.08, 0.0);
-        }
-        if self
-            .ui
-            .button(cx, ids!(marker_near_button))
-            .clicked(actions)
-        {
-            self.nudge_marker(cx, 0.0, 0.0, 0.08);
-        }
-        if self.ui.button(cx, ids!(marker_far_button)).clicked(actions) {
-            self.nudge_marker(cx, 0.0, 0.0, -0.08);
-        }
-        if self
-            .ui
-            .button(cx, ids!(marker_pulse_button))
-            .clicked(actions)
-        {
-            self.pulse_marker(cx);
-        }
-        if self
-            .ui
-            .button(cx, ids!(marker_reset_button))
-            .clicked(actions)
-        {
-            self.set_marker_state(cx, default_marker_state());
-        }
     }
 }
 
@@ -2421,7 +2178,7 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
         makepad_xr::script_mod(vm);
-        crate::shared_scene::script_mod(vm);
+        crate::host_scene::script_mod(vm);
         self::script_mod(vm)
     }
 

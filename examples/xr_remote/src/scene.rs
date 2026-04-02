@@ -1,13 +1,13 @@
 //! Software-rasterized fallback geometry for `xr_remote` stream mode.
 //!
 //! Keep the `TEST_SCENE_BOXES`/`TREE_SCENE_BOXES` layouts aligned with the
-//! matching `test_scene`/`tree_scene` definitions in `shared_scene.rs` and the
-//! desktop reference in `examples/xr/src/main.rs`.
+//! matching host scene definitions in `host_scene.rs` and the desktop reference
+//! in `examples/xr/src/main.rs`.
 
 use crate::protocol::{
-    default_session_config, EyeViewPacket, MarkerStatePacket, RenderStatePacket,
-    SessionConfigPacket, StreamConfigPacket, TrackingPacket, XrRemoteCodec, XrRemoteEye,
-    XrRemoteRenderMode, XrRemoteSceneId, XR_REMOTE_PROTOCOL_VERSION,
+    default_session_config, EyeViewPacket, RenderStatePacket, SessionConfigPacket,
+    StreamConfigPacket, TrackingPacket, XrRemoteCodec, XrRemoteEye, XrRemoteSceneId,
+    XR_REMOTE_PROTOCOL_VERSION,
 };
 use makepad_widgets::makepad_math::*;
 
@@ -297,7 +297,6 @@ pub fn render_eye_scene(
     eye: XrRemoteEye,
     session: &SessionConfigPacket,
     render_state: &RenderStatePacket,
-    marker_state: &MarkerStatePacket,
 ) {
     let width = session.per_eye_width as usize;
     let height = session.per_eye_height as usize;
@@ -319,19 +318,6 @@ pub fn render_eye_scene(
         eye_view(tracking, eye),
         scene_boxes(render_state),
     );
-    if render_state.mode == XrRemoteRenderMode::LocalScene {
-        render_eye(
-            output,
-            depth,
-            width,
-            0,
-            0,
-            width,
-            height,
-            eye_view(tracking, eye),
-            &[marker_box(marker_state)],
-        );
-    }
 }
 
 pub fn eye_view(tracking: &TrackingPacket, eye: XrRemoteEye) -> &EyeViewPacket {
@@ -406,24 +392,6 @@ fn scene_boxes(render_state: &RenderStatePacket) -> &'static [SceneBox] {
     match render_state.scene {
         XrRemoteSceneId::Test => &TEST_SCENE_BOXES,
         XrRemoteSceneId::Tree => &TREE_SCENE_BOXES,
-    }
-}
-
-fn marker_box(marker_state: &MarkerStatePacket) -> SceneBox {
-    let pulse = marker_state.pulse.clamp(0.0, 1.0);
-    SceneBox {
-        center: vec3f(marker_state.x, marker_state.y, marker_state.z),
-        size: vec3f(
-            0.18 * marker_state.scale.max(0.2),
-            0.18 * marker_state.scale.max(0.2),
-            0.18 * marker_state.scale.max(0.2),
-        ),
-        color: [
-            0xff,
-            (0x8c as f32 + 0x4b as f32 * pulse).clamp(0.0, 255.0) as u8,
-            (0x2f as f32 + 0x64 as f32 * (1.0 - pulse)).clamp(0.0, 255.0) as u8,
-            0xff,
-        ],
     }
 }
 
@@ -655,10 +623,7 @@ fn edge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{
-        default_marker_state, default_render_state, XR_REMOTE_IPD_METERS,
-        XR_REMOTE_PER_EYE_FOV_Y_DEGREES,
-    };
+    use crate::protocol::{default_render_state, XR_REMOTE_IPD_METERS, XR_REMOTE_PER_EYE_FOV_Y_DEGREES};
 
     fn test_session() -> SessionConfigPacket {
         let mut session = default_session_config();
@@ -680,34 +645,10 @@ mod tests {
         )
     }
 
-    fn render_buffer(render_state: RenderStatePacket, marker_state: MarkerStatePacket) -> Vec<u8> {
-        let session = test_session();
-        let tracking = test_tracking();
-        let mut output = Vec::new();
-        let mut depth = Vec::new();
-        render_eye_scene(
-            &mut output,
-            &mut depth,
-            &tracking,
-            XrRemoteEye::Left,
-            &session,
-            &render_state,
-            &marker_state,
-        );
-        output
-    }
-
     fn count_non_clear_pixels(buffer: &[u8]) -> usize {
         buffer
             .chunks_exact(4)
             .filter(|pixel| *pixel != CLEAR_BGRA)
-            .count()
-    }
-
-    fn count_pixel_differences(a: &[u8], b: &[u8]) -> usize {
-        a.chunks_exact(4)
-            .zip(b.chunks_exact(4))
-            .filter(|(left, right)| left != right)
             .count()
     }
 
@@ -736,7 +677,6 @@ mod tests {
         let session = test_session();
         let tracking = test_tracking();
         let render_state = default_render_state();
-        let marker_state = default_marker_state();
         let mut left_output = Vec::new();
         let mut left_depth = Vec::new();
         let mut right_output = Vec::new();
@@ -749,7 +689,6 @@ mod tests {
             XrRemoteEye::Left,
             &session,
             &render_state,
-            &marker_state,
         );
         render_eye_scene(
             &mut right_output,
@@ -758,7 +697,6 @@ mod tests {
             XrRemoteEye::Right,
             &session,
             &render_state,
-            &marker_state,
         );
 
         assert!(count_non_clear_pixels(&left_output) > 0);
@@ -767,33 +705,11 @@ mod tests {
     }
 
     #[test]
-    fn local_scene_renders_marker_overlay() {
-        let stream_output = render_buffer(default_render_state(), default_marker_state());
-        let local_output = render_buffer(
-            RenderStatePacket {
-                mode: XrRemoteRenderMode::LocalScene,
-                scene: XrRemoteSceneId::Test,
-            },
-            MarkerStatePacket {
-                x: 0.16,
-                y: 0.18,
-                z: -0.55,
-                scale: 1.3,
-                pulse: 0.6,
-            },
-        );
-
-        assert!(count_pixel_differences(&stream_output, &local_output) > 0);
-    }
-
-    #[test]
     fn stream_tree_scene_uses_tree_geometry_selection() {
         let stream_test = scene_boxes(&RenderStatePacket {
-            mode: XrRemoteRenderMode::Stream,
             scene: XrRemoteSceneId::Test,
         });
         let stream_tree = scene_boxes(&RenderStatePacket {
-            mode: XrRemoteRenderMode::Stream,
             scene: XrRemoteSceneId::Tree,
         });
 

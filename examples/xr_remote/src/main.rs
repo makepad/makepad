@@ -6,9 +6,10 @@ use makepad_widgets::*;
 mod client;
 #[cfg(not(target_os = "android"))]
 mod gpu_capture;
+#[cfg(not(target_os = "android"))]
+mod host_scene;
 mod protocol;
 mod scene;
-mod shared_scene;
 mod wire;
 
 #[cfg(not(target_os = "android"))]

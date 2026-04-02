@@ -1,4 +1,4 @@
-use crate::{protocol::*, shared_scene::*, wire::*};
+use crate::{protocol::*, wire::*};
 use makepad_widgets::makepad_platform::{
     makepad_live_id::LiveId,
     thread::SignalToUI,
@@ -23,11 +23,11 @@ script_mod! {
         width: Fill
         height: Fill
         draw_bg +: {
-            video_texture: texture_video()
+            video_texture: texture_2d(float)
             debug_mono: 0.0
 
             pixel: fn() {
-                return self.video_texture.sample_video(self.pos)
+                return self.video_texture.sample(self.pos)
             }
         }
     }
@@ -40,8 +40,6 @@ script_mod! {
             camera.distance: 1.4
             env.env_cube: false
             env.depth_mesh: false
-
-            scene_content := mod.widgets.XrRemoteSharedScene{}
 
             immersive_left := XrView{
                 visible: false
@@ -147,6 +145,10 @@ script_mod! {
 }
 
 fn remote_video_texture_format(_cx: &Cx) -> TextureFormat {
+    #[cfg(target_os = "android")]
+    {
+        return TextureFormat::VideoRgbaHardwareBuffer;
+    }
     TextureFormat::VideoExternal
 }
 
@@ -466,7 +468,7 @@ pub struct App {
     #[rust]
     render_state: RenderStatePacket,
     #[rust]
-    marker_state: MarkerStatePacket,
+    last_reported_stream_status: String,
 }
 
 impl Default for App {
@@ -491,7 +493,7 @@ impl Default for App {
             debug_mono,
             startup_log_sent: false,
             render_state: default_render_state(),
-            marker_state: default_marker_state(),
+            last_reported_stream_status: String::new(),
         }
     }
 }
@@ -510,15 +512,6 @@ impl App {
             (None, Some(port)) => format!("Waiting for XR host discovery udp:{}{}", port, mode),
             (None, None) => "Waiting for XR host discovery".to_string(),
         };
-    }
-
-    fn apply_marker_state(&mut self, cx: &mut Cx) {
-        apply_scene_content_state(
-            self.ui.widget(cx, ids!(scene_content)),
-            cx,
-            &self.render_state,
-            &self.marker_state,
-        );
     }
 
     fn decoder_slot(eye: XrRemoteEye) -> usize {
@@ -579,11 +572,7 @@ impl App {
     }
 
     fn render_state_summary(&self) -> String {
-        format!(
-            "render {} {}",
-            self.render_state.mode.label(),
-            self.render_state.scene.label()
-        )
+        format!("scene {}", self.render_state.scene.label())
     }
 
     fn startup_mode_text(&self) -> String {
@@ -603,6 +592,15 @@ impl App {
                 source: source.to_string(),
                 text: text.into(),
             }));
+    }
+
+    fn set_stream_status(&mut self, cx: &Cx, status: String, log: bool) {
+        let changed = self.latest_stream_text != status;
+        self.latest_stream_text = status.clone();
+        if log && changed && self.last_reported_stream_status != status {
+            self.last_reported_stream_status = status.clone();
+            self.send_remote_log(cx, "info", "quest-client", status);
+        }
     }
 
     fn refresh_labels(&mut self, cx: &mut Cx) {
@@ -685,6 +683,7 @@ impl App {
         let mut log_lines = Vec::new();
         {
             let state = self.eye_state_mut(eye);
+            let changed = state.latest_status != status;
             state.latest_status = status.to_string();
             if status.contains("decoder prepared") && !state.status_prepared {
                 state.status_prepared = true;
@@ -705,6 +704,9 @@ impl App {
             if status.contains("updateTexImage ok") && !state.status_update_ok {
                 state.status_update_ok = true;
                 log_lines.push(format!("{} updateTexImage ok", eye.label()));
+            }
+            if changed && log_lines.is_empty() {
+                log_lines.push(format!("{} status {}", eye.label(), status));
             }
         }
         for line in log_lines {
@@ -768,23 +770,9 @@ impl App {
     }
 
     fn apply_render_state(&mut self, cx: &mut Cx) {
-        let local_scene_visible = self.render_state.mode == XrRemoteRenderMode::LocalScene;
-        apply_scene_content_state(
-            self.ui.widget(cx, ids!(scene_content)),
-            cx,
-            &self.render_state,
-            &self.marker_state,
-        );
-        if local_scene_visible {
-            self.set_immersive_visible(cx, false);
-            self.latest_stream_text = format!(
-                "Stream: quest-local scene {} (video path kept for comparison)",
-                self.render_state.scene.label()
-            );
-        } else {
-            self.latest_stream_text = "Stream: remote video mode active".to_string();
-        }
-        self.apply_marker_state(cx);
+        self.latest_stream_text =
+            format!("Stream: remote video mode active | scene {}", self.render_state.scene.label());
+        self.refresh_labels(cx);
     }
 
     fn reset_eye_decoder(&mut self, cx: &mut Cx, eye: XrRemoteEye) {
@@ -883,10 +871,6 @@ impl App {
             ControlPacket::RenderState(render_state) => {
                 self.render_state = render_state;
                 self.apply_render_state(cx);
-            }
-            ControlPacket::MarkerState(marker_state) => {
-                self.marker_state = marker_state;
-                self.apply_marker_state(cx);
             }
             ControlPacket::StreamConfig(config) => {
                 let eye = config.eye;
@@ -1235,8 +1219,11 @@ impl App {
                 Ok(true) => {}
                 Ok(false) => return,
                 Err(err) => {
-                    self.latest_stream_text =
-                        format!("Stream: {} decoder start failed: {:?}", eye.label(), err);
+                    self.set_stream_status(
+                        cx,
+                        format!("Stream: {} decoder start failed: {:?}", eye.label(), err),
+                        true,
+                    );
                     return;
                 }
             }
@@ -1249,8 +1236,11 @@ impl App {
             match self.try_start_eye_decoder(cx, eye) {
                 Ok(_) => {}
                 Err(err) => {
-                    self.latest_stream_text =
-                        format!("Stream: {} decoder start failed: {:?}", eye.label(), err);
+                    self.set_stream_status(
+                        cx,
+                        format!("Stream: {} decoder start failed: {:?}", eye.label(), err),
+                        true,
+                    );
                     return;
                 }
             }
@@ -1259,6 +1249,15 @@ impl App {
             .into_iter()
             .all(|eye| self.eye_state(eye).decoder_started)
         {
+            self.set_stream_status(
+                cx,
+                format!(
+                    "Stream: waiting decoder start L{} R{}",
+                    self.eye_state(XrRemoteEye::Left).decoder_started as u8,
+                    self.eye_state(XrRemoteEye::Right).decoder_started as u8,
+                ),
+                true,
+            );
             return;
         }
         if self
@@ -1279,6 +1278,7 @@ impl App {
         }
         let ready_groups = self.ready_stereo_groups.len();
         let Some((frame_group_id, left, right)) = self.ready_stereo_groups.pop_back() else {
+            self.set_stream_status(cx, "Stream: waiting stereo frame group".to_string(), true);
             return;
         };
         let left_config_id = left.header.config_id;
@@ -1309,27 +1309,33 @@ impl App {
         {
             self.ready_stereo_groups
                 .push_back((frame_group_id, left, right));
-            self.latest_stream_text = format!(
-                "Stream: stereo waiting cfg L{} R{} (ready {})",
-                left_config_id, right_config_id, ready_groups
+            self.set_stream_status(
+                cx,
+                format!(
+                    "Stream: stereo waiting cfg L{} R{} (ready {})",
+                    left_config_id, right_config_id, ready_groups
+                ),
+                true,
             );
             return;
         }
         if let Err(err) = self.push_config_if_needed(cx, XrRemoteEye::Left, left_config_id) {
             self.ready_stereo_groups
                 .push_back((frame_group_id, left, right));
-            self.latest_stream_text = format!(
-                "Stream: left config push failed for cfg{}: {:?}",
-                left_config_id, err
+            self.set_stream_status(
+                cx,
+                format!("Stream: left config push failed for cfg{}: {:?}", left_config_id, err),
+                true,
             );
             return;
         }
         if let Err(err) = self.push_config_if_needed(cx, XrRemoteEye::Right, right_config_id) {
             self.ready_stereo_groups
                 .push_back((frame_group_id, left, right));
-            self.latest_stream_text = format!(
-                "Stream: right config push failed for cfg{}: {:?}",
-                right_config_id, err
+            self.set_stream_status(
+                cx,
+                format!("Stream: right config push failed for cfg{}: {:?}", right_config_id, err),
+                true,
             );
             return;
         }
@@ -1348,9 +1354,10 @@ impl App {
             )
             .is_err()
         {
-            self.latest_stream_text = format!(
-                "Stream: left frame push failed cfg{} group {}",
-                left_config_id, frame_group_id
+            self.set_stream_status(
+                cx,
+                format!("Stream: left frame push failed cfg{} group {}", left_config_id, frame_group_id),
+                true,
             );
             self.send_remote_log(
                 cx,
@@ -1387,9 +1394,10 @@ impl App {
             )
             .is_err()
         {
-            self.latest_stream_text = format!(
-                "Stream: right frame push failed cfg{} group {}",
-                right_config_id, frame_group_id
+            self.set_stream_status(
+                cx,
+                format!("Stream: right frame push failed cfg{} group {}", right_config_id, frame_group_id),
+                true,
             );
             self.send_remote_log(
                 cx,
@@ -1435,9 +1443,10 @@ impl App {
             self.send_remote_log(cx, "info", "quest-client", "right first keyframe queued");
         }
         self.latest_displayed_group = frame_group_id;
-        self.latest_stream_text = format!(
-            "Stream: group {} queued L{} R{}",
-            frame_group_id, left_config_id, right_config_id
+        self.set_stream_status(
+            cx,
+            format!("Stream: group {} queued L{} R{}", frame_group_id, left_config_id, right_config_id),
+            true,
         );
     }
 
@@ -1495,16 +1504,6 @@ impl App {
 
     fn sync_immersive_planes(&mut self, cx: &mut Cx, state: &XrState) {
         self.apply_surface_textures(cx);
-        if self.render_state.mode == XrRemoteRenderMode::LocalScene {
-            self.ui
-                .widget(cx, ids!(local_scene_select))
-                .set_visible(cx, true);
-            self.set_immersive_visible(cx, false);
-            return;
-        }
-        self.ui
-            .widget(cx, ids!(local_scene_select))
-            .set_visible(cx, false);
         let Some(session) = self.active_session.clone() else {
             self.set_immersive_visible(cx, false);
             return;
@@ -1727,7 +1726,6 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         makepad_widgets::script_mod(vm);
         makepad_xr::script_mod(vm);
-        crate::shared_scene::script_mod(vm);
         self::script_mod(vm)
     }
 

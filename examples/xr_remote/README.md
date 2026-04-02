@@ -1,18 +1,18 @@
 # XR Remote parity notes
 
 `examples/xr_remote` is the host/Quest split variant of `examples/xr`.
+The Quest side is now a remote video client only; it no longer renders a local
+fallback copy of the scene graph.
 
 ## What currently matches `examples/xr`
 
-- `src/shared_scene.rs::test_scene` mirrors the desktop example's cube/pedestal
-  test scene.
-- `src/shared_scene.rs::tree_scene` mirrors the desktop example's fractal tree
-  scene.
+- `src/host_scene.rs::test_scene` mirrors the desktop example's cube/pedestal
+  test scene on the Mac host.
+- `src/host_scene.rs::tree_scene` mirrors the desktop example's fractal tree
+  scene on the Mac host.
 - `src/scene.rs` keeps software-rasterized `TEST_SCENE_BOXES` and
-  `TREE_SCENE_BOXES` aligned with those same local-scene layouts so the stream
-  preview and encoded eye frames use the same scene IDs as Quest local-scene
-  mode.
-- The replicated marker path is shared between host and Quest local-scene mode.
+  `TREE_SCENE_BOXES` aligned with those same host-side scene layouts so the CPU
+  preview/encode path matches the GPU scene path.
 
 ## Known parity gaps versus `examples/xr`
 
@@ -29,9 +29,8 @@ The current remote example is intentionally narrower:
 For the streaming fix work, the practical lane-3 baseline is:
 
 1. keep the cube/test scene and tree scene aligned between `examples/xr`,
-   `shared_scene.rs`, and `scene.rs`;
-2. preserve the replicated marker behavior in Quest local-scene mode; and
-3. treat the extra desktop-only scenes/physics controls as follow-up parity
+   `host_scene.rs`, and `scene.rs`; and
+2. treat the extra desktop-only scenes/physics controls as follow-up parity
    work instead of silently assuming they already exist in `xr_remote`.
 
 ## Regression checks used for this lane

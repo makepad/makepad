@@ -1,11 +1,9 @@
-//! Shared local-scene widgets for host preview and Quest local-scene mode.
+//! Host-only scene graph for the streamed xr_remote path.
 //!
-//! The test/tree scene content here intentionally mirrors the same scenes in
-//! `examples/xr/src/main.rs`; if either side changes, update `scene.rs` too so
-//! the streamed fallback renderer and the local widget scene stay visually in
-//! sync.
+//! Quest no longer renders a mirrored local-scene fallback. This module exists
+//! only so the Mac host can render the test/tree scenes for the encoded stream.
 
-use crate::protocol::{MarkerStatePacket, RenderStatePacket, XrRemoteRenderMode};
+use crate::protocol::RenderStatePacket;
 use makepad_widgets::*;
 use makepad_xr::*;
 
@@ -30,9 +28,8 @@ script_mod! {
         metallic: 0.04
     }
 
-    mod.widgets.XrRemoteSharedScene = XrNode{
-        local_scene_select := XrSelect{
-            visible: false
+    mod.widgets.XrRemoteHostScene = XrNode{
+        host_scene_select := XrSelect{
             pos: vec3(0.0, -0.02, -0.62)
             scale: vec3(0.5, 0.5, 0.5)
             active_child: @test_scene
@@ -130,65 +127,15 @@ script_mod! {
                 }
             }
         }
-
-        replicated_marker := Cube{
-            visible: false
-            body: mod.widgets.XrBodyKind.Fixed
-            size: vec3(0.18, 0.18, 0.18)
-            corner_radius: 0.024
-            roughness: 0.10
-            metallic: 0.03
-            color: #xffff7a
-            pos: vec3(0.42, 0.34, -0.76)
-        }
-    }
-
-    mod.widgets.XrRemoteDesktopMonitor = XrRoot{
-        width: Fill
-        height: Fill
-        pass.clear_color: #x101820
-        camera.fov_y: 52.0
-        camera.distance: 1.4
-        env.env_cube: false
-        env.depth_mesh: false
-
-        scene_content := mod.widgets.XrRemoteSharedScene{}
     }
 }
 
-pub fn marker_color(marker_state: &MarkerStatePacket) -> Vec4f {
-    let pulse = marker_state.pulse.clamp(0.0, 1.0);
-    vec4f(1.0, 0.55 + 0.35 * pulse, 0.18 + 0.45 * (1.0 - pulse), 1.0)
-}
-
-pub fn apply_scene_content_state(
-    content: WidgetRef,
-    cx: &mut Cx,
-    render_state: &RenderStatePacket,
-    marker_state: &MarkerStatePacket,
-) {
-    let local_scene_visible = render_state.mode == XrRemoteRenderMode::LocalScene;
-    content
-        .widget(cx, ids!(local_scene_select))
-        .set_visible(cx, local_scene_visible);
+pub fn apply_host_scene_state(content: WidgetRef, cx: &mut Cx, render_state: &RenderStatePacket) {
     if let Some(mut select) = content
-        .widget(cx, ids!(local_scene_select))
+        .widget(cx, ids!(host_scene_select))
         .borrow_mut::<XrSelect>()
     {
         let _ = select.set_active_child(cx, render_state.scene.live_id());
-    }
-
-    let position = vec3f(marker_state.x, marker_state.y, marker_state.z);
-    let scale = vec3f(marker_state.scale, marker_state.scale, marker_state.scale);
-    let color = marker_color(marker_state);
-    if let Some(mut marker) = content
-        .widget(cx, ids!(replicated_marker))
-        .borrow_mut::<Cube>()
-    {
-        marker.set_visible(cx, local_scene_visible);
-        marker.set_pos(cx, position);
-        marker.set_scale(cx, scale);
-        marker.set_color(cx, color);
     }
     content.redraw(cx);
 }

@@ -31,7 +31,7 @@ Host runtime was already active from shell in release mode:
 
 ## Quest adb verification
 
-### 1) Relaunch without `MAKEPAD_XR_REMOTE_HOST`
+### 1) Earlier observation: relaunch without `MAKEPAD_XR_REMOTE_HOST`
 
 Command:
 
@@ -41,7 +41,7 @@ adb -s 192.168.2.120:5555 shell am start -W -n \
   dev.makepad.makepad_example_xr_remote/dev.makepad.makepad_example_xr_remote.MakepadApp
 ```
 
-Observed after ~15s:
+Observed at that earlier checkpoint:
 
 - Activity switched into XR activity:
   - `ResumedActivity: ... dev.makepad.makepad_example_xr_remote/.MakepadAppXr`
@@ -53,7 +53,7 @@ Observed after ~15s:
   - no fresh host `44510` accept / remote-log entries
   - no fresh host `dual-eye media client connected` after this relaunch
 
-Interpretation: xr_net peer discovery/sync is alive, but autodiscovery is not promoting the discovered peer IP into the xr_remote control/media connection path.
+Interpretation at that time: xr_net peer discovery/sync was alive, but the leader-side run did not yet show the xr_remote control/media path.
 
 ### 2) Relaunch with explicit host extra
 
@@ -86,11 +86,18 @@ Observed after ~15s:
 
 Interpretation: shell+adb launch works when the host IP is explicitly injected, and the Mac host is doing the render/encode side successfully enough to reach dual-eye media registration and decoder configuration.
 
-## Main finding
+## Updated finding
 
-Current blocker is **not** host shell launch or adb relaunch. The blocker is the no-extra / autodiscovery path:
+This document captured the first shell+adb proof pass. A later rerun on the
+current build showed that the no-extra autodiscovery path also comes up when
+tested against a freshly launched live host:
 
-- Quest reaches the host over xr_net (`41548` established)
-- but Quest never opens xr_remote control/media (`44510/44511`) unless `MAKEPAD_XR_REMOTE_HOST=192.168.2.23` is provided
+- Quest established `41548` and `44510` to the Mac host without passing
+  `MAKEPAD_XR_REMOTE_HOST`
+- explicit host injection still works as a deterministic launch path
 
-That isolates the remaining issue to the client-side handoff from xr_net-discovered peer address to xr_remote control/media connection.
+The remaining practical distinction is operational, not architectural:
+
+- explicit host injection is the fastest reproducible test path
+- no-extra autodiscovery now works on the current build, but it depends on
+  having a fresh live host running during the relaunch window

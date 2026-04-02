@@ -64,6 +64,8 @@ public class H264Decoder {
     /// Must exceed concurrent decoder output + mLatestImage + mHeldDecodeImage; too few causes
     /// ImageReader_JNI "Unable to acquire a buffer item" and can destabilize the codec surface.
     private static final int IMAGE_READER_MAX_IMAGES = 12;
+    private static final long IMAGE_READER_USAGE =
+        HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE | HardwareBuffer.USAGE_GPU_COLOR_OUTPUT;
 
     private static final class QueuedPacket {
         final byte[] data;
@@ -137,7 +139,7 @@ public class H264Decoder {
                     mHeightHint,
                     ImageFormat.PRIVATE,
                     IMAGE_READER_MAX_IMAGES,
-                    HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE
+                    IMAGE_READER_USAGE
                 );
                 mImageReader.setOnImageAvailableListener(
                     reader -> {

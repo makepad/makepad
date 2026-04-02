@@ -57,21 +57,6 @@ pub enum XrRemoteEyeTarget {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, SerBin, DeBin)]
-pub enum XrRemoteRenderMode {
-    Stream,
-    LocalScene,
-}
-
-impl XrRemoteRenderMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Stream => "stream-video",
-            Self::LocalScene => "quest-local-scene",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, SerBin, DeBin)]
 pub enum XrRemoteSceneId {
     Test,
     Tree,
@@ -212,7 +197,6 @@ pub struct LogLinePacket {
 
 #[derive(Clone, Debug, Eq, PartialEq, SerBin, DeBin)]
 pub struct RenderStatePacket {
-    pub mode: XrRemoteRenderMode,
     pub scene: XrRemoteSceneId,
 }
 
@@ -222,27 +206,11 @@ impl Default for RenderStatePacket {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, SerBin, DeBin)]
-pub struct MarkerStatePacket {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub scale: f32,
-    pub pulse: f32,
-}
-
-impl Default for MarkerStatePacket {
-    fn default() -> Self {
-        default_marker_state()
-    }
-}
-
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum ControlPacket {
     Hello(HelloPacket),
     SessionConfig(SessionConfigPacket),
     RenderState(RenderStatePacket),
-    MarkerState(MarkerStatePacket),
     ClientMediaChannel(ClientMediaChannelPacket),
     StreamConfig(StreamConfigPacket),
     VideoConfig(VideoConfigPacket),
@@ -265,17 +233,6 @@ pub fn default_session_config() -> SessionConfigPacket {
 
 pub fn default_render_state() -> RenderStatePacket {
     RenderStatePacket {
-        mode: XrRemoteRenderMode::Stream,
         scene: XrRemoteSceneId::Test,
-    }
-}
-
-pub fn default_marker_state() -> MarkerStatePacket {
-    MarkerStatePacket {
-        x: 0.42,
-        y: 0.34,
-        z: -0.76,
-        scale: 1.0,
-        pulse: 0.0,
     }
 }
