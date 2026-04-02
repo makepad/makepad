@@ -3701,6 +3701,7 @@ fn dispatch_flash_attn_ext(
                 depth: 1,
             },
         )?;
+        runtime.memory_barrier_buffers()?;
     }
 
     let args = KArgsFlashAttnExtVec {
@@ -3767,6 +3768,7 @@ fn dispatch_flash_attn_ext(
             depth: 1,
         },
     )?;
+    runtime.memory_barrier_buffers()?;
 
     let args_reduce = KArgsFlashAttnExtVecReduce {
         nrows: i32::try_from(

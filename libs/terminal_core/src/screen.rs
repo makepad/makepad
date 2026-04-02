@@ -1,5 +1,6 @@
 use crate::cell::{Cell, Style};
 use crate::grid::Grid;
+use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorShape {
@@ -56,8 +57,8 @@ pub struct Screen {
     pub scroll_bottom: usize,
 
     // Scrollback (primary screen only)
-    scrollback: Vec<Vec<Cell>>,
-    pub scrollback_wrapped: Vec<bool>,
+    scrollback: VecDeque<Vec<Cell>>,
+    pub scrollback_wrapped: VecDeque<bool>,
     pub max_scrollback: usize,
 
     // Tab stops
@@ -86,8 +87,8 @@ impl Screen {
             saved_cursor: None,
             scroll_top: 0,
             scroll_bottom: rows,
-            scrollback: Vec::new(),
-            scrollback_wrapped: Vec::new(),
+            scrollback: VecDeque::new(),
+            scrollback_wrapped: VecDeque::new(),
             max_scrollback: if with_scrollback { 10000 } else { 0 },
             tabstops,
             high_water_row: 0,
@@ -193,11 +194,11 @@ impl Screen {
             for i in 0..count.min(self.scroll_bottom) {
                 let row = self.grid.row_slice(i).to_vec();
                 let wrapped = self.grid.line_wrapped[i];
-                self.scrollback.push(row);
-                self.scrollback_wrapped.push(wrapped);
+                self.scrollback.push_back(row);
+                self.scrollback_wrapped.push_back(wrapped);
                 if self.scrollback.len() > self.max_scrollback {
-                    self.scrollback.remove(0);
-                    self.scrollback_wrapped.remove(0);
+                    self.scrollback.pop_front();
+                    self.scrollback_wrapped.pop_front();
                 }
             }
         }
@@ -491,8 +492,8 @@ impl Screen {
 
                 if copy_start > 0 {
                     for i in 0..copy_start {
-                        self.scrollback.push(old_grid_rows[i].clone());
-                        self.scrollback_wrapped.push(old_wrapped[i]);
+                        self.scrollback.push_back(old_grid_rows[i].clone());
+                        self.scrollback_wrapped.push_back(old_wrapped[i]);
                     }
                     if self.scrollback.len() > self.max_scrollback {
                         let overflow = self.scrollback.len() - self.max_scrollback;
@@ -698,8 +699,8 @@ impl Screen {
             new_scrollback_wrapped.drain(0..overflow);
         }
 
-        self.scrollback = new_scrollback;
-        self.scrollback_wrapped = new_scrollback_wrapped;
+        self.scrollback = new_scrollback.into();
+        self.scrollback_wrapped = new_scrollback_wrapped.into();
         self.grid = new_grid;
         self.cursor.x = self.cursor.x.min(new_cols.saturating_sub(1));
         self.high_water_row = self.high_water_row.min(new_rows.saturating_sub(1));
@@ -720,7 +721,7 @@ impl Screen {
     }
 
     /// Get scrollback lines
-    pub fn scrollback(&self) -> &[Vec<Cell>] {
+    pub fn scrollback(&self) -> &VecDeque<Vec<Cell>> {
         &self.scrollback
     }
 
@@ -750,12 +751,35 @@ impl Screen {
     /// - `scrollback_len..total_rows` maps to active grid rows.
     pub fn row_slice_virtual(&self, row: usize) -> Option<&[Cell]> {
         if row < self.scrollback.len() {
-            return Some(&self.scrollback[row]);
+            return self.scrollback.get(row).map(|row| row.as_slice());
         }
         let grid_row = row - self.scrollback.len();
         if grid_row < self.rows() {
             return Some(self.grid.row_slice(grid_row));
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollback_rollover_keeps_recent_rows_in_order() {
+        let mut screen = Screen::new(1, 2, true);
+        screen.max_scrollback = 3;
+
+        for ch in ['a', 'b', 'c', 'd', 'e'] {
+            screen.write_char(ch);
+            screen.do_carriage_return();
+            screen.do_linefeed();
+        }
+
+        assert_eq!(screen.scrollback_len(), 3);
+        assert_eq!(screen.scrollback()[0][0].codepoint, 'b');
+        assert_eq!(screen.scrollback()[1][0].codepoint, 'c');
+        assert_eq!(screen.scrollback()[2][0].codepoint, 'd');
+        assert_eq!(screen.row_slice_virtual(3).unwrap()[0].codepoint, 'e');
     }
 }

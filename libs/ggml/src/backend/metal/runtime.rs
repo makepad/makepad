@@ -179,6 +179,10 @@ mod imp {
         pub fn discard_command_batch(&self) -> MetalResult<()> {
             Err("Metal runtime is unavailable on this target".to_string())
         }
+
+        pub fn memory_barrier_buffers(&self) -> MetalResult<()> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
     }
 
     impl Default for MetalRuntime {
@@ -234,6 +238,7 @@ mod imp {
     const MTL_DATA_TYPE_INT: u64 = 29;
     const MTL_DATA_TYPE_SHORT: u64 = 37;
     const MTL_DATA_TYPE_BOOL: u64 = 53;
+    const MTL_BARRIER_SCOPE_BUFFERS: u64 = 1;
 
     const GGML_METAL_SOURCE_RAW: &str = include_str!("ggml/ggml-metal.metal");
     const GGML_COMMON_H: &str = include_str!("ggml/ggml-common.h");
@@ -734,6 +739,10 @@ mod imp {
         pub fn discard_command_batch(&self) -> MetalResult<()> {
             self.ctx.borrow_mut().discard_command_batch()
         }
+
+        pub fn memory_barrier_buffers(&self) -> MetalResult<()> {
+            self.ctx.borrow_mut().memory_barrier_buffers()
+        }
     }
 
     impl MetalContext {
@@ -928,6 +937,35 @@ mod imp {
 
         fn discard_command_batch(&mut self) -> MetalResult<()> {
             self.active_command_buffer = None;
+            Ok(())
+        }
+
+        fn memory_barrier_buffers(&mut self) -> MetalResult<()> {
+            let (command_buffer, commit_when_done) =
+                if let Some(command_buffer) = self.active_command_buffer.as_ref() {
+                    (command_buffer.clone(), false)
+                } else {
+                    (self.new_command_buffer()?, true)
+                };
+            let encoder_obj: ObjcId =
+                unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
+            let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
+                .ok_or_else(|| "computeCommandEncoder returned nil".to_string())?;
+
+            unsafe {
+                let _: () = msg_send![
+                    encoder.as_id(),
+                    memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS
+                ];
+                let _: () = msg_send![encoder.as_id(), endEncoding];
+                if commit_when_done {
+                    let _: () = msg_send![command_buffer.as_id(), commit];
+                }
+            }
+
+            if commit_when_done {
+                self.last_command_buffer = Some(command_buffer);
+            }
             Ok(())
         }
 

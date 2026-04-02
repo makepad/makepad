@@ -14,15 +14,21 @@ use std::collections::{HashMap, HashSet};
 const XR_MAX_LINKED_SUPPORT_BODIES_PER_CUBE: usize = XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT;
 pub(super) const XR_MAX_DEPTH_QUERY_KEYS_PER_CUBE: usize =
     XR_MAX_LINKED_SUPPORT_BODIES_PER_CUBE + 1;
-const XR_FOUR_WHEEL_FRONT_BACK_FRACTION: f32 = 0.68;
+const XR_FOUR_WHEEL_FRONT_BACK_FRACTION: f32 = 0.92;
 const XR_FOUR_WHEEL_LATERAL_FRACTION: f32 = 0.78;
-const XR_FOUR_WHEEL_RADIUS_SCALE: f32 = 1.52;
-const XR_FOUR_WHEEL_REST_LENGTH_SCALE: f32 = 0.58;
-const XR_FOUR_WHEEL_TRAVEL_SCALE: f32 = 0.34;
+const XR_FOUR_WHEEL_RADIUS_SCALE: f32 = 2.60;
+const XR_FOUR_WHEEL_REST_LENGTH_SCALE: f32 = 0.70;
+const XR_FOUR_WHEEL_TRAVEL_SCALE: f32 = 0.50;
+const XR_FOUR_WHEEL_MIN_SUSPENSION_LENGTH_FRACTION: f32 = 0.35;
+const XR_FOUR_WHEEL_CHASSIS_WIDTH_SCALE: f32 = 0.85;
+const XR_FOUR_WHEEL_CHASSIS_HEIGHT_SCALE: f32 = 0.70;
+const XR_FOUR_WHEEL_CHASSIS_DEPTH_SCALE: f32 = 0.85;
+const XR_FOUR_WHEEL_CHASSIS_UP_OFFSET_SCALE: f32 = 0.23;
+const XR_FOUR_WHEEL_MIN_CHASSIS_CLEARANCE_FRACTION: f32 = 0.10;
 const XR_CAR_MASS_KG: f32 = 500.0;
 const XR_CAR_MAX_STEER_DEG: f32 = 40.0;
 const XR_CAR_STEER_SMOOTHING_FACTOR: f32 = 0.1;
-const XR_CAR_ACCELERATION_FORCE: f32 = 12.0;
+const XR_CAR_ACCELERATION_FORCE: f32 = 18.0;
 const XR_CAR_BRAKE_FORCE: f32 = 12.0;
 const XR_CAR_TOP_SPEED_MPS: f32 = 25.0;
 const XR_CAR_DOWNFORCE_GAIN: f32 = 20.0;
@@ -401,7 +407,7 @@ fn sphere_support_radius(half_extents: Vec3f) -> f32 {
 }
 
 fn four_wheel_support_radius(half_extents: Vec3f) -> f32 {
-    (sphere_support_radius(half_extents) * XR_FOUR_WHEEL_RADIUS_SCALE).clamp(0.024, 0.078)
+    (sphere_support_radius(half_extents) * XR_FOUR_WHEEL_RADIUS_SCALE).clamp(0.036, 0.128)
 }
 
 fn four_wheel_support_specs(
@@ -409,11 +415,19 @@ fn four_wheel_support_specs(
 ) -> [Option<SupportMarkerSpec>; XR_MAX_LINKED_SUPPORT_BODIES_PER_CUBE] {
     let radius = four_wheel_support_radius(half_extents);
     let lateral = (half_extents.x * XR_FOUR_WHEEL_LATERAL_FRACTION).max(radius * 0.75);
-    let hardpoint_y = -half_extents.y;
-    let rest_length = (radius * XR_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(0.010, 0.040);
-    let travel = (radius * XR_FOUR_WHEEL_TRAVEL_SCALE).clamp(0.006, 0.022);
-    let min_length = (rest_length - travel).max(0.004);
+    let rest_length = (radius * XR_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(0.018, 0.072);
+    let min_length_floor = (rest_length * XR_FOUR_WHEEL_MIN_SUSPENSION_LENGTH_FRACTION)
+        .max(0.004)
+        .min(rest_length);
+    let travel = (radius * XR_FOUR_WHEEL_TRAVEL_SCALE)
+        .clamp(0.010, 0.052)
+        .min((rest_length - min_length_floor).max(0.0));
+    let min_length = (rest_length - travel).max(min_length_floor);
     let max_length = rest_length + travel;
+    let hardpoint_y = four_wheel_chassis_collider_bottom_y(half_extents)
+        + radius
+        + min_length
+        + four_wheel_min_chassis_clearance(radius);
     let front = half_extents.z * XR_FOUR_WHEEL_FRONT_BACK_FRACTION;
     let back = -half_extents.z * XR_FOUR_WHEEL_FRONT_BACK_FRACTION;
     let positions = [
@@ -453,6 +467,28 @@ impl VehicleConfig {
 
 fn linked_support_world_pose(owner_pose: Pose, support: LinkedSupportBody) -> Pose {
     Pose::multiply(&owner_pose, &support.local_pose)
+}
+
+fn four_wheel_chassis_collider_half_extents(half_extents: Vec3f) -> Vec3f {
+    vec3f(
+        half_extents.x * XR_FOUR_WHEEL_CHASSIS_WIDTH_SCALE,
+        half_extents.y * XR_FOUR_WHEEL_CHASSIS_HEIGHT_SCALE,
+        half_extents.z * XR_FOUR_WHEEL_CHASSIS_DEPTH_SCALE,
+    )
+}
+
+fn four_wheel_chassis_collider_translation(half_extents: Vec3f) -> Vec3f {
+    vec3f(0.0, half_extents.y * XR_FOUR_WHEEL_CHASSIS_UP_OFFSET_SCALE, 0.0)
+}
+
+fn four_wheel_chassis_collider_bottom_y(half_extents: Vec3f) -> f32 {
+    let collider_half_extents = four_wheel_chassis_collider_half_extents(half_extents);
+    let collider_translation = four_wheel_chassis_collider_translation(half_extents);
+    collider_translation.y - collider_half_extents.y
+}
+
+fn four_wheel_min_chassis_clearance(radius: f32) -> f32 {
+    (radius * XR_FOUR_WHEEL_MIN_CHASSIS_CLEARANCE_FRACTION).clamp(0.006, 0.014)
 }
 
 fn linked_support_world_linvel(
@@ -694,8 +730,25 @@ impl RapierScene {
         let query_radius = half_extents.length().max(0.0005);
         let depth_query_filter_key = matches!(depth_query_support, XrDepthQuerySupportRig::Body)
             .then(|| self.allocate_depth_query_filter_key());
+        let collider_half_extents = if matches!(depth_query_support, XrDepthQuerySupportRig::FourWheels)
+        {
+            four_wheel_chassis_collider_half_extents(half_extents)
+        } else {
+            half_extents
+        };
+        let collider_translation = if matches!(depth_query_support, XrDepthQuerySupportRig::FourWheels)
+        {
+            four_wheel_chassis_collider_translation(half_extents)
+        } else {
+            vec3f(0.0, 0.0, 0.0)
+        };
         let collider_builder =
-            ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
+            ColliderBuilder::cuboid(
+                collider_half_extents.x,
+                collider_half_extents.y,
+                collider_half_extents.z,
+            )
+                .translation(rapier_vec3(collider_translation))
                 .user_data(depth_query_filter_key.map(depth_query_body_user_data).unwrap_or(0))
                 .density(density.max(0.0))
                 .friction(friction.max(0.0))
@@ -1143,7 +1196,7 @@ impl RapierScene {
             let support_pose = if has_controller_pose {
                 let local_orientation = Quat::multiply(
                     &Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), wheel.steering),
-                    &Quat::from_axis_angle(vec3f(1.0, 0.0, 0.0), wheel.rotation),
+                    &Quat::from_axis_angle(vec3f(-1.0, 0.0, 0.0), wheel.rotation),
                 );
                 Pose::new(
                     Quat::multiply(&owner_pose.orientation, &local_orientation),

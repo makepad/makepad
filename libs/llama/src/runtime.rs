@@ -407,6 +407,7 @@ pub struct AttentionDecodeGraph {
     pub v_cache: TensorId,
     pub k_cache_view: TensorId,
     pub v_cache_view: TensorId,
+    pub graph_key_count: usize,
     pub result_output: TensorId,
 }
 
@@ -668,6 +669,7 @@ pub struct HybridAttentionCacheView {
     pub v_head_dim: i64,
     pub kv_head_count: i64,
     pub max_context: usize,
+    pub graph_key_count: usize,
     pub max_sequences: i64,
 }
 
@@ -2093,11 +2095,24 @@ fn build_attention_decode_from_hidden(
     input_write_indices: TensorId,
     input_rope_positions: Option<TensorId>,
     n_tokens: usize,
+    attention_key_count: usize,
     prefix: &str,
 ) -> Result<BuiltAttentionDecode> {
     let block = &spec.block;
     let n_tokens_i64 =
         i64::try_from(n_tokens).map_err(|_| LlamaError::format("n_tokens does not fit in i64"))?;
+    let max_context = usize::try_from(spec.cache.max_context).map_err(|_| {
+        LlamaError::format(format!(
+            "attention decode max_context {} does not fit in usize",
+            spec.cache.max_context
+        ))
+    })?;
+    if attention_key_count == 0 || attention_key_count > max_context {
+        return Err(LlamaError::format(format!(
+            "attention decode key_count {} is outside 1..={}",
+            attention_key_count, max_context
+        )));
+    }
 
     let input_norm = build_rms_norm_mul(
         ctx,
@@ -2310,7 +2325,14 @@ fn build_attention_decode_from_hidden(
                 format!("{prefix}.kq_mask"),
                 attention_mask_tensor_type(block.q_head_dim, n_tokens),
                 4,
-                &[i64::from(spec.cache.max_context), n_tokens_i64, 1, 1],
+                &[
+                    i64::try_from(attention_key_count).map_err(|_| {
+                        LlamaError::format("attention decode key_count does not fit in i64")
+                    })?,
+                    n_tokens_i64,
+                    1,
+                    1,
+                ],
                 BufferUsage::Activations,
             )
             .map_err(LlamaError::format)?;
@@ -2442,7 +2464,8 @@ fn build_attention_decode_from_hidden(
             k_cache_written,
             i64::from(block.k_head_dim),
             i64::from(block.kv_head_count),
-            i64::from(spec.cache.max_context),
+            i64::try_from(attention_key_count)
+                .map_err(|_| LlamaError::format("attention key_count does not fit in i64"))?,
             i64::from(spec.cache.max_sequences),
             row_size(spec.cache.k_type, i64::from(block.k_head_dim))?,
             row_size(spec.cache.k_type, k_merged_width)?,
@@ -2458,7 +2481,8 @@ fn build_attention_decode_from_hidden(
             v_cache_written,
             i64::from(block.v_head_dim),
             i64::from(block.kv_head_count),
-            i64::from(spec.cache.max_context),
+            i64::try_from(attention_key_count)
+                .map_err(|_| LlamaError::format("attention key_count does not fit in i64"))?,
             i64::from(spec.cache.max_sequences),
             row_size(spec.cache.v_type, i64::from(block.v_head_dim))?,
             row_size(spec.cache.v_type, v_merged_width)?,
@@ -2535,6 +2559,28 @@ pub fn build_attention_decode_graph(
     tensor_ids: &BTreeMap<String, TensorId>,
     spec: &AttentionDecodeSpec,
     n_tokens: usize,
+) -> Result<AttentionDecodeGraph> {
+    let attention_key_count = usize::try_from(spec.cache.max_context).map_err(|_| {
+        LlamaError::format(format!(
+            "attention decode max_context {} does not fit in usize",
+            spec.cache.max_context
+        ))
+    })?;
+    build_attention_decode_graph_with_key_count(
+        ctx,
+        tensor_ids,
+        spec,
+        n_tokens,
+        attention_key_count,
+    )
+}
+
+pub fn build_attention_decode_graph_with_key_count(
+    ctx: &mut Context,
+    tensor_ids: &BTreeMap<String, TensorId>,
+    spec: &AttentionDecodeSpec,
+    n_tokens: usize,
+    attention_key_count: usize,
 ) -> Result<AttentionDecodeGraph> {
     if n_tokens == 0 {
         return Err(LlamaError::format(
@@ -2626,6 +2672,7 @@ pub fn build_attention_decode_graph(
         input_write_indices,
         input_rope_positions,
         n_tokens,
+        attention_key_count,
         "attn_decode",
     )?;
     let result_output = built.result_output;
@@ -2647,6 +2694,7 @@ pub fn build_attention_decode_graph(
         v_cache: built.v_cache,
         k_cache_view: built.k_cache_view,
         v_cache_view: built.v_cache_view,
+        graph_key_count: attention_key_count,
         result_output,
     })
 }
@@ -2663,17 +2711,52 @@ pub fn prepare_attention_decode_graph(
     Ok((decode, prepared))
 }
 
+pub fn prepare_attention_decode_graph_with_key_count(
+    ctx: &mut Context,
+    tensor_ids: &BTreeMap<String, TensorId>,
+    spec: &AttentionDecodeSpec,
+    n_tokens: usize,
+    attention_key_count: usize,
+    features: MetalDeviceFeatures,
+) -> Result<(AttentionDecodeGraph, MetalPreparedGraph)> {
+    let decode = build_attention_decode_graph_with_key_count(
+        ctx,
+        tensor_ids,
+        spec,
+        n_tokens,
+        attention_key_count,
+    )?;
+    let prepared = prepare_graph(ctx, &decode.graph, features).map_err(LlamaError::format)?;
+    Ok((decode, prepared))
+}
+
 pub fn compile_attention_decode_metal(
     weights: &mut LoadedGgufWeights,
     spec: &AttentionDecodeSpec,
     n_tokens: usize,
 ) -> Result<CompiledAttentionDecodeMetal> {
+    let attention_key_count = usize::try_from(spec.cache.max_context).map_err(|_| {
+        LlamaError::format(format!(
+            "attention decode max_context {} does not fit in usize",
+            spec.cache.max_context
+        ))
+    })?;
+    compile_attention_decode_metal_with_key_count(weights, spec, n_tokens, attention_key_count)
+}
+
+pub fn compile_attention_decode_metal_with_key_count(
+    weights: &mut LoadedGgufWeights,
+    spec: &AttentionDecodeSpec,
+    n_tokens: usize,
+    attention_key_count: usize,
+) -> Result<CompiledAttentionDecodeMetal> {
     let runtime = MetalRuntime::new().map_err(LlamaError::unsupported)?;
-    let (decode, prepared) = prepare_attention_decode_graph(
+    let (decode, prepared) = prepare_attention_decode_graph_with_key_count(
         &mut weights.ctx,
         &weights.tensor_ids,
         spec,
         n_tokens,
+        attention_key_count,
         runtime.features(),
     )?;
     let session = MetalGraphSession::from_runtime(
@@ -2790,24 +2873,32 @@ pub fn execute_prepared_attention_decode_metal(
     };
 
     if should_reconfigure_attention_views(spec.block.q_head_dim, positions.len()) {
-        configure_attention_cache_view(
-            ctx,
-            decode.k_cache_view,
-            i64::from(spec.block.k_head_dim),
-            cache_tokens,
-            i64::from(spec.block.kv_head_count),
-            i64::from(spec.cache.max_sequences),
-        )?;
-        configure_attention_cache_view(
-            ctx,
-            decode.v_cache_view,
-            i64::from(spec.block.v_head_dim),
-            cache_tokens,
-            i64::from(spec.block.kv_head_count),
-            i64::from(spec.cache.max_sequences),
-        )?;
-        if let Some(input_mask) = decode.input_mask {
-            configure_attention_mask_view(ctx, input_mask, cache_tokens, positions.len())?;
+        if decode.graph_key_count != cache_tokens {
+            if decode.graph_key_count != max_context {
+                return Err(LlamaError::format(format!(
+                    "attention decode graph key_count {} does not match cache_tokens {}",
+                    decode.graph_key_count, cache_tokens
+                )));
+            }
+            configure_attention_cache_view(
+                ctx,
+                decode.k_cache_view,
+                i64::from(spec.block.k_head_dim),
+                cache_tokens,
+                i64::from(spec.block.kv_head_count),
+                i64::from(spec.cache.max_sequences),
+            )?;
+            configure_attention_cache_view(
+                ctx,
+                decode.v_cache_view,
+                i64::from(spec.block.v_head_dim),
+                cache_tokens,
+                i64::from(spec.block.kv_head_count),
+                i64::from(spec.cache.max_sequences),
+            )?;
+            if let Some(input_mask) = decode.input_mask {
+                configure_attention_mask_view(ctx, input_mask, cache_tokens, positions.len())?;
+            }
         }
     }
 
@@ -5153,6 +5244,7 @@ fn build_hybrid_decode_graph_impl(
     shared_cache: Option<&HybridSharedCacheTensorIds>,
     n_tokens: usize,
     n_outputs: usize,
+    attention_key_count: usize,
 ) -> Result<HybridDecodeGraph> {
     if n_tokens == 0 {
         return Err(LlamaError::format(
@@ -5344,6 +5436,7 @@ fn build_hybrid_decode_graph_impl(
                     })?,
                     input_rope_positions,
                     n_tokens,
+                    attention_key_count,
                     &format!("{prefix}.attn"),
                 )?;
                 attention_cache_views.push(HybridAttentionCacheView {
@@ -5360,6 +5453,7 @@ fn build_hybrid_decode_graph_impl(
                             layer_index, decode.cache.max_context
                         ))
                     })?,
+                    graph_key_count: attention_key_count,
                     max_sequences: i64::from(decode.cache.max_sequences),
                 });
                 let mut layer_output = attn.result_output;
@@ -5540,6 +5634,20 @@ fn build_hybrid_decode_graph_impl(
     })
 }
 
+fn default_attention_key_count(spec: &HybridDecodeSpec) -> Result<usize> {
+    for layer in &spec.layers {
+        if let HybridLayerSpec::Attention { decode, .. } = layer {
+            return usize::try_from(decode.cache.max_context).map_err(|_| {
+                LlamaError::format(format!(
+                    "attention max_context {} does not fit in usize",
+                    decode.cache.max_context
+                ))
+            });
+        }
+    }
+    Ok(1)
+}
+
 pub fn build_hybrid_decode_graph(
     ctx: &mut Context,
     tensor_ids: &BTreeMap<String, TensorId>,
@@ -5547,7 +5655,15 @@ pub fn build_hybrid_decode_graph(
     shared_cache: Option<&HybridSharedCacheTensorIds>,
     n_tokens: usize,
 ) -> Result<HybridDecodeGraph> {
-    build_hybrid_decode_graph_impl(ctx, tensor_ids, spec, shared_cache, n_tokens, n_tokens)
+    build_hybrid_decode_graph_impl(
+        ctx,
+        tensor_ids,
+        spec,
+        shared_cache,
+        n_tokens,
+        n_tokens,
+        default_attention_key_count(spec)?,
+    )
 }
 
 pub fn build_hybrid_decode_graph_with_outputs(
@@ -5558,7 +5674,35 @@ pub fn build_hybrid_decode_graph_with_outputs(
     n_tokens: usize,
     n_outputs: usize,
 ) -> Result<HybridDecodeGraph> {
-    build_hybrid_decode_graph_impl(ctx, tensor_ids, spec, shared_cache, n_tokens, n_outputs)
+    build_hybrid_decode_graph_impl(
+        ctx,
+        tensor_ids,
+        spec,
+        shared_cache,
+        n_tokens,
+        n_outputs,
+        default_attention_key_count(spec)?,
+    )
+}
+
+pub fn build_hybrid_decode_graph_with_attention_key_count(
+    ctx: &mut Context,
+    tensor_ids: &BTreeMap<String, TensorId>,
+    spec: &HybridDecodeSpec,
+    shared_cache: Option<&HybridSharedCacheTensorIds>,
+    n_tokens: usize,
+    n_outputs: usize,
+    attention_key_count: usize,
+) -> Result<HybridDecodeGraph> {
+    build_hybrid_decode_graph_impl(
+        ctx,
+        tensor_ids,
+        spec,
+        shared_cache,
+        n_tokens,
+        n_outputs,
+        attention_key_count,
+    )
 }
 
 pub fn prepare_hybrid_decode_graph(
@@ -5590,6 +5734,29 @@ pub fn prepare_hybrid_decode_graph_with_outputs(
         shared_cache,
         n_tokens,
         n_outputs,
+    )?;
+    let prepared = prepare_graph(ctx, &decode.graph, features).map_err(LlamaError::format)?;
+    Ok((decode, prepared))
+}
+
+pub fn prepare_hybrid_decode_graph_with_attention_key_count(
+    ctx: &mut Context,
+    tensor_ids: &BTreeMap<String, TensorId>,
+    spec: &HybridDecodeSpec,
+    shared_cache: Option<&HybridSharedCacheTensorIds>,
+    n_tokens: usize,
+    n_outputs: usize,
+    attention_key_count: usize,
+    features: MetalDeviceFeatures,
+) -> Result<(HybridDecodeGraph, MetalPreparedGraph)> {
+    let decode = build_hybrid_decode_graph_with_attention_key_count(
+        ctx,
+        tensor_ids,
+        spec,
+        shared_cache,
+        n_tokens,
+        n_outputs,
+        attention_key_count,
     )?;
     let prepared = prepare_graph(ctx, &decode.graph, features).map_err(LlamaError::format)?;
     Ok((decode, prepared))
@@ -5762,6 +5929,7 @@ fn compile_hybrid_decode_metal_impl(
     shared_main_buffer: Option<&MetalBuffer>,
     n_tokens: usize,
     n_outputs: usize,
+    attention_key_count: Option<usize>,
 ) -> Result<CompiledHybridDecodeMetal> {
     let runtime = if let Some(runtime) = shared_runtime {
         runtime.clone()
@@ -5773,7 +5941,18 @@ fn compile_hybrid_decode_metal_impl(
         tensor_ids,
         shared_cache,
     } = import_hybrid_graph_context(weights, shared_cache, shared_main_buffer.is_none())?;
-    let (decode, prepared) = if n_outputs == n_tokens {
+    let (decode, prepared) = if let Some(attention_key_count) = attention_key_count {
+        prepare_hybrid_decode_graph_with_attention_key_count(
+            &mut ctx,
+            &tensor_ids,
+            spec,
+            shared_cache.as_ref(),
+            n_tokens,
+            n_outputs,
+            attention_key_count,
+            runtime.features(),
+        )?
+    } else if n_outputs == n_tokens {
         prepare_hybrid_decode_graph(
             &mut ctx,
             &tensor_ids,
@@ -5824,7 +6003,7 @@ pub fn compile_hybrid_decode_metal(
     spec: &HybridDecodeSpec,
     n_tokens: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
-    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_tokens)
+    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_tokens, None)
 }
 
 pub fn compile_hybrid_decode_metal_with_outputs(
@@ -5833,7 +6012,7 @@ pub fn compile_hybrid_decode_metal_with_outputs(
     n_tokens: usize,
     n_outputs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
-    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_outputs)
+    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_outputs, None)
 }
 
 pub fn compile_hybrid_decode_metal_with_shared_state(
@@ -5851,6 +6030,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state(
         Some(shared_main_buffer),
         n_tokens,
         n_tokens,
+        None,
     )
 }
 
@@ -5870,6 +6050,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state_and_outputs(
         Some(shared_main_buffer),
         n_tokens,
         n_outputs,
+        None,
     )
 }
 
@@ -5889,6 +6070,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state(
         Some(shared_main_buffer),
         n_tokens,
         n_tokens,
+        None,
     )
 }
 
@@ -5909,6 +6091,29 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
         Some(shared_main_buffer),
         n_tokens,
         n_outputs,
+        None,
+    )
+}
+
+pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
+    weights: &mut LoadedGgufWeights,
+    spec: &HybridDecodeSpec,
+    shared_runtime: &MetalRuntime,
+    shared_cache: &HybridSharedCacheTensorIds,
+    shared_main_buffer: &MetalBuffer,
+    n_tokens: usize,
+    n_outputs: usize,
+    attention_key_count: usize,
+) -> Result<CompiledHybridDecodeMetal> {
+    compile_hybrid_decode_metal_impl(
+        weights,
+        spec,
+        Some(shared_runtime),
+        Some(shared_cache),
+        Some(shared_main_buffer),
+        n_tokens,
+        n_outputs,
+        Some(attention_key_count),
     )
 }
 
@@ -6210,24 +6415,32 @@ pub fn execute_prepared_hybrid_decode_metal(
 
     for cache_view in &decode.attention_cache_views {
         if should_reconfigure_attention_views(cache_view.k_head_dim as u32, positions.len()) {
-            configure_attention_cache_view(
-                ctx,
-                cache_view.k_cache_view,
-                cache_view.k_head_dim,
-                cache_tokens,
-                cache_view.kv_head_count,
-                cache_view.max_sequences,
-            )?;
-            configure_attention_cache_view(
-                ctx,
-                cache_view.v_cache_view,
-                cache_view.v_head_dim,
-                cache_tokens,
-                cache_view.kv_head_count,
-                cache_view.max_sequences,
-            )?;
-            if let Some(input_mask) = cache_view.input_mask {
-                configure_attention_mask_view(ctx, input_mask, cache_tokens, positions.len())?;
+            if cache_view.graph_key_count != cache_tokens {
+                if cache_view.graph_key_count != cache_view.max_context {
+                    return Err(LlamaError::format(format!(
+                        "hybrid decode graph key_count {} does not match cache_tokens {} for attention layer {}",
+                        cache_view.graph_key_count, cache_tokens, cache_view.layer_index
+                    )));
+                }
+                configure_attention_cache_view(
+                    ctx,
+                    cache_view.k_cache_view,
+                    cache_view.k_head_dim,
+                    cache_tokens,
+                    cache_view.kv_head_count,
+                    cache_view.max_sequences,
+                )?;
+                configure_attention_cache_view(
+                    ctx,
+                    cache_view.v_cache_view,
+                    cache_view.v_head_dim,
+                    cache_tokens,
+                    cache_view.kv_head_count,
+                    cache_view.max_sequences,
+                )?;
+                if let Some(input_mask) = cache_view.input_mask {
+                    configure_attention_mask_view(ctx, input_mask, cache_tokens, positions.len())?;
+                }
             }
         }
     }

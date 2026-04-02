@@ -25,29 +25,27 @@ const TANK_PROJECTILE_MAX_EMITS_PER_UPDATE: usize = 2;
 const TANK_HIT_FLASH_SECONDS: f64 = 0.35;
 const TANK_SPAWN_RING_RADIUS_METERS: f32 = 0.06;
 const TANK_WHEEL_COUNT: usize = 4;
-const TANK_WHEEL_RADIUS_METERS: f32 = 0.066;
-const TANK_WHEEL_LATERAL_OFFSET_METERS: f32 = 0.112;
-const TANK_WHEEL_VERTICAL_OFFSET_METERS: f32 = -(0.045 + TANK_WHEEL_RADIUS_METERS * 0.58);
-const TANK_WHEEL_FRONT_OFFSET_METERS: f32 = 0.140;
-const TANK_WHEEL_BACK_OFFSET_METERS: f32 = -0.140;
+const TANK_WHEEL_LATERAL_OFFSET_METERS: f32 = 0.113;
+const TANK_WHEEL_VERTICAL_OFFSET_METERS: f32 = -0.045;
+const TANK_WHEEL_FRONT_OFFSET_METERS: f32 = 0.189;
+const TANK_WHEEL_BACK_OFFSET_METERS: f32 = -0.189;
 const TANK_BODY_HALF_WIDTH_METERS: f32 = 0.145;
 const TANK_BODY_HALF_HEIGHT_METERS: f32 = 0.045;
 const TANK_BODY_HALF_DEPTH_METERS: f32 = 0.205;
 const TANK_PLATE_TOP_LOCAL_Y_METERS: f32 = -0.02;
-const TANK_FOUR_WHEEL_RADIUS_SCALE: f32 = 1.52;
-const TANK_FOUR_WHEEL_REST_LENGTH_SCALE: f32 = 0.58;
-const TANK_FOUR_WHEEL_RADIUS_MIN_METERS: f32 = 0.024;
-const TANK_FOUR_WHEEL_RADIUS_MAX_METERS: f32 = 0.078;
-const TANK_FOUR_WHEEL_REST_LENGTH_MIN_METERS: f32 = 0.010;
-const TANK_FOUR_WHEEL_REST_LENGTH_MAX_METERS: f32 = 0.040;
+const TANK_FOUR_WHEEL_RADIUS_SCALE: f32 = 2.60;
+const TANK_FOUR_WHEEL_REST_LENGTH_SCALE: f32 = 0.70;
+const TANK_FOUR_WHEEL_RADIUS_MIN_METERS: f32 = 0.036;
+const TANK_FOUR_WHEEL_RADIUS_MAX_METERS: f32 = 0.128;
+const TANK_FOUR_WHEEL_REST_LENGTH_MIN_METERS: f32 = 0.018;
+const TANK_FOUR_WHEEL_REST_LENGTH_MAX_METERS: f32 = 0.072;
 const TANK_SPAWN_SUSPENSION_PRELOAD_WORLD_METERS: f32 = 0.004;
 const TANK_SPAWN_EXTRA_CLEARANCE_WORLD_METERS: f32 = 0.030;
-const TANK_BODY_VISUAL_REST_LIFT_METERS: f32 = 0.0;
-const TANK_BODY_VISUAL_SUSPENSION_RESPONSE: f32 = 0.45;
-const TANK_BODY_VISUAL_LIFT_MIN_METERS: f32 = -0.008;
-const TANK_BODY_VISUAL_LIFT_MAX_METERS: f32 = 0.016;
+const TANK_BODY_VISUAL_SUSPENSION_RESPONSE: f32 = 0.0;
+const TANK_BODY_VISUAL_LIFT_MIN_METERS: f32 = 0.0;
+const TANK_BODY_VISUAL_LIFT_MAX_METERS: f32 = 0.180;
 const TANK_SCENE_STATUS_TEXT: &str =
-    "Tank mode: right stick drives, left stick aims the turret, triggers fire shells, B resets the tank, and controller grip picks the tank up.";
+    "Tank mode: right stick steers, right trigger accelerates, left trigger reverses, left stick aims the turret, A/X fire shells, B resets the tank, and controller grip picks the tank up.";
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -139,37 +137,81 @@ script_mod! {
         tank_wheel_0 := IcoSphere{
             body: mod.widgets.XrBodyKind.Disabled
             shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
-            radius: 0.066
+            radius: 0.117
             diffuse: #xc4c7ce
             color: #x18212b
-            pos: vec3(-0.112, -0.083, 0.140)
+            pos: vec3(-0.113, -0.045, 0.189)
+
+            marker := Cube{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                size: vec3(0.020, 0.020, 0.020)
+                pos: vec3(0.0, 0.072, 0.0)
+                corner_radius: 0.006
+                roughness: 0.22
+                metallic: 0.06
+                color: #xe8ebf2
+            }
         }
 
         tank_wheel_1 := IcoSphere{
             body: mod.widgets.XrBodyKind.Disabled
             shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
-            radius: 0.066
+            radius: 0.117
             diffuse: #xc4c7ce
             color: #x18212b
-            pos: vec3(-0.112, -0.083, -0.140)
+            pos: vec3(-0.113, -0.045, -0.189)
+
+            marker := Cube{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                size: vec3(0.020, 0.020, 0.020)
+                pos: vec3(0.0, 0.072, 0.0)
+                corner_radius: 0.006
+                roughness: 0.22
+                metallic: 0.06
+                color: #xe8ebf2
+            }
         }
 
         tank_wheel_2 := IcoSphere{
             body: mod.widgets.XrBodyKind.Disabled
             shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
-            radius: 0.066
+            radius: 0.117
             diffuse: #xc4c7ce
             color: #x18212b
-            pos: vec3(0.112, -0.083, 0.140)
+            pos: vec3(0.113, -0.045, 0.189)
+
+            marker := Cube{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                size: vec3(0.020, 0.020, 0.020)
+                pos: vec3(0.0, 0.072, 0.0)
+                corner_radius: 0.006
+                roughness: 0.22
+                metallic: 0.06
+                color: #xe8ebf2
+            }
         }
 
         tank_wheel_3 := IcoSphere{
             body: mod.widgets.XrBodyKind.Disabled
             shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
-            radius: 0.066
+            radius: 0.117
             diffuse: #xc4c7ce
             color: #x18212b
-            pos: vec3(0.112, -0.083, -0.140)
+            pos: vec3(0.113, -0.045, -0.189)
+
+            marker := Cube{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                size: vec3(0.020, 0.020, 0.020)
+                pos: vec3(0.0, 0.072, 0.0)
+                corner_radius: 0.006
+                roughness: 0.22
+                metallic: 0.06
+                color: #xe8ebf2
+            }
         }
     }
 
@@ -448,7 +490,7 @@ script_mod! {
                     on_render: ||{
                         Platform{
                             pos: vec3(0.0, -0.06, 0.0)
-                            size: vec3(1.612, 0.08, 1.612)
+                            size: vec3(3.2258065, 0.08, 3.2258065)
                             friction: 1.8
                             color: #x283544
                         }
@@ -712,7 +754,7 @@ script_mod! {
 
                         scene_status := Label{
                             width: Fill
-                            text: "Default scene: tank mode. Right stick drives, left stick aims the turret, triggers fire shells, B resets the tank, and controller grip picks the tank up."
+                            text: "Default scene: tank mode. Right stick steers, right trigger accelerates, left trigger reverses, left stick aims the turret, A/X fire shells, B resets the tank, and controller grip picks the tank up."
                             draw_text.color: #xe8f4ff
                         }
                     }
@@ -947,10 +989,71 @@ struct DesktopTankInput {
     right_stick: Vec2f,
     left_trigger: f32,
     right_trigger: f32,
+    a: f32,
     b: f32,
+    x: f32,
 }
 
 impl App {
+    fn tank_physics_wheel_radius_meters() -> f32 {
+        let support_base = TANK_BODY_HALF_WIDTH_METERS
+            .min(TANK_BODY_HALF_HEIGHT_METERS)
+            .min(TANK_BODY_HALF_DEPTH_METERS)
+            .max(0.0005);
+        (support_base * TANK_FOUR_WHEEL_RADIUS_SCALE)
+            .clamp(TANK_FOUR_WHEEL_RADIUS_MIN_METERS, TANK_FOUR_WHEEL_RADIUS_MAX_METERS)
+    }
+
+    fn tank_physics_wheel_rest_length_meters() -> f32 {
+        (Self::tank_physics_wheel_radius_meters() * TANK_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(
+            TANK_FOUR_WHEEL_REST_LENGTH_MIN_METERS,
+            TANK_FOUR_WHEEL_REST_LENGTH_MAX_METERS,
+        )
+    }
+
+    fn tank_physics_wheel_min_length_meters() -> f32 {
+        let rest_length = Self::tank_physics_wheel_rest_length_meters();
+        let min_length_floor = (rest_length * 0.35).max(0.004).min(rest_length);
+        let travel = (Self::tank_physics_wheel_radius_meters() * 0.50)
+            .clamp(0.010, 0.052)
+            .min((rest_length - min_length_floor).max(0.0));
+        (rest_length - travel).max(min_length_floor)
+    }
+
+    fn tank_physics_wheel_min_clearance_meters() -> f32 {
+        (Self::tank_physics_wheel_radius_meters() * 0.10).clamp(0.006, 0.014)
+    }
+
+    fn tank_physics_body_collider_bottom_meters() -> f32 {
+        let physics_half_height = TANK_BODY_HALF_HEIGHT_METERS * 0.70;
+        let physics_center_offset = TANK_BODY_HALF_HEIGHT_METERS * 0.23;
+        physics_center_offset - physics_half_height
+    }
+
+    fn tank_physics_wheel_local_pose(index: usize) -> Option<Pose> {
+        let radius = Self::tank_physics_wheel_radius_meters();
+        let rest_length = Self::tank_physics_wheel_rest_length_meters();
+        let lateral = (TANK_BODY_HALF_WIDTH_METERS * 0.78).max(radius * 0.75);
+        let hardpoint_y = Self::tank_physics_body_collider_bottom_meters()
+            + radius
+            + Self::tank_physics_wheel_min_length_meters()
+            + Self::tank_physics_wheel_min_clearance_meters();
+        let x = if index < 2 { -lateral } else { lateral };
+        let z = match index % 2 {
+            0 => TANK_BODY_HALF_DEPTH_METERS * 0.92,
+            1 => -TANK_BODY_HALF_DEPTH_METERS * 0.92,
+            _ => return None,
+        };
+        Some(Pose::new(
+            Quat::default(),
+            vec3f(x, hardpoint_y - rest_length, z),
+        ))
+    }
+
+    fn tank_physics_body_mount_lift_meters() -> f32 {
+        -Self::tank_physics_body_collider_bottom_meters() + Self::tank_physics_wheel_radius_meters()
+    }
+
     fn tank_support_world_metrics(&self, cx: &mut Cx) -> (f32, f32) {
         let scene_scale = self
             .tank_scene_spawn_basis(cx)
@@ -999,7 +1102,9 @@ impl App {
             && input.left_stick.length() <= 0.16
             && input.left_trigger <= 0.08
             && input.right_trigger <= 0.08
+            && input.a <= 0.5
             && input.b <= 0.5
+            && input.x <= 0.5
     }
 
     fn tank_wheel_widget_ref(
@@ -1018,20 +1123,22 @@ impl App {
     }
 
     fn default_tank_wheel_local_pose(index: usize) -> Option<Pose> {
-        let x = if index < 2 {
-            -TANK_WHEEL_LATERAL_OFFSET_METERS
-        } else {
-            TANK_WHEEL_LATERAL_OFFSET_METERS
-        };
-        let z = match index % 2 {
-            0 => TANK_WHEEL_FRONT_OFFSET_METERS,
-            1 => TANK_WHEEL_BACK_OFFSET_METERS,
-            _ => return None,
-        };
-        Some(Pose::new(
-            Quat::default(),
-            vec3f(x, TANK_WHEEL_VERTICAL_OFFSET_METERS, z),
-        ))
+        Self::tank_physics_wheel_local_pose(index).or_else(|| {
+            let x = if index < 2 {
+                -TANK_WHEEL_LATERAL_OFFSET_METERS
+            } else {
+                TANK_WHEEL_LATERAL_OFFSET_METERS
+            };
+            let z = match index % 2 {
+                0 => TANK_WHEEL_FRONT_OFFSET_METERS,
+                1 => TANK_WHEEL_BACK_OFFSET_METERS,
+                _ => return None,
+            };
+            Some(Pose::new(
+                Quat::default(),
+                vec3f(x, TANK_WHEEL_VERTICAL_OFFSET_METERS, z),
+            ))
+        })
     }
 
     fn sync_tank_wheel_widgets(
@@ -1051,6 +1158,7 @@ impl App {
                 .tank_wheel_widget_ref(cx, tank_widget, index)
                 .borrow_mut::<IcoSphere>()
             {
+                wheel.set_radius(cx, Self::tank_physics_wheel_radius_meters());
                 wheel.set_pos(cx, position);
                 wheel.set_rot(cx, Self::quat_to_rot(local_pose.orientation));
             }
@@ -1073,7 +1181,7 @@ impl App {
         } else {
             TANK_WHEEL_VERTICAL_OFFSET_METERS
         };
-        (TANK_BODY_VISUAL_REST_LIFT_METERS
+        (Self::tank_physics_body_mount_lift_meters()
             + (TANK_WHEEL_VERTICAL_OFFSET_METERS - average_wheel_y)
                 * TANK_BODY_VISUAL_SUSPENSION_RESPONSE)
             .clamp(
@@ -1901,11 +2009,14 @@ impl App {
                 right_stick: vec2f(gamepad.right_stick.x as f32, gamepad.right_stick.y as f32),
                 left_trigger: gamepad.left_trigger as f32,
                 right_trigger: gamepad.right_trigger as f32,
+                a: gamepad.a as f32,
                 b: gamepad.b as f32,
+                x: gamepad.x as f32,
             };
             let score = input.right_stick.length() * 2.0
                 + input.left_stick.length()
                 + input.left_trigger.max(input.right_trigger)
+                + input.a.max(input.x)
                 + input.b;
             if score > best_score {
                 best_input = Some(input);
@@ -1915,10 +2026,11 @@ impl App {
         (gamepad_count, best_input)
     }
 
-    fn drive_tank_with_controller(
+    fn drive_tank_with_controllers(
         &mut self,
         cx: &mut Cx,
-        controller: &XrController,
+        right_controller: &XrController,
+        left_controller: &XrController,
     ) -> Option<(bool, bool, bool, bool, Option<XrSharedHand>, Vec3f, Vec3f)> {
         let Some((tank_widget_uid, body)) = self.local_tank_body_state(cx) else {
             return None;
@@ -1926,7 +2038,9 @@ impl App {
         let control = car_drive_command(
             tank_widget_uid,
             body.held_by,
-            controller,
+            right_controller.stick,
+            right_controller.trigger,
+            left_controller.trigger,
             self.car_drive,
         );
         let forced_dynamic =
@@ -1970,12 +2084,19 @@ impl App {
             return;
         }
         let dt = (update.state.time - update.last.time).clamp(1.0 / 240.0, 0.1) as f32;
-        let _ = self.drive_tank_with_controller(cx, &update.state.right_controller);
+        let _ = self.drive_tank_with_controllers(
+            cx,
+            &update.state.right_controller,
+            &update.state.left_controller,
+        );
         self.update_tank_turret_with_controller(cx, &update.state.left_controller, dt);
         self.emit_tank_projectiles(
             cx,
             update.state.time,
-            update.state.left_controller.triggered() || update.state.right_controller.triggered(),
+            update.state.left_controller.click_a()
+                || update.state.left_controller.click_x()
+                || update.state.right_controller.click_a()
+                || update.state.right_controller.click_x(),
         );
         self.detect_local_tank_hits(cx, update.state.time);
         self.sync_local_tank_widgets(cx, update.state.time);
@@ -2028,19 +2149,32 @@ impl App {
         let right_controller = XrController {
             stick: input.right_stick,
             trigger: input.right_trigger,
+            buttons: if input.a > 0.5 {
+                XrController::CLICK_A
+            } else {
+                0
+            },
             ..XrController::default()
         };
         let left_controller = XrController {
             stick: input.left_stick,
             trigger: input.left_trigger,
+            buttons: if input.x > 0.5 {
+                XrController::CLICK_X
+            } else {
+                0
+            },
             ..XrController::default()
         };
-        let outcome = self.drive_tank_with_controller(cx, &right_controller);
+        let outcome = self.drive_tank_with_controllers(cx, &right_controller, &left_controller);
         self.update_tank_turret_with_controller(cx, &left_controller, dt);
         self.emit_tank_projectiles(
             cx,
             event.time,
-            left_controller.triggered() || right_controller.triggered(),
+            left_controller.click_a()
+                || left_controller.click_x()
+                || right_controller.click_a()
+                || right_controller.click_x(),
         );
         self.detect_local_tank_hits(cx, event.time);
         self.sync_local_tank_widgets(cx, event.time);
@@ -2056,7 +2190,7 @@ impl App {
                     angvel,
                 )) => {
                     crate::log!(
-                        "tank debug: desktop sticks rs=({:.2}, {:.2}) ls=({:.2}, {:.2}) trig=({:.2}, {:.2}) dt={:.3} drive={} forced_dynamic={} dynamic_body={} shadowed={} sleeping={} held_by={:?} linvel=({:.2}, {:.2}, {:.2}) angvel=({:.2}, {:.2}, {:.2})",
+                        "tank debug: desktop sticks rs=({:.2}, {:.2}) ls=({:.2}, {:.2}) lt={:.2} rt={:.2} dt={:.3} drive={} forced_dynamic={} dynamic_body={} shadowed={} sleeping={} held_by={:?} linvel=({:.2}, {:.2}, {:.2}) angvel=({:.2}, {:.2}, {:.2})",
                         input.right_stick.x,
                         input.right_stick.y,
                         input.left_stick.x,
