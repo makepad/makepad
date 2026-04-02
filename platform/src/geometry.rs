@@ -18,6 +18,18 @@ impl Geometry {
     }
 }
 
+impl GeometryId {
+    #[allow(dead_code)]
+    pub(crate) fn slot_index(self) -> usize {
+        self.0
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn generation(self) -> u64 {
+        self.1
+    }
+}
+
 #[derive(Default)]
 pub struct CxGeometryPool(pub(crate) IdPool<CxGeometry>);
 

@@ -417,8 +417,7 @@ fn four_wheel_support_specs(
     let radius = four_wheel_support_radius(half_extents);
     let lateral = (half_extents.x * XR_FOUR_WHEEL_LATERAL_FRACTION).max(radius * 0.75);
     let rest_length = (radius * XR_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(0.024, 0.110);
-    let min_length_floor = (rest_length * XR_FOUR_WHEEL_MIN_SUSPENSION_LENGTH_FRACTION)
-        .max(0.004);
+    let min_length_floor = (rest_length * XR_FOUR_WHEEL_MIN_SUSPENSION_LENGTH_FRACTION).max(0.004);
     let travel = (radius * XR_FOUR_WHEEL_TRAVEL_SCALE).clamp(0.018, 0.090);
     let min_length = (rest_length - travel).max(min_length_floor);
     let max_length = rest_length + travel;
@@ -767,8 +766,7 @@ impl RapierScene {
             && matches!(
                 depth_query_support,
                 XrDepthQuerySupportRig::Body | XrDepthQuerySupportRig::FourWheels
-            )
-        {
+            ) {
             Some(
                 self.spawn_depth_query_surface_set(
                     depth_query_filter_key

@@ -1,7 +1,7 @@
+use crate::prelude::*;
 use crate::scene::{
     arm_pair_metrics, flat_head_forward, hand_closed_fist_contact_point_geometry_only,
 };
-use crate::prelude::*;
 use makepad_widgets::event::{XrSyncAnchor, XrSyncAnchorExtrema};
 use std::{
     collections::{HashMap, VecDeque},
@@ -184,10 +184,7 @@ impl XrPeerSync {
             .is_some()
     }
 
-    pub fn shared_object_authority_for_widget(
-        &self,
-        widget_uid: WidgetUid,
-    ) -> Option<XrNetPeerId> {
+    pub fn shared_object_authority_for_widget(&self, widget_uid: WidgetUid) -> Option<XrNetPeerId> {
         let local_object_id = self
             .runtime
             .shared_objects

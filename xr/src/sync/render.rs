@@ -152,8 +152,13 @@ impl XrPeerSync {
 
     pub(super) fn draw_pending_sync_anchor_preview(&mut self, cx: &mut Cx3d, world: &Mat4f) {
         let now = self.runtime.local.state_time;
-        let recent_local_sync_anchors: Vec<TimedLocalSyncAnchor> =
-            self.runtime.local.recent_sync_anchors.iter().copied().collect();
+        let recent_local_sync_anchors: Vec<TimedLocalSyncAnchor> = self
+            .runtime
+            .local
+            .recent_sync_anchors
+            .iter()
+            .copied()
+            .collect();
         for recent_sync in recent_local_sync_anchors.iter().rev() {
             let age = now - recent_sync.last_seen_at_local_time;
             if !(0.0..=Self::LOCAL_SYNC_SAMPLE_PREVIEW_SECONDS).contains(&age) {
@@ -224,7 +229,10 @@ impl XrPeerSync {
         size: f32,
         color: Vec4f,
     ) {
-        let transform = Mat4f::mul(root_transform, &Pose::new(Quat::default(), position).to_mat4());
+        let transform = Mat4f::mul(
+            root_transform,
+            &Pose::new(Quat::default(), position).to_mat4(),
+        );
         self.draw_cube_at(cx, world, &transform, vec3(size, size, size), color);
     }
 
@@ -341,7 +349,11 @@ impl XrPeerSync {
             world,
             root_transform,
             hand,
-            &[XrHand::THUMB_BASE, XrHand::THUMB_KNUCKLE1, XrHand::THUMB_KNUCKLE2],
+            &[
+                XrHand::THUMB_BASE,
+                XrHand::THUMB_KNUCKLE1,
+                XrHand::THUMB_KNUCKLE2,
+            ],
             XrHand::THUMB_TIP,
             0.016,
             color,

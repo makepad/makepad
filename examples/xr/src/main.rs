@@ -793,22 +793,10 @@ script_mod! {
                             draw_text.color: #xe8f4ff
                         }
 
-                        depth_resolution_3_button := XrUiButton{
-                            width: 64
-                            text: "3 cm"
-                            on_press: || ui.root.set_depth_voxel_size(0.03)
-                        }
-
-                        depth_resolution_5_button := XrUiButton{
-                            width: 64
-                            text: "5 cm"
-                            on_press: || ui.root.set_depth_voxel_size(0.05)
-                        }
-
-                        depth_resolution_10_button := XrUiButton{
-                            width: 72
-                            text: "10 cm"
-                            on_press: || ui.root.set_depth_voxel_size(0.10)
+                        depth_resolution_2_button := XrUiButton{
+                            width: 94
+                            text: "2 cm fixed"
+                            on_press: || ui.root.set_depth_voxel_size(0.02)
                         }
                     }
 
@@ -993,15 +981,9 @@ pub struct App {
     #[rust]
     last_desktop_tank_drive_at: Option<f64>,
     #[rust]
-    last_logged_gamepad_count: Option<usize>,
-    #[rust]
-    last_logged_desktop_stick_bucket: Option<(i8, i8)>,
-    #[rust]
     last_desktop_tank_reset_pressed: bool,
     #[rust]
     desktop_tank_drive_armed: bool,
-    #[rust]
-    tank_debug_motion_log_frames_remaining: u32,
     #[rust]
     tank_depth_focus_cube_auto_enabled: bool,
 }
@@ -1144,12 +1126,7 @@ impl App {
         }
     }
 
-    fn tank_wheel_mesh_ref(
-        &self,
-        cx: &mut Cx,
-        tank_widget: &WidgetRef,
-        index: usize,
-    ) -> WidgetRef {
+    fn tank_wheel_mesh_ref(&self, cx: &mut Cx, tank_widget: &WidgetRef, index: usize) -> WidgetRef {
         match index {
             0 => tank_widget.widget(cx, ids!(tank_wheel_0.wheel_mesh)),
             1 => tank_widget.widget(cx, ids!(tank_wheel_1.wheel_mesh)),
@@ -1460,17 +1437,6 @@ impl App {
         self.current_activity(cx) == Some(XrActivityId(live_id!(tanks_scene)))
     }
 
-    fn stick_log_bucket(stick: Vec2f) -> Option<(i8, i8)> {
-        if stick.length() <= 0.12 {
-            None
-        } else {
-            Some((
-                (stick.x * 10.0).round().clamp(-10.0, 10.0) as i8,
-                (stick.y * 10.0).round().clamp(-10.0, 10.0) as i8,
-            ))
-        }
-    }
-
     fn collect_spawn_pool_widget_uids(widget: &WidgetRef, pool_uids: &mut Vec<WidgetUid>) {
         if !widget.visible() {
             return;
@@ -1658,14 +1624,9 @@ impl App {
         if !self.is_tanks_scene_active(cx) {
             self.tank_active_hit_projectiles.clear();
             self.tank_spawn_requested = false;
-            self.tank_debug_motion_log_frames_remaining = 0;
             return;
         }
         if let Some((widget_uid, _)) = self.local_tank_body_state(cx) {
-            if self.tank_spawn_requested {
-                crate::log!("tank debug: local tank materialized uid={widget_uid:?}");
-                self.tank_debug_motion_log_frames_remaining = 90;
-            }
             self.primary_tank_widget_uid = Some(widget_uid);
             self.tank_spawn_requested = false;
             return;
@@ -1687,12 +1648,6 @@ impl App {
             return;
         };
         let spawn_pose = self.tank_spawn_pose(cx);
-        crate::log!(
-            "tank debug: requesting local tank spawn uid={widget_uid:?} pos=({:.3}, {:.3}, {:.3})",
-            spawn_pose.position.x,
-            spawn_pose.position.y,
-            spawn_pose.position.z
-        );
         let widget_uid = self.emit_local_shared_body_spawn_exact(
             cx,
             XrBodySpawn {
@@ -1722,7 +1677,8 @@ impl App {
                     root.toggle_depth_mesh_focus_cube(cx);
                     self.tank_depth_focus_cube_auto_enabled = true;
                 }
-            } else if self.tank_depth_focus_cube_auto_enabled && root.depth_mesh_focus_cube_enabled()
+            } else if self.tank_depth_focus_cube_auto_enabled
+                && root.depth_mesh_focus_cube_enabled()
             {
                 root.toggle_depth_mesh_focus_cube(cx);
                 self.tank_depth_focus_cube_auto_enabled = false;
@@ -1755,7 +1711,6 @@ impl App {
         self.tank_projectile_next_emit_at = None;
         self.tank_active_hit_projectiles.clear();
         self.tank_hit_flash_until = 0.0;
-        self.tank_debug_motion_log_frames_remaining = 90;
         let widget_uid = self.emit_local_shared_body_spawn_exact(
             cx,
             XrBodySpawn {
@@ -1841,39 +1796,6 @@ impl App {
             hull.set_color(cx, color);
         }
         self.sync_tank_wheel_widgets(cx, &tank_widget, &tank_body);
-        if self.tank_debug_motion_log_frames_remaining > 0 {
-            self.tank_debug_motion_log_frames_remaining -= 1;
-            if self.tank_debug_motion_log_frames_remaining % 6 == 0 {
-                let wheel_summary = tank_body
-                    .linked_support_local_poses
-                    .iter()
-                    .take(TANK_WHEEL_COUNT)
-                    .enumerate()
-                    .map(|(index, pose)| match pose {
-                        Some(pose) => format!(
-                            "{index}:({:.3},{:.3},{:.3})",
-                            pose.position.x, pose.position.y, pose.position.z
-                        ),
-                        None => format!("{index}:(none)"),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                crate::log!(
-                    "tank debug: runtime pose=({:.3}, {:.3}, {:.3}) linvel=({:.3}, {:.3}, {:.3}) angvel=({:.3}, {:.3}, {:.3}) sleeping={} wheels={}",
-                    tank_body.pose.position.x,
-                    tank_body.pose.position.y,
-                    tank_body.pose.position.z,
-                    tank_body.linvel.x,
-                    tank_body.linvel.y,
-                    tank_body.linvel.z,
-                    tank_body.angvel.x,
-                    tank_body.angvel.y,
-                    tank_body.angvel.z,
-                    tank_body.sleeping,
-                    wheel_summary,
-                );
-            }
-        }
         let status = if now < self.tank_hit_flash_until {
             format!("Tank hit by a remote shell. {TANK_SCENE_STATUS_TEXT}")
         } else {
@@ -2142,16 +2064,7 @@ impl App {
             .map(|last| (event.time - last) as f32)
             .unwrap_or(1.0 / 60.0);
         self.last_desktop_tank_drive_at = Some(event.time);
-        let (gamepad_count, best_input) = self.desktop_gamepad_tank_input(cx);
-        if self.last_logged_gamepad_count != Some(gamepad_count) {
-            crate::log!("tank debug: desktop gamepads={gamepad_count}");
-            self.last_logged_gamepad_count = Some(gamepad_count);
-        }
-        let stick_bucket = best_input
-            .map(|input| input.left_stick)
-            .and_then(Self::stick_log_bucket);
-        let should_log_stick = stick_bucket != self.last_logged_desktop_stick_bucket;
-        self.last_logged_desktop_stick_bucket = stick_bucket;
+        let (_, best_input) = self.desktop_gamepad_tank_input(cx);
         let Some(input) = best_input else {
             self.last_desktop_tank_reset_pressed = false;
             self.desktop_tank_drive_armed = false;
@@ -2212,54 +2125,7 @@ impl App {
         );
         self.detect_local_tank_hits(cx, event.time);
         self.sync_local_tank_widgets(cx, event.time);
-        if should_log_stick {
-            match outcome {
-                Some((
-                    applied,
-                    forced_dynamic,
-                    dynamic_body,
-                    shadowed,
-                    held_by,
-                    linvel,
-                    angvel,
-                )) => {
-                    crate::log!(
-                        "tank debug: desktop sticks rs=({:.2}, {:.2}) ls=({:.2}, {:.2}) lt={:.2} rt={:.2} dt={:.3} drive={} forced_dynamic={} dynamic_body={} shadowed={} sleeping={} held_by={:?} linvel=({:.2}, {:.2}, {:.2}) angvel=({:.2}, {:.2}, {:.2})",
-                        input.right_stick.x,
-                        input.right_stick.y,
-                        input.left_stick.x,
-                        input.left_stick.y,
-                        input.left_trigger,
-                        input.right_trigger,
-                        dt,
-                        applied,
-                        forced_dynamic,
-                        dynamic_body,
-                        shadowed,
-                        self.local_tank_body_state(cx)
-                            .map(|(_, body)| body.sleeping)
-                            .unwrap_or(false),
-                        held_by,
-                        linvel.x,
-                        linvel.y,
-                        linvel.z,
-                        angvel.x,
-                        angvel.y,
-                        angvel.z
-                    );
-                }
-                None => {
-                    crate::log!(
-                        "tank debug: desktop sticks rs=({:.2}, {:.2}) ls=({:.2}, {:.2}) dt={:.3} but no tank runtime body was available",
-                        input.right_stick.x,
-                        input.right_stick.y,
-                        input.left_stick.x,
-                        input.left_stick.y,
-                        dt
-                    );
-                }
-            }
-        }
+        let _ = (dt, outcome);
     }
 
     fn publish_local_shared_object_states(&mut self, cx: &mut Cx) {
@@ -2310,6 +2176,10 @@ impl App {
             frame_cpu_ms,
             frame_update_cpu_ms,
             frame_draw_cpu_ms,
+            xr_frame_cpu_ms,
+            xr_render_cpu_ms,
+            xr_depth_readback_cpu_ms,
+            xr_frame_cpu_breakdown,
         ) = if let Some(root) = self.ui.borrow::<XrRoot>() {
             (
                 root.physics_depth_query_surface_count(),
@@ -2319,6 +2189,10 @@ impl App {
                 root.frame_cpu_ms(),
                 root.frame_update_cpu_ms(),
                 root.frame_draw_cpu_ms(),
+                cx.xr_frame_cpu_time_ms(),
+                cx.xr_render_cpu_time_ms(),
+                cx.xr_depth_readback_cpu_time_ms(),
+                cx.xr_frame_cpu_breakdown(),
             )
         } else {
             return;
@@ -2370,38 +2244,92 @@ impl App {
             .xr_gpu_frame_time_ms()
             .map(|gpu_ms| format!("{gpu_ms:.2} ms"))
             .unwrap_or_else(|| "waiting".to_string());
-        let tank_runtime_state = self.local_tank_body_state(cx).map(|(_, body)| body);
+        let xr_frame_cpu_text = xr_frame_cpu_ms
+            .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_render_cpu_text = xr_render_cpu_ms
+            .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_depth_readback_cpu_text = xr_depth_readback_cpu_ms
+            .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_begin_chain = xr_frame_cpu_breakdown
+            .map(|cpu| {
+                format!(
+                    "wait {:.2} > begin {:.2} > loc-space {:.2} > loc-views {:.2} > acq {:.2} > wait-img {:.2} > acq-depth {:.2}",
+                    cpu.wait_frame_ms,
+                    cpu.begin_frame_ms,
+                    cpu.locate_space_ms,
+                    cpu.locate_views_ms,
+                    cpu.acquire_swapchain_ms,
+                    cpu.wait_swapchain_ms,
+                    cpu.acquire_depth_ms,
+                )
+            })
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_work_chain = xr_frame_cpu_breakdown
+            .map(|cpu| {
+                format!(
+                    "prep {:.2} > xr {:.2} > next {:.2} > draw {:.2} > shaders {:.2} > repaint {:.2} > readback {:.2} > end {:.2} > resize {:.2} > total {:.2}",
+                    cpu.update_prepare_ms,
+                    cpu.update_dispatch_ms,
+                    cpu.next_frame_ms,
+                    cpu.draw_event_ms,
+                    cpu.compile_shaders_ms,
+                    cpu.repaint_ms,
+                    cpu.depth_readback_ms,
+                    cpu.end_frame_ms,
+                    cpu.resize_projection_ms,
+                    cpu.total_ms,
+                )
+            })
+            .unwrap_or_else(|| "waiting".to_string());
+        let bytes_to_mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+        let xr_repaint_chain = xr_frame_cpu_breakdown
+            .map(|cpu| {
+                format!(
+                    "wait-fence {:.2} > prep-tex {:.2} > record {:.2} > submit {:.2}",
+                    cpu.repaint_wait_inflight_ms,
+                    cpu.repaint_prepare_textures_ms,
+                    cpu.repaint_record_draw_ms,
+                    cpu.repaint_submit_ms,
+                )
+            })
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_repaint_uploads = xr_frame_cpu_breakdown
+            .map(|cpu| {
+                format!(
+                    "tex {:.2} MB/{} > packet {:.2} MB/{} > geom {:.2} MB > desc {}",
+                    bytes_to_mb(cpu.repaint_texture_upload_bytes),
+                    cpu.repaint_texture_upload_count,
+                    bytes_to_mb(cpu.repaint_packet_buffer_bytes),
+                    cpu.repaint_packet_buffer_count,
+                    bytes_to_mb(cpu.repaint_geometry_upload_bytes),
+                    cpu.repaint_descriptor_set_count,
+                )
+            })
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_repaint_draw = xr_frame_cpu_breakdown
+            .map(|cpu| {
+                format!(
+                    "items {} > calls {} > packets {} > instances {} > indices {}",
+                    cpu.repaint_draw_items,
+                    cpu.repaint_draw_calls,
+                    cpu.repaint_packets,
+                    cpu.repaint_instances,
+                    cpu.repaint_indices,
+                )
+            })
+            .unwrap_or_else(|| "waiting".to_string());
         let mut gamepad_count = 0usize;
-        let mut strongest_stick = vec2f(0.0, 0.0);
-        let mut strongest_stick_len = 0.0f32;
         for state in cx.game_input_states() {
-            let GameInputState::Gamepad(gamepad) = state else {
+            let GameInputState::Gamepad(_gamepad) = state else {
                 continue;
             };
             gamepad_count += 1;
-            let stick = vec2f(gamepad.left_stick.x as f32, gamepad.left_stick.y as f32);
-            let stick_len = stick.length();
-            if stick_len > strongest_stick_len {
-                strongest_stick = stick;
-                strongest_stick_len = stick_len;
-            }
         }
-        let tank_runtime_text = tank_runtime_state
-            .map(|body| {
-                format!(
-                    "Tank body: dynamic={} shadowed={} sleeping={} held={:?} linvel=({:.2}, {:.2}, {:.2})",
-                    body.dynamic_body,
-                    body.shadowed,
-                    body.sleeping,
-                    body.held_by,
-                    body.linvel.x,
-                    body.linvel.y,
-                    body.linvel.z
-                )
-            })
-            .unwrap_or_else(|| "Tank body: unavailable".to_string());
         let debug_text = format!(
-            "Connected peers: {}\nShared objects: {}\n{}\n{}\n{}\n{}\n{}\n{}\nGamepads: {gamepad_count}\nTank GP Left Stick: ({:.2}, {:.2})\n{tank_runtime_text}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nCPU frame time: {frame_cpu_ms:.2} ms\nUpdate time: {frame_update_cpu_ms:.2} ms\nDraw time: {frame_draw_cpu_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}",
+            "OpenXR frame CPU: {xr_frame_cpu_text}\nOpenXR begin chain: {xr_begin_chain}\nOpenXR work chain: {xr_work_chain}\nOpenXR repaint chain: {xr_repaint_chain}\nOpenXR repaint uploads: {xr_repaint_uploads}\nOpenXR repaint draw: {xr_repaint_draw}\nVulkan XR render CPU: {xr_render_cpu_text}\nDepth readback CPU: {xr_depth_readback_cpu_text}\nUI frame CPU: {frame_cpu_ms:.2} ms\nUI update time: {frame_update_cpu_ms:.2} ms\nUI draw time: {frame_draw_cpu_ms:.2} ms\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}\nGamepads: {gamepad_count}\nConnected peers: {}\nShared objects: {}\n{}\n{}\n{}\n{}\n{}\n{}",
             connected_peers.0,
             connected_peers.1,
             connected_peers.2,
@@ -2410,8 +2338,6 @@ impl App {
             connected_peers.5,
             connected_peers.6,
             connected_peers.7,
-            strongest_stick.x,
-            strongest_stick.y,
         );
         if self.last_debug_text != debug_text {
             self.ui
@@ -2420,9 +2346,9 @@ impl App {
             self.last_debug_text = debug_text;
         }
         let wrist_perf_text = format!(
-            "P:{:.1} C:{:.1}",
+            "P:{:.1} X:{:.1}",
             compute_ms + query_ms + rapier_ms,
-            frame_cpu_ms,
+            xr_frame_cpu_ms.unwrap_or(frame_cpu_ms),
         );
         self.ui
             .widget(cx, ids!(wrist_sync_status))
@@ -2571,7 +2497,7 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::GameInputConnected(ev) = event {
-            crate::log!("tank debug: game input event: {:?}", ev);
+            let _ = ev;
             self.desktop_tank_drive_armed = false;
         }
         self.match_event(cx, event);
