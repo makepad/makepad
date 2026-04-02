@@ -1,6 +1,6 @@
 use super::depth_debug_mesh::{
-    debug_depth_mesh_view_plan, DebugDepthMeshChunk, DebugDepthMeshChunkSignature,
-    DebugDepthMeshTriangulator,
+    debug_depth_mesh_focus_cube_plan, debug_depth_mesh_view_plan, DebugDepthMeshChunk,
+    DebugDepthMeshChunkSignature, DebugDepthMeshTriangulator,
 };
 use crate::prelude::*;
 use makepad_widgets::makepad_platform::{
@@ -18,7 +18,7 @@ const XR_DEPTH_DEBUG_MESH_RESULT_BATCH_REMOVALS: usize = 16;
 struct DepthDebugMeshWorkerRequest {
     request_id: u64,
     snapshot: Arc<TsdfPublishedSnapshot>,
-    head_pose: Pose,
+    selection: XrDepthDebugMeshSelection,
 }
 
 #[derive(Default)]
@@ -45,6 +45,17 @@ pub(crate) enum XrDepthDebugMeshWorkerResult {
     ChunkRemovals {
         request_id: u64,
         chunk_keys: Vec<ChunkKey>,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum XrDepthDebugMeshSelection {
+    HeadView {
+        head_pose: Pose,
+    },
+    FocusCube {
+        center: Vec3f,
+        cube_size_meters: f32,
     },
 }
 
@@ -112,7 +123,7 @@ impl XrDepthDebugMeshWorker {
     pub(crate) fn request_snapshot(
         &mut self,
         snapshot: Arc<TsdfPublishedSnapshot>,
-        head_pose: Pose,
+        selection: XrDepthDebugMeshSelection,
     ) {
         self.next_request_id = self.next_request_id.wrapping_add(1);
         if self.next_request_id == 0 {
@@ -124,7 +135,7 @@ impl XrDepthDebugMeshWorker {
             mailbox.pending_request = Some(DepthDebugMeshWorkerRequest {
                 request_id: self.next_request_id,
                 snapshot,
-                head_pose,
+                selection,
             });
             mailbox.version = mailbox.version.saturating_add(1);
             wake.notify_one();
@@ -206,7 +217,19 @@ fn depth_debug_mesh_worker_loop(
         let Some(request) = request else {
             continue;
         };
-        let view_plan = debug_depth_mesh_view_plan(request.snapshot.as_ref(), request.head_pose);
+        let view_plan = match request.selection {
+            XrDepthDebugMeshSelection::HeadView { head_pose } => {
+                debug_depth_mesh_view_plan(request.snapshot.as_ref(), head_pose)
+            }
+            XrDepthDebugMeshSelection::FocusCube {
+                center,
+                cube_size_meters,
+            } => debug_depth_mesh_focus_cube_plan(
+                request.snapshot.as_ref(),
+                center,
+                cube_size_meters,
+            ),
+        };
         if request_obsolete(&mailbox, active_version) {
             continue;
         }

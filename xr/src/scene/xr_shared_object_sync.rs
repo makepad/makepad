@@ -375,10 +375,9 @@ impl XrSharedObjectRegistry {
     }
 
     fn first_free_group_widget(&self, group_widgets: &[WidgetUid]) -> Option<WidgetUid> {
-        group_widgets
-            .iter()
-            .copied()
-            .find(|widget_uid| !self.widget_is_local(*widget_uid) && !self.widget_is_remote(*widget_uid))
+        group_widgets.iter().copied().find(|widget_uid| {
+            !self.widget_is_local(*widget_uid) && !self.widget_is_remote(*widget_uid)
+        })
     }
 
     fn oldest_group_widget(
@@ -413,7 +412,9 @@ impl XrSharedObjectRegistry {
             return None;
         }
         let group_widgets = self.spawnable_group_widgets(preferred_widget_uid)?;
-        if !self.widget_is_local(preferred_widget_uid) && !self.widget_is_remote(preferred_widget_uid) {
+        if !self.widget_is_local(preferred_widget_uid)
+            && !self.widget_is_remote(preferred_widget_uid)
+        {
             return Some(preferred_widget_uid);
         }
         self.first_free_group_widget(group_widgets)
@@ -429,7 +430,9 @@ impl XrSharedObjectRegistry {
             return None;
         }
         let group_widgets = self.spawnable_group_widgets(preferred_widget_uid)?;
-        if !self.widget_is_local(preferred_widget_uid) && !self.widget_is_remote(preferred_widget_uid) {
+        if !self.widget_is_local(preferred_widget_uid)
+            && !self.widget_is_remote(preferred_widget_uid)
+        {
             return Some(preferred_widget_uid);
         }
         self.first_free_group_widget(group_widgets)

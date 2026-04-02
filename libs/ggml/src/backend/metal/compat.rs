@@ -5639,10 +5639,10 @@ mod imp {
                 }
             }
 
-            let src_shape = shape4_from_row_major(&[n_cols, n_rows], elem_or_block)?;
+            let src_shape = shape4_from_row_major(&[n_rows, n_cols], elem_or_block)?;
             let idx_shape =
                 shape4_from_row_major(&[row_indices.len()], std::mem::size_of::<i32>() as u64)?;
-            let dst_shape = shape4_from_row_major(&[n_cols, row_indices.len()], 4)?;
+            let dst_shape = shape4_from_row_major(&[row_indices.len(), n_cols], 4)?;
 
             let idx_bytes = unsafe {
                 std::slice::from_raw_parts(

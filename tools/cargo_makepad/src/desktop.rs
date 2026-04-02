@@ -190,6 +190,13 @@ fn write_macos_app_bundle(
     <key>CFBundleVersion</key><string>1.0.0</string>\n\
     <key>CFBundleShortVersionString</key><string>1.0.0</string>\n\
     <key>CFBundleIconFile</key><string>AppIcon</string>\n\
+    <key>GCSupportsControllerUserInteraction</key><true/>\n\
+    <key>GCSupportedGameControllers</key>\n\
+    <array>\n\
+        <dict>\n\
+            <key>ProfileName</key><string>ExtendedGamepad</string>\n\
+        </dict>\n\
+    </array>\n\
 </dict>\n\
 </plist>\n"
     );

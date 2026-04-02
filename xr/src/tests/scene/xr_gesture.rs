@@ -1,5 +1,6 @@
 mod tests {
     use super::*;
+    const EPSILON: f32 = 1.0e-5;
 
     fn pose(position: Vec3f) -> Pose {
         Pose::new(Quat::default(), position)
@@ -155,6 +156,13 @@ mod tests {
         hand
     }
 
+    fn assert_vec3_close(actual: Vec3f, expected: Vec3f) {
+        assert!(
+            (actual - expected).length() <= EPSILON,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
     #[test]
     fn ready_fist_shape_accepts_joint_only_closed_pose_without_tip_bits() {
         let hand = make_ready_fist_hand(true);
@@ -203,16 +211,31 @@ mod tests {
     }
 
     #[test]
-    fn contact_point_uses_tracking_palm_center_for_open_hand() {
+    fn contact_point_uses_palm_surface_offset_for_open_left_hand() {
         let hand = make_ready_open_hand(true);
         let forward = vec3f(0.0, 0.0, -1.0);
-        let expected_point = hand.tracking_pose().expect("tracking pose").position
-            + forward.scale(OPEN_HAND_SYNC_FORWARD_OFFSET_METERS);
+        let tracking_pose = hand.tracking_pose().expect("tracking pose");
+        let expected_offset = vec3f(-0.00035, -0.01199, 0.01600);
+        let actual_point =
+            hand_closed_fist_contact_point(&hand, forward, true).expect("contact point");
 
-        assert_eq!(
-            hand_closed_fist_contact_point(&hand, forward, true),
-            Some(expected_point)
-        );
+        assert_vec3_close(actual_point - tracking_pose.position, expected_offset);
+        assert!(actual_point.z > tracking_pose.position.z);
+        assert!(actual_point.y < tracking_pose.position.y);
+    }
+
+    #[test]
+    fn contact_point_uses_palm_surface_offset_for_open_right_hand() {
+        let hand = make_ready_open_hand(false);
+        let forward = vec3f(0.0, 0.0, -1.0);
+        let tracking_pose = hand.tracking_pose().expect("tracking pose");
+        let expected_offset = vec3f(0.00035, -0.01199, 0.01600);
+        let actual_point =
+            hand_closed_fist_contact_point(&hand, forward, false).expect("contact point");
+
+        assert_vec3_close(actual_point - tracking_pose.position, expected_offset);
+        assert!(actual_point.z > tracking_pose.position.z);
+        assert!(actual_point.y < tracking_pose.position.y);
     }
 
     #[test]

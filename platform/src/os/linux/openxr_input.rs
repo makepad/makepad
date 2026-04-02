@@ -377,7 +377,7 @@ impl CxOpenXrController {
             } else {
                 XrSpaceLocation::locate(xr, local_space, time, self.detached_aim_space).pose
             },
-            stick: stick.current_state,
+            stick: normalize_xr_controller_stick(stick.current_state),
             trigger: trigger.current_state,
             grip: grip.current_state,
             //last_buttons,
