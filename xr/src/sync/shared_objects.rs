@@ -12,10 +12,8 @@ impl XrPeerSync {
         } else {
             Cx::time_now()
         };
-        let (allocation, reused_remote) = self
-            .runtime
-            .shared_objects
-            .prepare_local_spawn_allocation(
+        let (allocation, reused_remote) =
+            self.runtime.shared_objects.prepare_local_spawn_allocation(
                 activity_id,
                 spawn.widget_uid,
                 sent_at,
@@ -82,14 +80,17 @@ impl XrPeerSync {
             .shared_objects
             .resolve_remote_shared_object_for_widget(spawn.widget_uid)
             .is_some();
-        let allocation = self.runtime.shared_objects.force_local_shared_object_reset(
-            activity_id,
-            spawn.widget_uid,
-            sent_at,
-            spawn.pose,
-            spawn.linvel,
-            spawn.angvel,
-        )?;
+        let allocation = self
+            .runtime
+            .shared_objects
+            .force_local_shared_object_reset(
+                activity_id,
+                spawn.widget_uid,
+                sent_at,
+                spawn.pose,
+                spawn.linvel,
+                spawn.angvel,
+            )?;
         let authority = self.runtime.shared_objects.local_peer_id()?;
         let control = XrNetSharedObjectControl::XrSpawnObject {
             object_id: allocation.shared_object_id,

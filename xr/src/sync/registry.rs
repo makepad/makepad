@@ -82,11 +82,13 @@ impl XrPeerRegistry {
             {
                 recent_sync.last_seen_at_local_time = local_state_time;
             } else {
-                peer_state.recent_sync_anchors.push_back(TimedRemoteSyncAnchor {
-                    sync: sync_anchor,
-                    first_seen_at_local_time: local_state_time,
-                    last_seen_at_local_time: local_state_time,
-                });
+                peer_state
+                    .recent_sync_anchors
+                    .push_back(TimedRemoteSyncAnchor {
+                        sync: sync_anchor,
+                        first_seen_at_local_time: local_state_time,
+                        last_seen_at_local_time: local_state_time,
+                    });
             }
         }
         if let Some(anchor) = fresh_fist_hold_anchor {
@@ -99,16 +101,24 @@ impl XrPeerRegistry {
             peer_state.last_fist_hold_seen_at = None;
             peer_state.recent_sync_anchors.clear();
         }
-        while peer_state.recent_sync_anchors.front().is_some_and(|recent_sync| {
-            local_state_time - recent_sync.last_seen_at_local_time
-                > XrPeerSync::SYNC_SAMPLE_HISTORY_SECONDS
-        }) {
+        while peer_state
+            .recent_sync_anchors
+            .front()
+            .is_some_and(|recent_sync| {
+                local_state_time - recent_sync.last_seen_at_local_time
+                    > XrPeerSync::SYNC_SAMPLE_HISTORY_SECONDS
+            })
+        {
             peer_state.recent_sync_anchors.pop_front();
         }
         peer_state.latest_state = Some(frame);
     }
 
-    pub(super) fn track_descriptor(&mut self, peer: XrNetPeer, frame: XrNetAlignmentDescriptorFrame) {
+    pub(super) fn track_descriptor(
+        &mut self,
+        peer: XrNetPeer,
+        frame: XrNetAlignmentDescriptorFrame,
+    ) {
         let peer_state = self
             .peers
             .entry(peer.id)
@@ -142,12 +152,10 @@ impl XrPeerRegistry {
     }
 
     fn prune_accepted_sync_ids(&mut self, now: f64) {
-        self.accepted_local_sync_ids.retain(|_, accepted_at| {
-            now - *accepted_at <= XrPeerSync::SYNC_SAMPLE_HISTORY_SECONDS
-        });
-        self.accepted_remote_sync_ids.retain(|_, accepted_at| {
-            now - *accepted_at <= XrPeerSync::SYNC_SAMPLE_HISTORY_SECONDS
-        });
+        self.accepted_local_sync_ids
+            .retain(|_, accepted_at| now - *accepted_at <= XrPeerSync::SYNC_SAMPLE_HISTORY_SECONDS);
+        self.accepted_remote_sync_ids
+            .retain(|_, accepted_at| now - *accepted_at <= XrPeerSync::SYNC_SAMPLE_HISTORY_SECONDS);
     }
 
     fn translated_remote_sync_time(
@@ -228,7 +236,8 @@ impl XrPeerRegistry {
                     .insert(local_sync_anchor.id, now);
                 self.accepted_remote_sync_ids
                     .insert((*peer_id, remote_sync_anchor.sync.id), now);
-                let averaged_anchor = local.record_matched_sync_anchor(local_sync_anchor.anchor, now);
+                let averaged_anchor =
+                    local.record_matched_sync_anchor(local_sync_anchor.anchor, now);
                 local.anchor_override = Some(averaged_anchor);
                 cx.xr_set_local_anchor(averaged_anchor);
                 *recent_anchor_confirmation = Some(XrRecentAnchorConfirmation {
@@ -250,16 +259,15 @@ impl XrPeerRegistry {
                 }
             }
 
-            let next_transform = if let Some(descriptor_remote_to_local) =
-                peer_state.descriptor_remote_to_local
-            {
-                Some(Self::descriptor_with_anchor_height_override(
-                    descriptor_remote_to_local,
-                    peer_state.anchor_remote_to_local,
-                ))
-            } else {
-                peer_state.anchor_remote_to_local
-            };
+            let next_transform =
+                if let Some(descriptor_remote_to_local) = peer_state.descriptor_remote_to_local {
+                    Some(Self::descriptor_with_anchor_height_override(
+                        descriptor_remote_to_local,
+                        peer_state.anchor_remote_to_local,
+                    ))
+                } else {
+                    peer_state.anchor_remote_to_local
+                };
             let next_source = if peer_state.descriptor_remote_to_local.is_some() {
                 RemoteTransformSource::Descriptor
             } else if peer_state.anchor_remote_to_local.is_some() {

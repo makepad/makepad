@@ -70,7 +70,8 @@ impl AppleGameInput {
         let bundle_path: ObjcId = msg_send![bundle, bundlePath];
         let bundle_identifier: ObjcId = msg_send![bundle, bundleIdentifier];
         let controller_key = str_to_nsstring("GCSupportsControllerUserInteraction");
-        let controller_value: ObjcId = msg_send![bundle, objectForInfoDictionaryKey: controller_key];
+        let controller_value: ObjcId =
+            msg_send![bundle, objectForInfoDictionaryKey: controller_key];
         let responds_to_controllers: BOOL =
             msg_send![gc_controller_class, respondsToSelector: sel!(controllers)];
         let responds_to_discovery: BOOL = msg_send![
@@ -87,7 +88,9 @@ impl AppleGameInput {
         );
     }
 
-    unsafe fn raw_connected_controllers(gc_controller_class: &Class) -> Vec<(ObjcId, GameInputInfo)> {
+    unsafe fn raw_connected_controllers(
+        gc_controller_class: &Class,
+    ) -> Vec<(ObjcId, GameInputInfo)> {
         let controllers: ObjcId = msg_send![gc_controller_class, controllers];
         let count: usize = msg_send![controllers, count];
         let mut result = Vec::with_capacity(count);
@@ -111,7 +114,8 @@ impl AppleGameInput {
                 for (controller, info) in raw_controllers.iter() {
                     let extended_gamepad: ObjcId = msg_send![*controller, extendedGamepad];
                     let micro_gamepad: ObjcId = msg_send![*controller, microGamepad];
-                    let physical_input_profile: ObjcId = msg_send![*controller, physicalInputProfile];
+                    let physical_input_profile: ObjcId =
+                        msg_send![*controller, physicalInputProfile];
                     crate::log!(
                         "apple game input: raw controller id={:?} name={} category={} extended={} micro={} physical={}",
                         info.id,
@@ -311,7 +315,8 @@ impl AppleGameInput {
 
                         state.select = get_val(msg_send![extended_gamepad, buttonOptions]);
                         state.start = get_val(msg_send![extended_gamepad, buttonMenu]);
-                        let home = if msg_send![extended_gamepad, respondsToSelector: sel!(buttonHome)] {
+                        let home = if msg_send![extended_gamepad, respondsToSelector: sel!(buttonHome)]
+                        {
                             msg_send![extended_gamepad, buttonHome]
                         } else {
                             nil
@@ -497,7 +502,12 @@ impl AppleRawHidInput {
             HID_USAGE_GENERIC_DESKTOP_JOYSTICK,
         );
         let values = [gamepad as *const _, joystick as *const _];
-        CFArrayCreate(ptr::null(), values.as_ptr(), values.len() as isize, ptr::null())
+        CFArrayCreate(
+            ptr::null(),
+            values.as_ptr(),
+            values.len() as isize,
+            ptr::null(),
+        )
     }
 
     unsafe fn create_usage_matching_dict(usage_page: i32, usage: i32) -> CFDictionaryRef {
@@ -508,8 +518,11 @@ impl AppleRawHidInput {
             kCFNumberSInt32Type,
             &usage_page as *const _ as *const _,
         );
-        let usage_value =
-            CFNumberCreate(ptr::null(), kCFNumberSInt32Type, &usage as *const _ as *const _);
+        let usage_value = CFNumberCreate(
+            ptr::null(),
+            kCFNumberSInt32Type,
+            &usage as *const _ as *const _,
+        );
         let keys = [usage_page_key as *const _, usage_key as *const _];
         let values = [usage_page_value as *const _, usage_value as *const _];
         CFDictionaryCreate(
@@ -552,13 +565,11 @@ impl AppleRawHidInput {
         let report_size = Self::device_u32_property(device, "MaxInputReportSize").max(32);
         let name = Self::device_string_property(device, "Product");
         let info = GameInputInfo {
-            id: LiveId(
-                if location_id != 0 {
-                    ((vendor_id as u64) << 48) | ((product_id as u64) << 32) | location_id as u64
-                } else {
-                    device as u64
-                },
-            ),
+            id: LiveId(if location_id != 0 {
+                ((vendor_id as u64) << 48) | ((product_id as u64) << 32) | location_id as u64
+            } else {
+                device as u64
+            }),
             name: if name.is_empty() {
                 format!("Xbox Controller {:04x}:{:04x}", vendor_id, product_id)
             } else {
@@ -611,7 +622,11 @@ impl AppleRawHidInput {
             Ok(shared) => shared,
             Err(_) => return,
         };
-        if let Some(index) = shared.devices.iter().position(|entry| entry.device == device) {
+        if let Some(index) = shared
+            .devices
+            .iter()
+            .position(|entry| entry.device == device)
+        {
             let entry = shared.devices.remove(index);
             let _ = IOHIDDeviceClose(entry.device, 0);
             CFRelease(entry.device as *const _);
@@ -635,7 +650,11 @@ impl AppleRawHidInput {
             Ok(shared) => shared,
             Err(_) => return,
         };
-        let Some(entry) = shared.devices.iter_mut().find(|entry| entry.device == device) else {
+        let Some(entry) = shared
+            .devices
+            .iter_mut()
+            .find(|entry| entry.device == device)
+        else {
             return;
         };
 
@@ -677,10 +696,8 @@ impl AppleRawHidInput {
         state.left_thumb = Self::button(report[5] & 0x40);
         state.right_thumb = Self::button(report[5] & 0x80);
 
-        state.left_trigger =
-            Self::normalize_trigger(u16::from_le_bytes([report[6], report[7]]));
-        state.right_trigger =
-            Self::normalize_trigger(u16::from_le_bytes([report[8], report[9]]));
+        state.left_trigger = Self::normalize_trigger(u16::from_le_bytes([report[6], report[7]]));
+        state.right_trigger = Self::normalize_trigger(u16::from_le_bytes([report[8], report[9]]));
 
         state.left_stick = Vec2 {
             x: Self::normalize_stick(i16::from_le_bytes([report[10], report[11]])),
@@ -699,7 +716,11 @@ impl AppleRawHidInput {
     }
 
     fn button(flag: u8) -> f32 {
-        if flag != 0 { 1.0 } else { 0.0 }
+        if flag != 0 {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     fn normalize_trigger(raw: u16) -> f32 {

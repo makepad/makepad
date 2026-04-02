@@ -22,6 +22,7 @@ use ash::vk::{self, Handle};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
+use std::time::Instant;
 
 #[link(name = "nativewindow")]
 extern "C" {
@@ -30,6 +31,7 @@ extern "C" {
 
 const XR_FRAGMENT_DENSITY_MAP_FORMAT: vk::Format = vk::Format::R8G8_UNORM;
 const XR_MAX_FRAMES_IN_FLIGHT: u32 = 3;
+const XR_MAX_FRAMES_IN_FLIGHT_LIMIT: u32 = 8;
 
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -86,6 +88,8 @@ struct VulkanGeometryResource {
 struct FrameResources {
     buffers: Vec<VulkanBuffer>,
     descriptor_pools: Vec<vk::DescriptorPool>,
+    packet_buffer: Option<VulkanBuffer>,
+    packet_buffer_used: vk::DeviceSize,
 }
 
 struct VulkanXrInFlightFrame {
@@ -229,11 +233,32 @@ pub(crate) struct CxVulkanOpenXrSessionData {
     depth_readback_buffer: Option<VulkanBuffer>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct OpenXrVulkanRepaintStats {
+    pub wait_inflight_ms: f64,
+    pub prepare_textures_ms: f64,
+    pub record_draw_ms: f64,
+    pub submit_ms: f64,
+    pub texture_upload_count: u32,
+    pub texture_upload_bytes: u64,
+    pub packet_buffer_count: u32,
+    pub packet_buffer_bytes: u64,
+    pub geometry_upload_bytes: u64,
+    pub descriptor_set_count: u32,
+    pub draw_items: u64,
+    pub draw_calls: u64,
+    pub packets: u64,
+    pub instances: u64,
+    pub indices: u64,
+}
+
 #[derive(Default)]
 struct VulkanDrawStats {
     draw_items: usize,
     draw_calls: usize,
     packets_recorded: usize,
+    instances: u64,
+    indices: u64,
     skipped_non_draw_call: usize,
     skipped_no_os_shader: usize,
     skipped_no_vulkan_shader: usize,
@@ -285,6 +310,10 @@ pub struct CxVulkan {
     requested_height: u32,
     texture_upload_count_this_frame: u32,
     texture_upload_bytes_this_frame: u64,
+    xr_packet_buffer_count_this_frame: u32,
+    xr_packet_buffer_bytes_this_frame: u64,
+    xr_geometry_upload_bytes_this_frame: u64,
+    xr_descriptor_set_count_this_frame: u32,
     debug_utils_enabled: bool,
     debug_utils_loader: Option<ash::ext::debug_utils::Instance>,
     debug_messenger: vk::DebugUtilsMessengerEXT,
@@ -301,6 +330,30 @@ pub struct CxVulkan {
 }
 
 impl CxVulkan {
+    fn geometry_id_is_live(cx: &Cx, geometry_id: GeometryId) -> bool {
+        let slot_index = geometry_id.slot_index();
+        cx.geometries
+            .0
+            .pool
+            .get(slot_index)
+            .map(|item| item.generation == geometry_id.generation())
+            .unwrap_or(false)
+    }
+
+    fn prune_stale_geometry_resources(&mut self, cx: &Cx) {
+        let stale_keys = self
+            .geometries
+            .keys()
+            .copied()
+            .filter(|geometry_id| !Self::geometry_id_is_live(cx, *geometry_id))
+            .collect::<Vec<_>>();
+        for geometry_id in stale_keys {
+            if let Some(resource) = self.geometries.remove(&geometry_id) {
+                self.destroy_geometry_resource(resource);
+            }
+        }
+    }
+
     pub fn new(
         window: *mut ndk_sys::ANativeWindow,
         width: u32,
@@ -576,6 +629,10 @@ impl CxVulkan {
             requested_height: height.max(1),
             texture_upload_count_this_frame: 0,
             texture_upload_bytes_this_frame: 0,
+            xr_packet_buffer_count_this_frame: 0,
+            xr_packet_buffer_bytes_this_frame: 0,
+            xr_geometry_upload_bytes_this_frame: 0,
+            xr_descriptor_set_count_this_frame: 0,
             debug_utils_enabled: has_debug_utils_ext,
             debug_utils_loader: None,
             debug_messenger: vk::DebugUtilsMessengerEXT::null(),
@@ -969,6 +1026,10 @@ impl CxVulkan {
             requested_height: height.max(1),
             texture_upload_count_this_frame: 0,
             texture_upload_bytes_this_frame: 0,
+            xr_packet_buffer_count_this_frame: 0,
+            xr_packet_buffer_bytes_this_frame: 0,
+            xr_geometry_upload_bytes_this_frame: 0,
+            xr_descriptor_set_count_this_frame: 0,
             debug_utils_enabled: has_debug_utils_ext,
             debug_utils_loader: None,
             debug_messenger: vk::DebugUtilsMessengerEXT::null(),
@@ -1078,7 +1139,85 @@ impl CxVulkan {
                 device.destroy_buffer(buffer.buffer, None);
                 device.free_memory(buffer.memory, None);
             }
+            if let Some(buffer) = frame_resources.packet_buffer.take() {
+                device.destroy_buffer(buffer.buffer, None);
+                device.free_memory(buffer.memory, None);
+            }
         }
+        frame_resources.packet_buffer_used = 0;
+    }
+
+    fn recycle_owned_frame_resources(
+        &self,
+        frame_resources: &mut FrameResources,
+    ) -> Result<(), String> {
+        unsafe {
+            for &pool in &frame_resources.descriptor_pools {
+                self.device
+                    .reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())
+                    .map_err(|e| format!("reset_descriptor_pool(openxr inflight) failed: {e:?}"))?;
+            }
+            for buffer in frame_resources.buffers.drain(..) {
+                self.device.destroy_buffer(buffer.buffer, None);
+                self.device.free_memory(buffer.memory, None);
+            }
+        }
+        frame_resources.packet_buffer_used = 0;
+        Ok(())
+    }
+
+    fn alloc_frame_packet_slice(
+        &mut self,
+        usage: vk::BufferUsageFlags,
+        size: vk::DeviceSize,
+        alignment: vk::DeviceSize,
+    ) -> Result<(VulkanBuffer, vk::DeviceSize), String> {
+        let size = size.max(4);
+        let alignment = alignment.max(4);
+        let mut offset =
+            Self::align_device_size(self.frame_resources.packet_buffer_used, alignment);
+        let required_size = offset + size;
+        let needs_grow = self
+            .frame_resources
+            .packet_buffer
+            .map(|buffer| buffer.size < required_size)
+            .unwrap_or(true);
+        if needs_grow {
+            if let Some(old_buffer) = self.frame_resources.packet_buffer.take() {
+                self.destroy_buffer(old_buffer);
+            }
+            let new_size = required_size.next_power_of_two().max(64 * 1024);
+            let buffer = self.create_host_buffer(usage, new_size)?;
+            self.frame_resources.packet_buffer = Some(buffer);
+            self.frame_resources.packet_buffer_used = 0;
+            offset = 0;
+        }
+        self.frame_resources.packet_buffer_used = offset + size;
+        let buffer = self
+            .frame_resources
+            .packet_buffer
+            .ok_or_else(|| "missing frame packet buffer".to_string())?;
+        Ok((buffer, offset))
+    }
+
+    fn xr_in_flight_frame_is_ready(&self, frame: &VulkanXrInFlightFrame) -> Result<bool, String> {
+        if frame.fence == vk::Fence::null() {
+            return Ok(true);
+        }
+        match unsafe { self.device.get_fence_status(frame.fence) } {
+            Ok(ready) => Ok(ready),
+            Err(vk::Result::NOT_READY) => Ok(false),
+            Err(err) => Err(format!("get_fence_status(openxr inflight) failed: {err:?}")),
+        }
+    }
+
+    fn append_xr_in_flight_frames(&mut self, frame_count: u32) -> Result<(), String> {
+        if frame_count == 0 {
+            return Ok(());
+        }
+        let mut frames = self.create_xr_in_flight_frames(frame_count)?;
+        self.xr_in_flight_frames.append(&mut frames);
+        Ok(())
     }
 
     fn recycle_xr_in_flight_frame(
@@ -1123,7 +1262,7 @@ impl CxVulkan {
             frame.timestamp_query_pool = self.create_xr_timestamp_query_pool();
         }
 
-        Self::destroy_owned_frame_resources(&self.device, &mut frame.frame_resources);
+        self.recycle_owned_frame_resources(&mut frame.frame_resources)?;
 
         unsafe {
             self.device
@@ -2151,7 +2290,8 @@ impl CxVulkan {
         session: &CxVulkanOpenXrSessionData,
         color_image_index: usize,
         depth_image_index: Option<usize>,
-    ) -> Result<(), String> {
+    ) -> Result<OpenXrVulkanRepaintStats, String> {
+        let mut stats = OpenXrVulkanRepaintStats::default();
         let color_target = session
             .color_images
             .get(color_image_index)
@@ -2164,7 +2304,23 @@ impl CxVulkan {
         let mut xr_frame = if self.xr_in_flight_frames.is_empty() {
             None
         } else {
-            let frame_index = self.xr_in_flight_index % self.xr_in_flight_frames.len();
+            let preferred_index = self.xr_in_flight_index % self.xr_in_flight_frames.len();
+            let mut selected_index = None;
+            for offset in 0..self.xr_in_flight_frames.len() {
+                let frame_index = (preferred_index + offset) % self.xr_in_flight_frames.len();
+                if self.xr_in_flight_frame_is_ready(&self.xr_in_flight_frames[frame_index])? {
+                    selected_index = Some(frame_index);
+                    break;
+                }
+            }
+            let frame_index = if let Some(frame_index) = selected_index {
+                frame_index
+            } else if self.xr_in_flight_frames.len() < XR_MAX_FRAMES_IN_FLIGHT_LIMIT as usize {
+                self.append_xr_in_flight_frames(1)?;
+                self.xr_in_flight_frames.len() - 1
+            } else {
+                preferred_index
+            };
             let frame = std::mem::replace(
                 &mut self.xr_in_flight_frames[frame_index],
                 VulkanXrInFlightFrame {
@@ -2179,10 +2335,12 @@ impl CxVulkan {
         };
 
         if let Some((frame_index, mut frame)) = xr_frame.take() {
+            let recycle_started = Instant::now();
             let recycle_result = self.recycle_xr_in_flight_frame(&mut frame);
-            if recycle_result.is_err() {
+            stats.wait_inflight_ms = recycle_started.elapsed().as_secs_f64() * 1000.0;
+            if let Err(err) = recycle_result {
                 self.xr_in_flight_frames[frame_index] = frame;
-                return recycle_result;
+                return Err(err);
             }
             std::mem::swap(&mut self.frame_resources, &mut frame.frame_resources);
             std::mem::swap(&mut self.command_buffer, &mut frame.command_buffer);
@@ -2194,6 +2352,7 @@ impl CxVulkan {
             (frame.timestamp_query_pool != vk::QueryPool::null())
                 .then_some(frame.timestamp_query_pool)
         });
+        let mut draw_stats = VulkanDrawStats::default();
 
         let result = (|| -> Result<(), String> {
             unsafe {
@@ -2208,7 +2367,14 @@ impl CxVulkan {
 
             self.texture_upload_count_this_frame = 0;
             self.texture_upload_bytes_this_frame = 0;
+            self.xr_packet_buffer_count_this_frame = 0;
+            self.xr_packet_buffer_bytes_this_frame = 0;
+            self.xr_geometry_upload_bytes_this_frame = 0;
+            self.xr_descriptor_set_count_this_frame = 0;
+            self.prune_stale_geometry_resources(cx);
+            let prepare_textures_started = Instant::now();
             self.prepare_draw_list_textures(cx, draw_list_id)?;
+            stats.prepare_textures_ms = prepare_textures_started.elapsed().as_secs_f64() * 1000.0;
 
             let clear_color = if cx.passes[draw_pass_id].color_textures.is_empty() {
                 cx.passes[draw_pass_id].clear_color
@@ -2296,7 +2462,7 @@ impl CxVulkan {
             let render_pass_key = self.main_render_pass_key();
             let mut zbias = 0.0f32;
             let zbias_step = cx.passes[draw_pass_id].zbias_step;
-            let mut draw_stats = VulkanDrawStats::default();
+            let record_draw_started = Instant::now();
             self.record_draw_list(
                 cx,
                 draw_pass_id,
@@ -2307,7 +2473,9 @@ impl CxVulkan {
                 &mut draw_stats,
                 xr_depth_view,
             )?;
+            stats.record_draw_ms = record_draw_started.elapsed().as_secs_f64() * 1000.0;
 
+            let submit_started = Instant::now();
             unsafe {
                 self.device.cmd_end_render_pass(self.command_buffer);
                 if let Some(query_pool) = timestamp_query_pool {
@@ -2329,6 +2497,7 @@ impl CxVulkan {
                     )
                     .map_err(|e| format!("queue_submit(openxr) failed: {e:?}"))?;
             }
+            stats.submit_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
             Ok(())
         })();
 
@@ -2343,7 +2512,21 @@ impl CxVulkan {
             self.xr_in_flight_frames[frame_index] = frame;
         }
 
-        result
+        if result.is_ok() {
+            stats.texture_upload_count = self.texture_upload_count_this_frame;
+            stats.texture_upload_bytes = self.texture_upload_bytes_this_frame;
+            stats.packet_buffer_count = self.xr_packet_buffer_count_this_frame;
+            stats.packet_buffer_bytes = self.xr_packet_buffer_bytes_this_frame;
+            stats.geometry_upload_bytes = self.xr_geometry_upload_bytes_this_frame;
+            stats.descriptor_set_count = self.xr_descriptor_set_count_this_frame;
+            stats.draw_items = draw_stats.draw_items as u64;
+            stats.draw_calls = draw_stats.draw_calls as u64;
+            stats.packets = draw_stats.packets_recorded as u64;
+            stats.instances = draw_stats.instances;
+            stats.indices = draw_stats.indices;
+        }
+
+        result.map(|()| stats)
     }
 
     pub fn draw_pass_and_present(
@@ -5333,6 +5516,7 @@ impl CxVulkan {
                     draw_stats.skipped_zero_instances += 1;
                     continue;
                 }
+                draw_stats.instances += instance_count as u64;
                 let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {
                     geometry_id
                 } else {
@@ -5411,6 +5595,7 @@ impl CxVulkan {
                     )
                 })?;
             let index_count = geometry.indices.len() as u32;
+            draw_stats.indices += index_count as u64;
             let pass_uniforms = cx.passes[draw_pass_id].pass_uniforms.as_slice().to_vec();
             let draw_list_uniforms = cx.draw_lists[draw_list_id]
                 .draw_list_uniforms
@@ -5572,14 +5757,20 @@ impl CxVulkan {
 
         let packet_buffer_usage =
             vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
-        let packet_buffer = self.create_host_buffer(packet_buffer_usage, cursor.max(4))?;
+        let packet_span_size = cursor.max(4);
+        let packet_base_alignment = self.min_uniform_buffer_offset_alignment.max(4);
+        let (packet_buffer, packet_base_offset) = self.alloc_frame_packet_slice(
+            packet_buffer_usage,
+            packet_span_size,
+            packet_base_alignment,
+        )?;
         unsafe {
             let mapped = self
                 .device
                 .map_memory(
                     packet_buffer.memory,
-                    0,
-                    packet_buffer.size,
+                    packet_base_offset,
+                    packet_span_size,
                     vk::MemoryMapFlags::empty(),
                 )
                 .map_err(|e| format!("map_memory(packet_buffer) failed: {e:?}"))?;
@@ -5600,7 +5791,8 @@ impl CxVulkan {
             }
             self.device.unmap_memory(packet_buffer.memory);
         }
-        self.frame_resources.buffers.push(packet_buffer);
+        self.xr_packet_buffer_count_this_frame += 1;
+        self.xr_packet_buffer_bytes_this_frame += packet_span_size as u64;
 
         let mut texture_bindings = Vec::new();
         let mut texture_descriptor_types = Vec::new();
@@ -5682,7 +5874,7 @@ impl CxVulkan {
                 buffer_infos.push(
                     vk::DescriptorBufferInfo::default()
                         .buffer(packet_buffer.buffer)
-                        .offset(uniform.offset)
+                        .offset(packet_base_offset + uniform.offset)
                         .range(uniform.size),
                 );
             }
@@ -5732,7 +5924,7 @@ impl CxVulkan {
             None
         };
         let vertex_buffers = [geometry_resource.vertex_buffer.buffer, packet_buffer.buffer];
-        let vertex_offsets = [0, instances_offset];
+        let vertex_offsets = [0, packet_base_offset + instances_offset];
 
         unsafe {
             self.device.cmd_bind_pipeline(
@@ -6294,10 +6486,13 @@ impl CxVulkan {
         let index_needs_upload = existing.is_none() || geometry.dirty_indices;
 
         let new_vertex_buffer = if vertex_needs_upload {
-            Some(self.create_host_buffer_with_data(
+            let buffer = self.create_host_buffer_with_data(
                 vk::BufferUsageFlags::VERTEX_BUFFER,
                 &geometry.vertices,
-            )?)
+            )?;
+            self.xr_geometry_upload_bytes_this_frame +=
+                std::mem::size_of_val(geometry.vertices.as_slice()) as u64;
+            Some(buffer)
         } else {
             None
         };
@@ -6306,7 +6501,11 @@ impl CxVulkan {
             match self
                 .create_host_buffer_with_data(vk::BufferUsageFlags::INDEX_BUFFER, &geometry.indices)
             {
-                Ok(buffer) => Some(buffer),
+                Ok(buffer) => {
+                    self.xr_geometry_upload_bytes_this_frame +=
+                        std::mem::size_of_val(geometry.indices.as_slice()) as u64;
+                    Some(buffer)
+                }
                 Err(err) => {
                     if let Some(buffer) = new_vertex_buffer {
                         self.destroy_buffer(buffer);
@@ -6393,12 +6592,17 @@ impl CxVulkan {
 
         let pool = *self.frame_resources.descriptor_pools.last().unwrap();
         match try_alloc(&self.device, pool) {
-            Ok(set) => Ok(set),
+            Ok(set) => {
+                self.xr_descriptor_set_count_this_frame += 1;
+                Ok(set)
+            }
             Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY) | Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
                 let pool = self.create_frame_descriptor_pool()?;
                 self.frame_resources.descriptor_pools.push(pool);
-                try_alloc(&self.device, pool)
-                    .map_err(|e| format!("allocate_descriptor_sets failed: {e:?}"))
+                let set = try_alloc(&self.device, pool)
+                    .map_err(|e| format!("allocate_descriptor_sets failed: {e:?}"))?;
+                self.xr_descriptor_set_count_this_frame += 1;
+                Ok(set)
             }
             Err(e) => Err(format!("allocate_descriptor_sets failed: {e:?}")),
         }
