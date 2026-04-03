@@ -8,6 +8,24 @@ use crate::{
 };
 use std::collections::HashMap;
 
+/// A sample of finger position and time, used for flick velocity calculation.
+#[derive(Copy, Clone)]
+struct FingerScrollSample {
+    abs: f64,
+    time: f64,
+}
+
+/// Tracks the state of a finger-based drag-to-scroll gesture on the tab bar.
+enum FingerScrollState {
+    Idle,
+    Dragging { samples: Vec<FingerScrollSample> },
+    Flicking { delta: f64, next_frame: NextFrame },
+}
+
+impl Default for FingerScrollState {
+    fn default() -> Self { Self::Idle }
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -231,6 +249,10 @@ pub struct TabBar {
     active_tab_id: Option<LiveId>,
     #[rust]
     next_active_tab_id: Option<LiveId>,
+
+    /// State for finger-based drag-to-scroll on the tab bar.
+    #[rust]
+    finger_scroll: FingerScrollState,
 }
 
 impl ScriptHook for TabBar {
@@ -290,6 +312,8 @@ impl Widget for TabBar {
             self.view_area.redraw(cx);
         };
 
+        self.handle_finger_scroll_flick(cx, event);
+
         if let Some(tab_id) = self.next_active_tab_id.take() {
             cx.widget_action(uid, TabBarAction::TabWasPressed(tab_id));
         }
@@ -305,6 +329,57 @@ impl Widget for TabBar {
                     cx.widget_action(uid, TabBarAction::ShouldTabStartDrag(*tab_id));
                 }
                 TabAction::ShouldTabStopDrag => {}
+                TabAction::TouchDown { abs, time } => {
+                    self.finger_scroll = FingerScrollState::Dragging {
+                        samples: vec![FingerScrollSample { abs: abs.x, time }],
+                    };
+                }
+                TabAction::TouchScroll { abs, time } => {
+                    if let FingerScrollState::Dragging { samples } = &mut self.finger_scroll {
+                        let old_abs = samples.last().unwrap().abs;
+                        samples.push(FingerScrollSample { abs: abs.x, time });
+                        if samples.len() > 4 {
+                            samples.remove(0);
+                        }
+                        let delta = abs.x - old_abs;
+                        let scroll_pos = self.scroll_bars.get_scroll_pos();
+                        if self.scroll_bars.set_scroll_pos(cx, Vec2d { x: scroll_pos.x - delta, y: scroll_pos.y }) {
+                            self.view_area.redraw(cx);
+                        }
+                    }
+                }
+                TabAction::TouchUp { abs: _, time: _, } => {
+                    if let FingerScrollState::Dragging { samples } = &self.finger_scroll {
+                        // Calculate flick velocity from recent samples.
+                        let mut last: Option<&FingerScrollSample> = None;
+                        let mut scaled_delta = 0.0;
+                        let mut total_delta = 0.0;
+                        for sample in samples.iter().rev() {
+                            if let Some(prev) = last {
+                                let time_delta = prev.time - sample.time;
+                                if time_delta > 0.0 {
+                                    let abs_delta = prev.abs - sample.abs;
+                                    total_delta += abs_delta;
+                                    scaled_delta += abs_delta / time_delta;
+                                }
+                            }
+                            last = Some(sample);
+                        }
+                        const FLICK_SCALING: f64 = 0.005;
+                        const FLICK_MINIMUM: f64 = 0.2;
+                        const FLICK_MAXIMUM: f64 = 80.0;
+                        scaled_delta *= FLICK_SCALING;
+                        if total_delta.abs() > 10.0 && scaled_delta.abs() > FLICK_MINIMUM {
+                            let delta = scaled_delta.min(FLICK_MAXIMUM).max(-FLICK_MAXIMUM);
+                            self.finger_scroll = FingerScrollState::Flicking {
+                                delta,
+                                next_frame: cx.new_next_frame(),
+                            };
+                        } else {
+                            self.finger_scroll = FingerScrollState::Idle;
+                        }
+                    }
+                }
             });
         }
     }
@@ -321,6 +396,38 @@ impl Widget for TabBar {
 }
 
 impl TabBar {
+    /// Drives the flick animation for finger-based scroll on each frame.
+    fn handle_finger_scroll_flick(&mut self, cx: &mut Cx, event: &Event) {
+        const FLICK_DECAY: f64 = 0.97;
+        const FLICK_MINIMUM: f64 = 0.2;
+
+        let flick_delta = if let FingerScrollState::Flicking { delta, next_frame } = &self.finger_scroll {
+            if next_frame.is_event(event).is_some() {
+                Some(*delta)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(mut delta) = flick_delta {
+            delta *= FLICK_DECAY;
+            if delta.abs() > FLICK_MINIMUM {
+                let scroll_pos = self.scroll_bars.get_scroll_pos();
+                if self.scroll_bars.set_scroll_pos(cx, Vec2d { x: scroll_pos.x - delta, y: scroll_pos.y }) {
+                    self.view_area.redraw(cx);
+                }
+                self.finger_scroll = FingerScrollState::Flicking {
+                    delta,
+                    next_frame: cx.new_next_frame(),
+                };
+            } else {
+                self.finger_scroll = FingerScrollState::Idle;
+            }
+        }
+    }
+
     pub fn begin(&mut self, cx: &mut Cx2d, active_tab: Option<usize>, walk: Walk) {
         self.active_tab = active_tab;
         self.scroll_bars.begin(cx, walk, Layout::flow_right());
