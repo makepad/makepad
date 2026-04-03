@@ -537,6 +537,8 @@ pub struct TextInput {
     #[rust]
     laidout_text: Option<Rc<LaidoutText>>,
     #[rust]
+    laidout_width: Option<f32>,
+    #[rust]
     text_area: Area,
     #[rust]
     selection: Selection,
@@ -781,7 +783,13 @@ impl TextInput {
     }
 
     fn layout_text(&mut self, cx: &mut Cx2d) {
-        if self.laidout_text.is_some() {
+        let turtle_rect = cx.turtle().inner_rect();
+        let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
+            Some(turtle_rect.size.x as f32)
+        } else {
+            None
+        };
+        if self.laidout_text.is_some() && self.laidout_width == max_width_in_lpxs {
             return;
         }
         let text = if self.is_password {
@@ -794,13 +802,8 @@ impl TextInput {
         } else {
             &self.text
         };
-        let turtle_rect = cx.turtle().inner_rect();
-        let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
-            Some(turtle_rect.size.x as f32)
-        } else {
-            None
-        };
         let wrap = cx.turtle().layout().flow == Flow::right_wrap();
+        self.laidout_width = max_width_in_lpxs;
         self.laidout_text = Some(self.draw_text.layout(
             cx,
             0.0,
