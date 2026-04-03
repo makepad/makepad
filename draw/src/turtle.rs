@@ -795,6 +795,11 @@ impl Turtle {
         self.height
     }
 
+    /// Sets the height of this turtle's rectangle.
+    pub fn set_height(&mut self, height: f64) {
+        self.height = height;
+    }
+
     /// Returns the used width of this turtle's rectangle.
     pub fn used_width(&self) -> f64 {
         self.used_width
@@ -1655,6 +1660,62 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 clip_max.y = clip_min.y + turtle.height();
             }
         };
+    }
+
+    /// Computes the maximum available height for the current turtle by walking up
+    /// the ancestor turtle stack and evaluating any `Fit { max }` constraints.
+    ///
+    /// Returns the tightest (smallest) max height found, accounting for padding
+    /// consumed by each ancestor layer. Returns `f64::MAX` if no ancestor has a
+    /// max constraint.
+    ///
+    /// This is useful for widgets like TextInput that need to know when to start
+    /// scrolling, even when their own walk height is unbounded `Fit`.
+    pub fn compute_max_height_from_ancestors(&self) -> f64 {
+        let mut max_height = f64::MAX;
+        let current = self.turtles.last().unwrap();
+        let mut consumed_padding = current.padding().height();
+
+        // Walk ancestors (skip self)
+        for ancestor in self.turtles.iter().rev().skip(1) {
+            if let Size::Fit { max: Some(max), .. } = ancestor.walk.height {
+                if let Some(ancestor_max) = max.eval_height(self) {
+                    // The available height for the current turtle is the ancestor's
+                    // max minus the padding/spacing consumed between the ancestor
+                    // and the current turtle.
+                    let available = ancestor_max - consumed_padding;
+                    max_height = max_height.min(available);
+                }
+            }
+
+            // If this ancestor has a known (non-NaN) height, it already constrains
+            // children via layout, so we don't need to look further up.
+            if !ancestor.height().is_nan() {
+                let available = ancestor.inner_height() - consumed_padding + current.padding().height();
+                max_height = max_height.min(available);
+                break;
+            }
+
+            consumed_padding += ancestor.padding().height();
+        }
+        max_height
+    }
+
+    /// Pushes a clip rect entry and returns the index of that entry in the align list.
+    /// The clip can later be modified via [`update_clip_rect_at`].
+    pub fn push_clip_rect_tracked(&mut self, rect: Rect) -> usize {
+        let index = self.align_list.len();
+        self.align_list
+            .push(AlignEntry::BeginClip(rect.pos, rect.pos + rect.size));
+        index
+    }
+
+    /// Updates a previously pushed clip rect at the given align list index.
+    pub fn update_clip_rect_at(&mut self, index: usize, rect: Rect) {
+        if let AlignEntry::BeginClip(clip_min, clip_max) = &mut self.align_list[index] {
+            *clip_min = rect.pos;
+            *clip_max = rect.pos + rect.size;
+        }
     }
 
     // Returns the end of the align list of the finished walk with the given index.
