@@ -474,12 +474,15 @@ impl DrawText {
         )
     }
 
+    /// Draws text within the current turtle flow, calling `f` for each laid-out row.
+    /// Returns `(row_count, is_truncated)`: the number of rows produced, and whether
+    /// the text was truncated (e.g., by `max_lines` / ellipsis).
     pub fn draw_walk_resumable_with(
         &mut self,
         cx: &mut Cx2d,
         text_str: &str,
         mut f: impl FnMut(&mut Cx2d, Rect, f32),
-    ) {
+    ) -> (usize, bool) {
         let turtle_pos = cx.turtle().pos();
         let turtle_rect = cx.turtle().inner_rect();
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
@@ -584,6 +587,7 @@ impl DrawText {
                 row.ascender_in_lpxs,
             )
         }
+        (text.rows.len(), text.is_truncated)
     }
 
     #[allow(clippy::too_many_arguments)]
