@@ -4,7 +4,9 @@ use crate::makepad_draw::text::{
     selection::{Cursor, Selection},
 };
 use crate::{
-    animator::*, makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
+    animator::*, makepad_derive_widget::*, makepad_draw::*,
+    makepad_draw::shader::draw_text::TextOverflow,
+    widget::*, widget_tree::CxWidgetExt,
 };
 use std::rc::Rc;
 
@@ -583,6 +585,14 @@ pub struct TextFlow {
     /// The default font color used for all text if not otherwise specified.
     #[live]
     pub font_color: Vec4f,
+
+    /// Maximum number of lines to display. 0 means unlimited (default).
+    /// Combined with `text_overflow: Ellipsis`, truncated text shows "…".
+    #[live(0usize)]
+    pub max_lines: usize,
+    /// Controls how text overflow is handled when text exceeds the container.
+    #[live]
+    pub text_overflow: TextOverflow,
     #[walk]
     walk: Walk,
 
@@ -1582,6 +1592,8 @@ impl TextFlow {
             self.draw_text.text_style.font_size = *font_size as _;
             self.draw_text.color = *font_color;
             self.draw_text.temp_y_shift = top_drop;
+            self.draw_text.max_lines = self.max_lines;
+            self.draw_text.text_overflow = self.text_overflow;
 
             let dt = &mut self.draw_text;
 
