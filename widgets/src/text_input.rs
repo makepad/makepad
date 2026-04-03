@@ -1056,25 +1056,6 @@ impl TextInput {
             .draw_scroll_bar(cx, ScrollAxis::Vertical, view_rect, view_total);
     }
 
-    /// Draws the vertical scrollbar when the text content overflows the visible area.
-    fn draw_scroll_bar(&mut self, cx: &mut Cx2d) {
-        if !self.is_multiline {
-            return;
-        }
-        let Some(laidout_text) = self.laidout_text.as_ref() else {
-            return;
-        };
-        let view_rect = cx.turtle().inner_rect();
-        let view_total = dvec2(
-            view_rect.size.x,
-            laidout_text.size_in_lpxs.height as f64,
-        );
-        // Sync scroll_y (which scroll_to_cursor may have updated) into the scrollbar.
-        self.scroll_bar.set_scroll_pos_no_action(cx, self.scroll_y);
-        self.scroll_bar
-            .draw_scroll_bar(cx, ScrollAxis::Vertical, view_rect, view_total);
-    }
-
     /// Moves the cursor one column to the left.
     ///
     /// Returns `true` if the cursor/selection actually changed.
