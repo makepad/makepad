@@ -17,6 +17,7 @@ use {
             *,
         },
         makepad_script::{ScriptFnRef, ScriptRefOptionExt},
+        scroll_bar::{ScrollBar, ScrollAxis},
         widget::*,
         widget_async::ScriptAsyncResult,
     },
@@ -40,6 +41,12 @@ script_mod! {
         is_read_only: false
         is_numeric_only: false
         empty_text: "Your text here"
+        scroll_bar: mod.widgets.ScrollBar {
+            bar_size: 8.0
+            bar_side_margin: 2.0
+            min_handle_size: 20.0
+            drag_scrolling: true
+        }
 
         draw_bg +: {
             hover: instance(0.0)
@@ -524,10 +531,12 @@ pub struct TextInput {
     #[live(false)]
     is_multiline: bool,
     #[live]
+    scroll_bar: ScrollBar,
+    #[live]
     scroll_y: f64,
     #[live]
     empty_text: String,
-    #[rust]
+    #[live]
     text: String,
     #[live(0.5)]
     blink_speed: f64,
@@ -548,6 +557,15 @@ pub struct TextInput {
     blink_timer: Timer,
     #[rust]
     preserved_selection_cursor: Option<Cursor>,
+    /// When true, the next draw will scroll to keep the cursor visible.
+    /// Set when the cursor/selection changes; cleared after scroll_to_cursor runs.
+    #[rust(true)]
+    needs_scroll_to_cursor: bool,
+    /// Cached maximum scroll offset from the last draw pass. Used during event
+    /// handling to ensure boundary checks match exactly (avoiding floating-point
+    /// mismatch between draw-time and event-time computations).
+    #[rust]
+    cached_max_scroll_y: f64,
     /// Skip finger move after long press to prevent selection changes
     #[rust]
     ignore_next_move: bool,
@@ -605,6 +623,20 @@ impl TextInput {
                 vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
             });
         }
+    }
+
+    pub fn is_multiline(&self) -> bool {
+        self.is_multiline
+    }
+
+    pub fn set_is_multiline(&mut self, cx: &mut Cx, is_multiline: bool) {
+        self.is_multiline = is_multiline;
+        if !is_multiline {
+            self.scroll_y = 0.0;
+            self.cached_max_scroll_y = 0.0;
+        }
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
     }
 
     pub fn is_password(&self) -> bool {
@@ -666,6 +698,7 @@ impl TextInput {
 
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
         self.selection = selection;
+        self.needs_scroll_to_cursor = true;
         self.history.force_new_edit_group();
         self.draw_bg.redraw(cx);
     }
@@ -783,9 +816,8 @@ impl TextInput {
     }
 
     fn layout_text(&mut self, cx: &mut Cx2d) {
-        let turtle_rect = cx.turtle().inner_rect();
-        let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
-            Some(turtle_rect.size.x as f32)
+        let max_width_in_lpxs = if !cx.turtle().inner_rect().size.x.is_nan() {
+            Some(cx.turtle().inner_rect().size.x as f32)
         } else {
             None
         };
@@ -802,7 +834,7 @@ impl TextInput {
         } else {
             &self.text
         };
-        let wrap = cx.turtle().layout().flow == Flow::right_wrap();
+        let wrap = self.is_multiline && cx.turtle().layout().flow == Flow::right_wrap();
         self.laidout_width = max_width_in_lpxs;
         self.laidout_text = Some(self.draw_text.layout(
             cx,
@@ -937,28 +969,37 @@ impl TextInput {
         cx.compute_final_size();
         let height = cx.turtle().inner_rect().size.y;
 
-        // Compute the min and max y of the row that the cursor is on.
-        let laidout_text = self.laidout_text.as_ref().unwrap();
-        let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
-        let position = self.cursor_to_position(self.cursor()).unwrap();
-        let laidout_row = &laidout_text.rows[position.row_index];
-        let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
-        let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
+        // Only auto-scroll to keep the cursor visible when the cursor has actually
+        // moved (typing, arrow keys, clicking). Don't do this on every redraw, as
+        // that would fight with user-initiated mouse wheel scrolling.
+        if self.needs_scroll_to_cursor {
+            self.needs_scroll_to_cursor = false;
 
-        // If the min y of the row is less than the scroll position, scroll up so that the top of
-        // the row appears at the top.
-        if y_min < self.scroll_y {
-            self.scroll_y = y_min;
+            let laidout_text = self.laidout_text.as_ref().unwrap();
+            let position = self.cursor_to_position(self.cursor()).unwrap();
+            let laidout_row = &laidout_text.rows[position.row_index];
+            let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
+            let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
+
+            // If the min y of the row is less than the scroll position, scroll up so
+            // that the top of the row appears at the top.
+            if y_min < self.scroll_y {
+                self.scroll_y = y_min;
+            }
+
+            // If the max y of the row is greater than the scroll position, scroll down
+            // so that the bottom of the row appears at the bottom.
+            if y_max > self.scroll_y + height {
+                self.scroll_y = y_max - height;
+            }
         }
 
-        // If the max y of the row is greater than the scroll position, scroll down so that the
-        // bottom of the row appears at the bottom.
-        if y_max > self.scroll_y + height {
-            self.scroll_y = y_max - height;
-        }
-
-        // Clamp the scroll position so that we cannot scroll past the start or end of the text.
-        let max_scroll_y = laidout_text_height.max(height) - height;
+        // Always clamp the scroll position to valid bounds, and cache
+        // max_scroll_y so the event handler uses the exact same value
+        // (avoiding floating-point mismatch with relative Fit bounds).
+        let laidout_text_height = self.laidout_text.as_ref().unwrap().size_in_lpxs.height as f64;
+        let max_scroll_y = (laidout_text_height - height).max(0.0);
+        self.cached_max_scroll_y = max_scroll_y;
         self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
 
         // Shift the align range of the turtle with the scroll position, but do not include the
@@ -971,6 +1012,25 @@ impl TextInput {
             },
             dvec2(0.0, -self.scroll_y),
         );
+    }
+
+    /// Draws the vertical scrollbar when the text content overflows the visible area.
+    fn draw_scroll_bar(&mut self, cx: &mut Cx2d) {
+        if !self.is_multiline {
+            return;
+        }
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return;
+        };
+        let view_rect = cx.turtle().inner_rect();
+        let view_total = dvec2(
+            view_rect.size.x,
+            laidout_text.size_in_lpxs.height as f64,
+        );
+        // Sync scroll_y (which scroll_to_cursor may have updated) into the scrollbar.
+        self.scroll_bar.set_scroll_pos_no_action(cx, self.scroll_y);
+        self.scroll_bar
+            .draw_scroll_bar(cx, ScrollAxis::Vertical, view_rect, view_total);
     }
 
     /// Moves the cursor one column to the left.
@@ -1290,6 +1350,7 @@ impl TextInput {
     fn apply_edit(&mut self, cx: &mut Cx, edit: Edit) {
         self.selection.cursor.index = edit.start + edit.replace_with.len();
         self.selection.anchor.index = self.selection.cursor.index;
+        self.needs_scroll_to_cursor = true;
         self.history.apply_edit(edit, &mut self.text);
         self.laidout_text = None;
         self.check_text_is_empty(cx);
@@ -1299,6 +1360,7 @@ impl TextInput {
         if let Some(new_selection) = self.history.undo(self.selection, &mut self.text) {
             self.laidout_text = None;
             self.selection = new_selection;
+            self.needs_scroll_to_cursor = true;
             self.check_text_is_empty(cx);
             true
         } else {
@@ -1310,6 +1372,7 @@ impl TextInput {
         if let Some(new_selection) = self.history.redo(self.selection, &mut self.text) {
             self.laidout_text = None;
             self.selection = new_selection;
+            self.needs_scroll_to_cursor = true;
             self.check_text_is_empty(cx);
             true
         } else {
@@ -1391,6 +1454,7 @@ impl Widget for TextInput {
         self.draw_selection(cx, text_rect);
         self.draw_composition_underline(cx, text_rect);
         self.scroll_to_cursor(cx);
+        self.draw_scroll_bar(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
             if self.ime_update_frame != cx.redraw_id() {
@@ -1465,6 +1529,55 @@ impl Widget for TextInput {
                 self.handle_focus_lost(cx, uid);
             }
         }
+
+        // Handle scrollbar events for multiline text inputs.
+        if self.is_multiline {
+            // Handle mouse wheel / trackpad scroll directly.
+            // Makepad convention: positive scroll.y = viewport moves down = scroll_pos increases.
+            // self.scroll_y is the single source of truth; the ScrollBar is synced from it
+            // during draw_scroll_bar, so we don't update the ScrollBar here (which would
+            // trigger next_frame callbacks and cause feedback loops).
+            if let Event::Scroll(e) = event {
+                let bg_rect = self.draw_bg.area().rect(cx);
+                if !e.handled_y.get() && bg_rect.contains(e.abs) {
+                    // Use the cached max_scroll_y from the last draw pass to ensure
+                    // boundary checks match exactly, avoiding floating-point mismatch
+                    // with relative Fit bounds.
+                    let max_scroll_y = self.cached_max_scroll_y;
+                    if max_scroll_y > 0.0 {
+                        let new_scroll_y = (self.scroll_y + e.scroll.y)
+                            .max(0.0)
+                            .min(max_scroll_y);
+                        if new_scroll_y != self.scroll_y {
+                            self.scroll_y = new_scroll_y;
+                            self.draw_bg.redraw(cx);
+                            e.handled_y.set(true);
+                        }
+                    }
+                }
+            }
+
+            // Handle clicking/dragging on the scrollbar handle itself.
+            // We pass an empty callback because we sync scroll_y from the ScrollBar
+            // below, only when the scrollbar has actually captured the finger.
+            self.scroll_bar.handle_event_with(
+                cx,
+                event,
+                &mut |_, _| {},
+            );
+
+            // If the scrollbar has captured the finger (user is dragging the handle),
+            // sync scroll_y from the ScrollBar (which is the source of truth during
+            // drag).
+            if self.scroll_bar.is_area_captured(cx) {
+                self.scroll_y = self.scroll_bar.get_scroll_pos();
+                self.draw_bg.redraw(cx);
+            }
+        }
+
+        // Skip finger event processing if the scrollbar owns the finger,
+        // so dragging the scrollbar doesn't also move the text cursor.
+        let scrollbar_captured = self.is_multiline && self.scroll_bar.is_area_captured(cx);
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
@@ -1596,7 +1709,7 @@ impl Widget for TextInput {
                 tap_count,
                 device,
                 ..
-            }) if device.is_primary_hit() => {
+            }) if device.is_primary_hit() && !scrollbar_captured => {
                 self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
@@ -1708,7 +1821,7 @@ impl Widget for TextInput {
                 tap_count,
                 device,
                 ..
-            }) if device.is_primary_hit() => {
+            }) if device.is_primary_hit() && !scrollbar_captured => {
                 // Skip first move after long press to prevent selection changes
                 if self.ignore_next_move {
                     self.ignore_next_move = false;
@@ -1866,6 +1979,7 @@ impl Widget for TextInput {
 
                     let sel_start_byte = full_state.selection.start.to_byte_index(&self.text);
                     let sel_end_byte = full_state.selection.end.to_byte_index(&self.text);
+                    self.needs_scroll_to_cursor = true;
                     self.selection = Selection {
                         anchor: Cursor {
                             index: sel_start_byte,
@@ -2101,6 +2215,20 @@ impl Widget for TextInput {
 }
 
 impl TextInputRef {
+    pub fn is_multiline(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.is_multiline()
+        } else {
+            false
+        }
+    }
+
+    pub fn set_is_multiline(&self, cx: &mut Cx, is_multiline: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_is_multiline(cx, is_multiline);
+        }
+    }
+
     pub fn is_password(&self) -> bool {
         if let Some(inner) = self.borrow() {
             inner.is_password()
