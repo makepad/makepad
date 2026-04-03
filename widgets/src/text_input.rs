@@ -984,7 +984,7 @@ impl TextInput {
         rect(sel_x, sel_y, sel_width.max(10.0), sel_height.max(20.0))
     }
 
-    fn scroll_to_cursor(&mut self, cx: &mut Cx2d, content_clip_index: Option<usize>) {
+    fn scroll_to_cursor(&mut self, cx: &mut Cx2d, content_clip_index: usize) {
         // Compute the final size of the turtle, and obtain its inner dimensions.
         // For multiline inputs, also clamp to the tightest ancestor max height,
         // so that scrolling kicks in even when the TextInput's own walk height
@@ -1090,9 +1090,7 @@ impl TextInput {
         // also moves BeginClip entries. By setting the clip to inner_rect here,
         // we override whatever shift was applied, keeping the clip at the correct
         // absolute position (the inner area excluding padding).
-        if let Some(clip_index) = content_clip_index {
-            cx.update_clip_rect_at(clip_index, inner_rect);
-        }
+        cx.update_clip_rect_at(content_clip_index, inner_rect);
     }
 
     /// Draws the vertical scrollbar when the text content overflows the visible area.
@@ -1536,12 +1534,12 @@ impl Widget for TextInput {
         // scroll_to_cursor will tighten the bounds after compute_final_size
         // determines the actual dimensions.
         let inner_origin = cx.turtle().inner_origin();
-        let content_clip_index = Some(cx.push_clip_rect_tracked(rect(
+        let content_clip_index = cx.push_clip_rect_tracked(rect(
             inner_origin.x,
             inner_origin.y,
             f64::MAX,
             f64::MAX,
-        )));
+        ));
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
         let cursor_rect = self.draw_cursor(cx, text_rect);
@@ -1670,31 +1668,22 @@ impl Widget for TextInput {
             }
         }
 
-        // Handle scroll events for single-line text inputs (horizontal scrolling).
+        // Handle horizontal scroll events for single-line text inputs.
+        // Only consume horizontal scroll (scroll.x), NOT vertical scroll —
+        // vertical scroll should propagate to parent containers.
         if !self.is_multiline {
             if let Event::Scroll(e) = event {
-                let bg_rect = self.draw_bg.area().rect(cx);
-                if bg_rect.contains(e.abs) {
-                    let max_scroll_x = self.cached_max_scroll_x;
-                    if max_scroll_x > 0.0 {
-                        // For single-line, map both vertical and horizontal scroll
-                        // deltas to horizontal scrolling (vertical scroll doesn't
-                        // make sense for a single-line input).
-                        let delta = if !e.handled_x.get() && e.scroll.x != 0.0 {
-                            e.scroll.x
-                        } else if !e.handled_y.get() {
-                            e.scroll.y
-                        } else {
-                            0.0
-                        };
-                        if delta != 0.0 {
+                if !e.handled_x.get() && e.scroll.x != 0.0 {
+                    let bg_rect = self.draw_bg.area().rect(cx);
+                    if bg_rect.contains(e.abs) {
+                        let max_scroll_x = self.cached_max_scroll_x;
+                        if max_scroll_x > 0.0 {
                             let new_scroll_x =
-                                (self.scroll_x + delta).max(0.0).min(max_scroll_x);
+                                (self.scroll_x + e.scroll.x).max(0.0).min(max_scroll_x);
                             if new_scroll_x != self.scroll_x {
                                 self.scroll_x = new_scroll_x;
                                 self.draw_bg.redraw(cx);
                                 e.handled_x.set(true);
-                                e.handled_y.set(true);
                             }
                         }
                     }
