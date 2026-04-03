@@ -559,6 +559,11 @@ pub struct TextInput {
     /// Set when the cursor/selection changes; cleared after scroll_to_cursor runs.
     #[rust(true)]
     needs_scroll_to_cursor: bool,
+    /// Cached maximum scroll offset from the last draw pass. Used during event
+    /// handling to ensure boundary checks match exactly (avoiding floating-point
+    /// mismatch between draw-time and event-time computations).
+    #[rust]
+    cached_max_scroll_y: f64,
     /// Skip finger move after long press to prevent selection changes
     #[rust]
     ignore_next_move: bool,
@@ -956,13 +961,21 @@ impl TextInput {
         rect(sel_x, sel_y, sel_width.max(10.0), sel_height.max(20.0))
     }
 
+    /// Returns the maximum scroll offset for the current text content and visible height.
+    /// `visible_height` is the inner height of the widget (excluding padding).
+    fn max_scroll_y(&self, visible_height: f64) -> f64 {
+        if let Some(laidout_text) = self.laidout_text.as_ref() {
+            let text_height = laidout_text.size_in_lpxs.height as f64;
+            (text_height - visible_height).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
     fn scroll_to_cursor(&mut self, cx: &mut Cx2d) {
         // Compute the final size of the turtle, and obtain its inner height.
         cx.compute_final_size();
         let height = cx.turtle().inner_rect().size.y;
-
-        let laidout_text = self.laidout_text.as_ref().unwrap();
-        let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
 
         // Only auto-scroll to keep the cursor visible when the cursor has actually
         // moved (typing, arrow keys, clicking). Don't do this on every redraw, as
@@ -970,6 +983,7 @@ impl TextInput {
         if self.needs_scroll_to_cursor {
             self.needs_scroll_to_cursor = false;
 
+            let laidout_text = self.laidout_text.as_ref().unwrap();
             let position = self.cursor_to_position(self.cursor()).unwrap();
             let laidout_row = &laidout_text.rows[position.row_index];
             let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
@@ -988,8 +1002,10 @@ impl TextInput {
             }
         }
 
-        // Always clamp the scroll position to valid bounds.
-        let max_scroll_y = laidout_text_height.max(height) - height;
+        // Always clamp the scroll position to valid bounds, and cache
+        // max_scroll_y so the event handler uses the exact same value.
+        let max_scroll_y = self.max_scroll_y(height);
+        self.cached_max_scroll_y = max_scroll_y;
         self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
 
         // Shift the align range of the turtle with the scroll position, but do not include the
@@ -1530,21 +1546,18 @@ impl Widget for TextInput {
             if let Event::Scroll(e) = event {
                 let bg_rect = self.draw_bg.area().rect(cx);
                 if !e.handled_y.get() && bg_rect.contains(e.abs) {
-                    if let Some(laidout_text) = self.laidout_text.as_ref() {
-                        let visible_height = bg_rect.size.y
-                            - self.layout.padding.top
-                            - self.layout.padding.bottom;
-                        let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
-                        let max_scroll_y = (laidout_text_height - visible_height).max(0.0);
-                        if max_scroll_y > 0.0 {
-                            let new_scroll_y = (self.scroll_y + e.scroll.y)
-                                .max(0.0)
-                                .min(max_scroll_y);
-                            if new_scroll_y != self.scroll_y {
-                                self.scroll_y = new_scroll_y;
-                                self.draw_bg.redraw(cx);
-                                e.handled_y.set(true);
-                            }
+                    // Use the cached max_scroll_y from the last draw pass to ensure
+                    // boundary checks match exactly, avoiding floating-point mismatch
+                    // with relative Fit bounds.
+                    let max_scroll_y = self.cached_max_scroll_y;
+                    if max_scroll_y > 0.0 {
+                        let new_scroll_y = (self.scroll_y + e.scroll.y)
+                            .max(0.0)
+                            .min(max_scroll_y);
+                        if new_scroll_y != self.scroll_y {
+                            self.scroll_y = new_scroll_y;
+                            self.draw_bg.redraw(cx);
+                            e.handled_y.set(true);
                         }
                     }
                 }

@@ -82,6 +82,26 @@ script_mod! {
             }
 
             Hr{}
+            H4{text: "Multiline TextInput (Fit height with max bound)"}
+            P{text: "A multiline text input with Fit height that caps at 100px. The widget grows with content until hitting the max, then scrolls."}
+            TextInput{
+                empty_text: "Type several lines to grow this TextInput, then scroll..."
+                is_multiline: true
+                height: Fit{max: FitBound.Abs(100)}
+                width: Fill
+            }
+
+            Hr{}
+            H4{text: "Multiline TextInput (Fit height with relative max bound)"}
+            P{text: "A multiline text input with Fit height capped at 30% of the parent height. Uses FitBound.Rel with Base.Full."}
+            TextInput{
+                empty_text: "Type several lines to test relative max height..."
+                is_multiline: true
+                height: Fit{max: FitBound.Rel{base: Base.Full, factor: 0.3}}
+                width: Fill
+            }
+
+            Hr{}
             H4{text: "Toggle Multiline"}
             P{text: "Use the checkbox to toggle this text input between single-line and multiline mode."}
             UIZooRowH{
