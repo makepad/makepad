@@ -631,6 +631,7 @@ impl TextInput {
         self.is_multiline = is_multiline;
         if !is_multiline {
             self.scroll_y = 0.0;
+            self.cached_max_scroll_y = 0.0;
         }
         self.laidout_text = None;
         self.draw_bg.redraw(cx);
@@ -961,17 +962,6 @@ impl TextInput {
         rect(sel_x, sel_y, sel_width.max(10.0), sel_height.max(20.0))
     }
 
-    /// Returns the maximum scroll offset for the current text content and visible height.
-    /// `visible_height` is the inner height of the widget (excluding padding).
-    fn max_scroll_y(&self, visible_height: f64) -> f64 {
-        if let Some(laidout_text) = self.laidout_text.as_ref() {
-            let text_height = laidout_text.size_in_lpxs.height as f64;
-            (text_height - visible_height).max(0.0)
-        } else {
-            0.0
-        }
-    }
-
     fn scroll_to_cursor(&mut self, cx: &mut Cx2d) {
         // Compute the final size of the turtle, and obtain its inner height.
         cx.compute_final_size();
@@ -1003,8 +993,10 @@ impl TextInput {
         }
 
         // Always clamp the scroll position to valid bounds, and cache
-        // max_scroll_y so the event handler uses the exact same value.
-        let max_scroll_y = self.max_scroll_y(height);
+        // max_scroll_y so the event handler uses the exact same value
+        // (avoiding floating-point mismatch with relative Fit bounds).
+        let laidout_text_height = self.laidout_text.as_ref().unwrap().size_in_lpxs.height as f64;
+        let max_scroll_y = (laidout_text_height - height).max(0.0);
         self.cached_max_scroll_y = max_scroll_y;
         self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
 
@@ -1574,13 +1566,16 @@ impl Widget for TextInput {
 
             // If the scrollbar has captured the finger (user is dragging the handle),
             // sync scroll_y from the ScrollBar (which is the source of truth during
-            // drag) and prevent the text input from also processing finger events.
+            // drag).
             if self.scroll_bar.is_area_captured(cx) {
                 self.scroll_y = self.scroll_bar.get_scroll_pos();
                 self.draw_bg.redraw(cx);
-                return;
             }
         }
+
+        // Skip finger event processing if the scrollbar owns the finger,
+        // so dragging the scrollbar doesn't also move the text cursor.
+        let scrollbar_captured = self.is_multiline && self.scroll_bar.is_area_captured(cx);
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
@@ -1712,7 +1707,7 @@ impl Widget for TextInput {
                 tap_count,
                 device,
                 ..
-            }) if device.is_primary_hit() => {
+            }) if device.is_primary_hit() && !scrollbar_captured => {
                 self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
@@ -1824,7 +1819,7 @@ impl Widget for TextInput {
                 tap_count,
                 device,
                 ..
-            }) if device.is_primary_hit() => {
+            }) if device.is_primary_hit() && !scrollbar_captured => {
                 // Skip first move after long press to prevent selection changes
                 if self.ignore_next_move {
                     self.ignore_next_move = false;
