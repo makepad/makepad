@@ -341,6 +341,7 @@ impl Tab {
     pub fn set_draw_depth(&mut self, depth: f32) {
         self.draw_bg.draw_depth = depth;
         self.draw_text.draw_depth = depth;
+        self.close_button.set_draw_depth(depth);
     }
 
     pub fn handle_event_with(

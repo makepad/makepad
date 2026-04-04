@@ -612,32 +612,26 @@ impl Cx {
 
                 // Synthesize internal drag-and-drop events from touch gestures.
                 if self.os.internal_drag_items.is_some() {
-                    let has_move = e.touches.iter().any(|t| {
-                        t.state == crate::event::finger::TouchState::Move
-                    });
-                    let stop_touch = e.touches.iter().find(|t| {
+                    if let Some(touch) = e.touches.iter().find(|t| {
                         t.state == crate::event::finger::TouchState::Stop
-                    });
-                    if let Some(touch) = stop_touch {
+                    }) {
                         // Touch lifted: fire Drop + DragEnd
                         if let Some(items) = self.os.internal_drag_items.take() {
-                            let abs = touch.abs;
                             self.call_event_handler(&Event::Drop(DropEvent {
                                 modifiers: e.modifiers.clone(),
                                 handled: Arc::new(Mutex::new(false)),
-                                abs,
+                                abs: touch.abs,
                                 items,
                             }));
                             self.drag_drop.cycle_drag();
                             self.call_event_handler(&Event::DragEnd);
                             self.drag_drop.cycle_drag();
                         }
-                    } else if has_move {
-                        // Finger moving: fire Drag event using the first moving touch
+                    } else if let Some(touch) = e.touches.iter().find(|t| {
+                        t.state == crate::event::finger::TouchState::Move
+                    }) {
+                        // Finger moving: fire Drag event
                         if let Some(items) = self.os.internal_drag_items.as_ref() {
-                            let touch = e.touches.iter().find(|t| {
-                                t.state == crate::event::finger::TouchState::Move
-                            }).unwrap();
                             self.call_event_handler(&Event::Drag(DragEvent {
                                 modifiers: e.modifiers.clone(),
                                 handled: Arc::new(Mutex::new(false)),

@@ -207,7 +207,6 @@ pub struct Dock {
 
 /// Holds a clone of the tab being dragged so we can render it as a ghost overlay.
 struct DraggingTab {
-    _tab_id: LiveId,
     cursor: Vec2d,
     name: String,
     /// The size of the original tab, used for fixed-size rendering.
@@ -1446,12 +1445,13 @@ impl Widget for Dock {
                             .unwrap_or(dvec2(100.0, 30.0));
                         if let Some(ghost) = tab_bar.tab_bar.create_ghost_tab(cx, item) {
                             self.dragging_tab = Some(DraggingTab {
-                                _tab_id: item,
                                 cursor: Vec2d::default(),
                                 name,
                                 size: tab_size,
                                 ghost,
                             });
+                        } else {
+                            warning!("Dock: could not create ghost tab for {:?}", item);
                         }
                         cx.widget_action(uid, DockAction::ShouldTabStartDrag(item))
                     }

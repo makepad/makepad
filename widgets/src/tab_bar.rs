@@ -336,7 +336,7 @@ impl Widget for TabBar {
                 }
                 TabAction::TouchScroll { abs, time } => {
                     if let FingerScrollState::Dragging { samples } = &mut self.finger_scroll {
-                        let old_abs = samples.last().unwrap().abs;
+                        let Some(old_abs) = samples.last().map(|s| s.abs) else { return };
                         samples.push(FingerScrollSample { abs: abs.x, time });
                         if samples.len() > 4 {
                             samples.remove(0);
