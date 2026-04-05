@@ -1661,8 +1661,26 @@ fn bf16_round_to_f32(value: f32) -> f32 {
 }
 
 pub fn gemma4_qproj_case_input_bf16_words(len: usize) -> Vec<u16> {
+    gemma4_qproj_case_input_bf16_words_with_phase(len, 0)
+}
+
+pub fn gemma4_qproj_case_input_bf16_words_with_phase(len: usize, phase: usize) -> Vec<u16> {
     (0..len)
-        .map(|index| f32_to_bf16_word(GEMMA4_QPROJ_CASE_ACTIVATION_PATTERN[index % 16]))
+        .map(|index| {
+            f32_to_bf16_word(
+                GEMMA4_QPROJ_CASE_ACTIVATION_PATTERN
+                    [(index + phase) % GEMMA4_QPROJ_CASE_ACTIVATION_PATTERN.len()],
+            )
+        })
+        .collect()
+}
+
+pub fn gemma4_qproj_case_input_f32_values_with_phase(len: usize, phase: usize) -> Vec<f32> {
+    (0..len)
+        .map(|index| {
+            GEMMA4_QPROJ_CASE_ACTIVATION_PATTERN
+                [(index + phase) % GEMMA4_QPROJ_CASE_ACTIVATION_PATTERN.len()]
+        })
         .collect()
 }
 
