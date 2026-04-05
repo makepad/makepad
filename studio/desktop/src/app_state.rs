@@ -169,7 +169,8 @@ impl App {
         valid_mounts: &HashSet<String>,
     ) -> Option<HashMap<LiveId, DockItem>> {
         Self::sanitize_dock_items(dock_items, |_, name, _, kind| {
-            kind == id!(MountWorkspace) && valid_mounts.contains(name)
+            (kind == id!(MountWorkspace) && valid_mounts.contains(name))
+                || kind == id!(AiManagerPane)
         })
     }
 
@@ -267,10 +268,12 @@ impl App {
                 .load_state(cx, dock_items);
         }
         self.rebuild_mount_tab_bindings(cx);
+        let _ = self.ensure_ai_manager_tab(cx);
         for mount in &mount_names {
             let _ = self.ensure_mount_tab(cx, mount);
         }
         self.rebuild_mount_tab_bindings(cx);
+        let _ = self.ensure_ai_manager_tab(cx);
 
         let saved_mounts: HashMap<String, PersistedMountStateRon> = state
             .mounts

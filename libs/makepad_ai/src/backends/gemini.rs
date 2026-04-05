@@ -226,6 +226,22 @@ impl GeminiBackend {
             ));
         }
 
+        if !request.tools.is_empty() {
+            json.push_str(",\"tools\":[{\"functionDeclarations\":[");
+            for (index, tool) in request.tools.iter().enumerate() {
+                if index > 0 {
+                    json.push(',');
+                }
+                json.push_str(&format!(
+                    "{{\"name\":\"{}\",\"description\":\"{}\",\"parameters\":{}}}",
+                    Self::escape_json_string(&tool.name),
+                    Self::escape_json_string(&tool.description),
+                    tool.parameters
+                ));
+            }
+            json.push_str("]}]");
+        }
+
         // Generation config
         json.push_str(",\"generationConfig\":{");
         json.push_str(&format!("\"maxOutputTokens\":{}", request.max_tokens));

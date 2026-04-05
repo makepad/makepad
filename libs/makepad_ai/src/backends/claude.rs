@@ -133,6 +133,22 @@ impl ClaudeBackend {
             json.push_str(&format!("\"temperature\":{},", temp));
         }
 
+        if !request.tools.is_empty() {
+            json.push_str("\"tools\":[");
+            for (index, tool) in request.tools.iter().enumerate() {
+                if index > 0 {
+                    json.push(',');
+                }
+                json.push_str(&format!(
+                    "{{\"name\":\"{}\",\"description\":\"{}\",\"input_schema\":{}}}",
+                    Self::escape_json_string(&tool.name),
+                    Self::escape_json_string(&tool.description),
+                    tool.parameters
+                ));
+            }
+            json.push_str("],");
+        }
+
         // Messages
         json.push_str("\"messages\":[");
         let mut first = true;

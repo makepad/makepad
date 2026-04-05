@@ -16,8 +16,12 @@ struct OpenAiStreamChunk {
     created: Option<u64>,
     #[allow(dead_code)]
     model: Option<String>,
+    #[allow(dead_code)]
+    system_fingerprint: Option<String>,
     choices: Vec<OpenAiStreamChoice>,
     usage: Option<OpenAiUsage>,
+    #[allow(dead_code)]
+    timings: Option<JsonValue>,
 }
 
 #[derive(DeJson, Debug)]
@@ -33,6 +37,8 @@ struct OpenAiDelta {
     #[allow(dead_code)]
     role: Option<String>,
     content: Option<String>,
+    #[allow(dead_code)]
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<OpenAiToolCallDelta>>,
 }
 
@@ -136,6 +142,22 @@ impl OpenAiBackend {
             json.push_str(&format!("\"reasoning_effort\":\"{}\",", effort));
         }
 
+        if !request.tools.is_empty() {
+            json.push_str("\"tools\":[");
+            for (index, tool) in request.tools.iter().enumerate() {
+                if index > 0 {
+                    json.push(',');
+                }
+                json.push_str(&format!(
+                    "{{\"type\":\"function\",\"function\":{{\"name\":\"{}\",\"description\":\"{}\",\"parameters\":{}}}}}",
+                    Self::escape_json_string(&tool.name),
+                    Self::escape_json_string(&tool.description),
+                    tool.parameters
+                ));
+            }
+            json.push_str("],\"tool_choice\":\"auto\",");
+        }
+
         // Messages
         json.push_str("\"messages\":[");
         let mut first = true;
@@ -156,15 +178,26 @@ impl OpenAiBackend {
             first = false;
 
             let role = msg.role.as_str();
-            let content = msg.text();
+            let text_content = msg.text();
+            let tool_result_content = msg.content.iter().find_map(|block| {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    Some(content.as_str())
+                } else {
+                    None
+                }
+            });
+            let content = match msg.role {
+                MessageRole::Tool => tool_result_content.unwrap_or(""),
+                _ => text_content.as_str(),
+            };
 
             json.push_str("{");
             json.push_str(&format!("\"role\":\"{}\"", role));
 
-            if !content.is_empty() {
+            if !content.is_empty() || msg.role != MessageRole::Assistant {
                 json.push_str(&format!(
                     ",\"content\":\"{}\"",
-                    Self::escape_json_string(&content)
+                    Self::escape_json_string(content)
                 ));
             }
 
@@ -229,7 +262,9 @@ impl OpenAiBackend {
         let mut http = HttpRequest::new(url, HttpMethod::POST);
         http.set_is_streaming();
         http.set_header("Content-Type".to_string(), "application/json".to_string());
-        http.set_header("Authorization".to_string(), format!("Bearer {}", api_key));
+        if !api_key.trim().is_empty() {
+            http.set_header("Authorization".to_string(), format!("Bearer {}", api_key));
+        }
 
         let body = Self::build_request_json(request, model, reasoning_effort);
         http.set_string_body(body);
@@ -260,7 +295,10 @@ impl OpenAiBackend {
                 continue;
             }
 
-            match OpenAiStreamChunk::deserialize_json(json_data) {
+            // OpenAI-compatible local servers often add extra chunk fields such as
+            // `system_fingerprint`, `timings`, or `delta.reasoning_content`.
+            // Parse leniently so those extensions do not break streaming.
+            match OpenAiStreamChunk::deserialize_json_lenient(json_data) {
                 Ok(chunk) => {
                     if let Some(usage) = chunk.usage {
                         in_flight.usage = Some(usage);
