@@ -40,6 +40,7 @@ struct PhysicsWorkerRebuild {
     revision: u64,
     gravity: f32,
     cubes: Vec<CollectedXrCube>,
+    floor_y: Option<f32>,
 }
 
 #[derive(Clone)]
@@ -49,6 +50,7 @@ struct PhysicsWorkerStep {
     right_hand: XrHand,
     left_controller: XrController,
     right_controller: XrController,
+    floor_y: Option<f32>,
     time_scale: f32,
     include_retained_hits: bool,
 }
@@ -152,6 +154,7 @@ impl XrPhysicsWorker {
         revision: u64,
         gravity: f32,
         cubes: Vec<CollectedXrCube>,
+        floor_y: Option<f32>,
     ) {
         let (lock, wake) = &*self.mailbox;
         if let Ok(mut mailbox) = lock.lock() {
@@ -159,6 +162,7 @@ impl XrPhysicsWorker {
                 revision,
                 gravity,
                 cubes,
+                floor_y,
             });
             mailbox.version = mailbox.version.saturating_add(1);
             wake.notify_one();
@@ -172,6 +176,7 @@ impl XrPhysicsWorker {
         right_hand: XrHand,
         left_controller: XrController,
         right_controller: XrController,
+        floor_y: Option<f32>,
         time_scale: f32,
         include_retained_hits: bool,
     ) {
@@ -183,6 +188,7 @@ impl XrPhysicsWorker {
                 right_hand,
                 left_controller,
                 right_controller,
+                floor_y,
                 time_scale,
                 include_retained_hits,
             });
@@ -394,10 +400,12 @@ fn physics_worker_loop(
             clear_depth_query_state_for_scene(scene.as_ref(), &mut retained_hits);
             scene = Some(build_scene(rebuild.gravity, rebuild.cubes));
             if let Some(scene) = scene.as_mut() {
-                let floor_y = depth_mesh
-                    .latest_tsdf_snapshot()
-                    .as_deref()
-                    .and_then(|snapshot| snapshot.lowest_y_meters());
+                let floor_y = rebuild.floor_y.or_else(|| {
+                    depth_mesh
+                        .latest_tsdf_snapshot()
+                        .as_deref()
+                        .and_then(|snapshot| snapshot.lowest_y_meters())
+                });
                 scene.sync_floor_halfspace(floor_y);
             }
             last_step_started_at = None;
@@ -550,6 +558,7 @@ fn physics_worker_loop(
                     &mut retained_hits,
                     scene.as_mut(),
                     &depth_mesh,
+                    step.floor_y,
                 );
                 let physics_tsdf_query_ms = tsdf_query_started.elapsed().as_secs_f64() * 1000.0;
                 let (

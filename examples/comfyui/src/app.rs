@@ -11,7 +11,7 @@ script_mod! {
 
     let self_ip = "10.0.0.112"
     let comfy_ip = "10.0.0.165:8000"
-    let openai_base = "http://127.0.0.1:8080"
+    let llm_base = "http://10.0.0.217:8080"
     let prompt_path = "/Users/admin/prompt.txt"
     let auto_seconds = 60
     let Display = {mac:"" ip:"" landscape:false prompt:"empty"}.freeze_api()
@@ -131,7 +131,7 @@ script_mod! {
         promise.await()
     }
 
-    fn openai_stream_delta_content(chunk){
+    fn llm_stream_delta_content(chunk){
         let line = ("" + chunk).trim()
         if line == "" return nil
 
@@ -144,10 +144,10 @@ script_mod! {
         ok{payload.choices[0].delta.content}
     }
 
-    fn openai_completion(messages){
+    fn llm_completion(messages){
         let promise = std.promise()
         let req = net.HttpRequest{
-            url: openai_base + "/v1/chat/completions"
+            url: llm_base + "/v1/chat/completions"
             method: net.HttpMethod.POST
             headers:{"Content-Type": "application/json"}
             is_streaming: true
@@ -164,7 +164,7 @@ script_mod! {
             let total = ""
             on_stream:fn(res){
                 for split in res.body.to_string().split("\n\n"){
-                    let delta = openai_stream_delta_content(split)
+                    let delta = llm_stream_delta_content(split)
                     if delta != nil{
                         total += delta
                         set_last_prompt(total)
@@ -175,7 +175,7 @@ script_mod! {
                 promise.resolve(total.trim())
             }
             on_error: |e| {
-                set_status("OpenAI completion error")
+                set_status("LLM completion error")
                 ~e
                 promise.resolve("")
             }
@@ -410,7 +410,7 @@ script_mod! {
         set_display(display.ip + "  " + display.mac)
 
         set_status("Generating image prompt")
-        let image_prompt_text = openai_completion(messages).await()
+        let image_prompt_text = llm_completion(messages).await()
         let image_prompt = image_prompt_text
             .strip_prefix("```json")
             .strip_suffix("```")

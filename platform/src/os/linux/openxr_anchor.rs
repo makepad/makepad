@@ -6,8 +6,47 @@ use {
         makepad_micro_serde::*,
         os::linux::{openxr::*, openxr_sys::*},
     },
-    std::path::Path,
+    std::path::{Path, PathBuf},
 };
+
+const LOCAL_ANCHOR_LEFT_FILE: &str = "left_anchor";
+const LOCAL_ANCHOR_RIGHT_FILE: &str = "right_anchor";
+const LOCAL_FLOOR_Y_FILE: &str = "floor_y";
+
+fn cache_file_path(os_type: &OsType, name: &str) -> Option<PathBuf> {
+    Some(Path::new(&os_type.get_cache_dir()?).join(name))
+}
+
+fn read_uuid_cache_file(os_type: &OsType, name: &str) -> Option<XrUuid> {
+    let bytes = std::fs::read(cache_file_path(os_type, name)?).ok()?;
+    Some(XrUuid::from_bytes(&bytes))
+}
+
+fn write_cache_bytes(os_type: &OsType, name: &str, bytes: &[u8]) {
+    let Some(path) = cache_file_path(os_type, name) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, bytes);
+}
+
+fn read_floor_y_cache_file(os_type: &OsType) -> Option<f32> {
+    let text = std::fs::read_to_string(cache_file_path(os_type, LOCAL_FLOOR_Y_FILE)?).ok()?;
+    let floor_y = text.trim().parse::<f32>().ok()?;
+    floor_y.is_finite().then_some(floor_y)
+}
+
+fn write_floor_y_cache_file(os_type: &OsType, floor_y: f32) {
+    let Some(path) = cache_file_path(os_type, LOCAL_FLOOR_Y_FILE) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, format!("{floor_y:.8}\n"));
+}
 
 impl CxOpenXr {
     pub fn advertise_anchor(&mut self, _anchor: XrAnchor) {
@@ -27,6 +66,13 @@ impl CxOpenXr {
             //session.local_anchor = Some(pose);
             //session.create_local_anchor_request(pose, xr);
             //session.create_shareable_anchor_request(pose, xr);
+        }
+    }
+
+    pub fn set_local_floor(&mut self, floor_y: f32, os_type: &OsType) {
+        if let Some(session) = &mut self.session {
+            crate::log!("Setting local floor");
+            session.set_local_floor(floor_y, os_type);
         }
     }
 
@@ -207,6 +253,7 @@ impl CxOpenXrSession {
                 self.anchor.async_state
             );
         }
+        self.anchor.persisted_anchor_present = true;
         // delete old anchors
         if let Some(anchor) = self.anchor.anchor.take() {
             self.erase_spaces_request(xr, &[anchor.left_space, anchor.right_space])
@@ -221,22 +268,21 @@ impl CxOpenXrSession {
         }
     }
 
-    pub fn get_local_anchor(&mut self, xr: &LibOpenXr, os_type: &OsType) {
-        //let group_uuid = XrUuid::from_live_id(live_id!(makepad_space));
+    pub fn set_local_floor(&mut self, floor_y: f32, os_type: &OsType) {
+        self.anchor.set_floor_y(os_type, floor_y);
+    }
 
-        let path = Path::new(&os_type.get_cache_dir().unwrap()).join("left_anchor");
-        if let Ok(left_data) = std::fs::read(path) {
-            let path = Path::new(&os_type.get_cache_dir().unwrap()).join("right_anchor");
-            if let Ok(right_data) = std::fs::read(path) {
-                let left_uuid = XrUuid::from_bytes(&left_data);
-                let right_uuid = XrUuid::from_bytes(&right_data);
-                if let Ok(request_id) = self.query_local_spaces_request(xr, [left_uuid, right_uuid])
-                {
-                    self.anchor.async_state = AsyncAnchorState::GetLocalAnchor {
-                        left_uuid,
-                        right_uuid,
-                        request_id,
-                    }
+    pub fn get_local_anchor(&mut self, xr: &LibOpenXr, os_type: &OsType) {
+        self.anchor.floor_y = read_floor_y_cache_file(os_type);
+        let left_uuid = read_uuid_cache_file(os_type, LOCAL_ANCHOR_LEFT_FILE);
+        let right_uuid = read_uuid_cache_file(os_type, LOCAL_ANCHOR_RIGHT_FILE);
+        self.anchor.persisted_anchor_present = left_uuid.is_some() && right_uuid.is_some();
+        if let (Some(left_uuid), Some(right_uuid)) = (left_uuid, right_uuid) {
+            if let Ok(request_id) = self.query_local_spaces_request(xr, [left_uuid, right_uuid]) {
+                self.anchor.async_state = AsyncAnchorState::GetLocalAnchor {
+                    left_uuid,
+                    right_uuid,
+                    request_id,
                 }
             }
         }
@@ -284,8 +330,7 @@ impl CxOpenXrSession {
                     .async_state
                     .error(response.request_id != request_id, "request_id")?;
                 // lets write the left anchor uuid to disk
-                let path = Path::new(&os_type.get_cache_dir().unwrap()).join("left_anchor");
-                std::fs::write(path, response.uuid.data).ok();
+                write_cache_bytes(os_type, LOCAL_ANCHOR_LEFT_FILE, &response.uuid.data);
 
                 if let Ok(request_id) = self.create_anchor_request(xr, right_pose) {
                     self.anchor.async_state = AsyncAnchorState::LocalAnchorRight {
@@ -308,8 +353,8 @@ impl CxOpenXrSession {
                     .async_state
                     .error(response.request_id != request_id, "request_id")?;
 
-                let path = Path::new(&os_type.get_cache_dir().unwrap()).join("right_anchor");
-                std::fs::write(path, response.uuid.data).ok();
+                write_cache_bytes(os_type, LOCAL_ANCHOR_RIGHT_FILE, &response.uuid.data);
+                self.anchor.persisted_anchor_present = true;
                 if let Err(e) = self.set_space_status_request(
                     xr,
                     &[left_space, right_space],
@@ -769,9 +814,27 @@ impl CxOpenXrSession {
 pub struct CxOpenXrAnchor {
     anchor: Option<SpaceAnchor>,
     async_state: AsyncAnchorState,
+    persisted_anchor_present: bool,
+    floor_y: Option<f32>,
 }
 
 impl CxOpenXrAnchor {
+    pub fn anchor_persisted(&self) -> bool {
+        self.anchor.is_some() || self.persisted_anchor_present
+    }
+
+    pub fn floor_y(&self) -> Option<f32> {
+        self.floor_y
+    }
+
+    pub fn set_floor_y(&mut self, os_type: &OsType, floor_y: f32) {
+        if !floor_y.is_finite() {
+            return;
+        }
+        self.floor_y = Some(floor_y);
+        write_floor_y_cache_file(os_type, floor_y);
+    }
+
     pub fn locate_anchor(
         &self,
         xr: &LibOpenXr,

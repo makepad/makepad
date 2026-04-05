@@ -24,6 +24,7 @@ use std::{
 const DEPTH_SURFACE_MESH_IDLE_WAIT_MILLIS: u64 = 8;
 const DEPTH_COOPERATIVE_STEP_INTERVAL_MILLIS: u64 = 8;
 const DEPTH_COOPERATIVE_IDLE_POLL_INTERVAL_MILLIS: u64 = 33;
+const DEPTH_TSDF_INPUT_THROTTLING_DISABLED: bool = true;
 
 #[derive(Default)]
 struct LatestDepthJobMailbox {
@@ -175,14 +176,16 @@ impl CxOpenXrDepthMeshPipeline {
             };
 
         let now = Instant::now();
-        if !submit_should_readback_depth_frame(
-            self.store.latest_tsdf_snapshot().as_deref(),
-            camera_world,
-            inv_depth_proj,
-            world_from_depth_view,
-            now,
-            self.last_depth_readback_at,
-        ) {
+        if !DEPTH_TSDF_INPUT_THROTTLING_DISABLED
+            && !submit_should_readback_depth_frame(
+                self.store.latest_tsdf_snapshot().as_deref(),
+                camera_world,
+                inv_depth_proj,
+                world_from_depth_view,
+                now,
+                self.last_depth_readback_at,
+            )
+        {
             self.store.record_drop();
             return Ok(());
         }
@@ -288,10 +291,11 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: SharedLatestDepthJobMailbox, sto
         }
 
         let can_integrate_depth = pending_depth_candidate.is_some()
-            && last_depth_integration_at.is_none_or(|last| {
-                last.elapsed()
-                    >= Duration::from_millis(DEPTH_TSD_TARGET_INTEGRATION_INTERVAL_MILLIS)
-            });
+            && (DEPTH_TSDF_INPUT_THROTTLING_DISABLED
+                || last_depth_integration_at.is_none_or(|last| {
+                    last.elapsed()
+                        >= Duration::from_millis(DEPTH_TSD_TARGET_INTEGRATION_INTERVAL_MILLIS)
+                }));
         if can_integrate_depth {
             let candidate = pending_depth_candidate
                 .take()

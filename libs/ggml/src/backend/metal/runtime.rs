@@ -499,6 +499,7 @@ mod imp {
         library: StrongId,
         pipeline_cache: HashMap<String, MetalPipeline>,
         active_command_buffer: Option<StrongId>,
+        active_compute_encoder: Option<StrongId>,
         last_command_buffer: Option<StrongId>,
     }
 
@@ -568,6 +569,7 @@ mod imp {
                     library,
                     pipeline_cache: HashMap::new(),
                     active_command_buffer: None,
+                    active_compute_encoder: None,
                     last_command_buffer: None,
                 })),
                 info,
@@ -919,11 +921,23 @@ mod imp {
             if self.active_command_buffer.is_some() {
                 return Err("Metal command batch is already active".to_string());
             }
+            if self.active_compute_encoder.is_some() {
+                return Err("Metal compute encoder is already active".to_string());
+            }
             self.active_command_buffer = Some(self.new_command_buffer()?);
             Ok(())
         }
 
+        fn end_active_compute_encoder(&mut self) {
+            if let Some(encoder) = self.active_compute_encoder.take() {
+                unsafe {
+                    let _: () = msg_send![encoder.as_id(), endEncoding];
+                }
+            }
+        }
+
         fn end_command_batch(&mut self) -> MetalResult<()> {
+            self.end_active_compute_encoder();
             let command_buffer = self
                 .active_command_buffer
                 .take()
@@ -936,17 +950,23 @@ mod imp {
         }
 
         fn discard_command_batch(&mut self) -> MetalResult<()> {
+            self.end_active_compute_encoder();
             self.active_command_buffer = None;
             Ok(())
         }
 
         fn memory_barrier_buffers(&mut self) -> MetalResult<()> {
-            let (command_buffer, commit_when_done) =
-                if let Some(command_buffer) = self.active_command_buffer.as_ref() {
-                    (command_buffer.clone(), false)
-                } else {
-                    (self.new_command_buffer()?, true)
-                };
+            if let Some(encoder) = self.active_compute_encoder.as_ref() {
+                unsafe {
+                    let _: () = msg_send![
+                        encoder.as_id(),
+                        memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS
+                    ];
+                }
+                return Ok(());
+            }
+
+            let command_buffer = self.new_command_buffer()?;
             let encoder_obj: ObjcId =
                 unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
             let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
@@ -958,14 +978,10 @@ mod imp {
                     memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS
                 ];
                 let _: () = msg_send![encoder.as_id(), endEncoding];
-                if commit_when_done {
-                    let _: () = msg_send![command_buffer.as_id(), commit];
-                }
+                let _: () = msg_send![command_buffer.as_id(), commit];
             }
 
-            if commit_when_done {
-                self.last_command_buffer = Some(command_buffer);
-            }
+            self.last_command_buffer = Some(command_buffer);
             Ok(())
         }
 
@@ -1251,16 +1267,30 @@ mod imp {
             threadgroups: MetalSize,
             threads_per_threadgroup: MetalSize,
         ) -> MetalResult<()> {
+            let batched = self.active_command_buffer.is_some();
             let (command_buffer, commit_when_done) =
                 if let Some(command_buffer) = self.active_command_buffer.as_ref() {
                     (command_buffer.clone(), false)
                 } else {
                     (self.new_command_buffer()?, true)
                 };
-            let encoder_obj: ObjcId =
-                unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
-            let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
-                .ok_or_else(|| "computeCommandEncoder returned nil".to_string())?;
+            let encoder = if batched {
+                if let Some(encoder) = self.active_compute_encoder.as_ref() {
+                    encoder.clone()
+                } else {
+                    let encoder_obj: ObjcId =
+                        unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
+                    let encoder = unsafe { StrongId::from_unowned(encoder_obj) }
+                        .ok_or_else(|| "computeCommandEncoder returned nil".to_string())?;
+                    self.active_compute_encoder = Some(encoder.clone());
+                    encoder
+                }
+            } else {
+                let encoder_obj: ObjcId =
+                    unsafe { msg_send![command_buffer.as_id(), computeCommandEncoder] };
+                unsafe { StrongId::from_unowned(encoder_obj) }
+                    .ok_or_else(|| "computeCommandEncoder returned nil".to_string())?
+            };
 
             unsafe {
                 let _: () = msg_send![encoder.as_id(), setComputePipelineState: pipeline.as_id()];
@@ -1305,7 +1335,9 @@ mod imp {
                     dispatchThreadgroups: tgs
                     threadsPerThreadgroup: tpg
                 ];
-                let _: () = msg_send![encoder.as_id(), endEncoding];
+                if !batched {
+                    let _: () = msg_send![encoder.as_id(), endEncoding];
+                }
                 if commit_when_done {
                     let _: () = msg_send![command_buffer.as_id(), commit];
                 }
