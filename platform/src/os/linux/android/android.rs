@@ -2475,6 +2475,10 @@ impl Cx {
                 CxOsOp::XrSetLocalAnchor(anchor) => {
                     self.os.openxr.set_local_anchor(anchor);
                 }
+                CxOsOp::XrSetLocalFloor(floor_y) => {
+                    let os_type = self.os_type().clone();
+                    self.os.openxr.set_local_floor(floor_y, &os_type);
+                }
                 CxOsOp::XrDiscoverAnchor(id) => {
                     self.os.openxr.discover_anchor(id);
                 }

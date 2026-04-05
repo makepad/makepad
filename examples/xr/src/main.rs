@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 app_main!(App);
 
 const ACTIVITY_POSE_SYNC_INTERVAL_SECONDS: f64 = 0.6;
+const DEBUG_VIEW_REFRESH_INTERVAL_SECONDS: f64 = 1.0;
 const ACTIVITY_POSE_SYNC_POSITION_EPSILON_METERS: f32 = 0.015;
 const ACTIVITY_POSE_SYNC_ROTATION_EPSILON_DEGREES: f32 = 1.5;
 const TANK_TURRET_YAW_SPEED_RADPS: f32 = 1.5;
@@ -945,6 +946,8 @@ pub struct App {
     network_started: bool,
     #[rust]
     last_debug_text: String,
+    #[rust]
+    last_debug_refresh_at: Option<f64>,
     #[rust]
     last_wrist_perf_text: String,
     #[rust]
@@ -2175,6 +2178,15 @@ impl App {
     }
 
     fn refresh_debug_fields(&mut self, cx: &mut Cx) {
+        let now = Cx::time_now();
+        if self
+            .last_debug_refresh_at
+            .is_some_and(|last| now - last < DEBUG_VIEW_REFRESH_INTERVAL_SECONDS)
+        {
+            return;
+        }
+        self.last_debug_refresh_at = Some(now);
+
         let mut draw_top_children_text = String::new();
         let (
             surface_count,

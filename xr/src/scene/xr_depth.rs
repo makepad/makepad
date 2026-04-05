@@ -372,7 +372,7 @@ impl XrEnv {
         let Some(scene) = scene else {
             return;
         };
-        sync_depth_query_surfaces_with_store(retained_hits, Some(scene), &cx.xr_tsdf());
+        sync_depth_query_surfaces_with_store(retained_hits, Some(scene), &cx.xr_tsdf(), None);
     }
 }
 
@@ -639,16 +639,17 @@ pub(super) fn sync_depth_query_surfaces_with_store(
     retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
     scene: Option<&mut RapierScene>,
     depth_mesh: &XrTsdfStore,
+    floor_y_override: Option<f32>,
 ) {
     let Some(scene) = scene else {
         return;
     };
     let snapshot = depth_mesh.latest_tsdf_snapshot();
-    scene.sync_floor_halfspace(
+    scene.sync_floor_halfspace(floor_y_override.or_else(|| {
         snapshot
             .as_deref()
-            .and_then(|snapshot| snapshot.lowest_y_meters()),
-    );
+            .and_then(|snapshot| snapshot.lowest_y_meters())
+    }));
     if !XR_ENABLE_DEPTH_QUERY_PHYSICS {
         return;
     }

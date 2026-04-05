@@ -19,6 +19,7 @@ use crate::weights::LoadedGgufWeights;
 pub enum ProbeInputKind {
     TokenIds {
         token_embedding_name: String,
+        token_embedding_scale: Option<f32>,
     },
     Embeddings {
         hidden_size: u32,
@@ -32,6 +33,7 @@ pub struct LogitsProbeSpec {
     pub output_norm_name: String,
     pub output_name: String,
     pub rms_epsilon: f32,
+    pub final_logit_softcap: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -197,6 +199,46 @@ fn causal_mask_f32_bytes(n_tokens: usize) -> Vec<u8> {
     bytes
 }
 
+fn causal_window_key_start(position: usize, causal_window: Option<usize>) -> usize {
+    causal_window
+        .map(|window| position.saturating_add(1).saturating_sub(window))
+        .unwrap_or(0)
+}
+
+fn causal_mask_f16_bytes_with_window(n_tokens: usize, causal_window: Option<usize>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(n_tokens * n_tokens * std::mem::size_of::<u16>());
+    let zero = f32_to_f16(0.0);
+    let neg_inf = f32_to_f16(f32::NEG_INFINITY);
+    for query in 0..n_tokens {
+        let key_start = causal_window_key_start(query, causal_window);
+        for key in 0..n_tokens {
+            let value = if key > query || key < key_start {
+                neg_inf
+            } else {
+                zero
+            };
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes
+}
+
+fn causal_mask_f32_bytes_with_window(n_tokens: usize, causal_window: Option<usize>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(n_tokens * n_tokens * std::mem::size_of::<f32>());
+    for query in 0..n_tokens {
+        let key_start = causal_window_key_start(query, causal_window);
+        for key in 0..n_tokens {
+            let value = if key > query || key < key_start {
+                f32::NEG_INFINITY
+            } else {
+                0.0
+            };
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes
+}
+
 fn position_causal_mask_f16_bytes(key_count: usize, positions: &[i32]) -> Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(
         positions
@@ -218,6 +260,42 @@ fn position_causal_mask_f16_bytes(key_count: usize, positions: &[i32]) -> Result
         }
         for key in 0..key_count {
             let value = if key > position { neg_inf } else { zero };
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
+fn position_causal_mask_f16_bytes_with_window(
+    key_count: usize,
+    positions: &[i32],
+    causal_window: Option<usize>,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(
+        positions
+            .len()
+            .checked_mul(key_count)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<u16>()))
+            .ok_or_else(|| LlamaError::format("overflow computing attention decode mask bytes"))?,
+    );
+    let zero = f32_to_f16(0.0);
+    let neg_inf = f32_to_f16(f32::NEG_INFINITY);
+    for &position in positions {
+        let position = usize::try_from(position)
+            .map_err(|_| LlamaError::format(format!("negative attention position {}", position)))?;
+        if position >= key_count {
+            return Err(LlamaError::format(format!(
+                "attention position {} exceeds key_count {}",
+                position, key_count
+            )));
+        }
+        let key_start = causal_window_key_start(position, causal_window);
+        for key in 0..key_count {
+            let value = if key > position || key < key_start {
+                neg_inf
+            } else {
+                zero
+            };
             bytes.extend_from_slice(&value.to_le_bytes());
         }
     }
@@ -253,6 +331,40 @@ fn position_causal_mask_f32_bytes(key_count: usize, positions: &[i32]) -> Result
     Ok(bytes)
 }
 
+fn position_causal_mask_f32_bytes_with_window(
+    key_count: usize,
+    positions: &[i32],
+    causal_window: Option<usize>,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(
+        positions
+            .len()
+            .checked_mul(key_count)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| LlamaError::format("overflow computing attention decode mask bytes"))?,
+    );
+    for &position in positions {
+        let position = usize::try_from(position)
+            .map_err(|_| LlamaError::format(format!("negative attention position {}", position)))?;
+        if position >= key_count {
+            return Err(LlamaError::format(format!(
+                "attention position {} exceeds key_count {}",
+                position, key_count
+            )));
+        }
+        let key_start = causal_window_key_start(position, causal_window);
+        for key in 0..key_count {
+            let value = if key > position || key < key_start {
+                f32::NEG_INFINITY
+            } else {
+                0.0
+            };
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
 fn flash_attention_supported_head_dim(head_dim: u32) -> bool {
     matches!(
         head_dim,
@@ -276,11 +388,12 @@ fn attention_mask_bytes_for_tensor(
     ctx: &Context,
     tensor_id: TensorId,
     n_tokens: usize,
+    causal_window: Option<usize>,
 ) -> Result<Vec<u8>> {
     let tensor = require_tensor(ctx, tensor_id)?;
     match tensor.desc.ty {
-        TensorType::F16 => Ok(causal_mask_f16_bytes(n_tokens)),
-        TensorType::F32 => Ok(causal_mask_f32_bytes(n_tokens)),
+        TensorType::F16 => Ok(causal_mask_f16_bytes_with_window(n_tokens, causal_window)),
+        TensorType::F32 => Ok(causal_mask_f32_bytes_with_window(n_tokens, causal_window)),
         other => Err(LlamaError::unsupported(format!(
             "unsupported attention block mask tensor type {}",
             other.name()
@@ -293,11 +406,16 @@ fn position_attention_mask_bytes_for_tensor(
     tensor_id: TensorId,
     key_count: usize,
     positions: &[i32],
+    causal_window: Option<usize>,
 ) -> Result<Vec<u8>> {
     let tensor = require_tensor(ctx, tensor_id)?;
     match tensor.desc.ty {
-        TensorType::F16 => position_causal_mask_f16_bytes(key_count, positions),
-        TensorType::F32 => position_causal_mask_f32_bytes(key_count, positions),
+        TensorType::F16 => {
+            position_causal_mask_f16_bytes_with_window(key_count, positions, causal_window)
+        }
+        TensorType::F32 => {
+            position_causal_mask_f32_bytes_with_window(key_count, positions, causal_window)
+        }
         other => Err(LlamaError::unsupported(format!(
             "unsupported attention decode mask tensor type {}",
             other.name()
@@ -314,12 +432,13 @@ pub struct AttentionBlockSpec {
     pub q_layout: AttentionQueryLayout,
     pub k_proj_name: String,
     pub k_proj_scale_name: Option<String>,
-    pub v_proj_name: String,
+    pub v_proj_name: Option<String>,
     pub v_proj_scale_name: Option<String>,
     pub output_proj_name: String,
     pub output_proj_scale_name: Option<String>,
     pub q_norm_name: Option<String>,
     pub k_norm_name: Option<String>,
+    pub v_norm_epsilon: Option<f32>,
     pub q_head_dim: u32,
     pub q_head_count: u32,
     pub k_head_dim: u32,
@@ -327,7 +446,10 @@ pub struct AttentionBlockSpec {
     pub v_head_dim: u32,
     pub rms_epsilon: f32,
     pub rope: Option<AttentionRopeSpec>,
+    pub rope_factors_name: Option<String>,
+    pub attention_scale: f32,
     pub causal: bool,
+    pub causal_window: Option<u32>,
     pub residual: bool,
 }
 
@@ -393,6 +515,8 @@ pub struct AttentionKvCacheSpec {
 pub struct AttentionDecodeSpec {
     pub block: AttentionBlockSpec,
     pub cache: AttentionKvCacheSpec,
+    pub cache_layer_index: u32,
+    pub write_kv: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -558,6 +682,26 @@ pub struct DenseLayerFfnSpec {
 }
 
 #[derive(Clone, Debug)]
+pub struct HybridPerLayerInputProjectSpec {
+    pub token_embedding_name: String,
+    pub token_embedding_scale: Option<f32>,
+    pub model_proj_name: String,
+    pub model_proj_scale: Option<f32>,
+    pub proj_norm: RmsNormSpec,
+    pub hidden_size: u32,
+    pub layer_count: u32,
+    pub combine_scale: Option<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct HybridPerLayerInputLayerSpec {
+    pub input_gate_name: String,
+    pub proj_name: String,
+    pub post_norm: RmsNormSpec,
+    pub activation: UnaryOp,
+}
+
+#[derive(Clone, Debug)]
 pub struct MoeSharedExpertSpec {
     pub ffn: DenseGatedFfnSpec,
     pub output_gate_name: Option<String>,
@@ -641,7 +785,11 @@ pub enum HybridLayerSpec {
     Attention {
         layer_index: u32,
         decode: AttentionDecodeSpec,
+        post_attention_norm: Option<RmsNormSpec>,
         ffn: HybridLayerFfnSpec,
+        post_ffn_norm: Option<RmsNormSpec>,
+        per_layer_input: Option<HybridPerLayerInputLayerSpec>,
+        output_scale_name: Option<String>,
     },
     Recurrent {
         layer_index: u32,
@@ -656,6 +804,8 @@ pub struct HybridDecodeSpec {
     pub output_norm_name: String,
     pub output_name: String,
     pub rms_epsilon: f32,
+    pub final_logit_softcap: Option<f32>,
+    pub per_layer_input: Option<HybridPerLayerInputProjectSpec>,
     pub layers: Vec<HybridLayerSpec>,
 }
 
@@ -671,6 +821,7 @@ pub struct HybridAttentionCacheView {
     pub max_context: usize,
     pub graph_key_count: usize,
     pub max_sequences: i64,
+    pub causal_window: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -803,6 +954,7 @@ pub struct HybridMoeSelection {
 pub struct HybridDecodeGraph {
     pub graph: Graph,
     pub input_primary: TensorId,
+    pub input_per_layer_primary: Option<TensorId>,
     pub input_output_ids: TensorId,
     pub input_positions: Option<TensorId>,
     pub input_attention_write_indices: Option<TensorId>,
@@ -1015,12 +1167,14 @@ impl HybridCacheLayout {
             spec.attention_k_type,
             spec.attention_k_width
                 .checked_mul(u64::from(spec.n_ctx_seq))
+                .and_then(|v| v.checked_mul(u64::from(spec.n_seq_max)))
                 .ok_or_else(|| LlamaError::format("overflow computing key-cache elements"))?,
         )?;
         let attention_v_bytes_per_layer = bytes_for_elements(
             spec.attention_v_type,
             spec.attention_v_width
                 .checked_mul(u64::from(spec.n_ctx_seq))
+                .and_then(|v| v.checked_mul(u64::from(spec.n_seq_max)))
                 .ok_or_else(|| LlamaError::format("overflow computing value-cache elements"))?,
         )?;
         let recurrent_r_bytes_per_layer = bytes_for_elements(
@@ -1114,10 +1268,18 @@ pub fn build_logits_probe_graph(
     let input_embed = match &spec.input {
         ProbeInputKind::TokenIds {
             token_embedding_name,
+            token_embedding_scale,
         } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
-            ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
-                .map_err(LlamaError::format)?
+            let input_embed = ctx
+                .get_rows(token_embd, input_primary, BufferUsage::Activations)
+                .map_err(LlamaError::format)?;
+            apply_optional_input_scale(
+                ctx,
+                input_embed,
+                *token_embedding_scale,
+                "probe.input_embed_scaled",
+            )?
         }
         ProbeInputKind::Embeddings { .. } => input_primary,
     };
@@ -1144,9 +1306,20 @@ pub fn build_logits_probe_graph(
         .map_err(LlamaError::format)?;
 
     let output = require_tensor_id(tensor_ids, &spec.output_name)?;
-    let result_output = ctx
+    let mut result_output = ctx
         .mul_mat(output, result_norm_scaled, BufferUsage::Activations)
         .map_err(LlamaError::format)?;
+    if let Some(softcap) = spec.final_logit_softcap {
+        result_output = ctx
+            .scale(result_output, 1.0 / softcap, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        result_output = ctx
+            .unary(result_output, UnaryOp::Tanh, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        result_output = ctx
+            .scale(result_output, softcap, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+    }
     ctx.set_tensor_name(result_output, "probe.result_output")
         .map_err(LlamaError::format)?;
     mark_output(ctx, result_output)?;
@@ -1336,7 +1509,9 @@ fn build_attention_mha_output(
     v: TensorId,
     input_mask: Option<TensorId>,
     q_head_dim: u32,
+    attention_scale: f32,
     n_tokens: usize,
+    allow_flash_attention: bool,
     prefix: &str,
 ) -> Result<TensorId> {
     let v_trans = {
@@ -1371,7 +1546,7 @@ fn build_attention_mha_output(
     let mut k = ctx.permute(k, [0, 2, 1, 3]).map_err(LlamaError::format)?;
     let mut v = ctx.permute(v, [0, 2, 1, 3]).map_err(LlamaError::format)?;
 
-    let use_flash_attention = should_use_flash_attention(q_head_dim, n_tokens);
+    let use_flash_attention = allow_flash_attention && should_use_flash_attention(q_head_dim, n_tokens);
 
     if use_flash_attention {
         if v_trans {
@@ -1396,7 +1571,7 @@ fn build_attention_mha_output(
                 k,
                 v,
                 input_mask,
-                1.0f32 / (q_head_dim as f32).sqrt(),
+                attention_scale,
                 0.0,
                 0.0,
                 BufferUsage::Activations,
@@ -1428,7 +1603,7 @@ fn build_attention_mha_output(
         .soft_max_ext(
             kq,
             input_mask,
-            1.0f32 / (q_head_dim as f32).sqrt(),
+            attention_scale,
             0.0,
             BufferUsage::Activations,
         )
@@ -1535,10 +1710,18 @@ pub fn build_attention_block_graph(
     let input_embed = match &spec.input {
         ProbeInputKind::TokenIds {
             token_embedding_name,
+            token_embedding_scale,
         } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
-            ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
-                .map_err(LlamaError::format)?
+            let input_embed = ctx
+                .get_rows(token_embd, input_primary, BufferUsage::Activations)
+                .map_err(LlamaError::format)?;
+            apply_optional_input_scale(
+                ctx,
+                input_embed,
+                *token_embedding_scale,
+                "attn.input_embed_scaled",
+            )?
         }
         ProbeInputKind::Embeddings { .. } => input_primary,
     };
@@ -1702,6 +1885,35 @@ pub fn build_attention_block_graph(
     ctx.set_tensor_name(k_states, "attn.k_states")
         .map_err(LlamaError::format)?;
 
+    let mut v_states = if let Some(v_proj_name) = &spec.v_proj_name {
+        let v_weight = require_tensor_id(tensor_ids, v_proj_name)?;
+        let mut v_states = ctx
+            .mul_mat(v_weight, input_norm, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        v_states = apply_optional_proj_scale(
+            ctx,
+            tensor_ids,
+            v_states,
+            &spec.v_proj_scale_name,
+            "attn.v_states_scaled",
+        )?;
+        v_states = ctx
+            .reshape(
+                v_states,
+                &[
+                    i64::from(spec.v_head_dim),
+                    i64::from(spec.kv_head_count),
+                    n_tokens as i64,
+                ],
+            )
+            .map_err(LlamaError::format)?;
+        ctx.set_tensor_name(v_states, "attn.v_states")
+            .map_err(LlamaError::format)?;
+        v_states
+    } else {
+        k_states
+    };
+
     if let Some(k_norm_name) = &spec.k_norm_name {
         k_states = build_rms_norm_mul(
             ctx,
@@ -1711,6 +1923,9 @@ pub fn build_attention_block_graph(
             k_norm_name,
             "attn.k_norm",
         )?;
+    }
+    if let Some(v_norm_epsilon) = spec.v_norm_epsilon {
+        v_states = build_rms_norm(ctx, v_states, v_norm_epsilon, "attn.v_norm")?;
     }
     let k_norm_store = ctx
         .view_2d(
@@ -1726,41 +1941,22 @@ pub fn build_attention_block_graph(
     ctx.set_tensor_name(k_norm_store, "attn.k_norm_store")
         .map_err(LlamaError::format)?;
 
-    let v_weight = require_tensor_id(tensor_ids, &spec.v_proj_name)?;
-    let mut v_states = ctx
-        .mul_mat(v_weight, input_norm, BufferUsage::Activations)
-        .map_err(LlamaError::format)?;
-    v_states = apply_optional_proj_scale(
-        ctx,
-        tensor_ids,
-        v_states,
-        &spec.v_proj_scale_name,
-        "attn.v_states_scaled",
-    )?;
-    v_states = ctx
-        .reshape(
-            v_states,
-            &[
-                i64::from(spec.v_head_dim),
-                i64::from(spec.kv_head_count),
-                n_tokens as i64,
-            ],
-        )
-        .map_err(LlamaError::format)?;
-    ctx.set_tensor_name(v_states, "attn.v_states")
-        .map_err(LlamaError::format)?;
-
     if let Some(rope) = &spec.rope {
         let positions = input_positions.ok_or_else(|| {
             LlamaError::format(
                 "attention block rope was requested without an input positions tensor",
             )
         })?;
+        let rope_factors = spec
+            .rope_factors_name
+            .as_ref()
+            .map(|name| require_tensor_id(tensor_ids, name))
+            .transpose()?;
         q_states = ctx
             .rope_multi(
                 q_states,
                 positions,
-                None,
+                rope_factors,
                 rope.n_dims,
                 rope.sections,
                 rope.mode,
@@ -1778,7 +1974,7 @@ pub fn build_attention_block_graph(
             .rope_multi(
                 k_states,
                 positions,
-                None,
+                rope_factors,
                 rope.n_dims,
                 rope.sections,
                 rope.mode,
@@ -1841,7 +2037,9 @@ pub fn build_attention_block_graph(
         v_states,
         input_mask,
         spec.q_head_dim,
+        spec.attention_scale,
         n_tokens,
+        true,
         "attn",
     )?;
 
@@ -2027,7 +2225,15 @@ pub fn execute_prepared_attention_block_metal(
     }
     let mask_bytes = block
         .input_mask
-        .map(|input_mask| attention_mask_bytes_for_tensor(ctx, input_mask, n_tokens))
+        .map(|input_mask| {
+            attention_mask_bytes_for_tensor(
+                ctx,
+                input_mask,
+                n_tokens,
+                spec.causal_window
+                    .map(|window| usize::try_from(window).unwrap_or(usize::MAX)),
+            )
+        })
         .transpose()?;
     if let Some(input_mask) = block.input_mask {
         writes.push(MetalGraphTensorWrite {
@@ -2080,6 +2286,8 @@ struct BuiltAttentionDecode {
     input_mask: Option<TensorId>,
     k_cache: TensorId,
     v_cache: TensorId,
+    k_cache_written: TensorId,
+    v_cache_written: TensorId,
     k_cache_view: TensorId,
     v_cache_view: TensorId,
     result_output: TensorId,
@@ -2271,6 +2479,35 @@ fn build_attention_decode_from_hidden(
     ctx.set_tensor_name(k_states, format!("{prefix}.k_states"))
         .map_err(LlamaError::format)?;
 
+    let mut v_states = if let Some(v_proj_name) = &block.v_proj_name {
+        let v_weight = require_tensor_id(tensor_ids, v_proj_name)?;
+        let mut v_states = ctx
+            .mul_mat(v_weight, input_norm, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        v_states = apply_optional_proj_scale(
+            ctx,
+            tensor_ids,
+            v_states,
+            &block.v_proj_scale_name,
+            &format!("{prefix}.v_states_scaled"),
+        )?;
+        v_states = ctx
+            .reshape(
+                v_states,
+                &[
+                    i64::from(block.v_head_dim),
+                    i64::from(block.kv_head_count),
+                    n_tokens_i64,
+                ],
+            )
+            .map_err(LlamaError::format)?;
+        ctx.set_tensor_name(v_states, format!("{prefix}.v_states"))
+            .map_err(LlamaError::format)?;
+        v_states
+    } else {
+        k_states
+    };
+
     if let Some(k_norm_name) = &block.k_norm_name {
         k_states = build_rms_norm_mul(
             ctx,
@@ -2280,6 +2517,9 @@ fn build_attention_decode_from_hidden(
             k_norm_name,
             &format!("{prefix}.k_norm"),
         )?;
+    }
+    if let Some(v_norm_epsilon) = block.v_norm_epsilon {
+        v_states = build_rms_norm(ctx, v_states, v_norm_epsilon, &format!("{prefix}.v_norm"))?;
     }
     let k_norm_store = ctx
         .view_2d(
@@ -2293,30 +2533,6 @@ fn build_attention_decode_from_hidden(
         )
         .map_err(LlamaError::format)?;
     ctx.set_tensor_name(k_norm_store, format!("{prefix}.k_norm_store"))
-        .map_err(LlamaError::format)?;
-
-    let v_weight = require_tensor_id(tensor_ids, &block.v_proj_name)?;
-    let mut v_states = ctx
-        .mul_mat(v_weight, input_norm, BufferUsage::Activations)
-        .map_err(LlamaError::format)?;
-    v_states = apply_optional_proj_scale(
-        ctx,
-        tensor_ids,
-        v_states,
-        &block.v_proj_scale_name,
-        &format!("{prefix}.v_states_scaled"),
-    )?;
-    v_states = ctx
-        .reshape(
-            v_states,
-            &[
-                i64::from(block.v_head_dim),
-                i64::from(block.kv_head_count),
-                n_tokens_i64,
-            ],
-        )
-        .map_err(LlamaError::format)?;
-    ctx.set_tensor_name(v_states, format!("{prefix}.v_states"))
         .map_err(LlamaError::format)?;
 
     let input_mask = if block.causal {
@@ -2346,11 +2562,16 @@ fn build_attention_decode_from_hidden(
         let rope_positions = input_rope_positions.ok_or_else(|| {
             LlamaError::format("attention decode rope requested without a rope position tensor")
         })?;
+        let rope_factors = block
+            .rope_factors_name
+            .as_ref()
+            .map(|name| require_tensor_id(tensor_ids, name))
+            .transpose()?;
         q_states = ctx
             .rope_multi(
                 q_states,
                 rope_positions,
-                None,
+                rope_factors,
                 rope.n_dims,
                 rope.sections,
                 rope.mode,
@@ -2368,7 +2589,7 @@ fn build_attention_decode_from_hidden(
             .rope_multi(
                 k_states,
                 rope_positions,
-                None,
+                rope_factors,
                 rope.n_dims,
                 rope.sections,
                 rope.mode,
@@ -2452,12 +2673,16 @@ fn build_attention_decode_from_hidden(
         (k_cache, v_cache)
     };
 
-    let k_cache_written = ctx
-        .set_rows(k_cache, k_store, input_write_indices, BufferUsage::State)
-        .map_err(LlamaError::format)?;
-    let v_cache_written = ctx
-        .set_rows(v_cache, v_store, input_write_indices, BufferUsage::State)
-        .map_err(LlamaError::format)?;
+    let (k_cache_written, v_cache_written) = if spec.write_kv {
+        (
+            ctx.set_rows(k_cache, k_store, input_write_indices, BufferUsage::State)
+                .map_err(LlamaError::format)?,
+            ctx.set_rows(v_cache, v_store, input_write_indices, BufferUsage::State)
+                .map_err(LlamaError::format)?,
+        )
+    } else {
+        (k_cache, v_cache)
+    };
 
     let k_cache_view = ctx
         .view_4d(
@@ -2498,6 +2723,8 @@ fn build_attention_decode_from_hidden(
     ctx.set_tensor_name(v_cache_view, format!("{prefix}.v_cache_view"))
         .map_err(LlamaError::format)?;
 
+    let allow_flash_attention =
+        !(shared_cache.is_some() && !spec.write_kv && block.causal_window.is_none());
     let mut attn = build_attention_mha_output(
         ctx,
         q_states,
@@ -2505,7 +2732,9 @@ fn build_attention_decode_from_hidden(
         v_cache_view,
         input_mask,
         block.q_head_dim,
+        block.attention_scale,
         n_tokens,
+        allow_flash_attention,
         prefix,
     )?;
 
@@ -2548,6 +2777,8 @@ fn build_attention_decode_from_hidden(
         input_mask,
         k_cache,
         v_cache,
+        k_cache_written,
+        v_cache_written,
         k_cache_view,
         v_cache_view,
         result_output,
@@ -2653,10 +2884,18 @@ pub fn build_attention_decode_graph_with_key_count(
     let input_embed = match &block.input {
         ProbeInputKind::TokenIds {
             token_embedding_name,
+            token_embedding_scale,
         } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
-            ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
-                .map_err(LlamaError::format)?
+            let input_embed = ctx
+                .get_rows(token_embd, input_primary, BufferUsage::Activations)
+                .map_err(LlamaError::format)?;
+            apply_optional_input_scale(
+                ctx,
+                input_embed,
+                *token_embedding_scale,
+                "attn_decode.input_embed_scaled",
+            )?
         }
         ProbeInputKind::Embeddings { .. } => input_primary,
     };
@@ -2967,6 +3206,9 @@ pub fn execute_prepared_attention_decode_metal(
                 input_mask,
                 key_count,
                 positions,
+                spec.block
+                    .causal_window
+                    .map(|window| usize::try_from(window).unwrap_or(usize::MAX)),
             )?;
             Ok::<Vec<u8>, LlamaError>(bytes)
         })
@@ -4267,10 +4509,18 @@ pub fn build_delta_net_recurrent_decode_graph(
     let input_embed = match &block.input {
         ProbeInputKind::TokenIds {
             token_embedding_name,
+            token_embedding_scale,
         } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
-            ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
-                .map_err(LlamaError::format)?
+            let input_embed = ctx
+                .get_rows(token_embd, input_primary, BufferUsage::Activations)
+                .map_err(LlamaError::format)?;
+            apply_optional_input_scale(
+                ctx,
+                input_embed,
+                *token_embedding_scale,
+                "recur_decode.input_embed_scaled",
+            )?
         }
         ProbeInputKind::Embeddings { .. } => input_primary,
     };
@@ -4985,10 +5235,18 @@ pub fn build_moe_ffn_graph(
     let input_embed = match &spec.input {
         ProbeInputKind::TokenIds {
             token_embedding_name,
+            token_embedding_scale,
         } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
-            ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
-                .map_err(LlamaError::format)?
+            let input_embed = ctx
+                .get_rows(token_embd, input_primary, BufferUsage::Activations)
+                .map_err(LlamaError::format)?;
+            apply_optional_input_scale(
+                ctx,
+                input_embed,
+                *token_embedding_scale,
+                "moe_ffn.input_embed_scaled",
+            )?
         }
         ProbeInputKind::Embeddings { .. } => input_primary,
     };
@@ -5165,6 +5423,7 @@ pub fn allocate_hybrid_shared_cache_tensors(
     spec: &HybridDecodeSpec,
 ) -> Result<HybridSharedCacheTensorIds> {
     let mut shared = HybridSharedCacheTensorIds::default();
+    let mut allocated_attention = BTreeMap::<u32, HybridAttentionCacheIds>::new();
 
     for layer in &spec.layers {
         match layer {
@@ -5177,35 +5436,64 @@ pub fn allocate_hybrid_shared_cache_tensors(
                     i64::from(decode.block.k_head_dim) * i64::from(decode.block.kv_head_count);
                 let v_width =
                     i64::from(decode.block.v_head_dim) * i64::from(decode.block.kv_head_count);
-                let k_cache = ctx
-                    .new_named_tensor(
-                        format!("hybrid_cache.layer{layer_index}.k_cache"),
-                        decode.cache.k_type,
-                        3,
-                        &[
-                            k_width,
-                            i64::from(decode.cache.max_context),
-                            i64::from(decode.cache.max_sequences),
-                        ],
-                        BufferUsage::State,
-                    )
-                    .map_err(LlamaError::format)?;
-                let v_cache = ctx
-                    .new_named_tensor(
-                        format!("hybrid_cache.layer{layer_index}.v_cache"),
-                        decode.cache.v_type,
-                        3,
-                        &[
-                            v_width,
-                            i64::from(decode.cache.max_context),
-                            i64::from(decode.cache.max_sequences),
-                        ],
-                        BufferUsage::State,
-                    )
-                    .map_err(LlamaError::format)?;
-                shared
-                    .attention
-                    .insert(*layer_index, HybridAttentionCacheIds { k_cache, v_cache });
+                let cache_layer_index = decode.cache_layer_index;
+                let cache_ids = if let Some(existing) = allocated_attention.get(&cache_layer_index)
+                {
+                    let existing_k = require_tensor(ctx, existing.k_cache)?;
+                    let existing_v = require_tensor(ctx, existing.v_cache)?;
+                    let expected_k = [
+                        k_width,
+                        i64::from(decode.cache.max_context),
+                        i64::from(decode.cache.max_sequences),
+                    ];
+                    let expected_v = [
+                        v_width,
+                        i64::from(decode.cache.max_context),
+                        i64::from(decode.cache.max_sequences),
+                    ];
+                    if existing_k.desc.ty != decode.cache.k_type
+                        || existing_v.desc.ty != decode.cache.v_type
+                        || existing_k.ne[..3] != expected_k
+                        || existing_v.ne[..3] != expected_v
+                    {
+                        return Err(LlamaError::format(format!(
+                            "hybrid attention cache alias mismatch: layer {} reuses cache layer {} with incompatible shape or type",
+                            layer_index, cache_layer_index
+                        )));
+                    }
+                    existing.clone()
+                } else {
+                    let k_cache = ctx
+                        .new_named_tensor(
+                            format!("hybrid_cache.layer{cache_layer_index}.k_cache"),
+                            decode.cache.k_type,
+                            3,
+                            &[
+                                k_width,
+                                i64::from(decode.cache.max_context),
+                                i64::from(decode.cache.max_sequences),
+                            ],
+                            BufferUsage::State,
+                        )
+                        .map_err(LlamaError::format)?;
+                    let v_cache = ctx
+                        .new_named_tensor(
+                            format!("hybrid_cache.layer{cache_layer_index}.v_cache"),
+                            decode.cache.v_type,
+                            3,
+                            &[
+                                v_width,
+                                i64::from(decode.cache.max_context),
+                                i64::from(decode.cache.max_sequences),
+                            ],
+                            BufferUsage::State,
+                        )
+                        .map_err(LlamaError::format)?;
+                    let cache_ids = HybridAttentionCacheIds { k_cache, v_cache };
+                    allocated_attention.insert(cache_layer_index, cache_ids.clone());
+                    cache_ids
+                };
+                shared.attention.insert(*layer_index, cache_ids);
             }
             HybridLayerSpec::Recurrent {
                 layer_index,
@@ -5265,6 +5553,222 @@ pub fn allocate_hybrid_shared_cache_tensors(
     Ok(shared)
 }
 
+fn view_contiguous_3d_axis2_slice_as_2d(
+    ctx: &mut Context,
+    tensor_id: TensorId,
+    slice_index: u32,
+    tensor_name: &str,
+) -> Result<TensorId> {
+    let tensor = require_tensor(ctx, tensor_id)?;
+    let width = tensor.ne[0];
+    let height = tensor.ne[1];
+    let depth = tensor.ne[2];
+    if width <= 0 || height <= 0 || depth <= 0 {
+        return Err(LlamaError::format(format!(
+            "expected non-empty 3D tensor for '{}', got shape {:?}",
+            tensor.name().unwrap_or("<unnamed>"),
+            tensor.ne
+        )));
+    }
+    let slice_index_i64 = i64::from(slice_index);
+    if slice_index_i64 >= depth {
+        return Err(LlamaError::format(format!(
+            "slice index {} is outside 0..{} for '{}'",
+            slice_index,
+            depth,
+            tensor.name().unwrap_or("<unnamed>")
+        )));
+    }
+    let row_stride = row_size(tensor.desc.ty, width)?;
+    let offset = usize::try_from(slice_index_i64)
+        .ok()
+        .and_then(|value| value.checked_mul(tensor.nb[2]))
+        .ok_or_else(|| LlamaError::format("overflow computing per-layer slice offset"))?;
+    let slice = ctx
+        .view_2d(tensor_id, width, height, row_stride, offset)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(slice, tensor_name)
+        .map_err(LlamaError::format)?;
+    Ok(slice)
+}
+
+fn build_hybrid_per_layer_inputs(
+    ctx: &mut Context,
+    tensor_ids: &BTreeMap<String, TensorId>,
+    input: &ProbeInputKind,
+    input_per_layer_primary: TensorId,
+    input_embed: TensorId,
+    spec: &HybridPerLayerInputProjectSpec,
+    n_tokens: usize,
+    prefix: &str,
+) -> Result<TensorId> {
+    let n_tokens_i64 =
+        i64::try_from(n_tokens).map_err(|_| LlamaError::format("n_tokens does not fit in i64"))?;
+    let mut selected = match input {
+        ProbeInputKind::TokenIds { .. } => {
+            let token_embd = require_tensor_id(tensor_ids, &spec.token_embedding_name)?;
+            ctx.get_rows(token_embd, input_per_layer_primary, BufferUsage::Activations)
+                .map_err(LlamaError::format)?
+        }
+        ProbeInputKind::Embeddings { .. } => {
+            return Err(LlamaError::unsupported(
+                "hybrid per-layer inputs with embedding primaries are not implemented".to_string(),
+            ));
+        }
+    };
+    ctx.set_tensor_name(selected, &format!("{prefix}.selected"))
+        .map_err(LlamaError::format)?;
+    selected = apply_optional_input_scale(
+        ctx,
+        selected,
+        spec.token_embedding_scale,
+        &format!("{prefix}.selected_scaled"),
+    )?;
+    selected = ctx
+        .reshape(
+            selected,
+            &[
+                i64::from(spec.hidden_size),
+                i64::from(spec.layer_count),
+                n_tokens_i64,
+            ],
+        )
+        .map_err(LlamaError::format)?;
+    selected = ctx.cont(selected).map_err(LlamaError::format)?;
+    ctx.set_tensor_name(selected, &format!("{prefix}.selected_reshaped"))
+        .map_err(LlamaError::format)?;
+
+    let model_proj_weight = require_tensor_id(tensor_ids, &spec.model_proj_name)?;
+    let mut model_proj = ctx
+        .mul_mat(model_proj_weight, input_embed, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(model_proj, &format!("{prefix}.model_proj"))
+        .map_err(LlamaError::format)?;
+    model_proj = apply_optional_input_scale(
+        ctx,
+        model_proj,
+        spec.model_proj_scale,
+        &format!("{prefix}.model_proj_scaled"),
+    )?;
+    model_proj = ctx
+        .reshape(
+            model_proj,
+            &[
+                i64::from(spec.hidden_size),
+                i64::from(spec.layer_count),
+                n_tokens_i64,
+            ],
+        )
+        .map_err(LlamaError::format)?;
+    model_proj = ctx.cont(model_proj).map_err(LlamaError::format)?;
+    ctx.set_tensor_name(model_proj, &format!("{prefix}.model_proj_reshaped"))
+        .map_err(LlamaError::format)?;
+    model_proj = build_rms_norm_mul(
+        ctx,
+        tensor_ids,
+        model_proj,
+        spec.proj_norm.epsilon,
+        &spec.proj_norm.weight_name,
+        &format!("{prefix}.model_proj_norm"),
+    )?;
+
+    let mut combined = ctx
+        .binary_like_a(Op::Add, model_proj, selected, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(combined, &format!("{prefix}.combined"))
+        .map_err(LlamaError::format)?;
+    combined = apply_optional_input_scale(
+        ctx,
+        combined,
+        spec.combine_scale,
+        &format!("{prefix}.combined_scaled"),
+    )?;
+    combined = ctx
+        .permute(combined, [0, 2, 1, 3])
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(combined, &format!("{prefix}.permuted"))
+        .map_err(LlamaError::format)?;
+    combined = ctx.cont(combined).map_err(LlamaError::format)?;
+    ctx.set_tensor_name(combined, &format!("{prefix}.ready"))
+        .map_err(LlamaError::format)?;
+    Ok(combined)
+}
+
+fn build_hybrid_per_layer_residual(
+    ctx: &mut Context,
+    tensor_ids: &BTreeMap<String, TensorId>,
+    hidden: TensorId,
+    shared_per_layer_inputs: TensorId,
+    spec: &HybridPerLayerInputLayerSpec,
+    layer_index: u32,
+    output_ids: Option<TensorId>,
+    n_tokens: usize,
+    prefix: &str,
+) -> Result<TensorId> {
+    let gate_weight = require_tensor_id(tensor_ids, &spec.input_gate_name)?;
+    let mut gate = ctx
+        .mul_mat(gate_weight, hidden, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(gate, &format!("{prefix}.gate"))
+        .map_err(LlamaError::format)?;
+    gate = ctx
+        .unary(gate, spec.activation, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(gate, &format!("{prefix}.gate_act"))
+        .map_err(LlamaError::format)?;
+
+    let mut layer_inputs = view_contiguous_3d_axis2_slice_as_2d(
+        ctx,
+        shared_per_layer_inputs,
+        layer_index,
+        &format!("{prefix}.slice"),
+    )?;
+    if let Some(output_ids) = output_ids {
+        layer_inputs = ctx
+            .get_rows(layer_inputs, output_ids, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        ctx.set_tensor_name(layer_inputs, &format!("{prefix}.slice.out_ids"))
+            .map_err(LlamaError::format)?;
+    } else {
+        let expected_tokens = i64::try_from(n_tokens)
+            .map_err(|_| LlamaError::format("n_tokens does not fit in i64"))?;
+        let layer_inputs_tensor = require_tensor(ctx, layer_inputs)?;
+        if layer_inputs_tensor.ne[1] != expected_tokens {
+            return Err(LlamaError::format(format!(
+                "per-layer slice token count mismatch: expected {}, got {}",
+                expected_tokens, layer_inputs_tensor.ne[1]
+            )));
+        }
+    }
+
+    let gated = ctx
+        .binary_like_a(Op::Mul, gate, layer_inputs, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(gated, &format!("{prefix}.gated"))
+        .map_err(LlamaError::format)?;
+
+    let proj_weight = require_tensor_id(tensor_ids, &spec.proj_name)?;
+    let projected = ctx
+        .mul_mat(proj_weight, gated, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(projected, &format!("{prefix}.projected"))
+        .map_err(LlamaError::format)?;
+    let projected = build_rms_norm_mul(
+        ctx,
+        tensor_ids,
+        projected,
+        spec.post_norm.epsilon,
+        &spec.post_norm.weight_name,
+        &format!("{prefix}.post_norm"),
+    )?;
+    let residual = ctx
+        .binary_like_a(Op::Add, hidden, projected, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(residual, &format!("{prefix}.residual"))
+        .map_err(LlamaError::format)?;
+    Ok(residual)
+}
+
 fn build_hybrid_decode_graph_impl(
     ctx: &mut Context,
     tensor_ids: &BTreeMap<String, TensorId>,
@@ -5310,6 +5814,26 @@ fn build_hybrid_decode_graph_impl(
             .map_err(LlamaError::format)?,
     };
     mark_input(ctx, input_primary)?;
+    let input_per_layer_primary = if spec.per_layer_input.is_some() {
+        match &spec.input {
+            ProbeInputKind::TokenIds { .. } => {
+                let per_layer_primary = ctx
+                    .new_named_tensor(
+                        "hybrid_decode.inp_per_layer_tokens",
+                        TensorType::I32,
+                        1,
+                        &[n_tokens as i64],
+                        BufferUsage::Activations,
+                    )
+                    .map_err(LlamaError::format)?;
+                mark_input(ctx, per_layer_primary)?;
+                Some(per_layer_primary)
+            }
+            ProbeInputKind::Embeddings { .. } => None,
+        }
+    } else {
+        None
+    };
     let input_output_ids = ctx
         .new_named_tensor(
             "hybrid_decode.inp_out_ids",
@@ -5415,19 +5939,50 @@ fn build_hybrid_decode_graph_impl(
     let mut hidden = match &spec.input {
         ProbeInputKind::TokenIds {
             token_embedding_name,
+            token_embedding_scale,
         } => {
             let token_embd = require_tensor_id(tensor_ids, token_embedding_name)?;
-            ctx.get_rows(token_embd, input_primary, BufferUsage::Activations)
-                .map_err(LlamaError::format)?
+            let input_embed = ctx
+                .get_rows(token_embd, input_primary, BufferUsage::Activations)
+                .map_err(LlamaError::format)?;
+            apply_optional_input_scale(
+                ctx,
+                input_embed,
+                *token_embedding_scale,
+                "hybrid_decode.input_embed_scaled",
+            )?
         }
         ProbeInputKind::Embeddings { .. } => input_primary,
     };
     ctx.set_tensor_name(hidden, "hybrid_decode.input_embed")
         .map_err(LlamaError::format)?;
+    let shared_per_layer_inputs = spec
+        .per_layer_input
+        .as_ref()
+        .map(|per_layer_input| {
+            let per_layer_input_hidden = ctx.cont(hidden).map_err(LlamaError::format)?;
+            ctx.set_tensor_name(
+                per_layer_input_hidden,
+                "hybrid_decode.input_embed.per_layer_copy",
+            )
+            .map_err(LlamaError::format)?;
+            build_hybrid_per_layer_inputs(
+                ctx,
+                tensor_ids,
+                &spec.input,
+                input_per_layer_primary.unwrap_or(input_primary),
+                per_layer_input_hidden,
+                per_layer_input,
+                n_tokens,
+                "hybrid_decode.per_layer_input",
+            )
+        })
+        .transpose()?;
 
     let mut attention_cache_views = Vec::new();
     let mut moe_selected_experts = Vec::new();
     let mut state_updates = Vec::new();
+    let mut current_shared_attention = shared_cache.map(|cache| cache.attention.clone());
     let last_layer = spec.layers.len().checked_sub(1).ok_or_else(|| {
         LlamaError::format("hybrid decode spec requires at least one transformer layer")
     })?;
@@ -5438,7 +5993,11 @@ fn build_hybrid_decode_graph_impl(
             HybridLayerSpec::Attention {
                 layer_index,
                 decode,
+                post_attention_norm,
                 ffn,
+                post_ffn_norm,
+                per_layer_input,
+                output_scale_name,
             } => {
                 let prefix = format!("hybrid_decode.layer{layer_index}");
                 let mut decode = decode.clone();
@@ -5453,7 +6012,9 @@ fn build_hybrid_decode_graph_impl(
                     ctx,
                     tensor_ids,
                     &decode,
-                    shared_cache.and_then(|cache| cache.attention.get(layer_index)),
+                    current_shared_attention.as_ref().and_then(|cache| {
+                        cache.get(&decode.cache_layer_index)
+                    }),
                     hidden,
                     positions,
                     input_attention_write_indices.ok_or_else(|| {
@@ -5467,6 +6028,15 @@ fn build_hybrid_decode_graph_impl(
                     attention_key_count,
                     &format!("{prefix}.attn"),
                 )?;
+                if let Some(current_shared_attention) = current_shared_attention.as_mut() {
+                    current_shared_attention.insert(
+                        decode.cache_layer_index,
+                        HybridAttentionCacheIds {
+                            k_cache: attn.k_cache_written,
+                            v_cache: attn.v_cache_written,
+                        },
+                    );
+                }
                 attention_cache_views.push(HybridAttentionCacheView {
                     layer_index: *layer_index,
                     input_mask: attn.input_mask,
@@ -5483,6 +6053,10 @@ fn build_hybrid_decode_graph_impl(
                     })?,
                     graph_key_count: attention_key_count,
                     max_sequences: i64::from(decode.cache.max_sequences),
+                    causal_window: decode
+                        .block
+                        .causal_window
+                        .map(|window| usize::try_from(window).unwrap_or(usize::MAX)),
                 });
                 let mut layer_output = attn.result_output;
                 let mut residual_input = hidden;
@@ -5497,6 +6071,16 @@ fn build_hybrid_decode_graph_impl(
                         .map_err(LlamaError::format)?;
                     ctx.set_tensor_name(residual_input, format!("{prefix}.residual_in.out_ids"))
                         .map_err(LlamaError::format)?;
+                }
+                if let Some(norm) = post_attention_norm {
+                    layer_output = build_rms_norm_mul(
+                        ctx,
+                        tensor_ids,
+                        layer_output,
+                        norm.epsilon,
+                        &norm.weight_name,
+                        &format!("{prefix}.attn_post_norm"),
+                    )?;
                 }
                 let residual = ctx
                     .binary_like_a(
@@ -5523,14 +6107,54 @@ fn build_hybrid_decode_graph_impl(
                         expert_used_count,
                     });
                 }
-                hidden = ctx
-                    .binary_like_a(
-                        Op::Add,
+                let ffn_output = if let Some(norm) = post_ffn_norm {
+                    build_rms_norm_mul(
+                        ctx,
+                        tensor_ids,
                         ffn.result_output,
-                        residual,
-                        BufferUsage::Activations,
-                    )
+                        norm.epsilon,
+                        &norm.weight_name,
+                        &format!("{prefix}.ffn_post_norm"),
+                    )?
+                } else {
+                    ffn.result_output
+                };
+                hidden = ctx
+                    .binary_like_a(Op::Add, ffn_output, residual, BufferUsage::Activations)
                     .map_err(LlamaError::format)?;
+                ctx.set_tensor_name(hidden, format!("{prefix}.pe_in"))
+                    .map_err(LlamaError::format)?;
+                if let Some(per_layer_input) = per_layer_input {
+                    let shared_per_layer_inputs = shared_per_layer_inputs.as_ref().ok_or_else(|| {
+                        LlamaError::format(format!(
+                            "layer {} requires shared per-layer inputs, but none were built",
+                            layer_index
+                        ))
+                    })?;
+                    hidden = build_hybrid_per_layer_residual(
+                        ctx,
+                        tensor_ids,
+                        hidden,
+                        *shared_per_layer_inputs,
+                        per_layer_input,
+                        *layer_index,
+                        if is_last_layer {
+                            Some(input_output_ids)
+                        } else {
+                            None
+                        },
+                        if is_last_layer { n_outputs } else { n_tokens },
+                        &format!("{prefix}.per_layer_input"),
+                    )?;
+                }
+                if let Some(scale_name) = output_scale_name {
+                    let scale = require_tensor_id(tensor_ids, scale_name)?;
+                    hidden = ctx
+                        .binary_like_a(Op::Mul, hidden, scale, BufferUsage::Activations)
+                        .map_err(LlamaError::format)?;
+                    ctx.set_tensor_name(hidden, format!("{prefix}.post_scale"))
+                        .map_err(LlamaError::format)?;
+                }
                 ctx.set_tensor_name(hidden, format!("{prefix}.post_ffn"))
                     .map_err(LlamaError::format)?;
             }
@@ -5626,9 +6250,20 @@ fn build_hybrid_decode_graph_impl(
         "hybrid_decode.result_norm",
     )?;
     let output_weight = require_tensor_id(tensor_ids, &spec.output_name)?;
-    let result_logits = ctx
+    let mut result_logits = ctx
         .mul_mat(output_weight, result_norm, BufferUsage::Activations)
         .map_err(LlamaError::format)?;
+    if let Some(softcap) = spec.final_logit_softcap {
+        result_logits = ctx
+            .scale(result_logits, 1.0 / softcap, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        result_logits = ctx
+            .unary(result_logits, UnaryOp::Tanh, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+        result_logits = ctx
+            .scale(result_logits, softcap, BufferUsage::Activations)
+            .map_err(LlamaError::format)?;
+    }
     ctx.set_tensor_name(result_logits, "hybrid_decode.result_logits")
         .map_err(LlamaError::format)?;
     mark_output(ctx, result_logits)?;
@@ -5649,6 +6284,7 @@ fn build_hybrid_decode_graph_impl(
     Ok(HybridDecodeGraph {
         graph,
         input_primary,
+        input_per_layer_primary,
         input_output_ids,
         input_positions,
         input_attention_write_indices,
@@ -6505,6 +7141,12 @@ pub fn execute_prepared_hybrid_decode_metal(
         tensor_id: decode.input_primary,
         bytes: &input_primary,
     }];
+    if let Some(input_per_layer_primary) = decode.input_per_layer_primary {
+        writes.push(MetalGraphTensorWrite {
+            tensor_id: input_per_layer_primary,
+            bytes: &input_primary,
+        });
+    }
     writes.push(MetalGraphTensorWrite {
         tensor_id: decode.input_output_ids,
         bytes: i32_slice_as_bytes(&layout.output_ids),
@@ -6561,6 +7203,7 @@ pub fn execute_prepared_hybrid_decode_metal(
                 input_mask,
                 key_count,
                 positions,
+                cache_view.causal_window,
             )?;
             attention_mask_bytes.push(bytes);
         }
@@ -6708,6 +7351,7 @@ pub fn execute_logits_probe_metal(
         (
             ProbeInputKind::TokenIds {
                 token_embedding_name,
+                token_embedding_scale,
             },
             LogitsProbeInput::TokenIds(token_ids),
         ) => {
@@ -6730,6 +7374,10 @@ pub fn execute_logits_probe_metal(
                     "CPU get_rows is unavailable or unsupported for {}",
                     token_embd.desc.ty.name()
                 ))
+            })
+            .map(|mut input_embed| {
+                apply_optional_input_scale_f32(&mut input_embed, *token_embedding_scale);
+                input_embed
             })?
         }
         (
@@ -6772,6 +7420,7 @@ pub fn execute_logits_probe_metal(
     let hidden_size = match &spec.input {
         ProbeInputKind::TokenIds {
             token_embedding_name,
+            ..
         } => {
             let token_embd_id = weights.require_tensor_id(token_embedding_name)?;
             let token_embd = require_tensor(&weights.ctx, token_embd_id)?;
@@ -6817,7 +7466,7 @@ pub fn execute_logits_probe_metal(
     let output_id = require_tensor_id(tensor_ids(weights), &spec.output_name)?;
     let output = require_tensor(&weights.ctx, output_id)?;
     let vocab_size = ne_usize(output, 1)?;
-    let logits = try_matmul_nt_ggml_bytes(
+    let mut logits = try_matmul_nt_ggml_bytes(
         &normed,
         weights
             .ctx
@@ -6834,6 +7483,7 @@ pub fn execute_logits_probe_metal(
             output.desc.ty.name()
         ))
     })?;
+    apply_optional_logit_softcap_f32(&mut logits, spec.final_logit_softcap);
 
     Ok(LogitsProbeRun {
         logits,
@@ -6954,6 +7604,58 @@ fn apply_optional_proj_scale(
     ctx.set_tensor_name(scaled, tensor_name)
         .map_err(LlamaError::format)?;
     Ok(scaled)
+}
+
+fn apply_optional_input_scale(
+    ctx: &mut Context,
+    tensor: TensorId,
+    scale: Option<f32>,
+    tensor_name: &str,
+) -> Result<TensorId> {
+    let Some(scale) = scale else {
+        return Ok(tensor);
+    };
+    let scaled = ctx
+        .scale(tensor, scale, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(scaled, tensor_name)
+        .map_err(LlamaError::format)?;
+    Ok(scaled)
+}
+
+fn apply_optional_input_scale_f32(data: &mut [f32], scale: Option<f32>) {
+    let Some(scale) = scale else {
+        return;
+    };
+    for value in data {
+        *value *= scale;
+    }
+}
+
+fn apply_optional_logit_softcap_f32(data: &mut [f32], softcap: Option<f32>) {
+    let Some(softcap) = softcap else {
+        return;
+    };
+    if softcap <= 0.0 {
+        return;
+    }
+    for value in data {
+        *value = (*value / softcap).tanh() * softcap;
+    }
+}
+
+fn build_rms_norm(
+    ctx: &mut Context,
+    src: TensorId,
+    epsilon: f32,
+    tensor_name: &str,
+) -> Result<TensorId> {
+    let norm = ctx
+        .rms_norm_eps(src, epsilon, BufferUsage::Activations)
+        .map_err(LlamaError::format)?;
+    ctx.set_tensor_name(norm, tensor_name)
+        .map_err(LlamaError::format)?;
+    Ok(norm)
 }
 
 fn build_rms_norm_mul(

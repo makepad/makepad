@@ -1,4 +1,5 @@
 use super::xr_env::XrEnv;
+use super::xr_gesture::{floor_set_gesture_sample, XrFloorSetGestureSample};
 use super::xr_select::XrSelectAction;
 use super::{arm_pair_metrics, flat_head_forward, hand_closed_fist_contact_point};
 use crate::prelude::*;
@@ -24,6 +25,11 @@ const SYNC_BOX_MAX_CHEST_DISTANCE_METERS: f32 = 1.05;
 const SYNC_BOX_MAX_ARM_ELEVATION_DEGREES: f32 = 60.0;
 const XR_FIXED_DEPTH_VOXEL_SIZE_METERS: f32 = 0.02;
 const XR_ROOT_TOP_CHILD_DRAW_METRIC_COUNT: usize = 4;
+const FLOOR_SET_HOLD_SECONDS: f64 = 2.0;
+const FLOOR_SET_SAMPLE_POSITION_TOLERANCE_METERS: f32 = 0.05;
+const FLOOR_SET_SAMPLE_GAP_TOLERANCE_METERS: f32 = 0.08;
+const FLOOR_SET_SAMPLE_FLOOR_TOLERANCE_METERS: f32 = 0.03;
+const FLOOR_SET_PREVIEW_SECONDS: f64 = 2.0;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -361,6 +367,67 @@ struct XrSyncAnchorRuntime {
     next_sync_anchor_id: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct XrFloorSetGestureCommit {
+    floor_y: f32,
+    preview_center: Vec3f,
+    anchor: Option<XrAnchor>,
+    visible_until_time: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct XrFloorSetRuntime {
+    active_sample: Option<XrFloorSetGestureSample>,
+    active_since_time: Option<f64>,
+    committed_while_active: bool,
+}
+
+impl XrFloorSetRuntime {
+    fn reset(&mut self) {
+        self.active_sample = None;
+        self.active_since_time = None;
+        self.committed_while_active = false;
+    }
+
+    fn sample_matches(a: XrFloorSetGestureSample, b: XrFloorSetGestureSample) -> bool {
+        (a.midpoint - b.midpoint).length() <= FLOOR_SET_SAMPLE_POSITION_TOLERANCE_METERS
+            && (a.floor_y - b.floor_y).abs() <= FLOOR_SET_SAMPLE_FLOOR_TOLERANCE_METERS
+            && (a.hand_gap - b.hand_gap).abs() <= FLOOR_SET_SAMPLE_GAP_TOLERANCE_METERS
+    }
+
+    fn update(&mut self, state: &XrState) -> Option<XrFloorSetGestureCommit> {
+        let sample = floor_set_gesture_sample(state);
+        let Some(sample) = sample else {
+            self.reset();
+            return None;
+        };
+        if self
+            .active_sample
+            .is_none_or(|previous| !Self::sample_matches(previous, sample))
+        {
+            self.active_sample = Some(sample);
+            self.active_since_time = Some(state.time);
+            self.committed_while_active = false;
+            return None;
+        }
+        self.active_sample = Some(sample);
+        if self.committed_while_active {
+            return None;
+        }
+        let active_since_time = self.active_since_time.unwrap_or(state.time);
+        if state.time - active_since_time < FLOOR_SET_HOLD_SECONDS {
+            return None;
+        }
+        self.committed_while_active = true;
+        Some(XrFloorSetGestureCommit {
+            floor_y: sample.floor_y,
+            preview_center: sample.midpoint,
+            anchor: (!state.anchor_persisted).then_some(sample.anchor),
+            visible_until_time: state.time + FLOOR_SET_PREVIEW_SECONDS,
+        })
+    }
+}
+
 impl XrSyncAnchorRuntime {
     fn box_sync_pose_sample(state: &XrState) -> Option<BoxSyncPoseSample> {
         let forward = flat_head_forward(state.head_pose.orientation);
@@ -587,6 +654,8 @@ pub struct XrRoot {
     content_rig: XrContentRig,
     #[rust]
     sync_runtime: XrSyncAnchorRuntime,
+    #[rust]
+    floor_runtime: XrFloorSetRuntime,
 }
 
 impl XrRoot {
@@ -1498,7 +1567,25 @@ impl Widget for XrRoot {
                 }
             }
             Event::XrUpdate(update) => {
-                let augmented_state = self.augment_xr_state(update.state.as_ref());
+                let mut augmented_state = self.augment_xr_state(update.state.as_ref());
+                if let Some(commit) = self.floor_runtime.update(augmented_state.as_ref()) {
+                    cx.xr_set_local_floor(commit.floor_y);
+                    if let Some(anchor) = commit.anchor {
+                        cx.xr_set_local_anchor(anchor);
+                    }
+                    self.env.show_debug_floor_preview(
+                        cx,
+                        commit.floor_y,
+                        commit.preview_center,
+                        commit.visible_until_time,
+                    );
+                    let state = Rc::make_mut(&mut augmented_state);
+                    state.floor_y = Some(commit.floor_y);
+                    if let Some(anchor) = commit.anchor {
+                        state.anchor = Some(anchor);
+                        state.anchor_persisted = true;
+                    }
+                }
                 let last = self
                     .runtime
                     .last_dispatched_xr_state
@@ -1513,6 +1600,7 @@ impl Widget for XrRoot {
                     self.ensure_xr_content_pose(cx, &augmented_state);
                 }
                 self.runtime.last_xr_state = Some(augmented_state.clone());
+                self.env.set_runtime_xr_state(augmented_state.clone());
                 if augmented_update.clicked_menu() {
                     self.reset_scene_physics_and_emit_action(cx);
                 }

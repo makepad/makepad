@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use makepad_ggml::{
     backend::metal::{
-        prepare_graph, BufferStorageMode, MetalBuffer, MetalGraphSession, MetalGraphTensorWrite,
-        MetalRuntime,
+        prepare_graph, try_rms_norm_mul_f32, BufferStorageMode, MetalBuffer, MetalGraphSession,
+        MetalGraphTensorWrite, MetalRuntime,
     },
     bf16_to_f32, f16_to_f32, f32_to_f16, get_rows_ggml_bytes_cpu, ggml_row_size_for_type,
     BufferUsage, Context, Graph, InitParams, Prec, Tensor, TensorId, TensorLayout, TensorType,
@@ -21,15 +21,20 @@ use makepad_llama::{
     compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count,
     create_metal_context_buffer_with_runtime, execute_attention_block_graph_metal_cached,
     execute_attention_decode_graph_metal_cached,
-    execute_delta_net_recurrent_decode_graph_metal_cached, prepare_attention_block_graph,
+    execute_delta_net_recurrent_decode_graph_metal_cached, gemma4_attention_block_layout,
+    gemma4_attention_block_spec, gemma4_attention_decode_spec,
+    gemma4_embedding_logits_probe_spec, gemma4_first_attention_block_spec,
+    gemma4_first_full_attention_block_spec, execute_logits_probe_metal,
+    prepare_attention_block_graph,
     prepare_attention_decode_graph_with_key_count, qwen35_attention_block_layout,
-    qwen35_attention_decode_spec, qwen35_delta_net_recurrent_decode_spec,
-    qwen35_first_attention_block_spec, qwen35_first_recurrent_block_spec,
-    qwen35_recurrent_block_layout, qwen35_recurrent_block_spec, qwen35moe_attention_block_layout,
-    qwen35moe_attention_block_spec, qwen35moe_attention_decode_spec,
-    qwen35moe_delta_net_recurrent_decode_spec, qwen35moe_first_attention_block_spec,
-    qwen35moe_first_recurrent_block_spec, qwen35moe_moe_ffn_layout, qwen35moe_moe_ffn_spec,
-    qwen35moe_recurrent_block_layout, AttentionDecodeSpec, AttentionRopeSpec, GgufWeightLayout,
+    qwen35_attention_block_spec, qwen35_attention_decode_spec,
+    qwen35_delta_net_recurrent_decode_spec, qwen35_first_attention_block_spec,
+    qwen35_first_recurrent_block_spec, qwen35_recurrent_block_layout, qwen35_recurrent_block_spec,
+    qwen35moe_attention_block_layout, qwen35moe_attention_block_spec,
+    qwen35moe_attention_decode_spec, qwen35moe_delta_net_recurrent_decode_spec,
+    qwen35moe_first_attention_block_spec, qwen35moe_first_recurrent_block_spec,
+    qwen35moe_moe_ffn_layout, qwen35moe_moe_ffn_spec, qwen35moe_recurrent_block_layout,
+    AttentionBlockSpec, AttentionDecodeSpec, AttentionRopeSpec, GgufWeightLayout,
     HybridDecodeBatchLayout, HybridDecodeGraph, HybridDecodeSpec, HybridLayerSpec,
     HybridSharedCacheTensorIds, LlamaArchitecture, LlamaError, LlamaModel, LlamaSession,
     LlamaSessionConfig, LlamaVocab, LoadedGgufWeights, LogitsProbeInput, ProbeInputKind,
@@ -148,18 +153,36 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args(std::env::args_os())?;
     let model = LlamaModel::load(&args.model_path)?;
     model.validate_layout()?;
-    let vocab = LlamaVocab::from_model(&model).ok();
+    let vocab = LlamaVocab::from_model(&model)?;
+    let rust_prompt_token_ids = vocab.tokenize(&args.prompt, false, true)?;
+    let rust_step_logits = run_rust_hybrid_decode_stepwise(&model, &rust_prompt_token_ids)?;
+    let rust_logits = run_rust_hybrid_decode(&model, &rust_prompt_token_ids)?;
+    let rust_batched_logits = match run_rust_hybrid_decode_batched(&model, &rust_prompt_token_ids)
+    {
+        Ok(logits) => Some(logits),
+        Err(err) => {
+            println!("compare.batched.error: {}", err);
+            None
+        }
+    };
     let upstream_batched = run_upstream_debug(&args)?;
     let upstream = run_upstream_step_debug(&args)?;
     if upstream_batched.token_ids != upstream.token_ids {
         return Err("upstream batched and upstream step tokenization differ".into());
+    }
+    if rust_prompt_token_ids != upstream.token_ids {
+        return Err(format!(
+            "native and upstream tokenization differ: rust={:?} upstream={:?}",
+            rust_prompt_token_ids, upstream.token_ids
+        )
+        .into());
     }
     let upstream_step_final_logits = upstream
         .step_logits
         .last()
         .ok_or("upstream step output produced no step logits")?;
 
-    let input_token_labels = format_token_list(&upstream.token_ids, vocab.as_ref());
+    let input_token_labels = format_token_list(&upstream.token_ids, Some(&vocab));
     println!("model: {}", args.model_path.display());
     println!("prompt: {}", args.prompt);
     println!("input.token_count: {}", upstream.token_ids.len());
@@ -174,15 +197,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         upstream_batched.output_dir.display()
     );
 
-    let rust_step_logits = run_rust_hybrid_decode_stepwise(&model, &upstream.token_ids)?;
-    let rust_logits = run_rust_hybrid_decode(&model, &upstream.token_ids)?;
-    let rust_batched_logits = match run_rust_hybrid_decode_batched(&model, &upstream.token_ids) {
-        Ok(logits) => Some(logits),
-        Err(err) => {
-            println!("compare.batched.error: {}", err);
-            None
-        }
-    };
     if rust_logits.len() != upstream_step_final_logits.len() {
         return Err(format!(
             "logit length mismatch: rust={} upstream={}",
@@ -295,10 +309,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             step0_shared_cache_diff.input_embed.max_abs_diff
         );
         for layer in &step0_shared_cache_diff.layers {
-            println!(
-                "step0.shared_cache.layer{}._attn_residual_max_abs_diff: {:.9}",
-                layer.layer_index, layer.attn_residual.max_abs_diff
-            );
             if let Some(attn_post_norm) = &layer.attn_post_norm {
                 println!(
                     "step0.shared_cache.layer{}._attn_post_norm_max_abs_diff: {:.9}",
@@ -306,9 +316,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             println!(
+                "step0.shared_cache.layer{}._attn_residual_max_abs_diff: {:.9}",
+                layer.layer_index, layer.attn_residual.max_abs_diff
+            );
+            if let Some(ffn_input_norm) = &layer.ffn_input_norm {
+                println!(
+                    "step0.shared_cache.layer{}._ffn_input_norm_max_abs_diff: {:.9}",
+                    layer.layer_index, ffn_input_norm.max_abs_diff
+                );
+            }
+            println!(
                 "step0.shared_cache.layer{}._ffn_out_max_abs_diff: {:.9}",
                 layer.layer_index, layer.ffn_out.max_abs_diff
             );
+            if let Some(ffn_post_norm) = &layer.ffn_post_norm {
+                println!(
+                    "step0.shared_cache.layer{}._ffn_post_norm_max_abs_diff: {:.9}",
+                    layer.layer_index, ffn_post_norm.max_abs_diff
+                );
+            }
             println!(
                 "step0.shared_cache.layer{}._post_ffn_max_abs_diff: {:.9}",
                 layer.layer_index, layer.post_ffn.max_abs_diff
@@ -432,7 +458,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "rust_batched.next.top{}: {:?}",
             args.top_k,
-            describe_top_k(&rust_batched_top, vocab.as_ref())
+            describe_top_k(&rust_batched_top, Some(&vocab))
         );
 
         if let Some(continue_token) = continue_token_id {
@@ -483,12 +509,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "continue.step.top{}: {:?}",
                 args.top_k,
-                describe_top_k(&continued_top, vocab.as_ref())
+                describe_top_k(&continued_top, Some(&vocab))
             );
             println!(
                 "continue.batched_full.top{}: {:?}",
                 args.top_k,
-                describe_top_k(&full_continued_top, vocab.as_ref())
+                describe_top_k(&full_continued_top, Some(&vocab))
             );
 
             let final_cache_diff = compare_shared_hybrid_split_vs_full_cache_state(
@@ -518,7 +544,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 final_cache_diff.recurrent_s.max_abs_diff,
                 format_layer_suffix(final_cache_diff.recurrent_s.layer_index)
             );
-            if matches!(model.architecture, LlamaArchitecture::Qwen35) {
+            if matches!(
+                model.architecture,
+                LlamaArchitecture::Qwen35 | LlamaArchitecture::Gemma4
+            ) {
+                let continued_stats_f32 = compare_shared_hybrid_split_vs_full_logits(
+                    &model,
+                    &upstream.token_ids,
+                    continue_token,
+                    TensorType::F32,
+                    TensorType::F32,
+                )?;
+                println!(
+                    "continue.f32.max_abs_diff_vs_batched_full: {:.9}",
+                    continued_stats_f32.max_abs_diff
+                );
+                println!(
+                    "continue.f32.mean_abs_diff_vs_batched_full: {:.9}",
+                    continued_stats_f32.mean_abs_diff
+                );
+                println!(
+                    "continue.f32.rms_diff_vs_batched_full: {:.9}",
+                    continued_stats_f32.rms_diff
+                );
+                println!(
+                    "continue.f32.cosine_similarity_vs_batched_full: {:.9}",
+                    continued_stats_f32.cosine_similarity
+                );
                 let final_cache_diff_f32 = compare_shared_hybrid_split_vs_full_cache_state(
                     &model,
                     &upstream.token_ids,
@@ -547,25 +599,81 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     format_layer_suffix(final_cache_diff_f32.recurrent_s.layer_index)
                 );
             }
+            let continue_checkpoint_diff =
+                compare_hybrid_continue_checkpoints(&model, &upstream.token_ids, continue_token)?;
+            println!(
+                "continue.checkpoint.input_embed_max_abs_diff: {:.9}",
+                continue_checkpoint_diff.input_embed.max_abs_diff
+            );
+            println!(
+                "continue.checkpoint.result_norm_max_abs_diff: {:.9}",
+                continue_checkpoint_diff.result_norm.max_abs_diff
+            );
+            println!(
+                "continue.checkpoint.result_logits_max_abs_diff: {:.9}",
+                continue_checkpoint_diff.result_logits.max_abs_diff
+            );
+            let first_continue_layer_diff = continue_checkpoint_diff
+                .layers
+                .iter()
+                .find(|layer| hybrid_split_layer_max_abs_diff(layer) > 0.0);
+            println!(
+                "continue.checkpoint.first_layer_diff: {}",
+                first_continue_layer_diff
+                    .map(|layer| layer.layer_index.to_string())
+                    .unwrap_or_else(|| "none".to_owned())
+            );
+            if let Some(layer) = first_continue_layer_diff {
+                println!(
+                    "continue.checkpoint.layer{}._attn_residual_max_abs_diff: {:.9}",
+                    layer.layer_index, layer.attn_residual.max_abs_diff
+                );
+                if let Some(attn_post_norm) = &layer.attn_post_norm {
+                    println!(
+                        "continue.checkpoint.layer{}._attn_post_norm_max_abs_diff: {:.9}",
+                        layer.layer_index, attn_post_norm.max_abs_diff
+                    );
+                }
+                if let Some(ffn_input_norm) = &layer.ffn_input_norm {
+                    println!(
+                        "continue.checkpoint.layer{}._ffn_input_norm_max_abs_diff: {:.9}",
+                        layer.layer_index, ffn_input_norm.max_abs_diff
+                    );
+                }
+                println!(
+                    "continue.checkpoint.layer{}._ffn_out_max_abs_diff: {:.9}",
+                    layer.layer_index, layer.ffn_out.max_abs_diff
+                );
+                if let Some(ffn_post_norm) = &layer.ffn_post_norm {
+                    println!(
+                        "continue.checkpoint.layer{}._ffn_post_norm_max_abs_diff: {:.9}",
+                        layer.layer_index, ffn_post_norm.max_abs_diff
+                    );
+                }
+                println!(
+                    "continue.checkpoint.layer{}._post_ffn_max_abs_diff: {:.9}",
+                    layer.layer_index, layer.post_ffn.max_abs_diff
+                );
+            }
         }
     }
     println!(
         "upstream.step.next.top{}: {:?}",
         args.top_k,
-        describe_top_k(&upstream_top, vocab.as_ref())
+        describe_top_k(&upstream_top, Some(&vocab))
     );
     println!(
         "upstream.batched.next.top{}: {:?}",
         args.top_k,
         describe_top_k(
             &top_k_logits(&upstream_batched.logits, args.top_k),
-            vocab.as_ref()
+            Some(&vocab)
         )
     );
     println!(
         "rust.next.top{}: {:?}",
         args.top_k,
-        describe_top_k(&rust_top, vocab.as_ref())
+        describe_top_k(&rust_top, Some(&vocab))
     );
     if upstream.token_ids.len() > 1 {
         let attention_check_f16 =
@@ -574,9 +682,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             attention_cache_self_check(&model, &upstream.token_ids[..2], TensorType::F32)?;
         let attention_decode_batch_check =
             attention_decode_batch_self_check(&model, &upstream.token_ids[..2])?;
-        let recurrent_check = recurrent_cache_self_check(&model, &upstream.token_ids[..2])?;
-        let recurrent_step_cpu_base =
-            recurrent_step_cpu_check(&model, &upstream.token_ids[..2], None)?;
         println!(
             "attention_cache.f16.layer{}._same_top1: {}",
             attention_check_f16.layer_index, attention_check_f16.same_top1
@@ -640,7 +745,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "attention_decode_batch.layer{}._result_output_max_abs_diff: {:.9}",
             attention_decode_batch_check.layer_index,
-            attention_decode_batch_check.result_output_stats.max_abs_diff
+            attention_decode_batch_check
+                .result_output_stats
+                .max_abs_diff
         );
         println!(
             "attention_decode_batch.layer{}._result_output_token0_max_abs_diff: {:.9}",
@@ -664,7 +771,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "attention_decode_batch.layer{}._step0_k_cache_row_max_abs_diff: {:.9}",
             attention_decode_batch_check.layer_index,
-            attention_decode_batch_check.step0_k_cache_row_stats.max_abs_diff
+            attention_decode_batch_check
+                .step0_k_cache_row_stats
+                .max_abs_diff
         );
         println!(
             "attention_decode_batch.layer{}._step0_k_cache_tail_zero_max_abs_diff: {:.9}",
@@ -681,7 +790,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "attention_decode_batch.layer{}._step0_v_cache_row_max_abs_diff: {:.9}",
             attention_decode_batch_check.layer_index,
-            attention_decode_batch_check.step0_v_cache_row_stats.max_abs_diff
+            attention_decode_batch_check
+                .step0_v_cache_row_stats
+                .max_abs_diff
         );
         println!(
             "attention_decode_batch.layer{}._step0_v_cache_tail_zero_max_abs_diff: {:.9}",
@@ -690,54 +801,692 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .step0_v_cache_tail_zero_stats
                 .max_abs_diff
         );
-        println!(
-            "recurrent_cache.layer{}._same_top1: {}",
-            recurrent_check.layer_index, recurrent_check.same_top1
-        );
-        println!(
-            "recurrent_cache.layer{}._hidden_max_abs_diff: {:.9}",
-            recurrent_check.layer_index, recurrent_check.hidden_stats.max_abs_diff
-        );
-        println!(
-            "recurrent_cache.layer{}._hidden_mean_abs_diff: {:.9}",
-            recurrent_check.layer_index, recurrent_check.hidden_stats.mean_abs_diff
-        );
-        println!(
-            "recurrent_cache.layer{}._hidden_rms_diff: {:.9}",
-            recurrent_check.layer_index, recurrent_check.hidden_stats.rms_diff
-        );
-        println!(
-            "recurrent_cache.layer{}._hidden_cosine_similarity: {:.9}",
-            recurrent_check.layer_index, recurrent_check.hidden_stats.cosine_similarity
-        );
-        println!(
-            "recurrent_cache.layer{}._r_cache_max_abs_diff: {:.9}",
-            recurrent_check.layer_index, recurrent_check.r_cache_stats.max_abs_diff
-        );
-        println!(
-            "recurrent_cache.layer{}._s_cache_max_abs_diff: {:.9}",
-            recurrent_check.layer_index, recurrent_check.s_cache_stats.max_abs_diff
-        );
-        println!(
-            "recurrent_step_cpu.layer{}._conv_output_max_abs_diff: {:.9}",
-            recurrent_step_cpu_base.layer_index,
-            recurrent_step_cpu_base.conv_output_cpu_stats.max_abs_diff
-        );
-        println!(
-            "recurrent_step_cpu.layer{}._q_conv_max_abs_diff: {:.9}",
-            recurrent_step_cpu_base.layer_index,
-            recurrent_step_cpu_base.q_conv_cpu_stats.max_abs_diff
-        );
-        println!(
-            "recurrent_step_cpu.layer{}._k_conv_max_abs_diff: {:.9}",
-            recurrent_step_cpu_base.layer_index,
-            recurrent_step_cpu_base.k_conv_cpu_stats.max_abs_diff
-        );
-        println!(
-            "recurrent_step_cpu.layer{}._output_view_max_abs_diff: {:.9}",
-            recurrent_step_cpu_base.layer_index,
-            recurrent_step_cpu_base.output_view_cpu_stats.max_abs_diff
-        );
+        if matches!(model.architecture, LlamaArchitecture::Gemma4) {
+            let (full_layer_index, _) = gemma4_first_full_attention_block_spec(&model)?;
+            let full_attention_check = attention_cache_self_check_for_layer(
+                &model,
+                &upstream.token_ids[..2],
+                full_layer_index,
+                TensorType::F32,
+            )?;
+            let full_attention_decode_batch_check = attention_decode_batch_self_check_for_layer(
+                &model,
+                &upstream.token_ids[..2],
+                full_layer_index,
+            )?;
+            println!(
+                "attention_cache_full.f32.layer{}._same_top1: {}",
+                full_attention_check.layer_index, full_attention_check.same_top1
+            );
+            println!(
+                "attention_cache_full.f32.layer{}._hidden_max_abs_diff: {:.9}",
+                full_attention_check.layer_index, full_attention_check.hidden_stats.max_abs_diff
+            );
+            println!(
+                "attention_cache_full.f32.layer{}._hidden_mean_abs_diff: {:.9}",
+                full_attention_check.layer_index, full_attention_check.hidden_stats.mean_abs_diff
+            );
+            println!(
+                "attention_cache_full.f32.layer{}._hidden_rms_diff: {:.9}",
+                full_attention_check.layer_index, full_attention_check.hidden_stats.rms_diff
+            );
+            println!(
+                "attention_cache_full.f32.layer{}._hidden_cosine_similarity: {:.9}",
+                full_attention_check.layer_index,
+                full_attention_check.hidden_stats.cosine_similarity
+            );
+            println!(
+                "attention_decode_batch_full.layer{}._hidden_max_abs_diff: {:.9}",
+                full_attention_decode_batch_check.layer_index,
+                full_attention_decode_batch_check.hidden_stats.max_abs_diff
+            );
+            println!(
+                "attention_decode_batch_full.layer{}._result_output_max_abs_diff: {:.9}",
+                full_attention_decode_batch_check.layer_index,
+                full_attention_decode_batch_check
+                    .result_output_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batch_full.layer{}._k_cache_max_abs_diff: {:.9}",
+                full_attention_decode_batch_check.layer_index,
+                full_attention_decode_batch_check.k_cache_stats.max_abs_diff
+            );
+            println!(
+                "attention_decode_batch_full.layer{}._v_cache_max_abs_diff: {:.9}",
+                full_attention_decode_batch_check.layer_index,
+                full_attention_decode_batch_check.v_cache_stats.max_abs_diff
+            );
+            let gemma_upstream_input =
+                gemma_upstream_input_check(&args, &model, &upstream.token_ids)?;
+            println!(
+                "gemma_upstream.input_embed_max_abs_diff: {:.9}",
+                gemma_upstream_input.input_embed_stats.max_abs_diff
+            );
+            println!(
+                "gemma_upstream.input_embed_standalone_vs_rust_max_abs_diff: {:.9}",
+                gemma_upstream_input
+                    .input_embed_standalone_vs_rust_stats
+                    .max_abs_diff
+            );
+            println!(
+                "gemma_upstream.input_embed_standalone_vs_upstream_max_abs_diff: {:.9}",
+                gemma_upstream_input
+                    .input_embed_standalone_vs_upstream_stats
+                    .max_abs_diff
+            );
+            println!(
+                "gemma_upstream.attn_norm_layer0_max_abs_diff: {:.9}",
+                gemma_upstream_input.attn_input_norm_stats.max_abs_diff
+            );
+            println!(
+                "gemma_upstream.attn_norm_layer0_standalone_vs_rust_max_abs_diff: {:.9}",
+                gemma_upstream_input
+                    .attn_input_norm_standalone_vs_rust_stats
+                    .max_abs_diff
+            );
+            println!(
+                "gemma_upstream.attn_norm_layer0_standalone_vs_upstream_max_abs_diff: {:.9}",
+                gemma_upstream_input
+                    .attn_input_norm_standalone_vs_upstream_stats
+                    .max_abs_diff
+            );
+            let gemma_upstream_stack =
+                gemma_upstream_layer_preview_stack_check(&args, &model, &upstream.token_ids)?;
+            println!(
+                "gemma_upstream.layer_stack.first_diff_layer: {}",
+                gemma_upstream_stack
+                    .first_diff_layer
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_owned())
+            );
+            if let Some(stats) = gemma_upstream_stack.first_diff_stats {
+                println!(
+                    "gemma_upstream.layer_stack.first_diff_max_abs_diff: {:.9}",
+                    stats.max_abs_diff
+                );
+                println!(
+                    "gemma_upstream.layer_stack.first_diff_mean_abs_diff: {:.9}",
+                    stats.mean_abs_diff
+                );
+                println!(
+                    "gemma_upstream.layer_stack.first_diff_cosine_similarity: {:.9}",
+                    stats.cosine_similarity
+                );
+            }
+            println!(
+                "gemma_upstream.layer_stack.max_diff_layer: {}",
+                gemma_upstream_stack
+                    .max_diff_layer
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".to_owned())
+            );
+            println!(
+                "gemma_upstream.layer_stack.max_diff_max_abs_diff: {:.9}",
+                gemma_upstream_stack.max_diff_stats.max_abs_diff
+            );
+            println!(
+                "gemma_upstream.layer_stack.max_diff_mean_abs_diff: {:.9}",
+                gemma_upstream_stack.max_diff_stats.mean_abs_diff
+            );
+            println!(
+                "gemma_upstream.layer_stack.max_diff_cosine_similarity: {:.9}",
+                gemma_upstream_stack.max_diff_stats.cosine_similarity
+            );
+            let gemma_upstream_tail =
+                gemma_upstream_tail_check(&args, &model, &upstream.token_ids)?;
+            println!(
+                "gemma_upstream.result_norm_max_abs_diff: {:.9}",
+                gemma_upstream_tail.result_norm_stats.max_abs_diff
+            );
+            println!(
+                "gemma_upstream.result_output_max_abs_diff: {:.9}",
+                gemma_upstream_tail.result_output_stats.max_abs_diff
+            );
+            let gemma_final_probe = gemma_final_probe_check(
+                &model,
+                &upstream.token_ids,
+                upstream_step_final_logits,
+            )?;
+            println!(
+                "gemma_probe.result_output_vs_hybrid_max_abs_diff: {:.9}",
+                gemma_final_probe.probe_vs_hybrid_stats.max_abs_diff
+            );
+            println!(
+                "gemma_probe.result_output_vs_upstream_max_abs_diff: {:.9}",
+                gemma_final_probe.probe_vs_upstream_stats.max_abs_diff
+            );
+            if model.require_gemma4()?.embedding_length_per_layer_input != 0 {
+                let gemma_shared_per_layer =
+                    gemma_upstream_shared_per_layer_input_check(&args, &model, &upstream.token_ids)?;
+                println!(
+                    "gemma_upstream.shared_per_layer.selected_max_abs_diff: {:.9}",
+                    gemma_shared_per_layer.selected_stats.max_abs_diff
+                );
+                println!(
+                    "gemma_upstream.shared_per_layer.proj_max_abs_diff: {:.9}",
+                    gemma_shared_per_layer.proj_stats.max_abs_diff
+                );
+                println!(
+                    "gemma_upstream.shared_per_layer.input_max_abs_diff: {:.9}",
+                    gemma_shared_per_layer.input_stats.max_abs_diff
+                );
+                let direct_get_rows =
+                    gemma_per_layer_token_get_rows_direct_check(&model, &upstream.token_ids)?;
+                println!(
+                    "gemma_manual.shared_per_layer.direct_get_rows_max_abs_diff: {:.9}",
+                    direct_get_rows.max_abs_diff
+                );
+            }
+            if let Some(layer_index) = gemma_upstream_stack.first_diff_layer {
+                let layer_check = gemma_upstream_layer_preview_check(
+                    &args,
+                    &model,
+                    &upstream.token_ids,
+                    layer_index,
+                )?;
+                if let Some(attn_post_norm) = layer_check.attn_post_norm_stats {
+                    println!(
+                        "gemma_upstream.layer{}._attn_post_norm_max_abs_diff: {:.9}",
+                        layer_check.layer_index, attn_post_norm.max_abs_diff
+                    );
+                }
+                println!(
+                    "gemma_upstream.layer{}._attn_out_max_abs_diff: {:.9}",
+                    layer_check.layer_index, layer_check.attn_residual_stats.max_abs_diff
+                );
+                if let Some(ffn_input_norm) = layer_check.ffn_input_norm_stats {
+                    println!(
+                        "gemma_upstream.layer{}._ffn_norm_max_abs_diff: {:.9}",
+                        layer_check.layer_index, ffn_input_norm.max_abs_diff
+                    );
+                }
+                println!(
+                    "gemma_upstream.layer{}._ffn_out_max_abs_diff: {:.9}",
+                    layer_check.layer_index, layer_check.ffn_out_stats.max_abs_diff
+                );
+                if let Some(ffn_post_norm) = layer_check.ffn_post_norm_stats {
+                    println!(
+                        "gemma_upstream.layer{}._ffn_post_norm_max_abs_diff: {:.9}",
+                        layer_check.layer_index, ffn_post_norm.max_abs_diff
+                    );
+                }
+                if let Some(pe_in) = layer_check.pe_in_stats {
+                    println!(
+                        "gemma_upstream.layer{}._pe_in_max_abs_diff: {:.9}",
+                        layer_check.layer_index, pe_in.max_abs_diff
+                    );
+                }
+                if let Some(per_layer_embd_out) = layer_check.per_layer_embd_out_stats {
+                    println!(
+                        "gemma_upstream.layer{}._per_layer_embd_out_max_abs_diff: {:.9}",
+                        layer_check.layer_index, per_layer_embd_out.max_abs_diff
+                    );
+                }
+                println!(
+                    "gemma_upstream.layer{}._layer_out_max_abs_diff: {:.9}",
+                    layer_check.layer_index, layer_check.post_ffn_stats.max_abs_diff
+                );
+                let standalone_layer_out = gemma_upstream_layer_output_standalone_check(
+                    &args,
+                    &model,
+                    &upstream.token_ids,
+                    layer_check.layer_index,
+                )?;
+                let standalone_layer_check = gemma_upstream_layer_preview_standalone_check(
+                    &args,
+                    &model,
+                    &upstream.token_ids,
+                    layer_check.layer_index,
+                )?;
+                if let Some(attn_post_norm) = standalone_layer_check.attn_post_norm_stats {
+                    println!(
+                        "gemma_upstream.layer{}._attn_post_norm_standalone_max_abs_diff: {:.9}",
+                        layer_check.layer_index, attn_post_norm.max_abs_diff
+                    );
+                }
+                let raw_attn_post_norm = gemma_upstream_attn_post_norm_from_raw_attention_check(
+                    &args,
+                    &model,
+                    &upstream.token_ids,
+                    layer_check.layer_index,
+                )?;
+                println!(
+                    "gemma_upstream.layer{}._attn_post_norm_from_raw_attn_max_abs_diff: {:.9}",
+                    layer_check.layer_index, raw_attn_post_norm.max_abs_diff
+                );
+                if layer_check.layer_index == 0 && layer_check.post_ffn_stats.max_abs_diff > 1e-3 {
+                    let manual_shared =
+                        gemma_shared_per_layer_manual_check(&model, &upstream.token_ids)?;
+                    println!(
+                        "gemma_manual.shared_per_layer.selected_max_abs_diff: {:.9}",
+                        manual_shared.selected_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.shared_per_layer.proj_max_abs_diff: {:.9}",
+                        manual_shared.proj_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.shared_per_layer.input_max_abs_diff: {:.9}",
+                        manual_shared.input_stats.max_abs_diff
+                    );
+                    let manual_graph_f16 = gemma_layer_manual_graph_check(
+                        &model,
+                        &upstream.token_ids,
+                        layer_check.layer_index,
+                        TensorType::F16,
+                    )?;
+                    println!(
+                        "gemma_manual.layer{}._f16_attn_post_norm_max_abs_diff: {:.9}",
+                        manual_graph_f16.layer_index,
+                        manual_graph_f16.attn_post_norm_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.layer{}._f16_attn_residual_max_abs_diff: {:.9}",
+                        manual_graph_f16.layer_index, manual_graph_f16.attn_residual_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.layer{}._f16_ffn_norm_max_abs_diff: {:.9}",
+                        manual_graph_f16.layer_index,
+                        manual_graph_f16.ffn_input_norm_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.layer{}._f16_ffn_out_max_abs_diff: {:.9}",
+                        manual_graph_f16.layer_index, manual_graph_f16.ffn_out_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.layer{}._f16_ffn_post_norm_max_abs_diff: {:.9}",
+                        manual_graph_f16.layer_index,
+                        manual_graph_f16.ffn_post_norm_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.layer{}._f16_pe_in_max_abs_diff: {:.9}",
+                        manual_graph_f16.layer_index, manual_graph_f16.pe_in_stats.max_abs_diff
+                    );
+                    if let Some(per_layer_embd_out) = &manual_graph_f16.per_layer_embd_out_stats {
+                        println!(
+                            "gemma_manual.layer{}._f16_per_layer_embd_out_max_abs_diff: {:.9}",
+                            manual_graph_f16.layer_index, per_layer_embd_out.max_abs_diff
+                        );
+                    }
+                    println!(
+                        "gemma_manual.layer{}._f16_post_ffn_max_abs_diff: {:.9}",
+                        manual_graph_f16.layer_index, manual_graph_f16.post_ffn_stats.max_abs_diff
+                    );
+                    let manual_graph_f32 = gemma_layer_manual_graph_check(
+                        &model,
+                        &upstream.token_ids,
+                        layer_check.layer_index,
+                        TensorType::F32,
+                    )?;
+                    println!(
+                        "gemma_manual.layer{}._f32_attn_post_norm_max_abs_diff: {:.9}",
+                        manual_graph_f32.layer_index,
+                        manual_graph_f32.attn_post_norm_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.layer{}._f32_attn_residual_max_abs_diff: {:.9}",
+                        manual_graph_f32.layer_index, manual_graph_f32.attn_residual_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.layer{}._f32_ffn_norm_max_abs_diff: {:.9}",
+                        manual_graph_f32.layer_index,
+                        manual_graph_f32.ffn_input_norm_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.layer{}._f32_ffn_out_max_abs_diff: {:.9}",
+                        manual_graph_f32.layer_index, manual_graph_f32.ffn_out_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.layer{}._f32_ffn_post_norm_max_abs_diff: {:.9}",
+                        manual_graph_f32.layer_index,
+                        manual_graph_f32.ffn_post_norm_stats.max_abs_diff
+                    );
+                    println!(
+                        "gemma_manual.layer{}._f32_pe_in_max_abs_diff: {:.9}",
+                        manual_graph_f32.layer_index, manual_graph_f32.pe_in_stats.max_abs_diff
+                    );
+                    if let Some(per_layer_embd_out) = &manual_graph_f32.per_layer_embd_out_stats {
+                        println!(
+                            "gemma_manual.layer{}._f32_per_layer_embd_out_max_abs_diff: {:.9}",
+                            manual_graph_f32.layer_index, per_layer_embd_out.max_abs_diff
+                        );
+                    }
+                    println!(
+                        "gemma_manual.layer{}._f32_post_ffn_max_abs_diff: {:.9}",
+                        manual_graph_f32.layer_index, manual_graph_f32.post_ffn_stats.max_abs_diff
+                    );
+                }
+                println!(
+                    "gemma_upstream.layer{}._attn_out_standalone_max_abs_diff: {:.9}",
+                    layer_check.layer_index, standalone_layer_check.attn_residual_stats.max_abs_diff
+                );
+                println!(
+                    "gemma_upstream.layer{}._layer_out_standalone_max_abs_diff: {:.9}",
+                    layer_check.layer_index, standalone_layer_out.max_abs_diff
+                );
+            }
+            if gemma_upstream_stack.max_diff_layer != gemma_upstream_stack.first_diff_layer {
+                if let Some(layer_index) = gemma_upstream_stack.max_diff_layer {
+                    let gemma_tensors = model.gemma4_tensors()?;
+                    let gemma_layer = gemma_tensors
+                        .layers
+                        .iter()
+                        .find(|layer| layer.index == layer_index)
+                        .ok_or_else(|| format!("missing gemma4 layer {}", layer_index))?;
+                    let decode_spec = gemma4_attention_decode_spec(
+                        &model,
+                        layer_index,
+                        u32::try_from(upstream.token_ids.len())?,
+                        1,
+                        TensorType::F16,
+                        TensorType::F16,
+                    )?;
+                    println!(
+                        "gemma_upstream.layer{}._is_swa: {}",
+                        layer_index, gemma_layer.is_swa
+                    );
+                    println!(
+                        "gemma_upstream.layer{}._write_kv: {}",
+                        layer_index, decode_spec.write_kv
+                    );
+                    println!(
+                        "gemma_upstream.layer{}._cache_layer_index: {}",
+                        layer_index, decode_spec.cache_layer_index
+                    );
+                    if !decode_spec.write_kv {
+                        let source_layer_index = decode_spec.cache_layer_index;
+                        println!(
+                            "gemma_upstream.layer{}._cache_source_layer: {}",
+                            layer_index, source_layer_index
+                        );
+                        let source_self_check = attention_cache_self_check_for_layer(
+                            &model,
+                            &upstream.token_ids,
+                            source_layer_index,
+                            TensorType::F32,
+                        )?;
+                        println!(
+                            "gemma_upstream.layer{}._cache_source_selfcheck_same_top1: {}",
+                            source_layer_index, source_self_check.same_top1
+                        );
+                        println!(
+                            "gemma_upstream.layer{}._cache_source_selfcheck_max_abs_diff: {:.9}",
+                            source_layer_index, source_self_check.hidden_stats.max_abs_diff
+                        );
+                        let source_cache_check =
+                            gemma_hybrid_source_cache_check(&model, &upstream.token_ids, source_layer_index)?;
+                        println!(
+                            "gemma_upstream.layer{}._cache_source_k_cache_max_abs_diff: {:.9}",
+                            source_cache_check.layer_index, source_cache_check.k_cache_stats.max_abs_diff
+                        );
+                        println!(
+                            "gemma_upstream.layer{}._cache_source_v_cache_max_abs_diff: {:.9}",
+                            source_cache_check.layer_index, source_cache_check.v_cache_stats.max_abs_diff
+                        );
+                        let source_layer_check = gemma_upstream_layer_preview_check(
+                            &args,
+                            &model,
+                            &upstream.token_ids,
+                            source_layer_index,
+                        )?;
+                        if let Some(attn_post_norm) = source_layer_check.attn_post_norm_stats {
+                            println!(
+                                "gemma_upstream.layer{}._cache_source_attn_post_norm_max_abs_diff: {:.9}",
+                                source_layer_index, attn_post_norm.max_abs_diff
+                            );
+                        }
+                        println!(
+                            "gemma_upstream.layer{}._cache_source_attn_out_max_abs_diff: {:.9}",
+                            source_layer_index, source_layer_check.attn_residual_stats.max_abs_diff
+                        );
+                        println!(
+                            "gemma_upstream.layer{}._cache_source_layer_out_max_abs_diff: {:.9}",
+                            source_layer_index, source_layer_check.post_ffn_stats.max_abs_diff
+                        );
+                        for late_layer_index in source_layer_index..=layer_index {
+                            if let Some(layer_stats) =
+                                gemma_upstream_stack.layer_post_ffn_stats.get(&late_layer_index)
+                            {
+                                println!(
+                                    "gemma_upstream.layer{}._stack_layer_out_max_abs_diff: {:.9}",
+                                    late_layer_index, layer_stats.max_abs_diff
+                                );
+                            }
+                        }
+                        let first_large_shared_diff_layer = (source_layer_index + 1..=layer_index)
+                            .find(|late_layer_index| {
+                                gemma_upstream_stack
+                                    .layer_post_ffn_stats
+                                    .get(late_layer_index)
+                                    .map(|layer_stats| layer_stats.max_abs_diff > 0.01)
+                                    .unwrap_or(false)
+                            });
+                        if let Some(first_large_shared_diff_layer) = first_large_shared_diff_layer {
+                            println!(
+                                "gemma_upstream.first_large_shared_diff_layer: {}",
+                                first_large_shared_diff_layer
+                            );
+                            let first_large_layer = gemma_tensors
+                                .layers
+                                .iter()
+                                .find(|layer| layer.index == first_large_shared_diff_layer)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "missing gemma4 first large shared diff layer {}",
+                                        first_large_shared_diff_layer
+                                    )
+                                })?;
+                            let first_large_decode_spec = gemma4_attention_decode_spec(
+                                &model,
+                                first_large_shared_diff_layer,
+                                u32::try_from(upstream.token_ids.len())?,
+                                1,
+                                TensorType::F16,
+                                TensorType::F16,
+                            )?;
+                            println!(
+                                "gemma_upstream.layer{}._is_swa: {}",
+                                first_large_shared_diff_layer, first_large_layer.is_swa
+                            );
+                            println!(
+                                "gemma_upstream.layer{}._write_kv: {}",
+                                first_large_shared_diff_layer, first_large_decode_spec.write_kv
+                            );
+                            println!(
+                                "gemma_upstream.layer{}._cache_layer_index: {}",
+                                first_large_shared_diff_layer,
+                                first_large_decode_spec.cache_layer_index
+                            );
+                            let first_large_layer_check = gemma_upstream_layer_preview_check(
+                                &args,
+                                &model,
+                                &upstream.token_ids,
+                                first_large_shared_diff_layer,
+                            )?;
+                            if let Some(attn_post_norm) =
+                                first_large_layer_check.attn_post_norm_stats
+                            {
+                                println!(
+                                    "gemma_upstream.layer{}._attn_post_norm_max_abs_diff: {:.9}",
+                                    first_large_shared_diff_layer, attn_post_norm.max_abs_diff
+                                );
+                            }
+                            println!(
+                                "gemma_upstream.layer{}._attn_out_max_abs_diff: {:.9}",
+                                first_large_shared_diff_layer,
+                                first_large_layer_check.attn_residual_stats.max_abs_diff
+                            );
+                            println!(
+                                "gemma_upstream.layer{}._layer_out_max_abs_diff: {:.9}",
+                                first_large_shared_diff_layer,
+                                first_large_layer_check.post_ffn_stats.max_abs_diff
+                            );
+                        }
+
+                        let first_shared_layer_index = source_layer_index + 1;
+                        if gemma_tensors
+                            .layers
+                            .iter()
+                            .any(|layer| layer.index == first_shared_layer_index)
+                        {
+                            let first_shared_layer = gemma_tensors
+                                .layers
+                                .iter()
+                                .find(|layer| layer.index == first_shared_layer_index)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "missing gemma4 first shared layer {}",
+                                        first_shared_layer_index
+                                    )
+                                })?;
+                            let first_shared_decode_spec = gemma4_attention_decode_spec(
+                                &model,
+                                first_shared_layer_index,
+                                u32::try_from(upstream.token_ids.len())?,
+                                1,
+                                TensorType::F16,
+                                TensorType::F16,
+                            )?;
+                            println!(
+                                "gemma_upstream.layer{}._is_swa: {}",
+                                first_shared_layer_index, first_shared_layer.is_swa
+                            );
+                            println!(
+                                "gemma_upstream.layer{}._write_kv: {}",
+                                first_shared_layer_index, first_shared_decode_spec.write_kv
+                            );
+                            println!(
+                                "gemma_upstream.layer{}._cache_layer_index: {}",
+                                first_shared_layer_index,
+                                first_shared_decode_spec.cache_layer_index
+                            );
+                            let first_shared_layer_check = gemma_upstream_layer_preview_check(
+                                &args,
+                                &model,
+                                &upstream.token_ids,
+                                first_shared_layer_index,
+                            )?;
+                            if let Some(attn_post_norm) =
+                                first_shared_layer_check.attn_post_norm_stats
+                            {
+                                println!(
+                                    "gemma_upstream.layer{}._attn_post_norm_max_abs_diff: {:.9}",
+                                    first_shared_layer_index, attn_post_norm.max_abs_diff
+                                );
+                            }
+                            println!(
+                                "gemma_upstream.layer{}._attn_out_max_abs_diff: {:.9}",
+                                first_shared_layer_index,
+                                first_shared_layer_check.attn_residual_stats.max_abs_diff
+                            );
+                            println!(
+                                "gemma_upstream.layer{}._layer_out_max_abs_diff: {:.9}",
+                                first_shared_layer_index,
+                                first_shared_layer_check.post_ffn_stats.max_abs_diff
+                            );
+                        }
+                    }
+                    let layer_check =
+                        gemma_upstream_layer_preview_check(&args, &model, &upstream.token_ids, layer_index)?;
+                    if let Some(attn_post_norm) = layer_check.attn_post_norm_stats {
+                        println!(
+                            "gemma_upstream.layer{}._attn_post_norm_max_abs_diff: {:.9}",
+                            layer_check.layer_index, attn_post_norm.max_abs_diff
+                        );
+                    }
+                    println!(
+                        "gemma_upstream.layer{}._attn_out_max_abs_diff: {:.9}",
+                        layer_check.layer_index, layer_check.attn_residual_stats.max_abs_diff
+                    );
+                    if let Some(ffn_input_norm) = layer_check.ffn_input_norm_stats {
+                        println!(
+                            "gemma_upstream.layer{}._ffn_norm_max_abs_diff: {:.9}",
+                            layer_check.layer_index, ffn_input_norm.max_abs_diff
+                        );
+                    }
+                    println!(
+                        "gemma_upstream.layer{}._ffn_out_max_abs_diff: {:.9}",
+                        layer_check.layer_index, layer_check.ffn_out_stats.max_abs_diff
+                    );
+                    if let Some(ffn_post_norm) = layer_check.ffn_post_norm_stats {
+                        println!(
+                            "gemma_upstream.layer{}._ffn_post_norm_max_abs_diff: {:.9}",
+                            layer_check.layer_index, ffn_post_norm.max_abs_diff
+                        );
+                    }
+                    if let Some(pe_in) = layer_check.pe_in_stats {
+                        println!(
+                            "gemma_upstream.layer{}._pe_in_max_abs_diff: {:.9}",
+                            layer_check.layer_index, pe_in.max_abs_diff
+                        );
+                    }
+                    if let Some(per_layer_embd_out) = layer_check.per_layer_embd_out_stats {
+                        println!(
+                            "gemma_upstream.layer{}._per_layer_embd_out_max_abs_diff: {:.9}",
+                            layer_check.layer_index, per_layer_embd_out.max_abs_diff
+                        );
+                    }
+                    println!(
+                        "gemma_upstream.layer{}._layer_out_max_abs_diff: {:.9}",
+                        layer_check.layer_index, layer_check.post_ffn_stats.max_abs_diff
+                    );
+                }
+            }
+        }
+        if architecture_has_recurrent_layers(&model.architecture) {
+            let recurrent_check = recurrent_cache_self_check(&model, &upstream.token_ids[..2])?;
+            let recurrent_step_cpu_base =
+                recurrent_step_cpu_check(&model, &upstream.token_ids[..2], None)?;
+            println!(
+                "recurrent_cache.layer{}._same_top1: {}",
+                recurrent_check.layer_index, recurrent_check.same_top1
+            );
+            println!(
+                "recurrent_cache.layer{}._hidden_max_abs_diff: {:.9}",
+                recurrent_check.layer_index, recurrent_check.hidden_stats.max_abs_diff
+            );
+            println!(
+                "recurrent_cache.layer{}._hidden_mean_abs_diff: {:.9}",
+                recurrent_check.layer_index, recurrent_check.hidden_stats.mean_abs_diff
+            );
+            println!(
+                "recurrent_cache.layer{}._hidden_rms_diff: {:.9}",
+                recurrent_check.layer_index, recurrent_check.hidden_stats.rms_diff
+            );
+            println!(
+                "recurrent_cache.layer{}._hidden_cosine_similarity: {:.9}",
+                recurrent_check.layer_index, recurrent_check.hidden_stats.cosine_similarity
+            );
+            println!(
+                "recurrent_cache.layer{}._r_cache_max_abs_diff: {:.9}",
+                recurrent_check.layer_index, recurrent_check.r_cache_stats.max_abs_diff
+            );
+            println!(
+                "recurrent_cache.layer{}._s_cache_max_abs_diff: {:.9}",
+                recurrent_check.layer_index, recurrent_check.s_cache_stats.max_abs_diff
+            );
+            println!(
+                "recurrent_step_cpu.layer{}._conv_output_max_abs_diff: {:.9}",
+                recurrent_step_cpu_base.layer_index,
+                recurrent_step_cpu_base.conv_output_cpu_stats.max_abs_diff
+            );
+            println!(
+                "recurrent_step_cpu.layer{}._q_conv_max_abs_diff: {:.9}",
+                recurrent_step_cpu_base.layer_index,
+                recurrent_step_cpu_base.q_conv_cpu_stats.max_abs_diff
+            );
+            println!(
+                "recurrent_step_cpu.layer{}._k_conv_max_abs_diff: {:.9}",
+                recurrent_step_cpu_base.layer_index,
+                recurrent_step_cpu_base.k_conv_cpu_stats.max_abs_diff
+            );
+            println!(
+                "recurrent_step_cpu.layer{}._output_view_max_abs_diff: {:.9}",
+                recurrent_step_cpu_base.layer_index,
+                recurrent_step_cpu_base.output_view_cpu_stats.max_abs_diff
+            );
+        }
         if matches!(model.architecture, LlamaArchitecture::Qwen35) {
             let recurrent_step_cpu_layer8 =
                 recurrent_step_cpu_check(&model, &upstream.token_ids[..2], Some(8))?;
@@ -821,19 +1570,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .step0_k_cache_tail_zero_stats
                     .max_abs_diff
             );
-        println!(
-            "attention_hidden.layer{}._input_layer{}._v_cache_max_abs_diff: {:.9}",
-            attention_hidden_layer7.layer_index,
-            attention_hidden_layer7.source_layer_index,
-            attention_hidden_layer7.v_cache_stats.max_abs_diff
-        );
-        println!(
-            "attention_hidden.layer{}._input_layer{}._step0_v_cache_row_max_abs_diff: {:.9}",
-            attention_hidden_layer7.layer_index,
-            attention_hidden_layer7.source_layer_index,
-            attention_hidden_layer7.step0_v_cache_row_stats.max_abs_diff
-        );
-        println!(
+            println!(
+                "attention_hidden.layer{}._input_layer{}._v_cache_max_abs_diff: {:.9}",
+                attention_hidden_layer7.layer_index,
+                attention_hidden_layer7.source_layer_index,
+                attention_hidden_layer7.v_cache_stats.max_abs_diff
+            );
+            println!(
+                "attention_hidden.layer{}._input_layer{}._step0_v_cache_row_max_abs_diff: {:.9}",
+                attention_hidden_layer7.layer_index,
+                attention_hidden_layer7.source_layer_index,
+                attention_hidden_layer7.step0_v_cache_row_stats.max_abs_diff
+            );
+            println!(
             "attention_hidden.layer{}._input_layer{}._step0_v_cache_tail_zero_max_abs_diff: {:.9}",
             attention_hidden_layer7.layer_index,
             attention_hidden_layer7.source_layer_index,
@@ -841,224 +1590,267 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .step0_v_cache_tail_zero_stats
                 .max_abs_diff
         );
-        let attention_tensor_check =
-            attention_cache_tensor_check(&model, &upstream.token_ids[..2])?;
-        println!(
-            "attention_tensor.layer{}._q_proj_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index, attention_tensor_check.q_proj_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._q_pre_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index, attention_tensor_check.q_pre_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._q_norm_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index, attention_tensor_check.q_norm_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._k_norm_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index, attention_tensor_check.k_norm_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._q_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index, attention_tensor_check.q_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._k_store_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index, attention_tensor_check.k_store_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._v_store_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index, attention_tensor_check.v_store_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._k_cache_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index, attention_tensor_check.k_cache_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._v_cache_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index, attention_tensor_check.v_cache_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._attn_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index, attention_tensor_check.attn_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._isolated_attn_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index,
-            attention_tensor_check.isolated_attn_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._output_proj_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index,
-            attention_tensor_check.output_proj_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._result_output_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index,
-            attention_tensor_check.result_output_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._full_attn_cpu_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index,
-            attention_tensor_check.full_attn_cpu_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._isolated_attn_cpu_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index,
-            attention_tensor_check.isolated_attn_cpu_stats.max_abs_diff
-        );
-        println!(
-            "attention_tensor.layer{}._decode_attn_cpu_max_abs_diff: {:.9}",
-            attention_tensor_check.layer_index,
-            attention_tensor_check.decode_attn_cpu_stats.max_abs_diff
-        );
-        let attention_decode_batched_tensor_check =
-            attention_decode_batched_tensor_check(&model, &upstream.token_ids[..2])?;
-        println!(
-            "attention_decode_batched_tensor.layer{}._q_proj_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check.q_proj_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._q_pre_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check.q_pre_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._q_norm_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check.q_norm_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._k_norm_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check.k_norm_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._q_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check.q_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._k_store_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check.k_store_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._v_store_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check.v_store_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._k_cache_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check.k_cache_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._v_cache_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check.v_cache_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._k_cache_view_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check
-                .k_cache_view_stats
-                .max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._v_cache_view_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check
-                .v_cache_view_stats
-                .max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._attn_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check.attn_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._output_proj_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check
-                .output_proj_stats
-                .max_abs_diff
-        );
-        println!(
-            "attention_decode_batched_tensor.layer{}._result_output_max_abs_diff: {:.9}",
-            attention_decode_batched_tensor_check.layer_index,
-            attention_decode_batched_tensor_check
-                .result_output_stats
-                .max_abs_diff
-        );
-        let attention_decode_stepwise_tensor_check =
-            attention_decode_stepwise_tensor_check(&model, &upstream.token_ids[..2])?;
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._q_proj_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check.q_proj_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._q_pre_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check.q_pre_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._q_norm_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check.q_norm_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._k_norm_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check.k_norm_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._q_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check.q_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._k_store_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check.k_store_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._v_store_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check.v_store_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._k_cache_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check.k_cache_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._v_cache_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check.v_cache_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._attn_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check.attn_stats.max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._output_proj_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check
-                .output_proj_stats
-                .max_abs_diff
-        );
-        println!(
-            "attention_decode_stepwise_tensor.layer{}._result_output_max_abs_diff: {:.9}",
-            attention_decode_stepwise_tensor_check.layer_index,
-            attention_decode_stepwise_tensor_check
-                .result_output_stats
-                .max_abs_diff
-        );
+            let attention_tensor_check =
+                attention_cache_tensor_check(&model, &upstream.token_ids[..2])?;
+            println!(
+                "attention_tensor.layer{}._q_proj_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.q_proj_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._q_pre_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index, attention_tensor_check.q_pre_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._q_norm_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.q_norm_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._k_norm_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.k_norm_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._q_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index, attention_tensor_check.q_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._k_store_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.k_store_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._v_store_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.v_store_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._k_cache_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.k_cache_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._v_cache_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.v_cache_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._attn_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index, attention_tensor_check.attn_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._isolated_attn_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.isolated_attn_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._output_proj_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.output_proj_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._result_output_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.result_output_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._full_attn_cpu_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.full_attn_cpu_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._isolated_attn_cpu_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.isolated_attn_cpu_stats.max_abs_diff
+            );
+            println!(
+                "attention_tensor.layer{}._decode_attn_cpu_max_abs_diff: {:.9}",
+                attention_tensor_check.layer_index,
+                attention_tensor_check.decode_attn_cpu_stats.max_abs_diff
+            );
+            let attention_decode_batched_tensor_check =
+                attention_decode_batched_tensor_check(&model, &upstream.token_ids[..2])?;
+            println!(
+                "attention_decode_batched_tensor.layer{}._q_proj_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .q_proj_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._q_pre_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .q_pre_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._q_norm_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .q_norm_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._k_norm_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .k_norm_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._q_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check.q_stats.max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._k_store_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .k_store_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._v_store_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .v_store_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._k_cache_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .k_cache_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._v_cache_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .v_cache_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._k_cache_view_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .k_cache_view_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._v_cache_view_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .v_cache_view_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._attn_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .attn_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._output_proj_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .output_proj_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_batched_tensor.layer{}._result_output_max_abs_diff: {:.9}",
+                attention_decode_batched_tensor_check.layer_index,
+                attention_decode_batched_tensor_check
+                    .result_output_stats
+                    .max_abs_diff
+            );
+            let attention_decode_stepwise_tensor_check =
+                attention_decode_stepwise_tensor_check(&model, &upstream.token_ids[..2])?;
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._q_proj_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .q_proj_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._q_pre_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .q_pre_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._q_norm_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .q_norm_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._k_norm_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .k_norm_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._q_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check.q_stats.max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._k_store_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .k_store_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._v_store_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .v_store_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._k_cache_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .k_cache_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._v_cache_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .v_cache_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._attn_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .attn_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._output_proj_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .output_proj_stats
+                    .max_abs_diff
+            );
+            println!(
+                "attention_decode_stepwise_tensor.layer{}._result_output_max_abs_diff: {:.9}",
+                attention_decode_stepwise_tensor_check.layer_index,
+                attention_decode_stepwise_tensor_check
+                    .result_output_stats
+                    .max_abs_diff
+            );
         }
         if model.architecture != LlamaArchitecture::Qwen35Moe {
             return Ok(());
@@ -1396,20 +2188,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("compare.top1.upstream_id: {}", upstream_top1);
         println!("compare.top1.rust_logit: {:.9}", rust_logit);
         println!("compare.top1.upstream_logit: {:.9}", upstream_logit);
-        if let Some(vocab) = &vocab {
-            println!(
-                "compare.top1.rust_piece: {}",
-                vocab
-                    .escaped_piece(*rust_top1)
-                    .unwrap_or_else(|| "<unknown>".to_owned())
-            );
-            println!(
-                "compare.top1.upstream_piece: {}",
-                vocab
-                    .escaped_piece(*upstream_top1)
-                    .unwrap_or_else(|| "<unknown>".to_owned())
-            );
-        }
+        println!(
+            "compare.top1.rust_piece: {}",
+            vocab
+                .escaped_piece(*rust_top1)
+                .unwrap_or_else(|| "<unknown>".to_owned())
+        );
+        println!(
+            "compare.top1.upstream_piece: {}",
+            vocab
+                .escaped_piece(*upstream_top1)
+                .unwrap_or_else(|| "<unknown>".to_owned())
+        );
     }
 
     Ok(())
@@ -1515,6 +2305,9 @@ fn run_upstream_debug_command(
         .arg("f16")
         .arg("-ctv")
         .arg("f16");
+    if n_gpu_layers == "0" {
+        command.arg("-dev").arg("none");
+    }
     if mode.is_stepwise() {
         command
             .env("MAKEPAD_LLAMA_DEBUG_STEP_PROMPT", "1")
@@ -1997,6 +2790,68 @@ fn compare_shared_hybrid_split_vs_full_cache_state(
     Ok(summary)
 }
 
+fn compare_shared_hybrid_split_vs_full_logits(
+    model: &LlamaModel,
+    prompt_token_ids: &[i32],
+    continue_token_id: i32,
+    attention_k_type: TensorType,
+    attention_v_type: TensorType,
+) -> Result<LogitComparison, Box<dyn std::error::Error>> {
+    if prompt_token_ids.is_empty() {
+        return Err("cannot compare split/full logits for an empty prompt".into());
+    }
+    let total_tokens = prompt_token_ids
+        .len()
+        .checked_add(1)
+        .ok_or("overflow computing split/full token count")?;
+    let max_context = u32::try_from(total_tokens)?;
+
+    let split_logits = {
+        let mut split_env =
+            build_shared_hybrid_debug_env(model, max_context, attention_k_type, attention_v_type)?;
+        let split_prompt_positions = (0..prompt_token_ids.len())
+            .map(i32::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        let split_prompt_output_id = [i32::try_from(prompt_token_ids.len() - 1)?];
+        let _ = run_shared_hybrid_graph(
+            &mut split_env,
+            prompt_token_ids,
+            &split_prompt_positions,
+            prompt_token_ids.len(),
+            &split_prompt_output_id,
+        )?;
+        let split_step_position = [i32::try_from(prompt_token_ids.len())?];
+        let split_step_output_id = [0_i32];
+        run_shared_hybrid_graph(
+            &mut split_env,
+            std::slice::from_ref(&continue_token_id),
+            &split_step_position,
+            total_tokens,
+            &split_step_output_id,
+        )?
+    };
+
+    let full_logits = {
+        let mut full_env =
+            build_shared_hybrid_debug_env(model, max_context, attention_k_type, attention_v_type)?;
+        let mut full_token_ids = prompt_token_ids.to_vec();
+        full_token_ids.push(continue_token_id);
+        let full_positions = (0..full_token_ids.len())
+            .map(i32::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        let full_output_id = [i32::try_from(full_token_ids.len() - 1)?];
+        run_shared_hybrid_graph(
+            &mut full_env,
+            &full_token_ids,
+            &full_positions,
+            full_token_ids.len(),
+            &full_output_id,
+        )?
+    };
+
+    Ok(compare_logits(&split_logits, &full_logits))
+}
+
 #[allow(dead_code)]
 fn build_hybrid_checkpoint_session(
     model: &LlamaModel,
@@ -2011,6 +2866,37 @@ fn build_hybrid_checkpoint_session_with_shared_cache(
     max_context: u32,
     n_tokens: usize,
     use_shared_cache: bool,
+) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
+    build_hybrid_checkpoint_session_with_shared_cache_and_seed(
+        model,
+        max_context,
+        n_tokens,
+        use_shared_cache,
+        None,
+    )
+}
+
+fn build_hybrid_checkpoint_session_with_seeded_cache(
+    model: &LlamaModel,
+    max_context: u32,
+    n_tokens: usize,
+    initial_cache: &HybridCacheSnapshot,
+) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
+    build_hybrid_checkpoint_session_with_shared_cache_and_seed(
+        model,
+        max_context,
+        n_tokens,
+        true,
+        Some(initial_cache),
+    )
+}
+
+fn build_hybrid_checkpoint_session_with_shared_cache_and_seed(
+    model: &LlamaModel,
+    max_context: u32,
+    n_tokens: usize,
+    use_shared_cache: bool,
+    initial_cache: Option<&HybridCacheSnapshot>,
 ) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
     let plan = model.execution_plan()?;
     let mut weights = plan
@@ -2037,6 +2923,9 @@ fn build_hybrid_checkpoint_session_with_shared_cache(
         n_tokens,
         1,
     )?;
+    if let Some(initial_cache) = initial_cache {
+        write_hybrid_cache_snapshot(&mut weights.ctx, &shared_cache, initial_cache)?;
+    }
 
     let mut checkpoints = Vec::new();
     checkpoints.push(HybridCheckpointTensor {
@@ -2063,7 +2952,7 @@ fn build_hybrid_checkpoint_session_with_shared_cache(
             )?,
         });
 
-        let attn_post_norm_name = format!("hybrid_decode.layer{layer_index}.ffn.input_norm");
+        let attn_post_norm_name = format!("hybrid_decode.layer{layer_index}.attn_post_norm");
         if let Some(tensor_id) = maybe_add_hidden_token_checkpoint_by_name(
             &mut weights.ctx,
             &attn_post_norm_name,
@@ -2071,6 +2960,18 @@ fn build_hybrid_checkpoint_session_with_shared_cache(
         )? {
             checkpoints.push(HybridCheckpointTensor {
                 label: format!("layer{layer_index}.attn_post_norm"),
+                tensor_id,
+            });
+        }
+
+        let ffn_input_norm_name = format!("hybrid_decode.layer{layer_index}.ffn.input_norm");
+        if let Some(tensor_id) = maybe_add_hidden_token_checkpoint_by_name(
+            &mut weights.ctx,
+            &ffn_input_norm_name,
+            &format!("{ffn_input_norm_name}.ck"),
+        )? {
+            checkpoints.push(HybridCheckpointTensor {
+                label: format!("layer{layer_index}.ffn_input_norm"),
                 tensor_id,
             });
         }
@@ -2084,6 +2985,18 @@ fn build_hybrid_checkpoint_session_with_shared_cache(
                 &format!("{ffn_out_name}.ck"),
             )?,
         });
+
+        let ffn_post_norm_name = format!("hybrid_decode.layer{layer_index}.ffn_post_norm");
+        if let Some(tensor_id) = maybe_add_hidden_token_checkpoint_by_name(
+            &mut weights.ctx,
+            &ffn_post_norm_name,
+            &format!("{ffn_post_norm_name}.ck"),
+        )? {
+            checkpoints.push(HybridCheckpointTensor {
+                label: format!("layer{layer_index}.ffn_post_norm"),
+                tensor_id,
+            });
+        }
 
         let post_ffn_name = format!("hybrid_decode.layer{layer_index}.post_ffn");
         checkpoints.push(HybridCheckpointTensor {
@@ -2137,6 +3050,306 @@ fn build_hybrid_checkpoint_session_with_shared_cache(
         shared_cache,
         checkpoints,
     })
+}
+
+fn build_hybrid_preview_session(
+    model: &LlamaModel,
+    max_context: u32,
+    n_tokens: usize,
+    checkpoint_specs: &[HybridPreviewCheckpointSpec],
+) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
+    let plan = model.execution_plan()?;
+    let mut weights = plan
+        .full_weights
+        .allocate_and_load_with_extra(&model.gguf, COMPARE_SHARED_HYBRID_EXTRA_CONTEXT_BYTES)?;
+    let spec = model.hybrid_decode_spec(
+        max_context,
+        1,
+        TensorType::F16,
+        TensorType::F16,
+        TensorType::F32,
+        TensorType::F32,
+    )?;
+    build_hybrid_preview_session_with_spec(weights, spec, n_tokens, checkpoint_specs)
+}
+
+fn build_hybrid_preview_session_with_spec(
+    mut weights: makepad_llama::LoadedGgufWeights,
+    spec: makepad_llama::HybridDecodeSpec,
+    n_tokens: usize,
+    checkpoint_specs: &[HybridPreviewCheckpointSpec],
+) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
+    let shared_cache =
+        allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, &spec)?;
+    let mut decode = build_hybrid_decode_graph_with_outputs(
+        &mut weights.ctx,
+        &weights.tensor_ids,
+        &spec,
+        Some(&shared_cache),
+        n_tokens,
+        1,
+    )?;
+
+    let mut checkpoints = Vec::new();
+    for checkpoint_spec in checkpoint_specs {
+        if !checkpoint_spec
+            .source_names
+            .iter()
+            .any(|name| weights.ctx.get_tensor(name).is_some())
+        {
+            continue;
+        }
+        let source_names = checkpoint_spec
+            .source_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let checkpoint_name = format!("{}.ck", checkpoint_spec.label);
+        let tensor_id = add_contiguous_checkpoint_by_any_name(
+            &mut weights.ctx,
+            &source_names,
+            &checkpoint_name,
+        )?;
+        checkpoints.push(HybridCheckpointTensor {
+            label: checkpoint_spec.label.clone(),
+            tensor_id,
+        });
+    }
+
+    for checkpoint in &checkpoints {
+        decode
+            .graph
+            .build_forward_expand(&weights.ctx, checkpoint.tensor_id)?;
+    }
+
+    let runtime = MetalRuntime::new()?;
+    let prepared = prepare_graph(&weights.ctx, &decode.graph, runtime.features())?;
+    let session = MetalGraphSession::from_runtime(
+        runtime,
+        &weights.ctx,
+        &prepared,
+        BufferStorageMode::Shared,
+        BufferStorageMode::Shared,
+    )?;
+
+    Ok(HybridCheckpointSession {
+        weights,
+        spec,
+        decode,
+        session,
+        shared_cache,
+        checkpoints,
+    })
+}
+
+fn build_hybrid_hidden_token_capture_session(
+    model: &LlamaModel,
+    max_context: u32,
+    n_tokens: usize,
+    attention_k_type: TensorType,
+    attention_v_type: TensorType,
+    checkpoint_specs: &[HybridPreviewCheckpointSpec],
+) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
+    let plan = model.execution_plan()?;
+    let weights = plan
+        .full_weights
+        .allocate_and_load_with_extra(&model.gguf, COMPARE_SHARED_HYBRID_EXTRA_CONTEXT_BYTES)?;
+    let spec = model.hybrid_decode_spec(
+        max_context,
+        1,
+        attention_k_type,
+        attention_v_type,
+        TensorType::F32,
+        TensorType::F32,
+    )?;
+    build_hybrid_hidden_token_capture_session_with_spec(weights, spec, n_tokens, checkpoint_specs)
+}
+
+fn build_hybrid_token_dim2_capture_session(
+    model: &LlamaModel,
+    max_context: u32,
+    n_tokens: usize,
+    attention_k_type: TensorType,
+    attention_v_type: TensorType,
+    checkpoint_specs: &[HybridPreviewCheckpointSpec],
+) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
+    let plan = model.execution_plan()?;
+    let weights = plan
+        .full_weights
+        .allocate_and_load_with_extra(&model.gguf, COMPARE_SHARED_HYBRID_EXTRA_CONTEXT_BYTES)?;
+    let spec = model.hybrid_decode_spec(
+        max_context,
+        1,
+        attention_k_type,
+        attention_v_type,
+        TensorType::F32,
+        TensorType::F32,
+    )?;
+    build_hybrid_token_dim2_capture_session_with_spec(weights, spec, n_tokens, checkpoint_specs)
+}
+
+fn build_hybrid_hidden_token_capture_session_with_spec(
+    mut weights: makepad_llama::LoadedGgufWeights,
+    spec: makepad_llama::HybridDecodeSpec,
+    n_tokens: usize,
+    checkpoint_specs: &[HybridPreviewCheckpointSpec],
+) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
+    let shared_cache =
+        allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, &spec)?;
+    let mut decode = build_hybrid_decode_graph_with_outputs(
+        &mut weights.ctx,
+        &weights.tensor_ids,
+        &spec,
+        Some(&shared_cache),
+        n_tokens,
+        1,
+    )?;
+
+    let mut checkpoints = Vec::new();
+    for checkpoint_spec in checkpoint_specs {
+        if !checkpoint_spec
+            .source_names
+            .iter()
+            .any(|name| weights.ctx.get_tensor(name).is_some())
+        {
+            continue;
+        }
+        let source_names = checkpoint_spec
+            .source_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let checkpoint_name = format!("{}.ck", checkpoint_spec.label);
+        let tensor_id = add_hidden_token_checkpoint_by_any_name(
+            &mut weights.ctx,
+            &source_names,
+            &checkpoint_name,
+        )?;
+        checkpoints.push(HybridCheckpointTensor {
+            label: checkpoint_spec.label.clone(),
+            tensor_id,
+        });
+    }
+
+    for checkpoint in &checkpoints {
+        decode
+            .graph
+            .build_forward_expand(&weights.ctx, checkpoint.tensor_id)?;
+    }
+
+    let runtime = MetalRuntime::new()?;
+    let prepared = prepare_graph(&weights.ctx, &decode.graph, runtime.features())?;
+    let session = MetalGraphSession::from_runtime(
+        runtime,
+        &weights.ctx,
+        &prepared,
+        BufferStorageMode::Shared,
+        BufferStorageMode::Shared,
+    )?;
+
+    Ok(HybridCheckpointSession {
+        weights,
+        spec,
+        decode,
+        session,
+        shared_cache,
+        checkpoints,
+    })
+}
+
+fn build_hybrid_token_dim2_capture_session_with_spec(
+    mut weights: makepad_llama::LoadedGgufWeights,
+    spec: makepad_llama::HybridDecodeSpec,
+    n_tokens: usize,
+    checkpoint_specs: &[HybridPreviewCheckpointSpec],
+) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
+    let shared_cache =
+        allocate_hybrid_shared_cache_tensors(&mut weights.ctx, &weights.tensor_ids, &spec)?;
+    let mut decode = build_hybrid_decode_graph_with_outputs(
+        &mut weights.ctx,
+        &weights.tensor_ids,
+        &spec,
+        Some(&shared_cache),
+        n_tokens,
+        1,
+    )?;
+
+    let mut checkpoints = Vec::new();
+    for checkpoint_spec in checkpoint_specs {
+        if !checkpoint_spec
+            .source_names
+            .iter()
+            .any(|name| weights.ctx.get_tensor(name).is_some())
+        {
+            continue;
+        }
+        let source_names = checkpoint_spec
+            .source_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let checkpoint_name = format!("{}.ck", checkpoint_spec.label);
+        let tensor_id = add_token_dim2_checkpoint_by_any_name(
+            &mut weights.ctx,
+            &source_names,
+            &checkpoint_name,
+        )?;
+        checkpoints.push(HybridCheckpointTensor {
+            label: checkpoint_spec.label.clone(),
+            tensor_id,
+        });
+    }
+
+    for checkpoint in &checkpoints {
+        decode
+            .graph
+            .build_forward_expand(&weights.ctx, checkpoint.tensor_id)?;
+    }
+
+    let runtime = MetalRuntime::new()?;
+    let prepared = prepare_graph(&weights.ctx, &decode.graph, runtime.features())?;
+    let session = MetalGraphSession::from_runtime(
+        runtime,
+        &weights.ctx,
+        &prepared,
+        BufferStorageMode::Shared,
+        BufferStorageMode::Shared,
+    )?;
+
+    Ok(HybridCheckpointSession {
+        weights,
+        spec,
+        decode,
+        session,
+        shared_cache,
+        checkpoints,
+    })
+}
+
+fn build_truncated_hybrid_preview_session(
+    model: &LlamaModel,
+    max_context: u32,
+    n_tokens: usize,
+    max_layer_index: u32,
+    checkpoint_specs: &[HybridPreviewCheckpointSpec],
+) -> Result<HybridCheckpointSession, Box<dyn std::error::Error>> {
+    let plan = model.execution_plan()?;
+    let weights = plan
+        .full_weights
+        .allocate_and_load_with_extra(&model.gguf, COMPARE_SHARED_HYBRID_EXTRA_CONTEXT_BYTES)?;
+    let mut spec = model.hybrid_decode_spec(
+        max_context,
+        1,
+        TensorType::F16,
+        TensorType::F16,
+        TensorType::F32,
+        TensorType::F32,
+    )?;
+    spec.layers.retain(|layer| match layer {
+        HybridLayerSpec::Attention { layer_index, .. }
+        | HybridLayerSpec::Recurrent { layer_index, .. } => *layer_index <= max_layer_index,
+    });
+    build_hybrid_preview_session_with_spec(weights, spec, n_tokens, checkpoint_specs)
 }
 
 fn build_single_hybrid_capture_session(
@@ -2357,6 +3570,12 @@ fn execute_hybrid_checkpoint_session(
             bytes: &output_id_bytes,
         },
     ];
+    if let Some(input_per_layer_primary) = session.decode.input_per_layer_primary {
+        writes.push(MetalGraphTensorWrite {
+            tensor_id: input_per_layer_primary,
+            bytes: &input_primary,
+        });
+    }
     if let Some(input_attention_write_indices) = session.decode.input_attention_write_indices {
         writes.push(MetalGraphTensorWrite {
             tensor_id: input_attention_write_indices,
@@ -2415,6 +3634,1619 @@ fn execute_hybrid_checkpoint_session(
     Ok(outputs)
 }
 
+fn execute_hybrid_checkpoint_session_previews(
+    session: &mut HybridCheckpointSession,
+    token_ids: &[i32],
+    positions: &[i32],
+    cache_tokens: usize,
+    output_ids: &[i32],
+) -> Result<BTreeMap<String, TensorPreview>, Box<dyn std::error::Error>> {
+    let mut layout = HybridDecodeBatchLayout::from_contiguous_positions_and_outputs(
+        positions,
+        cache_tokens,
+        output_ids,
+    )?;
+    if session.decode.input_recurrent_state_rows.is_none() {
+        layout.recurrent_state_rows.clear();
+    }
+
+    for cache_view in &session.decode.attention_cache_views {
+        if compare_should_use_flash_attention(cache_view.k_head_dim as usize, positions.len()) {
+            compare_configure_attention_cache_view(
+                &mut session.weights.ctx,
+                cache_view.k_cache_view,
+                cache_view.k_head_dim,
+                cache_tokens,
+                cache_view.kv_head_count,
+                cache_view.max_sequences,
+            )?;
+            compare_configure_attention_cache_view(
+                &mut session.weights.ctx,
+                cache_view.v_cache_view,
+                cache_view.v_head_dim,
+                cache_tokens,
+                cache_view.kv_head_count,
+                cache_view.max_sequences,
+            )?;
+            if let Some(input_mask) = cache_view.input_mask {
+                compare_configure_attention_mask_view(
+                    &mut session.weights.ctx,
+                    input_mask,
+                    cache_tokens,
+                    positions.len(),
+                )?;
+            }
+        }
+    }
+
+    let input_primary = i32s_to_bytes(token_ids);
+    let output_id_bytes = i32s_to_bytes(&layout.output_ids);
+    let attention_write_index_bytes = layout
+        .attention_write_indices
+        .is_empty()
+        .then(Vec::new)
+        .unwrap_or_else(|| i32s_to_bytes(&layout.attention_write_indices));
+    let recurrent_state_row_bytes = layout
+        .recurrent_state_rows
+        .is_empty()
+        .then(Vec::new)
+        .unwrap_or_else(|| i32s_to_bytes(&layout.recurrent_state_rows));
+    let rope_positions = if session.decode.input_rope_positions.is_some() {
+        let rope = session
+            .spec
+            .layers
+            .iter()
+            .find_map(|layer| match layer {
+                HybridLayerSpec::Attention { decode, .. } => decode.block.rope.as_ref(),
+                HybridLayerSpec::Recurrent { .. } => None,
+            })
+            .ok_or("hybrid checkpoint session is missing rope spec")?;
+        Some(encode_rope_positions(rope, positions, positions.len())?)
+    } else {
+        None
+    };
+    let rope_position_bytes = rope_positions
+        .as_ref()
+        .map(|positions| i32s_to_bytes(positions));
+
+    let mut attention_mask_bytes = Vec::new();
+    for cache_view in &session.decode.attention_cache_views {
+        if let Some(input_mask) = cache_view.input_mask {
+            let key_count = compare_attention_mask_write_key_count(
+                &session.weights.ctx,
+                input_mask,
+                cache_view.k_head_dim,
+                cache_tokens,
+                positions.len(),
+            )?;
+            attention_mask_bytes.push(position_attention_mask_bytes_for_tensor(
+                &session.weights.ctx,
+                input_mask,
+                key_count,
+                positions,
+            )?);
+        }
+    }
+
+    let mut writes = vec![
+        MetalGraphTensorWrite {
+            tensor_id: session.decode.input_primary,
+            bytes: &input_primary,
+        },
+        MetalGraphTensorWrite {
+            tensor_id: session.decode.input_output_ids,
+            bytes: &output_id_bytes,
+        },
+    ];
+    if let Some(input_per_layer_primary) = session.decode.input_per_layer_primary {
+        writes.push(MetalGraphTensorWrite {
+            tensor_id: input_per_layer_primary,
+            bytes: &input_primary,
+        });
+    }
+    if let Some(input_attention_write_indices) = session.decode.input_attention_write_indices {
+        writes.push(MetalGraphTensorWrite {
+            tensor_id: input_attention_write_indices,
+            bytes: &attention_write_index_bytes,
+        });
+    }
+    if let Some(input_rope_positions) = session.decode.input_rope_positions {
+        writes.push(MetalGraphTensorWrite {
+            tensor_id: input_rope_positions,
+            bytes: rope_position_bytes
+                .as_deref()
+                .ok_or("rope position bytes were not prepared")?,
+        });
+    }
+    if let Some(input_recurrent_state_rows) = session.decode.input_recurrent_state_rows {
+        writes.push(MetalGraphTensorWrite {
+            tensor_id: input_recurrent_state_rows,
+            bytes: &recurrent_state_row_bytes,
+        });
+    }
+
+    let mut attention_mask_index = 0usize;
+    for cache_view in &session.decode.attention_cache_views {
+        if let Some(input_mask) = cache_view.input_mask {
+            let bytes = attention_mask_bytes
+                .get(attention_mask_index)
+                .ok_or("attention mask bytes were not prepared")?;
+            attention_mask_index += 1;
+            writes.push(MetalGraphTensorWrite {
+                tensor_id: input_mask,
+                bytes,
+            });
+        }
+    }
+
+    let output_tensors = session
+        .checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.tensor_id)
+        .collect::<Vec<_>>();
+    let execution = session
+        .session
+        .execute(&session.weights.ctx, &writes, &output_tensors)?;
+
+    let mut outputs = BTreeMap::new();
+    for checkpoint in &session.checkpoints {
+        let bytes = execution
+            .outputs
+            .get(&checkpoint.tensor_id)
+            .ok_or_else(|| format!("missing output for checkpoint '{}'", checkpoint.label))?;
+        let tensor = session
+            .weights
+            .ctx
+            .tensor(checkpoint.tensor_id)
+            .ok_or_else(|| format!("invalid checkpoint tensor '{}'", checkpoint.label))?;
+        outputs.insert(
+            checkpoint.label.clone(),
+            tensor_preview_from_tensor_bytes(tensor, bytes)?,
+        );
+    }
+    Ok(outputs)
+}
+
+fn compare_preview_label_to_upstream_names(
+    rust_previews: &BTreeMap<String, TensorPreview>,
+    upstream_previews: &BTreeMap<String, TensorPreview>,
+    rust_label: &str,
+    upstream_names: &[&str],
+) -> Result<LogitComparison, Box<dyn std::error::Error>> {
+    let rust_preview = rust_previews
+        .get(rust_label)
+        .ok_or_else(|| format!("missing rust preview '{rust_label}'"))?;
+    let upstream_preview = upstream_preview_by_any_name(upstream_previews, upstream_names)?;
+    Ok(compare_logits(
+        &rust_preview.values,
+        &upstream_preview.values,
+    ))
+}
+
+fn compare_optional_preview_label_to_upstream_names(
+    rust_previews: &BTreeMap<String, TensorPreview>,
+    upstream_previews: &BTreeMap<String, TensorPreview>,
+    rust_label: &str,
+    upstream_names: &[&str],
+) -> Result<Option<LogitComparison>, Box<dyn std::error::Error>> {
+    let Some(rust_preview) = rust_previews.get(rust_label) else {
+        return Ok(None);
+    };
+    let upstream_preview = upstream_preview_by_any_name(upstream_previews, upstream_names)?;
+    Ok(Some(compare_logits(
+        &rust_preview.values,
+        &upstream_preview.values,
+    )))
+}
+
+fn gemma_upstream_layer_preview_stack_check(
+    args: &Args,
+    model: &LlamaModel,
+    token_ids: &[i32],
+) -> Result<HybridUpstreamLayerPreviewStackCheck, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma upstream preview stack check requires a non-empty prompt".into());
+    }
+
+    let tensors = model.gemma4_tensors()?;
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+
+    let checkpoint_specs = tensors
+        .layers
+        .iter()
+        .map(|layer| HybridPreviewCheckpointSpec {
+            label: format!("layer{}.post_ffn", layer.index),
+            source_names: vec![format!("hybrid_decode.layer{}.post_ffn", layer.index)],
+        })
+        .collect::<Vec<_>>();
+    let mut rust_session =
+        build_hybrid_preview_session(model, max_context, token_ids.len(), &checkpoint_specs)?;
+    let rust_previews = execute_hybrid_checkpoint_session_previews(
+        &mut rust_session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+
+    let mut upstream_filter_names = Vec::with_capacity(tensors.layers.len() * 2);
+    for layer in &tensors.layers {
+        upstream_filter_names.push(format!("out_scaled-{}", layer.index));
+        upstream_filter_names.push(format!("l_out-{}", layer.index));
+    }
+    let upstream_filter_refs = upstream_filter_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let upstream_previews = run_upstream_debug_tensor_previews(args, &upstream_filter_refs)?;
+
+    let mut first_diff_layer = None;
+    let mut first_diff_stats = None;
+    let mut max_diff_layer = None;
+    let mut max_diff_stats = LogitComparison {
+        max_abs_diff: 0.0,
+        mean_abs_diff: 0.0,
+        rms_diff: 0.0,
+        cosine_similarity: 1.0,
+    };
+    let mut layer_post_ffn_stats = BTreeMap::new();
+
+    let mut compared_any_layer = false;
+    for layer in &tensors.layers {
+        let rust_label = format!("layer{}.post_ffn", layer.index);
+        if !rust_previews.contains_key(&rust_label) {
+            continue;
+        }
+        let upstream_out_scaled = format!("out_scaled-{}", layer.index);
+        let upstream_l_out = format!("l_out-{}", layer.index);
+        let stats = compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &rust_label,
+            &[upstream_out_scaled.as_str(), upstream_l_out.as_str()],
+        )?;
+        layer_post_ffn_stats.insert(layer.index, stats.clone());
+        compared_any_layer = true;
+        if first_diff_layer.is_none() && stats.max_abs_diff > 0.0 {
+            first_diff_layer = Some(layer.index);
+            first_diff_stats = Some(LogitComparison {
+                max_abs_diff: stats.max_abs_diff,
+                mean_abs_diff: stats.mean_abs_diff,
+                rms_diff: stats.rms_diff,
+                cosine_similarity: stats.cosine_similarity,
+            });
+        }
+        if stats.max_abs_diff >= max_diff_stats.max_abs_diff {
+            max_diff_layer = Some(layer.index);
+            max_diff_stats = LogitComparison {
+                max_abs_diff: stats.max_abs_diff,
+                mean_abs_diff: stats.mean_abs_diff,
+                rms_diff: stats.rms_diff,
+                cosine_similarity: stats.cosine_similarity,
+            };
+        }
+    }
+
+    if !compared_any_layer {
+        return Err(
+            "gemma upstream preview stack check found no comparable layer checkpoints".into(),
+        );
+    }
+
+    Ok(HybridUpstreamLayerPreviewStackCheck {
+        first_diff_layer,
+        first_diff_stats,
+        max_diff_layer,
+        max_diff_stats,
+        layer_post_ffn_stats,
+    })
+}
+
+fn gemma_upstream_shared_per_layer_input_check(
+    args: &Args,
+    model: &LlamaModel,
+    token_ids: &[i32],
+) -> Result<GemmaUpstreamSharedPerLayerInputCheck, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma upstream shared per-layer input check requires a non-empty prompt".into());
+    }
+
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+    let checkpoint_specs = vec![
+        HybridPreviewCheckpointSpec {
+            label: "shared_per_layer.selected".to_owned(),
+            source_names: vec!["hybrid_decode.per_layer_input.selected_reshaped".to_owned()],
+        },
+        HybridPreviewCheckpointSpec {
+            label: "shared_per_layer.proj".to_owned(),
+            source_names: vec!["hybrid_decode.per_layer_input.model_proj_norm".to_owned()],
+        },
+        HybridPreviewCheckpointSpec {
+            label: "shared_per_layer.input".to_owned(),
+            source_names: vec!["hybrid_decode.per_layer_input.combined_scaled".to_owned()],
+        },
+    ];
+    let mut rust_session =
+        build_hybrid_preview_session(model, max_context, token_ids.len(), &checkpoint_specs)?;
+    let rust_previews = execute_hybrid_checkpoint_session_previews(
+        &mut rust_session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+    let upstream_previews = run_upstream_debug_tensor_previews(
+        args,
+        &["inp_per_layer_selected", "per_layer_proj", "inp_per_layer"],
+    )?;
+
+    Ok(GemmaUpstreamSharedPerLayerInputCheck {
+        selected_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            "shared_per_layer.selected",
+            &["inp_per_layer_selected"],
+        )?,
+        proj_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            "shared_per_layer.proj",
+            &["per_layer_proj"],
+        )?,
+        input_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            "shared_per_layer.input",
+            &["inp_per_layer"],
+        )?,
+    })
+}
+
+fn gemma_upstream_input_check(
+    args: &Args,
+    model: &LlamaModel,
+    token_ids: &[i32],
+) -> Result<GemmaUpstreamInputCheck, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma upstream input check requires a non-empty prompt".into());
+    }
+
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+    let checkpoint_specs = vec![
+        HybridPreviewCheckpointSpec {
+            label: "input_embed".to_owned(),
+            source_names: vec!["hybrid_decode.input_embed".to_owned()],
+        },
+        HybridPreviewCheckpointSpec {
+            label: "layer0.attn_input_norm".to_owned(),
+            source_names: vec!["hybrid_decode.layer0.attn.input_norm".to_owned()],
+        },
+    ];
+    let mut rust_session =
+        build_hybrid_preview_session(model, max_context, token_ids.len(), &checkpoint_specs)?;
+    let rust_previews = execute_hybrid_checkpoint_session_previews(
+        &mut rust_session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+
+    let upstream_previews =
+        run_upstream_debug_tensor_previews(args, &["inp_scaled", "attn_norm-0"])?;
+    let standalone = execute_gemma_standalone_input_reference(model, token_ids)?;
+    let rust_input_embed = rust_previews
+        .get("input_embed")
+        .ok_or("missing rust gemma input_embed preview")?;
+    let rust_attn_input_norm = rust_previews
+        .get("layer0.attn_input_norm")
+        .ok_or("missing rust gemma attn input norm preview")?;
+    let upstream_input_embed = upstream_previews
+        .get("inp_scaled")
+        .ok_or("missing upstream gemma inp_scaled preview")?;
+    let upstream_attn_input_norm = upstream_previews
+        .get("attn_norm-0")
+        .ok_or("missing upstream gemma attn_norm-0 preview")?;
+
+    Ok(GemmaUpstreamInputCheck {
+        input_embed_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            "input_embed",
+            &["inp_scaled"],
+        )?,
+        input_embed_standalone_vs_rust_stats: compare_logits(
+            &standalone.input_embed.values,
+            &rust_input_embed.values,
+        ),
+        input_embed_standalone_vs_upstream_stats: compare_logits(
+            &standalone.input_embed.values,
+            &upstream_input_embed.values,
+        ),
+        attn_input_norm_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            "layer0.attn_input_norm",
+            &["attn_norm-0"],
+        )?,
+        attn_input_norm_standalone_vs_rust_stats: compare_logits(
+            &standalone.attn_input_norm.values,
+            &rust_attn_input_norm.values,
+        ),
+        attn_input_norm_standalone_vs_upstream_stats: compare_logits(
+            &standalone.attn_input_norm.values,
+            &upstream_attn_input_norm.values,
+        ),
+    })
+}
+
+fn execute_gemma_standalone_input_reference(
+    model: &LlamaModel,
+    token_ids: &[i32],
+) -> Result<GemmaStandaloneInputReference, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma standalone input reference requires at least one token".into());
+    }
+
+    let cfg = model.require_gemma4()?;
+    let tensors = model.gemma4_tensors()?;
+    let first_layer = tensors
+        .layers
+        .first()
+        .ok_or("gemma standalone input reference requires at least one layer")?;
+    let plan = model.execution_plan()?;
+    let mut loaded = plan
+        .full_weights
+        .allocate_and_load_with_extra(&model.gguf, COMPARE_SHARED_HYBRID_EXTRA_CONTEXT_BYTES)?;
+    let input_tokens = loaded.ctx.new_tensor_1d(
+        TensorType::I32,
+        i64::try_from(token_ids.len())?,
+        BufferUsage::Activations,
+    )?;
+    loaded
+        .ctx
+        .tensor_mut(input_tokens)
+        .ok_or("invalid gemma standalone input token tensor")?
+        .set_input();
+
+    let token_embd_id = *loaded
+        .tensor_ids
+        .get(&tensors.globals.token_embd.name)
+        .ok_or("missing gemma token embedding tensor id")?;
+    let mut input_embed = loaded
+        .ctx
+        .get_rows(token_embd_id, input_tokens, BufferUsage::Activations)?;
+    input_embed = loaded.ctx.scale(
+        input_embed,
+        (cfg.embedding_length as f32).sqrt(),
+        BufferUsage::Activations,
+    )?;
+    loaded
+        .ctx
+        .set_tensor_name(input_embed, "gemma_standalone.input_embed")?;
+    let input_embed_out = loaded.ctx.cont(input_embed)?;
+    loaded
+        .ctx
+        .set_tensor_name(input_embed_out, "gemma_standalone.input_embed.out")?;
+    loaded
+        .ctx
+        .tensor_mut(input_embed_out)
+        .ok_or("invalid gemma standalone input embed output tensor")?
+        .set_output();
+
+    let attn_norm_weight_id = *loaded
+        .tensor_ids
+        .get(&first_layer.attn_norm.name)
+        .ok_or("missing gemma layer0 attn_norm tensor id")?;
+    let attn_norm = loaded.ctx.rms_norm_eps(
+        input_embed,
+        cfg.attention_layer_norm_rms_epsilon,
+        BufferUsage::Activations,
+    )?;
+    let attn_input_norm = loaded.ctx.binary_like_a(
+        makepad_ggml::Op::Mul,
+        attn_norm,
+        attn_norm_weight_id,
+        BufferUsage::Activations,
+    )?;
+    loaded
+        .ctx
+        .set_tensor_name(attn_input_norm, "gemma_standalone.attn_norm")?;
+    let attn_input_norm_out = loaded.ctx.cont(attn_input_norm)?;
+    loaded
+        .ctx
+        .set_tensor_name(attn_input_norm_out, "gemma_standalone.attn_norm.out")?;
+    loaded
+        .ctx
+        .tensor_mut(attn_input_norm_out)
+        .ok_or("invalid gemma standalone attn norm output tensor")?
+        .set_output();
+
+    let mut graph = Graph::new();
+    graph.build_forward_expand(&loaded.ctx, input_embed_out)?;
+    graph.build_forward_expand(&loaded.ctx, attn_input_norm_out)?;
+
+    let runtime = MetalRuntime::new()?;
+    let prepared = prepare_graph(&loaded.ctx, &graph, runtime.features())?;
+    let session = MetalGraphSession::from_runtime(
+        runtime,
+        &loaded.ctx,
+        &prepared,
+        BufferStorageMode::Shared,
+        BufferStorageMode::Shared,
+    )?;
+    let token_bytes = i32s_to_bytes(token_ids);
+    let writes = [MetalGraphTensorWrite {
+        tensor_id: input_tokens,
+        bytes: &token_bytes,
+    }];
+    let execution = session.execute(&loaded.ctx, &writes, &[input_embed_out, attn_input_norm_out])?;
+
+    Ok(GemmaStandaloneInputReference {
+        input_embed: tensor_preview_from_tensor_bytes(
+            loaded
+                .ctx
+                .tensor(input_embed_out)
+                .ok_or("invalid gemma standalone input_embed output tensor")?,
+            execution
+                .outputs
+                .get(&input_embed_out)
+                .ok_or("missing gemma standalone input_embed output")?,
+        )?,
+        attn_input_norm: tensor_preview_from_tensor_bytes(
+            loaded
+                .ctx
+                .tensor(attn_input_norm_out)
+                .ok_or("invalid gemma standalone attn_norm output tensor")?,
+            execution
+                .outputs
+                .get(&attn_input_norm_out)
+                .ok_or("missing gemma standalone attn_norm output")?,
+        )?,
+    })
+}
+
+fn gemma_per_layer_token_get_rows_direct_check(
+    model: &LlamaModel,
+    token_ids: &[i32],
+) -> Result<LogitComparison, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma direct per-layer get_rows check requires a non-empty prompt".into());
+    }
+
+    let tensor = model
+        .gemma4_tensors()?
+        .globals
+        .per_layer_token_embd
+        .ok_or("gemma4 model is missing per_layer_token_embd.weight")?;
+    let layout = GgufWeightLayout::from_tensors(vec![tensor.clone()])?;
+    let mut loaded = layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
+    let cpu = cpu_get_rows_loaded(&mut loaded, &tensor.name, token_ids)?;
+    let metal = metal_get_rows_loaded(&mut loaded, &tensor.name, token_ids)?;
+    Ok(compare_logits(&metal, &cpu))
+}
+
+fn gemma_upstream_layer_preview_check(
+    args: &Args,
+    model: &LlamaModel,
+    token_ids: &[i32],
+    layer_index: u32,
+) -> Result<GemmaUpstreamLayerPreviewCheck, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma upstream preview check requires a non-empty prompt".into());
+    }
+
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+    let prefix = format!("hybrid_decode.layer{layer_index}");
+    let checkpoint_specs = vec![
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.attn_post_norm"),
+            source_names: vec![format!("{prefix}.attn_post_norm")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.attn_residual"),
+            source_names: vec![format!("{prefix}.attn_residual")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.ffn_input_norm"),
+            source_names: vec![format!("{prefix}.ffn.input_norm")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.ffn_out"),
+            source_names: vec![format!("{prefix}.ffn.result_output")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.ffn_post_norm"),
+            source_names: vec![format!("{prefix}.ffn_post_norm")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.pe_in"),
+            source_names: vec![format!("{prefix}.pe_in")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.per_layer_embd_out"),
+            source_names: vec![format!("{prefix}.per_layer_input.post_norm")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.post_ffn"),
+            source_names: vec![format!("{prefix}.post_ffn")],
+        },
+    ];
+    let mut rust_session =
+        build_hybrid_preview_session(model, max_context, token_ids.len(), &checkpoint_specs)?;
+    let rust_previews = execute_hybrid_checkpoint_session_previews(
+        &mut rust_session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+
+    let upstream_filter_names = vec![
+        format!("attn_post_norm-{layer_index}"),
+        format!("attn_out-{layer_index}"),
+        format!("ffn_norm-{layer_index}"),
+        format!("ffn_out-{layer_index}"),
+        format!("ffn_post_norm-{layer_index}"),
+        format!("pe_in-{layer_index}"),
+        format!("per_layer_embd_out-{layer_index}"),
+        format!("out_scaled-{layer_index}"),
+        format!("l_out-{layer_index}"),
+    ];
+    let upstream_filter_refs = upstream_filter_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let upstream_previews = run_upstream_debug_tensor_previews(args, &upstream_filter_refs)?;
+
+    let upstream_attn_post_norm = format!("attn_post_norm-{layer_index}");
+    let upstream_attn_out = format!("attn_out-{layer_index}");
+    let upstream_ffn_norm = format!("ffn_norm-{layer_index}");
+    let upstream_ffn_out = format!("ffn_out-{layer_index}");
+    let upstream_ffn_post_norm = format!("ffn_post_norm-{layer_index}");
+    let upstream_pe_in = format!("pe_in-{layer_index}");
+    let upstream_per_layer_embd_out = format!("per_layer_embd_out-{layer_index}");
+    let upstream_out_scaled = format!("out_scaled-{layer_index}");
+    let upstream_l_out = format!("l_out-{layer_index}");
+
+    Ok(GemmaUpstreamLayerPreviewCheck {
+        layer_index,
+        attn_post_norm_stats: compare_optional_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.attn_post_norm"),
+            &[upstream_attn_post_norm.as_str()],
+        )?,
+        attn_residual_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.attn_residual"),
+            &[upstream_attn_out.as_str()],
+        )?,
+        ffn_input_norm_stats: compare_optional_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.ffn_input_norm"),
+            &[upstream_ffn_norm.as_str()],
+        )?,
+        ffn_out_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.ffn_out"),
+            &[upstream_ffn_out.as_str()],
+        )?,
+        ffn_post_norm_stats: compare_optional_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.ffn_post_norm"),
+            &[upstream_ffn_post_norm.as_str()],
+        )?,
+        pe_in_stats: compare_optional_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.pe_in"),
+            &[upstream_pe_in.as_str()],
+        )?,
+        per_layer_embd_out_stats: compare_optional_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.per_layer_embd_out"),
+            &[upstream_per_layer_embd_out.as_str()],
+        )?,
+        post_ffn_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.post_ffn"),
+            &[upstream_out_scaled.as_str(), upstream_l_out.as_str()],
+        )?,
+    })
+}
+
+fn gemma_upstream_layer_output_standalone_check(
+    args: &Args,
+    model: &LlamaModel,
+    token_ids: &[i32],
+    layer_index: u32,
+) -> Result<LogitComparison, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma upstream standalone layer output check requires a non-empty prompt".into());
+    }
+
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+    let checkpoint_specs = vec![HybridPreviewCheckpointSpec {
+        label: format!("layer{layer_index}.post_ffn"),
+        source_names: vec![
+            format!("hybrid_decode.layer{layer_index}.post_ffn"),
+            "hybrid_decode.result_hidden".to_owned(),
+        ],
+    }];
+    let mut rust_session = build_truncated_hybrid_preview_session(
+        model,
+        max_context,
+        token_ids.len(),
+        layer_index,
+        &checkpoint_specs,
+    )?;
+    let rust_previews = execute_hybrid_checkpoint_session_previews(
+        &mut rust_session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+
+    let upstream_filter_names = vec![
+        format!("out_scaled-{layer_index}"),
+        format!("l_out-{layer_index}"),
+    ];
+    let upstream_filter_refs = upstream_filter_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let upstream_previews = run_upstream_debug_tensor_previews(args, &upstream_filter_refs)?;
+    let upstream_out_scaled = format!("out_scaled-{layer_index}");
+    let upstream_l_out = format!("l_out-{layer_index}");
+    compare_preview_label_to_upstream_names(
+        &rust_previews,
+        &upstream_previews,
+        &format!("layer{layer_index}.post_ffn"),
+        &[upstream_out_scaled.as_str(), upstream_l_out.as_str()],
+    )
+}
+
+fn gemma_upstream_layer_preview_standalone_check(
+    args: &Args,
+    model: &LlamaModel,
+    token_ids: &[i32],
+    layer_index: u32,
+) -> Result<GemmaUpstreamLayerPreviewCheck, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma upstream standalone layer preview check requires a non-empty prompt".into());
+    }
+
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+    let prefix = format!("hybrid_decode.layer{layer_index}");
+    let checkpoint_specs = vec![
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.attn_post_norm"),
+            source_names: vec![format!("{prefix}.attn_post_norm")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.attn_residual"),
+            source_names: vec![format!("{prefix}.attn_residual")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.post_ffn"),
+            source_names: vec![
+                format!("{prefix}.post_ffn"),
+                "hybrid_decode.result_hidden".to_owned(),
+            ],
+        },
+    ];
+    let mut rust_session = build_truncated_hybrid_preview_session(
+        model,
+        max_context,
+        token_ids.len(),
+        layer_index,
+        &checkpoint_specs,
+    )?;
+    let rust_previews = execute_hybrid_checkpoint_session_previews(
+        &mut rust_session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+
+    let upstream_filter_names = vec![
+        format!("attn_post_norm-{layer_index}"),
+        format!("attn_out-{layer_index}"),
+        format!("out_scaled-{layer_index}"),
+        format!("l_out-{layer_index}"),
+    ];
+    let upstream_filter_refs = upstream_filter_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let upstream_previews = run_upstream_debug_tensor_previews(args, &upstream_filter_refs)?;
+
+    let upstream_attn_post_norm = format!("attn_post_norm-{layer_index}");
+    let upstream_attn_out = format!("attn_out-{layer_index}");
+    let upstream_out_scaled = format!("out_scaled-{layer_index}");
+    let upstream_l_out = format!("l_out-{layer_index}");
+
+    Ok(GemmaUpstreamLayerPreviewCheck {
+        layer_index,
+        attn_post_norm_stats: compare_optional_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.attn_post_norm"),
+            &[upstream_attn_post_norm.as_str()],
+        )?,
+        attn_residual_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.attn_residual"),
+            &[upstream_attn_out.as_str()],
+        )?,
+        ffn_input_norm_stats: None,
+        ffn_out_stats: LogitComparison {
+            max_abs_diff: 0.0,
+            mean_abs_diff: 0.0,
+            rms_diff: 0.0,
+            cosine_similarity: 1.0,
+        },
+        ffn_post_norm_stats: None,
+        pe_in_stats: None,
+        per_layer_embd_out_stats: None,
+        post_ffn_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            &format!("layer{layer_index}.post_ffn"),
+            &[upstream_out_scaled.as_str(), upstream_l_out.as_str()],
+        )?,
+    })
+}
+
+fn gemma_upstream_attn_post_norm_from_raw_attention_check(
+    args: &Args,
+    model: &LlamaModel,
+    token_ids: &[i32],
+    layer_index: u32,
+) -> Result<LogitComparison, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err(
+            "gemma upstream raw-attention post norm check requires a non-empty prompt".into(),
+        );
+    }
+
+    let cfg = model.require_gemma4()?;
+    let tensors = model.gemma4_tensors()?;
+    let layer = tensors
+        .layers
+        .iter()
+        .find(|layer| layer.index == layer_index)
+        .ok_or_else(|| format!("missing gemma4 layer {}", layer_index))?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let layout = gemma4_attention_block_layout(model, layer_index)?;
+    let mut spec = gemma4_attention_decode_spec(
+        model,
+        layer_index,
+        u32::try_from(token_ids.len())?,
+        1,
+        TensorType::F32,
+        TensorType::F32,
+    )?;
+    spec.block.residual = false;
+    let run = run_attention_decode_sequence_exact(
+        model,
+        &layout,
+        &spec,
+        &positions,
+        AttentionDecodeSequenceInput::TokenIds(token_ids),
+    )?;
+
+    let post_norm_layout = GgufWeightLayout::from_tensors(vec![layer.post_attention_norm.clone()])?;
+    let post_norm_weights = post_norm_layout.allocate_and_load(&model.gguf)?;
+    let post_norm_id = *post_norm_weights
+        .tensor_ids
+        .get(&layer.post_attention_norm.name)
+        .ok_or("missing gemma post_attention_norm tensor id")?;
+    let post_norm_tensor = post_norm_weights
+        .ctx
+        .tensor(post_norm_id)
+        .ok_or("invalid gemma post_attention_norm tensor")?;
+    let post_norm_bytes = post_norm_weights
+        .ctx
+        .tensor_data(post_norm_id)
+        .map_err(|err| format!("failed to read gemma post_attention_norm bytes: {err}"))?;
+    let post_norm_weight = tensor_values_from_tensor_bytes_f32(post_norm_tensor, post_norm_bytes)?;
+    let hidden_size = usize::try_from(cfg.embedding_length)?;
+    let post_norm = try_rms_norm_mul_f32(
+        &run.result_output,
+        &[token_ids.len(), hidden_size],
+        &post_norm_weight,
+        &[hidden_size],
+        cfg.attention_layer_norm_rms_epsilon,
+    )
+    .ok_or("Metal rms_norm_mul helper failed for gemma raw attention output")?;
+    let rust_preview = tensor_preview_from_values(&post_norm, hidden_size, token_ids.len())?;
+
+    let upstream_name = format!("attn_post_norm-{layer_index}");
+    let upstream_previews = run_upstream_debug_tensor_previews(args, &[upstream_name.as_str()])?;
+    let upstream_preview = upstream_previews
+        .get(&upstream_name)
+        .ok_or_else(|| format!("missing upstream preview '{}'", upstream_name))?;
+    Ok(compare_logits(&rust_preview.values, &upstream_preview.values))
+}
+
+fn gemma_hybrid_source_cache_check(
+    model: &LlamaModel,
+    token_ids: &[i32],
+    layer_index: u32,
+) -> Result<GemmaHybridSourceCacheCheck, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma hybrid source cache check requires a non-empty prompt".into());
+    }
+
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+    let plan = model.execution_plan()?;
+    let weights = plan
+        .full_weights
+        .allocate_and_load_with_extra(&model.gguf, COMPARE_SHARED_HYBRID_EXTRA_CONTEXT_BYTES)?;
+    let spec = model.hybrid_decode_spec(
+        max_context,
+        1,
+        TensorType::F32,
+        TensorType::F32,
+        TensorType::F32,
+        TensorType::F32,
+    )?;
+    let mut session = build_hybrid_preview_session_with_spec(weights, spec, token_ids.len(), &[])?;
+    let _ = execute_hybrid_checkpoint_session(
+        &mut session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+    let snapshot = capture_checkpoint_session_cache_snapshot(&session, token_ids.len())?;
+    let hybrid_k = snapshot
+        .attention_k
+        .get(&layer_index)
+        .ok_or_else(|| format!("missing hybrid attention-k snapshot for layer {}", layer_index))?;
+    let hybrid_v = snapshot
+        .attention_v
+        .get(&layer_index)
+        .ok_or_else(|| format!("missing hybrid attention-v snapshot for layer {}", layer_index))?;
+
+    let (_, _, layout, decode_spec) =
+        attention_check_setup_for_layer(model, layer_index, max_context, TensorType::F32)?;
+    let decode_run = run_attention_decode_sequence_exact(
+        model,
+        &layout,
+        &decode_spec,
+        &positions,
+        AttentionDecodeSequenceInput::TokenIds(token_ids),
+    )?;
+    let expected_k = bytes_to_f32s(&decode_run.k_cache_bytes);
+    let expected_v = bytes_to_f32s(&decode_run.v_cache_bytes);
+    if expected_k.len() < hybrid_k.len() || expected_v.len() < hybrid_v.len() {
+        return Err(format!(
+            "standalone source cache output for layer {} was shorter than hybrid snapshot",
+            layer_index
+        )
+        .into());
+    }
+
+    Ok(GemmaHybridSourceCacheCheck {
+        layer_index,
+        k_cache_stats: compare_logits(hybrid_k, &expected_k[..hybrid_k.len()]),
+        v_cache_stats: compare_logits(hybrid_v, &expected_v[..hybrid_v.len()]),
+    })
+}
+
+fn gemma_upstream_tail_check(
+    args: &Args,
+    model: &LlamaModel,
+    token_ids: &[i32],
+) -> Result<GemmaUpstreamTailCheck, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma upstream tail check requires a non-empty prompt".into());
+    }
+
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+    let checkpoint_specs = vec![
+        HybridPreviewCheckpointSpec {
+            label: "model.result_norm".to_owned(),
+            source_names: vec!["hybrid_decode.result_norm".to_owned()],
+        },
+        HybridPreviewCheckpointSpec {
+            label: "model.result_logits".to_owned(),
+            source_names: vec!["hybrid_decode.result_logits".to_owned()],
+        },
+    ];
+    let mut rust_session =
+        build_hybrid_preview_session(model, max_context, token_ids.len(), &checkpoint_specs)?;
+    let rust_previews = execute_hybrid_checkpoint_session_previews(
+        &mut rust_session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+    let upstream_previews =
+        run_upstream_debug_tensor_previews(args, &["result_norm", "result_output"])?;
+
+    Ok(GemmaUpstreamTailCheck {
+        result_norm_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            "model.result_norm",
+            &["result_norm"],
+        )?,
+        result_output_stats: compare_preview_label_to_upstream_names(
+            &rust_previews,
+            &upstream_previews,
+            "model.result_logits",
+            &["result_output"],
+        )?,
+    })
+}
+
+fn gemma_final_probe_check(
+    model: &LlamaModel,
+    token_ids: &[i32],
+    upstream_logits: &[f32],
+) -> Result<GemmaFinalProbeCheck, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma final probe check requires a non-empty prompt".into());
+    }
+
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+    let checkpoint_specs = vec![
+        HybridPreviewCheckpointSpec {
+            label: "model.result_hidden".to_owned(),
+            source_names: vec!["hybrid_decode.result_hidden".to_owned()],
+        },
+        HybridPreviewCheckpointSpec {
+            label: "model.result_logits".to_owned(),
+            source_names: vec!["hybrid_decode.result_logits".to_owned()],
+        },
+    ];
+    let mut session = build_hybrid_hidden_token_capture_session(
+        model,
+        max_context,
+        token_ids.len(),
+        TensorType::F16,
+        TensorType::F16,
+        &checkpoint_specs,
+    )?;
+    let outputs = execute_hybrid_checkpoint_session(
+        &mut session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+    let result_hidden = outputs
+        .get("model.result_hidden")
+        .ok_or("missing model.result_hidden checkpoint")?;
+    let hybrid_logits = outputs
+        .get("model.result_logits")
+        .ok_or("missing model.result_logits checkpoint")?;
+    let probe_spec = gemma4_embedding_logits_probe_spec(model)?;
+    let probe_run = execute_logits_probe_metal(
+        &session.weights,
+        &probe_spec,
+        LogitsProbeInput::EmbeddingsF32 {
+            data: result_hidden,
+            n_tokens: 1,
+        },
+        &[0],
+    )?;
+
+    Ok(GemmaFinalProbeCheck {
+        probe_vs_hybrid_stats: compare_logits(&probe_run.logits, hybrid_logits),
+        probe_vs_upstream_stats: compare_logits(&probe_run.logits, upstream_logits),
+    })
+}
+
+fn gemma_layer_manual_graph_check(
+    model: &LlamaModel,
+    token_ids: &[i32],
+    layer_index: u32,
+    attention_cache_type: TensorType,
+) -> Result<GemmaLayerManualGraphCheck, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma manual layer graph check requires a non-empty prompt".into());
+    }
+
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+    let prefix = format!("hybrid_decode.layer{layer_index}");
+    let checkpoint_specs = vec![
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.attn_post_norm"),
+            source_names: vec![format!("{prefix}.attn_post_norm")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.attn_residual"),
+            source_names: vec![format!("{prefix}.attn_residual")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.ffn_input_norm"),
+            source_names: vec![format!("{prefix}.ffn.input_norm")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.ffn_out"),
+            source_names: vec![format!("{prefix}.ffn.result_output")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.ffn_post_norm"),
+            source_names: vec![format!("{prefix}.ffn_post_norm")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.pe_in"),
+            source_names: vec![format!("{prefix}.pe_in")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.per_layer_embd_out"),
+            source_names: vec![format!("{prefix}.per_layer_input.post_norm")],
+        },
+        HybridPreviewCheckpointSpec {
+            label: format!("layer{layer_index}.post_ffn"),
+            source_names: vec![format!("{prefix}.post_ffn")],
+        },
+    ];
+    let mut session = build_hybrid_hidden_token_capture_session(
+        model,
+        max_context,
+        token_ids.len(),
+        attention_cache_type,
+        attention_cache_type,
+        &checkpoint_specs,
+    )?;
+    let graph_outputs = execute_hybrid_checkpoint_session(
+        &mut session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+    let manual_outputs = gemma_layer_manual_reference(model, token_ids, layer_index)?;
+
+    Ok(GemmaLayerManualGraphCheck {
+        layer_index,
+        attn_post_norm_stats: compare_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            &format!("layer{layer_index}.attn_post_norm"),
+        )?,
+        attn_residual_stats: compare_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            &format!("layer{layer_index}.attn_residual"),
+        )?,
+        ffn_input_norm_stats: compare_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            &format!("layer{layer_index}.ffn_input_norm"),
+        )?,
+        ffn_out_stats: compare_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            &format!("layer{layer_index}.ffn_out"),
+        )?,
+        ffn_post_norm_stats: compare_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            &format!("layer{layer_index}.ffn_post_norm"),
+        )?,
+        pe_in_stats: compare_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            &format!("layer{layer_index}.pe_in"),
+        )?,
+        per_layer_embd_out_stats: compare_optional_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            &format!("layer{layer_index}.per_layer_embd_out"),
+        )?,
+        post_ffn_stats: compare_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            &format!("layer{layer_index}.post_ffn"),
+        )?,
+    })
+}
+
+fn gemma_shared_per_layer_manual_check(
+    model: &LlamaModel,
+    token_ids: &[i32],
+) -> Result<GemmaSharedPerLayerManualCheck, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma shared per-layer manual check requires a non-empty prompt".into());
+    }
+
+    let max_context = u32::try_from(token_ids.len())?;
+    let positions = (0..token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_ids = [i32::try_from(token_ids.len() - 1)?];
+    let checkpoint_specs = vec![
+        HybridPreviewCheckpointSpec {
+            label: "shared_per_layer.selected".to_owned(),
+            source_names: vec!["hybrid_decode.per_layer_input.selected_reshaped".to_owned()],
+        },
+        HybridPreviewCheckpointSpec {
+            label: "shared_per_layer.proj".to_owned(),
+            source_names: vec!["hybrid_decode.per_layer_input.model_proj_norm".to_owned()],
+        },
+        HybridPreviewCheckpointSpec {
+            label: "shared_per_layer.input".to_owned(),
+            source_names: vec!["hybrid_decode.per_layer_input.combined_scaled".to_owned()],
+        },
+    ];
+    let mut session = build_hybrid_token_dim2_capture_session(
+        model,
+        max_context,
+        token_ids.len(),
+        TensorType::F32,
+        TensorType::F32,
+        &checkpoint_specs,
+    )?;
+    let graph_outputs = execute_hybrid_checkpoint_session(
+        &mut session,
+        token_ids,
+        &positions,
+        token_ids.len(),
+        &output_ids,
+    )?;
+    let manual_outputs = gemma_layer_manual_reference(model, token_ids, 0)?;
+
+    Ok(GemmaSharedPerLayerManualCheck {
+        selected_stats: compare_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            "shared_per_layer.selected",
+        )?,
+        proj_stats: compare_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            "shared_per_layer.proj",
+        )?,
+        input_stats: compare_named_checkpoint(
+            &graph_outputs,
+            &manual_outputs,
+            "shared_per_layer.input",
+        )?,
+    })
+}
+
+fn gemma_layer_manual_reference(
+    model: &LlamaModel,
+    token_ids: &[i32],
+    layer_index: u32,
+) -> Result<BTreeMap<String, Vec<f32>>, Box<dyn std::error::Error>> {
+    if token_ids.is_empty() {
+        return Err("gemma manual layer reference requires a non-empty prompt".into());
+    }
+
+    let cfg = model.require_gemma4()?;
+    let tensors = model.gemma4_tensors()?;
+    let layer = tensors
+        .layers
+        .iter()
+        .find(|layer| layer.index == layer_index)
+        .ok_or_else(|| format!("missing gemma4 layer {}", layer_index))?;
+    let hidden_size = usize::try_from(cfg.embedding_length)?;
+    let n_tokens = token_ids.len();
+
+    let mut manual_tensors = vec![
+        tensors.globals.token_embd.clone(),
+        layer.post_attention_norm.clone(),
+        layer.ffn_norm.clone(),
+        layer.ffn_gate.clone(),
+        layer.ffn_up.clone(),
+        layer.ffn_down.clone(),
+        layer.post_ffw_norm.clone(),
+    ];
+    if let Some(tensor) = tensors.globals.per_layer_token_embd.as_ref() {
+        manual_tensors.push(tensor.clone());
+    }
+    if let Some(tensor) = tensors.globals.per_layer_model_proj.as_ref() {
+        manual_tensors.push(tensor.clone());
+    }
+    if let Some(tensor) = tensors.globals.per_layer_proj_norm.as_ref() {
+        manual_tensors.push(tensor.clone());
+    }
+    if let Some(tensor) = layer.per_layer_inp_gate.as_ref() {
+        manual_tensors.push(tensor.clone());
+    }
+    if let Some(tensor) = layer.per_layer_proj.as_ref() {
+        manual_tensors.push(tensor.clone());
+    }
+    if let Some(tensor) = layer.per_layer_post_norm.as_ref() {
+        manual_tensors.push(tensor.clone());
+    }
+    if let Some(tensor) = layer.layer_output_scale.as_ref() {
+        manual_tensors.push(tensor.clone());
+    }
+
+    let manual_layout = GgufWeightLayout::from_tensors(manual_tensors)?;
+    let mut loaded =
+        manual_layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
+
+    let mut outputs = BTreeMap::new();
+
+    let mut input_embed =
+        cpu_get_rows_loaded(&mut loaded, &tensors.globals.token_embd.name, token_ids)?;
+    cpu_scale_inplace(
+        &mut input_embed,
+        (cfg.embedding_length as f32).sqrt(),
+    );
+
+    let positions = (0..n_tokens)
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let layout = gemma4_attention_block_layout(model, layer_index)?;
+    let mut spec = gemma4_attention_decode_spec(
+        model,
+        layer_index,
+        u32::try_from(n_tokens)?,
+        1,
+        TensorType::F32,
+        TensorType::F32,
+    )?;
+    spec.block.residual = false;
+    let attn_run = run_attention_decode_sequence_exact(
+        model,
+        &layout,
+        &spec,
+        &positions,
+        AttentionDecodeSequenceInput::TokenIds(token_ids),
+    )?;
+
+    let attn_post_norm_weight =
+        read_loaded_tensor_values_f32(&loaded, &layer.post_attention_norm.name)?;
+    let attn_post_norm = cpu_rms_norm_mul_rows(
+        &attn_run.result_output,
+        hidden_size,
+        n_tokens,
+        &attn_post_norm_weight,
+        cfg.attention_layer_norm_rms_epsilon,
+    )?;
+    outputs.insert(
+        format!("layer{layer_index}.attn_post_norm"),
+        last_token_slice(&attn_post_norm, hidden_size)?.to_vec(),
+    );
+
+    let attn_residual = cpu_add_rows(&attn_post_norm, &input_embed)?;
+    outputs.insert(
+        format!("layer{layer_index}.attn_residual"),
+        last_token_slice(&attn_residual, hidden_size)?.to_vec(),
+    );
+
+    let ffn_norm_weight = read_loaded_tensor_values_f32(&loaded, &layer.ffn_norm.name)?;
+    let ffn_input_norm = cpu_rms_norm_mul_rows(
+        &attn_residual,
+        hidden_size,
+        n_tokens,
+        &ffn_norm_weight,
+        cfg.attention_layer_norm_rms_epsilon,
+    )?;
+    outputs.insert(
+        format!("layer{layer_index}.ffn_input_norm"),
+        last_token_slice(&ffn_input_norm, hidden_size)?.to_vec(),
+    );
+
+    let ffn_gate =
+        cpu_mul_mat_loaded(&mut loaded, &layer.ffn_gate.name, &ffn_input_norm, n_tokens)?;
+    let ffn_up = cpu_mul_mat_loaded(&mut loaded, &layer.ffn_up.name, &ffn_input_norm, n_tokens)?;
+    let ffn_hidden = cpu_geglu_rows(&ffn_gate, &ffn_up)?;
+    let ffn_out = cpu_mul_mat_loaded(&mut loaded, &layer.ffn_down.name, &ffn_hidden, n_tokens)?;
+    outputs.insert(
+        format!("layer{layer_index}.ffn_out"),
+        last_token_slice(&ffn_out, hidden_size)?.to_vec(),
+    );
+
+    let ffn_post_norm_weight = read_loaded_tensor_values_f32(&loaded, &layer.post_ffw_norm.name)?;
+    let ffn_post_norm = cpu_rms_norm_mul_rows(
+        &ffn_out,
+        hidden_size,
+        n_tokens,
+        &ffn_post_norm_weight,
+        cfg.attention_layer_norm_rms_epsilon,
+    )?;
+    outputs.insert(
+        format!("layer{layer_index}.ffn_post_norm"),
+        last_token_slice(&ffn_post_norm, hidden_size)?.to_vec(),
+    );
+
+    let pe_in = cpu_add_rows(&ffn_post_norm, &attn_residual)?;
+    outputs.insert(
+        format!("layer{layer_index}.pe_in"),
+        last_token_slice(&pe_in, hidden_size)?.to_vec(),
+    );
+
+    let mut post_ffn = pe_in.clone();
+    if cfg.embedding_length_per_layer_input != 0 {
+        let hidden_per_layer = usize::try_from(cfg.embedding_length_per_layer_input)?;
+        let layer_count = usize::try_from(cfg.block_count)?;
+        let per_layer_token_name = tensors
+            .globals
+            .per_layer_token_embd
+            .as_ref()
+            .ok_or("missing gemma per_layer_token_embd")?
+            .name
+            .clone();
+        let per_layer_model_proj_name = tensors
+            .globals
+            .per_layer_model_proj
+            .as_ref()
+            .ok_or("missing gemma per_layer_model_proj")?
+            .name
+            .clone();
+        let per_layer_proj_norm_name = tensors
+            .globals
+            .per_layer_proj_norm
+            .as_ref()
+            .ok_or("missing gemma per_layer_proj_norm")?
+            .name
+            .clone();
+        let per_layer_inp_gate_name = layer
+            .per_layer_inp_gate
+            .as_ref()
+            .ok_or("missing gemma per_layer_inp_gate")?
+            .name
+            .clone();
+        let per_layer_proj_name = layer
+            .per_layer_proj
+            .as_ref()
+            .ok_or("missing gemma per_layer_proj")?
+            .name
+            .clone();
+        let per_layer_post_norm_name = layer
+            .per_layer_post_norm
+            .as_ref()
+            .ok_or("missing gemma per_layer_post_norm")?
+            .name
+            .clone();
+
+        let mut per_layer_selected =
+            cpu_get_rows_loaded(&mut loaded, &per_layer_token_name, token_ids)?;
+        cpu_scale_inplace(
+            &mut per_layer_selected,
+            (cfg.embedding_length_per_layer_input as f32).sqrt(),
+        );
+        let shared_width = hidden_per_layer
+            .checked_mul(layer_count)
+            .ok_or("overflow computing gemma shared per-layer width")?;
+        outputs.insert(
+            "shared_per_layer.selected".to_owned(),
+            last_token_slice(&per_layer_selected, shared_width)?.to_vec(),
+        );
+        let mut per_layer_model_proj = cpu_mul_mat_loaded(
+            &mut loaded,
+            &per_layer_model_proj_name,
+            &input_embed,
+            n_tokens,
+        )?;
+        cpu_scale_inplace(
+            &mut per_layer_model_proj,
+            1.0 / (cfg.embedding_length as f32).sqrt(),
+        );
+        let per_layer_proj_norm_weight =
+            read_loaded_tensor_values_f32(&loaded, &per_layer_proj_norm_name)?;
+        let per_layer_model_proj = cpu_rms_norm_mul_rows(
+            &per_layer_model_proj,
+            hidden_per_layer,
+            n_tokens
+                .checked_mul(layer_count)
+                .ok_or("overflow computing gemma per-layer norm row count")?,
+            &per_layer_proj_norm_weight,
+            cfg.attention_layer_norm_rms_epsilon,
+        )?;
+        outputs.insert(
+            "shared_per_layer.proj".to_owned(),
+            last_token_slice(&per_layer_model_proj, shared_width)?.to_vec(),
+        );
+        let mut shared_per_layer_inputs =
+            cpu_add_rows(&per_layer_model_proj, &per_layer_selected)?;
+        cpu_scale_inplace(&mut shared_per_layer_inputs, 1.0 / 2.0f32.sqrt());
+        outputs.insert(
+            "shared_per_layer.input".to_owned(),
+            last_token_slice(&shared_per_layer_inputs, shared_width)?.to_vec(),
+        );
+        let layer_inputs = cpu_extract_interleaved_layer_rows(
+            &shared_per_layer_inputs,
+            hidden_per_layer,
+            layer_count,
+            usize::try_from(layer_index)?,
+            n_tokens,
+        )?;
+
+        let per_layer_gate =
+            cpu_mul_mat_loaded(&mut loaded, &per_layer_inp_gate_name, &pe_in, n_tokens)?;
+        let per_layer_gate = cpu_gelu_rows(&per_layer_gate)?;
+        let per_layer_gated = cpu_mul_rows_broadcast(&per_layer_gate, hidden_per_layer, &layer_inputs)?;
+        let per_layer_proj = cpu_mul_mat_loaded(
+            &mut loaded,
+            &per_layer_proj_name,
+            &per_layer_gated,
+            n_tokens,
+        )?;
+        let per_layer_post_norm_weight =
+            read_loaded_tensor_values_f32(&loaded, &per_layer_post_norm_name)?;
+        let per_layer_embd_out = cpu_rms_norm_mul_rows(
+            &per_layer_proj,
+            hidden_size,
+            n_tokens,
+            &per_layer_post_norm_weight,
+            cfg.attention_layer_norm_rms_epsilon,
+        )?;
+        outputs.insert(
+            format!("layer{layer_index}.per_layer_embd_out"),
+            last_token_slice(&per_layer_embd_out, hidden_size)?.to_vec(),
+        );
+        post_ffn = cpu_add_rows(&pe_in, &per_layer_embd_out)?;
+    }
+
+    if let Some(scale_name) = layer.layer_output_scale.as_ref().map(|tensor| tensor.name.as_str()) {
+        let scale = read_loaded_tensor_values_f32(&loaded, scale_name)?;
+        post_ffn = cpu_mul_rows_broadcast(&post_ffn, hidden_size, &scale)?;
+    }
+
+    outputs.insert(
+        format!("layer{layer_index}.post_ffn"),
+        last_token_slice(&post_ffn, hidden_size)?.to_vec(),
+    );
+
+    Ok(outputs)
+}
+
 #[allow(dead_code)]
 fn capture_checkpoint_session_cache_snapshot(
     session: &HybridCheckpointSession,
@@ -2461,6 +5293,79 @@ fn capture_checkpoint_session_cache_snapshot(
     Ok(snapshot)
 }
 
+fn write_hybrid_cache_snapshot(
+    ctx: &mut Context,
+    shared_cache: &HybridSharedCacheTensorIds,
+    snapshot: &HybridCacheSnapshot,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (&layer_index, ids) in &shared_cache.attention {
+        let k_values = snapshot
+            .attention_k
+            .get(&layer_index)
+            .ok_or_else(|| format!("attention-k snapshot missing layer {}", layer_index))?;
+        write_tensor_f32_prefix_snapshot(ctx, ids.k_cache, k_values)?;
+        let v_values = snapshot
+            .attention_v
+            .get(&layer_index)
+            .ok_or_else(|| format!("attention-v snapshot missing layer {}", layer_index))?;
+        write_tensor_f32_prefix_snapshot(ctx, ids.v_cache, v_values)?;
+    }
+
+    for (&layer_index, ids) in &shared_cache.recurrent {
+        let r_values = snapshot
+            .recurrent_r
+            .get(&layer_index)
+            .ok_or_else(|| format!("recurrent-r snapshot missing layer {}", layer_index))?;
+        write_tensor_f32_prefix_snapshot(ctx, ids.r_cache, r_values)?;
+        let s_values = snapshot
+            .recurrent_s
+            .get(&layer_index)
+            .ok_or_else(|| format!("recurrent-s snapshot missing layer {}", layer_index))?;
+        write_tensor_f32_prefix_snapshot(ctx, ids.s_cache, s_values)?;
+    }
+
+    Ok(())
+}
+
+fn write_tensor_f32_prefix_snapshot(
+    ctx: &mut Context,
+    tensor_id: TensorId,
+    values: &[f32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tensor = ctx
+        .tensor(tensor_id)
+        .ok_or_else(|| format!("invalid snapshot tensor id {}", tensor_id))?
+        .clone();
+    let mut bytes = vec![0u8; tensor.nbytes()];
+    let prefix = match tensor.desc.ty {
+        TensorType::F32 => f32s_to_bytes(values),
+        TensorType::F16 => values
+            .iter()
+            .flat_map(|value| f32_to_f16(*value).to_le_bytes())
+            .collect(),
+        other => {
+            return Err(format!(
+                "snapshot write does not support tensor '{}' type {}",
+                tensor.name().unwrap_or("<unnamed>"),
+                other.name()
+            )
+            .into())
+        }
+    };
+    if prefix.len() > bytes.len() {
+        return Err(format!(
+            "snapshot write for tensor '{}' exceeds storage: {} > {}",
+            tensor.name().unwrap_or("<unnamed>"),
+            prefix.len(),
+            bytes.len()
+        )
+        .into());
+    }
+    bytes[..prefix.len()].copy_from_slice(&prefix);
+    ctx.write_tensor_data(tensor_id, &bytes)?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn compare_hybrid_prompt_split_checkpoints(
     model: &LlamaModel,
@@ -2496,20 +5401,30 @@ fn compare_hybrid_prompt_split_checkpoints(
         };
         layers.push(HybridSplitLayerCheckpointDiff {
             layer_index,
-            attn_residual: compare_named_checkpoint(
-                &split_outputs,
-                &full_outputs,
-                &format!("layer{layer_index}.attn_residual"),
-            )?,
             attn_post_norm: compare_optional_named_checkpoint(
                 &split_outputs,
                 &full_outputs,
                 &format!("layer{layer_index}.attn_post_norm"),
             )?,
+            attn_residual: compare_named_checkpoint(
+                &split_outputs,
+                &full_outputs,
+                &format!("layer{layer_index}.attn_residual"),
+            )?,
+            ffn_input_norm: compare_optional_named_checkpoint(
+                &split_outputs,
+                &full_outputs,
+                &format!("layer{layer_index}.ffn_input_norm"),
+            )?,
             ffn_out: compare_named_checkpoint(
                 &split_outputs,
                 &full_outputs,
                 &format!("layer{layer_index}.ffn_out"),
+            )?,
+            ffn_post_norm: compare_optional_named_checkpoint(
+                &split_outputs,
+                &full_outputs,
+                &format!("layer{layer_index}.ffn_post_norm"),
             )?,
             post_ffn: compare_named_checkpoint(
                 &split_outputs,
@@ -2573,20 +5488,30 @@ fn compare_hybrid_first_step_capacity_checkpoints(
         };
         layers.push(HybridSplitLayerCheckpointDiff {
             layer_index,
-            attn_residual: compare_named_checkpoint(
-                &wide_outputs,
-                &reference_outputs,
-                &format!("layer{layer_index}.attn_residual"),
-            )?,
             attn_post_norm: compare_optional_named_checkpoint(
                 &wide_outputs,
                 &reference_outputs,
                 &format!("layer{layer_index}.attn_post_norm"),
             )?,
+            attn_residual: compare_named_checkpoint(
+                &wide_outputs,
+                &reference_outputs,
+                &format!("layer{layer_index}.attn_residual"),
+            )?,
+            ffn_input_norm: compare_optional_named_checkpoint(
+                &wide_outputs,
+                &reference_outputs,
+                &format!("layer{layer_index}.ffn_input_norm"),
+            )?,
             ffn_out: compare_named_checkpoint(
                 &wide_outputs,
                 &reference_outputs,
                 &format!("layer{layer_index}.ffn_out"),
+            )?,
+            ffn_post_norm: compare_optional_named_checkpoint(
+                &wide_outputs,
+                &reference_outputs,
+                &format!("layer{layer_index}.ffn_post_norm"),
             )?,
             post_ffn: compare_named_checkpoint(
                 &wide_outputs,
@@ -2702,20 +5627,30 @@ fn compare_hybrid_first_step_shared_cache_checkpoints(
         };
         layers.push(HybridSplitLayerCheckpointDiff {
             layer_index,
-            attn_residual: compare_named_checkpoint(
-                &shared_outputs,
-                &internal_outputs,
-                &format!("layer{layer_index}.attn_residual"),
-            )?,
             attn_post_norm: compare_optional_named_checkpoint(
                 &shared_outputs,
                 &internal_outputs,
                 &format!("layer{layer_index}.attn_post_norm"),
             )?,
+            attn_residual: compare_named_checkpoint(
+                &shared_outputs,
+                &internal_outputs,
+                &format!("layer{layer_index}.attn_residual"),
+            )?,
+            ffn_input_norm: compare_optional_named_checkpoint(
+                &shared_outputs,
+                &internal_outputs,
+                &format!("layer{layer_index}.ffn_input_norm"),
+            )?,
             ffn_out: compare_named_checkpoint(
                 &shared_outputs,
                 &internal_outputs,
                 &format!("layer{layer_index}.ffn_out"),
+            )?,
+            ffn_post_norm: compare_optional_named_checkpoint(
+                &shared_outputs,
+                &internal_outputs,
+                &format!("layer{layer_index}.ffn_post_norm"),
             )?,
             post_ffn: compare_named_checkpoint(
                 &shared_outputs,
@@ -2739,6 +5674,118 @@ fn compare_hybrid_first_step_shared_cache_checkpoints(
         result_logits: compare_named_checkpoint(
             &shared_outputs,
             &internal_outputs,
+            "model.result_logits",
+        )?,
+        layers,
+    })
+}
+
+fn compare_hybrid_continue_checkpoints(
+    model: &LlamaModel,
+    prompt_token_ids: &[i32],
+    continue_token_id: i32,
+) -> Result<HybridSplitCheckpointDiff, Box<dyn std::error::Error>> {
+    if prompt_token_ids.is_empty() {
+        return Err("hybrid continue checkpoint compare requires a non-empty prompt".into());
+    }
+
+    let total_tokens = prompt_token_ids
+        .len()
+        .checked_add(1)
+        .ok_or("overflow computing hybrid continue token count")?;
+    let max_context = u32::try_from(total_tokens)?;
+
+    let mut full_token_ids = prompt_token_ids.to_vec();
+    full_token_ids.push(continue_token_id);
+    let full_positions = (0..full_token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let full_output_ids = [i32::try_from(full_token_ids.len() - 1)?];
+
+    let mut full_session = build_hybrid_checkpoint_session(model, max_context, total_tokens)?;
+    let full_outputs = execute_hybrid_checkpoint_session(
+        &mut full_session,
+        &full_token_ids,
+        &full_positions,
+        total_tokens,
+        &full_output_ids,
+    )?;
+
+    let prompt_positions = (0..prompt_token_ids.len())
+        .map(i32::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let prompt_output_ids = [i32::try_from(prompt_token_ids.len() - 1)?];
+    let mut prompt_session =
+        build_hybrid_checkpoint_session(model, max_context, prompt_token_ids.len())?;
+    let _ = execute_hybrid_checkpoint_session(
+        &mut prompt_session,
+        prompt_token_ids,
+        &prompt_positions,
+        prompt_token_ids.len(),
+        &prompt_output_ids,
+    )?;
+    let prompt_cache =
+        capture_checkpoint_session_cache_snapshot(&prompt_session, prompt_token_ids.len())?;
+
+    let continue_positions = [i32::try_from(prompt_token_ids.len())?];
+    let continue_output_ids = [0_i32];
+    let mut split_session =
+        build_hybrid_checkpoint_session_with_seeded_cache(model, max_context, 1, &prompt_cache)?;
+    let split_outputs = execute_hybrid_checkpoint_session(
+        &mut split_session,
+        std::slice::from_ref(&continue_token_id),
+        &continue_positions,
+        total_tokens,
+        &continue_output_ids,
+    )?;
+
+    let mut layers = Vec::with_capacity(full_session.spec.layers.len());
+    for layer in &full_session.spec.layers {
+        let layer_index = match layer {
+            HybridLayerSpec::Attention { layer_index, .. }
+            | HybridLayerSpec::Recurrent { layer_index, .. } => *layer_index,
+        };
+        layers.push(HybridSplitLayerCheckpointDiff {
+            layer_index,
+            attn_post_norm: compare_optional_named_checkpoint(
+                &split_outputs,
+                &full_outputs,
+                &format!("layer{layer_index}.attn_post_norm"),
+            )?,
+            attn_residual: compare_named_checkpoint(
+                &split_outputs,
+                &full_outputs,
+                &format!("layer{layer_index}.attn_residual"),
+            )?,
+            ffn_input_norm: compare_optional_named_checkpoint(
+                &split_outputs,
+                &full_outputs,
+                &format!("layer{layer_index}.ffn_input_norm"),
+            )?,
+            ffn_out: compare_named_checkpoint(
+                &split_outputs,
+                &full_outputs,
+                &format!("layer{layer_index}.ffn_out"),
+            )?,
+            ffn_post_norm: compare_optional_named_checkpoint(
+                &split_outputs,
+                &full_outputs,
+                &format!("layer{layer_index}.ffn_post_norm"),
+            )?,
+            post_ffn: compare_named_checkpoint(
+                &split_outputs,
+                &full_outputs,
+                &format!("layer{layer_index}.post_ffn"),
+            )?,
+        });
+    }
+
+    Ok(HybridSplitCheckpointDiff {
+        input_embed: compare_named_checkpoint(&split_outputs, &full_outputs, "model.input_embed")?,
+        result_norm: compare_named_checkpoint(&split_outputs, &full_outputs, "model.result_norm")?,
+        result_logits: compare_named_checkpoint(
+            &split_outputs,
+            &full_outputs,
             "model.result_logits",
         )?,
         layers,
@@ -2934,6 +5981,7 @@ fn describe_top_k(top_k: &[(i32, f32)], vocab: Option<&LlamaVocab>) -> Vec<Strin
         .collect()
 }
 
+#[derive(Clone)]
 struct LogitComparison {
     max_abs_diff: f64,
     mean_abs_diff: f64,
@@ -2943,9 +5991,11 @@ struct LogitComparison {
 
 struct HybridSplitLayerCheckpointDiff {
     layer_index: u32,
-    attn_residual: LogitComparison,
     attn_post_norm: Option<LogitComparison>,
+    attn_residual: LogitComparison,
+    ffn_input_norm: Option<LogitComparison>,
     ffn_out: LogitComparison,
+    ffn_post_norm: Option<LogitComparison>,
     post_ffn: LogitComparison,
 }
 
@@ -2960,6 +6010,101 @@ struct HybridSplitCheckpointDiff {
 struct HybridCheckpointAndCacheDiff {
     checkpoints: HybridSplitCheckpointDiff,
     cache: HybridCacheDiffSummary,
+}
+
+fn hybrid_split_layer_max_abs_diff(layer: &HybridSplitLayerCheckpointDiff) -> f64 {
+    let mut max_abs_diff = layer.attn_residual.max_abs_diff;
+    if let Some(attn_post_norm) = &layer.attn_post_norm {
+        max_abs_diff = max_abs_diff.max(attn_post_norm.max_abs_diff);
+    }
+    if let Some(ffn_input_norm) = &layer.ffn_input_norm {
+        max_abs_diff = max_abs_diff.max(ffn_input_norm.max_abs_diff);
+    }
+    max_abs_diff = max_abs_diff.max(layer.ffn_out.max_abs_diff);
+    if let Some(ffn_post_norm) = &layer.ffn_post_norm {
+        max_abs_diff = max_abs_diff.max(ffn_post_norm.max_abs_diff);
+    }
+    max_abs_diff.max(layer.post_ffn.max_abs_diff)
+}
+
+struct HybridUpstreamLayerPreviewStackCheck {
+    first_diff_layer: Option<u32>,
+    first_diff_stats: Option<LogitComparison>,
+    max_diff_layer: Option<u32>,
+    max_diff_stats: LogitComparison,
+    layer_post_ffn_stats: BTreeMap<u32, LogitComparison>,
+}
+
+struct GemmaUpstreamInputCheck {
+    input_embed_stats: LogitComparison,
+    input_embed_standalone_vs_rust_stats: LogitComparison,
+    input_embed_standalone_vs_upstream_stats: LogitComparison,
+    attn_input_norm_stats: LogitComparison,
+    attn_input_norm_standalone_vs_rust_stats: LogitComparison,
+    attn_input_norm_standalone_vs_upstream_stats: LogitComparison,
+}
+
+struct GemmaStandaloneInputReference {
+    input_embed: TensorPreview,
+    attn_input_norm: TensorPreview,
+}
+
+struct GemmaUpstreamLayerPreviewCheck {
+    layer_index: u32,
+    attn_post_norm_stats: Option<LogitComparison>,
+    attn_residual_stats: LogitComparison,
+    ffn_input_norm_stats: Option<LogitComparison>,
+    ffn_out_stats: LogitComparison,
+    ffn_post_norm_stats: Option<LogitComparison>,
+    pe_in_stats: Option<LogitComparison>,
+    per_layer_embd_out_stats: Option<LogitComparison>,
+    post_ffn_stats: LogitComparison,
+}
+
+struct GemmaHybridSourceCacheCheck {
+    layer_index: u32,
+    k_cache_stats: LogitComparison,
+    v_cache_stats: LogitComparison,
+}
+
+struct GemmaUpstreamTailCheck {
+    result_norm_stats: LogitComparison,
+    result_output_stats: LogitComparison,
+}
+
+struct GemmaFinalProbeCheck {
+    probe_vs_hybrid_stats: LogitComparison,
+    probe_vs_upstream_stats: LogitComparison,
+}
+
+struct GemmaLayerManualGraphCheck {
+    layer_index: u32,
+    attn_post_norm_stats: LogitComparison,
+    attn_residual_stats: LogitComparison,
+    ffn_input_norm_stats: LogitComparison,
+    ffn_out_stats: LogitComparison,
+    ffn_post_norm_stats: LogitComparison,
+    pe_in_stats: LogitComparison,
+    per_layer_embd_out_stats: Option<LogitComparison>,
+    post_ffn_stats: LogitComparison,
+}
+
+struct GemmaUpstreamSharedPerLayerInputCheck {
+    selected_stats: LogitComparison,
+    proj_stats: LogitComparison,
+    input_stats: LogitComparison,
+}
+
+struct GemmaSharedPerLayerManualCheck {
+    selected_stats: LogitComparison,
+    proj_stats: LogitComparison,
+    input_stats: LogitComparison,
+}
+
+#[derive(Clone, Debug)]
+struct HybridPreviewCheckpointSpec {
+    label: String,
+    source_names: Vec<String>,
 }
 
 struct TensorPreview {
@@ -3627,8 +6772,8 @@ fn run_upstream_debug_tensor_previews(
         .arg("-ctv")
         .arg("f16")
         .arg("--verbose");
-    if !tensor_filters.is_empty() {
-        command.arg("--tensor-filter").arg(tensor_filters.join(","));
+    for tensor_filter in tensor_filters {
+        command.arg("--tensor-filter").arg(tensor_filter);
     }
     let output = command.output()?;
     ensure_success("llama-debug preview", &output)?;
@@ -4093,44 +7238,141 @@ fn upstream_preview_by_any_name<'a>(
     .into())
 }
 
+fn architecture_has_recurrent_layers(architecture: &LlamaArchitecture) -> bool {
+    matches!(
+        architecture,
+        LlamaArchitecture::Qwen35 | LlamaArchitecture::Qwen35Moe
+    )
+}
+
+fn first_attention_check_setup(
+    model: &LlamaModel,
+    token_count: usize,
+    cache_type: TensorType,
+) -> Result<
+    (
+        u32,
+        AttentionBlockSpec,
+        GgufWeightLayout,
+        AttentionDecodeSpec,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let token_count = u32::try_from(token_count)?;
+    match &model.architecture {
+        LlamaArchitecture::Qwen35 => {
+            let (layer_index, _) = qwen35_first_attention_block_spec(model)?;
+            attention_check_setup_for_layer(model, layer_index, token_count, cache_type)
+        }
+        LlamaArchitecture::Qwen35Moe => {
+            let (layer_index, _) = qwen35moe_first_attention_block_spec(model)?;
+            attention_check_setup_for_layer(model, layer_index, token_count, cache_type)
+        }
+        LlamaArchitecture::Gemma4 => {
+            let (layer_index, _) = gemma4_first_attention_block_spec(model)?;
+            attention_check_setup_for_layer(model, layer_index, token_count, cache_type)
+        }
+        LlamaArchitecture::Unknown(name) => {
+            Err(format!("unsupported architecture for attention self-check: {name}").into())
+        }
+    }
+}
+
+fn attention_check_setup_for_layer(
+    model: &LlamaModel,
+    layer_index: u32,
+    token_count: u32,
+    cache_type: TensorType,
+) -> Result<
+    (
+        u32,
+        AttentionBlockSpec,
+        GgufWeightLayout,
+        AttentionDecodeSpec,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let token_count = u32::try_from(token_count)?;
+    match &model.architecture {
+        LlamaArchitecture::Qwen35 => {
+            let block_spec = qwen35_attention_block_spec(model, layer_index)?;
+            let layout = qwen35_attention_block_layout(model, layer_index)?;
+            let decode_spec = qwen35_attention_decode_spec(
+                model,
+                layer_index,
+                token_count,
+                1,
+                cache_type,
+                cache_type,
+            )?;
+            Ok((layer_index, block_spec, layout, decode_spec))
+        }
+        LlamaArchitecture::Qwen35Moe => {
+            let block_spec = qwen35moe_attention_block_spec(model, layer_index)?;
+            let layout = qwen35moe_attention_block_layout(model, layer_index)?;
+            let decode_spec = qwen35moe_attention_decode_spec(
+                model,
+                layer_index,
+                token_count,
+                1,
+                cache_type,
+                cache_type,
+            )?;
+            Ok((layer_index, block_spec, layout, decode_spec))
+        }
+        LlamaArchitecture::Gemma4 => {
+            let block_spec = gemma4_attention_block_spec(model, layer_index)?;
+            let layout = gemma4_attention_block_layout(model, layer_index)?;
+            let decode_spec = gemma4_attention_decode_spec(
+                model,
+                layer_index,
+                token_count,
+                1,
+                cache_type,
+                cache_type,
+            )?;
+            Ok((layer_index, block_spec, layout, decode_spec))
+        }
+        LlamaArchitecture::Unknown(name) => {
+            Err(format!("unsupported architecture for attention self-check: {name}").into())
+        }
+    }
+}
+
 fn attention_cache_self_check(
     model: &LlamaModel,
     token_ids: &[i32],
     cache_type: TensorType,
 ) -> Result<AttentionCacheSelfCheck, Box<dyn std::error::Error>> {
-    let (layer_index, block_spec, layout, decode_spec) = match &model.architecture {
-        LlamaArchitecture::Qwen35 => {
-            let (layer_index, block_spec) = qwen35_first_attention_block_spec(model)?;
-            let layout = qwen35_attention_block_layout(model, layer_index)?;
-            let decode_spec = qwen35_attention_decode_spec(
-                model,
-                layer_index,
-                u32::try_from(token_ids.len())?,
-                1,
-                cache_type,
-                cache_type,
-            )?;
-            (layer_index, block_spec, layout, decode_spec)
-        }
-        LlamaArchitecture::Qwen35Moe => {
-            let (layer_index, block_spec) = qwen35moe_first_attention_block_spec(model)?;
-            let layout = qwen35moe_attention_block_layout(model, layer_index)?;
-            let decode_spec = qwen35moe_attention_decode_spec(
-                model,
-                layer_index,
-                u32::try_from(token_ids.len())?,
-                1,
-                cache_type,
-                cache_type,
-            )?;
-            (layer_index, block_spec, layout, decode_spec)
-        }
-        LlamaArchitecture::Unknown(name) => {
-            return Err(
-                format!("unsupported architecture for attention self-check: {name}").into(),
-            );
-        }
-    };
+    let setup = first_attention_check_setup(model, token_ids.len(), cache_type)?;
+    attention_cache_self_check_with_setup(model, token_ids, setup)
+}
+
+fn attention_cache_self_check_for_layer(
+    model: &LlamaModel,
+    token_ids: &[i32],
+    layer_index: u32,
+    cache_type: TensorType,
+) -> Result<AttentionCacheSelfCheck, Box<dyn std::error::Error>> {
+    let setup = attention_check_setup_for_layer(
+        model,
+        layer_index,
+        u32::try_from(token_ids.len())?,
+        cache_type,
+    )?;
+    attention_cache_self_check_with_setup(model, token_ids, setup)
+}
+
+fn attention_cache_self_check_with_setup(
+    model: &LlamaModel,
+    token_ids: &[i32],
+    (layer_index, block_spec, layout, decode_spec): (
+        u32,
+        AttentionBlockSpec,
+        GgufWeightLayout,
+        AttentionDecodeSpec,
+    ),
+) -> Result<AttentionCacheSelfCheck, Box<dyn std::error::Error>> {
     let positions = (0..token_ids.len())
         .map(i32::try_from)
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -4209,6 +7451,12 @@ fn recurrent_cache_self_check(
                 TensorType::F32,
             )?;
             (layer_index, layout, spec)
+        }
+        LlamaArchitecture::Gemma4 => {
+            return Err(
+                "recurrent self-check is not implemented for gemma4 because gemma4 has no recurrent layers"
+                    .into(),
+            );
         }
         LlamaArchitecture::Unknown(name) => {
             return Err(
@@ -4761,6 +8009,7 @@ fn recurrent_tensor_check(
 
     if let ProbeInputKind::TokenIds {
         token_embedding_name,
+        ..
     } = &spec.block.input
     {
         let token_embd_id = *full_loaded
@@ -4986,6 +8235,7 @@ fn recurrent_upstream_preview_check(
     let input_norm_cpu = match &spec.block.input {
         ProbeInputKind::TokenIds {
             token_embedding_name,
+            ..
         } => {
             let token_embd_id = *loaded
                 .tensor_ids
@@ -5101,6 +8351,12 @@ fn recurrent_step_cpu_check(
                 TensorType::F32,
             )?;
             (layer_index, block_spec, layout, spec)
+        }
+        LlamaArchitecture::Gemma4 => {
+            return Err(
+                "recurrent step cpu check is not implemented for gemma4 because gemma4 has no recurrent layers"
+                    .into(),
+            );
         }
         LlamaArchitecture::Unknown(name) => {
             return Err(
@@ -5361,201 +8617,201 @@ fn run_attention_decode_with_result_checkpoint(
         }
     }
 
-        let input_primary = match input {
-            AttentionDecodeSequenceInput::TokenIds(token_ids) => i32s_to_bytes(token_ids),
-            AttentionDecodeSequenceInput::EmbeddingsF32 { data, hidden_size } => {
-                let expected = hidden_size
-                    .checked_mul(positions.len())
-                    .ok_or("overflow computing attention decode embedding input length")?;
-                if data.len() != expected {
-                    return Err(format!(
-                        "attention decode embedding input length mismatch: got {}, expected {}",
-                        data.len(),
-                        expected
-                    )
-                    .into());
-                }
-                f32s_to_bytes(data)
+    let input_primary = match input {
+        AttentionDecodeSequenceInput::TokenIds(token_ids) => i32s_to_bytes(token_ids),
+        AttentionDecodeSequenceInput::EmbeddingsF32 { data, hidden_size } => {
+            let expected = hidden_size
+                .checked_mul(positions.len())
+                .ok_or("overflow computing attention decode embedding input length")?;
+            if data.len() != expected {
+                return Err(format!(
+                    "attention decode embedding input length mismatch: got {}, expected {}",
+                    data.len(),
+                    expected
+                )
+                .into());
             }
-        };
+            f32s_to_bytes(data)
+        }
+    };
 
-        let mut loaded =
-            layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
-        let runtime = MetalRuntime::new()?;
-        let features = runtime.features();
-        let (mut decode_graph, _) = prepare_attention_decode_graph_with_key_count(
-            &mut loaded.ctx,
-            &loaded.tensor_ids,
-            spec,
-            positions.len(),
-            key_count,
-            features,
-        )?;
-        let zero_k_cache = vec![0u8; loaded.ctx.tensor_data(decode_graph.k_cache)?.len()];
-        let zero_v_cache = vec![0u8; loaded.ctx.tensor_data(decode_graph.v_cache)?.len()];
-        loaded
-            .ctx
-            .write_tensor_data(decode_graph.k_cache, &zero_k_cache)?;
-        loaded
-            .ctx
-            .write_tensor_data(decode_graph.v_cache, &zero_v_cache)?;
-        if let Some(bytes) = previous_k_cache {
-            loaded.ctx.write_tensor_data(decode_graph.k_cache, bytes)?;
-        }
-        if let Some(bytes) = previous_v_cache {
-            loaded.ctx.write_tensor_data(decode_graph.v_cache, bytes)?;
-        }
-        let result_output_id = add_contiguous_checkpoint_by_any_name(
-            &mut loaded.ctx,
-            &["attn_decode.output_residual", "attn_decode.output_proj"],
-            "attn_decode.result_output_ck",
-        )?;
-        let k_cache_view_id = add_contiguous_checkpoint(
-            &mut loaded.ctx,
-            decode_graph.k_cache_view,
-            "attn_decode.k_cache_view_ck",
-        )?;
-        let v_cache_view_id = add_contiguous_checkpoint(
-            &mut loaded.ctx,
-            decode_graph.v_cache_view,
-            "attn_decode.v_cache_view_ck",
-        )?;
-        let last_hidden_id = add_hidden_token_checkpoint_by_any_name(
-            &mut loaded.ctx,
-            &["attn_decode.output_residual", "attn_decode.output_proj"],
-            "attn_decode.last_hidden_ck",
-        )?;
-        decode_graph
-            .graph
-            .build_forward_expand(&loaded.ctx, result_output_id)?;
-        decode_graph
-            .graph
-            .build_forward_expand(&loaded.ctx, last_hidden_id)?;
-        decode_graph
-            .graph
-            .build_forward_expand(&loaded.ctx, k_cache_view_id)?;
-        decode_graph
-            .graph
-            .build_forward_expand(&loaded.ctx, v_cache_view_id)?;
-        let prepared = prepare_graph(&loaded.ctx, &decode_graph.graph, features)?;
-        let session = MetalGraphSession::from_runtime(
-            runtime,
-            &loaded.ctx,
-            &prepared,
-            BufferStorageMode::Shared,
-            BufferStorageMode::Shared,
-        )?;
+    let mut loaded =
+        layout.allocate_and_load_with_extra(&model.gguf, COMPARE_EXTRA_CONTEXT_BYTES)?;
+    let runtime = MetalRuntime::new()?;
+    let features = runtime.features();
+    let (mut decode_graph, _) = prepare_attention_decode_graph_with_key_count(
+        &mut loaded.ctx,
+        &loaded.tensor_ids,
+        spec,
+        positions.len(),
+        key_count,
+        features,
+    )?;
+    let zero_k_cache = vec![0u8; loaded.ctx.tensor_data(decode_graph.k_cache)?.len()];
+    let zero_v_cache = vec![0u8; loaded.ctx.tensor_data(decode_graph.v_cache)?.len()];
+    loaded
+        .ctx
+        .write_tensor_data(decode_graph.k_cache, &zero_k_cache)?;
+    loaded
+        .ctx
+        .write_tensor_data(decode_graph.v_cache, &zero_v_cache)?;
+    if let Some(bytes) = previous_k_cache {
+        loaded.ctx.write_tensor_data(decode_graph.k_cache, bytes)?;
+    }
+    if let Some(bytes) = previous_v_cache {
+        loaded.ctx.write_tensor_data(decode_graph.v_cache, bytes)?;
+    }
+    let result_output_id = add_contiguous_checkpoint_by_any_name(
+        &mut loaded.ctx,
+        &["attn_decode.output_residual", "attn_decode.output_proj"],
+        "attn_decode.result_output_ck",
+    )?;
+    let k_cache_view_id = add_contiguous_checkpoint(
+        &mut loaded.ctx,
+        decode_graph.k_cache_view,
+        "attn_decode.k_cache_view_ck",
+    )?;
+    let v_cache_view_id = add_contiguous_checkpoint(
+        &mut loaded.ctx,
+        decode_graph.v_cache_view,
+        "attn_decode.v_cache_view_ck",
+    )?;
+    let last_hidden_id = add_hidden_token_checkpoint_by_any_name(
+        &mut loaded.ctx,
+        &["attn_decode.output_residual", "attn_decode.output_proj"],
+        "attn_decode.last_hidden_ck",
+    )?;
+    decode_graph
+        .graph
+        .build_forward_expand(&loaded.ctx, result_output_id)?;
+    decode_graph
+        .graph
+        .build_forward_expand(&loaded.ctx, last_hidden_id)?;
+    decode_graph
+        .graph
+        .build_forward_expand(&loaded.ctx, k_cache_view_id)?;
+    decode_graph
+        .graph
+        .build_forward_expand(&loaded.ctx, v_cache_view_id)?;
+    let prepared = prepare_graph(&loaded.ctx, &decode_graph.graph, features)?;
+    let session = MetalGraphSession::from_runtime(
+        runtime,
+        &loaded.ctx,
+        &prepared,
+        BufferStorageMode::Shared,
+        BufferStorageMode::Shared,
+    )?;
 
-        let rope_positions = spec
-            .block
-            .rope
-            .as_ref()
-            .map(|rope| encode_rope_positions(rope, positions, positions.len()))
-            .transpose()?;
-        let rope_pos_bytes = rope_positions.as_deref().map(i32s_to_bytes);
-        let positions_bytes = i32s_to_bytes(positions);
-        let mut writes = vec![
-            MetalGraphTensorWrite {
-                tensor_id: decode_graph.input_primary,
-                bytes: &input_primary,
-            },
-            MetalGraphTensorWrite {
-                tensor_id: decode_graph.input_write_indices,
-                bytes: &positions_bytes,
-            },
-        ];
-        if let Some(input_rope_positions) = decode_graph.input_rope_positions {
-            writes.push(MetalGraphTensorWrite {
-                tensor_id: input_rope_positions,
-                bytes: rope_pos_bytes
-                    .as_deref()
-                    .ok_or("attention decode rope positions were not prepared")?,
-            });
-        }
-        let mask_bytes = decode_graph
-            .input_mask
-            .map(|input_mask| {
-                position_attention_mask_bytes_for_tensor(
+    let rope_positions = spec
+        .block
+        .rope
+        .as_ref()
+        .map(|rope| encode_rope_positions(rope, positions, positions.len()))
+        .transpose()?;
+    let rope_pos_bytes = rope_positions.as_deref().map(i32s_to_bytes);
+    let positions_bytes = i32s_to_bytes(positions);
+    let mut writes = vec![
+        MetalGraphTensorWrite {
+            tensor_id: decode_graph.input_primary,
+            bytes: &input_primary,
+        },
+        MetalGraphTensorWrite {
+            tensor_id: decode_graph.input_write_indices,
+            bytes: &positions_bytes,
+        },
+    ];
+    if let Some(input_rope_positions) = decode_graph.input_rope_positions {
+        writes.push(MetalGraphTensorWrite {
+            tensor_id: input_rope_positions,
+            bytes: rope_pos_bytes
+                .as_deref()
+                .ok_or("attention decode rope positions were not prepared")?,
+        });
+    }
+    let mask_bytes = decode_graph
+        .input_mask
+        .map(|input_mask| {
+            position_attention_mask_bytes_for_tensor(
+                &loaded.ctx,
+                input_mask,
+                compare_attention_mask_write_key_count(
                     &loaded.ctx,
                     input_mask,
-                    compare_attention_mask_write_key_count(
-                        &loaded.ctx,
-                        input_mask,
-                        i64::from(spec.block.q_head_dim),
-                        key_count,
-                        positions.len(),
-                    )?,
-                    positions,
-                )
-            })
-            .transpose()?;
-        if let Some(input_mask) = decode_graph.input_mask {
-            writes.push(MetalGraphTensorWrite {
-                tensor_id: input_mask,
-                bytes: mask_bytes
-                    .as_deref()
-                    .ok_or("missing attention decode causal mask bytes")?,
-            });
-        }
+                    i64::from(spec.block.q_head_dim),
+                    key_count,
+                    positions.len(),
+                )?,
+                positions,
+            )
+        })
+        .transpose()?;
+    if let Some(input_mask) = decode_graph.input_mask {
+        writes.push(MetalGraphTensorWrite {
+            tensor_id: input_mask,
+            bytes: mask_bytes
+                .as_deref()
+                .ok_or("missing attention decode causal mask bytes")?,
+        });
+    }
 
-        let execution = session.execute(
-            &loaded.ctx,
-            &writes,
-            &[
-                result_output_id,
-                last_hidden_id,
-                k_cache_view_id,
-                v_cache_view_id,
-            ],
-        )?;
-        let result_output = bytes_to_f32s(
+    let execution = session.execute(
+        &loaded.ctx,
+        &writes,
+        &[
+            result_output_id,
+            last_hidden_id,
+            k_cache_view_id,
+            v_cache_view_id,
+        ],
+    )?;
+    let result_output = bytes_to_f32s(
+        execution
+            .outputs
+            .get(&result_output_id)
+            .ok_or("missing attention decode result_output checkpoint output")?,
+    );
+    if result_output.is_empty() {
+        return Err("attention decode result_output checkpoint was empty".into());
+    }
+    let mut k_cache_bytes = vec![0u8; loaded.ctx.tensor_data(decode_graph.k_cache)?.len()];
+    let exported_k_cache_view = execution
+        .outputs
+        .get(&k_cache_view_id)
+        .ok_or("missing attention decode k_cache_view checkpoint output")?;
+    if exported_k_cache_view.len() > k_cache_bytes.len() {
+        return Err(format!(
+            "attention decode exported k_cache_view size {} exceeds cache buffer size {}",
+            exported_k_cache_view.len(),
+            k_cache_bytes.len()
+        )
+        .into());
+    }
+    k_cache_bytes[..exported_k_cache_view.len()].copy_from_slice(exported_k_cache_view);
+    let mut v_cache_bytes = vec![0u8; loaded.ctx.tensor_data(decode_graph.v_cache)?.len()];
+    let exported_v_cache_view = execution
+        .outputs
+        .get(&v_cache_view_id)
+        .ok_or("missing attention decode v_cache_view checkpoint output")?;
+    if exported_v_cache_view.len() > v_cache_bytes.len() {
+        return Err(format!(
+            "attention decode exported v_cache_view size {} exceeds cache buffer size {}",
+            exported_v_cache_view.len(),
+            v_cache_bytes.len()
+        )
+        .into());
+    }
+    v_cache_bytes[..exported_v_cache_view.len()].copy_from_slice(exported_v_cache_view);
+    Ok(AttentionDecodeSequenceRun {
+        result_output,
+        last_hidden: bytes_to_f32s(
             execution
                 .outputs
-                .get(&result_output_id)
-                .ok_or("missing attention decode result_output checkpoint output")?,
-        );
-        if result_output.is_empty() {
-            return Err("attention decode result_output checkpoint was empty".into());
-        }
-        let mut k_cache_bytes = vec![0u8; loaded.ctx.tensor_data(decode_graph.k_cache)?.len()];
-        let exported_k_cache_view = execution
-            .outputs
-            .get(&k_cache_view_id)
-            .ok_or("missing attention decode k_cache_view checkpoint output")?;
-        if exported_k_cache_view.len() > k_cache_bytes.len() {
-            return Err(format!(
-                "attention decode exported k_cache_view size {} exceeds cache buffer size {}",
-                exported_k_cache_view.len(),
-                k_cache_bytes.len()
-            )
-            .into());
-        }
-        k_cache_bytes[..exported_k_cache_view.len()].copy_from_slice(exported_k_cache_view);
-        let mut v_cache_bytes = vec![0u8; loaded.ctx.tensor_data(decode_graph.v_cache)?.len()];
-        let exported_v_cache_view = execution
-            .outputs
-            .get(&v_cache_view_id)
-            .ok_or("missing attention decode v_cache_view checkpoint output")?;
-        if exported_v_cache_view.len() > v_cache_bytes.len() {
-            return Err(format!(
-                "attention decode exported v_cache_view size {} exceeds cache buffer size {}",
-                exported_v_cache_view.len(),
-                v_cache_bytes.len()
-            )
-            .into());
-        }
-        v_cache_bytes[..exported_v_cache_view.len()].copy_from_slice(exported_v_cache_view);
-        Ok(AttentionDecodeSequenceRun {
-            result_output,
-            last_hidden: bytes_to_f32s(
-                execution
-                    .outputs
-                    .get(&last_hidden_id)
-                    .ok_or("missing attention decode last_hidden checkpoint output")?,
-            ),
-            k_cache_bytes,
-            v_cache_bytes,
-        })
+                .get(&last_hidden_id)
+                .ok_or("missing attention decode last_hidden checkpoint output")?,
+        ),
+        k_cache_bytes,
+        v_cache_bytes,
+    })
 }
 
 fn run_attention_decode_sequence_exact(
@@ -5617,16 +8873,20 @@ fn run_attention_decode_sequence_exact(
 
     for token_index in 0..positions.len() {
         let run = match &input {
-            AttentionDecodeSequenceInput::TokenIds(token_ids) => run_attention_decode_with_result_checkpoint(
-                model,
-                layout,
-                spec,
-                &positions[token_index..token_index + 1],
-                stable_key_count,
-                AttentionDecodeSequenceInput::TokenIds(std::slice::from_ref(&token_ids[token_index])),
-                previous_k_cache.as_deref(),
-                previous_v_cache.as_deref(),
-            )?,
+            AttentionDecodeSequenceInput::TokenIds(token_ids) => {
+                run_attention_decode_with_result_checkpoint(
+                    model,
+                    layout,
+                    spec,
+                    &positions[token_index..token_index + 1],
+                    stable_key_count,
+                    AttentionDecodeSequenceInput::TokenIds(std::slice::from_ref(
+                        &token_ids[token_index],
+                    )),
+                    previous_k_cache.as_deref(),
+                    previous_v_cache.as_deref(),
+                )?
+            }
             AttentionDecodeSequenceInput::EmbeddingsF32 { data, hidden_size } => {
                 let start = token_index
                     .checked_mul(*hidden_size)
@@ -5670,40 +8930,34 @@ fn attention_decode_batch_self_check(
     model: &LlamaModel,
     token_ids: &[i32],
 ) -> Result<AttentionDecodeBatchSelfCheck, Box<dyn std::error::Error>> {
-    let (layer_index, layout, spec) = match &model.architecture {
-        LlamaArchitecture::Qwen35 => {
-            let (layer_index, _) = qwen35_first_attention_block_spec(model)?;
-            let layout = qwen35_attention_block_layout(model, layer_index)?;
-            let spec = qwen35_attention_decode_spec(
-                model,
-                layer_index,
-                u32::try_from(token_ids.len())?,
-                1,
-                TensorType::F32,
-                TensorType::F32,
-            )?;
-            (layer_index, layout, spec)
-        }
-        LlamaArchitecture::Qwen35Moe => {
-            let (layer_index, _) = qwen35moe_first_attention_block_spec(model)?;
-            let layout = qwen35moe_attention_block_layout(model, layer_index)?;
-            let spec = qwen35moe_attention_decode_spec(
-                model,
-                layer_index,
-                u32::try_from(token_ids.len())?,
-                1,
-                TensorType::F32,
-                TensorType::F32,
-            )?;
-            (layer_index, layout, spec)
-        }
-        LlamaArchitecture::Unknown(name) => {
-            return Err(format!(
-                "unsupported architecture for attention decode batch self-check: {name}"
-            )
-            .into());
-        }
-    };
+    let setup = first_attention_check_setup(model, token_ids.len(), TensorType::F32)?;
+    attention_decode_batch_self_check_with_setup(model, token_ids, setup)
+}
+
+fn attention_decode_batch_self_check_for_layer(
+    model: &LlamaModel,
+    token_ids: &[i32],
+    layer_index: u32,
+) -> Result<AttentionDecodeBatchSelfCheck, Box<dyn std::error::Error>> {
+    let setup = attention_check_setup_for_layer(
+        model,
+        layer_index,
+        u32::try_from(token_ids.len())?,
+        TensorType::F32,
+    )?;
+    attention_decode_batch_self_check_with_setup(model, token_ids, setup)
+}
+
+fn attention_decode_batch_self_check_with_setup(
+    model: &LlamaModel,
+    token_ids: &[i32],
+    (layer_index, _, layout, spec): (
+        u32,
+        AttentionBlockSpec,
+        GgufWeightLayout,
+        AttentionDecodeSpec,
+    ),
+) -> Result<AttentionDecodeBatchSelfCheck, Box<dyn std::error::Error>> {
     let positions = (0..token_ids.len())
         .map(i32::try_from)
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -6226,35 +9480,10 @@ fn add_contiguous_checkpoint(
     src: TensorId,
     name: &str,
 ) -> Result<TensorId, Box<dyn std::error::Error>> {
-    let tensor = ctx
+    let _ = ctx
         .tensor(src)
         .ok_or_else(|| format!("invalid tensor id {src} for checkpoint {name}"))?;
-    let cont = match tensor.desc.layout.rank() {
-        0..=2 => ctx.cont_2d(src, tensor.ne[0], tensor.ne[1])?,
-        3 => ctx.cont_2d(
-            src,
-            tensor.ne[0]
-                .checked_mul(tensor.ne[1])
-                .ok_or("checkpoint width overflow")?,
-            tensor.ne[2],
-        )?,
-        4 => ctx.cont_2d(
-            src,
-            tensor.ne[0]
-                .checked_mul(tensor.ne[1])
-                .ok_or("checkpoint width overflow")?,
-            tensor.ne[2]
-                .checked_mul(tensor.ne[3])
-                .ok_or("checkpoint row overflow")?,
-        )?,
-        rank => {
-            return Err(format!(
-                "unsupported rank {} for contiguous checkpoint '{}'",
-                rank, name
-            )
-            .into())
-        }
-    };
+    let cont = ctx.cont(src)?;
     ctx.set_tensor_name(cont, name)?;
     Ok(cont)
 }
@@ -6332,6 +9561,19 @@ fn add_hidden_token_checkpoint_by_any_name(
     for src_name in src_names {
         if ctx.get_tensor(src_name).is_some() {
             return add_hidden_token_checkpoint_by_name(ctx, src_name, checkpoint_name);
+        }
+    }
+    Err(format!("missing tensor, tried any of {}", src_names.join(", ")).into())
+}
+
+fn add_token_dim2_checkpoint_by_any_name(
+    ctx: &mut Context,
+    src_names: &[&str],
+    checkpoint_name: &str,
+) -> Result<TensorId, Box<dyn std::error::Error>> {
+    for src_name in src_names {
+        if ctx.get_tensor(src_name).is_some() {
+            return add_token_dim2_checkpoint_by_name(ctx, src_name, checkpoint_name);
         }
     }
     Err(format!("missing tensor, tried any of {}", src_names.join(", ")).into())
@@ -6872,41 +10114,8 @@ fn attention_cache_tensor_check(
     model: &LlamaModel,
     token_ids: &[i32],
 ) -> Result<AttentionCacheTensorCheck, Box<dyn std::error::Error>> {
-    let (layer_index, block_spec, layout, decode_spec) = match &model.architecture {
-        LlamaArchitecture::Qwen35 => {
-            let (layer_index, block_spec) = qwen35_first_attention_block_spec(model)?;
-            let layout = qwen35_attention_block_layout(model, layer_index)?;
-            let decode_spec = qwen35_attention_decode_spec(
-                model,
-                layer_index,
-                u32::try_from(token_ids.len())?,
-                1,
-                TensorType::F32,
-                TensorType::F32,
-            )?;
-            (layer_index, block_spec, layout, decode_spec)
-        }
-        LlamaArchitecture::Qwen35Moe => {
-            let (layer_index, block_spec) = qwen35moe_first_attention_block_spec(model)?;
-            let layout = qwen35moe_attention_block_layout(model, layer_index)?;
-            let decode_spec = qwen35moe_attention_decode_spec(
-                model,
-                layer_index,
-                u32::try_from(token_ids.len())?,
-                1,
-                TensorType::F32,
-                TensorType::F32,
-            )?;
-            (layer_index, block_spec, layout, decode_spec)
-        }
-        other => {
-            return Err(format!(
-                "attention cache tensor check is not implemented for architecture {}",
-                other.name()
-            )
-            .into())
-        }
-    };
+    let (layer_index, block_spec, layout, decode_spec) =
+        first_attention_check_setup(model, token_ids.len(), TensorType::F32)?;
     let positions = (0..token_ids.len())
         .map(i32::try_from)
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -7475,41 +10684,8 @@ fn attention_decode_stepwise_tensor_check(
     model: &LlamaModel,
     token_ids: &[i32],
 ) -> Result<AttentionDecodeStepwiseTensorCheck, Box<dyn std::error::Error>> {
-    let (layer_index, block_spec, layout, decode_spec) = match &model.architecture {
-        LlamaArchitecture::Qwen35 => {
-            let (layer_index, block_spec) = qwen35_first_attention_block_spec(model)?;
-            let layout = qwen35_attention_block_layout(model, layer_index)?;
-            let decode_spec = qwen35_attention_decode_spec(
-                model,
-                layer_index,
-                u32::try_from(token_ids.len())?,
-                1,
-                TensorType::F32,
-                TensorType::F32,
-            )?;
-            (layer_index, block_spec, layout, decode_spec)
-        }
-        LlamaArchitecture::Qwen35Moe => {
-            let (layer_index, block_spec) = qwen35moe_first_attention_block_spec(model)?;
-            let layout = qwen35moe_attention_block_layout(model, layer_index)?;
-            let decode_spec = qwen35moe_attention_decode_spec(
-                model,
-                layer_index,
-                u32::try_from(token_ids.len())?,
-                1,
-                TensorType::F32,
-                TensorType::F32,
-            )?;
-            (layer_index, block_spec, layout, decode_spec)
-        }
-        other => {
-            return Err(format!(
-                "attention decode stepwise tensor check is not implemented for architecture {}",
-                other.name()
-            )
-            .into())
-        }
-    };
+    let (layer_index, block_spec, layout, decode_spec) =
+        first_attention_check_setup(model, token_ids.len(), TensorType::F32)?;
     let positions = (0..token_ids.len())
         .map(i32::try_from)
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -7553,11 +10729,8 @@ fn attention_decode_stepwise_tensor_check(
         add_contiguous_checkpoint_by_name(&mut full_loaded.ctx, "attn.k_store", "attn.k_ck")?;
     let full_v_id =
         add_contiguous_checkpoint_by_name(&mut full_loaded.ctx, "attn.v_store", "attn.v_ck")?;
-    let full_attn_id = add_contiguous_checkpoint_by_name(
-        &mut full_loaded.ctx,
-        "attn.attn_flat",
-        "attn.attn_ck",
-    )?;
+    let full_attn_id =
+        add_contiguous_checkpoint_by_name(&mut full_loaded.ctx, "attn.attn_flat", "attn.attn_ck")?;
     let full_output_proj_id = add_contiguous_checkpoint_by_name(
         &mut full_loaded.ctx,
         "attn.output_proj",
@@ -7980,41 +11153,8 @@ fn attention_decode_batched_tensor_check(
     model: &LlamaModel,
     token_ids: &[i32],
 ) -> Result<AttentionDecodeBatchedTensorCheck, Box<dyn std::error::Error>> {
-    let (layer_index, block_spec, layout, decode_spec) = match &model.architecture {
-        LlamaArchitecture::Qwen35 => {
-            let (layer_index, block_spec) = qwen35_first_attention_block_spec(model)?;
-            let layout = qwen35_attention_block_layout(model, layer_index)?;
-            let decode_spec = qwen35_attention_decode_spec(
-                model,
-                layer_index,
-                u32::try_from(token_ids.len())?,
-                1,
-                TensorType::F32,
-                TensorType::F32,
-            )?;
-            (layer_index, block_spec, layout, decode_spec)
-        }
-        LlamaArchitecture::Qwen35Moe => {
-            let (layer_index, block_spec) = qwen35moe_first_attention_block_spec(model)?;
-            let layout = qwen35moe_attention_block_layout(model, layer_index)?;
-            let decode_spec = qwen35moe_attention_decode_spec(
-                model,
-                layer_index,
-                u32::try_from(token_ids.len())?,
-                1,
-                TensorType::F32,
-                TensorType::F32,
-            )?;
-            (layer_index, block_spec, layout, decode_spec)
-        }
-        other => {
-            return Err(format!(
-                "attention decode batched tensor check is not implemented for architecture {}",
-                other.name()
-            )
-            .into())
-        }
-    };
+    let (layer_index, block_spec, layout, decode_spec) =
+        first_attention_check_setup(model, token_ids.len(), TensorType::F32)?;
     let positions = (0..token_ids.len())
         .map(i32::try_from)
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -8058,11 +11198,8 @@ fn attention_decode_batched_tensor_check(
         add_contiguous_checkpoint_by_name(&mut full_loaded.ctx, "attn.k_store", "attn.k_ck")?;
     let full_v_id =
         add_contiguous_checkpoint_by_name(&mut full_loaded.ctx, "attn.v_store", "attn.v_ck")?;
-    let full_attn_id = add_contiguous_checkpoint_by_name(
-        &mut full_loaded.ctx,
-        "attn.attn_flat",
-        "attn.attn_ck",
-    )?;
+    let full_attn_id =
+        add_contiguous_checkpoint_by_name(&mut full_loaded.ctx, "attn.attn_flat", "attn.attn_ck")?;
     let full_output_proj_id = add_contiguous_checkpoint_by_name(
         &mut full_loaded.ctx,
         "attn.output_proj",
@@ -8913,6 +12050,94 @@ fn cpu_rms_norm_mul_rows(
     Ok(out)
 }
 
+fn cpu_add_rows(lhs: &[f32], rhs: &[f32]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    if lhs.len() != rhs.len() {
+        return Err(format!(
+            "row add length mismatch: lhs={} rhs={}",
+            lhs.len(),
+            rhs.len()
+        )
+        .into());
+    }
+    Ok(lhs
+        .iter()
+        .zip(rhs.iter())
+        .map(|(lhs, rhs)| lhs + rhs)
+        .collect())
+}
+
+fn cpu_scale_inplace(values: &mut [f32], scale: f32) {
+    for value in values {
+        *value *= scale;
+    }
+}
+
+fn cpu_gelu_tanh(value: f32) -> f32 {
+    const GELU_COEF_A: f32 = 0.044_715;
+    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
+    0.5 * value * (1.0 + (SQRT_2_OVER_PI * value * (1.0 + GELU_COEF_A * value * value)).tanh())
+}
+
+fn cpu_gelu_rows(values: &[f32]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    Ok(values.iter().copied().map(cpu_gelu_tanh).collect())
+}
+
+fn cpu_geglu_rows(gate: &[f32], up: &[f32]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    if gate.len() != up.len() {
+        return Err(format!(
+            "geglu input length mismatch: gate={} up={}",
+            gate.len(),
+            up.len()
+        )
+        .into());
+    }
+    Ok(gate
+        .iter()
+        .zip(up.iter())
+        .map(|(gate, up)| cpu_gelu_tanh(*gate) * up)
+        .collect())
+}
+
+fn cpu_mul_rows_broadcast(
+    lhs: &[f32],
+    row_width: usize,
+    rhs: &[f32],
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    if row_width == 0 {
+        return Err("row broadcast width was zero".into());
+    }
+    if lhs.is_empty() {
+        return Ok(Vec::new());
+    }
+    if lhs.len() % row_width != 0 {
+        return Err(format!(
+            "lhs length {} is not divisible by row width {}",
+            lhs.len(),
+            row_width
+        )
+        .into());
+    }
+    match rhs.len() {
+        1 => Ok(lhs.iter().map(|value| value * rhs[0]).collect()),
+        len if len == row_width => Ok(lhs
+            .chunks_exact(row_width)
+            .flat_map(|row| row.iter().zip(rhs.iter()).map(|(lhs, rhs)| lhs * rhs))
+            .collect()),
+        len if len == lhs.len() => Ok(lhs
+            .iter()
+            .zip(rhs.iter())
+            .map(|(lhs, rhs)| lhs * rhs)
+            .collect()),
+        len => Err(format!(
+            "unsupported broadcast length {} for lhs len {} and row width {}",
+            len,
+            lhs.len(),
+            row_width
+        )
+        .into()),
+    }
+}
+
 fn cpu_mul_mat_rows(
     weight_rows: &[f32],
     n_cols: usize,
@@ -8961,6 +12186,224 @@ fn cpu_mul_mat_rows(
         }
     }
     Ok(out)
+}
+
+fn cpu_get_rows_loaded(
+    loaded: &mut LoadedGgufWeights,
+    tensor_name: &str,
+    row_ids: &[i32],
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let tensor_id = *loaded
+        .tensor_ids
+        .get(tensor_name)
+        .ok_or_else(|| format!("missing tensor id for '{}'", tensor_name))?;
+    let tensor = loaded
+        .ctx
+        .tensor(tensor_id)
+        .ok_or_else(|| format!("invalid tensor '{}'", tensor_name))?;
+    let width = usize::try_from(tensor.ne[0])?;
+    let height = usize::try_from(tensor.ne[1])?;
+    let bytes = loaded.ctx.tensor_data(tensor_id)?;
+    if let Some(rows) = get_rows_ggml_bytes_cpu(
+        bytes,
+        tensor.desc.ty.ggml_type(),
+        width,
+        height,
+        row_ids,
+    ) {
+        return Ok(rows);
+    }
+    metal_get_rows_loaded(loaded, tensor_name, row_ids)
+}
+
+fn cpu_mul_mat_loaded(
+    loaded: &mut LoadedGgufWeights,
+    tensor_name: &str,
+    src: &[f32],
+    n_tokens: usize,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    metal_mul_mat_loaded(loaded, tensor_name, src, n_tokens)
+}
+
+fn read_loaded_tensor_values_f32(
+    loaded: &LoadedGgufWeights,
+    tensor_name: &str,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let tensor_id = *loaded
+        .tensor_ids
+        .get(tensor_name)
+        .ok_or_else(|| format!("missing tensor id for '{}'", tensor_name))?;
+    let tensor = loaded
+        .ctx
+        .tensor(tensor_id)
+        .ok_or_else(|| format!("invalid tensor '{}'", tensor_name))?;
+    tensor_values_from_tensor_bytes_f32(tensor, loaded.ctx.tensor_data(tensor_id)?)
+}
+
+fn cpu_extract_interleaved_layer_rows(
+    values: &[f32],
+    hidden_size: usize,
+    layer_count: usize,
+    layer_index: usize,
+    n_tokens: usize,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    if hidden_size == 0 || layer_count == 0 {
+        return Err("invalid gemma per-layer dimensions".into());
+    }
+    if layer_index >= layer_count {
+        return Err(format!(
+            "layer index {} exceeds layer count {}",
+            layer_index, layer_count
+        )
+        .into());
+    }
+    let row_width = hidden_size
+        .checked_mul(layer_count)
+        .ok_or("overflow computing interleaved layer row width")?;
+    let expected = row_width
+        .checked_mul(n_tokens)
+        .ok_or("overflow computing interleaved layer length")?;
+    if values.len() != expected {
+        return Err(format!(
+            "interleaved layer input length mismatch: got {}, expected {}",
+            values.len(),
+            expected
+        )
+        .into());
+    }
+    let mut out = Vec::with_capacity(
+        hidden_size
+            .checked_mul(n_tokens)
+            .ok_or("overflow computing extracted layer length")?,
+    );
+    for token_index in 0..n_tokens {
+        let token_start = token_index
+            .checked_mul(row_width)
+            .ok_or("overflow computing interleaved token offset")?;
+        let layer_start = token_start
+            .checked_add(
+                layer_index
+                    .checked_mul(hidden_size)
+                    .ok_or("overflow computing interleaved layer offset")?,
+            )
+            .ok_or("overflow computing interleaved layer start")?;
+        out.extend_from_slice(&values[layer_start..layer_start + hidden_size]);
+    }
+    Ok(out)
+}
+
+fn metal_get_rows_loaded(
+    loaded: &mut LoadedGgufWeights,
+    tensor_name: &str,
+    row_ids: &[i32],
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let tensor_id = *loaded
+        .tensor_ids
+        .get(tensor_name)
+        .ok_or_else(|| format!("missing tensor id for '{}'", tensor_name))?;
+    let row_tensor = loaded.ctx.new_tensor_1d(
+        TensorType::I32,
+        i64::try_from(row_ids.len())?,
+        BufferUsage::Activations,
+    )?;
+    loaded
+        .ctx
+        .tensor_mut(row_tensor)
+        .ok_or("invalid get_rows row-id tensor")?
+        .set_input();
+    let selected = loaded
+        .ctx
+        .get_rows(tensor_id, row_tensor, BufferUsage::Activations)?;
+    let selected = loaded.ctx.cont(selected)?;
+
+    let mut graph = Graph::new();
+    graph.build_forward_expand(&loaded.ctx, selected)?;
+    let runtime = MetalRuntime::new()?;
+    let prepared = prepare_graph(&loaded.ctx, &graph, runtime.features())?;
+    let session = MetalGraphSession::from_runtime(
+        runtime,
+        &loaded.ctx,
+        &prepared,
+        BufferStorageMode::Shared,
+        BufferStorageMode::Shared,
+    )?;
+    let row_bytes = i32s_to_bytes(row_ids);
+    let execution = session.execute(
+        &loaded.ctx,
+        &[MetalGraphTensorWrite {
+            tensor_id: row_tensor,
+            bytes: &row_bytes,
+        }],
+        &[selected],
+    )?;
+    tensor_values_from_execution_f32(&loaded.ctx, &execution, selected)
+}
+
+fn metal_mul_mat_loaded(
+    loaded: &mut LoadedGgufWeights,
+    tensor_name: &str,
+    src: &[f32],
+    n_tokens: usize,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let tensor_id = *loaded
+        .tensor_ids
+        .get(tensor_name)
+        .ok_or_else(|| format!("missing tensor id for '{}'", tensor_name))?;
+    let tensor = loaded
+        .ctx
+        .tensor(tensor_id)
+        .ok_or_else(|| format!("invalid tensor '{}'", tensor_name))?;
+    let n_cols = usize::try_from(tensor.ne[0])?;
+    let expected = n_cols
+        .checked_mul(n_tokens)
+        .ok_or("overflow computing mul_mat metal input length")?;
+    if src.len() != expected {
+        return Err(format!(
+            "mul_mat input length mismatch for '{}': got {}, expected {}",
+            tensor_name,
+            src.len(),
+            expected
+        )
+        .into());
+    }
+
+    let input = loaded.ctx.new_tensor_2d(
+        TensorType::F32,
+        i64::try_from(n_cols)?,
+        i64::try_from(n_tokens)?,
+        BufferUsage::Activations,
+    )?;
+    loaded
+        .ctx
+        .tensor_mut(input)
+        .ok_or("invalid mul_mat input tensor")?
+        .set_input();
+    let output = loaded
+        .ctx
+        .mul_mat(tensor_id, input, BufferUsage::Activations)?;
+    let output = loaded.ctx.cont(output)?;
+
+    let mut graph = Graph::new();
+    graph.build_forward_expand(&loaded.ctx, output)?;
+    let runtime = MetalRuntime::new()?;
+    let prepared = prepare_graph(&loaded.ctx, &graph, runtime.features())?;
+    let session = MetalGraphSession::from_runtime(
+        runtime,
+        &loaded.ctx,
+        &prepared,
+        BufferStorageMode::Shared,
+        BufferStorageMode::Shared,
+    )?;
+    let input_bytes = f32s_to_bytes(src);
+    let execution = session.execute(
+        &loaded.ctx,
+        &[MetalGraphTensorWrite {
+            tensor_id: input,
+            bytes: &input_bytes,
+        }],
+        &[output],
+    )?;
+    tensor_values_from_execution_f32(&loaded.ctx, &execution, output)
 }
 
 fn cpu_mul_mat_tensor_rows(
