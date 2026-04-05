@@ -358,7 +358,7 @@ mod imp {
         GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K,
         GGML_TYPE_Q6_K, GGML_TYPE_Q8_0,
     };
-    use makepad_objc_sys::runtime::{nil, ObjcId, Object, YES};
+    use makepad_objc_sys::runtime::{nil, ObjcId, Object, NO};
     use makepad_objc_sys::{class, msg_send, sel, sel_impl};
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -1454,7 +1454,7 @@ mod imp {
             let options = unsafe { StrongId::from_owned(options_obj) }
                 .ok_or_else(|| "MTLCompileOptions::new returned nil".to_string())?;
             unsafe {
-                let _: () = msg_send![options.as_id(), setFastMathEnabled: YES];
+                let _: () = msg_send![options.as_id(), setFastMathEnabled: NO];
             }
 
             let (has_bfloat, has_tensor) = metal_compile_feature_macros(device);

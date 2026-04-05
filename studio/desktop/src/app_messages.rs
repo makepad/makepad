@@ -629,6 +629,7 @@ impl App {
                     .entry(path)
                     .or_default();
                 self.refresh_active_mount_terminal_panel(cx, &redraw_path);
+                self.refresh_ai_manager_report(cx);
             }
             HubToClient::TerminalFramebuffer { path, frame } => {
                 if let Some(last_frame_id) = self.data.terminal_frame_id_by_path.get(&path) {
@@ -641,9 +642,12 @@ impl App {
                     .insert(path.clone(), frame.frame_id);
                 self.data.terminal_framebuffer_by_path.insert(path.clone(), frame);
                 self.refresh_active_mount_terminal_panel(cx, &path);
+                self.refresh_ai_manager_preview(cx);
+                self.process_ai_manager_task_terminal_update(cx, &path);
             }
             HubToClient::TerminalTitle { path, title } => {
                 self.apply_terminal_tab_title(cx, &path, title);
+                self.refresh_ai_manager_report(cx);
             }
             HubToClient::TerminalExited { path, code } => {
                 self.data.terminal_open_paths.remove(&path);
@@ -651,6 +655,7 @@ impl App {
                 self.data.terminal_framebuffer_by_path.remove(&path);
                 self.reset_terminal_tab_title(cx, &path);
                 self.set_status(cx, &format!("terminal exited ({})", code));
+                self.refresh_ai_manager_report(cx);
             }
             HubToClient::Error { message } => {
                 self.data.pending_reload_paths.clear();

@@ -1,0 +1,10 @@
+[package]
+name = "makepad-mlx-rt-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core metadata loading for MLX-format runtimes"
+license = "MIT"
+
+[dependencies]
+makepad-ggml = { path = "../ggml" }
+makepad-micro-serde = { path = "../micro_serde" }
