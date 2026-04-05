@@ -30,7 +30,6 @@ pub struct AppleGameInput {
     gc_states: Vec<GameInputState>,
     #[cfg(target_os = "macos")]
     raw_hid: AppleRawHidInput,
-    pub debug_last_raw_controller_count: Option<usize>,
 }
 
 impl AppleGameInput {
@@ -43,7 +42,6 @@ impl AppleGameInput {
             gc_states: Vec::new(),
             #[cfg(target_os = "macos")]
             raw_hid: AppleRawHidInput::new(),
-            debug_last_raw_controller_count: None,
         }
     }
 
@@ -54,38 +52,6 @@ impl AppleGameInput {
         } else {
             nsstring_to_string(vendor_name)
         }
-    }
-
-    unsafe fn controller_product_category(controller: ObjcId) -> String {
-        let category: ObjcId = msg_send![controller, productCategory];
-        if category == nil {
-            "<nil>".to_string()
-        } else {
-            nsstring_to_string(category)
-        }
-    }
-
-    unsafe fn log_bundle_debug(gc_controller_class: &Class) {
-        let bundle: ObjcId = msg_send![class!(NSBundle), mainBundle];
-        let bundle_path: ObjcId = msg_send![bundle, bundlePath];
-        let bundle_identifier: ObjcId = msg_send![bundle, bundleIdentifier];
-        let controller_key = str_to_nsstring("GCSupportsControllerUserInteraction");
-        let controller_value: ObjcId =
-            msg_send![bundle, objectForInfoDictionaryKey: controller_key];
-        let responds_to_controllers: BOOL =
-            msg_send![gc_controller_class, respondsToSelector: sel!(controllers)];
-        let responds_to_discovery: BOOL = msg_send![
-            gc_controller_class,
-            respondsToSelector: Sel::register("startWirelessControllerDiscoveryWithCompletionHandler:")
-        ];
-        crate::log!(
-            "apple game input: bundle path={} bundle_id={} GCSupportsControllerUserInteraction={} responds.controllers={} responds.discovery={}",
-            if bundle_path == nil { "<nil>".to_string() } else { nsstring_to_string(bundle_path) },
-            if bundle_identifier == nil { "<nil>".to_string() } else { nsstring_to_string(bundle_identifier) },
-            if controller_value == nil { "<nil>".to_string() } else { format!("{controller_value:p}") },
-            responds_to_controllers == YES,
-            responds_to_discovery == YES,
-        );
     }
 
     unsafe fn raw_connected_controllers(
@@ -108,26 +74,6 @@ impl AppleGameInput {
         unsafe {
             let gc_controller_class = class!(GCController);
             let raw_controllers = Self::raw_connected_controllers(gc_controller_class);
-            let raw_count = raw_controllers.len();
-            if self.debug_last_raw_controller_count != Some(raw_count) {
-                crate::log!("apple game input: raw GCController.controllers count={raw_count}");
-                for (controller, info) in raw_controllers.iter() {
-                    let extended_gamepad: ObjcId = msg_send![*controller, extendedGamepad];
-                    let micro_gamepad: ObjcId = msg_send![*controller, microGamepad];
-                    let physical_input_profile: ObjcId =
-                        msg_send![*controller, physicalInputProfile];
-                    crate::log!(
-                        "apple game input: raw controller id={:?} name={} category={} extended={} micro={} physical={}",
-                        info.id,
-                        info.name,
-                        Self::controller_product_category(*controller),
-                        extended_gamepad != nil,
-                        micro_gamepad != nil,
-                        physical_input_profile != nil,
-                    );
-                }
-                self.debug_last_raw_controller_count = Some(raw_count);
-            }
             for (_, info) in raw_controllers.iter() {
                 self.on_connected(info);
             }
@@ -144,7 +90,6 @@ impl AppleGameInput {
             if msg_send![gc_controller_class, respondsToSelector: sel_monitor] {
                 let () = msg_send![gc_controller_class, setShouldMonitorBackgroundEvents: YES];
             }
-            Self::log_bundle_debug(gc_controller_class);
 
             let center: ObjcId = msg_send![class!(NSNotificationCenter), defaultCenter];
             let callback_clone = callback.clone();
@@ -178,37 +123,18 @@ impl AppleGameInput {
             let () = msg_send![center, addObserverForName: GCControllerDidDisconnectNotification object: nil queue: nil usingBlock: &block];
 
             let raw_controllers = Self::raw_connected_controllers(gc_controller_class);
-            crate::log!(
-                "apple game input: init raw GCController.controllers count={}",
-                raw_controllers.len()
-            );
             let discovery_sel =
                 Sel::register("startWirelessControllerDiscoveryWithCompletionHandler:");
             if raw_controllers.is_empty()
                 && msg_send![gc_controller_class, respondsToSelector: discovery_sel]
             {
-                let block = objc_block!(move || {
-                    crate::log!("apple game input: wireless discovery completed");
-                });
+                let block = objc_block!(move || {});
                 let () = msg_send![
                     gc_controller_class,
                     startWirelessControllerDiscoveryWithCompletionHandler: &block
                 ];
-                crate::log!("apple game input: started wireless discovery");
             }
-            for (controller, info) in raw_controllers {
-                let extended_gamepad: ObjcId = msg_send![controller, extendedGamepad];
-                let micro_gamepad: ObjcId = msg_send![controller, microGamepad];
-                let physical_input_profile: ObjcId = msg_send![controller, physicalInputProfile];
-                crate::log!(
-                    "apple game input: init controller id={:?} name={} category={} extended={} micro={} physical={}",
-                    info.id,
-                    info.name,
-                    Self::controller_product_category(controller),
-                    extended_gamepad != nil,
-                    micro_gamepad != nil,
-                    physical_input_profile != nil,
-                );
+            for (_, info) in raw_controllers {
                 callback(GameInputConnectedEvent::Connected(info));
             }
         }
@@ -228,12 +154,6 @@ impl AppleGameInput {
         self.controllers.push(ptr);
         self.gc_states
             .push(GameInputState::Gamepad(GamepadState::default()));
-        crate::log!(
-            "apple game input: connected id={:?} name={} total={}",
-            info.id,
-            info.name,
-            self.gc_gamepads.len()
-        );
     }
 
     pub fn on_disconnected(&mut self, info: &GameInputInfo) {
@@ -245,12 +165,6 @@ impl AppleGameInput {
             unsafe {
                 let _: () = msg_send![ptr, release];
             }
-            crate::log!(
-                "apple game input: disconnected id={:?} name={} total={}",
-                info.id,
-                info.name,
-                self.gc_gamepads.len()
-            );
         }
     }
 
@@ -447,7 +361,6 @@ impl AppleRawHidInput {
 
             let manager = IOHIDManagerCreate(ptr::null(), 0);
             if manager.is_null() {
-                crate::log!("apple game input: failed to create IOHIDManager fallback");
                 return;
             }
 
@@ -472,12 +385,7 @@ impl AppleRawHidInput {
             IOHIDManagerScheduleWithRunLoop(manager, run_loop, kCFRunLoopDefaultMode);
 
             let open_result = IOHIDManagerOpen(manager, 0);
-            if open_result != 0 {
-                crate::log!(
-                    "apple game input: IOHIDManagerOpen fallback failed with {}",
-                    open_result
-                );
-            }
+            let _ = open_result;
 
             Self::enumerate_existing_devices(manager, callback_context_ptr as *mut _);
 
@@ -593,7 +501,6 @@ impl AppleRawHidInput {
             info: info.clone(),
             state: GamepadState::default(),
             report_buffer: vec![0u8; report_size as usize].into_boxed_slice(),
-            last_logged_unknown_report: None,
         });
 
         let index = shared.devices.len() - 1;
@@ -604,15 +511,6 @@ impl AppleRawHidInput {
             entry.report_buffer.len() as isize,
             Some(raw_hid_report_callback),
             context,
-        );
-
-        crate::log!(
-            "apple game input: hid fallback connected id={:?} name={} product=0x{:04x} location=0x{:08x} report_size={}",
-            info.id,
-            info.name,
-            product_id,
-            location_id,
-            report_size,
         );
     }
 
@@ -630,11 +528,6 @@ impl AppleRawHidInput {
             let entry = shared.devices.remove(index);
             let _ = IOHIDDeviceClose(entry.device, 0);
             CFRelease(entry.device as *const _);
-            crate::log!(
-                "apple game input: hid fallback disconnected id={:?} name={}",
-                entry.info.id,
-                entry.info.name,
-            );
         }
     }
 
@@ -662,16 +555,7 @@ impl AppleRawHidInput {
         match report_kind {
             XBOX_ONE_REPORT_BUTTONS => Self::parse_xbox_one_buttons(&mut entry.state, report),
             XBOX_ONE_REPORT_HOME => Self::parse_xbox_one_home(&mut entry.state, report),
-            unknown => {
-                if entry.last_logged_unknown_report != Some(unknown) {
-                    entry.last_logged_unknown_report = Some(unknown);
-                    crate::log!(
-                        "apple game input: hid fallback ignored report kind=0x{:02x} len={}",
-                        unknown,
-                        report.len(),
-                    );
-                }
-            }
+            _ => {}
         }
     }
 
@@ -788,7 +672,6 @@ struct AppleRawHidDevice {
     info: GameInputInfo,
     state: GamepadState,
     report_buffer: Box<[u8]>,
-    last_logged_unknown_report: Option<u8>,
 }
 
 #[cfg(target_os = "macos")]
