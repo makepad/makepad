@@ -1,0 +1,9 @@
+[package]
+name = "makepad-mlx-rt-kv"
+version = "0.1.0"
+edition = "2021"
+description = "Baseline Gemma 4 KV-cache layout and append/read semantics"
+license = "MIT"
+
+[dependencies]
+makepad-mlx-rt-core = { path = "../mlx_rt_core" }

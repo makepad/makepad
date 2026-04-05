@@ -38,6 +38,8 @@ pub struct SessionConfig {
     pub system_prompt: Option<String>,
     /// Model to use (if selectable)
     pub model: Option<String>,
+    /// Tool definitions exposed to the backend.
+    pub tools: Vec<ToolDefinition>,
 }
 
 /// Events emitted by an agent during operation
@@ -186,8 +188,11 @@ struct AdapterSession {
     id: SessionId,
     messages: Vec<Message>,
     system_prompt: Option<String>,
+    tools: Vec<ToolDefinition>,
     current_prompt: Option<PromptId>,
     accumulated_text: String,
+    pending_tool_uses: HashMap<String, String>,
+    awaiting_tool_results: usize,
 }
 
 /// Adapter that wraps a stateless AiBackend to implement the Agent trait.
@@ -217,8 +222,11 @@ impl Agent for StatelessBackendAdapter {
             id: session_id,
             messages: Vec::new(),
             system_prompt: config.system_prompt,
+            tools: config.tools,
             current_prompt: None,
             accumulated_text: String::new(),
+            pending_tool_uses: HashMap::new(),
+            awaiting_tool_results: 0,
         };
 
         self.sessions.insert(session_id.0, session);
@@ -242,6 +250,7 @@ impl Agent for StatelessBackendAdapter {
         let request = AiRequest {
             messages: session.messages.clone(),
             system_prompt: session.system_prompt.clone(),
+            tools: session.tools.clone(),
             stream: true,
             ..Default::default()
         };
@@ -255,14 +264,48 @@ impl Agent for StatelessBackendAdapter {
 
     fn send_tool_result(
         &mut self,
-        _cx: &mut Cx,
-        _session_id: SessionId,
-        _tool_use_id: &str,
-        _result: &str,
-        _is_error: bool,
+        cx: &mut Cx,
+        session_id: SessionId,
+        tool_use_id: &str,
+        result: &str,
+        is_error: bool,
     ) {
-        // TODO: Implement tool calling for stateless backends
-        log!("send_tool_result not yet implemented for stateless backends");
+        let Some(session) = self.sessions.get_mut(&session_id.0) else {
+            return;
+        };
+        if !session.pending_tool_uses.contains_key(tool_use_id) {
+            return;
+        }
+
+        session.messages.push(Message {
+            role: MessageRole::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: result.to_string(),
+                is_error,
+            }],
+        });
+        session.pending_tool_uses.remove(tool_use_id);
+        if session.awaiting_tool_results > 0 {
+            session.awaiting_tool_results -= 1;
+        }
+        if session.awaiting_tool_results != 0 {
+            return;
+        }
+
+        let Some(prompt_id) = session.current_prompt else {
+            return;
+        };
+        let request = AiRequest {
+            messages: session.messages.clone(),
+            system_prompt: session.system_prompt.clone(),
+            tools: session.tools.clone(),
+            stream: true,
+            ..Default::default()
+        };
+        let request_id = self.backend.send_request(cx, request);
+        self.pending_requests
+            .insert(request_id.0, (session_id, prompt_id));
     }
 
     fn cancel_prompt(&mut self, cx: &mut Cx, prompt_id: PromptId) {
@@ -283,6 +326,8 @@ impl Agent for StatelessBackendAdapter {
             if session.current_prompt == Some(prompt_id) {
                 session.current_prompt = None;
                 session.accumulated_text.clear();
+                session.pending_tool_uses.clear();
+                session.awaiting_tool_results = 0;
                 break;
             }
         }
@@ -324,14 +369,36 @@ impl Agent for StatelessBackendAdapter {
                         self.pending_requests.remove(&request_id.0)
                     {
                         if let Some(session) = self.sessions.get_mut(&session_id.0) {
-                            // Add assistant response to history
-                            session.messages.push(response.message);
-                            session.current_prompt = None;
+                            let mut tool_requests = Vec::new();
+                            for block in &response.message.content {
+                                if let ContentBlock::ToolUse { id, name, input } = block {
+                                    tool_requests.push((id.clone(), name.clone(), input.clone()));
+                                }
+                            }
 
-                            agent_events.push(AgentEvent::TurnComplete {
-                                prompt_id,
-                                stop_reason: response.stop_reason,
-                            });
+                            session.messages.push(response.message);
+
+                            if tool_requests.is_empty() {
+                                session.current_prompt = None;
+                                session.pending_tool_uses.clear();
+                                session.awaiting_tool_results = 0;
+                                agent_events.push(AgentEvent::TurnComplete {
+                                    prompt_id,
+                                    stop_reason: response.stop_reason,
+                                });
+                            } else {
+                                session.pending_tool_uses.clear();
+                                session.awaiting_tool_results = tool_requests.len();
+                                for (id, name, input) in tool_requests {
+                                    session.pending_tool_uses.insert(id.clone(), name.clone());
+                                    agent_events.push(AgentEvent::ToolRequest {
+                                        prompt_id,
+                                        tool_use_id: id,
+                                        tool_name: name,
+                                        tool_input: input,
+                                    });
+                                }
+                            }
                         }
                     }
                 }

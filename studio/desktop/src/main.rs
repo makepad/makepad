@@ -1,5 +1,6 @@
 pub mod app_data;
 pub mod app_ui;
+pub mod ai_manager;
 pub mod desktop_code_editor;
 pub mod desktop_file_tree;
 pub mod desktop_log_view;
@@ -19,6 +20,7 @@ pub use makepad_widgets::makepad_script::makepad_live_id;
 pub use makepad_widgets::makepad_script::makepad_micro_serde;
 
 use crate::{
+    ai_manager::{AiManagerBackend, AiManagerState},
     app_data::*,
     desktop_code_editor::*,
     desktop_file_tree::*,
@@ -128,6 +130,8 @@ pub struct App {
     #[rust]
     pub data: AppData,
     #[rust]
+    pub ai_manager: AiManagerState,
+    #[rust]
     pub file_filter_debounce_timer: Timer,
     #[rust]
     pub pending_file_filter: Option<(String, String)>,
@@ -149,9 +153,53 @@ impl MatchEvent for App {
         for mount in self.data.mounts.keys().cloned().collect::<Vec<_>>() {
             self.sync_run_preview_splitter(cx, &mount);
         }
+        self.init_ai_manager(cx);
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(ai_send_button)).clicked(actions) {
+            self.send_ai_manager_prompt(cx);
+        }
+        if self.ui.button(cx, ids!(ai_cancel_button)).clicked(actions) {
+            self.cancel_ai_manager_prompt(cx);
+        }
+        if self.ui.button(cx, ids!(ai_refresh_report_button)).clicked(actions) {
+            self.refresh_ai_manager_report(cx);
+        }
+        if self.ui.button(cx, ids!(ai_add_task_button)).clicked(actions) {
+            self.add_ai_manager_task(cx);
+        }
+        if self.ui.button(cx, ids!(ai_clear_tasks_button)).clicked(actions) {
+            self.clear_ai_manager_tasks(cx);
+        }
+        if self.ui.text_input(cx, ids!(ai_prompt_input)).escaped(actions) {
+            self.cancel_ai_manager_prompt(cx);
+        }
+        if self
+            .ui
+            .text_input(cx, ids!(ai_task_input))
+            .returned(actions)
+            .is_some()
+        {
+            self.add_ai_manager_task(cx);
+        }
+        if let Some(index) = self
+            .ui
+            .drop_down(cx, ids!(ai_backend_dropdown))
+            .selected(actions)
+        {
+            if let Some(backend) = AiManagerBackend::from_index(index) {
+                let _ = self.switch_ai_manager_backend(cx, backend);
+            }
+        }
+        if let Some(index) = self
+            .ui
+            .drop_down(cx, ids!(ai_task_terminal_dropdown))
+            .selected(actions)
+        {
+            self.set_ai_manager_task_terminal_selection(cx, index);
+        }
+
         if self.ui.button(cx, ids!(sidebar_toggle)).clicked(actions) {
             if let Some(active_mount) = self.data.active_mount.clone() {
                 self.toggle_mount_sidebar(cx, &active_mount);
@@ -251,6 +299,8 @@ impl MatchEvent for App {
                     DockAction::TabWasPressed(tab_id) => {
                         if let Some(mount) = self.data.tab_to_mount.get(&tab_id).cloned() {
                             self.select_mount(cx, &mount);
+                        } else if tab_id == id!(ai_manager_tab) {
+                            self.refresh_ai_manager_report(cx);
                         } else if tab_id == id!(terminal_add) {
                             if let Some(mount) = self.data.active_mount.clone() {
                                 self.select_bottom_terminal_panel(cx, &mount);
@@ -382,6 +432,7 @@ impl AppMain for App {
         if matches!(event, Event::Signal) {
             self.drain_studio_messages(cx)
         }
+        self.handle_ai_manager_agent_events(cx, event);
         self.refresh_run_view_targets(cx);
         self.save_state_if_needed(cx);
     }
