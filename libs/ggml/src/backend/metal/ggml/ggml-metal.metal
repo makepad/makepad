@@ -10358,3 +10358,533 @@ kernel void kernel_count_equal(
 typedef decltype(kernel_count_equal<int32_t>) kernel_count_equal_t;
 
 template [[host_name("kernel_count_equal_i32")]] kernel kernel_count_equal_t kernel_count_equal<int32_t>;
+
+#if defined(GGML_METAL_HAS_BF16)
+struct MlxAffineDequantRowArgs {
+    uint n;
+};
+
+struct MlxRmsNormRowArgs {
+    uint n;
+    float eps;
+};
+
+struct MlxRmsNormRowsArgs {
+    uint n;
+    uint row_stride;
+    uint row_count;
+    float eps;
+};
+
+struct MlxRopeSingleArgs {
+    uint half_dims;
+    uint row_stride;
+    uint row_count;
+    int offset;
+    float scale;
+    float base_log2;
+};
+
+struct MlxAffineQprojRowArgs {
+    uint n_in;
+    uint weight_words_per_row;
+    uint qparams_per_row;
+    uint out_rows;
+};
+
+struct MlxGqaAttentionLogitsArgs {
+    uint head_dim;
+    uint q_head_stride;
+    uint k_head_stride;
+    uint q_head_count;
+    uint q_heads_per_kv;
+};
+
+static inline float mlx_load_vector_u4_bf16(
+        device const bfloat * x,
+        thread float * x_thread) {
+    float sum = 0.0f;
+    for (uint i = 0; i < 8u; i += 4u) {
+        sum += x[i] + x[i + 1] + x[i + 2] + x[i + 3];
+        x_thread[i] = x[i];
+        x_thread[i + 1] = x[i + 1] / 16.0f;
+        x_thread[i + 2] = x[i + 2] / 256.0f;
+        x_thread[i + 3] = x[i + 3] / 4096.0f;
+    }
+    return sum;
+}
+
+static inline float mlx_load_vector_u4_bf16_safe(
+        device const bfloat * x,
+        thread float * x_thread,
+        uint n) {
+    float sum = 0.0f;
+    uint i = 0u;
+    for (; i + 4u <= n; i += 4u) {
+        sum += x[i] + x[i + 1] + x[i + 2] + x[i + 3];
+        x_thread[i] = x[i];
+        x_thread[i + 1] = x[i + 1] / 16.0f;
+        x_thread[i + 2] = x[i + 2] / 256.0f;
+        x_thread[i + 3] = x[i + 3] / 4096.0f;
+    }
+    for (; i < n; ++i) {
+        sum += x[i];
+        switch (i & 3u) {
+            case 0u:
+                x_thread[i] = x[i];
+                break;
+            case 1u:
+                x_thread[i] = x[i] / 16.0f;
+                break;
+            case 2u:
+                x_thread[i] = x[i] / 256.0f;
+                break;
+            default:
+                x_thread[i] = x[i] / 4096.0f;
+                break;
+        }
+    }
+    for (uint i = n; i < 8u; ++i) {
+        x_thread[i] = 0.0f;
+    }
+    return sum;
+}
+
+static inline float mlx_qdot_u4_bf16(
+        const device ushort * w,
+        thread const float * x_thread,
+        float scale,
+        float bias,
+        float sum) {
+    float accum =
+        x_thread[0] * float(w[0] & 0x000Fu) +
+        x_thread[1] * float(w[0] & 0x00F0u) +
+        x_thread[2] * float(w[0] & 0x0F00u) +
+        x_thread[3] * float(w[0] & 0xF000u) +
+        x_thread[4] * float(w[1] & 0x000Fu) +
+        x_thread[5] * float(w[1] & 0x00F0u) +
+        x_thread[6] * float(w[1] & 0x0F00u) +
+        x_thread[7] * float(w[1] & 0xF000u);
+    return scale * accum + sum * bias;
+}
+
+static inline float mlx_qdot_u4_bf16_safe(
+        const device ushort * w,
+        thread const float * x_thread,
+        float scale,
+        float bias,
+        float sum,
+        uint n) {
+    float accum = 0.0f;
+    if (n > 0u) accum += x_thread[0] * float(w[0] & 0x000Fu);
+    if (n > 1u) accum += x_thread[1] * float(w[0] & 0x00F0u);
+    if (n > 2u) accum += x_thread[2] * float(w[0] & 0x0F00u);
+    if (n > 3u) accum += x_thread[3] * float(w[0] & 0xF000u);
+    if (n > 4u) accum += x_thread[4] * float(w[1] & 0x000Fu);
+    if (n > 5u) accum += x_thread[5] * float(w[1] & 0x00F0u);
+    if (n > 6u) accum += x_thread[6] * float(w[1] & 0x0F00u);
+    if (n > 7u) accum += x_thread[7] * float(w[1] & 0xF000u);
+    return scale * accum + sum * bias;
+}
+
+kernel void kernel_mlx_affine_dequant_row_bf16(
+        constant MlxAffineDequantRowArgs & args [[buffer(0)]],
+        device const uint * weights [[buffer(1)]],
+        device const bfloat * scales [[buffer(2)]],
+        device const bfloat * biases [[buffer(3)]],
+        device bfloat * out [[buffer(4)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.n) {
+        return;
+    }
+
+    const uint group_idx = gid >> 6;
+    const uint word_idx = gid >> 3;
+    const uint shift = (gid & 7u) << 2;
+    const uint q = (weights[word_idx] >> shift) & 0xFu;
+
+    const bfloat scale = scales[group_idx];
+    const bfloat bias = biases[group_idx];
+    out[gid] = bfloat(q) * scale + bias;
+}
+
+kernel void kernel_mlx_affine_qproj_dot_bf16(
+        constant MlxAffineDequantRowArgs & args [[buffer(0)]],
+        device const bfloat * x [[buffer(1)]],
+        device const uint * weights [[buffer(2)]],
+        device const bfloat * scales [[buffer(3)]],
+        device const bfloat * biases [[buffer(4)]],
+        device bfloat * out [[buffer(5)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid != 0) {
+        return;
+    }
+
+    float sum = 0.0f;
+    for (uint i = 0; i < args.n; ++i) {
+        const uint group_idx = i >> 6;
+        const uint word_idx = i >> 3;
+        const uint shift = (i & 7u) << 2;
+        const uint q = (weights[word_idx] >> shift) & 0xFu;
+
+        const float scale = float(scales[group_idx]);
+        const float bias = float(biases[group_idx]);
+        const float deq = float(q) * scale + bias;
+        sum += float(x[i]) * deq;
+    }
+    out[0] = bfloat(sum);
+}
+
+kernel void kernel_mlx_affine_qproj_row_bf16(
+        constant MlxAffineQprojRowArgs & args [[buffer(0)]],
+        device const bfloat * x [[buffer(1)]],
+        device const uint * weights [[buffer(2)]],
+        device const bfloat * scales [[buffer(3)]],
+        device const bfloat * biases [[buffer(4)]],
+        device bfloat * out [[buffer(5)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.out_rows) {
+        return;
+    }
+
+    const uint weight_base = gid * args.weight_words_per_row;
+    const uint qparam_base = gid * args.qparams_per_row;
+    float sum = 0.0f;
+
+    for (uint i = 0; i < args.n_in; ++i) {
+        const uint group_idx = i >> 6;
+        const uint word_idx = i >> 3;
+        const uint shift = (i & 7u) << 2;
+        const uint q = (weights[weight_base + word_idx] >> shift) & 0xFu;
+
+        const float scale = float(scales[qparam_base + group_idx]);
+        const float bias = float(biases[qparam_base + group_idx]);
+        const float deq = float(q) * scale + bias;
+        sum += float(x[i]) * deq;
+    }
+
+    out[gid] = bfloat(sum);
+}
+
+kernel void kernel_mlx_affine_qproj_row_bf16_simd32(
+        constant MlxAffineQprojRowArgs & args [[buffer(0)]],
+        device const bfloat * x [[buffer(1)]],
+        device const uint * weights [[buffer(2)]],
+        device const bfloat * scales [[buffer(3)]],
+        device const bfloat * biases [[buffer(4)]],
+        device bfloat * out [[buffer(5)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint row = tgpig.x;
+    if (row >= args.out_rows) {
+        return;
+    }
+
+    const uint weight_base = row * args.weight_words_per_row;
+    const uint qparam_base = row * args.qparams_per_row;
+    float sum = 0.0f;
+
+    for (uint group_idx = 0; group_idx < args.qparams_per_row; ++group_idx) {
+        const uint i0 = (group_idx << 6) + uint(tiisg);
+        const uint word_idx0 = i0 >> 3;
+        const uint shift0 = (i0 & 7u) << 2;
+        const uint q0 = (weights[weight_base + word_idx0] >> shift0) & 0xFu;
+        const float scale = float(scales[qparam_base + group_idx]);
+        const float bias = float(biases[qparam_base + group_idx]);
+        const float deq0 = float(q0) * scale + bias;
+        sum += float(x[i0]) * deq0;
+
+        const uint i1 = i0 + 32u;
+        const uint word_idx1 = i1 >> 3;
+        const uint shift1 = (i1 & 7u) << 2;
+        const uint q1 = (weights[weight_base + word_idx1] >> shift1) & 0xFu;
+        const float deq1 = float(q1) * scale + bias;
+        sum += float(x[i1]) * deq1;
+    }
+
+    sum = simd_sum(sum);
+    if (tiisg == 0) {
+        out[row] = bfloat(sum);
+    }
+}
+
+kernel void kernel_mlx_affine_qmv_row_bf16(
+        constant MlxAffineQprojRowArgs & args [[buffer(0)]],
+        device const bfloat * x [[buffer(1)]],
+        device const uint * weights [[buffer(2)]],
+        device const bfloat * scales [[buffer(3)]],
+        device const bfloat * biases [[buffer(4)]],
+        device bfloat * out [[buffer(5)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort simd_gid [[simdgroup_index_in_threadgroup]],
+        ushort simd_lid [[thread_index_in_simdgroup]]) {
+    constexpr uint NUM_SIMDGROUPS = 2u;
+    constexpr uint RESULTS_PER_SIMDGROUP = 4u;
+    constexpr uint VALUES_PER_THREAD = 8u;
+    constexpr uint BLOCK_SIZE = VALUES_PER_THREAD * 32u;
+    constexpr uint SCALE_STEP_PER_THREAD = 8u;
+    constexpr uint BYTES_PER_PACK = 4u;
+
+    const uint out_row = tgpig.y * (NUM_SIMDGROUPS * RESULTS_PER_SIMDGROUP) +
+        simd_gid * RESULTS_PER_SIMDGROUP;
+    if (out_row >= args.out_rows) {
+        return;
+    }
+
+    const uint last_full_tile_base =
+        args.out_rows > RESULTS_PER_SIMDGROUP ? (args.out_rows - RESULTS_PER_SIMDGROUP) : 0u;
+    const uint used_out_row = min(last_full_tile_base, out_row);
+
+    const device uchar * ws =
+        reinterpret_cast<const device uchar *>(weights) +
+        used_out_row * args.weight_words_per_row * sizeof(uint) +
+        simd_lid * BYTES_PER_PACK;
+    const device bfloat * scales_row =
+        scales + used_out_row * args.qparams_per_row + simd_lid / SCALE_STEP_PER_THREAD;
+    const device bfloat * biases_row =
+        biases + used_out_row * args.qparams_per_row + simd_lid / SCALE_STEP_PER_THREAD;
+    const device bfloat * x_row = x + tgpig.x * args.n_in + simd_lid * VALUES_PER_THREAD;
+    device bfloat * out_row_ptr = out + tgpig.x * args.out_rows + used_out_row;
+
+    thread float x_thread[VALUES_PER_THREAD];
+    float results[RESULTS_PER_SIMDGROUP] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    uint k = 0u;
+    for (; k + BLOCK_SIZE <= args.n_in; k += BLOCK_SIZE) {
+        const float sum = mlx_load_vector_u4_bf16(x_row, x_thread);
+        for (uint row = 0; row < RESULTS_PER_SIMDGROUP; ++row) {
+            const device ushort * wl = reinterpret_cast<const device ushort *>(
+                ws + row * args.weight_words_per_row * sizeof(uint)
+            );
+            const float scale = float(scales_row[row * args.qparams_per_row]);
+            const float bias = float(biases_row[row * args.qparams_per_row]);
+            results[row] += mlx_qdot_u4_bf16(wl, x_thread, scale, bias, sum);
+        }
+
+        ws += BLOCK_SIZE / 2u;
+        scales_row += BLOCK_SIZE / 64u;
+        biases_row += BLOCK_SIZE / 64u;
+        x_row += BLOCK_SIZE;
+    }
+
+    const uint remaining = args.n_in - k;
+    if (remaining > simd_lid * VALUES_PER_THREAD) {
+        const uint lane_remaining = min(remaining - simd_lid * VALUES_PER_THREAD, VALUES_PER_THREAD);
+        const float sum = mlx_load_vector_u4_bf16_safe(x_row, x_thread, lane_remaining);
+        for (uint row = 0; row < RESULTS_PER_SIMDGROUP; ++row) {
+            const device ushort * wl = reinterpret_cast<const device ushort *>(
+                ws + row * args.weight_words_per_row * sizeof(uint)
+            );
+            const float scale = float(scales_row[row * args.qparams_per_row]);
+            const float bias = float(biases_row[row * args.qparams_per_row]);
+            results[row] += mlx_qdot_u4_bf16_safe(wl, x_thread, scale, bias, sum, lane_remaining);
+        }
+    }
+
+    for (uint row = 0; row < RESULTS_PER_SIMDGROUP; ++row) {
+        const float reduced = simd_sum(results[row]);
+        if (simd_lid == 0 && used_out_row + row < args.out_rows) {
+            out_row_ptr[row] = bfloat(reduced);
+        }
+    }
+}
+
+kernel void kernel_mlx_rms_norm_row_bf16(
+        constant MlxRmsNormRowArgs & args [[buffer(0)]],
+        device const bfloat * x [[buffer(1)]],
+        device const bfloat * w [[buffer(2)]],
+        device bfloat * out [[buffer(3)]],
+        uint lid [[thread_position_in_threadgroup]],
+        uint simd_lane_id [[thread_index_in_simdgroup]],
+        uint simd_group_id [[simdgroup_index_in_threadgroup]]) {
+    constexpr uint N_READS = 4u;
+    constexpr uint SIMD_SIZE = 32u;
+
+    threadgroup float local_inv_mean[1];
+    threadgroup float local_sums[SIMD_SIZE];
+
+    float acc = 0.0f;
+    const uint base = lid * N_READS;
+    if (base + N_READS <= args.n) {
+        for (uint i = 0; i < N_READS; ++i) {
+            const float xi = float(x[base + i]);
+            acc += xi * xi;
+        }
+    } else {
+        for (uint i = 0; i < N_READS; ++i) {
+            const uint idx = base + i;
+            if (idx < args.n) {
+                const float xi = float(x[idx]);
+                acc += xi * xi;
+            }
+        }
+    }
+
+    acc = simd_sum(acc);
+    if (simd_group_id == 0) {
+        local_sums[simd_lane_id] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_lane_id == 0) {
+        local_sums[simd_group_id] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group_id == 0) {
+        acc = simd_sum(local_sums[simd_lane_id]);
+        if (simd_lane_id == 0) {
+            local_inv_mean[0] = metal::precise::rsqrt(acc / float(args.n) + args.eps);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float inv_mean = local_inv_mean[0];
+    if (base + N_READS <= args.n) {
+        for (uint i = 0; i < N_READS; ++i) {
+            const uint idx = base + i;
+            const float normalized_f = float(bfloat(float(x[idx]) * inv_mean));
+            out[idx] = bfloat(normalized_f * float(w[idx]));
+        }
+    } else {
+        for (uint i = 0; i < N_READS; ++i) {
+            const uint idx = base + i;
+            if (idx < args.n) {
+                const float normalized_f = float(bfloat(float(x[idx]) * inv_mean));
+                out[idx] = bfloat(normalized_f * float(w[idx]));
+            }
+        }
+    }
+}
+
+kernel void kernel_mlx_rms_norm_rows_bf16(
+        constant MlxRmsNormRowsArgs & args [[buffer(0)]],
+        device const bfloat * x [[buffer(1)]],
+        device const bfloat * w [[buffer(2)]],
+        device bfloat * out [[buffer(3)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        uint lid [[thread_position_in_threadgroup]],
+        uint simd_lane_id [[thread_index_in_simdgroup]],
+        uint simd_group_id [[simdgroup_index_in_threadgroup]]) {
+    constexpr uint N_READS = 4u;
+    constexpr uint SIMD_SIZE = 32u;
+
+    if (tgpig >= args.row_count) {
+        return;
+    }
+
+    threadgroup float local_inv_mean[1];
+    threadgroup float local_sums[SIMD_SIZE];
+
+    const uint row_base = tgpig * args.row_stride;
+    device const bfloat * row_x = x + row_base;
+    device bfloat * row_out = out + row_base;
+
+    float acc = 0.0f;
+    const uint base = lid * N_READS;
+    if (base + N_READS <= args.n) {
+        for (uint i = 0; i < N_READS; ++i) {
+            const float xi = float(row_x[base + i]);
+            acc += xi * xi;
+        }
+    } else {
+        for (uint i = 0; i < N_READS; ++i) {
+            const uint idx = base + i;
+            if (idx < args.n) {
+                const float xi = float(row_x[idx]);
+                acc += xi * xi;
+            }
+        }
+    }
+
+    acc = simd_sum(acc);
+    if (simd_group_id == 0) {
+        local_sums[simd_lane_id] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_lane_id == 0) {
+        local_sums[simd_group_id] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group_id == 0) {
+        acc = simd_sum(local_sums[simd_lane_id]);
+        if (simd_lane_id == 0) {
+            local_inv_mean[0] = metal::precise::rsqrt(acc / float(args.n) + args.eps);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float inv_mean = local_inv_mean[0];
+    if (base + N_READS <= args.n) {
+        for (uint i = 0; i < N_READS; ++i) {
+            const uint idx = base + i;
+            const float normalized_f = float(bfloat(float(row_x[idx]) * inv_mean));
+            row_out[idx] = bfloat(normalized_f * float(w[idx]));
+        }
+    } else {
+        for (uint i = 0; i < N_READS; ++i) {
+            const uint idx = base + i;
+            if (idx < args.n) {
+                const float normalized_f = float(bfloat(float(row_x[idx]) * inv_mean));
+                row_out[idx] = bfloat(normalized_f * float(w[idx]));
+            }
+        }
+    }
+}
+
+kernel void kernel_mlx_rope_single_bf16(
+        constant MlxRopeSingleArgs & args [[buffer(0)]],
+        device const bfloat * in [[buffer(1)]],
+        device bfloat * out [[buffer(2)]],
+        uint2 pos [[thread_position_in_grid]],
+        uint2 grid [[threads_per_grid]]) {
+    if (pos.x >= args.half_dims || pos.y >= args.row_count) {
+        return;
+    }
+
+    const float d = float(pos.x) / float(grid.x);
+    const float inv_freq = metal::exp2(-d * args.base_log2);
+    const float L = args.scale * float(args.offset);
+    const float theta = L * inv_freq;
+    const float costheta = metal::fast::cos(theta);
+    const float sintheta = metal::fast::sin(theta);
+
+    const uint index_1 = pos.x + pos.y * args.row_stride;
+    const uint index_2 = index_1 + grid.x;
+
+    const float x1 = float(in[index_1]);
+    const float x2 = float(in[index_2]);
+    const float rx1 = x1 * costheta - x2 * sintheta;
+    const float rx2 = x1 * sintheta + x2 * costheta;
+    out[index_1] = bfloat(rx1);
+    out[index_2] = bfloat(rx2);
+}
+
+kernel void kernel_mlx_gqa_attention_logits_bf16(
+        constant MlxGqaAttentionLogitsArgs & args [[buffer(0)]],
+        device const bfloat * q [[buffer(1)]],
+        device const bfloat * k [[buffer(2)]],
+        device bfloat * out [[buffer(3)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        ushort simd_lid [[thread_index_in_simdgroup]]) {
+    const uint q_head = tgpig;
+    if (q_head >= args.q_head_count) {
+        return;
+    }
+
+    const uint k_head = q_head / args.q_heads_per_kv;
+    const device bfloat * q_row = q + q_head * args.q_head_stride;
+    const device bfloat * k_row = k + k_head * args.k_head_stride;
+
+    float sum = 0.0f;
+    for (uint i = simd_lid; i < args.head_dim; i += 32u) {
+        sum += float(q_row[i]) * float(k_row[i]);
+    }
+    sum = simd_sum(sum);
+    if (simd_lid == 0) {
+        out[q_head] = bfloat(sum);
+    }
+}
+#endif

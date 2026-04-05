@@ -391,6 +391,7 @@ pub enum CxOsOp {
     XrStartPresenting,
     XrSetRenderScale(f32),
     XrSetLocalAnchor(XrAnchor),
+    XrSetLocalFloor(f32),
     XrAdvertiseAnchor(XrAnchor),
     XrDiscoverAnchor(u8),
     XrStopPresenting,
@@ -476,6 +477,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::XrStopPresenting => write!(f, "XrStopPresenting"),
             Self::XrAdvertiseAnchor(_) => write!(f, "XrAdvertiseAnchor"),
             Self::XrSetLocalAnchor(_) => write!(f, "XrSetLocalAnchor"),
+            Self::XrSetLocalFloor(_) => write!(f, "XrSetLocalFloor"),
             Self::XrDiscoverAnchor(_) => write!(f, "XrDiscoverAnchor"),
         }
     }
@@ -778,6 +780,10 @@ impl Cx {
 
     pub fn xr_set_local_anchor(&mut self, anchor: XrAnchor) {
         self.platform_ops.push(CxOsOp::XrSetLocalAnchor(anchor));
+    }
+
+    pub fn xr_set_local_floor(&mut self, floor_y: f32) {
+        self.platform_ops.push(CxOsOp::XrSetLocalFloor(floor_y));
     }
 
     pub fn xr_discover_anchor(&mut self, id: u8) {

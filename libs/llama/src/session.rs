@@ -1,19 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use makepad_ggml::backend::metal::{MetalBuffer, MetalRuntime};
-use makepad_ggml::TensorType;
+use makepad_ggml::{ggml_row_size_for_type, TensorType};
 
 use crate::error::{LlamaError, Result};
 use crate::model::LlamaModel;
 use crate::plan::ModelExecutionPlan;
 use crate::runtime::{
     allocate_hybrid_shared_cache_tensors,
-    compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs,
+    compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count,
     create_metal_context_buffer_with_runtime, reserve_hybrid_decode_main_buffer_size,
     CompiledHybridDecodeMetal, HybridCacheLayout, HybridCacheShape, HybridCacheTypes,
-    HybridDecodeBatchLayout, HybridDecodeRun, HybridDecodeSpec, HybridSharedCacheTensorIds,
-    LogitsProbeInput,
+    HybridDecodeBatchLayout, HybridDecodeRun, HybridDecodeSpec, HybridLayerSpec,
+    HybridSharedCacheTensorIds, LogitsProbeInput,
 };
 use crate::vocab::LlamaVocab;
 use crate::weights::LoadedGgufWeights;
@@ -68,19 +68,24 @@ pub struct LlamaGeneration {
 struct SessionGraphParams {
     n_tokens: usize,
     n_outputs: usize,
+    attention_key_count: usize,
 }
 
 impl SessionGraphParams {
-    fn new(n_tokens: usize, n_outputs: usize) -> Self {
-        Self { n_tokens, n_outputs }
+    fn new(n_tokens: usize, n_outputs: usize, attention_key_count: usize) -> Self {
+        Self {
+            n_tokens,
+            n_outputs,
+            attention_key_count,
+        }
     }
 
-    fn greedy(n_tokens: usize) -> Self {
-        Self::new(n_tokens, 1)
+    fn greedy(n_tokens: usize, attention_key_count: usize) -> Self {
+        Self::new(n_tokens, 1, attention_key_count)
     }
 
-    fn token_generation() -> Self {
-        Self::greedy(1)
+    fn token_generation(max_context: usize) -> Self {
+        Self::greedy(1, max_context)
     }
 }
 
@@ -256,15 +261,6 @@ impl LlamaSession {
             recurrent_r_type: config.recurrent_r_type,
             recurrent_s_type: config.recurrent_s_type,
         };
-        let cache_bytes = plan
-            .hybrid_cache
-            .as_ref()
-            .map(|template| HybridCacheLayout::new(template.materialize(cache_shape, cache_types)))
-            .transpose()?
-            .map_or(0, |layout| layout.total_bytes);
-        let context_extra_bytes = cache_bytes
-            .checked_add(config.extra_activation_bytes)
-            .ok_or_else(|| LlamaError::format("overflow computing session activation bytes"))?;
         let spec = model.hybrid_decode_spec(
             cache_shape.n_ctx_seq,
             cache_shape.n_seq_max,
@@ -273,6 +269,14 @@ impl LlamaSession {
             config.recurrent_r_type,
             config.recurrent_s_type,
         )?;
+        let cache_bytes = if let Some(template) = plan.hybrid_cache.as_ref() {
+            HybridCacheLayout::new(template.materialize(cache_shape, cache_types))?.total_bytes
+        } else {
+            attention_cache_bytes_from_spec(&spec)?
+        };
+        let context_extra_bytes = cache_bytes
+            .checked_add(config.extra_activation_bytes)
+            .ok_or_else(|| LlamaError::format("overflow computing session activation bytes"))?;
         let max_context_usize = usize::try_from(max_context)
             .map_err(|_| LlamaError::format("session max_context does not fit in usize"))?;
         let (weights, graphs) = build_runtime_state(
@@ -341,7 +345,7 @@ impl LlamaSession {
         let cache_tokens = start
             .checked_add(batch_size)
             .ok_or_else(|| LlamaError::format("overflow computing session cache length"))?;
-        let graph_params = SessionGraphParams::greedy(batch_size);
+        let graph_params = SessionGraphParams::greedy(batch_size, cache_tokens);
         self.ensure_compiled_graph(graph_params)?;
         let run = {
             let compiled = self
@@ -372,7 +376,7 @@ impl LlamaSession {
         }
         for attempt in 0..=MAX_GRAPH_RESERVE_RETRIES {
             self.graphs.evict_graphs_except(params);
-            match compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
+            match compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
                 &mut self.weights,
                 &self.spec,
                 &self.graphs.shared_runtime,
@@ -380,6 +384,7 @@ impl LlamaSession {
                 &self.graphs.shared_main_buffer,
                 params.n_tokens,
                 params.n_outputs,
+                params.attention_key_count,
             ) {
                 Ok(compiled) => {
                     self.graphs.insert_graph(params, compiled);
@@ -478,16 +483,21 @@ fn build_runtime_state(
             create_metal_context_buffer_with_runtime(&shared_runtime, &weights.ctx)?;
         let mut compiled_by_params = BTreeMap::new();
         let build_result = (|| {
-            let token_generation = compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
-                &mut weights,
-                spec,
-                &shared_runtime,
-                &shared_cache,
-                &shared_main_buffer,
-                1,
-                1,
-            )?;
-            compiled_by_params.insert(SessionGraphParams::token_generation(), token_generation);
+            let token_generation =
+                compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
+                    &mut weights,
+                    spec,
+                    &shared_runtime,
+                    &shared_cache,
+                    &shared_main_buffer,
+                    1,
+                    1,
+                    session_attention_key_count(spec)?,
+                )?;
+            compiled_by_params.insert(
+                SessionGraphParams::token_generation(session_attention_key_count(spec)?),
+                token_generation,
+            );
             Ok::<(), LlamaError>(())
         })();
         match build_result {
@@ -529,6 +539,79 @@ fn should_retry_graph_reserve(err: &LlamaError) -> bool {
 
 fn prompt_batch_capacity(prefill_batch_size: usize, max_context: usize) -> usize {
     prefill_batch_size.max(1).min(max_context.max(1))
+}
+
+fn attention_cache_bytes_from_spec(spec: &HybridDecodeSpec) -> Result<usize> {
+    let mut total = 0usize;
+    let mut seen_attention_layers = BTreeSet::new();
+    for layer in &spec.layers {
+        match layer {
+            HybridLayerSpec::Attention { decode, .. } => {
+                if !seen_attention_layers.insert(decode.cache_layer_index) {
+                    continue;
+                }
+                let k_width = u64::from(decode.block.k_head_dim)
+                    .checked_mul(u64::from(decode.block.kv_head_count))
+                    .ok_or_else(|| LlamaError::format("overflow computing attention K width"))?;
+                let v_width = u64::from(decode.block.v_head_dim)
+                    .checked_mul(u64::from(decode.block.kv_head_count))
+                    .ok_or_else(|| LlamaError::format("overflow computing attention V width"))?;
+                let k_elements = k_width
+                    .checked_mul(u64::from(decode.cache.max_context))
+                    .and_then(|v| v.checked_mul(u64::from(decode.cache.max_sequences)))
+                    .ok_or_else(|| {
+                        LlamaError::format("overflow computing attention K cache elements")
+                    })?;
+                let v_elements = v_width
+                    .checked_mul(u64::from(decode.cache.max_context))
+                    .and_then(|v| v.checked_mul(u64::from(decode.cache.max_sequences)))
+                    .ok_or_else(|| {
+                        LlamaError::format("overflow computing attention V cache elements")
+                    })?;
+                let k_bytes = ggml_row_size_for_type(
+                    decode.cache.k_type,
+                    i64::try_from(k_elements).map_err(|_| {
+                        LlamaError::format("attention K elements do not fit in i64")
+                    })?,
+                )
+                .map_err(LlamaError::format)?;
+                let v_bytes = ggml_row_size_for_type(
+                    decode.cache.v_type,
+                    i64::try_from(v_elements).map_err(|_| {
+                        LlamaError::format("attention V elements do not fit in i64")
+                    })?,
+                )
+                .map_err(LlamaError::format)?;
+                total = total
+                    .checked_add(k_bytes)
+                    .and_then(|v| v.checked_add(v_bytes))
+                    .ok_or_else(|| {
+                        LlamaError::format("overflow computing attention cache bytes")
+                    })?;
+            }
+            HybridLayerSpec::Recurrent { .. } => {
+                return Err(LlamaError::unsupported(
+                    "session cache sizing without a hybrid_cache template is not implemented for recurrent layers"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn session_attention_key_count(spec: &HybridDecodeSpec) -> Result<usize> {
+    for layer in &spec.layers {
+        if let HybridLayerSpec::Attention { decode, .. } = layer {
+            return usize::try_from(decode.cache.max_context).map_err(|_| {
+                LlamaError::format(format!(
+                    "attention max_context {} does not fit in usize",
+                    decode.cache.max_context
+                ))
+            });
+        }
+    }
+    Ok(1)
 }
 
 fn argmax_token_id(logits: &[f32]) -> Result<i32> {

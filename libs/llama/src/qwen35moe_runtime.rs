@@ -106,10 +106,12 @@ pub fn qwen35moe_token_logits_probe_spec(model: &LlamaModel) -> Result<LogitsPro
     Ok(LogitsProbeSpec {
         input: ProbeInputKind::TokenIds {
             token_embedding_name: tensors.globals.token_embd.name.clone(),
+            token_embedding_scale: None,
         },
         output_norm_name: tensors.globals.output_norm.name.clone(),
         output_name: tensors.globals.output.name.clone(),
         rms_epsilon: cfg.attention_layer_norm_rms_epsilon,
+        final_logit_softcap: None,
     })
 }
 
@@ -125,6 +127,7 @@ pub fn qwen35moe_embedding_logits_probe_spec(model: &LlamaModel) -> Result<Logit
         output_norm_name: tensors.globals.output_norm.name.clone(),
         output_name: tensors.globals.output.name.clone(),
         rms_epsilon: cfg.attention_layer_norm_rms_epsilon,
+        final_logit_softcap: None,
     })
 }
 
@@ -151,6 +154,7 @@ pub fn qwen35moe_attention_block_spec(
     Ok(AttentionBlockSpec {
         input: ProbeInputKind::TokenIds {
             token_embedding_name: tensors.globals.token_embd.name.clone(),
+            token_embedding_scale: None,
         },
         input_norm_name: layer.attn_norm.name.clone(),
         q_proj_name: attention.wq.name.clone(),
@@ -160,12 +164,13 @@ pub fn qwen35moe_attention_block_spec(
         },
         k_proj_name: attention.wk.name.clone(),
         k_proj_scale_name: attention.scales.wk.as_ref().map(|t| t.name.clone()),
-        v_proj_name: attention.wv.name.clone(),
+        v_proj_name: Some(attention.wv.name.clone()),
         v_proj_scale_name: attention.scales.wv.as_ref().map(|t| t.name.clone()),
         output_proj_name: attention.wo.name.clone(),
         output_proj_scale_name: attention.scales.wo.as_ref().map(|t| t.name.clone()),
         q_norm_name: Some(attention.attn_q_norm.name.clone()),
         k_norm_name: Some(attention.attn_k_norm.name.clone()),
+        v_norm_epsilon: None,
         q_head_dim: dims.attention_key_length,
         q_head_count: dims.attention_head_count,
         k_head_dim: dims.attention_key_length,
@@ -194,7 +199,10 @@ pub fn qwen35moe_attention_block_spec(
             beta_fast: 0.0,
             beta_slow: 0.0,
         }),
+        rope_factors_name: None,
+        attention_scale: 1.0 / (dims.attention_key_length as f32).sqrt(),
         causal: true,
+        causal_window: None,
         residual: true,
     })
 }
@@ -230,6 +238,8 @@ pub fn qwen35moe_attention_decode_spec(
             k_type,
             v_type,
         },
+        cache_layer_index: layer_index,
+        write_kv: true,
     })
 }
 
@@ -267,6 +277,7 @@ pub fn qwen35moe_recurrent_block_spec(
     Ok(DeltaNetRecurrentBlockSpec {
         input: ProbeInputKind::TokenIds {
             token_embedding_name: tensors.globals.token_embd.name.clone(),
+            token_embedding_scale: None,
         },
         embedding_length: dims.embedding_length,
         input_norm_name: layer.attn_norm.name.clone(),
@@ -616,7 +627,11 @@ pub fn qwen35moe_hybrid_decode_spec(
                     attention_k_type,
                     attention_v_type,
                 )?,
+                post_attention_norm: None,
                 ffn,
+                post_ffn_norm: None,
+                per_layer_input: None,
+                output_scale_name: None,
             }),
             Qwen35MoeLayerKind::Recurrent => layers.push(HybridLayerSpec::Recurrent {
                 layer_index: layer.index,
@@ -635,10 +650,13 @@ pub fn qwen35moe_hybrid_decode_spec(
     Ok(HybridDecodeSpec {
         input: ProbeInputKind::TokenIds {
             token_embedding_name: tensors.globals.token_embd.name.clone(),
+            token_embedding_scale: None,
         },
         output_norm_name: tensors.globals.output_norm.name.clone(),
         output_name: tensors.globals.output.name.clone(),
         rms_epsilon: cfg.attention_layer_norm_rms_epsilon,
+        final_logit_softcap: None,
+        per_layer_input: None,
         layers,
     })
 }

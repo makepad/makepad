@@ -31,6 +31,9 @@ const XR_DEPTH_MESH_FOCUS_FADE_NEAR_METERS: f32 = 0.16;
 const XR_DEPTH_MESH_FOCUS_FADE_FAR_METERS: f32 = 0.82;
 const XR_DEPTH_MESH_FOCUS_FADE_FAR_ALPHA: f32 = 0.12;
 const XR_DEPTH_MESH_FOCUS_FADE_FAR_COLOR_SCALE: f32 = 0.28;
+const XR_DEBUG_FLOOR_PREVIEW_SIZE_METERS: f32 = 1.0;
+const XR_DEBUG_FLOOR_PREVIEW_THICKNESS_METERS: f32 = 0.004;
+const XR_DEBUG_FLOOR_PREVIEW_ALPHA: f32 = 0.18;
 
 #[path = "xr_depth.rs"]
 mod xr_depth;
@@ -388,6 +391,13 @@ impl Default for XrPassthroughRuntime {
 #[derive(Default)]
 struct XrHandSystem;
 
+#[derive(Clone, Copy, Debug, Default)]
+struct XrDebugFloorPreview {
+    floor_y: Option<f32>,
+    center: Vec3f,
+    visible_until_time: f64,
+}
+
 #[derive(Default)]
 struct XrWorld {
     last_xr_state: Option<Rc<XrState>>,
@@ -395,6 +405,7 @@ struct XrWorld {
     passthrough: XrPassthroughRuntime,
     physics: XrPhysicsRuntime,
     hands: XrHandSystem,
+    debug_floor_preview: XrDebugFloorPreview,
 }
 
 #[derive(Script, ScriptHook)]
@@ -582,6 +593,7 @@ impl XrEnv {
         color: Vec4f,
         depth_clip: f32,
     ) {
+        self.draw_cube.draw_vars.options.alpha_blend = color.w < 0.999;
         self.draw_cube.transform = pose.to_mat4();
         self.draw_cube.cube_pos = vec3(0.0, 0.0, 0.0);
         self.draw_cube.cube_size = size;
@@ -830,6 +842,26 @@ impl XrEnv {
         }
     }
 
+    pub(crate) fn set_runtime_xr_state(&mut self, state: Rc<XrState>) {
+        self.world.last_xr_state = Some(state);
+    }
+
+    pub(crate) fn show_debug_floor_preview(
+        &mut self,
+        cx: &mut Cx,
+        floor_y: f32,
+        center: Vec3f,
+        visible_until_time: f64,
+    ) {
+        if !floor_y.is_finite() || !center.is_finite() {
+            return;
+        }
+        self.world.debug_floor_preview.floor_y = Some(floor_y);
+        self.world.debug_floor_preview.center = center;
+        self.world.debug_floor_preview.visible_until_time = visible_until_time;
+        cx.redraw_all();
+    }
+
     // --- Physics management (moved from XrScene) ---
 
     fn rotation_quat(rot: Vec3f) -> Quat {
@@ -972,8 +1004,13 @@ impl XrEnv {
         self.world.physics.revision = self.world.physics.revision.saturating_add(1);
         let revision = self.world.physics.revision;
         let gravity = self.gravity;
+        let floor_y = self
+            .world
+            .last_xr_state
+            .as_deref()
+            .and_then(|state| state.floor_y);
         self.ensure_physics_worker(cx)
-            .request_rebuild(revision, gravity, cubes);
+            .request_rebuild(revision, gravity, cubes, floor_y);
         self.world.physics.scene_dirty = false;
     }
 
@@ -1034,7 +1071,7 @@ impl XrEnv {
         let revision = self.world.physics.revision;
         let physics_time_scale = self.physics_time_scale;
         let include_retained_hits = self.depth_query_hits_visible();
-        let (left_hand, right_hand, left_controller, right_controller) = self
+        let (left_hand, right_hand, left_controller, right_controller, floor_y) = self
             .world
             .last_xr_state
             .as_deref()
@@ -1044,6 +1081,7 @@ impl XrEnv {
                     state.right_hand.clone(),
                     state.left_controller.clone(),
                     state.right_controller.clone(),
+                    state.floor_y,
                 )
             })
             .unwrap_or_else(|| {
@@ -1052,6 +1090,7 @@ impl XrEnv {
                     XrHand::default(),
                     XrController::default(),
                     XrController::default(),
+                    None,
                 )
             });
         self.ensure_physics_worker(cx).request_step(
@@ -1060,6 +1099,7 @@ impl XrEnv {
             right_hand,
             left_controller,
             right_controller,
+            floor_y,
             physics_time_scale,
             include_retained_hits,
         );
@@ -1157,6 +1197,37 @@ impl XrEnv {
                 self.prepare_pbr(cx);
                 self.draw_hand(cx, &state.left_hand, None, true);
                 self.draw_hand(cx, &state.right_hand, None, false);
+            }
+
+            let preview_visible_until_time = self.world.debug_floor_preview.visible_until_time;
+            if state.time > preview_visible_until_time {
+                self.world.debug_floor_preview.floor_y = None;
+            }
+            let preview_floor_y = self
+                .world
+                .debug_floor_preview
+                .floor_y
+                .filter(|_| state.time <= preview_visible_until_time);
+            let preview_center = self.world.debug_floor_preview.center;
+            if let Some(floor_y) = preview_floor_y {
+                self.draw_pose_box(
+                    cx,
+                    Pose::new(
+                        Quat::default(),
+                        vec3f(
+                            preview_center.x,
+                            floor_y + XR_DEBUG_FLOOR_PREVIEW_THICKNESS_METERS * 0.5 + 0.001,
+                            preview_center.z,
+                        ),
+                    ),
+                    vec3f(
+                        XR_DEBUG_FLOOR_PREVIEW_SIZE_METERS,
+                        XR_DEBUG_FLOOR_PREVIEW_THICKNESS_METERS,
+                        XR_DEBUG_FLOOR_PREVIEW_SIZE_METERS,
+                    ),
+                    vec4(0.18, 0.72, 1.0, XR_DEBUG_FLOOR_PREVIEW_ALPHA),
+                    1.0,
+                );
             }
         }
 

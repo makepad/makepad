@@ -4,11 +4,9 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::Instant;
 
-use makepad_llama::{LlamaSession, LlamaSessionConfig, LlamaStopReason};
+use makepad_llama::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaStopReason, LlamaVocab};
 
 const DEFAULT_MAX_NEW_TOKENS: usize = 64;
-const DEFAULT_TOKENIZE_BIN: &str =
-    "local/llama.cpp/build-arm64-apple-clang-release/bin/llama-tokenize";
 const DEFAULT_UPSTREAM_COMPLETION_BIN: &str =
     "local/llama.cpp/build-arm64-apple-clang-release/bin/llama-completion";
 
@@ -17,9 +15,9 @@ struct Args {
     prompt: String,
     max_new_tokens: usize,
     prefill_batch_size: usize,
-    tokenize_bin: PathBuf,
     upstream_completion_bin: PathBuf,
     no_bos: bool,
+    parse_special: bool,
     dump_token_ids: bool,
     no_stream: bool,
     verify_upstream: bool,
@@ -37,7 +35,9 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args(std::env::args_os())?;
-    let prompt_token_ids = tokenize_prompt(&args)?;
+    let model = LlamaModel::load(&args.model_path)?;
+    let vocab = LlamaVocab::from_model(&model)?;
+    let prompt_token_ids = tokenize_prompt(&vocab, &args)?;
     if prompt_token_ids.is_empty() {
         return Err("tokenizer produced no prompt tokens".into());
     }
@@ -50,8 +50,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .len()
         .checked_add(args.max_new_tokens)
         .ok_or("overflow computing total generation context")?;
-    let mut session = LlamaSession::load(
-        &args.model_path,
+    let mut session = LlamaSession::from_model(
+        &model,
         LlamaSessionConfig {
             max_context: Some(u32::try_from(max_context)?),
             prefill_batch_size: args.prefill_batch_size,
@@ -84,7 +84,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args.verify_upstream {
-        let upstream_output = run_upstream_completion(&args)?;
+        let upstream_output = run_upstream_completion(&args, prompt_token_ids.len())?;
         verify_exact_output(&generation.text, &upstream_output)?;
         eprintln!("verify.upstream.exact_text_match: true");
         eprintln!("verify.upstream.generated_bytes: {}", upstream_output.len());
@@ -129,9 +129,9 @@ fn parse_args(
     let mut prompt_parts = Vec::new();
     let mut max_new_tokens = DEFAULT_MAX_NEW_TOKENS;
     let mut prefill_batch_size = 1usize;
-    let mut tokenize_bin = PathBuf::from(DEFAULT_TOKENIZE_BIN);
     let mut upstream_completion_bin = PathBuf::from(DEFAULT_UPSTREAM_COMPLETION_BIN);
     let mut no_bos = false;
+    let mut parse_special = true;
     let mut dump_token_ids = false;
     let mut no_stream = false;
     let mut verify_upstream = false;
@@ -155,8 +155,7 @@ fn parse_args(
                 prompt = Some(value.to_string_lossy().into_owned());
             }
             "--tokenize-bin" => {
-                let value = args.next().ok_or("--tokenize-bin requires a value")?;
-                tokenize_bin = PathBuf::from(value);
+                let _ = args.next().ok_or("--tokenize-bin requires a value")?;
             }
             "--upstream-completion-bin" => {
                 let value = args
@@ -166,6 +165,12 @@ fn parse_args(
             }
             "--no-bos" => {
                 no_bos = true;
+            }
+            "--parse-special" => {
+                parse_special = true;
+            }
+            "--no-parse-special" => {
+                parse_special = false;
             }
             "--dump-token-ids" => {
                 dump_token_ids = true;
@@ -199,9 +204,9 @@ fn parse_args(
         prompt,
         max_new_tokens,
         prefill_batch_size,
-        tokenize_bin,
         upstream_completion_bin,
         no_bos,
+        parse_special,
         dump_token_ids,
         no_stream,
         verify_upstream,
@@ -210,32 +215,24 @@ fn parse_args(
 
 fn print_usage() {
     eprintln!(
-        "usage: llama-generate <model.gguf> [--max-new-tokens N] [--prefill-batch-size N] [--tokenize-bin PATH] [--upstream-completion-bin PATH] [--no-bos] [--dump-token-ids] [--no-stream] [--verify-upstream] [--prompt TEXT | prompt words ...]"
+        "usage: llama-generate <model.gguf> [--max-new-tokens N] [--prefill-batch-size N] [--upstream-completion-bin PATH] [--no-bos] [--no-parse-special] [--dump-token-ids] [--no-stream] [--verify-upstream] [--prompt TEXT | prompt words ...]"
     );
 }
 
-fn tokenize_prompt(args: &Args) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
-    let mut command = Command::new(&args.tokenize_bin);
-    command
-        .arg("-m")
-        .arg(&args.model_path)
-        .arg("--ids")
-        .arg("--log-disable")
-        .arg("-p")
-        .arg(&args.prompt);
-    if args.no_bos {
-        command.arg("--no-bos");
-    }
-
-    let output = command.output()?;
-    ensure_success("llama-tokenize", &output)?;
-    parse_token_id_list(&String::from_utf8(output.stdout)?)
+fn tokenize_prompt(
+    vocab: &LlamaVocab,
+    args: &Args,
+) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
+    Ok(vocab.tokenize(&args.prompt, !args.no_bos, args.parse_special)?)
 }
 
-fn run_upstream_completion(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
+fn run_upstream_completion(
+    args: &Args,
+    prompt_token_count: usize,
+) -> Result<String, Box<dyn std::error::Error>> {
     let max_context = args
         .max_new_tokens
-        .checked_add(tokenize_prompt(args)?.len())
+        .checked_add(prompt_token_count)
         .ok_or("overflow computing upstream completion context")?;
     let mut command = Command::new(&args.upstream_completion_bin);
     command
@@ -281,16 +278,13 @@ fn run_upstream_completion(args: &Args) -> Result<String, Box<dyn std::error::Er
 
     let output = command.output()?;
     ensure_success("llama-completion", &output)?;
-    Ok(normalize_upstream_completion_stdout(
-        &String::from_utf8(output.stdout)?,
-    ))
+    Ok(normalize_upstream_completion_stdout(&String::from_utf8(
+        output.stdout,
+    )?))
 }
 
 fn normalize_upstream_completion_stdout(stdout: &str) -> String {
-    stdout
-        .strip_suffix("\n\n")
-        .unwrap_or(stdout)
-        .to_owned()
+    stdout.strip_suffix("\n\n").unwrap_or(stdout).to_owned()
 }
 
 fn ensure_success(name: &str, output: &Output) -> Result<(), Box<dyn std::error::Error>> {
@@ -304,30 +298,6 @@ fn ensure_success(name: &str, output: &Output) -> Result<(), Box<dyn std::error:
         String::from_utf8_lossy(&output.stderr)
     )
     .into())
-}
-
-fn parse_token_id_list(stdout: &str) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
-    let line = stdout
-        .lines()
-        .rev()
-        .find(|line| {
-            let line = line.trim();
-            line.starts_with('[') && line.ends_with(']')
-        })
-        .ok_or("tokenizer output did not contain an id list")?;
-    let line = line.trim();
-    let inner = line
-        .strip_prefix('[')
-        .and_then(|line| line.strip_suffix(']'))
-        .ok_or("tokenizer id list was malformed")?
-        .trim();
-    if inner.is_empty() {
-        return Ok(Vec::new());
-    }
-    inner
-        .split(',')
-        .map(|part| part.trim().parse::<i32>().map_err(Into::into))
-        .collect()
 }
 
 fn verify_exact_output(
@@ -406,10 +376,7 @@ mod tests {
 
     #[test]
     fn strips_cli_trailing_newlines_from_upstream_completion() {
-        assert_eq!(
-            normalize_upstream_completion_stdout("hello\n\n"),
-            "hello"
-        );
+        assert_eq!(normalize_upstream_completion_stdout("hello\n\n"), "hello");
     }
 
     #[test]
