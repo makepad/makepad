@@ -49,6 +49,35 @@ script_mod! {
             TextInputGradientY{empty_text: "Inline Label"}
 
             Hr{}
+            H4{text: "Single-line TextInput (Fill width, horizontal scroll)"}
+            P{text: "A single-line text input with Fill width. Type or paste enough text to overflow, then the text scrolls horizontally to keep the cursor visible."}
+            TextInput{
+                text: "This is a long piece of text that should overflow the available width and trigger horizontal scrolling in single-line mode."
+                width: Fill
+            }
+
+            Hr{}
+            H4{text: "Single-line TextInput (Fixed width, horizontal scroll)"}
+            P{text: "A single-line text input with a fixed width of 200px. Text scrolls horizontally when it overflows."}
+            TextInput{
+                text: "Fixed width input with long text that overflows"
+                width: 200.0
+            }
+
+            Hr{}
+            H4{text: "Single-line TextInput (Fit width, parent-constrained)"}
+            P{text: "A single-line text input with Fit width inside a fixed-width 300px container. The input grows to fit the text until hitting the container boundary, then scrolls."}
+            View{
+                width: 300.0
+                height: Fit
+                flow: Down
+                TextInput{
+                    empty_text: "Type a long string here..."
+                    width: Fit
+                }
+            }
+
+            Hr{}
             H4{text: "Multiline TextInput (fixed height, scrollable)"}
             P{text: "A multiline text input with a fixed height. Try typing or pasting enough text to overflow, then scroll with mouse wheel or drag the scrollbar."}
             multiline_textinput := TextInput{

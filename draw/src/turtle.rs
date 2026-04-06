@@ -795,6 +795,11 @@ impl Turtle {
         self.height
     }
 
+    /// Sets the width of this turtle's rectangle.
+    pub fn set_width(&mut self, width: f64) {
+        self.width = width;
+    }
+
     /// Sets the height of this turtle's rectangle.
     pub fn set_height(&mut self, height: f64) {
         self.height = height;
@@ -1699,6 +1704,37 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             consumed_padding += ancestor.padding().height();
         }
         max_height
+    }
+
+    /// Walks up the turtle stack looking for the tightest `Fit { max }` width
+    /// constraint on any ancestor, accounting for padding/spacing consumed by
+    /// each ancestor layer. Returns `f64::MAX` if no ancestor has a max constraint.
+    ///
+    /// This is useful for widgets like TextInput that need to know when to start
+    /// horizontal scrolling, even when their own walk width is unbounded `Fit`.
+    pub fn compute_max_width_from_ancestors(&self) -> f64 {
+        let mut max_width = f64::MAX;
+        let current = self.turtles.last().unwrap();
+        let mut consumed_padding = current.padding().width();
+
+        // Walk ancestors (skip self)
+        for ancestor in self.turtles.iter().rev().skip(1) {
+            if let Size::Fit { max: Some(max), .. } = ancestor.walk.width {
+                if let Some(ancestor_max) = max.eval_width(self) {
+                    let available = ancestor_max - consumed_padding;
+                    max_width = max_width.min(available);
+                }
+            }
+
+            if !ancestor.width().is_nan() {
+                let available = ancestor.inner_width() - consumed_padding + current.padding().width();
+                max_width = max_width.min(available);
+                break;
+            }
+
+            consumed_padding += ancestor.padding().width();
+        }
+        max_width
     }
 
     /// Pushes a clip rect entry and returns the index of that entry in the align list.
