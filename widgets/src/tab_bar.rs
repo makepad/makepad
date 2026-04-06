@@ -336,7 +336,7 @@ impl Widget for TabBar {
                 }
                 TabAction::TouchScroll { abs, time } => {
                     if let FingerScrollState::Dragging { samples } = &mut self.finger_scroll {
-                        let old_abs = samples.last().unwrap().abs;
+                        let Some(old_abs) = samples.last().map(|s| s.abs) else { return };
                         samples.push(FingerScrollSample { abs: abs.x, time });
                         if samples.len() > 4 {
                             samples.remove(0);
@@ -485,6 +485,17 @@ impl TabBar {
             (tab, template)
         });
         tab
+    }
+
+    /// Creates a new Tab from the same template as the given tab, with the same active state.
+    /// Returns `None` if the tab_id isn't found.
+    pub fn create_ghost_tab(&self, cx: &mut Cx, tab_id: LiveId) -> Option<Tab> {
+        let (tab, template_id) = self.tabs.get(&tab_id)?;
+        let is_active = tab.is_active();
+        let template_value: ScriptValue = self.templates.get(template_id)?.as_object().into();
+        let mut ghost = cx.with_vm(|vm| Tab::script_from_value(vm, template_value));
+        ghost.set_is_active(cx, is_active, Animate::No);
+        Some(ghost)
     }
 
     pub fn active_tab_id(&self) -> Option<LiveId> {
