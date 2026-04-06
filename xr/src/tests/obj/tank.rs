@@ -1,37 +1,80 @@
 #[test]
-fn head_relative_drive_direction_uses_head_yaw() {
-    let controller = XrController {
-        buttons: XrController::ACTIVE,
-        stick: vec2f(0.0, 1.0),
-        ..XrController::default()
-    };
-    let yaw_right = Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), -std::f32::consts::FRAC_PI_2);
-
-    let (direction, amount) = stick_deadzone_scaled_direction(&controller, yaw_right, 0.16)
-        .expect("active stick should produce a drive direction");
-
-    assert!((direction - vec3f(1.0, 0.0, 0.0)).length() < 0.0001);
-    assert!((amount - 1.0).abs() < 0.0001);
+fn stick_axes_map_forward_and_turn_in_local_space() {
+    let (forward, turn) = stick_deadzone_scaled_axes(vec2f(0.0, 1.0), 0.16, 1.45);
+    assert!((forward + 1.0).abs() < 0.0001);
+    assert!(turn.abs() < 0.0001);
 }
 
 #[test]
-fn track_commands_turn_right_for_target_on_right() {
-    let pose = Pose::default();
-    let desired_direction = vec3f(1.0, 0.0, 0.0);
-    let (left, right) =
-        differential_track_commands(pose, vec3f(0.0, 0.0, 0.0), desired_direction, 1.0, 1.35, 1.45);
-
-    assert!(left < 0.0);
-    assert!(right > 0.0);
+fn stick_axes_turn_in_place_with_horizontal_input() {
+    let (forward, turn) = stick_deadzone_scaled_axes(vec2f(1.0, 0.0), 0.16, 1.45);
+    assert!(forward.abs() < 0.0001);
+    assert!((turn + 1.0).abs() < 0.0001);
 }
 
 #[test]
-fn track_commands_reverse_when_target_is_behind_body() {
-    let pose = Pose::default();
-    let desired_direction = vec3f(0.0, 0.0, 1.0);
-    let (left, right) =
-        differential_track_commands(pose, vec3f(0.0, 0.0, 0.0), desired_direction, 1.0, 1.35, 1.45);
+fn stick_axes_soften_partial_input_response() {
+    let linear = deadzone_scaled_axis(0.5, 0.16, 1.0);
+    let softened = deadzone_scaled_axis(0.5, 0.16, 1.75);
 
-    assert!(left < 0.0);
-    assert!(right < 0.0);
+    assert!(softened > 0.0);
+    assert!(softened < linear);
+}
+
+#[test]
+fn tank_command_turns_for_positive_turn_input() {
+    let pose = Pose::default();
+    let config = TankDriveConfig::default();
+    let command = tank_drive_command(
+        WidgetUid(1),
+        pose,
+        None,
+        &XrController {
+            stick: vec2f(1.0, 0.0),
+            ..XrController::default()
+        },
+        config,
+    )
+    .unwrap();
+
+    assert!(command.target_angvel.y < 0.0);
+    assert!(
+        (command.target_angvel.y + config.turn_gain * config.max_yaw_speed_radps).abs() < 0.0001
+    );
+}
+
+#[test]
+fn tank_command_moves_forward_for_negative_stick_y() {
+    let pose = Pose::default();
+    let config = TankDriveConfig::default();
+    let command = tank_drive_command(
+        WidgetUid(1),
+        pose,
+        None,
+        &XrController {
+            stick: vec2f(0.0, -1.0),
+            ..XrController::default()
+        },
+        config,
+    )
+    .unwrap();
+
+    assert!(command.target_linvel.z < 0.0);
+    assert!(command.target_angvel.length() < 0.0001);
+}
+
+#[test]
+fn tank_command_preserves_vertical_velocity() {
+    let pose = Pose::default();
+    let config = TankDriveConfig::default();
+    let command = tank_drive_command(
+        WidgetUid(1),
+        pose,
+        None,
+        &XrController::default(),
+        config,
+    )
+    .unwrap();
+
+    assert!(command.preserve_vertical_linvel);
 }

@@ -34,6 +34,7 @@ workspace.members = [
     "libs/regex",
     "libs/svg",
     "libs/apple_sys",
+#    "libs/mlx_rt_core",
     "libs/shared_bytes",
     "libs/tsdf",
     "platform/network",

@@ -14,6 +14,11 @@ pub const XR_TOUCH_CAPTURE_FRONT: f32 = 11.0;
 pub const XR_TOUCH_CAPTURE_BACK: f32 = -16.0;
 pub const XR_TOUCH_REARM_FRONT: f32 = 28.0;
 
+pub fn normalize_xr_controller_stick(stick: Vec2f) -> Vec2f {
+    // Match the desktop gamepad convention so pushing the stick up yields a negative Y.
+    vec2f(stick.x, -stick.y)
+}
+
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrController {
     pub grip_pose: Pose,
@@ -481,14 +486,14 @@ impl XrHand {
             self.finger_bend_degrees(Self::RING_TIP),
             self.finger_bend_degrees(Self::LITTLE_TIP),
         ];
-        if !bends.iter().all(|bend| {
-            bend.is_some_and(|bend| bend <= Self::OPEN_MAX_FINGER_BEND_DEGREES)
-        }) {
+        if !bends
+            .iter()
+            .all(|bend| bend.is_some_and(|bend| bend <= Self::OPEN_MAX_FINGER_BEND_DEGREES))
+        {
             return false;
         }
-        self.average_open_finger_bend_degrees().is_some_and(|average| {
-            average <= Self::OPEN_MAX_AVERAGE_FINGER_BEND_DEGREES
-        })
+        self.average_open_finger_bend_degrees()
+            .is_some_and(|average| average <= Self::OPEN_MAX_AVERAGE_FINGER_BEND_DEGREES)
     }
 
     pub fn along_hand_up_angle_degrees(&self) -> Option<f32> {
@@ -974,6 +979,8 @@ pub struct XrState {
     pub head_pose: Pose,
     pub order_counter: u8,
     pub anchor: Option<XrAnchor>,
+    pub anchor_persisted: bool,
+    pub floor_y: Option<f32>,
     pub sync_anchor: Option<XrSyncAnchor>,
     pub left_controller: XrController,
     pub right_controller: XrController,
@@ -987,6 +994,8 @@ impl XrState {
             time: (b.time - a.time) * f as f64 + a.time,
             head_pose: Pose::from_lerp(a.head_pose, b.head_pose, f),
             anchor: b.anchor,
+            anchor_persisted: b.anchor_persisted,
+            floor_y: b.floor_y,
             sync_anchor: b.sync_anchor,
             left_controller: b.left_controller.clone(),
             right_controller: b.right_controller.clone(),
@@ -1357,5 +1366,13 @@ mod tests {
         assert!(!XrLocalEvent::tip_is_touching_for_capture(&tip(
             false, -18.0
         )));
+    }
+
+    #[test]
+    fn xr_controller_stick_normalization_matches_gamepad_y_sign() {
+        assert_eq!(
+            normalize_xr_controller_stick(vec2f(0.25, 0.75)),
+            vec2f(0.25, -0.75)
+        );
     }
 }

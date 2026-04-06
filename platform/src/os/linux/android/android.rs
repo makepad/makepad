@@ -26,7 +26,7 @@ use {
     },
     crate::{
         cx::{Cx, OsType},
-        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace, XrFrameCpuBreakdown},
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::{
@@ -1133,8 +1133,18 @@ impl Cx {
                 let e = Event::ImeAction(ImeActionEvent { action });
                 self.call_event_handler(&e);
             }
-            FromJavaMessage::SafeAreaInsets { top, right, bottom, left } => {
-                let new_insets = crate::event::SafeAreaInsets { top, right, bottom, left };
+            FromJavaMessage::SafeAreaInsets {
+                top,
+                right,
+                bottom,
+                left,
+            } => {
+                let new_insets = crate::event::SafeAreaInsets {
+                    top,
+                    right,
+                    bottom,
+                    left,
+                };
                 if self.os.safe_area_insets != new_insets {
                     self.os.safe_area_insets = new_insets;
                     // Update the WindowGeom with the new safe area insets
@@ -2455,6 +2465,10 @@ impl Cx {
                     self.os.xr_display_refresh_rate_active_hz = None;
                     self.os.xr_effective_frame_time_ms = None;
                     self.os.xr_effective_frame_rate_hz = None;
+                    self.os.xr_frame_cpu_time_ms = None;
+                    self.os.xr_render_cpu_time_ms = None;
+                    self.os.xr_depth_readback_cpu_time_ms = None;
+                    self.os.xr_frame_cpu_breakdown = None;
                     self.os.xr_retry_surface_after_destroy = true;
                     self.os.ignore_destroy = true;
                     if !self.os.in_xr_mode {
@@ -2471,6 +2485,10 @@ impl Cx {
                     self.os.xr_display_refresh_rate_active_hz = None;
                     self.os.xr_effective_frame_time_ms = None;
                     self.os.xr_effective_frame_rate_hz = None;
+                    self.os.xr_frame_cpu_time_ms = None;
+                    self.os.xr_render_cpu_time_ms = None;
+                    self.os.xr_depth_readback_cpu_time_ms = None;
+                    self.os.xr_frame_cpu_breakdown = None;
                     self.os.ignore_destroy = true;
                     if self.os.in_xr_mode {
                         self.os.in_xr_mode = false;
@@ -2493,6 +2511,10 @@ impl Cx {
                 }
                 CxOsOp::XrSetLocalAnchor(anchor) => {
                     self.os.openxr.set_local_anchor(anchor);
+                }
+                CxOsOp::XrSetLocalFloor(floor_y) => {
+                    let os_type = self.os_type().clone();
+                    self.os.openxr.set_local_floor(floor_y, &os_type);
                 }
                 CxOsOp::XrDiscoverAnchor(id) => {
                     self.os.openxr.discover_anchor(id);
@@ -2581,6 +2603,22 @@ impl CxOsApi for Cx {
         {
             None
         }
+    }
+
+    fn xr_frame_cpu_time_ms(&self) -> Option<f64> {
+        self.os.xr_frame_cpu_time_ms
+    }
+
+    fn xr_render_cpu_time_ms(&self) -> Option<f64> {
+        self.os.xr_render_cpu_time_ms
+    }
+
+    fn xr_depth_readback_cpu_time_ms(&self) -> Option<f64> {
+        self.os.xr_depth_readback_cpu_time_ms
+    }
+
+    fn xr_frame_cpu_breakdown(&self) -> Option<XrFrameCpuBreakdown> {
+        self.os.xr_frame_cpu_breakdown
     }
 
     fn xr_display_refresh_rate_hz(&self) -> Option<f64> {
@@ -2779,6 +2817,10 @@ impl Default for CxOs {
             xr_display_refresh_rate_active_hz: None,
             xr_effective_frame_time_ms: None,
             xr_effective_frame_rate_hz: None,
+            xr_frame_cpu_time_ms: None,
+            xr_render_cpu_time_ms: None,
+            xr_depth_readback_cpu_time_ms: None,
+            xr_frame_cpu_breakdown: None,
             #[cfg(use_vulkan)]
             xr_pending_surface_window: std::ptr::null_mut(),
             #[cfg(use_vulkan)]
@@ -2841,6 +2883,10 @@ pub struct CxOs {
     pub(crate) xr_display_refresh_rate_active_hz: Option<f32>,
     pub(crate) xr_effective_frame_time_ms: Option<f64>,
     pub(crate) xr_effective_frame_rate_hz: Option<f64>,
+    pub(crate) xr_frame_cpu_time_ms: Option<f64>,
+    pub(crate) xr_render_cpu_time_ms: Option<f64>,
+    pub(crate) xr_depth_readback_cpu_time_ms: Option<f64>,
+    pub(crate) xr_frame_cpu_breakdown: Option<XrFrameCpuBreakdown>,
     #[cfg(use_vulkan)]
     pub(crate) xr_pending_surface_window: *mut ndk_sys::ANativeWindow,
     #[cfg(use_vulkan)]

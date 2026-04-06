@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-pub const XR_TSDF_DEFAULT_VOXEL_SIZE_METERS: f32 = 0.03;
+pub const XR_TSDF_DEFAULT_VOXEL_SIZE_METERS: f32 = 0.02;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ChunkKey {
@@ -327,6 +327,16 @@ pub struct TsdfPublishedSnapshot {
     pub height_map: Option<XrDepthAlignHeightMap>,
 }
 
+impl TsdfPublishedSnapshot {
+    pub fn lowest_y_meters(&self) -> Option<f32> {
+        self.height_map
+            .as_ref()
+            .map(|height_map| height_map.bottom_y_meters)
+            .or_else(|| self.grid.active_bounds.map(|(min, _)| min.y))
+            .filter(|value| value.is_finite())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct XrTsdfCooperativeStepResult {
     pub did_work: bool,
@@ -427,7 +437,7 @@ impl XrTsdfStore {
     }
 
     pub fn set_voxel_size_meters(&self, voxel_size_meters: f32) -> f32 {
-        let voxel_size_meters = voxel_size_meters.clamp(0.03, 0.10);
+        let voxel_size_meters = voxel_size_meters.clamp(0.02, 0.10);
         let previous = self
             .voxel_size_meters_bits
             .swap(voxel_size_meters.to_bits(), Ordering::AcqRel);
@@ -592,3 +602,16 @@ pub use depth_integration::*;
 #[cfg(test)]
 #[path = "synthetic_bench.rs"]
 mod synthetic_bench;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tsdf_store_defaults_and_clamps_to_two_centimeter_voxels() {
+        let store = XrTsdfStore::default();
+        assert!((store.voxel_size_meters() - 0.02).abs() <= f32::EPSILON);
+        assert!((store.set_voxel_size_meters(0.005) - 0.02).abs() <= f32::EPSILON);
+        assert!((store.voxel_size_meters() - 0.02).abs() <= f32::EPSILON);
+    }
+}

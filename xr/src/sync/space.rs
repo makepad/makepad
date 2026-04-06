@@ -66,22 +66,53 @@ impl XrPeerSync {
         hand.tracking_pose()
     }
 
+    fn controller_tracking_pose(controller: &XrController) -> Option<Pose> {
+        let pose = controller.grip_pose;
+        (controller.active() && pose.is_finite()).then_some(pose)
+    }
+
     fn local_hand_state_from_frames(
         current: &XrState,
         previous: Option<&XrState>,
         shared_hand: XrSharedHand,
     ) -> Option<LocalSharedHandState> {
-        let (hand, previous_hand) = match shared_hand {
-            XrSharedHand::LeftHand => (&current.left_hand, previous.map(|state| &state.left_hand)),
-            XrSharedHand::RightHand => {
-                (&current.right_hand, previous.map(|state| &state.right_hand))
+        let (pose, previous_pose, gripping) = match shared_hand {
+            XrSharedHand::LeftController => {
+                let pose = Self::controller_tracking_pose(&current.left_controller)?;
+                let previous_pose = previous
+                    .and_then(|state| Self::controller_tracking_pose(&state.left_controller))
+                    .unwrap_or(pose);
+                (pose, previous_pose, current.left_controller.grip >= 0.55)
             }
-            _ => return None,
+            XrSharedHand::RightController => {
+                let pose = Self::controller_tracking_pose(&current.right_controller)?;
+                let previous_pose = previous
+                    .and_then(|state| Self::controller_tracking_pose(&state.right_controller))
+                    .unwrap_or(pose);
+                (pose, previous_pose, current.right_controller.grip >= 0.55)
+            }
+            XrSharedHand::LeftHand => {
+                if current.left_controller.active() {
+                    return None;
+                }
+                let pose = Self::hand_tracking_pose(&current.left_hand)?;
+                let previous_pose = previous
+                    .and_then(|state| Self::hand_tracking_pose(&state.left_hand))
+                    .unwrap_or(pose);
+                (pose, previous_pose, current.left_hand.grab_intent())
+            }
+            XrSharedHand::RightHand => {
+                if current.right_controller.active() {
+                    return None;
+                }
+                let pose = Self::hand_tracking_pose(&current.right_hand)?;
+                let previous_pose = previous
+                    .and_then(|state| Self::hand_tracking_pose(&state.right_hand))
+                    .unwrap_or(pose);
+                (pose, previous_pose, current.right_hand.grab_intent())
+            }
+            XrSharedHand::Unknown => return None,
         };
-        let pose = Self::hand_tracking_pose(hand)?;
-        let previous_pose = previous_hand
-            .and_then(Self::hand_tracking_pose)
-            .unwrap_or(pose);
         let dt = previous
             .map(|previous| (current.time - previous.time).abs())
             .unwrap_or(0.0)
@@ -90,7 +121,7 @@ impl XrPeerSync {
             shared_hand,
             pose,
             linvel: (pose.position - previous_pose.position) * (1.0 / dt),
-            gripping: hand.grab_intent(),
+            gripping,
         })
     }
 
@@ -99,11 +130,16 @@ impl XrPeerSync {
             return Vec::new();
         };
         let previous = self.runtime.local.previous_xr_state.as_ref();
-        [XrSharedHand::LeftHand, XrSharedHand::RightHand]
-            .into_iter()
-            .filter_map(|shared_hand| {
-                Self::local_hand_state_from_frames(current, previous, shared_hand)
-            })
-            .collect()
+        [
+            XrSharedHand::LeftController,
+            XrSharedHand::RightController,
+            XrSharedHand::LeftHand,
+            XrSharedHand::RightHand,
+        ]
+        .into_iter()
+        .filter_map(|shared_hand| {
+            Self::local_hand_state_from_frames(current, previous, shared_hand)
+        })
+        .collect()
     }
 }

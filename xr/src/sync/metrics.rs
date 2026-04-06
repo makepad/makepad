@@ -57,7 +57,11 @@ impl XrPeerSyncMetrics {
         );
     }
 
-    pub(super) fn record_activity_rx(&mut self, peer_id: XrNetPeerId, activity: XrNetActivityState) {
+    pub(super) fn record_activity_rx(
+        &mut self,
+        peer_id: XrNetPeerId,
+        activity: XrNetActivityState,
+    ) {
         self.rx_activity_count = self.rx_activity_count.saturating_add(1);
         self.last_event_text = format!(
             "activity {} {} tick {}",

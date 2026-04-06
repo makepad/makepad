@@ -621,13 +621,14 @@ impl App {
                 self.set_status(cx, "logs cleared");
             }
             HubToClient::TerminalOpened { path } => {
+                let redraw_path = path.clone();
                 self.data.terminal_open_paths.insert(path.clone());
                 self.data.terminal_frame_id_by_path.remove(&path);
                 self.data
                     .terminal_framebuffer_by_path
                     .entry(path)
                     .or_default();
-                self.refresh_active_mount_log_panels(cx);
+                self.refresh_active_mount_terminal_panel(cx, &redraw_path);
             }
             HubToClient::TerminalFramebuffer { path, frame } => {
                 if let Some(last_frame_id) = self.data.terminal_frame_id_by_path.get(&path) {
@@ -638,8 +639,8 @@ impl App {
                 self.data
                     .terminal_frame_id_by_path
                     .insert(path.clone(), frame.frame_id);
-                self.data.terminal_framebuffer_by_path.insert(path, frame);
-                self.refresh_active_mount_log_panels(cx);
+                self.data.terminal_framebuffer_by_path.insert(path.clone(), frame);
+                self.refresh_active_mount_terminal_panel(cx, &path);
             }
             HubToClient::TerminalTitle { path, title } => {
                 self.apply_terminal_tab_title(cx, &path, title);

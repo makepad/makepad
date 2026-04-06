@@ -477,6 +477,7 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             ..mod.sdf,
             ..mod.animator,
             ..mod.turtle,
+            ..mod.text,
             ..mod.ime,
             ..mod.shader,
             ..mod.animator.Play,
