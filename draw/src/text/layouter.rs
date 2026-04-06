@@ -276,6 +276,8 @@ impl LayoutContext {
     }
 
     fn layout_multiline(mut self) -> LaidoutText {
+        let has_ellipsis_config = self.options.max_rows.is_some() || self.options.ellipsis;
+
         for (line_index, len) in self
             .text
             .clone()
@@ -286,10 +288,24 @@ impl LayoutContext {
             if line_index != 0 {
                 self.finish_current_row(true);
             }
+            if self.is_past_max_rows() {
+                break;
+            }
             self.layout(len);
         }
-        self.finish_current_row(false);
-        self.finish()
+
+        if has_ellipsis_config {
+            self.apply_ellipsis_truncation()
+        } else {
+            self.finish_current_row(false);
+            self.finish_with(false)
+        }
+    }
+
+    fn is_past_max_rows(&self) -> bool {
+        self.options
+            .max_rows
+            .map_or(false, |max| self.rows.len() >= max)
     }
 
     fn layout(&mut self, len: usize) {
@@ -308,6 +324,9 @@ impl LayoutContext {
             SegmentKind::Word,
         );
         while !fitter.is_empty() {
+            if self.is_past_max_rows() {
+                break;
+            }
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
                 Some(text) => self.append_text(&text),
                 None => {
@@ -332,6 +351,9 @@ impl LayoutContext {
             SegmentKind::Grapheme,
         );
         while !fitter.is_empty() {
+            if self.is_past_max_rows() {
+                break;
+            }
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
                 Some(text) => self.append_text(&text),
                 None => {
@@ -415,7 +437,8 @@ impl LayoutContext {
         self.rows.push(row);
     }
 
-    fn finish(self) -> LaidoutText {
+    fn finish_with(self, is_truncated: bool) -> LaidoutText {
+        let last_row = self.rows.last().unwrap();
         LaidoutText {
             text: self.text,
             size_in_lpxs: Size::new(
@@ -424,11 +447,118 @@ impl LayoutContext {
                     .map(|row| row.width_in_lpxs)
                     .reduce(f32::max)
                     .unwrap_or(0.0),
-                self.current_point_in_lpxs.y - self.rows.last().unwrap().descender_in_lpxs,
+                last_row.origin_in_lpxs.y - last_row.descender_in_lpxs,
             ),
             rows: self.rows,
+            is_truncated,
         }
     }
+
+    /// Applies ellipsis truncation as a post-processing step after layout.
+    ///
+    /// Truncation is triggered when:
+    /// 1. `max_rows` is set and more text exists than fits in that many rows.
+    /// 2. `ellipsis` is true, wrap is false, and a single row exceeds `max_width_in_lpxs`.
+    fn apply_ellipsis_truncation(mut self) -> LaidoutText {
+        self.finish_current_row_if_pending();
+
+        // Detect whether all text was consumed during layout.
+        // If not, text was truncated by the max_rows early-exit.
+        let all_text_consumed = self.current_row_end >= self.text.len()
+            || (self.current_row_end + 1 == self.text.len()
+                && self.text.as_bytes()[self.current_row_end] == b'\n');
+
+        let max_rows = match self.options.max_rows {
+            Some(max) if max > 0 => max,
+            _ => {
+                // No max_rows constraint: check single-line non-wrapping overflow
+                if self.options.ellipsis && !self.options.wrap {
+                    if let Some(max_width) = self.options.max_width_in_lpxs {
+                        if self.rows.len() == 1 && self.rows[0].width_in_lpxs > max_width {
+                            self.truncate_last_row_with_ellipsis(max_width);
+                            return self.finish_with(true);
+                        }
+                    }
+                }
+                return self.finish_with(false);
+            }
+        };
+
+        let text_was_truncated = self.rows.len() > max_rows || !all_text_consumed;
+
+        self.rows.truncate(max_rows);
+
+        if !text_was_truncated {
+            return self.finish_with(false);
+        }
+
+        if self.options.ellipsis {
+            let max_width = self.options.max_width_in_lpxs.unwrap_or(f32::MAX);
+            self.truncate_last_row_with_ellipsis(max_width);
+        }
+
+        self.finish_with(true)
+    }
+
+    /// Truncates the last row to fit within `max_width` and appends an ellipsis glyph.
+    fn truncate_last_row_with_ellipsis(&mut self, max_width: f32) {
+        let ellipsis_shaped = self.font_family.get_or_shape("…".into());
+        let font_size_in_lpxs = self.style.font_size_in_lpxs();
+        let ellipsis_width: f32 = ellipsis_shaped
+            .glyphs
+            .iter()
+            .map(|g| g.advance_in_ems * font_size_in_lpxs)
+            .sum();
+
+        let last_row = match self.rows.last_mut() {
+            Some(row) => row,
+            None => return,
+        };
+
+        // Remove glyphs from the end until remaining + ellipsis fits
+        while last_row.width_in_lpxs + ellipsis_width > max_width && !last_row.glyphs.is_empty() {
+            let removed = last_row.glyphs.pop().unwrap();
+            last_row.width_in_lpxs -= removed.advance_in_lpxs();
+        }
+
+        // Trim trailing whitespace glyphs for a cleaner look before the ellipsis.
+        while last_row.glyphs.last().map_or(false, |g| {
+            last_row.text[g.cluster..]
+                .chars()
+                .next()
+                .map_or(false, |c| c.is_whitespace())
+        }) {
+            let removed = last_row.glyphs.pop().unwrap();
+            last_row.width_in_lpxs -= removed.advance_in_lpxs();
+        }
+
+        // Append ellipsis glyphs
+        for glyph in &ellipsis_shaped.glyphs {
+            let ellipsis_glyph = LaidoutGlyph {
+                origin_in_lpxs: Point::new(last_row.width_in_lpxs, 0.0),
+                font: glyph.font.clone(),
+                font_size_in_lpxs,
+                color: self.style.color,
+                id: glyph.id,
+                cluster: last_row.text.len(), // beyond the text range
+                advance_in_ems: glyph.advance_in_ems,
+                offset_in_ems: glyph.offset_in_ems,
+            };
+            last_row.width_in_lpxs += ellipsis_glyph.advance_in_lpxs();
+            last_row.glyphs.push(ellipsis_glyph);
+        }
+    }
+
+    /// Finishes any pending glyphs into a row (without a newline).
+    /// Always ensures at least one row exists.
+    fn finish_current_row_if_pending(&mut self) {
+        let has_pending_content = self.current_row_start != self.current_row_end
+            || !self.glyphs.is_empty();
+        if has_pending_content || self.rows.is_empty() {
+            self.finish_current_row(false);
+        }
+    }
+
 }
 
 #[derive(Debug)]
@@ -773,6 +903,13 @@ pub struct LayoutOptions {
     pub wrap: bool,
     pub align: f32,
     pub line_spacing_scale: f32,
+    /// Maximum number of rows to display. `None` means unlimited.
+    /// When set and the text exceeds this many rows, excess rows are discarded.
+    pub max_rows: Option<usize>,
+    /// When true and text is truncated (by `max_rows` or by exceeding `max_width_in_lpxs`
+    /// on a single non-wrapping line), an ellipsis character (U+2026 "…") is appended
+    /// to the last visible row.
+    pub ellipsis: bool,
 }
 
 impl Default for LayoutOptions {
@@ -784,6 +921,8 @@ impl Default for LayoutOptions {
             wrap: false,
             align: 0.0,
             line_spacing_scale: 1.0,
+            max_rows: None,
+            ellipsis: false,
         }
     }
 }
@@ -800,28 +939,26 @@ impl Hash for LayoutOptions {
             .to_bits()
             .hash(hasher);
         self.max_width_in_lpxs.map(f32::to_bits).hash(hasher);
+        self.wrap.hash(hasher);
         self.align.to_bits().hash(hasher);
         self.line_spacing_scale.to_bits().hash(hasher);
+        self.max_rows.hash(hasher);
+        self.ellipsis.hash(hasher);
     }
 }
 
 impl PartialEq for LayoutOptions {
     fn eq(&self, other: &Self) -> bool {
-        if self.first_row_indent_in_lpxs.to_bits() != other.first_row_indent_in_lpxs.to_bits() {
-            return false;
-        }
-        if self.first_row_min_line_spacing_below_in_lpxs.to_bits()
-            != other.first_row_min_line_spacing_below_in_lpxs.to_bits()
-        {
-            return false;
-        }
-        if self.max_width_in_lpxs.map(f32::to_bits) != other.max_width_in_lpxs.map(f32::to_bits) {
-            return false;
-        }
-        if self.align != other.align {
-            return false;
-        }
-        true
+        self.first_row_indent_in_lpxs.to_bits() == other.first_row_indent_in_lpxs.to_bits()
+            && self.first_row_min_line_spacing_below_in_lpxs.to_bits()
+                == other.first_row_min_line_spacing_below_in_lpxs.to_bits()
+            && self.max_width_in_lpxs.map(f32::to_bits)
+                == other.max_width_in_lpxs.map(f32::to_bits)
+            && self.wrap == other.wrap
+            && self.align.to_bits() == other.align.to_bits()
+            && self.line_spacing_scale.to_bits() == other.line_spacing_scale.to_bits()
+            && self.max_rows == other.max_rows
+            && self.ellipsis == other.ellipsis
     }
 }
 
@@ -830,6 +967,8 @@ pub struct LaidoutText {
     pub text: Substr,
     pub size_in_lpxs: Size<f32>,
     pub rows: Vec<LaidoutRow>,
+    /// True when the text was truncated (e.g., due to `max_rows` or ellipsis).
+    pub is_truncated: bool,
 }
 
 impl LaidoutText {

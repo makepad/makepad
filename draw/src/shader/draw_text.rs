@@ -39,6 +39,8 @@ script_mod! {
         let text = me
         FontFamily: mod.std.set_type_default() do #(FontFamily::script_component(vm))
         FontMember: mod.std.set_type_default() do #(FontMember::script_api(vm))
+        TextOverflow: mod.std.set_type_default() do #(TextOverflow::script_api(vm)),
+        ..me.TextOverflow,
         TextStyle: mod.std.set_type_default() do #(TextStyle::script_api(vm)){
             font_size: 10
             font_family: text.FontFamily{
@@ -181,6 +183,18 @@ script_mod! {
     }
 }
 
+/// Controls how text overflow is handled when text exceeds its container.
+///
+/// Analogous to CSS `text-overflow`. Requires a width constraint to take effect.
+#[derive(Copy, Clone, Debug, PartialEq, Script, ScriptHook)]
+pub enum TextOverflow {
+    /// Text is clipped at the container boundary (default).
+    #[pick]
+    Clip,
+    /// An ellipsis character (U+2026 "…") is shown where text is truncated.
+    Ellipsis,
+}
+
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawText {
@@ -197,6 +211,19 @@ pub struct DrawText {
 
     #[live]
     pub temp_y_shift: f32,
+
+    /// Maximum number of lines to display. 0 means unlimited (default).
+    /// When text exceeds this many lines, excess lines are hidden.
+    /// Combined with `text_overflow: Ellipsis`, an ellipsis is appended
+    /// to the last visible line.
+    #[live(0usize)]
+    pub max_lines: usize,
+
+    /// Controls how text overflow is handled.
+    /// `Clip` (default) clips text at the boundary.
+    /// `Ellipsis` appends "…" at the truncation point.
+    #[live]
+    pub text_overflow: TextOverflow,
 
     /// When true, successive draws extend the area instead of replacing it.
     /// Useful when drawing multiple text chunks that should be treated as one area.
@@ -369,11 +396,27 @@ impl DrawText {
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> Rect {
         let turtle_rect = cx.turtle().inner_rect();
-        let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
+        let mut max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
             None
         };
+
+        // For Fit-width containers with a max bound, resolve the bound so that
+        // ellipsis truncation and max_lines clamping can work. Without this, Fit
+        // layouts are unconstrained and text is laid out at full width on one line.
+        if max_width_in_lpxs.is_none()
+            && (self.text_overflow == TextOverflow::Ellipsis || self.max_lines > 0)
+        {
+            if let crate::turtle::Size::Fit { max: Some(max_bound), .. } = walk.width {
+                if let Some(resolved) = max_bound.eval_width(cx) {
+                    let padding = cx.turtle().padding();
+                    max_width_in_lpxs =
+                        Some((resolved - padding.left - padding.right).max(0.0) as f32);
+                }
+            }
+        }
+
         let wrap = cx.turtle().layout().flow
             == Flow::Right {
                 row_align: RowAlign::Top,
@@ -431,12 +474,15 @@ impl DrawText {
         )
     }
 
+    /// Draws text within the current turtle flow, calling `f` for each laid-out row.
+    /// Returns `(row_count, is_truncated)`: the number of rows produced, and whether
+    /// the text was truncated (e.g., by `max_lines` / ellipsis).
     pub fn draw_walk_resumable_with(
         &mut self,
         cx: &mut Cx2d,
         text_str: &str,
         mut f: impl FnMut(&mut Cx2d, Rect, f32),
-    ) {
+    ) -> (usize, bool) {
         let turtle_pos = cx.turtle().pos();
         let turtle_rect = cx.turtle().inner_rect();
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
@@ -541,6 +587,7 @@ impl DrawText {
                 row.ascender_in_lpxs,
             )
         }
+        (text.rows.len(), text.is_truncated)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -574,6 +621,12 @@ impl DrawText {
                 wrap,
                 align: align.x as f32,
                 line_spacing_scale: self.text_style.line_spacing,
+                max_rows: if self.max_lines > 0 {
+                    Some(self.max_lines)
+                } else {
+                    None
+                },
+                ellipsis: self.text_overflow == TextOverflow::Ellipsis,
             },
         })
     }
