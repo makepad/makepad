@@ -1,15 +1,33 @@
+mod gemma4_config;
+mod gguf_meta;
+mod qwen35_config;
+mod qwen35moe_config;
+
+use makepad_ggml::TensorType;
+
 use crate::error::{LlamaError, Result};
-use crate::gguf::{GgufArray, GgufFile, GgufString, GgufTensorInfo, GgufValue};
+use crate::gemma4::Gemma4Tensors;
+use crate::gemma4_runtime::{gemma4_execution_plan, gemma4_hybrid_decode_spec};
+use crate::gguf::{GgufFile, GgufTensorInfo};
 use crate::plan::ModelExecutionPlan;
+use crate::qwen35::Qwen35Tensors;
+use crate::qwen35_runtime::{qwen35_execution_plan, qwen35_hybrid_decode_spec};
 use crate::qwen35moe::Qwen35MoeTensors;
-use crate::qwen35moe_runtime::qwen35moe_execution_plan;
+use crate::qwen35moe_runtime::{qwen35moe_execution_plan, qwen35moe_hybrid_decode_spec};
+use crate::runtime::HybridDecodeSpec;
 use crate::weights::GgufWeightLayout;
 use std::path::Path;
+
+pub use gemma4_config::Gemma4Config;
+use gguf_meta::{optional_u32, optional_utf8_string, required_utf8_string};
+pub use qwen35_config::Qwen35Config;
+pub use qwen35moe_config::Qwen35MoeConfig;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LlamaArchitecture {
     Qwen35,
     Qwen35Moe,
+    Gemma4,
     Unknown(String),
 }
 
@@ -18,6 +36,7 @@ impl LlamaArchitecture {
         match value {
             "qwen35" => Self::Qwen35,
             "qwen35moe" => Self::Qwen35Moe,
+            "gemma4" => Self::Gemma4,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -26,6 +45,7 @@ impl LlamaArchitecture {
         match self {
             Self::Qwen35 => "qwen35",
             Self::Qwen35Moe => "qwen35moe",
+            Self::Gemma4 => "gemma4",
             Self::Unknown(name) => name.as_str(),
         }
     }
@@ -41,70 +61,13 @@ pub struct ModelGeneral {
 }
 
 #[derive(Clone, Debug)]
-pub struct Qwen35MoeConfig {
-    pub block_count: u32,
-    pub context_length: u32,
-    pub embedding_length: u32,
-    pub attention_head_count: u32,
-    pub attention_head_count_kv: u32,
-    pub attention_key_length: u32,
-    pub attention_value_length: u32,
-    pub rope_dimension_count: u32,
-    pub rope_dimension_sections: Vec<u32>,
-    pub rope_freq_base: f32,
-    pub attention_layer_norm_rms_epsilon: f32,
-    pub expert_count: u32,
-    pub expert_used_count: u32,
-    pub expert_feed_forward_length: u32,
-    pub expert_shared_feed_forward_length: u32,
-    pub ssm_conv_kernel: u32,
-    pub ssm_state_size: u32,
-    pub ssm_group_count: u32,
-    pub ssm_time_step_rank: u32,
-    pub ssm_inner_size: u32,
-    pub full_attention_interval: u32,
-}
-
-impl Qwen35MoeConfig {
-    pub fn from_gguf(gguf: &GgufFile) -> Result<Self> {
-        Ok(Self {
-            block_count: required_u32(gguf, "qwen35moe.block_count")?,
-            context_length: required_u32(gguf, "qwen35moe.context_length")?,
-            embedding_length: required_u32(gguf, "qwen35moe.embedding_length")?,
-            attention_head_count: required_u32(gguf, "qwen35moe.attention.head_count")?,
-            attention_head_count_kv: required_u32(gguf, "qwen35moe.attention.head_count_kv")?,
-            attention_key_length: required_u32(gguf, "qwen35moe.attention.key_length")?,
-            attention_value_length: required_u32(gguf, "qwen35moe.attention.value_length")?,
-            rope_dimension_count: required_u32(gguf, "qwen35moe.rope.dimension_count")?,
-            rope_dimension_sections: required_u32_array(gguf, "qwen35moe.rope.dimension_sections")?,
-            rope_freq_base: required_f32(gguf, "qwen35moe.rope.freq_base")?,
-            attention_layer_norm_rms_epsilon: required_f32(
-                gguf,
-                "qwen35moe.attention.layer_norm_rms_epsilon",
-            )?,
-            expert_count: required_u32(gguf, "qwen35moe.expert_count")?,
-            expert_used_count: required_u32(gguf, "qwen35moe.expert_used_count")?,
-            expert_feed_forward_length: required_u32(gguf, "qwen35moe.expert_feed_forward_length")?,
-            expert_shared_feed_forward_length: required_u32(
-                gguf,
-                "qwen35moe.expert_shared_feed_forward_length",
-            )?,
-            ssm_conv_kernel: required_u32(gguf, "qwen35moe.ssm.conv_kernel")?,
-            ssm_state_size: required_u32(gguf, "qwen35moe.ssm.state_size")?,
-            ssm_group_count: required_u32(gguf, "qwen35moe.ssm.group_count")?,
-            ssm_time_step_rank: required_u32(gguf, "qwen35moe.ssm.time_step_rank")?,
-            ssm_inner_size: required_u32(gguf, "qwen35moe.ssm.inner_size")?,
-            full_attention_interval: required_u32(gguf, "qwen35moe.full_attention_interval")?,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct LlamaModel {
     pub gguf: GgufFile,
     pub architecture: LlamaArchitecture,
     pub general: ModelGeneral,
+    pub qwen35: Option<Qwen35Config>,
     pub qwen35moe: Option<Qwen35MoeConfig>,
+    pub gemma4: Option<Gemma4Config>,
 }
 
 impl LlamaModel {
@@ -112,25 +75,37 @@ impl LlamaModel {
         let gguf = GgufFile::open(path)?;
         let architecture = required_utf8_string(&gguf, "general.architecture")?;
         let architecture_kind = LlamaArchitecture::from_str(&architecture);
+        let is_gemma4 = architecture == "gemma4";
 
         let general = ModelGeneral {
-            architecture,
+            architecture: architecture.clone(),
             model_type: optional_utf8_string(&gguf, "general.type")?,
             name: optional_utf8_string(&gguf, "general.name")?,
             file_type: optional_u32(&gguf, "general.file_type"),
             quantization_version: optional_u32(&gguf, "general.quantization_version"),
         };
 
+        let qwen35 = match architecture_kind {
+            LlamaArchitecture::Qwen35 => Some(Qwen35Config::from_gguf(&gguf)?),
+            _ => None,
+        };
         let qwen35moe = match architecture_kind {
             LlamaArchitecture::Qwen35Moe => Some(Qwen35MoeConfig::from_gguf(&gguf)?),
             _ => None,
+        };
+        let gemma4 = if is_gemma4 {
+            Some(Gemma4Config::from_gguf(&gguf)?)
+        } else {
+            None
         };
 
         Ok(Self {
             gguf,
             architecture: architecture_kind,
             general,
+            qwen35,
             qwen35moe,
+            gemma4,
         })
     }
 
@@ -155,9 +130,105 @@ impl LlamaModel {
         self.qwen35moe_tensors()?.weight_layout()
     }
 
+    pub fn require_qwen35(&self) -> Result<&Qwen35Config> {
+        self.qwen35.as_ref().ok_or_else(|| {
+            LlamaError::unsupported(format!(
+                "model architecture '{}' is not qwen35",
+                self.architecture.name()
+            ))
+        })
+    }
+
+    pub fn qwen35_tensors(&self) -> Result<Qwen35Tensors> {
+        Qwen35Tensors::from_model(self)
+    }
+
+    pub fn qwen35_weight_layout(&self) -> Result<GgufWeightLayout> {
+        self.qwen35_tensors()?.weight_layout()
+    }
+
+    pub fn require_gemma4(&self) -> Result<&Gemma4Config> {
+        self.gemma4.as_ref().ok_or_else(|| {
+            LlamaError::unsupported(format!(
+                "model architecture '{}' is not gemma4",
+                self.architecture.name()
+            ))
+        })
+    }
+
+    pub fn gemma4_tensors(&self) -> Result<Gemma4Tensors> {
+        Gemma4Tensors::from_model(self)
+    }
+
+    pub fn gemma4_weight_layout(&self) -> Result<GgufWeightLayout> {
+        self.gemma4_tensors()?.weight_layout()
+    }
+
+    pub fn context_length(&self) -> Result<u32> {
+        if let Some(cfg) = &self.qwen35 {
+            return Ok(cfg.context_length);
+        }
+        if let Some(cfg) = &self.qwen35moe {
+            return Ok(cfg.context_length);
+        }
+        if let Some(cfg) = &self.gemma4 {
+            return Ok(cfg.context_length);
+        }
+        Err(LlamaError::unsupported(format!(
+            "context length is not implemented for architecture '{}'",
+            self.architecture.name()
+        )))
+    }
+
+    pub fn hybrid_decode_spec(
+        &self,
+        max_context: u32,
+        max_sequences: u32,
+        attention_k_type: TensorType,
+        attention_v_type: TensorType,
+        recurrent_r_type: TensorType,
+        recurrent_s_type: TensorType,
+    ) -> Result<HybridDecodeSpec> {
+        match self.architecture {
+            LlamaArchitecture::Qwen35 => qwen35_hybrid_decode_spec(
+                self,
+                max_context,
+                max_sequences,
+                attention_k_type,
+                attention_v_type,
+                recurrent_r_type,
+                recurrent_s_type,
+            ),
+            LlamaArchitecture::Qwen35Moe => qwen35moe_hybrid_decode_spec(
+                self,
+                max_context,
+                max_sequences,
+                attention_k_type,
+                attention_v_type,
+                recurrent_r_type,
+                recurrent_s_type,
+            ),
+            LlamaArchitecture::Gemma4 => gemma4_hybrid_decode_spec(
+                self,
+                max_context,
+                max_sequences,
+                attention_k_type,
+                attention_v_type,
+                recurrent_r_type,
+                recurrent_s_type,
+            ),
+            _ => Err(LlamaError::unsupported(format!(
+                "hybrid decode spec is not implemented for architecture '{}'",
+                self.architecture.name()
+            ))),
+        }
+    }
+
     pub fn execution_plan(&self) -> Result<ModelExecutionPlan> {
         match self.architecture {
+            LlamaArchitecture::Qwen35 => qwen35_execution_plan(self),
             LlamaArchitecture::Qwen35Moe => qwen35moe_execution_plan(self),
+            LlamaArchitecture::Gemma4 => gemma4_execution_plan(self),
             _ => Err(LlamaError::unsupported(format!(
                 "execution plan builder is not implemented for architecture '{}'",
                 self.architecture.name()
@@ -178,111 +249,5 @@ impl LlamaModel {
 
     pub fn validate_qwen35moe_layout(&self) -> Result<()> {
         self.validate_layout()
-    }
-}
-
-fn required_u32(gguf: &GgufFile, key: &str) -> Result<u32> {
-    let value = gguf.require_value(key)?;
-    value_to_u32(value).ok_or_else(|| {
-        LlamaError::format(format!(
-            "gguf key '{}' has type {}, expected integral scalar",
-            key,
-            value.value_type().name()
-        ))
-    })
-}
-
-fn required_f32(gguf: &GgufFile, key: &str) -> Result<f32> {
-    gguf.require_value(key)?.as_f32().ok_or_else(|| {
-        LlamaError::format(format!(
-            "gguf key '{}' has type {}, expected f32",
-            key,
-            gguf.require_value(key).unwrap().value_type().name()
-        ))
-    })
-}
-
-fn required_u32_array(gguf: &GgufFile, key: &str) -> Result<Vec<u32>> {
-    let value = gguf.require_value(key)?;
-    match value {
-        GgufValue::Array(values) => array_to_u32_vec(values).ok_or_else(|| {
-            LlamaError::format(format!(
-                "gguf key '{}' has type {}, expected integral array",
-                key,
-                value.value_type().name()
-            ))
-        }),
-        other => Err(LlamaError::format(format!(
-            "gguf key '{}' has type {}, expected u32 array",
-            key,
-            other.value_type().name()
-        ))),
-    }
-}
-
-fn required_utf8_string(gguf: &GgufFile, key: &str) -> Result<String> {
-    match gguf.require_value(key)? {
-        GgufValue::String(value) => value.try_utf8().map(|s| s.to_owned()),
-        other => Err(LlamaError::format(format!(
-            "gguf key '{}' has type {}, expected string",
-            key,
-            other.value_type().name()
-        ))),
-    }
-}
-
-fn optional_utf8_string(gguf: &GgufFile, key: &str) -> Result<Option<String>> {
-    match gguf.get_value(key) {
-        None => Ok(None),
-        Some(GgufValue::String(value)) => value.try_utf8().map(|s| Some(s.to_owned())),
-        Some(other) => Err(LlamaError::format(format!(
-            "gguf key '{}' has type {}, expected string",
-            key,
-            other.value_type().name()
-        ))),
-    }
-}
-
-fn optional_u32(gguf: &GgufFile, key: &str) -> Option<u32> {
-    gguf.get_value(key).and_then(value_to_u32)
-}
-
-#[allow(dead_code)]
-fn optional_string<'a>(gguf: &'a GgufFile, key: &str) -> Option<&'a GgufString> {
-    gguf.get_value(key).and_then(GgufValue::as_string)
-}
-
-fn value_to_u32(value: &GgufValue) -> Option<u32> {
-    match value {
-        GgufValue::Uint32(v) => Some(*v),
-        GgufValue::Uint64(v) => u32::try_from(*v).ok(),
-        GgufValue::Int32(v) => u32::try_from(*v).ok(),
-        GgufValue::Int64(v) => u32::try_from(*v).ok(),
-        _ => None,
-    }
-}
-
-fn array_to_u32_vec(value: &GgufArray) -> Option<Vec<u32>> {
-    match value {
-        GgufArray::Uint32(values) => Some(values.clone()),
-        GgufArray::Int32(values) => values
-            .iter()
-            .copied()
-            .map(u32::try_from)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .ok(),
-        GgufArray::Uint64(values) => values
-            .iter()
-            .copied()
-            .map(u32::try_from)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .ok(),
-        GgufArray::Int64(values) => values
-            .iter()
-            .copied()
-            .map(u32::try_from)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .ok(),
-        _ => None,
     }
 }

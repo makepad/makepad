@@ -222,6 +222,29 @@ impl IcoSphere {
     pub fn node(&self) -> &XrNode {
         &self.node
     }
+
+    pub fn set_radius(&mut self, cx: &mut Cx, radius: f32) {
+        let radius = radius.max(0.001);
+        if (self.radius - radius).abs() <= f32::EPSILON {
+            return;
+        }
+        self.radius = radius;
+        let diameter = radius * 2.0;
+        self.node.set_implicit_physics_size(vec3f(
+            diameter * ICO_SPHERE_PHYSICS_DIAMETER_SCALE,
+            diameter * ICO_SPHERE_PHYSICS_DIAMETER_SCALE,
+            diameter * ICO_SPHERE_PHYSICS_DIAMETER_SCALE,
+        ));
+        self.node.redraw(cx);
+    }
+
+    pub fn set_pos(&mut self, cx: &mut Cx, pos: Vec3f) {
+        self.node.set_pos(cx, pos);
+    }
+
+    pub fn set_rot(&mut self, cx: &mut Cx, rot: Vec3f) {
+        self.node.set_rot(cx, rot);
+    }
 }
 
 impl ScriptHook for IcoSphere {

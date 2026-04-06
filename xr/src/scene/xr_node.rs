@@ -23,6 +23,9 @@ script_mod! {
     let XrRenderClass = set_type_default() do #(XrRenderClass::script_api(vm))
     mod.widgets.XrRenderClass = XrRenderClass
 
+    let XrDepthQuerySupportRig = set_type_default() do #(XrDepthQuerySupportRig::script_api(vm))
+    mod.widgets.XrDepthQuerySupportRig = XrDepthQuerySupportRig
+
     let XrSharedObjectPolicy = set_type_default() do #(XrSharedObjectPolicy::script_api(vm))
     mod.widgets.XrSharedObjectPolicy = XrSharedObjectPolicy
 
@@ -31,12 +34,14 @@ script_mod! {
         body: XrBodyKind.Disabled
         physics_shape: XrPhysicsShape.Box
         render_class: XrRenderClass.Opaque
+        depth_query_support: XrDepthQuerySupportRig.Body
         shared_object_policy: XrSharedObjectPolicy.None
         spawn_pool: false
         physics_size: vec3(0.0, 0.0, 0.0)
         density: 1.0
         friction: 0.8
         restitution: 0.0
+        gravity_scale: 1.0
     }
 }
 
@@ -81,6 +86,20 @@ impl Default for XrRenderClass {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]
+pub enum XrDepthQuerySupportRig {
+    None,
+    #[pick]
+    Body,
+    FourWheels,
+}
+
+impl Default for XrDepthQuerySupportRig {
+    fn default() -> Self {
+        Self::Body
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Script, ScriptHook)]
 pub enum XrSharedObjectPolicy {
     None,
     #[pick]
@@ -97,6 +116,7 @@ impl Default for XrSharedObjectPolicy {
 
 pub const XR_HAND_INFLUENCE_POINTS_PER_HAND: usize = 6;
 pub const XR_HAND_INFLUENCE_POINT_COUNT: usize = XR_HAND_INFLUENCE_POINTS_PER_HAND * 2;
+pub const XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct XrHandInfluencePoint {
@@ -112,7 +132,12 @@ pub struct XrRuntimeBodyState {
     pub linvel: Vec3f,
     pub angvel: Vec3f,
     pub sleeping: bool,
+    pub dynamic_body: bool,
+    pub shadowed: bool,
     pub held_by: Option<XrSharedHand>,
+    pub linked_support_local_poses: [Option<Pose>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
+    pub linked_support_spin_angles: [Option<f32>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
+    pub linked_support_steer_angles: [Option<f32>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -221,6 +246,8 @@ pub struct XrNode {
     #[live]
     render_class: XrRenderClass,
     #[live]
+    depth_query_support: XrDepthQuerySupportRig,
+    #[live]
     shared_object_policy: XrSharedObjectPolicy,
     #[live(false)]
     spawn_pool: bool,
@@ -236,6 +263,8 @@ pub struct XrNode {
     friction: f32,
     #[live(0.0)]
     restitution: f32,
+    #[live(1.0)]
+    gravity_scale: f32,
     #[rust]
     script_async: ScriptAsyncCalls,
     #[new]
@@ -270,8 +299,22 @@ impl XrNode {
         self.pos
     }
 
+    pub fn set_pos(&mut self, cx: &mut Cx, pos: Vec3f) {
+        if self.pos != pos {
+            self.pos = pos;
+            self.redraw(cx);
+        }
+    }
+
     pub fn rot(&self) -> Vec3f {
         self.rot
+    }
+
+    pub fn set_rot(&mut self, cx: &mut Cx, rot: Vec3f) {
+        if self.rot != rot {
+            self.rot = rot;
+            self.redraw(cx);
+        }
     }
 
     pub fn scale(&self) -> Vec3f {
@@ -288,6 +331,10 @@ impl XrNode {
 
     pub fn render_class(&self) -> XrRenderClass {
         self.render_class
+    }
+
+    pub fn depth_query_support(&self) -> XrDepthQuerySupportRig {
+        self.depth_query_support
     }
 
     pub fn shared_object_policy(&self) -> XrSharedObjectPolicy {
@@ -340,6 +387,10 @@ impl XrNode {
 
     pub fn restitution(&self) -> f32 {
         self.restitution.max(0.0)
+    }
+
+    pub fn gravity_scale(&self) -> f32 {
+        self.gravity_scale.max(0.0)
     }
 
     pub fn child_count(&self) -> usize {

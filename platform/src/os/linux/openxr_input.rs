@@ -73,6 +73,8 @@ impl CxOpenXrSession {
             time: (frame.frame_state.predicted_display_time.as_nanos() as f64) / 1e9f64,
             head_pose: frame.local_from_head.pose,
             anchor,
+            anchor_persisted: self.anchor.anchor_persisted(),
+            floor_y: self.anchor.floor_y(),
             sync_anchor: None,
             left_controller,
             right_controller,
@@ -377,7 +379,7 @@ impl CxOpenXrController {
             } else {
                 XrSpaceLocation::locate(xr, local_space, time, self.detached_aim_space).pose
             },
-            stick: stick.current_state,
+            stick: normalize_xr_controller_stick(stick.current_state),
             trigger: trigger.current_state,
             grip: grip.current_state,
             //last_buttons,

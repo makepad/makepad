@@ -7,7 +7,7 @@ use std::{
 };
 
 const XR_DEBUG_DEPTH_FLOATS_PER_VERTEX: usize = 8;
-const XR_DEBUG_TSDF_MESH_CHUNK_WORLD_SIZE_METERS: f32 = 1.0;
+const XR_DEBUG_TSDF_MESH_CHUNK_WORLD_SIZE_METERS: f32 = 0.32;
 const XR_DEBUG_TSDF_MESH_VIEW_DISTANCE_METERS: f32 = 5.5;
 const XR_DEBUG_TSDF_MESH_NEAR_VISIBILITY_METERS: f32 = 1.35;
 const XR_DEBUG_TSDF_MESH_VIEW_CONE_DOT: f32 = 0.309_016_88;
@@ -702,6 +702,117 @@ pub(crate) fn debug_depth_mesh_view_plan(
                         right.plan.chunk_key.z,
                     ))
             })
+    });
+
+    DebugDepthMeshViewPlan {
+        layout,
+        visible_chunks: candidates
+            .into_iter()
+            .map(|candidate| candidate.plan)
+            .collect(),
+    }
+}
+
+pub(crate) fn debug_depth_mesh_focus_cube_plan(
+    snapshot: &TsdfPublishedSnapshot,
+    focus_center: Vec3f,
+    cube_size_meters: f32,
+) -> DebugDepthMeshViewPlan {
+    let layout = snapshot_debug_mesh_layout(snapshot);
+    let Some((active_min, active_max)) = snapshot.grid.active_bounds else {
+        return DebugDepthMeshViewPlan {
+            layout,
+            visible_chunks: Vec::new(),
+        };
+    };
+    if !focus_center.is_finite() {
+        return DebugDepthMeshViewPlan {
+            layout,
+            visible_chunks: Vec::new(),
+        };
+    }
+
+    let cube_half_extent = (cube_size_meters * 0.5)
+        .max(snapshot.grid.voxel_size.max(1.0e-5))
+        .max(0.05);
+    let cube_extent = vec3f(cube_half_extent, cube_half_extent, cube_half_extent);
+    let cube_min = focus_center - cube_extent;
+    let cube_max = focus_center + cube_extent;
+    if !aabb_intersects(cube_min, cube_max, active_min, active_max) {
+        return DebugDepthMeshViewPlan {
+            layout,
+            visible_chunks: Vec::new(),
+        };
+    }
+
+    let (min_voxel_x, min_voxel_y, min_voxel_z) = snapshot.grid.world_to_voxel_xyz(cube_min);
+    let (max_voxel_x, max_voxel_y, max_voxel_z) = snapshot.grid.world_to_voxel_xyz(cube_max);
+    let min_chunk = VoxelCoord::new(
+        min_voxel_x.div_euclid(layout.chunk_edge_voxels.max(1)),
+        min_voxel_y.div_euclid(layout.chunk_edge_voxels.max(1)),
+        min_voxel_z.div_euclid(layout.chunk_edge_voxels.max(1)),
+    );
+    let max_chunk = VoxelCoord::new(
+        max_voxel_x.div_euclid(layout.chunk_edge_voxels.max(1)),
+        max_voxel_y.div_euclid(layout.chunk_edge_voxels.max(1)),
+        max_voxel_z.div_euclid(layout.chunk_edge_voxels.max(1)),
+    );
+    let extent = mesh_chunk_extent(layout);
+
+    #[derive(Clone)]
+    struct FocusCandidate {
+        distance: f32,
+        plan: DebugDepthMeshChunkPlan,
+    }
+
+    let mut candidates = Vec::<FocusCandidate>::new();
+    for z in min_chunk.z..=max_chunk.z {
+        for y in min_chunk.y..=max_chunk.y {
+            for x in min_chunk.x..=max_chunk.x {
+                let chunk_key = ChunkKey::new(x, y, z);
+                let (world_min, world_max) =
+                    mesh_chunk_world_bounds(snapshot.grid.voxel_size, chunk_key, layout);
+                if !aabb_intersects(world_min, world_max, cube_min, cube_max) {
+                    continue;
+                }
+                if !aabb_intersects(world_min, world_max, active_min, active_max) {
+                    continue;
+                }
+
+                let signature = snapshot_region_signature(
+                    snapshot.grid.as_ref(),
+                    mesh_chunk_start_coord(chunk_key, layout),
+                    extent,
+                );
+                if signature.sources.is_empty() {
+                    continue;
+                }
+
+                let center = (world_min + world_max).scale(0.5);
+                candidates.push(FocusCandidate {
+                    distance: (center - focus_center).length(),
+                    plan: DebugDepthMeshChunkPlan {
+                        chunk_key,
+                        signature,
+                    },
+                });
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        left.distance.total_cmp(&right.distance).then_with(|| {
+            (
+                left.plan.chunk_key.x,
+                left.plan.chunk_key.y,
+                left.plan.chunk_key.z,
+            )
+                .cmp(&(
+                    right.plan.chunk_key.x,
+                    right.plan.chunk_key.y,
+                    right.plan.chunk_key.z,
+                ))
+        })
     });
 
     DebugDepthMeshViewPlan {

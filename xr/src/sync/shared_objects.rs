@@ -12,10 +12,8 @@ impl XrPeerSync {
         } else {
             Cx::time_now()
         };
-        let (allocation, reused_remote) = self
-            .runtime
-            .shared_objects
-            .prepare_local_spawn_allocation(
+        let (allocation, reused_remote) =
+            self.runtime.shared_objects.prepare_local_spawn_allocation(
                 activity_id,
                 spawn.widget_uid,
                 sent_at,
@@ -40,6 +38,76 @@ impl XrPeerSync {
         let net_node = self.runtime.net_node.as_mut()?;
         net_node.send_shared_object_control(control);
         if reused_remote {
+            net_node.send_shared_object_control(XrNetSharedObjectControl::XrResetObject {
+                object_id: allocation.shared_object_id,
+                epoch: allocation.epoch,
+                pose: spawn.pose,
+                linvel: spawn.linvel,
+                angvel: spawn.angvel,
+            });
+        }
+        self.runtime
+            .metrics
+            .record_body_spawn_tx(allocation.shared_object_id.0);
+        Some(XrBodySpawn {
+            widget_uid: allocation.widget_uid,
+            shadow: spawn.shadow,
+            mode: spawn.mode,
+            pose: spawn.pose,
+            linvel: spawn.linvel,
+            angvel: spawn.angvel,
+        })
+    }
+
+    pub fn send_local_body_spawn_exact(&mut self, spawn: XrBodySpawn) -> Option<XrBodySpawn> {
+        if !self.enabled {
+            return None;
+        }
+        self.ensure_net_node();
+        let activity_id = self.runtime.shared_objects.activity_id()?;
+        let sent_at = if self.runtime.local.state_time != 0.0 {
+            self.runtime.local.state_time
+        } else {
+            Cx::time_now()
+        };
+        let had_local = self
+            .runtime
+            .shared_objects
+            .resolve_local_shared_object_for_widget(spawn.widget_uid)
+            .is_some();
+        let had_remote = self
+            .runtime
+            .shared_objects
+            .resolve_remote_shared_object_for_widget(spawn.widget_uid)
+            .is_some();
+        let allocation = self
+            .runtime
+            .shared_objects
+            .force_local_shared_object_reset(
+                activity_id,
+                spawn.widget_uid,
+                sent_at,
+                spawn.pose,
+                spawn.linvel,
+                spawn.angvel,
+            )?;
+        let authority = self.runtime.shared_objects.local_peer_id()?;
+        let control = XrNetSharedObjectControl::XrSpawnObject {
+            object_id: allocation.shared_object_id,
+            epoch: allocation.epoch,
+            authority,
+            fidelity: allocation.fidelity,
+            shape: XrSharedObjectShape::ActivitySpawnable {
+                activity_id,
+                spawnable_id: allocation.spawnable_object_id,
+            },
+            pose: spawn.pose,
+            linvel: spawn.linvel,
+            angvel: spawn.angvel,
+        };
+        let net_node = self.runtime.net_node.as_mut()?;
+        net_node.send_shared_object_control(control);
+        if had_local || had_remote {
             net_node.send_shared_object_control(XrNetSharedObjectControl::XrResetObject {
                 object_id: allocation.shared_object_id,
                 epoch: allocation.epoch,
