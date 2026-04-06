@@ -4,7 +4,9 @@ use crate::makepad_draw::text::{
     selection::{Cursor, Selection},
 };
 use crate::{
-    animator::*, makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
+    animator::*, makepad_derive_widget::*, makepad_draw::*,
+    makepad_draw::shader::draw_text::TextOverflow,
+    widget::*, widget_tree::CxWidgetExt,
 };
 use std::rc::Rc;
 
@@ -583,6 +585,14 @@ pub struct TextFlow {
     /// The default font color used for all text if not otherwise specified.
     #[live]
     pub font_color: Vec4f,
+
+    /// Maximum number of lines to display. 0 means unlimited (default).
+    /// Combined with `text_overflow: Ellipsis`, truncated text shows "…".
+    #[live(0usize)]
+    pub max_lines: usize,
+    /// Controls how text overflow is handled when text exceeds the container.
+    #[live]
+    pub text_overflow: TextOverflow,
     #[walk]
     walk: Walk,
 
@@ -613,6 +623,13 @@ pub struct TextFlow {
     pub item_counter: u64,
     #[rust]
     pub first_thing_on_a_line: bool,
+    /// Number of visual lines drawn so far (across all text runs).
+    /// Used for widget-level `max_lines` tracking in rich text.
+    #[rust]
+    lines_drawn: usize,
+    /// Set when `lines_drawn >= max_lines`; further text draws are skipped.
+    #[rust]
+    content_truncated: bool,
 
     #[rust]
     pub areas_tracker: RectAreasTracker,
@@ -1005,6 +1022,8 @@ impl TextFlow {
         self.draw_state.set(DrawState::Drawing);
         self.draw_block.append_to_draw_call(cx);
         self.clear_stacks();
+        self.lines_drawn = 0;
+        self.content_truncated = false;
         if self.selectable {
             self.selection_tracker.clear();
             self.widget_text_entries.clear();
@@ -1550,6 +1569,11 @@ impl TextFlow {
 
     pub fn draw_text(&mut self, cx: &mut Cx2d, text: &str) {
         if let Some(DrawState::Drawing) = self.draw_state.get() {
+            // If we've already exceeded max_lines, skip all further text.
+            if self.content_truncated {
+                return;
+            }
+
             if (text == " " || text == "") && self.first_thing_on_a_line {
                 return;
             }
@@ -1583,6 +1607,34 @@ impl TextFlow {
             self.draw_text.color = *font_color;
             self.draw_text.temp_y_shift = top_drop;
 
+            // Widget-level max_lines: compute how many layouter rows this run
+            // is allowed. A "continuation" run starts mid-line (turtle x > left
+            // edge), so its first row shares the current visual line.
+            let is_continuation = if self.max_lines > 0 {
+                let turtle_pos = cx.turtle().pos();
+                let turtle_rect = cx.turtle().inner_rect();
+                (turtle_pos.x - turtle_rect.pos.x) > 0.5
+            } else {
+                false
+            };
+
+            if self.max_lines > 0 {
+                let remaining_new_lines = self.max_lines.saturating_sub(self.lines_drawn);
+                if remaining_new_lines == 0 && !is_continuation {
+                    // No visual lines left and this run would start a new one.
+                    self.content_truncated = true;
+                    return;
+                }
+                // Continuation runs get +1 because their first row doesn't
+                // consume a new visual line (it shares the current one).
+                let run_max_rows = remaining_new_lines + if is_continuation { 1 } else { 0 };
+                self.draw_text.max_lines = run_max_rows;
+                self.draw_text.text_overflow = self.text_overflow;
+            } else {
+                self.draw_text.max_lines = 0;
+                self.draw_text.text_overflow = TextOverflow::Clip;
+            };
+
             let dt = &mut self.draw_text;
 
             // Capture LaidoutText for selection when selectable
@@ -1614,14 +1666,14 @@ impl TextFlow {
             }
 
             let areas_tracker = &mut self.areas_tracker;
-            if self.inline_code.value() > 0 {
+            let (run_rows, run_truncated) = if self.inline_code.value() > 0 {
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::InlineCode;
                 if !self.first_thing_on_a_line {
                     let rect = TextFlow::walk_margin(cx, self.inline_code_margin.left);
                     areas_tracker.track_rect(cx, rect);
                 }
-                dt.draw_walk_resumable_with(cx, text, |cx, mut rect, _| {
+                let result = dt.draw_walk_resumable_with(cx, text, |cx, mut rect, _| {
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
                     db.draw_abs(cx, rect);
@@ -1629,6 +1681,7 @@ impl TextFlow {
                 });
                 let rect = TextFlow::walk_margin(cx, self.inline_code_margin.right);
                 areas_tracker.track_rect(cx, rect);
+                result
             } else if self.strikethrough.value() > 0 {
                 let db = &mut self.draw_block;
                 db.line_color = *font_color;
@@ -1636,7 +1689,7 @@ impl TextFlow {
                 dt.draw_walk_resumable_with(cx, text, |cx, rect, _| {
                     db.draw_abs(cx, rect);
                     areas_tracker.track_rect(cx, rect);
-                });
+                })
             } else if self.underline.value() > 0 {
                 let db = &mut self.draw_block;
                 db.line_color = *font_color;
@@ -1644,11 +1697,21 @@ impl TextFlow {
                 dt.draw_walk_resumable_with(cx, text, |cx, rect, _| {
                     db.draw_abs(cx, rect);
                     areas_tracker.track_rect(cx, rect);
-                });
+                })
             } else {
                 dt.draw_walk_resumable_with(cx, text, |cx, rect, _| {
                     areas_tracker.track_rect(cx, rect);
-                });
+                })
+            };
+
+            // Update widget-level line tracking.
+            if self.max_lines > 0 {
+                let new_lines = run_rows.saturating_sub(if is_continuation { 1 } else { 0 });
+                self.lines_drawn += new_lines;
+                // If this run was truncated (ellipsis was appended), stop here.
+                if run_truncated {
+                    self.content_truncated = true;
+                }
             }
         }
         self.first_thing_on_a_line = false;
