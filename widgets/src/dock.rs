@@ -3,6 +3,7 @@ use crate::{
     makepad_draw::*,
     makepad_micro_serde::*,
     splitter::{Splitter, SplitterAction, SplitterAlign, SplitterAxis},
+    tab::Tab,
     tab_bar::{TabBar, TabBarAction},
     widget::*,
     widget_tree::CxWidgetExt,
@@ -171,6 +172,8 @@ pub struct Dock {
     round_corner: DrawRoundCorner,
     #[live]
     drag_target_preview: DrawColor,
+    #[live]
+    ghost_tab_draw_list: DrawList2d,
 
     #[live]
     tab_bar: ScriptObjectRef,
@@ -195,8 +198,20 @@ pub struct Dock {
     items: ComponentMap<LiveId, (LiveId, WidgetRef)>,
     #[rust]
     drop_state: Option<DropPosition>,
+    /// Info about the tab currently being dragged, for ghost tab rendering.
+    #[rust]
+    dragging_tab: Option<DraggingTab>,
     #[rust]
     dock_item_iter_stack: Vec<(LiveId, usize)>,
+}
+
+/// Holds a clone of the tab being dragged so we can render it as a ghost overlay.
+struct DraggingTab {
+    cursor: Vec2d,
+    name: String,
+    /// The size of the original tab, used for fixed-size rendering.
+    size: Vec2d,
+    ghost: Tab,
 }
 
 impl ScriptHook for Dock {
@@ -701,6 +716,31 @@ impl Dock {
             self.drop_target_draw_list.end(cx);
         }
 
+        // Draw the ghost tab overlay BEFORE retaining/ending, so it's
+        // registered as the last overlay and renders on top of everything.
+        if self.dragging_tab.is_some() {
+            self.ghost_tab_draw_list.begin_overlay_last(cx);
+            let size = cx.current_pass_size();
+            cx.begin_root_turtle(size, Layout::default());
+            let dt = self.dragging_tab.as_mut().unwrap();
+            let ghost_pos = dvec2(dt.cursor.x + 8.0, dt.cursor.y - 30.0);
+            dt.ghost.walk = Walk {
+                abs_pos: Some(ghost_pos),
+                width: Size::Fixed(dt.size.x),
+                height: Size::Fixed(dt.size.y),
+                ..Walk::default()
+            };
+            // Ensure the ghost tab renders above the drop target preview (draw_depth 10.0).
+            dt.ghost.set_draw_depth(20.0);
+            dt.ghost.draw(cx, &dt.name);
+            cx.end_pass_sized_turtle();
+            self.ghost_tab_draw_list.end(cx);
+        } else {
+            // Clear the ghost tab overlay when not dragging.
+            self.ghost_tab_draw_list.begin_always(cx);
+            self.ghost_tab_draw_list.end(cx);
+        }
+
         self.tab_bars.retain_visible();
         self.splitters.retain_visible();
 
@@ -717,6 +757,10 @@ impl Dock {
 
     fn find_drop_position(&self, cx: &Cx, abs: Vec2d) -> Option<DropPosition> {
         for (tab_bar_id, tab_bar) in self.tab_bars.iter() {
+            // Skip panels with hidden tab bars — they should not be drop targets.
+            if let Some(DockItem::Tabs { hide_tab_bar: true, .. }) = self.dock_items.get(tab_bar_id) {
+                continue;
+            }
             let rect = tab_bar.contents_rect;
             if let Some((tab_id, rect)) = tab_bar.tab_bar.is_over_tab(cx, abs) {
                 return Some(DropPosition {
@@ -1391,6 +1435,24 @@ impl Widget for Dock {
             for action in cx.capture_actions(|cx| tab_bar.tab_bar.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
                     TabBarAction::ShouldTabStartDrag(item) => {
+                        let name = if let Some(DockItem::Tab { name, .. }) = dock_items.get(&item) {
+                            name.clone()
+                        } else {
+                            String::new()
+                        };
+                        let tab_size = tab_bar.tab_bar.tab_rect(cx, item)
+                            .map(|r| r.size)
+                            .unwrap_or(dvec2(100.0, 30.0));
+                        if let Some(ghost) = tab_bar.tab_bar.create_ghost_tab(cx, item) {
+                            self.dragging_tab = Some(DraggingTab {
+                                cursor: Vec2d::default(),
+                                name,
+                                size: tab_size,
+                                ghost,
+                            });
+                        } else {
+                            warning!("Dock: could not create ghost tab for {:?}", item);
+                        }
                         cx.widget_action(uid, DockAction::ShouldTabStartDrag(item))
                     }
                     TabBarAction::TabWasPressed(tab_id) => {
@@ -1433,12 +1495,26 @@ impl Widget for Dock {
 
         if let Event::DragEnd = event {
             self.drop_state = None;
-            self.drop_target_draw_list.redraw(cx);
+            self.dragging_tab = None;
+            let redraw_id = cx.redraw_id;
+            let ghost_dl_id = self.ghost_tab_draw_list.draw_list_id();
+            cx.draw_lists[ghost_dl_id].clear_draw_items(redraw_id);
+            if let Some(pass_id) = cx.draw_lists[ghost_dl_id].draw_pass_id {
+                cx.repaint_pass_and_child_passes(pass_id);
+            }
+            let drop_dl_id = self.drop_target_draw_list.draw_list_id();
+            cx.draw_lists[drop_dl_id].clear_draw_items(redraw_id);
+            self.area.redraw(cx);
         }
 
         match event.drag_hits(cx, self.area) {
             DragHit::Drag(f) => {
                 self.drop_state = None;
+                // Update ghost tab cursor position.
+                if let Some(ref mut dt) = self.dragging_tab {
+                    dt.cursor = f.abs;
+                }
+                self.area.redraw(cx);
                 self.drop_target_draw_list.redraw(cx);
                 match f.state {
                     DragState::In | DragState::Over => {
@@ -1450,8 +1526,24 @@ impl Widget for Dock {
             DragHit::Drop(f) => {
                 self.needs_save = true;
                 self.drop_state = None;
-                self.drop_target_draw_list.redraw(cx);
+                self.dragging_tab = None;
+                let redraw_id = cx.redraw_id;
+                cx.draw_lists[self.ghost_tab_draw_list.draw_list_id()]
+                    .clear_draw_items(redraw_id);
+                cx.draw_lists[self.drop_target_draw_list.draw_list_id()]
+                    .clear_draw_items(redraw_id);
+                self.area.redraw(cx);
                 cx.widget_action(uid, DockAction::Drop(f.clone()))
+            }
+            DragHit::DragEnd => {
+                self.drop_state = None;
+                self.dragging_tab = None;
+                let redraw_id = cx.redraw_id;
+                cx.draw_lists[self.ghost_tab_draw_list.draw_list_id()]
+                    .clear_draw_items(redraw_id);
+                cx.draw_lists[self.drop_target_draw_list.draw_list_id()]
+                    .clear_draw_items(redraw_id);
+                self.area.redraw(cx);
             }
             _ => {}
         }

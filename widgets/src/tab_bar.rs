@@ -248,11 +248,22 @@ pub struct TabBar {
     #[rust]
     active_tab_id: Option<LiveId>,
     #[rust]
+    prev_active_tab_id: Option<LiveId>,
+    #[rust]
     next_active_tab_id: Option<LiveId>,
 
     /// State for finger-based drag-to-scroll on the tab bar.
     #[rust]
     finger_scroll: FingerScrollState,
+
+    /// Smooth scroll animation state for scrolling a selected tab into view.
+    #[rust]
+    scroll_into_view_anim: Option<ScrollIntoViewAnim>,
+}
+
+struct ScrollIntoViewAnim {
+    target_scroll_x: f64,
+    next_frame: NextFrame,
 }
 
 impl ScriptHook for TabBar {
@@ -313,6 +324,7 @@ impl Widget for TabBar {
         };
 
         self.handle_finger_scroll_flick(cx, event);
+        self.handle_scroll_into_view_anim(cx, event);
 
         if let Some(tab_id) = self.next_active_tab_id.take() {
             cx.widget_action(uid, TabBarAction::TabWasPressed(tab_id));
@@ -336,7 +348,7 @@ impl Widget for TabBar {
                 }
                 TabAction::TouchScroll { abs, time } => {
                     if let FingerScrollState::Dragging { samples } = &mut self.finger_scroll {
-                        let old_abs = samples.last().unwrap().abs;
+                        let Some(old_abs) = samples.last().map(|s| s.abs) else { return };
                         samples.push(FingerScrollSample { abs: abs.x, time });
                         if samples.len() > 4 {
                             samples.remove(0);
@@ -396,6 +408,40 @@ impl Widget for TabBar {
 }
 
 impl TabBar {
+    /// Drives the smooth scroll animation for scrolling a selected tab into view.
+    fn handle_scroll_into_view_anim(&mut self, cx: &mut Cx, event: &Event) {
+        const SMOOTHING: f64 = 0.12;
+
+        let target = if let Some(anim) = &self.scroll_into_view_anim {
+            if anim.next_frame.is_event(event).is_some() {
+                Some(anim.target_scroll_x)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(target) = target {
+            let current = self.scroll_bars.get_scroll_pos().x;
+            let remaining = target - current;
+            if remaining.abs() < 1.0 {
+                // Close enough — snap to target and stop.
+                self.scroll_bars.set_scroll_pos(cx, Vec2d { x: target, y: 0.0 });
+                self.scroll_into_view_anim = None;
+            } else {
+                // Ease toward target.
+                let new_x = current + remaining * SMOOTHING;
+                self.scroll_bars.set_scroll_pos(cx, Vec2d { x: new_x, y: 0.0 });
+                self.scroll_into_view_anim = Some(ScrollIntoViewAnim {
+                    target_scroll_x: target,
+                    next_frame: cx.new_next_frame(),
+                });
+            }
+            self.view_area.redraw(cx);
+        }
+    }
+
     /// Drives the flick animation for finger-based scroll on each frame.
     fn handle_finger_scroll_flick(&mut self, cx: &mut Cx, event: &Event) {
         const FLICK_DECAY: f64 = 0.97;
@@ -449,7 +495,44 @@ impl TabBar {
         self.tabs.retain_visible();
         self.draw_fill
             .draw_walk(cx, Walk::new(Size::fill(), Size::fill()));
+
         self.scroll_bars.end(cx);
+
+        // After scroll_bars.end() so that view_visible/view_total are up to date.
+        if self.active_tab_id != self.prev_active_tab_id {
+            self.prev_active_tab_id = self.active_tab_id;
+            if let Some(tab_id) = self.active_tab_id {
+                if let Some((tab, _)) = self.tabs.get(&tab_id) {
+                    // Convert the tab's absolute rect to content-relative coordinates.
+                    let abs_rect = tab.area().rect(cx);
+                    let container_pos = self.scroll_bars.area().rect(cx).pos;
+                    let scroll_pos = self.scroll_bars.get_scroll_pos();
+                    let content_x = abs_rect.pos.x - container_pos.x + scroll_pos.x;
+                    let view_visible = self.scroll_bars.get_scroll_view_visible().x;
+
+                    // Calculate the minimal target scroll position.
+                    let target = if content_x < scroll_pos.x {
+                        // Tab is off the left edge — scroll left.
+                        content_x
+                    } else if content_x + abs_rect.size.x > scroll_pos.x + view_visible {
+                        // Tab is off the right edge — scroll right.
+                        (content_x + abs_rect.size.x) - view_visible
+                    } else {
+                        // Already fully visible.
+                        return;
+                    };
+
+                    // Clamp to valid range.
+                    let view_total = self.scroll_bars.get_scroll_view_total().x;
+                    let target = target.max(0.0).min((view_total - view_visible).max(0.0));
+
+                    self.scroll_into_view_anim = Some(ScrollIntoViewAnim {
+                        target_scroll_x: target,
+                        next_frame: cx.new_next_frame(),
+                    });
+                }
+            }
+        }
     }
 
     pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: LiveId, name: &str, template: LiveId) {
@@ -485,6 +568,17 @@ impl TabBar {
             (tab, template)
         });
         tab
+    }
+
+    /// Creates a new Tab from the same template as the given tab, with the same active state.
+    /// Returns `None` if the tab_id isn't found.
+    pub fn create_ghost_tab(&self, cx: &mut Cx, tab_id: LiveId) -> Option<Tab> {
+        let (tab, template_id) = self.tabs.get(&tab_id)?;
+        let is_active = tab.is_active();
+        let template_value: ScriptValue = self.templates.get(template_id)?.as_object().into();
+        let mut ghost = cx.with_vm(|vm| Tab::script_from_value(vm, template_value));
+        ghost.set_is_active(cx, is_active, Animate::No);
+        Some(ghost)
     }
 
     pub fn active_tab_id(&self) -> Option<LiveId> {
