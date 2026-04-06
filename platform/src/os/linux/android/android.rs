@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
 #[cfg(use_vulkan)]
 use self::super::super::vulkan::CxVulkan;
@@ -40,6 +41,7 @@ use {
             TextClipboardEvent,
             //TimerEvent,
             TextInputEvent,
+            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             //TouchPoint,
             TouchUpdateEvent,
             VideoDecodingErrorEvent,
@@ -607,6 +609,47 @@ impl Cx {
                 } else {
                     panic!()
                 };
+
+                // Synthesize internal drag-and-drop events from touch gestures.
+                if self.os.internal_drag_items.is_some() {
+                    let has_move = e.touches.iter().any(|t| {
+                        t.state == crate::event::finger::TouchState::Move
+                    });
+                    let stop_touch = e.touches.iter().find(|t| {
+                        t.state == crate::event::finger::TouchState::Stop
+                    });
+                    if let Some(touch) = stop_touch {
+                        // Touch lifted: fire Drop + DragEnd
+                        if let Some(items) = self.os.internal_drag_items.take() {
+                            let abs = touch.abs;
+                            self.call_event_handler(&Event::Drop(DropEvent {
+                                modifiers: e.modifiers.clone(),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs,
+                                items,
+                            }));
+                            self.drag_drop.cycle_drag();
+                            self.call_event_handler(&Event::DragEnd);
+                            self.drag_drop.cycle_drag();
+                        }
+                    } else if has_move {
+                        // Finger moving: fire Drag event using the first moving touch
+                        if let Some(items) = self.os.internal_drag_items.as_ref() {
+                            let touch = e.touches.iter().find(|t| {
+                                t.state == crate::event::finger::TouchState::Move
+                            }).unwrap();
+                            self.call_event_handler(&Event::Drag(DragEvent {
+                                modifiers: e.modifiers.clone(),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs: touch.abs,
+                                items: items.clone(),
+                                response: Arc::new(Mutex::new(DragResponse::None)),
+                            }));
+                            self.drag_drop.cycle_drag();
+                        }
+                    }
+                }
+
                 self.fingers.process_touch_update_end(&e.touches);
             }
             FromJavaMessage::Character { character } => {
@@ -2499,6 +2542,9 @@ impl Cx {
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }
+                CxOsOp::StartDragging(items) => {
+                    self.os.internal_drag_items = Some(Arc::new(items));
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
@@ -2766,6 +2812,7 @@ impl Default for CxOs {
             pending_camera_preview_windows: HashMap::new(),
             software_video_players: HashMap::new(),
             websocket_parsers: HashMap::new(),
+            internal_drag_items: None,
             openxr: CxOpenXr::default(),
             activity_thread_id: None,
             render_thread_id: None,
@@ -2831,6 +2878,7 @@ pub struct CxOs {
     pub(crate) pending_camera_preview_windows: HashMap<LiveId, *mut ndk_sys::ANativeWindow>,
     pub(crate) software_video_players: HashMap<LiveId, AndroidSoftwarePlayer>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
+    pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
     pub(crate) openxr: CxOpenXr,
     pub(crate) activity_thread_id: Option<u64>,
     pub(crate) render_thread_id: Option<u64>,
