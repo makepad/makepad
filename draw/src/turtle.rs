@@ -312,7 +312,7 @@ pub enum FitBound {
 }
 
 impl FitBound {
-    fn eval_width(self, cx: &Cx2d<'_, '_>) -> Option<f64> {
+    pub fn eval_width(self, cx: &Cx2d<'_, '_>) -> Option<f64> {
         match self {
             FitBound::Abs(abs) => Some(abs),
             FitBound::Rel { base, factor } => {
@@ -322,7 +322,7 @@ impl FitBound {
         }
     }
 
-    fn eval_height(self, cx: &Cx2d<'_, '_>) -> Option<f64> {
+    pub fn eval_height(self, cx: &Cx2d<'_, '_>) -> Option<f64> {
         match self {
             FitBound::Abs(abs) => Some(abs),
             FitBound::Rel { base, factor } => {
