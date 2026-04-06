@@ -293,9 +293,9 @@ pub struct Tab {
     min_drag_dist: f64,
 
     #[walk]
-    walk: Walk,
+    pub walk: Walk,
     #[layout]
-    layout: Layout,
+    pub layout: Layout,
 }
 
 pub enum TabAction {
@@ -335,6 +335,13 @@ impl Tab {
 
     pub fn area(&self) -> Area {
         self.draw_bg.area()
+    }
+
+    /// Sets the draw depth on all draw primitives of this tab.
+    pub fn set_draw_depth(&mut self, depth: f32) {
+        self.draw_bg.draw_depth = depth;
+        self.draw_text.draw_depth = depth;
+        self.close_button.set_draw_depth(depth);
     }
 
     pub fn handle_event_with(

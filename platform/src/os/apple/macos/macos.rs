@@ -9,6 +9,7 @@ use {
                 VideoPlaybackPreparedEvent, VideoPlaybackResourcesReleasedEvent,
                 VideoSeekableRangesEvent, VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
+            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             Event, GameInputEventChannel, MouseButton, MouseUpEvent, VideoSource, WindowGeom,
         },
         makepad_live_id::*,
@@ -744,16 +745,43 @@ impl Cx {
             }
             MacosEvent::MouseMove(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
+                let abs = e.abs;
+                let modifiers = e.modifiers;
                 self.call_event_handler(&Event::MouseMove(e.into()));
+                if let Some(items) = self.os.internal_drag_items.as_ref() {
+                    self.call_event_handler(&Event::Drag(DragEvent {
+                        modifiers,
+                        handled: Arc::new(Mutex::new(false)),
+                        abs,
+                        items: items.clone(),
+                        response: Arc::new(Mutex::new(DragResponse::None)),
+                    }));
+                    self.drag_drop.cycle_drag();
+                }
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
                 self.fingers.switch_captures();
             }
             MacosEvent::MouseUp(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 let button = e.button;
+                let abs = e.abs;
+                let modifiers = e.modifiers;
                 self.call_event_handler(&Event::MouseUp(e.into()));
                 self.fingers.mouse_up(button);
                 self.fingers.cycle_hover_area(live_id!(mouse).into());
+                if button == MouseButton::PRIMARY {
+                    if let Some(items) = self.os.internal_drag_items.take() {
+                        self.call_event_handler(&Event::Drop(DropEvent {
+                            modifiers,
+                            handled: Arc::new(Mutex::new(false)),
+                            abs,
+                            items,
+                        }));
+                        self.drag_drop.cycle_drag();
+                        self.call_event_handler(&Event::DragEnd);
+                        self.drag_drop.cycle_drag();
+                    }
+                }
             }
             MacosEvent::Scroll(mut e) => {
                 self.dpi_override_scale(&mut e.abs, e.window_id);
@@ -1033,11 +1061,10 @@ impl Cx {
                     with_macos_app(|app| app.stop_timer(timer_id));
                 }
                 CxOsOp::StartDragging(items) => {
-                    //  lets start dragging on the right window
-                    if let Some(metal_window) = metal_windows.iter_mut().next() {
-                        metal_window.cocoa_window.start_dragging(items);
-                        break;
-                    }
+                    // Use internal drag-and-drop (synthesizing Drag/Drop events
+                    // from mouse move/up) instead of OS-level drag, which delays
+                    // DragEnd by ~1 second due to the macOS fly-back animation.
+                    self.os.internal_drag_items = Some(Arc::new(items));
                 }
                 CxOsOp::UpdateMacosMenu(menu) => with_macos_app(|app| app.update_macos_menu(&menu)),
                 CxOsOp::HttpRequest {
@@ -1657,4 +1684,5 @@ pub struct CxOs {
     pub(crate) video_players: HashMap<LiveId, AppleUnifiedVideoPlayer>,
     pub(crate) native_camera_previews: HashMap<LiveId, MacosNativeCameraPreview>,
     pub(crate) system_browsers: HashMap<LiveId, MacosSystemBrowser>,
+    pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
 }

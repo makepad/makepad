@@ -84,6 +84,10 @@ impl TabCloseButton {
         self.draw_button.draw_walk(cx, self.walk);
     }
 
+    pub fn set_draw_depth(&mut self, depth: f32) {
+        self.draw_button.draw_depth = depth;
+    }
+
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> TabCloseButtonAction {
         self.animator_handle_event(cx, event);
         match event.hits(cx, self.draw_button.area()) {
