@@ -60,6 +60,7 @@ script_mod! {
                 @tTextInput
                 @tVideo
                 @tView
+                @tAlignScroll
             ]
             selected: 0
             closable: false
@@ -100,6 +101,7 @@ script_mod! {
         tTextInput := DockTab{name: "TextInput" template: @PermanentTab kind: @TabTextInput}
         tVideo := DockTab{name: "Video" template: @PermanentTab kind: @TabVideo}
         tView := DockTab{name: "View" template: @PermanentTab kind: @TabView}
+        tAlignScroll := DockTab{name: "Align+Scroll" template: @PermanentTab kind: @TabAlignScroll}
 
         TabOverview := UIZooTab{WidgetsOverview{}}
         TabLayoutDemos := UIZooTab{DemoLayout{}}
@@ -130,6 +132,7 @@ script_mod! {
         TabTextInput := UIZooTab{DemoTextInput{}}
         TabVideo := UIZooTab{DemoVideo{}}
         TabView := UIZooTab{DemoView{}}
+        TabAlignScroll := UIZooTab{DemoAlignScroll{}}
     }
 
     mod.gc.set_static(AppDock)
@@ -386,6 +389,7 @@ impl AppMain for App {
         crate::tab_textinput::script_mod(vm);
         crate::tab_video::script_mod(vm);
         crate::tab_view::script_mod(vm);
+        crate::tab_align_scroll::script_mod(vm);
         crate::tab_widgetsoverview::script_mod(vm);
         self::script_mod(vm)
     }
