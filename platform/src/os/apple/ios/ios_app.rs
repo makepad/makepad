@@ -487,6 +487,7 @@ impl IosApp {
             dpi_factor,
             position: dvec2(0.0, 0.0),
             safe_area_insets,
+            window_chrome_buttons: Rect::default(),
         };
 
         let first_draw = with_ios_app(|app| app.first_draw);
