@@ -562,9 +562,60 @@ script_mod! {
         body +: {
             width: Fill
             height: Fill
-            flow: Down
+            flow: Overlay
             spacing: 0.0
             padding: Inset {left: 10.0 right: 10.0 top: 2.0 bottom: 10.0}
+
+            fullscreen_header := SolidView {
+                visible: false
+                width: Fill
+                height: STUDIO_HEADER_HEIGHT
+                flow: Right
+                align: Align {x: 0.0 y: 0.5}
+                draw_bg.color: theme.color_bg_app
+
+                left_controls_fullscreen := View {
+                    width: Fit
+                    height: Fit
+                    flow: Right
+                    align: Align {x: 0.0 y: 0.5}
+                    margin: Inset {left: 12.0 right: 0.0 top: 0.0 bottom: 0.0}
+
+                    sidebar_toggle_fullscreen := CaptionSidebarToggle {}
+                }
+
+                caption_label_fullscreen := View {
+                    width: Fill
+                    height: Fill
+                    align: Center
+                    label := Label {
+                        text: "Makepad"
+                        padding: 0.0
+                        draw_text +: {
+                            color: theme.color_label_outer
+                            text_style: theme.font_bold{
+                                font_size: theme.font_size_p + 0.5
+                            }
+                        }
+                    }
+                }
+
+                right_caption_tools_fullscreen := View {
+                    width: Fit
+                    height: Fit
+                    flow: Right
+                    spacing: theme.space_1
+                    margin: Inset {left: 0.0 right: 12.0 top: 0.0 bottom: 0.0}
+
+                    bottom_panel_toggle_fullscreen := CaptionPanelToggle {}
+                }
+            }
+
+            content := View {
+                width: Fill
+                height: Fill
+                flow: Down
+                spacing: 0.0
 
             RoundedView {
                 visible: false
@@ -739,6 +790,7 @@ script_mod! {
                         TerminalAddPane := View {}
                     }
                 }
+            }
             }
         }
     }

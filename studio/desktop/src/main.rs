@@ -95,6 +95,7 @@ pub struct BottomPanelAnimation {
 }
 
 const STUDIO_CAPTION_CONTROL_GAP: f64 = 12.0;
+const STUDIO_HEADER_HEIGHT: f64 = 36.0;
 
 fn parse_path_line_column_token(token: &str) -> Option<(String, usize, usize)> {
     let cleaned = token.trim_matches(|c| matches!(c, '"' | '\'' | '(' | ')' | ',' | ';'));
@@ -165,6 +166,44 @@ pub struct App {
 }
 
 impl App {
+    fn sync_fullscreen_header_visibility(&mut self, cx: &mut Cx, window_geom: &WindowGeom) {
+        let fullscreen_header = self.ui.view(cx, ids!(fullscreen_header));
+        let should_show = matches!(cx.os_type(), OsType::Macos) && window_geom.is_fullscreen;
+        let changed = if let Some(mut view) = fullscreen_header.borrow_mut() {
+            if view.visible != should_show {
+                view.visible = should_show;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed {
+            fullscreen_header.redraw(cx);
+        }
+
+        let content = self.ui.view(cx, ids!(content));
+        let content_changed = if let Some(mut view) = content.borrow_mut() {
+            let target_top_margin = if should_show {
+                STUDIO_HEADER_HEIGHT
+            } else {
+                0.0
+            };
+            if view.walk.margin.top != target_top_margin {
+                view.walk.margin.top = target_top_margin;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if content_changed {
+            content.redraw(cx);
+        }
+    }
+
     fn sync_caption_bar_controls(&mut self, cx: &mut Cx, window_geom: &WindowGeom) {
         let (left_margin, right_margin) = caption_bar_control_insets(window_geom);
 
@@ -183,6 +222,21 @@ impl App {
             left_controls.redraw(cx);
         }
 
+        let left_controls_fullscreen = self.ui.view(cx, ids!(left_controls_fullscreen));
+        let left_fullscreen_changed = if let Some(mut view) = left_controls_fullscreen.borrow_mut() {
+            if view.walk.margin.left != left_margin {
+                view.walk.margin.left = left_margin;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if left_fullscreen_changed {
+            left_controls_fullscreen.redraw(cx);
+        }
+
         let right_caption_tools = self.ui.view(cx, ids!(right_caption_tools));
         let right_changed = if let Some(mut view) = right_caption_tools.borrow_mut() {
             if view.walk.margin.right != right_margin {
@@ -197,6 +251,22 @@ impl App {
         if right_changed {
             right_caption_tools.redraw(cx);
         }
+
+        let right_caption_tools_fullscreen = self.ui.view(cx, ids!(right_caption_tools_fullscreen));
+        let right_fullscreen_changed =
+            if let Some(mut view) = right_caption_tools_fullscreen.borrow_mut() {
+                if view.walk.margin.right != right_margin {
+                    view.walk.margin.right = right_margin;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+        if right_fullscreen_changed {
+            right_caption_tools_fullscreen.redraw(cx);
+        }
     }
 
     fn sync_main_window_caption_bar_controls(&mut self, cx: &mut Cx) {
@@ -205,6 +275,7 @@ impl App {
             return;
         };
         let window_geom = cx.windows[window_id].window_geom.clone();
+        self.sync_fullscreen_header_visibility(cx, &window_geom);
         self.sync_caption_bar_controls(cx, &window_geom);
     }
 }
@@ -221,7 +292,12 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(cx, ids!(sidebar_toggle)).clicked(actions) {
+        if self.ui.button(cx, ids!(sidebar_toggle)).clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(sidebar_toggle_fullscreen))
+                .clicked(actions)
+        {
             if let Some(active_mount) = self.data.active_mount.clone() {
                 self.toggle_mount_sidebar(cx, &active_mount);
             }
@@ -231,6 +307,10 @@ impl MatchEvent for App {
             .ui
             .button(cx, ids!(bottom_panel_toggle))
             .clicked(actions)
+            || self
+                .ui
+                .button(cx, ids!(bottom_panel_toggle_fullscreen))
+                .clicked(actions)
         {
             if let Some(active_mount) = self.data.active_mount.clone() {
                 self.toggle_bottom_panel(cx, &active_mount);
@@ -319,6 +399,7 @@ impl MatchEvent for App {
                 if let WindowAction::WindowGeomChange(ce) = action.cast() {
                     let main_window = self.ui.window(cx, ids!(main_window));
                     if Some(ce.window_id) == main_window.window_id() {
+                        self.sync_fullscreen_header_visibility(cx, &ce.new_geom);
                         self.sync_caption_bar_controls(cx, &ce.new_geom);
                     }
                 }
@@ -442,6 +523,7 @@ impl AppMain for App {
         if let Event::WindowGeomChange(ce) = event {
             let main_window = self.ui.window(cx, ids!(main_window));
             if Some(ce.window_id) == main_window.window_id() {
+                self.sync_fullscreen_header_visibility(cx, &ce.new_geom);
                 self.sync_caption_bar_controls(cx, &ce.new_geom);
             }
         }
