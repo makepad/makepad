@@ -54,6 +54,18 @@ impl<T> IdPool<T>
 where
     T: Default,
 {
+    pub fn slot_count(&self) -> usize {
+        self.pool.len()
+    }
+
+    pub fn free_count(&self) -> usize {
+        self.free.0.borrow().len()
+    }
+
+    pub fn live_count(&self) -> usize {
+        self.slot_count().saturating_sub(self.free_count())
+    }
+
     pub fn alloc(&mut self) -> PoolId {
         let last_from_free_pool = self.free.0.borrow_mut().pop();
         if let Some(id) = last_from_free_pool {

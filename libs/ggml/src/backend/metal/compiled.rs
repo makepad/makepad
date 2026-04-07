@@ -105,6 +105,162 @@ struct KArgsCpy {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
+struct KArgsRepeat {
+    ne00: i32,
+    ne01: i32,
+    ne02: i32,
+    ne03: i32,
+    nb00: u64,
+    nb01: u64,
+    nb02: u64,
+    nb03: u64,
+    ne0: i32,
+    ne1: i32,
+    ne2: i32,
+    ne3: i32,
+    nb0: u64,
+    nb1: u64,
+    nb2: u64,
+    nb3: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct KArgsCumsumBlk {
+    ne00: i64,
+    ne01: i64,
+    ne02: i64,
+    ne03: i64,
+    nb00: u64,
+    nb01: u64,
+    nb02: u64,
+    nb03: u64,
+    net0: i64,
+    net1: i64,
+    net2: i64,
+    net3: i64,
+    nbt0: u64,
+    nbt1: u64,
+    nbt2: u64,
+    nbt3: u64,
+    outb: bool,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct KArgsCumsumAdd {
+    ne00: i64,
+    ne01: i64,
+    ne02: i64,
+    ne03: i64,
+    nb00: u64,
+    nb01: u64,
+    nb02: u64,
+    nb03: u64,
+    net0: i64,
+    net1: i64,
+    net2: i64,
+    net3: i64,
+    nbt0: u64,
+    nbt1: u64,
+    nbt2: u64,
+    nbt3: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct KArgsSolveTri {
+    ne00: i32,
+    ne01: i32,
+    ne02: i32,
+    ne03: i32,
+    nb00: u64,
+    nb01: u64,
+    nb02: u64,
+    nb03: u64,
+    ne10: i32,
+    ne11: i32,
+    ne12: i32,
+    ne13: i32,
+    nb10: u64,
+    nb11: u64,
+    nb12: u64,
+    nb13: u64,
+    ne0: i32,
+    ne1: i32,
+    ne2: i32,
+    ne3: i32,
+    nb0: u64,
+    nb1: u64,
+    nb2: u64,
+    nb3: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct KArgsDiag {
+    ne00: i32,
+    ne01: i32,
+    ne02: i32,
+    ne03: i32,
+    nb00: u64,
+    nb01: u64,
+    nb02: u64,
+    nb03: u64,
+    ne0: i32,
+    ne1: i32,
+    ne2: i32,
+    ne3: i32,
+    nb0: u64,
+    nb1: u64,
+    nb2: u64,
+    nb3: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct KArgsPad {
+    ne00: i64,
+    ne01: i64,
+    ne02: i64,
+    ne03: i64,
+    nb00: u64,
+    nb01: u64,
+    nb02: u64,
+    nb03: u64,
+    ne0: i64,
+    ne1: i64,
+    ne2: i64,
+    ne3: i64,
+    nb0: u64,
+    nb1: u64,
+    nb2: u64,
+    nb3: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct KArgsTri {
+    ne00: i32,
+    ne01: i32,
+    ne02: i32,
+    ne03: i32,
+    nb00: u64,
+    nb01: u64,
+    nb02: u64,
+    nb03: u64,
+    ne0: i32,
+    ne1: i32,
+    ne2: i32,
+    ne3: i32,
+    nb0: u64,
+    nb1: u64,
+    nb2: u64,
+    nb3: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
 struct KArgsBin {
     ne00: i32,
     ne01: i32,
@@ -200,6 +356,21 @@ struct KArgsUnary {
     val: f32,
     min: f32,
     max: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct KArgsGlu {
+    ne00: i32,
+    nb01: u64,
+    ne10: i32,
+    nb11: u64,
+    ne0: i32,
+    nb1: u64,
+    i00: i32,
+    i10: i32,
+    alpha: f32,
+    limit: f32,
 }
 
 #[repr(C)]
@@ -663,8 +834,7 @@ pub fn prepare_graph(
     features: MetalDeviceFeatures,
 ) -> Result<MetalPreparedGraph, String> {
     let graph_plan = build_graph_plan(ctx, graph, features)?;
-    let bindings = collect_tensor_bindings(ctx, graph)?;
-    let main_buffer_size = ggml_pad(ctx.used_mem(), GGML_MEM_ALIGN);
+    let (bindings, main_buffer_size) = collect_tensor_bindings(ctx, graph)?;
     let mut tail_cursor = 0usize;
     let mut nodes = Vec::with_capacity(graph_plan.nodes.len());
     for plan in &graph_plan.nodes {
@@ -696,20 +866,38 @@ pub fn prepare_graph(
     })
 }
 
-pub fn compile_prepared_graph(
+pub fn create_context_main_buffer(
     runtime: &MetalRuntime,
     ctx: &Context,
+    storage: BufferStorageMode,
+) -> Result<super::MetalBuffer, String> {
+    let main_bytes = collect_main_buffer_bytes(ctx, ctx.mem_size())?;
+    runtime.create_buffer_with_bytes(&main_bytes, storage)
+}
+
+fn compile_prepared_graph_from_buffers(
+    runtime: &MetalRuntime,
     prepared: &MetalPreparedGraph,
-    main_storage: BufferStorageMode,
-    tail_storage: BufferStorageMode,
+    main_buffer: super::MetalBuffer,
+    tail_buffer: Option<super::MetalBuffer>,
 ) -> Result<MetalCompiledGraph, String> {
-    let main_bytes = collect_main_buffer_bytes(ctx, prepared.main_buffer_size)?;
-    let main_buffer = runtime.create_buffer_with_bytes(&main_bytes, main_storage)?;
-    let tail_buffer = if prepared.tail_buffer_size > 0 {
-        Some(runtime.create_buffer(prepared.tail_buffer_size, tail_storage)?)
-    } else {
-        None
-    };
+    if main_buffer.size_bytes() < prepared.main_buffer_size {
+        return Err(format!(
+            "shared Metal main buffer is too small: got {}, need at least {}",
+            main_buffer.size_bytes(),
+            prepared.main_buffer_size
+        ));
+    }
+
+    if let Some(buffer) = &tail_buffer {
+        if buffer.size_bytes() < prepared.tail_buffer_size {
+            return Err(format!(
+                "shared Metal tail buffer is too small: got {}, need at least {}",
+                buffer.size_bytes(),
+                prepared.tail_buffer_size
+            ));
+        }
+    }
 
     let mut nodes = Vec::with_capacity(prepared.nodes.len());
     for node in &prepared.nodes {
@@ -742,6 +930,38 @@ pub fn compile_prepared_graph(
     })
 }
 
+pub fn compile_prepared_graph(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    prepared: &MetalPreparedGraph,
+    main_storage: BufferStorageMode,
+    tail_storage: BufferStorageMode,
+) -> Result<MetalCompiledGraph, String> {
+    let main_bytes = collect_main_buffer_bytes(ctx, prepared.main_buffer_size)?;
+    let main_buffer = runtime.create_buffer_with_bytes(&main_bytes, main_storage)?;
+    let tail_buffer = if prepared.tail_buffer_size > 0 {
+        Some(runtime.create_buffer(prepared.tail_buffer_size, tail_storage)?)
+    } else {
+        None
+    };
+
+    compile_prepared_graph_from_buffers(runtime, prepared, main_buffer, tail_buffer)
+}
+
+pub fn compile_prepared_graph_with_main_buffer(
+    runtime: &MetalRuntime,
+    prepared: &MetalPreparedGraph,
+    main_buffer: &super::MetalBuffer,
+    tail_storage: BufferStorageMode,
+) -> Result<MetalCompiledGraph, String> {
+    let tail_buffer = if prepared.tail_buffer_size > 0 {
+        Some(runtime.create_buffer(prepared.tail_buffer_size, tail_storage)?)
+    } else {
+        None
+    };
+    compile_prepared_graph_from_buffers(runtime, prepared, main_buffer.clone(), tail_buffer)
+}
+
 pub fn compile_graph_session(
     ctx: &Context,
     prepared: &MetalPreparedGraph,
@@ -761,6 +981,17 @@ impl MetalGraphSession {
         tail_storage: BufferStorageMode,
     ) -> Result<Self, String> {
         let compiled = compile_prepared_graph(&runtime, ctx, prepared, main_storage, tail_storage)?;
+        Ok(Self { runtime, compiled })
+    }
+
+    pub fn from_runtime_with_main_buffer(
+        runtime: MetalRuntime,
+        prepared: &MetalPreparedGraph,
+        main_buffer: &super::MetalBuffer,
+        tail_storage: BufferStorageMode,
+    ) -> Result<Self, String> {
+        let compiled =
+            compile_prepared_graph_with_main_buffer(&runtime, prepared, main_buffer, tail_storage)?;
         Ok(Self { runtime, compiled })
     }
 
@@ -789,28 +1020,38 @@ pub fn execute_compiled_graph(
     inputs: &[MetalGraphTensorWrite<'_>],
     outputs: &[TensorId],
 ) -> Result<MetalGraphExecution, String> {
-    for input in inputs {
-        let binding = binding(compiled, input.tensor_id)?;
-        let tensor = ctx
-            .tensor(input.tensor_id)
-            .ok_or_else(|| format!("input references invalid tensor {}", input.tensor_id))?;
-        if input.bytes.len() != tensor.nbytes() {
-            return Err(format!(
-                "input '{}' byte length mismatch: got {}, expected {}",
-                tensor.name().unwrap_or("<unnamed>"),
-                input.bytes.len(),
-                tensor.nbytes()
-            ));
+    runtime.begin_command_batch()?;
+    let execute_result = (|| -> Result<(), String> {
+        for input in inputs {
+            let binding = binding(compiled, input.tensor_id)?;
+            let tensor = ctx
+                .tensor(input.tensor_id)
+                .ok_or_else(|| format!("input references invalid tensor {}", input.tensor_id))?;
+            if input.bytes.len() != tensor.nbytes() {
+                return Err(format!(
+                    "input '{}' byte length mismatch: got {}, expected {}",
+                    tensor.name().unwrap_or("<unnamed>"),
+                    input.bytes.len(),
+                    tensor.nbytes()
+                ));
+            }
+            runtime.write_buffer(&compiled.main_buffer, binding.offset_bytes, input.bytes)?;
         }
-        runtime.write_buffer(&compiled.main_buffer, binding.offset_bytes, input.bytes)?;
-    }
 
-    for node in &compiled.nodes {
-        let tensor = ctx
-            .tensor(node.node_id)
-            .ok_or_else(|| format!("compiled graph references invalid tensor {}", node.node_id))?;
-        execute_node(runtime, ctx, compiled, tensor, node)?;
+        for node in &compiled.nodes {
+            let tensor = ctx.tensor(node.node_id).ok_or_else(|| {
+                format!("compiled graph references invalid tensor {}", node.node_id)
+            })?;
+            execute_node(runtime, ctx, compiled, tensor, node)?;
+        }
+        Ok(())
+    })();
+
+    if let Err(err) = execute_result {
+        let _ = runtime.discard_command_batch();
+        return Err(err);
     }
+    runtime.end_command_batch()?;
 
     let mut execution = MetalGraphExecution::default();
     for &tensor_id in outputs {
@@ -851,19 +1092,20 @@ fn prepared_node_from_plan(
 fn collect_tensor_bindings(
     ctx: &Context,
     graph: &Graph,
-) -> Result<BTreeMap<TensorId, MetalTensorBinding>, String> {
+) -> Result<(BTreeMap<TensorId, MetalTensorBinding>, usize), String> {
     let tensors = ctx.tensors();
     let mut needed = graph.nodes.clone();
     needed.extend(graph.leafs.iter().copied());
     needed.sort_unstable();
     needed.dedup();
 
+    let mut planner = GraphBindingPlanner::new(ctx.used_mem());
     let mut bindings = BTreeMap::new();
     for tensor_id in needed {
         let tensor = tensors
             .get(tensor_id)
             .ok_or_else(|| format!("graph references invalid tensor {}", tensor_id))?;
-        let offset_bytes = resolve_tensor_offset(tensors, tensor)?;
+        let offset_bytes = planner.resolve_tensor_offset(tensors, tensor_id)?;
         bindings.insert(
             tensor_id,
             MetalTensorBinding {
@@ -875,29 +1117,87 @@ fn collect_tensor_bindings(
             },
         );
     }
-    Ok(bindings)
+    Ok((bindings, planner.required_main_buffer_size()))
 }
 
-fn resolve_tensor_offset(tensors: &[Tensor], tensor: &Tensor) -> Result<usize, String> {
-    if tensor.is_view() {
-        let src_id = tensor
-            .view_src
-            .ok_or_else(|| format!("view tensor {} is missing view source", tensor.id))?;
-        let src = tensors.get(src_id).ok_or_else(|| {
-            format!(
-                "tensor {} references invalid view source {}",
-                tensor.id, src_id
-            )
-        })?;
-        let src_offset = resolve_tensor_offset(tensors, src)?;
-        return src_offset
-            .checked_add(tensor.view_offs)
-            .ok_or_else(|| format!("tensor {} view offset overflow", tensor.id));
+#[derive(Debug)]
+struct GraphBindingPlanner {
+    next_offset: usize,
+    max_end: usize,
+    planned_offsets: BTreeMap<TensorId, usize>,
+}
+
+impl GraphBindingPlanner {
+    fn new(resident_bytes: usize) -> Self {
+        Self {
+            next_offset: ggml_pad(resident_bytes, GGML_MEM_ALIGN),
+            max_end: resident_bytes,
+            planned_offsets: BTreeMap::new(),
+        }
     }
 
-    tensor
-        .data_offset
-        .ok_or_else(|| format!("tensor {} has no allocated data offset", tensor.id))
+    fn required_main_buffer_size(&self) -> usize {
+        ggml_pad(self.max_end, GGML_MEM_ALIGN)
+    }
+
+    fn resolve_tensor_offset(
+        &mut self,
+        tensors: &[Tensor],
+        tensor_id: TensorId,
+    ) -> Result<usize, String> {
+        if let Some(&offset) = self.planned_offsets.get(&tensor_id) {
+            return Ok(offset);
+        }
+
+        let tensor = tensors
+            .get(tensor_id)
+            .ok_or_else(|| format!("graph references invalid tensor {}", tensor_id))?;
+
+        let offset = if tensor.is_view() {
+            let src_id = tensor
+                .view_src
+                .ok_or_else(|| format!("view tensor {} is missing view source", tensor.id))?;
+            let src = tensors.get(src_id).ok_or_else(|| {
+                format!(
+                    "tensor {} references invalid view source {}",
+                    tensor.id, src_id
+                )
+            })?;
+            let src_offset = self.resolve_tensor_offset(tensors, src_id)?;
+            let offset = src_offset
+                .checked_add(tensor.view_offs)
+                .ok_or_else(|| format!("tensor {} view offset overflow", tensor.id))?;
+            let src_end = src_offset
+                .checked_add(src.nbytes())
+                .ok_or_else(|| format!("tensor {} source byte range overflow", src.id))?;
+            let view_end = offset
+                .checked_add(tensor.nbytes())
+                .ok_or_else(|| format!("tensor {} view byte range overflow", tensor.id))?;
+            if view_end > src_end {
+                return Err(format!(
+                    "tensor {} view exceeds source {} byte range",
+                    tensor.id, src.id
+                ));
+            }
+            offset
+        } else if let Some(offset) = tensor.data_offset {
+            offset
+        } else {
+            let offset = ggml_pad(self.next_offset, GGML_MEM_ALIGN);
+            let end = offset
+                .checked_add(tensor.nbytes())
+                .ok_or_else(|| format!("tensor {} allocation overflow", tensor.id))?;
+            self.next_offset = end;
+            offset
+        };
+
+        let end = offset
+            .checked_add(tensor.nbytes())
+            .ok_or_else(|| format!("tensor {} byte range overflow", tensor.id))?;
+        self.max_end = self.max_end.max(end);
+        self.planned_offsets.insert(tensor_id, offset);
+        Ok(offset)
+    }
 }
 
 fn collect_main_buffer_bytes(ctx: &Context, len: usize) -> Result<Vec<u8>, String> {
@@ -926,6 +1226,7 @@ fn execute_node(
         Op::AddId => dispatch_add_id(runtime, ctx, compiled, tensor, node),
         Op::GetRows => dispatch_get_rows(runtime, ctx, compiled, tensor, node),
         Op::SetRows => dispatch_set_rows(runtime, ctx, compiled, tensor, node),
+        Op::Repeat => dispatch_repeat(runtime, ctx, compiled, tensor, node),
         Op::Add | Op::Sub | Op::Mul | Op::Div => dispatch_bin(runtime, ctx, compiled, tensor, node),
         Op::Scale
         | Op::Fill
@@ -937,6 +1238,12 @@ fn execute_node(
         | Op::Cos
         | Op::Log
         | Op::Unary => dispatch_unary(runtime, ctx, compiled, tensor, node),
+        Op::Glu => dispatch_glu(runtime, ctx, compiled, tensor, node),
+        Op::CumSum => dispatch_cumsum(runtime, ctx, compiled, tensor, node),
+        Op::Diag => dispatch_diag(runtime, ctx, compiled, tensor, node),
+        Op::Pad => dispatch_pad(runtime, ctx, compiled, tensor, node),
+        Op::Tri => dispatch_tri(runtime, ctx, compiled, tensor, node),
+        Op::SolveTri => dispatch_solve_tri(runtime, ctx, compiled, tensor, node),
         Op::SumRows | Op::Mean => dispatch_sum_rows(runtime, ctx, compiled, tensor, node),
         Op::SoftMax => dispatch_soft_max(runtime, ctx, compiled, tensor, node),
         Op::Norm => dispatch_norm(runtime, ctx, compiled, tensor, node, false),
@@ -1263,9 +1570,12 @@ fn dispatch_bin(
         let b = src1_shape.ne[d];
         let a = src0_shape.ne[d];
         if b != 1 && b != a {
+            let dst_name = tensor.name().unwrap_or("<unnamed>");
+            let src0_name = src0.name().unwrap_or("<unnamed>");
+            let src1_name = src1.name().unwrap_or("<unnamed>");
             return Err(format!(
-                "binary broadcast mismatch at dim {}: lhs={}, rhs={}",
-                d, a, b
+                "binary broadcast mismatch at dim {}: lhs={}, rhs={} (dst={} src0={} src1={})",
+                d, a, b, dst_name, src0_name, src1_name
             ));
         }
     }
@@ -1448,6 +1758,530 @@ fn dispatch_unary(
         &[],
         threadgroups,
         threads_per_threadgroup,
+    )
+}
+
+fn dispatch_glu(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    tensor: &Tensor,
+    node: &MetalCompiledNode,
+) -> Result<(), String> {
+    let stage = main_stage(node, tensor.op)?;
+    let src0_id = tensor_src(tensor, 0)?;
+    let src1_id = tensor_src_opt(tensor, 1);
+    let src0 = ctx
+        .tensor(src0_id)
+        .ok_or_else(|| format!("glu src0 {} is invalid", src0_id))?;
+    let src1 = if let Some(src1_id) = src1_id {
+        Some(
+            ctx.tensor(src1_id)
+                .ok_or_else(|| format!("glu src1 {} is invalid", src1_id))?,
+        )
+    } else {
+        None
+    };
+    if let Some(src1) = src1.as_ref() {
+        if src0.ne != src1.ne {
+            return Err(format!(
+                "glu split shape mismatch: src0={:?} src1={:?}",
+                src0.ne, src1.ne
+            ));
+        }
+    }
+
+    let swapped = tensor.op_param_i32(1) != 0;
+    let i00 = if swapped { i32_dim(tensor, 0)? } else { 0 };
+    let i10 = if swapped { 0 } else { i32_dim(tensor, 0)? };
+    let args = KArgsGlu {
+        ne00: i32_dim(src0, 0)?,
+        nb01: u64::try_from(src0.nb[1]).map_err(|_| "glu nb01 exceeds u64".to_string())?,
+        ne10: if let Some(src1) = src1.as_ref() {
+            i32_dim(src1, 0)?
+        } else {
+            i32_dim(src0, 0)?
+        },
+        nb11: if let Some(src1) = src1.as_ref() {
+            u64::try_from(src1.nb[1]).map_err(|_| "glu nb11 exceeds u64".to_string())?
+        } else {
+            u64::try_from(src0.nb[1]).map_err(|_| "glu nb01 exceeds u64".to_string())?
+        },
+        ne0: i32_dim(tensor, 0)?,
+        nb1: u64::try_from(tensor.nb[1]).map_err(|_| "glu nb1 exceeds u64".to_string())?,
+        i00: if src1.is_some() { 0 } else { i00 },
+        i10: if src1.is_some() { 0 } else { i10 },
+        alpha: tensor.op_param_f32(2),
+        limit: tensor.op_param_f32(3),
+    };
+    let nth = std::cmp::min(
+        stage.pipeline.max_threads_per_threadgroup.max(1),
+        (i32_dim(src0, 0)? / 2).max(1) as u64,
+    );
+
+    let mut buffers = vec![buffer_ref(compiled, 1, src0_id)];
+    if let Some(src1_id) = src1_id {
+        buffers.push(buffer_ref(compiled, 2, src1_id));
+    } else {
+        buffers.push(buffer_ref(compiled, 2, src0_id));
+    }
+    buffers.push(buffer_ref(compiled, 3, tensor.id));
+
+    runtime.dispatch_compute(
+        &stage.pipeline,
+        bytes_of(&args),
+        &buffers,
+        &[],
+        MetalSize {
+            width: src0.nrows().max(1) as u64,
+            height: 1,
+            depth: 1,
+        },
+        MetalSize {
+            width: nth,
+            height: 1,
+            depth: 1,
+        },
+    )
+}
+
+fn dispatch_cumsum(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    tensor: &Tensor,
+    node: &MetalCompiledNode,
+) -> Result<(), String> {
+    let aux_stage = stage_kind(node, MetalStageKind::Aux, tensor.op)?;
+    let main_stage = main_stage(node, tensor.op)?;
+    let src0_id = tensor_src(tensor, 0)?;
+    let src0 = ctx
+        .tensor(src0_id)
+        .ok_or_else(|| format!("cumsum src0 {} is invalid", src0_id))?;
+    let src0_layout = Layout4::from_tensor(src0)?;
+
+    let mut nth = 1_i64;
+    while nth < src0_layout.ne[0]
+        && 2 * nth
+            <= i64::try_from(aux_stage.pipeline.max_threads_per_threadgroup).unwrap_or(i64::MAX)
+    {
+        nth *= 2;
+    }
+    let net0 = (src0_layout.ne[0] + nth - 1) / nth;
+    let net1 = src0_layout.ne[1];
+    let net2 = src0_layout.ne[2];
+    let net3 = src0_layout.ne[3];
+    let nbt0 = std::mem::size_of::<f32>() as u64;
+    let nbt1 = u64::try_from(net0).map_err(|_| "cumsum net0 exceeds u64".to_string())? * nbt0;
+    let nbt2 = u64::try_from(net1).map_err(|_| "cumsum net1 exceeds u64".to_string())? * nbt1;
+    let nbt3 = u64::try_from(net2).map_err(|_| "cumsum net2 exceeds u64".to_string())? * nbt2;
+    let smem = ggml_pad(32 * std::mem::size_of::<f32>(), 16);
+
+    let dst_ref = buffer_ref(compiled, 3, tensor.id);
+    let tmp_ref = tail_node_buffer_ref(compiled, node, 2, 0)?;
+    let blk_args = KArgsCumsumBlk {
+        ne00: src0_layout.ne[0],
+        ne01: src0_layout.ne[1],
+        ne02: src0_layout.ne[2],
+        ne03: src0_layout.ne[3],
+        nb00: src0_layout.nb[0],
+        nb01: src0_layout.nb[1],
+        nb02: src0_layout.nb[2],
+        nb03: src0_layout.nb[3],
+        net0,
+        net1,
+        net2,
+        net3,
+        nbt0,
+        nbt1,
+        nbt2,
+        nbt3,
+        outb: src0_layout.ne[0] > nth,
+    };
+    runtime.dispatch_compute(
+        &aux_stage.pipeline,
+        bytes_of(&blk_args),
+        &[buffer_ref(compiled, 1, src0_id), tmp_ref.clone(), dst_ref.clone()],
+        &[(0, smem)],
+        MetalSize {
+            width: u64::try_from(net0 * src0_layout.ne[1])
+                .map_err(|_| "cumsum blk width exceeds u64".to_string())?,
+            height: u64::try_from(src0_layout.ne[2])
+                .map_err(|_| "cumsum blk height exceeds u64".to_string())?,
+            depth: u64::try_from(src0_layout.ne[3])
+                .map_err(|_| "cumsum blk depth exceeds u64".to_string())?,
+        },
+        MetalSize {
+            width: u64::try_from(nth).map_err(|_| "cumsum nth exceeds u64".to_string())?,
+            height: 1,
+            depth: 1,
+        },
+    )?;
+
+    if src0_layout.ne[0] > nth {
+        let tmp_blk_args = KArgsCumsumBlk {
+            ne00: net0,
+            ne01: net1,
+            ne02: net2,
+            ne03: net3,
+            nb00: nbt0,
+            nb01: nbt1,
+            nb02: nbt2,
+            nb03: nbt3,
+            net0,
+            net1,
+            net2,
+            net3,
+            nbt0,
+            nbt1,
+            nbt2,
+            nbt3,
+            outb: false,
+        };
+        runtime.dispatch_compute(
+            &aux_stage.pipeline,
+            bytes_of(&tmp_blk_args),
+            &[tmp_ref.clone(), tmp_ref.clone(), tmp_ref.clone()],
+            &[(0, smem)],
+            MetalSize {
+                width: u64::try_from(net1)
+                    .map_err(|_| "cumsum tmp width exceeds u64".to_string())?,
+                height: u64::try_from(net2)
+                    .map_err(|_| "cumsum tmp height exceeds u64".to_string())?,
+                depth: u64::try_from(net3)
+                    .map_err(|_| "cumsum tmp depth exceeds u64".to_string())?,
+            },
+            MetalSize {
+                width: u64::try_from(nth).map_err(|_| "cumsum nth exceeds u64".to_string())?,
+                height: 1,
+                depth: 1,
+            },
+        )?;
+
+        let add_args = KArgsCumsumAdd {
+            ne00: src0_layout.ne[0],
+            ne01: src0_layout.ne[1],
+            ne02: src0_layout.ne[2],
+            ne03: src0_layout.ne[3],
+            nb00: src0_layout.nb[0],
+            nb01: src0_layout.nb[1],
+            nb02: src0_layout.nb[2],
+            nb03: src0_layout.nb[3],
+            net0,
+            net1,
+            net2,
+            net3,
+            nbt0,
+            nbt1,
+            nbt2,
+            nbt3,
+        };
+        runtime.dispatch_compute(
+            &main_stage.pipeline,
+            bytes_of(&add_args),
+            &[tmp_ref, buffer_ref(compiled, 2, tensor.id)],
+            &[],
+            MetalSize {
+                width: u64::try_from(net0 * src0_layout.ne[1])
+                    .map_err(|_| "cumsum add width exceeds u64".to_string())?,
+                height: u64::try_from(src0_layout.ne[2])
+                    .map_err(|_| "cumsum add height exceeds u64".to_string())?,
+                depth: u64::try_from(src0_layout.ne[3])
+                    .map_err(|_| "cumsum add depth exceeds u64".to_string())?,
+            },
+            MetalSize {
+                width: u64::try_from(nth).map_err(|_| "cumsum nth exceeds u64".to_string())?,
+                height: 1,
+                depth: 1,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+fn dispatch_diag(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    tensor: &Tensor,
+    node: &MetalCompiledNode,
+) -> Result<(), String> {
+    let stage = main_stage(node, tensor.op)?;
+    let src0_id = tensor_src(tensor, 0)?;
+    let src0 = ctx
+        .tensor(src0_id)
+        .ok_or_else(|| format!("diag src0 {} is invalid", src0_id))?;
+    let src0_shape = shape4(src0)?;
+    let dst_shape = shape4(tensor)?;
+    let args = KArgsDiag {
+        ne00: src0_shape.ne[0],
+        ne01: src0_shape.ne[1],
+        ne02: src0_shape.ne[2],
+        ne03: src0_shape.ne[3],
+        nb00: src0_shape.nb[0],
+        nb01: src0_shape.nb[1],
+        nb02: src0_shape.nb[2],
+        nb03: src0_shape.nb[3],
+        ne0: dst_shape.ne[0],
+        ne1: dst_shape.ne[1],
+        ne2: dst_shape.ne[2],
+        ne3: dst_shape.ne[3],
+        nb0: dst_shape.nb[0],
+        nb1: dst_shape.nb[1],
+        nb2: dst_shape.nb[2],
+        nb3: dst_shape.nb[3],
+    };
+    runtime.dispatch_compute(
+        &stage.pipeline,
+        bytes_of(&args),
+        &[buffer_ref(compiled, 1, src0_id), buffer_ref(compiled, 2, tensor.id)],
+        &[],
+        MetalSize {
+            width: dst_shape.ne[1].max(1) as u64,
+            height: dst_shape.ne[2].max(1) as u64,
+            depth: dst_shape.ne[3].max(1) as u64,
+        },
+        MetalSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    )
+}
+
+fn dispatch_pad(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    tensor: &Tensor,
+    node: &MetalCompiledNode,
+) -> Result<(), String> {
+    let stage = main_stage(node, tensor.op)?;
+    let src0_id = tensor_src(tensor, 0)?;
+    let src0 = ctx
+        .tensor(src0_id)
+        .ok_or_else(|| format!("pad src0 {} is invalid", src0_id))?;
+    let src0_layout = Layout4::from_tensor(src0)?;
+    let dst_layout = Layout4::from_tensor(tensor)?;
+    let args = KArgsPad {
+        ne00: src0_layout.ne[0],
+        ne01: src0_layout.ne[1],
+        ne02: src0_layout.ne[2],
+        ne03: src0_layout.ne[3],
+        nb00: src0_layout.nb[0],
+        nb01: src0_layout.nb[1],
+        nb02: src0_layout.nb[2],
+        nb03: src0_layout.nb[3],
+        ne0: dst_layout.ne[0],
+        ne1: dst_layout.ne[1],
+        ne2: dst_layout.ne[2],
+        ne3: dst_layout.ne[3],
+        nb0: dst_layout.nb[0],
+        nb1: dst_layout.nb[1],
+        nb2: dst_layout.nb[2],
+        nb3: dst_layout.nb[3],
+    };
+    runtime.dispatch_compute(
+        &stage.pipeline,
+        bytes_of(&args),
+        &[buffer_ref(compiled, 1, src0_id), buffer_ref(compiled, 2, tensor.id)],
+        &[],
+        MetalSize {
+            width: u64::try_from(dst_layout.ne[1]).map_err(|_| "pad width exceeds u64".to_string())?,
+            height: u64::try_from(dst_layout.ne[2])
+                .map_err(|_| "pad height exceeds u64".to_string())?,
+            depth: u64::try_from(dst_layout.ne[3]).map_err(|_| "pad depth exceeds u64".to_string())?,
+        },
+        MetalSize {
+            width: u64::try_from(std::cmp::min(1024_i64, dst_layout.ne[0].max(1)))
+                .map_err(|_| "pad nth exceeds u64".to_string())?,
+            height: 1,
+            depth: 1,
+        },
+    )
+}
+
+fn dispatch_tri(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    tensor: &Tensor,
+    node: &MetalCompiledNode,
+) -> Result<(), String> {
+    let stage = main_stage(node, tensor.op)?;
+    let src0_id = tensor_src(tensor, 0)?;
+    let src0 = ctx
+        .tensor(src0_id)
+        .ok_or_else(|| format!("tri src0 {} is invalid", src0_id))?;
+    let src0_shape = shape4(src0)?;
+    let dst_shape = shape4(tensor)?;
+    let args = KArgsTri {
+        ne00: src0_shape.ne[0],
+        ne01: src0_shape.ne[1],
+        ne02: src0_shape.ne[2],
+        ne03: src0_shape.ne[3],
+        nb00: src0_shape.nb[0],
+        nb01: src0_shape.nb[1],
+        nb02: src0_shape.nb[2],
+        nb03: src0_shape.nb[3],
+        ne0: dst_shape.ne[0],
+        ne1: dst_shape.ne[1],
+        ne2: dst_shape.ne[2],
+        ne3: dst_shape.ne[3],
+        nb0: dst_shape.nb[0],
+        nb1: dst_shape.nb[1],
+        nb2: dst_shape.nb[2],
+        nb3: dst_shape.nb[3],
+    };
+    let max_threads = i32::try_from(stage.pipeline.max_threads_per_threadgroup)
+        .map_err(|_| "tri max_threads exceeds i32".to_string())?;
+    let mut nth = 32_i32;
+    while nth < src0_shape.ne[0] && nth < max_threads {
+        nth *= 2;
+    }
+    nth = nth.min(max_threads).min(src0_shape.ne[0].max(1));
+    runtime.dispatch_compute(
+        &stage.pipeline,
+        bytes_of(&args),
+        &[buffer_ref(compiled, 1, src0_id), buffer_ref(compiled, 2, tensor.id)],
+        &[],
+        MetalSize {
+            width: src0_shape.ne[1].max(1) as u64,
+            height: src0_shape.ne[2].max(1) as u64,
+            depth: src0_shape.ne[3].max(1) as u64,
+        },
+        MetalSize {
+            width: nth as u64,
+            height: 1,
+            depth: 1,
+        },
+    )
+}
+
+fn dispatch_solve_tri(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    tensor: &Tensor,
+    node: &MetalCompiledNode,
+) -> Result<(), String> {
+    let stage = main_stage(node, tensor.op)?;
+    let src0_id = tensor_src(tensor, 0)?;
+    let src1_id = tensor_src(tensor, 1)?;
+    let src0 = ctx
+        .tensor(src0_id)
+        .ok_or_else(|| format!("solve_tri src0 {} is invalid", src0_id))?;
+    let src1 = ctx
+        .tensor(src1_id)
+        .ok_or_else(|| format!("solve_tri src1 {} is invalid", src1_id))?;
+    let src0_shape = shape4(src0)?;
+    let src1_shape = shape4(src1)?;
+    let dst_shape = shape4(tensor)?;
+    let args = KArgsSolveTri {
+        ne00: src0_shape.ne[0],
+        ne01: src0_shape.ne[1],
+        ne02: src0_shape.ne[2],
+        ne03: src0_shape.ne[3],
+        nb00: src0_shape.nb[0],
+        nb01: src0_shape.nb[1],
+        nb02: src0_shape.nb[2],
+        nb03: src0_shape.nb[3],
+        ne10: src1_shape.ne[0],
+        ne11: src1_shape.ne[1],
+        ne12: src1_shape.ne[2],
+        ne13: src1_shape.ne[3],
+        nb10: src1_shape.nb[0],
+        nb11: src1_shape.nb[1],
+        nb12: src1_shape.nb[2],
+        nb13: src1_shape.nb[3],
+        ne0: dst_shape.ne[0],
+        ne1: dst_shape.ne[1],
+        ne2: dst_shape.ne[2],
+        ne3: dst_shape.ne[3],
+        nb0: dst_shape.nb[0],
+        nb1: dst_shape.nb[1],
+        nb2: dst_shape.nb[2],
+        nb3: dst_shape.nb[3],
+    };
+    let nsg = 8_u64;
+    runtime.dispatch_compute(
+        &stage.pipeline,
+        bytes_of(&args),
+        &[
+            buffer_ref(compiled, 1, src0_id),
+            buffer_ref(compiled, 2, src1_id),
+            buffer_ref(compiled, 3, tensor.id),
+        ],
+        &[(0, stage.pipeline.smem_bytes)],
+        MetalSize {
+            width: ((src1_shape.ne[0].max(1) as u64) + nsg - 1) / nsg,
+            height: src0_shape.ne[2].max(1) as u64,
+            depth: src0_shape.ne[3].max(1) as u64,
+        },
+        MetalSize {
+            width: 32,
+            height: nsg,
+            depth: 1,
+        },
+    )
+}
+
+fn dispatch_repeat(
+    runtime: &MetalRuntime,
+    ctx: &Context,
+    compiled: &MetalCompiledGraph,
+    tensor: &Tensor,
+    node: &MetalCompiledNode,
+) -> Result<(), String> {
+    let stage = main_stage(node, tensor.op)?;
+    let src0_id = tensor_src(tensor, 0)?;
+    let src0 = ctx
+        .tensor(src0_id)
+        .ok_or_else(|| format!("repeat src0 {} is invalid", src0_id))?;
+    let src0_shape = shape4(src0)?;
+    let dst_shape = shape4(tensor)?;
+
+    let args = KArgsRepeat {
+        ne00: src0_shape.ne[0],
+        ne01: src0_shape.ne[1],
+        ne02: src0_shape.ne[2],
+        ne03: src0_shape.ne[3],
+        nb00: src0_shape.nb[0],
+        nb01: src0_shape.nb[1],
+        nb02: src0_shape.nb[2],
+        nb03: src0_shape.nb[3],
+        ne0: dst_shape.ne[0],
+        ne1: dst_shape.ne[1],
+        ne2: dst_shape.ne[2],
+        ne3: dst_shape.ne[3],
+        nb0: dst_shape.nb[0],
+        nb1: dst_shape.nb[1],
+        nb2: dst_shape.nb[2],
+        nb3: dst_shape.nb[3],
+    };
+
+    let nth_max = std::cmp::min(256u64, stage.pipeline.max_threads_per_threadgroup).max(1);
+    let mut nth = 1u64;
+    while 2 * nth < args.ne0 as u64 && nth < nth_max {
+        nth *= 2;
+    }
+
+    runtime.dispatch_compute(
+        &stage.pipeline,
+        bytes_of(&args),
+        &[buffer_ref(compiled, 1, src0_id), buffer_ref(compiled, 2, tensor.id)],
+        &[],
+        MetalSize {
+            width: dst_shape.ne[1] as u64,
+            height: dst_shape.ne[2] as u64,
+            depth: dst_shape.ne[3] as u64,
+        },
+        MetalSize {
+            width: nth,
+            height: 1,
+            depth: 1,
+        },
     )
 }
 
@@ -1640,26 +2474,29 @@ fn dispatch_norm(
         .tensor(src0_id)
         .ok_or_else(|| format!("norm src0 {} is invalid", src0_id))?;
     let src0_shape = shape4(src0)?;
-    let empty_shape = Shape4::default();
+    let dst_shape = shape4(tensor)?;
     let is_c4 = src0_shape.ne[0] % 4 == 0;
     let ne00_t = if is_c4 {
         src0_shape.ne[0] / 4
     } else {
         src0_shape.ne[0]
     };
+    // The Metal norm shader computes fused-src pointers before it branches on the
+    // fuse level. For unfused norm/rms_norm dispatches we still need non-zero
+    // extents/strides in those slots to avoid modulo-by-zero UB.
     let args = KArgsNorm {
         ne00: src0_shape.ne[0],
         ne00_t,
-        nb1: src0_shape.nb[1],
-        nb2: src0_shape.nb[2],
-        nb3: src0_shape.nb[3],
+        nb1: dst_shape.nb[1],
+        nb2: dst_shape.nb[2],
+        nb3: dst_shape.nb[3],
         eps: tensor.op_param_f32(0),
-        nef1: [src0_shape.ne[1], empty_shape.ne[1], empty_shape.ne[1]],
-        nef2: [src0_shape.ne[2], empty_shape.ne[2], empty_shape.ne[2]],
-        nef3: [src0_shape.ne[3], empty_shape.ne[3], empty_shape.ne[3]],
-        nbf1: [src0_shape.nb[1], empty_shape.nb[1], empty_shape.nb[1]],
-        nbf2: [src0_shape.nb[2], empty_shape.nb[2], empty_shape.nb[2]],
-        nbf3: [src0_shape.nb[3], empty_shape.nb[3], empty_shape.nb[3]],
+        nef1: [src0_shape.ne[1], src0_shape.ne[1], src0_shape.ne[1]],
+        nef2: [src0_shape.ne[2], src0_shape.ne[2], src0_shape.ne[2]],
+        nef3: [src0_shape.ne[3], src0_shape.ne[3], src0_shape.ne[3]],
+        nbf1: [src0_shape.nb[1], src0_shape.nb[1], src0_shape.nb[1]],
+        nbf2: [src0_shape.nb[2], src0_shape.nb[2], src0_shape.nb[2]],
+        nbf3: [src0_shape.nb[3], src0_shape.nb[3], src0_shape.nb[3]],
     };
 
     let mut nth = 32u64;
@@ -1673,8 +2510,8 @@ fn dispatch_norm(
     let buffers = if rms || tensor.op == Op::RmsNorm || tensor.op == Op::Norm {
         vec![
             buffer_ref(compiled, 1, src0_id),
-            dummy_buffer_ref(2, &compiled.main_buffer),
-            dummy_buffer_ref(3, &compiled.main_buffer),
+            buffer_ref(compiled, 2, src0_id),
+            buffer_ref(compiled, 3, src0_id),
             buffer_ref(compiled, 4, tensor.id),
         ]
     } else {
@@ -1783,32 +2620,60 @@ fn dispatch_mul_mat(
         .tensor(src1_id)
         .ok_or_else(|| format!("mul_mat src1 {} is invalid", src1_id))?;
     let base = stage.descriptor.base_name.as_str();
+    let ne02 = i32_dim(src0, 2)?;
+    let ne03 = i32_dim(src0, 3)?;
+    let ne12 = i32_dim(src1, 2)?;
+    let ne13 = i32_dim(src1, 3)?;
+    if ne02 == 0 || ne03 == 0 {
+        return Err("mul_mat source batch dimensions must be non-zero".to_string());
+    }
+    if ne12 % ne02 != 0 {
+        return Err(format!(
+            "mul_mat source batch ratio ne12/ne02 is not integral: src0={} {:?} src1={} {:?} ne12={} ne02={}",
+            src0.name().unwrap_or("<unnamed>"),
+            src0.ne,
+            src1.name().unwrap_or("<unnamed>"),
+            src1.ne,
+            ne12,
+            ne02
+        ));
+    }
+    if ne13 % ne03 != 0 {
+        return Err(format!(
+            "mul_mat source batch ratio ne13/ne03 is not integral: src0={} {:?} src1={} {:?} ne13={} ne03={}",
+            src0.name().unwrap_or("<unnamed>"),
+            src0.ne,
+            src1.name().unwrap_or("<unnamed>"),
+            src1.ne,
+            ne13,
+            ne03
+        ));
+    }
+    let r2 = i16::try_from(ne12 / ne02)
+        .map_err(|_| format!("mul_mat r2 {} exceeds i16", ne12 / ne02))?;
+    let r3 = i16::try_from(ne13 / ne03)
+        .map_err(|_| format!("mul_mat r3 {} exceeds i16", ne13 / ne03))?;
 
     if base.starts_with("kernel_mul_mm_") {
         let ne00 = i32_dim(src0, 0)?;
         let ne01 = i32_dim(src0, 1)?;
-        let ne12 = i32_dim(src1, 1)?;
         let ne0 = i32_dim(tensor, 0)?;
         let ne1 = i32_dim(tensor, 1)?;
         let args = KArgsMulMm {
             ne00,
-            ne02: 1,
+            ne02,
             nb01: u64::try_from(src0.nb[1]).map_err(|_| "mul_mm nb01 exceeds u64".to_string())?,
-            nb02: u64::try_from(src0.nb[1]).map_err(|_| "mul_mm nb02 exceeds u64".to_string())?
-                * ne01 as u64,
-            nb03: u64::try_from(src0.nb[1]).map_err(|_| "mul_mm nb03 exceeds u64".to_string())?
-                * ne01 as u64,
+            nb02: u64::try_from(src0.nb[2]).map_err(|_| "mul_mm nb02 exceeds u64".to_string())?,
+            nb03: u64::try_from(src0.nb[3]).map_err(|_| "mul_mm nb03 exceeds u64".to_string())?,
             ne12,
             nb10: u64::try_from(src1.nb[0]).map_err(|_| "mul_mm nb10 exceeds u64".to_string())?,
             nb11: u64::try_from(src1.nb[1]).map_err(|_| "mul_mm nb11 exceeds u64".to_string())?,
-            nb12: u64::try_from(src1.nb[1]).map_err(|_| "mul_mm nb12 exceeds u64".to_string())?
-                * ne1 as u64,
-            nb13: u64::try_from(src1.nb[1]).map_err(|_| "mul_mm nb13 exceeds u64".to_string())?
-                * ne1 as u64,
+            nb12: u64::try_from(src1.nb[2]).map_err(|_| "mul_mm nb12 exceeds u64".to_string())?,
+            nb13: u64::try_from(src1.nb[3]).map_err(|_| "mul_mm nb13 exceeds u64".to_string())?,
             ne0,
             ne1,
-            r2: 1,
-            r3: 1,
+            r2,
+            r3,
         };
         return runtime.dispatch_compute(
             &stage.pipeline,
@@ -1822,7 +2687,7 @@ fn dispatch_mul_mat(
             MetalSize {
                 width: ((ne1 + 31) / 32) as u64,
                 height: ((ne01 + 63) / 64) as u64,
-                depth: ne12 as u64,
+                depth: (ne12 * ne13) as u64,
             },
             MetalSize {
                 width: 128,
@@ -1839,7 +2704,7 @@ fn dispatch_mul_mat(
         let ne11 = i32_dim(src1, 1)?;
         let ne0 = i32_dim(tensor, 0)?;
         let ne1 = i32_dim(tensor, 1)?;
-        let nsg = constant_i16(&stage.descriptor.constants, 601)? as i32;
+        let nsg = constant_i16(&stage.descriptor.constants, 600)? as i32;
         let nxpsg = stage
             .descriptor
             .constants
@@ -1859,38 +2724,35 @@ fn dispatch_mul_mat(
                 }
             });
         let r1ptg = parse_trailing_i32(base, "_r1_")?;
-        let r0ptg = nxpsg * nsg;
+        let nypsg = 32 / nxpsg;
+        let r0ptg = nypsg * nsg;
         let args = KArgsMulMvExt {
             ne00,
             ne01,
-            ne02: 1,
+            ne02,
             nb00: u64::try_from(src0.nb[0])
                 .map_err(|_| "mul_mv_ext nb00 exceeds u64".to_string())?,
             nb01: u64::try_from(src0.nb[1])
                 .map_err(|_| "mul_mv_ext nb01 exceeds u64".to_string())?,
-            nb02: u64::try_from(src0.nb[1])
-                .map_err(|_| "mul_mv_ext nb02 exceeds u64".to_string())?
-                * ne01 as u64,
-            nb03: u64::try_from(src0.nb[1])
-                .map_err(|_| "mul_mv_ext nb03 exceeds u64".to_string())?
-                * ne01 as u64,
+            nb02: u64::try_from(src0.nb[2])
+                .map_err(|_| "mul_mv_ext nb02 exceeds u64".to_string())?,
+            nb03: u64::try_from(src0.nb[3])
+                .map_err(|_| "mul_mv_ext nb03 exceeds u64".to_string())?,
             ne10,
             ne11,
-            ne12: 1,
+            ne12,
             nb10: u64::try_from(src1.nb[0])
                 .map_err(|_| "mul_mv_ext nb10 exceeds u64".to_string())?,
             nb11: u64::try_from(src1.nb[1])
                 .map_err(|_| "mul_mv_ext nb11 exceeds u64".to_string())?,
-            nb12: u64::try_from(src1.nb[1])
-                .map_err(|_| "mul_mv_ext nb12 exceeds u64".to_string())?
-                * ne11 as u64,
-            nb13: u64::try_from(src1.nb[1])
-                .map_err(|_| "mul_mv_ext nb13 exceeds u64".to_string())?
-                * ne11 as u64,
+            nb12: u64::try_from(src1.nb[2])
+                .map_err(|_| "mul_mv_ext nb12 exceeds u64".to_string())?,
+            nb13: u64::try_from(src1.nb[3])
+                .map_err(|_| "mul_mv_ext nb13 exceeds u64".to_string())?,
             ne0,
             ne1,
-            r2: 1,
-            r3: 1,
+            r2,
+            r3,
         };
         return runtime.dispatch_compute(
             &stage.pipeline,
@@ -1904,7 +2766,7 @@ fn dispatch_mul_mat(
             MetalSize {
                 width: ((ne01 + r0ptg - 1) / r0ptg) as u64,
                 height: ((ne11 + r1ptg - 1) / r1ptg) as u64,
-                depth: 1,
+                depth: (ne12 * ne13) as u64,
             },
             MetalSize {
                 width: 32,
@@ -1924,27 +2786,23 @@ fn dispatch_mul_mat(
         let args = KArgsMulMv {
             ne00,
             ne01,
-            ne02: 1,
+            ne02,
             nb00: u64::try_from(src0.nb[0]).map_err(|_| "mul_mv nb00 exceeds u64".to_string())?,
             nb01: u64::try_from(src0.nb[1]).map_err(|_| "mul_mv nb01 exceeds u64".to_string())?,
-            nb02: u64::try_from(src0.nb[1]).map_err(|_| "mul_mv nb02 exceeds u64".to_string())?
-                * ne01 as u64,
-            nb03: u64::try_from(src0.nb[1]).map_err(|_| "mul_mv nb03 exceeds u64".to_string())?
-                * ne01 as u64,
+            nb02: u64::try_from(src0.nb[2]).map_err(|_| "mul_mv nb02 exceeds u64".to_string())?,
+            nb03: u64::try_from(src0.nb[3]).map_err(|_| "mul_mv nb03 exceeds u64".to_string())?,
             ne10,
             ne11,
-            ne12: 1,
+            ne12,
             nb10: u64::try_from(src1.nb[0]).map_err(|_| "mul_mv nb10 exceeds u64".to_string())?,
             nb11: u64::try_from(src1.nb[1]).map_err(|_| "mul_mv nb11 exceeds u64".to_string())?,
-            nb12: u64::try_from(src1.nb[1]).map_err(|_| "mul_mv nb12 exceeds u64".to_string())?
-                * ne11 as u64,
-            nb13: u64::try_from(src1.nb[1]).map_err(|_| "mul_mv nb13 exceeds u64".to_string())?
-                * ne11 as u64,
+            nb12: u64::try_from(src1.nb[2]).map_err(|_| "mul_mv nb12 exceeds u64".to_string())?,
+            nb13: u64::try_from(src1.nb[3]).map_err(|_| "mul_mv nb13 exceeds u64".to_string())?,
             ne0,
             ne1,
             nr0: stage.pipeline.nr0,
-            r2: 1,
-            r3: 1,
+            r2,
+            r3,
         };
 
         let scalar_like = matches!(
@@ -1976,7 +2834,7 @@ fn dispatch_mul_mat(
             MetalSize {
                 width: tg_x as u64,
                 height: tg_y as u64,
-                depth: 1,
+                depth: (ne12 * ne13) as u64,
             },
             MetalSize {
                 width: 32,
@@ -2843,6 +3701,7 @@ fn dispatch_flash_attn_ext(
                 depth: 1,
             },
         )?;
+        runtime.memory_barrier_buffers()?;
     }
 
     let args = KArgsFlashAttnExtVec {
@@ -2909,6 +3768,7 @@ fn dispatch_flash_attn_ext(
             depth: 1,
         },
     )?;
+    runtime.memory_barrier_buffers()?;
 
     let args_reduce = KArgsFlashAttnExtVecReduce {
         nrows: i32::try_from(
@@ -3495,9 +4355,11 @@ fn bytes_of<T>(value: &T) -> &[u8] {
 mod tests {
     use super::*;
     use crate::context::Context;
-    use crate::core::InitParams;
+    use crate::core::{InitParams, SortOrder};
+    use crate::f16_to_f32;
+    use crate::f32_to_f16;
     use crate::graph::Graph;
-    use crate::op::Op;
+    use crate::op::{GluOp, Op, UnaryOp};
     use crate::tensor::{ggml_row_size_for_type, BufferUsage, TensorType};
 
     #[test]
@@ -3590,6 +4452,44 @@ mod tests {
         let src_offset = prepared.bindings.get(&src).unwrap().offset_bytes;
         let view_offset = prepared.bindings.get(&view).unwrap().offset_bytes;
         assert_eq!(view_offset, src_offset + 32);
+    }
+
+    #[test]
+    fn prepare_graph_plans_unallocated_tensors_after_resident_region() {
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let resident = ctx
+            .new_tensor_2d(TensorType::F32, 16, 8, BufferUsage::Weights)
+            .unwrap();
+        let resident_used_mem = ctx.used_mem();
+
+        ctx.set_no_alloc(true);
+
+        let input = ctx
+            .new_tensor_2d(TensorType::F32, 16, 4, BufferUsage::Activations)
+            .unwrap();
+        let out = ctx
+            .mul_mat(resident, input, BufferUsage::Activations)
+            .unwrap();
+
+        assert!(ctx.tensor(input).unwrap().data_offset.is_none());
+        assert!(ctx.tensor(out).unwrap().data_offset.is_none());
+        assert_eq!(ctx.used_mem(), resident_used_mem);
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, out).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, MetalDeviceFeatures::default()).unwrap();
+        let input_binding = prepared.bindings.get(&input).unwrap();
+        let out_binding = prepared.bindings.get(&out).unwrap();
+
+        assert!(input_binding.offset_bytes >= ggml_pad(resident_used_mem, GGML_MEM_ALIGN));
+        assert!(out_binding.offset_bytes > input_binding.offset_bytes);
+        assert!(prepared.main_buffer_size > resident_used_mem);
     }
 
     #[test]
@@ -3953,6 +4853,415 @@ mod tests {
     }
 
     #[test]
+    fn executes_rope_multi_on_interleaved_query_view_matches_contiguous_equivalent() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 8 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let d = 128_i64;
+        let n_head = 8_i64;
+        let n_tokens = 2_i64;
+        let qg_full = ctx
+            .new_tensor_2d(
+                TensorType::F32,
+                2 * d * n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let q_cont = ctx
+            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .unwrap();
+        let positions = ctx
+            .new_tensor_1d(TensorType::I32, 4 * n_tokens, BufferUsage::Activations)
+            .unwrap();
+        let q_interleaved = ctx
+            .view_3d(
+                qg_full,
+                d,
+                n_head,
+                n_tokens,
+                ggml_row_size_for_type(TensorType::F32, 2 * d).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, 2 * d * n_head).unwrap(),
+                0,
+            )
+            .unwrap();
+        let rope_interleaved = ctx
+            .rope_multi(
+                q_interleaved,
+                positions,
+                None,
+                32,
+                [11, 11, 10, 0],
+                crate::GGML_ROPE_TYPE_IMROPE,
+                262_144,
+                1_000_000.0,
+                1.0,
+                0.0,
+                1.0,
+                32.0,
+                1.0,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let rope_interleaved_dense = ctx.cont(rope_interleaved).unwrap();
+        let rope_cont = ctx
+            .rope_multi(
+                q_cont,
+                positions,
+                None,
+                32,
+                [11, 11, 10, 0],
+                crate::GGML_ROPE_TYPE_IMROPE,
+                262_144,
+                1_000_000.0,
+                1.0,
+                0.0,
+                1.0,
+                32.0,
+                1.0,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let rope_cont_dense = ctx.cont(rope_cont).unwrap();
+
+        let q_values = patterned_f32s((d * n_head * n_tokens) as usize, -0.08, 0.003);
+        let gate_values = patterned_f32s((d * n_head * n_tokens) as usize, 0.17, -0.002);
+        let qg_values = interleave_query_gate_values(
+            &q_values,
+            &gate_values,
+            d as usize,
+            n_head as usize,
+            n_tokens as usize,
+        );
+        ctx.write_tensor_data(qg_full, &f32s_to_bytes(&qg_values))
+            .unwrap();
+        ctx.write_tensor_data(q_cont, &f32s_to_bytes(&q_values))
+            .unwrap();
+        ctx.write_tensor_data(positions, &i32s_to_bytes(&[0, 10, 20, 30, 1, 11, 21, 31]))
+            .unwrap();
+
+        let mut graph = Graph::new();
+        graph
+            .build_forward_expand(&ctx, rope_interleaved_dense)
+            .unwrap();
+        graph.build_forward_expand(&ctx, rope_cont_dense).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let execution = session
+            .execute(&ctx, &[], &[rope_interleaved_dense, rope_cont_dense])
+            .unwrap();
+        let interleaved_values =
+            bytes_to_f32s(execution.outputs.get(&rope_interleaved_dense).unwrap());
+        let cont_values = bytes_to_f32s(execution.outputs.get(&rope_cont_dense).unwrap());
+
+        assert_eq!(interleaved_values.len(), cont_values.len());
+        for (a, e) in interleaved_values.iter().zip(cont_values.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-4,
+                "interleaved rope mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_cont_on_interleaved_query_view_matches_contiguous_equivalent() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 4 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let d = 128_i64;
+        let n_head = 8_i64;
+        let n_tokens = 2_i64;
+        let qg_full = ctx
+            .new_tensor_2d(
+                TensorType::F32,
+                2 * d * n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let q_cont = ctx
+            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .unwrap();
+        let q_interleaved = ctx
+            .view_3d(
+                qg_full,
+                d,
+                n_head,
+                n_tokens,
+                ggml_row_size_for_type(TensorType::F32, 2 * d).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, 2 * d * n_head).unwrap(),
+                0,
+            )
+            .unwrap();
+        let q_interleaved_dense = ctx.cont(q_interleaved).unwrap();
+
+        let q_values = patterned_f32s((d * n_head * n_tokens) as usize, -0.08, 0.003);
+        let gate_values = patterned_f32s((d * n_head * n_tokens) as usize, 0.17, -0.002);
+        let qg_values = interleave_query_gate_values(
+            &q_values,
+            &gate_values,
+            d as usize,
+            n_head as usize,
+            n_tokens as usize,
+        );
+        ctx.write_tensor_data(qg_full, &f32s_to_bytes(&qg_values))
+            .unwrap();
+        ctx.write_tensor_data(q_cont, &f32s_to_bytes(&q_values))
+            .unwrap();
+
+        let mut graph = Graph::new();
+        graph
+            .build_forward_expand(&ctx, q_interleaved_dense)
+            .unwrap();
+        graph.build_forward_expand(&ctx, q_cont).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let execution = session.execute(&ctx, &[], &[q_interleaved_dense, q_cont]).unwrap();
+        let interleaved_values = bytes_to_f32s(execution.outputs.get(&q_interleaved_dense).unwrap());
+        let cont_values = bytes_to_f32s(execution.outputs.get(&q_cont).unwrap());
+
+        assert_eq!(interleaved_values.len(), cont_values.len());
+        for (a, e) in interleaved_values.iter().zip(cont_values.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-6,
+                "interleaved cont mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_flash_attn_vec_on_interleaved_query_rope_matches_contiguous_equivalent() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 16 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let d = 128_i64;
+        let n_head = 8_i64;
+        let n_kv_head = 2_i64;
+        let n_tokens = 2_i64;
+        let qg_full = ctx
+            .new_tensor_2d(
+                TensorType::F32,
+                2 * d * n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let q_cont = ctx
+            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .unwrap();
+        let k_base = ctx
+            .new_tensor_3d(
+                TensorType::F32,
+                d,
+                n_kv_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let v_base = ctx
+            .new_tensor_3d(
+                TensorType::F32,
+                d,
+                n_kv_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let positions = ctx
+            .new_tensor_1d(TensorType::I32, 4 * n_tokens, BufferUsage::Activations)
+            .unwrap();
+        let mask = ctx
+            .new_tensor_4d(
+                TensorType::F16,
+                n_tokens,
+                n_tokens,
+                1,
+                1,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let q_interleaved = ctx
+            .view_3d(
+                qg_full,
+                d,
+                n_head,
+                n_tokens,
+                ggml_row_size_for_type(TensorType::F32, 2 * d).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, 2 * d * n_head).unwrap(),
+                0,
+            )
+            .unwrap();
+        let q_interleaved_rope = ctx
+            .rope_multi(
+                q_interleaved,
+                positions,
+                None,
+                32,
+                [11, 11, 10, 0],
+                crate::GGML_ROPE_TYPE_IMROPE,
+                262_144,
+                1_000_000.0,
+                1.0,
+                0.0,
+                1.0,
+                32.0,
+                1.0,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let q_cont_rope = ctx
+            .rope_multi(
+                q_cont,
+                positions,
+                None,
+                32,
+                [11, 11, 10, 0],
+                crate::GGML_ROPE_TYPE_IMROPE,
+                262_144,
+                1_000_000.0,
+                1.0,
+                0.0,
+                1.0,
+                32.0,
+                1.0,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let k_rope = ctx
+            .rope_multi(
+                k_base,
+                positions,
+                None,
+                32,
+                [11, 11, 10, 0],
+                crate::GGML_ROPE_TYPE_IMROPE,
+                262_144,
+                1_000_000.0,
+                1.0,
+                0.0,
+                1.0,
+                32.0,
+                1.0,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let q_interleaved_attn = build_flash_attn_like_mha(
+            &mut ctx,
+            q_interleaved_rope,
+            k_rope,
+            v_base,
+            Some(mask),
+        )
+        .unwrap();
+        let q_cont_attn =
+            build_flash_attn_like_mha(&mut ctx, q_cont_rope, k_rope, v_base, Some(mask)).unwrap();
+
+        let q_values = patterned_f32s((d * n_head * n_tokens) as usize, -0.12, 0.0025);
+        let gate_values = patterned_f32s((d * n_head * n_tokens) as usize, 0.09, -0.0015);
+        let qg_values = interleave_query_gate_values(
+            &q_values,
+            &gate_values,
+            d as usize,
+            n_head as usize,
+            n_tokens as usize,
+        );
+        let k_values = patterned_f32s((d * n_kv_head * n_tokens) as usize, 0.15, -0.006);
+        let v_values = patterned_f32s((d * n_kv_head * n_tokens) as usize, -0.05, 0.008);
+        let neg_inf = f32_to_f16(f32::NEG_INFINITY);
+        let zero = f32_to_f16(0.0);
+        let mask_values = [zero, neg_inf, zero, zero];
+        let mask_bytes = mask_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+
+        ctx.write_tensor_data(qg_full, &f32s_to_bytes(&qg_values))
+            .unwrap();
+        ctx.write_tensor_data(q_cont, &f32s_to_bytes(&q_values))
+            .unwrap();
+        ctx.write_tensor_data(k_base, &f32s_to_bytes(&k_values))
+            .unwrap();
+        ctx.write_tensor_data(v_base, &f32s_to_bytes(&v_values))
+            .unwrap();
+        ctx.write_tensor_data(positions, &i32s_to_bytes(&[0, 10, 20, 30, 1, 11, 21, 31]))
+            .unwrap();
+        ctx.write_tensor_data(mask, &mask_bytes).unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, q_interleaved_attn).unwrap();
+        graph.build_forward_expand(&ctx, q_cont_attn).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let execution = session
+            .execute(&ctx, &[], &[q_interleaved_attn, q_cont_attn])
+            .unwrap();
+        let interleaved_values = bytes_to_f32s(execution.outputs.get(&q_interleaved_attn).unwrap());
+        let cont_values = bytes_to_f32s(execution.outputs.get(&q_cont_attn).unwrap());
+
+        assert_eq!(interleaved_values.len(), cont_values.len());
+        for (a, e) in interleaved_values.iter().zip(cont_values.iter()) {
+            assert!(
+                (a - e).abs() < 2.0e-3,
+                "interleaved flash_attn mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
     fn executes_rms_norm_mul_single_token_consistently_on_metal_when_available() {
         let runtime = match MetalRuntime::new() {
             Ok(runtime) => runtime,
@@ -4087,6 +5396,1514 @@ mod tests {
     }
 
     #[test]
+    fn executes_rms_norm_mul_on_interleaved_query_view_single_token_consistently() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let d = 128_i64;
+        let n_head = 8_i64;
+        let n_tokens = 2_i64;
+        let eps = 1.0e-6f32;
+        let token_width = (d * n_head) as usize;
+
+        let mut full_ctx = Context::new(InitParams {
+            mem_size: 8 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let qg_full = full_ctx
+            .new_tensor_2d(
+                TensorType::F32,
+                2 * d * n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let q_cont = full_ctx
+            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .unwrap();
+        let weight = full_ctx
+            .new_tensor_1d(TensorType::F32, d, BufferUsage::Weights)
+            .unwrap();
+        let q_interleaved = full_ctx
+            .view_3d(
+                qg_full,
+                d,
+                n_head,
+                n_tokens,
+                ggml_row_size_for_type(TensorType::F32, 2 * d).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, 2 * d * n_head).unwrap(),
+                0,
+            )
+            .unwrap();
+        let interleaved_norm = full_ctx
+            .rms_norm_eps(q_interleaved, eps, BufferUsage::Activations)
+            .unwrap();
+        let interleaved_scaled = full_ctx
+            .binary_like_a(Op::Mul, interleaved_norm, weight, BufferUsage::Activations)
+            .unwrap();
+        let cont_norm = full_ctx
+            .rms_norm_eps(q_cont, eps, BufferUsage::Activations)
+            .unwrap();
+        let cont_scaled = full_ctx
+            .binary_like_a(Op::Mul, cont_norm, weight, BufferUsage::Activations)
+            .unwrap();
+
+        let q_values = patterned_f32s((d * n_head * n_tokens) as usize, -0.08, 0.003);
+        let gate_values = patterned_f32s((d * n_head * n_tokens) as usize, 0.17, -0.002);
+        let qg_values = interleave_query_gate_values(
+            &q_values,
+            &gate_values,
+            d as usize,
+            n_head as usize,
+            n_tokens as usize,
+        );
+        let weight_values = patterned_f32s(d as usize, 0.5, -0.001);
+        full_ctx
+            .write_tensor_data(qg_full, &f32s_to_bytes(&qg_values))
+            .unwrap();
+        full_ctx
+            .write_tensor_data(q_cont, &f32s_to_bytes(&q_values))
+            .unwrap();
+        full_ctx
+            .write_tensor_data(weight, &f32s_to_bytes(&weight_values))
+            .unwrap();
+
+        let mut full_graph = Graph::new();
+        full_graph
+            .build_forward_expand(&full_ctx, interleaved_norm)
+            .unwrap();
+        full_graph.build_forward_expand(&full_ctx, cont_norm).unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, interleaved_scaled)
+            .unwrap();
+        full_graph.build_forward_expand(&full_ctx, cont_scaled).unwrap();
+
+        let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
+        let full_session = MetalGraphSession::from_runtime(
+            runtime,
+            &full_ctx,
+            &full_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let full_execution = full_session
+            .execute(
+                &full_ctx,
+                &[],
+                &[interleaved_norm, cont_norm, interleaved_scaled, cont_scaled],
+            )
+            .unwrap();
+        let full_interleaved_norm =
+            bytes_to_f32s(full_execution.outputs.get(&interleaved_norm).unwrap());
+        let full_cont_norm = bytes_to_f32s(full_execution.outputs.get(&cont_norm).unwrap());
+        let full_interleaved =
+            bytes_to_f32s(full_execution.outputs.get(&interleaved_scaled).unwrap());
+        let full_cont = bytes_to_f32s(full_execution.outputs.get(&cont_scaled).unwrap());
+
+        assert_eq!(full_interleaved_norm.len(), full_cont_norm.len());
+        for (a, e) in full_interleaved_norm.iter().zip(full_cont_norm.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "full interleaved rms_norm mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+        assert_eq!(full_interleaved.len(), full_cont.len());
+        for (a, e) in full_interleaved.iter().zip(full_cont.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "full interleaved rms_norm_mul mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+        let full_last_token = full_interleaved[full_interleaved.len() - token_width..].to_vec();
+
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let mut step_ctx = Context::new(InitParams {
+            mem_size: 4 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let qg_step = step_ctx
+            .new_tensor_2d(TensorType::F32, 2 * d * n_head, 1, BufferUsage::Activations)
+            .unwrap();
+        let q_cont_step = step_ctx
+            .new_tensor_3d(TensorType::F32, d, n_head, 1, BufferUsage::Activations)
+            .unwrap();
+        let weight_step = step_ctx
+            .new_tensor_1d(TensorType::F32, d, BufferUsage::Weights)
+            .unwrap();
+        let q_interleaved_step = step_ctx
+            .view_3d(
+                qg_step,
+                d,
+                n_head,
+                1,
+                ggml_row_size_for_type(TensorType::F32, 2 * d).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, 2 * d * n_head).unwrap(),
+                0,
+            )
+            .unwrap();
+        let interleaved_norm_step = step_ctx
+            .rms_norm_eps(q_interleaved_step, eps, BufferUsage::Activations)
+            .unwrap();
+        let interleaved_scaled_step = step_ctx
+            .binary_like_a(Op::Mul, interleaved_norm_step, weight_step, BufferUsage::Activations)
+            .unwrap();
+        let cont_norm_step = step_ctx
+            .rms_norm_eps(q_cont_step, eps, BufferUsage::Activations)
+            .unwrap();
+        let cont_scaled_step = step_ctx
+            .binary_like_a(Op::Mul, cont_norm_step, weight_step, BufferUsage::Activations)
+            .unwrap();
+
+        let q_step_values = {
+            let mut values = Vec::with_capacity(token_width);
+            for head in 0..(n_head as usize) {
+                let base_offset = token_width + head * (d as usize);
+                values.extend_from_slice(&q_values[base_offset..base_offset + d as usize]);
+            }
+            values
+        };
+        let gate_step_values = {
+            let mut values = Vec::with_capacity(token_width);
+            for head in 0..(n_head as usize) {
+                let base_offset = token_width + head * (d as usize);
+                values.extend_from_slice(&gate_values[base_offset..base_offset + d as usize]);
+            }
+            values
+        };
+        let qg_step_values = interleave_query_gate_values(
+            &q_step_values,
+            &gate_step_values,
+            d as usize,
+            n_head as usize,
+            1,
+        );
+        step_ctx
+            .write_tensor_data(qg_step, &f32s_to_bytes(&qg_step_values))
+            .unwrap();
+        step_ctx
+            .write_tensor_data(q_cont_step, &f32s_to_bytes(&q_step_values))
+            .unwrap();
+        step_ctx
+            .write_tensor_data(weight_step, &f32s_to_bytes(&weight_values))
+            .unwrap();
+
+        let mut step_graph = Graph::new();
+        step_graph
+            .build_forward_expand(&step_ctx, interleaved_norm_step)
+            .unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, cont_norm_step)
+            .unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, interleaved_scaled_step)
+            .unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, cont_scaled_step)
+            .unwrap();
+
+        let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
+        let step_session = MetalGraphSession::from_runtime(
+            runtime,
+            &step_ctx,
+            &step_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let step_execution = step_session
+            .execute(
+                &step_ctx,
+                &[],
+                &[
+                    interleaved_norm_step,
+                    cont_norm_step,
+                    interleaved_scaled_step,
+                    cont_scaled_step,
+                ],
+            )
+            .unwrap();
+        let step_interleaved_norm =
+            bytes_to_f32s(step_execution.outputs.get(&interleaved_norm_step).unwrap());
+        let step_cont_norm = bytes_to_f32s(step_execution.outputs.get(&cont_norm_step).unwrap());
+        let step_interleaved =
+            bytes_to_f32s(step_execution.outputs.get(&interleaved_scaled_step).unwrap());
+        let step_cont = bytes_to_f32s(step_execution.outputs.get(&cont_scaled_step).unwrap());
+
+        assert_eq!(step_interleaved_norm.len(), step_cont_norm.len());
+        for (a, e) in step_interleaved_norm.iter().zip(step_cont_norm.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "step interleaved rms_norm mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+        assert_eq!(step_interleaved.len(), step_cont.len());
+        assert_eq!(step_interleaved.len(), full_last_token.len());
+        for (a, e) in step_interleaved.iter().zip(step_cont.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "step interleaved rms_norm_mul mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+        for (a, e) in step_interleaved.iter().zip(full_last_token.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "step token rms_norm_mul mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_ssm_conv_multi_token_consistently_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let d_conv = 4_i64;
+        let d_inner = 4096_i64;
+        let n_tokens = 2_i64;
+        let n_seqs = 1_i64;
+        let src_tokens = d_conv - 1 + n_tokens;
+
+        let mut full_ctx = Context::new(InitParams {
+            mem_size: 32 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let src_full = full_ctx
+            .new_tensor_3d(
+                TensorType::F32,
+                src_tokens,
+                d_inner,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let kernel = full_ctx
+            .new_tensor_2d(TensorType::F32, d_conv, d_inner, BufferUsage::Weights)
+            .unwrap();
+        let conv_full = full_ctx
+            .ssm_conv(src_full, kernel, BufferUsage::Activations)
+            .unwrap();
+        let silu_full = full_ctx
+            .unary(conv_full, UnaryOp::Silu, BufferUsage::Activations)
+            .unwrap();
+
+        let src_full_values = patterned_f32s((src_tokens * d_inner * n_seqs) as usize, -0.11, 0.0007);
+        let kernel_values = patterned_f32s((d_conv * d_inner) as usize, 0.09, -0.0005);
+        full_ctx
+            .write_tensor_data(src_full, &f32s_to_bytes(&src_full_values))
+            .unwrap();
+        full_ctx
+            .write_tensor_data(kernel, &f32s_to_bytes(&kernel_values))
+            .unwrap();
+
+        let mut full_graph = Graph::new();
+        full_graph.build_forward_expand(&full_ctx, conv_full).unwrap();
+        full_graph.build_forward_expand(&full_ctx, silu_full).unwrap();
+
+        let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
+        let full_session = MetalGraphSession::from_runtime(
+            runtime,
+            &full_ctx,
+            &full_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let full_execution = full_session
+            .execute(&full_ctx, &[], &[conv_full, silu_full])
+            .unwrap();
+        let full_conv_values = bytes_to_f32s(full_execution.outputs.get(&conv_full).unwrap());
+        let full_silu_values = bytes_to_f32s(full_execution.outputs.get(&silu_full).unwrap());
+
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let mut step_ctx = Context::new(InitParams {
+            mem_size: 32 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let src_step = step_ctx
+            .new_tensor_3d(
+                TensorType::F32,
+                d_conv,
+                d_inner,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let kernel_step = step_ctx
+            .new_tensor_2d(TensorType::F32, d_conv, d_inner, BufferUsage::Weights)
+            .unwrap();
+        let conv_step = step_ctx
+            .ssm_conv(src_step, kernel_step, BufferUsage::Activations)
+            .unwrap();
+        let silu_step = step_ctx
+            .unary(conv_step, UnaryOp::Silu, BufferUsage::Activations)
+            .unwrap();
+        step_ctx
+            .write_tensor_data(kernel_step, &f32s_to_bytes(&kernel_values))
+            .unwrap();
+
+        let mut step_graph = Graph::new();
+        step_graph.build_forward_expand(&step_ctx, conv_step).unwrap();
+        step_graph.build_forward_expand(&step_ctx, silu_step).unwrap();
+
+        let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
+        let step_session = MetalGraphSession::from_runtime(
+            runtime,
+            &step_ctx,
+            &step_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+
+        let step_token_width = d_inner as usize;
+        let src_row_width = src_tokens as usize;
+        let mut step_conv_values = Vec::with_capacity(full_conv_values.len());
+        let mut step_silu_values = Vec::with_capacity(full_silu_values.len());
+        for token in 0..(n_tokens as usize) {
+            let mut src_step_values = Vec::with_capacity((d_conv * d_inner * n_seqs) as usize);
+            for seq in 0..(n_seqs as usize) {
+                let seq_base = seq * (src_tokens as usize) * (d_inner as usize);
+                for row in 0..(d_inner as usize) {
+                    let row_base = seq_base + row * src_row_width;
+                    src_step_values
+                        .extend_from_slice(&src_full_values[row_base + token..row_base + token + d_conv as usize]);
+                }
+            }
+            let src_step_bytes = f32s_to_bytes(&src_step_values);
+            let step_execution = step_session
+                .execute(
+                    &step_ctx,
+                    &[MetalGraphTensorWrite {
+                        tensor_id: src_step,
+                        bytes: &src_step_bytes,
+                    }],
+                    &[conv_step, silu_step],
+                )
+                .unwrap();
+            let conv_values = bytes_to_f32s(step_execution.outputs.get(&conv_step).unwrap());
+            let silu_values = bytes_to_f32s(step_execution.outputs.get(&silu_step).unwrap());
+            assert_eq!(conv_values.len(), step_token_width);
+            assert_eq!(silu_values.len(), step_token_width);
+            step_conv_values.extend_from_slice(&conv_values);
+            step_silu_values.extend_from_slice(&silu_values);
+        }
+
+        assert_eq!(full_conv_values.len(), step_conv_values.len());
+        for (a, e) in full_conv_values.iter().zip(step_conv_values.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "ssm_conv multi-token mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+
+        assert_eq!(full_silu_values.len(), step_silu_values.len());
+        for (a, e) in full_silu_values.iter().zip(step_silu_values.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "ssm_conv multi-token silu mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_concat_with_transposed_source_consistently_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let prefix_rows = 3_i64;
+        let qkv_dim = 512_i64;
+        let n_tokens = 2_i64;
+        let n_seqs = 1_i64;
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 8 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let conv_states = ctx
+            .new_tensor_3d(
+                TensorType::F32,
+                prefix_rows,
+                qkv_dim,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let qkv = ctx
+            .new_tensor_3d(
+                TensorType::F32,
+                qkv_dim,
+                n_tokens,
+                n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let qkv_t = ctx.transpose(qkv).unwrap();
+        let qkv_flat = ctx
+            .cont_2d(qkv, qkv_dim * n_tokens, n_seqs)
+            .unwrap();
+        let conv_input = ctx
+            .concat(conv_states, qkv_t, 0, BufferUsage::Activations)
+            .unwrap();
+        let conv_input_flat = ctx
+            .cont_2d(conv_input, (prefix_rows + n_tokens) * qkv_dim, n_seqs)
+            .unwrap();
+
+        let conv_states_values = vec![0.0f32; (prefix_rows * qkv_dim * n_seqs) as usize];
+        let qkv_values = patterned_f32s((qkv_dim * n_tokens * n_seqs) as usize, -0.17, 0.0009);
+        ctx.write_tensor_data(conv_states, &f32s_to_bytes(&conv_states_values))
+            .unwrap();
+        ctx.write_tensor_data(qkv, &f32s_to_bytes(&qkv_values))
+            .unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, qkv_flat).unwrap();
+        graph.build_forward_expand(&ctx, conv_input_flat).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+
+        let execution = session
+            .execute(&ctx, &[], &[qkv_flat, conv_input_flat])
+            .unwrap();
+        let actual_qkv = bytes_to_f32s(execution.outputs.get(&qkv_flat).unwrap());
+        let actual_conv_input = bytes_to_f32s(execution.outputs.get(&conv_input_flat).unwrap());
+
+        let expected_qkv = qkv_values.clone();
+        let mut expected_conv_input =
+            Vec::with_capacity(((prefix_rows + n_tokens) * qkv_dim * n_seqs) as usize);
+        for hidden_index in 0..(qkv_dim as usize) {
+            for row in 0..(prefix_rows as usize) {
+                let _ = row;
+                expected_conv_input.push(0.0);
+            }
+            for token_index in 0..(n_tokens as usize) {
+                expected_conv_input.push(qkv_values[token_index * qkv_dim as usize + hidden_index]);
+            }
+        }
+
+        assert_eq!(actual_qkv.len(), expected_qkv.len());
+        for (a, e) in actual_qkv.iter().zip(expected_qkv.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-6,
+                "qkv flat mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+
+        assert_eq!(actual_conv_input.len(), expected_conv_input.len());
+        for (a, e) in actual_conv_input.iter().zip(expected_conv_input.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-6,
+                "concat-transpose mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_get_rows_multi_row_consistently_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let width = 128_i64;
+        let source_rows = 6_i64;
+        let gather_rows = 2_i64;
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 8 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let src = ctx
+            .new_tensor_2d(TensorType::F32, width, source_rows, BufferUsage::Weights)
+            .unwrap();
+        let rows = ctx
+            .new_tensor_1d(TensorType::I32, gather_rows, BufferUsage::Activations)
+            .unwrap();
+        let gathered = ctx
+            .get_rows(src, rows, BufferUsage::Activations)
+            .unwrap();
+        let gathered = ctx.cont_2d(gathered, width, gather_rows).unwrap();
+
+        let src_values = patterned_f32s((width * source_rows) as usize, -0.31, 0.002);
+        let row_values = [1_i32, 4_i32];
+        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values)).unwrap();
+        ctx.write_tensor_data(rows, &i32s_to_bytes(&row_values)).unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, gathered).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let execution = session.execute(&ctx, &[], &[gathered]).unwrap();
+        let actual = bytes_to_f32s(execution.outputs.get(&gathered).unwrap());
+        let expected = cpu_get_rows_f32(&src_values, width as usize, &row_values);
+
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-6,
+                "get_rows multi-row mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_get_rows_multi_row_f16_consistently_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let width = 128_i64;
+        let source_rows = 6_i64;
+
+        let mut full_ctx = Context::new(InitParams {
+            mem_size: 16 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let src_f32 = full_ctx
+            .new_tensor_2d(TensorType::F32, width, source_rows, BufferUsage::Weights)
+            .unwrap();
+        let src = cast_tensor_to_type(&mut full_ctx, src_f32, TensorType::F16).unwrap();
+        let rows_full = full_ctx
+            .new_tensor_1d(TensorType::I32, 2, BufferUsage::Activations)
+            .unwrap();
+        let gathered_full = full_ctx
+            .get_rows(src, rows_full, BufferUsage::Activations)
+            .unwrap();
+        let gathered_full = full_ctx.cont_2d(gathered_full, width, 2).unwrap();
+
+        let src_values = patterned_f32s((width * source_rows) as usize, -0.27, 0.0017);
+        let row_values = [1_i32, 4_i32];
+        full_ctx
+            .write_tensor_data(src_f32, &f32s_to_bytes(&src_values))
+            .unwrap();
+        full_ctx
+            .write_tensor_data(rows_full, &i32s_to_bytes(&row_values))
+            .unwrap();
+
+        let mut full_graph = Graph::new();
+        full_graph.build_forward_expand(&full_ctx, gathered_full).unwrap();
+        let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
+        let full_session = MetalGraphSession::from_runtime(
+            runtime,
+            &full_ctx,
+            &full_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let full_execution = full_session.execute(&full_ctx, &[], &[gathered_full]).unwrap();
+        let full_values = bytes_to_f32s(full_execution.outputs.get(&gathered_full).unwrap());
+
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let mut step_ctx = Context::new(InitParams {
+            mem_size: 16 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let step_src_f32 = step_ctx
+            .new_tensor_2d(TensorType::F32, width, source_rows, BufferUsage::Weights)
+            .unwrap();
+        let step_src = cast_tensor_to_type(&mut step_ctx, step_src_f32, TensorType::F16).unwrap();
+        let rows_step = step_ctx
+            .new_tensor_1d(TensorType::I32, 1, BufferUsage::Activations)
+            .unwrap();
+        let gathered_step = step_ctx
+            .get_rows(step_src, rows_step, BufferUsage::Activations)
+            .unwrap();
+        let gathered_step = step_ctx.cont_2d(gathered_step, width, 1).unwrap();
+
+        step_ctx
+            .write_tensor_data(step_src_f32, &f32s_to_bytes(&src_values))
+            .unwrap();
+
+        let mut step_graph = Graph::new();
+        step_graph.build_forward_expand(&step_ctx, gathered_step).unwrap();
+        let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
+        let step_session = MetalGraphSession::from_runtime(
+            runtime,
+            &step_ctx,
+            &step_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let mut step_values = Vec::with_capacity(full_values.len());
+        for &row in &row_values {
+            let row_bytes = i32s_to_bytes(&[row]);
+            let execution = step_session
+                .execute(
+                    &step_ctx,
+                    &[MetalGraphTensorWrite {
+                        tensor_id: rows_step,
+                        bytes: &row_bytes,
+                    }],
+                    &[gathered_step],
+                )
+                .unwrap();
+            step_values.extend_from_slice(&bytes_to_f32s(
+                execution.outputs.get(&gathered_step).unwrap(),
+            ));
+        }
+
+        assert_eq!(full_values.len(), step_values.len());
+        for (a, e) in full_values.iter().zip(step_values.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "get_rows multi-row f16 mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_get_rows_multi_row_q5k_consistently_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let width = 2048_i64;
+        let source_rows = 6_i64;
+
+        let mut full_ctx = Context::new(InitParams {
+            mem_size: 16 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let src = full_ctx
+            .new_tensor_2d(TensorType::Q5K, width, source_rows, BufferUsage::Weights)
+            .unwrap();
+        let rows_full = full_ctx
+            .new_tensor_1d(TensorType::I32, 2, BufferUsage::Activations)
+            .unwrap();
+        let gathered_full_raw = full_ctx
+            .get_rows(src, rows_full, BufferUsage::Activations)
+            .unwrap();
+        let gathered_full_cont = full_ctx.cont_2d(gathered_full_raw, width, 2).unwrap();
+
+        let src_bytes = patterned_q5k_tensor_bytes(source_rows as usize, width as usize);
+        let row_values = [1_i32, 4_i32];
+        full_ctx
+            .write_tensor_data(src, &src_bytes)
+            .unwrap();
+        full_ctx
+            .write_tensor_data(rows_full, &i32s_to_bytes(&row_values))
+            .unwrap();
+
+        let mut full_graph = Graph::new();
+        full_graph
+            .build_forward_expand(&full_ctx, gathered_full_raw)
+            .unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, gathered_full_cont)
+            .unwrap();
+        let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
+        let full_session = MetalGraphSession::from_runtime(
+            runtime,
+            &full_ctx,
+            &full_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let full_src_binding = binding(full_session.compiled(), src).unwrap();
+        let full_rows_binding = binding(full_session.compiled(), rows_full).unwrap();
+        let full_src_image = full_session
+            .runtime()
+            .read_buffer_range(
+                &full_session.compiled().main_buffer,
+                full_src_binding.offset_bytes,
+                full_src_binding.size_bytes,
+            )
+            .unwrap();
+        let full_rows_image = full_session
+            .runtime()
+            .read_buffer_range(
+                &full_session.compiled().main_buffer,
+                full_rows_binding.offset_bytes,
+                full_rows_binding.size_bytes,
+            )
+            .unwrap();
+        assert_eq!(full_src_image, src_bytes);
+        assert_eq!(full_rows_image, i32s_to_bytes(&row_values));
+        let full_execution = full_session
+            .execute(&full_ctx, &[], &[gathered_full_raw, gathered_full_cont])
+            .unwrap();
+        let full_values = bytes_to_f32s(full_execution.outputs.get(&gathered_full_raw).unwrap());
+        let full_cont_values =
+            bytes_to_f32s(full_execution.outputs.get(&gathered_full_cont).unwrap());
+        let expected_full = cpu_get_rows_q5k(
+            &src_bytes,
+            width as usize,
+            source_rows as usize,
+            &row_values,
+        );
+
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let mut step_ctx = Context::new(InitParams {
+            mem_size: 16 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let step_src = step_ctx
+            .new_tensor_2d(TensorType::Q5K, width, source_rows, BufferUsage::Weights)
+            .unwrap();
+        let rows_step = step_ctx
+            .new_tensor_1d(TensorType::I32, 1, BufferUsage::Activations)
+            .unwrap();
+        let gathered_step_raw = step_ctx
+            .get_rows(step_src, rows_step, BufferUsage::Activations)
+            .unwrap();
+        let gathered_step_cont = step_ctx.cont_2d(gathered_step_raw, width, 1).unwrap();
+
+        step_ctx
+            .write_tensor_data(step_src, &src_bytes)
+            .unwrap();
+
+        let mut step_graph = Graph::new();
+        step_graph
+            .build_forward_expand(&step_ctx, gathered_step_raw)
+            .unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, gathered_step_cont)
+            .unwrap();
+        let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
+        let step_session = MetalGraphSession::from_runtime(
+            runtime,
+            &step_ctx,
+            &step_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let step_src_binding = binding(step_session.compiled(), step_src).unwrap();
+        let step_src_image = step_session
+            .runtime()
+            .read_buffer_range(
+                &step_session.compiled().main_buffer,
+                step_src_binding.offset_bytes,
+                step_src_binding.size_bytes,
+            )
+            .unwrap();
+        assert_eq!(step_src_image, src_bytes);
+        let mut step_raw_values = Vec::with_capacity(full_values.len());
+        let mut step_cont_values = Vec::with_capacity(full_values.len());
+        for &row in &row_values {
+            let row_bytes = i32s_to_bytes(&[row]);
+            let execution = step_session
+                .execute(
+                    &step_ctx,
+                    &[MetalGraphTensorWrite {
+                        tensor_id: rows_step,
+                        bytes: &row_bytes,
+                    }],
+                    &[gathered_step_raw, gathered_step_cont],
+                )
+                .unwrap();
+            step_raw_values.extend_from_slice(&bytes_to_f32s(
+                execution.outputs.get(&gathered_step_raw).unwrap(),
+            ));
+            step_cont_values.extend_from_slice(&bytes_to_f32s(
+                execution.outputs.get(&gathered_step_cont).unwrap(),
+            ));
+        }
+
+        assert_eq!(full_values.len(), expected_full.len());
+        assert_eq!(full_cont_values.len(), expected_full.len());
+        assert_eq!(step_raw_values.len(), expected_full.len());
+        assert_eq!(step_cont_values.len(), expected_full.len());
+        for (a, e) in full_values.iter().zip(expected_full.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-4,
+                "get_rows multi-row q5k full mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+        for (a, e) in full_cont_values.iter().zip(expected_full.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-4,
+                "get_rows multi-row q5k full cont mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+        for (a, e) in step_raw_values.iter().zip(expected_full.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-4,
+                "get_rows multi-row q5k step mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+        for (a, e) in step_cont_values.iter().zip(expected_full.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-4,
+                "get_rows multi-row q5k step cont mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_get_rows_3d_with_noncontiguous_topk_ids_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 22,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let width = 4_i64;
+        let source_rows = 16_i64;
+        let tokens = 2_i64;
+        let top_k = 4_i64;
+
+        let logits = ctx
+            .new_tensor_2d(TensorType::F32, source_rows, tokens, BufferUsage::Activations)
+            .unwrap();
+        let sorted = ctx.argsort(logits, BufferUsage::Activations).unwrap();
+        ctx.tensor_mut(sorted)
+            .unwrap()
+            .set_op_param_i32(0, SortOrder::Desc as i32);
+        let sorted_tensor = ctx.tensor(sorted).unwrap().clone();
+        let ids = ctx
+            .view_4d(
+                sorted,
+                top_k,
+                sorted_tensor.ne[1],
+                sorted_tensor.ne[2],
+                sorted_tensor.ne[3],
+                sorted_tensor.nb[1],
+                sorted_tensor.nb[2],
+                sorted_tensor.nb[3],
+                0,
+            )
+            .unwrap();
+
+        let src = ctx
+            .new_tensor_3d(TensorType::F32, width, source_rows, tokens, BufferUsage::Weights)
+            .unwrap();
+        let gathered = ctx
+            .get_rows(src, ids, BufferUsage::Activations)
+            .unwrap();
+
+        let logits_values = vec![
+            0.1, 0.4, 1.2, -0.3, 0.9, 0.7, -0.2, 1.1, 0.6, 0.5, 0.3, 0.2, 1.0, -0.4, 0.8, 0.0,
+            0.2, 1.3, 0.7, 0.1, -0.2, 0.5, 1.1, 0.4, 0.9, 0.8, 0.6, 0.3, 0.0, -0.1, 1.2, 1.0,
+        ];
+        let src_values = patterned_f32s((width * source_rows * tokens) as usize, -0.21, 0.031);
+        ctx.write_tensor_data(logits, &f32s_to_bytes(&logits_values))
+            .unwrap();
+        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values)).unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, gathered).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+
+        let execution = session.execute(&ctx, &[], &[gathered]).unwrap();
+        let actual = bytes_to_f32s(execution.outputs.get(&gathered).unwrap());
+        let ids_values = cpu_top_k_rows_i32(&logits_values, source_rows as usize, top_k as usize);
+        let expected = cpu_get_rows_3d_f32(
+            &src_values,
+            width as usize,
+            source_rows as usize,
+            tokens as usize,
+            &ids_values,
+            top_k as usize,
+        );
+
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-6,
+                "get_rows 3d noncontiguous ids mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_mul_mat_q5k_graph_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let width = 2048_i64;
+        let rows = 128_i64;
+        let tokens = 2_i64;
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 16 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let weights = ctx
+            .new_tensor_2d(TensorType::Q5K, width, rows, BufferUsage::Weights)
+            .unwrap();
+        let input = ctx
+            .new_tensor_2d(TensorType::F32, width, tokens, BufferUsage::Activations)
+            .unwrap();
+        let out = ctx
+            .mul_mat(weights, input, BufferUsage::Activations)
+            .unwrap();
+
+        let weight_bytes = patterned_q5k_tensor_bytes(rows as usize, width as usize);
+        let input_values = patterned_f32s((width * tokens) as usize, -0.12, 0.0008);
+        ctx.write_tensor_data(weights, &weight_bytes).unwrap();
+        ctx.write_tensor_data(input, &f32s_to_bytes(&input_values))
+            .unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, out).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+
+        let execution = session.execute(&ctx, &[], &[out]).unwrap();
+        let actual = bytes_to_f32s(execution.outputs.get(&out).unwrap());
+        let expected = cpu_mul_mat_q5k_f32(
+            &weight_bytes,
+            &input_values,
+            width as usize,
+            rows as usize,
+            tokens as usize,
+        );
+
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            let tol = 1.0e-4_f32.max(e.abs() * 2.0e-6);
+            assert!(
+                (a - e).abs() < tol,
+                "mul_mat q5k mismatch: actual={} expected={} tol={}",
+                a,
+                e,
+                tol
+            );
+        }
+    }
+
+    #[test]
+    fn executes_mul_mat_f32_graph_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let width = 2048_i64;
+        let rows = 256_i64;
+        let tokens = 2_i64;
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 16 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let weights = ctx
+            .new_tensor_2d(TensorType::F32, width, rows, BufferUsage::Weights)
+            .unwrap();
+        let input = ctx
+            .new_tensor_2d(TensorType::F32, width, tokens, BufferUsage::Activations)
+            .unwrap();
+        let out = ctx
+            .mul_mat(weights, input, BufferUsage::Activations)
+            .unwrap();
+
+        let weight_values = patterned_f32s((width * rows) as usize, -0.08, 0.00005);
+        let input_values = patterned_f32s((width * tokens) as usize, 0.12, -0.00007);
+        ctx.write_tensor_data(weights, &f32s_to_bytes(&weight_values))
+            .unwrap();
+        ctx.write_tensor_data(input, &f32s_to_bytes(&input_values))
+            .unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, out).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+
+        let execution = session.execute(&ctx, &[], &[out]).unwrap();
+        let actual = bytes_to_f32s(execution.outputs.get(&out).unwrap());
+        let expected = cpu_mul_mat_f32(
+            &weight_values,
+            &input_values,
+            width as usize,
+            rows as usize,
+            tokens as usize,
+        );
+
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            let tol = 1.0e-4_f32.max(e.abs() * 1.0e-5);
+            assert!(
+                (a - e).abs() < tol,
+                "mul_mat f32 mismatch: actual={} expected={} tol={}",
+                a,
+                e,
+                tol
+            );
+        }
+    }
+
+    #[test]
+    fn executes_mul_mat_f32_graph_with_high_variance_values_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let width = 2048_i64;
+        let rows = 256_i64;
+        let tokens = 2_i64;
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 16 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let weights = ctx
+            .new_tensor_2d(TensorType::F32, width, rows, BufferUsage::Weights)
+            .unwrap();
+        let input = ctx
+            .new_tensor_2d(TensorType::F32, width, tokens, BufferUsage::Activations)
+            .unwrap();
+        let out = ctx
+            .mul_mat(weights, input, BufferUsage::Activations)
+            .unwrap();
+
+        let weight_values =
+            hashed_f32s((width * rows) as usize, 0x3b92dc1f, 0.45, 0.03, 0.9);
+        let input_values = hashed_f32s((width * tokens) as usize, 0x91e10da5, 0.65, -0.02, 0.6);
+        ctx.write_tensor_data(weights, &f32s_to_bytes(&weight_values))
+            .unwrap();
+        ctx.write_tensor_data(input, &f32s_to_bytes(&input_values))
+            .unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, out).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+
+        let execution = session.execute(&ctx, &[], &[out]).unwrap();
+        let actual = bytes_to_f32s(execution.outputs.get(&out).unwrap());
+        let expected = cpu_mul_mat_f32(
+            &weight_values,
+            &input_values,
+            width as usize,
+            rows as usize,
+            tokens as usize,
+        );
+
+        assert_eq!(actual.len(), expected.len());
+        for (index, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+            let tol = 2.0e-5_f32.max(e.abs() * 2.5e-6);
+            let window_start = index.saturating_sub(4);
+            let window_end = usize::min(index + 20, actual.len().saturating_sub(1));
+            assert!(
+                (a - e).abs() < tol,
+                "mul_mat f32 high-variance mismatch at {}: actual={} expected={} tol={} actual_prefix={:?} expected_prefix={:?} actual_window={:?} expected_window={:?}",
+                index,
+                a,
+                e,
+                tol,
+                &actual[..usize::min(8, actual.len())],
+                &expected[..usize::min(8, expected.len())],
+                &actual[window_start..=window_end],
+                &expected[window_start..=window_end],
+            );
+        }
+    }
+
+    #[test]
+    fn executes_set_inplace_chunk_output_view_consistently_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let s_v = 32_i64;
+        let chunk_size = 16_i64;
+        let n_chunks = 1_i64;
+        let h_v = 2_i64;
+        let n_tokens = 2_i64;
+        let n_seqs = 1_i64;
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 8 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let v_base = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                s_v,
+                chunk_size,
+                n_chunks,
+                h_v * n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let o_ch = ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                s_v,
+                chunk_size,
+                1,
+                h_v * n_seqs,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let v_set = {
+            let v_tensor = ctx.tensor(v_base).unwrap().clone();
+            ctx.set_inplace(v_base, o_ch, v_tensor.nb[1], v_tensor.nb[2], v_tensor.nb[3], 0)
+                .unwrap()
+        };
+        let output = ctx
+            .view_4d(
+                v_set,
+                s_v,
+                n_tokens,
+                h_v,
+                n_seqs,
+                ggml_row_size_for_type(TensorType::F32, s_v).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, s_v * chunk_size * n_chunks).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, s_v * chunk_size * n_chunks * h_v).unwrap(),
+                0,
+            )
+            .unwrap();
+        let output = ctx.permute(output, [0, 2, 1, 3]).unwrap();
+        let output_cont = ctx.cont_2d(output, s_v * h_v, n_tokens * n_seqs).unwrap();
+
+        let v_base_values =
+            patterned_f32s((s_v * chunk_size * n_chunks * h_v * n_seqs) as usize, -0.15, 0.001);
+        let o_ch_values =
+            patterned_f32s((s_v * chunk_size * h_v * n_seqs) as usize, 0.12, -0.0007);
+        ctx.write_tensor_data(v_base, &f32s_to_bytes(&v_base_values))
+            .unwrap();
+        ctx.write_tensor_data(o_ch, &f32s_to_bytes(&o_ch_values)).unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, v_set).unwrap();
+        graph.build_forward_expand(&ctx, output_cont).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let execution = session.execute(&ctx, &[], &[v_set, output_cont]).unwrap();
+        let actual_v = bytes_to_f32s(execution.outputs.get(&v_set).unwrap());
+        let actual_output = bytes_to_f32s(execution.outputs.get(&output_cont).unwrap());
+
+        assert_eq!(actual_v.len(), o_ch_values.len());
+        for (a, e) in actual_v.iter().zip(o_ch_values.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "set_inplace chunk value mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+
+        let mut expected_output = Vec::with_capacity((s_v * h_v * n_tokens * n_seqs) as usize);
+        let chunk_width = s_v as usize;
+        let head_stride = (chunk_size * s_v) as usize;
+        let batch_stride = (h_v * chunk_size * s_v) as usize;
+        for seq in 0..(n_seqs as usize) {
+            let seq_base = seq * batch_stride;
+            for token in 0..(n_tokens as usize) {
+                for head in 0..(h_v as usize) {
+                    let head_base = seq_base + head * head_stride;
+                    let token_base = head_base + token * chunk_width;
+                    expected_output.extend_from_slice(&o_ch_values[token_base..token_base + chunk_width]);
+                }
+            }
+        }
+
+        assert_eq!(actual_output.len(), expected_output.len());
+        for (a, e) in actual_output.iter().zip(expected_output.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "set_inplace output view mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_solve_tri_graph_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let n = 64_i64;
+        let k = 64_i64;
+        let batches = 2_i64;
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 8 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let a = ctx
+            .new_tensor_4d(TensorType::F32, n, n, 1, batches, BufferUsage::Activations)
+            .unwrap();
+        let b = ctx
+            .new_tensor_4d(TensorType::F32, k, n, 1, batches, BufferUsage::Activations)
+            .unwrap();
+        let out = ctx.solve_tri(a, b, BufferUsage::Activations).unwrap();
+
+        let mut a_values = vec![0.0f32; (n * n * batches) as usize];
+        for batch in 0..(batches as usize) {
+            let batch_base = batch * (n * n) as usize;
+            for row in 0..(n as usize) {
+                for col in 0..(n as usize) {
+                    let idx = batch_base + row * n as usize + col;
+                    a_values[idx] = if col > row {
+                        0.0
+                    } else if col == row {
+                        1.0 + 0.01 * row as f32
+                    } else {
+                        0.001 * (1 + row + col) as f32
+                    };
+                }
+            }
+        }
+        let b_values = patterned_f32s((k * n * batches) as usize, -0.2, 0.0009);
+
+        ctx.write_tensor_data(a, &f32s_to_bytes(&a_values)).unwrap();
+        ctx.write_tensor_data(b, &f32s_to_bytes(&b_values)).unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, out).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let execution = session.execute(&ctx, &[], &[out]).unwrap();
+        let actual = bytes_to_f32s(execution.outputs.get(&out).unwrap());
+        let expected = cpu_solve_tri_f32(&a_values, &b_values, n as usize, k as usize, batches as usize);
+
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-4,
+                "solve_tri output mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_broadcast_mul_chunking_shapes_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let s = 64_i64;
+        let cs = 64_i64;
+        let h = 2_i64;
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 8 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let a_dim1 = ctx
+            .new_tensor_4d(TensorType::F32, cs, s, 1, h, BufferUsage::Activations)
+            .unwrap();
+        let b_dim1 = ctx
+            .new_tensor_4d(TensorType::F32, cs, 1, 1, h, BufferUsage::Activations)
+            .unwrap();
+        let out_dim1 = ctx
+            .binary_like_a(Op::Mul, a_dim1, b_dim1, BufferUsage::Activations)
+            .unwrap();
+
+        let a_dim0 = ctx
+            .new_tensor_4d(TensorType::F32, s, cs, 1, h, BufferUsage::Activations)
+            .unwrap();
+        let b_dim0 = ctx
+            .new_tensor_4d(TensorType::F32, 1, cs, 1, h, BufferUsage::Activations)
+            .unwrap();
+        let out_dim0 = ctx
+            .binary_like_a(Op::Mul, a_dim0, b_dim0, BufferUsage::Activations)
+            .unwrap();
+
+        let a_dim1_values = patterned_f32s((cs * s * h) as usize, -0.05, 0.0003);
+        let b_dim1_values = patterned_f32s((cs * h) as usize, 0.9, -0.0007);
+        let a_dim0_values = patterned_f32s((s * cs * h) as usize, 0.07, -0.0002);
+        let b_dim0_values = patterned_f32s((cs * h) as usize, -0.4, 0.0005);
+
+        ctx.write_tensor_data(a_dim1, &f32s_to_bytes(&a_dim1_values))
+            .unwrap();
+        ctx.write_tensor_data(b_dim1, &f32s_to_bytes(&b_dim1_values))
+            .unwrap();
+        ctx.write_tensor_data(a_dim0, &f32s_to_bytes(&a_dim0_values))
+            .unwrap();
+        ctx.write_tensor_data(b_dim0, &f32s_to_bytes(&b_dim0_values))
+            .unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, out_dim1).unwrap();
+        graph.build_forward_expand(&ctx, out_dim0).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let execution = session.execute(&ctx, &[], &[out_dim1, out_dim0]).unwrap();
+        let actual_dim1 = bytes_to_f32s(execution.outputs.get(&out_dim1).unwrap());
+        let actual_dim0 = bytes_to_f32s(execution.outputs.get(&out_dim0).unwrap());
+        let expected_dim1 = cpu_broadcast_mul_dim1(&a_dim1_values, &b_dim1_values, cs as usize, s as usize, h as usize);
+        let expected_dim0 = cpu_broadcast_mul_dim0(&a_dim0_values, &b_dim0_values, s as usize, cs as usize, h as usize);
+
+        assert_eq!(actual_dim1.len(), expected_dim1.len());
+        for (a, e) in actual_dim1.iter().zip(expected_dim1.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "broadcast mul dim1 mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+
+        assert_eq!(actual_dim0.len(), expected_dim0.len());
+        for (a, e) in actual_dim0.iter().zip(expected_dim0.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "broadcast mul dim0 mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
     fn executes_flash_attn_vec_graph_on_metal_when_available() {
         let runtime = match MetalRuntime::new() {
             Ok(runtime) => runtime,
@@ -4099,7 +6916,7 @@ mod tests {
             no_alloc: false,
         });
 
-        let d = 32_i64;
+        let d = 128_i64;
         let n_q = 1_i64;
         let n_kv = 3_i64;
 
@@ -4571,6 +7388,277 @@ mod tests {
     }
 
     #[test]
+    fn executes_flash_attn_vec_with_causal_mask_matches_last_token_decode() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let mut full_ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let d = 32_i64;
+        let n_q = 2_i64;
+        let n_head = 4_i64;
+        let n_kv = 2_i64;
+        let n_kv_head = 2_i64;
+
+        let q_base = full_ctx
+            .new_tensor_4d(TensorType::F32, d, n_head, n_q, 1, BufferUsage::Activations)
+            .unwrap();
+        let k_base = full_ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                d,
+                n_kv_head,
+                n_kv,
+                1,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let v_base = full_ctx
+            .new_tensor_4d(
+                TensorType::F32,
+                d,
+                n_kv_head,
+                n_kv,
+                1,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+        let mask = full_ctx
+            .new_tensor_4d(TensorType::F16, n_kv, n_q, 1, 1, BufferUsage::Activations)
+            .unwrap();
+        let q_full = full_ctx.permute(q_base, [0, 2, 1, 3]).unwrap();
+        let k_full = full_ctx.permute(k_base, [0, 2, 1, 3]).unwrap();
+        let v_full = full_ctx.permute(v_base, [0, 2, 1, 3]).unwrap();
+        let full_attn = full_ctx
+            .flash_attn_ext(
+                q_full,
+                k_full,
+                v_full,
+                Some(mask),
+                1.0 / (d as f32).sqrt(),
+                0.0,
+                0.0,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+
+        let q_base_values = patterned_f32s((d * n_q * n_head) as usize, -0.2, 0.004);
+        let k_base_values = patterned_f32s((d * n_kv * n_kv_head) as usize, 0.15, -0.006);
+        let v_base_values = patterned_f32s((d * n_kv * n_kv_head) as usize, -0.05, 0.008);
+        let neg_inf = f32_to_f16(f32::NEG_INFINITY);
+        let zero = f32_to_f16(0.0);
+        let mask_values = [zero, neg_inf, zero, zero];
+        let mask_bytes = mask_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+
+        full_ctx
+            .write_tensor_data(q_base, &f32s_to_bytes(&q_base_values))
+            .unwrap();
+        full_ctx
+            .write_tensor_data(k_base, &f32s_to_bytes(&k_base_values))
+            .unwrap();
+        full_ctx
+            .write_tensor_data(v_base, &f32s_to_bytes(&v_base_values))
+            .unwrap();
+        full_ctx.write_tensor_data(mask, &mask_bytes).unwrap();
+
+        let mut full_graph = Graph::new();
+        full_graph
+            .build_forward_expand(&full_ctx, full_attn)
+            .unwrap();
+
+        let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
+        let full_session = MetalGraphSession::from_runtime(
+            runtime,
+            &full_ctx,
+            &full_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let full_execution = full_session.execute(&full_ctx, &[], &[full_attn]).unwrap();
+        let full_values = bytes_to_f32s(full_execution.outputs.get(&full_attn).unwrap());
+        let last_token_width = (d * n_head) as usize;
+        let full_last_token = full_values[full_values.len() - last_token_width..].to_vec();
+
+        let mut decode_ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let q_step = decode_ctx
+            .new_tensor_4d(TensorType::F32, d, 1, n_head, 1, BufferUsage::Activations)
+            .unwrap();
+        let k_cache = decode_ctx
+            .new_tensor_3d(TensorType::F32, d * n_kv_head, n_kv, 1, BufferUsage::State)
+            .unwrap();
+        let v_cache = decode_ctx
+            .new_tensor_3d(TensorType::F32, d * n_kv_head, n_kv, 1, BufferUsage::State)
+            .unwrap();
+        let k_cur = decode_ctx
+            .new_tensor_2d(TensorType::F32, d * n_kv_head, 1, BufferUsage::Activations)
+            .unwrap();
+        let v_cur = decode_ctx
+            .new_tensor_2d(TensorType::F32, d * n_kv_head, 1, BufferUsage::Activations)
+            .unwrap();
+        let rows = decode_ctx
+            .new_tensor_1d(TensorType::I32, 1, BufferUsage::Activations)
+            .unwrap();
+
+        let k_written = decode_ctx
+            .set_rows(k_cache, k_cur, rows, BufferUsage::State)
+            .unwrap();
+        let v_written = decode_ctx
+            .set_rows(v_cache, v_cur, rows, BufferUsage::State)
+            .unwrap();
+        let k_view = decode_ctx
+            .view_4d(
+                k_written,
+                d,
+                n_kv,
+                n_kv_head,
+                1,
+                ggml_row_size_for_type(TensorType::F32, d * n_kv_head).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, d).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, d * n_kv_head * n_kv).unwrap(),
+                0,
+            )
+            .unwrap();
+        let v_view = decode_ctx
+            .view_4d(
+                v_written,
+                d,
+                n_kv,
+                n_kv_head,
+                1,
+                ggml_row_size_for_type(TensorType::F32, d * n_kv_head).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, d).unwrap(),
+                ggml_row_size_for_type(TensorType::F32, d * n_kv_head * n_kv).unwrap(),
+                0,
+            )
+            .unwrap();
+        let decode_attn = decode_ctx
+            .flash_attn_ext(
+                q_step,
+                k_view,
+                v_view,
+                None,
+                1.0 / (d as f32).sqrt(),
+                0.0,
+                0.0,
+                BufferUsage::Activations,
+            )
+            .unwrap();
+
+        let q_step_values = {
+            let mut values = Vec::with_capacity(last_token_width);
+            for head in 0..(n_head as usize) {
+                let base_offset = (d as usize) * (n_head as usize) + head * (d as usize);
+                values.extend_from_slice(&q_base_values[base_offset..base_offset + d as usize]);
+            }
+            values
+        };
+        let token0_k = {
+            let mut values = Vec::with_capacity((d * n_kv_head) as usize);
+            for head in 0..(n_kv_head as usize) {
+                let base_offset = head * (d as usize);
+                values.extend_from_slice(&k_base_values[base_offset..base_offset + d as usize]);
+            }
+            values
+        };
+        let token1_k = {
+            let mut values = Vec::with_capacity((d * n_kv_head) as usize);
+            for head in 0..(n_kv_head as usize) {
+                let base_offset = (d as usize) * (n_kv_head as usize) + head * (d as usize);
+                values.extend_from_slice(&k_base_values[base_offset..base_offset + d as usize]);
+            }
+            values
+        };
+        let token0_v = {
+            let mut values = Vec::with_capacity((d * n_kv_head) as usize);
+            for head in 0..(n_kv_head as usize) {
+                let base_offset = head * (d as usize);
+                values.extend_from_slice(&v_base_values[base_offset..base_offset + d as usize]);
+            }
+            values
+        };
+        let token1_v = {
+            let mut values = Vec::with_capacity((d * n_kv_head) as usize);
+            for head in 0..(n_kv_head as usize) {
+                let base_offset = (d as usize) * (n_kv_head as usize) + head * (d as usize);
+                values.extend_from_slice(&v_base_values[base_offset..base_offset + d as usize]);
+            }
+            values
+        };
+        let mut k_cache_values = vec![0.0f32; (d * n_kv_head * n_kv) as usize];
+        let mut v_cache_values = vec![0.0f32; (d * n_kv_head * n_kv) as usize];
+        k_cache_values[..token0_k.len()].copy_from_slice(&token0_k);
+        v_cache_values[..token0_v.len()].copy_from_slice(&token0_v);
+
+        decode_ctx
+            .write_tensor_data(q_step, &f32s_to_bytes(&q_step_values))
+            .unwrap();
+        decode_ctx
+            .write_tensor_data(k_cache, &f32s_to_bytes(&k_cache_values))
+            .unwrap();
+        decode_ctx
+            .write_tensor_data(v_cache, &f32s_to_bytes(&v_cache_values))
+            .unwrap();
+        decode_ctx
+            .write_tensor_data(k_cur, &f32s_to_bytes(&token1_k))
+            .unwrap();
+        decode_ctx
+            .write_tensor_data(v_cur, &f32s_to_bytes(&token1_v))
+            .unwrap();
+        decode_ctx
+            .write_tensor_data(rows, &i32s_to_bytes(&[1]))
+            .unwrap();
+
+        let mut decode_graph = Graph::new();
+        decode_graph
+            .build_forward_expand(&decode_ctx, decode_attn)
+            .unwrap();
+
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let decode_prepared =
+            prepare_graph(&decode_ctx, &decode_graph, runtime.features()).unwrap();
+        let decode_session = MetalGraphSession::from_runtime(
+            runtime,
+            &decode_ctx,
+            &decode_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let decode_execution = decode_session
+            .execute(&decode_ctx, &[], &[decode_attn])
+            .unwrap();
+        let decode_values = bytes_to_f32s(decode_execution.outputs.get(&decode_attn).unwrap());
+
+        assert_eq!(decode_values.len(), full_last_token.len());
+        for (a, e) in decode_values.iter().zip(full_last_token.iter()) {
+            assert!(
+                (a - e).abs() < 2.0e-3,
+                "masked flash_attn GQA output mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
     fn executes_set_rows_graph_on_metal_when_available() {
         let runtime = match MetalRuntime::new() {
             Ok(runtime) => runtime,
@@ -4690,6 +7778,174 @@ mod tests {
             assert!(
                 (a - e).abs() < 1.0e-5,
                 "add+sigmoid output mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_swiglu_split_graph_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let gate = ctx
+            .new_tensor_2d(TensorType::F32, 8, 2, BufferUsage::Activations)
+            .unwrap();
+        let up = ctx
+            .new_tensor_2d(TensorType::F32, 8, 2, BufferUsage::Activations)
+            .unwrap();
+        let out = ctx
+            .glu_split(gate, up, GluOp::Swiglu, BufferUsage::Activations)
+            .unwrap();
+        let gate_values = vec![
+            -2.0, -0.5, 0.0, 0.5, 1.0, 1.5, -1.2, 2.0,
+            0.3, -1.1, 2.2, -0.7, 1.8, -2.4, 0.9, 0.4,
+        ];
+        let up_values = vec![
+            1.0, -0.3, 0.8, 1.1, -1.4, 0.2, 2.0, -0.6,
+            -0.7, 1.3, -1.5, 0.4, 0.9, -0.8, 1.7, -2.1,
+        ];
+        ctx.write_tensor_data(gate, &f32s_to_bytes(&gate_values)).unwrap();
+        ctx.write_tensor_data(up, &f32s_to_bytes(&up_values)).unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, out).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+
+        let execution = session.execute(&ctx, &[], &[out]).unwrap();
+        let actual = bytes_to_f32s(execution.outputs.get(&out).unwrap());
+        let expected = gate_values
+            .iter()
+            .zip(up_values.iter())
+            .map(|(gate, up)| (gate / (1.0f32 + (-gate).exp())) * up)
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "swiglu split output mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn executes_swiglu_split_single_token_consistently_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let width = 128_i64;
+        let n_tokens = 2_i64;
+        let token_width = width as usize;
+
+        let mut full_ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let gate_full = full_ctx
+            .new_tensor_2d(TensorType::F32, width, n_tokens, BufferUsage::Activations)
+            .unwrap();
+        let up_full = full_ctx
+            .new_tensor_2d(TensorType::F32, width, n_tokens, BufferUsage::Activations)
+            .unwrap();
+        let out_full = full_ctx
+            .glu_split(gate_full, up_full, GluOp::Swiglu, BufferUsage::Activations)
+            .unwrap();
+
+        let gate_full_values = patterned_f32s((width * n_tokens) as usize, -1.2, 0.013);
+        let up_full_values = patterned_f32s((width * n_tokens) as usize, 0.7, -0.009);
+        full_ctx
+            .write_tensor_data(gate_full, &f32s_to_bytes(&gate_full_values))
+            .unwrap();
+        full_ctx
+            .write_tensor_data(up_full, &f32s_to_bytes(&up_full_values))
+            .unwrap();
+
+        let mut full_graph = Graph::new();
+        full_graph.build_forward_expand(&full_ctx, out_full).unwrap();
+        let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
+        let full_session = MetalGraphSession::from_runtime(
+            runtime,
+            &full_ctx,
+            &full_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let full_execution = full_session.execute(&full_ctx, &[], &[out_full]).unwrap();
+        let full_values = bytes_to_f32s(full_execution.outputs.get(&out_full).unwrap());
+        let full_last_token = full_values[full_values.len() - token_width..].to_vec();
+
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        let mut step_ctx = Context::new(InitParams {
+            mem_size: 1 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let gate_step = step_ctx
+            .new_tensor_2d(TensorType::F32, width, 1, BufferUsage::Activations)
+            .unwrap();
+        let up_step = step_ctx
+            .new_tensor_2d(TensorType::F32, width, 1, BufferUsage::Activations)
+            .unwrap();
+        let out_step = step_ctx
+            .glu_split(gate_step, up_step, GluOp::Swiglu, BufferUsage::Activations)
+            .unwrap();
+
+        let gate_step_values = gate_full_values[token_width..].to_vec();
+        let up_step_values = up_full_values[token_width..].to_vec();
+        step_ctx
+            .write_tensor_data(gate_step, &f32s_to_bytes(&gate_step_values))
+            .unwrap();
+        step_ctx
+            .write_tensor_data(up_step, &f32s_to_bytes(&up_step_values))
+            .unwrap();
+
+        let mut step_graph = Graph::new();
+        step_graph.build_forward_expand(&step_ctx, out_step).unwrap();
+        let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
+        let step_session = MetalGraphSession::from_runtime(
+            runtime,
+            &step_ctx,
+            &step_prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+        let step_execution = step_session.execute(&step_ctx, &[], &[out_step]).unwrap();
+        let step_values = bytes_to_f32s(step_execution.outputs.get(&out_step).unwrap());
+
+        assert_eq!(step_values.len(), full_last_token.len());
+        for (a, e) in step_values.iter().zip(full_last_token.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "swiglu split token1 mismatch: actual={} expected={}",
                 a,
                 e
             );
@@ -5026,6 +8282,112 @@ mod tests {
     }
 
     #[test]
+    fn executes_mul_mat_id_with_noncontiguous_topk_ids_on_metal_when_available() {
+        let runtime = match MetalRuntime::new() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        let mut ctx = Context::new(InitParams {
+            mem_size: 1 << 22,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+
+        let expert_count = 16_i64;
+        let used_experts = 4_i64;
+        let in_dim = 4_i64;
+        let out_dim = 3_i64;
+        let tokens = 2_i64;
+
+        let logits = ctx
+            .new_tensor_2d(TensorType::F32, expert_count, tokens, BufferUsage::Activations)
+            .unwrap();
+        let sorted = ctx.argsort(logits, BufferUsage::Activations).unwrap();
+        ctx.tensor_mut(sorted)
+            .unwrap()
+            .set_op_param_i32(0, SortOrder::Desc as i32);
+        let sorted_tensor = ctx.tensor(sorted).unwrap().clone();
+        let ids = ctx
+            .view_4d(
+                sorted,
+                used_experts,
+                sorted_tensor.ne[1],
+                sorted_tensor.ne[2],
+                sorted_tensor.ne[3],
+                sorted_tensor.nb[1],
+                sorted_tensor.nb[2],
+                sorted_tensor.nb[3],
+                0,
+            )
+            .unwrap();
+
+        let experts = ctx
+            .new_tensor_3d(TensorType::F32, in_dim, out_dim, expert_count, BufferUsage::Weights)
+            .unwrap();
+        let input = ctx
+            .new_tensor_3d(TensorType::F32, in_dim, 1, tokens, BufferUsage::Activations)
+            .unwrap();
+        let out = ctx
+            .mul_mat_id(experts, input, ids, BufferUsage::Activations)
+            .unwrap();
+
+        let logits_values = vec![
+            0.1, 0.4, 1.2, -0.3, 0.9, 0.7, -0.2, 1.1, 0.6, 0.5, 0.3, 0.2, 1.0, -0.4, 0.8, 0.0,
+            0.2, 1.3, 0.7, 0.1, -0.2, 0.5, 1.1, 0.4, 0.9, 0.8, 0.6, 0.3, 0.0, -0.1, 1.2, 1.0,
+        ];
+        let expert_values = patterned_f32s((in_dim * out_dim * expert_count) as usize, -0.3, 0.05);
+        let input_values = vec![
+            0.2, -0.1, 0.4, 0.8, //
+            -0.3, 0.5, -0.6, 0.7,
+        ];
+        ctx.write_tensor_data(logits, &f32s_to_bytes(&logits_values))
+            .unwrap();
+        ctx.write_tensor_data(experts, &f32s_to_bytes(&expert_values))
+            .unwrap();
+        ctx.write_tensor_data(input, &f32s_to_bytes(&input_values))
+            .unwrap();
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, out).unwrap();
+
+        let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
+        let session = MetalGraphSession::from_runtime(
+            runtime,
+            &ctx,
+            &prepared,
+            BufferStorageMode::Shared,
+            BufferStorageMode::Shared,
+        )
+        .unwrap();
+
+        let execution = session.execute(&ctx, &[], &[out]).unwrap();
+        let actual = bytes_to_f32s(execution.outputs.get(&out).unwrap());
+        let ids_values =
+            cpu_top_k_rows_i32(&logits_values, expert_count as usize, used_experts as usize);
+        let expected = cpu_mul_mat_id_f32(
+            &expert_values,
+            &input_values,
+            &ids_values,
+            in_dim as usize,
+            out_dim as usize,
+            expert_count as usize,
+            used_experts as usize,
+            tokens as usize,
+        );
+
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (a - e).abs() < 1.0e-5,
+                "mul_mat_id noncontiguous ids mismatch: actual={} expected={}",
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
     fn executes_gated_delta_net_graph_on_metal_when_available() {
         let runtime = match MetalRuntime::new() {
             Ok(runtime) => runtime,
@@ -5239,6 +8601,92 @@ mod tests {
         out
     }
 
+    fn interleave_query_gate_values(
+        query_values: &[f32],
+        gate_values: &[f32],
+        head_dim: usize,
+        head_count: usize,
+        n_tokens: usize,
+    ) -> Vec<f32> {
+        assert_eq!(query_values.len(), head_dim * head_count * n_tokens);
+        assert_eq!(gate_values.len(), query_values.len());
+        let token_width = head_dim * head_count;
+        let mut out = vec![0.0f32; query_values.len() + gate_values.len()];
+        for token in 0..n_tokens {
+            for head in 0..head_count {
+                let q_src = (token * head_count + head) * head_dim;
+                let qg_dst = token * 2 * token_width + head * 2 * head_dim;
+                out[qg_dst..qg_dst + head_dim]
+                    .copy_from_slice(&query_values[q_src..q_src + head_dim]);
+                out[qg_dst + head_dim..qg_dst + 2 * head_dim]
+                    .copy_from_slice(&gate_values[q_src..q_src + head_dim]);
+            }
+        }
+        out
+    }
+
+    fn cast_tensor_to_type(
+        ctx: &mut Context,
+        src: TensorId,
+        ty: TensorType,
+    ) -> Result<TensorId, String> {
+        let src_tensor = ctx
+            .tensor(src)
+            .ok_or_else(|| format!("invalid cast source tensor {}", src))?
+            .clone();
+        if src_tensor.desc.ty == ty {
+            return Ok(src);
+        }
+        let dst = ctx.new_tensor(
+            ty,
+            src_tensor.desc.layout.rank(),
+            src_tensor.desc.layout.extents(),
+            BufferUsage::Activations,
+        )?;
+        ctx.cpy(src, dst, BufferUsage::Activations)
+    }
+
+    fn build_flash_attn_like_mha(
+        ctx: &mut Context,
+        q: TensorId,
+        k: TensorId,
+        v: TensorId,
+        mask: Option<TensorId>,
+    ) -> Result<TensorId, String> {
+        let q_tensor = ctx
+            .tensor(q)
+            .ok_or_else(|| format!("invalid q tensor {}", q))?
+            .clone();
+        let q = ctx.view_4d(
+            q,
+            q_tensor.ne[0],
+            q_tensor.ne[1],
+            q_tensor.ne[2],
+            q_tensor.ne[3],
+            q_tensor.nb[1],
+            q_tensor.nb[2],
+            q_tensor.nb[3],
+            0,
+        )?;
+        let q = ctx.permute(q, [0, 2, 1, 3])?;
+        let k = ctx.permute(k, [0, 2, 1, 3])?;
+        let v = ctx.permute(v, [0, 2, 1, 3])?;
+        let k = cast_tensor_to_type(ctx, k, TensorType::F16)?;
+        let v = cast_tensor_to_type(ctx, v, TensorType::F16)?;
+        let attn = ctx.flash_attn_ext(
+            q,
+            k,
+            v,
+            mask,
+            1.0 / (q_tensor.ne[0] as f32).sqrt(),
+            0.0,
+            0.0,
+            BufferUsage::Activations,
+        )?;
+        ctx.flash_attn_ext_set_prec(attn, crate::Prec::F32)?;
+        Ok(attn)
+    }
+
     fn i32s_to_bytes(values: &[i32]) -> Vec<u8> {
         let mut out = Vec::with_capacity(values.len() * std::mem::size_of::<i32>());
         for value in values {
@@ -5265,6 +8713,47 @@ mod tests {
         (0..len).map(|i| base + step * (i as f32)).collect()
     }
 
+    fn hashed_f32s(len: usize, seed: u32, scale: f32, bias: f32, harmonic: f32) -> Vec<f32> {
+        let mut state = seed;
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let signed = (((state >> 9) & 0x7fff) as f32) / 16384.0 - 1.0;
+            let ripple = ((i % 29) as f32 - 14.0) * 0.0137;
+            let wave = (((i * 17 + 11) % 37) as f32 - 18.0) * 0.0079 * harmonic;
+            out.push((signed * scale + ripple + wave + bias) as f32);
+        }
+        out
+    }
+
+    fn patterned_q5k_tensor_bytes(rows: usize, width: usize) -> Vec<u8> {
+        assert_eq!(width % 256, 0);
+        let row_bytes = ggml_row_size_for_type(TensorType::Q5K, width as i64).unwrap();
+        let block_bytes = ggml_row_size_for_type(TensorType::Q5K, 256).unwrap();
+        let mut out = vec![0_u8; row_bytes * rows];
+        for row in 0..rows {
+            let base = row * row_bytes;
+            for block in 0..(width / 256) {
+                let block_base = base + block * block_bytes;
+                let d = f32_to_f16(0.25 + row as f32 * 0.03125 + block as f32 * 0.0078125);
+                let dmin = f32_to_f16(0.125 + row as f32 * 0.015625 + block as f32 * 0.00390625);
+                out[block_base..block_base + 2].copy_from_slice(&d.to_le_bytes());
+                out[block_base + 2..block_base + 4].copy_from_slice(&dmin.to_le_bytes());
+                for i in 0..12 {
+                    out[block_base + 4 + i] = ((row * 17 + block * 13 + i * 11) & 0xFF) as u8;
+                }
+                for i in 0..32 {
+                    out[block_base + 16 + i] = ((row * 29 + block * 19 + i * 7) & 0xFF) as u8;
+                }
+                for i in 0..128 {
+                    out[block_base + 48 + i] =
+                        ((row * 37 + block * 23 + i * 5) & 0xFF) as u8;
+                }
+            }
+        }
+        out
+    }
+
     fn cpu_softmax_rows_f32(values: &[f32], row_len: usize) -> Vec<f32> {
         let mut out = vec![0.0; values.len()];
         for row in 0..(values.len() / row_len) {
@@ -5284,6 +8773,108 @@ mod tests {
             }
         }
         out
+    }
+
+    fn cpu_get_rows_f32(values: &[f32], width: usize, rows: &[i32]) -> Vec<f32> {
+        let mut out = Vec::with_capacity(width * rows.len());
+        for &row in rows {
+            let row = usize::try_from(row).unwrap();
+            let start = row * width;
+            let end = start + width;
+            out.extend_from_slice(&values[start..end]);
+        }
+        out
+    }
+
+    fn cpu_mul_mat_f32(
+        weights: &[f32],
+        input: &[f32],
+        in_dim: usize,
+        out_dim: usize,
+        tokens: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; out_dim * tokens];
+        for token in 0..tokens {
+            for row in 0..out_dim {
+                let mut acc = 0.0f32;
+                for col in 0..in_dim {
+                    let w_idx = row * in_dim + col;
+                    let x_idx = token * in_dim + col;
+                    acc += weights[w_idx] * input[x_idx];
+                }
+                out[token * out_dim + row] = acc;
+            }
+        }
+        out
+    }
+
+    fn cpu_get_rows_q5k(src: &[u8], width: usize, n_rows: usize, rows: &[i32]) -> Vec<f32> {
+        assert_eq!(width % 256, 0);
+        let row_bytes = ggml_row_size_for_type(TensorType::Q5K, width as i64).unwrap();
+        assert_eq!(src.len(), row_bytes * n_rows);
+
+        let mut out = Vec::with_capacity(width * rows.len());
+        for &row in rows {
+            let row = usize::try_from(row).unwrap();
+            let row_bytes_src = &src[row * row_bytes..(row + 1) * row_bytes];
+            dequantize_row_q5k_bytes(row_bytes_src, width, &mut out);
+        }
+        out
+    }
+
+    fn dequantize_row_q5k_bytes(row_src: &[u8], width: usize, out: &mut Vec<f32>) {
+        assert_eq!(width % 256, 0);
+        let block_bytes = ggml_row_size_for_type(TensorType::Q5K, 256).unwrap();
+        assert_eq!(row_src.len(), block_bytes * (width / 256));
+
+        for block in row_src.chunks_exact(block_bytes) {
+            let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+            let dmin = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+            let scales = &block[4..16];
+            let qh = &block[16..48];
+            let qs = &block[48..176];
+
+            let mut is = 0usize;
+            let mut u1 = 1u8;
+            let mut u2 = 2u8;
+            let mut ql_offset = 0usize;
+            for _ in 0..4 {
+                let (sc1, m1) = get_scale_min_k4(is + 0, scales);
+                let (sc2, m2) = get_scale_min_k4(is + 1, scales);
+                let d1 = d * sc1 as f32;
+                let d2 = d * sc2 as f32;
+                let m1 = dmin * m1 as f32;
+                let m2 = dmin * m2 as f32;
+                let ql = &qs[ql_offset..ql_offset + 32];
+                for l in 0..32 {
+                    out.push(
+                        d1 * (((ql[l] & 0x0F) as f32) + if (qh[l] & u1) != 0 { 16.0 } else { 0.0 })
+                            - m1,
+                    );
+                }
+                for l in 0..32 {
+                    out.push(
+                        d2 * (((ql[l] >> 4) as f32) + if (qh[l] & u2) != 0 { 16.0 } else { 0.0 })
+                            - m2,
+                    );
+                }
+                ql_offset += 32;
+                is += 2;
+                u1 <<= 2;
+                u2 <<= 2;
+            }
+        }
+    }
+
+    fn get_scale_min_k4(j: usize, q: &[u8]) -> (u8, u8) {
+        if j < 4 {
+            (q[j] & 63, q[j + 4] & 63)
+        } else {
+            (
+                (q[j + 4] & 0x0F) | ((q[j - 4] >> 6) << 4),
+                (q[j + 4] >> 4) | ((q[j] >> 6) << 4),
+            )
+        }
     }
 
     fn cpu_sum_rows_f32(values: &[f32], row_len: usize) -> Vec<f32> {
@@ -5368,6 +8959,52 @@ mod tests {
             }
         }
         let _ = expert_count;
+        out
+    }
+
+    fn cpu_mul_mat_q5k_f32(
+        weights: &[u8],
+        input: &[f32],
+        in_dim: usize,
+        out_dim: usize,
+        tokens: usize,
+    ) -> Vec<f32> {
+        let row_ids = (0..out_dim).map(|row| row as i32).collect::<Vec<_>>();
+        let weights = cpu_get_rows_q5k(weights, in_dim, out_dim, &row_ids);
+        let mut out = vec![0.0f32; out_dim * tokens];
+        for token in 0..tokens {
+            for row in 0..out_dim {
+                let mut acc = 0.0f32;
+                for col in 0..in_dim {
+                    let w_idx = row * in_dim + col;
+                    let x_idx = token * in_dim + col;
+                    acc += weights[w_idx] * input[x_idx];
+                }
+                out[token * out_dim + row] = acc;
+            }
+        }
+        out
+    }
+
+    fn cpu_get_rows_3d_f32(
+        values: &[f32],
+        width: usize,
+        source_rows: usize,
+        tokens: usize,
+        ids: &[i32],
+        top_k: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; width * top_k * tokens];
+        for token in 0..tokens {
+            for slot in 0..top_k {
+                let row = ids[token * top_k + slot] as usize;
+                for channel in 0..width {
+                    let src_idx = (token * source_rows + row) * width + channel;
+                    let dst_idx = (token * top_k + slot) * width + channel;
+                    out[dst_idx] = values[src_idx];
+                }
+            }
+        }
         out
     }
 
@@ -5458,6 +9095,53 @@ mod tests {
         }
 
         (attn_out, state_out)
+    }
+
+    fn cpu_solve_tri_f32(a: &[f32], b: &[f32], n: usize, k: usize, batches: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; b.len()];
+        for batch in 0..batches {
+            let a_batch = &a[batch * n * n..(batch + 1) * n * n];
+            let b_batch = &b[batch * k * n..(batch + 1) * k * n];
+            let out_batch = &mut out[batch * k * n..(batch + 1) * k * n];
+            for col in 0..k {
+                for row in 0..n {
+                    let mut sum = 0.0f32;
+                    for idx in 0..row {
+                        sum += a_batch[row * n + idx] * out_batch[col + idx * k];
+                    }
+                    out_batch[col + row * k] = (b_batch[col + row * k] - sum) / a_batch[row * n + row];
+                }
+            }
+        }
+        out
+    }
+
+    fn cpu_broadcast_mul_dim1(a: &[f32], b: &[f32], cs: usize, s: usize, h: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; a.len()];
+        for head in 0..h {
+            for row in 0..s {
+                for col in 0..cs {
+                    let a_idx = ((head * s + row) * cs) + col;
+                    let b_idx = head * cs + col;
+                    out[a_idx] = a[a_idx] * b[b_idx];
+                }
+            }
+        }
+        out
+    }
+
+    fn cpu_broadcast_mul_dim0(a: &[f32], b: &[f32], s: usize, cs: usize, h: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; a.len()];
+        for head in 0..h {
+            for row in 0..cs {
+                for col in 0..s {
+                    let a_idx = ((head * cs + row) * s) + col;
+                    let b_idx = head * cs + row;
+                    out[a_idx] = a[a_idx] * b[b_idx];
+                }
+            }
+        }
+        out
     }
 
     fn cpu_flash_attn_f32(

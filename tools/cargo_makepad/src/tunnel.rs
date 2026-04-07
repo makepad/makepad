@@ -12,6 +12,8 @@ use std::thread;
 const TAG_FILE_DATA: u8 = 0x01;
 const TAG_CARGO_RUN: u8 = 0x02;
 const TAG_SHELL_RUN: u8 = 0x03;
+const TAG_STDIN_DATA: u8 = 0x04;
+const TAG_STDIN_CLOSE: u8 = 0x05;
 
 const TAG_OUTPUT: u8 = 0x01;
 const TAG_EXIT_CODE: u8 = 0x02;
@@ -368,6 +370,7 @@ fn handle_connection(
         c
     };
     cmd.current_dir(cwd)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     process_group::configure_command(&mut cmd);
@@ -383,6 +386,7 @@ fn handle_connection(
     let mut job = process_group::JobHandle::new()?;
     job.assign(&child)?;
 
+    let child_stdin = child.stdin.take().unwrap();
     let child_stdout = child.stdout.take().unwrap();
     let child_stderr = child.stderr.take().unwrap();
 
@@ -396,9 +400,11 @@ fn handle_connection(
         });
     }
 
+    let stream_in = stream.try_clone()?;
     let stream_out = stream.try_clone()?;
     let stream_err = stream.try_clone()?;
 
+    let _stdin_thread = thread::spawn(move || stream_stdin(stream_in, child_stdin));
     let stdout_thread = thread::spawn(move || stream_pipe(child_stdout, stream_out, STREAM_STDOUT));
     let stderr_thread = thread::spawn(move || stream_pipe(child_stderr, stream_err, STREAM_STDERR));
 
@@ -456,51 +462,84 @@ fn stream_pipe(reader: impl Read, mut writer: TcpStream, stream_id: u8) {
     }
 }
 
+fn stream_stdin(mut reader: TcpStream, mut writer: impl Write) {
+    loop {
+        match read_msg(&mut reader) {
+            Ok((TAG_STDIN_DATA, payload)) => {
+                if writer.write_all(&payload).is_err() {
+                    break;
+                }
+                if writer.flush().is_err() {
+                    break;
+                }
+            }
+            Ok((TAG_STDIN_CLOSE, _)) => break,
+            Ok((tag, _)) => {
+                eprintln!(
+                    "server: unexpected client tag while streaming stdin: 0x{:02x}",
+                    tag
+                );
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 // --- Client ---
 
-fn run_client(addr: &str, cmd_args: &[String], is_shell: bool) -> io::Result<i32> {
-    let files = get_changed_files()?;
-
+fn run_client(
+    addr: &str,
+    cmd_args: &[String],
+    is_shell: bool,
+    sync_files: bool,
+) -> io::Result<i32> {
     eprintln!("client: connecting to {}", addr);
     let mut stream = TcpStream::connect(addr)?;
     eprintln!("client: connected");
 
-    for (rel_path, is_tracked) in &files {
-        if rel_path.starts_with("local/") || rel_path.starts_with("local\\") {
-            continue;
-        }
-        if !rel_path.contains('/') {
-            continue;
-        }
-        let normalized = rel_path.replace('\\', "/");
-        let is_vendored = normalized.starts_with("libs/linux/");
-        let is_common_src = normalized.ends_with(".rs") || normalized.ends_with(".toml");
-        if !is_tracked {
-            if is_vendored {
-                let in_src = normalized.contains("/src/") && !normalized.contains("/src/test/");
-                let keep_vendored = normalized.ends_with("/Cargo.toml")
-                    || normalized.ends_with("/build.rs")
-                    || in_src
-                    || normalized.ends_with("/wayland.xml")
-                    || (normalized.contains("/protocols/") && normalized.ends_with(".xml"));
-                if !keep_vendored {
+    if sync_files {
+        let files = get_changed_files()?;
+
+        for (rel_path, is_tracked) in &files {
+            if rel_path.starts_with("local/") || rel_path.starts_with("local\\") {
+                continue;
+            }
+            if !rel_path.contains('/') {
+                continue;
+            }
+            let normalized = rel_path.replace('\\', "/");
+            let is_vendored = normalized.starts_with("libs/linux/");
+            let is_common_src = normalized.ends_with(".rs") || normalized.ends_with(".toml");
+            if !is_tracked {
+                if is_vendored {
+                    let in_src = normalized.contains("/src/") && !normalized.contains("/src/test/");
+                    let keep_vendored = normalized.ends_with("/Cargo.toml")
+                        || normalized.ends_with("/build.rs")
+                        || in_src
+                        || normalized.ends_with("/wayland.xml")
+                        || (normalized.contains("/protocols/") && normalized.ends_with(".xml"));
+                    if !keep_vendored {
+                        continue;
+                    }
+                } else if !is_common_src {
                     continue;
                 }
-            } else if !is_common_src {
-                continue;
             }
-        }
 
-        let data = match fs::read(rel_path) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("client: skip {}: {}", rel_path, e);
-                continue;
-            }
-        };
-        eprintln!("client: sending {} ({} bytes)", rel_path, data.len());
-        let payload = encode_file_data(rel_path, &data);
-        write_msg(&mut stream, TAG_FILE_DATA, &payload)?;
+            let data = match fs::read(rel_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("client: skip {}: {}", rel_path, e);
+                    continue;
+                }
+            };
+            eprintln!("client: sending {} ({} bytes)", rel_path, data.len());
+            let payload = encode_file_data(rel_path, &data);
+            write_msg(&mut stream, TAG_FILE_DATA, &payload)?;
+        }
+    } else {
+        eprintln!("client: file sync disabled (--no-sync)");
     }
 
     let args_str = cmd_args.join("\n");
@@ -515,6 +554,11 @@ fn run_client(addr: &str, cmd_args: &[String], is_shell: bool) -> io::Result<i32
     } else {
         eprintln!("client: cargo {}", cmd_args.join(" "));
     }
+
+    let _stdin_thread = {
+        let mut stream_in = stream.try_clone()?;
+        thread::spawn(move || forward_stdin(&mut stream_in))
+    };
 
     let exit_code;
     loop {
@@ -565,6 +609,20 @@ fn run_client(addr: &str, cmd_args: &[String], is_shell: bool) -> io::Result<i32
     Ok(exit_code)
 }
 
+fn forward_stdin(stream: &mut TcpStream) -> io::Result<()> {
+    let mut stdin = io::stdin();
+    let mut buf = [0u8; 8192];
+
+    loop {
+        let n = stdin.read(&mut buf)?;
+        if n == 0 {
+            let _ = write_msg(stream, TAG_STDIN_CLOSE, &[]);
+            return Ok(());
+        }
+        write_msg(stream, TAG_STDIN_DATA, &buf[..n])?;
+    }
+}
+
 fn get_changed_files() -> io::Result<Vec<(String, bool)>> {
     let mut files = Vec::new();
 
@@ -613,9 +671,9 @@ fn get_changed_files() -> io::Result<Vec<(String, bool)>> {
 fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  Server: cargo makepad tunnel --server [--port PORT] [--all]");
-    eprintln!("  Client: cargo makepad tunnel <ip:port> cargo [args...]");
+    eprintln!("  Client: cargo makepad tunnel <ip:port> [--no-sync] cargo [args...]");
     eprintln!(
-        "          cargo makepad tunnel <ip:port> shell <command...>  (requires --all on server)"
+        "          cargo makepad tunnel <ip:port> [--no-sync] shell <command...>  (requires --all on server)"
     );
 }
 
@@ -655,16 +713,29 @@ pub fn handle_tunnel(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         let addr = &args[0];
+        let mut sync_files = true;
+        let mut mode_idx = 1;
 
-        if args.len() < 2 || (args[1] != "cargo" && args[1] != "shell") {
-            print_usage();
-            return Err("client mode requires: <ip:port> cargo|shell [args...]".to_string());
+        while mode_idx < args.len() {
+            if args[mode_idx] == "--no-sync" {
+                sync_files = false;
+                mode_idx += 1;
+                continue;
+            }
+            break;
         }
 
-        let is_shell = args[1] == "shell";
-        let cmd_args = &args[2..];
+        if mode_idx >= args.len() || (args[mode_idx] != "cargo" && args[mode_idx] != "shell") {
+            print_usage();
+            return Err(
+                "client mode requires: <ip:port> [--no-sync] cargo|shell [args...]".to_string(),
+            );
+        }
 
-        match run_client(addr, cmd_args, is_shell) {
+        let is_shell = args[mode_idx] == "shell";
+        let cmd_args = &args[mode_idx + 1..];
+
+        match run_client(addr, cmd_args, is_shell, sync_files) {
             Ok(0) => Ok(()),
             Ok(code) => {
                 let exit_code = u8::try_from(code).unwrap_or(1) as i32;

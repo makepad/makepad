@@ -1,13 +1,54 @@
 use makepad_widgets;
 
 use makepad_widgets::*;
+use makepad_xr::net::{XrNetPeerId, XrSharedHand, XrSharedObjectMode};
+use makepad_xr::obj::car::{car_drive_command, CarDriveConfig};
+use makepad_xr::obj::cube::Cube;
+use makepad_xr::obj::tank::{tank_stick_axes, TankDriveConfig};
+use makepad_xr::obj::IcoSphere;
 use makepad_xr::scene::*;
+use std::collections::HashSet;
+use std::fmt::Write as _;
 
 app_main!(App);
 
 const ACTIVITY_POSE_SYNC_INTERVAL_SECONDS: f64 = 0.6;
+const DEBUG_VIEW_REFRESH_INTERVAL_SECONDS: f64 = 1.0;
 const ACTIVITY_POSE_SYNC_POSITION_EPSILON_METERS: f32 = 0.015;
 const ACTIVITY_POSE_SYNC_ROTATION_EPSILON_DEGREES: f32 = 1.5;
+const TANK_TURRET_YAW_SPEED_RADPS: f32 = 1.5;
+const TANK_TURRET_PITCH_SPEED_RADPS: f32 = 4.2;
+const TANK_TURRET_PITCH_MIN_RAD: f32 = -0.35;
+const TANK_TURRET_PITCH_MAX_RAD: f32 = 0.55;
+const TANK_PROJECTILE_RATE_HZ: f32 = 10.0;
+const TANK_PROJECTILE_SPEED_MPS: f32 = 7.5;
+const TANK_PROJECTILE_RADIUS_METERS: f32 = 0.024;
+const TANK_PROJECTILE_MAX_EMITS_PER_UPDATE: usize = 2;
+const TANK_HIT_FLASH_SECONDS: f64 = 0.35;
+const TANK_SPAWN_RING_RADIUS_METERS: f32 = 0.06;
+const TANK_WHEEL_COUNT: usize = 4;
+const TANK_WHEEL_LATERAL_OFFSET_METERS: f32 = 0.113;
+const TANK_WHEEL_VERTICAL_OFFSET_METERS: f32 = -0.045;
+const TANK_WHEEL_FRONT_OFFSET_METERS: f32 = 0.189;
+const TANK_WHEEL_BACK_OFFSET_METERS: f32 = -0.189;
+const TANK_BODY_HALF_WIDTH_METERS: f32 = 0.145;
+const TANK_BODY_HALF_HEIGHT_METERS: f32 = 0.045;
+const TANK_BODY_HALF_DEPTH_METERS: f32 = 0.205;
+const TANK_PLATE_TOP_LOCAL_Y_METERS: f32 = -0.02;
+const TANK_FOUR_WHEEL_RADIUS_SCALE: f32 = 3.20;
+const TANK_FOUR_WHEEL_REST_LENGTH_SCALE: f32 = 0.50;
+const TANK_FOUR_WHEEL_RADIUS_MIN_METERS: f32 = 0.036;
+const TANK_FOUR_WHEEL_RADIUS_MAX_METERS: f32 = 0.160;
+const TANK_FOUR_WHEEL_REST_LENGTH_MIN_METERS: f32 = 0.024;
+const TANK_FOUR_WHEEL_REST_LENGTH_MAX_METERS: f32 = 0.110;
+const TANK_SPAWN_SUSPENSION_PRELOAD_WORLD_METERS: f32 = 0.004;
+const TANK_SPAWN_EXTRA_CLEARANCE_WORLD_METERS: f32 = 0.030;
+const TANK_BODY_VISUAL_SUSPENSION_RESPONSE: f32 = 0.0;
+const TANK_BODY_VISUAL_AXLE_CLEARANCE_SCALE: f32 = 0.42;
+const TANK_BODY_VISUAL_LIFT_MIN_METERS: f32 = 0.0;
+const TANK_BODY_VISUAL_LIFT_MAX_METERS: f32 = 0.300;
+const TANK_SCENE_STATUS_TEXT: &str =
+    "Tank mode: left stick steers, right trigger accelerates, left trigger reverses, right stick aims the turret, A/X fire shells, B resets the tank, and controller grip picks the tank up.";
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -37,6 +78,166 @@ script_mod! {
         metallic: 0.04
     }
 
+    let TankSlot = XrNode{
+        body: mod.widgets.XrBodyKind.Dynamic
+        depth_query_support: mod.widgets.XrDepthQuerySupportRig.FourWheels
+        shared_object_policy: mod.widgets.XrSharedObjectPolicy.PooledOnDemand
+        spawn_pool: true
+        physics_size: vec3(0.29, 0.09, 0.41)
+        density: 120.0
+        friction: 1.35
+        restitution: 0.02
+        pos: vec3(-12.0, -12.0, 0.0)
+        rot: vec3(0.0, 0.0, 0.0)
+
+        tank_body_mount := XrNode{
+            body: mod.widgets.XrBodyKind.Disabled
+            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+            pos: vec3(0.0, 0.0, 0.0)
+
+            hull_block := Cube{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                size: vec3(0.28, 0.09, 0.41)
+                corner_radius: 0.03
+                roughness: 0.58
+                metallic: 0.03
+                color: #x6a8337
+            }
+
+            tank_turret_yaw := XrNode{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                pos: vec3(0.0, 0.08, 0.015)
+                turret_block := Cube{
+                    body: mod.widgets.XrBodyKind.Disabled
+                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                    size: vec3(0.12, 0.07, 0.17)
+                    corner_radius: 0.026
+                    roughness: 0.44
+                    metallic: 0.02
+                    color: #x8ca853
+                }
+
+                tank_barrel_pitch := XrNode{
+                    body: mod.widgets.XrBodyKind.Disabled
+                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                    pos: vec3(0.0, 0.0, 0.08)
+                    barrel_block := Cube{
+                        body: mod.widgets.XrBodyKind.Disabled
+                        shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                        pos: vec3(0.0, 0.0, 0.14)
+                        size: vec3(0.025, 0.025, 0.28)
+                        corner_radius: 0.02
+                        roughness: 0.30
+                        metallic: 0.06
+                        color: #x24291c
+                    }
+                }
+            }
+        }
+
+        tank_wheel_0 := XrNode{
+            body: mod.widgets.XrBodyKind.Disabled
+            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+            pos: vec3(-0.113, -0.045, 0.189)
+            wheel_mesh := IcoSphere{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                scale: vec3(0.44, 1.0, 1.0)
+                radius: 0.117
+                diffuse: #xc4c7ce
+                color: #x18212b
+
+                marker := Cube{
+                    body: mod.widgets.XrBodyKind.Disabled
+                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                    size: vec3(0.020, 0.020, 0.020)
+                    pos: vec3(0.0, 0.072, 0.0)
+                    corner_radius: 0.006
+                    roughness: 0.22
+                    metallic: 0.06
+                    color: #xe8ebf2
+                }
+            }
+        }
+
+        tank_wheel_1 := XrNode{
+            body: mod.widgets.XrBodyKind.Disabled
+            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+            pos: vec3(-0.113, -0.045, -0.189)
+            wheel_mesh := IcoSphere{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                scale: vec3(0.44, 1.0, 1.0)
+                radius: 0.117
+                diffuse: #xc4c7ce
+                color: #x18212b
+
+                marker := Cube{
+                    body: mod.widgets.XrBodyKind.Disabled
+                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                    size: vec3(0.020, 0.020, 0.020)
+                    pos: vec3(0.0, 0.072, 0.0)
+                    corner_radius: 0.006
+                    roughness: 0.22
+                    metallic: 0.06
+                    color: #xe8ebf2
+                }
+            }
+        }
+
+        tank_wheel_2 := XrNode{
+            body: mod.widgets.XrBodyKind.Disabled
+            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+            pos: vec3(0.113, -0.045, 0.189)
+            wheel_mesh := IcoSphere{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                scale: vec3(0.44, 1.0, 1.0)
+                radius: 0.117
+                diffuse: #xc4c7ce
+                color: #x18212b
+
+                marker := Cube{
+                    body: mod.widgets.XrBodyKind.Disabled
+                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                    size: vec3(0.020, 0.020, 0.020)
+                    pos: vec3(0.0, 0.072, 0.0)
+                    corner_radius: 0.006
+                    roughness: 0.22
+                    metallic: 0.06
+                    color: #xe8ebf2
+                }
+            }
+        }
+
+        tank_wheel_3 := XrNode{
+            body: mod.widgets.XrBodyKind.Disabled
+            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+            pos: vec3(0.113, -0.045, -0.189)
+            wheel_mesh := IcoSphere{
+                body: mod.widgets.XrBodyKind.Disabled
+                shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                scale: vec3(0.44, 1.0, 1.0)
+                radius: 0.117
+                diffuse: #xc4c7ce
+                color: #x18212b
+
+                marker := Cube{
+                    body: mod.widgets.XrBodyKind.Disabled
+                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                    size: vec3(0.020, 0.020, 0.020)
+                    pos: vec3(0.0, 0.072, 0.0)
+                    corner_radius: 0.006
+                    roughness: 0.22
+                    metallic: 0.06
+                    color: #xe8ebf2
+                }
+            }
+        }
+    }
+
     let XrUiButton = mod.widgets.ButtonFlat{
         draw_bg +: {
             border_size: 0.0
@@ -56,8 +257,9 @@ script_mod! {
         ui:  XrRoot{
             window.inner_size: vec2(1400, 900)
             pass.clear_color: #x0b1118
-            camera.fov_y: 52.0
-            camera.distance: 1.8
+            camera.fov_y: 38.0
+            camera.desktop_target: vec3(0.05, 0.10, -0.72)
+            camera.distance: 1.85
             env.gravity: 9.8
             env.env_cube: true
             env.depth_mesh: false
@@ -310,63 +512,51 @@ script_mod! {
                     scale: vec3(0.62, 0.62, 0.62)
                     on_render: ||{
                         Platform{
-                            pos: vec3(0.05, -0.06, -0.10)
-                            size: vec3(1.60, 0.08, 1.10)
+                            pos: vec3(0.0, -0.06, 0.0)
+                            size: vec3(0.48387095, 0.08, 0.48387095)
+                            friction: 1.8
                             color: #x283544
                         }
 
                         Cube{
                             body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.14, 0.12, 0.14)
-                            corner_radius: 0.02
+                            size: vec3(0.34, 0.05, 0.46)
+                            corner_radius: 0.018
                             roughness: 0.78
-                            metallic: 0.02
-                            color: #x516579
-                            pos: vec3(-0.34, 0.00, -0.26)
-                        }
-
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.18, 0.10, 0.18)
-                            corner_radius: 0.02
-                            roughness: 0.78
-                            metallic: 0.02
-                            color: #x516579
-                            pos: vec3(0.34, -0.01, -0.32)
-                        }
-
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.54, 0.08, 0.12)
-                            corner_radius: 0.018
-                            roughness: 0.82
                             metallic: 0.0
-                            color: #x1f2b37
-                            pos: vec3(0.05, -0.02, -0.48)
+                            friction: 1.6
+                            color: #x4b5f72
+                            pos: vec3(0.30, 0.01, -0.06)
+                            rot: vec3(0.24, 0.0, 0.0)
                         }
 
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.12, 0.16, 0.42)
-                            corner_radius: 0.018
-                            roughness: 0.80
-                            metallic: 0.0
-                            color: #x202f3d
-                            pos: vec3(-0.48, 0.02, -0.02)
+                        tank_slots := XrNode{
+                            body: mod.widgets.XrBodyKind.Disabled
+                            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                            for index in 0..8 {
+                                TankSlot{
+                                    pos: vec3(-14.0 - index * 0.7, -8.0, 0.0)
+                                }
+                            }
                         }
 
-                        Cube{
-                            body: mod.widgets.XrBodyKind.Fixed
-                            size: vec3(0.12, 0.16, 0.42)
-                            corner_radius: 0.018
-                            roughness: 0.80
-                            metallic: 0.0
-                            color: #x202f3d
-                            pos: vec3(0.58, 0.02, -0.02)
-                        }
-
-                        Tank{
-                            pos: vec3(0.05, 0.03, -0.10)
+                        tank_projectiles := XrNode{
+                            body: mod.widgets.XrBodyKind.Disabled
+                            shared_object_policy: mod.widgets.XrSharedObjectPolicy.None
+                            for index in 0..48 {
+                                IcoSphere{
+                                    spawn_pool: true
+                                    shared_object_policy: mod.widgets.XrSharedObjectPolicy.PooledOnDemand
+                                    gravity_scale: 1.0
+                                    density: 0.65
+                                    friction: 0.08
+                                    restitution: 0.01
+                                    radius: 0.024
+                                    diffuse: #xa0a4aa
+                                    color: #xffc857
+                                    pos: vec3(-12.0, -12.0 - index * 0.01, 0.0)
+                                }
+                            }
                         }
                     }
                 }
@@ -440,6 +630,7 @@ script_mod! {
             control_strip := XrView{
                 visible: false
                 show_in_non_xr: true
+                pos: vec3(0.05, 0.44, -0.78)
                 wrist_left: true
                 logical_size: vec2(1220, 700)
                 pixel_scale: 0.000215
@@ -578,9 +769,15 @@ script_mod! {
                             on_press: || ui.root.set_depth_query_hits(!ui.root.depth_query_hits_visible())
                         }
 
+                        tank_depth_mesh_mode_button := XrUiButton{
+                            width: 154
+                            text: "Tank TSDF Mode"
+                            on_press: || ui.root.toggle_depth_mesh_focus_cube()
+                        }
+
                         scene_status := Label{
                             width: Fill
-                            text: "Default scene: tank mode. Drive with the right thumbstick in head-relative screen direction, and grab the tank directly with your hands."
+                            text: "Default scene: tank mode. Left stick steers, right trigger accelerates, left trigger reverses, right stick aims the turret, A/X fire shells, B resets the tank, and controller grip picks the tank up."
                             draw_text.color: #xe8f4ff
                         }
                     }
@@ -598,22 +795,10 @@ script_mod! {
                             draw_text.color: #xe8f4ff
                         }
 
-                        depth_resolution_3_button := XrUiButton{
-                            width: 64
-                            text: "3 cm"
-                            on_press: || ui.root.set_depth_voxel_size(0.03)
-                        }
-
-                        depth_resolution_5_button := XrUiButton{
-                            width: 64
-                            text: "5 cm"
-                            on_press: || ui.root.set_depth_voxel_size(0.05)
-                        }
-
-                        depth_resolution_10_button := XrUiButton{
-                            width: 72
-                            text: "10 cm"
-                            on_press: || ui.root.set_depth_voxel_size(0.10)
+                        depth_resolution_2_button := XrUiButton{
+                            width: 94
+                            text: "2 cm fixed"
+                            on_press: || ui.root.set_depth_voxel_size(0.02)
                         }
                     }
 
@@ -682,7 +867,7 @@ script_mod! {
                                 debug_field := Label{
                                     width: Fill
                                     height: Fit
-                                    text: "Connected peers: 0"
+                                    text: "Waiting for debug stats..."
                                     draw_text.color: #xe8f4ff
                                     draw_text.flow: Flow.Right{wrap: true}
                                 }
@@ -741,7 +926,7 @@ script_mod! {
                     wrist_sync_status := Label{
                         width: Fill
                         height: Fit
-                        text: "P:0.0 C:0.0"
+                        text: "P:0.0 X:0.0"
                         draw_text.color: #xe8f4ff
                         draw_text.flow: Flow.Right{wrap: true}
                     }
@@ -762,6 +947,14 @@ pub struct App {
     #[rust]
     last_debug_text: String,
     #[rust]
+    last_debug_refresh_at: Option<f64>,
+    #[rust]
+    last_wrist_perf_text: String,
+    #[rust]
+    debug_text_scratch: String,
+    #[rust]
+    wrist_perf_text_scratch: String,
+    #[rust]
     suppress_activity_broadcast: Option<XrActivityId>,
     #[rust]
     pending_shared_scene_reset: bool,
@@ -771,9 +964,317 @@ pub struct App {
     last_activity_pose_sync_activity: Option<XrActivityId>,
     #[rust]
     last_activity_pose_sync_at: f64,
+    #[rust]
+    tank_drive: TankDriveConfig,
+    #[rust]
+    car_drive: CarDriveConfig,
+    #[rust]
+    tank_turret_yaw: f32,
+    #[rust]
+    tank_turret_pitch: f32,
+    #[rust]
+    tank_pool_uids: Vec<WidgetUid>,
+    #[rust]
+    tank_spawn_requested: bool,
+    #[rust]
+    primary_tank_widget_uid: Option<WidgetUid>,
+    #[rust]
+    tank_projectile_pool_uids: Vec<WidgetUid>,
+    #[rust]
+    tank_projectile_cursor: usize,
+    #[rust]
+    tank_projectile_next_emit_at: Option<f64>,
+    #[rust]
+    tank_active_hit_projectiles: HashSet<WidgetUid>,
+    #[rust]
+    tank_hit_flash_until: f64,
+    #[rust]
+    last_desktop_tank_drive_at: Option<f64>,
+    #[rust]
+    last_desktop_tank_reset_pressed: bool,
+    #[rust]
+    desktop_tank_drive_armed: bool,
+    #[rust]
+    tank_depth_focus_cube_auto_enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DesktopTankInput {
+    left_stick: Vec2f,
+    right_stick: Vec2f,
+    left_trigger: f32,
+    right_trigger: f32,
+    a: f32,
+    b: f32,
+    x: f32,
 }
 
 impl App {
+    fn tank_physics_wheel_radius_meters() -> f32 {
+        let support_base = TANK_BODY_HALF_WIDTH_METERS
+            .min(TANK_BODY_HALF_HEIGHT_METERS)
+            .min(TANK_BODY_HALF_DEPTH_METERS)
+            .max(0.0005);
+        (support_base * TANK_FOUR_WHEEL_RADIUS_SCALE).clamp(
+            TANK_FOUR_WHEEL_RADIUS_MIN_METERS,
+            TANK_FOUR_WHEEL_RADIUS_MAX_METERS,
+        )
+    }
+
+    fn tank_physics_wheel_rest_length_meters() -> f32 {
+        (Self::tank_physics_wheel_radius_meters() * TANK_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(
+            TANK_FOUR_WHEEL_REST_LENGTH_MIN_METERS,
+            TANK_FOUR_WHEEL_REST_LENGTH_MAX_METERS,
+        )
+    }
+
+    fn tank_physics_wheel_min_length_meters() -> f32 {
+        let rest_length = Self::tank_physics_wheel_rest_length_meters();
+        let min_length_floor = 0.004;
+        let travel = (Self::tank_physics_wheel_radius_meters() * 0.50).clamp(0.018, 0.090);
+        (rest_length - travel).max(min_length_floor)
+    }
+
+    fn tank_physics_wheel_min_clearance_meters() -> f32 {
+        (Self::tank_physics_wheel_radius_meters() * 0.28).clamp(0.014, 0.028)
+    }
+
+    fn tank_physics_body_collider_bottom_meters() -> f32 {
+        let physics_half_height = TANK_BODY_HALF_HEIGHT_METERS * 0.70;
+        let physics_center_offset = TANK_BODY_HALF_HEIGHT_METERS * 0.20;
+        physics_center_offset - physics_half_height
+    }
+
+    fn tank_physics_wheel_local_pose(index: usize) -> Option<Pose> {
+        let x = if index < 2 {
+            -TANK_WHEEL_LATERAL_OFFSET_METERS
+        } else {
+            TANK_WHEEL_LATERAL_OFFSET_METERS
+        };
+        let z = match index % 2 {
+            0 => TANK_WHEEL_FRONT_OFFSET_METERS,
+            1 => TANK_WHEEL_BACK_OFFSET_METERS,
+            _ => return None,
+        };
+        Some(Pose::new(
+            Quat::default(),
+            vec3f(x, TANK_WHEEL_VERTICAL_OFFSET_METERS, z),
+        ))
+    }
+
+    fn tank_physics_body_mount_lift_meters() -> f32 {
+        -Self::tank_physics_body_collider_bottom_meters() + Self::tank_physics_wheel_radius_meters()
+    }
+
+    fn tank_support_world_metrics(&self, cx: &mut Cx) -> (f32, f32) {
+        let scene_scale = self
+            .tank_scene_spawn_basis(cx)
+            .map(|(_, _, scale)| scale)
+            .unwrap_or(vec3f(1.0, 1.0, 1.0));
+        let half_extents = vec3f(
+            TANK_BODY_HALF_WIDTH_METERS * scene_scale.x,
+            TANK_BODY_HALF_HEIGHT_METERS * scene_scale.y,
+            TANK_BODY_HALF_DEPTH_METERS * scene_scale.z,
+        );
+        let support_base = half_extents
+            .x
+            .min(half_extents.y)
+            .min(half_extents.z)
+            .max(0.0005);
+        let radius = (support_base * TANK_FOUR_WHEEL_RADIUS_SCALE).clamp(
+            TANK_FOUR_WHEEL_RADIUS_MIN_METERS,
+            TANK_FOUR_WHEEL_RADIUS_MAX_METERS,
+        );
+        let rest_length = (radius * TANK_FOUR_WHEEL_REST_LENGTH_SCALE).clamp(
+            TANK_FOUR_WHEEL_REST_LENGTH_MIN_METERS,
+            TANK_FOUR_WHEEL_REST_LENGTH_MAX_METERS,
+        );
+        (radius, rest_length)
+    }
+
+    fn tank_spawn_support_clearance_meters(&self, cx: &mut Cx) -> f32 {
+        let scene_scale_y = self
+            .tank_scene_spawn_basis(cx)
+            .map(|(_, _, scale)| scale.y.abs())
+            .filter(|scale| *scale > 1.0e-4)
+            .unwrap_or(1.0);
+        let (support_radius_world, support_rest_world) = self.tank_support_world_metrics(cx);
+        let support_radius_local = support_radius_world / scene_scale_y;
+        let support_rest_local = support_rest_world / scene_scale_y;
+        let preload_local = TANK_SPAWN_SUSPENSION_PRELOAD_WORLD_METERS / scene_scale_y;
+        let extra_clearance_local = TANK_SPAWN_EXTRA_CLEARANCE_WORLD_METERS / scene_scale_y;
+        TANK_PLATE_TOP_LOCAL_Y_METERS
+            + TANK_BODY_HALF_HEIGHT_METERS
+            + support_rest_local
+            + support_radius_local
+            + extra_clearance_local
+            - preload_local
+    }
+
+    fn desktop_tank_input_is_neutral(input: DesktopTankInput) -> bool {
+        input.right_stick.length() <= 0.16
+            && input.left_stick.length() <= 0.16
+            && input.left_trigger <= 0.08
+            && input.right_trigger <= 0.08
+            && input.a <= 0.5
+            && input.b <= 0.5
+            && input.x <= 0.5
+    }
+
+    fn tank_wheel_pivot_ref(
+        &self,
+        cx: &mut Cx,
+        tank_widget: &WidgetRef,
+        index: usize,
+    ) -> WidgetRef {
+        match index {
+            0 => tank_widget.widget(cx, ids!(tank_wheel_0)),
+            1 => tank_widget.widget(cx, ids!(tank_wheel_1)),
+            2 => tank_widget.widget(cx, ids!(tank_wheel_2)),
+            3 => tank_widget.widget(cx, ids!(tank_wheel_3)),
+            _ => WidgetRef::default(),
+        }
+    }
+
+    fn tank_wheel_mesh_ref(&self, cx: &mut Cx, tank_widget: &WidgetRef, index: usize) -> WidgetRef {
+        match index {
+            0 => tank_widget.widget(cx, ids!(tank_wheel_0.wheel_mesh)),
+            1 => tank_widget.widget(cx, ids!(tank_wheel_1.wheel_mesh)),
+            2 => tank_widget.widget(cx, ids!(tank_wheel_2.wheel_mesh)),
+            3 => tank_widget.widget(cx, ids!(tank_wheel_3.wheel_mesh)),
+            _ => WidgetRef::default(),
+        }
+    }
+
+    fn default_tank_wheel_local_pose(index: usize) -> Option<Pose> {
+        Self::tank_physics_wheel_local_pose(index)
+    }
+
+    fn sync_tank_wheel_widgets(
+        &self,
+        cx: &mut Cx,
+        tank_widget: &WidgetRef,
+        tank_body: &XrRuntimeBodyState,
+    ) {
+        for index in 0..TANK_WHEEL_COUNT {
+            let Some(local_pose) = tank_body.linked_support_local_poses[index]
+                .or_else(|| Self::default_tank_wheel_local_pose(index))
+            else {
+                continue;
+            };
+            let steering = tank_body.linked_support_steer_angles[index].unwrap_or(0.0);
+            let spin = tank_body.linked_support_spin_angles[index].unwrap_or(0.0);
+            if let Some(mut pivot) = self
+                .tank_wheel_pivot_ref(cx, tank_widget, index)
+                .borrow_mut::<XrNode>()
+            {
+                pivot.set_pos(cx, local_pose.position);
+                pivot.set_rot(cx, vec3f(0.0, steering, 0.0));
+            }
+            if let Some(mut wheel) = self
+                .tank_wheel_mesh_ref(cx, tank_widget, index)
+                .borrow_mut::<IcoSphere>()
+            {
+                wheel.set_radius(cx, Self::tank_physics_wheel_radius_meters());
+                wheel.set_rot(cx, vec3f(spin, 0.0, 0.0));
+            }
+        }
+    }
+
+    fn tank_body_visual_lift(tank_body: &XrRuntimeBodyState) -> f32 {
+        let mut wheel_y_sum = 0.0;
+        let mut wheel_count = 0.0;
+        for index in 0..TANK_WHEEL_COUNT {
+            if let Some(local_pose) = tank_body.linked_support_local_poses[index]
+                .or_else(|| Self::default_tank_wheel_local_pose(index))
+            {
+                wheel_y_sum += local_pose.position.y;
+                wheel_count += 1.0;
+            }
+        }
+        let average_wheel_y = if wheel_count > 0.0 {
+            wheel_y_sum / wheel_count
+        } else {
+            TANK_WHEEL_VERTICAL_OFFSET_METERS
+        };
+        (Self::tank_physics_body_mount_lift_meters()
+            + (TANK_WHEEL_VERTICAL_OFFSET_METERS - average_wheel_y)
+                * TANK_BODY_VISUAL_SUSPENSION_RESPONSE)
+            .clamp(
+                TANK_BODY_VISUAL_LIFT_MIN_METERS,
+                TANK_BODY_VISUAL_LIFT_MAX_METERS,
+            )
+    }
+
+    fn rotation_quat(rot: Vec3f) -> Quat {
+        let x = Quat::from_axis_angle(vec3f(1.0, 0.0, 0.0), rot.x);
+        let y = Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), rot.y);
+        let z = Quat::from_axis_angle(vec3f(0.0, 0.0, 1.0), rot.z);
+        Quat::multiply(&z, &Quat::multiply(&y, &x))
+    }
+
+    fn quat_to_rot(quat: Quat) -> Vec3f {
+        // Invert `rotation_quat`, which composes local node rotations as X then Y then Z.
+        let x = (2.0 * (quat.w * quat.x - quat.y * quat.z))
+            .atan2(1.0 - 2.0 * (quat.x * quat.x + quat.y * quat.y));
+        let y = (2.0 * (quat.x * quat.z + quat.w * quat.y))
+            .clamp(-1.0, 1.0)
+            .asin();
+        let z = (2.0 * (quat.w * quat.z - quat.x * quat.y))
+            .atan2(1.0 - 2.0 * (quat.y * quat.y + quat.z * quat.z));
+        vec3f(x, y, z)
+    }
+
+    fn transform_basis_with_node(
+        parent_pos: Vec3f,
+        parent_ori: Quat,
+        parent_scale: Vec3f,
+        node: &XrNode,
+    ) -> (Vec3f, Quat, Vec3f) {
+        let local_pos = vec3f(
+            node.pos().x * parent_scale.x,
+            node.pos().y * parent_scale.y,
+            node.pos().z * parent_scale.z,
+        );
+        let rotated_pos = parent_ori.rotate_vec3(&local_pos);
+        let orientation = Quat::multiply(&Self::rotation_quat(node.rot()), &parent_ori);
+        let scale = vec3f(
+            parent_scale.x * node.scale().x,
+            parent_scale.y * node.scale().y,
+            parent_scale.z * node.scale().z,
+        );
+        (parent_pos + rotated_pos, orientation, scale)
+    }
+
+    fn transform_pose_with_basis(
+        parent_pos: Vec3f,
+        parent_ori: Quat,
+        parent_scale: Vec3f,
+        local_pose: Pose,
+    ) -> Pose {
+        let scaled_pos = vec3f(
+            local_pose.position.x * parent_scale.x,
+            local_pose.position.y * parent_scale.y,
+            local_pose.position.z * parent_scale.z,
+        );
+        Pose::new(
+            Quat::multiply(&local_pose.orientation, &parent_ori),
+            parent_pos + parent_ori.rotate_vec3(&scaled_pos),
+        )
+    }
+
+    fn tank_scene_spawn_basis(&self, cx: &mut Cx) -> Option<(Vec3f, Quat, Vec3f)> {
+        let scene_select = self.ui.widget(cx, ids!(scene_select));
+        let (select_pos, select_ori, select_scale) =
+            xr_widget_with_scene_node(&scene_select, |node| {
+                (node.pos(), Self::rotation_quat(node.rot()), node.scale())
+            })?;
+        let tanks_scene = scene_select.widget(cx, ids!(tanks_scene));
+        xr_widget_with_scene_node(&tanks_scene, |node| {
+            Self::transform_basis_with_node(select_pos, select_ori, select_scale, node)
+        })
+    }
+
     fn poses_match(left: Pose, right: Pose) -> bool {
         let translation_delta = (left.position - right.position).length();
         let rotation_dot = left
@@ -860,7 +1361,11 @@ impl App {
             return;
         }
 
-        let Some(content_pose) = self.ui.borrow::<XrRoot>().and_then(|root| root.content_pose()) else {
+        let Some(content_pose) = self
+            .ui
+            .borrow::<XrRoot>()
+            .and_then(|root| root.content_pose())
+        else {
             return;
         };
         let now = Cx::time_now();
@@ -868,8 +1373,8 @@ impl App {
         let pose_changed = self
             .last_activity_pose_sync
             .is_none_or(|previous| !Self::poses_match(previous, content_pose));
-        let interval_elapsed = now - self.last_activity_pose_sync_at
-            >= ACTIVITY_POSE_SYNC_INTERVAL_SECONDS;
+        let interval_elapsed =
+            now - self.last_activity_pose_sync_at >= ACTIVITY_POSE_SYNC_INTERVAL_SECONDS;
         if !(activity_changed || pose_changed || interval_elapsed) {
             return;
         }
@@ -932,6 +1437,707 @@ impl App {
         }
     }
 
+    fn apply_car_control(&mut self, cx: &mut Cx, control: XrCarControl) {
+        if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
+            root.apply_car_control(cx, control);
+        }
+    }
+
+    fn is_tanks_scene_active(&self, cx: &mut Cx) -> bool {
+        self.current_activity(cx) == Some(XrActivityId(live_id!(tanks_scene)))
+    }
+
+    fn collect_spawn_pool_widget_uids(widget: &WidgetRef, pool_uids: &mut Vec<WidgetUid>) {
+        if !widget.visible() {
+            return;
+        }
+        xr_widget_with_scene_node(widget, |node| {
+            if node.spawn_pool() {
+                pool_uids.push(widget.widget_uid());
+            }
+        });
+        xr_widget_children(widget, &mut |_, child| {
+            Self::collect_spawn_pool_widget_uids(&child, pool_uids)
+        });
+    }
+
+    fn find_widget_by_uid(widget: &WidgetRef, target: WidgetUid) -> Option<WidgetRef> {
+        if widget.widget_uid() == target {
+            return Some(widget.clone());
+        }
+        let mut found = None;
+        xr_widget_children(widget, &mut |_, child| {
+            if found.is_none() {
+                found = Self::find_widget_by_uid(&child, target);
+            }
+        });
+        found
+    }
+
+    fn peer_sync_local_peer_id(&self, cx: &mut Cx) -> Option<XrNetPeerId> {
+        self.ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow::<XrPeerSync>()
+            .and_then(|peer_sync| peer_sync.local_peer_id())
+    }
+
+    fn shared_object_authority_for_widget(
+        &self,
+        cx: &mut Cx,
+        widget_uid: WidgetUid,
+    ) -> Option<XrNetPeerId> {
+        self.ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow::<XrPeerSync>()
+            .and_then(|peer_sync| peer_sync.shared_object_authority_for_widget(widget_uid))
+    }
+
+    fn widget_is_local_shared_object(&self, cx: &mut Cx, widget_uid: WidgetUid) -> bool {
+        self.ui
+            .widget(cx, ids!(xr_peer_sync))
+            .borrow::<XrPeerSync>()
+            .is_some_and(|peer_sync| peer_sync.widget_is_local_shared_object(widget_uid))
+    }
+
+    fn refresh_tank_pool(&mut self, cx: &mut Cx) {
+        self.tank_pool_uids.clear();
+        let tank_slots = self.ui.widget(cx, ids!(tank_slots));
+        if tank_slots.borrow::<XrNode>().is_none() {
+            return;
+        }
+        Self::collect_spawn_pool_widget_uids(&tank_slots, &mut self.tank_pool_uids);
+    }
+
+    fn local_tank_widget_uid(&mut self, cx: &mut Cx) -> Option<WidgetUid> {
+        if self.tank_pool_uids.is_empty() {
+            self.refresh_tank_pool(cx);
+        }
+        if let Some(primary) = self.primary_tank_widget_uid {
+            if self.widget_is_local_shared_object(cx, primary) {
+                return Some(primary);
+            }
+            let has_any_local_shared = self
+                .tank_pool_uids
+                .iter()
+                .copied()
+                .any(|widget_uid| self.widget_is_local_shared_object(cx, widget_uid));
+            if !has_any_local_shared && self.tank_body_state_for_uid(cx, primary).is_some() {
+                return Some(primary);
+            }
+        }
+        self.tank_pool_uids
+            .iter()
+            .copied()
+            .find(|widget_uid| self.widget_is_local_shared_object(cx, *widget_uid))
+    }
+
+    fn tank_body_state_for_uid(
+        &self,
+        _cx: &mut Cx,
+        tank_widget_uid: WidgetUid,
+    ) -> Option<XrRuntimeBodyState> {
+        let runtime_bodies = self
+            .ui
+            .borrow::<XrRoot>()
+            .map(|root| root.runtime_bodies())?;
+        runtime_bodies.get(&tank_widget_uid).cloned()
+    }
+
+    fn local_tank_body_state(&mut self, cx: &mut Cx) -> Option<(WidgetUid, XrRuntimeBodyState)> {
+        let tank_widget_uid = self.local_tank_widget_uid(cx)?;
+        self.tank_body_state_for_uid(cx, tank_widget_uid)
+            .map(|body| (tank_widget_uid, body))
+    }
+
+    fn tank_widget_ref(&mut self, cx: &mut Cx, widget_uid: WidgetUid) -> Option<WidgetRef> {
+        let tank_slots = self.ui.widget(cx, ids!(tank_slots));
+        if tank_slots.borrow::<XrNode>().is_none() {
+            return None;
+        }
+        Self::find_widget_by_uid(&tank_slots, widget_uid)
+    }
+
+    fn emit_local_shared_body_spawn(&mut self, cx: &mut Cx, spawn: XrBodySpawn) -> WidgetUid {
+        let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
+        if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+            if let Some(spawn) = peer_sync.send_local_body_spawn(spawn) {
+                let widget_uid = spawn.widget_uid;
+                self.apply_remote_body_spawn(cx, spawn);
+                return widget_uid;
+            }
+        }
+        let widget_uid = spawn.widget_uid;
+        self.apply_remote_body_spawn(cx, spawn);
+        widget_uid
+    }
+
+    fn emit_local_shared_body_spawn_exact(&mut self, cx: &mut Cx, spawn: XrBodySpawn) -> WidgetUid {
+        let peer_sync_widget = self.ui.widget(cx, ids!(xr_peer_sync));
+        if let Some(mut peer_sync) = peer_sync_widget.borrow_mut::<XrPeerSync>() {
+            if let Some(spawn) = peer_sync.send_local_body_spawn_exact(spawn) {
+                let widget_uid = spawn.widget_uid;
+                self.apply_remote_body_spawn(cx, spawn);
+                return widget_uid;
+            }
+        }
+        let widget_uid = spawn.widget_uid;
+        self.apply_remote_body_spawn(cx, spawn);
+        widget_uid
+    }
+
+    fn tank_spawn_pose(&self, cx: &mut Cx) -> Pose {
+        let support_clearance = self.tank_spawn_support_clearance_meters(cx);
+        let peer_id = self.peer_sync_local_peer_id(cx).unwrap_or_default();
+        let hash = peer_id
+            .0
+            .wrapping_mul(0x9e37_79b9)
+            .wrapping_add(0x7f4a_7c15);
+        let angle = ((hash & 1023) as f32 / 1024.0) * std::f32::consts::TAU;
+        let radius =
+            TANK_SPAWN_RING_RADIUS_METERS + (((hash >> 10) & 63) as f32 / 63.0 - 0.5) * 0.015;
+        let local_pose = Pose::new(
+            Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), angle + std::f32::consts::PI),
+            vec3f(
+                angle.cos() * radius,
+                support_clearance,
+                angle.sin() * radius,
+            ),
+        );
+        if let Some((scene_pos, scene_ori, scene_scale)) = self.tank_scene_spawn_basis(cx) {
+            Self::transform_pose_with_basis(scene_pos, scene_ori, scene_scale, local_pose)
+        } else {
+            local_pose
+        }
+    }
+
+    fn tank_reset_pose_from_controller(&self, cx: &mut Cx, controller: &XrController) -> Pose {
+        let support_clearance = self.tank_spawn_support_clearance_meters(cx);
+        let pose = controller.grip_pose;
+        if !controller.active() || !pose.is_finite() {
+            return self.tank_spawn_pose(cx);
+        }
+        let mut forward = pose.orientation.rotate_vec3(&vec3f(0.0, 0.0, 1.0));
+        forward.y = 0.0;
+        let yaw = if forward.length() > 1.0e-4 {
+            forward = forward.normalize();
+            forward.x.atan2(forward.z)
+        } else {
+            0.0
+        };
+        Pose::new(
+            Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), yaw),
+            pose.position + vec3f(0.0, support_clearance, 0.0),
+        )
+    }
+
+    fn ensure_local_tank_spawned(&mut self, cx: &mut Cx) {
+        if !self.is_tanks_scene_active(cx) {
+            self.tank_active_hit_projectiles.clear();
+            self.tank_spawn_requested = false;
+            return;
+        }
+        if let Some((widget_uid, _)) = self.local_tank_body_state(cx) {
+            self.primary_tank_widget_uid = Some(widget_uid);
+            self.tank_spawn_requested = false;
+            return;
+        }
+        let scene_ready = self
+            .ui
+            .borrow::<XrRoot>()
+            .is_some_and(|root| root.physics_scene_body_count() > 0);
+        if !scene_ready || self.tank_spawn_requested {
+            return;
+        }
+        if self.tank_pool_uids.is_empty() {
+            self.refresh_tank_pool(cx);
+        }
+        let Some(widget_uid) = self
+            .primary_tank_widget_uid
+            .or_else(|| self.tank_pool_uids.first().copied())
+        else {
+            return;
+        };
+        let spawn_pose = self.tank_spawn_pose(cx);
+        let widget_uid = self.emit_local_shared_body_spawn_exact(
+            cx,
+            XrBodySpawn {
+                widget_uid,
+                shadow: false,
+                mode: XrSharedObjectMode::Dynamic,
+                pose: spawn_pose,
+                linvel: vec3f(0.0, 0.0, 0.0),
+                angvel: vec3f(0.0, 0.0, 0.0),
+            },
+        );
+        self.tank_spawn_requested = true;
+        self.primary_tank_widget_uid = Some(widget_uid);
+    }
+
+    fn sync_tank_depth_mesh_focus(&mut self, cx: &mut Cx) {
+        let focus_point = if self.is_tanks_scene_active(cx) {
+            self.local_tank_body_state(cx)
+                .map(|(_, body)| body.pose.position)
+                .filter(|position| position.is_finite())
+        } else {
+            None
+        };
+        if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
+            if focus_point.is_some() {
+                if !root.depth_mesh_focus_cube_enabled() {
+                    root.toggle_depth_mesh_focus_cube(cx);
+                    self.tank_depth_focus_cube_auto_enabled = true;
+                }
+            } else if self.tank_depth_focus_cube_auto_enabled
+                && root.depth_mesh_focus_cube_enabled()
+            {
+                root.toggle_depth_mesh_focus_cube(cx);
+                self.tank_depth_focus_cube_auto_enabled = false;
+            }
+            root.set_depth_mesh_focus_point(focus_point);
+        }
+    }
+
+    fn reset_local_tank(&mut self, cx: &mut Cx) -> bool {
+        let spawn_pose = self.tank_spawn_pose(cx);
+        self.reset_local_tank_at_pose(cx, spawn_pose)
+    }
+
+    fn reset_local_tank_at_pose(&mut self, cx: &mut Cx, spawn_pose: Pose) -> bool {
+        if !self.is_tanks_scene_active(cx) {
+            return false;
+        }
+        if self.tank_pool_uids.is_empty() {
+            self.refresh_tank_pool(cx);
+        }
+        let Some(widget_uid) = self
+            .local_tank_widget_uid(cx)
+            .or(self.primary_tank_widget_uid)
+            .or_else(|| self.tank_pool_uids.first().copied())
+        else {
+            return false;
+        };
+        self.tank_turret_yaw = 0.0;
+        self.tank_turret_pitch = 0.0;
+        self.tank_projectile_next_emit_at = None;
+        self.tank_active_hit_projectiles.clear();
+        self.tank_hit_flash_until = 0.0;
+        let widget_uid = self.emit_local_shared_body_spawn_exact(
+            cx,
+            XrBodySpawn {
+                widget_uid,
+                shadow: false,
+                mode: XrSharedObjectMode::Dynamic,
+                pose: spawn_pose,
+                linvel: vec3f(0.0, 0.0, 0.0),
+                angvel: vec3f(0.0, 0.0, 0.0),
+            },
+        );
+        self.tank_spawn_requested = true;
+        self.primary_tank_widget_uid = Some(widget_uid);
+        cx.redraw_all();
+        true
+    }
+
+    fn refresh_tank_projectile_pool(&mut self, cx: &mut Cx) {
+        self.tank_projectile_pool_uids.clear();
+        let projectile_root = self.ui.widget(cx, ids!(tank_projectiles));
+        if projectile_root.borrow::<XrNode>().is_none() {
+            self.tank_projectile_cursor = 0;
+            return;
+        }
+        Self::collect_spawn_pool_widget_uids(&projectile_root, &mut self.tank_projectile_pool_uids);
+        if self.tank_projectile_pool_uids.is_empty() {
+            self.tank_projectile_cursor = 0;
+        } else {
+            self.tank_projectile_cursor %= self.tank_projectile_pool_uids.len();
+        }
+    }
+
+    fn next_tank_projectile_widget_uid(&mut self, cx: &mut Cx) -> Option<WidgetUid> {
+        if self.tank_projectile_pool_uids.is_empty() {
+            self.refresh_tank_projectile_pool(cx);
+        }
+        let len = self.tank_projectile_pool_uids.len();
+        if len == 0 {
+            return None;
+        }
+        let widget_uid = self.tank_projectile_pool_uids[self.tank_projectile_cursor % len];
+        self.tank_projectile_cursor = (self.tank_projectile_cursor + 1) % len;
+        Some(widget_uid)
+    }
+
+    fn sync_local_tank_widgets(&mut self, cx: &mut Cx, now: f64) {
+        let Some((tank_widget_uid, tank_body)) = self.local_tank_body_state(cx) else {
+            self.ui
+                .widget(cx, ids!(scene_status))
+                .set_text(cx, TANK_SCENE_STATUS_TEXT);
+            return;
+        };
+        let Some(tank_widget) = self.tank_widget_ref(cx, tank_widget_uid) else {
+            return;
+        };
+        if let Some(mut body_mount) = tank_widget
+            .widget(cx, ids!(tank_body_mount))
+            .borrow_mut::<XrNode>()
+        {
+            body_mount.set_pos(cx, vec3f(0.0, Self::tank_body_visual_lift(&tank_body), 0.0));
+        }
+        if let Some(mut turret) = tank_widget
+            .widget(cx, ids!(tank_turret_yaw))
+            .borrow_mut::<XrNode>()
+        {
+            turret.set_rot(cx, vec3f(0.0, self.tank_turret_yaw, 0.0));
+        }
+        if let Some(mut barrel) = tank_widget
+            .widget(cx, ids!(tank_barrel_pitch))
+            .borrow_mut::<XrNode>()
+        {
+            barrel.set_rot(cx, vec3f(self.tank_turret_pitch, 0.0, 0.0));
+        }
+        if let Some(mut hull) = tank_widget
+            .widget(cx, ids!(hull_block))
+            .borrow_mut::<Cube>()
+        {
+            let color = if now < self.tank_hit_flash_until {
+                vec4f(0.98, 0.36, 0.26, 1.0)
+            } else {
+                vec4f(0.4157, 0.5137, 0.2157, 1.0)
+            };
+            hull.set_color(cx, color);
+        }
+        self.sync_tank_wheel_widgets(cx, &tank_widget, &tank_body);
+        let status = if now < self.tank_hit_flash_until {
+            format!("Tank hit by a remote shell. {TANK_SCENE_STATUS_TEXT}")
+        } else {
+            TANK_SCENE_STATUS_TEXT.to_string()
+        };
+        self.ui.widget(cx, ids!(scene_status)).set_text(cx, &status);
+    }
+
+    fn update_tank_turret_with_controller(
+        &mut self,
+        cx: &mut Cx,
+        controller: &XrController,
+        dt: f32,
+    ) {
+        if self.local_tank_body_state(cx).is_none() {
+            return;
+        }
+        let (pitch_input, yaw_input) = tank_stick_axes(controller.stick, self.tank_drive);
+        let dt = dt.clamp(1.0 / 240.0, 0.1);
+        self.tank_turret_yaw = (self.tank_turret_yaw
+            + yaw_input * TANK_TURRET_YAW_SPEED_RADPS * dt)
+            .rem_euclid(std::f32::consts::TAU);
+        self.tank_turret_pitch = (self.tank_turret_pitch
+            + pitch_input * TANK_TURRET_PITCH_SPEED_RADPS * dt)
+            .clamp(TANK_TURRET_PITCH_MIN_RAD, TANK_TURRET_PITCH_MAX_RAD);
+    }
+
+    fn detect_local_tank_hits(&mut self, cx: &mut Cx, now: f64) {
+        let Some(local_tank_widget_uid) = self.local_tank_widget_uid(cx) else {
+            self.tank_active_hit_projectiles.clear();
+            return;
+        };
+        let Some(local_authority) =
+            self.shared_object_authority_for_widget(cx, local_tank_widget_uid)
+        else {
+            self.tank_active_hit_projectiles.clear();
+            return;
+        };
+        if self.tank_projectile_pool_uids.is_empty() {
+            self.refresh_tank_projectile_pool(cx);
+        }
+        let projectile_pool: HashSet<WidgetUid> =
+            self.tank_projectile_pool_uids.iter().copied().collect();
+        let runtime_contacts = self
+            .ui
+            .borrow::<XrRoot>()
+            .map(|root| root.runtime_contacts());
+        let Some(runtime_contacts) = runtime_contacts else {
+            return;
+        };
+        let mut active_projectiles = HashSet::new();
+        for &(left, right) in runtime_contacts.iter() {
+            let projectile_uid =
+                if left == local_tank_widget_uid && projectile_pool.contains(&right) {
+                    Some(right)
+                } else if right == local_tank_widget_uid && projectile_pool.contains(&left) {
+                    Some(left)
+                } else {
+                    None
+                };
+            let Some(projectile_uid) = projectile_uid else {
+                continue;
+            };
+            let Some(projectile_authority) =
+                self.shared_object_authority_for_widget(cx, projectile_uid)
+            else {
+                continue;
+            };
+            if projectile_authority == local_authority {
+                continue;
+            }
+            if self.tank_active_hit_projectiles.insert(projectile_uid) {
+                self.tank_hit_flash_until = now + TANK_HIT_FLASH_SECONDS;
+                crate::log!(
+                    "tank hit: local authority {:08x} hit by projectile {:016x} from {:08x}",
+                    local_authority.0,
+                    projectile_uid.0,
+                    projectile_authority.0
+                );
+            }
+            active_projectiles.insert(projectile_uid);
+        }
+        self.tank_active_hit_projectiles = active_projectiles;
+    }
+
+    fn emit_tank_projectiles(&mut self, cx: &mut Cx, now: f64, fire_active: bool) {
+        if !fire_active {
+            self.tank_projectile_next_emit_at = None;
+            return;
+        }
+        let Some((_, tank_body)) = self.local_tank_body_state(cx) else {
+            self.tank_projectile_next_emit_at = None;
+            return;
+        };
+
+        let interval = (1.0 / TANK_PROJECTILE_RATE_HZ).clamp(0.01, 10.0) as f64;
+        let tank_orientation = tank_body.pose.orientation;
+        let turret_orientation = Quat::multiply(
+            &Quat::from_axis_angle(vec3f(0.0, 1.0, 0.0), self.tank_turret_yaw),
+            &tank_orientation,
+        );
+        let barrel_orientation = Quat::multiply(
+            &Quat::from_axis_angle(vec3f(1.0, 0.0, 0.0), self.tank_turret_pitch),
+            &turret_orientation,
+        );
+        let tank_position = tank_body.pose.position;
+        let tank_scale = tank_body.scale;
+        let scale_local = |offset: Vec3f| {
+            vec3f(
+                offset.x * tank_scale.x,
+                offset.y * tank_scale.y,
+                offset.z * tank_scale.z,
+            )
+        };
+        let turret_mount =
+            tank_position + tank_orientation.rotate_vec3(&scale_local(vec3f(0.0, 0.08, 0.015)));
+        let barrel_pivot =
+            turret_mount + turret_orientation.rotate_vec3(&scale_local(vec3f(0.0, 0.0, 0.08)));
+        let barrel_tip =
+            barrel_pivot + barrel_orientation.rotate_vec3(&scale_local(vec3f(0.0, 0.0, 0.28)));
+        let direction = barrel_orientation
+            .rotate_vec3(&vec3f(0.0, 0.0, 1.0))
+            .normalize();
+        let projectile_radius = TANK_PROJECTILE_RADIUS_METERS
+            * tank_scale.x.min(tank_scale.y).min(tank_scale.z).max(0.0001);
+        let mut next_emit_at = self.tank_projectile_next_emit_at.unwrap_or(now);
+        let mut emitted = 0usize;
+
+        while now >= next_emit_at && emitted < TANK_PROJECTILE_MAX_EMITS_PER_UPDATE {
+            let Some(widget_uid) = self.next_tank_projectile_widget_uid(cx) else {
+                self.tank_projectile_next_emit_at = None;
+                return;
+            };
+            let _ = self.emit_local_shared_body_spawn(
+                cx,
+                XrBodySpawn {
+                    widget_uid,
+                    shadow: false,
+                    mode: XrSharedObjectMode::Dynamic,
+                    pose: Pose::new(
+                        barrel_orientation,
+                        barrel_tip + direction * projectile_radius,
+                    ),
+                    linvel: tank_body.linvel + direction * TANK_PROJECTILE_SPEED_MPS,
+                    angvel: vec3f(0.0, 0.0, 0.0),
+                },
+            );
+            cx.redraw_all();
+            next_emit_at += interval;
+            emitted += 1;
+        }
+
+        self.tank_projectile_next_emit_at = Some(next_emit_at);
+    }
+
+    fn desktop_gamepad_tank_input(&mut self, cx: &mut Cx) -> (usize, Option<DesktopTankInput>) {
+        let mut gamepad_count = 0usize;
+        let mut best_input = None;
+        let mut best_score = 0.0f32;
+        for state in cx.game_input_states() {
+            let GameInputState::Gamepad(gamepad) = state else {
+                continue;
+            };
+            gamepad_count += 1;
+            let input = DesktopTankInput {
+                left_stick: vec2f(gamepad.left_stick.x as f32, gamepad.left_stick.y as f32),
+                right_stick: vec2f(gamepad.right_stick.x as f32, gamepad.right_stick.y as f32),
+                left_trigger: gamepad.left_trigger as f32,
+                right_trigger: gamepad.right_trigger as f32,
+                a: gamepad.a as f32,
+                b: gamepad.b as f32,
+                x: gamepad.x as f32,
+            };
+            let score = input.left_stick.length() * 2.0
+                + input.right_stick.length()
+                + input.left_trigger.max(input.right_trigger)
+                + input.a.max(input.x)
+                + input.b;
+            if score > best_score {
+                best_input = Some(input);
+                best_score = score;
+            }
+        }
+        (gamepad_count, best_input)
+    }
+
+    fn drive_tank_with_controllers(
+        &mut self,
+        cx: &mut Cx,
+        right_controller: &XrController,
+        left_controller: &XrController,
+    ) -> Option<(bool, bool, bool, bool, Option<XrSharedHand>, Vec3f, Vec3f)> {
+        let Some((tank_widget_uid, body)) = self.local_tank_body_state(cx) else {
+            return None;
+        };
+        let control = car_drive_command(
+            tank_widget_uid,
+            body.held_by,
+            left_controller.stick,
+            right_controller.trigger,
+            left_controller.trigger,
+            self.car_drive,
+        );
+        let forced_dynamic =
+            control.is_some() && body.held_by.is_none() && (!body.dynamic_body || body.shadowed);
+        if forced_dynamic {
+            let widget_uid = self.emit_local_shared_body_spawn_exact(
+                cx,
+                XrBodySpawn {
+                    widget_uid: tank_widget_uid,
+                    shadow: false,
+                    mode: XrSharedObjectMode::Dynamic,
+                    pose: body.pose,
+                    linvel: body.linvel,
+                    angvel: body.angvel,
+                },
+            );
+            self.primary_tank_widget_uid = Some(widget_uid);
+            self.tank_spawn_requested = true;
+        }
+        let applied = control.is_some();
+        if let Some(control) = control {
+            self.apply_car_control(cx, control);
+        }
+        Some((
+            applied,
+            forced_dynamic,
+            body.dynamic_body,
+            body.shadowed,
+            body.held_by,
+            body.linvel,
+            body.angvel,
+        ))
+    }
+
+    fn drive_tank_for_update(&mut self, cx: &mut Cx, update: &XrUpdateEvent) {
+        if update.clicked_b() {
+            let spawn_pose =
+                self.tank_reset_pose_from_controller(cx, &update.state.right_controller);
+            self.reset_local_tank_at_pose(cx, spawn_pose);
+            self.sync_local_tank_widgets(cx, update.state.time);
+            return;
+        }
+        let dt = (update.state.time - update.last.time).clamp(1.0 / 240.0, 0.1) as f32;
+        let _ = self.drive_tank_with_controllers(
+            cx,
+            &update.state.right_controller,
+            &update.state.left_controller,
+        );
+        self.update_tank_turret_with_controller(cx, &update.state.right_controller, dt);
+        self.emit_tank_projectiles(
+            cx,
+            update.state.time,
+            update.state.left_controller.click_a()
+                || update.state.left_controller.click_x()
+                || update.state.right_controller.click_a()
+                || update.state.right_controller.click_x(),
+        );
+        self.detect_local_tank_hits(cx, update.state.time);
+        self.sync_local_tank_widgets(cx, update.state.time);
+    }
+
+    fn drive_tank_for_desktop_frame(&mut self, cx: &mut Cx, event: &NextFrameEvent) {
+        let dt = self
+            .last_desktop_tank_drive_at
+            .map(|last| (event.time - last) as f32)
+            .unwrap_or(1.0 / 60.0);
+        self.last_desktop_tank_drive_at = Some(event.time);
+        let (_, best_input) = self.desktop_gamepad_tank_input(cx);
+        let Some(input) = best_input else {
+            self.last_desktop_tank_reset_pressed = false;
+            self.desktop_tank_drive_armed = false;
+            self.emit_tank_projectiles(cx, event.time, false);
+            self.detect_local_tank_hits(cx, event.time);
+            self.sync_local_tank_widgets(cx, event.time);
+            return;
+        };
+        if !self.desktop_tank_drive_armed {
+            if Self::desktop_tank_input_is_neutral(input) {
+                self.desktop_tank_drive_armed = true;
+            } else {
+                self.last_desktop_tank_reset_pressed = false;
+                self.emit_tank_projectiles(cx, event.time, false);
+                self.detect_local_tank_hits(cx, event.time);
+                self.sync_local_tank_widgets(cx, event.time);
+                return;
+            }
+        }
+        let reset_pressed = input.b > 0.5;
+        let reset_clicked = reset_pressed && !self.last_desktop_tank_reset_pressed;
+        self.last_desktop_tank_reset_pressed = reset_pressed;
+        if reset_clicked {
+            self.reset_local_tank(cx);
+            self.desktop_tank_drive_armed = false;
+            self.sync_local_tank_widgets(cx, event.time);
+            return;
+        }
+        let right_controller = XrController {
+            stick: input.right_stick,
+            trigger: input.right_trigger,
+            buttons: if input.a > 0.5 {
+                XrController::CLICK_A
+            } else {
+                0
+            },
+            ..XrController::default()
+        };
+        let left_controller = XrController {
+            stick: input.left_stick,
+            trigger: input.left_trigger,
+            buttons: if input.x > 0.5 {
+                XrController::CLICK_X
+            } else {
+                0
+            },
+            ..XrController::default()
+        };
+        let outcome = self.drive_tank_with_controllers(cx, &right_controller, &left_controller);
+        self.update_tank_turret_with_controller(cx, &right_controller, dt);
+        self.emit_tank_projectiles(
+            cx,
+            event.time,
+            left_controller.click_a()
+                || left_controller.click_x()
+                || right_controller.click_a()
+                || right_controller.click_x(),
+        );
+        self.detect_local_tank_hits(cx, event.time);
+        self.sync_local_tank_widgets(cx, event.time);
+        let _ = (dt, outcome);
+    }
+
     fn publish_local_shared_object_states(&mut self, cx: &mut Cx) {
         let runtime_bodies = self.ui.borrow::<XrRoot>().map(|root| root.runtime_bodies());
         let Some(runtime_bodies) = runtime_bodies else {
@@ -972,6 +2178,16 @@ impl App {
     }
 
     fn refresh_debug_fields(&mut self, cx: &mut Cx) {
+        let now = Cx::time_now();
+        if self
+            .last_debug_refresh_at
+            .is_some_and(|last| now - last < DEBUG_VIEW_REFRESH_INTERVAL_SECONDS)
+        {
+            return;
+        }
+        self.last_debug_refresh_at = Some(now);
+
+        let mut draw_top_children_text = String::new();
         let (
             surface_count,
             compute_ms,
@@ -980,6 +2196,27 @@ impl App {
             frame_cpu_ms,
             frame_update_cpu_ms,
             frame_draw_cpu_ms,
+            draw_setup_cpu_ms,
+            draw_env_prepare_cpu_ms,
+            draw_sort_cpu_ms,
+            draw_children_cpu_ms,
+            draw_child_count,
+            draw_transparent_child_count,
+            draw_runtime_body_count,
+            draw_geometry_pool_slots,
+            draw_geometry_pool_live,
+            draw_draw_list_pool_slots,
+            draw_draw_list_pool_live,
+            draw_texture_pool_slots,
+            draw_texture_pool_live,
+            draw_depth_mesh_chunk_count,
+            draw_recycled_depth_mesh_geometry_count,
+            draw_depth_mesh_pending_upsert_count,
+            draw_depth_query_retained_hit_count,
+            xr_frame_cpu_ms,
+            xr_render_cpu_ms,
+            xr_depth_readback_cpu_ms,
+            xr_frame_cpu_breakdown,
         ) = if let Some(root) = self.ui.borrow::<XrRoot>() {
             (
                 root.physics_depth_query_surface_count(),
@@ -989,10 +2226,34 @@ impl App {
                 root.frame_cpu_ms(),
                 root.frame_update_cpu_ms(),
                 root.frame_draw_cpu_ms(),
+                root.draw_setup_cpu_ms(),
+                root.draw_env_prepare_cpu_ms(),
+                root.draw_sort_cpu_ms(),
+                root.draw_children_cpu_ms(),
+                root.draw_child_count(),
+                root.draw_transparent_child_count(),
+                root.draw_runtime_body_count(),
+                root.draw_geometry_pool_slots(),
+                root.draw_geometry_pool_live(),
+                root.draw_draw_list_pool_slots(),
+                root.draw_draw_list_pool_live(),
+                root.draw_texture_pool_slots(),
+                root.draw_texture_pool_live(),
+                root.draw_depth_mesh_chunk_count(),
+                root.draw_recycled_depth_mesh_geometry_count(),
+                root.draw_depth_mesh_pending_upsert_count(),
+                root.draw_depth_query_retained_hit_count(),
+                cx.xr_frame_cpu_time_ms(),
+                cx.xr_render_cpu_time_ms(),
+                cx.xr_depth_readback_cpu_time_ms(),
+                cx.xr_frame_cpu_breakdown(),
             )
         } else {
             return;
         };
+        if let Some(root) = self.ui.borrow::<XrRoot>() {
+            root.write_draw_top_children_text(&mut draw_top_children_text);
+        }
         let connected_peers = self
             .ui
             .widget(cx, ids!(xr_peer_sync))
@@ -1040,8 +2301,94 @@ impl App {
             .xr_gpu_frame_time_ms()
             .map(|gpu_ms| format!("{gpu_ms:.2} ms"))
             .unwrap_or_else(|| "waiting".to_string());
-        let debug_text = format!(
-            "Connected peers: {}\nShared objects: {}\n{}\n{}\n{}\n{}\n{}\n{}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nCPU frame time: {frame_cpu_ms:.2} ms\nUpdate time: {frame_update_cpu_ms:.2} ms\nDraw time: {frame_draw_cpu_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}",
+        let xr_frame_cpu_text = xr_frame_cpu_ms
+            .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_render_cpu_text = xr_render_cpu_ms
+            .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_depth_readback_cpu_text = xr_depth_readback_cpu_ms
+            .map(|cpu_ms| format!("{cpu_ms:.2} ms"))
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_begin_chain = xr_frame_cpu_breakdown
+            .map(|cpu| {
+                format!(
+                    "wait {:.2} > begin {:.2} > loc-space {:.2} > loc-views {:.2} > acq {:.2} > wait-img {:.2} > acq-depth {:.2}",
+                    cpu.wait_frame_ms,
+                    cpu.begin_frame_ms,
+                    cpu.locate_space_ms,
+                    cpu.locate_views_ms,
+                    cpu.acquire_swapchain_ms,
+                    cpu.wait_swapchain_ms,
+                    cpu.acquire_depth_ms,
+                )
+            })
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_work_chain = xr_frame_cpu_breakdown
+            .map(|cpu| {
+                format!(
+                    "prep {:.2} > xr {:.2} > next {:.2} > draw {:.2} > shaders {:.2} > repaint {:.2} > readback {:.2} > end {:.2} > resize {:.2} > total {:.2}",
+                    cpu.update_prepare_ms,
+                    cpu.update_dispatch_ms,
+                    cpu.next_frame_ms,
+                    cpu.draw_event_ms,
+                    cpu.compile_shaders_ms,
+                    cpu.repaint_ms,
+                    cpu.depth_readback_ms,
+                    cpu.end_frame_ms,
+                    cpu.resize_projection_ms,
+                    cpu.total_ms,
+                )
+            })
+            .unwrap_or_else(|| "waiting".to_string());
+        let bytes_to_mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+        let xr_repaint_chain = xr_frame_cpu_breakdown
+            .map(|cpu| {
+                format!(
+                    "wait-fence {:.2} > prep-tex {:.2} > record {:.2} > submit {:.2}",
+                    cpu.repaint_wait_inflight_ms,
+                    cpu.repaint_prepare_textures_ms,
+                    cpu.repaint_record_draw_ms,
+                    cpu.repaint_submit_ms,
+                )
+            })
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_repaint_uploads = xr_frame_cpu_breakdown
+            .map(|cpu| {
+                format!(
+                    "tex {:.2} MB/{} > packet {:.2} MB/{} > geom {:.2} MB > desc {}",
+                    bytes_to_mb(cpu.repaint_texture_upload_bytes),
+                    cpu.repaint_texture_upload_count,
+                    bytes_to_mb(cpu.repaint_packet_buffer_bytes),
+                    cpu.repaint_packet_buffer_count,
+                    bytes_to_mb(cpu.repaint_geometry_upload_bytes),
+                    cpu.repaint_descriptor_set_count,
+                )
+            })
+            .unwrap_or_else(|| "waiting".to_string());
+        let xr_repaint_draw = xr_frame_cpu_breakdown
+            .map(|cpu| {
+                format!(
+                    "items {} > calls {} > packets {} > instances {} > indices {}",
+                    cpu.repaint_draw_items,
+                    cpu.repaint_draw_calls,
+                    cpu.repaint_packets,
+                    cpu.repaint_instances,
+                    cpu.repaint_indices,
+                )
+            })
+            .unwrap_or_else(|| "waiting".to_string());
+        let mut gamepad_count = 0usize;
+        for state in cx.game_input_states() {
+            let GameInputState::Gamepad(_gamepad) = state else {
+                continue;
+            };
+            gamepad_count += 1;
+        }
+        self.debug_text_scratch.clear();
+        let _ = write!(
+            &mut self.debug_text_scratch,
+            "OpenXR frame CPU: {xr_frame_cpu_text}\nOpenXR begin chain: {xr_begin_chain}\nOpenXR work chain: {xr_work_chain}\nOpenXR repaint chain: {xr_repaint_chain}\nOpenXR repaint uploads: {xr_repaint_uploads}\nOpenXR repaint draw: {xr_repaint_draw}\nVulkan XR render CPU: {xr_render_cpu_text}\nDepth readback CPU: {xr_depth_readback_cpu_text}\nUI frame CPU: {frame_cpu_ms:.2} ms\nUI update time: {frame_update_cpu_ms:.2} ms\nUI draw time: {frame_draw_cpu_ms:.2} ms\nUI draw chain: setup {draw_setup_cpu_ms:.2} > env {draw_env_prepare_cpu_ms:.2} > sort {draw_sort_cpu_ms:.2} > children {draw_children_cpu_ms:.2}\nUI top children: {draw_top_children_text}\nUI draw state: children {draw_child_count}/{draw_transparent_child_count} runtime-bodies {draw_runtime_body_count}\nUI pool state: geom {draw_geometry_pool_live}/{draw_geometry_pool_slots} > lists {draw_draw_list_pool_live}/{draw_draw_list_pool_slots} > tex {draw_texture_pool_live}/{draw_texture_pool_slots}\nUI depth state: chunks {draw_depth_mesh_chunk_count} recycled-geoms {draw_recycled_depth_mesh_geometry_count} pending-upserts {draw_depth_mesh_pending_upsert_count} retained-hits {draw_depth_query_retained_hit_count}\nPhysics planes: {surface_count}\nPhysics compute time: {compute_ms:.2} ms\nQuery time: {query_ms:.2} ms\nRapier time: {rapier_ms:.2} ms\nTSDF size: {tsdf_memory_mb:.1} MB\nDepth frames kept: {depth_frames_kept}\nGPU time: {gpu_time_text}\nGamepads: {gamepad_count}\nConnected peers: {}\nShared objects: {}\n{}\n{}\n{}\n{}\n{}\n{}",
             connected_peers.0,
             connected_peers.1,
             connected_peers.2,
@@ -1051,20 +2398,28 @@ impl App {
             connected_peers.6,
             connected_peers.7,
         );
-        if self.last_debug_text != debug_text {
+        if self.last_debug_text != self.debug_text_scratch {
             self.ui
                 .widget(cx, ids!(debug_field))
-                .set_text(cx, &debug_text);
-            self.last_debug_text = debug_text;
+                .set_text(cx, &self.debug_text_scratch);
+            self.last_debug_text.clear();
+            self.last_debug_text.push_str(&self.debug_text_scratch);
         }
-        let wrist_perf_text = format!(
-            "P:{:.1} C:{:.1}",
+        self.wrist_perf_text_scratch.clear();
+        let _ = write!(
+            &mut self.wrist_perf_text_scratch,
+            "P:{:.1} X:{:.1}",
             compute_ms + query_ms + rapier_ms,
-            frame_cpu_ms,
+            xr_frame_cpu_ms.unwrap_or(frame_cpu_ms),
         );
-        self.ui
-            .widget(cx, ids!(wrist_sync_status))
-            .set_text(cx, &wrist_perf_text);
+        if self.last_wrist_perf_text != self.wrist_perf_text_scratch {
+            self.ui
+                .widget(cx, ids!(wrist_sync_status))
+                .set_text(cx, &self.wrist_perf_text_scratch);
+            self.last_wrist_perf_text.clear();
+            self.last_wrist_perf_text
+                .push_str(&self.wrist_perf_text_scratch);
+        }
     }
 }
 
@@ -1109,8 +2464,7 @@ impl MatchEvent for App {
                     XrPeerSyncAction::None => {}
                 }
             }
-            if widget_action.widget_uid == root_uid
-            {
+            if widget_action.widget_uid == root_uid {
                 match widget_action.cast::<XrRootAction>() {
                     XrRootAction::PhysicsReset => {
                         self.pending_shared_scene_reset = true;
@@ -1209,7 +2563,21 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::GameInputConnected(ev) = event {
+            let _ = ev;
+            self.desktop_tank_drive_armed = false;
+        }
         self.match_event(cx, event);
+        if let Event::XrUpdate(update) = event {
+            self.last_desktop_tank_drive_at = None;
+            self.drive_tank_for_update(cx, update);
+        } else if let Event::NextFrame(next_frame) = event {
+            if !cx.in_xr_mode() {
+                self.drive_tank_for_desktop_frame(cx, next_frame);
+            } else {
+                self.last_desktop_tank_drive_at = None;
+            }
+        }
         self.ui.handle_event(cx, event, &mut Scope::empty());
         if matches!(event, Event::Startup) {
             self.ensure_network_started(cx);
@@ -1218,11 +2586,43 @@ impl AppMain for App {
         self.sync_authoritative_activity_pose(cx);
         self.refresh_spawnable_registry(cx, false);
         self.apply_pending_shared_scene_reset(cx);
+        self.ensure_local_tank_spawned(cx);
+        self.sync_tank_depth_mesh_focus(cx);
         if matches!(event, Event::XrUpdate(_))
             || (matches!(event, Event::NextFrame(_)) && !cx.in_xr_mode())
         {
             self.publish_local_shared_object_states(cx);
         }
         self.refresh_debug_fields(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quat_close(a: Quat, b: Quat, tolerance: f32) -> bool {
+        let dot = a.dot(b).abs();
+        (1.0 - dot) <= tolerance
+    }
+
+    #[test]
+    fn quat_to_rot_round_trips_x_then_y_then_z_node_rotations() {
+        for rotation in [
+            vec3f(0.0, 0.0, 0.0),
+            vec3f(0.35, 0.0, 0.0),
+            vec3f(0.0, -0.42, 0.0),
+            vec3f(0.0, 0.0, 0.61),
+            vec3f(0.37, -0.48, 0.29),
+            vec3f(-1.10, 0.43, 0.72),
+        ] {
+            let quat = App::rotation_quat(rotation);
+            let recovered = App::quat_to_rot(quat);
+            let roundtrip = App::rotation_quat(recovered);
+            assert!(
+                quat_close(quat, roundtrip, 1.0e-4),
+                "wheel/node quaternion conversion should preserve mixed-axis orientation: rotation={rotation:?} recovered={recovered:?} quat={quat:?} roundtrip={roundtrip:?}",
+            );
+        }
     }
 }

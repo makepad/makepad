@@ -1,5 +1,7 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*, widget::*, widget_async::ScriptAsyncResult,
+    makepad_derive_widget::*, makepad_draw::*,
+    makepad_draw::shader::draw_text::TextOverflow,
+    widget::*, widget_async::ScriptAsyncResult,
 };
 
 script_mod! {
@@ -232,6 +234,14 @@ pub struct Label {
     #[live]
     padding: Inset,
 
+    /// Maximum number of lines to display. 0 means unlimited (default).
+    /// Combined with `text_overflow: Ellipsis`, truncated text shows "…".
+    #[live(0usize)]
+    pub max_lines: usize,
+    /// Controls how text overflow is handled when text exceeds the container.
+    #[live]
+    pub text_overflow: TextOverflow,
+
     #[rust]
     area: Area,
     #[live]
@@ -297,6 +307,8 @@ impl Widget for Label {
         let _ = self.text.as_ref().is_empty().then(|| {
             let _ = self.set_text(cx, " ");
         });
+        self.draw_text.max_lines = self.max_lines;
+        self.draw_text.text_overflow = self.text_overflow;
         self.draw_text
             .draw_walk(cx, walk, self.align, self.text.as_ref());
         cx.end_turtle_with_area(&mut self.area);

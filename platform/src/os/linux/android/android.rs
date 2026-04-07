@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
 #[cfg(use_vulkan)]
 use self::super::super::vulkan::CxVulkan;
@@ -25,7 +26,7 @@ use {
     },
     crate::{
         cx::{Cx, OsType},
-        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace, XrFrameCpuBreakdown},
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::{
@@ -40,6 +41,7 @@ use {
             TextClipboardEvent,
             //TimerEvent,
             TextInputEvent,
+            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             //TouchPoint,
             TouchUpdateEvent,
             VideoDecodingErrorEvent,
@@ -607,6 +609,41 @@ impl Cx {
                 } else {
                     panic!()
                 };
+
+                // Synthesize internal drag-and-drop events from touch gestures.
+                if self.os.internal_drag_items.is_some() {
+                    if let Some(touch) = e.touches.iter().find(|t| {
+                        t.state == crate::event::finger::TouchState::Stop
+                    }) {
+                        // Touch lifted: fire Drop + DragEnd
+                        if let Some(items) = self.os.internal_drag_items.take() {
+                            self.call_event_handler(&Event::Drop(DropEvent {
+                                modifiers: e.modifiers.clone(),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs: touch.abs,
+                                items,
+                            }));
+                            self.drag_drop.cycle_drag();
+                            self.call_event_handler(&Event::DragEnd);
+                            self.drag_drop.cycle_drag();
+                        }
+                    } else if let Some(touch) = e.touches.iter().find(|t| {
+                        t.state == crate::event::finger::TouchState::Move
+                    }) {
+                        // Finger moving: fire Drag event
+                        if let Some(items) = self.os.internal_drag_items.as_ref() {
+                            self.call_event_handler(&Event::Drag(DragEvent {
+                                modifiers: e.modifiers.clone(),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs: touch.abs,
+                                items: items.clone(),
+                                response: Arc::new(Mutex::new(DragResponse::None)),
+                            }));
+                            self.drag_drop.cycle_drag();
+                        }
+                    }
+                }
+
                 self.fingers.process_touch_update_end(&e.touches);
             }
             FromJavaMessage::Character { character } => {
@@ -1096,8 +1133,18 @@ impl Cx {
                 let e = Event::ImeAction(ImeActionEvent { action });
                 self.call_event_handler(&e);
             }
-            FromJavaMessage::SafeAreaInsets { top, right, bottom, left } => {
-                let new_insets = crate::event::SafeAreaInsets { top, right, bottom, left };
+            FromJavaMessage::SafeAreaInsets {
+                top,
+                right,
+                bottom,
+                left,
+            } => {
+                let new_insets = crate::event::SafeAreaInsets {
+                    top,
+                    right,
+                    bottom,
+                    left,
+                };
                 if self.os.safe_area_insets != new_insets {
                     self.os.safe_area_insets = new_insets;
                     // Update the WindowGeom with the new safe area insets
@@ -2418,6 +2465,10 @@ impl Cx {
                     self.os.xr_display_refresh_rate_active_hz = None;
                     self.os.xr_effective_frame_time_ms = None;
                     self.os.xr_effective_frame_rate_hz = None;
+                    self.os.xr_frame_cpu_time_ms = None;
+                    self.os.xr_render_cpu_time_ms = None;
+                    self.os.xr_depth_readback_cpu_time_ms = None;
+                    self.os.xr_frame_cpu_breakdown = None;
                     self.os.xr_retry_surface_after_destroy = true;
                     self.os.ignore_destroy = true;
                     if !self.os.in_xr_mode {
@@ -2434,6 +2485,10 @@ impl Cx {
                     self.os.xr_display_refresh_rate_active_hz = None;
                     self.os.xr_effective_frame_time_ms = None;
                     self.os.xr_effective_frame_rate_hz = None;
+                    self.os.xr_frame_cpu_time_ms = None;
+                    self.os.xr_render_cpu_time_ms = None;
+                    self.os.xr_depth_readback_cpu_time_ms = None;
+                    self.os.xr_frame_cpu_breakdown = None;
                     self.os.ignore_destroy = true;
                     if self.os.in_xr_mode {
                         self.os.in_xr_mode = false;
@@ -2457,6 +2512,10 @@ impl Cx {
                 CxOsOp::XrSetLocalAnchor(anchor) => {
                     self.os.openxr.set_local_anchor(anchor);
                 }
+                CxOsOp::XrSetLocalFloor(floor_y) => {
+                    let os_type = self.os_type().clone();
+                    self.os.openxr.set_local_floor(floor_y, &os_type);
+                }
                 CxOsOp::XrDiscoverAnchor(id) => {
                     self.os.openxr.discover_anchor(id);
                 }
@@ -2476,6 +2535,9 @@ impl Cx {
                 }
                 CxOsOp::SetCursor(_) => {
                     // no need
+                }
+                CxOsOp::StartDragging(items) => {
+                    self.os.internal_drag_items = Some(Arc::new(items));
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
@@ -2541,6 +2603,22 @@ impl CxOsApi for Cx {
         {
             None
         }
+    }
+
+    fn xr_frame_cpu_time_ms(&self) -> Option<f64> {
+        self.os.xr_frame_cpu_time_ms
+    }
+
+    fn xr_render_cpu_time_ms(&self) -> Option<f64> {
+        self.os.xr_render_cpu_time_ms
+    }
+
+    fn xr_depth_readback_cpu_time_ms(&self) -> Option<f64> {
+        self.os.xr_depth_readback_cpu_time_ms
+    }
+
+    fn xr_frame_cpu_breakdown(&self) -> Option<XrFrameCpuBreakdown> {
+        self.os.xr_frame_cpu_breakdown
     }
 
     fn xr_display_refresh_rate_hz(&self) -> Option<f64> {
@@ -2728,6 +2806,7 @@ impl Default for CxOs {
             pending_camera_preview_windows: HashMap::new(),
             software_video_players: HashMap::new(),
             websocket_parsers: HashMap::new(),
+            internal_drag_items: None,
             openxr: CxOpenXr::default(),
             activity_thread_id: None,
             render_thread_id: None,
@@ -2738,6 +2817,10 @@ impl Default for CxOs {
             xr_display_refresh_rate_active_hz: None,
             xr_effective_frame_time_ms: None,
             xr_effective_frame_rate_hz: None,
+            xr_frame_cpu_time_ms: None,
+            xr_render_cpu_time_ms: None,
+            xr_depth_readback_cpu_time_ms: None,
+            xr_frame_cpu_breakdown: None,
             #[cfg(use_vulkan)]
             xr_pending_surface_window: std::ptr::null_mut(),
             #[cfg(use_vulkan)]
@@ -2789,6 +2872,7 @@ pub struct CxOs {
     pub(crate) pending_camera_preview_windows: HashMap<LiveId, *mut ndk_sys::ANativeWindow>,
     pub(crate) software_video_players: HashMap<LiveId, AndroidSoftwarePlayer>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
+    pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
     pub(crate) openxr: CxOpenXr,
     pub(crate) activity_thread_id: Option<u64>,
     pub(crate) render_thread_id: Option<u64>,
@@ -2799,6 +2883,10 @@ pub struct CxOs {
     pub(crate) xr_display_refresh_rate_active_hz: Option<f32>,
     pub(crate) xr_effective_frame_time_ms: Option<f64>,
     pub(crate) xr_effective_frame_rate_hz: Option<f64>,
+    pub(crate) xr_frame_cpu_time_ms: Option<f64>,
+    pub(crate) xr_render_cpu_time_ms: Option<f64>,
+    pub(crate) xr_depth_readback_cpu_time_ms: Option<f64>,
+    pub(crate) xr_frame_cpu_breakdown: Option<XrFrameCpuBreakdown>,
     #[cfg(use_vulkan)]
     pub(crate) xr_pending_surface_window: *mut ndk_sys::ANativeWindow,
     #[cfg(use_vulkan)]

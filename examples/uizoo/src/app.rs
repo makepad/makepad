@@ -60,6 +60,7 @@ script_mod! {
                 @tTextInput
                 @tVideo
                 @tView
+                @tAlignScroll
             ]
             selected: 0
             closable: false
@@ -100,6 +101,7 @@ script_mod! {
         tTextInput := DockTab{name: "TextInput" template: @PermanentTab kind: @TabTextInput}
         tVideo := DockTab{name: "Video" template: @PermanentTab kind: @TabVideo}
         tView := DockTab{name: "View" template: @PermanentTab kind: @TabView}
+        tAlignScroll := DockTab{name: "Align+Scroll" template: @PermanentTab kind: @TabAlignScroll}
 
         TabOverview := UIZooTab{WidgetsOverview{}}
         TabLayoutDemos := UIZooTab{DemoLayout{}}
@@ -130,6 +132,7 @@ script_mod! {
         TabTextInput := UIZooTab{DemoTextInput{}}
         TabVideo := UIZooTab{DemoVideo{}}
         TabView := UIZooTab{DemoView{}}
+        TabAlignScroll := UIZooTab{DemoAlignScroll{}}
     }
 
     mod.gc.set_static(AppDock)
@@ -227,6 +230,15 @@ impl MatchEvent for App {
             self.counter += 1;
             let lbl = self.ui.label(cx, ids!(simpletextinput_outputbox));
             lbl.set_text(cx, &format!("{} {}", self.counter, txt));
+        }
+
+        if let Some(is_multiline) = self
+            .ui
+            .check_box(cx, ids!(multiline_toggle))
+            .changed(actions)
+        {
+            let ti = self.ui.text_input(cx, ids!(multiline_toggleable));
+            ti.set_is_multiline(cx, is_multiline);
         }
 
         if self.ui.button(cx, ids!(basicbutton)).clicked(&actions) {
@@ -377,6 +389,7 @@ impl AppMain for App {
         crate::tab_textinput::script_mod(vm);
         crate::tab_video::script_mod(vm);
         crate::tab_view::script_mod(vm);
+        crate::tab_align_scroll::script_mod(vm);
         crate::tab_widgetsoverview::script_mod(vm);
         self::script_mod(vm)
     }

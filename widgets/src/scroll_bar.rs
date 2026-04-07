@@ -477,7 +477,10 @@ impl ScrollBar {
                     let scroll = match self.axis {
                         ScrollAxis::Horizontal => {
                             if self.use_vertical_finger_scroll {
-                                e.scroll.y
+                                // Accept both horizontal and vertical scroll input,
+                                // so trackpad horizontal scrolling and mouse wheel
+                                // vertical scrolling both work.
+                                e.scroll.x + e.scroll.y
                             } else {
                                 e.scroll.x
                             }

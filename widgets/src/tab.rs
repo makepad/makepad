@@ -293,9 +293,9 @@ pub struct Tab {
     min_drag_dist: f64,
 
     #[walk]
-    walk: Walk,
+    pub walk: Walk,
     #[layout]
-    layout: Layout,
+    pub layout: Layout,
 }
 
 pub enum TabAction {
@@ -303,6 +303,12 @@ pub enum TabAction {
     CloseWasPressed,
     ShouldTabStartDrag,
     ShouldTabStopDrag,
+    /// A touch finger went down on this tab (for scroll tracking).
+    TouchDown { abs: Vec2d, time: f64 },
+    /// A touch finger moved on this tab without a long press (scroll the tab bar).
+    TouchScroll { abs: Vec2d, time: f64 },
+    /// A touch finger lifted off this tab without a long press (end scroll / flick).
+    TouchUp { abs: Vec2d, time: f64 },
 }
 
 impl Tab {
@@ -329,6 +335,13 @@ impl Tab {
 
     pub fn area(&self) -> Area {
         self.draw_bg.area()
+    }
+
+    /// Sets the draw depth on all draw primitives of this tab.
+    pub fn set_draw_depth(&mut self, depth: f32) {
+        self.draw_bg.draw_depth = depth;
+        self.draw_text.draw_depth = depth;
+        self.close_button.set_draw_depth(depth);
     }
 
     pub fn handle_event_with(
@@ -359,23 +372,68 @@ impl Tab {
                 }
             }
             Hit::FingerMove(e) => {
-                if !self.is_dragging && (e.abs - e.abs_start).length() > self.min_drag_dist {
-                    self.is_dragging = true;
-                    dispatch_action(cx, TabAction::ShouldTabStartDrag);
+                if e.device.is_touch() {
+                    if e.has_long_press_occurred {
+                        // Touch: drag the tab only after a long press.
+                        if !self.is_dragging
+                            && (e.abs - e.abs_start).length() > self.min_drag_dist
+                        {
+                            self.is_dragging = true;
+                            dispatch_action(cx, TabAction::ShouldTabStartDrag);
+                        }
+                    } else {
+                        // Touch without long press: scroll the tab bar.
+                        dispatch_action(cx, TabAction::TouchScroll {
+                            abs: e.abs,
+                            time: e.time,
+                        });
+                    }
+                } else {
+                    // Mouse: drag the tab after exceeding the minimum drag distance.
+                    if !self.is_dragging
+                        && (e.abs - e.abs_start).length() > self.min_drag_dist
+                    {
+                        self.is_dragging = true;
+                        dispatch_action(cx, TabAction::ShouldTabStartDrag);
+                    }
                 }
             }
-            Hit::FingerUp(_) => {
+            Hit::FingerUp(fue) => {
                 if self.is_dragging {
                     dispatch_action(cx, TabAction::ShouldTabStopDrag);
                     self.is_dragging = false;
                 }
+                if fue.device.is_touch() {
+                    if !fue.has_long_press_occurred {
+                        dispatch_action(cx, TabAction::TouchUp {
+                            abs: fue.abs,
+                            time: fue.time,
+                        });
+                    }
+                    // For touch: only select the tab if it was a simple tap,
+                    // not a scroll gesture or long-press drag.
+                    if fue.was_tap() {
+                        dispatch_action(cx, TabAction::WasPressed);
+                    }
+                }
             }
             Hit::FingerDown(fde) => {
-                // A primary click/touch selects the tab, but a middle click closes it.
-                if fde.is_primary_hit() {
-                    dispatch_action(cx, TabAction::WasPressed);
-                } else if self.closeable && fde.mouse_button().is_some_and(|b| b.is_middle()) {
-                    dispatch_action(cx, TabAction::CloseWasPressed);
+                if fde.device.is_touch() {
+                    // For touch: don't select on finger down; selection happens
+                    // on finger up if no gesture was recognized (see FingerUp above).
+                    if fde.is_primary_hit() {
+                        dispatch_action(cx, TabAction::TouchDown {
+                            abs: fde.abs,
+                            time: fde.time,
+                        });
+                    }
+                } else {
+                    // Mouse: select immediately on click, middle-click to close.
+                    if fde.is_primary_hit() {
+                        dispatch_action(cx, TabAction::WasPressed);
+                    } else if self.closeable && fde.mouse_button().is_some_and(|b| b.is_middle()) {
+                        dispatch_action(cx, TabAction::CloseWasPressed);
+                    }
                 }
             }
             _ => {}

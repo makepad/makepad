@@ -10,6 +10,7 @@ use {
                 VideoSeekableRangesEvent, VideoSource, VideoTextureUpdatedEvent,
                 VideoYuvTexturesReady,
             },
+            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             Event, KeyEvent, TextInputEvent, TextRangeReplaceEvent,
         },
         makepad_live_id::*,
@@ -742,6 +743,39 @@ impl Cx {
                 } else {
                     panic!()
                 };
+
+                // Synthesize internal drag-and-drop events from touch gestures.
+                if self.os.internal_drag_items.is_some() {
+                    if let Some(touch) = e.touches.iter().find(|t| {
+                        t.state == crate::event::TouchState::Stop
+                    }) {
+                        if let Some(items) = self.os.internal_drag_items.take() {
+                            self.call_event_handler(&Event::Drop(DropEvent {
+                                modifiers: e.modifiers.clone(),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs: touch.abs,
+                                items,
+                            }));
+                            self.drag_drop.cycle_drag();
+                            self.call_event_handler(&Event::DragEnd);
+                            self.drag_drop.cycle_drag();
+                        }
+                    } else if let Some(touch) = e.touches.iter().find(|t| {
+                        t.state == crate::event::TouchState::Move
+                    }) {
+                        if let Some(items) = self.os.internal_drag_items.as_ref() {
+                            self.call_event_handler(&Event::Drag(DragEvent {
+                                modifiers: e.modifiers.clone(),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs: touch.abs,
+                                items: items.clone(),
+                                response: Arc::new(Mutex::new(DragResponse::None)),
+                            }));
+                            self.drag_drop.cycle_drag();
+                        }
+                    }
+                }
+
                 self.fingers.process_touch_update_end(&e.touches);
             }
             IosEvent::LongPress(e) => {
@@ -1247,6 +1281,9 @@ impl Cx {
                         window.popup_size = None;
                     }
                 }
+                CxOsOp::StartDragging(items) => {
+                    self.os.internal_drag_items = Some(Arc::new(items));
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
@@ -1536,6 +1573,7 @@ pub struct CxOs {
     pub(crate) camera_players: HashMap<LiveId, IosCameraPlayer>,
     pub(crate) native_camera_previews: HashMap<LiveId, IosNativeCameraPreview>,
     pub(crate) system_browsers: HashMap<LiveId, IosSystemBrowser>,
+    pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
 }
 
 pub struct PermissionResultChannel {
