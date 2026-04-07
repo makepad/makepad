@@ -514,6 +514,12 @@ pub fn expand_sdk(
                     // Rename extracted dir to versioned name.
                     let extracted = sdk_dir.join("ndk").join(NDK_ZIP_ROOT);
                     if extracted.exists() && extracted != ndk_out {
+                        // Remove the destination first (it may exist from a
+                        // previous install or from mkdir above).
+                        if ndk_out.exists() {
+                            std::fs::remove_dir_all(&ndk_out)
+                                .map_err(|e| format!("Failed to remove {ndk_out:?}: {e}"))?;
+                        }
                         std::fs::rename(&extracted, &ndk_out)
                             .map_err(|e| format!("Failed to rename {extracted:?} to {ndk_out:?}: {e}"))?;
                     }
@@ -1026,6 +1032,10 @@ pub fn expand_sdk(
                 // Rename the extracted directory to the versioned name.
                 let extracted = sdk_dir.join("ndk").join(NDK_ZIP_ROOT);
                 if extracted.exists() && extracted != ndk_out {
+                    if ndk_out.exists() {
+                        std::fs::remove_dir_all(&ndk_out)
+                            .map_err(|e| format!("Failed to remove {ndk_out:?}: {e}"))?;
+                    }
                     std::fs::rename(&extracted, &ndk_out)
                         .map_err(|e| format!("Failed to rename {extracted:?} to {ndk_out:?}: {e}"))?;
                 }
