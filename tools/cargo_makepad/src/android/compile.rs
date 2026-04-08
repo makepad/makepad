@@ -365,10 +365,19 @@ fn rust_build(
     } else {
         args.to_vec()
     };
-    let (_ndk_version, ndk_prebuilt_root) =
+    let (ndk_version, ndk_prebuilt_root) =
         resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
+    // Derive ndk_root from ndk_prebuilt_root by going up through
+    // `toolchains/llvm/prebuilt/<host>/` (4 levels).
+    let ndk_root = ndk_prebuilt_root
+        .parent().unwrap()   // prebuilt/
+        .parent().unwrap()   // llvm/
+        .parent().unwrap()   // toolchains/
+        .parent().unwrap()   // ndk root
+        .to_path_buf();
     for android_target in android_targets {
         let clang_filename = format!("{}{}-clang", android_target.clang(), urls.sdk_version);
+        let clangpp_filename = format!("{}{}-clang++", android_target.clang(), urls.sdk_version);
 
         let bin_name = |bin_filename: &str, windows_extension: &str| match host_os {
             HostOs::WindowsX64 => format!("{bin_filename}.{windows_extension}"),
@@ -378,6 +387,9 @@ fn rust_build(
         let full_clang_path = ndk_prebuilt_root
             .join("bin")
             .join(bin_name(&clang_filename, "cmd"));
+        let full_clangpp_path = ndk_prebuilt_root
+            .join("bin")
+            .join(bin_name(&clangpp_filename, "cmd"));
         let full_llvm_ar_path = ndk_prebuilt_root
             .join("bin")
             .join(bin_name("llvm-ar", "exe"));
@@ -450,8 +462,16 @@ fn rust_build(
             ),
             ("JAVA_HOME".to_string(), java_home),
             (
+                "ANDROID_NDK_ROOT".to_string(),
+                ndk_root.to_string_lossy().to_string(),
+            ),
+            (
                 format!("CC_{toolchain}"),
                 full_clang_path.to_string_lossy().to_string(),
+            ),
+            (
+                format!("CXX_{toolchain}"),
+                full_clangpp_path.to_string_lossy().to_string(),
             ),
             (
                 format!("AR_{toolchain}"),
@@ -461,6 +481,11 @@ fn rust_build(
                 format!("RANLIB_{toolchain}"),
                 full_llvm_ranlib_path.to_string_lossy().to_string(),
             ),
+            // The aws-lc-sys crate requires the cmake builder (not the cc builder)
+            // for Android cross-compilation targets. With ANDROID_NDK_ROOT set
+            // and the full NDK installed (via --full-ndk), cmake's built-in
+            // Android module handles the cross-compilation setup automatically.
+            ("AWS_LC_SYS_CMAKE_BUILDER".to_string(), "1".to_string()),
             ("RUSTFLAGS".to_string(), cfg_flag.clone()),
         ];
         if let Some(makepad_env) = makepad_env {
