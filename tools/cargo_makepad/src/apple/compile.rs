@@ -262,6 +262,8 @@ impl PlistValues {
                 <string>{version}</string>
                 <key>CFBundleShortVersionString</key>
                 <string>{version}</string>
+                <key>CFBundleDevelopmentRegion</key>
+                <string>en</string>
                 <key>CFBundleIconName</key>
                 <string>AppIcon</string>
                 <key>UILaunchStoryboardName</key>
