@@ -84,6 +84,7 @@ impl Cx {
                 }
             }
         }
+        self.call_event_handler(&Event::Shutdown);
     }
 
     fn handle_all_pending_messages(&mut self, from_ohos_rx: &mpsc::Receiver<FromOhosMessage>) {

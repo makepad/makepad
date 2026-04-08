@@ -58,6 +58,17 @@ use crate::{
 
 use super::opengl_wayland::{WaylandPopupWindow, WaylandWindow};
 
+/// Reserved timer ID for keyboard repeat. Uses a high value to avoid conflicts with app timers.
+const KEY_REPEAT_TIMER_ID: u64 = u64::MAX - 1;
+
+/// State for tracking keyboard key repeat.
+struct KeyRepeatState {
+    key_code: KeyCode,
+    text: String,
+    /// True while waiting for the initial delay; false during steady-state repeat.
+    in_initial_delay: bool,
+}
+
 pub(crate) struct ClipboardOffer {
     offer: wl_data_offer::WlDataOffer,
     mime_types: Vec<String>,
@@ -119,6 +130,13 @@ pub(crate) struct WaylandState {
     pub(crate) last_scroll_time: f64,
     pub(crate) event_flow: EventFlow,
     pub(crate) event_loop_running: bool,
+
+    /// Keyboard repeat rate in keys per second (0 = disabled).
+    key_repeat_rate: i32,
+    /// Keyboard repeat delay in milliseconds before repeat starts.
+    key_repeat_delay: i32,
+    /// Currently repeating key state, if any.
+    key_repeat: Option<KeyRepeatState>,
 }
 
 impl WaylandState {
@@ -169,6 +187,9 @@ impl WaylandState {
             last_scroll_time: 0.0,
             event_flow: EventFlow::Wait,
             event_loop_running: true,
+            key_repeat_rate: 25,
+            key_repeat_delay: 600,
+            key_repeat: None,
         }
     }
 
@@ -847,6 +868,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                 }
             }
             wl_keyboard::Event::Leave { serial, surface } => {
+                // Cancel any active key repeat when keyboard focus is lost
+                state.timers.stop_timer(KEY_REPEAT_TIMER_ID);
+                state.key_repeat = None;
+
                 state.keyboard_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
                 if let Some(window_id) = state.window_id_for_surface(&surface) {
@@ -877,11 +902,12 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                         wl_keyboard::KeyState::Pressed => {
                             state.keyboard_serial = Some(serial);
                             state.flush_pending_clipboard_copy(qhandle, serial);
-                            let (key_code, text_str) =
+                            let (key_code, text_str, should_repeat) =
                                 if let Some(xkb_state) = state.xkb_state.as_mut() {
                                     (
                                         xkb_state.keycode_to_makepad_keycode(key + 8),
                                         xkb_state.key_get_utf8(key + 8),
+                                        xkb_state.key_repeats(key + 8),
                                     )
                                 } else {
                                     return;
@@ -927,16 +953,35 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
 
                             if !block_text && text_str.chars().any(|ch| !ch.is_control()) {
                                 state.do_callback(XlibEvent::TextInput(TextInputEvent {
-                                    input: text_str,
+                                    input: text_str.clone(),
                                     replace_last: false,
                                     was_paste: false,
                                     ..Default::default()
                                 }));
                             }
+
+                            // Start key repeat timer if the key supports it
+                            if should_repeat && state.key_repeat_rate > 0 {
+                                state.timers.stop_timer(KEY_REPEAT_TIMER_ID);
+                                state.key_repeat = Some(KeyRepeatState {
+                                    key_code,
+                                    text: text_str,
+                                    in_initial_delay: true,
+                                });
+                                let delay_secs = state.key_repeat_delay as f64 / 1000.0;
+                                state.timers.start_timer(KEY_REPEAT_TIMER_ID, delay_secs, false);
+                            }
                         }
                         wl_keyboard::KeyState::Released => {
                             if let Some(xkb_state) = state.xkb_state.as_mut() {
                                 let key_code = xkb_state.keycode_to_makepad_keycode(key + 8);
+
+                                // Stop key repeat if this is the key being repeated
+                                if state.key_repeat.as_ref().is_some_and(|r| r.key_code == key_code) {
+                                    state.timers.stop_timer(KEY_REPEAT_TIMER_ID);
+                                    state.key_repeat = None;
+                                }
+
                                 state.do_callback(XlibEvent::KeyUp(KeyEvent {
                                     key_code,
                                     is_repeat: false,
@@ -949,7 +994,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
                     };
                 }
             }
-            // wl_keyboard::Event::RepeatInfo { rate, delay } => {},
+            wl_keyboard::Event::RepeatInfo { rate, delay } => {
+                state.key_repeat_rate = rate;
+                state.key_repeat_delay = delay;
+            }
             wl_keyboard::Event::Modifiers {
                 serial: _,
                 mods_depressed,
@@ -1552,6 +1600,44 @@ impl WaylandState {
             callback(self, event);
             self.event_callback = Some(callback);
         }
+    }
+
+    /// Called from the event loop when the key repeat timer fires.
+    /// Returns true if the timer was handled (i.e., it was the key repeat timer).
+    pub(crate) fn handle_key_repeat_timer(&mut self, timer_id: u64) -> bool {
+        if timer_id != KEY_REPEAT_TIMER_ID {
+            return false;
+        }
+        if let Some(repeat) = self.key_repeat.as_mut() {
+            let key_code = repeat.key_code;
+            let text = repeat.text.clone();
+            let modifiers = self.modifiers;
+
+            if repeat.in_initial_delay {
+                // Initial delay has elapsed; switch to steady-state repeat interval.
+                repeat.in_initial_delay = false;
+                let interval_secs = 1.0 / self.key_repeat_rate as f64;
+                self.timers.start_timer(KEY_REPEAT_TIMER_ID, interval_secs, true);
+            }
+
+            self.do_callback(XlibEvent::KeyDown(KeyEvent {
+                key_code,
+                is_repeat: true,
+                modifiers,
+                time: self.time_now(),
+            }));
+
+            let block_text = modifiers.control || modifiers.logo || modifiers.alt;
+            if !block_text && text.chars().any(|ch| !ch.is_control()) {
+                self.do_callback(XlibEvent::TextInput(TextInputEvent {
+                    input: text,
+                    replace_last: false,
+                    was_paste: false,
+                    ..Default::default()
+                }));
+            }
+        }
+        true
     }
 
     pub fn start_timer(&mut self, id: u64, timeout: f64, repeats: bool) {

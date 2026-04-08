@@ -107,6 +107,8 @@ impl X11Cx {
         opengl_windows: &mut Vec<OpenglWindow>,
     ) -> EventFlow {
         if let EventFlow::Exit = self.handle_platform_ops(opengl_windows, xlib_app) {
+            let mut cx = self.cx.borrow_mut();
+            cx.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit;
         }
 

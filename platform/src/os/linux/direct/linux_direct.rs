@@ -114,6 +114,7 @@ impl Cx {
         event: DirectEvent,
     ) -> EventFlow {
         if let EventFlow::Exit = self.handle_platform_ops(direct_app) {
+            self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit;
         }
 
