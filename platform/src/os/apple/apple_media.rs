@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use {
     crate::{
         audio::*, cx::Cx, event::Event, media_api::CxMediaApi, midi::*, os::apple::apple_sys::*,
@@ -87,6 +88,22 @@ struct AppleH264Probe {
 }
 
 fn probe_apple_h264() -> AppleH264Probe {
+    #[cfg(all(
+        feature = "hotreload",
+        any(target_os = "macos", target_os = "ios", target_os = "tvos")
+    ))]
+    {
+        // Dioxus/Subsecond fat-binary generation on Apple targets does not
+        // reliably carry the framework link metadata needed for the
+        // VideoToolbox symbol probe. Skip the capability probe in hotreload
+        // builds; normal Makepad builds still run the full native detection.
+        return AppleH264Probe::default();
+    }
+
+    #[cfg(not(all(
+        feature = "hotreload",
+        any(target_os = "macos", target_os = "ios", target_os = "tvos")
+    )))]
     unsafe {
         let mut probe = AppleH264Probe::default();
 

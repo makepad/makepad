@@ -42,6 +42,11 @@ mod debug;
 pub mod event;
 mod geometry;
 mod gpu_info;
+#[cfg(all(
+    feature = "hotreload",
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
+pub mod hotreload;
 mod id_pool;
 pub mod ime;
 mod live_reload;
@@ -151,6 +156,7 @@ pub use {
             NetworkResponsesEvent,
             NextFrame,
             NextFrameEvent,
+            SafeAreaInsets,
             SelectionHandleDragEvent,
             SelectionHandleKind,
             SelectionHandlePhase,
@@ -164,7 +170,6 @@ pub use {
             VirtualKeyboardEvent,
             WindowCloseRequestedEvent,
             WindowClosedEvent,
-            SafeAreaInsets,
             WindowDragQueryEvent,
             WindowDragQueryResponse,
             WindowGeom,

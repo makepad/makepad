@@ -30,6 +30,7 @@ serde = { version = "1.0", optional = true, features = ["derive"] }
 [features]
 default = []
 
+hotreload = ["makepad-draw/hotreload"]
 voice = ["dep:makepad-voice"]
 maps = ["dep:makepad-mbtile-reader", "dep:makepad-fast-inflate"]
 pdf = ["dep:makepad-pdf-parse"]

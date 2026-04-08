@@ -3,6 +3,10 @@ name = "makepad-example-text-input"
 version = "1.0.0"
 edition = "2021"
 
+[features]
+default = []
+hotreload = ["makepad-widgets/hotreload"]
+
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
 
