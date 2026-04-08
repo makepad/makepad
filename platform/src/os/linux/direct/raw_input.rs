@@ -1008,12 +1008,26 @@ impl RawInput {
                     })),
                 }
             }
-            KeyAction::KeyRepeat => dir_evts.push(DirectEvent::KeyDown(KeyEvent {
-                key_code,
-                is_repeat: false,
-                modifiers: self.modifiers,
-                time,
-            })),
+            KeyAction::KeyRepeat => {
+                if !self.modifiers.control && !self.modifiers.alt && !self.modifiers.logo {
+                    let uc = self.modifiers.shift;
+                    let inp = key_code.to_char(uc);
+                    if let Some(inp) = inp {
+                        dir_evts.push(DirectEvent::TextInput(TextInputEvent {
+                            input: format!("{}", inp),
+                            was_paste: false,
+                            replace_last: false,
+                            ..Default::default()
+                        }));
+                    }
+                }
+                dir_evts.push(DirectEvent::KeyDown(KeyEvent {
+                    key_code,
+                    is_repeat: true,
+                    modifiers: self.modifiers,
+                    time,
+                }))
+            }
         }
     }
 }

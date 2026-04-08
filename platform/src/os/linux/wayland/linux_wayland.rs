@@ -130,6 +130,8 @@ impl WaylandCx {
             }));
         }
         if let EventFlow::Exit = self.handle_platform_ops(state) {
+            let mut cx = self.cx.borrow_mut();
+            cx.call_event_handler(&Event::Shutdown);
             state.event_loop_running = false;
             return EventFlow::Exit;
         }
