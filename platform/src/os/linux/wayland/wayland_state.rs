@@ -1296,7 +1296,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                             let last = state.last_scroll_time;
                             state.last_scroll_time = time_now;
                             let speed = 1200.0 * (0.2 - 2.0 * (time_now - last)).max(0.01);
-                            dvec2(acc.x.signum() * speed, acc.y.signum() * speed)
+                            // Use 0.0 for axes with no input; signum(0.0) returns
+                            // 1.0 (not 0.0), which would create a phantom scroll
+                            // component that breaks widgets combining both axes
+                            // (e.g. tab bar horizontal scroll via vertical wheel).
+                            dvec2(
+                                if acc.x != 0.0 { acc.x.signum() * speed } else { 0.0 },
+                                if acc.y != 0.0 { acc.y.signum() * speed } else { 0.0 },
+                            )
                         } else {
                             acc
                         };
