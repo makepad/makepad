@@ -1611,11 +1611,6 @@ impl CxOsApi for Cx {
         }
         //self.live_scan_dependencies();
 
-        #[cfg(apple_bundle)]
-        self.apple_bundle_load_dependencies();
-        #[cfg(not(apple_bundle))]
-        self.native_load_dependencies();
-
         let sender = self.os.game_input_events.sender.clone();
         self.os.apple_game_input = Some(AppleGameInput::init(move |event| {
             let _ = sender.send(event);

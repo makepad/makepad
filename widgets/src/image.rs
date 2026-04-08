@@ -547,14 +547,24 @@ pub enum AsyncLoad {
 }
 
 impl ImageRef {
-    /// Loads the image at the given `image_path` resource into this `ImageRef`.
-    pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.lazy_create_image_cache(cx);
-            inner.load_image_dep_by_path(cx, image_path, 0)
-        } else {
-            Ok(()) // preserving existing behavior of silent failures.
-        }
+    /// Loads an image from a script resource registered via `crate_resource()`.
+    pub fn load_image_from_resource_abs_path(
+        &self,
+        cx: &mut Cx,
+        abs_path: &str,
+    ) -> Result<(), ImageError> {
+        let handle = cx
+            .script_data
+            .resources
+            .get_handle_by_abs_path(abs_path)
+            .ok_or_else(|| ImageError::PathNotFound(abs_path.into()))?;
+        cx.load_script_resource(handle);
+        let Some(data) = cx.get_resource(handle) else {
+            return Ok(()); // Not yet loaded — retry on next draw pass.
+        };
+        let path = Path::new(abs_path);
+        let data = Arc::new((*data).clone());
+        self.load_image_from_data_async(cx, path, data)
     }
 
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.

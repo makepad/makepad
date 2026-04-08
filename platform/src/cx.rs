@@ -102,8 +102,6 @@ pub struct Cx {
 
     pub new_actions: ActionsBuf,
 
-    pub(crate) dependencies: HashMap<String, CxDependency>,
-
     pub(crate) triggers: HashMap<Area, Vec<Trigger>>,
     /*
     pub (crate) live_file_change_receiver: std::sync::mpsc::Receiver<Vec<LiveFileChange>>,
@@ -168,9 +166,6 @@ pub struct Cx {
 #[derive(Clone)]
 pub struct CxRef(pub Rc<RefCell<Cx>>);
 
-pub struct CxDependency {
-    pub data: Option<Result<Rc<Vec<u8>>, String>>,
-}
 #[derive(Clone, Debug, Default, Script, ScriptHook)]
 pub struct AndroidParams {
     #[live]
@@ -409,8 +404,6 @@ impl Cx {
             run_view_frame_requests: Default::default(),
             run_view_frame_results: Default::default(),
             run_view_frame_encode_in_flight: false,
-
-            dependencies: Default::default(),
 
             triggers: Default::default(),
 
