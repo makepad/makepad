@@ -79,6 +79,7 @@ impl Cx {
         d3d11_windows: &mut Vec<D3d11Window>,
     ) -> EventFlow {
         if let EventFlow::Exit = self.handle_platform_ops(d3d11_windows, d3d11_cx) {
+            self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit;
         }
 
