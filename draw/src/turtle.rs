@@ -2041,7 +2041,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     }
 
     fn wrap_turtle(&mut self, align_list_start: usize) {
-        let old_pos = self.turtle().pos() - self.turtle_next_walk_offset();
+        let old_pos = self.turtle().pos() + self.turtle_next_walk_offset();
         self.turtle_new_line_internal(self.turtle().wrap_spacing, align_list_start);
         let new_pos = self.turtle().pos();
         let shift = new_pos - old_pos;
