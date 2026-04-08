@@ -798,15 +798,10 @@ impl CxGameInputApi for Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
-        if let Some(_item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
-            //    self.live_registry.borrow_mut().package_root = Some(item.to_string());
+        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
+            self.package_root = Some(item.to_string());
         }
 
-        //self.live_expand();
-        //if std::env::args().find( | v | v == "--stdin-loop").is_none() {
-        //    self.start_disk_live_file_watcher(100);
-        //}
-        //self.live_scan_dependencies();
         self.native_load_dependencies();
 
         self.os.windows_game_input = Some(WindowsGameInput::init());

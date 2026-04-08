@@ -1604,12 +1604,6 @@ impl CxOsApi for Cx {
         if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
             self.package_root = Some(item.to_string());
         }
-        //self.live_expand();
-        #[cfg(debug_assertions)]
-        if !Self::has_studio_web_socket() {
-            //self.start_disk_live_file_watcher(100);
-        }
-        //self.live_scan_dependencies();
 
         #[cfg(apple_bundle)]
         self.apple_bundle_load_dependencies();
