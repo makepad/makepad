@@ -378,6 +378,10 @@ pub struct Layout {
     #[live]
     pub spacing: f64,
 
+    /// The vertical spacing between rows when wrapping in a `Flow::Right { wrap: true }` layout.
+    #[live]
+    pub wrap_spacing: f64,
+
     /// The padding around the inner rectangle of each walk.
     #[live]
     pub padding: Inset,
@@ -472,6 +476,7 @@ impl Default for Layout {
             align: Align::default(),
             flow: Flow::default(),
             spacing: 0.0,
+            wrap_spacing: 0.0,
         }
     }
 }
@@ -1312,7 +1317,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                 x: layout.padding.left,
                 y: layout.padding.top,
             },
-            wrap_spacing: 0.0,
+            wrap_spacing: layout.wrap_spacing,
             origin: dvec2(0.0, 0.0),
             width: size.x,
             height: size.y,
@@ -1409,7 +1414,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             finished_walks_start: self.finished_walks.len(),
             deferred_fills: Vec::new(),
             resolved_fills: Vec::new(),
-            wrap_spacing: 0.0,
+            wrap_spacing: layout.wrap_spacing,
             pos: Vec2d {
                 x: origin.x + layout.padding.left,
                 y: origin.y + layout.padding.top,
