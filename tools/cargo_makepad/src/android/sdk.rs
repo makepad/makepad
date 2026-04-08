@@ -155,7 +155,7 @@ pub fn expand_sdk(
     _targets: &[AndroidTarget],
     urls: &AndroidSDKUrls,
 ) -> Result<(), String> {
-    let full_ndk = !args.contains(&String::from("--strip-ndk"));
+    let full_ndk = args.contains(&String::from("--full-ndk"));
     let src_dir = &sdk_dir.join("sources");
 
     fn unzip(
@@ -479,66 +479,111 @@ pub fn expand_sdk(
                     ("platform-tools/AdbWinUsbApi.dll", false),
                 ],
             )?;
-            const NDK_IN: &str = "android-ndk-r28b/toolchains/llvm/prebuilt/windows-x86_64";
-            let NDK_OUT =
-                &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/windows-x86_64");
+            const NDK_ZIP_ROOT: &str = "android-ndk-r28b";
+            let NDK_OUT_BASE = format!("ndk/{NDK_VERSION_FULL}");
 
-            // We only need to extract the contents of the `NDK_IN` directory within the `URL_NDK_33_LINUX` zip file,
-            // and then copy that directory it into the proper `NDK_OUT` directory location.
             let cwd = std::env::current_dir().unwrap();
             let url_file_name = url_file_name(urls.ndk_windows);
-            println!("4/5: Unzipping: {} (full NDK)", url_file_name);
-            let ndk_out_path = sdk_dir.join(NDK_OUT);
-            mkdir(&ndk_out_path)?;
+            println!("4/5: Unzipping: {} ({})", url_file_name, if full_ndk { "full NDK" } else { "stripped NDK" });
 
-            // Some shell environments on Windows are Linux-like (Git Bash, cygwin, mingw, etc),
-            // and therefore support `unzip` and `cp`.
-            let unzip_result = shell(
-                &cwd,
-                "unzip",
-                &[
-                    "-q", // quiet
-                    "-o", // overwrite existing files
-                    src_dir.join(url_file_name).to_str().unwrap(),
-                    &format!("{NDK_IN}/**/*"),
-                    "-d",
-                    src_dir.to_str().unwrap(),
-                ],
-            );
-            if unzip_result.is_ok() {
-                shell(
+            if full_ndk {
+                // Extract the entire NDK zip into src_dir, then move it.
+                let ndk_out = sdk_dir.join(&NDK_OUT_BASE);
+                mkdir(&ndk_out)?;
+
+                let unzip_result = shell(
                     &cwd,
-                    "cp",
+                    "unzip",
                     &[
-                        "--force",
-                        "--recursive",
-                        "--preserve",
-                        src_dir.join(NDK_IN).to_str().unwrap(),
-                        ndk_out_path.parent().unwrap().to_str().unwrap(),
-                    ],
-                )
-                .unwrap();
-            } else {
-                // If `unzip` failed, we're running on a true Windows shell (cmd, powershell),
-                // so we instead use `tar` (which is the BSD version of tar) to extract the zip file.
-                // Bonus: the BSD tar utility supports extracting files directly into NDK_OUT.
-                let num_path_components = Path::new(NDK_IN).iter().count();
-                shell(
-                    &cwd,
-                    "tar",
-                    &[
-                        "-x",
-                        "-z",
-                        "-f",
+                        "-q", "-o",
                         src_dir.join(url_file_name).to_str().unwrap(),
-                        "--strip-components",
-                        &num_path_components.to_string(),
-                        "-C",
-                        ndk_out_path.to_str().unwrap(),
-                        NDK_IN,
+                        "-d",
+                        src_dir.to_str().unwrap(),
                     ],
-                )
-                .unwrap();
+                );
+                if unzip_result.is_ok() {
+                    shell(
+                        &cwd,
+                        "cp",
+                        &[
+                            "--force", "--recursive", "--preserve",
+                            src_dir.join(NDK_ZIP_ROOT).to_str().unwrap(),
+                            ndk_out.parent().unwrap().to_str().unwrap(),
+                        ],
+                    ).unwrap();
+                    // Rename extracted dir to versioned name.
+                    let extracted = sdk_dir.join("ndk").join(NDK_ZIP_ROOT);
+                    if extracted.exists() && extracted != ndk_out {
+                        // Remove the destination first (it may exist from a
+                        // previous install or from mkdir above).
+                        if ndk_out.exists() {
+                            std::fs::remove_dir_all(&ndk_out)
+                                .map_err(|e| format!("Failed to remove {ndk_out:?}: {e}"))?;
+                        }
+                        std::fs::rename(&extracted, &ndk_out)
+                            .map_err(|e| format!("Failed to rename {extracted:?} to {ndk_out:?}: {e}"))?;
+                    }
+                } else {
+                    // Windows native shell: use tar.
+                    let num_path_components = Path::new(NDK_ZIP_ROOT).iter().count();
+                    shell(
+                        &cwd,
+                        "tar",
+                        &[
+                            "-x", "-z", "-f",
+                            src_dir.join(url_file_name).to_str().unwrap(),
+                            "--strip-components",
+                            &num_path_components.to_string(),
+                            "-C",
+                            ndk_out.to_str().unwrap(),
+                            NDK_ZIP_ROOT,
+                        ],
+                    ).unwrap();
+                }
+            } else {
+                // Stripped: only extract toolchains/llvm/prebuilt/<host>.
+                let NDK_IN = format!("{NDK_ZIP_ROOT}/toolchains/llvm/prebuilt/windows-x86_64");
+                let NDK_OUT = format!("{NDK_OUT_BASE}/toolchains/llvm/prebuilt/windows-x86_64");
+                let ndk_out_path = sdk_dir.join(&NDK_OUT);
+                mkdir(&ndk_out_path)?;
+
+                let unzip_result = shell(
+                    &cwd,
+                    "unzip",
+                    &[
+                        "-q", "-o",
+                        src_dir.join(url_file_name).to_str().unwrap(),
+                        &format!("{NDK_IN}/**/*"),
+                        "-d",
+                        src_dir.to_str().unwrap(),
+                    ],
+                );
+                if unzip_result.is_ok() {
+                    shell(
+                        &cwd,
+                        "cp",
+                        &[
+                            "--force", "--recursive", "--preserve",
+                            src_dir.join(&NDK_IN).to_str().unwrap(),
+                            ndk_out_path.parent().unwrap().to_str().unwrap(),
+                        ],
+                    ).unwrap();
+                } else {
+                    let num_path_components = Path::new(&NDK_IN).iter().count();
+                    shell(
+                        &cwd,
+                        "tar",
+                        &[
+                            "-x", "-z", "-f",
+                            src_dir.join(url_file_name).to_str().unwrap(),
+                            "--strip-components",
+                            &num_path_components.to_string(),
+                            "-C",
+                            ndk_out_path.to_str().unwrap(),
+                            &NDK_IN,
+                        ],
+                    ).unwrap();
+                }
             }
             /*
             else {
@@ -746,18 +791,30 @@ pub fn expand_sdk(
                 urls.platform_tools_macos,
                 &[("platform-tools/adb", true)],
             )?;
-            let NDK_IN = "AndroidNDK13676358.app/Contents/NDK/toolchains/llvm/prebuilt";
-            let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt");
+            let NDK_BASE_IN = "AndroidNDK13676358.app/Contents/NDK";
+            let NDK_BASE_OUT = &format!("ndk/{NDK_VERSION_FULL}");
 
-            let toolchain_dir = copy_map(NDK_IN, NDK_OUT, "");
-            let files = [(toolchain_dir.as_str(), false)];
-            dmg_extract(4, src_dir, sdk_dir, urls.ndk_macos, &files, full_ndk)?;
+            if full_ndk {
+                // Extract the entire NDK, which includes cmake toolchain files,
+                // source.properties, and everything else needed by crates that
+                // use cmake for cross-compilation (e.g., aws-lc-sys).
+                let ndk_all = copy_map(NDK_BASE_IN, NDK_BASE_OUT, "");
+                let files = [(ndk_all.as_str(), false)];
+                dmg_extract(4, src_dir, sdk_dir, urls.ndk_macos, &files, full_ndk)?;
+            } else {
+                // Stripped NDK: only extract the toolchain binaries.
+                let NDK_IN = &format!("{NDK_BASE_IN}/toolchains/llvm/prebuilt");
+                let NDK_OUT = &format!("{NDK_BASE_OUT}/toolchains/llvm/prebuilt");
+                let toolchain_dir = copy_map(NDK_IN, NDK_OUT, "");
+                let files = [(toolchain_dir.as_str(), false)];
+                dmg_extract(4, src_dir, sdk_dir, urls.ndk_macos, &files, full_ndk)?;
+            }
             // We copied over the entire contents of `toolchains/llvm/prebuilt/*`,
             // but we still need to make each host prebuilt's `bin/*` executable.
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let prebuilt_root = sdk_dir.join(NDK_OUT);
+                let prebuilt_root = sdk_dir.join(format!("{NDK_BASE_OUT}/toolchains/llvm/prebuilt"));
                 std::fs::read_dir(&prebuilt_root)
                     .expect("failed to read NDK `prebuilt/` dir: {prebuilt_root:?}")
                     .filter_map(|r| {
@@ -938,19 +995,13 @@ pub fn expand_sdk(
                 urls.platform_tools_linux,
                 &[("platform-tools/adb", true)],
             )?;
-            const NDK_IN: &str = "android-ndk-r28b/toolchains/llvm/prebuilt/linux-x86_64";
-            let NDK_OUT = &format!("ndk/{NDK_VERSION_FULL}/toolchains/llvm/prebuilt/linux-x86_64");
+            const NDK_ZIP_ROOT: &str = "android-ndk-r28b";
+            let NDK_OUT_BASE = format!("ndk/{NDK_VERSION_FULL}");
 
-            // Extract the entire NDK zip without file-pattern filters, then
-            // copy just the needed subtree.  Wildcard behavior in InfoZIP
-            // `unzip` varies across platforms (`*` matching `/` or not, `**`
-            // support), so the only portable invocation is a full extraction.
-            // The extra files are cleaned up by `remove_sdk_sources`.
+            // Extract the entire NDK zip, then copy the needed subtree(s).
             let cwd = std::env::current_dir().unwrap();
             let url_file_name = url_file_name(urls.ndk_linux);
-            println!("4/5: Unzipping: {} (full NDK)", url_file_name);
-            let ndk_out_path = sdk_dir.join(NDK_OUT);
-            mkdir(&ndk_out_path)?;
+            println!("4/5: Unzipping: {} ({})", url_file_name, if full_ndk { "full NDK" } else { "stripped NDK" });
             shell(
                 &cwd,
                 "unzip",
@@ -962,17 +1013,50 @@ pub fn expand_sdk(
                     src_dir.to_str().unwrap(),
                 ],
             )?;
-            shell(
-                &cwd,
-                "cp",
-                &[
-                    "--force",
-                    "--recursive",
-                    "--preserve",
-                    src_dir.join(NDK_IN).to_str().unwrap(),
-                    ndk_out_path.parent().unwrap().to_str().unwrap(),
-                ],
-            )?;
+
+            if full_ndk {
+                // Copy the entire NDK directory tree.
+                let ndk_out = sdk_dir.join(&NDK_OUT_BASE);
+                mkdir(&ndk_out)?;
+                shell(
+                    &cwd,
+                    "cp",
+                    &[
+                        "--force",
+                        "--recursive",
+                        "--preserve",
+                        src_dir.join(NDK_ZIP_ROOT).to_str().unwrap(),
+                        ndk_out.parent().unwrap().to_str().unwrap(),
+                    ],
+                )?;
+                // Rename the extracted directory to the versioned name.
+                let extracted = sdk_dir.join("ndk").join(NDK_ZIP_ROOT);
+                if extracted.exists() && extracted != ndk_out {
+                    if ndk_out.exists() {
+                        std::fs::remove_dir_all(&ndk_out)
+                            .map_err(|e| format!("Failed to remove {ndk_out:?}: {e}"))?;
+                    }
+                    std::fs::rename(&extracted, &ndk_out)
+                        .map_err(|e| format!("Failed to rename {extracted:?} to {ndk_out:?}: {e}"))?;
+                }
+            } else {
+                // Stripped: only copy toolchains/llvm/prebuilt/<host>.
+                let NDK_IN = format!("{NDK_ZIP_ROOT}/toolchains/llvm/prebuilt/linux-x86_64");
+                let NDK_OUT = format!("{NDK_OUT_BASE}/toolchains/llvm/prebuilt/linux-x86_64");
+                let ndk_out_path = sdk_dir.join(&NDK_OUT);
+                mkdir(&ndk_out_path)?;
+                shell(
+                    &cwd,
+                    "cp",
+                    &[
+                        "--force",
+                        "--recursive",
+                        "--preserve",
+                        src_dir.join(&NDK_IN).to_str().unwrap(),
+                        ndk_out_path.parent().unwrap().to_str().unwrap(),
+                    ],
+                )?;
+            }
 
             const JDK_IN: &str = "jdk-17.0.2";
             const JDK_OUT: &str = "openjdk";
