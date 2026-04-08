@@ -8,6 +8,9 @@ use {
     std::sync::{Arc, Mutex},
 };
 
+#[cfg(all(feature = "hotreload", target_os = "macos"))]
+use std::{ffi::c_void, sync::OnceLock};
+
 #[derive(Default)]
 pub struct CxAppleMedia {
     pub(crate) core_midi: Option<Arc<Mutex<CoreMidiAccess>>>,
@@ -87,27 +90,67 @@ struct AppleH264Probe {
     decode_software: bool,
 }
 
-fn probe_apple_h264() -> AppleH264Probe {
-    #[cfg(all(
-        feature = "hotreload",
-        any(target_os = "macos", target_os = "ios", target_os = "tvos")
-    ))]
-    {
-        // Dioxus/Subsecond fat-binary generation on Apple targets does not
-        // reliably carry the framework link metadata needed for the
-        // VideoToolbox symbol probe. Skip the capability probe in hotreload
-        // builds; normal Makepad builds still run the full native detection.
-        return AppleH264Probe::default();
+#[cfg(all(feature = "hotreload", target_os = "macos"))]
+unsafe fn videotoolbox_symbol(name: &'static [u8]) -> Option<*mut c_void> {
+    static VIDEOTOOLBOX_FRAMEWORK: OnceLock<usize> = OnceLock::new();
+
+    unsafe extern "C" {
+        fn dlopen(path: *const i8, mode: i32) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
     }
 
-    #[cfg(not(all(
-        feature = "hotreload",
-        any(target_os = "macos", target_os = "ios", target_os = "tvos")
-    )))]
+    let handle = *VIDEOTOOLBOX_FRAMEWORK.get_or_init(|| {
+        let framework_path = b"/System/Library/Frameworks/VideoToolbox.framework/VideoToolbox\0";
+        unsafe { dlopen(framework_path.as_ptr() as *const i8, 1) as usize }
+    });
+    if handle == 0 {
+        return None;
+    }
+
+    let symbol = unsafe { dlsym(handle as *mut c_void, name.as_ptr() as *const i8) };
+    if symbol.is_null() {
+        return None;
+    }
+    Some(symbol)
+}
+
+#[cfg(all(feature = "hotreload", target_os = "macos"))]
+unsafe fn vt_is_hardware_encode_supported(codec_type: u32) -> bool {
+    type VtIsHardwareSupportedFn = unsafe extern "C" fn(u32) -> BOOL;
+
+    let Some(symbol) = (unsafe { videotoolbox_symbol(b"VTIsHardwareEncodeSupported\0") }) else {
+        return false;
+    };
+    let func: VtIsHardwareSupportedFn = unsafe { std::mem::transmute(symbol) };
+    unsafe { func(codec_type) == YES }
+}
+
+#[cfg(not(all(feature = "hotreload", target_os = "macos")))]
+unsafe fn vt_is_hardware_encode_supported(codec_type: u32) -> bool {
+    VTIsHardwareEncodeSupported(codec_type) == YES
+}
+
+#[cfg(all(feature = "hotreload", target_os = "macos"))]
+unsafe fn vt_is_hardware_decode_supported(codec_type: u32) -> bool {
+    type VtIsHardwareSupportedFn = unsafe extern "C" fn(u32) -> BOOL;
+
+    let Some(symbol) = (unsafe { videotoolbox_symbol(b"VTIsHardwareDecodeSupported\0") }) else {
+        return false;
+    };
+    let func: VtIsHardwareSupportedFn = unsafe { std::mem::transmute(symbol) };
+    unsafe { func(codec_type) == YES }
+}
+
+#[cfg(not(all(feature = "hotreload", target_os = "macos")))]
+unsafe fn vt_is_hardware_decode_supported(codec_type: u32) -> bool {
+    VTIsHardwareDecodeSupported(codec_type) == YES
+}
+
+fn probe_apple_h264() -> AppleH264Probe {
     unsafe {
         let mut probe = AppleH264Probe::default();
 
-        probe.encode_hardware = VTIsHardwareEncodeSupported(kCMVideoCodecType_H264) == YES;
+        probe.encode_hardware = vt_is_hardware_encode_supported(kCMVideoCodecType_H264);
 
         let mut enc: VTCompressionSessionRef = std::ptr::null_mut();
         let enc_status = VTCompressionSessionCreate(
@@ -129,7 +172,7 @@ fn probe_apple_h264() -> AppleH264Probe {
         }
         probe.encode_software = encode_available && !probe.encode_hardware;
 
-        probe.decode_hardware = VTIsHardwareDecodeSupported(kCMVideoCodecType_H264) == YES;
+        probe.decode_hardware = vt_is_hardware_decode_supported(kCMVideoCodecType_H264);
 
         // Baseline 64x64 SPS/PPS probe stream.
         let sps: [u8; 23] = [

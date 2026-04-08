@@ -211,7 +211,9 @@ fn handle_devserver_msg(msg: DevserverMsg) {
     if let DevserverMsg::HotReload(hot_reload_msg) = msg {
         if let Some(jump_table) = hot_reload_msg.jump_table {
             if hot_reload_msg.for_pid == Some(std::process::id()) {
-                let _ = unsafe { subsecond::apply_patch(jump_table) };
+                if let Err(err) = unsafe { subsecond::apply_patch(jump_table) } {
+                    crate::error!("failed to apply hotreload patch: {err}");
+                }
             }
         }
     }
