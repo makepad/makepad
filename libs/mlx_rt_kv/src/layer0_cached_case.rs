@@ -1,50 +1,36 @@
+use crate::{
+    GemmaAttentionKind, GemmaKvCacheLayout, GemmaKvCacheSpec, KvTensor, KvTensorShape,
+};
 use makepad_ggml::backend::metal::{
-    BufferStorageMode, MetalBufferBindingRef, MetalPipelineDescriptor, MetalRuntime, MetalSize,
+    BufferStorageMode, MetalBuffer, MetalBufferBindingRef, MetalPipeline, MetalPipelineDescriptor,
+    MetalRuntime, MetalSize,
 };
 use makepad_mlx_rt_core::{
-    fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words_with_phase, MlxSafetensorsHeader,
+    fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words_with_phase, MlxGreedyToken,
+    MlxIndexedSafetensors,
 };
-use crate::{GemmaAttentionKind, GemmaKvCache, GemmaKvCacheSpec, KvTensor, KvTensorShape};
+use std::cell::{RefCell, RefMut};
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::error::Error;
+use std::fs;
 use std::mem::size_of;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::slice;
+use std::sync::{Arc, Mutex, OnceLock};
 
-const INPUT_NORM_WEIGHT_NAME: &str = "language_model.model.layers.0.input_layernorm.weight";
-const Q_NORM_WEIGHT_NAME: &str = "language_model.model.layers.0.self_attn.q_norm.weight";
-const K_NORM_WEIGHT_NAME: &str = "language_model.model.layers.0.self_attn.k_norm.weight";
-const O_PROJ_WEIGHT_NAME: &str = "language_model.model.layers.0.self_attn.o_proj.weight";
-const O_PROJ_SCALES_NAME: &str = "language_model.model.layers.0.self_attn.o_proj.scales";
-const O_PROJ_BIASES_NAME: &str = "language_model.model.layers.0.self_attn.o_proj.biases";
-const POST_ATTENTION_NORM_WEIGHT_NAME: &str =
-    "language_model.model.layers.0.post_attention_layernorm.weight";
-const PRE_FEEDFORWARD_NORM_WEIGHT_NAME: &str =
-    "language_model.model.layers.0.pre_feedforward_layernorm.weight";
-const MLP_GATE_WEIGHT_NAME: &str = "language_model.model.layers.0.mlp.gate_proj.weight";
-const MLP_GATE_SCALES_NAME: &str = "language_model.model.layers.0.mlp.gate_proj.scales";
-const MLP_GATE_BIASES_NAME: &str = "language_model.model.layers.0.mlp.gate_proj.biases";
-const MLP_UP_WEIGHT_NAME: &str = "language_model.model.layers.0.mlp.up_proj.weight";
-const MLP_UP_SCALES_NAME: &str = "language_model.model.layers.0.mlp.up_proj.scales";
-const MLP_UP_BIASES_NAME: &str = "language_model.model.layers.0.mlp.up_proj.biases";
-const MLP_DOWN_WEIGHT_NAME: &str = "language_model.model.layers.0.mlp.down_proj.weight";
-const MLP_DOWN_SCALES_NAME: &str = "language_model.model.layers.0.mlp.down_proj.scales";
-const MLP_DOWN_BIASES_NAME: &str = "language_model.model.layers.0.mlp.down_proj.biases";
-const ROUTER_SCALE_NAME: &str = "language_model.model.layers.0.router.scale";
-const ROUTER_PER_EXPERT_SCALE_NAME: &str =
-    "language_model.model.layers.0.router.per_expert_scale";
-const ROUTER_PROJ_WEIGHT_NAME: &str = "language_model.model.layers.0.router.proj.weight";
-const ROUTER_PROJ_SCALES_NAME: &str = "language_model.model.layers.0.router.proj.scales";
-const ROUTER_PROJ_BIASES_NAME: &str = "language_model.model.layers.0.router.proj.biases";
 const NORM_LEN: usize = 2_816;
 const EPS: f32 = 1e-6;
-const ROPE_BASE: f32 = 10_000.0;
 const ROPE_SCALE: f32 = 1.0;
 const PREFILL_ROPE_OFFSET: i32 = 17;
 const DECODE_ROPE_OFFSET: i32 = 18;
 const PREFILL_ACTIVATION_PHASE: usize = 0;
 const DECODE_ACTIVATION_PHASE: usize = 5;
 const ROUTER_TOP_K: usize = 8;
+const EMBED_TOKENS_WEIGHT_NAME: &str = "language_model.model.embed_tokens.weight";
+const EMBED_TOKENS_SCALES_NAME: &str = "language_model.model.embed_tokens.scales";
+const EMBED_TOKENS_BIASES_NAME: &str = "language_model.model.embed_tokens.biases";
+const FINAL_TEXT_NORM_WEIGHT_NAME: &str = "language_model.model.norm.weight";
 
 const EXPECTED_PREFILL_K_CACHE_HASH: u64 = 0x9731_B5D8_139C_BB3D;
 const EXPECTED_PREFILL_V_CACHE_HASH: u64 = 0xDAC6_F97C_1CD9_387D;
@@ -69,6 +55,15 @@ const EXPECTED_ROUTER_EXPERT_SCORES_HASH: u64 = 0x112B_3439_F573_0364;
 const EXPECTED_ROUTER_PROBS_HASH: u64 = 0x2BB7_8933_AA3F_E931;
 const EXPECTED_ROUTER_TOPK_INDICES_HASH: u64 = 0xD911_5D45_6505_F5AF;
 const EXPECTED_ROUTER_TOPK_WEIGHTS_HASH: u64 = 0xF6C4_9320_7320_26E6;
+const EXPECTED_MOE_EXPERT_GATE_HASH: u64 = 0x5890_3AC5_7D0A_353B;
+const EXPECTED_MOE_EXPERT_UP_HASH: u64 = 0x0834_48ED_211B_5962;
+const EXPECTED_MOE_EXPERT_GEGLU_HASH: u64 = 0x0EDF_808A_0376_BC68;
+const EXPECTED_MOE_EXPERT_DOWN_HASH: u64 = 0xCF0A_F77B_4E0A_D20A;
+const EXPECTED_POST_FFN_NORM1_HASH: u64 = 0x45A3_0135_90F6_A92B;
+const EXPECTED_MOE_EXPERT_OUT_HASH: u64 = 0xB2AE_987F_8D52_83B7;
+const EXPECTED_MOE_POST_FFN_NORM2_HASH: u64 = 0x0F8D_5C98_366F_571F;
+const EXPECTED_MOE_MERGE_HASH: u64 = 0xFB0B_FD1E_3F3F_BACE;
+const EXPECTED_POST_FFN_RESIDUAL_HASH: u64 = 0xC176_97C1_02C9_B81D;
 
 const EXPECTED_PREFILL_K_CACHE_FIRST16_BITS: [u32; 16] = [
     0xBE4E_0000,
@@ -459,42 +454,183 @@ const EXPECTED_ROUTER_TOPK_WEIGHTS_FIRST8_BITS: [u32; ROUTER_TOP_K] = [
     0x3DA8_0000,
     0x3DA5_0000,
 ];
+const EXPECTED_MOE_EXPERT_GATE_FIRST16_BITS: [u32; 16] = [
+    0x3F85_0000,
+    0xBF82_0000,
+    0xBEE1_0000,
+    0x3CE5_0000,
+    0xBDA9_0000,
+    0x3F07_0000,
+    0x3E5F_0000,
+    0xBE8F_0000,
+    0xBF15_0000,
+    0xBE9F_0000,
+    0xBE97_0000,
+    0xBD49_0000,
+    0x3DC0_0000,
+    0xBF3F_0000,
+    0x3F08_0000,
+    0x3F0E_0000,
+];
+const EXPECTED_MOE_EXPERT_UP_FIRST16_BITS: [u32; 16] = [
+    0x3DD7_0000,
+    0xBED7_0000,
+    0xBF58_0000,
+    0xBF05_0000,
+    0xBF1A_0000,
+    0xBF12_0000,
+    0xBDD0_0000,
+    0x3EB2_0000,
+    0x3D58_0000,
+    0x3E9A_0000,
+    0x3EE3_0000,
+    0x3E3B_0000,
+    0xBE71_0000,
+    0x3F25_0000,
+    0xBEBD_0000,
+    0xBEB7_0000,
+];
+const EXPECTED_MOE_EXPERT_GEGLU_FIRST16_BITS: [u32; 16] = [
+    0x3DBF_0000,
+    0x3D86_0000,
+    0x3DFB_0000,
+    0xBBF3_0000,
+    0x3CBE_0000,
+    0xBE59_0000,
+    0xBC55_0000,
+    0xBD1B_0000,
+    0xBC0E_0000,
+    0xBD11_0000,
+    0xBD4D_0000,
+    0xBB8D_0000,
+    0xBC43_0000,
+    0xBDE2_0000,
+    0xBE0D_0000,
+    0xBE10_0000,
+];
+const EXPECTED_MOE_EXPERT_DOWN_FIRST16_BITS: [u32; 16] = [
+    0x3DCA_0000,
+    0xBD0D_0000,
+    0x3DE7_0000,
+    0x3E2A_0000,
+    0xBE22_0000,
+    0xBD09_0000,
+    0x3DB3_0000,
+    0xBD65_0000,
+    0x3BD4_0000,
+    0x3CA4_0000,
+    0xBECD_0000,
+    0x3ED3_0000,
+    0xBD91_0000,
+    0x3E42_0000,
+    0x3D05_0000,
+    0x3CC2_0000,
+];
+const EXPECTED_POST_FFN_NORM1_FIRST16_BITS: [u32; 16] = [
+    0xBA92_0000,
+    0x3DA7_0000,
+    0xBE2E_0000,
+    0xBF98_0000,
+    0xBDE4_0000,
+    0x3E83_0000,
+    0x3DC8_0000,
+    0xBD96_0000,
+    0x40B3_0000,
+    0xBFC4_0000,
+    0xC00C_0000,
+    0x4031_0000,
+    0x4029_0000,
+    0x40CE_0000,
+    0x4065_0000,
+    0x3C8A_0000,
+];
+const EXPECTED_MOE_EXPERT_OUT_FIRST16_BITS: [u32; 16] = [
+    0x3DA4_0000,
+    0x3DC0_0000,
+    0xBD38_0000,
+    0x3D04_0000,
+    0xBDBA_0000,
+    0xBD4B_0000,
+    0xBC2F_0000,
+    0x3D34_0000,
+    0x3DB4_0000,
+    0xBB8E_0000,
+    0xBE39_0000,
+    0x3D97_0000,
+    0xBDA0_0000,
+    0x3D85_0000,
+    0x3D02_0000,
+    0x3C01_0000,
+];
+const EXPECTED_MOE_POST_FFN_NORM2_FIRST16_BITS: [u32; 16] = [
+    0x4042_0000,
+    0x408B_0000,
+    0xBFA7_0000,
+    0x3FFC_0000,
+    0xC06F_0000,
+    0xBF99_0000,
+    0xBEC8_0000,
+    0x400B_0000,
+    0x40F3_0000,
+    0xBE42_0000,
+    0xC133_0000,
+    0x40E3_0000,
+    0xC08F_0000,
+    0x40F2_0000,
+    0x3FD4_0000,
+    0x3EC5_0000,
+];
+const EXPECTED_MOE_MERGE_FIRST16_BITS: [u32; 16] = [
+    0x4042_0000,
+    0x408E_0000,
+    0xBFBD_0000,
+    0x3F48_0000,
+    0xC076_0000,
+    0xBF70_0000,
+    0xBE96_0000,
+    0x4006_0000,
+    0x4153_0000,
+    0xBFDC_0000,
+    0xC156_0000,
+    0x411E_0000,
+    0xBFEA_0000,
+    0x4160_0000,
+    0x40A8_0000,
+    0x3ECE_0000,
+];
+const EXPECTED_POST_FFN_RESIDUAL_FIRST16_BITS: [u32; 16] = [
+    0x403F_0000,
+    0x40A0_0000,
+    0xBF40_0000,
+    0x3F77_0000,
+    0xC054_0000,
+    0xBF28_0000,
+    0xBF5D_0000,
+    0x3F9A_0000,
+    0x40F4_0000,
+    0xBFAC_0000,
+    0xC14E_0000,
+    0x4111_0000,
+    0xC026_0000,
+    0x414B_0000,
+    0x409E_0000,
+    0x3EAB_0000,
+];
 
 #[derive(Clone, Copy)]
-struct ProjectionPathOracle {
-    weight_name: &'static str,
-    scales_name: &'static str,
-    biases_name: &'static str,
-    norm_weight_name: Option<&'static str>,
+#[repr(C)]
+struct MlxAffineDequantRowArgs {
+    n: u32,
 }
 
-const Q_PATH_ORACLE: ProjectionPathOracle = ProjectionPathOracle {
-    weight_name: "language_model.model.layers.0.self_attn.q_proj.weight",
-    scales_name: "language_model.model.layers.0.self_attn.q_proj.scales",
-    biases_name: "language_model.model.layers.0.self_attn.q_proj.biases",
-    norm_weight_name: Some(Q_NORM_WEIGHT_NAME),
-};
-
-const K_PATH_ORACLE: ProjectionPathOracle = ProjectionPathOracle {
-    weight_name: "language_model.model.layers.0.self_attn.k_proj.weight",
-    scales_name: "language_model.model.layers.0.self_attn.k_proj.scales",
-    biases_name: "language_model.model.layers.0.self_attn.k_proj.biases",
-    norm_weight_name: Some(K_NORM_WEIGHT_NAME),
-};
-
-const V_PATH_ORACLE: ProjectionPathOracle = ProjectionPathOracle {
-    weight_name: "language_model.model.layers.0.self_attn.v_proj.weight",
-    scales_name: "language_model.model.layers.0.self_attn.v_proj.scales",
-    biases_name: "language_model.model.layers.0.self_attn.v_proj.biases",
-    norm_weight_name: None,
-};
-
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct MlxRmsNormRowArgs {
     n: u32,
     eps: f32,
 }
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct MlxRmsNormRowsArgs {
     n: u32,
@@ -503,6 +639,7 @@ struct MlxRmsNormRowsArgs {
     eps: f32,
 }
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct MlxAffineQprojRowArgs {
     n_in: u32,
@@ -511,16 +648,37 @@ struct MlxAffineQprojRowArgs {
     out_rows: u32,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxAffineSelectedExpertsQprojRowArgs {
+    n_in: u32,
+    weight_words_per_row: u32,
+    qparams_per_row: u32,
+    out_rows: u32,
+    input_row_stride: u32,
+}
+
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct MlxAddRowArgs {
     n: u32,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxWeightedRowsArgs {
+    n: u32,
+    row_stride: u32,
+    row_count: u32,
+}
+
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct MlxGegluRowArgs {
     n: u32,
 }
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct MlxRouterScaleArgs {
     n: u32,
@@ -528,7 +686,62 @@ struct MlxRouterScaleArgs {
     root_size: f32,
 }
 
+#[derive(Clone, Copy)]
 #[repr(C)]
+struct MlxGqaAttentionLogitsSeqArgs {
+    head_dim: u32,
+    q_head_stride: u32,
+    kv_row_stride: u32,
+    q_head_count: u32,
+    q_heads_per_kv: u32,
+    seq_len: u32,
+    start_slot: u32,
+    capacity: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxGqaAttentionOutputArgs {
+    logits_row_stride: u32,
+    head_dim: u32,
+    kv_row_stride: u32,
+    out_head_stride: u32,
+    q_head_count: u32,
+    q_heads_per_kv: u32,
+    seq_len: u32,
+    start_slot: u32,
+    capacity: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxSoftmaxRowsArgs {
+    row_stride: u32,
+    row_count: u32,
+    seq_len: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxGqaAttentionWeightedSumArgs {
+    probs_row_stride: u32,
+    head_dim: u32,
+    kv_row_stride: u32,
+    out_head_stride: u32,
+    q_head_count: u32,
+    q_heads_per_kv: u32,
+    seq_len: u32,
+    start_slot: u32,
+    capacity: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxRouterTopKArgs {
+    expert_count: u32,
+    top_k: u32,
+}
+
 struct MlxRopeSingleArgs {
     half_dims: u32,
     row_stride: u32,
@@ -538,18 +751,3666 @@ struct MlxRopeSingleArgs {
     base_log2: f32,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxArgmaxSoftcappedBf16Args {
+    n: u32,
+    softcap: f32,
+    has_softcap: u32,
+}
+
 #[derive(Clone, Debug)]
-struct CachedRouterOutput {
-    router_scaled_bits: Vec<u32>,
-    expert_scores_bits: Vec<u32>,
-    router_probs_bits: Vec<u32>,
-    top_k_indices: Vec<u32>,
-    top_k_weights_bits: Vec<u32>,
+struct ProjectionTensorNames {
+    weight_name: String,
+    scales_name: String,
+    biases_name: String,
+    norm_weight_name: Option<String>,
+}
+
+impl ProjectionTensorNames {
+    fn new(base: &str, prefix: &str, norm_weight_name: Option<String>) -> Self {
+        Self {
+            weight_name: format!("{base}.self_attn.{prefix}.weight"),
+            scales_name: format!("{base}.self_attn.{prefix}.scales"),
+            biases_name: format!("{base}.self_attn.{prefix}.biases"),
+            norm_weight_name,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LayerTensorNames {
+    input_norm_weight_name: String,
+    q: ProjectionTensorNames,
+    k: ProjectionTensorNames,
+    v: ProjectionTensorNames,
+    o: ProjectionTensorNames,
+    post_attention_norm_weight_name: String,
+    pre_feedforward_norm_weight_name: String,
+    pre_feedforward_norm2_weight_name: String,
+    post_feedforward_norm1_weight_name: String,
+    post_feedforward_norm2_weight_name: String,
+    mlp_gate_weight_name: String,
+    mlp_gate_scales_name: String,
+    mlp_gate_biases_name: String,
+    mlp_up_weight_name: String,
+    mlp_up_scales_name: String,
+    mlp_up_biases_name: String,
+    mlp_down_weight_name: String,
+    mlp_down_scales_name: String,
+    mlp_down_biases_name: String,
+    router_scale_name: String,
+    router_per_expert_scale_name: String,
+    router_proj_weight_name: String,
+    router_proj_scales_name: String,
+    router_proj_biases_name: String,
+    expert_gate_weight_name: String,
+    expert_gate_scales_name: String,
+    expert_gate_biases_name: String,
+    expert_up_weight_name: String,
+    expert_up_scales_name: String,
+    expert_up_biases_name: String,
+    expert_down_weight_name: String,
+    expert_down_scales_name: String,
+    expert_down_biases_name: String,
+}
+
+impl LayerTensorNames {
+    fn for_layer(layer_idx: usize, attention_k_eq_v: bool) -> Self {
+        let base = format!("language_model.model.layers.{layer_idx}");
+        let q = ProjectionTensorNames::new(
+            &base,
+            "q_proj",
+            Some(format!("{base}.self_attn.q_norm.weight")),
+        );
+        let k = ProjectionTensorNames::new(
+            &base,
+            "k_proj",
+            Some(format!("{base}.self_attn.k_norm.weight")),
+        );
+        let v = if attention_k_eq_v {
+            ProjectionTensorNames {
+                weight_name: k.weight_name.clone(),
+                scales_name: k.scales_name.clone(),
+                biases_name: k.biases_name.clone(),
+                norm_weight_name: None,
+            }
+        } else {
+            ProjectionTensorNames::new(&base, "v_proj", None)
+        };
+        let o = ProjectionTensorNames::new(&base, "o_proj", None);
+        Self {
+            input_norm_weight_name: format!("{base}.input_layernorm.weight"),
+            q,
+            k,
+            v,
+            o,
+            post_attention_norm_weight_name: format!("{base}.post_attention_layernorm.weight"),
+            pre_feedforward_norm_weight_name: format!("{base}.pre_feedforward_layernorm.weight"),
+            pre_feedforward_norm2_weight_name: format!("{base}.pre_feedforward_layernorm_2.weight"),
+            post_feedforward_norm1_weight_name: format!(
+                "{base}.post_feedforward_layernorm_1.weight"
+            ),
+            post_feedforward_norm2_weight_name: format!(
+                "{base}.post_feedforward_layernorm_2.weight"
+            ),
+            mlp_gate_weight_name: format!("{base}.mlp.gate_proj.weight"),
+            mlp_gate_scales_name: format!("{base}.mlp.gate_proj.scales"),
+            mlp_gate_biases_name: format!("{base}.mlp.gate_proj.biases"),
+            mlp_up_weight_name: format!("{base}.mlp.up_proj.weight"),
+            mlp_up_scales_name: format!("{base}.mlp.up_proj.scales"),
+            mlp_up_biases_name: format!("{base}.mlp.up_proj.biases"),
+            mlp_down_weight_name: format!("{base}.mlp.down_proj.weight"),
+            mlp_down_scales_name: format!("{base}.mlp.down_proj.scales"),
+            mlp_down_biases_name: format!("{base}.mlp.down_proj.biases"),
+            router_scale_name: format!("{base}.router.scale"),
+            router_per_expert_scale_name: format!("{base}.router.per_expert_scale"),
+            router_proj_weight_name: format!("{base}.router.proj.weight"),
+            router_proj_scales_name: format!("{base}.router.proj.scales"),
+            router_proj_biases_name: format!("{base}.router.proj.biases"),
+            expert_gate_weight_name: format!("{base}.experts.switch_glu.gate_proj.weight"),
+            expert_gate_scales_name: format!("{base}.experts.switch_glu.gate_proj.scales"),
+            expert_gate_biases_name: format!("{base}.experts.switch_glu.gate_proj.biases"),
+            expert_up_weight_name: format!("{base}.experts.switch_glu.up_proj.weight"),
+            expert_up_scales_name: format!("{base}.experts.switch_glu.up_proj.scales"),
+            expert_up_biases_name: format!("{base}.experts.switch_glu.up_proj.biases"),
+            expert_down_weight_name: format!("{base}.experts.switch_glu.down_proj.weight"),
+            expert_down_scales_name: format!("{base}.experts.switch_glu.down_proj.scales"),
+            expert_down_biases_name: format!("{base}.experts.switch_glu.down_proj.biases"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CachedLayerInputs {
+    pub prefill_input_words: Vec<u16>,
+    pub decode_input_words: Vec<u16>,
+    pub prefill_rope_offset: i32,
+    pub decode_rope_offset: i32,
+    pub validate_against_oracle: bool,
+}
+
+impl CachedLayerInputs {
+    pub fn synthetic_case() -> Self {
+        Self {
+            prefill_input_words: gemma4_qproj_case_input_bf16_words_with_phase(
+                NORM_LEN,
+                PREFILL_ACTIVATION_PHASE,
+            ),
+            decode_input_words: gemma4_qproj_case_input_bf16_words_with_phase(
+                NORM_LEN,
+                DECODE_ACTIVATION_PHASE,
+            ),
+            prefill_rope_offset: PREFILL_ROPE_OFFSET,
+            decode_rope_offset: DECODE_ROPE_OFFSET,
+            validate_against_oracle: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CachedLayerSequenceInputs {
+    pub prefill_input_words_list: Vec<Vec<u16>>,
+    pub decode_input_words: Vec<u16>,
+    pub prefill_rope_offset: i32,
+    pub decode_rope_offset: i32,
+    pub validate_against_oracle: bool,
+}
+
+impl CachedLayerSequenceInputs {
+    pub fn from_single(inputs: CachedLayerInputs) -> Self {
+        Self {
+            prefill_input_words_list: vec![inputs.prefill_input_words],
+            decode_input_words: inputs.decode_input_words,
+            prefill_rope_offset: inputs.prefill_rope_offset,
+            decode_rope_offset: inputs.decode_rope_offset,
+            validate_against_oracle: inputs.validate_against_oracle,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Layer0CachedRouterOutput {
+    pub router_scaled_bits: Vec<u32>,
+    pub expert_scores_bits: Vec<u32>,
+    pub router_probs_bits: Vec<u32>,
+    pub top_k_indices: Vec<u32>,
+    pub top_k_weights_bits: Vec<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Layer0CachedArtifacts {
+    pub backend_name: String,
+    pub model_path: PathBuf,
+    pub layer_idx: usize,
+    pub selected_stage: Option<Layer0CachedStage>,
+    pub prefill_rope_offset: i32,
+    pub decode_rope_offset: i32,
+    pub q_head_count: usize,
+    pub k_head_count: usize,
+    pub v_head_count: usize,
+    pub q_heads_per_kv: usize,
+    pub head_dim: usize,
+    pub prefill_input_norm_bits: Vec<u32>,
+    pub prefill_v_proj_bits: Vec<u32>,
+    pub prefill_q_bits: Vec<u32>,
+    pub prefill_k_bits: Vec<u32>,
+    pub prefill_v_bits: Vec<u32>,
+    pub decode_input_norm_bits: Vec<u32>,
+    pub decode_v_proj_bits: Vec<u32>,
+    pub decode_q_bits: Vec<u32>,
+    pub decode_k_bits: Vec<u32>,
+    pub decode_v_bits: Vec<u32>,
+    pub full_k_bits: Vec<u32>,
+    pub full_v_bits: Vec<u32>,
+    pub attention_score_bits: Vec<u32>,
+    pub attention_prob_bits: Vec<u32>,
+    pub attention_out_bits: Vec<u32>,
+    pub attention_oproj_bits: Option<Vec<u32>>,
+    pub post_attention_norm_bits: Option<Vec<u32>>,
+    pub post_attention_residual_bits: Option<Vec<u32>>,
+    pub pre_feedforward_norm_bits: Option<Vec<u32>>,
+    pub dense_gate_bits: Option<Vec<u32>>,
+    pub dense_up_bits: Option<Vec<u32>>,
+    pub dense_geglu_bits: Option<Vec<u32>>,
+    pub dense_down_bits: Option<Vec<u32>>,
+    pub router_output: Option<Layer0CachedRouterOutput>,
+    pub moe_expert_gate_bits: Option<Vec<u32>>,
+    pub moe_expert_up_bits: Option<Vec<u32>>,
+    pub moe_expert_geglu_bits: Option<Vec<u32>>,
+    pub moe_expert_down_bits: Option<Vec<u32>>,
+    pub post_ffn_norm1_bits: Option<Vec<u32>>,
+    pub moe_expert_out_bits: Option<Vec<u32>>,
+    pub moe_post_ffn_norm2_bits: Option<Vec<u32>>,
+    pub moe_merge_bits: Option<Vec<u32>>,
+    pub prefill_post_ffn_residual_bits: Option<Vec<u32>>,
+    pub post_ffn_residual_bits: Option<Vec<u32>>,
+}
+
+impl Layer0CachedArtifacts {
+    pub fn stage_name(&self) -> &'static str {
+        self.selected_stage
+            .map(Layer0CachedStage::stage_name)
+            .unwrap_or("qkv_attention_output_cached")
+    }
+
+    pub fn tensor_bits_for_stage(&self, stage: Layer0CachedStage) -> Option<&[u32]> {
+        match stage {
+            Layer0CachedStage::AttentionOproj => self.attention_oproj_bits.as_deref(),
+            Layer0CachedStage::PostAttentionResidual => {
+                self.post_attention_residual_bits.as_deref()
+            }
+            Layer0CachedStage::PreFeedforwardNorm => self.pre_feedforward_norm_bits.as_deref(),
+            Layer0CachedStage::DenseGate => self.dense_gate_bits.as_deref(),
+            Layer0CachedStage::DenseUp => self.dense_up_bits.as_deref(),
+            Layer0CachedStage::DenseGeGlu => self.dense_geglu_bits.as_deref(),
+            Layer0CachedStage::DenseDown => self.dense_down_bits.as_deref(),
+            Layer0CachedStage::PostFfnNorm1 => self.post_ffn_norm1_bits.as_deref(),
+            Layer0CachedStage::Router => None,
+            Layer0CachedStage::MoeExpertGate => self.moe_expert_gate_bits.as_deref(),
+            Layer0CachedStage::MoeExpertUp => self.moe_expert_up_bits.as_deref(),
+            Layer0CachedStage::MoeExpertGeGlu => self.moe_expert_geglu_bits.as_deref(),
+            Layer0CachedStage::MoeExpertDown => self.moe_expert_down_bits.as_deref(),
+            Layer0CachedStage::MoeExpertOut => self.moe_expert_out_bits.as_deref(),
+            Layer0CachedStage::MoePostFfnNorm2 => self.moe_post_ffn_norm2_bits.as_deref(),
+            Layer0CachedStage::MoeMerge => self.moe_merge_bits.as_deref(),
+            Layer0CachedStage::PostFfnResidual => self.post_ffn_residual_bits.as_deref(),
+        }
+    }
+
+    pub fn bf16_words_for_stage(&self, stage: Layer0CachedStage) -> Option<Vec<u16>> {
+        self.tensor_bits_for_stage(stage)
+            .map(bf16_words_from_f32_bits)
+    }
+
+    pub fn layer_output_bits(&self) -> Option<&[u32]> {
+        self.tensor_bits_for_stage(Layer0CachedStage::PostFfnResidual)
+    }
+
+    pub fn prefill_layer_output_bits(&self) -> Option<&[u32]> {
+        self.prefill_post_ffn_residual_bits.as_deref()
+    }
+
+    pub fn prefill_layer_output_bf16_words(&self) -> Option<Vec<u16>> {
+        self.prefill_layer_output_bits()
+            .map(bf16_words_from_f32_bits)
+    }
 }
 
 fn default_model_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../local/models/gemma-4-26b-mlx/model-00001-of-00003.safetensors")
+}
+
+fn model_root_dir(model_path: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    if model_path.is_dir() {
+        return Ok(model_path.to_path_buf());
+    }
+    model_path.parent().map(Path::to_path_buf).ok_or_else(|| {
+        format!(
+            "model path {} has no parent directory",
+            model_path.display()
+        )
+        .into()
+    })
+}
+
+struct LayerExecutionSession {
+    model_path: PathBuf,
+    weights: MlxIndexedSafetensors,
+    runtime: MetalRuntime,
+    private_weight_buffers: HashMap<String, MetalBuffer>,
+}
+
+impl LayerExecutionSession {
+    fn load(model_path: PathBuf) -> Result<Self, Box<dyn Error>> {
+        let model_root = model_root_dir(&model_path)?;
+        let weights = MlxIndexedSafetensors::load(&model_root)?;
+        let runtime =
+            MetalRuntime::new().map_err(|err| format!("MetalRuntime::new failed: {err}"))?;
+        if !runtime.features().has_bfloat {
+            return Err("Metal device does not report BF16 support".into());
+        }
+        Ok(Self {
+            model_path,
+            weights,
+            runtime,
+            private_weight_buffers: HashMap::new(),
+        })
+    }
+
+    fn private_weight_buffer(&mut self, name: &str) -> Result<MetalBuffer, Box<dyn Error>> {
+        if let Some(buffer) = self.private_weight_buffers.get(name) {
+            return Ok(buffer.clone());
+        }
+        let bytes = self.weights.read_tensor_bytes(name)?;
+        let buffer = self
+            .runtime
+            .create_buffer_with_bytes(&bytes, BufferStorageMode::Private)?;
+        self.private_weight_buffers
+            .insert(name.to_string(), buffer.clone());
+        Ok(buffer)
+    }
+}
+
+struct ExactMetalKvCache {
+    spec: GemmaKvCacheSpec,
+    key_buffer: MetalBuffer,
+    value_buffer: MetalBuffer,
+    stored_tokens: usize,
+    next_position: usize,
+}
+
+impl ExactMetalKvCache {
+    fn load(runtime: &MetalRuntime, spec: GemmaKvCacheSpec) -> Result<Self, Box<dyn Error>> {
+        let storage_words = spec
+            .batch_size
+            .checked_mul(spec.kv_head_count)
+            .and_then(|value| value.checked_mul(spec.max_tokens))
+            .and_then(|value| value.checked_mul(spec.head_dim))
+            .ok_or("exact metal KV cache storage overflow")?;
+        Ok(Self {
+            key_buffer: create_bf16_buffer(runtime, storage_words, BufferStorageMode::Private)?,
+            value_buffer: create_bf16_buffer(runtime, storage_words, BufferStorageMode::Private)?,
+            spec,
+            stored_tokens: 0,
+            next_position: 0,
+        })
+    }
+
+    fn reset(&mut self) {
+        self.stored_tokens = 0;
+        self.next_position = 0;
+    }
+
+    fn capacity_tokens(&self) -> usize {
+        self.spec.max_tokens
+    }
+
+    fn row_stride_words(&self) -> Result<usize, Box<dyn Error>> {
+        self.spec
+            .max_tokens
+            .checked_mul(self.spec.head_dim)
+            .ok_or_else(|| "exact metal KV row stride overflow".into())
+    }
+
+    fn start_slot(&self) -> usize {
+        match self.spec.attention {
+            GemmaAttentionKind::Full => 0,
+            GemmaAttentionKind::Sliding if self.stored_tokens < self.spec.max_tokens => 0,
+            GemmaAttentionKind::Sliding => self.next_position % self.spec.max_tokens,
+        }
+    }
+
+    fn seq_len(&self) -> usize {
+        self.stored_tokens
+    }
+
+    fn append_token_from_buffers(
+        &mut self,
+        runtime: &MetalRuntime,
+        src_k: &MetalBuffer,
+        src_v: &MetalBuffer,
+    ) -> Result<(), Box<dyn Error>> {
+        if self.spec.attention == GemmaAttentionKind::Full
+            && self.stored_tokens >= self.spec.max_tokens
+        {
+            return Err(format!(
+                "exact metal full KV cache overflow: attempted token {} with capacity {}",
+                self.next_position + 1,
+                self.spec.max_tokens
+            )
+            .into());
+        }
+
+        let slot = self.next_position % self.spec.max_tokens;
+        let head_dim_words = self.spec.head_dim;
+        let row_stride_words = self.row_stride_words()?;
+        let bytes_per_head = head_dim_words * size_of::<u16>();
+
+        for head in 0..self.spec.kv_head_count {
+            let src_offset = head
+                .checked_mul(bytes_per_head)
+                .ok_or("exact metal KV src offset overflow")?;
+            let dst_word_offset = head
+                .checked_mul(row_stride_words)
+                .and_then(|value| value.checked_add(slot * head_dim_words))
+                .ok_or("exact metal KV dst offset overflow")?;
+            let dst_offset = dst_word_offset
+                .checked_mul(size_of::<u16>())
+                .ok_or("exact metal KV dst byte offset overflow")?;
+            runtime.copy_buffer_range(
+                src_k,
+                src_offset,
+                &self.key_buffer,
+                dst_offset,
+                bytes_per_head,
+            )?;
+            runtime.copy_buffer_range(
+                src_v,
+                src_offset,
+                &self.value_buffer,
+                dst_offset,
+                bytes_per_head,
+            )?;
+        }
+
+        self.next_position = self
+            .next_position
+            .checked_add(1)
+            .ok_or("exact metal KV next_position overflow")?;
+        self.stored_tokens = self
+            .stored_tokens
+            .saturating_add(1)
+            .min(self.spec.max_tokens);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ExactMetalQprojLayout {
+    weight_words_per_row: u32,
+    qparams_per_row: u32,
+    out_rows: u32,
+}
+
+impl ExactMetalQprojLayout {
+    fn out_len(self) -> usize {
+        self.out_rows as usize
+    }
+
+    fn uses_fast_qmv(self, n_in: u32) -> bool {
+        self.out_rows % 8 == 0 && n_in % 512 == 0
+    }
+
+    fn row_args(self, n_in: u32) -> MlxAffineQprojRowArgs {
+        MlxAffineQprojRowArgs {
+            n_in,
+            weight_words_per_row: self.weight_words_per_row,
+            qparams_per_row: self.qparams_per_row,
+            out_rows: self.out_rows,
+        }
+    }
+
+    fn selected_experts_args(
+        self,
+        n_in: u32,
+        input_row_stride: u32,
+    ) -> MlxAffineSelectedExpertsQprojRowArgs {
+        MlxAffineSelectedExpertsQprojRowArgs {
+            n_in,
+            weight_words_per_row: self.weight_words_per_row,
+            qparams_per_row: self.qparams_per_row,
+            out_rows: self.out_rows,
+            input_row_stride,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ExactMetalRopeLayout {
+    half_dims: u32,
+    row_stride: u32,
+    row_count: u32,
+    base_log2: f32,
+}
+
+impl ExactMetalRopeLayout {
+    fn args(self, position: usize) -> Result<MlxRopeSingleArgs, Box<dyn Error>> {
+        Ok(MlxRopeSingleArgs {
+            half_dims: self.half_dims,
+            row_stride: self.row_stride,
+            row_count: self.row_count,
+            offset: i32::try_from(position)?,
+            scale: ROPE_SCALE,
+            base_log2: self.base_log2,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ExactMetalLayerBuffers {
+    x: MetalBuffer,
+    h: MetalBuffer,
+    q_proj: MetalBuffer,
+    q_norm: MetalBuffer,
+    q_rope: MetalBuffer,
+    k_proj: MetalBuffer,
+    k_norm: MetalBuffer,
+    k_rope: MetalBuffer,
+    v_proj: MetalBuffer,
+    v_norm: MetalBuffer,
+    attention_logits: MetalBuffer,
+    attention_probs: MetalBuffer,
+    attn_out: MetalBuffer,
+    o_proj_out: MetalBuffer,
+    post_attention_norm_out: MetalBuffer,
+    residual_out: MetalBuffer,
+    pre_feedforward_norm_out: MetalBuffer,
+    mlp_gate_out: MetalBuffer,
+    mlp_up_out: MetalBuffer,
+    geglu_out: MetalBuffer,
+    mlp_down_out: MetalBuffer,
+    router_scaled_out: MetalBuffer,
+    router_proj_out: MetalBuffer,
+    router_probs_out: MetalBuffer,
+    pre_feedforward_norm2_out: MetalBuffer,
+    moe_top_k_indices: MetalBuffer,
+    moe_top_k_weights: MetalBuffer,
+    expert_gate_out: MetalBuffer,
+    expert_up_out: MetalBuffer,
+    expert_geglu_out: MetalBuffer,
+    expert_down_out: MetalBuffer,
+    post_feedforward_norm1_out: MetalBuffer,
+    moe_weighted_out: MetalBuffer,
+    moe_post_ffn_norm2_out: MetalBuffer,
+    moe_merge_out: MetalBuffer,
+    post_ffn_residual_out: MetalBuffer,
+}
+
+#[derive(Clone)]
+struct ExactMetalLayerWeights {
+    input_norm_weight: MetalBuffer,
+    q_weight: MetalBuffer,
+    q_scales: MetalBuffer,
+    q_biases: MetalBuffer,
+    q_norm_weight: MetalBuffer,
+    k_weight: MetalBuffer,
+    k_scales: MetalBuffer,
+    k_biases: MetalBuffer,
+    k_norm_weight: MetalBuffer,
+    v_weight: MetalBuffer,
+    v_scales: MetalBuffer,
+    v_biases: MetalBuffer,
+    v_norm_weight: MetalBuffer,
+    o_weight: MetalBuffer,
+    o_scales: MetalBuffer,
+    o_biases: MetalBuffer,
+    post_attention_norm_weight: MetalBuffer,
+    pre_feedforward_norm_weight: MetalBuffer,
+    pre_feedforward_norm2_weight: MetalBuffer,
+    mlp_gate_weight: MetalBuffer,
+    mlp_gate_scales: MetalBuffer,
+    mlp_gate_biases: MetalBuffer,
+    mlp_up_weight: MetalBuffer,
+    mlp_up_scales: MetalBuffer,
+    mlp_up_biases: MetalBuffer,
+    mlp_down_weight: MetalBuffer,
+    mlp_down_scales: MetalBuffer,
+    mlp_down_biases: MetalBuffer,
+    router_scale_weight: MetalBuffer,
+    router_proj_weight: MetalBuffer,
+    router_proj_scales: MetalBuffer,
+    router_proj_biases: MetalBuffer,
+    router_per_expert_scale: MetalBuffer,
+    expert_gate_weight: MetalBuffer,
+    expert_gate_scales: MetalBuffer,
+    expert_gate_biases: MetalBuffer,
+    expert_up_weight: MetalBuffer,
+    expert_up_scales: MetalBuffer,
+    expert_up_biases: MetalBuffer,
+    expert_down_weight: MetalBuffer,
+    expert_down_scales: MetalBuffer,
+    expert_down_biases: MetalBuffer,
+    post_feedforward_norm1_weight: MetalBuffer,
+    post_feedforward_norm2_weight: MetalBuffer,
+}
+
+#[derive(Clone)]
+struct ExactMetalLayerPipelines {
+    rms: MetalPipeline,
+    proj: MetalPipeline,
+    proj_fast: MetalPipeline,
+    head_norm: MetalPipeline,
+    rope: MetalPipeline,
+    attention_logits_seq: MetalPipeline,
+    attention_softmax_rows: MetalPipeline,
+    attention_weighted_sum: MetalPipeline,
+    o_proj_fast: MetalPipeline,
+    residual: MetalPipeline,
+    weighted_sum_rows: MetalPipeline,
+    geglu: MetalPipeline,
+    router_scale: MetalPipeline,
+    router_topk: MetalPipeline,
+    selected_expert_proj: MetalPipeline,
+}
+
+#[derive(Clone)]
+struct ExactMetalLayerWorkspace {
+    q_proj: ExactMetalQprojLayout,
+    k_proj: ExactMetalQprojLayout,
+    v_proj: ExactMetalQprojLayout,
+    o_proj: ExactMetalQprojLayout,
+    mlp_gate: ExactMetalQprojLayout,
+    mlp_up: ExactMetalQprojLayout,
+    mlp_down: ExactMetalQprojLayout,
+    router_proj: ExactMetalQprojLayout,
+    expert_gate: ExactMetalQprojLayout,
+    expert_up: ExactMetalQprojLayout,
+    expert_down: ExactMetalQprojLayout,
+    post_attention_norm_len: usize,
+    pre_feedforward_norm_len: usize,
+    pre_feedforward_norm2_len: usize,
+    post_feedforward_norm1_len: usize,
+    post_feedforward_norm2_len: usize,
+    q_head_count: usize,
+    k_head_count: usize,
+    v_head_count: usize,
+    q_heads_per_kv: usize,
+    head_dim: usize,
+    kv_cache_capacity_tokens: usize,
+    eps: f32,
+    q_rope: ExactMetalRopeLayout,
+    k_rope: ExactMetalRopeLayout,
+    buffers: ExactMetalLayerBuffers,
+    weights: ExactMetalLayerWeights,
+    pipelines: ExactMetalLayerPipelines,
+}
+
+#[derive(Clone)]
+struct ExactMetalTextIoBuffers {
+    standalone_hidden: MetalBuffer,
+    hidden_scratch: MetalBuffer,
+    final_norm_out: MetalBuffer,
+    logits_out: MetalBuffer,
+    argmax_index_out: MetalBuffer,
+}
+
+#[derive(Clone)]
+struct ExactMetalTextIoWeights {
+    embed_weight: MetalBuffer,
+    embed_scales: MetalBuffer,
+    embed_biases: MetalBuffer,
+    final_norm_weight: MetalBuffer,
+}
+
+#[derive(Clone)]
+struct ExactMetalTextIoPipelines {
+    dequant_row: MetalPipeline,
+    rms: MetalPipeline,
+    logits_proj: MetalPipeline,
+    argmax_softcapped_bf16: MetalPipeline,
+}
+
+#[derive(Clone)]
+struct ExactMetalTextIoWorkspace {
+    embed_weight_row_bytes: usize,
+    embed_qparams_row_bytes: usize,
+    logits_qproj: ExactMetalQprojLayout,
+    vocab_size: usize,
+    eps: f32,
+    softcap: Option<f32>,
+    buffers: ExactMetalTextIoBuffers,
+    weights: ExactMetalTextIoWeights,
+    pipelines: ExactMetalTextIoPipelines,
+}
+
+fn dispatch_exact_mlx_qmv_row(
+    runtime: &MetalRuntime,
+    generic_pipeline: &MetalPipeline,
+    fast_pipeline: &MetalPipeline,
+    layout: ExactMetalQprojLayout,
+    args: &MlxAffineQprojRowArgs,
+    bindings: &[MetalBufferBindingRef<'_>],
+    threadgroups: MetalSize,
+    threads_per_threadgroup: MetalSize,
+) -> Result<(), Box<dyn Error>> {
+    let pipeline = if layout.uses_fast_qmv(args.n_in) {
+        fast_pipeline
+    } else {
+        generic_pipeline
+    };
+    runtime.dispatch_compute(
+        pipeline,
+        bytes_of(args),
+        bindings,
+        &[],
+        threadgroups,
+        threads_per_threadgroup,
+    )?;
+    Ok(())
+}
+
+impl ExactMetalLayerWorkspace {
+    fn load(session: &mut LayerExecutionSession, layer_idx: usize) -> Result<Self, Box<dyn Error>> {
+        let indexed = session.weights.clone();
+        let runtime = session.runtime.clone();
+        let text_config = &indexed.snapshot.config.text_config;
+        let kv_layout = GemmaKvCacheLayout::from_text_config(text_config, 1)?;
+        let cache_spec = kv_layout.cache_spec_for_layer(layer_idx)?.clone();
+        if !text_config.enable_moe_block {
+            return Err("exact metal text runtime currently expects Gemma MoE layers".into());
+        }
+        if text_config.top_k_experts as usize != ROUTER_TOP_K {
+            return Err(format!(
+                "exact metal text runtime expects top_k_experts={}, got {}",
+                ROUTER_TOP_K, text_config.top_k_experts
+            )
+            .into());
+        }
+
+        let layer_type = text_config
+            .layer_types
+            .get(layer_idx)
+            .ok_or_else(|| format!("missing text layer type for layer {layer_idx}"))?;
+        let attention_k_eq_v = text_config.attention_k_eq_v && layer_type == "full_attention";
+        let layer_names = LayerTensorNames::for_layer(layer_idx, attention_k_eq_v);
+        let q_norm_weight_name = layer_names
+            .q
+            .norm_weight_name
+            .as_deref()
+            .ok_or("missing q norm weight name")?;
+        let k_norm_weight_name = layer_names
+            .k
+            .norm_weight_name
+            .as_deref()
+            .ok_or("missing k norm weight name")?;
+
+        let q_weight_entry = indexed.tensor(&layer_names.q.weight_name)?;
+        let q_scales_entry = indexed.tensor(&layer_names.q.scales_name)?;
+        let q_norm_weight_entry = indexed.tensor(q_norm_weight_name)?;
+        let k_weight_entry = indexed.tensor(&layer_names.k.weight_name)?;
+        let k_scales_entry = indexed.tensor(&layer_names.k.scales_name)?;
+        let k_norm_weight_entry = indexed.tensor(k_norm_weight_name)?;
+        let v_weight_entry = indexed.tensor(&layer_names.v.weight_name)?;
+        let v_scales_entry = indexed.tensor(&layer_names.v.scales_name)?;
+        let o_weight_entry = indexed.tensor(&layer_names.o.weight_name)?;
+        let o_scales_entry = indexed.tensor(&layer_names.o.scales_name)?;
+        let mlp_gate_weight_entry = indexed.tensor(&layer_names.mlp_gate_weight_name)?;
+        let mlp_gate_scales_entry = indexed.tensor(&layer_names.mlp_gate_scales_name)?;
+        let mlp_up_weight_entry = indexed.tensor(&layer_names.mlp_up_weight_name)?;
+        let mlp_up_scales_entry = indexed.tensor(&layer_names.mlp_up_scales_name)?;
+        let mlp_down_weight_entry = indexed.tensor(&layer_names.mlp_down_weight_name)?;
+        let mlp_down_scales_entry = indexed.tensor(&layer_names.mlp_down_scales_name)?;
+        let router_proj_weight_entry = indexed.tensor(&layer_names.router_proj_weight_name)?;
+        let router_proj_scales_entry = indexed.tensor(&layer_names.router_proj_scales_name)?;
+        let expert_gate_weight_entry = indexed.tensor(&layer_names.expert_gate_weight_name)?;
+        let expert_gate_scales_entry = indexed.tensor(&layer_names.expert_gate_scales_name)?;
+        let expert_up_weight_entry = indexed.tensor(&layer_names.expert_up_weight_name)?;
+        let expert_up_scales_entry = indexed.tensor(&layer_names.expert_up_scales_name)?;
+        let expert_down_weight_entry = indexed.tensor(&layer_names.expert_down_weight_name)?;
+        let expert_down_scales_entry = indexed.tensor(&layer_names.expert_down_scales_name)?;
+
+        let q_proj = ExactMetalQprojLayout {
+            weight_words_per_row: q_weight_entry.shape[1] as u32,
+            qparams_per_row: q_scales_entry.shape[1] as u32,
+            out_rows: u32::try_from(q_weight_entry.shape[0])?,
+        };
+        let k_proj = ExactMetalQprojLayout {
+            weight_words_per_row: k_weight_entry.shape[1] as u32,
+            qparams_per_row: k_scales_entry.shape[1] as u32,
+            out_rows: u32::try_from(k_weight_entry.shape[0])?,
+        };
+        let v_proj = ExactMetalQprojLayout {
+            weight_words_per_row: v_weight_entry.shape[1] as u32,
+            qparams_per_row: v_scales_entry.shape[1] as u32,
+            out_rows: u32::try_from(v_weight_entry.shape[0])?,
+        };
+        let o_proj = ExactMetalQprojLayout {
+            weight_words_per_row: o_weight_entry.shape[1] as u32,
+            qparams_per_row: o_scales_entry.shape[1] as u32,
+            out_rows: u32::try_from(o_weight_entry.shape[0])?,
+        };
+        let mlp_gate = ExactMetalQprojLayout {
+            weight_words_per_row: mlp_gate_weight_entry.shape[1] as u32,
+            qparams_per_row: mlp_gate_scales_entry.shape[1] as u32,
+            out_rows: u32::try_from(mlp_gate_weight_entry.shape[0])?,
+        };
+        let mlp_up = ExactMetalQprojLayout {
+            weight_words_per_row: mlp_up_weight_entry.shape[1] as u32,
+            qparams_per_row: mlp_up_scales_entry.shape[1] as u32,
+            out_rows: u32::try_from(mlp_up_weight_entry.shape[0])?,
+        };
+        let mlp_down = ExactMetalQprojLayout {
+            weight_words_per_row: mlp_down_weight_entry.shape[1] as u32,
+            qparams_per_row: mlp_down_scales_entry.shape[1] as u32,
+            out_rows: u32::try_from(mlp_down_weight_entry.shape[0])?,
+        };
+        let router_proj = ExactMetalQprojLayout {
+            weight_words_per_row: router_proj_weight_entry.shape[1] as u32,
+            qparams_per_row: router_proj_scales_entry.shape[1] as u32,
+            out_rows: u32::try_from(router_proj_weight_entry.shape[0])?,
+        };
+        let expert_gate = ExactMetalQprojLayout {
+            weight_words_per_row: expert_gate_weight_entry.shape[2] as u32,
+            qparams_per_row: expert_gate_scales_entry.shape[2] as u32,
+            out_rows: u32::try_from(expert_gate_weight_entry.shape[1])?,
+        };
+        let expert_up = ExactMetalQprojLayout {
+            weight_words_per_row: expert_up_weight_entry.shape[2] as u32,
+            qparams_per_row: expert_up_scales_entry.shape[2] as u32,
+            out_rows: u32::try_from(expert_up_weight_entry.shape[1])?,
+        };
+        let expert_down = ExactMetalQprojLayout {
+            weight_words_per_row: expert_down_weight_entry.shape[2] as u32,
+            qparams_per_row: expert_down_scales_entry.shape[2] as u32,
+            out_rows: u32::try_from(expert_down_weight_entry.shape[1])?,
+        };
+
+        let post_attention_norm_len = usize::try_from(
+            indexed
+                .tensor(&layer_names.post_attention_norm_weight_name)?
+                .shape[0],
+        )?;
+        let pre_feedforward_norm_len = usize::try_from(
+            indexed
+                .tensor(&layer_names.pre_feedforward_norm_weight_name)?
+                .shape[0],
+        )?;
+        let pre_feedforward_norm2_len = usize::try_from(
+            indexed
+                .tensor(&layer_names.pre_feedforward_norm2_weight_name)?
+                .shape[0],
+        )?;
+        let post_feedforward_norm1_len = usize::try_from(
+            indexed
+                .tensor(&layer_names.post_feedforward_norm1_weight_name)?
+                .shape[0],
+        )?;
+        let post_feedforward_norm2_len = usize::try_from(
+            indexed
+                .tensor(&layer_names.post_feedforward_norm2_weight_name)?
+                .shape[0],
+        )?;
+        if post_attention_norm_len != NORM_LEN
+            || pre_feedforward_norm_len != NORM_LEN
+            || pre_feedforward_norm2_len != NORM_LEN
+            || post_feedforward_norm1_len != NORM_LEN
+            || post_feedforward_norm2_len != NORM_LEN
+            || o_proj.out_len() != NORM_LEN
+            || mlp_down.out_len() != NORM_LEN
+            || expert_down.out_len() != NORM_LEN
+        {
+            return Err(format!(
+                "exact metal text runtime expects hidden-size-preserving layer {layer_idx}"
+            )
+            .into());
+        }
+
+        let head_dim = usize::try_from(q_norm_weight_entry.shape[0])?;
+        let k_head_dim = usize::try_from(k_norm_weight_entry.shape[0])?;
+        if head_dim == 0 || head_dim != k_head_dim {
+            return Err(format!("invalid q/k head_dim: q={head_dim} k={k_head_dim}").into());
+        }
+        if q_proj.out_len() % head_dim != 0
+            || k_proj.out_len() % head_dim != 0
+            || v_proj.out_len() % head_dim != 0
+        {
+            return Err(format!(
+                "invalid q/k/v head layout: q_out_len={} k_out_len={} v_out_len={} head_dim={}",
+                q_proj.out_len(),
+                k_proj.out_len(),
+                v_proj.out_len(),
+                head_dim
+            )
+            .into());
+        }
+        let q_head_count = q_proj.out_len() / head_dim;
+        let k_head_count = k_proj.out_len() / head_dim;
+        let v_head_count = v_proj.out_len() / head_dim;
+        if k_head_count == 0 || v_head_count != k_head_count || q_head_count % k_head_count != 0 {
+            return Err(format!(
+                "invalid grouped-query head layout: q_head_count={} k_head_count={} v_head_count={}",
+                q_head_count, k_head_count, v_head_count
+            )
+            .into());
+        }
+        let q_heads_per_kv = q_head_count / k_head_count;
+        let rope_params = if layer_type == "full_attention" {
+            &text_config.rope_parameters.full_attention
+        } else {
+            &text_config.rope_parameters.sliding_attention
+        };
+        let rope_rotary_dim = if let Some(partial_factor) = rope_params.partial_rotary_factor {
+            let rotary_dim = (head_dim as f32 * partial_factor).round() as usize;
+            if rotary_dim == 0 || rotary_dim > head_dim || rotary_dim % 2 != 0 {
+                return Err(format!(
+                    "invalid rope rotary dim {} for layer {} head_dim {} factor {}",
+                    rotary_dim, layer_idx, head_dim, partial_factor
+                )
+                .into());
+            }
+            rotary_dim
+        } else {
+            head_dim
+        };
+        let rope_half_dims = rope_rotary_dim / 2;
+        let rope_base_log2 = (rope_params.rope_theta as f32).log2();
+
+        let buffers = ExactMetalLayerBuffers {
+            x: create_bf16_buffer(&runtime, NORM_LEN, BufferStorageMode::Shared)?,
+            h: create_bf16_buffer(&runtime, NORM_LEN, BufferStorageMode::Private)?,
+            q_proj: create_bf16_buffer(&runtime, q_proj.out_len(), BufferStorageMode::Private)?,
+            q_norm: create_bf16_buffer(&runtime, q_proj.out_len(), BufferStorageMode::Private)?,
+            q_rope: create_bf16_buffer(&runtime, q_proj.out_len(), BufferStorageMode::Private)?,
+            k_proj: create_bf16_buffer(&runtime, k_proj.out_len(), BufferStorageMode::Private)?,
+            k_norm: create_bf16_buffer(&runtime, k_proj.out_len(), BufferStorageMode::Private)?,
+            k_rope: create_bf16_buffer(&runtime, k_proj.out_len(), BufferStorageMode::Private)?,
+            v_proj: create_bf16_buffer(&runtime, v_proj.out_len(), BufferStorageMode::Private)?,
+            v_norm: create_bf16_buffer(&runtime, v_proj.out_len(), BufferStorageMode::Private)?,
+            attention_logits: create_bf16_buffer(
+                &runtime,
+                q_head_count * cache_spec.max_tokens,
+                BufferStorageMode::Private,
+            )?,
+            attention_probs: create_bf16_buffer(
+                &runtime,
+                q_head_count * cache_spec.max_tokens,
+                BufferStorageMode::Private,
+            )?,
+            attn_out: create_bf16_buffer(&runtime, q_proj.out_len(), BufferStorageMode::Private)?,
+            o_proj_out: create_bf16_buffer(&runtime, o_proj.out_len(), BufferStorageMode::Private)?,
+            post_attention_norm_out: create_bf16_buffer(
+                &runtime,
+                post_attention_norm_len,
+                BufferStorageMode::Private,
+            )?,
+            residual_out: create_bf16_buffer(
+                &runtime,
+                post_attention_norm_len,
+                BufferStorageMode::Private,
+            )?,
+            pre_feedforward_norm_out: create_bf16_buffer(
+                &runtime,
+                pre_feedforward_norm_len,
+                BufferStorageMode::Private,
+            )?,
+            mlp_gate_out: create_bf16_buffer(
+                &runtime,
+                mlp_gate.out_len(),
+                BufferStorageMode::Private,
+            )?,
+            mlp_up_out: create_bf16_buffer(&runtime, mlp_up.out_len(), BufferStorageMode::Private)?,
+            geglu_out: create_bf16_buffer(
+                &runtime,
+                mlp_gate.out_len(),
+                BufferStorageMode::Private,
+            )?,
+            mlp_down_out: create_bf16_buffer(
+                &runtime,
+                mlp_down.out_len(),
+                BufferStorageMode::Private,
+            )?,
+            router_scaled_out: create_bf16_buffer(
+                &runtime,
+                post_attention_norm_len,
+                BufferStorageMode::Private,
+            )?,
+            router_proj_out: create_bf16_buffer(
+                &runtime,
+                router_proj.out_len(),
+                BufferStorageMode::Private,
+            )?,
+            router_probs_out: create_bf16_buffer(
+                &runtime,
+                router_proj.out_len(),
+                BufferStorageMode::Private,
+            )?,
+            pre_feedforward_norm2_out: create_bf16_buffer(
+                &runtime,
+                pre_feedforward_norm2_len,
+                BufferStorageMode::Private,
+            )?,
+            moe_top_k_indices: runtime
+                .create_buffer(ROUTER_TOP_K * size_of::<u32>(), BufferStorageMode::Private)?,
+            moe_top_k_weights: create_bf16_buffer(
+                &runtime,
+                ROUTER_TOP_K,
+                BufferStorageMode::Private,
+            )?,
+            expert_gate_out: create_bf16_buffer(
+                &runtime,
+                ROUTER_TOP_K * expert_gate.out_len(),
+                BufferStorageMode::Private,
+            )?,
+            expert_up_out: create_bf16_buffer(
+                &runtime,
+                ROUTER_TOP_K * expert_up.out_len(),
+                BufferStorageMode::Private,
+            )?,
+            expert_geglu_out: create_bf16_buffer(
+                &runtime,
+                ROUTER_TOP_K * expert_gate.out_len(),
+                BufferStorageMode::Private,
+            )?,
+            expert_down_out: create_bf16_buffer(
+                &runtime,
+                ROUTER_TOP_K * expert_down.out_len(),
+                BufferStorageMode::Private,
+            )?,
+            post_feedforward_norm1_out: create_bf16_buffer(
+                &runtime,
+                post_feedforward_norm1_len,
+                BufferStorageMode::Private,
+            )?,
+            moe_weighted_out: create_bf16_buffer(
+                &runtime,
+                post_feedforward_norm2_len,
+                BufferStorageMode::Private,
+            )?,
+            moe_post_ffn_norm2_out: create_bf16_buffer(
+                &runtime,
+                post_feedforward_norm2_len,
+                BufferStorageMode::Private,
+            )?,
+            moe_merge_out: create_bf16_buffer(
+                &runtime,
+                post_feedforward_norm1_len,
+                BufferStorageMode::Private,
+            )?,
+            post_ffn_residual_out: create_bf16_buffer(
+                &runtime,
+                post_feedforward_norm1_len,
+                BufferStorageMode::Shared,
+            )?,
+        };
+
+        let v_norm_weight = runtime.create_buffer_with_bytes(
+            &bytes_from_bf16_words(&vec![0x3F80u16; head_dim]),
+            BufferStorageMode::Private,
+        )?;
+        let weights = ExactMetalLayerWeights {
+            input_norm_weight: session
+                .private_weight_buffer(&layer_names.input_norm_weight_name)?,
+            q_weight: session.private_weight_buffer(&layer_names.q.weight_name)?,
+            q_scales: session.private_weight_buffer(&layer_names.q.scales_name)?,
+            q_biases: session.private_weight_buffer(&layer_names.q.biases_name)?,
+            q_norm_weight: session.private_weight_buffer(q_norm_weight_name)?,
+            k_weight: session.private_weight_buffer(&layer_names.k.weight_name)?,
+            k_scales: session.private_weight_buffer(&layer_names.k.scales_name)?,
+            k_biases: session.private_weight_buffer(&layer_names.k.biases_name)?,
+            k_norm_weight: session.private_weight_buffer(k_norm_weight_name)?,
+            v_weight: session.private_weight_buffer(&layer_names.v.weight_name)?,
+            v_scales: session.private_weight_buffer(&layer_names.v.scales_name)?,
+            v_biases: session.private_weight_buffer(&layer_names.v.biases_name)?,
+            v_norm_weight,
+            o_weight: session.private_weight_buffer(&layer_names.o.weight_name)?,
+            o_scales: session.private_weight_buffer(&layer_names.o.scales_name)?,
+            o_biases: session.private_weight_buffer(&layer_names.o.biases_name)?,
+            post_attention_norm_weight: session
+                .private_weight_buffer(&layer_names.post_attention_norm_weight_name)?,
+            pre_feedforward_norm_weight: session
+                .private_weight_buffer(&layer_names.pre_feedforward_norm_weight_name)?,
+            pre_feedforward_norm2_weight: session
+                .private_weight_buffer(&layer_names.pre_feedforward_norm2_weight_name)?,
+            mlp_gate_weight: session.private_weight_buffer(&layer_names.mlp_gate_weight_name)?,
+            mlp_gate_scales: session.private_weight_buffer(&layer_names.mlp_gate_scales_name)?,
+            mlp_gate_biases: session.private_weight_buffer(&layer_names.mlp_gate_biases_name)?,
+            mlp_up_weight: session.private_weight_buffer(&layer_names.mlp_up_weight_name)?,
+            mlp_up_scales: session.private_weight_buffer(&layer_names.mlp_up_scales_name)?,
+            mlp_up_biases: session.private_weight_buffer(&layer_names.mlp_up_biases_name)?,
+            mlp_down_weight: session.private_weight_buffer(&layer_names.mlp_down_weight_name)?,
+            mlp_down_scales: session.private_weight_buffer(&layer_names.mlp_down_scales_name)?,
+            mlp_down_biases: session.private_weight_buffer(&layer_names.mlp_down_biases_name)?,
+            router_scale_weight: session.private_weight_buffer(&layer_names.router_scale_name)?,
+            router_proj_weight: session
+                .private_weight_buffer(&layer_names.router_proj_weight_name)?,
+            router_proj_scales: session
+                .private_weight_buffer(&layer_names.router_proj_scales_name)?,
+            router_proj_biases: session
+                .private_weight_buffer(&layer_names.router_proj_biases_name)?,
+            router_per_expert_scale: session
+                .private_weight_buffer(&layer_names.router_per_expert_scale_name)?,
+            expert_gate_weight: session
+                .private_weight_buffer(&layer_names.expert_gate_weight_name)?,
+            expert_gate_scales: session
+                .private_weight_buffer(&layer_names.expert_gate_scales_name)?,
+            expert_gate_biases: session
+                .private_weight_buffer(&layer_names.expert_gate_biases_name)?,
+            expert_up_weight: session.private_weight_buffer(&layer_names.expert_up_weight_name)?,
+            expert_up_scales: session.private_weight_buffer(&layer_names.expert_up_scales_name)?,
+            expert_up_biases: session.private_weight_buffer(&layer_names.expert_up_biases_name)?,
+            expert_down_weight: session
+                .private_weight_buffer(&layer_names.expert_down_weight_name)?,
+            expert_down_scales: session
+                .private_weight_buffer(&layer_names.expert_down_scales_name)?,
+            expert_down_biases: session
+                .private_weight_buffer(&layer_names.expert_down_biases_name)?,
+            post_feedforward_norm1_weight: session
+                .private_weight_buffer(&layer_names.post_feedforward_norm1_weight_name)?,
+            post_feedforward_norm2_weight: session
+                .private_weight_buffer(&layer_names.post_feedforward_norm2_weight_name)?,
+        };
+
+        let pipelines = ExactMetalLayerPipelines {
+            rms: compile_default_pipeline(&runtime, "kernel_mlx_rms_norm_row_bf16")?,
+            proj: compile_default_pipeline(&runtime, "kernel_mlx_affine_qmv_row_bf16")?,
+            proj_fast: compile_default_pipeline(
+                &runtime,
+                "kernel_mlx_affine_qmv_fast_row_bf16",
+            )?,
+            head_norm: compile_default_pipeline(&runtime, "kernel_mlx_rms_norm_rows_bf16")?,
+            rope: compile_default_pipeline(&runtime, "kernel_mlx_rope_single_bf16")?,
+            attention_logits_seq: compile_default_pipeline(
+                &runtime,
+                "kernel_mlx_gqa_attention_logits_seq_bf16",
+            )?,
+            attention_softmax_rows: compile_default_pipeline(
+                &runtime,
+                "kernel_mlx_softmax_rows_bf16",
+            )?,
+            attention_weighted_sum: compile_default_pipeline(
+                &runtime,
+                "kernel_mlx_gqa_attention_weighted_sum_bf16",
+            )?,
+            o_proj_fast: compile_default_pipeline(&runtime, "kernel_mlx_affine_qmv_fast_row_bf16")?,
+            residual: compile_default_pipeline(&runtime, "kernel_mlx_add_row_bf16")?,
+            weighted_sum_rows: compile_default_pipeline(
+                &runtime,
+                "kernel_mlx_weighted_sum_rows_bf16",
+            )?,
+            geglu: compile_default_pipeline(&runtime, "kernel_mlx_geglu_row_bf16")?,
+            router_scale: compile_default_pipeline(&runtime, "kernel_mlx_router_scale_bf16")?,
+            router_topk: compile_default_pipeline(&runtime, "kernel_mlx_router_topk_bf16")?,
+            selected_expert_proj: compile_default_pipeline(
+                &runtime,
+                "kernel_mlx_affine_qmv_selected_experts_row_bf16",
+            )?,
+        };
+
+        Ok(Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            mlp_gate,
+            mlp_up,
+            mlp_down,
+            router_proj,
+            expert_gate,
+            expert_up,
+            expert_down,
+            post_attention_norm_len,
+            pre_feedforward_norm_len,
+            pre_feedforward_norm2_len,
+            post_feedforward_norm1_len,
+            post_feedforward_norm2_len,
+            q_head_count,
+            k_head_count,
+            v_head_count,
+            q_heads_per_kv,
+            head_dim,
+            kv_cache_capacity_tokens: cache_spec.max_tokens,
+            eps: text_config.rms_norm_eps,
+            q_rope: ExactMetalRopeLayout {
+                half_dims: rope_half_dims as u32,
+                row_stride: head_dim as u32,
+                row_count: q_head_count as u32,
+                base_log2: rope_base_log2,
+            },
+            k_rope: ExactMetalRopeLayout {
+                half_dims: rope_half_dims as u32,
+                row_stride: head_dim as u32,
+                row_count: k_head_count as u32,
+                base_log2: rope_base_log2,
+            },
+            buffers,
+            weights,
+            pipelines,
+        })
+    }
+}
+
+impl ExactMetalTextIoWorkspace {
+    fn load(session: &mut LayerExecutionSession) -> Result<Self, Box<dyn Error>> {
+        let indexed = session.weights.clone();
+        let runtime = session.runtime.clone();
+        let embed_weight_entry = indexed.tensor(EMBED_TOKENS_WEIGHT_NAME)?;
+        let embed_scales_entry = indexed.tensor(EMBED_TOKENS_SCALES_NAME)?;
+        let embed_biases_entry = indexed.tensor(EMBED_TOKENS_BIASES_NAME)?;
+        let final_norm_entry = indexed.tensor(FINAL_TEXT_NORM_WEIGHT_NAME)?;
+        if embed_weight_entry.shape.len() != 2
+            || embed_scales_entry.shape.len() != 2
+            || embed_biases_entry.shape.len() != 2
+        {
+            return Err("exact text IO expects rank-2 embed tensors".into());
+        }
+        if final_norm_entry.shape.len() != 1 {
+            return Err("exact text IO expects rank-1 final norm weight".into());
+        }
+        let hidden_size = usize::try_from(final_norm_entry.shape[0])?;
+        if hidden_size != NORM_LEN {
+            return Err(format!(
+                "exact text IO hidden size mismatch: got {} expected {}",
+                hidden_size, NORM_LEN
+            )
+            .into());
+        }
+        if embed_weight_entry.shape[0] != embed_scales_entry.shape[0]
+            || embed_weight_entry.shape[0] != embed_biases_entry.shape[0]
+            || embed_scales_entry.shape != embed_biases_entry.shape
+        {
+            return Err("exact text IO embed tensor shape mismatch".into());
+        }
+        let logits_qproj = ExactMetalQprojLayout {
+            weight_words_per_row: u32::try_from(embed_weight_entry.shape[1])?,
+            qparams_per_row: u32::try_from(embed_scales_entry.shape[1])?,
+            out_rows: u32::try_from(embed_weight_entry.shape[0])?,
+        };
+        let embed_weight_row_bytes = usize::try_from(
+            embed_weight_entry.shape[1]
+                .checked_mul(embed_weight_entry.dtype.byte_width())
+                .ok_or("exact text IO embed weight row stride overflow")?,
+        )?;
+        let embed_qparams_row_bytes = usize::try_from(
+            embed_scales_entry.shape[1]
+                .checked_mul(embed_scales_entry.dtype.byte_width())
+                .ok_or("exact text IO embed qparams row stride overflow")?,
+        )?;
+        let vocab_size = usize::try_from(embed_weight_entry.shape[0])?;
+
+        Ok(Self {
+            embed_weight_row_bytes,
+            embed_qparams_row_bytes,
+            logits_qproj,
+            vocab_size,
+            eps: indexed.snapshot.config.text_config.rms_norm_eps,
+            softcap: Some(indexed.snapshot.config.text_config.final_logit_softcapping)
+                .filter(|softcap| *softcap > 0.0),
+            buffers: ExactMetalTextIoBuffers {
+                standalone_hidden: create_bf16_buffer(
+                    &runtime,
+                    NORM_LEN,
+                    BufferStorageMode::Private,
+                )?,
+                hidden_scratch: create_bf16_buffer(&runtime, NORM_LEN, BufferStorageMode::Private)?,
+                final_norm_out: create_bf16_buffer(&runtime, NORM_LEN, BufferStorageMode::Private)?,
+                logits_out: create_bf16_buffer(&runtime, vocab_size, BufferStorageMode::Private)?,
+                argmax_index_out: runtime
+                    .create_buffer(size_of::<u32>(), BufferStorageMode::Private)?,
+            },
+            weights: ExactMetalTextIoWeights {
+                embed_weight: session.private_weight_buffer(EMBED_TOKENS_WEIGHT_NAME)?,
+                embed_scales: session.private_weight_buffer(EMBED_TOKENS_SCALES_NAME)?,
+                embed_biases: session.private_weight_buffer(EMBED_TOKENS_BIASES_NAME)?,
+                final_norm_weight: session.private_weight_buffer(FINAL_TEXT_NORM_WEIGHT_NAME)?,
+            },
+            pipelines: ExactMetalTextIoPipelines {
+                dequant_row: compile_default_pipeline(
+                    &runtime,
+                    "kernel_mlx_affine_dequant_row_bf16",
+                )?,
+                rms: compile_default_pipeline(&runtime, "kernel_mlx_rms_norm_row_bf16")?,
+                logits_proj: compile_default_pipeline(&runtime, "kernel_mlx_affine_qmv_row_bf16")?,
+                argmax_softcapped_bf16: compile_default_pipeline(
+                    &runtime,
+                    "kernel_mlx_argmax_softcapped_bf16_single",
+                )?,
+            },
+        })
+    }
+}
+
+pub(crate) struct ExactMetalTextRuntimeSession {
+    session: LayerExecutionSession,
+    kv_layout: GemmaKvCacheLayout,
+    kv_caches: Vec<RefCell<ExactMetalKvCache>>,
+    text_io: ExactMetalTextIoWorkspace,
+    layer_workspaces: HashMap<usize, ExactMetalLayerWorkspace>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExactMetalGenerationStopReason {
+    MaxNewTokens,
+    EosToken(u32),
+}
+
+pub(crate) struct ExactMetalGenerationCursor {
+    backend: Arc<Mutex<ExactMetalTextRuntimeSession>>,
+    prompt_token_ids: Arc<[u32]>,
+    stop_tokens: BTreeSet<u32>,
+    max_new_tokens: usize,
+    processed_prompt_tokens: usize,
+    position: usize,
+    pending_next: Option<MlxGreedyToken>,
+    generated_token_ids: Vec<u32>,
+    stop_reason: Option<ExactMetalGenerationStopReason>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ExactMetalGenerationSnapshot {
+    pub(crate) generated_token_ids: Arc<[u32]>,
+    pub(crate) stop_reason: Option<ExactMetalGenerationStopReason>,
+    #[cfg(test)]
+    pub(crate) processed_prompt_tokens: usize,
+    #[cfg(test)]
+    pub(crate) position: usize,
+    #[cfg(test)]
+    pub(crate) has_pending_next: bool,
+}
+
+pub(crate) struct ExactMetalPromptPrefillNode {
+    cursor: Arc<Mutex<ExactMetalGenerationCursor>>,
+    value: OnceLock<Result<Arc<ExactMetalGenerationSnapshot>, String>>,
+}
+
+enum ExactMetalGenerationDependency {
+    PromptPrefill(Arc<ExactMetalPromptPrefillNode>),
+    Previous(Arc<ExactMetalGenerationStepNode>),
+}
+
+pub(crate) struct ExactMetalGenerationStepNode {
+    cursor: Arc<Mutex<ExactMetalGenerationCursor>>,
+    target_count: usize,
+    dependency: ExactMetalGenerationDependency,
+    value: OnceLock<Result<Arc<ExactMetalGenerationSnapshot>, String>>,
+}
+
+pub(crate) struct ExactMetalGenerationGraph {
+    cursor: Arc<Mutex<ExactMetalGenerationCursor>>,
+    prompt_prefill: Arc<ExactMetalPromptPrefillNode>,
+    step_nodes: Mutex<Vec<Arc<ExactMetalGenerationStepNode>>>,
+    max_new_tokens: usize,
+}
+
+impl ExactMetalTextRuntimeSession {
+    pub(crate) fn load(model_path: PathBuf) -> Result<Self, Box<dyn Error>> {
+        let mut session = LayerExecutionSession::load(model_path)?;
+        let text_io = ExactMetalTextIoWorkspace::load(&mut session)?;
+        let kv_layout =
+            GemmaKvCacheLayout::from_text_config(&session.weights.snapshot.config.text_config, 1)?;
+        let mut kv_caches = Vec::with_capacity(kv_layout.cache_specs.len());
+        for spec in &kv_layout.cache_specs {
+            kv_caches.push(RefCell::new(ExactMetalKvCache::load(
+                &session.runtime,
+                spec.clone(),
+            )?));
+        }
+        Ok(Self {
+            session,
+            kv_layout,
+            kv_caches,
+            text_io,
+            layer_workspaces: HashMap::new(),
+        })
+    }
+
+    pub(crate) fn reset_kv_caches(&mut self) {
+        for cache in &self.kv_caches {
+            cache.borrow_mut().reset();
+        }
+    }
+
+    pub(crate) fn generation_cursor(
+        backend: Arc<Mutex<Self>>,
+        prompt_token_ids: Arc<[u32]>,
+        stop_tokens: BTreeSet<u32>,
+        max_new_tokens: usize,
+    ) -> Result<ExactMetalGenerationCursor, Box<dyn Error>> {
+        if prompt_token_ids.is_empty() {
+            return Err("generation requires at least one prompt token".into());
+        }
+        Ok(ExactMetalGenerationCursor {
+            backend,
+            prompt_token_ids,
+            stop_tokens,
+            max_new_tokens,
+            processed_prompt_tokens: 0,
+            position: 0,
+            pending_next: None,
+            generated_token_ids: Vec::with_capacity(max_new_tokens),
+            stop_reason: None,
+        })
+    }
+
+    pub(crate) fn generation_graph(
+        backend: Arc<Mutex<Self>>,
+        prompt_token_ids: Arc<[u32]>,
+        stop_tokens: BTreeSet<u32>,
+        max_new_tokens: usize,
+    ) -> Result<ExactMetalGenerationGraph, Box<dyn Error>> {
+        ExactMetalGenerationGraph::new(Self::generation_cursor(
+            backend,
+            prompt_token_ids,
+            stop_tokens,
+            max_new_tokens,
+        )?)
+    }
+
+    fn kv_cache_for_layer(
+        &self,
+        layer_idx: usize,
+    ) -> Result<RefMut<'_, ExactMetalKvCache>, Box<dyn Error>> {
+        let cache_idx = self.kv_layout.cache_idx_for_layer(layer_idx)?;
+        self.kv_caches
+            .get(cache_idx)
+            .ok_or_else(|| format!("missing exact metal KV cache {cache_idx}").into())
+            .map(|cache| cache.borrow_mut())
+    }
+
+    fn layer_workspace(
+        &mut self,
+        layer_idx: usize,
+    ) -> Result<ExactMetalLayerWorkspace, Box<dyn Error>> {
+        if !self.layer_workspaces.contains_key(&layer_idx) {
+            let workspace = ExactMetalLayerWorkspace::load(&mut self.session, layer_idx)?;
+            self.layer_workspaces.insert(layer_idx, workspace);
+        }
+        self.layer_workspaces
+            .get(&layer_idx)
+            .cloned()
+            .ok_or_else(|| format!("missing exact metal workspace for layer {layer_idx}").into())
+    }
+
+    fn token_input_buffer(&mut self) -> Result<MetalBuffer, Box<dyn Error>> {
+        Ok(self.text_io.buffers.standalone_hidden.clone())
+    }
+
+    fn final_hidden_buffer(&mut self) -> Result<MetalBuffer, Box<dyn Error>> {
+        let layer_count = self
+            .session
+            .weights
+            .snapshot
+            .config
+            .text_config
+            .num_hidden_layers as usize;
+        if layer_count == 0 {
+            return Ok(self.text_io.buffers.standalone_hidden.clone());
+        }
+        if layer_count % 2 == 0 {
+            Ok(self.text_io.buffers.standalone_hidden.clone())
+        } else {
+            Ok(self.text_io.buffers.hidden_scratch.clone())
+        }
+    }
+
+    fn dequantize_token_embedding_into_buffer(
+        &mut self,
+        token_id: u32,
+        dst: &MetalBuffer,
+    ) -> Result<(), Box<dyn Error>> {
+        let token_idx = usize::try_from(token_id)?;
+        if token_idx >= self.text_io.vocab_size {
+            return Err(format!(
+                "token id {} exceeds exact text IO vocabulary {}",
+                token_id, self.text_io.vocab_size
+            )
+            .into());
+        }
+        let weight_offset = token_idx
+            .checked_mul(self.text_io.embed_weight_row_bytes)
+            .ok_or("exact text IO embed weight offset overflow")?;
+        let qparams_offset = token_idx
+            .checked_mul(self.text_io.embed_qparams_row_bytes)
+            .ok_or("exact text IO embed qparams offset overflow")?;
+        let runtime = self.session.runtime.clone();
+        let owns_command_batch = !runtime.command_batch_is_active();
+        let args = MlxAffineDequantRowArgs { n: NORM_LEN as u32 };
+        if owns_command_batch {
+            runtime.begin_command_batch()?;
+        }
+        runtime.dispatch_compute(
+            &self.text_io.pipelines.dequant_row,
+            bytes_of(&args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &self.text_io.weights.embed_weight,
+                    offset_bytes: weight_offset,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &self.text_io.weights.embed_scales,
+                    offset_bytes: qparams_offset,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &self.text_io.weights.embed_biases,
+                    offset_bytes: qparams_offset,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: dst,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            MetalSize {
+                width: (NORM_LEN as u64).div_ceil(64),
+                height: 1,
+                depth: 1,
+            },
+            MetalSize {
+                width: 64,
+                height: 1,
+                depth: 1,
+            },
+        )?;
+        if owns_command_batch {
+            runtime.end_command_batch()?;
+            runtime.wait_idle()?;
+        }
+        Ok(())
+    }
+
+    fn dispatch_greedy_head_on_hidden_buffer(
+        &mut self,
+        hidden_buffer: &MetalBuffer,
+    ) -> Result<(), Box<dyn Error>> {
+        let runtime = self.session.runtime.clone();
+        let owns_command_batch = !runtime.command_batch_is_active();
+        let n_reads = 4usize;
+        let simd_size = 32usize;
+        let rms_threadgroup_size = simd_size * NORM_LEN.div_ceil(n_reads).div_ceil(simd_size);
+        let rms_args = MlxRmsNormRowArgs {
+            n: NORM_LEN as u32,
+            eps: self.text_io.eps,
+        };
+        let logits_args = self.text_io.logits_qproj.row_args(NORM_LEN as u32);
+        let argmax_args = MlxArgmaxSoftcappedBf16Args {
+            n: self.text_io.vocab_size as u32,
+            softcap: self.text_io.softcap.unwrap_or(0.0),
+            has_softcap: u32::from(self.text_io.softcap.is_some()),
+        };
+        if owns_command_batch {
+            runtime.begin_command_batch()?;
+        }
+        runtime.dispatch_compute(
+            &self.text_io.pipelines.rms,
+            bytes_of(&rms_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: hidden_buffer,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &self.text_io.weights.final_norm_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &self.text_io.buffers.final_norm_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            MetalSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MetalSize {
+                width: rms_threadgroup_size as u64,
+                height: 1,
+                depth: 1,
+            },
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &self.text_io.pipelines.logits_proj,
+            bytes_of(&logits_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &self.text_io.buffers.final_norm_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &self.text_io.weights.embed_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &self.text_io.weights.embed_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &self.text_io.weights.embed_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &self.text_io.buffers.logits_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            MetalSize {
+                width: 1,
+                height: (self.text_io.vocab_size as u64).div_ceil(8),
+                depth: 1,
+            },
+            MetalSize {
+                width: 32,
+                height: 2,
+                depth: 1,
+            },
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &self.text_io.pipelines.argmax_softcapped_bf16,
+            bytes_of(&argmax_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &self.text_io.buffers.logits_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &self.text_io.buffers.argmax_index_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            MetalSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MetalSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        )?;
+        if owns_command_batch {
+            runtime.end_command_batch()?;
+            runtime.wait_idle()?;
+        }
+        Ok(())
+    }
+
+    fn read_device_greedy_token(&self) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        let runtime = self.session.runtime.clone();
+        let token_id = runtime.with_readable_buffer(
+            &self.text_io.buffers.argmax_index_out,
+            size_of::<u32>(),
+            |bytes| {
+                if bytes.len() != size_of::<u32>() {
+                    return Err(format!(
+                        "exact text IO argmax byte length mismatch: {}",
+                        bytes.len()
+                    ));
+                }
+                Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            },
+        )?;
+        let token_idx = usize::try_from(token_id)?;
+        if token_idx >= self.text_io.vocab_size {
+            return Err(format!(
+                "exact text IO argmax token {} exceeds vocab {}",
+                token_id, self.text_io.vocab_size
+            )
+            .into());
+        }
+        let raw_logit = runtime.with_readable_buffer_range(
+            &self.text_io.buffers.logits_out,
+            token_idx * size_of::<u16>(),
+            size_of::<u16>(),
+            |bytes| {
+                if bytes.len() != size_of::<u16>() {
+                    return Err(format!(
+                        "exact text IO bf16 logit byte length mismatch: {}",
+                        bytes.len()
+                    ));
+                }
+                Ok(bf16_word_to_f32(u16::from_le_bytes([bytes[0], bytes[1]])))
+            },
+        )?;
+        let logit = if let Some(softcap) = self.text_io.softcap {
+            bf16_round_to_f32((raw_logit / softcap).tanh() * softcap)
+        } else {
+            raw_logit
+        };
+        Ok(MlxGreedyToken { token_id, logit })
+    }
+
+    fn read_hidden_words_from_buffer(
+        &self,
+        hidden_buffer: &MetalBuffer,
+    ) -> Result<Vec<u16>, Box<dyn Error>> {
+        Ok(bf16_words_from_f32_bits(&read_bf16_buffer_bits(
+            &self.session.runtime,
+            hidden_buffer,
+            NORM_LEN,
+        )?))
+    }
+
+    #[cfg(test)]
+    fn read_shared_logits_greedy_token(&self) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        let runtime = self.session.runtime.clone();
+        Ok(runtime.with_readable_buffer(
+            &self.text_io.buffers.logits_out,
+            self.text_io.vocab_size * size_of::<u16>(),
+            |bytes| {
+                if bytes.len() != self.text_io.vocab_size * size_of::<u16>() {
+                    return Err(format!(
+                        "exact text IO logits byte length mismatch: {}",
+                        bytes.len()
+                    ));
+                }
+                let mut best_token_id = 0u32;
+                let mut best_logit = f32::NEG_INFINITY;
+                for (token_idx, word_bytes) in bytes.chunks_exact(size_of::<u16>()).enumerate() {
+                    let raw_logit =
+                        bf16_word_to_f32(u16::from_le_bytes([word_bytes[0], word_bytes[1]]));
+                    let logit = if let Some(softcap) = self.text_io.softcap {
+                        bf16_round_to_f32((raw_logit / softcap).tanh() * softcap)
+                    } else {
+                        raw_logit
+                    };
+                    let token_id = token_idx as u32;
+                    if logit > best_logit || (logit == best_logit && token_id < best_token_id) {
+                        best_logit = logit;
+                        best_token_id = token_id;
+                    }
+                }
+                Ok(MlxGreedyToken {
+                    token_id: best_token_id,
+                    logit: best_logit,
+                })
+            },
+        )?)
+    }
+
+    fn greedy_token_from_hidden_buffer(
+        &mut self,
+        hidden_buffer: &MetalBuffer,
+    ) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        self.dispatch_greedy_head_on_hidden_buffer(hidden_buffer)?;
+        self.read_device_greedy_token()
+    }
+
+    fn eval_layer_hidden_state_core(
+        &mut self,
+        layer_idx: usize,
+        input_words: Option<&[u16]>,
+        input_hidden_buffer: Option<&MetalBuffer>,
+        output_hidden_buffer: Option<&MetalBuffer>,
+        position: usize,
+        read_output: bool,
+    ) -> Result<Option<Vec<u16>>, Box<dyn Error>> {
+        if let Some(input_words) = input_words {
+            if input_words.len() != NORM_LEN {
+                return Err(format!(
+                    "exact metal layer input length mismatch: got {} expected {}",
+                    input_words.len(),
+                    NORM_LEN
+                )
+                .into());
+            }
+        }
+
+        let runtime = self.session.runtime.clone();
+        let workspace = self.layer_workspace(layer_idx)?;
+        let input_hidden_buffer = input_hidden_buffer.unwrap_or(&workspace.buffers.x);
+        let output_hidden_buffer =
+            output_hidden_buffer.unwrap_or(&workspace.buffers.post_ffn_residual_out);
+        let owns_command_batch = !runtime.command_batch_is_active();
+        if read_output && !owns_command_batch {
+            return Err("cannot read exact layer output while Metal command batch is active".into());
+        }
+
+        let n_reads = 4usize;
+        let simd_size = 32usize;
+        let rms_threadgroup_size = simd_size * NORM_LEN.div_ceil(n_reads).div_ceil(simd_size);
+        let head_norm_threadgroup_size =
+            simd_size * workspace.head_dim.div_ceil(n_reads).div_ceil(simd_size);
+        let rms_threadgroups = MetalSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let rms_threads_per_threadgroup = MetalSize {
+            width: rms_threadgroup_size as u64,
+            height: 1,
+            depth: 1,
+        };
+        let proj_threads_per_threadgroup = MetalSize {
+            width: 32,
+            height: 2,
+            depth: 1,
+        };
+        let q_proj_threadgroups = MetalSize {
+            width: 1,
+            height: (workspace.q_proj.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let k_proj_threadgroups = MetalSize {
+            width: 1,
+            height: (workspace.k_proj.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let v_proj_threadgroups = MetalSize {
+            width: 1,
+            height: (workspace.v_proj.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let o_proj_threadgroups = MetalSize {
+            width: 1,
+            height: (workspace.o_proj.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let q_head_norm_threadgroups = MetalSize {
+            width: workspace.q_head_count as u64,
+            height: 1,
+            depth: 1,
+        };
+        let k_head_norm_threadgroups = MetalSize {
+            width: workspace.k_head_count as u64,
+            height: 1,
+            depth: 1,
+        };
+        let v_head_norm_threadgroups = MetalSize {
+            width: workspace.v_head_count as u64,
+            height: 1,
+            depth: 1,
+        };
+        let head_norm_threads_per_threadgroup = MetalSize {
+            width: head_norm_threadgroup_size as u64,
+            height: 1,
+            depth: 1,
+        };
+        let q_rope_threadgroups = MetalSize {
+            width: (workspace.q_rope.half_dims as u64).div_ceil(32),
+            height: workspace.q_head_count as u64,
+            depth: 1,
+        };
+        let k_rope_threadgroups = MetalSize {
+            width: (workspace.k_rope.half_dims as u64).div_ceil(32),
+            height: workspace.k_head_count as u64,
+            depth: 1,
+        };
+        let rope_threads_per_threadgroup = MetalSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
+        let attention_logits_threadgroups = MetalSize {
+            width: workspace.kv_cache_capacity_tokens as u64,
+            height: workspace.q_head_count as u64,
+            depth: 1,
+        };
+        let attention_output_threadgroups = MetalSize {
+            width: (workspace.head_dim as u64).div_ceil(64),
+            height: 1,
+            depth: workspace.q_head_count as u64,
+        };
+        let attention_logits_threads_per_threadgroup = MetalSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
+        let attention_output_threads_per_threadgroup = MetalSize {
+            width: 32,
+            height: 4,
+            depth: 1,
+        };
+        let residual_threads_per_threadgroup = MetalSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        let residual_threadgroups = MetalSize {
+            width: (workspace.post_attention_norm_len as u64)
+                .div_ceil(residual_threads_per_threadgroup.width),
+            height: 1,
+            depth: 1,
+        };
+        let mlp_gate_threadgroups = MetalSize {
+            width: 1,
+            height: (workspace.mlp_gate.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let mlp_up_threadgroups = MetalSize {
+            width: 1,
+            height: (workspace.mlp_up.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let mlp_down_threadgroups = MetalSize {
+            width: 1,
+            height: (workspace.mlp_down.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let geglu_threads_per_threadgroup = MetalSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        let geglu_threadgroups = MetalSize {
+            width: (workspace.mlp_gate.out_len() as u64)
+                .div_ceil(geglu_threads_per_threadgroup.width),
+            height: 1,
+            depth: 1,
+        };
+        let router_scale_threads_per_threadgroup = MetalSize {
+            width: rms_threadgroup_size as u64,
+            height: 1,
+            depth: 1,
+        };
+        let router_scale_threadgroups = MetalSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let router_proj_threadgroups = MetalSize {
+            width: 1,
+            height: (workspace.router_proj.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let router_softmax_threadgroups = MetalSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let router_topk_threadgroups = MetalSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let router_topk_threads_per_threadgroup = MetalSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let selected_expert_threadgroups = MetalSize {
+            width: ROUTER_TOP_K as u64,
+            height: (workspace.expert_gate.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let selected_expert_up_threadgroups = MetalSize {
+            width: ROUTER_TOP_K as u64,
+            height: (workspace.expert_up.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let selected_expert_down_threadgroups = MetalSize {
+            width: ROUTER_TOP_K as u64,
+            height: (workspace.expert_down.out_len() as u64).div_ceil(8),
+            depth: 1,
+        };
+        let selected_expert_threads_per_threadgroup = MetalSize {
+            width: 32,
+            height: 2,
+            depth: 1,
+        };
+        let expert_geglu_threadgroups = MetalSize {
+            width: ((ROUTER_TOP_K * workspace.expert_gate.out_len()) as u64)
+                .div_ceil(geglu_threads_per_threadgroup.width),
+            height: 1,
+            depth: 1,
+        };
+
+        let rms_args = MlxRmsNormRowArgs {
+            n: NORM_LEN as u32,
+            eps: workspace.eps,
+        };
+        let q_proj_args = workspace.q_proj.row_args(NORM_LEN as u32);
+        let k_proj_args = workspace.k_proj.row_args(NORM_LEN as u32);
+        let v_proj_args = workspace.v_proj.row_args(NORM_LEN as u32);
+        let o_proj_args = workspace.o_proj.row_args(workspace.q_proj.out_rows);
+        let q_head_norm_args = MlxRmsNormRowsArgs {
+            n: workspace.head_dim as u32,
+            row_stride: workspace.head_dim as u32,
+            row_count: workspace.q_head_count as u32,
+            eps: workspace.eps,
+        };
+        let k_head_norm_args = MlxRmsNormRowsArgs {
+            n: workspace.head_dim as u32,
+            row_stride: workspace.head_dim as u32,
+            row_count: workspace.k_head_count as u32,
+            eps: workspace.eps,
+        };
+        let v_head_norm_args = MlxRmsNormRowsArgs {
+            n: workspace.head_dim as u32,
+            row_stride: workspace.head_dim as u32,
+            row_count: workspace.v_head_count as u32,
+            eps: workspace.eps,
+        };
+        let q_rope_args = workspace.q_rope.args(position)?;
+        let k_rope_args = workspace.k_rope.args(position)?;
+        let residual_args = MlxAddRowArgs {
+            n: workspace.post_attention_norm_len as u32,
+        };
+        let post_attention_norm_args = MlxRmsNormRowArgs {
+            n: workspace.post_attention_norm_len as u32,
+            eps: workspace.eps,
+        };
+        let pre_ffn_norm_args = MlxRmsNormRowArgs {
+            n: workspace.pre_feedforward_norm_len as u32,
+            eps: workspace.eps,
+        };
+        let mlp_gate_args = workspace
+            .mlp_gate
+            .row_args(workspace.pre_feedforward_norm_len as u32);
+        let mlp_up_args = workspace
+            .mlp_up
+            .row_args(workspace.pre_feedforward_norm_len as u32);
+        let geglu_args = MlxGegluRowArgs {
+            n: workspace.mlp_gate.out_rows,
+        };
+        let mlp_down_args = workspace.mlp_down.row_args(workspace.mlp_gate.out_rows);
+        let router_scale_args = MlxRouterScaleArgs {
+            n: workspace.post_attention_norm_len as u32,
+            eps: workspace.eps,
+            root_size: bf16_round_to_f32((workspace.post_attention_norm_len as f32).powf(-0.5)),
+        };
+        let router_proj_args = workspace
+            .router_proj
+            .row_args(workspace.post_attention_norm_len as u32);
+        let router_softmax_args = MlxSoftmaxRowsArgs {
+            row_stride: workspace.router_proj.out_rows,
+            row_count: 1,
+            seq_len: workspace.router_proj.out_rows,
+        };
+        let router_topk_args = MlxRouterTopKArgs {
+            expert_count: workspace.router_proj.out_rows,
+            top_k: ROUTER_TOP_K as u32,
+        };
+        let pre_ffn_norm2_args = MlxRmsNormRowArgs {
+            n: workspace.pre_feedforward_norm2_len as u32,
+            eps: workspace.eps,
+        };
+        let expert_gate_args = workspace
+            .expert_gate
+            .selected_experts_args(workspace.pre_feedforward_norm2_len as u32, 0);
+        let expert_up_args = workspace
+            .expert_up
+            .selected_experts_args(workspace.pre_feedforward_norm2_len as u32, 0);
+        let expert_geglu_args = MlxGegluRowArgs {
+            n: (ROUTER_TOP_K * workspace.expert_gate.out_len()) as u32,
+        };
+        let expert_down_args = workspace.expert_down.selected_experts_args(
+            workspace.expert_gate.out_rows,
+            workspace.expert_gate.out_rows,
+        );
+        let moe_weighted_args = MlxWeightedRowsArgs {
+            n: workspace.expert_down.out_rows,
+            row_stride: workspace.expert_down.out_rows,
+            row_count: ROUTER_TOP_K as u32,
+        };
+        let post_ffn_norm1_args = MlxRmsNormRowArgs {
+            n: workspace.post_feedforward_norm1_len as u32,
+            eps: workspace.eps,
+        };
+        let post_ffn_norm2_args = MlxRmsNormRowArgs {
+            n: workspace.post_feedforward_norm2_len as u32,
+            eps: workspace.eps,
+        };
+
+        if let Some(input_words) = input_words {
+            runtime.write_buffer(input_hidden_buffer, 0, &bytes_from_bf16_words(input_words))?;
+        }
+        if owns_command_batch {
+            runtime.begin_command_batch()?;
+        }
+        runtime.dispatch_compute(
+            &workspace.pipelines.rms,
+            bytes_of(&rms_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: input_hidden_buffer,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.input_norm_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.h,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        dispatch_exact_mlx_qmv_row(
+            &runtime,
+            &workspace.pipelines.proj,
+            &workspace.pipelines.proj_fast,
+            workspace.q_proj,
+            &q_proj_args,
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.h,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.q_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.q_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.q_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.buffers.q_proj,
+                    offset_bytes: 0,
+                },
+            ],
+            q_proj_threadgroups,
+            proj_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.head_norm,
+            bytes_of(&q_head_norm_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.q_proj,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.q_norm_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.q_norm,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            q_head_norm_threadgroups,
+            head_norm_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        if usize::try_from(workspace.q_rope.half_dims)? * 2 < workspace.head_dim {
+            runtime.copy_buffer_range(
+                &workspace.buffers.q_norm,
+                0,
+                &workspace.buffers.q_rope,
+                0,
+                workspace.q_proj.out_len() * size_of::<u16>(),
+            )?;
+        }
+        runtime.dispatch_compute(
+            &workspace.pipelines.rope,
+            bytes_of(&q_rope_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.q_norm,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.q_rope,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            q_rope_threadgroups,
+            rope_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        dispatch_exact_mlx_qmv_row(
+            &runtime,
+            &workspace.pipelines.proj,
+            &workspace.pipelines.proj_fast,
+            workspace.k_proj,
+            &k_proj_args,
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.h,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.k_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.k_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.k_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.buffers.k_proj,
+                    offset_bytes: 0,
+                },
+            ],
+            k_proj_threadgroups,
+            proj_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.head_norm,
+            bytes_of(&k_head_norm_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.k_proj,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.k_norm_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.k_norm,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            k_head_norm_threadgroups,
+            head_norm_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        if usize::try_from(workspace.k_rope.half_dims)? * 2 < workspace.head_dim {
+            runtime.copy_buffer_range(
+                &workspace.buffers.k_norm,
+                0,
+                &workspace.buffers.k_rope,
+                0,
+                workspace.k_proj.out_len() * size_of::<u16>(),
+            )?;
+        }
+        runtime.dispatch_compute(
+            &workspace.pipelines.rope,
+            bytes_of(&k_rope_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.k_norm,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.k_rope,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            k_rope_threadgroups,
+            rope_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        dispatch_exact_mlx_qmv_row(
+            &runtime,
+            &workspace.pipelines.proj,
+            &workspace.pipelines.proj_fast,
+            workspace.v_proj,
+            &v_proj_args,
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.h,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.v_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.v_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.v_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.buffers.v_proj,
+                    offset_bytes: 0,
+                },
+            ],
+            v_proj_threadgroups,
+            proj_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.head_norm,
+            bytes_of(&v_head_norm_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.v_proj,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.v_norm_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.v_norm,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            v_head_norm_threadgroups,
+            head_norm_threads_per_threadgroup,
+        )?;
+
+        let (
+            attention_seq_len,
+            attention_start_slot,
+            attention_kv_row_stride,
+            attention_key_buffer,
+            attention_value_buffer,
+        ) = {
+            let mut layer_cache = self.kv_cache_for_layer(layer_idx)?;
+            layer_cache.append_token_from_buffers(
+                &runtime,
+                &workspace.buffers.k_rope,
+                &workspace.buffers.v_norm,
+            )?;
+            (
+                layer_cache.seq_len(),
+                layer_cache.start_slot(),
+                layer_cache.row_stride_words()?,
+                layer_cache.key_buffer.clone(),
+                layer_cache.value_buffer.clone(),
+            )
+        };
+        let attention_logits_args = MlxGqaAttentionLogitsSeqArgs {
+            head_dim: workspace.head_dim as u32,
+            q_head_stride: workspace.head_dim as u32,
+            kv_row_stride: attention_kv_row_stride as u32,
+            q_head_count: workspace.q_head_count as u32,
+            q_heads_per_kv: workspace.q_heads_per_kv as u32,
+            seq_len: attention_seq_len as u32,
+            start_slot: attention_start_slot as u32,
+            capacity: workspace.kv_cache_capacity_tokens as u32,
+        };
+        let attention_softmax_args = MlxSoftmaxRowsArgs {
+            row_stride: workspace.kv_cache_capacity_tokens as u32,
+            row_count: workspace.q_head_count as u32,
+            seq_len: attention_seq_len as u32,
+        };
+        let attention_weighted_sum_args = MlxGqaAttentionWeightedSumArgs {
+            probs_row_stride: workspace.kv_cache_capacity_tokens as u32,
+            head_dim: workspace.head_dim as u32,
+            kv_row_stride: attention_kv_row_stride as u32,
+            out_head_stride: workspace.head_dim as u32,
+            q_head_count: workspace.q_head_count as u32,
+            q_heads_per_kv: workspace.q_heads_per_kv as u32,
+            seq_len: attention_seq_len as u32,
+            start_slot: attention_start_slot as u32,
+            capacity: workspace.kv_cache_capacity_tokens as u32,
+        };
+
+        runtime.dispatch_compute(
+            &workspace.pipelines.attention_logits_seq,
+            bytes_of(&attention_logits_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.q_rope,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &attention_key_buffer,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.attention_logits,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            attention_logits_threadgroups,
+            attention_logits_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.attention_softmax_rows,
+            bytes_of(&attention_softmax_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.attention_logits,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.attention_probs,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            MetalSize {
+                width: workspace.q_head_count as u64,
+                height: 1,
+                depth: 1,
+            },
+            mlx_softmax_threads_per_threadgroup(
+                attention_seq_len,
+                workspace
+                    .pipelines
+                    .attention_softmax_rows
+                    .max_threads_per_threadgroup,
+            )?,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.attention_weighted_sum,
+            bytes_of(&attention_weighted_sum_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.attention_probs,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &attention_value_buffer,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.attn_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            attention_output_threadgroups,
+            attention_output_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        dispatch_exact_mlx_qmv_row(
+            &runtime,
+            &workspace.pipelines.proj,
+            &workspace.pipelines.proj_fast,
+            workspace.o_proj,
+            &o_proj_args,
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.attn_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.o_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.o_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.o_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.buffers.o_proj_out,
+                    offset_bytes: 0,
+                },
+            ],
+            o_proj_threadgroups,
+            proj_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.rms,
+            bytes_of(&post_attention_norm_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.o_proj_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.post_attention_norm_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.post_attention_norm_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.residual,
+            bytes_of(&residual_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: input_hidden_buffer,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.post_attention_norm_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.residual_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            residual_threadgroups,
+            residual_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.rms,
+            bytes_of(&pre_ffn_norm_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.residual_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.pre_feedforward_norm_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.pre_feedforward_norm_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        dispatch_exact_mlx_qmv_row(
+            &runtime,
+            &workspace.pipelines.proj,
+            &workspace.pipelines.proj_fast,
+            workspace.mlp_gate,
+            &mlp_gate_args,
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.pre_feedforward_norm_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.mlp_gate_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.mlp_gate_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.mlp_gate_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.buffers.mlp_gate_out,
+                    offset_bytes: 0,
+                },
+            ],
+            mlp_gate_threadgroups,
+            proj_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        dispatch_exact_mlx_qmv_row(
+            &runtime,
+            &workspace.pipelines.proj,
+            &workspace.pipelines.proj_fast,
+            workspace.mlp_up,
+            &mlp_up_args,
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.pre_feedforward_norm_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.mlp_up_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.mlp_up_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.mlp_up_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.buffers.mlp_up_out,
+                    offset_bytes: 0,
+                },
+            ],
+            mlp_up_threadgroups,
+            proj_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.geglu,
+            bytes_of(&geglu_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.mlp_gate_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.mlp_up_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.geglu_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            geglu_threadgroups,
+            geglu_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        dispatch_exact_mlx_qmv_row(
+            &runtime,
+            &workspace.pipelines.proj,
+            &workspace.pipelines.proj_fast,
+            workspace.mlp_down,
+            &mlp_down_args,
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.geglu_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.mlp_down_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.mlp_down_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.mlp_down_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.buffers.mlp_down_out,
+                    offset_bytes: 0,
+                },
+            ],
+            mlp_down_threadgroups,
+            proj_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.router_scale,
+            bytes_of(&router_scale_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.residual_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.router_scale_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.router_scaled_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            router_scale_threadgroups,
+            router_scale_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        dispatch_exact_mlx_qmv_row(
+            &runtime,
+            &workspace.pipelines.proj,
+            &workspace.pipelines.proj_fast,
+            workspace.router_proj,
+            &router_proj_args,
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.router_scaled_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.router_proj_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.router_proj_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.router_proj_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.buffers.router_proj_out,
+                    offset_bytes: 0,
+                },
+            ],
+            router_proj_threadgroups,
+            proj_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.attention_softmax_rows,
+            bytes_of(&router_softmax_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.router_proj_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.router_probs_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            router_softmax_threadgroups,
+            mlx_softmax_threads_per_threadgroup(
+                workspace.router_proj.out_rows as usize,
+                workspace
+                    .pipelines
+                    .attention_softmax_rows
+                    .max_threads_per_threadgroup,
+            )?,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.router_topk,
+            bytes_of(&router_topk_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.router_proj_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.router_probs_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.router_per_expert_scale,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.buffers.moe_top_k_indices,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.buffers.moe_top_k_weights,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            router_topk_threadgroups,
+            router_topk_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.rms,
+            bytes_of(&pre_ffn_norm2_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.residual_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.pre_feedforward_norm2_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.pre_feedforward_norm2_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.selected_expert_proj,
+            bytes_of(&expert_gate_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.pre_feedforward_norm2_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.moe_top_k_indices,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.expert_gate_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.expert_gate_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.weights.expert_gate_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 6,
+                    buffer: &workspace.buffers.expert_gate_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            selected_expert_threadgroups,
+            selected_expert_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.selected_expert_proj,
+            bytes_of(&expert_up_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.pre_feedforward_norm2_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.moe_top_k_indices,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.expert_up_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.expert_up_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.weights.expert_up_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 6,
+                    buffer: &workspace.buffers.expert_up_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            selected_expert_up_threadgroups,
+            selected_expert_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.geglu,
+            bytes_of(&expert_geglu_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.expert_gate_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.expert_up_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.expert_geglu_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            expert_geglu_threadgroups,
+            geglu_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.selected_expert_proj,
+            bytes_of(&expert_down_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.expert_geglu_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.moe_top_k_indices,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.weights.expert_down_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: &workspace.weights.expert_down_scales,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: &workspace.weights.expert_down_biases,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 6,
+                    buffer: &workspace.buffers.expert_down_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            selected_expert_down_threadgroups,
+            selected_expert_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.weighted_sum_rows,
+            bytes_of(&moe_weighted_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.expert_down_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.moe_top_k_weights,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.moe_weighted_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            MetalSize {
+                width: workspace.expert_down.out_len() as u64,
+                height: 1,
+                depth: 1,
+            },
+            MetalSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        )?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.rms,
+            bytes_of(&post_ffn_norm1_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.mlp_down_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.post_feedforward_norm1_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.post_feedforward_norm1_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.rms,
+            bytes_of(&post_ffn_norm2_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.moe_weighted_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.weights.post_feedforward_norm2_weight,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.moe_post_ffn_norm2_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.residual,
+            bytes_of(&residual_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.post_feedforward_norm1_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.moe_post_ffn_norm2_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: &workspace.buffers.moe_merge_out,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            residual_threadgroups,
+            residual_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &workspace.pipelines.residual,
+            bytes_of(&residual_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &workspace.buffers.residual_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &workspace.buffers.moe_merge_out,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: output_hidden_buffer,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            residual_threadgroups,
+            residual_threads_per_threadgroup,
+        )?;
+        if owns_command_batch {
+            runtime.end_command_batch()?;
+            runtime.wait_idle()?;
+        }
+
+        if read_output {
+            Ok(Some(bf16_words_from_f32_bits(&read_bf16_buffer_bits(
+                &runtime,
+                output_hidden_buffer,
+                workspace.post_feedforward_norm1_len,
+            )?)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn eval_layer_hidden_state(
+        &mut self,
+        layer_idx: usize,
+        input_words: &[u16],
+        position: usize,
+    ) -> Result<Vec<u16>, Box<dyn Error>> {
+        self.eval_layer_hidden_state_core(layer_idx, Some(input_words), None, None, position, true)?
+            .ok_or_else(|| "exact metal layer eval did not return output".into())
+    }
+
+    fn eval_token_hidden_state_core(
+        &mut self,
+        input_words: Option<&[u16]>,
+        position: usize,
+        read_output: bool,
+    ) -> Result<Option<Vec<u16>>, Box<dyn Error>> {
+        if let Some(input_words) = input_words {
+            if input_words.len() != NORM_LEN {
+                return Err(format!(
+                    "exact metal token input length mismatch: got {} expected {}",
+                    input_words.len(),
+                    NORM_LEN
+                )
+                .into());
+            }
+        }
+
+        let layer_count = self
+            .session
+            .weights
+            .snapshot
+            .config
+            .text_config
+            .num_hidden_layers as usize;
+        if layer_count == 0 {
+            if !read_output {
+                return Ok(None);
+            }
+            if let Some(input_words) = input_words {
+                return Ok(Some(input_words.to_vec()));
+            }
+            return Ok(Some(bf16_words_from_f32_bits(&read_bf16_buffer_bits(
+                &self.session.runtime,
+                &self.text_io.buffers.standalone_hidden,
+                NORM_LEN,
+            )?)));
+        }
+
+        let hidden_a = self.text_io.buffers.standalone_hidden.clone();
+        let hidden_b = self.text_io.buffers.hidden_scratch.clone();
+        for layer_idx in 0..layer_count {
+            let (input_buffer, output_buffer) = if layer_idx % 2 == 0 {
+                (&hidden_a, &hidden_b)
+            } else {
+                (&hidden_b, &hidden_a)
+            };
+            let maybe_words = self.eval_layer_hidden_state_core(
+                layer_idx,
+                if layer_idx == 0 { input_words } else { None },
+                Some(input_buffer),
+                Some(output_buffer),
+                position,
+                read_output && layer_idx + 1 == layer_count,
+            )?;
+            if let Some(words) = maybe_words {
+                return Ok(Some(words));
+            }
+        }
+
+        if read_output {
+            Err("exact metal token eval completed without a final layer output".into())
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn eval_token_hidden_state(
+        &mut self,
+        input_words: &[u16],
+        position: usize,
+    ) -> Result<Vec<u16>, Box<dyn Error>> {
+        let runtime = self.session.runtime.clone();
+        runtime.begin_command_batch()?;
+        let batch_result = self.eval_token_hidden_state_core(Some(input_words), position, false);
+        if let Err(err) = batch_result {
+            let _ = runtime.discard_command_batch();
+            return Err(err);
+        }
+        runtime.end_command_batch()?;
+        runtime.wait_idle()?;
+        let hidden_buffer = self.final_hidden_buffer()?;
+        self.read_hidden_words_from_buffer(&hidden_buffer)
+    }
+
+    pub(crate) fn eval_token_hidden_state_from_token_id(
+        &mut self,
+        token_id: u32,
+        position: usize,
+    ) -> Result<Vec<u16>, Box<dyn Error>> {
+        let input_buffer = self.token_input_buffer()?;
+        let runtime = self.session.runtime.clone();
+        runtime.begin_command_batch()?;
+        let batch_result = (|| -> Result<(), Box<dyn Error>> {
+            self.dequantize_token_embedding_into_buffer(token_id, &input_buffer)?;
+            self.eval_token_hidden_state_core(None, position, false)?;
+            Ok(())
+        })();
+        if let Err(err) = batch_result {
+            let _ = runtime.discard_command_batch();
+            return Err(err);
+        }
+        runtime.end_command_batch()?;
+        runtime.wait_idle()?;
+        let hidden_buffer = self.final_hidden_buffer()?;
+        self.read_hidden_words_from_buffer(&hidden_buffer)
+    }
+
+    pub(crate) fn eval_token_greedy_from_token_id(
+        &mut self,
+        token_id: u32,
+        position: usize,
+    ) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        let input_buffer = self.token_input_buffer()?;
+        let runtime = self.session.runtime.clone();
+        runtime.begin_command_batch()?;
+        let batch_result = (|| -> Result<(), Box<dyn Error>> {
+            self.dequantize_token_embedding_into_buffer(token_id, &input_buffer)?;
+            self.eval_token_hidden_state_core(None, position, false)?;
+            let hidden_buffer = self.final_hidden_buffer()?;
+            self.dispatch_greedy_head_on_hidden_buffer(&hidden_buffer)?;
+            Ok(())
+        })();
+        if let Err(err) = batch_result {
+            let _ = runtime.discard_command_batch();
+            return Err(err);
+        }
+        runtime.end_command_batch()?;
+        runtime.wait_idle()?;
+        self.read_device_greedy_token()
+    }
+
+    pub(crate) fn greedy_token_from_hidden_words(
+        &mut self,
+        hidden_words: &[u16],
+    ) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        if hidden_words.len() != NORM_LEN {
+            return Err(format!(
+                "exact metal hidden-word length mismatch: got {} expected {}",
+                hidden_words.len(),
+                NORM_LEN
+            )
+            .into());
+        }
+        self.session.runtime.write_buffer(
+            &self.text_io.buffers.standalone_hidden,
+            0,
+            &bytes_from_bf16_words(hidden_words),
+        )?;
+        let hidden_buffer = self.text_io.buffers.standalone_hidden.clone();
+        self.greedy_token_from_hidden_buffer(&hidden_buffer)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compare_greedy_token_paths_from_hidden_words(
+        &mut self,
+        hidden_words: &[u16],
+    ) -> Result<(MlxGreedyToken, MlxGreedyToken), Box<dyn Error>> {
+        if hidden_words.len() != NORM_LEN {
+            return Err(format!(
+                "exact metal hidden-word length mismatch: got {} expected {}",
+                hidden_words.len(),
+                NORM_LEN
+            )
+            .into());
+        }
+        self.session.runtime.write_buffer(
+            &self.text_io.buffers.standalone_hidden,
+            0,
+            &bytes_from_bf16_words(hidden_words),
+        )?;
+        let hidden_buffer = self.text_io.buffers.standalone_hidden.clone();
+        self.dispatch_greedy_head_on_hidden_buffer(&hidden_buffer)?;
+        let device = self.read_device_greedy_token()?;
+        let shared = self.read_shared_logits_greedy_token()?;
+        Ok((device, shared))
+    }
+}
+
+impl ExactMetalGenerationCursor {
+    fn eval_token_next_with_backend(
+        backend: &mut ExactMetalTextRuntimeSession,
+        token_id: u32,
+        position: usize,
+    ) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        if position == 0 {
+            backend.reset_kv_caches();
+        }
+        backend.eval_token_greedy_from_token_id(token_id, position)
+    }
+
+    fn ensure_prompt_prefilled_locked(
+        &mut self,
+        backend: &mut ExactMetalTextRuntimeSession,
+    ) -> Result<(), Box<dyn Error>> {
+        while self.processed_prompt_tokens < self.prompt_token_ids.len() {
+            let token_id = self.prompt_token_ids[self.processed_prompt_tokens];
+            self.pending_next = Some(Self::eval_token_next_with_backend(
+                backend,
+                token_id,
+                self.position,
+            )?);
+            self.processed_prompt_tokens += 1;
+            self.position += 1;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_prompt_prefilled(&mut self) -> Result<(), Box<dyn Error>> {
+        let backend_handle = Arc::clone(&self.backend);
+        let mut backend = backend_handle
+            .lock()
+            .map_err(|_| "exact backend mutex poisoned".to_string())?;
+        self.ensure_prompt_prefilled_locked(&mut backend)
+    }
+
+    fn snapshot(&self) -> ExactMetalGenerationSnapshot {
+        ExactMetalGenerationSnapshot {
+            generated_token_ids: Arc::<[u32]>::from(self.generated_token_ids.clone()),
+            stop_reason: self.stop_reason,
+            #[cfg(test)]
+            processed_prompt_tokens: self.processed_prompt_tokens,
+            #[cfg(test)]
+            position: self.position,
+            #[cfg(test)]
+            has_pending_next: self.pending_next.is_some(),
+        }
+    }
+
+    pub(crate) fn ensure_generated(
+        &mut self,
+        requested_count: usize,
+    ) -> Result<(), Box<dyn Error>> {
+        let target = requested_count.min(self.max_new_tokens);
+        let backend_handle = Arc::clone(&self.backend);
+        let mut backend = backend_handle
+            .lock()
+            .map_err(|_| "exact backend mutex poisoned".to_string())?;
+        while self.generated_token_ids.len() < target {
+            if self.stop_reason.is_some() {
+                break;
+            }
+            if self.pending_next.is_none() {
+                self.ensure_prompt_prefilled_locked(&mut backend)?;
+            }
+            let next_token = self
+                .pending_next
+                .take()
+                .ok_or_else(|| "generation cursor missing pending next token".to_string())?;
+            if self.stop_tokens.contains(&next_token.token_id) {
+                self.stop_reason = Some(ExactMetalGenerationStopReason::EosToken(
+                    next_token.token_id,
+                ));
+                break;
+            }
+            self.generated_token_ids.push(next_token.token_id);
+            if self.generated_token_ids.len() >= self.max_new_tokens {
+                self.position += 1;
+                self.stop_reason = Some(ExactMetalGenerationStopReason::MaxNewTokens);
+                break;
+            }
+            self.pending_next = Some(Self::eval_token_next_with_backend(
+                &mut backend,
+                next_token.token_id,
+                self.position,
+            )?);
+            self.position += 1;
+        }
+        if self.generated_token_ids.len() >= self.max_new_tokens && self.stop_reason.is_none() {
+            self.stop_reason = Some(ExactMetalGenerationStopReason::MaxNewTokens);
+            self.pending_next = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_finished(&mut self) -> Result<(), Box<dyn Error>> {
+        self.ensure_generated(self.max_new_tokens)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generated_token_ids(&self) -> &[u32] {
+        &self.generated_token_ids
+    }
+
+    #[cfg(test)]
+    pub(crate) fn processed_prompt_tokens(&self) -> usize {
+        self.processed_prompt_tokens
+    }
+
+    #[cfg(test)]
+    pub(crate) fn position(&self) -> usize {
+        self.position
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_next(&self) -> bool {
+        self.pending_next.is_some()
+    }
+}
+
+impl ExactMetalPromptPrefillNode {
+    fn new(cursor: Arc<Mutex<ExactMetalGenerationCursor>>) -> Self {
+        Self {
+            cursor,
+            value: OnceLock::new(),
+        }
+    }
+
+    fn eval(&self) -> Result<Arc<ExactMetalGenerationSnapshot>, String> {
+        self.value
+            .get_or_init(|| {
+                let mut cursor = self
+                    .cursor
+                    .lock()
+                    .map_err(|_| "generation cursor mutex poisoned".to_string())?;
+                cursor
+                    .ensure_prompt_prefilled()
+                    .map_err(|err| err.to_string())?;
+                Ok(Arc::new(cursor.snapshot()))
+            })
+            .clone()
+    }
+}
+
+impl ExactMetalGenerationStepNode {
+    fn new(
+        cursor: Arc<Mutex<ExactMetalGenerationCursor>>,
+        target_count: usize,
+        dependency: ExactMetalGenerationDependency,
+    ) -> Self {
+        Self {
+            cursor,
+            target_count,
+            dependency,
+            value: OnceLock::new(),
+        }
+    }
+
+    fn eval(&self) -> Result<Arc<ExactMetalGenerationSnapshot>, String> {
+        self.value
+            .get_or_init(|| {
+                match &self.dependency {
+                    ExactMetalGenerationDependency::PromptPrefill(node) => {
+                        node.eval()?;
+                    }
+                    ExactMetalGenerationDependency::Previous(node) => {
+                        node.eval()?;
+                    }
+                }
+                let mut cursor = self
+                    .cursor
+                    .lock()
+                    .map_err(|_| "generation cursor mutex poisoned".to_string())?;
+                cursor
+                    .ensure_generated(self.target_count)
+                    .map_err(|err| err.to_string())?;
+                Ok(Arc::new(cursor.snapshot()))
+            })
+            .clone()
+    }
+}
+
+impl ExactMetalGenerationGraph {
+    fn new(cursor: ExactMetalGenerationCursor) -> Result<Self, Box<dyn Error>> {
+        let max_new_tokens = cursor.max_new_tokens;
+        let cursor = Arc::new(Mutex::new(cursor));
+        Ok(Self {
+            prompt_prefill: Arc::new(ExactMetalPromptPrefillNode::new(Arc::clone(&cursor))),
+            cursor,
+            step_nodes: Mutex::new(Vec::with_capacity(max_new_tokens)),
+            max_new_tokens,
+        })
+    }
+
+    fn step_node(&self, requested_count: usize) -> Result<Arc<ExactMetalGenerationStepNode>, String> {
+        let target = requested_count.min(self.max_new_tokens);
+        if target == 0 {
+            return Err("generation step nodes start at token count 1".to_string());
+        }
+        let mut nodes = self
+            .step_nodes
+            .lock()
+            .map_err(|_| "generation step-node mutex poisoned".to_string())?;
+        while nodes.len() < target {
+            let next_count = nodes.len() + 1;
+            let dependency = if let Some(prev) = nodes.last() {
+                ExactMetalGenerationDependency::Previous(Arc::clone(prev))
+            } else {
+                ExactMetalGenerationDependency::PromptPrefill(Arc::clone(&self.prompt_prefill))
+            };
+            nodes.push(Arc::new(ExactMetalGenerationStepNode::new(
+                Arc::clone(&self.cursor),
+                next_count,
+                dependency,
+            )));
+        }
+        nodes
+            .get(target - 1)
+            .cloned()
+            .ok_or_else(|| format!("missing generation step node {target}"))
+    }
+
+    pub(crate) fn generated_token_ids_up_to(
+        &self,
+        requested_count: usize,
+    ) -> Result<Arc<[u32]>, String> {
+        let target = requested_count.min(self.max_new_tokens);
+        if target == 0 {
+            return Ok(Arc::<[u32]>::from(Vec::<u32>::new()));
+        }
+        Ok(self.step_node(target)?.eval()?.generated_token_ids.clone())
+    }
+
+    pub(crate) fn finish_snapshot(&self) -> Result<Arc<ExactMetalGenerationSnapshot>, String> {
+        if self.max_new_tokens == 0 {
+            let mut cursor = self
+                .cursor
+                .lock()
+                .map_err(|_| "generation cursor mutex poisoned".to_string())?;
+            cursor.ensure_finished().map_err(|err| err.to_string())?;
+            return Ok(Arc::new(cursor.snapshot()));
+        }
+        self.step_node(self.max_new_tokens)?.eval()
+    }
+}
+
+fn optional_private_weight_buffer(
+    session: &mut LayerExecutionSession,
+    enabled: bool,
+    name: &str,
+) -> Result<Option<MetalBuffer>, Box<dyn Error>> {
+    if enabled {
+        Ok(Some(session.private_weight_buffer(name)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn create_bf16_buffer(
+    runtime: &MetalRuntime,
+    len_words: usize,
+    storage: BufferStorageMode,
+) -> Result<MetalBuffer, Box<dyn Error>> {
+    Ok(runtime.create_buffer(len_words * size_of::<u16>(), storage)?)
+}
+
+fn compile_default_pipeline(
+    runtime: &MetalRuntime,
+    name: &str,
+) -> Result<MetalPipeline, Box<dyn Error>> {
+    compile_pipeline(runtime, name, 0)
+}
+
+fn compile_pipeline(
+    runtime: &MetalRuntime,
+    name: &str,
+    smem_bytes: usize,
+) -> Result<MetalPipeline, Box<dyn Error>> {
+    Ok(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+        cache_name: name.to_string(),
+        base_name: name.to_string(),
+        constants: Vec::new(),
+        smem_bytes,
+        nr0: 0,
+        nr1: 0,
+        nsg: 0,
+    })?)
+}
+
+fn read_bf16_buffer_bits(
+    runtime: &MetalRuntime,
+    buffer: &MetalBuffer,
+    len_words: usize,
+) -> Result<Vec<u32>, Box<dyn Error>> {
+    Ok(
+        runtime.with_readable_buffer(buffer, len_words * size_of::<u16>(), |bytes| {
+            Ok(decode_bf16_buffer_bits(bytes))
+        })?,
+    )
 }
 
 fn bytes_of<T>(value: &T) -> &[u8] {
@@ -564,8 +4425,39 @@ fn bytes_from_bf16_words(words: &[u16]) -> Vec<u8> {
     out
 }
 
+fn read_f32_file_as_bf16_words(path: &Path) -> Result<Vec<u16>, Box<dyn Error>> {
+    let bytes = fs::read(path)?;
+    if bytes.len() % size_of::<f32>() != 0 {
+        return Err(format!(
+            "f32 input file {} length {} is not a multiple of {}",
+            path.display(),
+            bytes.len(),
+            size_of::<f32>()
+        )
+        .into());
+    }
+    let mut words = Vec::with_capacity(bytes.len() / size_of::<f32>());
+    for chunk in bytes.chunks_exact(size_of::<f32>()) {
+        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        words.push((bf16_round_to_f32(value).to_bits() >> 16) as u16);
+    }
+    Ok(words)
+}
+
+fn write_bf16_words_as_f32_file(path: &Path, words: &[u16]) -> Result<(), Box<dyn Error>> {
+    let mut bytes = Vec::with_capacity(words.len() * size_of::<f32>());
+    for &word in words {
+        bytes.extend_from_slice(&bf16_word_to_f32(word).to_le_bytes());
+    }
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
 fn bf16_words_from_f32_bits(bits: &[u32]) -> Vec<u16> {
-    bits.iter().copied().map(|bits| (bits >> 16) as u16).collect()
+    bits.iter()
+        .copied()
+        .map(|bits| (bits >> 16) as u16)
+        .collect()
 }
 
 fn bf16_word_to_f32(word: u16) -> f32 {
@@ -580,18 +4472,60 @@ fn bf16_round_to_f32(value: f32) -> f32 {
 }
 
 fn decode_bf16_buffer_bits(bytes: &[u8]) -> Vec<u32> {
-    bytes.chunks_exact(2)
+    bytes
+        .chunks_exact(2)
         .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
         .map(bf16_word_to_f32)
         .map(f32::to_bits)
         .collect()
 }
 
+fn decode_u32_buffer_words(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(size_of::<u32>())
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
+fn read_router_output_from_device(
+    runtime: &MetalRuntime,
+    router_scaled_out: &MetalBuffer,
+    router_proj_out: &MetalBuffer,
+    router_probs_out: &MetalBuffer,
+    moe_top_k_indices: &MetalBuffer,
+    moe_top_k_weights: &MetalBuffer,
+    router_scaled_len: usize,
+    expert_count: usize,
+    top_k: usize,
+) -> Result<Layer0CachedRouterOutput, Box<dyn Error>> {
+    Ok(Layer0CachedRouterOutput {
+        router_scaled_bits: decode_bf16_buffer_bits(
+            &runtime.read_buffer(router_scaled_out, router_scaled_len * size_of::<u16>())?,
+        ),
+        expert_scores_bits: decode_bf16_buffer_bits(
+            &runtime.read_buffer(router_proj_out, expert_count * size_of::<u16>())?,
+        ),
+        router_probs_bits: decode_bf16_buffer_bits(
+            &runtime.read_buffer(router_probs_out, expert_count * size_of::<u16>())?,
+        ),
+        top_k_indices: decode_u32_buffer_words(
+            &runtime.read_buffer(moe_top_k_indices, top_k * size_of::<u32>())?,
+        ),
+        top_k_weights_bits: decode_bf16_buffer_bits(
+            &runtime.read_buffer(moe_top_k_weights, top_k * size_of::<u16>())?,
+        ),
+    })
+}
+
 fn bits_to_f32(bits: &[u32]) -> Vec<f32> {
     bits.iter().copied().map(f32::from_bits).collect()
 }
 
-fn flatten_heads_to_tensor(bits: &[u32], head_count: usize, head_dim: usize) -> Result<KvTensor<f32>, Box<dyn Error>> {
+fn flatten_heads_to_tensor(
+    bits: &[u32],
+    head_count: usize,
+    head_dim: usize,
+) -> Result<KvTensor<f32>, Box<dyn Error>> {
     let shape = KvTensorShape {
         batch_size: 1,
         kv_head_count: head_count,
@@ -601,141 +4535,313 @@ fn flatten_heads_to_tensor(bits: &[u32], head_count: usize, head_dim: usize) -> 
     KvTensor::from_vec(shape, bits_to_f32(bits)).map_err(|err| err.into())
 }
 
-fn compute_cached_attention(
-    q_bits: &[u32],
-    cache: &GemmaKvCache<f32>,
+fn attention_prob_bits_from_logits(
+    logits_bits: &[u32],
     q_head_count: usize,
-    q_heads_per_kv: usize,
-    head_dim: usize,
-) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>), Box<dyn Error>> {
-    let q_values = bits_to_f32(q_bits);
-    let cache_state = cache.fetch()?;
-    let seq_len = cache_state.stored_tokens();
-    let mut score_bits = Vec::with_capacity(q_head_count * seq_len);
+    seq_len: usize,
+) -> Vec<u32> {
     let mut prob_bits = Vec::with_capacity(q_head_count * seq_len);
-    let mut out_bits = Vec::with_capacity(q_head_count * head_dim);
-
     for q_head in 0..q_head_count {
-        let q_base = q_head * head_dim;
-        let q_row = &q_values[q_base..q_base + head_dim];
-        let kv_head = q_head / q_heads_per_kv;
-
-        let mut scores = Vec::with_capacity(seq_len);
-        for token in 0..seq_len {
-            let k_row = cache_state.keys.row(0, kv_head, token)?;
-            let mut sum = 0.0f32;
-            for dim in 0..head_dim {
-                sum += q_row[dim] * k_row[dim];
-            }
-            scores.push(bf16_round_to_f32(sum));
-        }
-
-        let max_score = scores
+        let row_start = q_head * seq_len;
+        let row = &logits_bits[row_start..row_start + seq_len];
+        let max_score = row
             .iter()
             .copied()
+            .map(f32::from_bits)
             .fold(f32::NEG_INFINITY, f32::max);
-        let exp_scores = scores
+        let exp_scores = row
             .iter()
+            .copied()
+            .map(f32::from_bits)
             .map(|score| (score - max_score).exp())
             .collect::<Vec<_>>();
         let exp_sum = exp_scores.iter().copied().sum::<f32>();
-        let probs = exp_scores
-            .iter()
-            .map(|score| bf16_round_to_f32(score / exp_sum))
-            .collect::<Vec<_>>();
-
-        for score in &scores {
-            score_bits.push(score.to_bits());
-        }
-        for prob in &probs {
-            prob_bits.push(prob.to_bits());
-        }
-
-        for dim in 0..head_dim {
-            let mut acc = 0.0f32;
-            for (token, prob) in probs.iter().enumerate() {
-                let v_row = cache_state.values.row(0, kv_head, token)?;
-                acc += *prob * v_row[dim];
-            }
-            out_bits.push(bf16_round_to_f32(acc).to_bits());
+        for value in exp_scores {
+            prob_bits.push(bf16_round_to_f32(value / exp_sum).to_bits());
         }
     }
-
-    Ok((score_bits, prob_bits, out_bits))
+    prob_bits
 }
 
-fn compute_router_output_from_expert_scores(
-    router_scaled_bits: Vec<u32>,
-    expert_scores_bits: Vec<u32>,
-    per_expert_scale_words: &[u16],
-    top_k: usize,
-) -> Result<CachedRouterOutput, Box<dyn Error>> {
-    let expert_scores = expert_scores_bits
-        .iter()
-        .copied()
-        .map(f32::from_bits)
-        .collect::<Vec<_>>();
-    if top_k == 0 || top_k > expert_scores.len() || top_k > per_expert_scale_words.len() {
+fn read_exact_kv_cache_tensor_bits(
+    runtime: &MetalRuntime,
+    cache: &ExactMetalKvCache,
+    buffer: &MetalBuffer,
+) -> Result<Vec<u32>, Box<dyn Error>> {
+    let row_stride_words = cache.row_stride_words()?;
+    let storage_words = cache
+        .spec
+        .batch_size
+        .checked_mul(cache.spec.kv_head_count)
+        .and_then(|value| value.checked_mul(row_stride_words))
+        .ok_or("exact metal KV cache readback overflow")?;
+    let storage_bits = read_bf16_buffer_bits(runtime, buffer, storage_words)?;
+    let mut out = Vec::with_capacity(
+        cache
+            .spec
+            .batch_size
+            .checked_mul(cache.spec.kv_head_count)
+            .and_then(|value| value.checked_mul(cache.stored_tokens))
+            .and_then(|value| value.checked_mul(cache.spec.head_dim))
+            .ok_or("exact metal KV tensor compact size overflow")?,
+    );
+    let start_slot = cache.start_slot();
+    for batch in 0..cache.spec.batch_size {
+        for head in 0..cache.spec.kv_head_count {
+            let row_base = (batch * cache.spec.kv_head_count + head)
+                .checked_mul(row_stride_words)
+                .ok_or("exact metal KV compact row base overflow")?;
+            for token in 0..cache.stored_tokens {
+                let slot = (start_slot + token) % cache.spec.max_tokens;
+                let token_base = row_base
+                    .checked_add(slot * cache.spec.head_dim)
+                    .ok_or("exact metal KV compact token base overflow")?;
+                out.extend_from_slice(&storage_bits[token_base..token_base + cache.spec.head_dim]);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn read_attention_logits_bits(
+    runtime: &MetalRuntime,
+    buffer: &MetalBuffer,
+    q_head_count: usize,
+    seq_len: usize,
+    row_stride_words: usize,
+) -> Result<Vec<u32>, Box<dyn Error>> {
+    let storage_words = q_head_count
+        .checked_mul(row_stride_words)
+        .ok_or("attention logits storage overflow")?;
+    let storage_bits = read_bf16_buffer_bits(runtime, buffer, storage_words)?;
+    let mut out = Vec::with_capacity(
+        q_head_count
+            .checked_mul(seq_len)
+            .ok_or("attention logits compact size overflow")?,
+    );
+    for q_head in 0..q_head_count {
+        let row_base = q_head
+            .checked_mul(row_stride_words)
+            .ok_or("attention logits row base overflow")?;
+        out.extend_from_slice(&storage_bits[row_base..row_base + seq_len]);
+    }
+    Ok(out)
+}
+
+fn mlx_softmax_threads_per_threadgroup(
+    seq_len: usize,
+    max_threads_per_threadgroup: u64,
+) -> Result<MetalSize, Box<dyn Error>> {
+    const MLX_SOFTMAX_N_READS: usize = 4;
+    const MLX_SIMD_WIDTH: usize = 32;
+
+    let threadgroup_needed = seq_len.max(1).div_ceil(MLX_SOFTMAX_N_READS);
+    let simds_needed = threadgroup_needed.div_ceil(MLX_SIMD_WIDTH).max(1);
+    let threadgroup_width = u64::try_from(MLX_SIMD_WIDTH.checked_mul(simds_needed).ok_or(
+        "softmax threadgroup size overflow",
+    )?)?;
+    if threadgroup_width > max_threads_per_threadgroup {
         return Err(format!(
-            "invalid router top_k {} for expert_scores={} per_expert_scales={}",
-            top_k,
-            expert_scores.len(),
-            per_expert_scale_words.len()
+            "softmax threadgroup width {} exceeds pipeline max {} for seq_len {}",
+            threadgroup_width, max_threads_per_threadgroup, seq_len
+        )
+        .into());
+    }
+    Ok(MetalSize {
+        width: threadgroup_width,
+        height: 1,
+        depth: 1,
+    })
+}
+
+fn compute_cached_attention_metal(
+    runtime: &MetalRuntime,
+    logits_pipeline: &MetalPipeline,
+    softmax_pipeline: &MetalPipeline,
+    weighted_sum_pipeline: &MetalPipeline,
+    q_buffer: &MetalBuffer,
+    cache: &ExactMetalKvCache,
+    q_head_count: usize,
+    q_heads_per_kv: usize,
+    head_dim: usize,
+    logits_buffer: &MetalBuffer,
+    probs_buffer: &MetalBuffer,
+    out_buffer: &MetalBuffer,
+) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>), Box<dyn Error>> {
+    let seq_len = cache.seq_len();
+    let kv_row_stride = cache.row_stride_words()?;
+    let logits_row_stride = cache.spec.max_tokens;
+    let logits_args = MlxGqaAttentionLogitsSeqArgs {
+        head_dim: head_dim as u32,
+        q_head_stride: head_dim as u32,
+        kv_row_stride: kv_row_stride as u32,
+        q_head_count: q_head_count as u32,
+        q_heads_per_kv: q_heads_per_kv as u32,
+        seq_len: seq_len as u32,
+        start_slot: cache.start_slot() as u32,
+        capacity: cache.spec.max_tokens as u32,
+    };
+    let softmax_args = MlxSoftmaxRowsArgs {
+        row_stride: logits_row_stride as u32,
+        row_count: q_head_count as u32,
+        seq_len: seq_len as u32,
+    };
+    let weighted_sum_args = MlxGqaAttentionWeightedSumArgs {
+        probs_row_stride: logits_row_stride as u32,
+        head_dim: head_dim as u32,
+        kv_row_stride: kv_row_stride as u32,
+        out_head_stride: head_dim as u32,
+        q_head_count: q_head_count as u32,
+        q_heads_per_kv: q_heads_per_kv as u32,
+        seq_len: seq_len as u32,
+        start_slot: cache.start_slot() as u32,
+        capacity: cache.spec.max_tokens as u32,
+    };
+    let threadgroups_logits = MetalSize {
+        width: seq_len as u64,
+        height: q_head_count as u64,
+        depth: 1,
+    };
+    let softmax_threads_per_threadgroup =
+        mlx_softmax_threads_per_threadgroup(seq_len, softmax_pipeline.max_threads_per_threadgroup)?;
+    let threadgroups_output = MetalSize {
+        width: (head_dim as u64).div_ceil(64),
+        height: 1,
+        depth: q_head_count as u64,
+    };
+    let logits_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 1,
+        depth: 1,
+    };
+    let output_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 4,
+        depth: 1,
+    };
+
+    runtime.begin_command_batch()?;
+    runtime.dispatch_compute(
+        logits_pipeline,
+        bytes_of(&logits_args),
+        &[
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: q_buffer,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: &cache.key_buffer,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: logits_buffer,
+                offset_bytes: 0,
+            },
+        ],
+        &[],
+        threadgroups_logits,
+        logits_threads_per_threadgroup,
+    )?;
+    runtime.memory_barrier_buffers()?;
+    runtime.dispatch_compute(
+        softmax_pipeline,
+        bytes_of(&softmax_args),
+        &[
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: logits_buffer,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: probs_buffer,
+                offset_bytes: 0,
+            },
+        ],
+        &[],
+        MetalSize {
+            width: q_head_count as u64,
+            height: 1,
+            depth: 1,
+        },
+        softmax_threads_per_threadgroup,
+    )?;
+    runtime.memory_barrier_buffers()?;
+    runtime.dispatch_compute(
+        weighted_sum_pipeline,
+        bytes_of(&weighted_sum_args),
+        &[
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: probs_buffer,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: &cache.value_buffer,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: out_buffer,
+                offset_bytes: 0,
+            },
+        ],
+        &[],
+        threadgroups_output,
+        output_threads_per_threadgroup,
+    )?;
+    runtime.end_command_batch()?;
+    runtime.wait_idle()?;
+
+    let logits_bits =
+        read_attention_logits_bits(runtime, logits_buffer, q_head_count, seq_len, logits_row_stride)?;
+    let prob_bits =
+        read_attention_logits_bits(runtime, probs_buffer, q_head_count, seq_len, logits_row_stride)?;
+    let out_bits = read_bf16_buffer_bits(runtime, out_buffer, q_head_count * head_dim)?;
+    Ok((logits_bits, prob_bits, out_bits))
+}
+
+fn moe_weighted_expert_out_bits(
+    down_bits: &[u32],
+    top_k_weights_bits: &[u32],
+    hidden: usize,
+) -> Result<Vec<u32>, Box<dyn Error>> {
+    if top_k_weights_bits.len() != ROUTER_TOP_K {
+        return Err(format!(
+            "expected {} routed expert weights, got {}",
+            ROUTER_TOP_K,
+            top_k_weights_bits.len()
+        )
+        .into());
+    }
+    let expected_len = ROUTER_TOP_K
+        .checked_mul(hidden)
+        .ok_or("expert_out size overflow")?;
+    if down_bits.len() != expected_len {
+        return Err(format!(
+            "expert_down length mismatch: got {} expected {}",
+            down_bits.len(),
+            expected_len
         )
         .into());
     }
 
-    let max_score = expert_scores
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
-    let exp_scores = expert_scores
-        .iter()
-        .copied()
-        .map(|value| (value - max_score).exp())
-        .collect::<Vec<_>>();
-    let exp_sum = exp_scores.iter().copied().sum::<f32>();
-    let router_probs = exp_scores
-        .iter()
-        .copied()
-        .map(|value| bf16_round_to_f32(value / exp_sum))
-        .collect::<Vec<_>>();
-    let router_probs_bits = router_probs.iter().copied().map(f32::to_bits).collect::<Vec<_>>();
-
-    let mut top_k_indices = (0..expert_scores.len()).collect::<Vec<_>>();
-    top_k_indices.sort_by(|&lhs, &rhs| {
-        expert_scores[rhs]
-            .total_cmp(&expert_scores[lhs])
-            .then_with(|| lhs.cmp(&rhs))
-    });
-    let top_k_indices = top_k_indices
-        .into_iter()
-        .take(top_k)
-        .map(|index| index as u32)
-        .collect::<Vec<_>>();
-
-    let mut top_k_weights = top_k_indices
-        .iter()
-        .copied()
-        .map(|index| router_probs[index as usize])
-        .collect::<Vec<_>>();
-    let mut top_k_sum = 0.0f32;
-    for weight in &top_k_weights {
-        top_k_sum = bf16_round_to_f32(top_k_sum + *weight);
+    let mut out = Vec::with_capacity(hidden);
+    for hidden_index in 0..hidden {
+        let mut acc = 0.0f32;
+        for (expert_slot, &weight_bits) in top_k_weights_bits.iter().enumerate() {
+            let down = f32::from_bits(down_bits[expert_slot * hidden + hidden_index]);
+            let weight = f32::from_bits(weight_bits);
+            let weighted = bf16_round_to_f32(down * weight);
+            acc = bf16_round_to_f32(acc + weighted);
+        }
+        out.push(acc.to_bits());
     }
-    for (slot, weight) in top_k_weights.iter_mut().enumerate() {
-        let normalized = bf16_round_to_f32(*weight / top_k_sum);
-        let expert_scale = bf16_word_to_f32(per_expert_scale_words[top_k_indices[slot] as usize]);
-        *weight = bf16_round_to_f32(normalized * expert_scale);
-    }
-
-    Ok(CachedRouterOutput {
-        router_scaled_bits,
-        expert_scores_bits,
-        router_probs_bits,
-        top_k_indices,
-        top_k_weights_bits: top_k_weights.iter().copied().map(f32::to_bits).collect(),
-    })
+    Ok(out)
 }
 
 fn validate_hash_and_prefix<const N: usize>(
@@ -773,70 +4879,614 @@ fn print_first16(label: &str, bits: &[u32]) {
     print_prefix(label, bits, 16);
 }
 
+fn print_cached_artifacts(artifacts: &Layer0CachedArtifacts) {
+    println!("backend={}", artifacts.backend_name);
+    println!("model_path={}", artifacts.model_path.display());
+    println!("prefill_rope_offset={}", artifacts.prefill_rope_offset);
+    println!("decode_rope_offset={}", artifacts.decode_rope_offset);
+    println!("prefill_activation_phase={PREFILL_ACTIVATION_PHASE}");
+    println!("decode_activation_phase={DECODE_ACTIVATION_PHASE}");
+    println!("q_head_count={}", artifacts.q_head_count);
+    println!("k_head_count={}", artifacts.k_head_count);
+    println!("v_head_count={}", artifacts.v_head_count);
+    println!("q_heads_per_kv={}", artifacts.q_heads_per_kv);
+    println!("head_dim={}", artifacts.head_dim);
+    println!("stage={}", artifacts.stage_name());
+    println!(
+        "prefill_k_cache_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.prefill_k_bits)
+    );
+    println!(
+        "prefill_v_proj_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.prefill_v_proj_bits)
+    );
+    println!(
+        "prefill_v_cache_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.prefill_v_bits)
+    );
+    println!(
+        "decode_q_rope_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.decode_q_bits)
+    );
+    println!(
+        "decode_k_rope_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.decode_k_bits)
+    );
+    println!(
+        "decode_v_proj_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.decode_v_proj_bits)
+    );
+    println!(
+        "decode_v_norm_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.decode_v_bits)
+    );
+    println!(
+        "full_k_cache_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.full_k_bits)
+    );
+    println!(
+        "full_v_cache_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.full_v_bits)
+    );
+    println!(
+        "attention_scores_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.attention_score_bits)
+    );
+    println!(
+        "attention_probs_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.attention_prob_bits)
+    );
+    println!(
+        "attention_output_fnv1a64=0x{:016X}",
+        fnv1a64_u32_words(&artifacts.attention_out_bits)
+    );
+    if let Some(bits) = &artifacts.attention_oproj_bits {
+        println!("attention_oproj_fnv1a64=0x{:016X}", fnv1a64_u32_words(bits));
+    }
+    if let Some(bits) = &artifacts.post_attention_norm_bits {
+        println!(
+            "attention_post_attn_norm_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.post_attention_residual_bits {
+        println!(
+            "attention_post_attn_residual_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.pre_feedforward_norm_bits {
+        println!(
+            "attention_pre_ffn_norm_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.dense_gate_bits {
+        println!(
+            "attention_pre_ffn_gate_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.dense_up_bits {
+        println!(
+            "attention_pre_ffn_up_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.dense_geglu_bits {
+        println!(
+            "attention_pre_ffn_geglu_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.dense_down_bits {
+        println!(
+            "attention_pre_ffn_down_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(router_output) = &artifacts.router_output {
+        println!(
+            "router_scaled_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&router_output.router_scaled_bits)
+        );
+        println!(
+            "expert_scores_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&router_output.expert_scores_bits)
+        );
+        println!(
+            "router_probs_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&router_output.router_probs_bits)
+        );
+        println!(
+            "router_topk_indices_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&router_output.top_k_indices)
+        );
+        println!(
+            "router_topk_weights_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&router_output.top_k_weights_bits)
+        );
+    }
+    if let Some(bits) = &artifacts.moe_expert_gate_bits {
+        println!(
+            "attention_moe_expert_gate_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.moe_expert_up_bits {
+        println!(
+            "attention_moe_expert_up_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.moe_expert_geglu_bits {
+        println!(
+            "attention_moe_expert_geglu_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.moe_expert_down_bits {
+        println!(
+            "attention_moe_expert_down_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.post_ffn_norm1_bits {
+        println!(
+            "attention_post_ffn_norm1_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.moe_expert_out_bits {
+        println!(
+            "attention_moe_expert_out_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.moe_post_ffn_norm2_bits {
+        println!(
+            "attention_moe_post_ffn_norm2_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.moe_merge_bits {
+        println!(
+            "attention_moe_merge_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    if let Some(bits) = &artifacts.post_ffn_residual_bits {
+        println!(
+            "attention_post_ffn_residual_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(bits)
+        );
+    }
+    print_first16(
+        "prefill_k_cache_first16_f32_bits",
+        &artifacts.prefill_k_bits,
+    );
+    print_first16(
+        "prefill_v_proj_first16_f32_bits",
+        &artifacts.prefill_v_proj_bits,
+    );
+    print_first16(
+        "prefill_v_cache_first16_f32_bits",
+        &artifacts.prefill_v_bits,
+    );
+    print_first16("decode_q_rope_first16_f32_bits", &artifacts.decode_q_bits);
+    print_first16("decode_k_rope_first16_f32_bits", &artifacts.decode_k_bits);
+    print_first16("decode_v_proj_first16_f32_bits", &artifacts.decode_v_proj_bits);
+    print_first16("decode_v_norm_first16_f32_bits", &artifacts.decode_v_bits);
+    print_first16("full_k_cache_first16_f32_bits", &artifacts.full_k_bits);
+    print_first16("full_v_cache_first16_f32_bits", &artifacts.full_v_bits);
+    print_first16(
+        "attention_scores_first16_f32_bits",
+        &artifacts.attention_score_bits,
+    );
+    print_first16(
+        "attention_probs_first16_f32_bits",
+        &artifacts.attention_prob_bits,
+    );
+    print_first16(
+        "attention_output_first16_f32_bits",
+        &artifacts.attention_out_bits,
+    );
+    if let Some(bits) = &artifacts.attention_oproj_bits {
+        print_first16("attention_oproj_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.post_attention_norm_bits {
+        print_first16("attention_post_attn_norm_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.post_attention_residual_bits {
+        print_first16("attention_post_attn_residual_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.pre_feedforward_norm_bits {
+        print_first16("attention_pre_ffn_norm_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.dense_gate_bits {
+        print_first16("attention_pre_ffn_gate_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.dense_up_bits {
+        print_first16("attention_pre_ffn_up_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.dense_geglu_bits {
+        print_first16("attention_pre_ffn_geglu_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.dense_down_bits {
+        print_first16("attention_pre_ffn_down_first16_f32_bits", bits);
+    }
+    if let Some(router_output) = &artifacts.router_output {
+        print_first16(
+            "router_scaled_first16_f32_bits",
+            &router_output.router_scaled_bits,
+        );
+        print_first16(
+            "expert_scores_first16_f32_bits",
+            &router_output.expert_scores_bits,
+        );
+        print_first16(
+            "router_probs_first16_f32_bits",
+            &router_output.router_probs_bits,
+        );
+        print!("top_k_indices=");
+        for (index, value) in router_output.top_k_indices.iter().enumerate() {
+            if index != 0 {
+                print!(",");
+            }
+            print!("{value}");
+        }
+        println!();
+        print_prefix(
+            "top_k_weights_first8_f32_bits",
+            &router_output.top_k_weights_bits,
+            ROUTER_TOP_K,
+        );
+    }
+    if let Some(bits) = &artifacts.moe_expert_gate_bits {
+        print_first16("attention_moe_expert_gate_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.moe_expert_up_bits {
+        print_first16("attention_moe_expert_up_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.moe_expert_geglu_bits {
+        print_first16("attention_moe_expert_geglu_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.moe_expert_down_bits {
+        print_first16("attention_moe_expert_down_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.post_ffn_norm1_bits {
+        print_first16("attention_post_ffn_norm1_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.moe_expert_out_bits {
+        print_first16("attention_moe_expert_out_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.moe_post_ffn_norm2_bits {
+        print_first16("attention_moe_post_ffn_norm2_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.moe_merge_bits {
+        print_first16("attention_moe_merge_first16_f32_bits", bits);
+    }
+    if let Some(bits) = &artifacts.post_ffn_residual_bits {
+        print_first16("attention_post_ffn_residual_first16_f32_bits", bits);
+    }
+    println!("status=ok");
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Layer0CachedStage {
+    AttentionOproj = 0,
+    PostAttentionResidual = 1,
+    PreFeedforwardNorm = 2,
+    DenseGate = 3,
+    DenseUp = 4,
+    DenseGeGlu = 5,
+    DenseDown = 6,
+    PostFfnNorm1 = 7,
+    Router = 8,
+    MoeExpertGate = 9,
+    MoeExpertUp = 10,
+    MoeExpertGeGlu = 11,
+    MoeExpertDown = 12,
+    MoeExpertOut = 13,
+    MoePostFfnNorm2 = 14,
+    MoeMerge = 15,
+    PostFfnResidual = 16,
+}
+
+impl Layer0CachedStage {
+    const fn bit(self) -> u32 {
+        1u32 << (self as u8)
+    }
+
+    pub const fn cli_flag(self) -> &'static str {
+        match self {
+            Self::AttentionOproj => "--oproj",
+            Self::PostAttentionResidual => "--residual",
+            Self::PreFeedforwardNorm => "--pre-ffn-norm",
+            Self::DenseGate => "--dense-gate",
+            Self::DenseUp => "--dense-up",
+            Self::DenseGeGlu => "--dense-geglu",
+            Self::DenseDown => "--dense-down",
+            Self::PostFfnNorm1 => "--post-ffn-norm1",
+            Self::Router => "--router",
+            Self::MoeExpertGate => "--moe-expert-gate",
+            Self::MoeExpertUp => "--moe-expert-up",
+            Self::MoeExpertGeGlu => "--moe-expert-geglu",
+            Self::MoeExpertDown => "--moe-expert-down",
+            Self::MoeExpertOut => "--moe-expert-out",
+            Self::MoePostFfnNorm2 => "--moe-post-ffn-norm2",
+            Self::MoeMerge => "--moe-merge",
+            Self::PostFfnResidual => "--post-ffn-residual",
+        }
+    }
+
+    pub const fn stage_name(self) -> &'static str {
+        match self {
+            Self::AttentionOproj => "attention_oproj_cached",
+            Self::PostAttentionResidual => "attention_post_attn_residual_cached",
+            Self::PreFeedforwardNorm => "attention_pre_ffn_norm_cached",
+            Self::DenseGate => "attention_pre_ffn_gate_cached",
+            Self::DenseUp => "attention_pre_ffn_up_cached",
+            Self::DenseGeGlu => "attention_pre_ffn_geglu_cached",
+            Self::DenseDown => "attention_pre_ffn_down_cached",
+            Self::PostFfnNorm1 => "attention_post_ffn_norm1_cached",
+            Self::Router => "attention_router_cached",
+            Self::MoeExpertGate => "attention_moe_expert_gate_cached",
+            Self::MoeExpertUp => "attention_moe_expert_up_cached",
+            Self::MoeExpertGeGlu => "attention_moe_expert_geglu_cached",
+            Self::MoeExpertDown => "attention_moe_expert_down_cached",
+            Self::MoeExpertOut => "attention_moe_expert_out_cached",
+            Self::MoePostFfnNorm2 => "attention_moe_post_ffn_norm2_cached",
+            Self::MoeMerge => "attention_moe_merge_cached",
+            Self::PostFfnResidual => "attention_post_ffn_residual_cached",
+        }
+    }
+
+    pub fn from_cli_flag(flag: &str) -> Option<Self> {
+        match flag {
+            "--oproj" => Some(Self::AttentionOproj),
+            "--residual" => Some(Self::PostAttentionResidual),
+            "--pre-ffn-norm" => Some(Self::PreFeedforwardNorm),
+            "--dense-gate" => Some(Self::DenseGate),
+            "--dense-up" => Some(Self::DenseUp),
+            "--dense-geglu" => Some(Self::DenseGeGlu),
+            "--dense-down" => Some(Self::DenseDown),
+            "--post-ffn-norm1" => Some(Self::PostFfnNorm1),
+            "--router" => Some(Self::Router),
+            "--moe-expert-gate" => Some(Self::MoeExpertGate),
+            "--moe-expert-up" => Some(Self::MoeExpertUp),
+            "--moe-expert-geglu" => Some(Self::MoeExpertGeGlu),
+            "--moe-expert-down" => Some(Self::MoeExpertDown),
+            "--moe-expert-out" => Some(Self::MoeExpertOut),
+            "--moe-post-ffn-norm2" => Some(Self::MoePostFfnNorm2),
+            "--moe-merge" => Some(Self::MoeMerge),
+            "--post-ffn-residual" | "--layer-output" => Some(Self::PostFfnResidual),
+            _ => None,
+        }
+    }
+}
+
+const LAYER0_CACHED_EVALUATION_ORDER: [Layer0CachedStage; 17] = [
+    Layer0CachedStage::AttentionOproj,
+    Layer0CachedStage::PostAttentionResidual,
+    Layer0CachedStage::PreFeedforwardNorm,
+    Layer0CachedStage::DenseGate,
+    Layer0CachedStage::DenseUp,
+    Layer0CachedStage::DenseGeGlu,
+    Layer0CachedStage::DenseDown,
+    Layer0CachedStage::PostFfnNorm1,
+    Layer0CachedStage::Router,
+    Layer0CachedStage::MoeExpertGate,
+    Layer0CachedStage::MoeExpertUp,
+    Layer0CachedStage::MoeExpertGeGlu,
+    Layer0CachedStage::MoeExpertDown,
+    Layer0CachedStage::MoeExpertOut,
+    Layer0CachedStage::MoePostFfnNorm2,
+    Layer0CachedStage::MoeMerge,
+    Layer0CachedStage::PostFfnResidual,
+];
+
+const LAYER0_CACHED_DISPLAY_ORDER: [Layer0CachedStage; 17] = [
+    Layer0CachedStage::PostFfnResidual,
+    Layer0CachedStage::MoeMerge,
+    Layer0CachedStage::MoePostFfnNorm2,
+    Layer0CachedStage::MoeExpertOut,
+    Layer0CachedStage::PostFfnNorm1,
+    Layer0CachedStage::DenseDown,
+    Layer0CachedStage::MoeExpertDown,
+    Layer0CachedStage::MoeExpertGeGlu,
+    Layer0CachedStage::MoeExpertUp,
+    Layer0CachedStage::MoeExpertGate,
+    Layer0CachedStage::DenseGeGlu,
+    Layer0CachedStage::DenseUp,
+    Layer0CachedStage::DenseGate,
+    Layer0CachedStage::Router,
+    Layer0CachedStage::PreFeedforwardNorm,
+    Layer0CachedStage::PostAttentionResidual,
+    Layer0CachedStage::AttentionOproj,
+];
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Layer0CachedPlan {
+    mask: u32,
+}
+
+impl Layer0CachedPlan {
+    pub const fn new() -> Self {
+        Self { mask: 0 }
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.mask == 0
+    }
+
+    pub const fn requires(self, stage: Layer0CachedStage) -> bool {
+        (self.mask & stage.bit()) != 0
+    }
+
+    pub fn require_stage(&mut self, stage: Layer0CachedStage) {
+        match stage {
+            Layer0CachedStage::AttentionOproj => {}
+            Layer0CachedStage::PostAttentionResidual => {
+                self.require_stage(Layer0CachedStage::AttentionOproj);
+            }
+            Layer0CachedStage::PreFeedforwardNorm => {
+                self.require_stage(Layer0CachedStage::PostAttentionResidual);
+            }
+            Layer0CachedStage::DenseGate | Layer0CachedStage::DenseUp => {
+                self.require_stage(Layer0CachedStage::PreFeedforwardNorm);
+            }
+            Layer0CachedStage::DenseGeGlu => {
+                self.require_stage(Layer0CachedStage::DenseGate);
+                self.require_stage(Layer0CachedStage::DenseUp);
+            }
+            Layer0CachedStage::DenseDown => {
+                self.require_stage(Layer0CachedStage::DenseGeGlu);
+            }
+            Layer0CachedStage::PostFfnNorm1 => {
+                self.require_stage(Layer0CachedStage::DenseDown);
+            }
+            Layer0CachedStage::Router => {
+                self.require_stage(Layer0CachedStage::PostAttentionResidual);
+            }
+            Layer0CachedStage::MoeExpertGate => {
+                self.require_stage(Layer0CachedStage::Router);
+            }
+            Layer0CachedStage::MoeExpertUp => {
+                self.require_stage(Layer0CachedStage::MoeExpertGate);
+            }
+            Layer0CachedStage::MoeExpertGeGlu => {
+                self.require_stage(Layer0CachedStage::MoeExpertUp);
+            }
+            Layer0CachedStage::MoeExpertDown => {
+                self.require_stage(Layer0CachedStage::MoeExpertGeGlu);
+            }
+            Layer0CachedStage::MoeExpertOut => {
+                self.require_stage(Layer0CachedStage::MoeExpertDown);
+            }
+            Layer0CachedStage::MoePostFfnNorm2 => {
+                self.require_stage(Layer0CachedStage::MoeExpertOut);
+            }
+            Layer0CachedStage::MoeMerge => {
+                self.require_stage(Layer0CachedStage::PostFfnNorm1);
+                self.require_stage(Layer0CachedStage::MoePostFfnNorm2);
+            }
+            Layer0CachedStage::PostFfnResidual => {
+                self.require_stage(Layer0CachedStage::MoeMerge);
+            }
+        }
+        self.mask |= stage.bit();
+    }
+
+    pub fn evaluation_order(self) -> Vec<Layer0CachedStage> {
+        LAYER0_CACHED_EVALUATION_ORDER
+            .iter()
+            .copied()
+            .filter(|stage| self.requires(*stage))
+            .collect()
+    }
+
+    pub fn display_stage(self) -> Option<Layer0CachedStage> {
+        LAYER0_CACHED_DISPLAY_ORDER
+            .iter()
+            .copied()
+            .find(|stage| self.requires(*stage))
+    }
+}
+
 pub fn run_cli() -> Result<(), Box<dyn Error>> {
     let mut model_path = default_model_path();
-    let mut validate_oproj = false;
-    let mut validate_residual = false;
-    let mut validate_pre_ffn_norm = false;
-    let mut validate_dense_gate = false;
-    let mut validate_dense_up = false;
-    let mut validate_dense_geglu = false;
-    let mut validate_dense_down = false;
-    let mut validate_router = false;
+    let mut layer_idx = 0usize;
+    let mut plan = Layer0CachedPlan::new();
+    let mut prefill_token_ids = Vec::<u32>::new();
+    let mut decode_token_id = None;
+    let mut prefill_input_f32_files = Vec::<PathBuf>::new();
+    let mut decode_input_f32_file = None;
+    let mut write_prefill_layer_output_f32_file = None;
+    let mut write_layer_output_f32_file = None;
+    let mut prefill_rope_offset = PREFILL_ROPE_OFFSET;
+    let mut decode_rope_offset = DECODE_ROPE_OFFSET;
     let mut args_iter = env::args().skip(1);
     while let Some(arg) = args_iter.next() {
+        if let Some(stage) = Layer0CachedStage::from_cli_flag(arg.as_str()) {
+            plan.require_stage(stage);
+            continue;
+        }
         match arg.as_str() {
-            "--oproj" => {
-                validate_oproj = true;
-            }
-            "--residual" => {
-                validate_residual = true;
-                validate_oproj = true;
-            }
-            "--pre-ffn-norm" => {
-                validate_pre_ffn_norm = true;
-                validate_residual = true;
-                validate_oproj = true;
-            }
-            "--dense-gate" => {
-                validate_dense_gate = true;
-                validate_pre_ffn_norm = true;
-                validate_residual = true;
-                validate_oproj = true;
-            }
-            "--dense-up" => {
-                validate_dense_up = true;
-                validate_pre_ffn_norm = true;
-                validate_residual = true;
-                validate_oproj = true;
-            }
-            "--dense-geglu" => {
-                validate_dense_geglu = true;
-                validate_dense_gate = true;
-                validate_dense_up = true;
-                validate_pre_ffn_norm = true;
-                validate_residual = true;
-                validate_oproj = true;
-            }
-            "--dense-down" => {
-                validate_dense_down = true;
-                validate_dense_geglu = true;
-                validate_dense_gate = true;
-                validate_dense_up = true;
-                validate_pre_ffn_norm = true;
-                validate_residual = true;
-                validate_oproj = true;
-            }
-            "--router" => {
-                validate_router = true;
-                validate_residual = true;
-                validate_oproj = true;
-            }
             "-h" | "--help" => {
                 eprintln!(
-                    "Usage: metal_qkv_attention_output_cached_row [model.safetensors] [--oproj] [--residual] [--pre-ffn-norm] [--dense-gate] [--dense-up] [--dense-geglu] [--dense-down] [--router]"
+                    "Usage: metal_qkv_attention_output_cached_row [model.safetensors] [--layer N] [--prefill-token ID] [--prefill-tokens ID,ID,...] [--decode-token ID] [--prefill-input-f32-file PATH] [--prefill-input-f32-files PATH,PATH,...] [--decode-input-f32-file PATH] [--write-prefill-layer-output-f32-file PATH] [--write-layer-output-f32-file PATH] [--prefill-position N] [--decode-position N] [--oproj] [--residual] [--pre-ffn-norm] [--dense-gate] [--dense-up] [--dense-geglu] [--dense-down] [--post-ffn-norm1] [--router] [--moe-expert-gate] [--moe-expert-up] [--moe-expert-geglu] [--moe-expert-down] [--moe-expert-out] [--moe-post-ffn-norm2] [--moe-merge] [--post-ffn-residual|--layer-output]"
                 );
                 return Ok(());
+            }
+            "--layer" => {
+                let value = args_iter.next().ok_or("--layer expects a value")?;
+                layer_idx = value.parse()?;
+            }
+            "--prefill-token" => {
+                let value = args_iter
+                    .next()
+                    .ok_or("--prefill-token expects a value")?;
+                prefill_token_ids.push(value.parse()?);
+            }
+            "--prefill-tokens" => {
+                let value = args_iter
+                    .next()
+                    .ok_or("--prefill-tokens expects a value")?;
+                for token in value.split(',').filter(|token| !token.is_empty()) {
+                    prefill_token_ids.push(token.parse()?);
+                }
+            }
+            "--decode-token" => {
+                let value = args_iter
+                    .next()
+                    .ok_or("--decode-token expects a value")?;
+                decode_token_id = Some(value.parse()?);
+            }
+            "--prefill-input-f32-file" => {
+                let value = args_iter
+                    .next()
+                    .ok_or("--prefill-input-f32-file expects a value")?;
+                prefill_input_f32_files.push(PathBuf::from(value));
+            }
+            "--prefill-input-f32-files" => {
+                let value = args_iter
+                    .next()
+                    .ok_or("--prefill-input-f32-files expects a value")?;
+                for path in value.split(',').filter(|path| !path.is_empty()) {
+                    prefill_input_f32_files.push(PathBuf::from(path));
+                }
+            }
+            "--decode-input-f32-file" => {
+                let value = args_iter
+                    .next()
+                    .ok_or("--decode-input-f32-file expects a value")?;
+                decode_input_f32_file = Some(PathBuf::from(value));
+            }
+            "--write-prefill-layer-output-f32-file" => {
+                let value = args_iter
+                    .next()
+                    .ok_or("--write-prefill-layer-output-f32-file expects a value")?;
+                write_prefill_layer_output_f32_file = Some(PathBuf::from(value));
+            }
+            "--write-layer-output-f32-file" => {
+                let value = args_iter
+                    .next()
+                    .ok_or("--write-layer-output-f32-file expects a value")?;
+                write_layer_output_f32_file = Some(PathBuf::from(value));
+            }
+            "--prefill-position" => {
+                let value = args_iter
+                    .next()
+                    .ok_or("--prefill-position expects a value")?;
+                prefill_rope_offset = value.parse()?;
+            }
+            "--decode-position" => {
+                let value = args_iter
+                    .next()
+                    .ok_or("--decode-position expects a value")?;
+                decode_rope_offset = value.parse()?;
             }
             _ if arg.starts_with("--") => {
                 return Err(format!("unknown option {arg}").into());
@@ -847,233 +5497,394 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let header = MlxSafetensorsHeader::load(&model_path)?;
-    let runtime = MetalRuntime::new().map_err(|err| format!("MetalRuntime::new failed: {err}"))?;
-    if !runtime.features().has_bfloat {
-        return Err("Metal device does not report BF16 support".into());
+    let using_file_inputs =
+        !prefill_input_f32_files.is_empty() || decode_input_f32_file.is_some();
+    let using_token_inputs = !prefill_token_ids.is_empty() || decode_token_id.is_some();
+    if using_file_inputs && using_token_inputs {
+        return Err(
+            "choose either token-id inputs or f32 hidden-state inputs, not both".into(),
+        );
     }
 
-    let input_norm_weight_bytes = header.read_tensor_bytes(INPUT_NORM_WEIGHT_NAME)?;
-    let q_weight_bytes = header.read_tensor_bytes(Q_PATH_ORACLE.weight_name)?;
-    let q_scales_bytes = header.read_tensor_bytes(Q_PATH_ORACLE.scales_name)?;
-    let q_biases_bytes = header.read_tensor_bytes(Q_PATH_ORACLE.biases_name)?;
-    let q_norm_weight_bytes = header.read_tensor_bytes(Q_PATH_ORACLE.norm_weight_name.unwrap())?;
-    let k_weight_bytes = header.read_tensor_bytes(K_PATH_ORACLE.weight_name)?;
-    let k_scales_bytes = header.read_tensor_bytes(K_PATH_ORACLE.scales_name)?;
-    let k_biases_bytes = header.read_tensor_bytes(K_PATH_ORACLE.biases_name)?;
-    let k_norm_weight_bytes = header.read_tensor_bytes(K_PATH_ORACLE.norm_weight_name.unwrap())?;
-    let v_weight_bytes = header.read_tensor_bytes(V_PATH_ORACLE.weight_name)?;
-    let v_scales_bytes = header.read_tensor_bytes(V_PATH_ORACLE.scales_name)?;
-    let v_biases_bytes = header.read_tensor_bytes(V_PATH_ORACLE.biases_name)?;
-    let o_weight_bytes = if validate_oproj {
-        Some(header.read_tensor_bytes(O_PROJ_WEIGHT_NAME)?)
+    let artifacts = if !using_file_inputs && !using_token_inputs {
+        run_layer_plan(model_path, layer_idx, CachedLayerInputs::synthetic_case(), plan)?
+    } else if using_file_inputs {
+        let decode_input_f32_file = decode_input_f32_file
+            .ok_or("--decode-input-f32-file must be provided with f32 hidden-state inputs")?;
+        if prefill_input_f32_files.is_empty() {
+            return Err("at least one --prefill-input-f32-file is required".into());
+        }
+        let prefill_input_words_list = prefill_input_f32_files
+            .iter()
+            .map(|path| read_f32_file_as_bf16_words(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let decode_input_words = read_f32_file_as_bf16_words(&decode_input_f32_file)?;
+        run_layer_plan_from_sequence(
+            model_path,
+            layer_idx,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list,
+                decode_input_words,
+                prefill_rope_offset,
+                decode_rope_offset,
+                validate_against_oracle: false,
+            },
+            plan,
+        )?
     } else {
-        None
+        let decode_token_id = decode_token_id.ok_or(
+            "--decode-token must be provided when using --prefill-token or --prefill-tokens",
+        )?;
+        let mut session = LayerExecutionSession::load(model_path.clone())?;
+        let prefill_input_words_list = prefill_token_ids
+            .iter()
+            .copied()
+            .map(|token_id| session.weights.embed_token_bf16_words(token_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        if prefill_input_words_list.is_empty() {
+            return Err("at least one prefill token is required".into());
+        }
+        let decode_input_words = session.weights.embed_token_bf16_words(decode_token_id)?;
+        run_layer_plan_with_session_from_sequence(
+            &mut session,
+            layer_idx,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list,
+                decode_input_words,
+                prefill_rope_offset,
+                decode_rope_offset,
+                validate_against_oracle: false,
+            },
+            plan,
+        )?
     };
-    let o_scales_bytes = if validate_oproj {
-        Some(header.read_tensor_bytes(O_PROJ_SCALES_NAME)?)
-    } else {
-        None
-    };
-    let o_biases_bytes = if validate_oproj {
-        Some(header.read_tensor_bytes(O_PROJ_BIASES_NAME)?)
-    } else {
-        None
-    };
-    let post_attention_norm_weight_bytes = if validate_residual {
-        Some(header.read_tensor_bytes(POST_ATTENTION_NORM_WEIGHT_NAME)?)
-    } else {
-        None
-    };
-    let pre_feedforward_norm_weight_bytes = if validate_pre_ffn_norm {
-        Some(header.read_tensor_bytes(PRE_FEEDFORWARD_NORM_WEIGHT_NAME)?)
-    } else {
-        None
-    };
-    let mlp_gate_weight_bytes = if validate_dense_gate {
-        Some(header.read_tensor_bytes(MLP_GATE_WEIGHT_NAME)?)
-    } else {
-        None
-    };
-    let mlp_gate_scales_bytes = if validate_dense_gate {
-        Some(header.read_tensor_bytes(MLP_GATE_SCALES_NAME)?)
-    } else {
-        None
-    };
-    let mlp_gate_biases_bytes = if validate_dense_gate {
-        Some(header.read_tensor_bytes(MLP_GATE_BIASES_NAME)?)
-    } else {
-        None
-    };
-    let mlp_up_weight_bytes = if validate_dense_up {
-        Some(header.read_tensor_bytes(MLP_UP_WEIGHT_NAME)?)
-    } else {
-        None
-    };
-    let mlp_up_scales_bytes = if validate_dense_up {
-        Some(header.read_tensor_bytes(MLP_UP_SCALES_NAME)?)
-    } else {
-        None
-    };
-    let mlp_up_biases_bytes = if validate_dense_up {
-        Some(header.read_tensor_bytes(MLP_UP_BIASES_NAME)?)
-    } else {
-        None
-    };
-    let mlp_down_weight_bytes = if validate_dense_down {
-        Some(header.read_tensor_bytes(MLP_DOWN_WEIGHT_NAME)?)
-    } else {
-        None
-    };
-    let mlp_down_scales_bytes = if validate_dense_down {
-        Some(header.read_tensor_bytes(MLP_DOWN_SCALES_NAME)?)
-    } else {
-        None
-    };
-    let mlp_down_biases_bytes = if validate_dense_down {
-        Some(header.read_tensor_bytes(MLP_DOWN_BIASES_NAME)?)
-    } else {
-        None
-    };
-    let router_scale_bytes = if validate_router {
-        Some(header.read_tensor_bytes(ROUTER_SCALE_NAME)?)
-    } else {
-        None
-    };
-    let router_proj_weight_bytes = if validate_router {
-        Some(header.read_tensor_bytes(ROUTER_PROJ_WEIGHT_NAME)?)
-    } else {
-        None
-    };
-    let router_proj_scales_bytes = if validate_router {
-        Some(header.read_tensor_bytes(ROUTER_PROJ_SCALES_NAME)?)
-    } else {
-        None
-    };
-    let router_proj_biases_bytes = if validate_router {
-        Some(header.read_tensor_bytes(ROUTER_PROJ_BIASES_NAME)?)
-    } else {
-        None
-    };
-    let router_per_expert_scale_words = if validate_router {
-        Some(header.read_bf16_tensor_words(ROUTER_PER_EXPERT_SCALE_NAME)?)
-    } else {
-        None
-    };
+    print_cached_artifacts(&artifacts);
+    if let Some(path) = write_prefill_layer_output_f32_file {
+        let prefill_words = artifacts
+            .prefill_layer_output_bf16_words()
+            .ok_or("--write-prefill-layer-output-f32-file requires prefill post-ffn residual output")?;
+        write_bf16_words_as_f32_file(&path, &prefill_words)?;
+        println!("prefill_layer_output_f32_file={}", path.display());
+    }
+    if let Some(path) = write_layer_output_f32_file {
+        let decode_words = artifacts
+            .bf16_words_for_stage(Layer0CachedStage::PostFfnResidual)
+            .ok_or("--write-layer-output-f32-file requires post-ffn residual output")?;
+        write_bf16_words_as_f32_file(&path, &decode_words)?;
+        println!("layer_output_f32_file={}", path.display());
+    }
+    Ok(())
+}
 
-    let q_weight_entry = header.tensor(Q_PATH_ORACLE.weight_name).ok_or("missing q projection weight entry")?;
-    let q_scales_entry = header.tensor(Q_PATH_ORACLE.scales_name).ok_or("missing q projection scales entry")?;
-    let q_norm_weight_entry = header.tensor(Q_PATH_ORACLE.norm_weight_name.unwrap()).ok_or("missing q norm weight entry")?;
-    let k_weight_entry = header.tensor(K_PATH_ORACLE.weight_name).ok_or("missing k projection weight entry")?;
-    let k_scales_entry = header.tensor(K_PATH_ORACLE.scales_name).ok_or("missing k projection scales entry")?;
-    let k_norm_weight_entry = header.tensor(K_PATH_ORACLE.norm_weight_name.unwrap()).ok_or("missing k norm weight entry")?;
-    let v_weight_entry = header.tensor(V_PATH_ORACLE.weight_name).ok_or("missing v projection weight entry")?;
-    let v_scales_entry = header.tensor(V_PATH_ORACLE.scales_name).ok_or("missing v projection scales entry")?;
+pub fn run_plan(
+    model_path: PathBuf,
+    plan: Layer0CachedPlan,
+) -> Result<Layer0CachedArtifacts, Box<dyn Error>> {
+    run_layer_plan(model_path, 0, CachedLayerInputs::synthetic_case(), plan)
+}
+
+pub fn run_layer_plan(
+    model_path: PathBuf,
+    layer_idx: usize,
+    inputs: CachedLayerInputs,
+    plan: Layer0CachedPlan,
+) -> Result<Layer0CachedArtifacts, Box<dyn Error>> {
+    let mut session = LayerExecutionSession::load(model_path)?;
+    run_layer_plan_with_session(&mut session, layer_idx, inputs, plan)
+}
+
+pub fn run_layer_plan_from_sequence(
+    model_path: PathBuf,
+    layer_idx: usize,
+    inputs: CachedLayerSequenceInputs,
+    plan: Layer0CachedPlan,
+) -> Result<Layer0CachedArtifacts, Box<dyn Error>> {
+    let mut session = LayerExecutionSession::load(model_path)?;
+    run_layer_plan_with_session_from_sequence(&mut session, layer_idx, inputs, plan)
+}
+
+fn run_layer_plan_with_session(
+    session: &mut LayerExecutionSession,
+    layer_idx: usize,
+    inputs: CachedLayerInputs,
+    plan: Layer0CachedPlan,
+) -> Result<Layer0CachedArtifacts, Box<dyn Error>> {
+    run_layer_plan_with_session_from_sequence(
+        session,
+        layer_idx,
+        CachedLayerSequenceInputs::from_single(inputs),
+        plan,
+    )
+}
+
+fn run_layer_plan_with_session_from_sequence(
+    session: &mut LayerExecutionSession,
+    layer_idx: usize,
+    inputs: CachedLayerSequenceInputs,
+    plan: Layer0CachedPlan,
+) -> Result<Layer0CachedArtifacts, Box<dyn Error>> {
+    let validate_oproj = plan.requires(Layer0CachedStage::AttentionOproj);
+    let validate_residual = plan.requires(Layer0CachedStage::PostAttentionResidual);
+    let validate_pre_ffn_norm = plan.requires(Layer0CachedStage::PreFeedforwardNorm);
+    let validate_dense_gate = plan.requires(Layer0CachedStage::DenseGate);
+    let validate_dense_up = plan.requires(Layer0CachedStage::DenseUp);
+    let validate_dense_geglu = plan.requires(Layer0CachedStage::DenseGeGlu);
+    let validate_dense_down = plan.requires(Layer0CachedStage::DenseDown);
+    let validate_post_ffn_norm1 = plan.requires(Layer0CachedStage::PostFfnNorm1);
+    let validate_router = plan.requires(Layer0CachedStage::Router);
+    let validate_moe_expert_gate = plan.requires(Layer0CachedStage::MoeExpertGate);
+    let validate_moe_expert_up = plan.requires(Layer0CachedStage::MoeExpertUp);
+    let validate_moe_expert_geglu = plan.requires(Layer0CachedStage::MoeExpertGeGlu);
+    let validate_moe_expert_down = plan.requires(Layer0CachedStage::MoeExpertDown);
+    let validate_moe_expert_out = plan.requires(Layer0CachedStage::MoeExpertOut);
+    let validate_moe_post_ffn_norm2 = plan.requires(Layer0CachedStage::MoePostFfnNorm2);
+    let validate_moe_merge = plan.requires(Layer0CachedStage::MoeMerge);
+    let validate_post_ffn_residual = plan.requires(Layer0CachedStage::PostFfnResidual);
+
+    let model_path = session.model_path.clone();
+    let weights = session.weights.clone();
+    let runtime = session.runtime.clone();
+    let layer_type = weights
+        .snapshot
+        .config
+        .text_config
+        .layer_types
+        .get(layer_idx)
+        .ok_or_else(|| format!("missing text layer type for layer {layer_idx}"))?;
+    let attention_k_eq_v =
+        weights.snapshot.config.text_config.attention_k_eq_v && layer_type == "full_attention";
+    let layer_names = LayerTensorNames::for_layer(layer_idx, attention_k_eq_v);
+
+    let q_weight_entry = weights
+        .tensor(&layer_names.q.weight_name)
+        .map_err(|_| "missing q projection weight entry")?;
+    let q_scales_entry = weights
+        .tensor(&layer_names.q.scales_name)
+        .map_err(|_| "missing q projection scales entry")?;
+    let q_norm_weight_entry = weights
+        .tensor(
+            layer_names
+                .q
+                .norm_weight_name
+                .as_deref()
+                .ok_or("missing q norm weight name")?,
+        )
+        .map_err(|_| "missing q norm weight entry")?;
+    let k_weight_entry = weights
+        .tensor(&layer_names.k.weight_name)
+        .map_err(|_| "missing k projection weight entry")?;
+    let k_scales_entry = weights
+        .tensor(&layer_names.k.scales_name)
+        .map_err(|_| "missing k projection scales entry")?;
+    let k_norm_weight_entry = weights
+        .tensor(
+            layer_names
+                .k
+                .norm_weight_name
+                .as_deref()
+                .ok_or("missing k norm weight name")?,
+        )
+        .map_err(|_| "missing k norm weight entry")?;
+    let v_weight_entry = weights
+        .tensor(&layer_names.v.weight_name)
+        .map_err(|_| "missing v projection weight entry")?;
+    let v_scales_entry = weights
+        .tensor(&layer_names.v.scales_name)
+        .map_err(|_| "missing v projection scales entry")?;
     let o_weight_entry = if validate_oproj {
-        Some(header.tensor(O_PROJ_WEIGHT_NAME).ok_or("missing o_proj weight entry")?)
+        Some(
+            weights
+                .tensor(&layer_names.o.weight_name)
+                .map_err(|_| "missing o_proj weight entry")?,
+        )
     } else {
         None
     };
     let o_scales_entry = if validate_oproj {
-        Some(header.tensor(O_PROJ_SCALES_NAME).ok_or("missing o_proj scales entry")?)
+        Some(
+            weights
+                .tensor(&layer_names.o.scales_name)
+                .map_err(|_| "missing o_proj scales entry")?,
+        )
     } else {
         None
     };
     let post_attention_norm_weight_entry = if validate_residual {
         Some(
-            header
-                .tensor(POST_ATTENTION_NORM_WEIGHT_NAME)
-                .ok_or("missing post-attention norm weight entry")?,
+            weights
+                .tensor(&layer_names.post_attention_norm_weight_name)
+                .map_err(|_| "missing post-attention norm weight entry")?,
         )
     } else {
         None
     };
     let pre_feedforward_norm_weight_entry = if validate_pre_ffn_norm {
         Some(
-            header
-                .tensor(PRE_FEEDFORWARD_NORM_WEIGHT_NAME)
-                .ok_or("missing pre-feedforward norm weight entry")?,
+            weights
+                .tensor(&layer_names.pre_feedforward_norm_weight_name)
+                .map_err(|_| "missing pre-feedforward norm weight entry")?,
+        )
+    } else {
+        None
+    };
+    let pre_feedforward_norm2_weight_entry = if validate_moe_expert_gate {
+        Some(
+            weights
+                .tensor(&layer_names.pre_feedforward_norm2_weight_name)
+                .map_err(|_| "missing pre-feedforward norm2 weight entry")?,
+        )
+    } else {
+        None
+    };
+    let post_feedforward_norm1_weight_entry = if validate_post_ffn_norm1 {
+        Some(
+            weights
+                .tensor(&layer_names.post_feedforward_norm1_weight_name)
+                .map_err(|_| "missing post-feedforward norm1 weight entry")?,
+        )
+    } else {
+        None
+    };
+    let post_feedforward_norm2_weight_entry = if validate_moe_post_ffn_norm2 {
+        Some(
+            weights
+                .tensor(&layer_names.post_feedforward_norm2_weight_name)
+                .map_err(|_| "missing post-feedforward norm2 weight entry")?,
         )
     } else {
         None
     };
     let mlp_gate_weight_entry = if validate_dense_gate {
         Some(
-            header
-                .tensor(MLP_GATE_WEIGHT_NAME)
-                .ok_or("missing mlp gate_proj weight entry")?,
+            weights
+                .tensor(&layer_names.mlp_gate_weight_name)
+                .map_err(|_| "missing mlp gate_proj weight entry")?,
         )
     } else {
         None
     };
     let mlp_gate_scales_entry = if validate_dense_gate {
         Some(
-            header
-                .tensor(MLP_GATE_SCALES_NAME)
-                .ok_or("missing mlp gate_proj scales entry")?,
+            weights
+                .tensor(&layer_names.mlp_gate_scales_name)
+                .map_err(|_| "missing mlp gate_proj scales entry")?,
         )
     } else {
         None
     };
     let mlp_up_weight_entry = if validate_dense_up {
         Some(
-            header
-                .tensor(MLP_UP_WEIGHT_NAME)
-                .ok_or("missing mlp up_proj weight entry")?,
+            weights
+                .tensor(&layer_names.mlp_up_weight_name)
+                .map_err(|_| "missing mlp up_proj weight entry")?,
         )
     } else {
         None
     };
     let mlp_up_scales_entry = if validate_dense_up {
         Some(
-            header
-                .tensor(MLP_UP_SCALES_NAME)
-                .ok_or("missing mlp up_proj scales entry")?,
+            weights
+                .tensor(&layer_names.mlp_up_scales_name)
+                .map_err(|_| "missing mlp up_proj scales entry")?,
         )
     } else {
         None
     };
     let mlp_down_weight_entry = if validate_dense_down {
         Some(
-            header
-                .tensor(MLP_DOWN_WEIGHT_NAME)
-                .ok_or("missing mlp down_proj weight entry")?,
+            weights
+                .tensor(&layer_names.mlp_down_weight_name)
+                .map_err(|_| "missing mlp down_proj weight entry")?,
         )
     } else {
         None
     };
     let mlp_down_scales_entry = if validate_dense_down {
         Some(
-            header
-                .tensor(MLP_DOWN_SCALES_NAME)
-                .ok_or("missing mlp down_proj scales entry")?,
+            weights
+                .tensor(&layer_names.mlp_down_scales_name)
+                .map_err(|_| "missing mlp down_proj scales entry")?,
         )
     } else {
         None
     };
     let router_scale_entry = if validate_router {
         Some(
-            header
-                .tensor(ROUTER_SCALE_NAME)
-                .ok_or("missing router scale entry")?,
+            weights
+                .tensor(&layer_names.router_scale_name)
+                .map_err(|_| "missing router scale entry")?,
         )
     } else {
         None
     };
     let router_proj_weight_entry = if validate_router {
         Some(
-            header
-                .tensor(ROUTER_PROJ_WEIGHT_NAME)
-                .ok_or("missing router proj weight entry")?,
+            weights
+                .tensor(&layer_names.router_proj_weight_name)
+                .map_err(|_| "missing router proj weight entry")?,
         )
     } else {
         None
     };
     let router_proj_scales_entry = if validate_router {
         Some(
-            header
-                .tensor(ROUTER_PROJ_SCALES_NAME)
-                .ok_or("missing router proj scales entry")?,
+            weights
+                .tensor(&layer_names.router_proj_scales_name)
+                .map_err(|_| "missing router proj scales entry")?,
+        )
+    } else {
+        None
+    };
+    let expert_gate_weight_entry = if validate_moe_expert_gate {
+        Some(
+            weights
+                .tensor(&layer_names.expert_gate_weight_name)
+                .map_err(|_| "missing expert gate weight entry")?,
+        )
+    } else {
+        None
+    };
+    let expert_gate_scales_entry = if validate_moe_expert_gate {
+        Some(
+            weights
+                .tensor(&layer_names.expert_gate_scales_name)
+                .map_err(|_| "missing expert gate scales entry")?,
+        )
+    } else {
+        None
+    };
+    let expert_up_weight_entry = if validate_moe_expert_up {
+        Some(
+            weights
+                .tensor(&layer_names.expert_up_weight_name)
+                .map_err(|_| "missing expert up weight entry")?,
+        )
+    } else {
+        None
+    };
+    let expert_up_scales_entry = if validate_moe_expert_up {
+        Some(
+            weights
+                .tensor(&layer_names.expert_up_scales_name)
+                .map_err(|_| "missing expert up scales entry")?,
+        )
+    } else {
+        None
+    };
+    let expert_down_weight_entry = if validate_moe_expert_down {
+        Some(
+            weights
+                .tensor(&layer_names.expert_down_weight_name)
+                .map_err(|_| "missing expert down weight entry")?,
+        )
+    } else {
+        None
+    };
+    let expert_down_scales_entry = if validate_moe_expert_down {
+        Some(
+            weights
+                .tensor(&layer_names.expert_down_scales_name)
+                .map_err(|_| "missing expert down scales entry")?,
         )
     } else {
         None
@@ -1093,6 +5904,21 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         0
     };
     let pre_feedforward_norm_len = if let Some(entry) = pre_feedforward_norm_weight_entry {
+        usize::try_from(entry.shape[0])?
+    } else {
+        0
+    };
+    let pre_feedforward_norm2_len = if let Some(entry) = pre_feedforward_norm2_weight_entry {
+        usize::try_from(entry.shape[0])?
+    } else {
+        0
+    };
+    let post_feedforward_norm1_len = if let Some(entry) = post_feedforward_norm1_weight_entry {
+        usize::try_from(entry.shape[0])?
+    } else {
+        0
+    };
+    let post_feedforward_norm2_len = if let Some(entry) = post_feedforward_norm2_weight_entry {
         usize::try_from(entry.shape[0])?
     } else {
         0
@@ -1122,6 +5948,21 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
     } else {
         0
     };
+    let expert_gate_out_len = if let Some(entry) = expert_gate_weight_entry {
+        usize::try_from(entry.shape[1])?
+    } else {
+        0
+    };
+    let expert_up_out_len = if let Some(entry) = expert_up_weight_entry {
+        usize::try_from(entry.shape[1])?
+    } else {
+        0
+    };
+    let expert_down_out_len = if let Some(entry) = expert_down_weight_entry {
+        usize::try_from(entry.shape[1])?
+    } else {
+        0
+    };
     let head_dim = usize::try_from(q_norm_weight_entry.shape[0])?;
     let k_head_dim = usize::try_from(k_norm_weight_entry.shape[0])?;
     if head_dim == 0 || head_dim != k_head_dim {
@@ -1145,6 +5986,41 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         .into());
     }
     let q_heads_per_kv = q_head_count / k_head_count;
+    let rope_params = if layer_type == "full_attention" {
+        &weights
+            .snapshot
+            .config
+            .text_config
+            .rope_parameters
+            .full_attention
+    } else {
+        &weights
+            .snapshot
+            .config
+            .text_config
+            .rope_parameters
+            .sliding_attention
+    };
+    let rope_rotary_dim = if let Some(partial_factor) = rope_params.partial_rotary_factor {
+        let rotary_dim = (head_dim as f32 * partial_factor).round() as usize;
+        if rotary_dim == 0 || rotary_dim > head_dim || rotary_dim % 2 != 0 {
+            return Err(format!(
+                "invalid rope rotary dim {} for layer {} head_dim {} factor {}",
+                rotary_dim, layer_idx, head_dim, partial_factor
+            )
+            .into());
+        }
+        rotary_dim
+    } else {
+        head_dim
+    };
+    let rope_half_dims = rope_rotary_dim / 2;
+    let rope_base = rope_params.rope_theta as f32;
+    let layer_attention_kind = if layer_type == "full_attention" {
+        GemmaAttentionKind::Full
+    } else {
+        GemmaAttentionKind::Sliding
+    };
     if validate_residual && post_attention_norm_len != o_out_len {
         return Err(format!(
             "invalid post-attention norm length: got {} expected {}",
@@ -1196,6 +6072,13 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
             .into());
         }
     }
+    if validate_post_ffn_norm1 && post_feedforward_norm1_len != mlp_down_out_len {
+        return Err(format!(
+            "invalid post-feedforward norm1 length: got {} expected {}",
+            post_feedforward_norm1_len, mlp_down_out_len
+        )
+        .into());
+    }
     if validate_router && router_scale_len != post_attention_norm_len {
         return Err(format!(
             "invalid router scale length: got {} expected {}",
@@ -1210,132 +6093,277 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
+    if validate_moe_expert_gate && pre_feedforward_norm2_len != post_attention_norm_len {
+        return Err(format!(
+            "invalid pre-feedforward norm2 length: got {} expected {}",
+            pre_feedforward_norm2_len, post_attention_norm_len
+        )
+        .into());
+    }
+    if let Some(weight_entry) = expert_gate_weight_entry {
+        let expert_gate_n_in = usize::try_from(weight_entry.shape[2] * 8)?;
+        if expert_gate_n_in != pre_feedforward_norm2_len {
+            return Err(format!(
+                "invalid expert gate input size: got {} expected {}",
+                expert_gate_n_in, pre_feedforward_norm2_len
+            )
+            .into());
+        }
+    }
+    if let Some(weight_entry) = expert_up_weight_entry {
+        let expert_up_n_in = usize::try_from(weight_entry.shape[2] * 8)?;
+        if expert_up_n_in != pre_feedforward_norm2_len {
+            return Err(format!(
+                "invalid expert up input size: got {} expected {}",
+                expert_up_n_in, pre_feedforward_norm2_len
+            )
+            .into());
+        }
+    }
+    if let Some(weight_entry) = expert_down_weight_entry {
+        let expert_down_n_in = usize::try_from(weight_entry.shape[2] * 8)?;
+        if expert_down_n_in != expert_gate_out_len {
+            return Err(format!(
+                "invalid expert down input size: got {} expected {}",
+                expert_down_n_in, expert_gate_out_len
+            )
+            .into());
+        }
+        if expert_down_out_len != pre_feedforward_norm2_len {
+            return Err(format!(
+                "invalid expert down output size: got {} expected {}",
+                expert_down_out_len, pre_feedforward_norm2_len
+            )
+            .into());
+        }
+    }
+    if validate_moe_post_ffn_norm2 && post_feedforward_norm2_len != expert_down_out_len {
+        return Err(format!(
+            "invalid post-feedforward norm2 length: got {} expected {}",
+            post_feedforward_norm2_len, expert_down_out_len
+        )
+        .into());
+    }
 
-    let prefill_x_words = gemma4_qproj_case_input_bf16_words_with_phase(NORM_LEN, PREFILL_ACTIVATION_PHASE);
-    let decode_x_words = gemma4_qproj_case_input_bf16_words_with_phase(NORM_LEN, DECODE_ACTIVATION_PHASE);
+    let CachedLayerSequenceInputs {
+        prefill_input_words_list,
+        decode_input_words: decode_x_words,
+        prefill_rope_offset,
+        decode_rope_offset,
+        validate_against_oracle,
+    } = inputs;
+    if prefill_input_words_list.is_empty() {
+        return Err("cached layer sequence requires at least one prefill input".into());
+    }
+    for (prefill_index, prefill_x_words) in prefill_input_words_list.iter().enumerate() {
+        if prefill_x_words.len() != NORM_LEN {
+            return Err(format!(
+                "prefill input length mismatch at index {}: got {} expected {}",
+                prefill_index,
+                prefill_x_words.len(),
+                NORM_LEN
+            )
+            .into());
+        }
+    }
+    if decode_x_words.len() != NORM_LEN {
+        return Err(format!(
+            "decode input length mismatch: got {} expected {}",
+            decode_x_words.len(),
+            NORM_LEN
+        )
+        .into());
+    }
+    let kv_capacity = prefill_input_words_list.len() + 1;
     let x_buf = runtime.create_buffer(NORM_LEN * 2, BufferStorageMode::Shared)?;
     let input_norm_weight_buf =
-        runtime.create_buffer_with_bytes(&input_norm_weight_bytes, BufferStorageMode::Private)?;
+        session.private_weight_buffer(&layer_names.input_norm_weight_name)?;
     let h_buf = runtime.create_buffer(NORM_LEN * 2, BufferStorageMode::Private)?;
 
-    let q_weight_buf = runtime.create_buffer_with_bytes(&q_weight_bytes, BufferStorageMode::Private)?;
-    let q_scales_buf = runtime.create_buffer_with_bytes(&q_scales_bytes, BufferStorageMode::Private)?;
-    let q_biases_buf = runtime.create_buffer_with_bytes(&q_biases_bytes, BufferStorageMode::Private)?;
-    let q_norm_weight_buf = runtime.create_buffer_with_bytes(&q_norm_weight_bytes, BufferStorageMode::Private)?;
+    let q_weight_buf = session.private_weight_buffer(&layer_names.q.weight_name)?;
+    let q_scales_buf = session.private_weight_buffer(&layer_names.q.scales_name)?;
+    let q_biases_buf = session.private_weight_buffer(&layer_names.q.biases_name)?;
+    let q_norm_weight_buf = session.private_weight_buffer(
+        layer_names
+            .q
+            .norm_weight_name
+            .as_deref()
+            .ok_or("missing q norm weight name")?,
+    )?;
     let q_proj_buf = runtime.create_buffer(q_out_len * 2, BufferStorageMode::Private)?;
     let q_norm_buf = runtime.create_buffer(q_out_len * 2, BufferStorageMode::Private)?;
     let q_rope_buf = runtime.create_buffer(q_out_len * 2, BufferStorageMode::Private)?;
 
-    let k_weight_buf = runtime.create_buffer_with_bytes(&k_weight_bytes, BufferStorageMode::Private)?;
-    let k_scales_buf = runtime.create_buffer_with_bytes(&k_scales_bytes, BufferStorageMode::Private)?;
-    let k_biases_buf = runtime.create_buffer_with_bytes(&k_biases_bytes, BufferStorageMode::Private)?;
-    let k_norm_weight_buf = runtime.create_buffer_with_bytes(&k_norm_weight_bytes, BufferStorageMode::Private)?;
+    let k_weight_buf = session.private_weight_buffer(&layer_names.k.weight_name)?;
+    let k_scales_buf = session.private_weight_buffer(&layer_names.k.scales_name)?;
+    let k_biases_buf = session.private_weight_buffer(&layer_names.k.biases_name)?;
+    let k_norm_weight_buf = session.private_weight_buffer(
+        layer_names
+            .k
+            .norm_weight_name
+            .as_deref()
+            .ok_or("missing k norm weight name")?,
+    )?;
     let k_proj_buf = runtime.create_buffer(k_out_len * 2, BufferStorageMode::Private)?;
     let k_norm_buf = runtime.create_buffer(k_out_len * 2, BufferStorageMode::Private)?;
     let k_rope_buf = runtime.create_buffer(k_out_len * 2, BufferStorageMode::Private)?;
 
-    let v_weight_buf = runtime.create_buffer_with_bytes(&v_weight_bytes, BufferStorageMode::Private)?;
-    let v_scales_buf = runtime.create_buffer_with_bytes(&v_scales_bytes, BufferStorageMode::Private)?;
-    let v_biases_buf = runtime.create_buffer_with_bytes(&v_biases_bytes, BufferStorageMode::Private)?;
+    let v_weight_buf = session.private_weight_buffer(&layer_names.v.weight_name)?;
+    let v_scales_buf = session.private_weight_buffer(&layer_names.v.scales_name)?;
+    let v_biases_buf = session.private_weight_buffer(&layer_names.v.biases_name)?;
     let v_proj_buf = runtime.create_buffer(v_out_len * 2, BufferStorageMode::Private)?;
     let v_norm_buf = runtime.create_buffer(v_out_len * 2, BufferStorageMode::Private)?;
     let ones_bytes = bytes_from_bf16_words(&vec![0x3F80u16; head_dim]);
-    let v_norm_weight_buf = runtime.create_buffer_with_bytes(&ones_bytes, BufferStorageMode::Private)?;
-    let o_weight_buf = if let Some(bytes) = &o_weight_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let o_scales_buf = if let Some(bytes) = &o_scales_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let o_biases_buf = if let Some(bytes) = &o_biases_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let post_attention_norm_weight_buf = if let Some(bytes) = &post_attention_norm_weight_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let pre_feedforward_norm_weight_buf = if let Some(bytes) = &pre_feedforward_norm_weight_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let mlp_gate_weight_buf = if let Some(bytes) = &mlp_gate_weight_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let mlp_gate_scales_buf = if let Some(bytes) = &mlp_gate_scales_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let mlp_gate_biases_buf = if let Some(bytes) = &mlp_gate_biases_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let mlp_up_weight_buf = if let Some(bytes) = &mlp_up_weight_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let mlp_up_scales_buf = if let Some(bytes) = &mlp_up_scales_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let mlp_up_biases_buf = if let Some(bytes) = &mlp_up_biases_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let mlp_down_weight_buf = if let Some(bytes) = &mlp_down_weight_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let mlp_down_scales_buf = if let Some(bytes) = &mlp_down_scales_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let mlp_down_biases_buf = if let Some(bytes) = &mlp_down_biases_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let router_scale_weight_buf = if let Some(bytes) = &router_scale_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let router_proj_weight_buf = if let Some(bytes) = &router_proj_weight_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let router_proj_scales_buf = if let Some(bytes) = &router_proj_scales_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let router_proj_biases_buf = if let Some(bytes) = &router_proj_biases_bytes {
-        Some(runtime.create_buffer_with_bytes(bytes, BufferStorageMode::Private)?)
-    } else {
-        None
-    };
-    let attn_out_buf = if validate_oproj {
-        Some(runtime.create_buffer(q_out_len * 2, BufferStorageMode::Shared)?)
-    } else {
-        None
-    };
+    let v_norm_weight_buf =
+        runtime.create_buffer_with_bytes(&ones_bytes, BufferStorageMode::Private)?;
+    let attention_logits_buf =
+        runtime.create_buffer(q_head_count * kv_capacity * 2, BufferStorageMode::Private)?;
+    let o_weight_buf =
+        optional_private_weight_buffer(session, validate_oproj, &layer_names.o.weight_name)?;
+    let o_scales_buf =
+        optional_private_weight_buffer(session, validate_oproj, &layer_names.o.scales_name)?;
+    let o_biases_buf =
+        optional_private_weight_buffer(session, validate_oproj, &layer_names.o.biases_name)?;
+    let post_attention_norm_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_residual,
+        &layer_names.post_attention_norm_weight_name,
+    )?;
+    let pre_feedforward_norm_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_pre_ffn_norm,
+        &layer_names.pre_feedforward_norm_weight_name,
+    )?;
+    let pre_feedforward_norm2_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_expert_gate,
+        &layer_names.pre_feedforward_norm2_weight_name,
+    )?;
+    let post_feedforward_norm1_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_post_ffn_norm1,
+        &layer_names.post_feedforward_norm1_weight_name,
+    )?;
+    let post_feedforward_norm2_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_post_ffn_norm2,
+        &layer_names.post_feedforward_norm2_weight_name,
+    )?;
+    let mlp_gate_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_dense_gate,
+        &layer_names.mlp_gate_weight_name,
+    )?;
+    let mlp_gate_scales_buf = optional_private_weight_buffer(
+        session,
+        validate_dense_gate,
+        &layer_names.mlp_gate_scales_name,
+    )?;
+    let mlp_gate_biases_buf = optional_private_weight_buffer(
+        session,
+        validate_dense_gate,
+        &layer_names.mlp_gate_biases_name,
+    )?;
+    let mlp_up_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_dense_up,
+        &layer_names.mlp_up_weight_name,
+    )?;
+    let mlp_up_scales_buf = optional_private_weight_buffer(
+        session,
+        validate_dense_up,
+        &layer_names.mlp_up_scales_name,
+    )?;
+    let mlp_up_biases_buf = optional_private_weight_buffer(
+        session,
+        validate_dense_up,
+        &layer_names.mlp_up_biases_name,
+    )?;
+    let mlp_down_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_dense_down,
+        &layer_names.mlp_down_weight_name,
+    )?;
+    let mlp_down_scales_buf = optional_private_weight_buffer(
+        session,
+        validate_dense_down,
+        &layer_names.mlp_down_scales_name,
+    )?;
+    let mlp_down_biases_buf = optional_private_weight_buffer(
+        session,
+        validate_dense_down,
+        &layer_names.mlp_down_biases_name,
+    )?;
+    let router_scale_weight_buf =
+        optional_private_weight_buffer(session, validate_router, &layer_names.router_scale_name)?;
+    let router_proj_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_router,
+        &layer_names.router_proj_weight_name,
+    )?;
+    let router_proj_scales_buf = optional_private_weight_buffer(
+        session,
+        validate_router,
+        &layer_names.router_proj_scales_name,
+    )?;
+    let router_proj_biases_buf = optional_private_weight_buffer(
+        session,
+        validate_router,
+        &layer_names.router_proj_biases_name,
+    )?;
+    let router_per_expert_scale_buf = optional_private_weight_buffer(
+        session,
+        validate_router,
+        &layer_names.router_per_expert_scale_name,
+    )?;
+    let expert_gate_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_expert_gate,
+        &layer_names.expert_gate_weight_name,
+    )?;
+    let expert_gate_scales_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_expert_gate,
+        &layer_names.expert_gate_scales_name,
+    )?;
+    let expert_gate_biases_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_expert_gate,
+        &layer_names.expert_gate_biases_name,
+    )?;
+    let expert_up_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_expert_up,
+        &layer_names.expert_up_weight_name,
+    )?;
+    let expert_up_scales_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_expert_up,
+        &layer_names.expert_up_scales_name,
+    )?;
+    let expert_up_biases_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_expert_up,
+        &layer_names.expert_up_biases_name,
+    )?;
+    let expert_down_weight_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_expert_down,
+        &layer_names.expert_down_weight_name,
+    )?;
+    let expert_down_scales_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_expert_down,
+        &layer_names.expert_down_scales_name,
+    )?;
+    let expert_down_biases_buf = optional_private_weight_buffer(
+        session,
+        validate_moe_expert_down,
+        &layer_names.expert_down_biases_name,
+    )?;
+    let attention_probs_buf =
+        Some(runtime.create_buffer(q_head_count * kv_capacity * 2, BufferStorageMode::Private)?);
+    let attn_out_buf = Some(runtime.create_buffer(q_out_len * 2, BufferStorageMode::Private)?);
     let o_proj_out_buf = if validate_oproj {
         Some(runtime.create_buffer(o_out_len * 2, BufferStorageMode::Private)?)
     } else {
@@ -1386,6 +6414,83 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
+    let router_probs_out_buf = if validate_router {
+        Some(runtime.create_buffer(router_out_len * 2, BufferStorageMode::Shared)?)
+    } else {
+        None
+    };
+    let pre_feedforward_norm2_out_buf = if validate_moe_expert_gate {
+        Some(runtime.create_buffer(pre_feedforward_norm2_len * 2, BufferStorageMode::Private)?)
+    } else {
+        None
+    };
+    let moe_top_k_indices_buf = if validate_router {
+        Some(runtime.create_buffer(ROUTER_TOP_K * size_of::<u32>(), BufferStorageMode::Shared)?)
+    } else {
+        None
+    };
+    let moe_top_k_weights_buf = if validate_router {
+        Some(runtime.create_buffer(ROUTER_TOP_K * size_of::<u16>(), BufferStorageMode::Shared)?)
+    } else {
+        None
+    };
+    let expert_gate_out_buf = if validate_moe_expert_gate {
+        Some(runtime.create_buffer(
+            ROUTER_TOP_K * expert_gate_out_len * 2,
+            BufferStorageMode::Private,
+        )?)
+    } else {
+        None
+    };
+    let expert_up_out_buf = if validate_moe_expert_up {
+        Some(runtime.create_buffer(
+            ROUTER_TOP_K * expert_up_out_len * 2,
+            BufferStorageMode::Private,
+        )?)
+    } else {
+        None
+    };
+    let expert_geglu_out_buf = if validate_moe_expert_geglu {
+        Some(runtime.create_buffer(
+            ROUTER_TOP_K * expert_gate_out_len * 2,
+            BufferStorageMode::Private,
+        )?)
+    } else {
+        None
+    };
+    let expert_down_out_buf = if validate_moe_expert_down {
+        Some(runtime.create_buffer(
+            ROUTER_TOP_K * expert_down_out_len * 2,
+            BufferStorageMode::Private,
+        )?)
+    } else {
+        None
+    };
+    let post_feedforward_norm1_out_buf = if validate_post_ffn_norm1 {
+        Some(runtime.create_buffer(post_feedforward_norm1_len * 2, BufferStorageMode::Private)?)
+    } else {
+        None
+    };
+    let moe_weighted_out_buf = if validate_moe_post_ffn_norm2 {
+        Some(runtime.create_buffer(post_feedforward_norm2_len * 2, BufferStorageMode::Shared)?)
+    } else {
+        None
+    };
+    let moe_post_ffn_norm2_out_buf = if validate_moe_post_ffn_norm2 {
+        Some(runtime.create_buffer(post_feedforward_norm2_len * 2, BufferStorageMode::Private)?)
+    } else {
+        None
+    };
+    let moe_merge_out_buf = if validate_moe_merge {
+        Some(runtime.create_buffer(post_feedforward_norm1_len * 2, BufferStorageMode::Private)?)
+    } else {
+        None
+    };
+    let post_ffn_residual_out_buf = if validate_post_ffn_residual {
+        Some(runtime.create_buffer(post_feedforward_norm1_len * 2, BufferStorageMode::Private)?)
+    } else {
+        None
+    };
 
     let rms_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
         cache_name: "kernel_mlx_rms_norm_row_bf16".to_string(),
@@ -1423,6 +6528,34 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         nr1: 0,
         nsg: 0,
     })?;
+    let attention_logits_seq_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+        cache_name: "kernel_mlx_gqa_attention_logits_seq_bf16".to_string(),
+        base_name: "kernel_mlx_gqa_attention_logits_seq_bf16".to_string(),
+        constants: Vec::new(),
+        smem_bytes: 0,
+        nr0: 0,
+        nr1: 0,
+        nsg: 0,
+    })?;
+    let attention_softmax_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+        cache_name: "kernel_mlx_softmax_rows_bf16".to_string(),
+        base_name: "kernel_mlx_softmax_rows_bf16".to_string(),
+        constants: Vec::new(),
+        smem_bytes: 0,
+        nr0: 0,
+        nr1: 0,
+        nsg: 0,
+    })?;
+    let attention_weighted_sum_pipeline =
+        runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+        cache_name: "kernel_mlx_gqa_attention_weighted_sum_bf16".to_string(),
+        base_name: "kernel_mlx_gqa_attention_weighted_sum_bf16".to_string(),
+        constants: Vec::new(),
+        smem_bytes: 0,
+        nr0: 0,
+        nr1: 0,
+        nsg: 0,
+    })?;
     let o_proj_fast_pipeline = if validate_oproj {
         Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
             cache_name: "kernel_mlx_affine_qmv_fast_row_bf16".to_string(),
@@ -1449,7 +6582,7 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
-    let geglu_pipeline = if validate_dense_geglu {
+    let geglu_pipeline = if validate_dense_geglu || validate_moe_expert_geglu {
         Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
             cache_name: "kernel_mlx_geglu_row_bf16".to_string(),
             base_name: "kernel_mlx_geglu_row_bf16".to_string(),
@@ -1466,6 +6599,32 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
             cache_name: "kernel_mlx_router_scale_bf16".to_string(),
             base_name: "kernel_mlx_router_scale_bf16".to_string(),
+            constants: Vec::new(),
+            smem_bytes: 0,
+            nr0: 0,
+            nr1: 0,
+            nsg: 0,
+        })?)
+    } else {
+        None
+    };
+    let router_topk_pipeline = if validate_router {
+        Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+            cache_name: "kernel_mlx_router_topk_bf16".to_string(),
+            base_name: "kernel_mlx_router_topk_bf16".to_string(),
+            constants: Vec::new(),
+            smem_bytes: 0,
+            nr0: 0,
+            nr1: 0,
+            nsg: 0,
+        })?)
+    } else {
+        None
+    };
+    let selected_expert_proj_pipeline = if validate_moe_expert_gate {
+        Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+            cache_name: "kernel_mlx_affine_qmv_selected_experts_row_bf16".to_string(),
+            base_name: "kernel_mlx_affine_qmv_selected_experts_row_bf16".to_string(),
             constants: Vec::new(),
             smem_bytes: 0,
             nr0: 0,
@@ -1507,16 +6666,17 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         qparams_per_row: v_scales_entry.shape[1] as u32,
         out_rows: v_out_len as u32,
     };
-    let o_proj_args = if let (Some(weight_entry), Some(scales_entry)) = (o_weight_entry, o_scales_entry) {
-        Some(MlxAffineQprojRowArgs {
-            n_in: q_out_len as u32,
-            weight_words_per_row: weight_entry.shape[1] as u32,
-            qparams_per_row: scales_entry.shape[1] as u32,
-            out_rows: o_out_len as u32,
-        })
-    } else {
-        None
-    };
+    let o_proj_layout =
+        if let (Some(weight_entry), Some(scales_entry)) = (o_weight_entry, o_scales_entry) {
+            Some(ExactMetalQprojLayout {
+                weight_words_per_row: weight_entry.shape[1] as u32,
+                qparams_per_row: scales_entry.shape[1] as u32,
+                out_rows: o_out_len as u32,
+            })
+        } else {
+            None
+        };
+    let o_proj_args = o_proj_layout.map(|layout| layout.row_args(q_out_len as u32));
     let post_attention_norm_args = if validate_residual {
         Some(MlxRmsNormRowArgs {
             n: post_attention_norm_len as u32,
@@ -1604,6 +6764,93 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
+    let router_softmax_args = if validate_router {
+        Some(MlxSoftmaxRowsArgs {
+            row_stride: router_out_len as u32,
+            row_count: 1,
+            seq_len: router_out_len as u32,
+        })
+    } else {
+        None
+    };
+    let router_topk_args = if validate_router {
+        Some(MlxRouterTopKArgs {
+            expert_count: router_out_len as u32,
+            top_k: ROUTER_TOP_K as u32,
+        })
+    } else {
+        None
+    };
+    let pre_feedforward_norm2_args = if validate_moe_expert_gate {
+        Some(MlxRmsNormRowArgs {
+            n: pre_feedforward_norm2_len as u32,
+            eps: EPS,
+        })
+    } else {
+        None
+    };
+    let expert_gate_selected_args = if let (Some(weight_entry), Some(scales_entry)) =
+        (expert_gate_weight_entry, expert_gate_scales_entry)
+    {
+        Some(MlxAffineSelectedExpertsQprojRowArgs {
+            n_in: pre_feedforward_norm2_len as u32,
+            weight_words_per_row: weight_entry.shape[2] as u32,
+            qparams_per_row: scales_entry.shape[2] as u32,
+            out_rows: expert_gate_out_len as u32,
+            input_row_stride: 0,
+        })
+    } else {
+        None
+    };
+    let expert_up_selected_args = if let (Some(weight_entry), Some(scales_entry)) =
+        (expert_up_weight_entry, expert_up_scales_entry)
+    {
+        Some(MlxAffineSelectedExpertsQprojRowArgs {
+            n_in: pre_feedforward_norm2_len as u32,
+            weight_words_per_row: weight_entry.shape[2] as u32,
+            qparams_per_row: scales_entry.shape[2] as u32,
+            out_rows: expert_up_out_len as u32,
+            input_row_stride: 0,
+        })
+    } else {
+        None
+    };
+    let moe_expert_geglu_args = if validate_moe_expert_geglu {
+        Some(MlxGegluRowArgs {
+            n: (ROUTER_TOP_K * expert_gate_out_len) as u32,
+        })
+    } else {
+        None
+    };
+    let expert_down_selected_args = if let (Some(weight_entry), Some(scales_entry)) =
+        (expert_down_weight_entry, expert_down_scales_entry)
+    {
+        Some(MlxAffineSelectedExpertsQprojRowArgs {
+            n_in: expert_gate_out_len as u32,
+            weight_words_per_row: weight_entry.shape[2] as u32,
+            qparams_per_row: scales_entry.shape[2] as u32,
+            out_rows: expert_down_out_len as u32,
+            input_row_stride: expert_gate_out_len as u32,
+        })
+    } else {
+        None
+    };
+    let post_ffn_norm1_args = if validate_post_ffn_norm1 {
+        Some(MlxRmsNormRowArgs {
+            n: post_feedforward_norm1_len as u32,
+            eps: EPS,
+        })
+    } else {
+        None
+    };
+    let moe_post_ffn_norm2_args = if validate_moe_post_ffn_norm2 {
+        Some(MlxRmsNormRowArgs {
+            n: post_feedforward_norm2_len as u32,
+            eps: EPS,
+        })
+    } else {
+        None
+    };
     let q_head_norm_args = MlxRmsNormRowsArgs {
         n: head_dim as u32,
         row_stride: head_dim as u32,
@@ -1624,49 +6871,158 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
     };
 
     let rms_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &x_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &input_norm_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &h_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &x_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &input_norm_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &h_buf,
+            offset_bytes: 0,
+        },
     ];
     let q_proj_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &h_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &q_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &q_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &q_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &q_proj_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &h_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &q_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &q_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &q_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &q_proj_buf,
+            offset_bytes: 0,
+        },
     ];
     let q_head_norm_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &q_proj_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &q_norm_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &q_norm_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &q_proj_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &q_norm_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &q_norm_buf,
+            offset_bytes: 0,
+        },
     ];
     let k_proj_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &h_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &k_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &k_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &k_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &k_proj_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &h_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &k_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &k_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &k_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &k_proj_buf,
+            offset_bytes: 0,
+        },
     ];
     let k_head_norm_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &k_proj_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &k_norm_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &k_norm_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &k_proj_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &k_norm_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &k_norm_buf,
+            offset_bytes: 0,
+        },
     ];
     let v_proj_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &h_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &v_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &v_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &v_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &v_proj_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &h_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &v_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &v_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &v_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &v_proj_buf,
+            offset_bytes: 0,
+        },
     ];
     let v_head_norm_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &v_proj_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &v_norm_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &v_norm_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &v_proj_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &v_norm_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &v_norm_buf,
+            offset_bytes: 0,
+        },
     ];
-    let router_scale_bindings = if let (Some(scale_buf), Some(out_buf)) =
-        (router_scale_weight_buf.as_ref(), router_scaled_out_buf.as_ref())
-    {
+    let router_scale_bindings = if let (Some(scale_buf), Some(out_buf)) = (
+        router_scale_weight_buf.as_ref(),
+        router_scaled_out_buf.as_ref(),
+    ) {
         Some([
             MetalBufferBindingRef {
                 index: 1,
@@ -1689,82 +7045,84 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
-    let mlp_gate_bindings = if let (Some(weight_buf), Some(scales_buf), Some(biases_buf), Some(out_buf)) = (
-        mlp_gate_weight_buf.as_ref(),
-        mlp_gate_scales_buf.as_ref(),
-        mlp_gate_biases_buf.as_ref(),
-        mlp_gate_out_buf.as_ref(),
-    ) {
-        Some([
-            MetalBufferBindingRef {
-                index: 1,
-                buffer: pre_feedforward_norm_out_buf
-                    .as_ref()
-                    .ok_or("missing pre-feedforward norm output buffer")?,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 2,
-                buffer: weight_buf,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 3,
-                buffer: scales_buf,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 4,
-                buffer: biases_buf,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 5,
-                buffer: out_buf,
-                offset_bytes: 0,
-            },
-        ])
-    } else {
-        None
-    };
-    let mlp_up_bindings = if let (Some(weight_buf), Some(scales_buf), Some(biases_buf), Some(out_buf)) = (
-        mlp_up_weight_buf.as_ref(),
-        mlp_up_scales_buf.as_ref(),
-        mlp_up_biases_buf.as_ref(),
-        mlp_up_out_buf.as_ref(),
-    ) {
-        Some([
-            MetalBufferBindingRef {
-                index: 1,
-                buffer: pre_feedforward_norm_out_buf
-                    .as_ref()
-                    .ok_or("missing pre-feedforward norm output buffer")?,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 2,
-                buffer: weight_buf,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 3,
-                buffer: scales_buf,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 4,
-                buffer: biases_buf,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 5,
-                buffer: out_buf,
-                offset_bytes: 0,
-            },
-        ])
-    } else {
-        None
-    };
+    let mlp_gate_bindings =
+        if let (Some(weight_buf), Some(scales_buf), Some(biases_buf), Some(out_buf)) = (
+            mlp_gate_weight_buf.as_ref(),
+            mlp_gate_scales_buf.as_ref(),
+            mlp_gate_biases_buf.as_ref(),
+            mlp_gate_out_buf.as_ref(),
+        ) {
+            Some([
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: pre_feedforward_norm_out_buf
+                        .as_ref()
+                        .ok_or("missing pre-feedforward norm output buffer")?,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: weight_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: scales_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: biases_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: out_buf,
+                    offset_bytes: 0,
+                },
+            ])
+        } else {
+            None
+        };
+    let mlp_up_bindings =
+        if let (Some(weight_buf), Some(scales_buf), Some(biases_buf), Some(out_buf)) = (
+            mlp_up_weight_buf.as_ref(),
+            mlp_up_scales_buf.as_ref(),
+            mlp_up_biases_buf.as_ref(),
+            mlp_up_out_buf.as_ref(),
+        ) {
+            Some([
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: pre_feedforward_norm_out_buf
+                        .as_ref()
+                        .ok_or("missing pre-feedforward norm output buffer")?,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: weight_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: scales_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: biases_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: out_buf,
+                    offset_bytes: 0,
+                },
+            ])
+        } else {
+            None
+        };
     let geglu_bindings = if let (Some(out_buf), Some(gate_buf), Some(up_buf)) = (
         geglu_out_buf.as_ref(),
         mlp_gate_out_buf.as_ref(),
@@ -1790,18 +7148,94 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
-    let mlp_down_bindings = if let (Some(weight_buf), Some(scales_buf), Some(biases_buf), Some(out_buf)) = (
-        mlp_down_weight_buf.as_ref(),
-        mlp_down_scales_buf.as_ref(),
-        mlp_down_biases_buf.as_ref(),
-        mlp_down_out_buf.as_ref(),
+    let mlp_down_bindings =
+        if let (Some(weight_buf), Some(scales_buf), Some(biases_buf), Some(out_buf)) = (
+            mlp_down_weight_buf.as_ref(),
+            mlp_down_scales_buf.as_ref(),
+            mlp_down_biases_buf.as_ref(),
+            mlp_down_out_buf.as_ref(),
+        ) {
+            Some([
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: geglu_out_buf
+                        .as_ref()
+                        .ok_or("missing geglu output buffer")?,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: weight_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: scales_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: biases_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: out_buf,
+                    offset_bytes: 0,
+                },
+            ])
+        } else {
+            None
+        };
+    let router_proj_bindings =
+        if let (Some(weight_buf), Some(scales_buf), Some(biases_buf), Some(out_buf)) = (
+            router_proj_weight_buf.as_ref(),
+            router_proj_scales_buf.as_ref(),
+            router_proj_biases_buf.as_ref(),
+            router_proj_out_buf.as_ref(),
+        ) {
+            Some([
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: router_scaled_out_buf
+                        .as_ref()
+                        .ok_or("missing router scaled output buffer")?,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: weight_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: scales_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: biases_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: out_buf,
+                    offset_bytes: 0,
+                },
+            ])
+        } else {
+            None
+        };
+    let pre_feedforward_norm2_bindings = if let (Some(weight_buf), Some(out_buf)) = (
+        pre_feedforward_norm2_weight_buf.as_ref(),
+        pre_feedforward_norm2_out_buf.as_ref(),
     ) {
         Some([
             MetalBufferBindingRef {
                 index: 1,
-                buffer: geglu_out_buf
+                buffer: residual_out_buf
                     .as_ref()
-                    .ok_or("missing geglu output buffer")?,
+                    .ok_or("missing residual output buffer for pre-feedforward norm2")?,
                 offset_bytes: 0,
             },
             MetalBufferBindingRef {
@@ -1811,16 +7245,6 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
             },
             MetalBufferBindingRef {
                 index: 3,
-                buffer: scales_buf,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 4,
-                buffer: biases_buf,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 5,
                 buffer: out_buf,
                 offset_bytes: 0,
             },
@@ -1828,18 +7252,191 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
-    let router_proj_bindings = if let (Some(weight_buf), Some(scales_buf), Some(biases_buf), Some(out_buf)) = (
-        router_proj_weight_buf.as_ref(),
-        router_proj_scales_buf.as_ref(),
-        router_proj_biases_buf.as_ref(),
-        router_proj_out_buf.as_ref(),
+    let expert_gate_selected_bindings = if let (
+        Some(indices_buf),
+        Some(weight_buf),
+        Some(scales_buf),
+        Some(biases_buf),
+        Some(out_buf),
+    ) = (
+        moe_top_k_indices_buf.as_ref(),
+        expert_gate_weight_buf.as_ref(),
+        expert_gate_scales_buf.as_ref(),
+        expert_gate_biases_buf.as_ref(),
+        expert_gate_out_buf.as_ref(),
     ) {
         Some([
             MetalBufferBindingRef {
                 index: 1,
-                buffer: router_scaled_out_buf
+                buffer: pre_feedforward_norm2_out_buf
                     .as_ref()
-                    .ok_or("missing router scaled output buffer")?,
+                    .ok_or("missing pre-feedforward norm2 output buffer")?,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: indices_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: weight_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 4,
+                buffer: scales_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 5,
+                buffer: biases_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 6,
+                buffer: out_buf,
+                offset_bytes: 0,
+            },
+        ])
+    } else {
+        None
+    };
+    let expert_up_selected_bindings = if let (
+        Some(indices_buf),
+        Some(weight_buf),
+        Some(scales_buf),
+        Some(biases_buf),
+        Some(out_buf),
+    ) = (
+        moe_top_k_indices_buf.as_ref(),
+        expert_up_weight_buf.as_ref(),
+        expert_up_scales_buf.as_ref(),
+        expert_up_biases_buf.as_ref(),
+        expert_up_out_buf.as_ref(),
+    ) {
+        Some([
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: pre_feedforward_norm2_out_buf
+                    .as_ref()
+                    .ok_or("missing pre-feedforward norm2 output buffer")?,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: indices_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: weight_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 4,
+                buffer: scales_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 5,
+                buffer: biases_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 6,
+                buffer: out_buf,
+                offset_bytes: 0,
+            },
+        ])
+    } else {
+        None
+    };
+    let moe_expert_geglu_bindings = if let (Some(out_buf), Some(gate_buf), Some(up_buf)) = (
+        expert_geglu_out_buf.as_ref(),
+        expert_gate_out_buf.as_ref(),
+        expert_up_out_buf.as_ref(),
+    ) {
+        Some([
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: gate_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: up_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: out_buf,
+                offset_bytes: 0,
+            },
+        ])
+    } else {
+        None
+    };
+    let expert_down_selected_bindings = if let (
+        Some(indices_buf),
+        Some(weight_buf),
+        Some(scales_buf),
+        Some(biases_buf),
+        Some(out_buf),
+    ) = (
+        moe_top_k_indices_buf.as_ref(),
+        expert_down_weight_buf.as_ref(),
+        expert_down_scales_buf.as_ref(),
+        expert_down_biases_buf.as_ref(),
+        expert_down_out_buf.as_ref(),
+    ) {
+        Some([
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: expert_geglu_out_buf
+                    .as_ref()
+                    .ok_or("missing expert geglu output buffer")?,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: indices_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: weight_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 4,
+                buffer: scales_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 5,
+                buffer: biases_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 6,
+                buffer: out_buf,
+                offset_bytes: 0,
+            },
+        ])
+    } else {
+        None
+    };
+    let post_ffn_norm1_bindings = if let (Some(weight_buf), Some(out_buf)) = (
+        post_feedforward_norm1_weight_buf.as_ref(),
+        post_feedforward_norm1_out_buf.as_ref(),
+    ) {
+        Some([
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: mlp_down_out_buf
+                    .as_ref()
+                    .ok_or("missing dense down output buffer for post-ffn norm1")?,
                 offset_bytes: 0,
             },
             MetalBufferBindingRef {
@@ -1849,16 +7446,81 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
             },
             MetalBufferBindingRef {
                 index: 3,
-                buffer: scales_buf,
+                buffer: out_buf,
+                offset_bytes: 0,
+            },
+        ])
+    } else {
+        None
+    };
+    let moe_post_ffn_norm2_bindings = if let (Some(weight_buf), Some(out_buf), Some(weighted_buf)) = (
+        post_feedforward_norm2_weight_buf.as_ref(),
+        moe_post_ffn_norm2_out_buf.as_ref(),
+        moe_weighted_out_buf.as_ref(),
+    ) {
+        Some([
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: weighted_buf,
                 offset_bytes: 0,
             },
             MetalBufferBindingRef {
-                index: 4,
-                buffer: biases_buf,
+                index: 2,
+                buffer: weight_buf,
                 offset_bytes: 0,
             },
             MetalBufferBindingRef {
-                index: 5,
+                index: 3,
+                buffer: out_buf,
+                offset_bytes: 0,
+            },
+        ])
+    } else {
+        None
+    };
+    let moe_merge_bindings = if let (Some(dense_buf), Some(moe_buf), Some(out_buf)) = (
+        post_feedforward_norm1_out_buf.as_ref(),
+        moe_post_ffn_norm2_out_buf.as_ref(),
+        moe_merge_out_buf.as_ref(),
+    ) {
+        Some([
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: dense_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: moe_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: out_buf,
+                offset_bytes: 0,
+            },
+        ])
+    } else {
+        None
+    };
+    let post_ffn_residual_bindings = if let (Some(base_buf), Some(merge_buf), Some(out_buf)) = (
+        residual_out_buf.as_ref(),
+        moe_merge_out_buf.as_ref(),
+        post_ffn_residual_out_buf.as_ref(),
+    ) {
+        Some([
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: base_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: merge_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
                 buffer: out_buf,
                 offset_bytes: 0,
             },
@@ -1867,160 +7529,510 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         None
     };
 
-    let rms_threadgroups = MetalSize { width: 1, height: 1, depth: 1 };
-    let rms_threads_per_threadgroup = MetalSize { width: rms_threadgroup_size as u64, height: 1, depth: 1 };
-    let q_proj_threadgroups = MetalSize { width: 1, height: (q_out_len as u64).div_ceil(8), depth: 1 };
-    let q_proj_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let q_head_norm_threadgroups = MetalSize { width: q_head_count as u64, height: 1, depth: 1 };
-    let q_head_norm_threads_per_threadgroup = MetalSize { width: head_norm_threadgroup_size as u64, height: 1, depth: 1 };
-    let k_proj_threadgroups = MetalSize { width: 1, height: (k_out_len as u64).div_ceil(8), depth: 1 };
-    let k_proj_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let k_head_norm_threadgroups = MetalSize { width: k_head_count as u64, height: 1, depth: 1 };
-    let k_head_norm_threads_per_threadgroup = MetalSize { width: head_norm_threadgroup_size as u64, height: 1, depth: 1 };
-    let v_proj_threadgroups = MetalSize { width: 1, height: (v_out_len as u64).div_ceil(8), depth: 1 };
-    let v_proj_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let v_head_norm_threadgroups = MetalSize { width: v_head_count as u64, height: 1, depth: 1 };
-    let v_head_norm_threads_per_threadgroup = MetalSize { width: head_norm_threadgroup_size as u64, height: 1, depth: 1 };
-    let o_proj_threadgroups = MetalSize { width: 1, height: (o_out_len as u64).div_ceil(8), depth: 1 };
-    let o_proj_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let residual_threads_per_threadgroup = MetalSize { width: 256, height: 1, depth: 1 };
+    let rms_threadgroups = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let rms_threads_per_threadgroup = MetalSize {
+        width: rms_threadgroup_size as u64,
+        height: 1,
+        depth: 1,
+    };
+    let q_proj_threadgroups = MetalSize {
+        width: 1,
+        height: (q_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let q_proj_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let q_head_norm_threadgroups = MetalSize {
+        width: q_head_count as u64,
+        height: 1,
+        depth: 1,
+    };
+    let q_head_norm_threads_per_threadgroup = MetalSize {
+        width: head_norm_threadgroup_size as u64,
+        height: 1,
+        depth: 1,
+    };
+    let k_proj_threadgroups = MetalSize {
+        width: 1,
+        height: (k_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let k_proj_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let k_head_norm_threadgroups = MetalSize {
+        width: k_head_count as u64,
+        height: 1,
+        depth: 1,
+    };
+    let k_head_norm_threads_per_threadgroup = MetalSize {
+        width: head_norm_threadgroup_size as u64,
+        height: 1,
+        depth: 1,
+    };
+    let v_proj_threadgroups = MetalSize {
+        width: 1,
+        height: (v_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let v_proj_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let v_head_norm_threadgroups = MetalSize {
+        width: v_head_count as u64,
+        height: 1,
+        depth: 1,
+    };
+    let v_head_norm_threads_per_threadgroup = MetalSize {
+        width: head_norm_threadgroup_size as u64,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_threadgroups = MetalSize {
+        width: 1,
+        height: (o_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let o_proj_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let residual_threads_per_threadgroup = MetalSize {
+        width: 256,
+        height: 1,
+        depth: 1,
+    };
     let residual_threadgroups = MetalSize {
         width: (post_attention_norm_len as u64).div_ceil(residual_threads_per_threadgroup.width),
         height: 1,
         depth: 1,
     };
-    let pre_feedforward_norm_threadgroups = MetalSize { width: 1, height: 1, depth: 1 };
-    let mlp_gate_threadgroups =
-        MetalSize { width: 1, height: (mlp_gate_out_len as u64).div_ceil(8), depth: 1 };
-    let mlp_gate_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let mlp_up_threadgroups =
-        MetalSize { width: 1, height: (mlp_up_out_len as u64).div_ceil(8), depth: 1 };
-    let mlp_up_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let geglu_threads_per_threadgroup = MetalSize { width: 256, height: 1, depth: 1 };
+    let pre_feedforward_norm_threadgroups = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let mlp_gate_threadgroups = MetalSize {
+        width: 1,
+        height: (mlp_gate_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let mlp_gate_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let mlp_up_threadgroups = MetalSize {
+        width: 1,
+        height: (mlp_up_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let mlp_up_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let geglu_threads_per_threadgroup = MetalSize {
+        width: 256,
+        height: 1,
+        depth: 1,
+    };
     let geglu_threadgroups = MetalSize {
         width: (mlp_gate_out_len as u64).div_ceil(geglu_threads_per_threadgroup.width),
         height: 1,
         depth: 1,
     };
-    let mlp_down_threadgroups =
-        MetalSize { width: 1, height: (mlp_down_out_len as u64).div_ceil(8), depth: 1 };
-    let mlp_down_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let router_scale_threads_per_threadgroup = MetalSize { width: 256, height: 1, depth: 1 };
-    let router_scale_threadgroups = MetalSize { width: 1, height: 1, depth: 1 };
-    let router_proj_threadgroups =
-        MetalSize { width: 1, height: (router_out_len as u64).div_ceil(8), depth: 1 };
-    let router_proj_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-
-    let run_projection = |input_words: &[u16], rope_offset: i32| -> Result<(Vec<u32>, Vec<u32>, Vec<u32>), Box<dyn Error>> {
-        runtime.write_buffer(&x_buf, 0, &bytes_from_bf16_words(input_words))?;
-
-        let q_rope_args = MlxRopeSingleArgs {
-            half_dims: (head_dim / 2) as u32,
-            row_stride: head_dim as u32,
-            row_count: q_head_count as u32,
-            offset: rope_offset,
-            scale: ROPE_SCALE,
-            base_log2: ROPE_BASE.log2(),
-        };
-        let k_rope_args = MlxRopeSingleArgs {
-            half_dims: (head_dim / 2) as u32,
-            row_stride: head_dim as u32,
-            row_count: k_head_count as u32,
-            offset: rope_offset,
-            scale: ROPE_SCALE,
-            base_log2: ROPE_BASE.log2(),
-        };
-        let q_rope_bindings = [
-            MetalBufferBindingRef { index: 1, buffer: &q_norm_buf, offset_bytes: 0 },
-            MetalBufferBindingRef { index: 2, buffer: &q_rope_buf, offset_bytes: 0 },
-        ];
-        let k_rope_bindings = [
-            MetalBufferBindingRef { index: 1, buffer: &k_norm_buf, offset_bytes: 0 },
-            MetalBufferBindingRef { index: 2, buffer: &k_rope_buf, offset_bytes: 0 },
-        ];
-        let q_rope_threadgroups = MetalSize { width: ((head_dim / 2) as u64).div_ceil(32), height: q_head_count as u64, depth: 1 };
-        let q_rope_threads_per_threadgroup = MetalSize { width: 32, height: 1, depth: 1 };
-        let k_rope_threadgroups = MetalSize { width: ((head_dim / 2) as u64).div_ceil(32), height: k_head_count as u64, depth: 1 };
-        let k_rope_threads_per_threadgroup = MetalSize { width: 32, height: 1, depth: 1 };
-
-        runtime.begin_command_batch()?;
-        runtime.dispatch_compute(&rms_pipeline, bytes_of(&rms_args), &rms_bindings, &[], rms_threadgroups, rms_threads_per_threadgroup)?;
-        runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&proj_pipeline, bytes_of(&q_proj_args), &q_proj_bindings, &[], q_proj_threadgroups, q_proj_threads_per_threadgroup)?;
-        runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&head_norm_pipeline, bytes_of(&q_head_norm_args), &q_head_norm_bindings, &[], q_head_norm_threadgroups, q_head_norm_threads_per_threadgroup)?;
-        runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&rope_pipeline, bytes_of(&q_rope_args), &q_rope_bindings, &[], q_rope_threadgroups, q_rope_threads_per_threadgroup)?;
-        runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&proj_pipeline, bytes_of(&k_proj_args), &k_proj_bindings, &[], k_proj_threadgroups, k_proj_threads_per_threadgroup)?;
-        runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&head_norm_pipeline, bytes_of(&k_head_norm_args), &k_head_norm_bindings, &[], k_head_norm_threadgroups, k_head_norm_threads_per_threadgroup)?;
-        runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&rope_pipeline, bytes_of(&k_rope_args), &k_rope_bindings, &[], k_rope_threadgroups, k_rope_threads_per_threadgroup)?;
-        runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&proj_pipeline, bytes_of(&v_proj_args), &v_proj_bindings, &[], v_proj_threadgroups, v_proj_threads_per_threadgroup)?;
-        runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&head_norm_pipeline, bytes_of(&v_head_norm_args), &v_head_norm_bindings, &[], v_head_norm_threadgroups, v_head_norm_threads_per_threadgroup)?;
-        runtime.end_command_batch()?;
-        runtime.wait_idle()?;
-
-        let q_bits = decode_bf16_buffer_bits(&runtime.read_buffer(&q_rope_buf, q_out_len * 2)?);
-        let k_bits = decode_bf16_buffer_bits(&runtime.read_buffer(&k_rope_buf, k_out_len * 2)?);
-        let v_bits = decode_bf16_buffer_bits(&runtime.read_buffer(&v_norm_buf, v_out_len * 2)?);
-        Ok((q_bits, k_bits, v_bits))
+    let mlp_down_threadgroups = MetalSize {
+        width: 1,
+        height: (mlp_down_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let mlp_down_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let router_scale_threads_per_threadgroup = MetalSize {
+        width: rms_threadgroup_size as u64,
+        height: 1,
+        depth: 1,
+    };
+    let router_scale_threadgroups = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let router_proj_threadgroups = MetalSize {
+        width: 1,
+        height: (router_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let router_proj_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let router_softmax_threadgroups = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let router_topk_threadgroups = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let router_topk_threads_per_threadgroup = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let expert_gate_selected_threadgroups = MetalSize {
+        width: ROUTER_TOP_K as u64,
+        height: (expert_gate_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let expert_gate_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let expert_up_selected_threadgroups = MetalSize {
+        width: ROUTER_TOP_K as u64,
+        height: (expert_up_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let expert_up_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let moe_expert_geglu_threadgroups = MetalSize {
+        width: ((ROUTER_TOP_K * expert_gate_out_len) as u64)
+            .div_ceil(geglu_threads_per_threadgroup.width),
+        height: 1,
+        depth: 1,
+    };
+    let expert_down_selected_threadgroups = MetalSize {
+        width: ROUTER_TOP_K as u64,
+        height: (expert_down_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let expert_down_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
     };
 
-    let (_, prefill_k_bits, prefill_v_bits) = run_projection(&prefill_x_words, PREFILL_ROPE_OFFSET)?;
-    let (decode_q_bits, decode_k_bits, decode_v_bits) =
-        run_projection(&decode_x_words, DECODE_ROPE_OFFSET)?;
+    let run_projection =
+        |input_words: &[u16],
+         rope_offset: i32|
+         -> Result<(Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>), Box<dyn Error>> {
+            runtime.write_buffer(&x_buf, 0, &bytes_from_bf16_words(input_words))?;
 
-    let mut kv_cache = GemmaKvCache::<f32>::new(GemmaKvCacheSpec::new(
-        GemmaAttentionKind::Full,
+            let q_rope_args = MlxRopeSingleArgs {
+                half_dims: rope_half_dims as u32,
+                row_stride: head_dim as u32,
+                row_count: q_head_count as u32,
+                offset: rope_offset,
+                scale: ROPE_SCALE,
+                base_log2: rope_base.log2(),
+            };
+            let k_rope_args = MlxRopeSingleArgs {
+                half_dims: rope_half_dims as u32,
+                row_stride: head_dim as u32,
+                row_count: k_head_count as u32,
+                offset: rope_offset,
+                scale: ROPE_SCALE,
+                base_log2: rope_base.log2(),
+            };
+            let q_rope_bindings = [
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &q_norm_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &q_rope_buf,
+                    offset_bytes: 0,
+                },
+            ];
+            let k_rope_bindings = [
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: &k_norm_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: &k_rope_buf,
+                    offset_bytes: 0,
+                },
+            ];
+            let q_rope_threadgroups = MetalSize {
+                width: (rope_half_dims as u64).div_ceil(32),
+                height: q_head_count as u64,
+                depth: 1,
+            };
+            let q_rope_threads_per_threadgroup = MetalSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            };
+            let k_rope_threadgroups = MetalSize {
+                width: (rope_half_dims as u64).div_ceil(32),
+                height: k_head_count as u64,
+                depth: 1,
+            };
+            let k_rope_threads_per_threadgroup = MetalSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            };
+
+            runtime.begin_command_batch()?;
+            runtime.dispatch_compute(
+                &rms_pipeline,
+                bytes_of(&rms_args),
+                &rms_bindings,
+                &[],
+                rms_threadgroups,
+                rms_threads_per_threadgroup,
+            )?;
+            runtime.memory_barrier_buffers()?;
+            runtime.dispatch_compute(
+                &proj_pipeline,
+                bytes_of(&q_proj_args),
+                &q_proj_bindings,
+                &[],
+                q_proj_threadgroups,
+                q_proj_threads_per_threadgroup,
+            )?;
+            runtime.memory_barrier_buffers()?;
+            runtime.dispatch_compute(
+                &head_norm_pipeline,
+                bytes_of(&q_head_norm_args),
+                &q_head_norm_bindings,
+                &[],
+                q_head_norm_threadgroups,
+                q_head_norm_threads_per_threadgroup,
+            )?;
+            runtime.memory_barrier_buffers()?;
+            if rope_half_dims * 2 < head_dim {
+                runtime.copy_buffer_range(
+                    &q_norm_buf,
+                    0,
+                    &q_rope_buf,
+                    0,
+                    q_out_len * size_of::<u16>(),
+                )?;
+            }
+            runtime.dispatch_compute(
+                &rope_pipeline,
+                bytes_of(&q_rope_args),
+                &q_rope_bindings,
+                &[],
+                q_rope_threadgroups,
+                q_rope_threads_per_threadgroup,
+            )?;
+            runtime.memory_barrier_buffers()?;
+            runtime.dispatch_compute(
+                &proj_pipeline,
+                bytes_of(&k_proj_args),
+                &k_proj_bindings,
+                &[],
+                k_proj_threadgroups,
+                k_proj_threads_per_threadgroup,
+            )?;
+            runtime.memory_barrier_buffers()?;
+            runtime.dispatch_compute(
+                &head_norm_pipeline,
+                bytes_of(&k_head_norm_args),
+                &k_head_norm_bindings,
+                &[],
+                k_head_norm_threadgroups,
+                k_head_norm_threads_per_threadgroup,
+            )?;
+            runtime.memory_barrier_buffers()?;
+            if rope_half_dims * 2 < head_dim {
+                runtime.copy_buffer_range(
+                    &k_norm_buf,
+                    0,
+                    &k_rope_buf,
+                    0,
+                    k_out_len * size_of::<u16>(),
+                )?;
+            }
+            runtime.dispatch_compute(
+                &rope_pipeline,
+                bytes_of(&k_rope_args),
+                &k_rope_bindings,
+                &[],
+                k_rope_threadgroups,
+                k_rope_threads_per_threadgroup,
+            )?;
+            runtime.memory_barrier_buffers()?;
+            runtime.dispatch_compute(
+                &proj_pipeline,
+                bytes_of(&v_proj_args),
+                &v_proj_bindings,
+                &[],
+                v_proj_threadgroups,
+                v_proj_threads_per_threadgroup,
+            )?;
+            runtime.memory_barrier_buffers()?;
+            runtime.dispatch_compute(
+                &head_norm_pipeline,
+                bytes_of(&v_head_norm_args),
+                &v_head_norm_bindings,
+                &[],
+                v_head_norm_threadgroups,
+                v_head_norm_threads_per_threadgroup,
+            )?;
+            runtime.end_command_batch()?;
+            runtime.wait_idle()?;
+
+            let input_norm_bits =
+                decode_bf16_buffer_bits(&runtime.read_buffer(&h_buf, NORM_LEN * 2)?);
+            let v_proj_bits =
+                decode_bf16_buffer_bits(&runtime.read_buffer(&v_proj_buf, v_out_len * 2)?);
+            let q_bits = decode_bf16_buffer_bits(&runtime.read_buffer(&q_rope_buf, q_out_len * 2)?);
+            let k_bits = decode_bf16_buffer_bits(&runtime.read_buffer(&k_rope_buf, k_out_len * 2)?);
+            let v_bits = decode_bf16_buffer_bits(&runtime.read_buffer(&v_norm_buf, v_out_len * 2)?);
+            Ok((input_norm_bits, v_proj_bits, q_bits, k_bits, v_bits))
+        };
+
+    let mut kv_cache = ExactMetalKvCache::load(&runtime, GemmaKvCacheSpec::new(
+        layer_attention_kind,
         1,
         k_head_count,
         head_dim,
-        2,
+        kv_capacity,
     )?)?;
-    let prefill_k_tensor = flatten_heads_to_tensor(&prefill_k_bits, k_head_count, head_dim)?;
-    let prefill_v_tensor = flatten_heads_to_tensor(&prefill_v_bits, v_head_count, head_dim)?;
-    let decode_k_tensor = flatten_heads_to_tensor(&decode_k_bits, k_head_count, head_dim)?;
-    let decode_v_tensor = flatten_heads_to_tensor(&decode_v_bits, v_head_count, head_dim)?;
-    kv_cache.update_and_fetch(prefill_k_tensor.view(), prefill_v_tensor.view())?;
-    kv_cache.update_and_fetch(decode_k_tensor.view(), decode_v_tensor.view())?;
+    let mut prefill_attention_cache = if validate_post_ffn_residual {
+        Some(ExactMetalKvCache::load(&runtime, GemmaKvCacheSpec::new(
+            layer_attention_kind,
+            1,
+            k_head_count,
+            head_dim,
+            kv_capacity,
+        )?)?)
+    } else {
+        None
+    };
+    let mut prefill_input_norm_bits = Vec::new();
+    let mut prefill_v_proj_bits = Vec::new();
+    let mut prefill_q_bits = Vec::new();
+    let mut prefill_k_bits = Vec::new();
+    let mut prefill_v_bits = Vec::new();
+    let mut prefill_x_words = Vec::new();
+    let mut prefill_attention_out_bits = None;
+    for (prefill_index, input_words) in prefill_input_words_list.iter().enumerate() {
+        let rope_offset = prefill_rope_offset + prefill_index as i32;
+        let (
+            current_input_norm_bits,
+            current_v_proj_bits,
+            current_q_bits,
+            current_k_bits,
+            current_v_bits,
+        ) = run_projection(input_words, rope_offset)?;
+        kv_cache.append_token_from_buffers(&runtime, &k_rope_buf, &v_norm_buf)?;
+        if let Some(cache) = prefill_attention_cache.as_mut() {
+            cache.append_token_from_buffers(&runtime, &k_rope_buf, &v_norm_buf)?;
+            if prefill_index + 1 == prefill_input_words_list.len() {
+                prefill_attention_out_bits = Some(
+                    compute_cached_attention_metal(
+                        &runtime,
+                        &attention_logits_seq_pipeline,
+                        &attention_softmax_pipeline,
+                        &attention_weighted_sum_pipeline,
+                        &q_rope_buf,
+                        cache,
+                        q_head_count,
+                        q_heads_per_kv,
+                        head_dim,
+                        &attention_logits_buf,
+                        attention_probs_buf
+                            .as_ref()
+                            .ok_or("missing attention probs buffer for prefill attention")?,
+                        attn_out_buf
+                            .as_ref()
+                            .ok_or("missing attention output buffer for prefill attention")?,
+                    )?
+                    .2,
+                );
+            }
+        }
+        if prefill_index + 1 == prefill_input_words_list.len() {
+            prefill_input_norm_bits = current_input_norm_bits;
+            prefill_v_proj_bits = current_v_proj_bits;
+            prefill_q_bits = current_q_bits;
+            prefill_k_bits = current_k_bits;
+            prefill_v_bits = current_v_bits;
+            prefill_x_words = input_words.clone();
+        }
+    }
+    let (decode_input_norm_bits, decode_v_proj_bits, decode_q_bits, decode_k_bits, decode_v_bits) =
+        run_projection(&decode_x_words, decode_rope_offset)?;
 
-    let full_state = kv_cache.fetch()?;
-    let full_k_bits = full_state
-        .keys
-        .to_tensor()?
-        .data()
-        .iter()
-        .copied()
-        .map(f32::to_bits)
-        .collect::<Vec<_>>();
-    let full_v_bits = full_state
-        .values
-        .to_tensor()?
-        .data()
-        .iter()
-        .copied()
-        .map(f32::to_bits)
-        .collect::<Vec<_>>();
+    kv_cache.append_token_from_buffers(&runtime, &k_rope_buf, &v_norm_buf)?;
+
+    let full_k_bits = read_exact_kv_cache_tensor_bits(&runtime, &kv_cache, &kv_cache.key_buffer)?;
+    let full_v_bits =
+        read_exact_kv_cache_tensor_bits(&runtime, &kv_cache, &kv_cache.value_buffer)?;
     let (attention_score_bits, attention_prob_bits, attention_out_bits) =
-        compute_cached_attention(&decode_q_bits, &kv_cache, q_head_count, q_heads_per_kv, head_dim)?;
+        compute_cached_attention_metal(
+        &runtime,
+        &attention_logits_seq_pipeline,
+        &attention_softmax_pipeline,
+        &attention_weighted_sum_pipeline,
+        &q_rope_buf,
+        &kv_cache,
+        q_head_count,
+        q_heads_per_kv,
+        head_dim,
+        &attention_logits_buf,
+        attention_probs_buf
+            .as_ref()
+            .ok_or("missing attention probs buffer for decode attention")?,
+        attn_out_buf
+            .as_ref()
+            .ok_or("missing attention output buffer for decode attention")?,
+    )?;
     let attention_oproj_bits = if validate_oproj {
-        let attn_out_words = bf16_words_from_f32_bits(&attention_out_bits);
-        let attn_out_buf = attn_out_buf.as_ref().ok_or("missing attention output buffer")?;
+        let attn_out_buf = attn_out_buf
+            .as_ref()
+            .ok_or("missing attention output buffer")?;
         let o_proj_out_buf = o_proj_out_buf
             .as_ref()
             .ok_or("missing attention o_proj output buffer")?;
-        let o_weight_buf = o_weight_buf.as_ref().ok_or("missing o_proj weight buffer")?;
-        let o_scales_buf = o_scales_buf.as_ref().ok_or("missing o_proj scales buffer")?;
-        let o_biases_buf = o_biases_buf.as_ref().ok_or("missing o_proj biases buffer")?;
+        let o_weight_buf = o_weight_buf
+            .as_ref()
+            .ok_or("missing o_proj weight buffer")?;
+        let o_scales_buf = o_scales_buf
+            .as_ref()
+            .ok_or("missing o_proj scales buffer")?;
+        let o_biases_buf = o_biases_buf
+            .as_ref()
+            .ok_or("missing o_proj biases buffer")?;
         let o_proj_fast_pipeline = o_proj_fast_pipeline
             .as_ref()
             .ok_or("missing o_proj fast pipeline")?;
+        let o_proj_layout = o_proj_layout.as_ref().ok_or("missing o_proj layout")?;
         let o_proj_args = o_proj_args.as_ref().ok_or("missing o_proj args")?;
-        runtime.write_buffer(attn_out_buf, 0, &bytes_from_bf16_words(&attn_out_words))?;
         let o_proj_bindings = [
             MetalBufferBindingRef {
                 index: 1,
@@ -2049,11 +8061,13 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
             },
         ];
         runtime.begin_command_batch()?;
-        runtime.dispatch_compute(
+        dispatch_exact_mlx_qmv_row(
+            &runtime,
+            &proj_pipeline,
             o_proj_fast_pipeline,
-            bytes_of(o_proj_args),
+            *o_proj_layout,
+            o_proj_args,
             &o_proj_bindings,
-            &[],
             o_proj_threadgroups,
             o_proj_threads_per_threadgroup,
         )?;
@@ -2167,7 +8181,9 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
             residual_threadgroups,
             residual_threads_per_threadgroup,
         )?;
-        if let (Some(args), Some(bindings)) = (pre_feedforward_norm_args, &pre_feedforward_norm_bindings) {
+        if let (Some(args), Some(bindings)) =
+            (pre_feedforward_norm_args, &pre_feedforward_norm_bindings)
+        {
             runtime.memory_barrier_buffers()?;
             runtime.dispatch_compute(
                 &rms_pipeline,
@@ -2193,14 +8209,16 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         } else {
             None
         };
-        Some((post_attention_norm_bits, residual_bits, pre_feedforward_norm_bits))
+        Some((
+            post_attention_norm_bits,
+            residual_bits,
+            pre_feedforward_norm_bits,
+        ))
     } else {
         None
     };
     let dense_gate_bits = if validate_dense_gate {
-        let mlp_gate_args = mlp_gate_args
-            .as_ref()
-            .ok_or("missing mlp gate args")?;
+        let mlp_gate_args = mlp_gate_args.as_ref().ok_or("missing mlp gate args")?;
         let mlp_gate_bindings = mlp_gate_bindings
             .as_ref()
             .ok_or("missing mlp gate bindings")?;
@@ -2226,9 +8244,7 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
     };
     let dense_up_bits = if validate_dense_up {
         let mlp_up_args = mlp_up_args.as_ref().ok_or("missing mlp up args")?;
-        let mlp_up_bindings = mlp_up_bindings
-            .as_ref()
-            .ok_or("missing mlp up bindings")?;
+        let mlp_up_bindings = mlp_up_bindings.as_ref().ok_or("missing mlp up bindings")?;
         let mlp_up_out_buf = mlp_up_out_buf
             .as_ref()
             .ok_or("missing mlp up output buffer")?;
@@ -2250,13 +8266,9 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         None
     };
     let dense_geglu_bits = if validate_dense_geglu {
-        let geglu_pipeline = geglu_pipeline
-            .as_ref()
-            .ok_or("missing geglu pipeline")?;
+        let geglu_pipeline = geglu_pipeline.as_ref().ok_or("missing geglu pipeline")?;
         let geglu_args = geglu_args.as_ref().ok_or("missing geglu args")?;
-        let geglu_bindings = geglu_bindings
-            .as_ref()
-            .ok_or("missing geglu bindings")?;
+        let geglu_bindings = geglu_bindings.as_ref().ok_or("missing geglu bindings")?;
         let geglu_out_buf = geglu_out_buf
             .as_ref()
             .ok_or("missing geglu output buffer")?;
@@ -2315,18 +8327,36 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
         let router_proj_args = router_proj_args
             .as_ref()
             .ok_or("missing router proj args")?;
+        let router_softmax_args = router_softmax_args
+            .as_ref()
+            .ok_or("missing router softmax args")?;
+        let router_topk_args = router_topk_args
+            .as_ref()
+            .ok_or("missing router top-k args")?;
         let router_proj_bindings = router_proj_bindings
             .as_ref()
             .ok_or("missing router proj bindings")?;
+        let router_topk_pipeline = router_topk_pipeline
+            .as_ref()
+            .ok_or("missing router top-k pipeline")?;
         let router_scaled_out_buf = router_scaled_out_buf
             .as_ref()
             .ok_or("missing router scaled output buffer")?;
         let router_proj_out_buf = router_proj_out_buf
             .as_ref()
             .ok_or("missing router proj output buffer")?;
-        let per_expert_scale_words = router_per_expert_scale_words
+        let router_probs_out_buf = router_probs_out_buf
             .as_ref()
-            .ok_or("missing router per-expert scales")?;
+            .ok_or("missing router probs output buffer")?;
+        let router_per_expert_scale_buf = router_per_expert_scale_buf
+            .as_ref()
+            .ok_or("missing router per-expert scale buffer")?;
+        let moe_top_k_indices_buf = moe_top_k_indices_buf
+            .as_ref()
+            .ok_or("missing moe top-k indices buffer")?;
+        let moe_top_k_weights_buf = moe_top_k_weights_buf
+            .as_ref()
+            .ok_or("missing moe top-k weights buffer")?;
         runtime.begin_command_batch()?;
         runtime.dispatch_compute(
             router_scale_pipeline,
@@ -2345,352 +8375,2828 @@ pub fn run_cli() -> Result<(), Box<dyn Error>> {
             router_proj_threadgroups,
             router_proj_threads_per_threadgroup,
         )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &attention_softmax_pipeline,
+            bytes_of(router_softmax_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: router_proj_out_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: router_probs_out_buf,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            router_softmax_threadgroups,
+            mlx_softmax_threads_per_threadgroup(
+                router_out_len,
+                attention_softmax_pipeline.max_threads_per_threadgroup,
+            )?,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            router_topk_pipeline,
+            bytes_of(router_topk_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: router_proj_out_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: router_probs_out_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: router_per_expert_scale_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: moe_top_k_indices_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: moe_top_k_weights_buf,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            router_topk_threadgroups,
+            router_topk_threads_per_threadgroup,
+        )?;
         runtime.end_command_batch()?;
         runtime.wait_idle()?;
-        let router_scaled_bits = decode_bf16_buffer_bits(
-            &runtime.read_buffer(router_scaled_out_buf, post_attention_norm_len * 2)?,
-        );
-        let expert_scores_bits = decode_bf16_buffer_bits(
-            &runtime.read_buffer(router_proj_out_buf, router_out_len * 2)?,
-        );
-        Some(compute_router_output_from_expert_scores(
-            router_scaled_bits,
-            expert_scores_bits,
-            per_expert_scale_words,
+        Some(read_router_output_from_device(
+            &runtime,
+            router_scaled_out_buf,
+            router_proj_out_buf,
+            router_probs_out_buf,
+            moe_top_k_indices_buf,
+            moe_top_k_weights_buf,
+            post_attention_norm_len,
+            router_out_len,
             ROUTER_TOP_K,
         )?)
     } else {
         None
     };
-
-    validate_hash_and_prefix(
-        "prefill_k_cache",
-        &prefill_k_bits,
-        EXPECTED_PREFILL_K_CACHE_HASH,
-        &EXPECTED_PREFILL_K_CACHE_FIRST16_BITS,
-    )?;
-    validate_hash_and_prefix(
-        "prefill_v_cache",
-        &prefill_v_bits,
-        EXPECTED_PREFILL_V_CACHE_HASH,
-        &EXPECTED_PREFILL_V_CACHE_FIRST16_BITS,
-    )?;
-    validate_hash_and_prefix(
-        "decode_q_rope",
-        &decode_q_bits,
-        EXPECTED_DECODE_Q_ROPE_HASH,
-        &EXPECTED_DECODE_Q_ROPE_FIRST16_BITS,
-    )?;
-    validate_hash_and_prefix(
-        "decode_k_rope",
-        &decode_k_bits,
-        EXPECTED_DECODE_K_ROPE_HASH,
-        &EXPECTED_DECODE_K_ROPE_FIRST16_BITS,
-    )?;
-    validate_hash_and_prefix(
-        "decode_v_norm",
-        &decode_v_bits,
-        EXPECTED_DECODE_V_NORM_HASH,
-        &EXPECTED_DECODE_V_NORM_FIRST16_BITS,
-    )?;
-    validate_hash_and_prefix(
-        "full_k_cache",
-        &full_k_bits,
-        EXPECTED_FULL_K_CACHE_HASH,
-        &EXPECTED_FULL_K_CACHE_FIRST16_BITS,
-    )?;
-    validate_hash_and_prefix(
-        "full_v_cache",
-        &full_v_bits,
-        EXPECTED_FULL_V_CACHE_HASH,
-        &EXPECTED_FULL_V_CACHE_FIRST16_BITS,
-    )?;
-    validate_hash_and_prefix(
-        "attention_scores",
-        &attention_score_bits,
-        EXPECTED_ATTENTION_SCORES_HASH,
-        &EXPECTED_ATTENTION_SCORES_FIRST16_BITS,
-    )?;
-    validate_hash_and_prefix(
-        "attention_probs",
-        &attention_prob_bits,
-        EXPECTED_ATTENTION_PROBS_HASH,
-        &EXPECTED_ATTENTION_PROBS_FIRST16_BITS,
-    )?;
-    validate_hash_and_prefix(
-        "attention_output",
-        &attention_out_bits,
-        EXPECTED_ATTENTION_OUTPUT_HASH,
-        &EXPECTED_ATTENTION_OUTPUT_FIRST16_BITS,
-    )?;
-    if let Some(attention_oproj_bits) = &attention_oproj_bits {
-        validate_hash_and_prefix(
-            "attention_oproj",
-            attention_oproj_bits,
-            EXPECTED_ATTENTION_OPROJ_HASH,
-            &EXPECTED_ATTENTION_OPROJ_FIRST16_BITS,
-        )?;
-    }
-    if let Some((post_attention_norm_bits, residual_bits, pre_feedforward_norm_bits)) =
-        &post_attention_stage_bits
+    let (moe_expert_gate_bits, moe_expert_up_bits, moe_expert_geglu_bits, moe_expert_down_bits) =
+        if validate_moe_expert_gate {
+            let router_output = router_output
+                .as_ref()
+                .ok_or("missing router output for moe expert gate")?;
+            let pre_feedforward_norm2_args = pre_feedforward_norm2_args
+                .as_ref()
+                .ok_or("missing pre-feedforward norm2 args")?;
+            let pre_feedforward_norm2_bindings = pre_feedforward_norm2_bindings
+                .as_ref()
+                .ok_or("missing pre-feedforward norm2 bindings")?;
+            let selected_expert_proj_pipeline = selected_expert_proj_pipeline
+                .as_ref()
+                .ok_or("missing selected expert projection pipeline")?;
+            let expert_gate_selected_args = expert_gate_selected_args
+                .as_ref()
+                .ok_or("missing expert gate selected args")?;
+            let expert_gate_selected_bindings = expert_gate_selected_bindings
+                .as_ref()
+                .ok_or("missing expert gate selected bindings")?;
+            let moe_top_k_indices_buf = moe_top_k_indices_buf
+                .as_ref()
+                .ok_or("missing moe top-k indices buffer")?;
+            let expert_gate_out_buf = expert_gate_out_buf
+                .as_ref()
+                .ok_or("missing expert gate output buffer")?;
+            let expert_up_selected_args = expert_up_selected_args.as_ref();
+            let expert_up_selected_bindings = expert_up_selected_bindings.as_ref();
+            let expert_up_out_buf = expert_up_out_buf.as_ref();
+            let moe_expert_geglu_args = moe_expert_geglu_args.as_ref();
+            let moe_expert_geglu_bindings = moe_expert_geglu_bindings.as_ref();
+            let expert_geglu_out_buf = expert_geglu_out_buf.as_ref();
+            let expert_down_selected_args = expert_down_selected_args.as_ref();
+            let expert_down_selected_bindings = expert_down_selected_bindings.as_ref();
+            let expert_down_out_buf = expert_down_out_buf.as_ref();
+            let geglu_pipeline = geglu_pipeline.as_ref();
+            let mut top_k_index_bytes = Vec::with_capacity(ROUTER_TOP_K * size_of::<u32>());
+            for &index in &router_output.top_k_indices {
+                top_k_index_bytes.extend_from_slice(&index.to_le_bytes());
+            }
+            runtime.write_buffer(moe_top_k_indices_buf, 0, &top_k_index_bytes)?;
+            runtime.begin_command_batch()?;
+            runtime.dispatch_compute(
+                &rms_pipeline,
+                bytes_of(pre_feedforward_norm2_args),
+                pre_feedforward_norm2_bindings,
+                &[],
+                rms_threadgroups,
+                rms_threads_per_threadgroup,
+            )?;
+            runtime.memory_barrier_buffers()?;
+            runtime.dispatch_compute(
+                selected_expert_proj_pipeline,
+                bytes_of(expert_gate_selected_args),
+                expert_gate_selected_bindings,
+                &[],
+                expert_gate_selected_threadgroups,
+                expert_gate_threads_per_threadgroup,
+            )?;
+            if let (Some(args), Some(bindings)) =
+                (expert_up_selected_args, expert_up_selected_bindings)
+            {
+                runtime.memory_barrier_buffers()?;
+                runtime.dispatch_compute(
+                    selected_expert_proj_pipeline,
+                    bytes_of(args),
+                    bindings,
+                    &[],
+                    expert_up_selected_threadgroups,
+                    expert_up_threads_per_threadgroup,
+                )?;
+            }
+            if let (Some(pipeline), Some(args), Some(bindings)) = (
+                geglu_pipeline,
+                moe_expert_geglu_args,
+                moe_expert_geglu_bindings,
+            ) {
+                runtime.memory_barrier_buffers()?;
+                runtime.dispatch_compute(
+                    pipeline,
+                    bytes_of(args),
+                    bindings,
+                    &[],
+                    moe_expert_geglu_threadgroups,
+                    geglu_threads_per_threadgroup,
+                )?;
+            }
+            if let (Some(args), Some(bindings)) =
+                (expert_down_selected_args, expert_down_selected_bindings)
+            {
+                runtime.memory_barrier_buffers()?;
+                runtime.dispatch_compute(
+                    selected_expert_proj_pipeline,
+                    bytes_of(args),
+                    bindings,
+                    &[],
+                    expert_down_selected_threadgroups,
+                    expert_down_threads_per_threadgroup,
+                )?;
+            }
+            runtime.end_command_batch()?;
+            runtime.wait_idle()?;
+            let gate_bits = Some(decode_bf16_buffer_bits(
+                &runtime
+                    .read_buffer(expert_gate_out_buf, ROUTER_TOP_K * expert_gate_out_len * 2)?,
+            ));
+            let up_bits = if let Some(out_buf) = expert_up_out_buf {
+                Some(decode_bf16_buffer_bits(&runtime.read_buffer(
+                    out_buf,
+                    ROUTER_TOP_K * expert_up_out_len * 2,
+                )?))
+            } else {
+                None
+            };
+            let geglu_bits = if let Some(out_buf) = expert_geglu_out_buf {
+                Some(decode_bf16_buffer_bits(&runtime.read_buffer(
+                    out_buf,
+                    ROUTER_TOP_K * expert_gate_out_len * 2,
+                )?))
+            } else {
+                None
+            };
+            let down_bits = if let Some(out_buf) = expert_down_out_buf {
+                Some(decode_bf16_buffer_bits(&runtime.read_buffer(
+                    out_buf,
+                    ROUTER_TOP_K * expert_down_out_len * 2,
+                )?))
+            } else {
+                None
+            };
+            (gate_bits, up_bits, geglu_bits, down_bits)
+        } else {
+            (None, None, None, None)
+        };
+    let (
+        post_ffn_norm1_bits,
+        moe_expert_out_bits,
+        moe_post_ffn_norm2_bits,
+        moe_merge_bits,
+        post_ffn_residual_bits,
+    ) = if validate_post_ffn_norm1
+        || validate_moe_expert_out
+        || validate_moe_post_ffn_norm2
+        || validate_moe_merge
+        || validate_post_ffn_residual
     {
+        let weighted_bits = if validate_moe_expert_out
+            || validate_moe_post_ffn_norm2
+            || validate_moe_merge
+            || validate_post_ffn_residual
+        {
+            Some(moe_weighted_expert_out_bits(
+                moe_expert_down_bits
+                    .as_ref()
+                    .ok_or("missing moe expert down output for weighted expert reduction")?,
+                &router_output
+                    .as_ref()
+                    .ok_or("missing router output for weighted expert reduction")?
+                    .top_k_weights_bits,
+                expert_down_out_len,
+            )?)
+        } else {
+            None
+        };
+
+        let post_ffn_norm1_args = post_ffn_norm1_args.as_ref();
+        let post_ffn_norm1_bindings = post_ffn_norm1_bindings.as_ref();
+        let moe_post_ffn_norm2_args = moe_post_ffn_norm2_args.as_ref();
+        let moe_post_ffn_norm2_bindings = moe_post_ffn_norm2_bindings.as_ref();
+        let moe_merge_bindings = moe_merge_bindings.as_ref();
+        let post_ffn_residual_bindings = post_ffn_residual_bindings.as_ref();
+
+        if let (Some(bits), Some(weighted_buf)) = (&weighted_bits, moe_weighted_out_buf.as_ref()) {
+            let weighted_words = bf16_words_from_f32_bits(bits);
+            let weighted_bytes = bytes_from_bf16_words(&weighted_words);
+            runtime.write_buffer(weighted_buf, 0, &weighted_bytes)?;
+        }
+
+        runtime.begin_command_batch()?;
+        if let (Some(args), Some(bindings)) = (post_ffn_norm1_args, post_ffn_norm1_bindings) {
+            runtime.dispatch_compute(
+                &rms_pipeline,
+                bytes_of(args),
+                bindings,
+                &[],
+                rms_threadgroups,
+                rms_threads_per_threadgroup,
+            )?;
+        }
+        if let (Some(args), Some(bindings)) = (moe_post_ffn_norm2_args, moe_post_ffn_norm2_bindings)
+        {
+            runtime.memory_barrier_buffers()?;
+            runtime.dispatch_compute(
+                &rms_pipeline,
+                bytes_of(args),
+                bindings,
+                &[],
+                rms_threadgroups,
+                rms_threads_per_threadgroup,
+            )?;
+        }
+        if let Some(bindings) = moe_merge_bindings {
+            runtime.memory_barrier_buffers()?;
+            runtime.dispatch_compute(
+                residual_pipeline
+                    .as_ref()
+                    .ok_or("missing add pipeline for moe merge")?,
+                bytes_of(
+                    residual_args
+                        .as_ref()
+                        .ok_or("missing add args for moe merge")?,
+                ),
+                bindings,
+                &[],
+                residual_threadgroups,
+                residual_threads_per_threadgroup,
+            )?;
+        }
+        if let Some(bindings) = post_ffn_residual_bindings {
+            runtime.memory_barrier_buffers()?;
+            runtime.dispatch_compute(
+                residual_pipeline
+                    .as_ref()
+                    .ok_or("missing add pipeline for post-ffn residual")?,
+                bytes_of(
+                    residual_args
+                        .as_ref()
+                        .ok_or("missing add args for post-ffn residual")?,
+                ),
+                bindings,
+                &[],
+                residual_threadgroups,
+                residual_threads_per_threadgroup,
+            )?;
+        }
+        runtime.end_command_batch()?;
+        runtime.wait_idle()?;
+
+        let post_ffn_norm1_bits = if let Some(out_buf) = post_feedforward_norm1_out_buf.as_ref() {
+            Some(decode_bf16_buffer_bits(
+                &runtime.read_buffer(out_buf, post_feedforward_norm1_len * 2)?,
+            ))
+        } else {
+            None
+        };
+        let moe_post_ffn_norm2_bits = if let Some(out_buf) = moe_post_ffn_norm2_out_buf.as_ref() {
+            Some(decode_bf16_buffer_bits(
+                &runtime.read_buffer(out_buf, post_feedforward_norm2_len * 2)?,
+            ))
+        } else {
+            None
+        };
+        let moe_merge_bits = if let Some(out_buf) = moe_merge_out_buf.as_ref() {
+            Some(decode_bf16_buffer_bits(
+                &runtime.read_buffer(out_buf, post_feedforward_norm1_len * 2)?,
+            ))
+        } else {
+            None
+        };
+        let post_ffn_residual_bits = if let Some(out_buf) = post_ffn_residual_out_buf.as_ref() {
+            Some(decode_bf16_buffer_bits(
+                &runtime.read_buffer(out_buf, post_feedforward_norm1_len * 2)?,
+            ))
+        } else {
+            None
+        };
+        (
+            post_ffn_norm1_bits,
+            weighted_bits,
+            moe_post_ffn_norm2_bits,
+            moe_merge_bits,
+            post_ffn_residual_bits,
+        )
+    } else {
+        (None, None, None, None, None)
+    };
+    let prefill_post_ffn_residual_bits = if let Some(prefill_attention_out_bits) =
+        &prefill_attention_out_bits
+    {
+        let attn_out_buf = attn_out_buf
+            .as_ref()
+            .ok_or("missing attention output buffer for prefill tail")?;
+        let o_proj_out_buf = o_proj_out_buf
+            .as_ref()
+            .ok_or("missing attention o_proj output buffer for prefill tail")?;
+        let o_weight_buf = o_weight_buf
+            .as_ref()
+            .ok_or("missing o_proj weight buffer for prefill tail")?;
+        let o_scales_buf = o_scales_buf
+            .as_ref()
+            .ok_or("missing o_proj scales buffer for prefill tail")?;
+        let o_biases_buf = o_biases_buf
+            .as_ref()
+            .ok_or("missing o_proj biases buffer for prefill tail")?;
+        let o_proj_fast_pipeline = o_proj_fast_pipeline
+            .as_ref()
+            .ok_or("missing o_proj fast pipeline for prefill tail")?;
+        let o_proj_layout = o_proj_layout
+            .as_ref()
+            .ok_or("missing o_proj layout for prefill tail")?;
+        let o_proj_args = o_proj_args
+            .as_ref()
+            .ok_or("missing o_proj args for prefill tail")?;
+        let post_attention_norm_weight_buf = post_attention_norm_weight_buf
+            .as_ref()
+            .ok_or("missing post-attention norm weight buffer for prefill tail")?;
+        let post_attention_norm_out_buf = post_attention_norm_out_buf
+            .as_ref()
+            .ok_or("missing post-attention norm output buffer for prefill tail")?;
+        let residual_out_buf = residual_out_buf
+            .as_ref()
+            .ok_or("missing residual output buffer for prefill tail")?;
+        let residual_pipeline = residual_pipeline
+            .as_ref()
+            .ok_or("missing add pipeline for prefill tail")?;
+        let post_attention_norm_args = post_attention_norm_args
+            .as_ref()
+            .ok_or("missing post-attention norm args for prefill tail")?;
+        let residual_args = residual_args
+            .as_ref()
+            .ok_or("missing residual args for prefill tail")?;
+        let pre_feedforward_norm_weight_buf = pre_feedforward_norm_weight_buf
+            .as_ref()
+            .ok_or("missing pre-feedforward norm weight buffer for prefill tail")?;
+        let pre_feedforward_norm_out_buf = pre_feedforward_norm_out_buf
+            .as_ref()
+            .ok_or("missing pre-feedforward norm output buffer for prefill tail")?;
+        let pre_feedforward_norm_args = pre_feedforward_norm_args
+            .as_ref()
+            .ok_or("missing pre-feedforward norm args for prefill tail")?;
+        let mlp_gate_args = mlp_gate_args
+            .as_ref()
+            .ok_or("missing mlp gate args for prefill tail")?;
+        let mlp_gate_bindings = mlp_gate_bindings
+            .as_ref()
+            .ok_or("missing mlp gate bindings for prefill tail")?;
+        let mlp_up_args = mlp_up_args
+            .as_ref()
+            .ok_or("missing mlp up args for prefill tail")?;
+        let mlp_up_bindings = mlp_up_bindings
+            .as_ref()
+            .ok_or("missing mlp up bindings for prefill tail")?;
+        let geglu_pipeline = geglu_pipeline
+            .as_ref()
+            .ok_or("missing geglu pipeline for prefill tail")?;
+        let geglu_args = geglu_args
+            .as_ref()
+            .ok_or("missing geglu args for prefill tail")?;
+        let geglu_bindings = geglu_bindings
+            .as_ref()
+            .ok_or("missing geglu bindings for prefill tail")?;
+        let mlp_down_args = mlp_down_args
+            .as_ref()
+            .ok_or("missing mlp down args for prefill tail")?;
+        let mlp_down_bindings = mlp_down_bindings
+            .as_ref()
+            .ok_or("missing mlp down bindings for prefill tail")?;
+        let router_scale_pipeline = router_scale_pipeline
+            .as_ref()
+            .ok_or("missing router scale pipeline for prefill tail")?;
+        let router_scale_args = router_scale_args
+            .as_ref()
+            .ok_or("missing router scale args for prefill tail")?;
+        let router_scale_bindings = router_scale_bindings
+            .as_ref()
+            .ok_or("missing router scale bindings for prefill tail")?;
+        let router_proj_args = router_proj_args
+            .as_ref()
+            .ok_or("missing router proj args for prefill tail")?;
+        let router_proj_bindings = router_proj_bindings
+            .as_ref()
+            .ok_or("missing router proj bindings for prefill tail")?;
+        let router_scaled_out_buf = router_scaled_out_buf
+            .as_ref()
+            .ok_or("missing router scaled output buffer for prefill tail")?;
+        let router_proj_out_buf = router_proj_out_buf
+            .as_ref()
+            .ok_or("missing router proj output buffer for prefill tail")?;
+        let router_probs_out_buf = router_probs_out_buf
+            .as_ref()
+            .ok_or("missing router probs output buffer for prefill tail")?;
+        let router_per_expert_scale_buf = router_per_expert_scale_buf
+            .as_ref()
+            .ok_or("missing router per-expert scale buffer for prefill tail")?;
+        let router_softmax_args = router_softmax_args
+            .as_ref()
+            .ok_or("missing router softmax args for prefill tail")?;
+        let router_topk_args = router_topk_args
+            .as_ref()
+            .ok_or("missing router top-k args for prefill tail")?;
+        let router_topk_pipeline = router_topk_pipeline
+            .as_ref()
+            .ok_or("missing router top-k pipeline for prefill tail")?;
+        let pre_feedforward_norm2_args = pre_feedforward_norm2_args
+            .as_ref()
+            .ok_or("missing pre-feedforward norm2 args for prefill tail")?;
+        let pre_feedforward_norm2_bindings = pre_feedforward_norm2_bindings
+            .as_ref()
+            .ok_or("missing pre-feedforward norm2 bindings for prefill tail")?;
+        let selected_expert_proj_pipeline = selected_expert_proj_pipeline
+            .as_ref()
+            .ok_or("missing selected expert projection pipeline for prefill tail")?;
+        let expert_gate_selected_args = expert_gate_selected_args
+            .as_ref()
+            .ok_or("missing expert gate args for prefill tail")?;
+        let expert_gate_selected_bindings = expert_gate_selected_bindings
+            .as_ref()
+            .ok_or("missing expert gate bindings for prefill tail")?;
+        let expert_up_selected_args = expert_up_selected_args
+            .as_ref()
+            .ok_or("missing expert up args for prefill tail")?;
+        let expert_up_selected_bindings = expert_up_selected_bindings
+            .as_ref()
+            .ok_or("missing expert up bindings for prefill tail")?;
+        let moe_expert_geglu_args = moe_expert_geglu_args
+            .as_ref()
+            .ok_or("missing expert geglu args for prefill tail")?;
+        let moe_expert_geglu_bindings = moe_expert_geglu_bindings
+            .as_ref()
+            .ok_or("missing expert geglu bindings for prefill tail")?;
+        let expert_down_selected_args = expert_down_selected_args
+            .as_ref()
+            .ok_or("missing expert down args for prefill tail")?;
+        let expert_down_selected_bindings = expert_down_selected_bindings
+            .as_ref()
+            .ok_or("missing expert down bindings for prefill tail")?;
+        let moe_top_k_indices_buf = moe_top_k_indices_buf
+            .as_ref()
+            .ok_or("missing moe top-k index buffer for prefill tail")?;
+        let moe_top_k_weights_buf = moe_top_k_weights_buf
+            .as_ref()
+            .ok_or("missing moe top-k weight buffer for prefill tail")?;
+        let expert_down_out_buf = expert_down_out_buf
+            .as_ref()
+            .ok_or("missing expert down output buffer for prefill tail")?;
+        let post_ffn_norm1_args = post_ffn_norm1_args
+            .as_ref()
+            .ok_or("missing post-ffn norm1 args for prefill tail")?;
+        let post_ffn_norm1_bindings = post_ffn_norm1_bindings
+            .as_ref()
+            .ok_or("missing post-ffn norm1 bindings for prefill tail")?;
+        let moe_post_ffn_norm2_args = moe_post_ffn_norm2_args
+            .as_ref()
+            .ok_or("missing moe post-ffn norm2 args for prefill tail")?;
+        let moe_post_ffn_norm2_bindings = moe_post_ffn_norm2_bindings
+            .as_ref()
+            .ok_or("missing moe post-ffn norm2 bindings for prefill tail")?;
+        let moe_merge_bindings = moe_merge_bindings
+            .as_ref()
+            .ok_or("missing moe merge bindings for prefill tail")?;
+        let post_ffn_residual_bindings = post_ffn_residual_bindings
+            .as_ref()
+            .ok_or("missing post-ffn residual bindings for prefill tail")?;
+        let moe_weighted_out_buf = moe_weighted_out_buf
+            .as_ref()
+            .ok_or("missing weighted moe output buffer for prefill tail")?;
+        let post_ffn_residual_out_buf = post_ffn_residual_out_buf
+            .as_ref()
+            .ok_or("missing post-ffn residual output buffer for prefill tail")?;
+
+        let prefill_x_bytes = bytes_from_bf16_words(&prefill_x_words);
+        let prefill_attn_out_words = bf16_words_from_f32_bits(prefill_attention_out_bits);
+        let prefill_attn_out_bytes = bytes_from_bf16_words(&prefill_attn_out_words);
+        let o_proj_bindings = [
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: attn_out_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: o_weight_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: o_scales_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 4,
+                buffer: o_biases_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 5,
+                buffer: o_proj_out_buf,
+                offset_bytes: 0,
+            },
+        ];
+        let post_attention_norm_bindings = [
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: o_proj_out_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: post_attention_norm_weight_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: post_attention_norm_out_buf,
+                offset_bytes: 0,
+            },
+        ];
+        let residual_bindings = [
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: &x_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: post_attention_norm_out_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: residual_out_buf,
+                offset_bytes: 0,
+            },
+        ];
+        let pre_feedforward_norm_bindings = [
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: residual_out_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: pre_feedforward_norm_weight_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: pre_feedforward_norm_out_buf,
+                offset_bytes: 0,
+            },
+        ];
+
+        runtime.write_buffer(&x_buf, 0, &prefill_x_bytes)?;
+        runtime.write_buffer(attn_out_buf, 0, &prefill_attn_out_bytes)?;
+        runtime.begin_command_batch()?;
+        dispatch_exact_mlx_qmv_row(
+            &runtime,
+            &proj_pipeline,
+            o_proj_fast_pipeline,
+            *o_proj_layout,
+            o_proj_args,
+            &o_proj_bindings,
+            o_proj_threadgroups,
+            o_proj_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &rms_pipeline,
+            bytes_of(post_attention_norm_args),
+            &post_attention_norm_bindings,
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            residual_pipeline,
+            bytes_of(residual_args),
+            &residual_bindings,
+            &[],
+            residual_threadgroups,
+            residual_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &rms_pipeline,
+            bytes_of(pre_feedforward_norm_args),
+            &pre_feedforward_norm_bindings,
+            &[],
+            pre_feedforward_norm_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &proj_pipeline,
+            bytes_of(mlp_gate_args),
+            mlp_gate_bindings,
+            &[],
+            mlp_gate_threadgroups,
+            mlp_gate_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &proj_pipeline,
+            bytes_of(mlp_up_args),
+            mlp_up_bindings,
+            &[],
+            mlp_up_threadgroups,
+            mlp_up_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            geglu_pipeline,
+            bytes_of(geglu_args),
+            geglu_bindings,
+            &[],
+            geglu_threadgroups,
+            geglu_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &proj_pipeline,
+            bytes_of(mlp_down_args),
+            mlp_down_bindings,
+            &[],
+            mlp_down_threadgroups,
+            mlp_down_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            router_scale_pipeline,
+            bytes_of(router_scale_args),
+            router_scale_bindings,
+            &[],
+            router_scale_threadgroups,
+            router_scale_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &proj_pipeline,
+            bytes_of(router_proj_args),
+            router_proj_bindings,
+            &[],
+            router_proj_threadgroups,
+            router_proj_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &attention_softmax_pipeline,
+            bytes_of(router_softmax_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: router_proj_out_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: router_probs_out_buf,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            router_softmax_threadgroups,
+            mlx_softmax_threads_per_threadgroup(
+                router_out_len,
+                attention_softmax_pipeline.max_threads_per_threadgroup,
+            )?,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            router_topk_pipeline,
+            bytes_of(router_topk_args),
+            &[
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: router_proj_out_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: router_probs_out_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: router_per_expert_scale_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 4,
+                    buffer: moe_top_k_indices_buf,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 5,
+                    buffer: moe_top_k_weights_buf,
+                    offset_bytes: 0,
+                },
+            ],
+            &[],
+            router_topk_threadgroups,
+            router_topk_threads_per_threadgroup,
+        )?;
+        runtime.end_command_batch()?;
+        runtime.wait_idle()?;
+
+        let router_output = read_router_output_from_device(
+            &runtime,
+            router_scaled_out_buf,
+            router_proj_out_buf,
+            router_probs_out_buf,
+            moe_top_k_indices_buf,
+            moe_top_k_weights_buf,
+            post_attention_norm_len,
+            router_out_len,
+            ROUTER_TOP_K,
+        )?;
+        runtime.begin_command_batch()?;
+        runtime.dispatch_compute(
+            &rms_pipeline,
+            bytes_of(pre_feedforward_norm2_args),
+            pre_feedforward_norm2_bindings,
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            selected_expert_proj_pipeline,
+            bytes_of(expert_gate_selected_args),
+            expert_gate_selected_bindings,
+            &[],
+            expert_gate_selected_threadgroups,
+            expert_gate_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            selected_expert_proj_pipeline,
+            bytes_of(expert_up_selected_args),
+            expert_up_selected_bindings,
+            &[],
+            expert_up_selected_threadgroups,
+            expert_up_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            geglu_pipeline,
+            bytes_of(moe_expert_geglu_args),
+            moe_expert_geglu_bindings,
+            &[],
+            moe_expert_geglu_threadgroups,
+            geglu_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            selected_expert_proj_pipeline,
+            bytes_of(expert_down_selected_args),
+            expert_down_selected_bindings,
+            &[],
+            expert_down_selected_threadgroups,
+            expert_down_threads_per_threadgroup,
+        )?;
+        runtime.end_command_batch()?;
+        runtime.wait_idle()?;
+
+        let expert_down_bits = decode_bf16_buffer_bits(
+            &runtime.read_buffer(expert_down_out_buf, ROUTER_TOP_K * expert_down_out_len * 2)?,
+        );
+        let weighted_bits = moe_weighted_expert_out_bits(
+            &expert_down_bits,
+            &router_output.top_k_weights_bits,
+            expert_down_out_len,
+        )?;
+        let weighted_words = bf16_words_from_f32_bits(&weighted_bits);
+        let weighted_bytes = bytes_from_bf16_words(&weighted_words);
+        runtime.write_buffer(moe_weighted_out_buf, 0, &weighted_bytes)?;
+        runtime.begin_command_batch()?;
+        runtime.dispatch_compute(
+            &rms_pipeline,
+            bytes_of(post_ffn_norm1_args),
+            post_ffn_norm1_bindings,
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            &rms_pipeline,
+            bytes_of(moe_post_ffn_norm2_args),
+            moe_post_ffn_norm2_bindings,
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            residual_pipeline,
+            bytes_of(residual_args),
+            moe_merge_bindings,
+            &[],
+            residual_threadgroups,
+            residual_threads_per_threadgroup,
+        )?;
+        runtime.memory_barrier_buffers()?;
+        runtime.dispatch_compute(
+            residual_pipeline,
+            bytes_of(residual_args),
+            post_ffn_residual_bindings,
+            &[],
+            residual_threadgroups,
+            residual_threads_per_threadgroup,
+        )?;
+        runtime.end_command_batch()?;
+        runtime.wait_idle()?;
+        Some(decode_bf16_buffer_bits(&runtime.read_buffer(
+            post_ffn_residual_out_buf,
+            post_feedforward_norm1_len * 2,
+        )?))
+    } else {
+        None
+    };
+
+    if layer_idx == 0 && validate_against_oracle && prefill_input_words_list.len() == 1 {
         validate_hash_and_prefix(
-            "attention_post_attn_norm",
-            post_attention_norm_bits,
-            EXPECTED_POST_ATTENTION_NORM_HASH,
-            &EXPECTED_POST_ATTENTION_NORM_FIRST16_BITS,
+            "prefill_k_cache",
+            &prefill_k_bits,
+            EXPECTED_PREFILL_K_CACHE_HASH,
+            &EXPECTED_PREFILL_K_CACHE_FIRST16_BITS,
         )?;
         validate_hash_and_prefix(
-            "attention_post_attn_residual",
-            residual_bits,
-            EXPECTED_POST_ATTENTION_RESIDUAL_HASH,
-            &EXPECTED_POST_ATTENTION_RESIDUAL_FIRST16_BITS,
+            "prefill_v_cache",
+            &prefill_v_bits,
+            EXPECTED_PREFILL_V_CACHE_HASH,
+            &EXPECTED_PREFILL_V_CACHE_FIRST16_BITS,
         )?;
-        if let Some(pre_feedforward_norm_bits) = pre_feedforward_norm_bits {
+        validate_hash_and_prefix(
+            "decode_q_rope",
+            &decode_q_bits,
+            EXPECTED_DECODE_Q_ROPE_HASH,
+            &EXPECTED_DECODE_Q_ROPE_FIRST16_BITS,
+        )?;
+        validate_hash_and_prefix(
+            "decode_k_rope",
+            &decode_k_bits,
+            EXPECTED_DECODE_K_ROPE_HASH,
+            &EXPECTED_DECODE_K_ROPE_FIRST16_BITS,
+        )?;
+        validate_hash_and_prefix(
+            "decode_v_norm",
+            &decode_v_bits,
+            EXPECTED_DECODE_V_NORM_HASH,
+            &EXPECTED_DECODE_V_NORM_FIRST16_BITS,
+        )?;
+        validate_hash_and_prefix(
+            "full_k_cache",
+            &full_k_bits,
+            EXPECTED_FULL_K_CACHE_HASH,
+            &EXPECTED_FULL_K_CACHE_FIRST16_BITS,
+        )?;
+        validate_hash_and_prefix(
+            "full_v_cache",
+            &full_v_bits,
+            EXPECTED_FULL_V_CACHE_HASH,
+            &EXPECTED_FULL_V_CACHE_FIRST16_BITS,
+        )?;
+        validate_hash_and_prefix(
+            "attention_scores",
+            &attention_score_bits,
+            EXPECTED_ATTENTION_SCORES_HASH,
+            &EXPECTED_ATTENTION_SCORES_FIRST16_BITS,
+        )?;
+        validate_hash_and_prefix(
+            "attention_probs",
+            &attention_prob_bits,
+            EXPECTED_ATTENTION_PROBS_HASH,
+            &EXPECTED_ATTENTION_PROBS_FIRST16_BITS,
+        )?;
+        validate_hash_and_prefix(
+            "attention_output",
+            &attention_out_bits,
+            EXPECTED_ATTENTION_OUTPUT_HASH,
+            &EXPECTED_ATTENTION_OUTPUT_FIRST16_BITS,
+        )?;
+        if let Some(attention_oproj_bits) = &attention_oproj_bits {
             validate_hash_and_prefix(
-                "attention_pre_ffn_norm",
-                pre_feedforward_norm_bits,
-                EXPECTED_PRE_FEEDFORWARD_NORM_HASH,
-                &EXPECTED_PRE_FEEDFORWARD_NORM_FIRST16_BITS,
+                "attention_oproj",
+                attention_oproj_bits,
+                EXPECTED_ATTENTION_OPROJ_HASH,
+                &EXPECTED_ATTENTION_OPROJ_FIRST16_BITS,
+            )?;
+        }
+        if let Some((post_attention_norm_bits, residual_bits, pre_feedforward_norm_bits)) =
+            &post_attention_stage_bits
+        {
+            validate_hash_and_prefix(
+                "attention_post_attn_norm",
+                post_attention_norm_bits,
+                EXPECTED_POST_ATTENTION_NORM_HASH,
+                &EXPECTED_POST_ATTENTION_NORM_FIRST16_BITS,
+            )?;
+            validate_hash_and_prefix(
+                "attention_post_attn_residual",
+                residual_bits,
+                EXPECTED_POST_ATTENTION_RESIDUAL_HASH,
+                &EXPECTED_POST_ATTENTION_RESIDUAL_FIRST16_BITS,
+            )?;
+            if let Some(pre_feedforward_norm_bits) = pre_feedforward_norm_bits {
+                validate_hash_and_prefix(
+                    "attention_pre_ffn_norm",
+                    pre_feedforward_norm_bits,
+                    EXPECTED_PRE_FEEDFORWARD_NORM_HASH,
+                    &EXPECTED_PRE_FEEDFORWARD_NORM_FIRST16_BITS,
+                )?;
+            }
+        }
+        if let Some(dense_gate_bits) = &dense_gate_bits {
+            validate_hash_and_prefix(
+                "attention_pre_ffn_gate",
+                dense_gate_bits,
+                EXPECTED_PRE_FEEDFORWARD_GATE_HASH,
+                &EXPECTED_PRE_FEEDFORWARD_GATE_FIRST16_BITS,
+            )?;
+        }
+        if let Some(dense_up_bits) = &dense_up_bits {
+            validate_hash_and_prefix(
+                "attention_pre_ffn_up",
+                dense_up_bits,
+                EXPECTED_PRE_FEEDFORWARD_UP_HASH,
+                &EXPECTED_PRE_FEEDFORWARD_UP_FIRST16_BITS,
+            )?;
+        }
+        if let Some(dense_geglu_bits) = &dense_geglu_bits {
+            validate_hash_and_prefix(
+                "attention_pre_ffn_geglu",
+                dense_geglu_bits,
+                EXPECTED_PRE_FEEDFORWARD_GEGLU_HASH,
+                &EXPECTED_PRE_FEEDFORWARD_GEGLU_FIRST16_BITS,
+            )?;
+        }
+        if let Some(dense_down_bits) = &dense_down_bits {
+            validate_hash_and_prefix(
+                "attention_pre_ffn_down",
+                dense_down_bits,
+                EXPECTED_PRE_FEEDFORWARD_DOWN_HASH,
+                &EXPECTED_PRE_FEEDFORWARD_DOWN_FIRST16_BITS,
+            )?;
+        }
+        if let Some(router_output) = &router_output {
+            validate_hash_and_prefix(
+                "router_scaled",
+                &router_output.router_scaled_bits,
+                EXPECTED_ROUTER_SCALED_HASH,
+                &EXPECTED_ROUTER_SCALED_FIRST16_BITS,
+            )?;
+            validate_hash_and_prefix(
+                "router_expert_scores",
+                &router_output.expert_scores_bits,
+                EXPECTED_ROUTER_EXPERT_SCORES_HASH,
+                &EXPECTED_ROUTER_EXPERT_SCORES_FIRST16_BITS,
+            )?;
+            validate_hash_and_prefix(
+                "router_probs",
+                &router_output.router_probs_bits,
+                EXPECTED_ROUTER_PROBS_HASH,
+                &EXPECTED_ROUTER_PROBS_FIRST16_BITS,
+            )?;
+            validate_hash_and_prefix(
+                "router_topk_indices",
+                &router_output.top_k_indices,
+                EXPECTED_ROUTER_TOPK_INDICES_HASH,
+                &EXPECTED_ROUTER_TOPK_INDICES,
+            )?;
+            validate_hash_and_prefix(
+                "router_topk_weights",
+                &router_output.top_k_weights_bits,
+                EXPECTED_ROUTER_TOPK_WEIGHTS_HASH,
+                &EXPECTED_ROUTER_TOPK_WEIGHTS_FIRST8_BITS,
+            )?;
+        }
+        if let Some(moe_expert_gate_bits) = &moe_expert_gate_bits {
+            validate_hash_and_prefix(
+                "attention_moe_expert_gate",
+                moe_expert_gate_bits,
+                EXPECTED_MOE_EXPERT_GATE_HASH,
+                &EXPECTED_MOE_EXPERT_GATE_FIRST16_BITS,
+            )?;
+        }
+        if let Some(moe_expert_up_bits) = &moe_expert_up_bits {
+            validate_hash_and_prefix(
+                "attention_moe_expert_up",
+                moe_expert_up_bits,
+                EXPECTED_MOE_EXPERT_UP_HASH,
+                &EXPECTED_MOE_EXPERT_UP_FIRST16_BITS,
+            )?;
+        }
+        if let Some(moe_expert_geglu_bits) = &moe_expert_geglu_bits {
+            validate_hash_and_prefix(
+                "attention_moe_expert_geglu",
+                moe_expert_geglu_bits,
+                EXPECTED_MOE_EXPERT_GEGLU_HASH,
+                &EXPECTED_MOE_EXPERT_GEGLU_FIRST16_BITS,
+            )?;
+        }
+        if let Some(moe_expert_down_bits) = &moe_expert_down_bits {
+            validate_hash_and_prefix(
+                "attention_moe_expert_down",
+                moe_expert_down_bits,
+                EXPECTED_MOE_EXPERT_DOWN_HASH,
+                &EXPECTED_MOE_EXPERT_DOWN_FIRST16_BITS,
+            )?;
+        }
+        if let Some(post_ffn_norm1_bits) = &post_ffn_norm1_bits {
+            validate_hash_and_prefix(
+                "attention_post_ffn_norm1",
+                post_ffn_norm1_bits,
+                EXPECTED_POST_FFN_NORM1_HASH,
+                &EXPECTED_POST_FFN_NORM1_FIRST16_BITS,
+            )?;
+        }
+        if let Some(moe_expert_out_bits) = &moe_expert_out_bits {
+            validate_hash_and_prefix(
+                "attention_moe_expert_out",
+                moe_expert_out_bits,
+                EXPECTED_MOE_EXPERT_OUT_HASH,
+                &EXPECTED_MOE_EXPERT_OUT_FIRST16_BITS,
+            )?;
+        }
+        if let Some(moe_post_ffn_norm2_bits) = &moe_post_ffn_norm2_bits {
+            validate_hash_and_prefix(
+                "attention_moe_post_ffn_norm2",
+                moe_post_ffn_norm2_bits,
+                EXPECTED_MOE_POST_FFN_NORM2_HASH,
+                &EXPECTED_MOE_POST_FFN_NORM2_FIRST16_BITS,
+            )?;
+        }
+        if let Some(moe_merge_bits) = &moe_merge_bits {
+            validate_hash_and_prefix(
+                "attention_moe_merge",
+                moe_merge_bits,
+                EXPECTED_MOE_MERGE_HASH,
+                &EXPECTED_MOE_MERGE_FIRST16_BITS,
+            )?;
+        }
+        if let Some(post_ffn_residual_bits) = &post_ffn_residual_bits {
+            validate_hash_and_prefix(
+                "attention_post_ffn_residual",
+                post_ffn_residual_bits,
+                EXPECTED_POST_FFN_RESIDUAL_HASH,
+                &EXPECTED_POST_FFN_RESIDUAL_FIRST16_BITS,
             )?;
         }
     }
-    if let Some(dense_gate_bits) = &dense_gate_bits {
-        validate_hash_and_prefix(
-            "attention_pre_ffn_gate",
-            dense_gate_bits,
-            EXPECTED_PRE_FEEDFORWARD_GATE_HASH,
-            &EXPECTED_PRE_FEEDFORWARD_GATE_FIRST16_BITS,
-        )?;
+
+    let (post_attention_norm_bits, post_attention_residual_bits, pre_feedforward_norm_bits) =
+        match post_attention_stage_bits {
+            Some((post_attention_norm_bits, residual_bits, pre_feedforward_norm_bits)) => (
+                Some(post_attention_norm_bits),
+                Some(residual_bits),
+                pre_feedforward_norm_bits,
+            ),
+            None => (None, None, None),
+        };
+
+    Ok(Layer0CachedArtifacts {
+        backend_name: runtime.backend_info().name.to_string(),
+        model_path,
+        layer_idx,
+        selected_stage: plan.display_stage(),
+        prefill_rope_offset,
+        decode_rope_offset,
+        q_head_count,
+        k_head_count,
+        v_head_count,
+        q_heads_per_kv,
+        head_dim,
+        prefill_input_norm_bits,
+        prefill_v_proj_bits,
+        prefill_q_bits,
+        prefill_k_bits,
+        prefill_v_bits,
+        decode_input_norm_bits,
+        decode_v_proj_bits,
+        decode_q_bits,
+        decode_k_bits,
+        decode_v_bits,
+        full_k_bits,
+        full_v_bits,
+        attention_score_bits,
+        attention_prob_bits,
+        attention_out_bits,
+        attention_oproj_bits,
+        post_attention_norm_bits,
+        post_attention_residual_bits,
+        pre_feedforward_norm_bits,
+        dense_gate_bits,
+        dense_up_bits,
+        dense_geglu_bits,
+        dense_down_bits,
+        router_output,
+        moe_expert_gate_bits,
+        moe_expert_up_bits,
+        moe_expert_geglu_bits,
+        moe_expert_down_bits,
+        post_ffn_norm1_bits,
+        moe_expert_out_bits,
+        moe_post_ffn_norm2_bits,
+        moe_merge_bits,
+        prefill_post_ffn_residual_bits,
+        post_ffn_residual_bits,
+    })
+}
+
+pub fn run_layer_sequence(
+    model_path: PathBuf,
+    layer_indices: &[usize],
+    plan: Layer0CachedPlan,
+) -> Result<Vec<Layer0CachedArtifacts>, Box<dyn Error>> {
+    run_layer_sequence_from_inputs(
+        model_path,
+        layer_indices,
+        CachedLayerInputs::synthetic_case(),
+        plan,
+    )
+}
+
+pub fn run_layer_sequence_from_inputs(
+    model_path: PathBuf,
+    layer_indices: &[usize],
+    mut inputs: CachedLayerInputs,
+    plan: Layer0CachedPlan,
+) -> Result<Vec<Layer0CachedArtifacts>, Box<dyn Error>> {
+    let mut session = LayerExecutionSession::load(model_path)?;
+    let mut outputs = Vec::with_capacity(layer_indices.len());
+    for &layer_idx in layer_indices {
+        let artifacts = run_layer_plan_with_session(&mut session, layer_idx, inputs, plan)?;
+        let next_prefill = artifacts
+            .prefill_layer_output_bf16_words()
+            .ok_or("layer sequence requires prefill post-ffn residual output")?;
+        let next_decode = artifacts
+            .bf16_words_for_stage(Layer0CachedStage::PostFfnResidual)
+            .ok_or("layer sequence requires decode post-ffn residual output")?;
+        inputs = CachedLayerInputs {
+            prefill_input_words: next_prefill,
+            decode_input_words: next_decode,
+            prefill_rope_offset: artifacts.prefill_rope_offset,
+            decode_rope_offset: artifacts.decode_rope_offset,
+            validate_against_oracle: false,
+        };
+        outputs.push(artifacts);
     }
-    if let Some(dense_up_bits) = &dense_up_bits {
-        validate_hash_and_prefix(
-            "attention_pre_ffn_up",
-            dense_up_bits,
-            EXPECTED_PRE_FEEDFORWARD_UP_HASH,
-            &EXPECTED_PRE_FEEDFORWARD_UP_FIRST16_BITS,
-        )?;
-    }
-    if let Some(dense_geglu_bits) = &dense_geglu_bits {
-        validate_hash_and_prefix(
-            "attention_pre_ffn_geglu",
-            dense_geglu_bits,
-            EXPECTED_PRE_FEEDFORWARD_GEGLU_HASH,
-            &EXPECTED_PRE_FEEDFORWARD_GEGLU_FIRST16_BITS,
-        )?;
-    }
-    if let Some(dense_down_bits) = &dense_down_bits {
-        validate_hash_and_prefix(
-            "attention_pre_ffn_down",
-            dense_down_bits,
-            EXPECTED_PRE_FEEDFORWARD_DOWN_HASH,
-            &EXPECTED_PRE_FEEDFORWARD_DOWN_FIRST16_BITS,
-        )?;
-    }
-    if let Some(router_output) = &router_output {
-        validate_hash_and_prefix(
-            "router_scaled",
-            &router_output.router_scaled_bits,
-            EXPECTED_ROUTER_SCALED_HASH,
-            &EXPECTED_ROUTER_SCALED_FIRST16_BITS,
-        )?;
-        validate_hash_and_prefix(
-            "router_expert_scores",
-            &router_output.expert_scores_bits,
-            EXPECTED_ROUTER_EXPERT_SCORES_HASH,
-            &EXPECTED_ROUTER_EXPERT_SCORES_FIRST16_BITS,
-        )?;
-        validate_hash_and_prefix(
-            "router_probs",
-            &router_output.router_probs_bits,
-            EXPECTED_ROUTER_PROBS_HASH,
-            &EXPECTED_ROUTER_PROBS_FIRST16_BITS,
-        )?;
-        validate_hash_and_prefix(
-            "router_topk_indices",
-            &router_output.top_k_indices,
-            EXPECTED_ROUTER_TOPK_INDICES_HASH,
-            &EXPECTED_ROUTER_TOPK_INDICES,
-        )?;
-        validate_hash_and_prefix(
-            "router_topk_weights",
-            &router_output.top_k_weights_bits,
-            EXPECTED_ROUTER_TOPK_WEIGHTS_HASH,
-            &EXPECTED_ROUTER_TOPK_WEIGHTS_FIRST8_BITS,
-        )?;
+    Ok(outputs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        bf16_round_to_f32, bf16_word_to_f32, bf16_words_from_f32_bits, bytes_from_bf16_words,
+        compile_default_pipeline, default_model_path, print_cached_artifacts,
+        read_bf16_buffer_bits, read_f32_file_as_bf16_words, run_layer_plan,
+        run_layer_plan_from_sequence, run_layer_plan_with_session,
+        run_layer_plan_with_session_from_sequence, run_layer_sequence,
+        run_layer_sequence_from_inputs, CachedLayerInputs, CachedLayerSequenceInputs,
+        ExactMetalQprojLayout, ExactMetalTextRuntimeSession, Layer0CachedArtifacts,
+        Layer0CachedPlan, Layer0CachedStage, LayerExecutionSession, LayerTensorNames,
+        MlxAffineQprojRowArgs, MlxIndexedSafetensors, NORM_LEN, write_bf16_words_as_f32_file,
+        DECODE_ROPE_OFFSET, PREFILL_ROPE_OFFSET,
+    };
+    use makepad_ggml::backend::metal::{BufferStorageMode, MetalBufferBindingRef, MetalSize};
+    use makepad_mlx_rt_core::fnv1a64_u32_words;
+    use std::env::temp_dir;
+    use std::path::PathBuf;
+    use std::{fs, io::Write};
+
+    fn u4_group_terms_row_totals(
+        x_bf16_words: &[u16],
+        weights: &[u32],
+        scales: &[u16],
+        biases: &[u16],
+        row: usize,
+        weight_stride_words: usize,
+        qparams_per_row: usize,
+    ) -> (u32, u32) {
+        const VALUES_PER_THREAD: usize = 8;
+        const BLOCK_SIZE: usize = VALUES_PER_THREAD * 32;
+        const GROUPS_PER_BLOCK: usize = BLOCK_SIZE / 64;
+
+        let row_weight_base = row * weight_stride_words;
+        let row_qparam_base = row * qparams_per_row;
+        let mut total_plain = 0.0f32;
+        let mut total_groupbf16 = 0.0f32;
+
+        for block in 0..(x_bf16_words.len() / BLOCK_SIZE) {
+            let block_weight_base = block * (BLOCK_SIZE / 8);
+            let block_x_base = block * BLOCK_SIZE;
+            for group in 0..GROUPS_PER_BLOCK {
+                let scale = bf16_word_to_f32(scales[row_qparam_base + block * GROUPS_PER_BLOCK + group]);
+                let bias = bf16_word_to_f32(biases[row_qparam_base + block * GROUPS_PER_BLOCK + group]);
+                let mut group_sum = 0.0f32;
+                let mut group_accum = 0.0f32;
+
+                for lane in 0..8 {
+                    let lane_in_block = group * 8 + lane;
+                    let lane_x_base = block_x_base + lane_in_block * VALUES_PER_THREAD;
+                    let w = weights[row_weight_base + block_weight_base + lane_in_block];
+
+                    let mut x_thread = [0.0f32; VALUES_PER_THREAD];
+                    let mut lane_sum = 0.0f32;
+                    for i in (0..VALUES_PER_THREAD).step_by(4) {
+                        let x0 = bf16_word_to_f32(x_bf16_words[lane_x_base + i]);
+                        let x1 = bf16_word_to_f32(x_bf16_words[lane_x_base + i + 1]);
+                        let x2 = bf16_word_to_f32(x_bf16_words[lane_x_base + i + 2]);
+                        let x3 = bf16_word_to_f32(x_bf16_words[lane_x_base + i + 3]);
+                        lane_sum += x0 + x1 + x2 + x3;
+                        x_thread[i] = x0;
+                        x_thread[i + 1] = x1 / 16.0;
+                        x_thread[i + 2] = x2 / 256.0;
+                        x_thread[i + 3] = x3 / 4096.0;
+                    }
+
+                    let ws0 = (w & 0xFFFF) as u16;
+                    let ws1 = (w >> 16) as u16;
+                    let lane_accum =
+                        x_thread[0] * ((ws0 & 0x000F) as f32) +
+                        x_thread[1] * ((ws0 & 0x00F0) as f32) +
+                        x_thread[2] * ((ws0 & 0x0F00) as f32) +
+                        x_thread[3] * ((ws0 & 0xF000) as f32) +
+                        x_thread[4] * ((ws1 & 0x000F) as f32) +
+                        x_thread[5] * ((ws1 & 0x00F0) as f32) +
+                        x_thread[6] * ((ws1 & 0x0F00) as f32) +
+                        x_thread[7] * ((ws1 & 0xF000) as f32);
+
+                    group_sum += lane_sum;
+                    group_accum += lane_accum;
+                }
+
+                total_plain += scale * group_accum + bias * group_sum;
+                total_groupbf16 +=
+                    bf16_round_to_f32(scale * group_accum) +
+                    bf16_round_to_f32(bias * group_sum);
+            }
+        }
+
+        (
+            bf16_round_to_f32(total_plain).to_bits(),
+            bf16_round_to_f32(total_groupbf16).to_bits(),
+        )
     }
 
-    println!("backend={}", runtime.backend_info().name);
-    println!("model_path={}", model_path.display());
-    println!("prefill_rope_offset={PREFILL_ROPE_OFFSET}");
-    println!("decode_rope_offset={DECODE_ROPE_OFFSET}");
-    println!("prefill_activation_phase={PREFILL_ACTIVATION_PHASE}");
-    println!("decode_activation_phase={DECODE_ACTIVATION_PHASE}");
-    println!("q_head_count={q_head_count}");
-    println!("k_head_count={k_head_count}");
-    println!("v_head_count={v_head_count}");
-    println!("q_heads_per_kv={q_heads_per_kv}");
-    println!("head_dim={head_dim}");
-    if validate_dense_down {
-        println!("stage=attention_pre_ffn_down_cached");
-    } else if validate_dense_geglu {
-        println!("stage=attention_pre_ffn_geglu_cached");
-    } else if validate_dense_up {
-        println!("stage=attention_pre_ffn_up_cached");
-    } else if validate_dense_gate {
-        println!("stage=attention_pre_ffn_gate_cached");
-    } else if validate_router {
-        println!("stage=attention_router_cached");
-    } else if validate_pre_ffn_norm {
-        println!("stage=attention_pre_ffn_norm_cached");
-    } else if validate_residual {
-        println!("stage=attention_post_attn_residual_cached");
-    } else if validate_oproj {
-        println!("stage=attention_oproj_cached");
-    } else {
-        println!("stage=qkv_attention_output_cached");
-    }
-    println!("prefill_k_cache_fnv1a64=0x{:016X}", fnv1a64_u32_words(&prefill_k_bits));
-    println!("prefill_v_cache_fnv1a64=0x{:016X}", fnv1a64_u32_words(&prefill_v_bits));
-    println!("decode_q_rope_fnv1a64=0x{:016X}", fnv1a64_u32_words(&decode_q_bits));
-    println!("decode_k_rope_fnv1a64=0x{:016X}", fnv1a64_u32_words(&decode_k_bits));
-    println!("decode_v_norm_fnv1a64=0x{:016X}", fnv1a64_u32_words(&decode_v_bits));
-    println!("full_k_cache_fnv1a64=0x{:016X}", fnv1a64_u32_words(&full_k_bits));
-    println!("full_v_cache_fnv1a64=0x{:016X}", fnv1a64_u32_words(&full_v_bits));
-    println!("attention_scores_fnv1a64=0x{:016X}", fnv1a64_u32_words(&attention_score_bits));
-    println!("attention_probs_fnv1a64=0x{:016X}", fnv1a64_u32_words(&attention_prob_bits));
-    println!("attention_output_fnv1a64=0x{:016X}", fnv1a64_u32_words(&attention_out_bits));
-    if let Some(attention_oproj_bits) = &attention_oproj_bits {
-        println!(
-            "attention_oproj_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(attention_oproj_bits)
-        );
-    }
-    if let Some((post_attention_norm_bits, residual_bits, pre_feedforward_norm_bits)) =
-        &post_attention_stage_bits
-    {
-        println!(
-            "attention_post_attn_norm_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(post_attention_norm_bits)
-        );
-        println!(
-            "attention_post_attn_residual_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(residual_bits)
-        );
-        if let Some(pre_feedforward_norm_bits) = pre_feedforward_norm_bits {
-            println!(
-                "attention_pre_ffn_norm_fnv1a64=0x{:016X}",
-                fnv1a64_u32_words(pre_feedforward_norm_bits)
-            );
+    fn empty_artifacts() -> Layer0CachedArtifacts {
+        Layer0CachedArtifacts {
+            backend_name: "test".to_string(),
+            model_path: PathBuf::from("test.safetensors"),
+            layer_idx: 0,
+            selected_stage: None,
+            prefill_rope_offset: PREFILL_ROPE_OFFSET,
+            decode_rope_offset: DECODE_ROPE_OFFSET,
+            q_head_count: 0,
+            k_head_count: 0,
+            v_head_count: 0,
+            q_heads_per_kv: 0,
+            head_dim: 0,
+            prefill_input_norm_bits: Vec::new(),
+            prefill_v_proj_bits: Vec::new(),
+            prefill_q_bits: Vec::new(),
+            prefill_k_bits: Vec::new(),
+            prefill_v_bits: Vec::new(),
+            decode_input_norm_bits: Vec::new(),
+            decode_v_proj_bits: Vec::new(),
+            decode_q_bits: Vec::new(),
+            decode_k_bits: Vec::new(),
+            decode_v_bits: Vec::new(),
+            full_k_bits: Vec::new(),
+            full_v_bits: Vec::new(),
+            attention_score_bits: Vec::new(),
+            attention_prob_bits: Vec::new(),
+            attention_out_bits: Vec::new(),
+            attention_oproj_bits: None,
+            post_attention_norm_bits: None,
+            post_attention_residual_bits: None,
+            pre_feedforward_norm_bits: None,
+            dense_gate_bits: None,
+            dense_up_bits: None,
+            dense_geglu_bits: None,
+            dense_down_bits: None,
+            router_output: None,
+            moe_expert_gate_bits: None,
+            moe_expert_up_bits: None,
+            moe_expert_geglu_bits: None,
+            moe_expert_down_bits: None,
+            post_ffn_norm1_bits: None,
+            moe_expert_out_bits: None,
+            moe_post_ffn_norm2_bits: None,
+            moe_merge_bits: None,
+            prefill_post_ffn_residual_bits: None,
+            post_ffn_residual_bits: None,
         }
     }
-    if let Some(dense_gate_bits) = &dense_gate_bits {
-        println!(
-            "attention_pre_ffn_gate_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(dense_gate_bits)
-        );
+
+    fn device_qproj_row_bits(
+        session: &mut LayerExecutionSession,
+        input_words: &[u16],
+        layout: ExactMetalQprojLayout,
+        weight_name: &str,
+        scales_name: &str,
+        biases_name: &str,
+    ) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+        let runtime = session.runtime.clone();
+        let x_buf =
+            runtime.create_buffer_with_bytes(&bytes_from_bf16_words(input_words), BufferStorageMode::Private)?;
+        let out_buf = runtime.create_buffer(layout.out_len() * 2, BufferStorageMode::Private)?;
+        let pipeline = compile_default_pipeline(&runtime, "kernel_mlx_affine_qproj_row_bf16")?;
+        let args = MlxAffineQprojRowArgs {
+            n_in: u32::try_from(input_words.len())?,
+            weight_words_per_row: layout.weight_words_per_row,
+            qparams_per_row: layout.qparams_per_row,
+            out_rows: layout.out_rows,
+        };
+        let bindings = [
+            MetalBufferBindingRef {
+                index: 1,
+                buffer: &x_buf,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 2,
+                buffer: &session.private_weight_buffer(weight_name)?,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 3,
+                buffer: &session.private_weight_buffer(scales_name)?,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 4,
+                buffer: &session.private_weight_buffer(biases_name)?,
+                offset_bytes: 0,
+            },
+            MetalBufferBindingRef {
+                index: 5,
+                buffer: &out_buf,
+                offset_bytes: 0,
+            },
+        ];
+        let threads_per_threadgroup = MetalSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroups = MetalSize {
+            width: (layout.out_len() as u64).div_ceil(threads_per_threadgroup.width),
+            height: 1,
+            depth: 1,
+        };
+        runtime.begin_command_batch()?;
+        runtime.dispatch_compute(
+            &pipeline,
+            super::bytes_of(&args),
+            &bindings,
+            &[],
+            threadgroups,
+            threads_per_threadgroup,
+        )?;
+        runtime.end_command_batch()?;
+        runtime.wait_idle()?;
+        read_bf16_buffer_bits(&runtime, &out_buf, layout.out_len())
     }
-    if let Some(dense_up_bits) = &dense_up_bits {
-        println!(
-            "attention_pre_ffn_up_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(dense_up_bits)
-        );
-    }
-    if let Some(dense_geglu_bits) = &dense_geglu_bits {
-        println!(
-            "attention_pre_ffn_geglu_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(dense_geglu_bits)
-        );
-    }
-    if let Some(dense_down_bits) = &dense_down_bits {
-        println!(
-            "attention_pre_ffn_down_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(dense_down_bits)
-        );
-    }
-    if let Some(router_output) = &router_output {
-        println!(
-            "router_scaled_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(&router_output.router_scaled_bits)
-        );
-        println!(
-            "expert_scores_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(&router_output.expert_scores_bits)
-        );
-        println!(
-            "router_probs_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(&router_output.router_probs_bits)
-        );
-        println!(
-            "router_topk_indices_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(&router_output.top_k_indices)
-        );
-        println!(
-            "router_topk_weights_fnv1a64=0x{:016X}",
-            fnv1a64_u32_words(&router_output.top_k_weights_bits)
-        );
-    }
-    print_first16("prefill_k_cache_first16_f32_bits", &prefill_k_bits);
-    print_first16("prefill_v_cache_first16_f32_bits", &prefill_v_bits);
-    print_first16("decode_q_rope_first16_f32_bits", &decode_q_bits);
-    print_first16("decode_k_rope_first16_f32_bits", &decode_k_bits);
-    print_first16("decode_v_norm_first16_f32_bits", &decode_v_bits);
-    print_first16("full_k_cache_first16_f32_bits", &full_k_bits);
-    print_first16("full_v_cache_first16_f32_bits", &full_v_bits);
-    print_first16("attention_scores_first16_f32_bits", &attention_score_bits);
-    print_first16("attention_probs_first16_f32_bits", &attention_prob_bits);
-    print_first16("attention_output_first16_f32_bits", &attention_out_bits);
-    if let Some(attention_oproj_bits) = &attention_oproj_bits {
-        print_first16("attention_oproj_first16_f32_bits", attention_oproj_bits);
-    }
-    if let Some((post_attention_norm_bits, residual_bits, pre_feedforward_norm_bits)) =
-        &post_attention_stage_bits
-    {
-        print_first16(
-            "attention_post_attn_norm_first16_f32_bits",
-            post_attention_norm_bits,
-        );
-        print_first16(
-            "attention_post_attn_residual_first16_f32_bits",
-            residual_bits,
-        );
-        if let Some(pre_feedforward_norm_bits) = pre_feedforward_norm_bits {
-            print_first16(
-                "attention_pre_ffn_norm_first16_f32_bits",
-                pre_feedforward_norm_bits,
-            );
+
+    fn write_f32_bits_file(path: &PathBuf, bits: &[u32]) {
+        let mut bytes = Vec::with_capacity(bits.len() * size_of::<u32>());
+        for word in bits {
+            bytes.extend_from_slice(&word.to_le_bytes());
         }
+        fs::write(path, bytes).unwrap();
     }
-    if let Some(dense_gate_bits) = &dense_gate_bits {
-        print_first16("attention_pre_ffn_gate_first16_f32_bits", dense_gate_bits);
+
+    #[derive(Debug)]
+    struct FormattedSayHiLayerOutputs {
+        layer_idx: usize,
+        step1_prefill_hash: u64,
+        step1_decode_hash: u64,
+        step2_decode_hash: u64,
+        step1_prefill_f32_path: PathBuf,
+        step1_decode_f32_path: PathBuf,
+        step2_decode_f32_path: PathBuf,
     }
-    if let Some(dense_up_bits) = &dense_up_bits {
-        print_first16("attention_pre_ffn_up_first16_f32_bits", dense_up_bits);
+
+    fn post_ffn_only_plan() -> Layer0CachedPlan {
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::PostFfnResidual);
+        plan
     }
-    if let Some(dense_geglu_bits) = &dense_geglu_bits {
-        print_first16("attention_pre_ffn_geglu_first16_f32_bits", dense_geglu_bits);
+
+    fn write_formatted_say_hi_outputs_through_layer(
+        last_layer_idx: usize,
+    ) -> Vec<FormattedSayHiLayerOutputs> {
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let mut token2_words = weights.embed_token_bf16_words(2).unwrap();
+        let mut token105_words = weights.embed_token_bf16_words(105).unwrap();
+        let mut token2364_words = weights.embed_token_bf16_words(2_364).unwrap();
+        let tmp_dir = temp_dir();
+        let mut outputs = Vec::with_capacity(last_layer_idx + 1);
+
+        for layer_idx in 0..=last_layer_idx {
+            let step1 = run_layer_plan_with_session(
+                &mut session,
+                layer_idx,
+                CachedLayerInputs {
+                    prefill_input_words: token2_words.clone(),
+                    decode_input_words: token105_words.clone(),
+                    prefill_rope_offset: 0,
+                    decode_rope_offset: 1,
+                    validate_against_oracle: false,
+                },
+                post_ffn_only_plan(),
+            )
+            .unwrap();
+            let step2 = run_layer_plan_with_session_from_sequence(
+                &mut session,
+                layer_idx,
+                CachedLayerSequenceInputs {
+                    prefill_input_words_list: vec![token2_words.clone(), token105_words.clone()],
+                    decode_input_words: token2364_words.clone(),
+                    prefill_rope_offset: 0,
+                    decode_rope_offset: 2,
+                    validate_against_oracle: false,
+                },
+                post_ffn_only_plan(),
+            )
+            .unwrap();
+
+            let step1_prefill_words = step1
+                .prefill_layer_output_bf16_words()
+                .expect("missing step1 prefill output");
+            let step1_decode_words = step1
+                .bf16_words_for_stage(Layer0CachedStage::PostFfnResidual)
+                .expect("missing step1 decode output");
+            let step2_decode_words = step2
+                .bf16_words_for_stage(Layer0CachedStage::PostFfnResidual)
+                .expect("missing step2 decode output");
+
+            let step1_prefill_f32_path =
+                tmp_dir.join(format!("gemma_say_hi_layer{layer_idx}_prefill_2_f32.bin"));
+            let step1_decode_f32_path =
+                tmp_dir.join(format!("gemma_say_hi_layer{layer_idx}_decode_105_f32.bin"));
+            let step2_decode_f32_path =
+                tmp_dir.join(format!("gemma_say_hi_layer{layer_idx}_decode_2364_f32.bin"));
+            write_bf16_words_as_f32_file(&step1_prefill_f32_path, &step1_prefill_words).unwrap();
+            write_bf16_words_as_f32_file(&step1_decode_f32_path, &step1_decode_words).unwrap();
+            write_bf16_words_as_f32_file(&step2_decode_f32_path, &step2_decode_words).unwrap();
+
+            let entry = FormattedSayHiLayerOutputs {
+                layer_idx,
+                step1_prefill_hash: fnv1a64_u32_words(
+                    step1
+                        .prefill_layer_output_bits()
+                        .expect("missing step1 prefill bits"),
+                ),
+                step1_decode_hash: fnv1a64_u32_words(
+                    step1
+                        .layer_output_bits()
+                        .expect("missing step1 decode bits"),
+                ),
+                step2_decode_hash: fnv1a64_u32_words(
+                    step2
+                        .layer_output_bits()
+                        .expect("missing step2 decode bits"),
+                ),
+                step1_prefill_f32_path,
+                step1_decode_f32_path,
+                step2_decode_f32_path,
+            };
+            outputs.push(entry);
+
+            token2_words = step1_prefill_words;
+            token105_words = step1_decode_words;
+            token2364_words = step2_decode_words;
+        }
+
+        outputs
     }
-    if let Some(dense_down_bits) = &dense_down_bits {
-        print_first16("attention_pre_ffn_down_first16_f32_bits", dense_down_bits);
-    }
-    if let Some(router_output) = &router_output {
-        print_first16("router_scaled_first16_f32_bits", &router_output.router_scaled_bits);
-        print_first16("expert_scores_first16_f32_bits", &router_output.expert_scores_bits);
-        print_first16("router_probs_first16_f32_bits", &router_output.router_probs_bits);
-        print!("top_k_indices=");
-        for (index, value) in router_output.top_k_indices.iter().enumerate() {
-            if index != 0 {
-                print!(",");
+
+    fn rms_norm_unweighted_rows_f32(x: &[f32], head_dim: usize, eps: f32) -> Vec<f32> {
+        assert!(head_dim != 0);
+        assert_eq!(x.len() % head_dim, 0);
+        let mut out = Vec::with_capacity(x.len());
+        for row in x.chunks_exact(head_dim) {
+            let mut mean_square = 0.0f32;
+            for value in row {
+                mean_square += value * value;
             }
-            print!("{value}");
+            mean_square /= head_dim as f32;
+            let inv_rms = 1.0f32 / (mean_square + eps).sqrt();
+            for value in row {
+                out.push(bf16_round_to_f32(*value * inv_rms));
+            }
         }
-        println!();
-        print_prefix(
-            "top_k_weights_first8_f32_bits",
-            &router_output.top_k_weights_bits,
-            ROUTER_TOP_K,
+        out
+    }
+
+    fn formatted_say_hi_prompt_token_ids() -> Vec<u32> {
+        vec![2, 105, 2364, 107, 30_468, 5_631, 106, 107, 105, 4_368, 107]
+    }
+
+    fn teacher_forced_prompt_hidden_words_through_layer(last_layer_idx: usize) -> Vec<Vec<u16>> {
+        let prompt_token_ids = formatted_say_hi_prompt_token_ids();
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let weights = session.weights.clone();
+        let mut token_hidden_words = prompt_token_ids
+            .iter()
+            .map(|token_id| weights.embed_token_bf16_words(*token_id).unwrap())
+            .collect::<Vec<_>>();
+
+        for layer_idx in 0..=last_layer_idx {
+            let mut next_token_hidden_words = vec![Vec::new(); prompt_token_ids.len()];
+            for pos in 0..(prompt_token_ids.len() - 1) {
+                let artifacts = run_layer_plan_with_session_from_sequence(
+                    &mut session,
+                    layer_idx,
+                    CachedLayerSequenceInputs {
+                        prefill_input_words_list: token_hidden_words[..=pos].to_vec(),
+                        decode_input_words: token_hidden_words[pos + 1].clone(),
+                        prefill_rope_offset: 0,
+                        decode_rope_offset: i32::try_from(pos + 1).unwrap(),
+                        validate_against_oracle: false,
+                    },
+                    post_ffn_only_plan(),
+                )
+                .unwrap();
+
+                let prefill_output_words = artifacts
+                    .prefill_layer_output_bf16_words()
+                    .expect("missing teacher-forced prefill output");
+                let decode_output_words = artifacts
+                    .bf16_words_for_stage(Layer0CachedStage::PostFfnResidual)
+                    .expect("missing teacher-forced decode output");
+
+                if pos == 0 {
+                    next_token_hidden_words[pos] = prefill_output_words;
+                } else {
+                    assert_eq!(
+                        next_token_hidden_words[pos], prefill_output_words,
+                        "teacher-forced layer {} token {} prefill output disagreed with prior decode path",
+                        layer_idx, pos
+                    );
+                }
+                next_token_hidden_words[pos + 1] = decode_output_words;
+            }
+            token_hidden_words = next_token_hidden_words;
+        }
+
+        token_hidden_words
+    }
+
+    fn write_teacher_forced_hidden_inputs_for_oracle(
+        input_layer_idx: usize,
+        decode_token_position: usize,
+    ) {
+        let token_hidden_words = teacher_forced_prompt_hidden_words_through_layer(input_layer_idx);
+        let tmp_dir = temp_dir();
+        let mut prefill_paths = Vec::new();
+        for token_position in 0..decode_token_position {
+            let path = tmp_dir.join(format!(
+                "gemma_say_hi_layer{input_layer_idx}_token{token_position}_f32.bin"
+            ));
+            write_bf16_words_as_f32_file(&path, &token_hidden_words[token_position]).unwrap();
+            println!(
+                "token_position={} hidden_fnv1a64=0x{:016X} f32_path={}",
+                token_position,
+                fnv1a64_u32_words(
+                    &token_hidden_words[token_position]
+                        .iter()
+                        .copied()
+                        .map(bf16_word_to_f32)
+                        .map(f32::to_bits)
+                        .collect::<Vec<_>>()
+                ),
+                path.display()
+            );
+            prefill_paths.push(path);
+        }
+
+        let decode_path = tmp_dir.join(format!(
+            "gemma_say_hi_layer{input_layer_idx}_token{decode_token_position}_f32.bin"
+        ));
+        write_bf16_words_as_f32_file(&decode_path, &token_hidden_words[decode_token_position])
+            .unwrap();
+        println!(
+            "token_position={} hidden_fnv1a64=0x{:016X} f32_path={}",
+            decode_token_position,
+            fnv1a64_u32_words(
+                &token_hidden_words[decode_token_position]
+                    .iter()
+                    .copied()
+                    .map(bf16_word_to_f32)
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>()
+            ),
+            decode_path.display()
+        );
+        println!(
+            "prefill_input_f32_files={}",
+            prefill_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        println!("decode_input_f32_file={}", decode_path.display());
+    }
+
+    fn teacher_forced_prompt_step_artifacts(
+        layer_idx: usize,
+        input_layer_idx: usize,
+        decode_token_position: usize,
+    ) -> Layer0CachedArtifacts {
+        let token_hidden_words = teacher_forced_prompt_hidden_words_through_layer(input_layer_idx);
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        run_layer_plan_with_session_from_sequence(
+            &mut session,
+            layer_idx,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: token_hidden_words[..decode_token_position].to_vec(),
+                decode_input_words: token_hidden_words[decode_token_position].clone(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: i32::try_from(decode_token_position).unwrap(),
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap()
+    }
+
+    fn teacher_env_usize(name: &str) -> usize {
+        std::env::var(name)
+            .unwrap_or_else(|_| panic!("missing {name}"))
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid {name}"))
+    }
+
+    #[test]
+    fn post_ffn_residual_plan_pulls_in_full_cached_layer_path() {
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::PostFfnResidual);
+
+        for stage in [
+            Layer0CachedStage::AttentionOproj,
+            Layer0CachedStage::PostAttentionResidual,
+            Layer0CachedStage::PreFeedforwardNorm,
+            Layer0CachedStage::DenseGate,
+            Layer0CachedStage::DenseUp,
+            Layer0CachedStage::DenseGeGlu,
+            Layer0CachedStage::DenseDown,
+            Layer0CachedStage::PostFfnNorm1,
+            Layer0CachedStage::Router,
+            Layer0CachedStage::MoeExpertGate,
+            Layer0CachedStage::MoeExpertUp,
+            Layer0CachedStage::MoeExpertGeGlu,
+            Layer0CachedStage::MoeExpertDown,
+            Layer0CachedStage::MoeExpertOut,
+            Layer0CachedStage::MoePostFfnNorm2,
+            Layer0CachedStage::MoeMerge,
+            Layer0CachedStage::PostFfnResidual,
+        ] {
+            assert!(plan.requires(stage), "missing dependency for {stage:?}");
+        }
+    }
+
+    #[test]
+    fn display_stage_matches_previous_priority_order() {
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::Router);
+        plan.require_stage(Layer0CachedStage::DenseUp);
+
+        assert_eq!(plan.display_stage(), Some(Layer0CachedStage::DenseUp));
+    }
+
+    #[test]
+    fn evaluation_order_is_dependency_first() {
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::MoeMerge);
+
+        assert_eq!(
+            plan.evaluation_order().last().copied(),
+            Some(Layer0CachedStage::MoeMerge)
+        );
+        assert!(plan.requires(Layer0CachedStage::PostFfnNorm1));
+        assert!(plan.requires(Layer0CachedStage::MoePostFfnNorm2));
+    }
+
+    #[test]
+    fn artifacts_expose_stage_bits_and_bf16_words() {
+        let mut artifacts = empty_artifacts();
+        artifacts.post_ffn_residual_bits = Some(vec![0x3F80_0000, 0xC020_0000]);
+
+        assert_eq!(
+            artifacts.layer_output_bits(),
+            Some([0x3F80_0000, 0xC020_0000].as_slice())
+        );
+        assert_eq!(
+            artifacts.bf16_words_for_stage(Layer0CachedStage::PostFfnResidual),
+            Some(vec![0x3F80, 0xC020])
+        );
+        assert_eq!(
+            artifacts.tensor_bits_for_stage(Layer0CachedStage::Router),
+            None
         );
     }
-    println!("status=ok");
-    Ok(())
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_v_path_matches_local_mlx_math() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let text_config = &weights.snapshot.config.text_config;
+        let layer_idx = 28usize;
+        let layer_type = text_config.layer_types.get(layer_idx).unwrap();
+        let attention_k_eq_v = text_config.attention_k_eq_v && layer_type == "full_attention";
+        let layer_names = LayerTensorNames::for_layer(layer_idx, attention_k_eq_v);
+
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            layer_idx,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let expected_input_norm = weights
+            .header_for_tensor(&layer_names.input_norm_weight_name)
+            .unwrap()
+            .rms_norm_weighted_f32(
+                &read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path).unwrap(),
+                &layer_names.input_norm_weight_name,
+                weights.snapshot.config.text_config.rms_norm_eps,
+            )
+            .unwrap();
+        let expected_input_norm_bits = expected_input_norm
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        let decode_h_words = bf16_words_from_f32_bits(&artifacts.decode_input_norm_bits);
+        let expected_v_proj = weights
+            .header_for_tensor(&layer_names.v.weight_name)
+            .unwrap()
+            .affine_quantized_matmul_t_f32(
+                &decode_h_words,
+                &layer_names.v.weight_name,
+                &layer_names.v.scales_name,
+                &layer_names.v.biases_name,
+                weights.snapshot.config.quantization.group_size as u64,
+                weights.snapshot.config.quantization.bits,
+            )
+            .unwrap();
+        let expected_k_proj = weights
+            .header_for_tensor(&layer_names.k.weight_name)
+            .unwrap()
+            .affine_quantized_matmul_t_f32(
+                &decode_h_words,
+                &layer_names.k.weight_name,
+                &layer_names.k.scales_name,
+                &layer_names.k.biases_name,
+                weights.snapshot.config.quantization.group_size as u64,
+                weights.snapshot.config.quantization.bits,
+            )
+            .unwrap();
+        let expected_v_proj_bits = expected_v_proj
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        let expected_k_proj_bits = expected_k_proj
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        let expected_v_norm_bits = rms_norm_unweighted_rows_f32(
+            &expected_v_proj,
+            artifacts.head_dim,
+            weights.snapshot.config.text_config.rms_norm_eps,
+        )
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+        eprintln!(
+            "layer28_step1 decode_input_norm expected=0x{:016X} actual=0x{:016X}",
+            fnv1a64_u32_words(&expected_input_norm_bits),
+            fnv1a64_u32_words(&artifacts.decode_input_norm_bits),
+        );
+        eprintln!(
+            "layer28_step1 decode_k_proj expected=0x{:016X}",
+            fnv1a64_u32_words(&expected_k_proj_bits),
+        );
+        eprintln!(
+            "layer28_step1 decode_v_proj expected=0x{:016X} actual=0x{:016X}",
+            fnv1a64_u32_words(&expected_v_proj_bits),
+            fnv1a64_u32_words(&artifacts.decode_v_proj_bits),
+        );
+        eprintln!(
+            "layer28_step1 decode_v_proj expected_first16={}",
+            expected_v_proj_bits
+                .iter()
+                .take(16)
+                .map(|bits| format!("0x{bits:08X}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        eprintln!(
+            "layer28_step1 decode_v_proj actual_first16={}",
+            artifacts
+                .decode_v_proj_bits
+                .iter()
+                .take(16)
+                .map(|bits| format!("0x{bits:08X}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        assert_eq!(
+            fnv1a64_u32_words(&expected_input_norm_bits),
+            fnv1a64_u32_words(&artifacts.decode_input_norm_bits),
+            "layer 28 step1 decode_input_norm diverged from local MLX math"
+        );
+        assert_eq!(
+            fnv1a64_u32_words(&expected_v_proj_bits),
+            fnv1a64_u32_words(&artifacts.decode_v_proj_bits),
+            "layer 28 step1 decode_v_proj diverged from local MLX math"
+        );
+        assert_eq!(
+            fnv1a64_u32_words(&expected_v_norm_bits),
+            fnv1a64_u32_words(&artifacts.decode_v_bits),
+            "layer 28 step1 decode_v_norm diverged from local MLX math"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_v_row665_term_models() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let text_config = &weights.snapshot.config.text_config;
+        let layer_idx = 28usize;
+        let layer_type = text_config.layer_types.get(layer_idx).unwrap();
+        let attention_k_eq_v = text_config.attention_k_eq_v && layer_type == "full_attention";
+        let layer_names = LayerTensorNames::for_layer(layer_idx, attention_k_eq_v);
+
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            layer_idx,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let v_weight_entry = weights.tensor(&layer_names.v.weight_name).unwrap();
+        let v_scales_entry = weights.tensor(&layer_names.v.scales_name).unwrap();
+        let v_weights = weights
+            .header_for_tensor(&layer_names.v.weight_name)
+            .unwrap()
+            .read_u32_tensor_words(&layer_names.v.weight_name)
+            .unwrap();
+        let v_scales = weights.read_bf16_tensor_words(&layer_names.v.scales_name).unwrap();
+        let v_biases = weights.read_bf16_tensor_words(&layer_names.v.biases_name).unwrap();
+        let decode_h_words = bf16_words_from_f32_bits(&artifacts.decode_input_norm_bits);
+        let row = 665usize;
+        let (plain_bits, groupbf16_bits) = u4_group_terms_row_totals(
+            &decode_h_words,
+            &v_weights,
+            &v_scales,
+            &v_biases,
+            row,
+            v_weight_entry.shape[1] as usize,
+            v_scales_entry.shape[1] as usize,
+        );
+
+        eprintln!(
+            "layer28_step1 row665 actual=0x{:08X} plain_seq=0x{:08X} groupbf16_seq=0x{:08X}",
+            artifacts.decode_v_proj_bits[row],
+            plain_bits,
+            groupbf16_bits,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_device_qproj_matches_device_qmv() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let text_config = &weights.snapshot.config.text_config;
+        let layer_idx = 28usize;
+        let layer_type = text_config.layer_types.get(layer_idx).unwrap();
+        let attention_k_eq_v = text_config.attention_k_eq_v && layer_type == "full_attention";
+        let layer_names = LayerTensorNames::for_layer(layer_idx, attention_k_eq_v);
+        let v_weight_entry = weights.tensor(&layer_names.v.weight_name).unwrap();
+        let v_scales_entry = weights.tensor(&layer_names.v.scales_name).unwrap();
+        let v_layout = ExactMetalQprojLayout {
+            weight_words_per_row: v_weight_entry.shape[1] as u32,
+            qparams_per_row: v_scales_entry.shape[1] as u32,
+            out_rows: u32::try_from(v_weight_entry.shape[0]).unwrap(),
+        };
+
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            layer_idx,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let decode_h_words = bf16_words_from_f32_bits(&artifacts.decode_input_norm_bits);
+        let qproj_bits = device_qproj_row_bits(
+            &mut session,
+            &decode_h_words,
+            v_layout,
+            &layer_names.v.weight_name,
+            &layer_names.v.scales_name,
+            &layer_names.v.biases_name,
+        )
+        .unwrap();
+
+        eprintln!(
+            "layer28_step1 device_qproj expected=0x{:016X} qmv=0x{:016X}",
+            fnv1a64_u32_words(&qproj_bits),
+            fnv1a64_u32_words(&artifacts.decode_v_proj_bits),
+        );
+        eprintln!(
+            "layer28_step1 device_qproj first16={}",
+            qproj_bits
+                .iter()
+                .take(16)
+                .map(|bits| format!("0x{bits:08X}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        assert_eq!(
+            fnv1a64_u32_words(&qproj_bits),
+            fnv1a64_u32_words(&artifacts.decode_v_proj_bits),
+            "layer 28 step1 device qproj row kernel diverged from qmv output"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_writes_rust_decode_v_proj_file() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            28,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let out_path = temp_dir().join("rust_layer28_step1_decode_v_proj_f32.bin");
+        write_f32_bits_file(&out_path, &artifacts.decode_v_proj_bits);
+        println!("rust_decode_v_proj_f32_path={}", out_path.display());
+        println!(
+            "rust_decode_v_proj_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&artifacts.decode_v_proj_bits)
+        );
+        assert_eq!(artifacts.decode_v_proj_bits.len(), 2048);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_writes_rust_decode_v_norm_file() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            28,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let out_path = temp_dir().join("rust_layer28_step1_decode_v_norm_f32.bin");
+        write_f32_bits_file(&out_path, &artifacts.decode_v_bits);
+        println!("rust_decode_v_norm_f32_path={}", out_path.display());
+        println!(
+            "rust_decode_v_norm_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&artifacts.decode_v_bits)
+        );
+        assert_eq!(artifacts.decode_v_bits.len(), 2048);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_writes_rust_post_ffn_residual_file() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            28,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let out_bits = artifacts
+            .post_ffn_residual_bits
+            .as_ref()
+            .expect("missing post-ffn residual bits");
+        let out_path = temp_dir().join("rust_layer28_step1_post_ffn_residual_f32.bin");
+        write_f32_bits_file(&out_path, out_bits);
+        println!("rust_post_ffn_residual_f32_path={}", out_path.display());
+        println!(
+            "rust_post_ffn_residual_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(out_bits)
+        );
+        assert_eq!(out_bits.len(), 2816);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_writes_rust_attention_output_file() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            28,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let out_path = temp_dir().join("rust_layer28_step1_attention_output_f32.bin");
+        write_f32_bits_file(&out_path, &artifacts.attention_out_bits);
+        println!("rust_attention_output_f32_path={}", out_path.display());
+        println!(
+            "rust_attention_output_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&artifacts.attention_out_bits)
+        );
+        assert_eq!(artifacts.attention_out_bits.len(), 8192);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_writes_rust_full_v_cache_file() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            28,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let out_path = temp_dir().join("rust_layer28_step1_full_v_cache_f32.bin");
+        write_f32_bits_file(&out_path, &artifacts.full_v_bits);
+        println!("rust_full_v_cache_f32_path={}", out_path.display());
+        println!(
+            "rust_full_v_cache_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&artifacts.full_v_bits)
+        );
+        assert_eq!(artifacts.full_v_bits.len(), 4096);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_writes_rust_attention_scores_file() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            28,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let out_path = temp_dir().join("rust_layer28_step1_attention_scores_f32.bin");
+        write_f32_bits_file(&out_path, &artifacts.attention_score_bits);
+        println!("rust_attention_scores_f32_path={}", out_path.display());
+        println!(
+            "rust_attention_scores_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&artifacts.attention_score_bits)
+        );
+        assert_eq!(artifacts.attention_score_bits.len(), 32);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_writes_rust_attention_probs_file() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            28,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let out_path = temp_dir().join("rust_layer28_step1_attention_probs_f32.bin");
+        write_f32_bits_file(&out_path, &artifacts.attention_prob_bits);
+        println!("rust_attention_probs_f32_path={}", out_path.display());
+        println!(
+            "rust_attention_probs_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&artifacts.attention_prob_bits)
+        );
+        assert_eq!(artifacts.attention_prob_bits.len(), 32);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer28_step1_writes_rust_attention_oproj_file() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(27);
+        let layer27 = outputs.last().expect("missing layer 27 outputs");
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path).unwrap();
+        let artifacts = run_layer_plan_with_session_from_sequence(
+            &mut session,
+            28,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    read_f32_file_as_bf16_words(&layer27.step1_prefill_f32_path).unwrap(),
+                ],
+                decode_input_words: read_f32_file_as_bf16_words(&layer27.step1_decode_f32_path)
+                    .unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            post_ffn_only_plan(),
+        )
+        .unwrap();
+
+        let out_bits = artifacts
+            .attention_oproj_bits
+            .as_ref()
+            .expect("missing attention oproj bits");
+        let out_path = temp_dir().join("rust_layer28_step1_attention_oproj_f32.bin");
+        write_f32_bits_file(&out_path, out_bits);
+        println!("rust_attention_oproj_f32_path={}", out_path.display());
+        println!(
+            "rust_attention_oproj_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(out_bits)
+        );
+        assert_eq!(out_bits.len(), 2816);
+    }
+
+    #[test]
+    #[ignore]
+    fn layer0_to_layer1_hidden_state_handoff_executes() {
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::PostFfnResidual);
+        let outputs = run_layer_sequence(default_model_path(), &[0, 1], plan).unwrap();
+        assert_eq!(outputs.len(), 2);
+        assert!(outputs[0].prefill_layer_output_bits().is_some());
+        assert!(outputs[1].prefill_layer_output_bits().is_some());
+        assert!(outputs[1].layer_output_bits().is_some());
+    }
+
+    #[test]
+    #[ignore]
+    fn all_30_text_layers_execute_from_synthetic_hidden_state_handoff() {
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::PostFfnResidual);
+        let layer_indices = (0usize..30).collect::<Vec<_>>();
+        let outputs = run_layer_sequence(default_model_path(), &layer_indices, plan).unwrap();
+        assert_eq!(outputs.len(), 30);
+        assert!(outputs[29].prefill_layer_output_bits().is_some());
+        assert!(outputs[29].layer_output_bits().is_some());
+    }
+
+    #[test]
+    #[ignore]
+    fn layer0_real_two_token_inputs_report_exact_cached_stage_hashes() {
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::PostFfnResidual);
+        let outputs = run_layer_sequence_from_inputs(
+            model_path,
+            &[0],
+            CachedLayerInputs {
+                prefill_input_words: weights.embed_token_bf16_words(30_468).unwrap(),
+                decode_input_words: weights.embed_token_bf16_words(5_631).unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            plan,
+        )
+        .unwrap();
+        assert_eq!(outputs.len(), 1);
+        print_cached_artifacts(&outputs[0]);
+    }
+
+    #[test]
+    #[ignore]
+    fn single_prefill_sequence_path_matches_single_prefill_plan() {
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::PostFfnResidual);
+        let single = run_layer_plan(
+            model_path.clone(),
+            0,
+            CachedLayerInputs {
+                prefill_input_words: weights.embed_token_bf16_words(30_468).unwrap(),
+                decode_input_words: weights.embed_token_bf16_words(5_631).unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            plan,
+        )
+        .unwrap();
+        let sequence = run_layer_plan_from_sequence(
+            model_path,
+            0,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![weights.embed_token_bf16_words(30_468).unwrap()],
+                decode_input_words: weights.embed_token_bf16_words(5_631).unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            plan,
+        )
+        .unwrap();
+        assert_eq!(sequence.prefill_k_bits, single.prefill_k_bits);
+        assert_eq!(sequence.full_k_bits, single.full_k_bits);
+        assert_eq!(sequence.full_v_bits, single.full_v_bits);
+        assert_eq!(sequence.layer_output_bits(), single.layer_output_bits());
+    }
+
+    #[test]
+    #[ignore]
+    fn layer0_formatted_say_hi_prefix_step_matches_local_mlx_hash() {
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::PostFfnResidual);
+        let artifacts = run_layer_plan_from_sequence(
+            model_path,
+            0,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    weights.embed_token_bf16_words(2).unwrap(),
+                    weights.embed_token_bf16_words(105).unwrap(),
+                ],
+                decode_input_words: weights.embed_token_bf16_words(2_364).unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 2,
+                validate_against_oracle: false,
+            },
+            plan,
+        )
+        .unwrap();
+        assert_eq!(
+            fnv1a64_u32_words(&artifacts.decode_q_bits),
+            0x9B1CAF70FB269479
+        );
+        assert_eq!(
+            fnv1a64_u32_words(&artifacts.full_k_bits),
+            0xF4944920E989FCF5
+        );
+        assert_eq!(
+            fnv1a64_u32_words(
+                artifacts
+                    .layer_output_bits()
+                    .expect("missing post-ffn residual bits for formatted prompt step"),
+            ),
+            0xA062311D5B7C20A4
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_first_prefix_step_writes_layer0_outputs_for_layer1_oracle() {
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::PostFfnResidual);
+        let artifacts = run_layer_plan(
+            model_path,
+            0,
+            CachedLayerInputs {
+                prefill_input_words: weights.embed_token_bf16_words(2).unwrap(),
+                decode_input_words: weights.embed_token_bf16_words(105).unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 1,
+                validate_against_oracle: false,
+            },
+            plan,
+        )
+        .unwrap();
+        let prefill_words = artifacts
+            .prefill_layer_output_bf16_words()
+            .expect("missing layer-0 prefill output");
+        let decode_words = artifacts
+            .bf16_words_for_stage(Layer0CachedStage::PostFfnResidual)
+            .expect("missing layer-0 decode output");
+        let prefill_path = temp_dir().join("gemma_say_hi_layer0_prefill_2_f32.bin");
+        let decode_path = temp_dir().join("gemma_say_hi_layer0_decode_105_f32.bin");
+        write_bf16_words_as_f32_file(&prefill_path, &prefill_words).unwrap();
+        write_bf16_words_as_f32_file(&decode_path, &decode_words).unwrap();
+        println!("prefill_f32_path={}", prefill_path.display());
+        println!("decode_f32_path={}", decode_path.display());
+        println!(
+            "prefill_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(
+                artifacts
+                    .prefill_layer_output_bits()
+                    .expect("missing layer-0 prefill bits"),
+            )
+        );
+        println!(
+            "decode_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(
+                artifacts
+                    .layer_output_bits()
+                    .expect("missing layer-0 decode bits"),
+            )
+        );
+        assert_eq!(prefill_words.len(), NORM_LEN);
+        assert_eq!(decode_words.len(), NORM_LEN);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_second_prefix_step_writes_layer0_decode_output_for_layer1_oracle() {
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let mut plan = Layer0CachedPlan::new();
+        plan.require_stage(Layer0CachedStage::PostFfnResidual);
+        let artifacts = run_layer_plan_from_sequence(
+            model_path,
+            0,
+            CachedLayerSequenceInputs {
+                prefill_input_words_list: vec![
+                    weights.embed_token_bf16_words(2).unwrap(),
+                    weights.embed_token_bf16_words(105).unwrap(),
+                ],
+                decode_input_words: weights.embed_token_bf16_words(2_364).unwrap(),
+                prefill_rope_offset: 0,
+                decode_rope_offset: 2,
+                validate_against_oracle: false,
+            },
+            plan,
+        )
+        .unwrap();
+        let decode_words = artifacts
+            .bf16_words_for_stage(Layer0CachedStage::PostFfnResidual)
+            .expect("missing layer-0 decode output for token 2364");
+        let decode_path = temp_dir().join("gemma_say_hi_layer0_decode_2364_f32.bin");
+        write_bf16_words_as_f32_file(&decode_path, &decode_words).unwrap();
+        println!("decode_f32_path={}", decode_path.display());
+        println!(
+            "decode_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(
+                artifacts
+                    .layer_output_bits()
+                    .expect("missing layer-0 decode bits for token 2364"),
+            )
+        );
+        assert_eq!(decode_words.len(), NORM_LEN);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_prefix_step_writes_outputs_through_text_tower() {
+        let outputs = write_formatted_say_hi_outputs_through_layer(29);
+        let manifest_path = temp_dir().join("gemma_say_hi_layer_hashes.txt");
+        let mut manifest = fs::File::create(&manifest_path).unwrap();
+        for entry in &outputs {
+            writeln!(
+                manifest,
+                "layer={} step1_prefill_fnv1a64=0x{:016X} step1_decode105_fnv1a64=0x{:016X} step2_decode2364_fnv1a64=0x{:016X}",
+                entry.layer_idx,
+                entry.step1_prefill_hash,
+                entry.step1_decode_hash,
+                entry.step2_decode_hash,
+            )
+            .unwrap();
+            println!(
+                "layer={} step1_prefill_fnv1a64=0x{:016X} step1_decode105_fnv1a64=0x{:016X} step2_decode2364_fnv1a64=0x{:016X}",
+                entry.layer_idx,
+                entry.step1_prefill_hash,
+                entry.step1_decode_hash,
+                entry.step2_decode_hash,
+            );
+            println!(
+                "layer={} step1_prefill_f32_path={}",
+                entry.layer_idx,
+                entry.step1_prefill_f32_path.display()
+            );
+            println!(
+                "layer={} step1_decode105_f32_path={}",
+                entry.layer_idx,
+                entry.step1_decode_f32_path.display()
+            );
+            println!(
+                "layer={} step2_decode2364_f32_path={}",
+                entry.layer_idx,
+                entry.step2_decode_f32_path.display()
+            );
+        }
+        println!("manifest_path={}", manifest_path.display());
+        assert_eq!(outputs.len(), 30);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_full_prompt_teacher_forced_hash_manifest() {
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let num_layers = weights.snapshot.config.text_config.num_hidden_layers as usize;
+
+        for layer_idx in 0..num_layers {
+            let token_hidden_words = teacher_forced_prompt_hidden_words_through_layer(layer_idx);
+            for (position, hidden_words) in token_hidden_words.iter().enumerate() {
+                let hidden_bits = hidden_words
+                    .iter()
+                    .copied()
+                    .map(bf16_word_to_f32)
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>();
+                println!(
+                    "token_position={} layer_idx={} hidden_fnv1a64=0x{:016X}",
+                    position,
+                    layer_idx,
+                    fnv1a64_u32_words(&hidden_bits)
+                );
+            }
+
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer6_token8_writes_layer5_hidden_inputs_for_oracle() {
+        write_teacher_forced_hidden_inputs_for_oracle(5, 8);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer17_token8_writes_layer16_hidden_inputs_for_oracle() {
+        write_teacher_forced_hidden_inputs_for_oracle(16, 8);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer29_token7_writes_layer28_hidden_inputs_for_oracle() {
+        write_teacher_forced_hidden_inputs_for_oracle(28, 7);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_layer17_token8_writes_rust_attention_output_file() {
+        let artifacts = teacher_forced_prompt_step_artifacts(17, 16, 8);
+        let out_path = temp_dir().join("rust_layer17_token8_attention_output_f32.bin");
+        write_f32_bits_file(&out_path, &artifacts.attention_out_bits);
+        println!("rust_attention_output_f32_path={}", out_path.display());
+        println!(
+            "rust_attention_output_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&artifacts.attention_out_bits)
+        );
+        assert_eq!(artifacts.attention_out_bits.len(), 8192);
+    }
+
+    #[test]
+    #[ignore]
+    fn teacher_forced_prompt_hidden_inputs_for_oracle_from_env() {
+        let input_layer_idx = teacher_env_usize("MAKEPAD_TEACHER_INPUT_LAYER");
+        let decode_token_position = teacher_env_usize("MAKEPAD_TEACHER_DECODE_POS");
+        write_teacher_forced_hidden_inputs_for_oracle(input_layer_idx, decode_token_position);
+    }
+
+    #[test]
+    #[ignore]
+    fn teacher_forced_prompt_attention_output_file_from_env() {
+        let layer_idx = teacher_env_usize("MAKEPAD_TEACHER_LAYER");
+        let input_layer_idx = teacher_env_usize("MAKEPAD_TEACHER_INPUT_LAYER");
+        let decode_token_position = teacher_env_usize("MAKEPAD_TEACHER_DECODE_POS");
+        let artifacts =
+            teacher_forced_prompt_step_artifacts(layer_idx, input_layer_idx, decode_token_position);
+        let out_path = temp_dir().join(format!(
+            "rust_layer{layer_idx}_token{decode_token_position}_attention_output_f32.bin"
+        ));
+        write_f32_bits_file(&out_path, &artifacts.attention_out_bits);
+        println!("rust_attention_output_f32_path={}", out_path.display());
+        println!(
+            "rust_attention_output_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&artifacts.attention_out_bits)
+        );
+        assert_eq!(artifacts.attention_out_bits.len(), 8192);
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_full_prompt_teacher_forced_plan_matches_exact_backend() {
+        let prompt_token_ids = formatted_say_hi_prompt_token_ids();
+        let model_path = default_model_path();
+        let mut session = LayerExecutionSession::load(model_path.clone()).unwrap();
+        let weights = session.weights.clone();
+        let num_layers = weights.snapshot.config.text_config.num_hidden_layers as usize;
+        let mut token_hidden_words = prompt_token_ids
+            .iter()
+            .map(|token_id| weights.embed_token_bf16_words(*token_id).unwrap())
+            .collect::<Vec<_>>();
+
+        for layer_idx in 0..num_layers {
+            let mut next_token_hidden_words = vec![Vec::new(); prompt_token_ids.len()];
+            for pos in 0..(prompt_token_ids.len() - 1) {
+                let artifacts = run_layer_plan_with_session_from_sequence(
+                    &mut session,
+                    layer_idx,
+                    CachedLayerSequenceInputs {
+                        prefill_input_words_list: token_hidden_words[..=pos].to_vec(),
+                        decode_input_words: token_hidden_words[pos + 1].clone(),
+                        prefill_rope_offset: 0,
+                        decode_rope_offset: i32::try_from(pos + 1).unwrap(),
+                        validate_against_oracle: false,
+                    },
+                    post_ffn_only_plan(),
+                )
+                .unwrap();
+
+                let prefill_output_words = artifacts
+                    .prefill_layer_output_bf16_words()
+                    .expect("missing teacher-forced prefill output");
+                let decode_output_words = artifacts
+                    .bf16_words_for_stage(Layer0CachedStage::PostFfnResidual)
+                    .expect("missing teacher-forced decode output");
+
+                if pos == 0 {
+                    next_token_hidden_words[pos] = prefill_output_words;
+                } else {
+                    assert_eq!(
+                        next_token_hidden_words[pos], prefill_output_words,
+                        "teacher-forced layer {} token {} prefill output disagreed with prior decode path",
+                        layer_idx, pos
+                    );
+                }
+                next_token_hidden_words[pos + 1] = decode_output_words;
+            }
+            token_hidden_words = next_token_hidden_words;
+        }
+
+        let explicit_final_hidden_words = token_hidden_words
+            .last()
+            .expect("missing explicit final hidden")
+            .clone();
+        let explicit_final_hidden_bits = read_bf16_buffer_bits(
+            &session.runtime,
+            &session
+                .runtime
+                .create_buffer_with_bytes(
+                    &bytes_from_bf16_words(&explicit_final_hidden_words),
+                    BufferStorageMode::Shared,
+                )
+                .unwrap(),
+            explicit_final_hidden_words.len(),
+        )
+        .unwrap();
+        let explicit_final_norm_words = weights
+            .final_text_norm_bf16_words(&explicit_final_hidden_words)
+            .unwrap();
+        let explicit_next = weights
+            .tied_text_logits_top1_f32(&explicit_final_norm_words)
+            .unwrap();
+
+        let mut backend = ExactMetalTextRuntimeSession::load(model_path).unwrap();
+        backend.reset_kv_caches();
+        let mut backend_final_hidden_words = Vec::new();
+        for (position, token_id) in prompt_token_ids.iter().copied().enumerate() {
+            backend_final_hidden_words = backend
+                .eval_token_hidden_state_from_token_id(token_id, position)
+                .unwrap();
+        }
+        let backend_next = backend
+            .greedy_token_from_hidden_words(&backend_final_hidden_words)
+            .unwrap();
+
+        println!(
+            "explicit_final_hidden_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&explicit_final_hidden_bits)
+        );
+        println!(
+            "backend_final_hidden_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(
+                &backend_final_hidden_words
+                    .iter()
+                    .copied()
+                    .map(|word| (bf16_word_to_f32(word)).to_bits())
+                    .collect::<Vec<_>>()
+            )
+        );
+        println!(
+            "explicit_next_token_id={} backend_next_token_id={}",
+            explicit_next.token_id, backend_next.token_id
+        );
+
+        assert_eq!(explicit_final_hidden_words, backend_final_hidden_words);
+        assert_eq!(explicit_next.token_id, backend_next.token_id);
+    }
+
+    #[test]
+    #[ignore]
+    fn exact_runtime_reuses_cached_layer_workspace() {
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let mut runtime = ExactMetalTextRuntimeSession::load(model_path).unwrap();
+        let token0 = weights.embed_token_bf16_words(30_468).unwrap();
+        let token1 = weights.embed_token_bf16_words(5_631).unwrap();
+
+        runtime.eval_layer_hidden_state(0, &token0, 0).unwrap();
+        assert_eq!(runtime.layer_workspaces.len(), 1);
+        let workspace_ptr = runtime
+            .layer_workspaces
+            .get(&0)
+            .map(|workspace| workspace as *const _)
+            .unwrap();
+
+        runtime.eval_layer_hidden_state(0, &token1, 1).unwrap();
+        assert_eq!(runtime.layer_workspaces.len(), 1);
+        let workspace_ptr_after = runtime
+            .layer_workspaces
+            .get(&0)
+            .map(|workspace| workspace as *const _)
+            .unwrap();
+        assert_eq!(workspace_ptr, workspace_ptr_after);
+    }
 }

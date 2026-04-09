@@ -438,6 +438,457 @@ pub struct MlxWeightIndexMetadata {
     pub total_size: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct MlxIndexedSafetensors {
+    pub snapshot: MlxModelSnapshot,
+    pub shard_headers: HashMap<String, MlxSafetensorsHeader>,
+}
+
+impl MlxIndexedSafetensors {
+    pub fn load(root_dir: impl AsRef<Path>) -> Result<Self> {
+        let snapshot = MlxModelSnapshot::load(root_dir)?;
+        let mut shard_headers = HashMap::new();
+        for shard_name in snapshot.unique_weight_shards() {
+            let shard_path = snapshot.paths.root_dir.join(&shard_name);
+            let header = MlxSafetensorsHeader::load(&shard_path)?;
+            shard_headers.insert(shard_name, header);
+        }
+        Ok(Self {
+            snapshot,
+            shard_headers,
+        })
+    }
+
+    pub fn shard_name_for_tensor(&self, name: &str) -> Result<&str> {
+        self.snapshot
+            .weight_index
+            .weight_map
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| MlxRtError::InvalidModelDir {
+                path: self.snapshot.paths.model_safetensors_index_json.clone(),
+                message: format!("tensor {} missing from weight index", name),
+            })
+    }
+
+    pub fn header_for_tensor(&self, name: &str) -> Result<&MlxSafetensorsHeader> {
+        let shard_name = self.shard_name_for_tensor(name)?;
+        self.shard_headers
+            .get(shard_name)
+            .ok_or_else(|| MlxRtError::MissingFile {
+                path: self.snapshot.paths.root_dir.join(shard_name),
+            })
+    }
+
+    pub fn tensor(&self, name: &str) -> Result<&MlxTensorEntry> {
+        let header = self.header_for_tensor(name)?;
+        header.tensor(name).ok_or_else(|| MlxRtError::InvalidSafetensors {
+            path: header.path.clone(),
+            message: format!("tensor {} not found in shard header", name),
+        })
+    }
+
+    pub fn read_tensor_bytes(&self, name: &str) -> Result<Vec<u8>> {
+        self.header_for_tensor(name)?.read_tensor_bytes(name)
+    }
+
+    pub fn read_bf16_tensor_words(&self, name: &str) -> Result<Vec<u16>> {
+        self.header_for_tensor(name)?.read_bf16_tensor_words(name)
+    }
+
+    pub fn embed_token_f32(&self, token_id: u32) -> Result<Vec<f32>> {
+        let header = self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?;
+        header.affine_dequantize_row_f32(
+            EMBED_TOKENS_WEIGHT_NAME,
+            EMBED_TOKENS_SCALES_NAME,
+            EMBED_TOKENS_BIASES_NAME,
+            token_id as u64,
+            self.snapshot.config.quantization.group_size as u64,
+            self.snapshot.config.quantization.bits,
+        )
+    }
+
+    pub fn embed_token_bf16_words(&self, token_id: u32) -> Result<Vec<u16>> {
+        Ok(self
+            .embed_token_f32(token_id)?
+            .into_iter()
+            .map(f32_to_bf16_word)
+            .collect())
+    }
+
+    pub fn final_text_norm_f32(&self, hidden_bf16_words: &[u16]) -> Result<Vec<f32>> {
+        self.header_for_tensor(FINAL_TEXT_NORM_WEIGHT_NAME)?
+            .rms_norm_weighted_f32(
+                hidden_bf16_words,
+                FINAL_TEXT_NORM_WEIGHT_NAME,
+                self.snapshot.config.text_config.rms_norm_eps,
+            )
+    }
+
+    pub fn final_text_norm_bf16_words(&self, hidden_bf16_words: &[u16]) -> Result<Vec<u16>> {
+        Ok(self
+            .final_text_norm_f32(hidden_bf16_words)?
+            .into_iter()
+            .map(f32_to_bf16_word)
+            .collect())
+    }
+
+    pub fn tied_text_logits_top1_f32(&self, hidden_bf16_words: &[u16]) -> Result<MlxGreedyToken> {
+        let header = self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?;
+        let softcap = Some(self.snapshot.config.text_config.final_logit_softcapping)
+            .filter(|softcap| *softcap > 0.0);
+        header.affine_quantized_matmul_t_top1_f32(
+            hidden_bf16_words,
+            EMBED_TOKENS_WEIGHT_NAME,
+            EMBED_TOKENS_SCALES_NAME,
+            EMBED_TOKENS_BIASES_NAME,
+            self.snapshot.config.quantization.group_size as u64,
+            self.snapshot.config.quantization.bits,
+            softcap,
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MlxTokenizer {
+    normalized_space: String,
+    vocab: HashMap<String, u32>,
+    tokens_by_id: Vec<String>,
+    merge_ranks: HashMap<(String, String), usize>,
+    special_tokens: Vec<(String, u32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MlxGreedyToken {
+    pub token_id: u32,
+    pub logit: f32,
+}
+
+impl MlxTokenizer {
+    pub fn load(root_dir: impl AsRef<Path>) -> Result<Self> {
+        let snapshot = MlxModelSnapshot::load(root_dir)?;
+        Self::from_snapshot(&snapshot)
+    }
+
+    pub fn from_snapshot(snapshot: &MlxModelSnapshot) -> Result<Self> {
+        let text = fs::read_to_string(&snapshot.paths.tokenizer_json).map_err(|err| MlxRtError::Io {
+            path: snapshot.paths.tokenizer_json.clone(),
+            message: err.to_string(),
+        })?;
+        let root =
+            HashMap::<String, JsonValue>::deserialize_json(&text).map_err(|err| MlxRtError::Json {
+                path: snapshot.paths.tokenizer_json.clone(),
+                message: format!("{:?}", err),
+            })?;
+
+        let normalizer = tokenizer_object(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.normalizer",
+            root.get("normalizer"),
+        )?;
+        let normalizer_type = tokenizer_string(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.normalizer.type",
+            normalizer.get("type"),
+        )?;
+        if normalizer_type != "Replace" {
+            return Err(MlxRtError::InvalidModelDir {
+                path: snapshot.paths.tokenizer_json.clone(),
+                message: format!("unsupported tokenizer normalizer {}", normalizer_type),
+            });
+        }
+        let normalized_space = tokenizer_pattern_string(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.normalizer.pattern",
+            normalizer.get("pattern"),
+        )?;
+        let normalizer_content = tokenizer_string(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.normalizer.content",
+            normalizer.get("content"),
+        )?;
+        if normalized_space != " " || normalizer_content != "▁" {
+            return Err(MlxRtError::InvalidModelDir {
+                path: snapshot.paths.tokenizer_json.clone(),
+                message: format!(
+                    "unsupported tokenizer normalizer pattern/content {:?} -> {:?}",
+                    normalized_space, normalizer_content
+                ),
+            });
+        }
+
+        let pre_tokenizer = tokenizer_object(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.pre_tokenizer",
+            root.get("pre_tokenizer"),
+        )?;
+        let pre_tokenizer_type = tokenizer_string(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.pre_tokenizer.type",
+            pre_tokenizer.get("type"),
+        )?;
+        let pre_tokenizer_pattern = tokenizer_pattern_string(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.pre_tokenizer.pattern",
+            pre_tokenizer.get("pattern"),
+        )?;
+        let pre_tokenizer_behavior = tokenizer_string(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.pre_tokenizer.behavior",
+            pre_tokenizer.get("behavior"),
+        )?;
+        if pre_tokenizer_type != "Split"
+            || pre_tokenizer_pattern != " "
+            || pre_tokenizer_behavior != "MergedWithPrevious"
+        {
+            return Err(MlxRtError::InvalidModelDir {
+                path: snapshot.paths.tokenizer_json.clone(),
+                message: format!(
+                    "unsupported tokenizer pre_tokenizer {} / {:?} / {}",
+                    pre_tokenizer_type, pre_tokenizer_pattern, pre_tokenizer_behavior
+                ),
+            });
+        }
+
+        let model = tokenizer_object(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.model",
+            root.get("model"),
+        )?;
+        let model_type = tokenizer_string(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.model.type",
+            model.get("type"),
+        )?;
+        if model_type != "BPE" {
+            return Err(MlxRtError::InvalidModelDir {
+                path: snapshot.paths.tokenizer_json.clone(),
+                message: format!("unsupported tokenizer model {}", model_type),
+            });
+        }
+        if !tokenizer_bool(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.model.byte_fallback",
+            model.get("byte_fallback"),
+        )? {
+            return Err(MlxRtError::InvalidModelDir {
+                path: snapshot.paths.tokenizer_json.clone(),
+                message: "tokenizer must enable byte_fallback".to_string(),
+            });
+        }
+
+        let vocab_object = tokenizer_object(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.model.vocab",
+            model.get("vocab"),
+        )?;
+        let mut vocab = HashMap::with_capacity(vocab_object.len());
+        let mut max_token_id = 0u32;
+        for (token, value) in vocab_object {
+            let token_id = tokenizer_u32(
+                &snapshot.paths.tokenizer_json,
+                &format!("tokenizer.model.vocab.{token}"),
+                Some(value),
+            )?;
+            max_token_id = max_token_id.max(token_id);
+            vocab.insert(token.clone(), token_id);
+        }
+        let mut tokens_by_id = vec![String::new(); max_token_id as usize + 1];
+        for (token, &token_id) in &vocab {
+            tokens_by_id[token_id as usize] = token.clone();
+        }
+
+        let merges = tokenizer_array(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.model.merges",
+            model.get("merges"),
+        )?;
+        let mut merge_ranks = HashMap::with_capacity(merges.len());
+        for (rank, merge_value) in merges.iter().enumerate() {
+            let merge_pair = tokenizer_string_pair(
+                &snapshot.paths.tokenizer_json,
+                &format!("tokenizer.model.merges[{rank}]"),
+                merge_value,
+            )?;
+            merge_ranks.insert(merge_pair, rank);
+        }
+
+        let added_tokens = tokenizer_array(
+            &snapshot.paths.tokenizer_json,
+            "tokenizer.added_tokens",
+            root.get("added_tokens"),
+        )?;
+        let mut special_tokens = Vec::new();
+        for (index, value) in added_tokens.iter().enumerate() {
+            let token = tokenizer_object(
+                &snapshot.paths.tokenizer_json,
+                &format!("tokenizer.added_tokens[{index}]"),
+                Some(value),
+            )?;
+            let special = tokenizer_bool(
+                &snapshot.paths.tokenizer_json,
+                &format!("tokenizer.added_tokens[{index}].special"),
+                token.get("special"),
+            )?;
+            if !special {
+                continue;
+            }
+            let content = tokenizer_string(
+                &snapshot.paths.tokenizer_json,
+                &format!("tokenizer.added_tokens[{index}].content"),
+                token.get("content"),
+            )?;
+            let token_id = tokenizer_u32(
+                &snapshot.paths.tokenizer_json,
+                &format!("tokenizer.added_tokens[{index}].id"),
+                token.get("id"),
+            )?;
+            special_tokens.push((content, token_id));
+        }
+        special_tokens.sort_by(|lhs, rhs| rhs.0.len().cmp(&lhs.0.len()).then_with(|| lhs.0.cmp(&rhs.0)));
+
+        Ok(Self {
+            normalized_space: normalizer_content,
+            vocab,
+            tokens_by_id,
+            merge_ranks,
+            special_tokens,
+        })
+    }
+
+    pub fn vocab_size(&self) -> usize {
+        self.vocab.len()
+    }
+
+    pub fn merge_count(&self) -> usize {
+        self.merge_ranks.len()
+    }
+
+    pub fn token_to_id(&self, token: &str) -> Option<u32> {
+        self.vocab.get(token).copied()
+    }
+
+    pub fn id_to_token(&self, token_id: u32) -> Option<&str> {
+        self.tokens_by_id.get(token_id as usize).and_then(|token| {
+            if token.is_empty() {
+                None
+            } else {
+                Some(token.as_str())
+            }
+        })
+    }
+
+    pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
+        let mut out = Vec::new();
+        let mut plain = String::new();
+        let mut byte_index = 0usize;
+        while byte_index < text.len() {
+            let mut matched_special = None;
+            for (special, token_id) in &self.special_tokens {
+                if text[byte_index..].starts_with(special) {
+                    matched_special = Some((special.len(), *token_id));
+                    break;
+                }
+            }
+            if let Some((special_len, token_id)) = matched_special {
+                if !plain.is_empty() {
+                    out.extend(self.encode_plain_text(&plain)?);
+                    plain.clear();
+                }
+                out.push(token_id);
+                byte_index += special_len;
+                continue;
+            }
+            let next = text[byte_index..]
+                .chars()
+                .next()
+                .ok_or_else(|| MlxRtError::InvalidModelDir {
+                    path: PathBuf::new(),
+                    message: "invalid tokenizer input slice".to_string(),
+                })?;
+            plain.push(next);
+            byte_index += next.len_utf8();
+        }
+        if !plain.is_empty() {
+            out.extend(self.encode_plain_text(&plain)?);
+        }
+        Ok(out)
+    }
+
+    pub fn decode(&self, token_ids: &[u32]) -> Result<String> {
+        let mut out = String::new();
+        let mut pending_bytes = Vec::new();
+        for &token_id in token_ids {
+            let token = self
+                .id_to_token(token_id)
+                .ok_or_else(|| MlxRtError::InvalidModelDir {
+                    path: PathBuf::new(),
+                    message: format!("token id {} is out of vocabulary", token_id),
+                })?;
+            if let Some(byte) = parse_byte_fallback_token(token) {
+                pending_bytes.push(byte);
+                continue;
+            }
+            flush_pending_bytes(&mut out, &mut pending_bytes);
+            out.push_str(&token.replace(&self.normalized_space, " "));
+        }
+        flush_pending_bytes(&mut out, &mut pending_bytes);
+        Ok(out)
+    }
+
+    fn encode_plain_text(&self, text: &str) -> Result<Vec<u32>> {
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        let normalized = text.replace(' ', &self.normalized_space);
+        let mut pieces = normalized.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+        while pieces.len() >= 2 {
+            let mut best_index = None;
+            let mut best_rank = usize::MAX;
+            for pair_index in 0..pieces.len() - 1 {
+                let merge_key = (pieces[pair_index].clone(), pieces[pair_index + 1].clone());
+                if let Some(&rank) = self.merge_ranks.get(&merge_key) {
+                    if rank < best_rank {
+                        best_rank = rank;
+                        best_index = Some(pair_index);
+                    }
+                }
+            }
+            let Some(pair_index) = best_index else {
+                break;
+            };
+            let merged = format!("{}{}", pieces[pair_index], pieces[pair_index + 1]);
+            pieces.splice(pair_index..pair_index + 2, [merged]);
+        }
+
+        let mut token_ids = Vec::new();
+        for piece in pieces {
+            if let Some(&token_id) = self.vocab.get(&piece) {
+                token_ids.push(token_id);
+                continue;
+            }
+            for byte in piece.into_bytes() {
+                let byte_piece = format!("<0x{byte:02X}>");
+                let token_id = self
+                    .vocab
+                    .get(&byte_piece)
+                    .copied()
+                    .ok_or_else(|| MlxRtError::InvalidModelDir {
+                        path: PathBuf::new(),
+                        message: format!("missing byte fallback token {}", byte_piece),
+                    })?;
+                token_ids.push(token_id);
+            }
+        }
+        Ok(token_ids)
+    }
+}
+
+const EMBED_TOKENS_WEIGHT_NAME: &str = "language_model.model.embed_tokens.weight";
+const EMBED_TOKENS_SCALES_NAME: &str = "language_model.model.embed_tokens.scales";
+const EMBED_TOKENS_BIASES_NAME: &str = "language_model.model.embed_tokens.biases";
+const FINAL_TEXT_NORM_WEIGHT_NAME: &str = "language_model.model.norm.weight";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MlxDType {
     Bool,
@@ -966,8 +1417,7 @@ impl MlxSafetensorsHeader {
             for packed in &weight[group_start..group_end] {
                 for shift in (0..32).step_by(bits as usize) {
                     let q = ((*packed >> shift) & mask) as f32;
-                    let mul = bf16_round_to_f32(q * scale);
-                    out.push(bf16_round_to_f32(mul + bias));
+                    out.push(bf16_round_to_f32(q * scale + bias));
                 }
             }
         }
@@ -1129,6 +1579,239 @@ impl MlxSafetensorsHeader {
         }
 
         Ok(out)
+    }
+
+    pub fn affine_quantized_matmul_t_top1_f32(
+        &self,
+        x_bf16_words: &[u16],
+        weight_name: &str,
+        scales_name: &str,
+        biases_name: &str,
+        group_size: u64,
+        bits: u32,
+        softcap: Option<f32>,
+    ) -> Result<MlxGreedyToken> {
+        if bits == 0 || bits > 8 || (bits & (bits - 1)) != 0 {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!("unsupported affine quantized matmul bits {}", bits),
+            });
+        }
+        let weight_entry =
+            self.tensor(weight_name)
+                .ok_or_else(|| MlxRtError::InvalidSafetensors {
+                    path: self.path.clone(),
+                    message: format!("tensor {} not found in header", weight_name),
+                })?;
+        let scales_entry =
+            self.tensor(scales_name)
+                .ok_or_else(|| MlxRtError::InvalidSafetensors {
+                    path: self.path.clone(),
+                    message: format!("tensor {} not found in header", scales_name),
+                })?;
+        let biases_entry =
+            self.tensor(biases_name)
+                .ok_or_else(|| MlxRtError::InvalidSafetensors {
+                    path: self.path.clone(),
+                    message: format!("tensor {} not found in header", biases_name),
+                })?;
+        if weight_entry.dtype != MlxDType::U32 {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!(
+                    "tensor {} expected U32, got {:?}",
+                    weight_name, weight_entry.dtype
+                ),
+            });
+        }
+        if scales_entry.dtype != MlxDType::BF16 || biases_entry.dtype != MlxDType::BF16 {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!(
+                    "tensors {} / {} expected BF16, got {:?} / {:?}",
+                    scales_name, biases_name, scales_entry.dtype, biases_entry.dtype
+                ),
+            });
+        }
+        if weight_entry.shape.len() != 2
+            || scales_entry.shape.len() != 2
+            || biases_entry.shape.len() != 2
+        {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!(
+                    "quantized matmul expects rank-2 tensors, got {:?} {:?} {:?}",
+                    weight_entry.shape, scales_entry.shape, biases_entry.shape
+                ),
+            });
+        }
+        if scales_entry.shape != biases_entry.shape {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!(
+                    "scale/bias shape mismatch: {:?} vs {:?}",
+                    scales_entry.shape, biases_entry.shape
+                ),
+            });
+        }
+        if weight_entry.shape[0] != scales_entry.shape[0] {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!(
+                    "weight/scales outer shape mismatch: {:?} vs {:?}",
+                    weight_entry.shape, scales_entry.shape
+                ),
+            });
+        }
+        let values_per_word = 32 / bits as u64;
+        let inner_dim = weight_entry.shape[1] * values_per_word;
+        if inner_dim != scales_entry.shape[1] * group_size {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!(
+                    "packed/scales shape mismatch for group_size={} bits={}",
+                    group_size, bits
+                ),
+            });
+        }
+        if x_bf16_words.len() as u64 != inner_dim {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!(
+                    "activation length mismatch: got {} expected {}",
+                    x_bf16_words.len(),
+                    inner_dim
+                ),
+            });
+        }
+        let words_per_group = group_size / values_per_word;
+        if words_per_group == 0 || weight_entry.shape[1] != scales_entry.shape[1] * words_per_group
+        {
+            return Err(MlxRtError::InvalidSafetensors {
+                path: self.path.clone(),
+                message: format!("invalid words_per_group {}", words_per_group),
+            });
+        }
+
+        let weight_offsets = weight_entry.file_offsets(self.payload_base_offset());
+        let scales_offsets = scales_entry.file_offsets(self.payload_base_offset());
+        let biases_offsets = biases_entry.file_offsets(self.payload_base_offset());
+        let weight_row_bytes = (weight_entry.shape[1] * weight_entry.dtype.byte_width()) as usize;
+        let qparam_row_bytes = (scales_entry.shape[1] * scales_entry.dtype.byte_width()) as usize;
+        let rows = weight_entry.shape[0] as usize;
+        let groups_per_row = scales_entry.shape[1] as usize;
+        let pack_factor = values_per_word as usize;
+        let mask = (1u32 << bits) - 1;
+        let x = x_bf16_words
+            .iter()
+            .copied()
+            .map(bf16_word_to_f32)
+            .collect::<Vec<_>>();
+        let mut weight_file = fs::File::open(&self.path).map_err(|err| MlxRtError::Io {
+            path: self.path.clone(),
+            message: err.to_string(),
+        })?;
+        let mut scales_file = fs::File::open(&self.path).map_err(|err| MlxRtError::Io {
+            path: self.path.clone(),
+            message: err.to_string(),
+        })?;
+        let mut biases_file = fs::File::open(&self.path).map_err(|err| MlxRtError::Io {
+            path: self.path.clone(),
+            message: err.to_string(),
+        })?;
+        let mut weight_bytes = vec![0u8; weight_row_bytes];
+        let mut scales_bytes = vec![0u8; qparam_row_bytes];
+        let mut biases_bytes = vec![0u8; qparam_row_bytes];
+
+        let mut best = MlxGreedyToken {
+            token_id: 0,
+            logit: f32::NEG_INFINITY,
+        };
+        for row in 0..rows {
+            let weight_row_offset = weight_offsets[0] + row as u64 * weight_row_bytes as u64;
+            let qparam_row_offset = scales_offsets[0] + row as u64 * qparam_row_bytes as u64;
+            let bias_row_offset = biases_offsets[0] + row as u64 * qparam_row_bytes as u64;
+            weight_file
+                .seek(SeekFrom::Start(weight_row_offset))
+                .map_err(|err| MlxRtError::Io {
+                    path: self.path.clone(),
+                    message: err.to_string(),
+                })?;
+            weight_file
+                .read_exact(&mut weight_bytes)
+                .map_err(|err| MlxRtError::Io {
+                    path: self.path.clone(),
+                    message: err.to_string(),
+                })?;
+            scales_file
+                .seek(SeekFrom::Start(qparam_row_offset))
+                .map_err(|err| MlxRtError::Io {
+                    path: self.path.clone(),
+                    message: err.to_string(),
+                })?;
+            scales_file
+                .read_exact(&mut scales_bytes)
+                .map_err(|err| MlxRtError::Io {
+                    path: self.path.clone(),
+                    message: err.to_string(),
+                })?;
+            biases_file
+                .seek(SeekFrom::Start(bias_row_offset))
+                .map_err(|err| MlxRtError::Io {
+                    path: self.path.clone(),
+                    message: err.to_string(),
+                })?;
+            biases_file
+                .read_exact(&mut biases_bytes)
+                .map_err(|err| MlxRtError::Io {
+                    path: self.path.clone(),
+                    message: err.to_string(),
+                })?;
+
+            let mut sum = 0.0f32;
+            let mut x_index = 0usize;
+            for group in 0..groups_per_row {
+                let scale_byte_offset = group * 2;
+                let scale = bf16_word_to_f32(u16::from_le_bytes([
+                    scales_bytes[scale_byte_offset],
+                    scales_bytes[scale_byte_offset + 1],
+                ]));
+                let bias = bf16_word_to_f32(u16::from_le_bytes([
+                    biases_bytes[scale_byte_offset],
+                    biases_bytes[scale_byte_offset + 1],
+                ]));
+                let group_start = group * words_per_group as usize * 4;
+                let group_end = group_start + words_per_group as usize * 4;
+                for chunk in weight_bytes[group_start..group_end].chunks_exact(4) {
+                    let mut packed_word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    for _ in 0..pack_factor {
+                        let q = (packed_word & mask) as f32;
+                        let deq_mul = bf16_round_to_f32(scale * q);
+                        let deq = bf16_round_to_f32(deq_mul + bias);
+                        let prod = bf16_round_to_f32(x[x_index] * deq);
+                        sum = bf16_round_to_f32(sum + prod);
+                        x_index += 1;
+                        if bits != 8 {
+                            packed_word >>= bits;
+                        }
+                    }
+                }
+            }
+
+            let logit = if let Some(softcap) = softcap.filter(|softcap| *softcap > 0.0) {
+                bf16_round_to_f32((sum / softcap).tanh() * softcap)
+            } else {
+                sum
+            };
+            if logit > best.logit {
+                best = MlxGreedyToken {
+                    token_id: row as u32,
+                    logit,
+                };
+            }
+        }
+
+        Ok(best)
     }
 
     pub fn affine_quantized_matmul_t_f32_rank3_plane(
@@ -1809,12 +2492,156 @@ fn json_dtype(path: &Path, context: &str, value: Option<&JsonValue>) -> Result<M
     })
 }
 
+fn tokenizer_object<'a>(
+    path: &Path,
+    context: &str,
+    value: Option<&'a JsonValue>,
+) -> Result<&'a HashMap<String, JsonValue>> {
+    match value {
+        Some(JsonValue::Object(object)) => Ok(object),
+        Some(other) => Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} expected object, got {:?}", context, other),
+        }),
+        None => Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} missing object", context),
+        }),
+    }
+}
+
+fn tokenizer_array<'a>(
+    path: &Path,
+    context: &str,
+    value: Option<&'a JsonValue>,
+) -> Result<&'a Vec<JsonValue>> {
+    match value {
+        Some(JsonValue::Array(array)) => Ok(array),
+        Some(other) => Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} expected array, got {:?}", context, other),
+        }),
+        None => Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} missing array", context),
+        }),
+    }
+}
+
+fn tokenizer_string(path: &Path, context: &str, value: Option<&JsonValue>) -> Result<String> {
+    match value {
+        Some(JsonValue::String(text)) => Ok(text.clone()),
+        Some(other) => Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} expected string, got {:?}", context, other),
+        }),
+        None => Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} missing string", context),
+        }),
+    }
+}
+
+fn tokenizer_bool(path: &Path, context: &str, value: Option<&JsonValue>) -> Result<bool> {
+    match value {
+        Some(JsonValue::Bool(flag)) => Ok(*flag),
+        Some(other) => Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} expected bool, got {:?}", context, other),
+        }),
+        None => Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} missing bool", context),
+        }),
+    }
+}
+
+fn tokenizer_u32(path: &Path, context: &str, value: Option<&JsonValue>) -> Result<u32> {
+    match value {
+        Some(JsonValue::U64(number)) => {
+            u32::try_from(*number).map_err(|_| MlxRtError::Json {
+                path: path.to_path_buf(),
+                message: format!("{} value {} does not fit in u32", context, number),
+            })
+        }
+        Some(JsonValue::U128(number)) => {
+            u32::try_from(*number).map_err(|_| MlxRtError::Json {
+                path: path.to_path_buf(),
+                message: format!("{} value {} does not fit in u32", context, number),
+            })
+        }
+        Some(JsonValue::I64(number)) => {
+            u32::try_from(*number).map_err(|_| MlxRtError::Json {
+                path: path.to_path_buf(),
+                message: format!("{} value {} is negative or too large", context, number),
+            })
+        }
+        Some(JsonValue::I128(number)) => {
+            u32::try_from(*number).map_err(|_| MlxRtError::Json {
+                path: path.to_path_buf(),
+                message: format!("{} value {} is negative or too large", context, number),
+            })
+        }
+        Some(other) => Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} expected integer, got {:?}", context, other),
+        }),
+        None => Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} missing integer", context),
+        }),
+    }
+}
+
+fn tokenizer_pattern_string(path: &Path, context: &str, value: Option<&JsonValue>) -> Result<String> {
+    let object = tokenizer_object(path, context, value)?;
+    tokenizer_string(path, &format!("{}.String", context), object.get("String"))
+}
+
+fn tokenizer_string_pair(path: &Path, context: &str, value: &JsonValue) -> Result<(String, String)> {
+    let array = match value {
+        JsonValue::Array(array) => array,
+        other => {
+            return Err(MlxRtError::Json {
+                path: path.to_path_buf(),
+                message: format!("{} expected [string, string], got {:?}", context, other),
+            });
+        }
+    };
+    if array.len() != 2 {
+        return Err(MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} expected two strings, got {}", context, array.len()),
+        });
+    }
+    Ok((
+        tokenizer_string(path, &format!("{}[0]", context), array.first())?,
+        tokenizer_string(path, &format!("{}[1]", context), array.get(1))?,
+    ))
+}
+
+fn parse_byte_fallback_token(token: &str) -> Option<u8> {
+    if !token.starts_with("<0x") || !token.ends_with('>') || token.len() != 6 {
+        return None;
+    }
+    u8::from_str_radix(&token[3..5], 16).ok()
+}
+
+fn flush_pending_bytes(out: &mut String, pending_bytes: &mut Vec<u8>) {
+    if pending_bytes.is_empty() {
+        return;
+    }
+    out.push_str(&String::from_utf8_lossy(pending_bytes));
+    pending_bytes.clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         bf16_word_to_f32, fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words, MlxDType,
-        MlxModelSnapshot, MlxSafetensorsHeader, GEMMA4_QPROJ_CASE_INNER_DIM,
-        GEMMA4_QPROJ_CASE_OUTPUT_DIM, GEMMA4_QPROJ_CASE_OUTPUT_FNV1A64,
+        MlxIndexedSafetensors, MlxModelSnapshot, MlxSafetensorsHeader, MlxTokenizer,
+        GEMMA4_QPROJ_CASE_INNER_DIM, GEMMA4_QPROJ_CASE_OUTPUT_DIM,
+        GEMMA4_QPROJ_CASE_OUTPUT_FNV1A64,
     };
     use std::path::PathBuf;
 
@@ -1909,6 +2736,92 @@ mod tests {
     }
 
     #[test]
+    fn indexed_safetensors_resolves_late_layer_to_correct_shard() {
+        let indexed = MlxIndexedSafetensors::load(local_model_dir()).unwrap();
+
+        assert_eq!(
+            indexed
+                .shard_name_for_tensor("language_model.model.layers.29.self_attn.q_proj.weight")
+                .unwrap(),
+            "model-00003-of-00003.safetensors"
+        );
+
+        let header = indexed
+            .header_for_tensor("language_model.model.layers.29.self_attn.q_proj.weight")
+            .unwrap();
+        assert!(header.path.ends_with("model-00003-of-00003.safetensors"));
+
+        let entry = indexed
+            .tensor("language_model.model.layers.29.self_attn.q_proj.weight")
+            .unwrap();
+        assert_eq!(entry.dtype, MlxDType::U32);
+        assert_eq!(entry.shape, vec![8_192, 352]);
+    }
+
+    #[test]
+    fn loads_local_tokenizer_metadata() {
+        let tokenizer = MlxTokenizer::load(local_model_dir()).unwrap();
+
+        assert!(tokenizer.vocab_size() > 260_000);
+        assert!(tokenizer.merge_count() > 500_000);
+        assert_eq!(tokenizer.token_to_id("<bos>"), Some(2));
+        assert_eq!(tokenizer.token_to_id("<eos>"), Some(1));
+        assert_eq!(tokenizer.token_to_id("<|video|>"), Some(258_884));
+        assert_eq!(tokenizer.token_to_id("say"), Some(30_468));
+        assert_eq!(tokenizer.token_to_id("▁hi"), Some(5_631));
+        assert_eq!(tokenizer.id_to_token(2), Some("<bos>"));
+    }
+
+    #[test]
+    fn tokenizer_encodes_and_decodes_simple_phrase() {
+        let tokenizer = MlxTokenizer::load(local_model_dir()).unwrap();
+
+        assert_eq!(tokenizer.encode("say hi").unwrap(), vec![30_468, 5_631]);
+        assert_eq!(tokenizer.encode(" hi").unwrap(), vec![5_631]);
+        assert_eq!(tokenizer.decode(&[30_468, 5_631]).unwrap(), "say hi");
+        assert_eq!(tokenizer.decode(&[1_879, 5_631]).unwrap(), " say hi");
+    }
+
+    #[test]
+    fn embeds_and_norms_local_text_token_rows() {
+        let weights = MlxIndexedSafetensors::load(local_model_dir()).unwrap();
+
+        let embed = weights.embed_token_bf16_words(30_468).unwrap();
+        assert_eq!(embed.len(), 2_816);
+
+        let final_norm = weights.final_text_norm_bf16_words(&embed).unwrap();
+        assert_eq!(final_norm.len(), 2_816);
+    }
+
+    #[test]
+    #[ignore]
+    fn embed_rows_report_hashes_for_two_token_prompt() {
+        let weights = MlxIndexedSafetensors::load(local_model_dir()).unwrap();
+        for token_id in [30_468u32, 5_631u32] {
+            let bits = weights
+                .embed_token_bf16_words(token_id)
+                .unwrap()
+                .into_iter()
+                .map(|word| (word as u32) << 16)
+                .collect::<Vec<_>>();
+            println!(
+                "token_id={} embed_fnv1a64=0x{:016X}",
+                token_id,
+                fnv1a64_u32_words(&bits)
+            );
+            println!(
+                "token_id={} embed_first16_f32_bits={}",
+                token_id,
+                bits.iter()
+                    .take(16)
+                    .map(|bits| format!("0x{bits:08X}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+    }
+
+    #[test]
     fn reads_local_tensor_payload_words() {
         let header = MlxSafetensorsHeader::load(local_model_shard_1()).unwrap();
 
@@ -1942,7 +2855,7 @@ mod tests {
     }
 
     #[test]
-    fn dequantizes_one_local_q_proj_row_with_upstream_affine_fallback_logic() {
+    fn dequantizes_one_local_q_proj_row_matches_mlx_oracle() {
         let header = MlxSafetensorsHeader::load(local_model_shard_1()).unwrap();
         let row = header
             .affine_dequantize_row_f32(
@@ -1956,26 +2869,30 @@ mod tests {
             .unwrap();
         assert_eq!(row.len(), 2_816);
         assert_eq!(
+            fnv1a64_u32_words(&row.iter().map(|value| value.to_bits()).collect::<Vec<_>>()),
+            0x2D44_4223_7EE7_C10F
+        );
+        assert_eq!(
             &row[..16]
                 .iter()
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>(),
             &[
-                0x3BD8_0000,
-                0x3CDA_0000,
+                0x3BD9_0000,
+                0x3CD9_0000,
                 0x0000_0000,
                 0x0000_0000,
-                0xBBD8_0000,
-                0x3C5C_0000,
-                0xBC58_0000,
+                0xBBD9_0000,
+                0x3C59_0000,
+                0xBC59_0000,
                 0x0000_0000,
-                0x3D07_0000,
-                0x3BD8_0000,
-                0x3CDA_0000,
+                0x3D08_0000,
+                0x3BD9_0000,
+                0x3CD9_0000,
                 0xBD59_0000,
-                0x3BD8_0000,
-                0xBBD8_0000,
-                0x3CDA_0000,
+                0x3BD9_0000,
+                0xBBD9_0000,
+                0x3CD9_0000,
                 0xBCD9_0000,
             ]
         );
