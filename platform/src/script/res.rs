@@ -143,8 +143,9 @@ impl CxScriptResources {
 //       3. error
 // ---------------------------------------------------------------------------
 
-/// Try to load a resource from the packaged location on iOS/tvOS.
-#[cfg(any(target_os = "ios", target_os = "tvos"))]
+/// Try to load a resource from the packaged location on Apple platforms
+/// using NSBundle to resolve the app bundle's resource path.
+#[cfg(any(target_os = "ios", target_os = "tvos", all(target_os = "macos", apple_bundle)))]
 fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
     let bundle_path = if let Some(root) = cx.package_root.as_deref() {
         format!("{}/{}", root, dep_path)
@@ -158,7 +159,8 @@ fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
 /// Returns None when not in packaged mode (package_root is None).
 #[cfg(all(
     not(target_arch = "wasm32"),
-    not(any(target_os = "android", target_os = "ios", target_os = "tvos"))
+    not(any(target_os = "android", target_os = "ios", target_os = "tvos")),
+    not(all(target_os = "macos", apple_bundle))
 ))]
 fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
     let root = cx.package_root.as_deref()?;
