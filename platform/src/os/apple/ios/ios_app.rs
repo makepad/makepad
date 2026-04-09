@@ -610,90 +610,120 @@ impl IosApp {
     pub fn configure_keyboard(config: &crate::ime::TextInputConfig) {
         use crate::ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType};
 
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    if app.last_keyboard_config.as_ref() == Some(config) {
-                        return;
-                    }
-
-                    if let Some(text_input_view) = app.text_input_view {
-                        unsafe {
-                            let kb_type: i64 = match config.soft_keyboard.input_mode {
-                                InputMode::Text => UI_KEYBOARD_TYPE_DEFAULT,
-                                InputMode::Ascii => UI_KEYBOARD_TYPE_ASCII_CAPABLE,
-                                InputMode::Url => UI_KEYBOARD_TYPE_URL,
-                                InputMode::Numeric => UI_KEYBOARD_TYPE_NUMBER_PAD,
-                                InputMode::Tel => UI_KEYBOARD_TYPE_PHONE_PAD,
-                                InputMode::Email => UI_KEYBOARD_TYPE_EMAIL_ADDRESS,
-                                InputMode::Decimal => UI_KEYBOARD_TYPE_DECIMAL_PAD,
-                                InputMode::Search => UI_KEYBOARD_TYPE_WEB_SEARCH,
-                            };
-
-                            let autocap_type: i64 = match config.soft_keyboard.autocapitalize {
-                                AutoCapitalize::None => UI_TEXT_AUTOCAPITALIZATION_NONE,
-                                AutoCapitalize::Words => UI_TEXT_AUTOCAPITALIZATION_WORDS,
-                                AutoCapitalize::Sentences => UI_TEXT_AUTOCAPITALIZATION_SENTENCES,
-                                AutoCapitalize::AllCharacters => UI_TEXT_AUTOCAPITALIZATION_ALL,
-                            };
-
-                            let autocorrect_type: i64 = match config.soft_keyboard.autocorrect {
-                                AutoCorrect::Default => -1,
-                                AutoCorrect::Disabled => UI_TEXT_AUTOCORRECTION_NO,
-                                AutoCorrect::Enabled => UI_TEXT_AUTOCORRECTION_YES,
-                            };
-
-                            let return_type: i64 = match config.soft_keyboard.return_key_type {
-                                ReturnKeyType::Default => UI_RETURN_KEY_DEFAULT,
-                                ReturnKeyType::Go => UI_RETURN_KEY_GO,
-                                ReturnKeyType::Search => UI_RETURN_KEY_SEARCH,
-                                ReturnKeyType::Send => UI_RETURN_KEY_SEND,
-                                ReturnKeyType::Done => UI_RETURN_KEY_DONE,
-                            };
-
-                            (*text_input_view).set_ivar::<i64>("_keyboard_type", kb_type);
-                            (*text_input_view)
-                                .set_ivar::<i64>("_autocapitalization_type", autocap_type);
-                            (*text_input_view)
-                                .set_ivar::<i64>("_autocorrection_type", autocorrect_type);
-                            (*text_input_view).set_ivar::<i64>("_return_key_type", return_type);
-                            (*text_input_view)
-                                .set_ivar::<bool>("_secure_text_entry", config.is_secure);
-
-                            let () = msg_send![text_input_view, reloadInputViews];
+        // Set ivars and update cached config inside the borrow, but call
+        // reloadInputViews OUTSIDE the borrow because it can synchronously
+        // trigger UIKit callbacks that re-enter IOS_APP.
+        let needs_reload = IOS_APP
+            .try_with(|app| {
+                if let Ok(mut app_ref) = app.try_borrow_mut() {
+                    if let Some(ref mut app) = *app_ref {
+                        if app.last_keyboard_config.as_ref() == Some(config) {
+                            return None;
                         }
-                    }
 
-                    app.last_keyboard_config = Some(*config);
+                        let view = if let Some(text_input_view) = app.text_input_view {
+                            unsafe {
+                                let kb_type: i64 = match config.soft_keyboard.input_mode {
+                                    InputMode::Text => UI_KEYBOARD_TYPE_DEFAULT,
+                                    InputMode::Ascii => UI_KEYBOARD_TYPE_ASCII_CAPABLE,
+                                    InputMode::Url => UI_KEYBOARD_TYPE_URL,
+                                    InputMode::Numeric => UI_KEYBOARD_TYPE_NUMBER_PAD,
+                                    InputMode::Tel => UI_KEYBOARD_TYPE_PHONE_PAD,
+                                    InputMode::Email => UI_KEYBOARD_TYPE_EMAIL_ADDRESS,
+                                    InputMode::Decimal => UI_KEYBOARD_TYPE_DECIMAL_PAD,
+                                    InputMode::Search => UI_KEYBOARD_TYPE_WEB_SEARCH,
+                                };
+
+                                let autocap_type: i64 = match config.soft_keyboard.autocapitalize {
+                                    AutoCapitalize::None => UI_TEXT_AUTOCAPITALIZATION_NONE,
+                                    AutoCapitalize::Words => UI_TEXT_AUTOCAPITALIZATION_WORDS,
+                                    AutoCapitalize::Sentences => {
+                                        UI_TEXT_AUTOCAPITALIZATION_SENTENCES
+                                    }
+                                    AutoCapitalize::AllCharacters => UI_TEXT_AUTOCAPITALIZATION_ALL,
+                                };
+
+                                let autocorrect_type: i64 =
+                                    match config.soft_keyboard.autocorrect {
+                                        AutoCorrect::Default => -1,
+                                        AutoCorrect::Disabled => UI_TEXT_AUTOCORRECTION_NO,
+                                        AutoCorrect::Enabled => UI_TEXT_AUTOCORRECTION_YES,
+                                    };
+
+                                let return_type: i64 = match config.soft_keyboard.return_key_type {
+                                    ReturnKeyType::Default => UI_RETURN_KEY_DEFAULT,
+                                    ReturnKeyType::Go => UI_RETURN_KEY_GO,
+                                    ReturnKeyType::Search => UI_RETURN_KEY_SEARCH,
+                                    ReturnKeyType::Send => UI_RETURN_KEY_SEND,
+                                    ReturnKeyType::Done => UI_RETURN_KEY_DONE,
+                                };
+
+                                (*text_input_view).set_ivar::<i64>("_keyboard_type", kb_type);
+                                (*text_input_view)
+                                    .set_ivar::<i64>("_autocapitalization_type", autocap_type);
+                                (*text_input_view)
+                                    .set_ivar::<i64>("_autocorrection_type", autocorrect_type);
+                                (*text_input_view)
+                                    .set_ivar::<i64>("_return_key_type", return_type);
+                                (*text_input_view)
+                                    .set_ivar::<bool>("_secure_text_entry", config.is_secure);
+                            }
+                            Some(text_input_view)
+                        } else {
+                            None
+                        };
+
+                        app.last_keyboard_config = Some(*config);
+                        return view;
+                    }
                 }
+                None
+            })
+            .ok()
+            .flatten();
+
+        // Call reloadInputViews after the borrow is dropped
+        if let Some(text_input_view) = needs_reload {
+            unsafe {
+                let () = msg_send![text_input_view, reloadInputViews];
             }
-        });
+        }
     }
 
     pub fn show_keyboard() {
-        // Use text_input_view for keyboard (UITextInput protocol)
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(app_ref) = app.try_borrow_mut() {
-                if let Some(ref app) = *app_ref {
-                    if let Some(text_input_view) = app.text_input_view {
-                        let () = unsafe { msg_send![text_input_view, becomeFirstResponder] };
-                    }
-                }
-            }
-        });
+        // Extract the view pointer first, then drop the borrow before calling UIKit.
+        // becomeFirstResponder synchronously fires keyboard notifications (e.g.
+        // keyboard_will_show) which call try_with_ios_app, causing a re-entrant borrow.
+        let view = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.text_input_view)
+            })
+            .ok()
+            .flatten();
+
+        if let Some(text_input_view) = view {
+            let () = unsafe { msg_send![text_input_view, becomeFirstResponder] };
+        }
     }
 
     pub fn hide_keyboard() {
-        // Use text_input_view for keyboard
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    if let Some(text_input_view) = app.text_input_view {
-                        let () = unsafe { msg_send![text_input_view, resignFirstResponder] };
-                    }
-                }
-            }
-        });
+        // Extract the view pointer first, then drop the borrow before calling UIKit.
+        // resignFirstResponder synchronously fires keyboard notifications which
+        // call try_with_ios_app, causing a re-entrant borrow.
+        let view = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.text_input_view)
+            })
+            .ok()
+            .flatten();
+
+        if let Some(text_input_view) = view {
+            let () = unsafe { msg_send![text_input_view, resignFirstResponder] };
+        }
     }
 
     pub fn set_ime_position(pos: DVec2) {
@@ -719,64 +749,70 @@ impl IosApp {
         // Convert character cursor index to UTF-16 code units for NSString indexing.
         let cursor_utf16_pos: usize = text.chars().take(cursor).map(|c| c.len_utf16()).sum();
 
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    if let Some(text_input_view) = app.text_input_view {
-                        unsafe {
-                            // Get inputDelegate for notifications - this is critical for iOS
-                            // to know the text/cursor has changed (needed for autocorrect positioning)
-                            let input_delegate: ObjcId =
-                                *(*text_input_view).get_ivar("_inputDelegate");
+        // Extract the view pointer inside the borrow, then do ALL UIKit/ObjC
+        // messaging outside the borrow. The inputDelegate notifications
+        // (textWillChange, textDidChange, etc.) can synchronously trigger
+        // UITextInput callbacks that re-enter IOS_APP.
+        let view = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.text_input_view)
+            })
+            .ok()
+            .flatten();
 
-                            // Notify BEFORE changes
-                            if input_delegate != nil {
-                                let () = msg_send![input_delegate, textWillChange: text_input_view];
-                                let () =
-                                    msg_send![input_delegate, selectionWillChange: text_input_view];
-                            }
+        let Some(text_input_view) = view else {
+            return;
+        };
 
-                            // Get or create text buffer
-                            let buffer: ObjcId = *(*text_input_view).get_ivar("textBuffer");
-                            let buffer = if buffer != nil {
-                                buffer
-                            } else {
-                                let new_buffer: ObjcId = msg_send![class!(NSMutableString), alloc];
-                                let new_buffer: ObjcId = msg_send![new_buffer, init];
-                                (*text_input_view).set_ivar("textBuffer", new_buffer);
-                                new_buffer
-                            };
+        unsafe {
+            // Get inputDelegate for notifications - this is critical for iOS
+            // to know the text/cursor has changed (needed for autocorrect positioning)
+            let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
 
-                            // Clear existing content
-                            let len: u64 = msg_send![buffer, length];
-                            if len > 0 {
-                                let range = NSRange {
-                                    location: 0,
-                                    length: len,
-                                };
-                                let () = msg_send![buffer, deleteCharactersInRange: range];
-                            }
-
-                            // Set new content
-                            let ns_text = str_to_nsstring(&text);
-                            let () = msg_send![buffer, appendString: ns_text];
-
-                            // Set cursor position and selection (UTF-16 index)
-                            (*text_input_view).set_ivar("cursorPosition", cursor_utf16_pos as i64);
-                            (*text_input_view).set_ivar("selectionStart", cursor_utf16_pos as i64);
-                            (*text_input_view).set_ivar("selectionEnd", cursor_utf16_pos as i64);
-
-                            // Notify AFTER changes (CRITICAL for autocorrect positioning)
-                            if input_delegate != nil {
-                                let () =
-                                    msg_send![input_delegate, selectionDidChange: text_input_view];
-                                let () = msg_send![input_delegate, textDidChange: text_input_view];
-                            }
-                        }
-                    }
-                }
+            // Notify BEFORE changes
+            if input_delegate != nil {
+                let () = msg_send![input_delegate, textWillChange: text_input_view];
+                let () = msg_send![input_delegate, selectionWillChange: text_input_view];
             }
-        });
+
+            // Get or create text buffer
+            let buffer: ObjcId = *(*text_input_view).get_ivar("textBuffer");
+            let buffer = if buffer != nil {
+                buffer
+            } else {
+                let new_buffer: ObjcId = msg_send![class!(NSMutableString), alloc];
+                let new_buffer: ObjcId = msg_send![new_buffer, init];
+                (*text_input_view).set_ivar("textBuffer", new_buffer);
+                new_buffer
+            };
+
+            // Clear existing content
+            let len: u64 = msg_send![buffer, length];
+            if len > 0 {
+                let range = NSRange {
+                    location: 0,
+                    length: len,
+                };
+                let () = msg_send![buffer, deleteCharactersInRange: range];
+            }
+
+            // Set new content
+            let ns_text = str_to_nsstring(&text);
+            let () = msg_send![buffer, appendString: ns_text];
+
+            // Set cursor position and selection (UTF-16 index)
+            (*text_input_view).set_ivar("cursorPosition", cursor_utf16_pos as i64);
+            (*text_input_view).set_ivar("selectionStart", cursor_utf16_pos as i64);
+            (*text_input_view).set_ivar("selectionEnd", cursor_utf16_pos as i64);
+
+            // Notify AFTER changes (CRITICAL for autocorrect positioning)
+            if input_delegate != nil {
+                let () = msg_send![input_delegate, selectionDidChange: text_input_view];
+                let () = msg_send![input_delegate, textDidChange: text_input_view];
+            }
+        }
     }
 
     pub fn do_callback(event: IosEvent) {
@@ -911,8 +947,20 @@ impl IosApp {
         IosApp::do_callback(IosEvent::Paint);
     }
 
-    pub fn set_fullscreen(&mut self, fullscreen: bool) {
-        if let Some(vc) = self.view_controller {
+    pub fn set_fullscreen(fullscreen: bool) {
+        // Set ivars inside a short borrow, then call UIKit methods outside.
+        // setNeedsStatusBarAppearanceUpdate can trigger viewSafeAreaInsetsDidChange
+        // which calls check_window_geom → with_ios_app, causing re-entrant borrow.
+        let vc = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.view_controller)
+            })
+            .ok()
+            .flatten();
+
+        if let Some(vc) = vc {
             unsafe {
                 let val = if fullscreen { YES } else { NO };
                 (*vc).set_ivar::<BOOL>("_prefersStatusBarHidden", val);
@@ -1038,43 +1086,56 @@ impl IosApp {
     }
 
     fn update_native_selection_display(start: DVec2, end: DVec2, visible: bool) {
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    if !app.has_native_selection_display_api {
-                        return;
-                    }
-                    let Some(text_input_view) = app.text_input_view else {
-                        return;
-                    };
-                    unsafe {
-                        (*text_input_view).set_ivar::<f64>("selection_handle_start_x", start.x);
-                        (*text_input_view).set_ivar::<f64>("selection_handle_start_y", start.y);
-                        (*text_input_view).set_ivar::<f64>("selection_handle_end_x", end.x);
-                        (*text_input_view).set_ivar::<f64>("selection_handle_end_y", end.y);
-                        (*text_input_view).set_ivar::<BOOL>(
-                            "selection_handles_visible",
-                            if visible { YES } else { NO },
-                        );
-
-                        // UITextSelectionDisplayInteraction listens via the input delegate.
-                        let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
-                        if input_delegate != nil {
-                            let () = msg_send![input_delegate, selectionWillChange: text_input_view];
-                            let () = msg_send![input_delegate, selectionDidChange: text_input_view];
+        // Extract views and set ivars inside the borrow. Then call inputDelegate
+        // notifications and interaction updates OUTSIDE the borrow, because
+        // selectionWillChange/selectionDidChange can trigger UITextInput callbacks
+        // that re-enter IOS_APP.
+        let state = IOS_APP
+            .try_with(|app| {
+                if let Ok(app_ref) = app.try_borrow() {
+                    if let Some(ref app) = *app_ref {
+                        if !app.has_native_selection_display_api {
+                            return None;
                         }
-
-                        if let Some(interaction) = app.native_selection_display_interaction {
-                            let has_refresh: BOOL =
-                                msg_send![interaction, respondsToSelector: sel!(setNeedsSelectionUpdate)];
-                            if has_refresh == YES {
-                                let () = msg_send![interaction, setNeedsSelectionUpdate];
-                            }
-                        }
+                        let text_input_view = app.text_input_view?;
+                        return Some((text_input_view, app.native_selection_display_interaction));
                     }
                 }
+                None
+            })
+            .ok()
+            .flatten();
+
+        let Some((text_input_view, interaction)) = state else {
+            return;
+        };
+
+        unsafe {
+            // Set ivars directly on the view (no borrow needed for ObjC ivar access)
+            (*text_input_view).set_ivar::<f64>("selection_handle_start_x", start.x);
+            (*text_input_view).set_ivar::<f64>("selection_handle_start_y", start.y);
+            (*text_input_view).set_ivar::<f64>("selection_handle_end_x", end.x);
+            (*text_input_view).set_ivar::<f64>("selection_handle_end_y", end.y);
+            (*text_input_view).set_ivar::<BOOL>(
+                "selection_handles_visible",
+                if visible { YES } else { NO },
+            );
+
+            // UITextSelectionDisplayInteraction listens via the input delegate.
+            let input_delegate: ObjcId = *(*text_input_view).get_ivar("_inputDelegate");
+            if input_delegate != nil {
+                let () = msg_send![input_delegate, selectionWillChange: text_input_view];
+                let () = msg_send![input_delegate, selectionDidChange: text_input_view];
             }
-        });
+
+            if let Some(interaction) = interaction {
+                let has_refresh: BOOL =
+                    msg_send![interaction, respondsToSelector: sel!(setNeedsSelectionUpdate)];
+                if has_refresh == YES {
+                    let () = msg_send![interaction, setNeedsSelectionUpdate];
+                }
+            }
+        }
     }
 
     fn set_selection_handle_center(handle: ObjcId, center: DVec2) {
@@ -1091,68 +1152,96 @@ impl IosApp {
 
     pub fn show_selection_handles(start: DVec2, end: DVec2) {
         Self::update_native_selection_display(start, end, true);
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    if let Some(start_view) = app.selection_handle_start_view {
-                        Self::set_selection_handle_center(start_view, start);
-                        unsafe {
-                            let () = msg_send![start_view, setHidden: NO];
-                            let parent: ObjcId = msg_send![start_view, superview];
-                            if parent != nil {
-                                let () = msg_send![parent, bringSubviewToFront: start_view];
-                            }
-                        }
-                    }
-                    if let Some(end_view) = app.selection_handle_end_view {
-                        Self::set_selection_handle_center(end_view, end);
-                        unsafe {
-                            let () = msg_send![end_view, setHidden: NO];
-                            let parent: ObjcId = msg_send![end_view, superview];
-                            if parent != nil {
-                                let () = msg_send![parent, bringSubviewToFront: end_view];
-                            }
-                        }
-                    }
+        // Extract view pointers inside the borrow, then do UIKit calls outside.
+        // bringSubviewToFront can trigger layout callbacks that re-enter IOS_APP.
+        let views = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| {
+                        let app = app_ref.as_ref()?;
+                        Some((app.selection_handle_start_view, app.selection_handle_end_view))
+                    })
+            })
+            .ok()
+            .flatten();
+
+        let Some((start_view, end_view)) = views else {
+            return;
+        };
+
+        if let Some(start_view) = start_view {
+            Self::set_selection_handle_center(start_view, start);
+            unsafe {
+                let () = msg_send![start_view, setHidden: NO];
+                let parent: ObjcId = msg_send![start_view, superview];
+                if parent != nil {
+                    let () = msg_send![parent, bringSubviewToFront: start_view];
                 }
             }
-        });
+        }
+        if let Some(end_view) = end_view {
+            Self::set_selection_handle_center(end_view, end);
+            unsafe {
+                let () = msg_send![end_view, setHidden: NO];
+                let parent: ObjcId = msg_send![end_view, superview];
+                if parent != nil {
+                    let () = msg_send![parent, bringSubviewToFront: end_view];
+                }
+            }
+        }
     }
 
     pub fn update_selection_handles(start: DVec2, end: DVec2) {
         Self::update_native_selection_display(start, end, true);
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    if let Some(start_view) = app.selection_handle_start_view {
-                        Self::set_selection_handle_center(start_view, start);
-                    }
-                    if let Some(end_view) = app.selection_handle_end_view {
-                        Self::set_selection_handle_center(end_view, end);
-                    }
-                }
+        let views = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| {
+                        let app = app_ref.as_ref()?;
+                        Some((app.selection_handle_start_view, app.selection_handle_end_view))
+                    })
+            })
+            .ok()
+            .flatten();
+
+        if let Some((start_view, end_view)) = views {
+            if let Some(start_view) = start_view {
+                Self::set_selection_handle_center(start_view, start);
             }
-        });
+            if let Some(end_view) = end_view {
+                Self::set_selection_handle_center(end_view, end);
+            }
+        }
     }
 
     pub fn hide_selection_handles() {
         Self::update_native_selection_display(dvec2(0.0, 0.0), dvec2(0.0, 0.0), false);
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    if let Some(start_view) = app.selection_handle_start_view {
-                        unsafe {
-                            let () = msg_send![start_view, setHidden: YES];
-                        }
-                    }
-                    if let Some(end_view) = app.selection_handle_end_view {
-                        unsafe {
-                            let () = msg_send![end_view, setHidden: YES];
-                        }
-                    }
+        let views = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| {
+                        let app = app_ref.as_ref()?;
+                        Some((app.selection_handle_start_view, app.selection_handle_end_view))
+                    })
+            })
+            .ok()
+            .flatten();
+
+        if let Some((start_view, end_view)) = views {
+            if let Some(start_view) = start_view {
+                unsafe {
+                    let () = msg_send![start_view, setHidden: YES];
                 }
             }
-        });
+            if let Some(end_view) = end_view {
+                unsafe {
+                    let () = msg_send![end_view, setHidden: YES];
+                }
+            }
+        }
     }
 
     pub fn send_selection_handle_drag(
@@ -1185,79 +1274,113 @@ impl IosApp {
     }
 
     pub fn attach_camera_preview(video_id: u64, session: ObjcId) {
+        // Check if already attached and get the mtk_view inside the borrow.
+        let mtk_view = IOS_APP
+            .try_with(|app| {
+                if let Ok(app_ref) = app.try_borrow() {
+                    if let Some(ref app) = *app_ref {
+                        if app.camera_preview_layers.contains_key(&video_id) {
+                            return None;
+                        }
+                        return app.mtk_view;
+                    }
+                }
+                None
+            })
+            .ok()
+            .flatten();
+
+        let Some(mtk_view) = mtk_view else {
+            return;
+        };
+
+        // Do all UIKit/CALayer work outside the borrow — addSublayer can
+        // trigger layout callbacks that re-enter IOS_APP.
+        let preview_layer: ObjcId =
+            unsafe { msg_send![class!(AVCaptureVideoPreviewLayer), layerWithSession: session] };
+        if preview_layer == nil {
+            return;
+        }
+
+        unsafe {
+            let gravity = str_to_nsstring("AVLayerVideoGravityResizeAspectFill");
+            let () = msg_send![preview_layer, setVideoGravity: gravity];
+
+            let host_view: ObjcId = msg_send![mtk_view, superview];
+            if host_view == nil {
+                return;
+            }
+
+            let host_layer: ObjcId = msg_send![host_view, layer];
+            if host_layer == nil {
+                return;
+            }
+
+            let () = msg_send![host_layer, addSublayer: preview_layer];
+        }
+
+        // Store the layer in app state with a short borrow.
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
-                    let Some(mtk_view) = app.mtk_view else {
-                        return;
-                    };
-                    unsafe {
-                        if app.camera_preview_layers.contains_key(&video_id) {
-                            return;
-                        }
-
-                        let preview_layer: ObjcId = msg_send![class!(AVCaptureVideoPreviewLayer), layerWithSession: session];
-                        if preview_layer == nil {
-                            return;
-                        }
-
-                        let gravity = str_to_nsstring("AVLayerVideoGravityResizeAspectFill");
-                        let () = msg_send![preview_layer, setVideoGravity: gravity];
-
-                        let host_view: ObjcId = msg_send![mtk_view, superview];
-                        if host_view == nil {
-                            return;
-                        }
-
-                        let host_layer: ObjcId = msg_send![host_view, layer];
-                        if host_layer != nil {
-                            let () = msg_send![host_layer, addSublayer: preview_layer];
-                            app.camera_preview_layers.insert(video_id, preview_layer);
-                        }
-                    }
+                    app.camera_preview_layers.insert(video_id, preview_layer);
                 }
             }
         });
     }
 
     pub fn update_camera_preview(video_id: u64, rect: Rect, visible: bool) {
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    let Some(layer) = app.camera_preview_layers.get(&video_id).copied() else {
-                        return;
-                    };
-                    unsafe {
-                        let frame = NSRect {
-                            origin: NSPoint {
-                                x: rect.pos.x,
-                                y: rect.pos.y,
-                            },
-                            size: NSSize {
-                                width: rect.size.x.max(0.0),
-                                height: rect.size.y.max(0.0),
-                            },
-                        };
-                        let () = msg_send![layer, setFrame: frame];
-                        let () = msg_send![layer, setHidden: if visible { NO } else { YES }];
-                    }
-                }
+        // Extract the layer pointer inside the borrow, then do CALayer
+        // operations outside — setFrame/setHidden can trigger layout callbacks.
+        let layer = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| {
+                        app_ref.as_ref()?.camera_preview_layers.get(&video_id).copied()
+                    })
+            })
+            .ok()
+            .flatten();
+
+        if let Some(layer) = layer {
+            unsafe {
+                let frame = NSRect {
+                    origin: NSPoint {
+                        x: rect.pos.x,
+                        y: rect.pos.y,
+                    },
+                    size: NSSize {
+                        width: rect.size.x.max(0.0),
+                        height: rect.size.y.max(0.0),
+                    },
+                };
+                let () = msg_send![layer, setFrame: frame];
+                let () = msg_send![layer, setHidden: if visible { NO } else { YES }];
             }
-        });
+        }
     }
 
     pub fn detach_camera_preview(video_id: u64) {
-        let _ = IOS_APP.try_with(|app| {
-            if let Ok(mut app_ref) = app.try_borrow_mut() {
-                if let Some(ref mut app) = *app_ref {
-                    if let Some(layer) = app.camera_preview_layers.remove(&video_id) {
-                        unsafe {
-                            let () = msg_send![layer, removeFromSuperlayer];
-                        }
+        // Remove the layer from app state inside the borrow, then call
+        // removeFromSuperlayer outside — it can trigger layout callbacks.
+        let layer = IOS_APP
+            .try_with(|app| {
+                if let Ok(mut app_ref) = app.try_borrow_mut() {
+                    if let Some(ref mut app) = *app_ref {
+                        return app.camera_preview_layers.remove(&video_id);
                     }
                 }
+                None
+            })
+            .ok()
+            .flatten();
+
+        if let Some(layer) = layer {
+            unsafe {
+                let () = msg_send![layer, removeFromSuperlayer];
             }
-        });
+        }
     }
 
     // Action dispatch methods called from MakepadView's action handlers
