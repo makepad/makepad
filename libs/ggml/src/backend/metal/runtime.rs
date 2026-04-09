@@ -143,11 +143,56 @@ mod imp {
             Err("Metal runtime is unavailable on this target".to_string())
         }
 
+        pub fn with_readable_buffer_range<R, F>(
+            &self,
+            _buffer: &MetalBuffer,
+            _offset_bytes: usize,
+            _len_bytes: usize,
+            _f: F,
+        ) -> MetalResult<R>
+        where
+            F: FnOnce(&[u8]) -> MetalResult<R>,
+        {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
+
+        pub fn with_readable_buffer<R, F>(
+            &self,
+            buffer: &MetalBuffer,
+            len_bytes: usize,
+            f: F,
+        ) -> MetalResult<R>
+        where
+            F: FnOnce(&[u8]) -> MetalResult<R>,
+        {
+            self.with_readable_buffer_range(buffer, 0, len_bytes, f)
+        }
+
         pub fn write_buffer(
             &self,
             _buffer: &MetalBuffer,
             _offset_bytes: usize,
             _bytes: &[u8],
+        ) -> MetalResult<()> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
+
+        pub fn copy_buffer(
+            &self,
+            _src: &MetalBuffer,
+            _dst: &MetalBuffer,
+            _len_bytes: usize,
+        ) -> MetalResult<()> {
+            Err("Metal runtime is unavailable on this target".to_string())
+        }
+
+        pub fn copy_buffer_range(
+            &self,
+            _src: &MetalBuffer,
+            _src_offset_bytes: usize,
+            _dst: &MetalBuffer,
+            _dst_offset_bytes: usize,
+            _len_bytes: usize,
         ) -> MetalResult<()> {
             Err("Metal runtime is unavailable on this target".to_string())
         }
@@ -174,6 +219,10 @@ mod imp {
 
         pub fn end_command_batch(&self) -> MetalResult<()> {
             Err("Metal runtime is unavailable on this target".to_string())
+        }
+
+        pub fn command_batch_is_active(&self) -> bool {
+            false
         }
 
         pub fn discard_command_batch(&self) -> MetalResult<()> {
@@ -593,9 +642,9 @@ mod imp {
             if bytes.is_empty() {
                 return self.create_buffer(0, storage);
             }
-            let ctx = self.ctx.borrow();
             match storage {
                 BufferStorageMode::Shared => {
+                    let ctx = self.ctx.borrow();
                     let obj = ctx.new_buffer_with_bytes(bytes)?;
                     Ok(MetalBuffer {
                         obj,
@@ -604,6 +653,7 @@ mod imp {
                     })
                 }
                 BufferStorageMode::Private => {
+                    let mut ctx = self.ctx.borrow_mut();
                     let dst = ctx.new_buffer_with_length_private(bytes.len().max(1))?;
                     let staging = ctx.new_buffer_with_bytes(bytes)?;
                     ctx.copy_between_buffers(staging.as_id(), dst.as_id(), bytes.len())?;
@@ -659,7 +709,7 @@ mod imp {
         }
 
         pub fn read_buffer(&self, buffer: &MetalBuffer, len_bytes: usize) -> MetalResult<Vec<u8>> {
-            let ctx = self.ctx.borrow();
+            let mut ctx = self.ctx.borrow_mut();
             if len_bytes > buffer.size_bytes {
                 return Err(format!(
                     "requested read of {} bytes exceeds buffer size {}",
@@ -675,7 +725,7 @@ mod imp {
             offset_bytes: usize,
             len_bytes: usize,
         ) -> MetalResult<Vec<u8>> {
-            let ctx = self.ctx.borrow();
+            let mut ctx = self.ctx.borrow_mut();
             if offset_bytes > buffer.size_bytes
                 || len_bytes > buffer.size_bytes.saturating_sub(offset_bytes)
             {
@@ -687,13 +737,47 @@ mod imp {
             ctx.read_buffer_bytes_range(buffer.as_id(), offset_bytes, len_bytes)
         }
 
+        pub fn with_readable_buffer_range<R, F>(
+            &self,
+            buffer: &MetalBuffer,
+            offset_bytes: usize,
+            len_bytes: usize,
+            f: F,
+        ) -> MetalResult<R>
+        where
+            F: FnOnce(&[u8]) -> MetalResult<R>,
+        {
+            let mut ctx = self.ctx.borrow_mut();
+            if offset_bytes > buffer.size_bytes
+                || len_bytes > buffer.size_bytes.saturating_sub(offset_bytes)
+            {
+                return Err(format!(
+                    "requested read of {} bytes at offset {} exceeds buffer size {}",
+                    len_bytes, offset_bytes, buffer.size_bytes
+                ));
+            }
+            ctx.with_readable_buffer_bytes_range(buffer.as_id(), offset_bytes, len_bytes, f)
+        }
+
+        pub fn with_readable_buffer<R, F>(
+            &self,
+            buffer: &MetalBuffer,
+            len_bytes: usize,
+            f: F,
+        ) -> MetalResult<R>
+        where
+            F: FnOnce(&[u8]) -> MetalResult<R>,
+        {
+            self.with_readable_buffer_range(buffer, 0, len_bytes, f)
+        }
+
         pub fn write_buffer(
             &self,
             buffer: &MetalBuffer,
             offset_bytes: usize,
             bytes: &[u8],
         ) -> MetalResult<()> {
-            let ctx = self.ctx.borrow();
+            let mut ctx = self.ctx.borrow_mut();
             if offset_bytes > buffer.size_bytes
                 || bytes.len() > buffer.size_bytes.saturating_sub(offset_bytes)
             {
@@ -705,6 +789,43 @@ mod imp {
                 ));
             }
             ctx.write_buffer_bytes(buffer.as_id(), offset_bytes, bytes)
+        }
+
+        pub fn copy_buffer(
+            &self,
+            src: &MetalBuffer,
+            dst: &MetalBuffer,
+            len_bytes: usize,
+        ) -> MetalResult<()> {
+            self.copy_buffer_range(src, 0, dst, 0, len_bytes)
+        }
+
+        pub fn copy_buffer_range(
+            &self,
+            src: &MetalBuffer,
+            src_offset_bytes: usize,
+            dst: &MetalBuffer,
+            dst_offset_bytes: usize,
+            len_bytes: usize,
+        ) -> MetalResult<()> {
+            let mut ctx = self.ctx.borrow_mut();
+            if src_offset_bytes > src.size_bytes
+                || len_bytes > src.size_bytes.saturating_sub(src_offset_bytes)
+                || dst_offset_bytes > dst.size_bytes
+                || len_bytes > dst.size_bytes.saturating_sub(dst_offset_bytes)
+            {
+                return Err(format!(
+                    "requested buffer copy of {} bytes exceeds src={} dst={} with offsets {} -> {}",
+                    len_bytes, src.size_bytes, dst.size_bytes, src_offset_bytes, dst_offset_bytes
+                ));
+            }
+            ctx.copy_between_buffers_ranges(
+                src.as_id(),
+                src_offset_bytes,
+                dst.as_id(),
+                dst_offset_bytes,
+                len_bytes,
+            )
         }
 
         pub fn dispatch_compute(
@@ -736,6 +857,10 @@ mod imp {
 
         pub fn end_command_batch(&self) -> MetalResult<()> {
             self.ctx.borrow_mut().end_command_batch()
+        }
+
+        pub fn command_batch_is_active(&self) -> bool {
+            self.ctx.borrow().command_batch_is_active()
         }
 
         pub fn discard_command_batch(&self) -> MetalResult<()> {
@@ -917,6 +1042,10 @@ mod imp {
                 .ok_or_else(|| "commandBuffer returned nil".to_string())
         }
 
+        fn command_batch_is_active(&self) -> bool {
+            self.active_command_buffer.is_some()
+        }
+
         fn begin_command_batch(&mut self) -> MetalResult<()> {
             if self.active_command_buffer.is_some() {
                 return Err("Metal command batch is already active".to_string());
@@ -986,7 +1115,7 @@ mod imp {
         }
 
         fn copy_between_buffers(
-            &self,
+            &mut self,
             src_buffer: ObjcId,
             dst_buffer: ObjcId,
             len_bytes: usize,
@@ -995,7 +1124,7 @@ mod imp {
         }
 
         fn copy_between_buffers_ranges(
-            &self,
+            &mut self,
             src_buffer: ObjcId,
             src_offset: usize,
             dst_buffer: ObjcId,
@@ -1016,12 +1145,19 @@ mod imp {
                 ));
             }
 
-            let (command_buffer, commit_when_done) =
-                if let Some(command_buffer) = self.active_command_buffer.as_ref() {
-                    (command_buffer.clone(), false)
-                } else {
-                    (self.new_command_buffer()?, true)
-                };
+            let (command_buffer, commit_when_done) = if self.active_command_buffer.is_some() {
+                self.end_active_compute_encoder();
+                let command_buffer = self
+                    .active_command_buffer
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "Metal command batch disappeared during buffer copy".to_string()
+                    })?
+                    .clone();
+                (command_buffer, false)
+            } else {
+                (self.new_command_buffer()?, true)
+            };
 
             let blit_encoder_obj: ObjcId =
                 unsafe { msg_send![command_buffer.as_id(), blitCommandEncoder] };
@@ -1059,7 +1195,7 @@ mod imp {
         }
 
         fn copy_buffer_to_shared_staging(
-            &self,
+            &mut self,
             src_buffer: ObjcId,
             len_bytes: usize,
         ) -> MetalResult<StrongId> {
@@ -1069,7 +1205,7 @@ mod imp {
         }
 
         fn copy_buffer_range_to_shared_staging(
-            &self,
+            &mut self,
             src_buffer: ObjcId,
             src_offset: usize,
             len_bytes: usize,
@@ -1079,12 +1215,12 @@ mod imp {
             Ok(dst)
         }
 
-        fn read_buffer_bytes(&self, buffer: ObjcId, len_bytes: usize) -> MetalResult<Vec<u8>> {
+        fn read_buffer_bytes(&mut self, buffer: ObjcId, len_bytes: usize) -> MetalResult<Vec<u8>> {
             self.read_buffer_bytes_range(buffer, 0, len_bytes)
         }
 
         fn read_buffer_bytes_range(
-            &self,
+            &mut self,
             buffer: ObjcId,
             offset_bytes: usize,
             len_bytes: usize,
@@ -1130,8 +1266,51 @@ mod imp {
             Ok(out)
         }
 
+        fn with_readable_buffer_bytes_range<R, F>(
+            &mut self,
+            buffer: ObjcId,
+            offset_bytes: usize,
+            len_bytes: usize,
+            f: F,
+        ) -> MetalResult<R>
+        where
+            F: FnOnce(&[u8]) -> MetalResult<R>,
+        {
+            self.wait_queue_idle()?;
+            let cap = self.buffer_length_bytes(buffer)?;
+            if offset_bytes > cap || len_bytes > cap.saturating_sub(offset_bytes) {
+                return Err(format!(
+                    "requested read of {} bytes at offset {} exceeds buffer size {}",
+                    len_bytes, offset_bytes, cap
+                ));
+            }
+
+            let (readable, readable_offset) = {
+                let storage_mode: u64 = unsafe { msg_send![buffer, storageMode] };
+                if storage_mode == MTL_STORAGE_MODE_PRIVATE {
+                    (
+                        self.copy_buffer_range_to_shared_staging(buffer, offset_bytes, len_bytes)?,
+                        0usize,
+                    )
+                } else {
+                    (
+                        unsafe { StrongId::from_unowned(buffer) }
+                            .ok_or_else(|| "buffer handle became invalid".to_string())?,
+                        offset_bytes,
+                    )
+                }
+            };
+
+            let ptr: *const u8 = unsafe { msg_send![readable.as_id(), contents] };
+            if ptr.is_null() {
+                return Err("buffer contents returned null".to_string());
+            }
+            let bytes = unsafe { std::slice::from_raw_parts(ptr.add(readable_offset), len_bytes) };
+            f(bytes)
+        }
+
         fn write_buffer_bytes(
-            &self,
+            &mut self,
             buffer: ObjcId,
             offset_bytes: usize,
             bytes: &[u8],

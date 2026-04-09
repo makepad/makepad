@@ -1,4 +1,5 @@
 pub mod layer0_cached_case;
+pub mod text_runtime;
 
 use makepad_mlx_rt_core::MlxTextConfig;
 use std::fmt;
@@ -363,15 +364,9 @@ impl GemmaKvCacheLayout {
             ));
         }
 
-        let kv_head_count = checked_usize(config.num_key_value_heads, "num_key_value_heads")?;
-        let head_dim = checked_usize(config.head_dim, "head_dim")?;
-        let max_position_embeddings =
-            checked_usize(config.max_position_embeddings, "max_position_embeddings")?;
-        let sliding_window = checked_usize(config.sliding_window, "sliding_window")?;
         let first_kv_shared_layer_idx = layer_count - shared_layer_count;
 
         let mut cache_specs = Vec::with_capacity(first_kv_shared_layer_idx);
-        let mut concrete_attention = Vec::with_capacity(first_kv_shared_layer_idx);
         for (layer_idx, layer_type) in config
             .layer_types
             .iter()
@@ -379,18 +374,7 @@ impl GemmaKvCacheLayout {
             .enumerate()
         {
             let attention = parse_attention_kind(layer_idx, layer_type)?;
-            let max_tokens = match attention {
-                GemmaAttentionKind::Full => max_position_embeddings,
-                GemmaAttentionKind::Sliding => sliding_window,
-            };
-            cache_specs.push(GemmaKvCacheSpec::new(
-                attention,
-                batch_size,
-                kv_head_count,
-                head_dim,
-                max_tokens,
-            )?);
-            concrete_attention.push(attention);
+            cache_specs.push(cache_spec_for_layer(config, batch_size, attention)?);
         }
 
         let mut layer_idx_to_cache_idx = (0..first_kv_shared_layer_idx).collect::<Vec<_>>();
@@ -401,9 +385,10 @@ impl GemmaKvCacheLayout {
             .skip(first_kv_shared_layer_idx)
         {
             let attention = parse_attention_kind(layer_idx, layer_type)?;
-            let cache_idx = concrete_attention
+            let expected_spec = cache_spec_for_layer(config, batch_size, attention)?;
+            let cache_idx = cache_specs
                 .iter()
-                .rposition(|candidate| *candidate == attention)
+                .rposition(|candidate| *candidate == expected_spec)
                 .ok_or(GemmaKvError::MissingConcreteCache {
                     layer_idx,
                     attention,
@@ -411,12 +396,12 @@ impl GemmaKvCacheLayout {
             layer_idx_to_cache_idx.push(cache_idx);
         }
 
-        let first_full_cache_idx = concrete_attention
+        let first_full_cache_idx = cache_specs
             .iter()
-            .position(|candidate| *candidate == GemmaAttentionKind::Full);
-        let first_sliding_cache_idx = concrete_attention
+            .position(|candidate| candidate.attention == GemmaAttentionKind::Full);
+        let first_sliding_cache_idx = cache_specs
             .iter()
-            .position(|candidate| *candidate == GemmaAttentionKind::Sliding);
+            .position(|candidate| candidate.attention == GemmaAttentionKind::Sliding);
 
         Ok(Self {
             cache_specs,
@@ -461,6 +446,37 @@ impl GemmaKvCacheLayout {
         let cache_idx = self.cache_idx_for_layer(layer_idx)?;
         Ok(&self.cache_specs[cache_idx])
     }
+}
+
+fn cache_spec_for_layer(
+    config: &MlxTextConfig,
+    batch_size: usize,
+    attention: GemmaAttentionKind,
+) -> Result<GemmaKvCacheSpec> {
+    let max_tokens = match attention {
+        GemmaAttentionKind::Full => {
+            checked_usize(config.max_position_embeddings, "max_position_embeddings")?
+        }
+        GemmaAttentionKind::Sliding => checked_usize(config.sliding_window, "sliding_window")?,
+    };
+    let head_dim = match attention {
+        GemmaAttentionKind::Full if config.global_head_dim != 0 => {
+            checked_usize(config.global_head_dim, "global_head_dim")?
+        }
+        _ => checked_usize(config.head_dim, "head_dim")?,
+    };
+    let kv_head_count = match attention {
+        GemmaAttentionKind::Full
+            if config.attention_k_eq_v && config.num_global_key_value_heads != 0 =>
+        {
+            checked_usize(
+                config.num_global_key_value_heads,
+                "num_global_key_value_heads",
+            )?
+        }
+        _ => checked_usize(config.num_key_value_heads, "num_key_value_heads")?,
+    };
+    GemmaKvCacheSpec::new(attention, batch_size, kv_head_count, head_dim, max_tokens)
 }
 
 #[derive(Clone, Debug)]
@@ -986,6 +1002,39 @@ mod tests {
         assert_eq!(layout.cache_specs[1].attention, GemmaAttentionKind::Sliding);
         assert!(layout.is_kv_shared_layer(4)?);
         assert!(!layout.is_kv_shared_layer(3)?);
+        Ok(())
+    }
+
+    #[test]
+    fn layout_uses_global_kv_shape_for_full_attention_layers() -> Result<()> {
+        let mut config = sample_text_config(
+            &["sliding_attention", "full_attention", "sliding_attention"],
+            0,
+        );
+        config.attention_k_eq_v = true;
+        config.head_dim = 4;
+        config.global_head_dim = 8;
+        config.num_key_value_heads = 2;
+        config.num_global_key_value_heads = 1;
+        config.max_position_embeddings = 32;
+        config.sliding_window = 6;
+
+        let layout = GemmaKvCacheLayout::from_text_config(&config, 1)?;
+
+        assert_eq!(layout.cache_specs.len(), 3);
+        assert_eq!(
+            layout.cache_specs[0],
+            GemmaKvCacheSpec::new(GemmaAttentionKind::Sliding, 1, 2, 4, 6)?
+        );
+        assert_eq!(
+            layout.cache_specs[1],
+            GemmaKvCacheSpec::new(GemmaAttentionKind::Full, 1, 1, 8, 32)?
+        );
+        assert_eq!(
+            layout.cache_specs[2],
+            GemmaKvCacheSpec::new(GemmaAttentionKind::Sliding, 1, 2, 4, 6)?
+        );
+        assert_eq!(layout.cache_spec_for_layer(1)?, &layout.cache_specs[1]);
         Ok(())
     }
 
