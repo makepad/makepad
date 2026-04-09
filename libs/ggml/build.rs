@@ -43,7 +43,17 @@ fn build_metallib() {
 
     let metal_status = Command::new("xcrun")
         .args([
-            "--sdk", "macosx", "metal", "-O3", "-c", &metal_src, "-I", &metal_dir, "-o", &air_path,
+            "--sdk",
+            "macosx",
+            "metal",
+            "-O3",
+            "-fno-fast-math",
+            "-c",
+            &metal_src,
+            "-I",
+            &metal_dir,
+            "-o",
+            &air_path,
         ])
         .status();
 
