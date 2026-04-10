@@ -349,6 +349,17 @@ impl MatchEvent for App {
                         if self.data.tab_to_mount.contains_key(&tab_id) {
                             continue;
                         }
+                        if tab_id == id!(tree_tab)
+                            || tab_id == id!(run_list_tab)
+                            || tab_id == id!(editor_first)
+                            || tab_id == id!(run_first)
+                            || tab_id == id!(log_first)
+                            || tab_id == id!(bottom_terminal_tab)
+                            || tab_id == id!(terminal_first)
+                            || tab_id == id!(terminal_add)
+                        {
+                            continue;
+                        }
                         if self.data.run_tab_state.contains_key(&tab_id) {
                             self.close_run_tab(cx, tab_id);
                         } else if self.data.log_tab_state.contains_key(&tab_id) {
@@ -357,10 +368,10 @@ impl MatchEvent for App {
                             self.close_profiler_tab(cx, tab_id);
                         } else if self.data.tab_to_path.contains_key(&tab_id) {
                             self.close_editor_tab(cx, tab_id);
-                        } else if tab_id != id!(terminal_add) {
+                        } else {
                             if let Some((mount, _path)) = self.terminal_tab_mount_path(tab_id) {
                                 self.delete_terminal_tab_file(cx, &mount, tab_id);
-                            } else if tab_id != id!(terminal_first) {
+                            } else {
                                 if let Some(mount) = self.data.active_mount.clone() {
                                     if let Some(dock) = self.mount_workspace_dock(cx, &mount) {
                                         dock.close_tab(cx, tab_id);
