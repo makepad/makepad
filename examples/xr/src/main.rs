@@ -1027,7 +1027,7 @@ impl App {
             .ui
             .widget(cx, ids!(xr_peer_sync))
             .borrow::<XrPeerSync>()
-            .map(|peer_sync| {
+            .map(|peer_sync| { 
                 (
                     peer_sync.connected_peer_count(),
                     peer_sync.shared_object_count(),

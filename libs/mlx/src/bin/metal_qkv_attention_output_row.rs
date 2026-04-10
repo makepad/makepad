@@ -22,7 +22,6 @@ const ROPE_OFFSET: i32 = 17;
 
 #[derive(Clone, Copy)]
 struct ProjectionPathOracle {
-    prefix: &'static str,
     weight_name: &'static str,
     scales_name: &'static str,
     biases_name: &'static str,
@@ -34,7 +33,6 @@ struct ProjectionPathOracle {
 }
 
 const Q_PATH_ORACLE: ProjectionPathOracle = ProjectionPathOracle {
-    prefix: "q_proj",
     weight_name: "language_model.model.layers.0.self_attn.q_proj.weight",
     scales_name: "language_model.model.layers.0.self_attn.q_proj.scales",
     biases_name: "language_model.model.layers.0.self_attn.q_proj.biases",
@@ -80,7 +78,6 @@ const Q_PATH_ORACLE: ProjectionPathOracle = ProjectionPathOracle {
 };
 
 const K_PATH_ORACLE: ProjectionPathOracle = ProjectionPathOracle {
-    prefix: "k_proj",
     weight_name: "language_model.model.layers.0.self_attn.k_proj.weight",
     scales_name: "language_model.model.layers.0.self_attn.k_proj.scales",
     biases_name: "language_model.model.layers.0.self_attn.k_proj.biases",
@@ -126,7 +123,6 @@ const K_PATH_ORACLE: ProjectionPathOracle = ProjectionPathOracle {
 };
 
 const V_PATH_ORACLE: ProjectionPathOracle = ProjectionPathOracle {
-    prefix: "v_proj",
     weight_name: "language_model.model.layers.0.self_attn.v_proj.weight",
     scales_name: "language_model.model.layers.0.self_attn.v_proj.scales",
     biases_name: "language_model.model.layers.0.self_attn.v_proj.biases",
