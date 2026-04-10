@@ -1,4 +1,6 @@
-use crate::text_runtime::{GemmaTextGenerationOutput, GemmaTextModel};
+use crate::text_runtime::{
+    GemmaTextGenerationOutput, GemmaTextModel, GemmaTextSamplingOptions, MlxTextSamplingRng,
+};
 use crate::MlxTokenizerConfig;
 use std::error::Error;
 use std::path::Path;
@@ -55,6 +57,9 @@ pub fn format_gemma4_chat_prompt(
     prompt.push_str(&tokenizer_config.sot_token);
     prompt.push_str(GemmaChatRole::Assistant.as_prompt_label());
     prompt.push('\n');
+    prompt.push_str(&tokenizer_config.soc_token);
+    prompt.push_str("thought\n");
+    prompt.push_str(&tokenizer_config.eoc_token);
     Ok(prompt)
 }
 
@@ -74,6 +79,7 @@ fn erase_all_spans(text: &mut String, start: &str, end: &str) {
     while let Some(start_pos) = text.find(start) {
         let after_start = start_pos + start.len();
         let Some(rel_end) = text[after_start..].find(end) else {
+            text.truncate(start_pos);
             break;
         };
         let end_pos = after_start + rel_end + end.len();
@@ -105,6 +111,8 @@ pub fn extract_gemma4_assistant_response_text(
 pub struct GemmaChatSession {
     model: GemmaTextModel,
     max_new_tokens: Option<usize>,
+    rng: MlxTextSamplingRng,
+    sampling_options: GemmaTextSamplingOptions,
     messages: Vec<GemmaChatMessage>,
 }
 
@@ -116,6 +124,8 @@ impl GemmaChatSession {
         Ok(Self {
             model: GemmaTextModel::load(model_path)?,
             max_new_tokens,
+            rng: MlxTextSamplingRng::new(0),
+            sampling_options: GemmaTextSamplingOptions::mlx_vlm_chat_default(),
             messages: Vec::new(),
         })
     }
@@ -148,7 +158,12 @@ impl GemmaChatSession {
             format_gemma4_chat_prompt(self.model.tokenizer_config(), &self.messages)?;
         let output = self
             .model
-            .generate_preformatted(formatted_prompt, self.max_new_tokens)?;
+            .generate_preformatted_with_rng_and_sampling(
+                formatted_prompt,
+                self.max_new_tokens,
+                &self.sampling_options,
+                &mut self.rng,
+            )?;
         self.messages.push(GemmaChatMessage::new(
             GemmaChatRole::Assistant,
             output.generated_text.as_ref(),
@@ -169,11 +184,15 @@ impl GemmaChatSession {
             .push(GemmaChatMessage::new(GemmaChatRole::User, content));
         let formatted_prompt =
             format_gemma4_chat_prompt(self.model.tokenizer_config(), &self.messages)?;
-        let output = self.model.stream_generate_preformatted(
-            formatted_prompt,
-            self.max_new_tokens,
-            on_text_delta,
-        )?;
+        let output = self
+            .model
+            .stream_generate_preformatted_with_rng_and_sampling(
+                formatted_prompt,
+                self.max_new_tokens,
+                &self.sampling_options,
+                &mut self.rng,
+                on_text_delta,
+            )?;
         self.messages.push(GemmaChatMessage::new(
             GemmaChatRole::Assistant,
             output.generated_text.as_ref(),

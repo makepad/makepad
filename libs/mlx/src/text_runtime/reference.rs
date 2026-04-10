@@ -40,12 +40,14 @@ impl GemmaTextRuntimeSession {
                 self.weights.snapshot.tokenizer_config.bos_token, prompt_text
             ),
             GemmaPromptFormat::Gemma4UserTurn => format!(
-                "{}{}user\n{}{}\n{}model\n",
+                "{}{}user\n{}{}\n{}model\n{}thought\n{}",
                 self.weights.snapshot.tokenizer_config.bos_token,
                 self.weights.snapshot.tokenizer_config.sot_token,
                 prompt_text,
                 self.weights.snapshot.tokenizer_config.eot_token,
                 self.weights.snapshot.tokenizer_config.sot_token,
+                self.weights.snapshot.tokenizer_config.soc_token,
+                self.weights.snapshot.tokenizer_config.eoc_token,
             ),
         }
     }
