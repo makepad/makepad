@@ -267,15 +267,15 @@ script_mod! {
 
                 let color_fill = self.color
                     .mix(self.color_focus, self.focus)
-                    .mix(self.color_active, self.active)
                     .mix(self.color_hover, self.hover)
+                    .mix(self.color_active, self.active)
                     .mix(self.color_down, self.down)
                     .mix(self.color_disabled, self.disabled)
 
                 let color_stroke = self.border_color
                     .mix(self.border_color_focus, self.focus)
-                    .mix(self.border_color_active, self.active)
                     .mix(self.border_color_hover, self.hover)
+                    .mix(self.border_color_active, self.active)
                     .mix(self.border_color_down, self.down)
                     .mix(self.border_color_disabled, self.disabled)
 
