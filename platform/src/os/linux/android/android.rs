@@ -322,7 +322,15 @@ impl Cx {
                         self.call_event_handler(&Event::LiveEdit);
                         self.redraw_all();
                     }
-                    self.handle_drawing();
+                    // Drop the frame entirely if the window surface has been
+                    // torn down (typically during background/foreground or a
+                    // rotation). Issuing GL calls without a current EGL context
+                    // — which is what `destroy_surface` leaves us in — is
+                    // undefined behavior and crashes Mali/Adreno drivers with
+                    // a SIGSEGV inside `render_view`.
+                    if self.os.has_drawable_surface() {
+                        self.handle_drawing();
+                    }
                 }
                 Ok(message) => {
                     self.handle_message(message);
@@ -384,6 +392,15 @@ impl Cx {
                     unsafe {
                         self.os.display.as_mut().unwrap().update_surface(window);
                     }
+                    // Only mark the surface alive if `update_surface` actually
+                    // succeeded — otherwise we'd lie to the renderer and it
+                    // would try to draw against a null EGL surface.
+                    self.os.surface_alive = self
+                        .os
+                        .display
+                        .as_ref()
+                        .map(|d| d.is_surface_alive())
+                        .unwrap_or(false);
                 }
 
                 #[cfg(use_vulkan)]
@@ -402,12 +419,22 @@ impl Cx {
                             let height = self.os.display_size.y.max(1.0) as u32;
                             if let Err(err) = vulkan.update_surface(window, width, height) {
                                 crate::error!("Android Vulkan surface create/update failed: {err}");
+                            } else {
+                                self.os.surface_alive = true;
                             }
                         }
                     }
                 }
             }
-            FromJavaMessage::SurfaceDestroyed => {
+            FromJavaMessage::SurfaceDestroyed { ack } => {
+                // CRITICAL: clear `surface_alive` BEFORE tearing down the
+                // surface itself. The render thread is the only one allowed to
+                // touch GL state, and we are on the render thread right now —
+                // but the helper functions we call below (`destroy_surface`,
+                // `suspend_surface`) issue EGL/Vulkan calls that can themselves
+                // trip the renderer if it observes a half-torn-down state.
+                self.os.surface_alive = false;
+
                 #[cfg(not(use_vulkan))]
                 unsafe {
                     self.os.display.as_mut().unwrap().destroy_surface();
@@ -449,6 +476,11 @@ impl Cx {
                         );
                     }
                 }
+
+                // Tell the JNI thread (which is blocked inside
+                // `surfaceOnSurfaceDestroyed`) that it's now safe to return to
+                // Android — we've fully released our hold on the surface.
+                signal_surface_ack(&ack);
             }
             FromJavaMessage::SurfaceChanged {
                 window,
@@ -491,6 +523,16 @@ impl Cx {
                     unsafe {
                         self.os.display.as_mut().unwrap().update_surface(window);
                     }
+                    // SurfaceChanged is the canonical "surface is good now"
+                    // signal — it's also how the very first surface is
+                    // delivered. Mark the surface alive only if the EGL window
+                    // surface actually got created.
+                    self.os.surface_alive = self
+                        .os
+                        .display
+                        .as_ref()
+                        .map(|d| d.is_surface_alive())
+                        .unwrap_or(false);
                 }
 
                 #[cfg(use_vulkan)]
@@ -513,10 +555,15 @@ impl Cx {
                         if let Some(vulkan) = self.os.vulkan.as_mut() {
                             if let Err(err) = vulkan.update_surface(window, width_u32, height_u32) {
                                 crate::error!("Android Vulkan surface update failed: {err}");
+                            } else {
+                                self.os.surface_alive = true;
                             }
                         } else {
                             match CxVulkan::new(window, width_u32, height_u32) {
-                                Ok(vulkan) => self.os.vulkan = Some(vulkan),
+                                Ok(vulkan) => {
+                                    self.os.vulkan = Some(vulkan);
+                                    self.os.surface_alive = true;
+                                }
                                 Err(err) => {
                                     crate::error!(
                                         "Android Vulkan backend init failed, falling back to OpenGL: {err}"
@@ -1206,6 +1253,13 @@ impl Cx {
     }
 
     fn draw_pass_to_window_for_active_backend(&mut self, draw_pass_id: DrawPassId) {
+        // No surface → no point dispatching to either backend. Both backends
+        // will SIGSEGV inside the GPU driver if their swapchain/window has
+        // been torn down out from under them.
+        if !self.os.has_drawable_surface() {
+            return;
+        }
+
         #[cfg(use_vulkan)]
         {
             if self.os.vulkan.is_some() {
@@ -1228,6 +1282,13 @@ impl Cx {
     }
 
     pub(crate) fn draw_pass_to_texture_for_active_backend(&mut self, draw_pass_id: DrawPassId) {
+        // Off-screen passes still issue GL/Vulkan commands against the active
+        // context, so they must respect surface validity for the same reason
+        // as window passes.
+        if !self.os.has_drawable_surface() {
+            return;
+        }
+
         #[cfg(use_vulkan)]
         {
             if let Some(mut vulkan) = self.os.vulkan.take() {
@@ -1251,10 +1312,17 @@ impl Cx {
             if self.os.vulkan.is_none() {
                 unsafe {
                     if let Some(display) = &mut self.os.display {
-                        (display.libegl.eglSwapBuffers.unwrap())(
-                            display.egl_display,
-                            display.surface,
-                        );
+                        // Skip the swap if the window surface has been torn
+                        // down — most drivers return EGL_BAD_SURFACE here, but
+                        // some (Mali/Adreno) crash inside the swap buffer
+                        // implementation when the underlying buffer queue is
+                        // already gone.
+                        if display.is_surface_alive() {
+                            (display.libegl.eglSwapBuffers.unwrap())(
+                                display.egl_display,
+                                display.surface,
+                            );
+                        }
                     }
                 }
             }
@@ -1264,7 +1332,12 @@ impl Cx {
         #[cfg(not(use_vulkan))]
         unsafe {
             if let Some(display) = &mut self.os.display {
-                (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+                if display.is_surface_alive() {
+                    (display.libegl.eglSwapBuffers.unwrap())(
+                        display.egl_display,
+                        display.surface,
+                    );
+                }
             }
         }
     }
@@ -1801,6 +1874,34 @@ impl Cx {
     }
 
     pub fn draw_pass_to_fullscreen(&mut self, draw_pass_id: DrawPassId) {
+        // Defense in depth: even though `main_loop` already gates `handle_drawing`
+        // on `has_drawable_surface`, this method is also reachable via the popup
+        // overlay path in `handle_repaint`, and we want a hard, local guarantee
+        // that we never issue GL commands without a current EGL context.
+        //
+        // 1. Bail immediately if the surface is gone.
+        // 2. Re-bind our context to its surface every frame. On Android the
+        //    EGL context can become "uncurrent" if foreign code (or our own
+        //    teardown path) called `eglMakeCurrent(NULL, ...)`. Re-binding is
+        //    cheap when already current and is the only way to recover from
+        //    a context that quietly drifted out of sync.
+        if !self.os.has_drawable_surface() {
+            return;
+        }
+        let make_current_ok = self
+            .os
+            .display
+            .as_ref()
+            .map(|d| d.try_make_current())
+            .unwrap_or(false);
+        if !make_current_ok {
+            // The display struct exists but the EGL surface is no longer
+            // bindable; mark it dead so we don't burn CPU re-checking until
+            // the next SurfaceCreated.
+            self.os.surface_alive = false;
+            return;
+        }
+
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
         self.setup_render_pass(draw_pass_id);
@@ -2795,6 +2896,7 @@ impl Default for CxOs {
             keyboard_closed: 0.0,
             media: CxAndroidMedia::default(),
             display: None,
+            surface_alive: false,
             #[cfg(use_vulkan)]
             vulkan: None,
             quit: false,
@@ -2863,6 +2965,17 @@ pub struct CxOs {
     pub(crate) start_time: Instant,
     pub(crate) timers: PollTimers,
     pub display: Option<CxAndroidDisplay>,
+    /// Tracks whether the active rendering surface (EGL window surface in OpenGL
+    /// mode, or `ANativeWindow`-backed Vulkan surface in Vulkan mode) is currently
+    /// valid for drawing.
+    ///
+    /// Set to `true` after a successful `SurfaceCreated`/`SurfaceChanged` and to
+    /// `false` synchronously inside the `SurfaceDestroyed` handler. The render
+    /// thread MUST consult this before issuing any GL/Vulkan draw or present
+    /// calls — Android can pull the underlying buffer queue out from under us
+    /// at any moment, and the GPU drivers (Mali/Adreno) will SIGSEGV if you
+    /// touch GL state without a current/valid surface.
+    pub(crate) surface_alive: bool,
     #[cfg(use_vulkan)]
     pub(crate) vulkan: Option<CxVulkan>,
     pub(crate) media: CxAndroidMedia,
@@ -2900,13 +3013,88 @@ impl CxOs {
     pub(crate) fn gl(&self) -> &LibGl {
         &self.display.as_ref().unwrap().libgl
     }
+
+    /// Returns `true` only when it is currently safe to issue draw / swap-buffer
+    /// calls against the active backend's window surface.
+    ///
+    /// This consults the `surface_alive` flag (set by the `SurfaceCreated`/
+    /// `SurfaceChanged`/`SurfaceDestroyed` message handlers) AND verifies that
+    /// the underlying handles still look healthy.
+    ///
+    /// On Android the only thread allowed to drive the renderer is the
+    /// dedicated render thread that owns the EGL/Vulkan context, so calling
+    /// this from anywhere else is meaningless.
+    ///
+    /// **XR mode escape hatch (Vulkan only):** when an OpenXR session is
+    /// active, rendering goes through OpenXR's own swapchains and a Vulkan
+    /// instance whose validity is **independent** of the Android window
+    /// surface lifecycle. The `SurfaceDestroyed` handler deliberately keeps
+    /// the Vulkan backend alive in that case (`keep_xr_backend_alive`) and
+    /// only nulls out `display.window`. Without this escape hatch the
+    /// off-screen texture passes invoked from `openxr_handle_repaint` (UI
+    /// surfaces composited into the XR scene) would be silently skipped any
+    /// time `display.window` is null — which would visibly break Quest 3
+    /// rendering whenever the host Activity surface is recycled.
+    pub(crate) fn has_drawable_surface(&self) -> bool {
+        #[cfg(use_vulkan)]
+        {
+            // Vulkan + active XR session: rendering is driven by OpenXR's own
+            // swapchains, not the Android window surface. Always allow passes
+            // to proceed; the actual draw uses Vulkan resources that we know
+            // are still alive (we never `suspend_surface()` while a session
+            // is running).
+            if self.in_xr_mode && self.openxr.session.is_some() {
+                return self.vulkan.is_some();
+            }
+        }
+
+        if !self.surface_alive {
+            return false;
+        }
+
+        #[cfg(not(use_vulkan))]
+        {
+            self.display
+                .as_ref()
+                .map(|d| d.is_surface_alive())
+                .unwrap_or(false)
+        }
+        #[cfg(use_vulkan)]
+        {
+            // Non-XR Vulkan: the EGL surface is a 1x1 pbuffer kept alive only
+            // for GL interop, so the relevant question is whether the Vulkan
+            // backend has a usable native window.
+            self.vulkan.is_some()
+                && self
+                    .display
+                    .as_ref()
+                    .map(|d| !d.window.is_null())
+                    .unwrap_or(false)
+        }
+    }
 }
 
 impl CxAndroidDisplay {
+    /// Returns `true` if the EGL window surface is non-null. This is the
+    /// low-level test the GL backend uses; higher-level code should prefer
+    /// [`CxOs::has_drawable_surface`].
+    #[inline]
+    pub(crate) fn is_surface_alive(&self) -> bool {
+        !self.surface.is_null()
+    }
+
     /// Make Makepad's EGL context current (with its surface).
     /// Required before creating shared GL contexts.
+    ///
+    /// Panics if no surface is bound or if `eglMakeCurrent` fails. Call sites
+    /// that may run while the surface is being torn down should use
+    /// [`Self::try_make_current`] instead.
     pub fn make_current(&self) {
         unsafe {
+            assert!(
+                !self.surface.is_null(),
+                "CxAndroidDisplay::make_current called with no EGL surface bound"
+            );
             let res = (self.libegl.eglMakeCurrent.unwrap())(
                 self.egl_display,
                 self.surface,
@@ -2920,15 +3108,39 @@ impl CxAndroidDisplay {
         }
     }
 
+    /// Fallible version of [`Self::make_current`]. Returns `false` if no
+    /// surface is bound or if `eglMakeCurrent` fails for any reason. The render
+    /// loop calls this on every frame as defense-in-depth: if the GL context
+    /// somehow got detached (driver-initiated, foreign code, etc.) we re-bind
+    /// it; if the surface is gone we silently skip the frame.
+    pub(crate) fn try_make_current(&self) -> bool {
+        if self.surface.is_null() {
+            return false;
+        }
+        unsafe {
+            (self.libegl.eglMakeCurrent.unwrap())(
+                self.egl_display,
+                self.surface,
+                self.surface,
+                self.egl_context,
+            ) != 0
+        }
+    }
+
     #[cfg(not(use_vulkan))]
     unsafe fn destroy_surface(&mut self) {
+        // Releasing the context from the current thread BEFORE destroying the
+        // surface is required by the EGL spec — otherwise the driver may
+        // dereference torn-down state on the next GL call.
         (self.libegl.eglMakeCurrent.unwrap())(
             self.egl_display,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
-        (self.libegl.eglDestroySurface.unwrap())(self.egl_display, self.surface);
+        if !self.surface.is_null() {
+            (self.libegl.eglDestroySurface.unwrap())(self.egl_display, self.surface);
+        }
         self.surface = std::ptr::null_mut();
     }
 
