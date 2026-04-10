@@ -38,7 +38,7 @@
         config.head_dim = 4;
         config.global_head_dim = 8;
         config.num_key_value_heads = 2;
-        config.num_global_key_value_heads = 1;
+        config.num_global_key_value_heads = Some(1);
         config.max_position_embeddings = 32;
         config.sliding_window = 6;
 
@@ -181,10 +181,11 @@
             layer_types: layer_types.iter().map(|item| (*item).to_owned()).collect(),
             max_position_embeddings: 16,
             model_type: "gemma4".to_owned(),
-            moe_intermediate_size: 32,
+            moe_intermediate_size: Some(32),
+            expert_intermediate_size: None,
             num_attention_heads: 4,
-            num_experts: 8,
-            num_global_key_value_heads: 1,
+            num_experts: Some(8),
+            num_global_key_value_heads: Some(1),
             num_hidden_layers: layer_types.len() as u32,
             num_key_value_heads: 2,
             num_kv_shared_layers,
@@ -204,8 +205,8 @@
             },
             sliding_window: 4,
             tie_word_embeddings: true,
-            top_k_experts: 2,
-            use_bidirectional_attention: "never".to_owned(),
+            top_k_experts: Some(2),
+            use_bidirectional_attention: Some("never".to_owned()),
             use_cache: true,
             use_double_wide_mlp: false,
             vocab_size: 256,

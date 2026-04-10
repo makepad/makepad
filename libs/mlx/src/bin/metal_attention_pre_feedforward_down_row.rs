@@ -15,7 +15,6 @@ use std::time::Instant;
 const INPUT_NORM_WEIGHT_NAME: &str = "language_model.model.layers.0.input_layernorm.weight";
 const Q_NORM_WEIGHT_NAME: &str = "language_model.model.layers.0.self_attn.q_norm.weight";
 const K_NORM_WEIGHT_NAME: &str = "language_model.model.layers.0.self_attn.k_norm.weight";
-const NORM_LEN: usize = 2_816;
 const EPS: f32 = 1e-6;
 const ROPE_BASE: f32 = 10_000.0;
 const ROPE_SCALE: f32 = 1.0;
@@ -773,6 +772,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut warmup_iters = 0usize;
     let mut bench_iters = 1usize;
     let mut dump_all_f32_bits = false;
+    let mut skip_oracle_checks = false;
     let mut analyze_row: Option<usize> = None;
     let mut post_feedforward_norm = false;
     let mut moe_post_ffn_norm1 = false;
@@ -791,6 +791,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             "--dump-all-f32-bits" => {
                 dump_all_f32_bits = true;
+            }
+            "--skip-oracle-checks" => {
+                skip_oracle_checks = true;
             }
             "--post-feedforward-norm" => {
                 post_feedforward_norm = true;
@@ -812,7 +815,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             "-h" | "--help" => {
                 eprintln!(
-                    "Usage: metal_attention_pre_feedforward_down_row [model.safetensors] [--warmup N] [--iters N] [--dump-all-f32-bits] [--post-feedforward-norm] [--moe-post-ffn-norm1] [--final-residual] [--analyze-row-1836] [--analyze-row N]"
+                    "Usage: metal_attention_pre_feedforward_down_row [model.safetensors] [--warmup N] [--iters N] [--dump-all-f32-bits] [--skip-oracle-checks] [--post-feedforward-norm] [--moe-post-ffn-norm1] [--final-residual] [--analyze-row-1836] [--analyze-row N]"
                 );
                 return Ok(());
             }
@@ -853,8 +856,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("Metal device does not report BF16 support".into());
     }
 
-    let x_words = gemma4_qproj_case_input_bf16_words(NORM_LEN);
-    let x_bytes = bytes_from_bf16_words(&x_words);
     let input_norm_weight_bytes = header.read_tensor_bytes(INPUT_NORM_WEIGHT_NAME)?;
     let q_weight_bytes = header.read_tensor_bytes(Q_PATH_ORACLE.weight_name)?;
     let q_scales_bytes = header.read_tensor_bytes(Q_PATH_ORACLE.scales_name)?;
@@ -886,6 +887,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mlp_down_scales_bytes = header.read_tensor_bytes(MLP_DOWN_SCALES_NAME)?;
     let mlp_down_biases_bytes = header.read_tensor_bytes(MLP_DOWN_BIASES_NAME)?;
 
+    let input_norm_weight_entry = header
+        .tensor(INPUT_NORM_WEIGHT_NAME)
+        .ok_or("missing input layernorm entry")?;
     let q_weight_entry = header
         .tensor(Q_PATH_ORACLE.weight_name)
         .ok_or("missing q projection weight entry")?;
@@ -944,6 +948,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .tensor(MLP_DOWN_SCALES_NAME)
         .ok_or("missing mlp down_proj scales entry")?;
 
+    let norm_len = usize::try_from(input_norm_weight_entry.shape[0])?;
+    let x_words = gemma4_qproj_case_input_bf16_words(norm_len);
+    let x_bytes = bytes_from_bf16_words(&x_words);
     let q_out_len = usize::try_from(q_weight_entry.shape[0])?;
     let k_out_len = usize::try_from(k_weight_entry.shape[0])?;
     let v_out_len = usize::try_from(v_weight_entry.shape[0])?;
@@ -991,7 +998,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
-    let mlp_gate_n_in = usize::try_from(mlp_gate_weight_entry.shape[1] * 8)?;
+    let mlp_gate_n_in = usize::try_from(mlp_gate_scales_entry.shape[1] * 64)?;
     if mlp_gate_n_in != pre_feedforward_norm_len {
         return Err(format!(
             "invalid mlp gate_proj input size: got {} expected {}",
@@ -999,7 +1006,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
-    let mlp_up_n_in = usize::try_from(mlp_up_weight_entry.shape[1] * 8)?;
+    let mlp_up_n_in = usize::try_from(mlp_up_scales_entry.shape[1] * 64)?;
     if mlp_up_n_in != pre_feedforward_norm_len {
         return Err(format!(
             "invalid mlp up_proj input size: got {} expected {}",
@@ -1014,7 +1021,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
-    let mlp_down_n_in = usize::try_from(mlp_down_weight_entry.shape[1] * 8)?;
+    let mlp_down_n_in = usize::try_from(mlp_down_scales_entry.shape[1] * 64)?;
     if mlp_down_n_in != mlp_gate_out_len {
         return Err(format!(
             "invalid mlp down_proj input size: got {} expected {}",
@@ -1040,7 +1047,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let x_buf = runtime.create_buffer_with_bytes(&x_bytes, BufferStorageMode::Private)?;
     let input_norm_weight_buf =
         runtime.create_buffer_with_bytes(&input_norm_weight_bytes, BufferStorageMode::Private)?;
-    let h_buf = runtime.create_buffer(NORM_LEN * 2, BufferStorageMode::Private)?;
+    let h_buf = runtime.create_buffer(norm_len * 2, BufferStorageMode::Private)?;
 
     let q_weight_buf =
         runtime.create_buffer_with_bytes(&q_weight_bytes, BufferStorageMode::Private)?;
@@ -1287,37 +1294,36 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let n_reads = 4usize;
     let simd_size = 32usize;
-    let rms_threadgroup_needed = NORM_LEN.div_ceil(n_reads);
+    let rms_threadgroup_needed = norm_len.div_ceil(n_reads);
     let rms_simds_needed = rms_threadgroup_needed.div_ceil(simd_size);
-    let rms_threadgroup_size = simd_size * rms_simds_needed;
+    let rms_threadgroup_size = (simd_size * rms_simds_needed).min(
+        ((rms_pipeline.max_threads_per_threadgroup as usize) / simd_size).max(1) * simd_size,
+    );
     let head_norm_threadgroup_needed = head_dim.div_ceil(n_reads);
     let head_norm_simds_needed = head_norm_threadgroup_needed.div_ceil(simd_size);
     let head_norm_threadgroup_size = simd_size * head_norm_simds_needed;
-    if rms_threadgroup_size as u64 > rms_pipeline.max_threads_per_threadgroup {
-        return Err("rms threadgroup exceeds pipeline max".into());
-    }
     if head_norm_threadgroup_size as u64 > head_norm_pipeline.max_threads_per_threadgroup {
         return Err("head_norm threadgroup exceeds pipeline max".into());
     }
 
     let rms_args = MlxRmsNormRowArgs {
-        n: NORM_LEN as u32,
+        n: norm_len as u32,
         eps: EPS,
     };
     let q_proj_args = MlxAffineQprojRowArgs {
-        n_in: NORM_LEN as u32,
+        n_in: norm_len as u32,
         weight_words_per_row: q_weight_entry.shape[1] as u32,
         qparams_per_row: q_scales_entry.shape[1] as u32,
         out_rows: q_out_len as u32,
     };
     let k_proj_args = MlxAffineQprojRowArgs {
-        n_in: NORM_LEN as u32,
+        n_in: norm_len as u32,
         weight_words_per_row: k_weight_entry.shape[1] as u32,
         qparams_per_row: k_scales_entry.shape[1] as u32,
         out_rows: k_out_len as u32,
     };
     let v_proj_args = MlxAffineQprojRowArgs {
-        n_in: NORM_LEN as u32,
+        n_in: norm_len as u32,
         weight_words_per_row: v_weight_entry.shape[1] as u32,
         qparams_per_row: v_scales_entry.shape[1] as u32,
         out_rows: v_out_len as u32,
@@ -2714,170 +2720,173 @@ fn main() -> Result<(), Box<dyn Error>> {
         io::stdout().flush()?;
     }
 
-    if q_norm_bits[..16] != Q_PATH_ORACLE.expected_norm_first16_bits
-        || q_norm_hash != Q_PATH_ORACLE.expected_norm_hash
-    {
-        return Err(format!(
-            "q_norm mismatch: got hash 0x{q_norm_hash:016X} first16 {:08X?}",
-            &q_norm_bits[..16]
-        )
-        .into());
-    }
-    if q_rope_bits[..16] != Q_PATH_ORACLE.expected_rope_first16_bits.unwrap()
-        || q_rope_hash != Q_PATH_ORACLE.expected_rope_hash.unwrap()
-    {
-        return Err(format!(
-            "q_rope mismatch: got hash 0x{q_rope_hash:016X} first16 {:08X?}",
-            &q_rope_bits[..16]
-        )
-        .into());
-    }
-    if k_norm_bits[..16] != K_PATH_ORACLE.expected_norm_first16_bits
-        || k_norm_hash != K_PATH_ORACLE.expected_norm_hash
-    {
-        return Err(format!(
-            "k_norm mismatch: got hash 0x{k_norm_hash:016X} first16 {:08X?}",
-            &k_norm_bits[..16]
-        )
-        .into());
-    }
-    if k_rope_bits[..16] != K_PATH_ORACLE.expected_rope_first16_bits.unwrap()
-        || k_rope_hash != K_PATH_ORACLE.expected_rope_hash.unwrap()
-    {
-        return Err(format!(
-            "k_rope mismatch: got hash 0x{k_rope_hash:016X} first16 {:08X?}",
-            &k_rope_bits[..16]
-        )
-        .into());
-    }
-    if v_norm_bits[..16] != V_PATH_ORACLE.expected_norm_first16_bits
-        || v_norm_hash != V_PATH_ORACLE.expected_norm_hash
-    {
-        return Err(format!(
-            "v_norm mismatch: got hash 0x{v_norm_hash:016X} first16 {:08X?}",
-            &v_norm_bits[..16]
-        )
-        .into());
-    }
-    if logits_bits != EXPECTED_LOGITS_BITS || logits_hash != EXPECTED_LOGITS_HASH {
-        return Err(format!(
-            "attention logits mismatch: got hash 0x{logits_hash:016X} bits {:08X?}",
-            &logits_bits
-        )
-        .into());
-    }
-    if attn_out_bits[..16] != EXPECTED_ATTN_OUT_FIRST16_BITS
-        || attn_out_hash != EXPECTED_ATTN_OUT_HASH
-    {
-        return Err(format!(
-            "attention output mismatch: got hash 0x{attn_out_hash:016X} first16 {:08X?}",
-            &attn_out_bits[..16]
-        )
-        .into());
-    }
-    if o_proj_bits[..16] != EXPECTED_O_PROJ_FIRST16_BITS || o_proj_hash != EXPECTED_O_PROJ_HASH {
-        return Err(format!(
-            "o_proj branch output mismatch: main hash 0x{o_proj_hash:016X} main first16 {:08X?} proof hash 0x{o_proj_proof_hash:016X} proof first16 {:08X?} debug_row {debug_row_index} kernel 0x{o_proj_row1836_bit:08X} seq 0x{o_proj_row1836_seq_bit:08X} row1836_expected 0x{EXPECTED_O_PROJ_ROW_1836_BITS:08X} fast hash 0x{o_proj_fast_hash:016X} fast first16 {:08X?} generic hash 0x{o_proj_generic_hash:016X} generic first16 {:08X?} serial hash 0x{o_proj_serial_hash:016X} serial first16 {:08X?} expected hash 0x{:016X} first16 {:08X?}",
-            o_proj_main_first16,
-            o_proj_proof_first16,
-            o_proj_fast_first16,
-            o_proj_generic_first16,
-            o_proj_serial_first16,
-            EXPECTED_O_PROJ_HASH,
-            EXPECTED_O_PROJ_FIRST16_BITS
-        ).into());
-    }
-    if post_attention_norm_bits[..16] != EXPECTED_POST_ATTENTION_NORM_FIRST16_BITS
-        || post_attention_norm_hash != EXPECTED_POST_ATTENTION_NORM_HASH
-    {
-        return Err(format!(
-            "post_attention_layernorm mismatch: got hash 0x{post_attention_norm_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_POST_ATTENTION_NORM_HASH:016X} expected first16 {:08X?}",
-            post_attention_norm_first16,
-            EXPECTED_POST_ATTENTION_NORM_FIRST16_BITS
-        )
-        .into());
-    }
-    if residual_bits[..16] != EXPECTED_POST_ATTENTION_RESIDUAL_FIRST16_BITS
-        || residual_hash != EXPECTED_POST_ATTENTION_RESIDUAL_HASH
-    {
-        return Err(format!(
-            "post_attention residual mismatch: got hash 0x{residual_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_POST_ATTENTION_RESIDUAL_HASH:016X} expected first16 {:08X?}",
-            residual_first16,
-            EXPECTED_POST_ATTENTION_RESIDUAL_FIRST16_BITS
-        )
-        .into());
-    }
-    if pre_feedforward_norm_bits[..16] != EXPECTED_PRE_FEEDFORWARD_NORM_FIRST16_BITS
-        || pre_feedforward_norm_hash != EXPECTED_PRE_FEEDFORWARD_NORM_HASH
-    {
-        return Err(format!(
-            "pre_feedforward_layernorm mismatch: got hash 0x{pre_feedforward_norm_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_PRE_FEEDFORWARD_NORM_HASH:016X} expected first16 {:08X?}",
-            pre_feedforward_norm_first16,
-            EXPECTED_PRE_FEEDFORWARD_NORM_FIRST16_BITS
-        )
-        .into());
-    }
-    if mlp_gate_bits[..16] != EXPECTED_PRE_FEEDFORWARD_GATE_FIRST16_BITS
-        || mlp_gate_hash != EXPECTED_PRE_FEEDFORWARD_GATE_HASH
-    {
-        return Err(format!(
-            "pre_feedforward gate_proj mismatch: got hash 0x{mlp_gate_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_PRE_FEEDFORWARD_GATE_HASH:016X} expected first16 {:08X?}",
-            mlp_gate_first16,
-            EXPECTED_PRE_FEEDFORWARD_GATE_FIRST16_BITS
-        )
-        .into());
-    }
-    if mlp_up_bits[..16] != EXPECTED_PRE_FEEDFORWARD_UP_FIRST16_BITS
-        || mlp_up_hash != EXPECTED_PRE_FEEDFORWARD_UP_HASH
-    {
-        return Err(format!(
-            "pre_feedforward up_proj mismatch: got hash 0x{mlp_up_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_PRE_FEEDFORWARD_UP_HASH:016X} expected first16 {:08X?}",
-            mlp_up_first16,
-            EXPECTED_PRE_FEEDFORWARD_UP_FIRST16_BITS
-        )
-        .into());
-    }
-    if geglu_bits[..16] != EXPECTED_PRE_FEEDFORWARD_GEGLU_FIRST16_BITS
-        || geglu_hash != EXPECTED_PRE_FEEDFORWARD_GEGLU_HASH
-    {
-        return Err(format!(
-            "pre_feedforward geglu mismatch: got hash 0x{geglu_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_PRE_FEEDFORWARD_GEGLU_HASH:016X} expected first16 {:08X?}",
-            geglu_first16,
-            EXPECTED_PRE_FEEDFORWARD_GEGLU_FIRST16_BITS
-        )
-        .into());
-    }
-    if mlp_down_bits[..16] != EXPECTED_PRE_FEEDFORWARD_DOWN_FIRST16_BITS
-        || mlp_down_hash != EXPECTED_PRE_FEEDFORWARD_DOWN_HASH
-    {
-        return Err(format!(
-            "pre_feedforward down_proj mismatch: got hash 0x{mlp_down_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_PRE_FEEDFORWARD_DOWN_HASH:016X} expected first16 {:08X?}",
-            mlp_down_first16,
-            EXPECTED_PRE_FEEDFORWARD_DOWN_FIRST16_BITS
-        )
-        .into());
-    }
-    if post_feedforward_norm
-        && (post_feedforward_norm_bits[..16] != *expected_post_feedforward_norm_first16
-            || post_feedforward_norm_hash != expected_post_feedforward_norm_hash)
-    {
-        return Err(format!(
-            "post_feedforward_layernorm mismatch: got hash 0x{post_feedforward_norm_hash:016X} first16 {:08X?} expected hash 0x{expected_post_feedforward_norm_hash:016X} expected first16 {:08X?}",
-            post_feedforward_norm_first16,
-            expected_post_feedforward_norm_first16
-        )
-        .into());
-    }
-    if final_residual
-        && (final_residual_bits[..16] != EXPECTED_POST_FEEDFORWARD_RESIDUAL_FIRST16_BITS
-            || final_residual_hash != EXPECTED_POST_FEEDFORWARD_RESIDUAL_HASH)
-    {
-        return Err(format!(
-            "post_feedforward residual mismatch: got hash 0x{final_residual_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_POST_FEEDFORWARD_RESIDUAL_HASH:016X} expected first16 {:08X?}",
-            final_residual_first16,
-            EXPECTED_POST_FEEDFORWARD_RESIDUAL_FIRST16_BITS
-        )
-        .into());
+    if !skip_oracle_checks {
+        if q_norm_bits[..16] != Q_PATH_ORACLE.expected_norm_first16_bits
+            || q_norm_hash != Q_PATH_ORACLE.expected_norm_hash
+        {
+            return Err(format!(
+                "q_norm mismatch: got hash 0x{q_norm_hash:016X} first16 {:08X?}",
+                &q_norm_bits[..16]
+            )
+            .into());
+        }
+        if q_rope_bits[..16] != Q_PATH_ORACLE.expected_rope_first16_bits.unwrap()
+            || q_rope_hash != Q_PATH_ORACLE.expected_rope_hash.unwrap()
+        {
+            return Err(format!(
+                "q_rope mismatch: got hash 0x{q_rope_hash:016X} first16 {:08X?}",
+                &q_rope_bits[..16]
+            )
+            .into());
+        }
+        if k_norm_bits[..16] != K_PATH_ORACLE.expected_norm_first16_bits
+            || k_norm_hash != K_PATH_ORACLE.expected_norm_hash
+        {
+            return Err(format!(
+                "k_norm mismatch: got hash 0x{k_norm_hash:016X} first16 {:08X?}",
+                &k_norm_bits[..16]
+            )
+            .into());
+        }
+        if k_rope_bits[..16] != K_PATH_ORACLE.expected_rope_first16_bits.unwrap()
+            || k_rope_hash != K_PATH_ORACLE.expected_rope_hash.unwrap()
+        {
+            return Err(format!(
+                "k_rope mismatch: got hash 0x{k_rope_hash:016X} first16 {:08X?}",
+                &k_rope_bits[..16]
+            )
+            .into());
+        }
+        if v_norm_bits[..16] != V_PATH_ORACLE.expected_norm_first16_bits
+            || v_norm_hash != V_PATH_ORACLE.expected_norm_hash
+        {
+            return Err(format!(
+                "v_norm mismatch: got hash 0x{v_norm_hash:016X} first16 {:08X?}",
+                &v_norm_bits[..16]
+            )
+            .into());
+        }
+        if logits_bits != EXPECTED_LOGITS_BITS || logits_hash != EXPECTED_LOGITS_HASH {
+            return Err(format!(
+                "attention logits mismatch: got hash 0x{logits_hash:016X} bits {:08X?}",
+                &logits_bits
+            )
+            .into());
+        }
+        if attn_out_bits[..16] != EXPECTED_ATTN_OUT_FIRST16_BITS
+            || attn_out_hash != EXPECTED_ATTN_OUT_HASH
+        {
+            return Err(format!(
+                "attention output mismatch: got hash 0x{attn_out_hash:016X} first16 {:08X?}",
+                &attn_out_bits[..16]
+            )
+            .into());
+        }
+        if o_proj_bits[..16] != EXPECTED_O_PROJ_FIRST16_BITS || o_proj_hash != EXPECTED_O_PROJ_HASH
+        {
+            return Err(format!(
+                "o_proj branch output mismatch: main hash 0x{o_proj_hash:016X} main first16 {:08X?} proof hash 0x{o_proj_proof_hash:016X} proof first16 {:08X?} debug_row {debug_row_index} kernel 0x{o_proj_row1836_bit:08X} seq 0x{o_proj_row1836_seq_bit:08X} row1836_expected 0x{EXPECTED_O_PROJ_ROW_1836_BITS:08X} fast hash 0x{o_proj_fast_hash:016X} fast first16 {:08X?} generic hash 0x{o_proj_generic_hash:016X} generic first16 {:08X?} serial hash 0x{o_proj_serial_hash:016X} serial first16 {:08X?} expected hash 0x{:016X} first16 {:08X?}",
+                o_proj_main_first16,
+                o_proj_proof_first16,
+                o_proj_fast_first16,
+                o_proj_generic_first16,
+                o_proj_serial_first16,
+                EXPECTED_O_PROJ_HASH,
+                EXPECTED_O_PROJ_FIRST16_BITS
+            ).into());
+        }
+        if post_attention_norm_bits[..16] != EXPECTED_POST_ATTENTION_NORM_FIRST16_BITS
+            || post_attention_norm_hash != EXPECTED_POST_ATTENTION_NORM_HASH
+        {
+            return Err(format!(
+                "post_attention_layernorm mismatch: got hash 0x{post_attention_norm_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_POST_ATTENTION_NORM_HASH:016X} expected first16 {:08X?}",
+                post_attention_norm_first16,
+                EXPECTED_POST_ATTENTION_NORM_FIRST16_BITS
+            )
+            .into());
+        }
+        if residual_bits[..16] != EXPECTED_POST_ATTENTION_RESIDUAL_FIRST16_BITS
+            || residual_hash != EXPECTED_POST_ATTENTION_RESIDUAL_HASH
+        {
+            return Err(format!(
+                "post_attention residual mismatch: got hash 0x{residual_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_POST_ATTENTION_RESIDUAL_HASH:016X} expected first16 {:08X?}",
+                residual_first16,
+                EXPECTED_POST_ATTENTION_RESIDUAL_FIRST16_BITS
+            )
+            .into());
+        }
+        if pre_feedforward_norm_bits[..16] != EXPECTED_PRE_FEEDFORWARD_NORM_FIRST16_BITS
+            || pre_feedforward_norm_hash != EXPECTED_PRE_FEEDFORWARD_NORM_HASH
+        {
+            return Err(format!(
+                "pre_feedforward_layernorm mismatch: got hash 0x{pre_feedforward_norm_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_PRE_FEEDFORWARD_NORM_HASH:016X} expected first16 {:08X?}",
+                pre_feedforward_norm_first16,
+                EXPECTED_PRE_FEEDFORWARD_NORM_FIRST16_BITS
+            )
+            .into());
+        }
+        if mlp_gate_bits[..16] != EXPECTED_PRE_FEEDFORWARD_GATE_FIRST16_BITS
+            || mlp_gate_hash != EXPECTED_PRE_FEEDFORWARD_GATE_HASH
+        {
+            return Err(format!(
+                "pre_feedforward gate_proj mismatch: got hash 0x{mlp_gate_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_PRE_FEEDFORWARD_GATE_HASH:016X} expected first16 {:08X?}",
+                mlp_gate_first16,
+                EXPECTED_PRE_FEEDFORWARD_GATE_FIRST16_BITS
+            )
+            .into());
+        }
+        if mlp_up_bits[..16] != EXPECTED_PRE_FEEDFORWARD_UP_FIRST16_BITS
+            || mlp_up_hash != EXPECTED_PRE_FEEDFORWARD_UP_HASH
+        {
+            return Err(format!(
+                "pre_feedforward up_proj mismatch: got hash 0x{mlp_up_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_PRE_FEEDFORWARD_UP_HASH:016X} expected first16 {:08X?}",
+                mlp_up_first16,
+                EXPECTED_PRE_FEEDFORWARD_UP_FIRST16_BITS
+            )
+            .into());
+        }
+        if geglu_bits[..16] != EXPECTED_PRE_FEEDFORWARD_GEGLU_FIRST16_BITS
+            || geglu_hash != EXPECTED_PRE_FEEDFORWARD_GEGLU_HASH
+        {
+            return Err(format!(
+                "pre_feedforward geglu mismatch: got hash 0x{geglu_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_PRE_FEEDFORWARD_GEGLU_HASH:016X} expected first16 {:08X?}",
+                geglu_first16,
+                EXPECTED_PRE_FEEDFORWARD_GEGLU_FIRST16_BITS
+            )
+            .into());
+        }
+        if mlp_down_bits[..16] != EXPECTED_PRE_FEEDFORWARD_DOWN_FIRST16_BITS
+            || mlp_down_hash != EXPECTED_PRE_FEEDFORWARD_DOWN_HASH
+        {
+            return Err(format!(
+                "pre_feedforward down_proj mismatch: got hash 0x{mlp_down_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_PRE_FEEDFORWARD_DOWN_HASH:016X} expected first16 {:08X?}",
+                mlp_down_first16,
+                EXPECTED_PRE_FEEDFORWARD_DOWN_FIRST16_BITS
+            )
+            .into());
+        }
+        if post_feedforward_norm
+            && (post_feedforward_norm_bits[..16] != *expected_post_feedforward_norm_first16
+                || post_feedforward_norm_hash != expected_post_feedforward_norm_hash)
+        {
+            return Err(format!(
+                "post_feedforward_layernorm mismatch: got hash 0x{post_feedforward_norm_hash:016X} first16 {:08X?} expected hash 0x{expected_post_feedforward_norm_hash:016X} expected first16 {:08X?}",
+                post_feedforward_norm_first16,
+                expected_post_feedforward_norm_first16
+            )
+            .into());
+        }
+        if final_residual
+            && (final_residual_bits[..16] != EXPECTED_POST_FEEDFORWARD_RESIDUAL_FIRST16_BITS
+                || final_residual_hash != EXPECTED_POST_FEEDFORWARD_RESIDUAL_HASH)
+        {
+            return Err(format!(
+                "post_feedforward residual mismatch: got hash 0x{final_residual_hash:016X} first16 {:08X?} expected hash 0x{EXPECTED_POST_FEEDFORWARD_RESIDUAL_HASH:016X} expected first16 {:08X?}",
+                final_residual_first16,
+                EXPECTED_POST_FEEDFORWARD_RESIDUAL_FIRST16_BITS
+            )
+            .into());
+        }
     }
 
     println!("backend={}", runtime.backend_info().name);
@@ -2896,8 +2905,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("rope_base={ROPE_BASE}");
     println!("rope_scale={ROPE_SCALE}");
     println!("rope_offset={ROPE_OFFSET}");
+    println!("norm_len={norm_len}");
     println!("warmup_iters={warmup_iters}");
     println!("bench_iters={bench_iters}");
+    println!(
+        "oracle_checks={}",
+        if skip_oracle_checks {
+            "skipped"
+        } else {
+            "enforced"
+        }
+    );
     println!("rms_threads_per_threadgroup={rms_threadgroup_size}");
     println!("head_norm_threads_per_threadgroup={head_norm_threadgroup_size}");
     println!("q_head_count={q_head_count}");

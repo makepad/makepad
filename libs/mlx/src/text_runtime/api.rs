@@ -1,6 +1,5 @@
 use crate::chat::extract_gemma4_assistant_response_text;
 use crate::multimodal::{prepare_image_prompt, GemmaVisionRuntime, PreparedImagePrompt};
-const GREEDY_STREAM_BATCH_TOKENS: usize = 8;
 
 #[derive(Clone, Debug)]
 pub struct GemmaTextStepOutput {
@@ -169,6 +168,15 @@ impl GemmaTextSamplingOptions {
     fn chat_from_generation_config(config: &crate::MlxGenerationConfig) -> Self {
         let mut options = Self::from_generation_config(config);
         options.allow_thought = false;
+        options
+    }
+
+    pub(crate) fn greedy_variant(&self) -> Self {
+        let mut options = self.clone();
+        options.do_sample = false;
+        options.temperature = 0.0;
+        options.top_k = 1;
+        options.top_p = 1.0;
         options
     }
 }
@@ -698,6 +706,42 @@ fn finalize_sampled_candidates(
     })
 }
 
+fn sample_token_from_logits_f32(
+    logits: &[f32],
+    disallowed_token_ids: &[u32],
+    sampling_options: &GemmaTextSamplingOptions,
+    rng: &mut MlxTextSamplingRng,
+) -> Result<MlxGreedyToken, String> {
+    if !sampling_options.do_sample || sampling_options.temperature <= 0.0 {
+        return select_top1_token_from_logits(logits, disallowed_token_ids);
+    }
+
+    let top_k = sampling_options.top_k as usize;
+    let mut candidates = Vec::with_capacity(top_k.max(logits.len().min(1024)));
+    for (token_idx, &logit) in logits.iter().enumerate() {
+        let token_id = token_idx as u32;
+        if token_is_disallowed(disallowed_token_ids, token_id) {
+            continue;
+        }
+        push_sampled_candidate_top_k(
+            &mut candidates,
+            SampledTokenCandidate {
+                token_id,
+                logit,
+                scaled_logit: logit / sampling_options.temperature,
+                prob: 0.0,
+            },
+            top_k,
+        );
+    }
+    finalize_sampled_candidates(
+        candidates,
+        || select_top1_token_from_logits(logits, disallowed_token_ids),
+        sampling_options,
+        rng,
+    )
+}
+
 pub(crate) fn sample_token_from_softcapped_bf16_bytes(
     logits_bytes: &[u8],
     softcap: Option<f32>,
@@ -776,7 +820,7 @@ pub(crate) fn sample_token_from_softcapped_bf16_bytes(
     )
 }
 
-fn generate_sampled_token_ids_with_prefill<P, F>(
+fn generate_sampled_token_ids_with_exact_prefill<P, F>(
     runtime: &Arc<GemmaTextRuntimeSession>,
     prompt_token_ids: Arc<[u32]>,
     max_new_tokens: Option<usize>,
@@ -803,8 +847,8 @@ where
     let stop_tokens = &runtime.stop_tokens;
     let constraints = ChatSamplingConstraints::from_runtime(runtime);
     let mut sampling_state = ChatSamplingState::new();
-    let mut backend = runtime
-        .exact_backend
+    let exact_backend = runtime.exact_backend()?;
+    let mut backend = exact_backend
         .lock()
         .map_err(|_| "exact backend mutex poisoned".to_string())?;
 
@@ -865,23 +909,85 @@ fn generate_sampled_token_ids<F>(
 where
     F: FnMut(&[u32]) -> Result<(), String>,
 {
-    generate_sampled_token_ids_with_prefill(
-        runtime,
-        prompt_token_ids,
-        max_new_tokens,
-        sampling_options,
-        rng,
-        |backend, prompt_token_ids, start_position, disallowed_token_ids, sampling_options, rng| {
-            backend.prefill_prompt_sampled_from_token_ids(
-                prompt_token_ids,
-                start_position,
-                disallowed_token_ids,
-                sampling_options,
-                rng,
-            )
-        },
-        on_generated_ids,
-    )
+    if runtime.has_exact_backend() {
+        generate_sampled_token_ids_with_exact_prefill(
+            runtime,
+            prompt_token_ids,
+            max_new_tokens,
+            sampling_options,
+            rng,
+            |backend,
+             prompt_token_ids,
+             start_position,
+             disallowed_token_ids,
+             sampling_options,
+             rng| {
+                backend.prefill_prompt_sampled_from_token_ids(
+                    prompt_token_ids,
+                    start_position,
+                    disallowed_token_ids,
+                    sampling_options,
+                    rng,
+                )
+            },
+            on_generated_ids,
+        )
+    } else {
+        runtime.generate_sampled_token_ids_reference(
+            prompt_token_ids,
+            max_new_tokens,
+            sampling_options,
+            rng,
+            on_generated_ids,
+        )
+    }
+}
+
+fn generate_sampled_token_ids_from_embedding_rows<F>(
+    runtime: &Arc<GemmaTextRuntimeSession>,
+    prompt_token_ids: Arc<[u32]>,
+    prompt_embedding_rows: Vec<Vec<u16>>,
+    max_new_tokens: Option<usize>,
+    sampling_options: &GemmaTextSamplingOptions,
+    rng: &mut MlxTextSamplingRng,
+    on_generated_ids: F,
+) -> Result<(Arc<[u32]>, GemmaStopReason), String>
+where
+    F: FnMut(&[u32]) -> Result<(), String>,
+{
+    if runtime.has_exact_backend() {
+        generate_sampled_token_ids_with_exact_prefill(
+            runtime,
+            prompt_token_ids,
+            max_new_tokens,
+            sampling_options,
+            rng,
+            |backend,
+             _prompt_token_ids,
+             start_position,
+             disallowed_token_ids,
+             sampling_options,
+             rng| {
+                backend.prefill_prompt_sampled_from_embedding_rows(
+                    &prompt_embedding_rows,
+                    start_position,
+                    disallowed_token_ids,
+                    sampling_options,
+                    rng,
+                )
+            },
+            on_generated_ids,
+        )
+    } else {
+        runtime.generate_sampled_token_ids_from_embedding_rows_reference(
+            prompt_token_ids,
+            prompt_embedding_rows,
+            max_new_tokens,
+            sampling_options,
+            rng,
+            on_generated_ids,
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -892,10 +998,9 @@ struct GemmaTextRuntimeSession {
     #[cfg_attr(not(test), allow(dead_code))]
     kv_layout: GemmaKvCacheLayout,
     stop_tokens: BTreeSet<u32>,
-    exact_backend: Arc<Mutex<ExactMetalTextRuntimeSession>>,
+    exact_backend: Option<Arc<Mutex<ExactMetalTextRuntimeSession>>>,
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug)]
 struct TextProjectionNames {
     weight_name: String,
@@ -904,7 +1009,6 @@ struct TextProjectionNames {
     norm_weight_name: Option<String>,
 }
 
-#[cfg(test)]
 impl TextProjectionNames {
     fn new(base: &str, prefix: &str, norm_weight_name: Option<String>) -> Self {
         Self {
@@ -916,7 +1020,6 @@ impl TextProjectionNames {
     }
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug)]
 struct TextLayerTensorNames {
     input_norm_weight_name: String,
@@ -953,10 +1056,16 @@ struct TextLayerTensorNames {
     expert_down_weight_name: String,
     expert_down_scales_name: String,
     expert_down_biases_name: String,
+    per_layer_input_gate_weight_name: String,
+    per_layer_input_gate_scales_name: String,
+    per_layer_input_gate_biases_name: String,
+    per_layer_projection_weight_name: String,
+    per_layer_projection_scales_name: String,
+    per_layer_projection_biases_name: String,
+    post_per_layer_input_norm_weight_name: String,
     layer_scalar_name: String,
 }
 
-#[cfg(test)]
 impl TextLayerTensorNames {
     fn for_layer(layer_idx: usize, attention_k_eq_v: bool) -> Self {
         let base = format!("language_model.model.layers.{layer_idx}");
@@ -1020,12 +1129,20 @@ impl TextLayerTensorNames {
             expert_down_weight_name: format!("{base}.experts.switch_glu.down_proj.weight"),
             expert_down_scales_name: format!("{base}.experts.switch_glu.down_proj.scales"),
             expert_down_biases_name: format!("{base}.experts.switch_glu.down_proj.biases"),
+            per_layer_input_gate_weight_name: format!("{base}.per_layer_input_gate.weight"),
+            per_layer_input_gate_scales_name: format!("{base}.per_layer_input_gate.scales"),
+            per_layer_input_gate_biases_name: format!("{base}.per_layer_input_gate.biases"),
+            per_layer_projection_weight_name: format!("{base}.per_layer_projection.weight"),
+            per_layer_projection_scales_name: format!("{base}.per_layer_projection.scales"),
+            per_layer_projection_biases_name: format!("{base}.per_layer_projection.biases"),
+            post_per_layer_input_norm_weight_name: format!(
+                "{base}.post_per_layer_input_norm.weight"
+            ),
             layer_scalar_name: format!("{base}.layer_scalar"),
         }
     }
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct RopeSpec {
     head_dim: usize,
@@ -1119,14 +1236,37 @@ impl GemmaLazyTextPlanInner {
             let runtime = self.runtime()?;
             let formatted_prompt_text = self.formatted_prompt_text()?;
             let prompt_token_ids = self.prompt_token_ids()?;
-            let snapshot = self.generation_graph()?.finish_snapshot()?;
-            build_generation_output(
-                &runtime,
-                self.prompt_text.clone(),
-                formatted_prompt_text,
-                prompt_token_ids,
-                snapshot,
-            )
+            if runtime.has_exact_backend() {
+                let snapshot = self.generation_graph()?.finish_snapshot()?;
+                build_generation_output(
+                    &runtime,
+                    self.prompt_text.clone(),
+                    formatted_prompt_text,
+                    prompt_token_ids,
+                    snapshot,
+                )
+            } else {
+                let mut rng = MlxTextSamplingRng::new(0);
+                let sampling_options = GemmaTextSamplingOptions::from_generation_config(
+                    &runtime.weights.snapshot.generation_config,
+                );
+                let (generated_token_ids, stop_reason) = generate_sampled_token_ids(
+                    &runtime,
+                    prompt_token_ids.clone(),
+                    Some(self.options.max_new_tokens),
+                    &sampling_options,
+                    &mut rng,
+                    |_| Ok(()),
+                )?;
+                build_generation_output_from_token_ids(
+                    &runtime,
+                    self.prompt_text.clone(),
+                    formatted_prompt_text,
+                    prompt_token_ids,
+                    generated_token_ids,
+                    stop_reason,
+                )
+            }
         })
     }
 }
@@ -1241,23 +1381,15 @@ impl GemmaTextModel {
         let prompt_token_ids = Arc::<[u32]>::from(prepared.prompt_token_ids);
         let prompt_embedding_rows = prepared.prompt_embedding_rows;
         let mut rng = MlxTextSamplingRng::new(0);
-        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_with_prefill(
+        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_from_embedding_rows(
             &self.runtime,
             prompt_token_ids.clone(),
+            prompt_embedding_rows,
             Some(options.max_new_tokens),
             &GemmaTextSamplingOptions::from_generation_config(
                 &self.runtime.weights.snapshot.generation_config,
             ),
             &mut rng,
-            |backend, _prompt_token_ids, start_position, disallowed_token_ids, sampling_options, rng| {
-                backend.prefill_prompt_sampled_from_embedding_rows(
-                    &prompt_embedding_rows,
-                    start_position,
-                    disallowed_token_ids,
-                    sampling_options,
-                    rng,
-                )
-            },
             |_| Ok(()),
         )?;
         build_generation_output_from_token_ids(
@@ -1296,21 +1428,13 @@ impl GemmaTextModel {
         let mut rng = MlxTextSamplingRng::new(0);
         let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
         let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
-        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_with_prefill(
+        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_from_embedding_rows(
             &self.runtime,
             prompt_token_ids.clone(),
+            prompt_embedding_rows,
             Some(options.max_new_tokens),
             &sampling_options,
             &mut rng,
-            |backend, _prompt_token_ids, start_position, disallowed_token_ids, sampling_options, rng| {
-                backend.prefill_prompt_sampled_from_embedding_rows(
-                    &prompt_embedding_rows,
-                    start_position,
-                    disallowed_token_ids,
-                    sampling_options,
-                    rng,
-                )
-            },
             |generated_token_ids| {
                 let Some(&token_id) = generated_token_ids.last() else {
                     return Ok(());
@@ -1395,21 +1519,13 @@ impl GemmaTextModel {
         )?;
         let prompt_token_ids = Arc::<[u32]>::from(prepared.prompt_token_ids);
         let prompt_embedding_rows = prepared.prompt_embedding_rows;
-        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_with_prefill(
+        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_from_embedding_rows(
             &self.runtime,
             prompt_token_ids.clone(),
+            prompt_embedding_rows,
             max_new_tokens,
             sampling_options,
             rng,
-            |backend, _prompt_token_ids, start_position, disallowed_token_ids, sampling_options, rng| {
-                backend.prefill_prompt_sampled_from_embedding_rows(
-                    &prompt_embedding_rows,
-                    start_position,
-                    disallowed_token_ids,
-                    sampling_options,
-                    rng,
-                )
-            },
             |_| Ok(()),
         )?;
         build_generation_output_from_token_ids(
@@ -1419,32 +1535,6 @@ impl GemmaTextModel {
             prompt_token_ids,
             generated_token_ids,
             stop_reason,
-        )
-        .map_err(|err| err.into())
-    }
-
-    pub(crate) fn generate_preformatted_greedy(
-        &self,
-        formatted_prompt_text: impl Into<String>,
-        max_new_tokens: Option<usize>,
-    ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
-        let formatted_prompt_text = Arc::<str>::from(formatted_prompt_text.into());
-        let prompt_text = formatted_prompt_text.clone();
-        let prompt_token_ids = self
-            .runtime
-            .tokenize_prompt(formatted_prompt_text.as_ref())
-            .map_err(|err| err.to_string())?;
-        let snapshot = self
-            .runtime
-            .start_generation_graph(prompt_token_ids.clone(), max_new_tokens)
-            .map_err(|err| err.to_string())?
-            .finish_snapshot()?;
-        build_generation_output(
-            &self.runtime,
-            prompt_text,
-            formatted_prompt_text,
-            prompt_token_ids,
-            snapshot,
         )
         .map_err(|err| err.into())
     }
@@ -1586,21 +1676,13 @@ impl GemmaTextModel {
         let prompt_embedding_rows = prepared.prompt_embedding_rows;
         let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
         let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
-        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_with_prefill(
+        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_from_embedding_rows(
             &self.runtime,
             prompt_token_ids.clone(),
+            prompt_embedding_rows,
             max_new_tokens,
             sampling_options,
             rng,
-            |backend, _prompt_token_ids, start_position, disallowed_token_ids, sampling_options, rng| {
-                backend.prefill_prompt_sampled_from_embedding_rows(
-                    &prompt_embedding_rows,
-                    start_position,
-                    disallowed_token_ids,
-                    sampling_options,
-                    rng,
-                )
-            },
             |generated_token_ids| {
                 let Some(&token_id) = generated_token_ids.last() else {
                     return Ok(());
@@ -1623,58 +1705,6 @@ impl GemmaTextModel {
             prompt_token_ids,
             generated_token_ids,
             stop_reason,
-        )
-        .map_err(|err| err.into())
-    }
-
-    pub(crate) fn stream_generate_preformatted_greedy<F>(
-        &self,
-        formatted_prompt_text: impl Into<String>,
-        max_new_tokens: Option<usize>,
-        mut on_text_delta: F,
-    ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>>
-    where
-        F: FnMut(&str) -> Result<(), Box<dyn Error>>,
-    {
-        let formatted_prompt_text = Arc::<str>::from(formatted_prompt_text.into());
-        let prompt_text = formatted_prompt_text.clone();
-        let prompt_token_ids = self
-            .runtime
-            .tokenize_prompt(formatted_prompt_text.as_ref())
-            .map_err(|err| err.to_string())?;
-        let graph = self
-            .runtime
-            .start_generation_graph(prompt_token_ids.clone(), max_new_tokens)
-            .map_err(|err| err.to_string())?;
-        let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
-        let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
-        let mut emitted_count = 0usize;
-        loop {
-            let token_ids = graph.generated_token_ids_up_to(
-                emitted_count.saturating_add(GREEDY_STREAM_BATCH_TOKENS),
-            )?;
-            if token_ids.len() <= emitted_count {
-                break;
-            }
-            for &token_id in &token_ids[emitted_count..] {
-                let delta = detokenizer.add_token(token_id, &skip_special_token_ids);
-                if !delta.is_empty() {
-                    on_text_delta(&delta)?;
-                }
-            }
-            emitted_count = token_ids.len();
-        }
-        let final_delta = detokenizer.finalize();
-        if !final_delta.is_empty() {
-            on_text_delta(&final_delta)?;
-        }
-        let snapshot = graph.finish_snapshot()?;
-        build_generation_output(
-            &self.runtime,
-            prompt_text,
-            formatted_prompt_text,
-            prompt_token_ids,
-            snapshot,
         )
         .map_err(|err| err.into())
     }
@@ -1742,7 +1772,7 @@ pub fn generate_text(
     prompt_text: impl Into<String>,
     options: GemmaTextGenerationOptions,
 ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
-    lazy_text_plan(model_path, prompt_text, options).eval_generate()
+    GemmaTextModel::load(model_path)?.generate(prompt_text, options)
 }
 
 pub fn generate_multimodal_text(
@@ -1768,6 +1798,7 @@ pub fn benchmark_text_generation(
     let prompt_text = Arc::<str>::from(prompt_text.into());
     let load_started = Instant::now();
     let runtime = GemmaTextRuntimeSession::load(&model_path).map_err(|err| err.to_string())?;
+    let exact_backend = runtime.exact_backend()?;
     let load_duration = load_started.elapsed();
     let formatted_prompt_text =
         Arc::<str>::from(runtime.format_prompt_text(prompt_text.as_ref(), options.prompt_format));
@@ -1778,8 +1809,7 @@ pub fn benchmark_text_generation(
             .start_generation_graph(prompt_token_ids.clone(), Some(options.max_new_tokens))?
             .finish_snapshot()?;
     }
-    runtime
-        .exact_backend
+    exact_backend
         .lock()
         .map_err(|_| "exact backend mutex poisoned".to_string())?
         .reset_runtime_counters();
@@ -1851,8 +1881,7 @@ pub fn benchmark_text_generation(
     } else {
         0.0
     };
-    let metal_counters = runtime
-        .exact_backend
+    let metal_counters = exact_backend
         .lock()
         .map_err(|_| "exact backend mutex poisoned".to_string())?
         .runtime_counters();

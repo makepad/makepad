@@ -110,7 +110,7 @@
             .unwrap();
         for layer_idx in 0..num_layers {
             prefill_hidden = runtime
-                .eval_layer_hidden_state(layer_idx, &prefill_hidden, 0, &mut caches)
+                .eval_layer_hidden_state(layer_idx, &prefill_hidden, None, 0, &mut caches)
                 .unwrap();
         }
 
@@ -121,7 +121,7 @@
         let mut host_layer_hashes = Vec::with_capacity(num_layers);
         for layer_idx in 0..num_layers {
             host_hidden = runtime
-                .eval_layer_hidden_state(layer_idx, &host_hidden, 1, &mut caches)
+                .eval_layer_hidden_state(layer_idx, &host_hidden, None, 1, &mut caches)
                 .unwrap();
             let layer_bits = host_hidden
                 .iter()
@@ -185,7 +185,7 @@
             config.head_dim as usize
         };
         let k_head_count = if attention_k_eq_v && layer_type == "full_attention" {
-            config.num_global_key_value_heads as usize
+            config.num_global_key_value_heads_or_default() as usize
         } else {
             config.num_key_value_heads as usize
         };
@@ -279,7 +279,7 @@
             )
             .unwrap();
         prefill_hidden = runtime
-            .eval_layer_hidden_state(layer_idx, &prefill_hidden, 0, &mut caches)
+            .eval_layer_hidden_state(layer_idx, &prefill_hidden, None, 0, &mut caches)
             .unwrap();
 
         let decode_hidden = runtime
@@ -429,6 +429,8 @@
 
     #[test]
     fn lazy_plan_formats_gemma4_user_turn_prompt() {
+        let runtime = GemmaTextRuntimeSession::load(&default_model_path()).unwrap();
+        let tokenizer_config = &runtime.weights.snapshot.tokenizer_config;
         let plan = lazy_text_plan(
             default_model_path(),
             "say hi",
@@ -438,9 +440,16 @@
             },
         );
         let formatted = plan.eval_formatted_prompt_text().unwrap();
-        assert!(formatted.starts_with("<bos><|turn>user\n"));
+        assert!(formatted.starts_with(&format!(
+            "{}{}user\n",
+            tokenizer_config.bos_token, tokenizer_config.sot_token
+        )));
         assert!(formatted.contains("say hi"));
-        assert!(formatted.ends_with("<|turn>model\n"));
+        assert!(formatted.contains(&format!("{}model\n", tokenizer_config.sot_token)));
+        assert!(formatted.ends_with(&format!(
+            "{}thought\n{}",
+            tokenizer_config.soc_token, tokenizer_config.eoc_token
+        )));
     }
 
     #[test]
@@ -470,7 +479,10 @@
         let runtime = GemmaTextRuntimeSession::load(&default_model_path()).unwrap();
         let exact = run_two_token_ids(default_model_path(), [30_468, 5_631], 0, 1).unwrap();
         let mut cursor = runtime
-            .start_generation_cursor(Arc::<[u32]>::from(exact.prompt_token_ids.clone()), 1)
+            .start_generation_cursor(
+                Arc::<[u32]>::from(exact.prompt_token_ids.clone()),
+                Some(1),
+            )
             .unwrap();
         cursor.ensure_generated(1).unwrap();
         assert_eq!(cursor.generated_token_ids(), [exact.next_token.token_id]);
@@ -482,7 +494,7 @@
         let runtime = GemmaTextRuntimeSession::load(&default_model_path()).unwrap();
         let prompt_token_ids = Arc::<[u32]>::from(vec![30_468, 5_631]);
         let mut cursor = runtime
-            .start_generation_cursor(prompt_token_ids.clone(), 1)
+            .start_generation_cursor(prompt_token_ids.clone(), Some(1))
             .unwrap();
         assert_eq!(cursor.processed_prompt_tokens(), 0);
         assert_eq!(cursor.position(), 0);
@@ -504,7 +516,7 @@
         let runtime = GemmaTextRuntimeSession::load(&default_model_path()).unwrap();
         let prompt_token_ids = Arc::<[u32]>::from(vec![30_468, 5_631]);
         let graph = runtime
-            .start_generation_graph(prompt_token_ids.clone(), 2)
+            .start_generation_graph(prompt_token_ids.clone(), Some(2))
             .unwrap();
 
         let prefix1 = graph.generated_token_ids_up_to(1).unwrap();
@@ -532,7 +544,8 @@
     fn exact_backend_head_matches_two_token_exact_hidden() {
         let runtime = GemmaTextRuntimeSession::load(&default_model_path()).unwrap();
         let exact = run_two_token_ids(default_model_path(), [30_468, 5_631], 0, 1).unwrap();
-        let mut backend = runtime.exact_backend.lock().unwrap();
+        let exact_backend = runtime.exact_backend().unwrap();
+        let mut backend = exact_backend.lock().unwrap();
         let next = backend
             .greedy_token_from_hidden_words(&exact.final_hidden_bf16_words)
             .unwrap();
@@ -548,7 +561,8 @@
     fn exact_backend_device_head_matches_shared_logits_scan() {
         let runtime = GemmaTextRuntimeSession::load(&default_model_path()).unwrap();
         let exact = run_two_token_ids(default_model_path(), [30_468, 5_631], 0, 1).unwrap();
-        let mut backend = runtime.exact_backend.lock().unwrap();
+        let exact_backend = runtime.exact_backend().unwrap();
+        let mut backend = exact_backend.lock().unwrap();
         let (device, shared) = backend
             .compare_greedy_token_paths_from_hidden_words(&exact.final_hidden_bf16_words)
             .unwrap();
@@ -671,7 +685,8 @@
             .iter()
             .map(|&token_id| runtime.weights.embed_token_bf16_words(token_id).unwrap())
             .collect::<Vec<_>>();
-        let mut backend = runtime.exact_backend.lock().unwrap();
+        let exact_backend = runtime.exact_backend().unwrap();
+        let mut backend = exact_backend.lock().unwrap();
 
         for layer_idx in 0..num_layers {
             backend.reset_kv_caches();
@@ -704,7 +719,8 @@
         let runtime = Arc::unwrap_or_clone(GemmaTextRuntimeSession::load(&default_model_path()).unwrap());
         let formatted_prompt = runtime.format_prompt_text("say hi", GemmaPromptFormat::Gemma4UserTurn);
         let prompt_token_ids = runtime.tokenize_prompt(&formatted_prompt).unwrap();
-        let mut backend = runtime.exact_backend.lock().unwrap();
+        let exact_backend = runtime.exact_backend().unwrap();
+        let mut backend = exact_backend.lock().unwrap();
         let final_hidden_words = backend
             .prefill_prompt_hidden_words_from_token_ids(prompt_token_ids.as_ref(), 0)
             .unwrap();

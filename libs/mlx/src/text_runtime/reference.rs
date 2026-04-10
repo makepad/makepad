@@ -1,16 +1,21 @@
 impl GemmaTextRuntimeSession {
+    fn supports_exact_backend(weights: &MlxIndexedSafetensors) -> bool {
+        let config = &weights.snapshot.config;
+        let text_config = &config.text_config;
+        config.quantization.mode == "affine"
+            && matches!(config.quantization.bits, 4 | 8)
+            && config.quantization.group_size == 64
+            && text_config.hidden_size_per_layer_input == 0
+            && text_config.num_kv_shared_layers == 0
+            && (!text_config.enable_moe_block || text_config.top_k_experts_or_zero() == 8)
+    }
+
     fn load(model_path: &Path) -> Result<Arc<Self>, String> {
         let model_root = model_root_dir(model_path).map_err(|err| err.to_string())?;
         let weights = MlxIndexedSafetensors::load(&model_root).map_err(|err| err.to_string())?;
         let tokenizer =
             MlxTokenizer::from_snapshot(&weights.snapshot).map_err(|err| err.to_string())?;
         let config = &weights.snapshot.config.text_config;
-        if config.hidden_size_per_layer_input != 0 {
-            return Err("text runtime does not yet support per-layer input embeddings".to_string());
-        }
-        if config.num_kv_shared_layers != 0 {
-            return Err("text runtime does not yet support KV-shared Gemma variants".to_string());
-        }
         let kv_layout =
             GemmaKvCacheLayout::from_text_config(config, 1).map_err(|err| err.to_string())?;
         let stop_tokens = weights
@@ -20,17 +25,33 @@ impl GemmaTextRuntimeSession {
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
+        let exact_backend = if Self::supports_exact_backend(&weights) {
+            Some(Arc::new(Mutex::new(
+                ExactMetalTextRuntimeSession::load(model_path.to_path_buf())
+                    .map_err(|err| err.to_string())?,
+            )))
+        } else {
+            None
+        };
         Ok(Arc::new(Self {
             model_path: model_path.to_path_buf(),
             weights,
             tokenizer,
             kv_layout,
             stop_tokens,
-            exact_backend: Arc::new(Mutex::new(
-                ExactMetalTextRuntimeSession::load(model_path.to_path_buf())
-                    .map_err(|err| err.to_string())?,
-            )),
+            exact_backend,
         }))
+    }
+
+    fn has_exact_backend(&self) -> bool {
+        self.exact_backend.is_some()
+    }
+
+    fn exact_backend(&self) -> Result<Arc<Mutex<ExactMetalTextRuntimeSession>>, String> {
+        self.exact_backend
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "exact metal text runtime is unavailable for this Gemma family member".to_string())
     }
 
     fn format_prompt_text(&self, prompt_text: &str, prompt_format: GemmaPromptFormat) -> String {
@@ -70,7 +91,7 @@ impl GemmaTextRuntimeSession {
         max_new_tokens: Option<usize>,
     ) -> Result<ExactMetalGenerationCursor, String> {
         ExactMetalTextRuntimeSession::generation_cursor(
-            self.exact_backend.clone(),
+            self.exact_backend()?,
             prompt_token_ids,
             self.stop_tokens.clone(),
             max_new_tokens,
@@ -84,7 +105,7 @@ impl GemmaTextRuntimeSession {
         max_new_tokens: Option<usize>,
     ) -> Result<ExactMetalGenerationGraph, String> {
         ExactMetalTextRuntimeSession::generation_graph(
-            self.exact_backend.clone(),
+            self.exact_backend()?,
             prompt_token_ids,
             self.stop_tokens.clone(),
             max_new_tokens,
@@ -93,41 +114,205 @@ impl GemmaTextRuntimeSession {
     }
 }
 
-#[cfg(test)]
 impl GemmaTextRuntimeSession {
+    #[cfg_attr(not(test), allow(dead_code))]
     fn greedy_token_from_hidden(&self, hidden_words: &[u16]) -> Result<MlxGreedyToken, String> {
         let final_norm_words = self
             .weights
             .final_text_norm_bf16_words(hidden_words)
             .map_err(|err| err.to_string())?;
-        self.weights
-            .tied_text_logits_top1_f32(&final_norm_words)
-            .map_err(|err| err.to_string())
+        let mut logits = quantized_matmul_tensor(
+            &self.weights,
+            &final_norm_words,
+            EMBED_TOKENS_WEIGHT_NAME,
+            EMBED_TOKENS_SCALES_NAME,
+            EMBED_TOKENS_BIASES_NAME,
+        )?;
+        if let Some(softcap) = Some(self.weights.snapshot.config.text_config.final_logit_softcapping)
+            .filter(|softcap| *softcap > 0.0)
+        {
+            for logit in &mut logits {
+                *logit = bf16_round_to_f32((*logit / softcap).tanh() * softcap);
+            }
+        }
+        let mut best_token_id = 0u32;
+        let mut best_logit = f32::NEG_INFINITY;
+        for (token_idx, logit) in logits.into_iter().enumerate() {
+            let token_id = token_idx as u32;
+            if logit > best_logit || (logit == best_logit && token_id < best_token_id) {
+                best_token_id = token_id;
+                best_logit = logit;
+            }
+        }
+        Ok(MlxGreedyToken {
+            token_id: best_token_id,
+            logit: best_logit,
+        })
+    }
+
+    fn sampled_token_from_hidden(
+        &self,
+        hidden_words: &[u16],
+        disallowed_token_ids: &[u32],
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+    ) -> Result<MlxGreedyToken, String> {
+        let final_norm_words = self
+            .weights
+            .final_text_norm_bf16_words(hidden_words)
+            .map_err(|err| err.to_string())?;
+        let mut logits = quantized_matmul_tensor(
+            &self.weights,
+            &final_norm_words,
+            EMBED_TOKENS_WEIGHT_NAME,
+            EMBED_TOKENS_SCALES_NAME,
+            EMBED_TOKENS_BIASES_NAME,
+        )?;
+        if let Some(softcap) = Some(self.weights.snapshot.config.text_config.final_logit_softcapping)
+            .filter(|softcap| *softcap > 0.0)
+        {
+            for logit in &mut logits {
+                *logit = bf16_round_to_f32((*logit / softcap).tanh() * softcap);
+            }
+        }
+        sample_token_from_logits_f32(&logits, disallowed_token_ids, sampling_options, rng)
+    }
+
+    fn raw_per_layer_inputs_for_token(&self, token_id: u32) -> Result<Option<Vec<Vec<u16>>>, String> {
+        let config = &self.weights.snapshot.config.text_config;
+        let per_layer_dim = config.hidden_size_per_layer_input as usize;
+        if per_layer_dim == 0 {
+            return Ok(None);
+        }
+        let per_layer_token_id = if token_id < config.vocab_size_per_layer_input {
+            token_id
+        } else {
+            0
+        };
+        let header = self
+            .weights
+            .header_for_tensor("language_model.model.embed_tokens_per_layer.weight")
+            .map_err(|err| err.to_string())?;
+        let mut values = header
+            .affine_dequantize_row_f32(
+                "language_model.model.embed_tokens_per_layer.weight",
+                "language_model.model.embed_tokens_per_layer.scales",
+                "language_model.model.embed_tokens_per_layer.biases",
+                per_layer_token_id as u64,
+                self.weights.snapshot.config.quantization.group_size as u64,
+                self.weights.snapshot.config.quantization.bits,
+            )
+            .map_err(|err| err.to_string())?;
+        let embed_scale = bf16_round_to_f32((per_layer_dim as f32).sqrt());
+        for value in &mut values {
+            *value = bf16_round_to_f32(*value * embed_scale);
+        }
+        split_f32_rows_to_bf16_words(
+            &values,
+            config.num_hidden_layers as usize,
+            per_layer_dim,
+            "embed_tokens_per_layer",
+        )
+        .map(Some)
+    }
+
+    fn project_per_layer_inputs_for_token(
+        &self,
+        token_id: u32,
+        input_words: &[u16],
+    ) -> Result<Option<Vec<Vec<u16>>>, String> {
+        let config = &self.weights.snapshot.config.text_config;
+        let per_layer_dim = config.hidden_size_per_layer_input as usize;
+        if per_layer_dim == 0 {
+            return Ok(None);
+        }
+
+        let mut projection = quantized_matmul_tensor(
+            &self.weights,
+            input_words,
+            "language_model.model.per_layer_model_projection.weight",
+            "language_model.model.per_layer_model_projection.scales",
+            "language_model.model.per_layer_model_projection.biases",
+        )?;
+        let projection_scale = bf16_round_to_f32((config.hidden_size as f32).powf(-0.5));
+        for value in &mut projection {
+            *value = bf16_round_to_f32(*value * projection_scale);
+        }
+
+        let row_count = config.num_hidden_layers as usize;
+        let norm_weights = self
+            .weights
+            .read_bf16_tensor_words("language_model.model.per_layer_projection_norm.weight")
+            .map_err(|err| err.to_string())?;
+        let mut projection = rms_norm_rows_weighted_f32(
+            &projection,
+            row_count,
+            per_layer_dim,
+            &norm_weights,
+        )?;
+
+        if let Some(raw_rows) = self.raw_per_layer_inputs_for_token(token_id)? {
+            let combine_scale = bf16_round_to_f32(2.0f32.powf(-0.5));
+            for (index, raw_word) in raw_rows.iter().flatten().enumerate() {
+                projection[index] = bf16_round_to_f32(
+                    bf16_round_to_f32(projection[index] + bf16_word_to_f32(*raw_word))
+                        * combine_scale,
+                );
+            }
+        }
+
+        split_f32_rows_to_bf16_words(
+            &projection,
+            row_count,
+            per_layer_dim,
+            "per_layer_model_projection",
+        )
+        .map(Some)
     }
 }
 
-#[cfg(test)]
 impl GemmaTextRuntimeSession {
+    fn eval_input_row_hidden_state(
+        &self,
+        token_id: u32,
+        input_words: Vec<u16>,
+        position: usize,
+        caches: &mut GemmaKvCacheSet<f32>,
+    ) -> Result<Vec<u16>, String> {
+        let per_layer_inputs = self.project_per_layer_inputs_for_token(token_id, &input_words)?;
+        let mut hidden_words = input_words;
+        for layer_idx in 0..self.weights.snapshot.config.text_config.num_hidden_layers as usize {
+            hidden_words = self.eval_layer_hidden_state(
+                layer_idx,
+                &hidden_words,
+                per_layer_inputs
+                    .as_ref()
+                    .map(|rows| rows[layer_idx].as_slice()),
+                position,
+                caches,
+            )?;
+        }
+        Ok(hidden_words)
+    }
+
     fn eval_token_hidden_state(
         &self,
         token_id: u32,
         position: usize,
         caches: &mut GemmaKvCacheSet<f32>,
     ) -> Result<Vec<u16>, String> {
-        let mut hidden_words = self
+        let hidden_words = self
             .weights
             .embed_token_bf16_words(token_id)
             .map_err(|err| err.to_string())?;
-        for layer_idx in 0..self.weights.snapshot.config.text_config.num_hidden_layers as usize {
-            hidden_words =
-                self.eval_layer_hidden_state(layer_idx, &hidden_words, position, caches)?;
-        }
-        Ok(hidden_words)
+        self.eval_input_row_hidden_state(token_id, hidden_words, position, caches)
     }
+
     fn eval_layer_hidden_state(
         &self,
         layer_idx: usize,
         input_words: &[u16],
+        per_layer_input_words: Option<&[u16]>,
         position: usize,
         caches: &mut GemmaKvCacheSet<f32>,
     ) -> Result<Vec<u16>, String> {
@@ -143,7 +328,7 @@ impl GemmaTextRuntimeSession {
             config.head_dim as usize
         };
         let k_head_count = if attention_k_eq_v && layer_type == "full_attention" {
-            config.num_global_key_value_heads as usize
+            config.num_global_key_value_heads_or_default() as usize
         } else {
             config.num_key_value_heads as usize
         };
@@ -178,6 +363,9 @@ impl GemmaTextRuntimeSession {
             base: rope_params.rope_theta,
         };
         let names = TextLayerTensorNames::for_layer(layer_idx, attention_k_eq_v);
+        let first_kv_shared_layer_idx =
+            config.num_hidden_layers as usize - config.num_kv_shared_layers as usize;
+        let is_kv_shared_layer = layer_idx >= first_kv_shared_layer_idx && config.num_kv_shared_layers != 0;
 
         let input_norm =
             rms_norm_weighted_tensor(&self.weights, input_words, &names.input_norm_weight_name)?;
@@ -202,60 +390,73 @@ impl GemmaTextRuntimeSession {
         let mut q_norm =
             rms_norm_rows_weighted_f32(&q_raw, q_head_count, head_dim, &q_norm_weights)?;
         apply_rope_rows_in_place(&mut q_norm, q_head_count, rope, position)?;
-
-        let k_raw = quantized_matmul_tensor(
-            &self.weights,
-            &input_norm_words,
-            &names.k.weight_name,
-            &names.k.scales_name,
-            &names.k.biases_name,
-        )?;
-        let k_norm_weight_name = names
-            .k
-            .norm_weight_name
-            .as_deref()
-            .ok_or_else(|| format!("missing k norm weight name for layer {layer_idx}"))?;
-        let k_norm_weights = self
-            .weights
-            .read_bf16_tensor_words(k_norm_weight_name)
-            .map_err(|err| err.to_string())?;
-        let mut k_norm =
-            rms_norm_rows_weighted_f32(&k_raw, k_head_count, head_dim, &k_norm_weights)?;
-        apply_rope_rows_in_place(&mut k_norm, k_head_count, rope, position)?;
-
-        let v_raw = if attention_k_eq_v {
-            k_raw
+        let attention_out = if is_kv_shared_layer {
+            let layer_cache = caches
+                .cache_for_layer(layer_idx)
+                .map_err(|err| err.to_string())?;
+            compute_attention_output_f32(
+                &q_norm,
+                layer_cache,
+                q_head_count,
+                q_heads_per_kv,
+                head_dim,
+            )
+            .map_err(|err| err.to_string())?
         } else {
-            quantized_matmul_tensor(
+            let k_raw = quantized_matmul_tensor(
                 &self.weights,
                 &input_norm_words,
-                &names.v.weight_name,
-                &names.v.scales_name,
-                &names.v.biases_name,
-            )?
+                &names.k.weight_name,
+                &names.k.scales_name,
+                &names.k.biases_name,
+            )?;
+            let k_norm_weight_name = names
+                .k
+                .norm_weight_name
+                .as_deref()
+                .ok_or_else(|| format!("missing k norm weight name for layer {layer_idx}"))?;
+            let k_norm_weights = self
+                .weights
+                .read_bf16_tensor_words(k_norm_weight_name)
+                .map_err(|err| err.to_string())?;
+            let mut k_norm =
+                rms_norm_rows_weighted_f32(&k_raw, k_head_count, head_dim, &k_norm_weights)?;
+            apply_rope_rows_in_place(&mut k_norm, k_head_count, rope, position)?;
+
+            let v_raw = if attention_k_eq_v {
+                k_raw
+            } else {
+                quantized_matmul_tensor(
+                    &self.weights,
+                    &input_norm_words,
+                    &names.v.weight_name,
+                    &names.v.scales_name,
+                    &names.v.biases_name,
+                )?
+            };
+            let v_norm =
+                rms_norm_rows_no_scale_f32(&v_raw, v_head_count, head_dim, config.rms_norm_eps)?;
+
+            let k_tensor = single_token_tensor(k_head_count, head_dim, k_norm)
+                .map_err(|err| err.to_string())?;
+            let v_tensor = single_token_tensor(v_head_count, head_dim, v_norm)
+                .map_err(|err| err.to_string())?;
+            let layer_cache = caches
+                .cache_for_layer_mut(layer_idx)
+                .map_err(|err| err.to_string())?;
+            layer_cache
+                .update_and_fetch(k_tensor.view(), v_tensor.view())
+                .map_err(|err| err.to_string())?;
+
+            compute_attention_output_f32(
+                &q_norm,
+                layer_cache,
+                q_head_count,
+                q_heads_per_kv,
+                head_dim,
+            )
+            .map_err(|err| err.to_string())?
         };
-        let v_norm =
-            rms_norm_rows_no_scale_f32(&v_raw, v_head_count, head_dim, config.rms_norm_eps)?;
-
-        let k_tensor =
-            single_token_tensor(k_head_count, head_dim, k_norm).map_err(|err| err.to_string())?;
-        let v_tensor =
-            single_token_tensor(v_head_count, head_dim, v_norm).map_err(|err| err.to_string())?;
-        let layer_cache = caches
-            .cache_for_layer_mut(layer_idx)
-            .map_err(|err| err.to_string())?;
-        layer_cache
-            .update_and_fetch(k_tensor.view(), v_tensor.view())
-            .map_err(|err| err.to_string())?;
-
-        let attention_out = compute_attention_output_f32(
-            &q_norm,
-            layer_cache,
-            q_head_count,
-            q_heads_per_kv,
-            head_dim,
-        )
-        .map_err(|err| err.to_string())?;
         let attention_out_words = f32s_to_bf16_words(&attention_out);
         let attention_oproj = quantized_matmul_tensor(
             &self.weights,
@@ -319,7 +520,7 @@ impl GemmaTextRuntimeSession {
                 &names.router_proj_scales_name,
                 &names.router_proj_biases_name,
                 config.rms_norm_eps,
-                config.top_k_experts as usize,
+                config.top_k_experts_or_zero() as usize,
             )?;
             let moe = gemma_moe_expert_block_from_residual_bf16(
                 &self.weights,
@@ -360,6 +561,45 @@ impl GemmaTextRuntimeSession {
         };
 
         let mut output = add_f32(&post_attention_residual, &feedforward_out)?;
+        if let Some(per_layer_input_words) = per_layer_input_words {
+            let gate = quantized_matmul_tensor(
+                &self.weights,
+                &f32s_to_bf16_words(&output),
+                &names.per_layer_input_gate_weight_name,
+                &names.per_layer_input_gate_scales_name,
+                &names.per_layer_input_gate_biases_name,
+            )?;
+            if gate.len() != per_layer_input_words.len() {
+                return Err(format!(
+                    "per-layer input gate length mismatch in layer {layer_idx}: gate={} ple={}",
+                    gate.len(),
+                    per_layer_input_words.len()
+                ));
+            }
+            let gated_per_layer = gate
+                .iter()
+                .copied()
+                .zip(per_layer_input_words.iter().copied())
+                .map(|(gate_value, per_layer_value)| {
+                    bf16_round_to_f32(gelu_approx_f32(gate_value) * bf16_word_to_f32(per_layer_value))
+                })
+                .collect::<Vec<_>>();
+            let gated_words = f32s_to_bf16_words(&gated_per_layer);
+            let per_layer_contribution = quantized_matmul_tensor(
+                &self.weights,
+                &gated_words,
+                &names.per_layer_projection_weight_name,
+                &names.per_layer_projection_scales_name,
+                &names.per_layer_projection_biases_name,
+            )?;
+            let per_layer_contribution_words = f32s_to_bf16_words(&per_layer_contribution);
+            let per_layer_contribution = rms_norm_weighted_tensor(
+                &self.weights,
+                &per_layer_contribution_words,
+                &names.post_per_layer_input_norm_weight_name,
+            )?;
+            output = add_bf16_and_f32(&f32s_to_bf16_words(&output), &per_layer_contribution)?;
+        }
         if let Some(layer_scalar) =
             load_optional_scalar_f32(&self.weights, &names.layer_scalar_name)?
         {
@@ -369,7 +609,188 @@ impl GemmaTextRuntimeSession {
     }
 }
 
-#[cfg(test)]
+impl GemmaTextRuntimeSession {
+    fn eval_token_sampled_from_token_id_reference(
+        &self,
+        token_id: u32,
+        position: usize,
+        disallowed_token_ids: &[u32],
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+        caches: &mut GemmaKvCacheSet<f32>,
+    ) -> Result<MlxGreedyToken, String> {
+        let hidden_words = self.eval_token_hidden_state(token_id, position, caches)?;
+        self.sampled_token_from_hidden(&hidden_words, disallowed_token_ids, sampling_options, rng)
+    }
+
+    fn prefill_prompt_sampled_from_embedding_rows_reference(
+        &self,
+        prompt_token_ids: &[u32],
+        prompt_embedding_rows: &[Vec<u16>],
+        start_position: usize,
+        disallowed_token_ids: &[u32],
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+        caches: &mut GemmaKvCacheSet<f32>,
+    ) -> Result<MlxGreedyToken, String> {
+        if prompt_token_ids.is_empty() {
+            return Err("generation requires at least one prompt token".to_string());
+        }
+        if prompt_token_ids.len() != prompt_embedding_rows.len() {
+            return Err(format!(
+                "prompt token/embedding row mismatch: {} ids vs {} rows",
+                prompt_token_ids.len(),
+                prompt_embedding_rows.len()
+            ));
+        }
+        let mut last_hidden_words = None;
+        for (offset, (&token_id, input_words)) in prompt_token_ids
+            .iter()
+            .zip(prompt_embedding_rows.iter())
+            .enumerate()
+        {
+            last_hidden_words = Some(self.eval_input_row_hidden_state(
+                token_id,
+                input_words.clone(),
+                start_position + offset,
+                caches,
+            )?);
+        }
+        self.sampled_token_from_hidden(
+            last_hidden_words
+                .as_deref()
+                .ok_or_else(|| "prompt prefill produced no hidden state".to_string())?,
+            disallowed_token_ids,
+            sampling_options,
+            rng,
+        )
+    }
+}
+
+impl GemmaTextRuntimeSession {
+    fn generate_sampled_token_ids_reference<F>(
+        self: &Arc<Self>,
+        prompt_token_ids: Arc<[u32]>,
+        max_new_tokens: Option<usize>,
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+        on_generated_ids: F,
+    ) -> Result<(Arc<[u32]>, GemmaStopReason), String>
+    where
+        F: FnMut(&[u32]) -> Result<(), String>,
+    {
+        let prompt_embedding_rows = prompt_token_ids
+            .iter()
+            .copied()
+            .map(|token_id| {
+                self.weights
+                    .embed_token_bf16_words(token_id)
+                    .map_err(|err| err.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.generate_sampled_token_ids_from_embedding_rows_reference(
+            prompt_token_ids,
+            prompt_embedding_rows,
+            max_new_tokens,
+            sampling_options,
+            rng,
+            on_generated_ids,
+        )
+    }
+
+    fn generate_sampled_token_ids_from_embedding_rows_reference<F>(
+        self: &Arc<Self>,
+        prompt_token_ids: Arc<[u32]>,
+        prompt_embedding_rows: Vec<Vec<u16>>,
+        max_new_tokens: Option<usize>,
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+        mut on_generated_ids: F,
+    ) -> Result<(Arc<[u32]>, GemmaStopReason), String>
+    where
+        F: FnMut(&[u32]) -> Result<(), String>,
+    {
+        if prompt_token_ids.is_empty() {
+            return Err("generation requires at least one prompt token".to_string());
+        }
+
+        let stop_tokens = &self.stop_tokens;
+        let constraints = ChatSamplingConstraints::from_runtime(self);
+        let mut sampling_state = ChatSamplingState::new();
+        let mut caches = GemmaKvCacheSet::<f32>::new(self.kv_layout.clone())
+            .map_err(|err| err.to_string())?;
+
+        let mut generated_token_ids = Vec::with_capacity(max_new_tokens.unwrap_or(32));
+        let mut next_token = self.prefill_prompt_sampled_from_embedding_rows_reference(
+            prompt_token_ids.as_ref(),
+            &prompt_embedding_rows,
+            0,
+            &sampling_state.disallowed_token_ids(&constraints, stop_tokens, sampling_options),
+            sampling_options,
+            rng,
+            &mut caches,
+        )?;
+
+        loop {
+            generated_token_ids.push(next_token.token_id);
+            sampling_state.observe_token(next_token.token_id, &constraints);
+            on_generated_ids(&generated_token_ids)?;
+
+            if stop_tokens.contains(&next_token.token_id) {
+                return Ok((
+                    Arc::<[u32]>::from(generated_token_ids),
+                    GemmaStopReason::EosToken(next_token.token_id),
+                ));
+            }
+            if max_new_tokens.is_some_and(|limit| generated_token_ids.len() >= limit) {
+                return Ok((
+                    Arc::<[u32]>::from(generated_token_ids),
+                    GemmaStopReason::MaxNewTokens,
+                ));
+            }
+
+            let position = prompt_token_ids
+                .len()
+                .checked_add(generated_token_ids.len())
+                .and_then(|value| value.checked_sub(1))
+                .ok_or_else(|| "generation cursor position overflow".to_string())?;
+            next_token = self.eval_token_sampled_from_token_id_reference(
+                next_token.token_id,
+                position,
+                &sampling_state.disallowed_token_ids(&constraints, stop_tokens, sampling_options),
+                sampling_options,
+                rng,
+                &mut caches,
+            )?;
+        }
+    }
+}
+
+fn split_f32_rows_to_bf16_words(
+    values: &[f32],
+    row_count: usize,
+    row_len: usize,
+    context: &str,
+) -> Result<Vec<Vec<u16>>, String> {
+    let expected = row_count
+        .checked_mul(row_len)
+        .ok_or_else(|| format!("{context} row shape overflow"))?;
+    if values.len() != expected {
+        return Err(format!(
+            "{context} length mismatch: got {} expected {}",
+            values.len(),
+            expected
+        ));
+    }
+    let mut rows = Vec::with_capacity(row_count);
+    for row_idx in 0..row_count {
+        let start = row_idx * row_len;
+        let end = start + row_len;
+        rows.push(f32s_to_bf16_words(&values[start..end]));
+    }
+    Ok(rows)
+}
+
 fn rms_norm_weighted_tensor(
     weights: &MlxIndexedSafetensors,
     input_words: &[u16],
@@ -386,7 +807,6 @@ fn rms_norm_weighted_tensor(
         .map_err(|err| err.to_string())
 }
 
-#[cfg(test)]
 fn quantized_matmul_tensor(
     weights: &MlxIndexedSafetensors,
     input_words: &[u16],
@@ -394,21 +814,25 @@ fn quantized_matmul_tensor(
     scales_name: &str,
     biases_name: &str,
 ) -> Result<Vec<f32>, String> {
+    let weight_entry = weights.tensor(weight_name).map_err(|err| err.to_string())?;
+    if weight_entry.dtype == MlxDType::BF16 {
+        return dense_bf16_matmul_tensor(weights, input_words, weight_name);
+    }
+    if weight_entry.dtype != MlxDType::U32 {
+        return Err(format!(
+            "tensor {weight_name} expected U32 or BF16, got {:?}",
+            weight_entry.dtype
+        ));
+    }
+
     let bits = weights.snapshot.config.quantization.bits;
     let group_size = weights.snapshot.config.quantization.group_size as u64;
     if bits == 0 || bits > 8 || (bits & (bits - 1)) != 0 {
         return Err(format!("unsupported affine quantized matmul bits {bits}"));
     }
 
-    let weight_entry = weights.tensor(weight_name).map_err(|err| err.to_string())?;
     let scales_entry = weights.tensor(scales_name).map_err(|err| err.to_string())?;
     let biases_entry = weights.tensor(biases_name).map_err(|err| err.to_string())?;
-    if weight_entry.dtype != MlxDType::U32 {
-        return Err(format!(
-            "tensor {weight_name} expected U32, got {:?}",
-            weight_entry.dtype
-        ));
-    }
     if scales_entry.dtype != MlxDType::BF16 || biases_entry.dtype != MlxDType::BF16 {
         return Err(format!(
             "tensors {scales_name} / {biases_name} expected BF16, got {:?} / {:?}",
@@ -453,6 +877,16 @@ fn quantized_matmul_tensor(
     let words_per_group = group_size / values_per_word;
     if words_per_group == 0 || weight_entry.shape[1] != scales_entry.shape[1] * words_per_group {
         return Err(format!("invalid words_per_group {words_per_group}"));
+    }
+
+    if let Some(result) = try_affine_quantized_matmul_tensor_metal(
+        weights,
+        input_words,
+        weight_name,
+        scales_name,
+        biases_name,
+    ) {
+        return result;
     }
 
     let packed_weights = weights
@@ -515,7 +949,90 @@ fn quantized_matmul_tensor(
     Ok(out)
 }
 
-#[cfg(test)]
+fn dense_bf16_matmul_tensor(
+    weights: &MlxIndexedSafetensors,
+    input_words: &[u16],
+    weight_name: &str,
+) -> Result<Vec<f32>, String> {
+    let weight_entry = weights.tensor(weight_name).map_err(|err| err.to_string())?;
+    if weight_entry.dtype != MlxDType::BF16 {
+        return Err(format!(
+            "tensor {weight_name} expected BF16, got {:?}",
+            weight_entry.dtype
+        ));
+    }
+    if weight_entry.shape.len() != 2 {
+        return Err(format!(
+            "dense bf16 matmul expects rank-2 tensor, got {:?}",
+            weight_entry.shape
+        ));
+    }
+    let rows = weight_entry.shape[0] as usize;
+    let inner_dim = weight_entry.shape[1] as usize;
+    if input_words.len() != inner_dim {
+        return Err(format!(
+            "activation length mismatch: got {} expected {}",
+            input_words.len(),
+            inner_dim
+        ));
+    }
+
+    let weight_words = weights
+        .read_bf16_tensor_words_cached(weight_name)
+        .map_err(|err| err.to_string())?;
+    let expected_words = rows
+        .checked_mul(inner_dim)
+        .ok_or_else(|| format!("dense bf16 matmul shape overflow for {weight_name}"))?;
+    if weight_words.len() != expected_words {
+        return Err(format!(
+            "tensor {weight_name} word count mismatch: got {} expected {}",
+            weight_words.len(),
+            expected_words
+        ));
+    }
+
+    let x = input_words
+        .iter()
+        .copied()
+        .map(bf16_word_to_f32)
+        .collect::<Vec<_>>();
+    if let Some(out) = try_matmul_nt_ggml_bytes(
+        &x,
+        bf16_words_as_bytes(weight_words.as_slice()),
+        GGML_TYPE_BF16,
+        1,
+        inner_dim,
+        rows,
+    ) {
+        return Ok(out);
+    }
+
+    let mut out = Vec::with_capacity(rows);
+    for row_idx in 0..rows {
+        let row_start = row_idx * inner_dim;
+        let row_end = row_start + inner_dim;
+        let mut sum = 0.0f32;
+        for (weight_word, x_value) in weight_words[row_start..row_end].iter().zip(x.iter()) {
+            let product = bf16_round_to_f32(bf16_word_to_f32(*weight_word) * *x_value);
+            sum = bf16_round_to_f32(sum + product);
+        }
+        out.push(sum);
+    }
+    Ok(out)
+}
+
+fn bf16_words_as_bytes(words: &[u16]) -> &[u8] {
+    #[cfg(target_endian = "little")]
+    unsafe {
+        std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), words.len() * size_of::<u16>())
+    }
+
+    #[cfg(not(target_endian = "little"))]
+    {
+        unreachable!("bf16 byte reinterpreting currently assumes little-endian targets")
+    }
+}
+
 fn quantized_matmul_rank3_plane_tensor(
     weights: &MlxIndexedSafetensors,
     input_words: &[u16],
@@ -524,21 +1041,25 @@ fn quantized_matmul_rank3_plane_tensor(
     biases_name: &str,
     plane: u64,
 ) -> Result<Vec<f32>, String> {
+    let weight_entry = weights.tensor(weight_name).map_err(|err| err.to_string())?;
+    if weight_entry.dtype == MlxDType::BF16 {
+        return dense_bf16_matmul_rank3_plane_tensor(weights, input_words, weight_name, plane);
+    }
+    if weight_entry.dtype != MlxDType::U32 {
+        return Err(format!(
+            "tensor {weight_name} expected U32 or BF16, got {:?}",
+            weight_entry.dtype
+        ));
+    }
+
     let bits = weights.snapshot.config.quantization.bits;
     let group_size = weights.snapshot.config.quantization.group_size as u64;
     if bits == 0 || bits > 8 || (bits & (bits - 1)) != 0 {
         return Err(format!("unsupported affine quantized matmul bits {bits}"));
     }
 
-    let weight_entry = weights.tensor(weight_name).map_err(|err| err.to_string())?;
     let scales_entry = weights.tensor(scales_name).map_err(|err| err.to_string())?;
     let biases_entry = weights.tensor(biases_name).map_err(|err| err.to_string())?;
-    if weight_entry.dtype != MlxDType::U32 {
-        return Err(format!(
-            "tensor {weight_name} expected U32, got {:?}",
-            weight_entry.dtype
-        ));
-    }
     if scales_entry.dtype != MlxDType::BF16 || biases_entry.dtype != MlxDType::BF16 {
         return Err(format!(
             "tensors {scales_name} / {biases_name} expected BF16, got {:?} / {:?}",
@@ -591,6 +1112,17 @@ fn quantized_matmul_rank3_plane_tensor(
     let words_per_group = group_size / values_per_word;
     if words_per_group == 0 || weight_entry.shape[2] != scales_entry.shape[2] * words_per_group {
         return Err(format!("invalid words_per_group {words_per_group}"));
+    }
+
+    if let Some(result) = try_affine_quantized_matmul_rank3_plane_metal(
+        weights,
+        input_words,
+        weight_name,
+        scales_name,
+        biases_name,
+        plane,
+    ) {
+        return result;
     }
 
     let packed_weights = weights
@@ -651,7 +1183,88 @@ fn quantized_matmul_rank3_plane_tensor(
     Ok(out)
 }
 
-#[cfg(test)]
+fn dense_bf16_matmul_rank3_plane_tensor(
+    weights: &MlxIndexedSafetensors,
+    input_words: &[u16],
+    weight_name: &str,
+    plane: u64,
+) -> Result<Vec<f32>, String> {
+    let weight_entry = weights.tensor(weight_name).map_err(|err| err.to_string())?;
+    if weight_entry.dtype != MlxDType::BF16 {
+        return Err(format!(
+            "tensor {weight_name} expected BF16, got {:?}",
+            weight_entry.dtype
+        ));
+    }
+    if weight_entry.shape.len() != 3 {
+        return Err(format!(
+            "dense bf16 plane matmul expects rank-3 tensor, got {:?}",
+            weight_entry.shape
+        ));
+    }
+    if plane >= weight_entry.shape[0] {
+        return Err(format!(
+            "plane {plane} out of range for tensor {weight_name} with {} planes",
+            weight_entry.shape[0]
+        ));
+    }
+
+    let rows = weight_entry.shape[1] as usize;
+    let inner_dim = weight_entry.shape[2] as usize;
+    if input_words.len() != inner_dim {
+        return Err(format!(
+            "activation length mismatch: got {} expected {}",
+            input_words.len(),
+            inner_dim
+        ));
+    }
+
+    let plane_words = weights
+        .header_for_tensor(weight_name)
+        .map_err(|err| err.to_string())?
+        .read_rank3_plane_bf16_words(weight_name, plane)
+        .map_err(|err| err.to_string())?;
+    let expected_words = rows
+        .checked_mul(inner_dim)
+        .ok_or_else(|| format!("dense bf16 plane matmul shape overflow for {weight_name}"))?;
+    if plane_words.len() != expected_words {
+        return Err(format!(
+            "tensor {weight_name} plane word count mismatch: got {} expected {}",
+            plane_words.len(),
+            expected_words
+        ));
+    }
+
+    let x = input_words
+        .iter()
+        .copied()
+        .map(bf16_word_to_f32)
+        .collect::<Vec<_>>();
+    if let Some(out) = try_matmul_nt_ggml_bytes(
+        &x,
+        bf16_words_as_bytes(&plane_words),
+        GGML_TYPE_BF16,
+        1,
+        inner_dim,
+        rows,
+    ) {
+        return Ok(out);
+    }
+
+    let mut out = Vec::with_capacity(rows);
+    for row_idx in 0..rows {
+        let row_start = row_idx * inner_dim;
+        let row_end = row_start + inner_dim;
+        let mut sum = 0.0f32;
+        for (weight_word, x_value) in plane_words[row_start..row_end].iter().zip(x.iter()) {
+            let product = bf16_round_to_f32(bf16_word_to_f32(*weight_word) * *x_value);
+            sum = bf16_round_to_f32(sum + product);
+        }
+        out.push(sum);
+    }
+    Ok(out)
+}
+
 fn gemma_router_topk_from_residual_bf16(
     weights: &MlxIndexedSafetensors,
     residual_bf16_words: &[u16],
@@ -780,7 +1393,6 @@ fn gemma_router_topk_from_residual_bf16(
     })
 }
 
-#[cfg(test)]
 fn gemma_moe_expert_block_from_residual_bf16(
     weights: &MlxIndexedSafetensors,
     residual_bf16_words: &[u16],
@@ -899,7 +1511,6 @@ fn gemma_moe_expert_block_from_residual_bf16(
     })
 }
 
-#[cfg(test)]
 fn load_optional_scalar_f32(
     weights: &MlxIndexedSafetensors,
     tensor_name: &str,
@@ -921,7 +1532,6 @@ fn load_optional_scalar_f32(
     Ok(Some(bf16_word_to_f32(word)))
 }
 
-#[cfg(test)]
 fn rms_norm_rows_weighted_f32(
     input: &[f32],
     row_count: usize,
@@ -959,7 +1569,6 @@ fn rms_norm_rows_weighted_f32(
     Ok(out)
 }
 
-#[cfg(test)]
 fn rms_norm_rows_no_scale_f32(
     input: &[f32],
     row_count: usize,
@@ -984,7 +1593,6 @@ fn rms_norm_rows_no_scale_f32(
     Ok(out)
 }
 
-#[cfg(test)]
 fn apply_rope_rows_in_place(
     values: &mut [f32],
     row_count: usize,
@@ -1029,7 +1637,6 @@ fn apply_rope_rows_in_place(
     Ok(())
 }
 
-#[cfg(test)]
 fn compute_attention_output_f32(
     q_values: &[f32],
     cache: &crate::GemmaKvCache<f32>,
@@ -1081,7 +1688,6 @@ fn compute_attention_output_f32(
     Ok(out)
 }
 
-#[cfg(test)]
 fn single_token_tensor(
     head_count: usize,
     head_dim: usize,
@@ -1098,7 +1704,6 @@ fn single_token_tensor(
     )
 }
 
-#[cfg(test)]
 fn geglu_f32(gate: &[f32], up: &[f32]) -> Result<Vec<f32>, String> {
     if gate.len() != up.len() {
         return Err(format!(
@@ -1114,7 +1719,6 @@ fn geglu_f32(gate: &[f32], up: &[f32]) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
-#[cfg(test)]
 fn gelu_approx_f32(value: f32) -> f32 {
     let squared = bf16_round_to_f32(value * value);
     let cubic = bf16_round_to_f32(squared * value);
@@ -1125,7 +1729,6 @@ fn gelu_approx_f32(value: f32) -> f32 {
     bf16_round_to_f32(half * bf16_round_to_f32(1.0f32 + tanh_value))
 }
 
-#[cfg(test)]
 fn add_bf16_and_f32(left_words: &[u16], right: &[f32]) -> Result<Vec<f32>, String> {
     if left_words.len() != right.len() {
         return Err(format!(
@@ -1142,7 +1745,6 @@ fn add_bf16_and_f32(left_words: &[u16], right: &[f32]) -> Result<Vec<f32>, Strin
         .collect())
 }
 
-#[cfg(test)]
 fn add_f32(left: &[f32], right: &[f32]) -> Result<Vec<f32>, String> {
     if left.len() != right.len() {
         return Err(format!(
@@ -1159,14 +1761,12 @@ fn add_f32(left: &[f32], right: &[f32]) -> Result<Vec<f32>, String> {
         .collect())
 }
 
-#[cfg(test)]
 fn scale_in_place(values: &mut [f32], scale: f32) {
     for value in values {
         *value = bf16_round_to_f32(*value * scale);
     }
 }
 
-#[cfg(test)]
 fn inv_rms_f32(values: &[f32], eps: f32) -> f32 {
     let mean_square = values
         .iter()
@@ -1177,22 +1777,18 @@ fn inv_rms_f32(values: &[f32], eps: f32) -> f32 {
     1.0f32 / (mean_square + eps).sqrt()
 }
 
-#[cfg(test)]
 fn f32s_to_bf16_words(values: &[f32]) -> Vec<u16> {
     values.iter().copied().map(f32_to_bf16_word).collect()
 }
 
-#[cfg(test)]
 fn bf16_word_to_f32(word: u16) -> f32 {
     f32::from_bits((word as u32) << 16)
 }
 
-#[cfg(test)]
 fn f32_to_bf16_word(value: f32) -> u16 {
     (bf16_round_to_f32(value).to_bits() >> 16) as u16
 }
 
-#[cfg(test)]
 fn bf16_round_to_f32(value: f32) -> f32 {
     let bits = value.to_bits();
     let lsb = (bits >> 16) & 1;
