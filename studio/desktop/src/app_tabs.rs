@@ -4,6 +4,18 @@ fn run_preview_splitter_is_collapsed(align: SplitterAlign) -> bool {
     matches!(align, SplitterAlign::Weighted(w) if w >= 0.999)
 }
 
+fn run_preview_splitter_restore_target(
+    current: SplitterAlign,
+    has_runs: bool,
+    restore: Option<SplitterAlign>,
+) -> Option<SplitterAlign> {
+    if has_runs && run_preview_splitter_is_collapsed(current) {
+        Some(restore.unwrap_or(SplitterAlign::Weighted(0.62)))
+    } else {
+        None
+    }
+}
+
 impl App {
     pub(super) fn sync_run_preview_splitter(&mut self, cx: &mut Cx, mount: &str) {
         let Some(dock) = self.mount_workspace_dock(cx, mount) else {
@@ -23,19 +35,16 @@ impl App {
             return;
         };
         let collapsed = run_preview_splitter_is_collapsed(current);
-        if !has_runs && !collapsed {
+        if !collapsed {
             self.data
                 .run_panel_split_restore
                 .insert(mount.to_string(), current);
-            dock.set_splitter_align(cx, id!(editor_split), SplitterAlign::Weighted(1.0), false);
-            return;
         }
-        if has_runs && collapsed {
-            let align = self
-                .data
-                .run_panel_split_restore
-                .remove(mount)
-                .unwrap_or(SplitterAlign::Weighted(0.62));
+        if let Some(align) = run_preview_splitter_restore_target(
+            current,
+            has_runs,
+            self.data.run_panel_split_restore.remove(mount),
+        ) {
             dock.set_splitter_align(cx, id!(editor_split), align, false);
         }
     }
@@ -1245,5 +1254,52 @@ impl App {
         if let Some(dock) = self.mount_workspace_dock(cx, &state.mount) {
             dock.close_tab(cx, tab_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_weighted(align: Option<SplitterAlign>, expected: f64) {
+        match align {
+            Some(SplitterAlign::Weighted(actual)) => {
+                assert!((actual - expected).abs() < 0.0001, "expected {expected}, got {actual}");
+            }
+            Some(other) => panic!("expected weighted splitter align, got {:?}", other),
+            None => panic!("expected weighted splitter align, got none"),
+        }
+    }
+
+    #[test]
+    fn no_active_runs_do_not_auto_collapse_preview() {
+        assert!(
+            run_preview_splitter_restore_target(
+                SplitterAlign::Weighted(0.62),
+                false,
+                Some(SplitterAlign::Weighted(0.4)),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn collapsed_preview_restores_saved_align_when_run_starts() {
+        assert_weighted(
+            run_preview_splitter_restore_target(
+                SplitterAlign::Weighted(1.0),
+                true,
+                Some(SplitterAlign::Weighted(0.4)),
+            ),
+            0.4,
+        );
+    }
+
+    #[test]
+    fn collapsed_preview_uses_default_align_without_saved_state() {
+        assert_weighted(
+            run_preview_splitter_restore_target(SplitterAlign::Weighted(1.0), true, None),
+            0.62,
+        );
     }
 }

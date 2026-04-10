@@ -145,7 +145,7 @@ pub struct AppData {
     pub file_filter_mount_by_query: HashMap<QueryId, String>,
     pub pending_stop_all_mount: Option<String>,
     pub pending_log_jumps: HashMap<String, (usize, usize)>,
-    /// Last `editor_split` ratio before hiding the Run preview column (no active run tabs).
+    /// Last non-collapsed `editor_split` ratio, used when reopening the Run preview column.
     pub run_panel_split_restore: HashMap<String, SplitterAlign>,
 }
 
