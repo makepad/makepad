@@ -1,4 +1,6 @@
 use crate::chat::extract_gemma4_assistant_response_text;
+const GREEDY_STREAM_BATCH_TOKENS: usize = 8;
+
 #[derive(Clone, Debug)]
 pub struct GemmaTextStepOutput {
     pub model_path: PathBuf,
@@ -163,14 +165,10 @@ impl GemmaTextSamplingOptions {
         }
     }
 
-    pub fn mlx_vlm_chat_default() -> Self {
-        Self {
-            do_sample: true,
-            temperature: 0.7,
-            top_k: 0,
-            top_p: 1.0,
-            allow_thought: false,
-        }
+    fn chat_from_generation_config(config: &crate::MlxGenerationConfig) -> Self {
+        let mut options = Self::from_generation_config(config);
+        options.allow_thought = false;
+        options
     }
 }
 
@@ -377,6 +375,47 @@ struct SampledTokenCandidate {
     prob: f64,
 }
 
+fn bf16_word_to_f32_local(word: u16) -> f32 {
+    f32::from_bits((word as u32) << 16)
+}
+
+fn bf16_round_to_f32_local(value: f32) -> f32 {
+    bf16_word_to_f32_local((value.to_bits() >> 16) as u16)
+}
+
+fn push_sampled_candidate_top_k(
+    candidates: &mut Vec<SampledTokenCandidate>,
+    candidate: SampledTokenCandidate,
+    top_k: usize,
+) {
+    if top_k == 0 {
+        candidates.push(candidate);
+        return;
+    }
+    if candidates.len() < top_k {
+        candidates.push(candidate);
+        return;
+    }
+
+    let mut worst_index = 0usize;
+    for candidate_index in 1..candidates.len() {
+        let current = &candidates[candidate_index];
+        let worst = &candidates[worst_index];
+        let current_is_worse = current.scaled_logit < worst.scaled_logit
+            || (current.scaled_logit == worst.scaled_logit
+                && current.token_id > worst.token_id);
+        if current_is_worse {
+            worst_index = candidate_index;
+        }
+    }
+    let worst = &candidates[worst_index];
+    let candidate_is_better = candidate.scaled_logit > worst.scaled_logit
+        || (candidate.scaled_logit == worst.scaled_logit && candidate.token_id < worst.token_id);
+    if candidate_is_better {
+        candidates[worst_index] = candidate;
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct ChatSamplingConstraints {
     bos_token_id: Option<u32>,
@@ -531,6 +570,8 @@ impl ChatSamplingState {
                 }
             }
         }
+        out.sort_unstable();
+        out.dedup();
         out
     }
 
@@ -560,6 +601,10 @@ impl ChatSamplingState {
     }
 }
 
+fn token_is_disallowed(disallowed_token_ids: &[u32], token_id: u32) -> bool {
+    disallowed_token_ids.binary_search(&token_id).is_ok()
+}
+
 fn select_top1_token_from_logits(
     logits: &[f32],
     disallowed_token_ids: &[u32],
@@ -567,7 +612,7 @@ fn select_top1_token_from_logits(
     let mut best: Option<MlxGreedyToken> = None;
     for (token_idx, &logit) in logits.iter().enumerate() {
         let token_id = token_idx as u32;
-        if disallowed_token_ids.contains(&token_id) {
+        if token_is_disallowed(disallowed_token_ids, token_id) {
             continue;
         }
         let better = match best {
@@ -583,28 +628,12 @@ fn select_top1_token_from_logits(
     best.ok_or_else(|| "no selectable token remained after suppression".to_string())
 }
 
-fn sample_token_from_logits(
-    logits: &[f32],
-    disallowed_token_ids: &[u32],
+fn finalize_sampled_candidates(
+    mut candidates: Vec<SampledTokenCandidate>,
+    fallback_top1: impl FnOnce() -> Result<MlxGreedyToken, String>,
     sampling_options: &GemmaTextSamplingOptions,
     rng: &mut MlxTextSamplingRng,
 ) -> Result<MlxGreedyToken, String> {
-    if !sampling_options.do_sample || sampling_options.temperature <= 0.0 {
-        return select_top1_token_from_logits(logits, disallowed_token_ids);
-    }
-
-    let mut candidates = logits
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(token_idx, _)| !disallowed_token_ids.contains(&(*token_idx as u32)))
-        .map(|(token_idx, logit)| SampledTokenCandidate {
-            token_id: token_idx as u32,
-            logit,
-            scaled_logit: logit / sampling_options.temperature,
-            prob: 0.0,
-        })
-        .collect::<Vec<_>>();
     if candidates.is_empty() {
         return Err("no selectable token remained after suppression".to_string());
     }
@@ -616,11 +645,6 @@ fn sample_token_from_logits(
             .then_with(|| lhs.token_id.cmp(&rhs.token_id))
     });
 
-    let top_k = sampling_options.top_k as usize;
-    if top_k > 0 && top_k < candidates.len() {
-        candidates.truncate(top_k);
-    }
-
     let max_scaled_logit = candidates[0].scaled_logit;
     let mut prob_sum = 0.0f64;
     for candidate in &mut candidates {
@@ -628,7 +652,7 @@ fn sample_token_from_logits(
         prob_sum += candidate.prob;
     }
     if prob_sum <= 0.0 || !prob_sum.is_finite() {
-        return select_top1_token_from_logits(logits, disallowed_token_ids);
+        return fallback_top1();
     }
     for candidate in &mut candidates {
         candidate.prob /= prob_sum;
@@ -672,6 +696,84 @@ fn sample_token_from_logits(
     })
 }
 
+pub(crate) fn sample_token_from_softcapped_bf16_bytes(
+    logits_bytes: &[u8],
+    softcap: Option<f32>,
+    disallowed_token_ids: &[u32],
+    sampling_options: &GemmaTextSamplingOptions,
+    rng: &mut MlxTextSamplingRng,
+) -> Result<MlxGreedyToken, String> {
+    if logits_bytes.len() % size_of::<u16>() != 0 {
+        return Err(format!(
+            "softcapped logits byte length {} is not a multiple of {}",
+            logits_bytes.len(),
+            size_of::<u16>()
+        ));
+    }
+
+    if !sampling_options.do_sample || sampling_options.temperature <= 0.0 {
+        let mut logits = Vec::with_capacity(logits_bytes.len() / size_of::<u16>());
+        for word_bytes in logits_bytes.chunks_exact(size_of::<u16>()) {
+            let raw_logit =
+                bf16_word_to_f32_local(u16::from_le_bytes([word_bytes[0], word_bytes[1]]));
+            logits.push(if let Some(softcap) = softcap {
+                bf16_round_to_f32_local((raw_logit / softcap).tanh() * softcap)
+            } else {
+                raw_logit
+            });
+        }
+        return select_top1_token_from_logits(&logits, disallowed_token_ids);
+    }
+
+    let top_k = sampling_options.top_k as usize;
+    let mut candidates =
+        Vec::with_capacity(top_k.max((logits_bytes.len() / size_of::<u16>()).min(1024)));
+    for (token_idx, word_bytes) in logits_bytes.chunks_exact(size_of::<u16>()).enumerate() {
+        let token_id = token_idx as u32;
+        if token_is_disallowed(disallowed_token_ids, token_id) {
+            continue;
+        }
+        let raw_logit =
+            bf16_word_to_f32_local(u16::from_le_bytes([word_bytes[0], word_bytes[1]]));
+        push_sampled_candidate_top_k(
+            &mut candidates,
+            SampledTokenCandidate {
+                token_id,
+                logit: raw_logit,
+                scaled_logit: raw_logit,
+                prob: 0.0,
+            },
+            top_k,
+        );
+    }
+    for candidate in &mut candidates {
+        candidate.logit = if let Some(softcap) = softcap {
+            bf16_round_to_f32_local((candidate.logit / softcap).tanh() * softcap)
+        } else {
+            candidate.logit
+        };
+        candidate.scaled_logit = candidate.logit / sampling_options.temperature;
+    }
+    finalize_sampled_candidates(
+        candidates,
+        || {
+            let mut logits = Vec::with_capacity(logits_bytes.len() / size_of::<u16>());
+            for word_bytes in logits_bytes.chunks_exact(size_of::<u16>()) {
+                let raw_logit =
+                    bf16_word_to_f32_local(u16::from_le_bytes([word_bytes[0], word_bytes[1]]));
+                logits.push(if let Some(softcap) = softcap {
+                    bf16_round_to_f32_local((raw_logit / softcap).tanh() * softcap)
+                } else {
+                    raw_logit
+                });
+            }
+            select_top1_token_from_logits(&logits, disallowed_token_ids)
+        },
+        sampling_options,
+        rng,
+    )
+}
+
 fn generate_sampled_token_ids<F>(
     runtime: &Arc<GemmaTextRuntimeSession>,
     prompt_token_ids: Arc<[u32]>,
@@ -696,15 +798,15 @@ where
         .map_err(|_| "exact backend mutex poisoned".to_string())?;
 
     let mut generated_token_ids = Vec::with_capacity(max_new_tokens.unwrap_or(32));
-    let first_logits = backend
-        .prefill_prompt_logits_from_token_ids(prompt_token_ids.as_ref(), 0)
+    let mut next_token = backend
+        .prefill_prompt_sampled_from_token_ids(
+            prompt_token_ids.as_ref(),
+            0,
+            &sampling_state.disallowed_token_ids(&constraints, stop_tokens, sampling_options),
+            sampling_options,
+            rng,
+        )
         .map_err(|err| err.to_string())?;
-    let mut next_token = sample_token_from_logits(
-        &first_logits,
-        &sampling_state.disallowed_token_ids(&constraints, stop_tokens, sampling_options),
-        sampling_options,
-        rng,
-    )?;
 
     loop {
         generated_token_ids.push(next_token.token_id);
@@ -729,15 +831,15 @@ where
             .checked_add(generated_token_ids.len())
             .and_then(|value| value.checked_sub(1))
             .ok_or_else(|| "generation cursor position overflow".to_string())?;
-        let logits = backend
-            .eval_token_logits_from_token_id(next_token.token_id, position)
+        next_token = backend
+            .eval_token_sampled_from_token_id(
+                next_token.token_id,
+                position,
+                &sampling_state.disallowed_token_ids(&constraints, stop_tokens, sampling_options),
+                sampling_options,
+                rng,
+            )
             .map_err(|err| err.to_string())?;
-        next_token = sample_token_from_logits(
-            &logits,
-            &sampling_state.disallowed_token_ids(&constraints, stop_tokens, sampling_options),
-            sampling_options,
-            rng,
-        )?;
     }
 }
 
@@ -1000,6 +1102,12 @@ impl GemmaTextModel {
         &self.runtime.weights.snapshot.tokenizer_config
     }
 
+    pub fn chat_sampling_options(&self) -> GemmaTextSamplingOptions {
+        GemmaTextSamplingOptions::chat_from_generation_config(
+            &self.runtime.weights.snapshot.generation_config,
+        )
+    }
+
     pub fn generate(
         &self,
         prompt_text: impl Into<String>,
@@ -1064,6 +1172,32 @@ impl GemmaTextModel {
         )
     }
 
+    pub(crate) fn generate_preformatted_greedy(
+        &self,
+        formatted_prompt_text: impl Into<String>,
+        max_new_tokens: Option<usize>,
+    ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
+        let formatted_prompt_text = Arc::<str>::from(formatted_prompt_text.into());
+        let prompt_text = formatted_prompt_text.clone();
+        let prompt_token_ids = self
+            .runtime
+            .tokenize_prompt(formatted_prompt_text.as_ref())
+            .map_err(|err| err.to_string())?;
+        let snapshot = self
+            .runtime
+            .start_generation_graph(prompt_token_ids.clone(), max_new_tokens)
+            .map_err(|err| err.to_string())?
+            .finish_snapshot()?;
+        build_generation_output(
+            &self.runtime,
+            prompt_text,
+            formatted_prompt_text,
+            prompt_token_ids,
+            snapshot,
+        )
+        .map_err(|err| err.into())
+    }
+
     pub fn stream_generate_preformatted<F>(
         &self,
         formatted_prompt_text: impl Into<String>,
@@ -1120,27 +1254,53 @@ impl GemmaTextModel {
             .runtime
             .tokenize_prompt(formatted_prompt_text.as_ref())
             .map_err(|err| err.to_string())?;
-
-        let mut streamed_text = String::new();
-        let (generated_token_ids, stop_reason) = generate_sampled_token_ids(
-            &self.runtime,
-            prompt_token_ids.clone(),
-            max_new_tokens,
-            sampling_options,
-            rng,
-            |generated_token_ids| {
-                let partial_text = self
-                    .decode_generated_text(generated_token_ids)
-                    .map_err(|err| err.to_string())?;
-                if let Some(delta) = partial_text.strip_prefix(&streamed_text) {
-                    if !delta.is_empty() {
-                        on_text_delta(delta).map_err(|err| err.to_string())?;
-                        streamed_text.push_str(delta);
+        let (generated_token_ids, stop_reason) = if sampling_options.allow_thought {
+            let mut streamed_text = String::new();
+            generate_sampled_token_ids(
+                &self.runtime,
+                prompt_token_ids.clone(),
+                max_new_tokens,
+                sampling_options,
+                rng,
+                |generated_token_ids| {
+                    let partial_text = self
+                        .decode_generated_text(generated_token_ids)
+                        .map_err(|err| err.to_string())?;
+                    if let Some(delta) = partial_text.strip_prefix(&streamed_text) {
+                        if !delta.is_empty() {
+                            on_text_delta(delta).map_err(|err| err.to_string())?;
+                            streamed_text.push_str(delta);
+                        }
                     }
-                }
-                Ok(())
-            },
-        )?;
+                    Ok(())
+                },
+            )?
+        } else {
+            let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
+            let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
+            let (generated_token_ids, stop_reason) = generate_sampled_token_ids(
+                &self.runtime,
+                prompt_token_ids.clone(),
+                max_new_tokens,
+                sampling_options,
+                rng,
+                |generated_token_ids| {
+                    let Some(&token_id) = generated_token_ids.last() else {
+                        return Ok(());
+                    };
+                    let delta = detokenizer.add_token(token_id, &skip_special_token_ids);
+                    if !delta.is_empty() {
+                        on_text_delta(&delta).map_err(|err| err.to_string())?;
+                    }
+                    Ok(())
+                },
+            )?;
+            let final_delta = detokenizer.finalize();
+            if !final_delta.is_empty() {
+                on_text_delta(&final_delta).map_err(|err| err.to_string())?;
+            }
+            (generated_token_ids, stop_reason)
+        };
 
         let output = build_generation_output_from_token_ids(
             &self.runtime,
@@ -1150,12 +1310,59 @@ impl GemmaTextModel {
             generated_token_ids,
             stop_reason,
         )?;
-        if let Some(delta) = output.generated_text.as_ref().strip_prefix(&streamed_text) {
-            if !delta.is_empty() {
-                on_text_delta(delta)?;
-            }
-        }
         Ok(output)
+    }
+
+    pub(crate) fn stream_generate_preformatted_greedy<F>(
+        &self,
+        formatted_prompt_text: impl Into<String>,
+        max_new_tokens: Option<usize>,
+        mut on_text_delta: F,
+    ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>>
+    where
+        F: FnMut(&str) -> Result<(), Box<dyn Error>>,
+    {
+        let formatted_prompt_text = Arc::<str>::from(formatted_prompt_text.into());
+        let prompt_text = formatted_prompt_text.clone();
+        let prompt_token_ids = self
+            .runtime
+            .tokenize_prompt(formatted_prompt_text.as_ref())
+            .map_err(|err| err.to_string())?;
+        let graph = self
+            .runtime
+            .start_generation_graph(prompt_token_ids.clone(), max_new_tokens)
+            .map_err(|err| err.to_string())?;
+        let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
+        let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
+        let mut emitted_count = 0usize;
+        loop {
+            let token_ids = graph.generated_token_ids_up_to(
+                emitted_count.saturating_add(GREEDY_STREAM_BATCH_TOKENS),
+            )?;
+            if token_ids.len() <= emitted_count {
+                break;
+            }
+            for &token_id in &token_ids[emitted_count..] {
+                let delta = detokenizer.add_token(token_id, &skip_special_token_ids);
+                if !delta.is_empty() {
+                    on_text_delta(&delta)?;
+                }
+            }
+            emitted_count = token_ids.len();
+        }
+        let final_delta = detokenizer.finalize();
+        if !final_delta.is_empty() {
+            on_text_delta(&final_delta)?;
+        }
+        let snapshot = graph.finish_snapshot()?;
+        build_generation_output(
+            &self.runtime,
+            prompt_text,
+            formatted_prompt_text,
+            prompt_token_ids,
+            snapshot,
+        )
+        .map_err(|err| err.into())
     }
 
     fn generate_from_formatted_arcs_with_rng(
