@@ -149,31 +149,45 @@ impl MlxModelSnapshot {
                 message: format!("unexpected model_type {}", self.config.model_type),
             });
         }
-        if self.config.quantization.bits != 4
+        let bits = self.config.quantization.bits;
+        if bits == 0
+            || bits > 8
+            || (bits & (bits - 1)) != 0
             || self.config.quantization.group_size != 64
             || self.config.quantization.mode != "affine"
         {
             return Err(MlxRtError::InvalidModelDir {
                 path: self.paths.root_dir.clone(),
-                message: "expected affine 4-bit group_size=64 quantization".to_string(),
-            });
-        }
-        if self.config.text_config.num_hidden_layers != 30 {
-            return Err(MlxRtError::InvalidModelDir {
-                path: self.paths.root_dir.clone(),
                 message: format!(
-                    "expected 30 text layers, got {}",
-                    self.config.text_config.num_hidden_layers
+                    "expected affine power-of-two quantization <= 8 bits with group_size=64, got bits={} group_size={} mode={}",
+                    self.config.quantization.bits,
+                    self.config.quantization.group_size,
+                    self.config.quantization.mode,
                 ),
             });
         }
-        if self.config.vision_config.num_hidden_layers != 27 {
+        if self.config.text_config.num_hidden_layers == 0 {
+            return Err(MlxRtError::InvalidModelDir {
+                path: self.paths.root_dir.clone(),
+                message: "expected at least one text layer".to_string(),
+            });
+        }
+        if self.config.text_config.layer_types.len()
+            != self.config.text_config.num_hidden_layers as usize
+        {
             return Err(MlxRtError::InvalidModelDir {
                 path: self.paths.root_dir.clone(),
                 message: format!(
-                    "expected 27 vision layers, got {}",
-                    self.config.vision_config.num_hidden_layers
+                    "layer_types length {} does not match num_hidden_layers {}",
+                    self.config.text_config.layer_types.len(),
+                    self.config.text_config.num_hidden_layers,
                 ),
+            });
+        }
+        if self.config.vision_config.num_hidden_layers == 0 {
+            return Err(MlxRtError::InvalidModelDir {
+                path: self.paths.root_dir.clone(),
+                message: "expected at least one vision layer".to_string(),
             });
         }
         for shard_name in self.unique_weight_shards() {
@@ -182,10 +196,18 @@ impl MlxModelSnapshot {
                 return Err(MlxRtError::MissingFile { path: shard_path });
             }
         }
+        let last_text_layer_idx = self
+            .config
+            .text_config
+            .num_hidden_layers
+            .checked_sub(1)
+            .ok_or_else(|| MlxRtError::InvalidModelDir {
+                path: self.paths.root_dir.clone(),
+                message: "expected at least one text layer".to_string(),
+            })?;
         for required_weight in [
             "language_model.model.embed_tokens.weight",
             "language_model.model.layers.0.self_attn.q_proj.weight",
-            "language_model.model.layers.29.self_attn.o_proj.weight",
             "vision_tower.patch_embedder.input_proj.weight",
             "embed_vision.embedding_projection.weight",
         ] {
@@ -195,6 +217,14 @@ impl MlxModelSnapshot {
                     message: format!("missing required tensor key {}", required_weight),
                 });
             }
+        }
+        let last_layer_o_proj =
+            format!("language_model.model.layers.{last_text_layer_idx}.self_attn.o_proj.weight");
+        if !self.weight_index.weight_map.contains_key(last_layer_o_proj.as_str()) {
+            return Err(MlxRtError::InvalidModelDir {
+                path: self.paths.model_safetensors_index_json.clone(),
+                message: format!("missing required tensor key {}", last_layer_o_proj),
+            });
         }
         Ok(())
     }
@@ -211,6 +241,47 @@ fn load_json<T: DeJson>(path: &Path) -> Result<T> {
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MlxTokenIdList(pub Vec<u32>);
+
+impl MlxTokenIdList {
+    pub fn iter(&self) -> std::slice::Iter<'_, u32> {
+        self.0.iter()
+    }
+}
+
+impl DeJson for MlxTokenIdList {
+    fn de_json(
+        s: &mut DeJsonState,
+        i: &mut std::str::Chars,
+    ) -> std::result::Result<Self, DeJsonErr> {
+        match s.tok {
+            makepad_micro_serde::DeJsonTok::U64(value) => {
+                s.next_tok(i)?;
+                Ok(Self(vec![u32::try_from(value)
+                    .map_err(|_| s.err_msg("token id does not fit in u32"))?]))
+            }
+            makepad_micro_serde::DeJsonTok::U128(value) => {
+                s.next_tok(i)?;
+                Ok(Self(vec![u32::try_from(value)
+                    .map_err(|_| s.err_msg("token id does not fit in u32"))?]))
+            }
+            makepad_micro_serde::DeJsonTok::I64(value) => {
+                s.next_tok(i)?;
+                Ok(Self(vec![u32::try_from(value)
+                    .map_err(|_| s.err_msg("token id must be a non-negative u32"))?]))
+            }
+            makepad_micro_serde::DeJsonTok::I128(value) => {
+                s.next_tok(i)?;
+                Ok(Self(vec![u32::try_from(value)
+                    .map_err(|_| s.err_msg("token id must be a non-negative u32"))?]))
+            }
+            makepad_micro_serde::DeJsonTok::BlockOpen => Ok(Self(Vec::<u32>::de_json(s, i)?)),
+            _ => Err(s.err_msg("expected token id or token id array")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, DeJson)]
 pub struct MlxModelConfig {
     pub architectures: Vec<String>,
@@ -222,7 +293,7 @@ pub struct MlxModelConfig {
     pub eoa_token_id: u32,
     pub eoa_token_index: u32,
     pub eoi_token_id: u32,
-    pub eos_token_id: Vec<u32>,
+    pub eos_token_id: MlxTokenIdList,
     pub image_token_id: u32,
     pub initializer_range: f32,
     pub model_type: String,
@@ -263,10 +334,11 @@ pub struct MlxTextConfig {
     pub layer_types: Vec<String>,
     pub max_position_embeddings: u32,
     pub model_type: String,
-    pub moe_intermediate_size: u32,
+    pub moe_intermediate_size: Option<u32>,
+    pub expert_intermediate_size: Option<u32>,
     pub num_attention_heads: u32,
-    pub num_experts: u32,
-    pub num_global_key_value_heads: u32,
+    pub num_experts: Option<u32>,
+    pub num_global_key_value_heads: Option<u32>,
     pub num_hidden_layers: u32,
     pub num_key_value_heads: u32,
     pub num_kv_shared_layers: u32,
@@ -275,12 +347,23 @@ pub struct MlxTextConfig {
     pub rope_parameters: MlxTextRopeParameters,
     pub sliding_window: u32,
     pub tie_word_embeddings: bool,
-    pub top_k_experts: u32,
-    pub use_bidirectional_attention: String,
+    pub top_k_experts: Option<u32>,
+    pub use_bidirectional_attention: Option<String>,
     pub use_cache: bool,
     pub use_double_wide_mlp: bool,
     pub vocab_size: u32,
     pub vocab_size_per_layer_input: u32,
+}
+
+impl MlxTextConfig {
+    pub fn top_k_experts_or_zero(&self) -> u32 {
+        self.top_k_experts.unwrap_or(0)
+    }
+
+    pub fn num_global_key_value_heads_or_default(&self) -> u32 {
+        self.num_global_key_value_heads
+            .unwrap_or(self.num_key_value_heads)
+    }
 }
 
 #[derive(Clone, Debug, DeJson)]
@@ -299,34 +382,34 @@ pub struct MlxRopeAttentionParameters {
 #[derive(Clone, Debug, DeJson)]
 pub struct MlxVisionConfig {
     #[rename(_name_or_path)]
-    pub _name_or_path: String,
+    pub _name_or_path: Option<String>,
     pub architectures: Option<Vec<String>>,
     pub attention_bias: bool,
     pub attention_dropout: f32,
-    pub chunk_size_feed_forward: u32,
+    pub chunk_size_feed_forward: Option<u32>,
     pub default_output_length: u32,
     pub dtype: String,
     pub global_head_dim: u32,
     pub head_dim: u32,
     pub hidden_activation: String,
     pub hidden_size: u32,
-    pub id2label: HashMap<String, String>,
-    pub initializer_range: f32,
+    pub id2label: Option<HashMap<String, String>>,
+    pub initializer_range: Option<f32>,
     pub intermediate_size: u32,
-    pub is_encoder_decoder: bool,
-    pub label2id: HashMap<String, u32>,
+    pub is_encoder_decoder: Option<bool>,
+    pub label2id: Option<HashMap<String, u32>>,
     pub max_position_embeddings: u32,
     pub model_type: String,
     pub num_attention_heads: u32,
     pub num_hidden_layers: u32,
     pub num_key_value_heads: u32,
-    pub output_attentions: bool,
-    pub output_hidden_states: bool,
+    pub output_attentions: Option<bool>,
+    pub output_hidden_states: Option<bool>,
     pub patch_size: u32,
     pub pooling_kernel_size: u32,
     pub position_embedding_size: u32,
     pub problem_type: Option<String>,
-    pub return_dict: bool,
+    pub return_dict: Option<bool>,
     pub rms_norm_eps: f32,
     pub rope_parameters: MlxVisionRopeParameters,
     pub standardize: bool,
@@ -343,7 +426,7 @@ pub struct MlxVisionRopeParameters {
 pub struct MlxGenerationConfig {
     pub bos_token_id: u32,
     pub do_sample: bool,
-    pub eos_token_id: Vec<u32>,
+    pub eos_token_id: MlxTokenIdList,
     pub pad_token_id: u32,
     pub temperature: f32,
     pub top_k: u32,
@@ -357,6 +440,8 @@ pub struct MlxProcessorConfig {
     pub image_processor: MlxImageProcessorConfig,
     pub image_seq_length: u32,
     pub processor_class: String,
+    pub feature_extractor: Option<JsonValue>,
+    pub audio_ms_per_token: Option<u32>,
 }
 
 #[derive(Clone, Debug, DeJson)]
@@ -408,7 +493,7 @@ pub struct MlxTokenizerConfig {
     pub pad_token: String,
     pub padding_side: String,
     pub processor_class: String,
-    pub response_schema: JsonValue,
+    pub response_schema: Option<JsonValue>,
     pub soc_token: String,
     pub sot_token: String,
     pub stc_token: String,
@@ -434,6 +519,7 @@ pub struct MlxWeightIndexMetadata {
 pub struct MlxIndexedSafetensors {
     pub snapshot: MlxModelSnapshot,
     pub shard_headers: HashMap<String, MlxSafetensorsHeader>,
+    bf16_tensor_cache: Arc<Mutex<HashMap<String, Arc<Vec<u16>>>>>,
 }
 
 impl MlxIndexedSafetensors {
@@ -448,6 +534,7 @@ impl MlxIndexedSafetensors {
         Ok(Self {
             snapshot,
             shard_headers,
+            bf16_tensor_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -488,6 +575,34 @@ impl MlxIndexedSafetensors {
 
     pub fn read_bf16_tensor_words(&self, name: &str) -> Result<Vec<u16>> {
         self.header_for_tensor(name)?.read_bf16_tensor_words(name)
+    }
+
+    pub fn read_bf16_tensor_words_cached(&self, name: &str) -> Result<Arc<Vec<u16>>> {
+        {
+            let cache = self
+                .bf16_tensor_cache
+                .lock()
+                .map_err(|_| MlxRtError::InvalidModelDir {
+                    path: self.snapshot.paths.root_dir.clone(),
+                    message: "bf16 tensor cache mutex poisoned".to_string(),
+                })?;
+            if let Some(words) = cache.get(name) {
+                return Ok(words.clone());
+            }
+        }
+
+        let words = Arc::new(self.read_bf16_tensor_words(name)?);
+        let mut cache = self
+            .bf16_tensor_cache
+            .lock()
+            .map_err(|_| MlxRtError::InvalidModelDir {
+                path: self.snapshot.paths.root_dir.clone(),
+                message: "bf16 tensor cache mutex poisoned".to_string(),
+            })?;
+        Ok(cache
+            .entry(name.to_owned())
+            .or_insert_with(|| words.clone())
+            .clone())
     }
 
     pub fn embed_token_f32(&self, token_id: u32) -> Result<Vec<f32>> {
@@ -552,5 +667,25 @@ impl MlxIndexedSafetensors {
             self.snapshot.config.quantization.bits,
             softcap,
         )
+    }
+
+    pub fn tied_text_logits_f32(&self, hidden_bf16_words: &[u16]) -> Result<Vec<f32>> {
+        let header = self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?;
+        let mut logits = header.affine_quantized_matmul_t_f32(
+            hidden_bf16_words,
+            EMBED_TOKENS_WEIGHT_NAME,
+            EMBED_TOKENS_SCALES_NAME,
+            EMBED_TOKENS_BIASES_NAME,
+            self.snapshot.config.quantization.group_size as u64,
+            self.snapshot.config.quantization.bits,
+        )?;
+        if let Some(softcap) = Some(self.snapshot.config.text_config.final_logit_softcapping)
+            .filter(|softcap| *softcap > 0.0)
+        {
+            for logit in &mut logits {
+                *logit = bf16_round_to_f32((*logit / softcap).tanh() * softcap);
+            }
+        }
+        Ok(logits)
     }
 }

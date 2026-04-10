@@ -1499,6 +1499,15 @@ struct ExactMetalQprojLayout {
     weight_words_per_row: u32,
     qparams_per_row: u32,
     out_rows: u32,
+    quant_bits: u32,
+    fast_n_in_multiple: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExactMetalQmvVariant {
+    Generic,
+    Fast,
+    FastWide,
 }
 
 impl ExactMetalQprojLayout {
@@ -1507,7 +1516,21 @@ impl ExactMetalQprojLayout {
     }
 
     fn uses_fast_qmv(self, n_in: u32) -> bool {
-        self.out_rows % 8 == 0 && n_in % 512 == 0
+        self.out_rows % 8 == 0 && n_in % self.fast_n_in_multiple == 0
+    }
+
+    fn uses_fast_qmv_wide(self, n_in: u32) -> bool {
+        self.quant_bits == 8 && self.out_rows % 8 == 0 && n_in % 512 == 0
+    }
+
+    fn qmv_variant(self, n_in: u32) -> ExactMetalQmvVariant {
+        if self.uses_fast_qmv_wide(n_in) {
+            ExactMetalQmvVariant::FastWide
+        } else if self.uses_fast_qmv(n_in) {
+            ExactMetalQmvVariant::Fast
+        } else {
+            ExactMetalQmvVariant::Generic
+        }
     }
 
     fn row_args(self, n_in: u32) -> MlxAffineQprojRowArgs {
@@ -1531,6 +1554,28 @@ impl ExactMetalQprojLayout {
             out_rows: self.out_rows,
             input_row_stride,
         }
+    }
+}
+
+fn exact_qmv_fast_n_in_multiple(quant_bits: u32) -> u32 {
+    match quant_bits {
+        8 => 256,
+        _ => 512,
+    }
+}
+
+fn exact_qproj_layout(
+    weight_words_per_row: u32,
+    qparams_per_row: u32,
+    out_rows: u32,
+    quant_bits: u32,
+) -> ExactMetalQprojLayout {
+    ExactMetalQprojLayout {
+        weight_words_per_row,
+        qparams_per_row,
+        out_rows,
+        quant_bits,
+        fast_n_in_multiple: exact_qmv_fast_n_in_multiple(quant_bits),
     }
 }
 
@@ -1634,6 +1679,7 @@ struct ExactMetalLayerPipelines {
     rms: MetalPipeline,
     proj: MetalPipeline,
     proj_fast: MetalPipeline,
+    proj_fast_wide: Option<MetalPipeline>,
     head_norm: MetalPipeline,
     rope: MetalPipeline,
     attention_logits_seq: MetalPipeline,
@@ -1647,6 +1693,8 @@ struct ExactMetalLayerPipelines {
     router_scale_pair: MetalPipeline,
     router_topk: MetalPipeline,
     selected_expert_proj: MetalPipeline,
+    selected_expert_proj_fast: MetalPipeline,
+    selected_expert_proj_fast_wide: Option<MetalPipeline>,
     scale_row: MetalPipeline,
 }
 
@@ -1674,6 +1722,8 @@ struct ExactMetalLayerWorkspace {
     v_head_count: usize,
     q_heads_per_kv: usize,
     head_dim: usize,
+    hidden_size: usize,
+    use_moe_block: bool,
     kv_cache_capacity_tokens: usize,
     eps: f32,
     layer_scalar: Option<f32>,
@@ -1708,6 +1758,8 @@ struct ExactMetalTextIoPipelines {
     dequant_row_from_token_buffer: MetalPipeline,
     rms: MetalPipeline,
     logits_proj: MetalPipeline,
+    logits_proj_fast: MetalPipeline,
+    logits_proj_fast_wide: Option<MetalPipeline>,
     argmax_softcapped_bf16: MetalPipeline,
 }
 
@@ -1717,6 +1769,7 @@ struct ExactMetalTextIoWorkspace {
     embed_qparams_row_bytes: usize,
     logits_qproj: ExactMetalQprojLayout,
     vocab_size: usize,
+    hidden_size: usize,
     eps: f32,
     softcap: Option<f32>,
     buffers: ExactMetalTextIoBuffers,
@@ -1728,16 +1781,45 @@ fn dispatch_exact_mlx_qmv_row(
     runtime: &MetalRuntime,
     generic_pipeline: &MetalPipeline,
     fast_pipeline: &MetalPipeline,
+    fast_wide_pipeline: Option<&MetalPipeline>,
     layout: ExactMetalQprojLayout,
     args: &MlxAffineQprojRowArgs,
     bindings: &[MetalBufferBindingRef<'_>],
     threadgroups: MetalSize,
     threads_per_threadgroup: MetalSize,
 ) -> Result<(), Box<dyn Error>> {
-    let pipeline = if layout.uses_fast_qmv(args.n_in) {
-        fast_pipeline
-    } else {
-        generic_pipeline
+    let pipeline = match layout.qmv_variant(args.n_in) {
+        ExactMetalQmvVariant::Generic => generic_pipeline,
+        ExactMetalQmvVariant::Fast => fast_pipeline,
+        ExactMetalQmvVariant::FastWide => fast_wide_pipeline.unwrap_or(fast_pipeline),
+    };
+    runtime.dispatch_compute_tracked(
+        pipeline,
+        bytes_of(args),
+        &bindings[..bindings.len() - 1],
+        &bindings[bindings.len() - 1..],
+        &[],
+        threadgroups,
+        threads_per_threadgroup,
+    )?;
+    Ok(())
+}
+
+fn dispatch_exact_mlx_selected_experts_qmv_row(
+    runtime: &MetalRuntime,
+    generic_pipeline: &MetalPipeline,
+    fast_pipeline: &MetalPipeline,
+    fast_wide_pipeline: Option<&MetalPipeline>,
+    layout: ExactMetalQprojLayout,
+    args: &MlxAffineSelectedExpertsQprojRowArgs,
+    bindings: &[MetalBufferBindingRef<'_>],
+    threadgroups: MetalSize,
+    threads_per_threadgroup: MetalSize,
+) -> Result<(), Box<dyn Error>> {
+    let pipeline = match layout.qmv_variant(args.n_in) {
+        ExactMetalQmvVariant::Generic => generic_pipeline,
+        ExactMetalQmvVariant::Fast => fast_pipeline,
+        ExactMetalQmvVariant::FastWide => fast_wide_pipeline.unwrap_or(fast_pipeline),
     };
     runtime.dispatch_compute_tracked(
         pipeline,
@@ -1778,18 +1860,40 @@ impl ExactMetalLayerWorkspace {
         let indexed = session.weights.clone();
         let runtime = session.runtime.clone();
         let text_config = &indexed.snapshot.config.text_config;
+        let quantization = &indexed.snapshot.config.quantization;
         let kv_layout = GemmaKvCacheLayout::from_text_config(text_config, 1)?;
         let cache_spec = kv_layout.cache_spec_for_layer(layer_idx)?.clone();
-        if !text_config.enable_moe_block {
-            return Err("exact metal text runtime currently expects Gemma MoE layers".into());
-        }
-        if text_config.top_k_experts as usize != ROUTER_TOP_K {
+        if quantization.mode != "affine" {
             return Err(format!(
-                "exact metal text runtime expects top_k_experts={}, got {}",
-                ROUTER_TOP_K, text_config.top_k_experts
+                "exact metal text runtime expects affine quantization, got {}",
+                quantization.mode
             )
             .into());
         }
+        if quantization.group_size != 64 {
+            return Err(format!(
+                "exact metal text runtime expects group_size=64, got {}",
+                quantization.group_size
+            )
+            .into());
+        }
+        if quantization.bits != 4 && quantization.bits != 8 {
+            return Err(format!(
+                "exact metal text runtime supports 4-bit or 8-bit affine weights, got {}",
+                quantization.bits
+            )
+            .into());
+        }
+        let use_moe_block = text_config.enable_moe_block;
+        if use_moe_block && text_config.top_k_experts_or_zero() as usize != ROUTER_TOP_K {
+            return Err(format!(
+                "exact metal text runtime expects top_k_experts={}, got {}",
+                ROUTER_TOP_K,
+                text_config.top_k_experts_or_zero()
+            )
+            .into());
+        }
+        let hidden_size = usize::try_from(text_config.hidden_size)?;
 
         let layer_type = text_config
             .layer_types
@@ -1824,31 +1928,66 @@ impl ExactMetalLayerWorkspace {
         let mlp_up_scales_entry = indexed.tensor(&layer_names.mlp_up_scales_name)?;
         let mlp_down_weight_entry = indexed.tensor(&layer_names.mlp_down_weight_name)?;
         let mlp_down_scales_entry = indexed.tensor(&layer_names.mlp_down_scales_name)?;
-        let router_proj_weight_entry = indexed.tensor(&layer_names.router_proj_weight_name)?;
-        let router_proj_scales_entry = indexed.tensor(&layer_names.router_proj_scales_name)?;
-        let expert_gate_weight_entry = indexed.tensor(&layer_names.expert_gate_weight_name)?;
-        let expert_gate_scales_entry = indexed.tensor(&layer_names.expert_gate_scales_name)?;
-        let expert_up_weight_entry = indexed.tensor(&layer_names.expert_up_weight_name)?;
-        let expert_up_scales_entry = indexed.tensor(&layer_names.expert_up_scales_name)?;
-        let expert_down_weight_entry = indexed.tensor(&layer_names.expert_down_weight_name)?;
-        let expert_down_scales_entry = indexed.tensor(&layer_names.expert_down_scales_name)?;
+        let router_proj_weight_entry = if use_moe_block {
+            Some(indexed.tensor(&layer_names.router_proj_weight_name)?)
+        } else {
+            None
+        };
+        let router_proj_scales_entry = if use_moe_block {
+            Some(indexed.tensor(&layer_names.router_proj_scales_name)?)
+        } else {
+            None
+        };
+        let expert_gate_weight_entry = if use_moe_block {
+            Some(indexed.tensor(&layer_names.expert_gate_weight_name)?)
+        } else {
+            None
+        };
+        let expert_gate_scales_entry = if use_moe_block {
+            Some(indexed.tensor(&layer_names.expert_gate_scales_name)?)
+        } else {
+            None
+        };
+        let expert_up_weight_entry = if use_moe_block {
+            Some(indexed.tensor(&layer_names.expert_up_weight_name)?)
+        } else {
+            None
+        };
+        let expert_up_scales_entry = if use_moe_block {
+            Some(indexed.tensor(&layer_names.expert_up_scales_name)?)
+        } else {
+            None
+        };
+        let expert_down_weight_entry = if use_moe_block {
+            Some(indexed.tensor(&layer_names.expert_down_weight_name)?)
+        } else {
+            None
+        };
+        let expert_down_scales_entry = if use_moe_block {
+            Some(indexed.tensor(&layer_names.expert_down_scales_name)?)
+        } else {
+            None
+        };
         let layer_scalar = load_optional_scalar_f32(&indexed, &layer_names.layer_scalar_name)?;
 
-        let q_proj = ExactMetalQprojLayout {
-            weight_words_per_row: q_weight_entry.shape[1] as u32,
-            qparams_per_row: q_scales_entry.shape[1] as u32,
-            out_rows: u32::try_from(q_weight_entry.shape[0])?,
-        };
-        let k_proj = ExactMetalQprojLayout {
-            weight_words_per_row: k_weight_entry.shape[1] as u32,
-            qparams_per_row: k_scales_entry.shape[1] as u32,
-            out_rows: u32::try_from(k_weight_entry.shape[0])?,
-        };
-        let v_proj = ExactMetalQprojLayout {
-            weight_words_per_row: v_weight_entry.shape[1] as u32,
-            qparams_per_row: v_scales_entry.shape[1] as u32,
-            out_rows: u32::try_from(v_weight_entry.shape[0])?,
-        };
+        let q_proj = exact_qproj_layout(
+            q_weight_entry.shape[1] as u32,
+            q_scales_entry.shape[1] as u32,
+            u32::try_from(q_weight_entry.shape[0])?,
+            quantization.bits,
+        );
+        let k_proj = exact_qproj_layout(
+            k_weight_entry.shape[1] as u32,
+            k_scales_entry.shape[1] as u32,
+            u32::try_from(k_weight_entry.shape[0])?,
+            quantization.bits,
+        );
+        let v_proj = exact_qproj_layout(
+            v_weight_entry.shape[1] as u32,
+            v_scales_entry.shape[1] as u32,
+            u32::try_from(v_weight_entry.shape[0])?,
+            quantization.bits,
+        );
         if q_proj.weight_words_per_row != k_proj.weight_words_per_row
             || q_proj.weight_words_per_row != v_proj.weight_words_per_row
             || q_proj.qparams_per_row != k_proj.qparams_per_row
@@ -1865,30 +2004,34 @@ impl ExactMetalLayerWorkspace {
             )
             .into());
         }
-        let qkv_proj = ExactMetalQprojLayout {
-            weight_words_per_row: q_proj.weight_words_per_row,
-            qparams_per_row: q_proj.qparams_per_row,
-            out_rows: q_proj
+        let qkv_proj = exact_qproj_layout(
+            q_proj.weight_words_per_row,
+            q_proj.qparams_per_row,
+            q_proj
                 .out_rows
                 .checked_add(k_proj.out_rows)
                 .and_then(|value| value.checked_add(v_proj.out_rows))
                 .ok_or("qkv combined out_rows overflow")?,
-        };
-        let o_proj = ExactMetalQprojLayout {
-            weight_words_per_row: o_weight_entry.shape[1] as u32,
-            qparams_per_row: o_scales_entry.shape[1] as u32,
-            out_rows: u32::try_from(o_weight_entry.shape[0])?,
-        };
-        let mlp_gate = ExactMetalQprojLayout {
-            weight_words_per_row: mlp_gate_weight_entry.shape[1] as u32,
-            qparams_per_row: mlp_gate_scales_entry.shape[1] as u32,
-            out_rows: u32::try_from(mlp_gate_weight_entry.shape[0])?,
-        };
-        let mlp_up = ExactMetalQprojLayout {
-            weight_words_per_row: mlp_up_weight_entry.shape[1] as u32,
-            qparams_per_row: mlp_up_scales_entry.shape[1] as u32,
-            out_rows: u32::try_from(mlp_up_weight_entry.shape[0])?,
-        };
+            quantization.bits,
+        );
+        let o_proj = exact_qproj_layout(
+            o_weight_entry.shape[1] as u32,
+            o_scales_entry.shape[1] as u32,
+            u32::try_from(o_weight_entry.shape[0])?,
+            quantization.bits,
+        );
+        let mlp_gate = exact_qproj_layout(
+            mlp_gate_weight_entry.shape[1] as u32,
+            mlp_gate_scales_entry.shape[1] as u32,
+            u32::try_from(mlp_gate_weight_entry.shape[0])?,
+            quantization.bits,
+        );
+        let mlp_up = exact_qproj_layout(
+            mlp_up_weight_entry.shape[1] as u32,
+            mlp_up_scales_entry.shape[1] as u32,
+            u32::try_from(mlp_up_weight_entry.shape[0])?,
+            quantization.bits,
+        );
         if mlp_gate.weight_words_per_row != mlp_up.weight_words_per_row
             || mlp_gate.qparams_per_row != mlp_up.qparams_per_row
         {
@@ -1901,62 +2044,96 @@ impl ExactMetalLayerWorkspace {
             )
             .into());
         }
-        let mlp_gate_up = ExactMetalQprojLayout {
-            weight_words_per_row: mlp_gate.weight_words_per_row,
-            qparams_per_row: mlp_gate.qparams_per_row,
-            out_rows: mlp_gate
+        let mlp_gate_up = exact_qproj_layout(
+            mlp_gate.weight_words_per_row,
+            mlp_gate.qparams_per_row,
+            mlp_gate
                 .out_rows
                 .checked_add(mlp_up.out_rows)
                 .ok_or("mlp gate/up combined out_rows overflow")?,
-        };
-        let mlp_down = ExactMetalQprojLayout {
-            weight_words_per_row: mlp_down_weight_entry.shape[1] as u32,
-            qparams_per_row: mlp_down_scales_entry.shape[1] as u32,
-            out_rows: u32::try_from(mlp_down_weight_entry.shape[0])?,
-        };
-        let router_proj = ExactMetalQprojLayout {
-            weight_words_per_row: router_proj_weight_entry.shape[1] as u32,
-            qparams_per_row: router_proj_scales_entry.shape[1] as u32,
-            out_rows: u32::try_from(router_proj_weight_entry.shape[0])?,
-        };
-        let expert_gate = ExactMetalQprojLayout {
-            weight_words_per_row: expert_gate_weight_entry.shape[2] as u32,
-            qparams_per_row: expert_gate_scales_entry.shape[2] as u32,
-            out_rows: u32::try_from(expert_gate_weight_entry.shape[1])?,
-        };
-        let expert_up = ExactMetalQprojLayout {
-            weight_words_per_row: expert_up_weight_entry.shape[2] as u32,
-            qparams_per_row: expert_up_scales_entry.shape[2] as u32,
-            out_rows: u32::try_from(expert_up_weight_entry.shape[1])?,
-        };
-        if expert_gate.weight_words_per_row != expert_up.weight_words_per_row
-            || expert_gate.qparams_per_row != expert_up.qparams_per_row
-            || expert_gate.out_rows != expert_up.out_rows
+            quantization.bits,
+        );
+        let mlp_down = exact_qproj_layout(
+            mlp_down_weight_entry.shape[1] as u32,
+            mlp_down_scales_entry.shape[1] as u32,
+            u32::try_from(mlp_down_weight_entry.shape[0])?,
+            quantization.bits,
+        );
+        let router_proj = if let (Some(weight_entry), Some(scales_entry)) =
+            (router_proj_weight_entry, router_proj_scales_entry)
         {
-            return Err(format!(
-                "expert gate/up layout mismatch in layer {layer_idx}: gate=({}, {}, {}) up=({}, {}, {})",
-                expert_gate.weight_words_per_row,
-                expert_gate.qparams_per_row,
-                expert_gate.out_rows,
-                expert_up.weight_words_per_row,
-                expert_up.qparams_per_row,
-                expert_up.out_rows,
+            exact_qproj_layout(
+                weight_entry.shape[1] as u32,
+                scales_entry.shape[1] as u32,
+                u32::try_from(weight_entry.shape[0])?,
+                quantization.bits,
             )
-            .into());
-        }
-        let expert_gate_up = ExactMetalQprojLayout {
-            weight_words_per_row: expert_gate.weight_words_per_row,
-            qparams_per_row: expert_gate.qparams_per_row,
-            out_rows: expert_gate
-                .out_rows
-                .checked_add(expert_up.out_rows)
-                .ok_or("expert gate/up combined out_rows overflow")?,
+        } else {
+            qproj_layout_dummy()
         };
-        let expert_down = ExactMetalQprojLayout {
-            weight_words_per_row: expert_down_weight_entry.shape[2] as u32,
-            qparams_per_row: expert_down_scales_entry.shape[2] as u32,
-            out_rows: u32::try_from(expert_down_weight_entry.shape[1])?,
-        };
+        let (expert_gate, _expert_up, expert_gate_up, expert_down) =
+            if let (
+                Some(gate_weight_entry),
+                Some(gate_scales_entry),
+                Some(up_weight_entry),
+                Some(up_scales_entry),
+                Some(down_weight_entry),
+                Some(down_scales_entry),
+            ) = (
+                expert_gate_weight_entry,
+                expert_gate_scales_entry,
+                expert_up_weight_entry,
+                expert_up_scales_entry,
+                expert_down_weight_entry,
+                expert_down_scales_entry,
+            ) {
+                let expert_gate = exact_qproj_layout(
+                    gate_weight_entry.shape[2] as u32,
+                    gate_scales_entry.shape[2] as u32,
+                    u32::try_from(gate_weight_entry.shape[1])?,
+                    quantization.bits,
+                );
+                let expert_up = exact_qproj_layout(
+                    up_weight_entry.shape[2] as u32,
+                    up_scales_entry.shape[2] as u32,
+                    u32::try_from(up_weight_entry.shape[1])?,
+                    quantization.bits,
+                );
+                if expert_gate.weight_words_per_row != expert_up.weight_words_per_row
+                    || expert_gate.qparams_per_row != expert_up.qparams_per_row
+                    || expert_gate.out_rows != expert_up.out_rows
+                {
+                    return Err(format!(
+                        "expert gate/up layout mismatch in layer {layer_idx}: gate=({}, {}, {}) up=({}, {}, {})",
+                        expert_gate.weight_words_per_row,
+                        expert_gate.qparams_per_row,
+                        expert_gate.out_rows,
+                        expert_up.weight_words_per_row,
+                        expert_up.qparams_per_row,
+                        expert_up.out_rows,
+                    )
+                    .into());
+                }
+                let expert_gate_up = exact_qproj_layout(
+                    expert_gate.weight_words_per_row,
+                    expert_gate.qparams_per_row,
+                    expert_gate
+                        .out_rows
+                        .checked_add(expert_up.out_rows)
+                        .ok_or("expert gate/up combined out_rows overflow")?,
+                    quantization.bits,
+                );
+                let expert_down = exact_qproj_layout(
+                    down_weight_entry.shape[2] as u32,
+                    down_scales_entry.shape[2] as u32,
+                    u32::try_from(down_weight_entry.shape[1])?,
+                    quantization.bits,
+                );
+                (expert_gate, expert_up, expert_gate_up, expert_down)
+            } else {
+                let dummy = qproj_layout_dummy();
+                (dummy, dummy, dummy, dummy)
+            };
 
         let post_attention_norm_len = usize::try_from(
             indexed
@@ -1968,36 +2145,49 @@ impl ExactMetalLayerWorkspace {
                 .tensor(&layer_names.pre_feedforward_norm_weight_name)?
                 .shape[0],
         )?;
-        let pre_feedforward_norm2_len = usize::try_from(
-            indexed
-                .tensor(&layer_names.pre_feedforward_norm2_weight_name)?
-                .shape[0],
-        )?;
         let post_feedforward_norm_len = usize::try_from(
             indexed
                 .tensor(&layer_names.post_feedforward_norm_weight_name)?
                 .shape[0],
         )?;
-        let post_feedforward_norm1_len = usize::try_from(
-            indexed
-                .tensor(&layer_names.post_feedforward_norm1_weight_name)?
-                .shape[0],
-        )?;
-        let post_feedforward_norm2_len = usize::try_from(
-            indexed
-                .tensor(&layer_names.post_feedforward_norm2_weight_name)?
-                .shape[0],
-        )?;
-        if post_attention_norm_len != NORM_LEN
-            || pre_feedforward_norm_len != NORM_LEN
-            || pre_feedforward_norm2_len != NORM_LEN
-            || post_feedforward_norm_len != NORM_LEN
-            || post_feedforward_norm1_len != NORM_LEN
-            || post_feedforward_norm2_len != NORM_LEN
-            || o_proj.out_len() != NORM_LEN
-            || mlp_down.out_len() != NORM_LEN
-            || expert_down.out_len() != NORM_LEN
-        {
+        let pre_feedforward_norm2_len = if use_moe_block {
+            usize::try_from(
+                indexed
+                    .tensor(&layer_names.pre_feedforward_norm2_weight_name)?
+                    .shape[0],
+            )?
+        } else {
+            hidden_size
+        };
+        let post_feedforward_norm1_len = if use_moe_block {
+            usize::try_from(
+                indexed
+                    .tensor(&layer_names.post_feedforward_norm1_weight_name)?
+                    .shape[0],
+            )?
+        } else {
+            hidden_size
+        };
+        let post_feedforward_norm2_len = if use_moe_block {
+            usize::try_from(
+                indexed
+                    .tensor(&layer_names.post_feedforward_norm2_weight_name)?
+                    .shape[0],
+            )?
+        } else {
+            hidden_size
+        };
+        let hidden_size_preserving = post_attention_norm_len == hidden_size
+            && pre_feedforward_norm_len == hidden_size
+            && post_feedforward_norm_len == hidden_size
+            && o_proj.out_len() == hidden_size
+            && mlp_down.out_len() == hidden_size;
+        let moe_hidden_size_preserving = !use_moe_block
+            || (pre_feedforward_norm2_len == hidden_size
+                && post_feedforward_norm1_len == hidden_size
+                && post_feedforward_norm2_len == hidden_size
+                && expert_down.out_len() == hidden_size);
+        if !hidden_size_preserving || !moe_hidden_size_preserving {
             return Err(format!(
                 "exact metal text runtime expects hidden-size-preserving layer {layer_idx}"
             )
@@ -2055,8 +2245,8 @@ impl ExactMetalLayerWorkspace {
         let rope_base_log2 = (rope_params.rope_theta as f32).log2();
 
         let buffers = ExactMetalLayerBuffers {
-            x: create_bf16_buffer(&runtime, NORM_LEN, BufferStorageMode::Shared)?,
-            h: create_bf16_buffer(&runtime, NORM_LEN, BufferStorageMode::Private)?,
+            x: create_bf16_buffer(&runtime, hidden_size, BufferStorageMode::Shared)?,
+            h: create_bf16_buffer(&runtime, hidden_size, BufferStorageMode::Private)?,
             qkv_proj_out: create_bf16_buffer(
                 &runtime,
                 qkv_proj.out_len(),
@@ -2111,44 +2301,63 @@ impl ExactMetalLayerWorkspace {
             )?,
             router_scaled_out: create_bf16_buffer(
                 &runtime,
-                post_attention_norm_len,
+                post_attention_norm_len.max(1),
                 BufferStorageMode::Private,
             )?,
             router_proj_out: create_bf16_buffer(
                 &runtime,
-                router_proj.out_len(),
+                router_proj.out_len().max(1),
                 BufferStorageMode::Private,
             )?,
             router_probs_out: create_bf16_buffer(
                 &runtime,
-                router_proj.out_len(),
+                router_proj.out_len().max(1),
                 BufferStorageMode::Private,
             )?,
             pre_feedforward_norm2_out: create_bf16_buffer(
                 &runtime,
-                pre_feedforward_norm2_len,
+                pre_feedforward_norm2_len.max(1),
                 BufferStorageMode::Private,
             )?,
             moe_top_k_indices: runtime
-                .create_buffer(ROUTER_TOP_K * size_of::<u32>(), BufferStorageMode::Private)?,
+                .create_buffer(
+                    if use_moe_block {
+                        ROUTER_TOP_K * size_of::<u32>()
+                    } else {
+                        size_of::<u32>()
+                    },
+                    BufferStorageMode::Private,
+                )?,
             moe_top_k_weights: create_bf16_buffer(
                 &runtime,
-                ROUTER_TOP_K,
+                if use_moe_block { ROUTER_TOP_K } else { 1 },
                 BufferStorageMode::Private,
             )?,
             expert_gate_up_out: create_bf16_buffer(
                 &runtime,
-                ROUTER_TOP_K * expert_gate_up.out_len(),
+                if use_moe_block {
+                    ROUTER_TOP_K * expert_gate_up.out_len()
+                } else {
+                    1
+                },
                 BufferStorageMode::Private,
             )?,
             expert_geglu_out: create_bf16_buffer(
                 &runtime,
-                ROUTER_TOP_K * expert_gate.out_len(),
+                if use_moe_block {
+                    ROUTER_TOP_K * expert_gate.out_len()
+                } else {
+                    1
+                },
                 BufferStorageMode::Private,
             )?,
             expert_down_out: create_bf16_buffer(
                 &runtime,
-                ROUTER_TOP_K * expert_down.out_len(),
+                if use_moe_block {
+                    ROUTER_TOP_K * expert_down.out_len()
+                } else {
+                    1
+                },
                 BufferStorageMode::Private,
             )?,
             post_feedforward_norm_out: create_bf16_buffer(
@@ -2158,27 +2367,27 @@ impl ExactMetalLayerWorkspace {
             )?,
             post_feedforward_norm1_out: create_bf16_buffer(
                 &runtime,
-                post_feedforward_norm1_len,
+                post_feedforward_norm1_len.max(1),
                 BufferStorageMode::Private,
             )?,
             moe_weighted_out: create_bf16_buffer(
                 &runtime,
-                post_feedforward_norm2_len,
+                post_feedforward_norm2_len.max(1),
                 BufferStorageMode::Private,
             )?,
             moe_post_ffn_norm2_out: create_bf16_buffer(
                 &runtime,
-                post_feedforward_norm2_len,
+                post_feedforward_norm2_len.max(1),
                 BufferStorageMode::Private,
             )?,
             moe_merge_out: create_bf16_buffer(
                 &runtime,
-                post_feedforward_norm1_len,
+                post_feedforward_norm1_len.max(1),
                 BufferStorageMode::Private,
             )?,
             post_ffn_residual_out: create_bf16_buffer(
                 &runtime,
-                post_feedforward_norm1_len,
+                hidden_size,
                 BufferStorageMode::Shared,
             )?,
         };
@@ -2187,6 +2396,7 @@ impl ExactMetalLayerWorkspace {
             &bytes_from_bf16_words(&vec![0x3F80u16; head_dim]),
             BufferStorageMode::Private,
         )?;
+        let dummy_private = create_private_zero_buffer(&runtime, size_of::<u32>())?;
         let weights = ExactMetalLayerWeights {
             input_norm_weight: session
                 .private_weight_buffer(&layer_names.input_norm_weight_name)?,
@@ -2227,8 +2437,11 @@ impl ExactMetalLayerWorkspace {
                 .private_weight_buffer(&layer_names.post_attention_norm_weight_name)?,
             pre_feedforward_norm_weight: session
                 .private_weight_buffer(&layer_names.pre_feedforward_norm_weight_name)?,
-            pre_feedforward_norm2_weight: session
-                .private_weight_buffer(&layer_names.pre_feedforward_norm2_weight_name)?,
+            pre_feedforward_norm2_weight: if use_moe_block {
+                session.private_weight_buffer(&layer_names.pre_feedforward_norm2_weight_name)?
+            } else {
+                dummy_private.clone()
+            },
             mlp_gate_up_weight: create_private_buffer_with_concatenated_tensors(
                 &runtime,
                 &indexed,
@@ -2256,57 +2469,114 @@ impl ExactMetalLayerWorkspace {
             mlp_down_weight: session.private_weight_buffer(&layer_names.mlp_down_weight_name)?,
             mlp_down_scales: session.private_weight_buffer(&layer_names.mlp_down_scales_name)?,
             mlp_down_biases: session.private_weight_buffer(&layer_names.mlp_down_biases_name)?,
-            router_scale_weight: session.private_weight_buffer(&layer_names.router_scale_name)?,
-            router_proj_weight: session
-                .private_weight_buffer(&layer_names.router_proj_weight_name)?,
-            router_proj_scales: session
-                .private_weight_buffer(&layer_names.router_proj_scales_name)?,
-            router_proj_biases: session
-                .private_weight_buffer(&layer_names.router_proj_biases_name)?,
-            router_per_expert_scale: session
-                .private_weight_buffer(&layer_names.router_per_expert_scale_name)?,
-            expert_gate_up_weight: create_private_buffer_with_concatenated_expert_tensors(
-                &runtime,
-                &indexed,
-                &[
-                    &layer_names.expert_gate_weight_name,
-                    &layer_names.expert_up_weight_name,
-                ],
-            )?,
-            expert_gate_up_scales: create_private_buffer_with_concatenated_expert_tensors(
-                &runtime,
-                &indexed,
-                &[
-                    &layer_names.expert_gate_scales_name,
-                    &layer_names.expert_up_scales_name,
-                ],
-            )?,
-            expert_gate_up_biases: create_private_buffer_with_concatenated_expert_tensors(
-                &runtime,
-                &indexed,
-                &[
-                    &layer_names.expert_gate_biases_name,
-                    &layer_names.expert_up_biases_name,
-                ],
-            )?,
-            expert_down_weight: session
-                .private_weight_buffer(&layer_names.expert_down_weight_name)?,
-            expert_down_scales: session
-                .private_weight_buffer(&layer_names.expert_down_scales_name)?,
-            expert_down_biases: session
-                .private_weight_buffer(&layer_names.expert_down_biases_name)?,
+            router_scale_weight: if use_moe_block {
+                session.private_weight_buffer(&layer_names.router_scale_name)?
+            } else {
+                dummy_private.clone()
+            },
+            router_proj_weight: if use_moe_block {
+                session.private_weight_buffer(&layer_names.router_proj_weight_name)?
+            } else {
+                dummy_private.clone()
+            },
+            router_proj_scales: if use_moe_block {
+                session.private_weight_buffer(&layer_names.router_proj_scales_name)?
+            } else {
+                dummy_private.clone()
+            },
+            router_proj_biases: if use_moe_block {
+                session.private_weight_buffer(&layer_names.router_proj_biases_name)?
+            } else {
+                dummy_private.clone()
+            },
+            router_per_expert_scale: if use_moe_block {
+                session.private_weight_buffer(&layer_names.router_per_expert_scale_name)?
+            } else {
+                dummy_private.clone()
+            },
+            expert_gate_up_weight: if use_moe_block {
+                create_private_buffer_with_concatenated_expert_tensors(
+                    &runtime,
+                    &indexed,
+                    &[
+                        &layer_names.expert_gate_weight_name,
+                        &layer_names.expert_up_weight_name,
+                    ],
+                )?
+            } else {
+                dummy_private.clone()
+            },
+            expert_gate_up_scales: if use_moe_block {
+                create_private_buffer_with_concatenated_expert_tensors(
+                    &runtime,
+                    &indexed,
+                    &[
+                        &layer_names.expert_gate_scales_name,
+                        &layer_names.expert_up_scales_name,
+                    ],
+                )?
+            } else {
+                dummy_private.clone()
+            },
+            expert_gate_up_biases: if use_moe_block {
+                create_private_buffer_with_concatenated_expert_tensors(
+                    &runtime,
+                    &indexed,
+                    &[
+                        &layer_names.expert_gate_biases_name,
+                        &layer_names.expert_up_biases_name,
+                    ],
+                )?
+            } else {
+                dummy_private.clone()
+            },
+            expert_down_weight: if use_moe_block {
+                session.private_weight_buffer(&layer_names.expert_down_weight_name)?
+            } else {
+                dummy_private.clone()
+            },
+            expert_down_scales: if use_moe_block {
+                session.private_weight_buffer(&layer_names.expert_down_scales_name)?
+            } else {
+                dummy_private.clone()
+            },
+            expert_down_biases: if use_moe_block {
+                session.private_weight_buffer(&layer_names.expert_down_biases_name)?
+            } else {
+                dummy_private.clone()
+            },
             post_feedforward_norm_weight: session
                 .private_weight_buffer(&layer_names.post_feedforward_norm_weight_name)?,
-            post_feedforward_norm1_weight: session
-                .private_weight_buffer(&layer_names.post_feedforward_norm1_weight_name)?,
-            post_feedforward_norm2_weight: session
-                .private_weight_buffer(&layer_names.post_feedforward_norm2_weight_name)?,
+            post_feedforward_norm1_weight: if use_moe_block {
+                session.private_weight_buffer(&layer_names.post_feedforward_norm1_weight_name)?
+            } else {
+                dummy_private.clone()
+            },
+            post_feedforward_norm2_weight: if use_moe_block {
+                session.private_weight_buffer(&layer_names.post_feedforward_norm2_weight_name)?
+            } else {
+                dummy_private.clone()
+            },
         };
 
+        let proj_pipeline_name = exact_affine_qmv_pipeline_name(quantization.bits, false, false)?;
+        let proj_fast_pipeline_name =
+            exact_affine_qmv_pipeline_name(quantization.bits, true, false)?;
+        let proj_fast_wide_pipeline_name =
+            exact_affine_qmv_fast_wide_pipeline_name(quantization.bits, false);
+        let selected_expert_pipeline_name =
+            exact_affine_qmv_pipeline_name(quantization.bits, false, true)?;
+        let selected_expert_fast_pipeline_name =
+            exact_affine_qmv_pipeline_name(quantization.bits, true, true)?;
+        let selected_expert_fast_wide_pipeline_name =
+            exact_affine_qmv_fast_wide_pipeline_name(quantization.bits, true);
         let pipelines = ExactMetalLayerPipelines {
             rms: compile_default_pipeline(&runtime, "kernel_mlx_rms_norm_row_bf16")?,
-            proj: compile_default_pipeline(&runtime, "kernel_mlx_affine_qmv_row_bf16")?,
-            proj_fast: compile_default_pipeline(&runtime, "kernel_mlx_affine_qmv_fast_row_bf16")?,
+            proj: compile_default_pipeline(&runtime, proj_pipeline_name)?,
+            proj_fast: compile_default_pipeline(&runtime, proj_fast_pipeline_name)?,
+            proj_fast_wide: proj_fast_wide_pipeline_name
+                .map(|name| compile_default_pipeline(&runtime, name))
+                .transpose()?,
             head_norm: compile_default_pipeline(&runtime, "kernel_mlx_rms_norm_rows_bf16")?,
             rope: compile_default_pipeline(&runtime, "kernel_mlx_rope_single_bf16")?,
             attention_logits_seq: compile_default_pipeline(
@@ -2321,7 +2591,7 @@ impl ExactMetalLayerWorkspace {
                 &runtime,
                 "kernel_mlx_gqa_attention_weighted_sum_bf16",
             )?,
-            o_proj_fast: compile_default_pipeline(&runtime, "kernel_mlx_affine_qmv_fast_row_bf16")?,
+            o_proj_fast: compile_default_pipeline(&runtime, proj_fast_pipeline_name)?,
             residual: compile_default_pipeline(&runtime, "kernel_mlx_add_row_bf16")?,
             weighted_sum_rows: compile_default_pipeline(
                 &runtime,
@@ -2337,10 +2607,14 @@ impl ExactMetalLayerWorkspace {
                 "kernel_mlx_router_scale_pair_bf16",
             )?,
             router_topk: compile_default_pipeline(&runtime, "kernel_mlx_router_topk_bf16")?,
-            selected_expert_proj: compile_default_pipeline(
+            selected_expert_proj: compile_default_pipeline(&runtime, selected_expert_pipeline_name)?,
+            selected_expert_proj_fast: compile_default_pipeline(
                 &runtime,
-                "kernel_mlx_affine_qmv_selected_experts_row_bf16",
+                selected_expert_fast_pipeline_name,
             )?,
+            selected_expert_proj_fast_wide: selected_expert_fast_wide_pipeline_name
+                .map(|name| compile_default_pipeline(&runtime, name))
+                .transpose()?,
             scale_row: compile_default_pipeline(&runtime, "kernel_mlx_scale_row_bf16")?,
         };
 
@@ -2367,6 +2641,8 @@ impl ExactMetalLayerWorkspace {
             v_head_count,
             q_heads_per_kv,
             head_dim,
+            hidden_size,
+            use_moe_block,
             kv_cache_capacity_tokens: cache_spec.max_tokens,
             eps: text_config.rms_norm_eps,
             layer_scalar,
@@ -2393,10 +2669,32 @@ impl ExactMetalTextIoWorkspace {
     fn load(session: &mut LayerExecutionSession) -> Result<Self, Box<dyn Error>> {
         let indexed = session.weights.clone();
         let runtime = session.runtime.clone();
+        let quantization = &indexed.snapshot.config.quantization;
         let embed_weight_entry = indexed.tensor(EMBED_TOKENS_WEIGHT_NAME)?;
         let embed_scales_entry = indexed.tensor(EMBED_TOKENS_SCALES_NAME)?;
         let embed_biases_entry = indexed.tensor(EMBED_TOKENS_BIASES_NAME)?;
         let final_norm_entry = indexed.tensor(FINAL_TEXT_NORM_WEIGHT_NAME)?;
+        if quantization.mode != "affine" {
+            return Err(format!(
+                "exact text IO expects affine quantization, got {}",
+                quantization.mode
+            )
+            .into());
+        }
+        if quantization.group_size != 64 {
+            return Err(format!(
+                "exact text IO expects group_size=64, got {}",
+                quantization.group_size
+            )
+            .into());
+        }
+        if quantization.bits != 4 && quantization.bits != 8 {
+            return Err(format!(
+                "exact text IO supports 4-bit or 8-bit affine weights, got {}",
+                quantization.bits
+            )
+            .into());
+        }
         if embed_weight_entry.shape.len() != 2
             || embed_scales_entry.shape.len() != 2
             || embed_biases_entry.shape.len() != 2
@@ -2407,24 +2705,18 @@ impl ExactMetalTextIoWorkspace {
             return Err("exact text IO expects rank-1 final norm weight".into());
         }
         let hidden_size = usize::try_from(final_norm_entry.shape[0])?;
-        if hidden_size != NORM_LEN {
-            return Err(format!(
-                "exact text IO hidden size mismatch: got {} expected {}",
-                hidden_size, NORM_LEN
-            )
-            .into());
-        }
         if embed_weight_entry.shape[0] != embed_scales_entry.shape[0]
             || embed_weight_entry.shape[0] != embed_biases_entry.shape[0]
             || embed_scales_entry.shape != embed_biases_entry.shape
         {
             return Err("exact text IO embed tensor shape mismatch".into());
         }
-        let logits_qproj = ExactMetalQprojLayout {
-            weight_words_per_row: u32::try_from(embed_weight_entry.shape[1])?,
-            qparams_per_row: u32::try_from(embed_scales_entry.shape[1])?,
-            out_rows: u32::try_from(embed_weight_entry.shape[0])?,
-        };
+        let logits_qproj = exact_qproj_layout(
+            u32::try_from(embed_weight_entry.shape[1])?,
+            u32::try_from(embed_scales_entry.shape[1])?,
+            u32::try_from(embed_weight_entry.shape[0])?,
+            quantization.bits,
+        );
         let embed_weight_row_bytes = usize::try_from(
             embed_weight_entry.shape[1]
                 .checked_mul(embed_weight_entry.dtype.byte_width())
@@ -2436,23 +2728,33 @@ impl ExactMetalTextIoWorkspace {
                 .ok_or("exact text IO embed qparams row stride overflow")?,
         )?;
         let vocab_size = usize::try_from(embed_weight_entry.shape[0])?;
+        let dequant_pipeline_name = exact_affine_dequant_pipeline_name(quantization.bits, false)?;
+        let dequant_from_token_pipeline_name =
+            exact_affine_dequant_pipeline_name(quantization.bits, true)?;
+        let logits_proj_pipeline_name =
+            exact_affine_qmv_pipeline_name(quantization.bits, false, false)?;
+        let logits_proj_fast_pipeline_name =
+            exact_affine_qmv_pipeline_name(quantization.bits, true, false)?;
+        let logits_proj_fast_wide_pipeline_name =
+            exact_affine_qmv_fast_wide_pipeline_name(quantization.bits, false);
 
         Ok(Self {
             embed_weight_row_bytes,
             embed_qparams_row_bytes,
             logits_qproj,
             vocab_size,
+            hidden_size,
             eps: indexed.snapshot.config.text_config.rms_norm_eps,
             softcap: Some(indexed.snapshot.config.text_config.final_logit_softcapping)
                 .filter(|softcap| *softcap > 0.0),
             buffers: ExactMetalTextIoBuffers {
                 standalone_hidden: create_bf16_buffer(
                     &runtime,
-                    NORM_LEN,
+                    hidden_size,
                     BufferStorageMode::Private,
                 )?,
-                hidden_scratch: create_bf16_buffer(&runtime, NORM_LEN, BufferStorageMode::Private)?,
-                final_norm_out: create_bf16_buffer(&runtime, NORM_LEN, BufferStorageMode::Private)?,
+                hidden_scratch: create_bf16_buffer(&runtime, hidden_size, BufferStorageMode::Private)?,
+                final_norm_out: create_bf16_buffer(&runtime, hidden_size, BufferStorageMode::Private)?,
                 logits_out: create_bf16_buffer(&runtime, vocab_size, BufferStorageMode::Shared)?,
                 argmax_index_out: runtime
                     .create_buffer(size_of::<u32>(), BufferStorageMode::Shared)?,
@@ -2468,16 +2770,17 @@ impl ExactMetalTextIoWorkspace {
                 final_norm_weight: session.private_weight_buffer(FINAL_TEXT_NORM_WEIGHT_NAME)?,
             },
             pipelines: ExactMetalTextIoPipelines {
-                dequant_row: compile_default_pipeline(
-                    &runtime,
-                    "kernel_mlx_affine_dequant_row_bf16",
-                )?,
+                dequant_row: compile_default_pipeline(&runtime, dequant_pipeline_name)?,
                 dequant_row_from_token_buffer: compile_default_pipeline(
                     &runtime,
-                    "kernel_mlx_affine_dequant_row_from_token_buffer_bf16",
+                    dequant_from_token_pipeline_name,
                 )?,
                 rms: compile_default_pipeline(&runtime, "kernel_mlx_rms_norm_row_bf16")?,
-                logits_proj: compile_default_pipeline(&runtime, "kernel_mlx_affine_qmv_row_bf16")?,
+                logits_proj: compile_default_pipeline(&runtime, logits_proj_pipeline_name)?,
+                logits_proj_fast: compile_default_pipeline(&runtime, logits_proj_fast_pipeline_name)?,
+                logits_proj_fast_wide: logits_proj_fast_wide_pipeline_name
+                    .map(|name| compile_default_pipeline(&runtime, name))
+                    .transpose()?,
                 argmax_softcapped_bf16: compile_default_pipeline(
                     &runtime,
                     "kernel_mlx_argmax_softcapped_bf16_single",
@@ -2650,14 +2953,17 @@ impl ExactMetalTextRuntimeSession {
                 spec.clone(),
             )?));
         }
-        Ok(Self {
+        let mut runtime = Self {
             session,
             kv_layout,
             kv_caches,
             kv_append_pipeline,
             text_io,
             layer_workspaces: HashMap::new(),
-        })
+        };
+        runtime.preload_all_layer_workspaces()?;
+        runtime.reset_runtime_counters();
+        Ok(runtime)
     }
 
     pub(crate) fn reset_kv_caches(&mut self) {
@@ -2860,6 +3166,21 @@ impl ExactMetalTextRuntimeSession {
             .ok_or_else(|| format!("missing exact metal workspace for layer {layer_idx}").into())
     }
 
+    fn preload_all_layer_workspaces(&mut self) -> Result<(), Box<dyn Error>> {
+        let layer_count = self
+            .session
+            .weights
+            .snapshot
+            .config
+            .text_config
+            .num_hidden_layers as usize;
+        for layer_idx in 0..layer_count {
+            let workspace = ExactMetalLayerWorkspace::load(&mut self.session, layer_idx)?;
+            self.layer_workspaces.insert(layer_idx, workspace);
+        }
+        Ok(())
+    }
+
     fn token_input_buffer(&mut self) -> Result<MetalBuffer, Box<dyn Error>> {
         Ok(self.text_io.buffers.standalone_hidden.clone())
     }
@@ -2904,10 +3225,8 @@ impl ExactMetalTextRuntimeSession {
         let runtime = self.session.runtime.clone();
         let owns_command_batch = !runtime.command_batch_is_active();
         let args = MlxAffineDequantRowArgs {
-            n: NORM_LEN as u32,
-            embed_scale: bf16_round_to_f32(
-                ((self.text_io.embed_weight_row_bytes / size_of::<u32>()) as f32).sqrt(),
-            ),
+            n: self.text_io.hidden_size as u32,
+            embed_scale: bf16_round_to_f32((self.text_io.hidden_size as f32).sqrt()),
         };
         if owns_command_batch {
             runtime.begin_command_batch()?;
@@ -2941,7 +3260,7 @@ impl ExactMetalTextRuntimeSession {
             3,
             &[],
             MetalSize {
-                width: (NORM_LEN as u64).div_ceil(64),
+                width: (self.text_io.hidden_size as u64).div_ceil(64),
                 height: 1,
                 depth: 1,
             },
@@ -2962,10 +3281,10 @@ impl ExactMetalTextRuntimeSession {
         words: &[u16],
         dst: &MetalBuffer,
     ) -> Result<(), Box<dyn Error>> {
-        if words.len() != NORM_LEN {
+        if words.len() != self.text_io.hidden_size {
             return Err(format!(
                 "expected {} bf16 embedding words, got {}",
-                NORM_LEN,
+                self.text_io.hidden_size,
                 words.len()
             )
             .into());
@@ -2995,10 +3314,8 @@ impl ExactMetalTextRuntimeSession {
         let runtime = self.session.runtime.clone();
         let owns_command_batch = !runtime.command_batch_is_active();
         let args = MlxAffineDequantTokenRowArgs {
-            n: NORM_LEN as u32,
-            embed_scale: bf16_round_to_f32(
-                ((self.text_io.embed_weight_row_bytes / size_of::<u32>()) as f32).sqrt(),
-            ),
+            n: self.text_io.hidden_size as u32,
+            embed_scale: bf16_round_to_f32((self.text_io.hidden_size as f32).sqrt()),
             weight_words_per_row: self.text_io.logits_qproj.weight_words_per_row,
             qparams_per_row: self.text_io.logits_qproj.qparams_per_row,
             vocab_size: self.text_io.vocab_size as u32,
@@ -3046,7 +3363,7 @@ impl ExactMetalTextRuntimeSession {
             4,
             &[],
             MetalSize {
-                width: (NORM_LEN as u64).div_ceil(64),
+                width: (self.text_io.hidden_size as u64).div_ceil(64),
                 height: 1,
                 depth: 1,
             },
@@ -3129,9 +3446,10 @@ impl ExactMetalTextRuntimeSession {
         let owns_command_batch = !runtime.command_batch_is_active();
         let n_reads = 4usize;
         let simd_size = 32usize;
-        let rms_threadgroup_size = simd_size * NORM_LEN.div_ceil(n_reads).div_ceil(simd_size);
+        let rms_threadgroup_size =
+            simd_size * self.text_io.hidden_size.div_ceil(n_reads).div_ceil(simd_size);
         let rms_args = MlxRmsNormRowArgs {
-            n: NORM_LEN as u32,
+            n: self.text_io.hidden_size as u32,
             eps: self.text_io.eps,
         };
         if owns_command_batch {
@@ -3180,15 +3498,21 @@ impl ExactMetalTextRuntimeSession {
     fn dispatch_logits_projection_from_final_norm(&mut self) -> Result<(), Box<dyn Error>> {
         let runtime = self.session.runtime.clone();
         let owns_command_batch = !runtime.command_batch_is_active();
-        let logits_args = self.text_io.logits_qproj.row_args(NORM_LEN as u32);
+        let logits_args = self
+            .text_io
+            .logits_qproj
+            .row_args(self.text_io.hidden_size as u32);
         if owns_command_batch {
             runtime.begin_command_batch()?;
         }
-        dispatch_compute_tracked_split(
+        dispatch_exact_mlx_qmv_row(
             &runtime,
             &self.text_io.pipelines.logits_proj,
-            bytes_of(&logits_args),
-            [
+            &self.text_io.pipelines.logits_proj_fast,
+            self.text_io.pipelines.logits_proj_fast_wide.as_ref(),
+            self.text_io.logits_qproj,
+            &logits_args,
+            &[
                 MetalBufferBindingRef {
                     index: 1,
                     buffer: &self.text_io.buffers.final_norm_out,
@@ -3215,8 +3539,6 @@ impl ExactMetalTextRuntimeSession {
                     offset_bytes: 0,
                 },
             ],
-            4,
-            &[],
             MetalSize {
                 width: 1,
                 height: (self.text_io.vocab_size as u64).div_ceil(8),
@@ -3242,6 +3564,12 @@ impl ExactMetalTextRuntimeSession {
             softcap: self.text_io.softcap.unwrap_or(0.0),
             has_softcap: u32::from(self.text_io.softcap.is_some()),
         };
+        let argmax_threads = self
+            .text_io
+            .pipelines
+            .argmax_softcapped_bf16
+            .max_threads_per_threadgroup
+            .min(256);
         if owns_command_batch {
             runtime.begin_command_batch()?;
         }
@@ -3269,7 +3597,7 @@ impl ExactMetalTextRuntimeSession {
                 depth: 1,
             },
             MetalSize {
-                width: 1,
+                width: argmax_threads,
                 height: 1,
                 depth: 1,
             },
@@ -3348,7 +3676,7 @@ impl ExactMetalTextRuntimeSession {
         Ok(bf16_words_from_f32_bits(&read_bf16_buffer_bits(
             &self.session.runtime,
             hidden_buffer,
-            NORM_LEN,
+            self.text_io.hidden_size,
         )?))
     }
 
@@ -3456,19 +3784,19 @@ impl ExactMetalTextRuntimeSession {
         position: usize,
         read_output: bool,
     ) -> Result<Option<Vec<u16>>, Box<dyn Error>> {
+        let workspace = self.layer_workspace(layer_idx)?;
         if let Some(input_words) = input_words {
-            if input_words.len() != NORM_LEN {
+            if input_words.len() != workspace.hidden_size {
                 return Err(format!(
                     "exact metal layer input length mismatch: got {} expected {}",
                     input_words.len(),
-                    NORM_LEN
+                    workspace.hidden_size
                 )
                 .into());
             }
         }
 
         let runtime = self.session.runtime.clone();
-        let workspace = self.layer_workspace(layer_idx)?;
         let input_hidden_buffer = input_hidden_buffer.unwrap_or(&workspace.buffers.x);
         let output_hidden_buffer =
             output_hidden_buffer.unwrap_or(&workspace.buffers.post_ffn_residual_out);
@@ -3481,7 +3809,8 @@ impl ExactMetalTextRuntimeSession {
 
         let n_reads = 4usize;
         let simd_size = 32usize;
-        let rms_threadgroup_size = simd_size * NORM_LEN.div_ceil(n_reads).div_ceil(simd_size);
+        let rms_threadgroup_size =
+            simd_size * workspace.hidden_size.div_ceil(n_reads).div_ceil(simd_size);
         let head_norm_threadgroup_size =
             simd_size * workspace.head_dim.div_ceil(n_reads).div_ceil(simd_size);
         let rms_threadgroups = MetalSize {
@@ -3644,10 +3973,10 @@ impl ExactMetalTextRuntimeSession {
         };
 
         let rms_args = MlxRmsNormRowArgs {
-            n: NORM_LEN as u32,
+            n: workspace.hidden_size as u32,
             eps: workspace.eps,
         };
-        let qkv_proj_args = workspace.qkv_proj.row_args(NORM_LEN as u32);
+        let qkv_proj_args = workspace.qkv_proj.row_args(workspace.hidden_size as u32);
         let o_proj_args = workspace.o_proj.row_args(workspace.q_proj.out_rows);
         let q_head_norm_args = MlxRmsNormRowsArgs {
             n: workspace.head_dim as u32,
@@ -3792,6 +4121,7 @@ impl ExactMetalTextRuntimeSession {
             &runtime,
             &workspace.pipelines.proj,
             &workspace.pipelines.proj_fast,
+            workspace.pipelines.proj_fast_wide.as_ref(),
             workspace.qkv_proj,
             &qkv_proj_args,
             &[
@@ -4086,6 +4416,7 @@ impl ExactMetalTextRuntimeSession {
             &runtime,
             &workspace.pipelines.proj,
             &workspace.pipelines.proj_fast,
+            workspace.pipelines.proj_fast_wide.as_ref(),
             workspace.o_proj,
             &o_proj_args,
             &[
@@ -4200,6 +4531,7 @@ impl ExactMetalTextRuntimeSession {
             &runtime,
             &workspace.pipelines.proj,
             &workspace.pipelines.proj_fast,
+            workspace.pipelines.proj_fast_wide.as_ref(),
             workspace.mlp_gate_up,
             &mlp_gate_up_args,
             &[
@@ -4262,6 +4594,7 @@ impl ExactMetalTextRuntimeSession {
             &runtime,
             &workspace.pipelines.proj,
             &workspace.pipelines.proj_fast,
+            workspace.pipelines.proj_fast_wide.as_ref(),
             workspace.mlp_down,
             &mlp_down_args,
             &[
@@ -4294,382 +4627,414 @@ impl ExactMetalTextRuntimeSession {
             mlp_down_threadgroups,
             proj_threads_per_threadgroup,
         )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.rms,
-            bytes_of(&post_ffn_norm1_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.mlp_down_out,
-                    offset_bytes: 0,
+        if workspace.use_moe_block {
+            dispatch_compute_tracked_split(
+                &runtime,
+                &workspace.pipelines.rms,
+                bytes_of(&post_ffn_norm1_args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.mlp_down_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.weights.post_feedforward_norm1_weight,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.buffers.post_feedforward_norm1_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                2,
+                &[],
+                rms_threadgroups,
+                rms_threads_per_threadgroup,
+            )?;
+            dispatch_compute_tracked_split(
+                &runtime,
+                &workspace.pipelines.router_scale_pair,
+                bytes_of(&router_scale_args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.residual_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.weights.router_scale_weight,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.weights.pre_feedforward_norm2_weight,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 4,
+                        buffer: &workspace.buffers.router_scaled_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 5,
+                        buffer: &workspace.buffers.pre_feedforward_norm2_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                3,
+                &[],
+                router_scale_threadgroups,
+                router_scale_threads_per_threadgroup,
+            )?;
+            dispatch_exact_mlx_qmv_row(
+                &runtime,
+                &workspace.pipelines.proj,
+                &workspace.pipelines.proj_fast,
+                workspace.pipelines.proj_fast_wide.as_ref(),
+                workspace.router_proj,
+                &router_proj_args,
+                &[
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.router_scaled_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.weights.router_proj_weight,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.weights.router_proj_scales,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 4,
+                        buffer: &workspace.weights.router_proj_biases,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 5,
+                        buffer: &workspace.buffers.router_proj_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                router_proj_threadgroups,
+                proj_threads_per_threadgroup,
+            )?;
+            dispatch_compute_tracked_split(
+                &runtime,
+                &workspace.pipelines.attention_softmax_rows,
+                bytes_of(&router_softmax_args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.router_proj_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.buffers.router_probs_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                1,
+                &[],
+                router_softmax_threadgroups,
+                mlx_softmax_threads_per_threadgroup(
+                    workspace.router_proj.out_rows as usize,
+                    workspace
+                        .pipelines
+                        .attention_softmax_rows
+                        .max_threads_per_threadgroup,
+                )?,
+            )?;
+            dispatch_compute_tracked_split(
+                &runtime,
+                &workspace.pipelines.router_topk,
+                bytes_of(&router_topk_args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.router_proj_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.buffers.router_probs_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.weights.router_per_expert_scale,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 4,
+                        buffer: &workspace.buffers.moe_top_k_indices,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 5,
+                        buffer: &workspace.buffers.moe_top_k_weights,
+                        offset_bytes: 0,
+                    },
+                ],
+                3,
+                &[],
+                router_topk_threadgroups,
+                router_topk_threads_per_threadgroup,
+            )?;
+            dispatch_exact_mlx_selected_experts_qmv_row(
+                &runtime,
+                &workspace.pipelines.selected_expert_proj,
+                &workspace.pipelines.selected_expert_proj_fast,
+                workspace.pipelines.selected_expert_proj_fast_wide.as_ref(),
+                workspace.expert_gate_up,
+                &expert_gate_args,
+                &[
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.pre_feedforward_norm2_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.buffers.moe_top_k_indices,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.weights.expert_gate_up_weight,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 4,
+                        buffer: &workspace.weights.expert_gate_up_scales,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 5,
+                        buffer: &workspace.weights.expert_gate_up_biases,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 6,
+                        buffer: &workspace.buffers.expert_gate_up_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                selected_expert_threadgroups,
+                selected_expert_threads_per_threadgroup,
+            )?;
+            dispatch_compute_tracked_split(
+                &runtime,
+                &workspace.pipelines.geglu_strided,
+                bytes_of(&expert_geglu_args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.expert_gate_up_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.buffers.expert_geglu_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                1,
+                &[],
+                expert_geglu_threadgroups,
+                geglu_threads_per_threadgroup,
+            )?;
+            dispatch_exact_mlx_selected_experts_qmv_row(
+                &runtime,
+                &workspace.pipelines.selected_expert_proj,
+                &workspace.pipelines.selected_expert_proj_fast,
+                workspace.pipelines.selected_expert_proj_fast_wide.as_ref(),
+                workspace.expert_down,
+                &expert_down_args,
+                &[
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.expert_geglu_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.buffers.moe_top_k_indices,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.weights.expert_down_weight,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 4,
+                        buffer: &workspace.weights.expert_down_scales,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 5,
+                        buffer: &workspace.weights.expert_down_biases,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 6,
+                        buffer: &workspace.buffers.expert_down_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                selected_expert_down_threadgroups,
+                selected_expert_threads_per_threadgroup,
+            )?;
+            dispatch_compute_tracked_split(
+                &runtime,
+                &workspace.pipelines.weighted_sum_rows,
+                bytes_of(&moe_weighted_args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.expert_down_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.buffers.moe_top_k_weights,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.buffers.moe_weighted_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                2,
+                &[],
+                MetalSize {
+                    width: workspace.expert_down.out_len() as u64,
+                    height: 1,
+                    depth: 1,
                 },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.weights.post_feedforward_norm1_weight,
-                    offset_bytes: 0,
+                MetalSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
                 },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.buffers.post_feedforward_norm1_out,
-                    offset_bytes: 0,
-                },
-            ],
-            2,
-            &[],
-            rms_threadgroups,
-            rms_threads_per_threadgroup,
-        )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.router_scale_pair,
-            bytes_of(&router_scale_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.residual_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.weights.router_scale_weight,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.weights.pre_feedforward_norm2_weight,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 4,
-                    buffer: &workspace.buffers.router_scaled_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 5,
-                    buffer: &workspace.buffers.pre_feedforward_norm2_out,
-                    offset_bytes: 0,
-                },
-            ],
-            3,
-            &[],
-            router_scale_threadgroups,
-            router_scale_threads_per_threadgroup,
-        )?;
-        dispatch_exact_mlx_qmv_row(
-            &runtime,
-            &workspace.pipelines.proj,
-            &workspace.pipelines.proj_fast,
-            workspace.router_proj,
-            &router_proj_args,
-            &[
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.router_scaled_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.weights.router_proj_weight,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.weights.router_proj_scales,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 4,
-                    buffer: &workspace.weights.router_proj_biases,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 5,
-                    buffer: &workspace.buffers.router_proj_out,
-                    offset_bytes: 0,
-                },
-            ],
-            router_proj_threadgroups,
-            proj_threads_per_threadgroup,
-        )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.attention_softmax_rows,
-            bytes_of(&router_softmax_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.router_proj_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.buffers.router_probs_out,
-                    offset_bytes: 0,
-                },
-            ],
-            1,
-            &[],
-            router_softmax_threadgroups,
-            mlx_softmax_threads_per_threadgroup(
-                workspace.router_proj.out_rows as usize,
-                workspace
-                    .pipelines
-                    .attention_softmax_rows
-                    .max_threads_per_threadgroup,
-            )?,
-        )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.router_topk,
-            bytes_of(&router_topk_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.router_proj_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.buffers.router_probs_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.weights.router_per_expert_scale,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 4,
-                    buffer: &workspace.buffers.moe_top_k_indices,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 5,
-                    buffer: &workspace.buffers.moe_top_k_weights,
-                    offset_bytes: 0,
-                },
-            ],
-            3,
-            &[],
-            router_topk_threadgroups,
-            router_topk_threads_per_threadgroup,
-        )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.selected_expert_proj,
-            bytes_of(&expert_gate_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.pre_feedforward_norm2_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.buffers.moe_top_k_indices,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.weights.expert_gate_up_weight,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 4,
-                    buffer: &workspace.weights.expert_gate_up_scales,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 5,
-                    buffer: &workspace.weights.expert_gate_up_biases,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 6,
-                    buffer: &workspace.buffers.expert_gate_up_out,
-                    offset_bytes: 0,
-                },
-            ],
-            5,
-            &[],
-            selected_expert_threadgroups,
-            selected_expert_threads_per_threadgroup,
-        )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.geglu_strided,
-            bytes_of(&expert_geglu_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.expert_gate_up_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.buffers.expert_geglu_out,
-                    offset_bytes: 0,
-                },
-            ],
-            1,
-            &[],
-            expert_geglu_threadgroups,
-            geglu_threads_per_threadgroup,
-        )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.selected_expert_proj,
-            bytes_of(&expert_down_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.expert_geglu_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.buffers.moe_top_k_indices,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.weights.expert_down_weight,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 4,
-                    buffer: &workspace.weights.expert_down_scales,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 5,
-                    buffer: &workspace.weights.expert_down_biases,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 6,
-                    buffer: &workspace.buffers.expert_down_out,
-                    offset_bytes: 0,
-                },
-            ],
-            5,
-            &[],
-            selected_expert_down_threadgroups,
-            selected_expert_threads_per_threadgroup,
-        )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.weighted_sum_rows,
-            bytes_of(&moe_weighted_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.expert_down_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.buffers.moe_top_k_weights,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.buffers.moe_weighted_out,
-                    offset_bytes: 0,
-                },
-            ],
-            2,
-            &[],
-            MetalSize {
-                width: workspace.expert_down.out_len() as u64,
-                height: 1,
-                depth: 1,
-            },
-            MetalSize {
-                width: 1,
-                height: 1,
-                depth: 1,
-            },
-        )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.rms,
-            bytes_of(&post_ffn_norm2_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.moe_weighted_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.weights.post_feedforward_norm2_weight,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.buffers.moe_post_ffn_norm2_out,
-                    offset_bytes: 0,
-                },
-            ],
-            2,
-            &[],
-            rms_threadgroups,
-            rms_threads_per_threadgroup,
-        )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.residual,
-            bytes_of(&residual_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.post_feedforward_norm1_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.buffers.moe_post_ffn_norm2_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.buffers.moe_merge_out,
-                    offset_bytes: 0,
-                },
-            ],
-            2,
-            &[],
-            residual_threadgroups,
-            residual_threads_per_threadgroup,
-        )?;
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.rms,
-            bytes_of(&post_ffn_norm_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.moe_merge_out,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &workspace.weights.post_feedforward_norm_weight,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.buffers.post_feedforward_norm_out,
-                    offset_bytes: 0,
-                },
-            ],
-            2,
-            &[],
-            rms_threadgroups,
-            rms_threads_per_threadgroup,
-        )?;
+            )?;
+            dispatch_compute_tracked_split(
+                &runtime,
+                &workspace.pipelines.rms,
+                bytes_of(&post_ffn_norm2_args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.moe_weighted_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.weights.post_feedforward_norm2_weight,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.buffers.moe_post_ffn_norm2_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                2,
+                &[],
+                rms_threadgroups,
+                rms_threads_per_threadgroup,
+            )?;
+            dispatch_compute_tracked_split(
+                &runtime,
+                &workspace.pipelines.residual,
+                bytes_of(&residual_args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.post_feedforward_norm1_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.buffers.moe_post_ffn_norm2_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.buffers.moe_merge_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                2,
+                &[],
+                residual_threadgroups,
+                residual_threads_per_threadgroup,
+            )?;
+            dispatch_compute_tracked_split(
+                &runtime,
+                &workspace.pipelines.rms,
+                bytes_of(&post_ffn_norm_args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.moe_merge_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.weights.post_feedforward_norm_weight,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.buffers.post_feedforward_norm_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                2,
+                &[],
+                rms_threadgroups,
+                rms_threads_per_threadgroup,
+            )?;
+        } else {
+            dispatch_compute_tracked_split(
+                &runtime,
+                &workspace.pipelines.rms,
+                bytes_of(&post_ffn_norm_args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: &workspace.buffers.mlp_down_out,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: &workspace.weights.post_feedforward_norm_weight,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: &workspace.buffers.post_feedforward_norm_out,
+                        offset_bytes: 0,
+                    },
+                ],
+                2,
+                &[],
+                rms_threadgroups,
+                rms_threads_per_threadgroup,
+            )?;
+        }
         dispatch_compute_tracked_split(
             &runtime,
             &workspace.pipelines.residual,
@@ -4750,12 +5115,13 @@ impl ExactMetalTextRuntimeSession {
         position: usize,
         read_output: bool,
     ) -> Result<Option<Vec<u16>>, Box<dyn Error>> {
+        let hidden_size = self.text_io.hidden_size;
         if let Some(input_words) = input_words {
-            if input_words.len() != NORM_LEN {
+            if input_words.len() != hidden_size {
                 return Err(format!(
                     "exact metal token input length mismatch: got {} expected {}",
                     input_words.len(),
-                    NORM_LEN
+                    hidden_size
                 )
                 .into());
             }
@@ -4778,7 +5144,7 @@ impl ExactMetalTextRuntimeSession {
             return Ok(Some(bf16_words_from_f32_bits(&read_bf16_buffer_bits(
                 &self.session.runtime,
                 &self.text_io.buffers.standalone_hidden,
-                NORM_LEN,
+                hidden_size,
             )?)));
         }
 
@@ -5237,11 +5603,11 @@ impl ExactMetalTextRuntimeSession {
         &mut self,
         hidden_words: &[u16],
     ) -> Result<MlxGreedyToken, Box<dyn Error>> {
-        if hidden_words.len() != NORM_LEN {
+        if hidden_words.len() != self.text_io.hidden_size {
             return Err(format!(
                 "exact metal hidden-word length mismatch: got {} expected {}",
                 hidden_words.len(),
-                NORM_LEN
+                self.text_io.hidden_size
             )
             .into());
         }
@@ -5259,11 +5625,11 @@ impl ExactMetalTextRuntimeSession {
         &mut self,
         hidden_words: &[u16],
     ) -> Result<(MlxGreedyToken, MlxGreedyToken), Box<dyn Error>> {
-        if hidden_words.len() != NORM_LEN {
+        if hidden_words.len() != self.text_io.hidden_size {
             return Err(format!(
                 "exact metal hidden-word length mismatch: got {} expected {}",
                 hidden_words.len(),
-                NORM_LEN
+                self.text_io.hidden_size
             )
             .into());
         }
@@ -5324,18 +5690,7 @@ impl ExactMetalGenerationCursor {
         if token_count == 0 {
             return Ok(Vec::new());
         }
-        if position == 0 {
-            backend.reset_kv_caches();
-        }
-        let mut current_token = token_id;
-        let mut generated = Vec::with_capacity(token_count);
-        for step_idx in 0..token_count {
-            let next_token = backend
-                .eval_token_greedy_token_id_from_token_id(current_token, position + step_idx)?;
-            generated.push(next_token);
-            current_token = next_token;
-        }
-        Ok(generated)
+        backend.eval_token_greedy_token_chunk_from_token_id(token_id, position, token_count)
     }
 
     fn ensure_prompt_prefilled_locked(
@@ -5449,14 +5804,6 @@ impl ExactMetalGenerationCursor {
                 self.stop_reason = Some(ExactMetalGenerationStopReason::MaxNewTokens);
                 break;
             }
-            if self.generated_token_ids.len() >= target {
-                break;
-            }
-            self.pending_next = Some(Self::eval_token_next_with_backend(
-                &mut backend,
-                next_token,
-                self.position - 1,
-            )?);
         }
         if self.reached_generation_limit() && self.stop_reason.is_none() {
             self.stop_reason = Some(ExactMetalGenerationStopReason::MaxNewTokens);
@@ -5663,6 +6010,60 @@ fn compile_default_pipeline(
     name: &str,
 ) -> Result<MetalPipeline, Box<dyn Error>> {
     compile_pipeline(runtime, name, 0)
+}
+
+fn qproj_layout_dummy() -> ExactMetalQprojLayout {
+    exact_qproj_layout(1, 1, 1, 4)
+}
+
+fn create_private_zero_buffer(
+    runtime: &MetalRuntime,
+    len_bytes: usize,
+) -> Result<MetalBuffer, Box<dyn Error>> {
+    let len_bytes = len_bytes.max(size_of::<u32>());
+    Ok(runtime.create_buffer_with_bytes(&vec![0u8; len_bytes], BufferStorageMode::Private)?)
+}
+
+fn exact_affine_qmv_pipeline_name(
+    quant_bits: u32,
+    fast: bool,
+    selected_experts: bool,
+) -> Result<&'static str, Box<dyn Error>> {
+    match (quant_bits, fast, selected_experts) {
+        (4, false, false) => Ok("kernel_mlx_affine_qmv_row_bf16"),
+        (4, true, false) => Ok("kernel_mlx_affine_qmv_fast_row_bf16"),
+        (4, false, true) => Ok("kernel_mlx_affine_qmv_selected_experts_row_bf16"),
+        (4, true, true) => Ok("kernel_mlx_affine_qmv_selected_experts_fast_row_bf16"),
+        (8, false, false) => Ok("kernel_mlx_affine_qmv_row_bf16_q8"),
+        (8, true, false) => Ok("kernel_mlx_affine_qmv_fast_row_bf16_q8"),
+        (8, false, true) => Ok("kernel_mlx_affine_qmv_selected_experts_row_bf16_q8"),
+        (8, true, true) => Ok("kernel_mlx_affine_qmv_selected_experts_fast_row_bf16_q8"),
+        _ => Err(format!("unsupported exact affine qmv quant bits {quant_bits}").into()),
+    }
+}
+
+fn exact_affine_qmv_fast_wide_pipeline_name(
+    quant_bits: u32,
+    selected_experts: bool,
+) -> Option<&'static str> {
+    match (quant_bits, selected_experts) {
+        (8, false) => Some("kernel_mlx_affine_qmv_fast_row_bf16_q8_wide"),
+        (8, true) => Some("kernel_mlx_affine_qmv_selected_experts_fast_row_bf16_q8_wide"),
+        _ => None,
+    }
+}
+
+fn exact_affine_dequant_pipeline_name(
+    quant_bits: u32,
+    from_token_buffer: bool,
+) -> Result<&'static str, Box<dyn Error>> {
+    match (quant_bits, from_token_buffer) {
+        (4, false) => Ok("kernel_mlx_affine_dequant_row_bf16"),
+        (4, true) => Ok("kernel_mlx_affine_dequant_row_from_token_buffer_bf16"),
+        (8, false) => Ok("kernel_mlx_affine_dequant_row_bf16_q8"),
+        (8, true) => Ok("kernel_mlx_affine_dequant_row_from_token_buffer_bf16_q8"),
+        _ => Err(format!("unsupported exact affine dequant quant bits {quant_bits}").into()),
+    }
 }
 
 fn compile_pipeline(
@@ -7960,11 +8361,12 @@ fn run_layer_plan_with_session_from_sequence(
     };
     let o_proj_layout =
         if let (Some(weight_entry), Some(scales_entry)) = (o_weight_entry, o_scales_entry) {
-            Some(ExactMetalQprojLayout {
-                weight_words_per_row: weight_entry.shape[1] as u32,
-                qparams_per_row: scales_entry.shape[1] as u32,
-                out_rows: o_out_len as u32,
-            })
+            Some(exact_qproj_layout(
+                weight_entry.shape[1] as u32,
+                scales_entry.shape[1] as u32,
+                o_out_len as u32,
+                4,
+            ))
         } else {
             None
         };
@@ -9350,6 +9752,7 @@ fn run_layer_plan_with_session_from_sequence(
             &runtime,
             &proj_pipeline,
             o_proj_fast_pipeline,
+            None,
             *o_proj_layout,
             o_proj_args,
             &o_proj_bindings,
@@ -10283,6 +10686,7 @@ fn run_layer_plan_with_session_from_sequence(
             &runtime,
             &proj_pipeline,
             o_proj_fast_pipeline,
+            None,
             *o_proj_layout,
             o_proj_args,
             &o_proj_bindings,

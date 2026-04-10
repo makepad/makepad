@@ -211,6 +211,7 @@ impl GemmaChatSession {
             &self.messages,
             self.current_image_path.is_some(),
         )?;
+        let greedy_sampling_options = self.sampling_options.greedy_variant();
         let output = match (self.decode_mode, self.current_image_path.as_deref()) {
             (GemmaChatDecodeMode::Sampled, Some(image_path)) => self
                 .model
@@ -229,12 +230,23 @@ impl GemmaChatSession {
                     &self.sampling_options,
                     &mut self.rng,
                 )?,
-            (GemmaChatDecodeMode::Greedy, Some(_)) => {
-                return Err("greedy multimodal chat is not wired yet".into());
-            }
+            (GemmaChatDecodeMode::Greedy, Some(image_path)) => self
+                .model
+                .generate_preformatted_multimodal_with_rng_and_sampling(
+                    image_path,
+                    formatted_prompt,
+                    self.max_new_tokens,
+                    &greedy_sampling_options,
+                    &mut self.rng,
+                )?,
             (GemmaChatDecodeMode::Greedy, None) => self
                 .model
-                .generate_preformatted_greedy(formatted_prompt, self.max_new_tokens)?,
+                .generate_preformatted_with_rng_and_sampling(
+                    formatted_prompt,
+                    self.max_new_tokens,
+                    &greedy_sampling_options,
+                    &mut self.rng,
+                )?,
         };
         self.messages.push(GemmaChatMessage::new(
             GemmaChatRole::Assistant,
@@ -259,6 +271,7 @@ impl GemmaChatSession {
             &self.messages,
             self.current_image_path.is_some(),
         )?;
+        let greedy_sampling_options = self.sampling_options.greedy_variant();
         let output = match (self.decode_mode, self.current_image_path.as_deref()) {
             (GemmaChatDecodeMode::Sampled, Some(image_path)) => self
                 .model
@@ -279,14 +292,23 @@ impl GemmaChatSession {
                     &mut self.rng,
                     on_text_delta,
                 )?,
-            (GemmaChatDecodeMode::Greedy, Some(_)) => {
-                return Err("greedy multimodal chat is not wired yet".into());
-            }
-            (GemmaChatDecodeMode::Greedy, None) => self
+            (GemmaChatDecodeMode::Greedy, Some(image_path)) => self
                 .model
-                .stream_generate_preformatted_greedy(
+                .stream_generate_preformatted_multimodal_with_rng_and_sampling(
+                    image_path,
                     formatted_prompt,
                     self.max_new_tokens,
+                    &greedy_sampling_options,
+                    &mut self.rng,
+                    on_text_delta,
+                )?,
+            (GemmaChatDecodeMode::Greedy, None) => self
+                .model
+                .stream_generate_preformatted_with_rng_and_sampling(
+                    formatted_prompt,
+                    self.max_new_tokens,
+                    &greedy_sampling_options,
+                    &mut self.rng,
                     on_text_delta,
                 )?,
         };

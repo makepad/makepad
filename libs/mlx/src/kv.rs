@@ -464,10 +464,10 @@ fn cache_spec_for_layer(
     };
     let kv_head_count = match attention {
         GemmaAttentionKind::Full
-            if config.attention_k_eq_v && config.num_global_key_value_heads != 0 =>
+            if config.attention_k_eq_v && config.num_global_key_value_heads_or_default() != 0 =>
         {
             checked_usize(
-                config.num_global_key_value_heads,
+                config.num_global_key_value_heads_or_default(),
                 "num_global_key_value_heads",
             )?
         }

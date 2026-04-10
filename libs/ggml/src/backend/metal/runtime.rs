@@ -1264,6 +1264,14 @@ mod imp {
                     .iter()
                     .find(|binding| Self::buffer_key(binding.buffer.as_id()) == key)
                 {
+                    // Private buffers are persistent GPU allocations. Counting their full size
+                    // against a per-command-buffer residency budget forces pathological rollover
+                    // on large-model exact decode because every projection weight is "seen" as a
+                    // new multi-megabyte buffer. Keep the byte heuristic for shared/host-visible
+                    // buffers and let the op-count limit govern private-weight-heavy batches.
+                    if binding.buffer.storage() != BufferStorageMode::Shared {
+                        continue;
+                    }
                     self.active_command_buffer_bytes = self
                         .active_command_buffer_bytes
                         .saturating_add(binding.buffer.size_bytes);

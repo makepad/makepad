@@ -1,6 +1,6 @@
     use super::{
         bf16_round_to_f32, bf16_word_to_f32, bf16_words_from_f32_bits, bytes_from_bf16_words,
-        compile_default_pipeline, default_model_path, print_cached_artifacts,
+        compile_default_pipeline, default_model_path, exact_qproj_layout, print_cached_artifacts,
         read_bf16_buffer_bits, read_exact_kv_cache_tensor_bits, read_f32_file_as_bf16_words, run_layer_plan,
         run_layer_plan_from_sequence, run_layer_plan_with_session,
         run_layer_plan_with_session_from_sequence, run_layer_sequence,
@@ -779,11 +779,12 @@
         let layer_names = LayerTensorNames::for_layer(layer_idx, attention_k_eq_v);
         let v_weight_entry = weights.tensor(&layer_names.v.weight_name).unwrap();
         let v_scales_entry = weights.tensor(&layer_names.v.scales_name).unwrap();
-        let v_layout = ExactMetalQprojLayout {
-            weight_words_per_row: v_weight_entry.shape[1] as u32,
-            qparams_per_row: v_scales_entry.shape[1] as u32,
-            out_rows: u32::try_from(v_weight_entry.shape[0]).unwrap(),
-        };
+        let v_layout = exact_qproj_layout(
+            v_weight_entry.shape[1] as u32,
+            v_scales_entry.shape[1] as u32,
+            u32::try_from(v_weight_entry.shape[0]).unwrap(),
+            weights.snapshot.config.quantization.bits,
+        );
 
         let mut session = LayerExecutionSession::load(model_path).unwrap();
         let artifacts = run_layer_plan_with_session_from_sequence(
