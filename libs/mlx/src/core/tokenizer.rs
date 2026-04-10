@@ -5,12 +5,101 @@ pub struct MlxTokenizer {
     tokens_by_id: Vec<String>,
     merge_ranks: HashMap<(String, String), usize>,
     special_tokens: Vec<(String, u32)>,
+    special_token_ids: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MlxGreedyToken {
     pub token_id: u32,
     pub logit: f32,
+}
+
+pub struct MlxStreamingDetokenizer<'a> {
+    tokenizer: &'a MlxTokenizer,
+    trim_space: bool,
+    text_started: bool,
+    unflushed: String,
+    byte_buffer: Vec<u8>,
+}
+
+impl<'a> MlxStreamingDetokenizer<'a> {
+    fn new(tokenizer: &'a MlxTokenizer, trim_space: bool) -> Self {
+        Self {
+            tokenizer,
+            trim_space,
+            text_started: false,
+            unflushed: String::new(),
+            byte_buffer: Vec::new(),
+        }
+    }
+
+    pub fn add_token(&mut self, token_id: u32, skip_special_token_ids: &[u32]) -> String {
+        if skip_special_token_ids.contains(&token_id) {
+            return String::new();
+        }
+
+        let Some(token) = self.tokenizer.id_to_token(token_id) else {
+            self.flush_bytes_into_unflushed();
+            let mut delta = self.take_unflushed();
+            delta.push_str(&self.render_text(&format!("<unused{token_id}>")));
+            return delta;
+        };
+
+        if let Some(byte) = parse_byte_fallback_token(token) {
+            self.byte_buffer.push(byte);
+            return String::new();
+        }
+
+        self.flush_bytes_into_unflushed();
+        if token.starts_with(&self.tokenizer.normalized_space) {
+            let delta = self.take_unflushed();
+            self.unflushed.clear();
+            self.unflushed.push_str(token);
+            return delta;
+        }
+
+        self.unflushed.push_str(token);
+        String::new()
+    }
+
+    pub fn finalize(&mut self) -> String {
+        self.flush_bytes_into_unflushed();
+        self.take_unflushed()
+    }
+
+    fn flush_bytes_into_unflushed(&mut self) {
+        if self.byte_buffer.is_empty() {
+            return;
+        }
+        let decoded = String::from_utf8_lossy(&self.byte_buffer);
+        self.unflushed.push_str(&decoded);
+        self.byte_buffer.clear();
+    }
+
+    fn take_unflushed(&mut self) -> String {
+        if self.unflushed.is_empty() {
+            return String::new();
+        }
+        let unflushed = std::mem::take(&mut self.unflushed);
+        let rendered = self.render_text(&unflushed);
+        self.unflushed.clear();
+        rendered
+    }
+
+    fn render_text(&mut self, text: &str) -> String {
+        let replaced = text.replace(&self.tokenizer.normalized_space, " ");
+        if self.text_started || !self.trim_space {
+            if !replaced.is_empty() {
+                self.text_started = true;
+            }
+            return replaced;
+        }
+        let trimmed = replaced.trim_start_matches(' ').to_owned();
+        if !trimmed.is_empty() {
+            self.text_started = true;
+        }
+        trimmed
+    }
 }
 
 impl MlxTokenizer {
@@ -202,6 +291,9 @@ impl MlxTokenizer {
                 .cmp(&lhs.0.len())
                 .then_with(|| lhs.0.cmp(&rhs.0))
         });
+        let mut special_token_ids = special_tokens.iter().map(|(_, token_id)| *token_id).collect::<Vec<_>>();
+        special_token_ids.sort_unstable();
+        special_token_ids.dedup();
 
         Ok(Self {
             normalized_space: normalizer_content,
@@ -209,6 +301,7 @@ impl MlxTokenizer {
             tokens_by_id,
             merge_ranks,
             special_tokens,
+            special_token_ids,
         })
     }
 
@@ -292,6 +385,14 @@ impl MlxTokenizer {
         }
         flush_pending_bytes(&mut out, &mut pending_bytes);
         Ok(out)
+    }
+
+    pub fn special_token_ids(&self) -> &[u32] {
+        &self.special_token_ids
+    }
+
+    pub fn streaming_detokenizer(&self, trim_space: bool) -> MlxStreamingDetokenizer<'_> {
+        MlxStreamingDetokenizer::new(self, trim_space)
     }
 
     fn encode_plain_text(&self, text: &str) -> Result<Vec<u32>> {

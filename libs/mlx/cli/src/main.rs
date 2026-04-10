@@ -1,8 +1,8 @@
-use makepad_mlx::chat::{GemmaChatRole, GemmaChatSession};
+use makepad_mlx::chat::{GemmaChatDecodeMode, GemmaChatRole, GemmaChatSession};
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn default_model_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -10,7 +10,7 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: mlx-cli [model.safetensors] [--max-new-tokens N]"
+    "Usage: mlx-cli [model.safetensors] [--max-new-tokens N] [--greedy]"
 }
 
 fn format_max_new_tokens(max_new_tokens: Option<usize>) -> String {
@@ -47,12 +47,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let mut model_path = default_model_path();
     let mut max_new_tokens = None;
+    let mut decode_mode = GemmaChatDecodeMode::Sampled;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--max-new-tokens" => {
                 let value = args.next().ok_or("--max-new-tokens requires a value")?;
                 max_new_tokens = Some(value.parse::<usize>()?);
+            }
+            "--greedy" => {
+                decode_mode = GemmaChatDecodeMode::Greedy;
             }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());
@@ -64,11 +68,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!("loading model={}...", model_path.display());
-    let mut session = GemmaChatSession::load(&model_path, max_new_tokens)?;
+    let mut session = GemmaChatSession::load_with_mode(&model_path, max_new_tokens, decode_mode)?;
     println!("model={}", model_path.display());
     println!(
         "max_new_tokens={}",
         format_max_new_tokens(session.max_new_tokens())
+    );
+    println!(
+        "decode_mode={}",
+        match session.decode_mode() {
+            GemmaChatDecodeMode::Sampled => "sampled",
+            GemmaChatDecodeMode::Greedy => "greedy",
+        }
     );
     println!("commands: /reset /history /exit");
     println!("ready");
@@ -109,11 +120,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         print!("assistant> ");
         io::stdout().flush()?;
         let started = Instant::now();
+        let mut buffered_output = String::new();
+        let mut last_flush = Instant::now();
         let output = session.send_user_message_streaming(input, |delta| {
-            print!("{delta}");
-            io::stdout().flush()?;
+            buffered_output.push_str(delta);
+            if buffered_output.contains('\n')
+                || buffered_output.len() >= 64
+                || last_flush.elapsed() >= Duration::from_millis(50)
+            {
+                print!("{buffered_output}");
+                buffered_output.clear();
+                io::stdout().flush()?;
+                last_flush = Instant::now();
+            }
             Ok(())
         })?;
+        if !buffered_output.is_empty() {
+            print!("{buffered_output}");
+        }
         println!();
         let elapsed = started.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
