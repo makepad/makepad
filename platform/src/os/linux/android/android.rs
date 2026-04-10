@@ -304,8 +304,30 @@ impl Cx {
             // This ensures we're in sync with the Android Choreographer when we receive a RenderLoop message.
             match from_java_rx.recv() {
                 Ok(FromJavaMessage::RenderLoop) => {
+                    // Drain all pending messages, coalescing consecutive touch-move
+                    // events to avoid redundant event dispatch before painting.
+                    // Start/Stop events are never dropped — only pure-Move events
+                    // are replaced by the next one.
+                    let mut pending_touch_move: Option<FromJavaMessage> = None;
                     while let Ok(msg) = from_java_rx.try_recv() {
+                        if let FromJavaMessage::Touch(ref touches) = msg {
+                            if touches.iter().all(|t| t.state == crate::event::finger::TouchState::Move) {
+                                // This is a pure move event — defer it; a newer one
+                                // may arrive and supersede it.
+                                pending_touch_move = Some(msg);
+                                continue;
+                            }
+                        }
+                        // A non-touch or non-pure-move message arrived.
+                        // Flush the deferred move first (if any) so ordering is preserved.
+                        if let Some(deferred) = pending_touch_move.take() {
+                            self.handle_message(deferred);
+                        }
                         self.handle_message(msg);
+                    }
+                    // Flush the last deferred move (if any).
+                    if let Some(deferred) = pending_touch_move.take() {
+                        self.handle_message(deferred);
                     }
                     self.handle_other_events();
                     if self.os.in_xr_mode && self.os.openxr.session.is_none() {
@@ -329,7 +351,23 @@ impl Cx {
                     // undefined behavior and crashes Mali/Adreno drivers with
                     // a SIGSEGV inside `render_view`.
                     if self.os.has_drawable_surface() {
+                        // If we previously skipped frames because the surface
+                        // wasn't ready, the redraw request may have been consumed
+                        // by an earlier draw cycle that couldn't actually paint.
+                        // Force a full redraw on the first frame after the surface
+                        // becomes (or becomes again) drawable.
+                        if self.os.needs_first_draw {
+                            self.os.needs_first_draw = false;
+                            self.redraw_all();
+                        }
                         self.handle_drawing();
+                    } else {
+                        // Surface not ready — remember that we need a full
+                        // redraw once it becomes available, since any pending
+                        // draw event may be consumed by handle_drawing() on
+                        // a future iteration when the surface is briefly valid
+                        // but immediately torn down again (rotation race).
+                        self.os.needs_first_draw = true;
                     }
                 }
                 Ok(message) => {
@@ -434,6 +472,9 @@ impl Cx {
                 // `suspend_surface`) issue EGL/Vulkan calls that can themselves
                 // trip the renderer if it observes a half-torn-down state.
                 self.os.surface_alive = false;
+                // Ensure the next time the surface becomes drawable, we force
+                // a full redraw to avoid a black screen.
+                self.os.needs_first_draw = true;
 
                 #[cfg(not(use_vulkan))]
                 unsafe {
@@ -1399,6 +1440,9 @@ impl Cx {
     }
 
     fn get_video_updates(&mut self) -> Vec<LiveId> {
+        if self.os.video_surfaces.is_empty() {
+            return Vec::new();
+        }
         let mut videos_to_update = Vec::new();
         for (live_id, surface_texture) in self.os.video_surfaces.iter_mut() {
             unsafe {
@@ -1976,7 +2020,7 @@ impl Cx {
                     self.draw_pass_to_window_for_active_backend(*draw_pass_id);
 
                     // Draw popup window passes as overlays on the same surface
-                    for popup_pass_id in &passes_todo.clone() {
+                    for popup_pass_id in &passes_todo {
                         if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent
                         {
                             let pw = &self.windows[pw_id];
@@ -2889,6 +2933,7 @@ impl Default for CxOs {
         Self {
             start_time: Instant::now(),
             first_after_resize: true,
+            needs_first_draw: true,
             frame_time: 0,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
@@ -2955,6 +3000,12 @@ pub(crate) struct AndroidSoftwarePlayer {
 
 pub struct CxOs {
     pub first_after_resize: bool,
+    /// Set to `true` when a `RenderLoop` callback arrives but the surface is not
+    /// yet drawable. When the surface later becomes ready, this flag triggers a
+    /// `redraw_all()` to ensure the first frame is painted. Without this, the app
+    /// can start up showing a black screen if the initial redraw request was
+    /// consumed before the surface was available.
+    pub needs_first_draw: bool,
     pub display_size: Vec2d,
     pub dpi_factor: f64,
     pub safe_area_insets: crate::event::SafeAreaInsets,
