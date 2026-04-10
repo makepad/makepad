@@ -3,7 +3,7 @@ use crate::android::{AndroidConfig, AndroidTarget, AndroidVariant, HostOs};
 use crate::makepad_shell::*;
 use crate::utils::*;
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashSet},
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -1012,6 +1012,134 @@ fn bundle_ndk_shared_deps(
     Ok(())
 }
 
+fn read_needed_shared_libs(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    urls: &AndroidSDKUrls,
+    so_path: &Path,
+) -> Result<Vec<String>, String> {
+    let (_ndk_version, ndk_prebuilt_root) =
+        resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
+
+    let readelf_path = ndk_prebuilt_root.join("bin/llvm-readelf");
+    if !readelf_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let cwd = std::env::current_dir().unwrap();
+    let output = shell_env_cap(
+        &[],
+        &cwd,
+        readelf_path.to_str().unwrap(),
+        &["-d", so_path.to_str().unwrap()],
+    )?;
+
+    let mut libs = Vec::new();
+    for line in output.lines() {
+        if !line.contains("(NEEDED)") {
+            continue;
+        }
+        let Some(lib_name) = line.find('[').and_then(|start| {
+            line[start + 1..]
+                .find(']')
+                .map(|end| &line[start + 1..start + 1 + end])
+        }) else {
+            continue;
+        };
+        libs.push(lib_name.to_string());
+    }
+    Ok(libs)
+}
+
+fn bundle_local_shared_deps(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    urls: &AndroidSDKUrls,
+    android_target: &AndroidTarget,
+    so_path: &Path,
+    abi: &str,
+    build_paths: &BuildPaths,
+    build_dir: &Path,
+) -> Result<(), String> {
+    let mut pending = vec![so_path.to_path_buf()];
+    let mut visited = HashSet::<String>::new();
+    let search_dirs = [build_dir.to_path_buf(), build_dir.join("deps")];
+
+    while let Some(current_so) = pending.pop() {
+        for lib_name in read_needed_shared_libs(sdk_dir, host_os, urls, &current_so)? {
+            if !visited.insert(lib_name.clone()) {
+                continue;
+            }
+
+            let binary_path = format!("lib/{abi}/{lib_name}");
+            let dst_lib = build_paths.out_dir.join(&binary_path);
+            if dst_lib.exists() {
+                continue;
+            }
+
+            let candidate = search_dirs
+                .iter()
+                .map(|dir| dir.join(&lib_name))
+                .find(|path| path.is_file())
+                .or_else(|| find_rustup_shared_lib(android_target, &lib_name));
+            let Some(candidate) = candidate else {
+                continue;
+            };
+
+            cp(&candidate, &dst_lib, false)?;
+            shell_env_cap(
+                &[],
+                &build_paths.out_dir,
+                aapt_path(sdk_dir, urls).to_str().unwrap(),
+                &[
+                    "add",
+                    build_paths.dst_unaligned_apk.to_str().unwrap(),
+                    &binary_path,
+                ],
+            )?;
+
+            // A local Rust dylib can still depend on NDK-provided shared libs.
+            bundle_ndk_shared_deps(
+                sdk_dir,
+                host_os,
+                urls,
+                android_target,
+                &dst_lib,
+                abi,
+                build_paths,
+            )?;
+
+            println!("  Bundled local shared dep: {lib_name} (for {abi})");
+            pending.push(candidate);
+        }
+    }
+
+    Ok(())
+}
+
+fn find_rustup_shared_lib(android_target: &AndroidTarget, lib_name: &str) -> Option<PathBuf> {
+    let rustup_home = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")))?;
+    let toolchains_dir = rustup_home.join("toolchains");
+    let tail = Path::new("lib")
+        .join("rustlib")
+        .join(android_target.toolchain())
+        .join("lib")
+        .join(lib_name);
+
+    for entry in fs::read_dir(toolchains_dir).ok()? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let candidate = entry.path().join(&tail);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn add_rust_library(
     sdk_dir: &Path,
     host_os: HostOs,
@@ -1038,7 +1166,8 @@ fn add_rust_library(
         let src_lib = target_dir.join(format!(
             "{android_target_dir}/{profile}/lib{underscore_target}.so"
         ));
-        build_dir = Some(target_dir.join(format!("{android_target_dir}/{profile}")));
+        let current_build_dir = target_dir.join(format!("{android_target_dir}/{profile}"));
+        build_dir = Some(current_build_dir.clone());
         let dst_lib = build_paths.out_dir.join(binary_path.clone());
         cp(&src_lib, &dst_lib, false)?;
 
@@ -1063,6 +1192,16 @@ fn add_rust_library(
             &dst_lib,
             abi,
             build_paths,
+        )?;
+        bundle_local_shared_deps(
+            sdk_dir,
+            host_os,
+            urls,
+            android_target,
+            &src_lib,
+            abi,
+            build_paths,
+            &current_build_dir,
         )?;
     }
     // for the quest variant add the precompiled openXR loader

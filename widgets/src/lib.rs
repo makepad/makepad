@@ -598,10 +598,30 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
         use makepad_script::trap::NoTrap;
         let insets = vm.cx().display_context.safe_area_insets;
         let widgets = vm.module(id!(widgets));
-        vm.bx.heap.set_value(widgets, id!(SAFE_INSET_PAD_TOP).into(), insets.top.into(), NoTrap);
-        vm.bx.heap.set_value(widgets, id!(SAFE_INSET_PAD_BOTTOM).into(), insets.bottom.into(), NoTrap);
-        vm.bx.heap.set_value(widgets, id!(SAFE_INSET_PAD_LEFT).into(), insets.left.into(), NoTrap);
-        vm.bx.heap.set_value(widgets, id!(SAFE_INSET_PAD_RIGHT).into(), insets.right.into(), NoTrap);
+        vm.bx.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_TOP).into(),
+            insets.top.into(),
+            NoTrap,
+        );
+        vm.bx.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_BOTTOM).into(),
+            insets.bottom.into(),
+            NoTrap,
+        );
+        vm.bx.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_LEFT).into(),
+            insets.left.into(),
+            NoTrap,
+        );
+        vm.bx.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_RIGHT).into(),
+            insets.right.into(),
+            NoTrap,
+        );
     }
 
     script_eval!(vm, {

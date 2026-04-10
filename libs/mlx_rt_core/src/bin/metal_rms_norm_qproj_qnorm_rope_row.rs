@@ -236,9 +236,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
             "--tensor-prefix" => {
-                tensor_prefix = args_iter
-                    .next()
-                    .ok_or("--tensor-prefix expects a value")?;
+                tensor_prefix = args_iter.next().ok_or("--tensor-prefix expects a value")?;
             }
             "--warmup" => {
                 let value = args_iter.next().ok_or("--warmup expects a value")?;
@@ -584,7 +582,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rope_bytes = runtime.read_buffer(&rope_buf, proj_out_len * 2)?;
 
     let decode_bits = |bytes: Vec<u8>| {
-        bytes.chunks_exact(2)
+        bytes
+            .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .map(bf16_word_to_f32)
             .map(f32::to_bits)

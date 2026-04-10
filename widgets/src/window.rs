@@ -287,7 +287,9 @@ impl Window {
 
     fn sync_caption_bar_height(&mut self, cx: &mut Cx) {
         // Explicit DSL override takes priority, then system-calculated.
-        let height = self.window.caption_bar_height_override
+        let height = self
+            .window
+            .caption_bar_height_override
             .or(self.system_caption_bar_height);
         if let Some(h) = height {
             let caption_bar = self.view(cx, ids!(caption_bar));
@@ -650,7 +652,9 @@ impl Widget for Window {
                         let buttons_rect = self.view(cx, ids!(windows_buttons)).area().rect(cx);
 
                         if caption_rect.contains(dq.abs) {
-                            if buttons_rect.size != Vec2d::default() && buttons_rect.contains(dq.abs) {
+                            if buttons_rect.size != Vec2d::default()
+                                && buttons_rect.contains(dq.abs)
+                            {
                                 dq.response.set(WindowDragQueryResponse::Client);
                             } else {
                                 dq.response.set(WindowDragQueryResponse::Caption);

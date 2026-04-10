@@ -95,6 +95,7 @@ pub enum ClientToHub {
 
     // === Build Control ===
     ListBuilds,
+    ListAppSockets,
     RunItem {
         mount: String,
         name: String,
@@ -295,6 +296,9 @@ pub enum HubToClient {
     // === Build ===
     Builds {
         builds: Vec<BuildInfo>,
+    },
+    AppSockets {
+        sockets: Vec<AppSocketInfo>,
     },
     RunItems {
         mount: String,
@@ -566,6 +570,15 @@ pub struct BuildInfo {
     pub mount: String,
     pub package: String,
     pub active: bool,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
+pub struct AppSocketInfo {
+    pub web_socket_id: u64,
+    pub build_id: QueryId,
+    pub mount: Option<String>,
+    pub package: Option<String>,
+    pub build_active: bool,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]

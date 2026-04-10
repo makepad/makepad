@@ -599,9 +599,9 @@ impl MacosWindow {
             let (t1, l1, r1, b1) = ns_to_rect(miniaturize);
             let (t2, l2, r2, b2) = ns_to_rect(zoom);
 
-            let top  = t0.min(t1).min(t2);
+            let top = t0.min(t1).min(t2);
             let left = l0.min(l1).min(l2);
-            let right  = r0.max(r1).max(r2);
+            let right = r0.max(r1).max(r2);
             let bottom = b0.max(b1).max(b2);
 
             // During a fullscreen transition the content view resizes before
@@ -615,7 +615,10 @@ impl MacosWindow {
 
             let rect = Rect {
                 pos: Vec2d { x: left, y: top },
-                size: Vec2d { x: right - left, y: bottom - top },
+                size: Vec2d {
+                    x: right - left,
+                    y: bottom - top,
+                },
             };
 
             Some(rect)

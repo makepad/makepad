@@ -581,7 +581,10 @@ pub fn define_shader_builtins(
             if let Some(v) = x_val.as_f16() {
                 return ScriptValue::from_u32(v.to_bits());
             }
-            let f = vm.bx.heap.cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
+            let f = vm
+                .bx
+                .heap
+                .cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
             ScriptValue::from_u32(f.to_bits())
         },
     );
@@ -607,7 +610,10 @@ pub fn define_shader_builtins(
             if let Some(v) = x_val.as_f16() {
                 return ScriptValue::from_i32(v.to_bits() as i32);
             }
-            let f = vm.bx.heap.cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
+            let f = vm
+                .bx
+                .heap
+                .cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
             ScriptValue::from_i32(f.to_bits() as i32)
         },
     );
@@ -630,7 +636,10 @@ pub fn define_shader_builtins(
             if let Some(v) = x_val.as_i32() {
                 return ScriptValue::from_f32(f32::from_bits(v as u32));
             }
-            let f = vm.bx.heap.cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
+            let f = vm
+                .bx
+                .heap
+                .cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
             ScriptValue::from_f32(f)
         },
     );

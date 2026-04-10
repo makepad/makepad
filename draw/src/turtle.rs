@@ -1709,7 +1709,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             // If this ancestor has a known (non-NaN) height, it already constrains
             // children via layout, so we don't need to look further up.
             if !ancestor.height().is_nan() {
-                let available = ancestor.inner_height() - consumed_padding + current.padding().height();
+                let available =
+                    ancestor.inner_height() - consumed_padding + current.padding().height();
                 max_height = max_height.min(available);
                 break;
             }

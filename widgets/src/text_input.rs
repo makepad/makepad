@@ -17,7 +17,7 @@ use {
             *,
         },
         makepad_script::{ScriptFnRef, ScriptRefOptionExt},
-        scroll_bar::{ScrollBar, ScrollAxis},
+        scroll_bar::{ScrollAxis, ScrollBar},
         widget::*,
         widget_async::ScriptAsyncResult,
     },
@@ -1102,10 +1102,7 @@ impl TextInput {
             return;
         };
         let view_rect = cx.turtle().inner_rect();
-        let view_total = dvec2(
-            view_rect.size.x,
-            laidout_text.size_in_lpxs.height as f64,
-        );
+        let view_total = dvec2(view_rect.size.x, laidout_text.size_in_lpxs.height as f64);
         // Sync scroll_y (which scroll_to_cursor may have updated) into the scrollbar.
         self.scroll_bar.set_scroll_pos_no_action(cx, self.scroll_y);
         self.scroll_bar
@@ -1638,9 +1635,7 @@ impl Widget for TextInput {
                     // with relative Fit bounds.
                     let max_scroll_y = self.cached_max_scroll_y;
                     if max_scroll_y > 0.0 {
-                        let new_scroll_y = (self.scroll_y + e.scroll.y)
-                            .max(0.0)
-                            .min(max_scroll_y);
+                        let new_scroll_y = (self.scroll_y + e.scroll.y).max(0.0).min(max_scroll_y);
                         if new_scroll_y != self.scroll_y {
                             self.scroll_y = new_scroll_y;
                             self.draw_bg.redraw(cx);
@@ -1653,11 +1648,7 @@ impl Widget for TextInput {
             // Handle clicking/dragging on the scrollbar handle itself.
             // We pass an empty callback because we sync scroll_y from the ScrollBar
             // below, only when the scrollbar has actually captured the finger.
-            self.scroll_bar.handle_event_with(
-                cx,
-                event,
-                &mut |_, _| {},
-            );
+            self.scroll_bar.handle_event_with(cx, event, &mut |_, _| {});
 
             // If the scrollbar has captured the finger (user is dragging the handle),
             // sync scroll_y from the ScrollBar (which is the source of truth during

@@ -640,7 +640,9 @@ impl App {
                 self.data
                     .terminal_frame_id_by_path
                     .insert(path.clone(), frame.frame_id);
-                self.data.terminal_framebuffer_by_path.insert(path.clone(), frame);
+                self.data
+                    .terminal_framebuffer_by_path
+                    .insert(path.clone(), frame);
                 self.refresh_active_mount_terminal_panel(cx, &path);
                 self.refresh_ai_manager_preview(cx);
                 self.process_ai_manager_task_terminal_update(cx, &path);

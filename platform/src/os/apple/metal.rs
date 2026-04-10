@@ -2440,6 +2440,7 @@ impl CglRenderBridge {
         type CGLPixelFormatObj = *mut c_void;
         type CGLContextObj = *mut c_void;
 
+        #[link(name = "OpenGL", kind = "framework")]
         extern "C" {
             fn CGLChoosePixelFormat(
                 attribs: *const u32,
@@ -2505,6 +2506,7 @@ impl CglRenderBridge {
     }
 
     pub fn make_current(&self) {
+        #[link(name = "OpenGL", kind = "framework")]
         extern "C" {
             fn CGLSetCurrentContext(ctx: *mut std::ffi::c_void) -> i32;
         }
@@ -2557,6 +2559,7 @@ impl CglRenderBridge {
         type GlGenTexturesFn = unsafe extern "C" fn(GLsizei, *mut GLuint);
         type GlBindTextureFn = unsafe extern "C" fn(GLenum, GLuint);
 
+        #[link(name = "OpenGL", kind = "framework")]
         extern "C" {
             fn CGLTexImageIOSurface2D(
                 ctx: *mut c_void,

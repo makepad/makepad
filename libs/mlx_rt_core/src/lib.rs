@@ -482,10 +482,12 @@ impl MlxIndexedSafetensors {
 
     pub fn tensor(&self, name: &str) -> Result<&MlxTensorEntry> {
         let header = self.header_for_tensor(name)?;
-        header.tensor(name).ok_or_else(|| MlxRtError::InvalidSafetensors {
-            path: header.path.clone(),
-            message: format!("tensor {} not found in shard header", name),
-        })
+        header
+            .tensor(name)
+            .ok_or_else(|| MlxRtError::InvalidSafetensors {
+                path: header.path.clone(),
+                message: format!("tensor {} not found in shard header", name),
+            })
     }
 
     pub fn read_tensor_bytes(&self, name: &str) -> Result<Vec<u8>> {
@@ -571,15 +573,17 @@ impl MlxTokenizer {
     }
 
     pub fn from_snapshot(snapshot: &MlxModelSnapshot) -> Result<Self> {
-        let text = fs::read_to_string(&snapshot.paths.tokenizer_json).map_err(|err| MlxRtError::Io {
-            path: snapshot.paths.tokenizer_json.clone(),
-            message: err.to_string(),
-        })?;
-        let root =
-            HashMap::<String, JsonValue>::deserialize_json(&text).map_err(|err| MlxRtError::Json {
+        let text =
+            fs::read_to_string(&snapshot.paths.tokenizer_json).map_err(|err| MlxRtError::Io {
+                path: snapshot.paths.tokenizer_json.clone(),
+                message: err.to_string(),
+            })?;
+        let root = HashMap::<String, JsonValue>::deserialize_json(&text).map_err(|err| {
+            MlxRtError::Json {
                 path: snapshot.paths.tokenizer_json.clone(),
                 message: format!("{:?}", err),
-            })?;
+            }
+        })?;
 
         let normalizer = tokenizer_object(
             &snapshot.paths.tokenizer_json,
@@ -745,7 +749,12 @@ impl MlxTokenizer {
             )?;
             special_tokens.push((content, token_id));
         }
-        special_tokens.sort_by(|lhs, rhs| rhs.0.len().cmp(&lhs.0.len()).then_with(|| lhs.0.cmp(&rhs.0)));
+        special_tokens.sort_by(|lhs, rhs| {
+            rhs.0
+                .len()
+                .cmp(&lhs.0.len())
+                .then_with(|| lhs.0.cmp(&rhs.0))
+        });
 
         Ok(Self {
             normalized_space: normalizer_content,
@@ -799,13 +808,14 @@ impl MlxTokenizer {
                 byte_index += special_len;
                 continue;
             }
-            let next = text[byte_index..]
-                .chars()
-                .next()
-                .ok_or_else(|| MlxRtError::InvalidModelDir {
-                    path: PathBuf::new(),
-                    message: "invalid tokenizer input slice".to_string(),
-                })?;
+            let next =
+                text[byte_index..]
+                    .chars()
+                    .next()
+                    .ok_or_else(|| MlxRtError::InvalidModelDir {
+                        path: PathBuf::new(),
+                        message: "invalid tokenizer input slice".to_string(),
+                    })?;
             plain.push(next);
             byte_index += next.len_utf8();
         }
@@ -841,7 +851,10 @@ impl MlxTokenizer {
             return Ok(Vec::new());
         }
         let normalized = text.replace(' ', &self.normalized_space);
-        let mut pieces = normalized.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+        let mut pieces = normalized
+            .chars()
+            .map(|ch| ch.to_string())
+            .collect::<Vec<_>>();
         while pieces.len() >= 2 {
             let mut best_index = None;
             let mut best_rank = usize::MAX;
@@ -869,14 +882,12 @@ impl MlxTokenizer {
             }
             for byte in piece.into_bytes() {
                 let byte_piece = format!("<0x{byte:02X}>");
-                let token_id = self
-                    .vocab
-                    .get(&byte_piece)
-                    .copied()
-                    .ok_or_else(|| MlxRtError::InvalidModelDir {
+                let token_id = self.vocab.get(&byte_piece).copied().ok_or_else(|| {
+                    MlxRtError::InvalidModelDir {
                         path: PathBuf::new(),
                         message: format!("missing byte fallback token {}", byte_piece),
-                    })?;
+                    }
+                })?;
                 token_ids.push(token_id);
             }
         }
@@ -1223,12 +1234,12 @@ impl MlxSafetensorsHeader {
                 message: format!("tensor {} plane {} out of range", name, plane),
             });
         }
-        let plane_elems = entry.shape[1]
-            .checked_mul(entry.shape[2])
-            .ok_or_else(|| MlxRtError::InvalidSafetensors {
+        let plane_elems = entry.shape[1].checked_mul(entry.shape[2]).ok_or_else(|| {
+            MlxRtError::InvalidSafetensors {
                 path: self.path.clone(),
                 message: format!("tensor {} plane element count overflow", name),
-            })?;
+            }
+        })?;
         let plane_bytes = plane_elems
             .checked_mul(entry.dtype.byte_width())
             .ok_or_else(|| MlxRtError::InvalidSafetensors {
@@ -1256,7 +1267,10 @@ impl MlxSafetensorsHeader {
         if end > file_offsets[1] {
             return Err(MlxRtError::InvalidSafetensors {
                 path: self.path.clone(),
-                message: format!("tensor {} plane {} extends past tensor payload", name, plane),
+                message: format!(
+                    "tensor {} plane {} extends past tensor payload",
+                    name, plane
+                ),
             });
         }
         let mut file = fs::File::open(&self.path).map_err(|err| MlxRtError::Io {
@@ -1783,7 +1797,8 @@ impl MlxSafetensorsHeader {
                 let group_start = group * words_per_group as usize * 4;
                 let group_end = group_start + words_per_group as usize * 4;
                 for chunk in weight_bytes[group_start..group_end].chunks_exact(4) {
-                    let mut packed_word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    let mut packed_word =
+                        u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                     for _ in 0..pack_factor {
                         let q = (packed_word & mask) as f32;
                         let deq_mul = bf16_round_to_f32(scale * q);
@@ -1989,16 +2004,19 @@ impl MlxSafetensorsHeader {
         weight_name: &str,
         eps: f32,
     ) -> Result<Vec<f32>> {
-        let weight_entry = self
-            .tensor(weight_name)
-            .ok_or_else(|| MlxRtError::InvalidSafetensors {
-                path: self.path.clone(),
-                message: format!("missing tensor {}", weight_name),
-            })?;
+        let weight_entry =
+            self.tensor(weight_name)
+                .ok_or_else(|| MlxRtError::InvalidSafetensors {
+                    path: self.path.clone(),
+                    message: format!("missing tensor {}", weight_name),
+                })?;
         if weight_entry.shape.len() != 1 {
             return Err(MlxRtError::InvalidSafetensors {
                 path: self.path.clone(),
-                message: format!("rms_norm expects rank-1 weight, got {:?}", weight_entry.shape),
+                message: format!(
+                    "rms_norm expects rank-1 weight, got {:?}",
+                    weight_entry.shape
+                ),
             });
         }
         let hidden = weight_entry.shape[0] as usize;
@@ -2096,7 +2114,8 @@ impl MlxSafetensorsHeader {
         for (index, value) in residual.iter().copied().enumerate() {
             let normed = bf16_round_to_f32(value * inv_rms);
             let scaled_root = bf16_round_to_f32(normed * root_size);
-            let scaled = bf16_round_to_f32(scaled_root * bf16_word_to_f32(router_scale_words[index]));
+            let scaled =
+                bf16_round_to_f32(scaled_root * bf16_word_to_f32(router_scale_words[index]));
             router_scaled.push(scaled);
             router_scaled_words.push(f32_to_bf16_word(scaled));
         }
@@ -2165,7 +2184,8 @@ impl MlxSafetensorsHeader {
         }
         for (slot, weight) in top_k_weights.iter_mut().enumerate() {
             let normalized = bf16_round_to_f32(*weight / top_k_sum);
-            let expert_scale = bf16_word_to_f32(per_expert_scale_words[top_k_indices[slot] as usize]);
+            let expert_scale =
+                bf16_word_to_f32(per_expert_scale_words[top_k_indices[slot] as usize]);
             *weight = bf16_round_to_f32(normalized * expert_scale);
         }
 
@@ -2212,8 +2232,11 @@ impl MlxSafetensorsHeader {
             });
         }
 
-        let pre_feedforward_norm2 =
-            self.rms_norm_weighted_f32(residual_bf16_words, pre_feedforward_norm2_weight_name, eps)?;
+        let pre_feedforward_norm2 = self.rms_norm_weighted_f32(
+            residual_bf16_words,
+            pre_feedforward_norm2_weight_name,
+            eps,
+        )?;
         let pre_feedforward_norm2_words = pre_feedforward_norm2
             .iter()
             .copied()
@@ -2305,8 +2328,7 @@ impl MlxSafetensorsHeader {
             for hidden_index in 0..hidden {
                 let weighted =
                     bf16_round_to_f32(down_proj[expert_slot * hidden + hidden_index] * weight);
-                expert_out[hidden_index] =
-                    bf16_round_to_f32(expert_out[hidden_index] + weighted);
+                expert_out[hidden_index] = bf16_round_to_f32(expert_out[hidden_index] + weighted);
             }
         }
 
@@ -2558,30 +2580,22 @@ fn tokenizer_bool(path: &Path, context: &str, value: Option<&JsonValue>) -> Resu
 
 fn tokenizer_u32(path: &Path, context: &str, value: Option<&JsonValue>) -> Result<u32> {
     match value {
-        Some(JsonValue::U64(number)) => {
-            u32::try_from(*number).map_err(|_| MlxRtError::Json {
-                path: path.to_path_buf(),
-                message: format!("{} value {} does not fit in u32", context, number),
-            })
-        }
-        Some(JsonValue::U128(number)) => {
-            u32::try_from(*number).map_err(|_| MlxRtError::Json {
-                path: path.to_path_buf(),
-                message: format!("{} value {} does not fit in u32", context, number),
-            })
-        }
-        Some(JsonValue::I64(number)) => {
-            u32::try_from(*number).map_err(|_| MlxRtError::Json {
-                path: path.to_path_buf(),
-                message: format!("{} value {} is negative or too large", context, number),
-            })
-        }
-        Some(JsonValue::I128(number)) => {
-            u32::try_from(*number).map_err(|_| MlxRtError::Json {
-                path: path.to_path_buf(),
-                message: format!("{} value {} is negative or too large", context, number),
-            })
-        }
+        Some(JsonValue::U64(number)) => u32::try_from(*number).map_err(|_| MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} value {} does not fit in u32", context, number),
+        }),
+        Some(JsonValue::U128(number)) => u32::try_from(*number).map_err(|_| MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} value {} does not fit in u32", context, number),
+        }),
+        Some(JsonValue::I64(number)) => u32::try_from(*number).map_err(|_| MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} value {} is negative or too large", context, number),
+        }),
+        Some(JsonValue::I128(number)) => u32::try_from(*number).map_err(|_| MlxRtError::Json {
+            path: path.to_path_buf(),
+            message: format!("{} value {} is negative or too large", context, number),
+        }),
         Some(other) => Err(MlxRtError::Json {
             path: path.to_path_buf(),
             message: format!("{} expected integer, got {:?}", context, other),
@@ -2593,12 +2607,20 @@ fn tokenizer_u32(path: &Path, context: &str, value: Option<&JsonValue>) -> Resul
     }
 }
 
-fn tokenizer_pattern_string(path: &Path, context: &str, value: Option<&JsonValue>) -> Result<String> {
+fn tokenizer_pattern_string(
+    path: &Path,
+    context: &str,
+    value: Option<&JsonValue>,
+) -> Result<String> {
     let object = tokenizer_object(path, context, value)?;
     tokenizer_string(path, &format!("{}.String", context), object.get("String"))
 }
 
-fn tokenizer_string_pair(path: &Path, context: &str, value: &JsonValue) -> Result<(String, String)> {
+fn tokenizer_string_pair(
+    path: &Path,
+    context: &str,
+    value: &JsonValue,
+) -> Result<(String, String)> {
     let array = match value {
         JsonValue::Array(array) => array,
         other => {

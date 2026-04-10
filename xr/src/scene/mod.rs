@@ -12,6 +12,10 @@ pub mod xr_peer_sync {
     pub use crate::sync::xr_peer_sync::*;
 }
 
+pub mod xr_scene_sync_controller {
+    pub use crate::sync::xr_scene_sync_controller::*;
+}
+
 pub(crate) use xr_gesture::{
     arm_pair_metrics, flat_head_forward, hand_closed_fist_contact_point,
     hand_closed_fist_contact_point_geometry_only,
@@ -19,6 +23,7 @@ pub(crate) use xr_gesture::{
 
 pub use crate::net::{XrActivityId, XrSpawnableObjectId};
 pub use crate::sync::xr_peer_sync::{XrPeerSync, XrPeerSyncAction};
+pub use crate::sync::xr_scene_sync_controller::XrSceneSyncController;
 pub use xr_body_spawn::{XrBodyDrive, XrBodyImpulse, XrBodySpawn, XrBodyWrench, XrCarControl};
 pub use xr_env::{DrawDepthMeshBasic, XrEnv};
 pub use xr_node::{
