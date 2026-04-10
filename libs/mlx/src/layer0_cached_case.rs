@@ -9,6 +9,9 @@ use crate::{
     fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words_with_phase, MlxDType,
     MlxGreedyToken, MlxIndexedSafetensors,
 };
+use crate::text_runtime::{
+    sample_token_from_softcapped_bf16_bytes, GemmaTextSamplingOptions, MlxTextSamplingRng,
+};
 use std::cell::{RefCell, RefMut};
 use std::collections::{BTreeSet, HashMap};
 use std::env;
@@ -3254,6 +3257,15 @@ impl ExactMetalTextRuntimeSession {
         Ok(())
     }
 
+    fn sampled_token_from_logits(
+        &mut self,
+        disallowed_token_ids: &[u32],
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+    ) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        self.read_shared_logits_sampled_token(disallowed_token_ids, sampling_options, rng)
+    }
+
     fn read_device_argmax_token_id(&self) -> Result<u32, Box<dyn Error>> {
         let runtime = self.session.runtime.clone();
         let token_id = runtime.with_readable_buffer(
@@ -3377,6 +3389,28 @@ impl ExactMetalTextRuntimeSession {
                     logits.push(logit);
                 }
                 Ok(logits)
+            },
+        )?)
+    }
+
+    fn read_shared_logits_sampled_token(
+        &self,
+        disallowed_token_ids: &[u32],
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+    ) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        let runtime = self.session.runtime.clone();
+        Ok(runtime.with_readable_buffer(
+            &self.text_io.buffers.logits_out,
+            self.text_io.vocab_size * size_of::<u16>(),
+            |bytes| {
+                sample_token_from_softcapped_bf16_bytes(
+                    bytes,
+                    self.text_io.softcap,
+                    disallowed_token_ids,
+                    sampling_options,
+                    rng,
+                )
             },
         )?)
     }
@@ -4840,6 +4874,33 @@ impl ExactMetalTextRuntimeSession {
         self.read_shared_logits_softcapped()
     }
 
+    pub(crate) fn eval_token_sampled_from_token_id(
+        &mut self,
+        token_id: u32,
+        position: usize,
+        disallowed_token_ids: &[u32],
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+    ) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        let input_buffer = self.token_input_buffer()?;
+        let runtime = self.session.runtime.clone();
+        runtime.begin_command_batch()?;
+        let batch_result = (|| -> Result<(), Box<dyn Error>> {
+            self.dequantize_token_embedding_into_buffer(token_id, &input_buffer)?;
+            self.eval_token_hidden_state_core(None, position, false)?;
+            let hidden_buffer = self.final_hidden_buffer()?;
+            self.dispatch_final_text_norm_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_logits_projection_from_final_norm()?;
+            Ok(())
+        })();
+        if let Err(err) = batch_result {
+            let _ = runtime.discard_command_batch();
+            return Err(err);
+        }
+        runtime.end_command_batch()?;
+        self.sampled_token_from_logits(disallowed_token_ids, sampling_options, rng)
+    }
+
     pub(crate) fn eval_token_greedy_from_token_id(
         &mut self,
         token_id: u32,
@@ -4971,6 +5032,42 @@ impl ExactMetalTextRuntimeSession {
         }
         runtime.end_command_batch()?;
         self.read_shared_logits_softcapped()
+    }
+
+    pub(crate) fn prefill_prompt_sampled_from_token_ids(
+        &mut self,
+        prompt_token_ids: &[u32],
+        start_position: usize,
+        disallowed_token_ids: &[u32],
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+    ) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        if prompt_token_ids.is_empty() {
+            return Err("prompt prefill requires at least one token".into());
+        }
+        if start_position == 0 {
+            self.reset_kv_caches();
+        }
+        let input_buffer = self.token_input_buffer()?;
+        let runtime = self.session.runtime.clone();
+        runtime.begin_command_batch()?;
+        let batch_result = (|| -> Result<(), Box<dyn Error>> {
+            for (offset, token_id) in prompt_token_ids.iter().copied().enumerate() {
+                let position = start_position + offset;
+                self.dequantize_token_embedding_into_buffer(token_id, &input_buffer)?;
+                self.eval_token_hidden_state_core(None, position, false)?;
+            }
+            let hidden_buffer = self.final_hidden_buffer()?;
+            self.dispatch_final_text_norm_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_logits_projection_from_final_norm()?;
+            Ok(())
+        })();
+        if let Err(err) = batch_result {
+            let _ = runtime.discard_command_batch();
+            return Err(err);
+        }
+        runtime.end_command_batch()?;
+        self.sampled_token_from_logits(disallowed_token_ids, sampling_options, rng)
     }
 
     pub(crate) fn prefill_prompt_hidden_words_from_token_ids(

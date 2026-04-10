@@ -21,6 +21,13 @@ impl GemmaChatRole {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GemmaChatDecodeMode {
+    #[default]
+    Sampled,
+    Greedy,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GemmaChatMessage {
     pub role: GemmaChatRole,
@@ -112,6 +119,7 @@ pub struct GemmaChatSession {
     model: GemmaTextModel,
     max_new_tokens: Option<usize>,
     rng: MlxTextSamplingRng,
+    decode_mode: GemmaChatDecodeMode,
     sampling_options: GemmaTextSamplingOptions,
     messages: Vec<GemmaChatMessage>,
 }
@@ -121,11 +129,22 @@ impl GemmaChatSession {
         model_path: impl AsRef<Path>,
         max_new_tokens: Option<usize>,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::load_with_mode(model_path, max_new_tokens, GemmaChatDecodeMode::Sampled)
+    }
+
+    pub fn load_with_mode(
+        model_path: impl AsRef<Path>,
+        max_new_tokens: Option<usize>,
+        decode_mode: GemmaChatDecodeMode,
+    ) -> Result<Self, Box<dyn Error>> {
+        let model = GemmaTextModel::load(model_path)?;
+        let sampling_options = model.chat_sampling_options();
         Ok(Self {
-            model: GemmaTextModel::load(model_path)?,
+            model,
             max_new_tokens,
             rng: MlxTextSamplingRng::new(0),
-            sampling_options: GemmaTextSamplingOptions::mlx_vlm_chat_default(),
+            decode_mode,
+            sampling_options,
             messages: Vec::new(),
         })
     }
@@ -136,6 +155,10 @@ impl GemmaChatSession {
 
     pub fn messages(&self) -> &[GemmaChatMessage] {
         &self.messages
+    }
+
+    pub fn decode_mode(&self) -> GemmaChatDecodeMode {
+        self.decode_mode
     }
 
     pub fn reset(&mut self) {
@@ -156,14 +179,19 @@ impl GemmaChatSession {
             .push(GemmaChatMessage::new(GemmaChatRole::User, content));
         let formatted_prompt =
             format_gemma4_chat_prompt(self.model.tokenizer_config(), &self.messages)?;
-        let output = self
-            .model
-            .generate_preformatted_with_rng_and_sampling(
-                formatted_prompt,
-                self.max_new_tokens,
-                &self.sampling_options,
-                &mut self.rng,
-            )?;
+        let output = match self.decode_mode {
+            GemmaChatDecodeMode::Sampled => self
+                .model
+                .generate_preformatted_with_rng_and_sampling(
+                    formatted_prompt,
+                    self.max_new_tokens,
+                    &self.sampling_options,
+                    &mut self.rng,
+                )?,
+            GemmaChatDecodeMode::Greedy => self
+                .model
+                .generate_preformatted_greedy(formatted_prompt, self.max_new_tokens)?,
+        };
         self.messages.push(GemmaChatMessage::new(
             GemmaChatRole::Assistant,
             output.generated_text.as_ref(),
@@ -184,15 +212,24 @@ impl GemmaChatSession {
             .push(GemmaChatMessage::new(GemmaChatRole::User, content));
         let formatted_prompt =
             format_gemma4_chat_prompt(self.model.tokenizer_config(), &self.messages)?;
-        let output = self
-            .model
-            .stream_generate_preformatted_with_rng_and_sampling(
-                formatted_prompt,
-                self.max_new_tokens,
-                &self.sampling_options,
-                &mut self.rng,
-                on_text_delta,
-            )?;
+        let output = match self.decode_mode {
+            GemmaChatDecodeMode::Sampled => self
+                .model
+                .stream_generate_preformatted_with_rng_and_sampling(
+                    formatted_prompt,
+                    self.max_new_tokens,
+                    &self.sampling_options,
+                    &mut self.rng,
+                    on_text_delta,
+                )?,
+            GemmaChatDecodeMode::Greedy => self
+                .model
+                .stream_generate_preformatted_greedy(
+                    formatted_prompt,
+                    self.max_new_tokens,
+                    on_text_delta,
+                )?,
+        };
         self.messages.push(GemmaChatMessage::new(
             GemmaChatRole::Assistant,
             output.generated_text.as_ref(),
