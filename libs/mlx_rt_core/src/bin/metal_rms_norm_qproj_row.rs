@@ -173,9 +173,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
             "--tensor-prefix" => {
-                tensor_prefix = args_iter
-                    .next()
-                    .ok_or("--tensor-prefix expects a value")?;
+                tensor_prefix = args_iter.next().ok_or("--tensor-prefix expects a value")?;
             }
             "--warmup" => {
                 let value = args_iter.next().ok_or("--warmup expects a value")?;

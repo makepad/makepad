@@ -1,5 +1,7 @@
 workspace.members = [
+    "widgets/dll",
     # === examples ===
+    "examples/hotload_ui",
     "examples/teamtalk",
     "examples/automate",
     "examples/map",

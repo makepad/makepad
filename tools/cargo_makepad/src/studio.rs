@@ -43,6 +43,7 @@ fn show_studio_help() {
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  echo '{{\"ListBuilds\":[]}}' | cargo makepad studio");
+    eprintln!("  echo '{{\"ListAppSockets\":[]}}' | cargo makepad studio");
 }
 
 pub fn handle_studio(args: &[String]) -> Result<(), String> {
@@ -499,6 +500,7 @@ fn should_emit_protocol_response(msg: &HubToClient) -> bool {
             | HubToClient::FindFileResults { .. }
             | HubToClient::SearchFileResults { .. }
             | HubToClient::Builds { .. }
+            | HubToClient::AppSockets { .. }
             | HubToClient::RunItems { .. }
             | HubToClient::BuildStarted { .. }
             | HubToClient::BuildStopped { .. }

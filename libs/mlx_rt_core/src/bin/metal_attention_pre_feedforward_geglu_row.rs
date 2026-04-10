@@ -590,7 +590,8 @@ fn analyze_o_proj_row(
                 + lane_sums[block][lane2]
                 + lane_sums[block][lane3];
             let qparam = block * GROUPS_PER_BLOCK + group;
-            let scale = bf16_word_to_f32(read_u16_le(o_scales_bytes, row_scales_base / 2 + qparam)?);
+            let scale =
+                bf16_word_to_f32(read_u16_le(o_scales_bytes, row_scales_base / 2 + qparam)?);
             let bias = bf16_word_to_f32(read_u16_le(o_biases_bytes, row_biases_base / 2 + qparam)?);
             let group_term =
                 bf16_round_to_f32(scale * group_accum) + bf16_round_to_f32(bias * group_sum);
@@ -607,14 +608,8 @@ fn analyze_o_proj_row(
 
     println!("analysis_row={row}");
     println!("analysis_rust_output_bits=0x{:08X}", o_proj_bits[row]);
-    println!(
-        "analysis_current_seq_bits=0x{:08X}",
-        sequential.to_bits()
-    );
-    println!(
-        "analysis_current_tree_bits=0x{:08X}",
-        tree_sum.to_bits()
-    );
+    println!("analysis_current_seq_bits=0x{:08X}", sequential.to_bits());
+    println!("analysis_current_tree_bits=0x{:08X}", tree_sum.to_bits());
     println!(
         "analysis_block_bf16_tree_bits=0x{:08X}",
         tree_block_bf16_sum.to_bits()
@@ -650,7 +645,10 @@ fn analyze_o_proj_row(
         width = half;
     }
     let gpu_group_tree_sum = bf16_round_to_f32(gpu_group_tree[0]);
-    println!("analysis_gpu_group_seq_bits=0x{:08X}", gpu_group_seq.to_bits());
+    println!(
+        "analysis_gpu_group_seq_bits=0x{:08X}",
+        gpu_group_seq.to_bits()
+    );
     println!(
         "analysis_gpu_group_running_bf16_bits=0x{:08X}",
         gpu_group_running_bf16.to_bits()
@@ -768,16 +766,36 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mlp_up_scales_bytes = header.read_tensor_bytes(MLP_UP_SCALES_NAME)?;
     let mlp_up_biases_bytes = header.read_tensor_bytes(MLP_UP_BIASES_NAME)?;
 
-    let q_weight_entry = header.tensor(Q_PATH_ORACLE.weight_name).ok_or("missing q projection weight entry")?;
-    let q_scales_entry = header.tensor(Q_PATH_ORACLE.scales_name).ok_or("missing q projection scales entry")?;
-    let q_norm_weight_entry = header.tensor(Q_PATH_ORACLE.norm_weight_name.unwrap()).ok_or("missing q norm weight entry")?;
-    let k_weight_entry = header.tensor(K_PATH_ORACLE.weight_name).ok_or("missing k projection weight entry")?;
-    let k_scales_entry = header.tensor(K_PATH_ORACLE.scales_name).ok_or("missing k projection scales entry")?;
-    let k_norm_weight_entry = header.tensor(K_PATH_ORACLE.norm_weight_name.unwrap()).ok_or("missing k norm weight entry")?;
-    let v_weight_entry = header.tensor(V_PATH_ORACLE.weight_name).ok_or("missing v projection weight entry")?;
-    let v_scales_entry = header.tensor(V_PATH_ORACLE.scales_name).ok_or("missing v projection scales entry")?;
-    let o_weight_entry = header.tensor(O_PROJ_WEIGHT_NAME).ok_or("missing o_proj weight entry")?;
-    let o_scales_entry = header.tensor(O_PROJ_SCALES_NAME).ok_or("missing o_proj scales entry")?;
+    let q_weight_entry = header
+        .tensor(Q_PATH_ORACLE.weight_name)
+        .ok_or("missing q projection weight entry")?;
+    let q_scales_entry = header
+        .tensor(Q_PATH_ORACLE.scales_name)
+        .ok_or("missing q projection scales entry")?;
+    let q_norm_weight_entry = header
+        .tensor(Q_PATH_ORACLE.norm_weight_name.unwrap())
+        .ok_or("missing q norm weight entry")?;
+    let k_weight_entry = header
+        .tensor(K_PATH_ORACLE.weight_name)
+        .ok_or("missing k projection weight entry")?;
+    let k_scales_entry = header
+        .tensor(K_PATH_ORACLE.scales_name)
+        .ok_or("missing k projection scales entry")?;
+    let k_norm_weight_entry = header
+        .tensor(K_PATH_ORACLE.norm_weight_name.unwrap())
+        .ok_or("missing k norm weight entry")?;
+    let v_weight_entry = header
+        .tensor(V_PATH_ORACLE.weight_name)
+        .ok_or("missing v projection weight entry")?;
+    let v_scales_entry = header
+        .tensor(V_PATH_ORACLE.scales_name)
+        .ok_or("missing v projection scales entry")?;
+    let o_weight_entry = header
+        .tensor(O_PROJ_WEIGHT_NAME)
+        .ok_or("missing o_proj weight entry")?;
+    let o_scales_entry = header
+        .tensor(O_PROJ_SCALES_NAME)
+        .ok_or("missing o_proj scales entry")?;
     let post_attention_norm_weight_entry = header
         .tensor(POST_ATTENTION_NORM_WEIGHT_NAME)
         .ok_or("missing post-attention layernorm weight entry")?;
@@ -871,35 +889,53 @@ fn main() -> Result<(), Box<dyn Error>> {
         runtime.create_buffer_with_bytes(&input_norm_weight_bytes, BufferStorageMode::Private)?;
     let h_buf = runtime.create_buffer(NORM_LEN * 2, BufferStorageMode::Private)?;
 
-    let q_weight_buf = runtime.create_buffer_with_bytes(&q_weight_bytes, BufferStorageMode::Private)?;
-    let q_scales_buf = runtime.create_buffer_with_bytes(&q_scales_bytes, BufferStorageMode::Private)?;
-    let q_biases_buf = runtime.create_buffer_with_bytes(&q_biases_bytes, BufferStorageMode::Private)?;
-    let q_norm_weight_buf = runtime.create_buffer_with_bytes(&q_norm_weight_bytes, BufferStorageMode::Private)?;
+    let q_weight_buf =
+        runtime.create_buffer_with_bytes(&q_weight_bytes, BufferStorageMode::Private)?;
+    let q_scales_buf =
+        runtime.create_buffer_with_bytes(&q_scales_bytes, BufferStorageMode::Private)?;
+    let q_biases_buf =
+        runtime.create_buffer_with_bytes(&q_biases_bytes, BufferStorageMode::Private)?;
+    let q_norm_weight_buf =
+        runtime.create_buffer_with_bytes(&q_norm_weight_bytes, BufferStorageMode::Private)?;
     let q_proj_buf = runtime.create_buffer(q_out_len * 2, BufferStorageMode::Private)?;
     let q_norm_buf = runtime.create_buffer(q_out_len * 2, BufferStorageMode::Private)?;
     let q_rope_buf = runtime.create_buffer(q_out_len * 2, BufferStorageMode::Private)?;
 
-    let k_weight_buf = runtime.create_buffer_with_bytes(&k_weight_bytes, BufferStorageMode::Private)?;
-    let k_scales_buf = runtime.create_buffer_with_bytes(&k_scales_bytes, BufferStorageMode::Private)?;
-    let k_biases_buf = runtime.create_buffer_with_bytes(&k_biases_bytes, BufferStorageMode::Private)?;
-    let k_norm_weight_buf = runtime.create_buffer_with_bytes(&k_norm_weight_bytes, BufferStorageMode::Private)?;
+    let k_weight_buf =
+        runtime.create_buffer_with_bytes(&k_weight_bytes, BufferStorageMode::Private)?;
+    let k_scales_buf =
+        runtime.create_buffer_with_bytes(&k_scales_bytes, BufferStorageMode::Private)?;
+    let k_biases_buf =
+        runtime.create_buffer_with_bytes(&k_biases_bytes, BufferStorageMode::Private)?;
+    let k_norm_weight_buf =
+        runtime.create_buffer_with_bytes(&k_norm_weight_bytes, BufferStorageMode::Private)?;
     let k_proj_buf = runtime.create_buffer(k_out_len * 2, BufferStorageMode::Private)?;
     let k_norm_buf = runtime.create_buffer(k_out_len * 2, BufferStorageMode::Private)?;
     let k_rope_buf = runtime.create_buffer(k_out_len * 2, BufferStorageMode::Private)?;
 
-    let v_weight_buf = runtime.create_buffer_with_bytes(&v_weight_bytes, BufferStorageMode::Private)?;
-    let v_scales_buf = runtime.create_buffer_with_bytes(&v_scales_bytes, BufferStorageMode::Private)?;
-    let v_biases_buf = runtime.create_buffer_with_bytes(&v_biases_bytes, BufferStorageMode::Private)?;
+    let v_weight_buf =
+        runtime.create_buffer_with_bytes(&v_weight_bytes, BufferStorageMode::Private)?;
+    let v_scales_buf =
+        runtime.create_buffer_with_bytes(&v_scales_bytes, BufferStorageMode::Private)?;
+    let v_biases_buf =
+        runtime.create_buffer_with_bytes(&v_biases_bytes, BufferStorageMode::Private)?;
     let v_proj_buf = runtime.create_buffer(v_out_len * 2, BufferStorageMode::Private)?;
     let v_norm_buf = runtime.create_buffer(v_out_len * 2, BufferStorageMode::Private)?;
 
-    let o_weight_buf = runtime.create_buffer_with_bytes(&o_weight_bytes, BufferStorageMode::Private)?;
-    let o_scales_buf = runtime.create_buffer_with_bytes(&o_scales_bytes, BufferStorageMode::Private)?;
-    let o_biases_buf = runtime.create_buffer_with_bytes(&o_biases_bytes, BufferStorageMode::Private)?;
-    let post_attention_norm_weight_buf =
-        runtime.create_buffer_with_bytes(&post_attention_norm_weight_bytes, BufferStorageMode::Private)?;
-    let pre_feedforward_norm_weight_buf =
-        runtime.create_buffer_with_bytes(&pre_feedforward_norm_weight_bytes, BufferStorageMode::Private)?;
+    let o_weight_buf =
+        runtime.create_buffer_with_bytes(&o_weight_bytes, BufferStorageMode::Private)?;
+    let o_scales_buf =
+        runtime.create_buffer_with_bytes(&o_scales_bytes, BufferStorageMode::Private)?;
+    let o_biases_buf =
+        runtime.create_buffer_with_bytes(&o_biases_bytes, BufferStorageMode::Private)?;
+    let post_attention_norm_weight_buf = runtime.create_buffer_with_bytes(
+        &post_attention_norm_weight_bytes,
+        BufferStorageMode::Private,
+    )?;
+    let pre_feedforward_norm_weight_buf = runtime.create_buffer_with_bytes(
+        &pre_feedforward_norm_weight_bytes,
+        BufferStorageMode::Private,
+    )?;
     let mlp_gate_weight_buf =
         runtime.create_buffer_with_bytes(&mlp_gate_weight_bytes, BufferStorageMode::Private)?;
     let mlp_gate_scales_buf =
@@ -922,18 +958,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     let o_proj_out_buf = runtime.create_buffer(o_out_len * 2, BufferStorageMode::Private)?;
     let o_proj_row1836_out_buf = runtime.create_buffer(2, BufferStorageMode::Private)?;
     let o_proj_row1836_seq_out_buf = runtime.create_buffer(2, BufferStorageMode::Private)?;
-    let o_proj_row1836_group_terms_buf =
-        runtime.create_buffer(o_scales_entry.shape[1] as usize * 4, BufferStorageMode::Private)?;
+    let o_proj_row1836_group_terms_buf = runtime.create_buffer(
+        o_scales_entry.shape[1] as usize * 4,
+        BufferStorageMode::Private,
+    )?;
     let o_proj_fast_out_buf = runtime.create_buffer(o_out_len * 2, BufferStorageMode::Private)?;
     let post_attention_norm_out_buf =
         runtime.create_buffer(post_attention_norm_len * 2, BufferStorageMode::Private)?;
-    let residual_out_buf = runtime.create_buffer(post_attention_norm_len * 2, BufferStorageMode::Private)?;
+    let residual_out_buf =
+        runtime.create_buffer(post_attention_norm_len * 2, BufferStorageMode::Private)?;
     let pre_feedforward_norm_out_buf =
         runtime.create_buffer(pre_feedforward_norm_len * 2, BufferStorageMode::Private)?;
-    let mlp_gate_out_buf = runtime.create_buffer(mlp_gate_out_len * 2, BufferStorageMode::Private)?;
+    let mlp_gate_out_buf =
+        runtime.create_buffer(mlp_gate_out_len * 2, BufferStorageMode::Private)?;
     let mlp_up_out_buf = runtime.create_buffer(mlp_up_out_len * 2, BufferStorageMode::Private)?;
     let geglu_out_buf = runtime.create_buffer(mlp_gate_out_len * 2, BufferStorageMode::Private)?;
-    let o_proj_generic_out_buf = runtime.create_buffer(o_out_len * 2, BufferStorageMode::Private)?;
+    let o_proj_generic_out_buf =
+        runtime.create_buffer(o_out_len * 2, BufferStorageMode::Private)?;
     let o_proj_serial_out_buf = runtime.create_buffer(o_out_len * 2, BufferStorageMode::Private)?;
 
     let rms_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
@@ -972,15 +1013,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         nr1: 0,
         nsg: 0,
     })?;
-    let o_proj_group_terms_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-        cache_name: "kernel_mlx_affine_qmv_group_terms_f32".to_string(),
-        base_name: "kernel_mlx_affine_qmv_group_terms_f32".to_string(),
-        constants: Vec::new(),
-        smem_bytes: 0,
-        nr0: 0,
-        nr1: 0,
-        nsg: 0,
-    })?;
+    let o_proj_group_terms_pipeline =
+        runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+            cache_name: "kernel_mlx_affine_qmv_group_terms_f32".to_string(),
+            base_name: "kernel_mlx_affine_qmv_group_terms_f32".to_string(),
+            constants: Vec::new(),
+            smem_bytes: 0,
+            nr0: 0,
+            nr1: 0,
+            nsg: 0,
+        })?;
     let o_proj_reduce_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
         cache_name: "kernel_mlx_reduce_rows_f32_to_bf16".to_string(),
         base_name: "kernel_mlx_reduce_rows_f32_to_bf16".to_string(),
@@ -1053,24 +1095,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         nr1: 0,
         nsg: 0,
     })?;
-    let o_proj_row1836_seq_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-        cache_name: "kernel_mlx_affine_qmv_single_row_seq_bf16_groupbf16".to_string(),
-        base_name: "kernel_mlx_affine_qmv_single_row_seq_bf16_groupbf16".to_string(),
-        constants: Vec::new(),
-        smem_bytes: 0,
-        nr0: 0,
-        nr1: 0,
-        nsg: 0,
-    })?;
-    let o_proj_row1836_group_terms_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-        cache_name: "kernel_mlx_affine_qmv_single_row_seq_group_terms_bf16".to_string(),
-        base_name: "kernel_mlx_affine_qmv_single_row_seq_group_terms_bf16".to_string(),
-        constants: Vec::new(),
-        smem_bytes: 0,
-        nr0: 0,
-        nr1: 0,
-        nsg: 0,
-    })?;
+    let o_proj_row1836_seq_pipeline =
+        runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+            cache_name: "kernel_mlx_affine_qmv_single_row_seq_bf16_groupbf16".to_string(),
+            base_name: "kernel_mlx_affine_qmv_single_row_seq_bf16_groupbf16".to_string(),
+            constants: Vec::new(),
+            smem_bytes: 0,
+            nr0: 0,
+            nr1: 0,
+            nsg: 0,
+        })?;
+    let o_proj_row1836_group_terms_pipeline =
+        runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+            cache_name: "kernel_mlx_affine_qmv_single_row_seq_group_terms_bf16".to_string(),
+            base_name: "kernel_mlx_affine_qmv_single_row_seq_group_terms_bf16".to_string(),
+            constants: Vec::new(),
+            smem_bytes: 0,
+            nr0: 0,
+            nr1: 0,
+            nsg: 0,
+        })?;
 
     let n_reads = 4usize;
     let simd_size = 32usize;
@@ -1087,7 +1131,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("head_norm threadgroup exceeds pipeline max".into());
     }
 
-    let rms_args = MlxRmsNormRowArgs { n: NORM_LEN as u32, eps: EPS };
+    let rms_args = MlxRmsNormRowArgs {
+        n: NORM_LEN as u32,
+        eps: EPS,
+    };
     let q_proj_args = MlxAffineQprojRowArgs {
         n_in: NORM_LEN as u32,
         weight_words_per_row: q_weight_entry.shape[1] as u32,
@@ -1191,194 +1238,719 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let rms_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &x_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &input_norm_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &h_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &x_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &input_norm_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &h_buf,
+            offset_bytes: 0,
+        },
     ];
     let q_proj_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &h_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &q_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &q_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &q_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &q_proj_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &h_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &q_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &q_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &q_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &q_proj_buf,
+            offset_bytes: 0,
+        },
     ];
     let q_head_norm_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &q_proj_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &q_norm_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &q_norm_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &q_proj_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &q_norm_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &q_norm_buf,
+            offset_bytes: 0,
+        },
     ];
     let q_rope_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &q_norm_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &q_rope_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &q_norm_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &q_rope_buf,
+            offset_bytes: 0,
+        },
     ];
     let k_proj_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &h_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &k_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &k_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &k_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &k_proj_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &h_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &k_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &k_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &k_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &k_proj_buf,
+            offset_bytes: 0,
+        },
     ];
     let k_head_norm_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &k_proj_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &k_norm_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &k_norm_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &k_proj_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &k_norm_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &k_norm_buf,
+            offset_bytes: 0,
+        },
     ];
     let k_rope_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &k_norm_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &k_rope_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &k_norm_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &k_rope_buf,
+            offset_bytes: 0,
+        },
     ];
     let v_proj_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &h_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &v_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &v_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &v_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &v_proj_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &h_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &v_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &v_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &v_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &v_proj_buf,
+            offset_bytes: 0,
+        },
     ];
     let ones_bytes = bytes_from_bf16_words(&vec![0x3F80u16; head_dim]);
-    let v_norm_weight_buf = runtime.create_buffer_with_bytes(&ones_bytes, BufferStorageMode::Private)?;
+    let v_norm_weight_buf =
+        runtime.create_buffer_with_bytes(&ones_bytes, BufferStorageMode::Private)?;
     let v_head_norm_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &v_proj_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &v_norm_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &v_norm_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &v_proj_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &v_norm_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &v_norm_buf,
+            offset_bytes: 0,
+        },
     ];
     let logits_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &q_rope_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &k_rope_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &logits_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &q_rope_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &k_rope_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &logits_buf,
+            offset_bytes: 0,
+        },
     ];
     let attn_out_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &v_norm_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &attn_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &v_norm_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &attn_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let o_proj_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &attn_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &o_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &o_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &o_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &o_proj_group_terms_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &attn_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &o_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &o_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &o_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &o_proj_group_terms_buf,
+            offset_bytes: 0,
+        },
     ];
     let o_proj_reduce_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &o_proj_group_terms_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &o_proj_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &o_proj_group_terms_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &o_proj_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let o_proj_row1836_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &attn_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &o_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &o_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &o_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &o_proj_row1836_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &attn_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &o_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &o_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &o_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &o_proj_row1836_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let o_proj_row1836_seq_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &attn_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &o_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &o_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &o_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &o_proj_row1836_seq_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &attn_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &o_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &o_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &o_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &o_proj_row1836_seq_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let o_proj_row1836_group_terms_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &attn_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &o_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &o_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &o_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &o_proj_row1836_group_terms_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &attn_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &o_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &o_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &o_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &o_proj_row1836_group_terms_buf,
+            offset_bytes: 0,
+        },
     ];
     let o_proj_generic_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &attn_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &o_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &o_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &o_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &o_proj_generic_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &attn_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &o_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &o_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &o_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &o_proj_generic_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let o_proj_fast_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &attn_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &o_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &o_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &o_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &o_proj_fast_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &attn_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &o_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &o_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &o_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &o_proj_fast_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let post_attention_norm_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &o_proj_fast_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &post_attention_norm_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &post_attention_norm_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &o_proj_fast_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &post_attention_norm_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &post_attention_norm_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let residual_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &x_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &post_attention_norm_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &residual_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &x_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &post_attention_norm_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &residual_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let pre_feedforward_norm_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &residual_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &pre_feedforward_norm_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &pre_feedforward_norm_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &residual_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &pre_feedforward_norm_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &pre_feedforward_norm_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let mlp_gate_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &pre_feedforward_norm_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &mlp_gate_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &mlp_gate_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &mlp_gate_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &mlp_gate_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &pre_feedforward_norm_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &mlp_gate_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &mlp_gate_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &mlp_gate_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &mlp_gate_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let mlp_up_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &pre_feedforward_norm_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &mlp_up_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &mlp_up_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &mlp_up_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &mlp_up_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &pre_feedforward_norm_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &mlp_up_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &mlp_up_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &mlp_up_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &mlp_up_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let geglu_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &mlp_gate_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &mlp_up_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &geglu_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &mlp_gate_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &mlp_up_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &geglu_out_buf,
+            offset_bytes: 0,
+        },
     ];
     let o_proj_serial_bindings = [
-        MetalBufferBindingRef { index: 1, buffer: &attn_out_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 2, buffer: &o_weight_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 3, buffer: &o_scales_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 4, buffer: &o_biases_buf, offset_bytes: 0 },
-        MetalBufferBindingRef { index: 5, buffer: &o_proj_serial_out_buf, offset_bytes: 0 },
+        MetalBufferBindingRef {
+            index: 1,
+            buffer: &attn_out_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 2,
+            buffer: &o_weight_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 3,
+            buffer: &o_scales_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 4,
+            buffer: &o_biases_buf,
+            offset_bytes: 0,
+        },
+        MetalBufferBindingRef {
+            index: 5,
+            buffer: &o_proj_serial_out_buf,
+            offset_bytes: 0,
+        },
     ];
 
-    let rms_threadgroups = MetalSize { width: 1, height: 1, depth: 1 };
-    let rms_threads_per_threadgroup = MetalSize { width: rms_threadgroup_size as u64, height: 1, depth: 1 };
-    let q_proj_threadgroups = MetalSize { width: 1, height: (q_out_len as u64).div_ceil(8), depth: 1 };
-    let q_proj_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let q_head_norm_threadgroups = MetalSize { width: q_head_count as u64, height: 1, depth: 1 };
-    let q_head_norm_threads_per_threadgroup = MetalSize { width: head_norm_threadgroup_size as u64, height: 1, depth: 1 };
-    let q_rope_threadgroups = MetalSize { width: ((head_dim / 2) as u64).div_ceil(32), height: q_head_count as u64, depth: 1 };
-    let q_rope_threads_per_threadgroup = MetalSize { width: 32, height: 1, depth: 1 };
-    let k_proj_threadgroups = MetalSize { width: 1, height: (k_out_len as u64).div_ceil(8), depth: 1 };
-    let k_proj_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let k_head_norm_threadgroups = MetalSize { width: k_head_count as u64, height: 1, depth: 1 };
-    let k_head_norm_threads_per_threadgroup = MetalSize { width: head_norm_threadgroup_size as u64, height: 1, depth: 1 };
-    let k_rope_threadgroups = MetalSize { width: ((head_dim / 2) as u64).div_ceil(32), height: k_head_count as u64, depth: 1 };
-    let k_rope_threads_per_threadgroup = MetalSize { width: 32, height: 1, depth: 1 };
-    let v_proj_threadgroups = MetalSize { width: 1, height: (v_out_len as u64).div_ceil(8), depth: 1 };
-    let v_proj_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let v_head_norm_threadgroups = MetalSize { width: v_head_count as u64, height: 1, depth: 1 };
-    let v_head_norm_threads_per_threadgroup = MetalSize { width: head_norm_threadgroup_size as u64, height: 1, depth: 1 };
-    let logits_threadgroups = MetalSize { width: q_head_count as u64, height: 1, depth: 1 };
-    let logits_threads_per_threadgroup = MetalSize { width: 32, height: 1, depth: 1 };
-    let attn_out_threadgroups = MetalSize { width: head_dim as u64, height: q_head_count as u64, depth: 1 };
-    let attn_out_threads_per_threadgroup = MetalSize { width: 16, height: 16, depth: 1 };
-    let o_proj_threadgroups = MetalSize { width: 1, height: (o_out_len as u64).div_ceil(8), depth: 1 };
-    let o_proj_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
+    let rms_threadgroups = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let rms_threads_per_threadgroup = MetalSize {
+        width: rms_threadgroup_size as u64,
+        height: 1,
+        depth: 1,
+    };
+    let q_proj_threadgroups = MetalSize {
+        width: 1,
+        height: (q_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let q_proj_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let q_head_norm_threadgroups = MetalSize {
+        width: q_head_count as u64,
+        height: 1,
+        depth: 1,
+    };
+    let q_head_norm_threads_per_threadgroup = MetalSize {
+        width: head_norm_threadgroup_size as u64,
+        height: 1,
+        depth: 1,
+    };
+    let q_rope_threadgroups = MetalSize {
+        width: ((head_dim / 2) as u64).div_ceil(32),
+        height: q_head_count as u64,
+        depth: 1,
+    };
+    let q_rope_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 1,
+        depth: 1,
+    };
+    let k_proj_threadgroups = MetalSize {
+        width: 1,
+        height: (k_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let k_proj_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let k_head_norm_threadgroups = MetalSize {
+        width: k_head_count as u64,
+        height: 1,
+        depth: 1,
+    };
+    let k_head_norm_threads_per_threadgroup = MetalSize {
+        width: head_norm_threadgroup_size as u64,
+        height: 1,
+        depth: 1,
+    };
+    let k_rope_threadgroups = MetalSize {
+        width: ((head_dim / 2) as u64).div_ceil(32),
+        height: k_head_count as u64,
+        depth: 1,
+    };
+    let k_rope_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 1,
+        depth: 1,
+    };
+    let v_proj_threadgroups = MetalSize {
+        width: 1,
+        height: (v_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let v_proj_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let v_head_norm_threadgroups = MetalSize {
+        width: v_head_count as u64,
+        height: 1,
+        depth: 1,
+    };
+    let v_head_norm_threads_per_threadgroup = MetalSize {
+        width: head_norm_threadgroup_size as u64,
+        height: 1,
+        depth: 1,
+    };
+    let logits_threadgroups = MetalSize {
+        width: q_head_count as u64,
+        height: 1,
+        depth: 1,
+    };
+    let logits_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 1,
+        depth: 1,
+    };
+    let attn_out_threadgroups = MetalSize {
+        width: head_dim as u64,
+        height: q_head_count as u64,
+        depth: 1,
+    };
+    let attn_out_threads_per_threadgroup = MetalSize {
+        width: 16,
+        height: 16,
+        depth: 1,
+    };
+    let o_proj_threadgroups = MetalSize {
+        width: 1,
+        height: (o_out_len as u64).div_ceil(8),
+        depth: 1,
+    };
+    let o_proj_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
     let o_proj_group_terms_threadgroups = MetalSize {
         width: o_scales_entry.shape[1] as u64,
         height: o_out_len as u64,
         depth: 1,
     };
-    let o_proj_group_terms_threads_per_threadgroup = MetalSize { width: 1, height: 1, depth: 1 };
-    let o_proj_reduce_threadgroups = MetalSize { width: o_out_len as u64, height: 1, depth: 1 };
-    let o_proj_reduce_threads_per_threadgroup = MetalSize { width: 1, height: 1, depth: 1 };
-    let o_proj_row1836_threadgroups = MetalSize { width: 1, height: 1, depth: 1 };
-    let o_proj_row1836_threads_per_threadgroup = MetalSize { width: 32, height: 1, depth: 1 };
-    let o_proj_row1836_seq_threadgroups = MetalSize { width: 1, height: 1, depth: 1 };
-    let o_proj_row1836_seq_threads_per_threadgroup = MetalSize { width: 1, height: 1, depth: 1 };
-    let o_proj_row1836_group_terms_threadgroups = MetalSize { width: 1, height: 1, depth: 1 };
-    let o_proj_row1836_group_terms_threads_per_threadgroup = MetalSize { width: 1, height: 1, depth: 1 };
-    let o_proj_serial_threadgroups = MetalSize { width: o_out_len as u64, height: 1, depth: 1 };
-    let o_proj_serial_threads_per_threadgroup = MetalSize { width: 1, height: 1, depth: 1 };
-    let residual_threads_per_threadgroup = MetalSize { width: 256, height: 1, depth: 1 };
+    let o_proj_group_terms_threads_per_threadgroup = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_reduce_threadgroups = MetalSize {
+        width: o_out_len as u64,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_reduce_threads_per_threadgroup = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_row1836_threadgroups = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_row1836_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_row1836_seq_threadgroups = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_row1836_seq_threads_per_threadgroup = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_row1836_group_terms_threadgroups = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_row1836_group_terms_threads_per_threadgroup = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_serial_threadgroups = MetalSize {
+        width: o_out_len as u64,
+        height: 1,
+        depth: 1,
+    };
+    let o_proj_serial_threads_per_threadgroup = MetalSize {
+        width: 1,
+        height: 1,
+        depth: 1,
+    };
+    let residual_threads_per_threadgroup = MetalSize {
+        width: 256,
+        height: 1,
+        depth: 1,
+    };
     let residual_threadgroups = MetalSize {
         width: (post_attention_norm_len as u64).div_ceil(residual_threads_per_threadgroup.width),
         height: 1,
@@ -1389,14 +1961,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         height: (mlp_gate_out_len as u64).div_ceil(8),
         depth: 1,
     };
-    let mlp_gate_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
+    let mlp_gate_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
     let mlp_up_threadgroups = MetalSize {
         width: 1,
         height: (mlp_up_out_len as u64).div_ceil(8),
         depth: 1,
     };
-    let mlp_up_threads_per_threadgroup = MetalSize { width: 32, height: 2, depth: 1 };
-    let geglu_threads_per_threadgroup = MetalSize { width: 256, height: 1, depth: 1 };
+    let mlp_up_threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 2,
+        depth: 1,
+    };
+    let geglu_threads_per_threadgroup = MetalSize {
+        width: 256,
+        height: 1,
+        depth: 1,
+    };
     let geglu_threadgroups = MetalSize {
         width: (mlp_gate_out_len as u64).div_ceil(geglu_threads_per_threadgroup.width),
         height: 1,
@@ -1425,60 +2009,235 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let run_once = || -> Result<(), Box<dyn Error>> {
         runtime.begin_command_batch()?;
-        runtime.dispatch_compute(&rms_pipeline, rms_args_bytes, &rms_bindings, &[], rms_threadgroups, rms_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &rms_pipeline,
+            rms_args_bytes,
+            &rms_bindings,
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
 
-        runtime.dispatch_compute(&proj_pipeline, q_proj_args_bytes, &q_proj_bindings, &[], q_proj_threadgroups, q_proj_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &proj_pipeline,
+            q_proj_args_bytes,
+            &q_proj_bindings,
+            &[],
+            q_proj_threadgroups,
+            q_proj_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&head_norm_pipeline, q_head_norm_args_bytes, &q_head_norm_bindings, &[], q_head_norm_threadgroups, q_head_norm_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &head_norm_pipeline,
+            q_head_norm_args_bytes,
+            &q_head_norm_bindings,
+            &[],
+            q_head_norm_threadgroups,
+            q_head_norm_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&rope_pipeline, q_rope_args_bytes, &q_rope_bindings, &[], q_rope_threadgroups, q_rope_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &rope_pipeline,
+            q_rope_args_bytes,
+            &q_rope_bindings,
+            &[],
+            q_rope_threadgroups,
+            q_rope_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
 
-        runtime.dispatch_compute(&proj_pipeline, k_proj_args_bytes, &k_proj_bindings, &[], k_proj_threadgroups, k_proj_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &proj_pipeline,
+            k_proj_args_bytes,
+            &k_proj_bindings,
+            &[],
+            k_proj_threadgroups,
+            k_proj_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&head_norm_pipeline, k_head_norm_args_bytes, &k_head_norm_bindings, &[], k_head_norm_threadgroups, k_head_norm_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &head_norm_pipeline,
+            k_head_norm_args_bytes,
+            &k_head_norm_bindings,
+            &[],
+            k_head_norm_threadgroups,
+            k_head_norm_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&rope_pipeline, k_rope_args_bytes, &k_rope_bindings, &[], k_rope_threadgroups, k_rope_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &rope_pipeline,
+            k_rope_args_bytes,
+            &k_rope_bindings,
+            &[],
+            k_rope_threadgroups,
+            k_rope_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
 
-        runtime.dispatch_compute(&proj_pipeline, v_proj_args_bytes, &v_proj_bindings, &[], v_proj_threadgroups, v_proj_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &proj_pipeline,
+            v_proj_args_bytes,
+            &v_proj_bindings,
+            &[],
+            v_proj_threadgroups,
+            v_proj_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&head_norm_pipeline, v_head_norm_args_bytes, &v_head_norm_bindings, &[], v_head_norm_threadgroups, v_head_norm_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &head_norm_pipeline,
+            v_head_norm_args_bytes,
+            &v_head_norm_bindings,
+            &[],
+            v_head_norm_threadgroups,
+            v_head_norm_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
 
-        runtime.dispatch_compute(&logits_pipeline, logits_args_bytes, &logits_bindings, &[], logits_threadgroups, logits_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &logits_pipeline,
+            logits_args_bytes,
+            &logits_bindings,
+            &[],
+            logits_threadgroups,
+            logits_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&attn_out_pipeline, attn_out_args_bytes, &attn_out_bindings, &[], attn_out_threadgroups, attn_out_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &attn_out_pipeline,
+            attn_out_args_bytes,
+            &attn_out_bindings,
+            &[],
+            attn_out_threadgroups,
+            attn_out_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&o_proj_fast_pipeline, o_proj_args_bytes, &o_proj_fast_bindings, &[], o_proj_threadgroups, o_proj_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &o_proj_fast_pipeline,
+            o_proj_args_bytes,
+            &o_proj_fast_bindings,
+            &[],
+            o_proj_threadgroups,
+            o_proj_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&rms_pipeline, rms_args_bytes, &post_attention_norm_bindings, &[], rms_threadgroups, rms_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &rms_pipeline,
+            rms_args_bytes,
+            &post_attention_norm_bindings,
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&residual_pipeline, residual_args_bytes, &residual_bindings, &[], residual_threadgroups, residual_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &residual_pipeline,
+            residual_args_bytes,
+            &residual_bindings,
+            &[],
+            residual_threadgroups,
+            residual_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&rms_pipeline, rms_args_bytes, &pre_feedforward_norm_bindings, &[], rms_threadgroups, rms_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &rms_pipeline,
+            rms_args_bytes,
+            &pre_feedforward_norm_bindings,
+            &[],
+            rms_threadgroups,
+            rms_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&proj_pipeline, mlp_gate_args_bytes, &mlp_gate_bindings, &[], mlp_gate_threadgroups, mlp_gate_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &proj_pipeline,
+            mlp_gate_args_bytes,
+            &mlp_gate_bindings,
+            &[],
+            mlp_gate_threadgroups,
+            mlp_gate_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&proj_pipeline, mlp_up_args_bytes, &mlp_up_bindings, &[], mlp_up_threadgroups, mlp_up_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &proj_pipeline,
+            mlp_up_args_bytes,
+            &mlp_up_bindings,
+            &[],
+            mlp_up_threadgroups,
+            mlp_up_threads_per_threadgroup,
+        )?;
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(&geglu_pipeline, geglu_args_bytes, &geglu_bindings, &[], geglu_threadgroups, geglu_threads_per_threadgroup)?;
+        runtime.dispatch_compute(
+            &geglu_pipeline,
+            geglu_args_bytes,
+            &geglu_bindings,
+            &[],
+            geglu_threadgroups,
+            geglu_threads_per_threadgroup,
+        )?;
         if diagnostics_enabled {
             runtime.memory_barrier_buffers()?;
-            runtime.dispatch_compute(&o_proj_row1836_pipeline, o_proj_row1836_args_bytes, &o_proj_row1836_bindings, &[], o_proj_row1836_threadgroups, o_proj_row1836_threads_per_threadgroup)?;
+            runtime.dispatch_compute(
+                &o_proj_row1836_pipeline,
+                o_proj_row1836_args_bytes,
+                &o_proj_row1836_bindings,
+                &[],
+                o_proj_row1836_threadgroups,
+                o_proj_row1836_threads_per_threadgroup,
+            )?;
             runtime.memory_barrier_buffers()?;
-            runtime.dispatch_compute(&o_proj_row1836_seq_pipeline, o_proj_row1836_args_bytes, &o_proj_row1836_seq_bindings, &[], o_proj_row1836_seq_threadgroups, o_proj_row1836_seq_threads_per_threadgroup)?;
+            runtime.dispatch_compute(
+                &o_proj_row1836_seq_pipeline,
+                o_proj_row1836_args_bytes,
+                &o_proj_row1836_seq_bindings,
+                &[],
+                o_proj_row1836_seq_threadgroups,
+                o_proj_row1836_seq_threads_per_threadgroup,
+            )?;
             runtime.memory_barrier_buffers()?;
-            runtime.dispatch_compute(&o_proj_row1836_group_terms_pipeline, o_proj_row1836_args_bytes, &o_proj_row1836_group_terms_bindings, &[], o_proj_row1836_group_terms_threadgroups, o_proj_row1836_group_terms_threads_per_threadgroup)?;
+            runtime.dispatch_compute(
+                &o_proj_row1836_group_terms_pipeline,
+                o_proj_row1836_args_bytes,
+                &o_proj_row1836_group_terms_bindings,
+                &[],
+                o_proj_row1836_group_terms_threadgroups,
+                o_proj_row1836_group_terms_threads_per_threadgroup,
+            )?;
             runtime.memory_barrier_buffers()?;
-            runtime.dispatch_compute(&o_proj_group_terms_pipeline, o_proj_args_bytes, &o_proj_bindings, &[], o_proj_group_terms_threadgroups, o_proj_group_terms_threads_per_threadgroup)?;
+            runtime.dispatch_compute(
+                &o_proj_group_terms_pipeline,
+                o_proj_args_bytes,
+                &o_proj_bindings,
+                &[],
+                o_proj_group_terms_threadgroups,
+                o_proj_group_terms_threads_per_threadgroup,
+            )?;
             runtime.memory_barrier_buffers()?;
-            runtime.dispatch_compute(&o_proj_reduce_pipeline, o_proj_reduce_args_bytes, &o_proj_reduce_bindings, &[], o_proj_reduce_threadgroups, o_proj_reduce_threads_per_threadgroup)?;
+            runtime.dispatch_compute(
+                &o_proj_reduce_pipeline,
+                o_proj_reduce_args_bytes,
+                &o_proj_reduce_bindings,
+                &[],
+                o_proj_reduce_threadgroups,
+                o_proj_reduce_threads_per_threadgroup,
+            )?;
             runtime.memory_barrier_buffers()?;
-            runtime.dispatch_compute(&proj_pipeline, o_proj_args_bytes, &o_proj_generic_bindings, &[], o_proj_threadgroups, o_proj_threads_per_threadgroup)?;
+            runtime.dispatch_compute(
+                &proj_pipeline,
+                o_proj_args_bytes,
+                &o_proj_generic_bindings,
+                &[],
+                o_proj_threadgroups,
+                o_proj_threads_per_threadgroup,
+            )?;
             runtime.memory_barrier_buffers()?;
-            runtime.dispatch_compute(&o_proj_serial_pipeline, o_proj_args_bytes, &o_proj_serial_bindings, &[], o_proj_serial_threadgroups, o_proj_serial_threads_per_threadgroup)?;
+            runtime.dispatch_compute(
+                &o_proj_serial_pipeline,
+                o_proj_args_bytes,
+                &o_proj_serial_bindings,
+                &[],
+                o_proj_serial_threadgroups,
+                o_proj_serial_threads_per_threadgroup,
+            )?;
         }
         runtime.end_command_batch()?;
         runtime.wait_idle()?;
@@ -1496,7 +2255,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     run_once()?;
 
     let decode_bits = |bytes: Vec<u8>| {
-        bytes.chunks_exact(2)
+        bytes
+            .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .map(bf16_word_to_f32)
             .map(f32::to_bits)
@@ -1511,34 +2271,50 @@ fn main() -> Result<(), Box<dyn Error>> {
     let logits_bits = decode_bits(runtime.read_buffer(&logits_buf, q_head_count * 2)?);
     let attn_out_bits = decode_bits(runtime.read_buffer(&attn_out_buf, q_out_len * 2)?);
     let o_proj_fast_bits = decode_bits(runtime.read_buffer(&o_proj_fast_out_buf, o_out_len * 2)?);
-    let post_attention_norm_bits =
-        decode_bits(runtime.read_buffer(&post_attention_norm_out_buf, post_attention_norm_len * 2)?);
-    let residual_bits = decode_bits(runtime.read_buffer(&residual_out_buf, post_attention_norm_len * 2)?);
-    let pre_feedforward_norm_bits =
-        decode_bits(runtime.read_buffer(&pre_feedforward_norm_out_buf, pre_feedforward_norm_len * 2)?);
-    let mlp_gate_bits =
-        decode_bits(runtime.read_buffer(&mlp_gate_out_buf, mlp_gate_out_len * 2)?);
-    let mlp_up_bits =
-        decode_bits(runtime.read_buffer(&mlp_up_out_buf, mlp_up_out_len * 2)?);
-    let geglu_bits =
-        decode_bits(runtime.read_buffer(&geglu_out_buf, mlp_gate_out_len * 2)?);
-    let (o_proj_row1836_bits, o_proj_row1836_seq_bits, o_proj_row1836_group_term_bits, o_proj_proof_bits, o_proj_generic_bits, o_proj_serial_bits) =
-        if diagnostics_enabled {
-            (
-                decode_bits(runtime.read_buffer(&o_proj_row1836_out_buf, 2)?),
-                decode_bits(runtime.read_buffer(&o_proj_row1836_seq_out_buf, 2)?),
-                runtime
-                    .read_buffer(&o_proj_row1836_group_terms_buf, o_scales_entry.shape[1] as usize * 4)?
-                    .chunks_exact(4)
-                    .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect::<Vec<_>>(),
-                decode_bits(runtime.read_buffer(&o_proj_out_buf, o_out_len * 2)?),
-                decode_bits(runtime.read_buffer(&o_proj_generic_out_buf, o_out_len * 2)?),
-                decode_bits(runtime.read_buffer(&o_proj_serial_out_buf, o_out_len * 2)?),
-            )
-        } else {
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
-        };
+    let post_attention_norm_bits = decode_bits(
+        runtime.read_buffer(&post_attention_norm_out_buf, post_attention_norm_len * 2)?,
+    );
+    let residual_bits =
+        decode_bits(runtime.read_buffer(&residual_out_buf, post_attention_norm_len * 2)?);
+    let pre_feedforward_norm_bits = decode_bits(
+        runtime.read_buffer(&pre_feedforward_norm_out_buf, pre_feedforward_norm_len * 2)?,
+    );
+    let mlp_gate_bits = decode_bits(runtime.read_buffer(&mlp_gate_out_buf, mlp_gate_out_len * 2)?);
+    let mlp_up_bits = decode_bits(runtime.read_buffer(&mlp_up_out_buf, mlp_up_out_len * 2)?);
+    let geglu_bits = decode_bits(runtime.read_buffer(&geglu_out_buf, mlp_gate_out_len * 2)?);
+    let (
+        o_proj_row1836_bits,
+        o_proj_row1836_seq_bits,
+        o_proj_row1836_group_term_bits,
+        o_proj_proof_bits,
+        o_proj_generic_bits,
+        o_proj_serial_bits,
+    ) = if diagnostics_enabled {
+        (
+            decode_bits(runtime.read_buffer(&o_proj_row1836_out_buf, 2)?),
+            decode_bits(runtime.read_buffer(&o_proj_row1836_seq_out_buf, 2)?),
+            runtime
+                .read_buffer(
+                    &o_proj_row1836_group_terms_buf,
+                    o_scales_entry.shape[1] as usize * 4,
+                )?
+                .chunks_exact(4)
+                .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect::<Vec<_>>(),
+            decode_bits(runtime.read_buffer(&o_proj_out_buf, o_out_len * 2)?),
+            decode_bits(runtime.read_buffer(&o_proj_generic_out_buf, o_out_len * 2)?),
+            decode_bits(runtime.read_buffer(&o_proj_serial_out_buf, o_out_len * 2)?),
+        )
+    } else {
+        (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
     let o_proj_bits = &o_proj_fast_bits;
 
     let q_norm_hash = fnv1a64_u32_words(&q_norm_bits);
@@ -1624,47 +2400,66 @@ fn main() -> Result<(), Box<dyn Error>> {
         io::stdout().flush()?;
     }
 
-    if q_norm_bits[..16] != Q_PATH_ORACLE.expected_norm_first16_bits || q_norm_hash != Q_PATH_ORACLE.expected_norm_hash {
+    if q_norm_bits[..16] != Q_PATH_ORACLE.expected_norm_first16_bits
+        || q_norm_hash != Q_PATH_ORACLE.expected_norm_hash
+    {
         return Err(format!(
             "q_norm mismatch: got hash 0x{q_norm_hash:016X} first16 {:08X?}",
             &q_norm_bits[..16]
-        ).into());
+        )
+        .into());
     }
-    if q_rope_bits[..16] != Q_PATH_ORACLE.expected_rope_first16_bits.unwrap() || q_rope_hash != Q_PATH_ORACLE.expected_rope_hash.unwrap() {
+    if q_rope_bits[..16] != Q_PATH_ORACLE.expected_rope_first16_bits.unwrap()
+        || q_rope_hash != Q_PATH_ORACLE.expected_rope_hash.unwrap()
+    {
         return Err(format!(
             "q_rope mismatch: got hash 0x{q_rope_hash:016X} first16 {:08X?}",
             &q_rope_bits[..16]
-        ).into());
+        )
+        .into());
     }
-    if k_norm_bits[..16] != K_PATH_ORACLE.expected_norm_first16_bits || k_norm_hash != K_PATH_ORACLE.expected_norm_hash {
+    if k_norm_bits[..16] != K_PATH_ORACLE.expected_norm_first16_bits
+        || k_norm_hash != K_PATH_ORACLE.expected_norm_hash
+    {
         return Err(format!(
             "k_norm mismatch: got hash 0x{k_norm_hash:016X} first16 {:08X?}",
             &k_norm_bits[..16]
-        ).into());
+        )
+        .into());
     }
-    if k_rope_bits[..16] != K_PATH_ORACLE.expected_rope_first16_bits.unwrap() || k_rope_hash != K_PATH_ORACLE.expected_rope_hash.unwrap() {
+    if k_rope_bits[..16] != K_PATH_ORACLE.expected_rope_first16_bits.unwrap()
+        || k_rope_hash != K_PATH_ORACLE.expected_rope_hash.unwrap()
+    {
         return Err(format!(
             "k_rope mismatch: got hash 0x{k_rope_hash:016X} first16 {:08X?}",
             &k_rope_bits[..16]
-        ).into());
+        )
+        .into());
     }
-    if v_norm_bits[..16] != V_PATH_ORACLE.expected_norm_first16_bits || v_norm_hash != V_PATH_ORACLE.expected_norm_hash {
+    if v_norm_bits[..16] != V_PATH_ORACLE.expected_norm_first16_bits
+        || v_norm_hash != V_PATH_ORACLE.expected_norm_hash
+    {
         return Err(format!(
             "v_norm mismatch: got hash 0x{v_norm_hash:016X} first16 {:08X?}",
             &v_norm_bits[..16]
-        ).into());
+        )
+        .into());
     }
     if logits_bits != EXPECTED_LOGITS_BITS || logits_hash != EXPECTED_LOGITS_HASH {
         return Err(format!(
             "attention logits mismatch: got hash 0x{logits_hash:016X} bits {:08X?}",
             &logits_bits
-        ).into());
+        )
+        .into());
     }
-    if attn_out_bits[..16] != EXPECTED_ATTN_OUT_FIRST16_BITS || attn_out_hash != EXPECTED_ATTN_OUT_HASH {
+    if attn_out_bits[..16] != EXPECTED_ATTN_OUT_FIRST16_BITS
+        || attn_out_hash != EXPECTED_ATTN_OUT_HASH
+    {
         return Err(format!(
             "attention output mismatch: got hash 0x{attn_out_hash:016X} first16 {:08X?}",
             &attn_out_bits[..16]
-        ).into());
+        )
+        .into());
     }
     if o_proj_bits[..16] != EXPECTED_O_PROJ_FIRST16_BITS || o_proj_hash != EXPECTED_O_PROJ_HASH {
         return Err(format!(
@@ -1761,8 +2556,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("q_heads_per_kv={q_heads_per_kv}");
     println!("head_dim={head_dim}");
     println!("total_ns={}", elapsed.as_nanos());
-    println!("avg_ns={:.0}", elapsed.as_secs_f64() * 1e9 / bench_iters as f64);
-    println!("avg_us={:.3}", elapsed.as_secs_f64() * 1e6 / bench_iters as f64);
+    println!(
+        "avg_ns={:.0}",
+        elapsed.as_secs_f64() * 1e9 / bench_iters as f64
+    );
+    println!(
+        "avg_us={:.3}",
+        elapsed.as_secs_f64() * 1e6 / bench_iters as f64
+    );
     println!("attention_output_fnv1a64=0x{attn_out_hash:016X}");
     println!("attention_oproj_fnv1a64=0x{o_proj_hash:016X}");
     println!("attention_post_attn_norm_fnv1a64=0x{post_attention_norm_hash:016X}");

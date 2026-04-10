@@ -231,9 +231,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         projections.push(ProjectionBuffers {
             oracle,
             weight_name,
-            weight_buf: runtime.create_buffer_with_bytes(&weight_bytes, BufferStorageMode::Private)?,
-            scales_buf: runtime.create_buffer_with_bytes(&scales_bytes, BufferStorageMode::Private)?,
-            biases_buf: runtime.create_buffer_with_bytes(&biases_bytes, BufferStorageMode::Private)?,
+            weight_buf: runtime
+                .create_buffer_with_bytes(&weight_bytes, BufferStorageMode::Private)?,
+            scales_buf: runtime
+                .create_buffer_with_bytes(&scales_bytes, BufferStorageMode::Private)?,
+            biases_buf: runtime
+                .create_buffer_with_bytes(&biases_bytes, BufferStorageMode::Private)?,
             args: MlxAffineQprojRowArgs {
                 n_in: NORM_LEN as u32,
                 weight_words_per_row: weight_entry.shape[1] as u32,
@@ -368,14 +371,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         for (index, (args_bytes, bindings, tgs, tpg)) in projection_bindings.iter().enumerate() {
             runtime.memory_barrier_buffers()?;
-            runtime.dispatch_compute(
-                &qproj_pipeline,
-                args_bytes,
-                bindings,
-                &[],
-                *tgs,
-                *tpg,
-            )?;
+            runtime.dispatch_compute(&qproj_pipeline, args_bytes, bindings, &[], *tgs, *tpg)?;
             if index + 1 < projection_bindings.len() {
                 runtime.memory_barrier_buffers()?;
             }
@@ -397,14 +393,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         for (index, (args_bytes, bindings, tgs, tpg)) in projection_bindings.iter().enumerate() {
             runtime.memory_barrier_buffers()?;
-            runtime.dispatch_compute(
-                &qproj_pipeline,
-                args_bytes,
-                bindings,
-                &[],
-                *tgs,
-                *tpg,
-            )?;
+            runtime.dispatch_compute(&qproj_pipeline, args_bytes, bindings, &[], *tgs, *tpg)?;
             if index + 1 < projection_bindings.len() {
                 runtime.memory_barrier_buffers()?;
             }
@@ -425,14 +414,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     for (index, (args_bytes, bindings, tgs, tpg)) in projection_bindings.iter().enumerate() {
         runtime.memory_barrier_buffers()?;
-        runtime.dispatch_compute(
-            &qproj_pipeline,
-            args_bytes,
-            bindings,
-            &[],
-            *tgs,
-            *tpg,
-        )?;
+        runtime.dispatch_compute(&qproj_pipeline, args_bytes, bindings, &[], *tgs, *tpg)?;
         if index + 1 < projection_bindings.len() {
             runtime.memory_barrier_buffers()?;
         }
@@ -511,8 +493,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if hash != p.oracle.expected_hash {
             return Err(format!(
                 "{} full-row hash mismatch: got 0x{hash:016X} expected 0x{:016X}",
-                p.oracle.prefix,
-                p.oracle.expected_hash
+                p.oracle.prefix, p.oracle.expected_hash
             )
             .into());
         }

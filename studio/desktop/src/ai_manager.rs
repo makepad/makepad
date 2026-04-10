@@ -345,8 +345,8 @@ impl App {
                     reasoning_effort: None,
                 })),
             ))),
-            AiManagerBackend::OpenAiCloud => Self::read_secret_or_env("OPENAI_API_KEY").map(
-                |api_key| {
+            AiManagerBackend::OpenAiCloud => {
+                Self::read_secret_or_env("OPENAI_API_KEY").map(|api_key| {
                     Box::new(StatelessBackendAdapter::new(Box::new(OpenAiBackend::new(
                         BackendConfig::OpenAI {
                             api_key,
@@ -355,10 +355,10 @@ impl App {
                             reasoning_effort: None,
                         },
                     )))) as Box<dyn Agent>
-                },
-            ),
-            AiManagerBackend::ClaudeApi => Self::read_secret_or_env("ANTHROPIC_API_KEY").map(
-                |api_key| {
+                })
+            }
+            AiManagerBackend::ClaudeApi => {
+                Self::read_secret_or_env("ANTHROPIC_API_KEY").map(|api_key| {
                     Box::new(StatelessBackendAdapter::new(Box::new(ClaudeBackend::new(
                         BackendConfig::Claude {
                             api_key: Some(api_key),
@@ -366,8 +366,8 @@ impl App {
                             model: "claude-sonnet-4-5-20250929".to_string(),
                         },
                     )))) as Box<dyn Agent>
-                },
-            ),
+                })
+            }
             AiManagerBackend::Gemini => Self::read_secret_or_env("GOOGLE_API_KEY").map(|api_key| {
                 Box::new(StatelessBackendAdapter::new(Box::new(GeminiBackend::new(
                     BackendConfig::Gemini {
@@ -443,10 +443,7 @@ impl App {
         backend: AiManagerBackend,
     ) -> bool {
         let Some(agent) = self.create_ai_manager_agent(backend) else {
-            self.set_ai_manager_status(
-                cx,
-                &format!("{} is not configured", backend.label()),
-            );
+            self.set_ai_manager_status(cx, &format!("{} is not configured", backend.label()));
             if let Some(active) = self.ai_manager.active_backend {
                 self.ui
                     .drop_down(cx, ids!(ai_backend_dropdown))
@@ -463,10 +460,8 @@ impl App {
         self.ai_manager.streaming_text.clear();
 
         if let Some(agent) = self.ai_manager.agent.as_mut() {
-            self.ai_manager.session_id = Some(agent.create_session(
-                cx,
-                Self::create_ai_manager_session_config(backend),
-            ));
+            self.ai_manager.session_id =
+                Some(agent.create_session(cx, Self::create_ai_manager_session_config(backend)));
         }
 
         self.ui
@@ -474,7 +469,11 @@ impl App {
             .set_selected_item(cx, backend.to_index());
         self.set_ai_manager_status(
             cx,
-            &format!("{} [{}]", backend.label(), self.ai_manager_backend_details(backend)),
+            &format!(
+                "{} [{}]",
+                backend.label(),
+                self.ai_manager_backend_details(backend)
+            ),
         );
         self.refresh_ai_manager_report(cx);
         true
@@ -517,7 +516,8 @@ impl App {
         self.ai_manager.streaming_text.clear();
 
         if !self.ai_manager.history_injected && agent.is_stateless() {
-            let history: Vec<Message> = self.ai_manager.messages[..self.ai_manager.messages.len() - 1]
+            let history: Vec<Message> = self.ai_manager.messages
+                [..self.ai_manager.messages.len() - 1]
                 .iter()
                 .filter_map(|message| match message.role {
                     AiManagerMessageRole::User | AiManagerMessageRole::Task => {
@@ -685,9 +685,10 @@ impl App {
     }
 
     pub(super) fn cancel_ai_manager_prompt(&mut self, cx: &mut Cx) {
-        if let (Some(agent), Some(prompt_id)) =
-            (&mut self.ai_manager.agent, self.ai_manager.current_prompt.take())
-        {
+        if let (Some(agent), Some(prompt_id)) = (
+            &mut self.ai_manager.agent,
+            self.ai_manager.current_prompt.take(),
+        ) {
             agent.cancel_prompt(cx, prompt_id);
         }
         self.commit_ai_manager_streaming_message();
@@ -716,7 +717,13 @@ impl App {
             .active_mount
             .as_ref()
             .or_else(|| self.data.mounts.keys().next())?;
-        Some(self.data.mounts.get(mount)?.root.join(AI_MANAGER_REPORT_FILE))
+        Some(
+            self.data
+                .mounts
+                .get(mount)?
+                .root
+                .join(AI_MANAGER_REPORT_FILE),
+        )
     }
 
     fn truncate_for_summary(text: &str, max_chars: usize) -> String {
@@ -942,7 +949,14 @@ impl App {
 
         let summary = Self::terminal_summary_line(&lines, is_codex, codex_status.as_deref());
 
-        (mode, is_codex, needs_attention, summary, codex_status, auto_action)
+        (
+            mode,
+            is_codex,
+            needs_attention,
+            summary,
+            codex_status,
+            auto_action,
+        )
     }
 
     fn ai_terminal_snapshot(&self, path: &str) -> AiTerminalSnapshot {
@@ -991,11 +1005,7 @@ impl App {
             .collect()
     }
 
-    pub(super) fn set_ai_manager_task_terminal_selection(
-        &mut self,
-        cx: &mut Cx,
-        index: usize,
-    ) {
+    pub(super) fn set_ai_manager_task_terminal_selection(&mut self, cx: &mut Cx, index: usize) {
         self.ai_manager.draft_task_terminal_path = if index == 0 {
             None
         } else {
@@ -1045,10 +1055,7 @@ impl App {
                 task.last_terminal_summary
             ));
             if let Some(last_auto_action) = &task.last_auto_action {
-                markdown.push_str(&format!(
-                    "**Last Auto Action:** {}\n\n",
-                    last_auto_action
-                ));
+                markdown.push_str(&format!("**Last Auto Action:** {}\n\n", last_auto_action));
             }
             if !task.last_output_excerpt.is_empty() {
                 markdown.push_str("**Latest Output Excerpt:**\n\n```text\n");
@@ -1252,10 +1259,7 @@ impl App {
                     markdown.push_str(&format!("- **Codex status:** {}\n", codex_status));
                 }
                 if let Some(last_auto_action) = &task.last_auto_action {
-                    markdown.push_str(&format!(
-                        "- **Last auto action:** {}\n",
-                        last_auto_action
-                    ));
+                    markdown.push_str(&format!("- **Last auto action:** {}\n", last_auto_action));
                 }
                 markdown.push('\n');
             }
@@ -1410,7 +1414,10 @@ impl App {
             "get_manager_context" => {
                 let result = ManagerContextResult {
                     active_mount: self.data.active_mount.clone(),
-                    backend: self.ai_manager.active_backend.map(|backend| backend.label().to_string()),
+                    backend: self
+                        .ai_manager
+                        .active_backend
+                        .map(|backend| backend.label().to_string()),
                     report_path: self
                         .ai_manager_report_path()
                         .map(|path| path.display().to_string()),
@@ -1457,7 +1464,10 @@ impl App {
                         })
                         .collect(),
                 };
-                let summary = format!("captured context for {} terminal(s)", result.terminals.len());
+                let summary = format!(
+                    "captured context for {} terminal(s)",
+                    result.terminals.len()
+                );
                 self.log_ai_manager_tool(tool_name, summary, true);
                 (result.serialize_json(), false)
             }
@@ -1600,13 +1610,7 @@ impl App {
                     if let (Some(agent), Some(session_id)) =
                         (&mut self.ai_manager.agent, self.ai_manager.session_id)
                     {
-                        agent.send_tool_result(
-                            cx,
-                            session_id,
-                            &tool_use_id,
-                            &result,
-                            is_error,
-                        );
+                        agent.send_tool_result(cx, session_id, &tool_use_id, &result, is_error);
                     }
                     self.sync_ai_manager_widgets(cx);
                 }

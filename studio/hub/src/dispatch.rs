@@ -6,11 +6,11 @@ use crate::terminal_manager::TerminalManager;
 use crate::virtual_fs::VirtualFs;
 use crate::worker_pool::WorkerPool;
 use backend_proto::{
-    BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec, BuildInfo, ClientId,
-    ClientToHub, ClientToHubEnvelope, EventSample as HubEventSample, GCSample as StudioGCSample,
-    GPUSample as StudioGPUSample, HubToBuildBox, HubToBuildBoxVec, HubToClient, LogEntry,
-    LogSource, QueryId, RunItem, RunViewInputVizKind, SaveResult, SearchResult,
-    TerminalFramebuffer,
+    AppSocketInfo, BuildBoxInfo, BuildBoxStatus, BuildBoxToHub, BuildBoxToHubVec, BuildInfo,
+    ClientId, ClientToHub, ClientToHubEnvelope, EventSample as HubEventSample,
+    GCSample as StudioGCSample, GPUSample as StudioGPUSample, HubToBuildBox, HubToBuildBoxVec,
+    HubToClient, LogEntry, LogSource, QueryId, RunItem, RunViewInputVizKind, SaveResult,
+    SearchResult, TerminalFramebuffer,
 };
 use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_git::{FileStatus as GitFileStatus, Repository as GitRepository};
@@ -180,6 +180,8 @@ struct UiClient {
 struct AppSocket {
     build_id: QueryId,
     sender: Sender<Vec<u8>>,
+    mount: Option<String>,
+    package: Option<String>,
 }
 
 struct BuildBoxSocket {
@@ -408,8 +410,16 @@ impl HubCore {
                 build_id,
                 sender,
             } => {
-                self.app_sockets
-                    .insert(web_socket_id, AppSocket { build_id, sender });
+                let build_info = self.build_info_for_id(build_id);
+                self.app_sockets.insert(
+                    web_socket_id,
+                    AppSocket {
+                        build_id,
+                        sender,
+                        mount: build_info.as_ref().map(|info| info.mount.clone()),
+                        package: build_info.as_ref().map(|info| info.package.clone()),
+                    },
+                );
                 self.flush_pending_forward_to_app(build_id);
             }
             HubEvent::AppDisconnected { web_socket_id } => {
@@ -949,6 +959,14 @@ impl HubCore {
                             .into_iter()
                             .filter(|build| build.package != MAKEPAD_SPLASH_RUNNABLE)
                             .collect(),
+                    },
+                );
+            }
+            ClientToHub::ListAppSockets => {
+                self.send_ui_reply(
+                    client_id,
+                    HubToClient::AppSockets {
+                        sockets: self.list_app_sockets(),
                     },
                 );
             }
@@ -2355,6 +2373,39 @@ impl HubCore {
         builds.extend(self.remote_builds.values().cloned());
         builds.sort_by_key(|build| build.build_id.0);
         builds
+    }
+
+    fn build_info_for_id(&self, build_id: QueryId) -> Option<BuildInfo> {
+        self.process_manager
+            .list_builds()
+            .into_iter()
+            .find(|build| build.build_id == build_id)
+            .or_else(|| self.remote_builds.get(&build_id).cloned())
+    }
+
+    fn list_app_sockets(&self) -> Vec<AppSocketInfo> {
+        let mut sockets = self
+            .app_sockets
+            .iter()
+            .map(|(web_socket_id, socket)| {
+                let build_info = self.build_info_for_id(socket.build_id);
+                AppSocketInfo {
+                    web_socket_id: *web_socket_id,
+                    build_id: socket.build_id,
+                    mount: build_info
+                        .as_ref()
+                        .map(|info| info.mount.clone())
+                        .or_else(|| socket.mount.clone()),
+                    package: build_info
+                        .as_ref()
+                        .map(|info| info.package.clone())
+                        .or_else(|| socket.package.clone()),
+                    build_active: build_info.as_ref().map(|info| info.active).unwrap_or(false),
+                }
+            })
+            .collect::<Vec<_>>();
+        sockets.sort_by_key(|socket| (socket.build_id.0, socket.web_socket_id));
+        sockets
     }
 
     fn mount_has_root_splash(&self, mount: &str) -> bool {

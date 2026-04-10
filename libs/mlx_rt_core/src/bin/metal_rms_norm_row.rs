@@ -78,9 +78,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 bench_iters = value.parse::<usize>()?;
             }
             "-h" | "--help" => {
-                eprintln!(
-                    "Usage: metal_rms_norm_row [model.safetensors] [--warmup N] [--iters N]"
-                );
+                eprintln!("Usage: metal_rms_norm_row [model.safetensors] [--warmup N] [--iters N]");
                 return Ok(());
             }
             _ if arg.starts_with("--") => {
