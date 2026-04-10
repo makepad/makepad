@@ -137,50 +137,10 @@ script_mod! {
             quote_fg_color: theme.color_label_inner
             code_color: theme.color_bg_highlight
             selection_color: theme.color_selection_focus
+            table_header_bg_color: theme.color_bg_highlight
+            table_border_color: theme.color_shadow
             space_1: uniform(theme.space_1)
             space_2: uniform(theme.space_2)
-
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                match self.block_type {
-                    FlowBlockType.Quote => {
-                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
-                        sdf.fill(self.quote_bg_color)
-                        sdf.box(self.space_1 self.space_1 self.space_1 self.rect_size.y-self.space_2 1.5)
-                        sdf.fill(self.quote_fg_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.Sep => {
-                        sdf.box(0. 1. self.rect_size.x-1. self.rect_size.y-2. 2.)
-                        sdf.fill(self.sep_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.Code => {
-                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
-                        sdf.fill(self.code_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.InlineCode => {
-                        sdf.box(1. 1. self.rect_size.x-2. self.rect_size.y-2. 2.)
-                        sdf.fill(self.code_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.Underline => {
-                        sdf.box(0. self.rect_size.y-2. self.rect_size.x 2.0 0.5)
-                        sdf.fill(self.line_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.Strikethrough => {
-                        sdf.box(0. self.rect_size.y * 0.45 self.rect_size.x 2.0 0.5)
-                        sdf.fill(self.line_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.Selection => {
-                        return vec4(self.selection_color.rgb * self.selection_color.a, self.selection_color.a)
-                    }
-                }
-                return #f00
-            }
         }
     }
 }
@@ -258,6 +218,42 @@ impl ScriptHook for Html {
 }
 
 impl Html {
+    fn count_table_columns(nodes: &[HtmlNode], start_index: usize) -> usize {
+        let mut count = 0;
+        let mut in_first_row = false;
+        let mut depth = 0;
+        for node in &nodes[start_index + 1..] {
+            match node {
+                HtmlNode::OpenTag { lc, .. } => {
+                    if *lc == live_id!(table) {
+                        depth += 1;
+                    } else if depth == 0 && *lc == live_id!(tr) && !in_first_row {
+                        in_first_row = true;
+                    } else if depth == 0
+                        && in_first_row
+                        && (*lc == live_id!(td) || *lc == live_id!(th))
+                    {
+                        count += 1;
+                    }
+                }
+                HtmlNode::CloseTag { lc, .. } => {
+                    if *lc == live_id!(table) {
+                        if depth > 0 {
+                            depth -= 1;
+                        } else {
+                            return count;
+                        }
+                    }
+                    if depth == 0 && *lc == live_id!(tr) && in_first_row {
+                        return count;
+                    }
+                }
+                _ => {}
+            }
+        }
+        count
+    }
+
     fn handle_open_tag(
         cx: &mut Cx2d,
         tf: &mut TextFlow,
@@ -401,6 +397,34 @@ impl Html {
                 tf.new_line_collapsed(cx);
                 tf.begin_list_item(cx, marker, pad);
             }
+            some_id!(table) => {
+                tf.new_line_collapsed(cx);
+                let col_count = Self::count_table_columns(node.nodes, node.index);
+                tf.begin_table(cx, col_count);
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
+            }
+            some_id!(thead) => {
+                tf.in_table_header = true;
+            }
+            some_id!(tbody) => {}
+            some_id!(tr) => {
+                if tf.in_table_header {
+                    tf.begin_table_header_row(cx);
+                } else {
+                    tf.begin_table_row(cx);
+                }
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
+            }
+            some_id!(th) => {
+                tf.table_row_is_header = true;
+                tf.begin_table_cell(cx);
+                tf.bold.push();
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
+            }
+            some_id!(td) => {
+                tf.begin_table_cell(cx);
+                trim_whitespace_in_text = TrimWhitespaceInText::Trim;
+            }
             Some(x) => return (Some(x), trim_whitespace_in_text),
             _ => (),
         }
@@ -462,6 +486,19 @@ impl Html {
             some_id!(li) => tf.end_list_item(cx),
             some_id!(u) => tf.underline.pop(),
             some_id!(del) | some_id!(s) | some_id!(strike) => tf.strikethrough.pop(),
+            some_id!(table) => tf.end_table(cx),
+            some_id!(thead) => {
+                tf.in_table_header = false;
+            }
+            some_id!(tbody) => {}
+            some_id!(tr) => {
+                tf.end_table_row(cx);
+            }
+            some_id!(th) => {
+                tf.bold.pop();
+                tf.end_table_cell(cx);
+            }
+            some_id!(td) => tf.end_table_cell(cx),
             _ => (),
         }
         None
@@ -479,6 +516,9 @@ impl Html {
             } else {
                 text
             };
+            if tf.table_num_columns > 0 && node.text_is_all_ws() {
+                return false;
+            }
             tf.draw_text(cx, text);
             true
         } else {
