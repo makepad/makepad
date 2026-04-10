@@ -916,7 +916,8 @@ impl DrawGlyph {
 
     pub fn get_aa_pad_px(&self, cx: &mut Cx) -> f32 {
         let mut value = [0.0];
-        self.draw_vars.get_uniform(cx, live_id!(aa_pad_px), &mut value);
+        self.draw_vars
+            .get_uniform(cx, live_id!(aa_pad_px), &mut value);
         value[0]
     }
 
@@ -1035,7 +1036,9 @@ impl DrawGlyph {
         let pass_id = cx.pass_stack.last().unwrap().pass_id;
         let draw_list_id = *cx.draw_list_stack.last().unwrap();
         let pass_uniforms = cx.passes[pass_id].pass_uniforms.clone();
-        let view_transform = cx.draw_lists[draw_list_id].draw_list_uniforms.view_transform;
+        let view_transform = cx.draw_lists[draw_list_id]
+            .draw_list_uniforms
+            .view_transform;
         let model_view = Mat4f::mul(&pass_uniforms.camera_view, &view_transform);
         let slug_matrix = Mat4f::mul(&pass_uniforms.camera_projection, &model_view);
         let viewport = cx.current_pass_size();
@@ -1204,7 +1207,12 @@ fn push_quad(curves: &mut Vec<QuadCurve>, bounds: &mut BBox, curve: QuadCurve) {
     curves.push(curve);
 }
 
-fn band_range(min_value: f32, max_value: f32, bands_f: f32, num_bands: usize) -> Option<(usize, usize)> {
+fn band_range(
+    min_value: f32,
+    max_value: f32,
+    bands_f: f32,
+    num_bands: usize,
+) -> Option<(usize, usize)> {
     if num_bands == 0 {
         return None;
     }

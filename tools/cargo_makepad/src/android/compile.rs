@@ -3,7 +3,7 @@ use crate::android::{AndroidConfig, AndroidTarget, AndroidVariant, HostOs};
 use crate::makepad_shell::*;
 use crate::utils::*;
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashSet},
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -419,6 +419,10 @@ fn rust_build(
 
         let target_arch_str = android_target.to_str();
         let cfg_flag = format!("--cfg android_target=\"{}\"", target_arch_str);
+        let rustflags = compose_android_rustflags(
+            std::env::var("RUSTFLAGS").ok().as_deref(),
+            &cfg_flag,
+        );
 
         let makepad_env = if let AndroidVariant::Quest = variant {
             Some(match std::env::var("MAKEPAD") {
@@ -486,7 +490,7 @@ fn rust_build(
             // and the full NDK installed (via --full-ndk), cmake's built-in
             // Android module handles the cross-compilation setup automatically.
             ("AWS_LC_SYS_CMAKE_BUILDER".to_string(), "1".to_string()),
-            ("RUSTFLAGS".to_string(), cfg_flag.clone()),
+            ("RUSTFLAGS".to_string(), rustflags),
         ];
         if let Some(makepad_env) = makepad_env {
             env.push(("MAKEPAD".to_string(), makepad_env));
@@ -500,6 +504,32 @@ fn rust_build(
     }
 
     Ok(())
+}
+
+fn compose_android_rustflags(existing: Option<&str>, cfg_flag: &str) -> String {
+    let mut rustflags = existing.unwrap_or_default().trim().to_string();
+    let has_prefer_dynamic = rustflags
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| pair == ["-C", "prefer-dynamic"])
+        || rustflags
+            .split_whitespace()
+            .any(|token| token == "-Cprefer-dynamic");
+
+    if !has_prefer_dynamic {
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str("-C prefer-dynamic");
+    }
+    if !cfg_flag.trim().is_empty() {
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str(cfg_flag.trim());
+    }
+    rustflags
 }
 
 /// Resolve the cargo target directory for android builds.
@@ -1012,6 +1042,134 @@ fn bundle_ndk_shared_deps(
     Ok(())
 }
 
+fn read_needed_shared_libs(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    urls: &AndroidSDKUrls,
+    so_path: &Path,
+) -> Result<Vec<String>, String> {
+    let (_ndk_version, ndk_prebuilt_root) =
+        resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
+
+    let readelf_path = ndk_prebuilt_root.join("bin/llvm-readelf");
+    if !readelf_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let cwd = std::env::current_dir().unwrap();
+    let output = shell_env_cap(
+        &[],
+        &cwd,
+        readelf_path.to_str().unwrap(),
+        &["-d", so_path.to_str().unwrap()],
+    )?;
+
+    let mut libs = Vec::new();
+    for line in output.lines() {
+        if !line.contains("(NEEDED)") {
+            continue;
+        }
+        let Some(lib_name) = line.find('[').and_then(|start| {
+            line[start + 1..]
+                .find(']')
+                .map(|end| &line[start + 1..start + 1 + end])
+        }) else {
+            continue;
+        };
+        libs.push(lib_name.to_string());
+    }
+    Ok(libs)
+}
+
+fn bundle_local_shared_deps(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    urls: &AndroidSDKUrls,
+    android_target: &AndroidTarget,
+    so_path: &Path,
+    abi: &str,
+    build_paths: &BuildPaths,
+    build_dir: &Path,
+) -> Result<(), String> {
+    let mut pending = vec![so_path.to_path_buf()];
+    let mut visited = HashSet::<String>::new();
+    let search_dirs = [build_dir.to_path_buf(), build_dir.join("deps")];
+
+    while let Some(current_so) = pending.pop() {
+        for lib_name in read_needed_shared_libs(sdk_dir, host_os, urls, &current_so)? {
+            if !visited.insert(lib_name.clone()) {
+                continue;
+            }
+
+            let binary_path = format!("lib/{abi}/{lib_name}");
+            let dst_lib = build_paths.out_dir.join(&binary_path);
+            if dst_lib.exists() {
+                continue;
+            }
+
+            let candidate = search_dirs
+                .iter()
+                .map(|dir| dir.join(&lib_name))
+                .find(|path| path.is_file())
+                .or_else(|| find_rustup_shared_lib(android_target, &lib_name));
+            let Some(candidate) = candidate else {
+                continue;
+            };
+
+            cp(&candidate, &dst_lib, false)?;
+            shell_env_cap(
+                &[],
+                &build_paths.out_dir,
+                aapt_path(sdk_dir, urls).to_str().unwrap(),
+                &[
+                    "add",
+                    build_paths.dst_unaligned_apk.to_str().unwrap(),
+                    &binary_path,
+                ],
+            )?;
+
+            // A local Rust dylib can still depend on NDK-provided shared libs.
+            bundle_ndk_shared_deps(
+                sdk_dir,
+                host_os,
+                urls,
+                android_target,
+                &dst_lib,
+                abi,
+                build_paths,
+            )?;
+
+            println!("  Bundled local shared dep: {lib_name} (for {abi})");
+            pending.push(candidate);
+        }
+    }
+
+    Ok(())
+}
+
+fn find_rustup_shared_lib(android_target: &AndroidTarget, lib_name: &str) -> Option<PathBuf> {
+    let rustup_home = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")))?;
+    let toolchains_dir = rustup_home.join("toolchains");
+    let tail = Path::new("lib")
+        .join("rustlib")
+        .join(android_target.toolchain())
+        .join("lib")
+        .join(lib_name);
+
+    for entry in fs::read_dir(toolchains_dir).ok()? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let candidate = entry.path().join(&tail);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn add_rust_library(
     sdk_dir: &Path,
     host_os: HostOs,
@@ -1038,7 +1196,8 @@ fn add_rust_library(
         let src_lib = target_dir.join(format!(
             "{android_target_dir}/{profile}/lib{underscore_target}.so"
         ));
-        build_dir = Some(target_dir.join(format!("{android_target_dir}/{profile}")));
+        let current_build_dir = target_dir.join(format!("{android_target_dir}/{profile}"));
+        build_dir = Some(current_build_dir.clone());
         let dst_lib = build_paths.out_dir.join(binary_path.clone());
         cp(&src_lib, &dst_lib, false)?;
 
@@ -1063,6 +1222,16 @@ fn add_rust_library(
             &dst_lib,
             abi,
             build_paths,
+        )?;
+        bundle_local_shared_deps(
+            sdk_dir,
+            host_os,
+            urls,
+            android_target,
+            &src_lib,
+            abi,
+            build_paths,
+            &current_build_dir,
         )?;
     }
     // for the quest variant add the precompiled openXR loader
@@ -1402,6 +1571,7 @@ pub fn run(
     urls: &AndroidSDKUrls,
     devices: Vec<String>,
 ) -> Result<(), String> {
+    let build_crate = get_build_crate_from_args(args)?;
     let result = build(
         sdk_dir,
         host_os,
@@ -1417,7 +1587,7 @@ pub fn run(
     let cwd = std::env::current_dir().unwrap();
     // alright so how will we do multiple targets eh
 
-    fn android_start_args(java_url: &str) -> Vec<String> {
+    fn android_start_args(java_url: &str, build_crate: &str) -> Vec<String> {
         let mut args = vec![
             "shell".to_string(),
             "am".to_string(),
@@ -1426,15 +1596,18 @@ pub fn run(
             "-n".to_string(),
             format!("{0}/{0}.MakepadApp", java_url),
         ];
-        if let Ok(studio) = std::env::var("STUDIO") {
-            if !studio.trim().is_empty() {
-                println!("Android launch intent makepad.STUDIO={}", studio);
+        if let Ok(studio_host) = std::env::var("STUDIO_HOST") {
+            if !studio_host.trim().is_empty() {
+                println!("Android launch intent makepad.STUDIO_HOST={}", studio_host);
                 args.push("--es".to_string());
-                args.push("makepad.STUDIO".to_string());
-                args.push(studio);
+                args.push("makepad.STUDIO_HOST".to_string());
+                args.push(studio_host);
+                args.push("--es".to_string());
+                args.push("makepad.STUDIO_CRATE".to_string());
+                args.push(build_crate.to_string());
             }
         } else {
-            println!("Android launch intent makepad.STUDIO is not set");
+            println!("Android launch intent makepad.STUDIO_HOST is not set");
         }
         args
     }
@@ -1453,7 +1626,7 @@ pub fn run(
             ],
         )?;
         println!("Starting android application");
-        let start_args = android_start_args(&result.java_url);
+        let start_args = android_start_args(&result.java_url, build_crate);
         let start_args_refs = start_args
             .iter()
             .map(|arg| arg.as_str())
@@ -1507,7 +1680,7 @@ pub fn run(
         let mut children = Vec::new();
         println!("Starting android application");
         for device in &devices {
-            let start_args = android_start_args(&result.java_url);
+            let start_args = android_start_args(&result.java_url, build_crate);
             let mut device_args = vec!["-s".to_string(), device.clone()];
             device_args.extend(start_args);
             let device_args_refs = device_args
@@ -1712,7 +1885,7 @@ pub fn adb_tcp(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_adb_devices, parse_ip_addr_show, parse_ip_route};
+    use super::{compose_android_rustflags, parse_adb_devices, parse_ip_addr_show, parse_ip_route};
 
     #[test]
     fn parse_adb_devices_filters_ready_targets() {
@@ -1743,6 +1916,36 @@ quest-unauthorized     unauthorized usb:3\n\
 default via 192.168.0.1 dev wlan0 proto dhcp src 192.168.0.42 metric 303\n\
 192.168.0.0/24 dev wlan0 proto kernel scope link src 192.168.0.42\n";
         assert_eq!(parse_ip_route(output), Some("192.168.0.42".to_string()));
+    }
+
+    #[test]
+    fn compose_android_rustflags_adds_prefer_dynamic() {
+        assert_eq!(
+            compose_android_rustflags(None, "--cfg android_target=\"aarch64\""),
+            "-C prefer-dynamic --cfg android_target=\"aarch64\""
+        );
+    }
+
+    #[test]
+    fn compose_android_rustflags_preserves_existing_flags() {
+        assert_eq!(
+            compose_android_rustflags(
+                Some("-C debuginfo=1"),
+                "--cfg android_target=\"aarch64\""
+            ),
+            "-C debuginfo=1 -C prefer-dynamic --cfg android_target=\"aarch64\""
+        );
+    }
+
+    #[test]
+    fn compose_android_rustflags_does_not_duplicate_prefer_dynamic() {
+        assert_eq!(
+            compose_android_rustflags(
+                Some("-C prefer-dynamic -C debuginfo=1"),
+                "--cfg android_target=\"aarch64\""
+            ),
+            "-C prefer-dynamic -C debuginfo=1 --cfg android_target=\"aarch64\""
+        );
     }
 }
 

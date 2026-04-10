@@ -2196,9 +2196,15 @@ impl VarGlyphLabel {
             return;
         }
 
-        let laidout = self
-            .draw_text
-            .layout(cx.cx.cx, 0.0, 0.0, None, false, Align::default(), &self.text);
+        let laidout = self.draw_text.layout(
+            cx.cx.cx,
+            0.0,
+            0.0,
+            None,
+            false,
+            Align::default(),
+            &self.text,
+        );
         self.size = vec2(laidout.size_in_lpxs.width, laidout.size_in_lpxs.height);
         self.shape_id = build_laidout_text_shape(&mut self.draw_glyph, laidout.as_ref());
     }

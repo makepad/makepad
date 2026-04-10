@@ -177,13 +177,25 @@ impl WaylandCx {
                 // When drawing our own window chrome (no server-side decorations),
                 // populate the chrome buttons bounding box: three buttons right-aligned
                 // at the top of the caption bar, matching the Makepad widget layout.
-                if matches!(cx.os_type(), OsType::LinuxWindow(LinuxWindowParams { custom_window_chrome: true, .. })) {
+                if matches!(
+                    cx.os_type(),
+                    OsType::LinuxWindow(LinuxWindowParams {
+                        custom_window_chrome: true,
+                        ..
+                    })
+                ) {
                     const BUTTONS_W: f64 = 46.0 * 3.0;
                     const BUTTONS_H: f64 = 29.0;
                     let w = re.new_geom.inner_size.x;
                     re.new_geom.window_chrome_buttons = Rect {
-                        pos: Vec2d { x: w - BUTTONS_W, y: 0.0 },
-                        size: Vec2d { x: BUTTONS_W, y: BUTTONS_H },
+                        pos: Vec2d {
+                            x: w - BUTTONS_W,
+                            y: 0.0,
+                        },
+                        size: Vec2d {
+                            x: BUTTONS_W,
+                            y: BUTTONS_H,
+                        },
                     };
                 }
 
