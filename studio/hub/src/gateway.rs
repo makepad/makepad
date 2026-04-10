@@ -55,10 +55,19 @@ pub fn start_http_gateway(
                     headers,
                     response_sender,
                 } => {
+                    let request_path = if let Some(search) = headers
+                        .search
+                        .as_ref()
+                        .filter(|search| !search.is_empty())
+                    {
+                        format!("{}?{}", headers.path, search)
+                    } else {
+                        headers.path.clone()
+                    };
                     if studio_hub_debug_enabled() {
                         eprintln!(
                             "studio hub debug: websocket connect id={} path={}",
-                            web_socket_id, headers.path
+                            web_socket_id, request_path
                         );
                     }
                     if headers.path == "/ui" {
@@ -76,7 +85,7 @@ pub fn start_http_gateway(
                         });
                         continue;
                     }
-                    if let Some(app_connect) = parse_app_path(&headers.path) {
+                    if let Some(app_connect) = parse_app_path(&request_path) {
                         if studio_hub_debug_enabled() {
                             eprintln!(
                                 "studio hub debug: websocket id={} accepted as app build={:?} crate={:?}",
@@ -111,12 +120,12 @@ pub fn start_http_gateway(
                     if studio_hub_debug_enabled() {
                         eprintln!(
                             "studio hub debug: websocket id={} rejected path={}",
-                            web_socket_id, headers.path
+                            web_socket_id, request_path
                         );
                     }
                     let _ = response_sender.send(
                         HubToClient::Error {
-                            message: format!("invalid websocket path: {}", headers.path),
+                            message: format!("invalid websocket path: {}", request_path),
                         }
                         .serialize_bin(),
                     );
