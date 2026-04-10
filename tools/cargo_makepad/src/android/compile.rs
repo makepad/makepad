@@ -365,7 +365,7 @@ fn rust_build(
     } else {
         args.to_vec()
     };
-    let (ndk_version, ndk_prebuilt_root) =
+    let (_ndk_version, ndk_prebuilt_root) =
         resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
     // Derive ndk_root from ndk_prebuilt_root by going up through
     // `toolchains/llvm/prebuilt/<host>/` (4 levels).
