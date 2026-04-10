@@ -42,18 +42,7 @@ impl ExactMetalGenerationCursor {
         if token_count == 0 {
             return Ok(Vec::new());
         }
-        if position == 0 {
-            backend.reset_kv_caches();
-        }
-        let mut current_token = token_id;
-        let mut generated = Vec::with_capacity(token_count);
-        for step_idx in 0..token_count {
-            let next_token = backend
-                .eval_token_greedy_token_id_from_token_id(current_token, position + step_idx)?;
-            generated.push(next_token);
-            current_token = next_token;
-        }
-        Ok(generated)
+        backend.eval_token_greedy_token_chunk_from_token_id(token_id, position, token_count)
     }
 
     fn ensure_prompt_prefilled_locked(
@@ -167,14 +156,6 @@ impl ExactMetalGenerationCursor {
                 self.stop_reason = Some(ExactMetalGenerationStopReason::MaxNewTokens);
                 break;
             }
-            if self.generated_token_ids.len() >= target {
-                break;
-            }
-            self.pending_next = Some(Self::eval_token_next_with_backend(
-                &mut backend,
-                next_token,
-                self.position - 1,
-            )?);
         }
         if self.reached_generation_limit() && self.stop_reason.is_none() {
             self.stop_reason = Some(ExactMetalGenerationStopReason::MaxNewTokens);

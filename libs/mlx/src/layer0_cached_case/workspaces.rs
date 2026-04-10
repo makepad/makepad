@@ -7,10 +7,11 @@
         if !text_config.enable_moe_block {
             return Err("exact metal text runtime currently expects Gemma MoE layers".into());
         }
-        if text_config.top_k_experts as usize != ROUTER_TOP_K {
+        if text_config.top_k_experts_or_zero() as usize != ROUTER_TOP_K {
             return Err(format!(
                 "exact metal text runtime expects top_k_experts={}, got {}",
-                ROUTER_TOP_K, text_config.top_k_experts
+                ROUTER_TOP_K,
+                text_config.top_k_experts_or_zero()
             )
             .into());
         }

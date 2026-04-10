@@ -114,14 +114,17 @@ impl ExactMetalTextRuntimeSession {
                 spec.clone(),
             )?));
         }
-        Ok(Self {
+        let mut runtime = Self {
             session,
             kv_layout,
             kv_caches,
             kv_append_pipeline,
             text_io,
             layer_workspaces: HashMap::new(),
-        })
+        };
+        runtime.preload_all_layer_workspaces()?;
+        runtime.reset_runtime_counters();
+        Ok(runtime)
     }
 
     pub(crate) fn reset_kv_caches(&mut self) {
@@ -322,6 +325,21 @@ impl ExactMetalTextRuntimeSession {
             .get(&layer_idx)
             .cloned()
             .ok_or_else(|| format!("missing exact metal workspace for layer {layer_idx}").into())
+    }
+
+    fn preload_all_layer_workspaces(&mut self) -> Result<(), Box<dyn Error>> {
+        let layer_count = self
+            .session
+            .weights
+            .snapshot
+            .config
+            .text_config
+            .num_hidden_layers as usize;
+        for layer_idx in 0..layer_count {
+            let workspace = ExactMetalLayerWorkspace::load(&mut self.session, layer_idx)?;
+            self.layer_workspaces.insert(layer_idx, workspace);
+        }
+        Ok(())
     }
 
     fn token_input_buffer(&mut self) -> Result<MetalBuffer, Box<dyn Error>> {
