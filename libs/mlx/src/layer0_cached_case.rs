@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 use crate::{GemmaAttentionKind, GemmaKvCacheLayout, GemmaKvCacheSpec, KvTensor, KvTensorShape};
 use makepad_ggml::backend::metal::{
     BufferStorageMode, MetalBuffer, MetalBufferBindingRef, MetalPipeline, MetalPipelineDescriptor,
@@ -2576,7 +2578,7 @@ pub(crate) struct ExactMetalGenerationCursor {
     backend: Arc<Mutex<ExactMetalTextRuntimeSession>>,
     prompt_token_ids: Arc<[u32]>,
     stop_tokens: BTreeSet<u32>,
-    max_new_tokens: usize,
+    max_new_tokens: Option<usize>,
     processed_prompt_tokens: usize,
     position: usize,
     pending_next: Option<u32>,
@@ -2618,7 +2620,7 @@ pub(crate) struct ExactMetalGenerationGraph {
     prompt_prefill: Arc<ExactMetalPromptPrefillNode>,
     step_nodes: Mutex<Vec<Arc<ExactMetalGenerationStepNode>>>,
     final_snapshot: OnceLock<Result<Arc<ExactMetalGenerationSnapshot>, String>>,
-    max_new_tokens: usize,
+    max_new_tokens: Option<usize>,
 }
 
 impl ExactMetalTextRuntimeSession {
@@ -2796,7 +2798,7 @@ impl ExactMetalTextRuntimeSession {
         backend: Arc<Mutex<Self>>,
         prompt_token_ids: Arc<[u32]>,
         stop_tokens: BTreeSet<u32>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
     ) -> Result<ExactMetalGenerationCursor, Box<dyn Error>> {
         if prompt_token_ids.is_empty() {
             return Err("generation requires at least one prompt token".into());
@@ -2809,7 +2811,9 @@ impl ExactMetalTextRuntimeSession {
             processed_prompt_tokens: 0,
             position: 0,
             pending_next: None,
-            generated_token_ids: Vec::with_capacity(max_new_tokens),
+            generated_token_ids: Vec::with_capacity(
+                max_new_tokens.unwrap_or(DEVICE_GREEDY_DECODE_CHUNK_TOKENS),
+            ),
             stop_reason: None,
         })
     }
@@ -2818,7 +2822,7 @@ impl ExactMetalTextRuntimeSession {
         backend: Arc<Mutex<Self>>,
         prompt_token_ids: Arc<[u32]>,
         stop_tokens: BTreeSet<u32>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
     ) -> Result<ExactMetalGenerationGraph, Box<dyn Error>> {
         ExactMetalGenerationGraph::new(Self::generation_cursor(
             backend,
@@ -5004,6 +5008,21 @@ pub fn profile_decode_layers_after_prompt_token_ids(
 }
 
 impl ExactMetalGenerationCursor {
+    fn target_count(&self, requested_count: usize) -> usize {
+        self.max_new_tokens
+            .map_or(requested_count, |limit| requested_count.min(limit))
+    }
+
+    fn remaining_generation_limit(&self) -> usize {
+        self.max_new_tokens
+            .map_or(usize::MAX, |limit| limit.saturating_sub(self.generated_token_ids.len()))
+    }
+
+    fn reached_generation_limit(&self) -> bool {
+        self.max_new_tokens
+            .is_some_and(|limit| self.generated_token_ids.len() >= limit)
+    }
+
     fn eval_token_next_with_backend(
         backend: &mut ExactMetalTextRuntimeSession,
         token_id: u32,
@@ -5080,7 +5099,7 @@ impl ExactMetalGenerationCursor {
         &mut self,
         requested_count: usize,
     ) -> Result<(), Box<dyn Error>> {
-        let target = requested_count.min(self.max_new_tokens);
+        let target = self.target_count(requested_count);
         let backend_handle = Arc::clone(&self.backend);
         let mut backend = backend_handle
             .lock()
@@ -5098,9 +5117,7 @@ impl ExactMetalGenerationCursor {
                         .checked_sub(1)
                         .ok_or("generation cursor position underflow")?;
                     let remaining_target = target.saturating_sub(self.generated_token_ids.len());
-                    let remaining_max = self
-                        .max_new_tokens
-                        .saturating_sub(self.generated_token_ids.len());
+                    let remaining_max = self.remaining_generation_limit();
                     let chunk_len = remaining_target
                         .min(remaining_max)
                         .min(DEVICE_GREEDY_DECODE_CHUNK_TOKENS);
@@ -5119,7 +5136,7 @@ impl ExactMetalGenerationCursor {
                             }
                             self.generated_token_ids.push(token_id);
                             self.position += 1;
-                            if self.generated_token_ids.len() >= self.max_new_tokens {
+                            if self.reached_generation_limit() {
                                 self.stop_reason =
                                     Some(ExactMetalGenerationStopReason::MaxNewTokens);
                                 break;
@@ -5147,7 +5164,7 @@ impl ExactMetalGenerationCursor {
             }
             self.generated_token_ids.push(next_token);
             self.position += 1;
-            if self.generated_token_ids.len() >= self.max_new_tokens {
+            if self.reached_generation_limit() {
                 self.stop_reason = Some(ExactMetalGenerationStopReason::MaxNewTokens);
                 break;
             }
@@ -5160,7 +5177,7 @@ impl ExactMetalGenerationCursor {
                 self.position - 1,
             )?);
         }
-        if self.generated_token_ids.len() >= self.max_new_tokens && self.stop_reason.is_none() {
+        if self.reached_generation_limit() && self.stop_reason.is_none() {
             self.stop_reason = Some(ExactMetalGenerationStopReason::MaxNewTokens);
             self.pending_next = None;
         }
@@ -5168,7 +5185,18 @@ impl ExactMetalGenerationCursor {
     }
 
     pub(crate) fn ensure_finished(&mut self) -> Result<(), Box<dyn Error>> {
-        self.ensure_generated(self.max_new_tokens)
+        if let Some(limit) = self.max_new_tokens {
+            self.ensure_generated(limit)
+        } else {
+            while self.stop_reason.is_none() {
+                let next_target = self
+                    .generated_token_ids
+                    .len()
+                    .saturating_add(DEVICE_GREEDY_DECODE_CHUNK_TOKENS);
+                self.ensure_generated(next_target)?;
+            }
+            Ok(())
+        }
     }
 
     #[cfg(test)]
@@ -5261,7 +5289,9 @@ impl ExactMetalGenerationGraph {
         Ok(Self {
             prompt_prefill: Arc::new(ExactMetalPromptPrefillNode::new(Arc::clone(&cursor))),
             cursor,
-            step_nodes: Mutex::new(Vec::with_capacity(max_new_tokens)),
+            step_nodes: Mutex::new(Vec::with_capacity(
+                max_new_tokens.unwrap_or(DEVICE_GREEDY_DECODE_CHUNK_TOKENS),
+            )),
             final_snapshot: OnceLock::new(),
             max_new_tokens,
         })
@@ -5271,7 +5301,9 @@ impl ExactMetalGenerationGraph {
         &self,
         requested_count: usize,
     ) -> Result<Arc<ExactMetalGenerationStepNode>, String> {
-        let target = requested_count.min(self.max_new_tokens);
+        let target = self
+            .max_new_tokens
+            .map_or(requested_count, |limit| requested_count.min(limit));
         if target == 0 {
             return Err("generation step nodes start at token count 1".to_string());
         }
@@ -5302,7 +5334,9 @@ impl ExactMetalGenerationGraph {
         &self,
         requested_count: usize,
     ) -> Result<Arc<[u32]>, String> {
-        let target = requested_count.min(self.max_new_tokens);
+        let target = self
+            .max_new_tokens
+            .map_or(requested_count, |limit| requested_count.min(limit));
         if target == 0 {
             return Ok(Arc::<[u32]>::from(Vec::<u32>::new()));
         }

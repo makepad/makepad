@@ -1626,6 +1626,7 @@ mod imp {
             Ok(())
         }
 
+        #[allow(dead_code)]
         fn copy_buffer_to_shared_staging(
             &mut self,
             src_buffer: ObjcId,

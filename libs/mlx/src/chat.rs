@@ -67,20 +67,29 @@ fn erase_all_substrings(text: &mut String, needle: &str) {
     }
 }
 
+fn erase_all_spans(text: &mut String, start: &str, end: &str) {
+    if start.is_empty() || end.is_empty() {
+        return;
+    }
+    while let Some(start_pos) = text.find(start) {
+        let after_start = start_pos + start.len();
+        let Some(rel_end) = text[after_start..].find(end) else {
+            break;
+        };
+        let end_pos = after_start + rel_end + end.len();
+        text.replace_range(start_pos..end_pos, "");
+    }
+}
+
 pub fn extract_gemma4_assistant_response_text(
     tokenizer_config: &MlxTokenizerConfig,
     raw_text: &str,
 ) -> String {
-    let thought_prefix = format!("{}thought\n", tokenizer_config.soc_token);
     let mut text = raw_text.to_owned();
-    if let Some(stripped) = text.strip_prefix(&thought_prefix) {
-        if let Some(thought_end) = stripped.find(&tokenizer_config.eoc_token) {
-            text = stripped[thought_end + tokenizer_config.eoc_token.len()..].to_owned();
-        }
-    }
     if let Some(tool_call_start) = text.find(&tokenizer_config.stc_token) {
         text.truncate(tool_call_start);
     }
+    erase_all_spans(&mut text, &tokenizer_config.soc_token, &tokenizer_config.eoc_token);
 
     erase_all_substrings(&mut text, &tokenizer_config.bos_token);
     erase_all_substrings(&mut text, &tokenizer_config.sot_token);
@@ -95,14 +104,14 @@ pub fn extract_gemma4_assistant_response_text(
 #[derive(Clone)]
 pub struct GemmaChatSession {
     model: GemmaTextModel,
-    max_new_tokens: usize,
+    max_new_tokens: Option<usize>,
     messages: Vec<GemmaChatMessage>,
 }
 
 impl GemmaChatSession {
     pub fn load(
         model_path: impl AsRef<Path>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
     ) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             model: GemmaTextModel::load(model_path)?,
@@ -111,7 +120,7 @@ impl GemmaChatSession {
         })
     }
 
-    pub fn max_new_tokens(&self) -> usize {
+    pub fn max_new_tokens(&self) -> Option<usize> {
         self.max_new_tokens
     }
 
