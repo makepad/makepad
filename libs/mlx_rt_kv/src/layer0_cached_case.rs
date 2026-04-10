@@ -2360,7 +2360,7 @@ impl ExactMetalTextIoWorkspace {
                 )?,
                 hidden_scratch: create_bf16_buffer(&runtime, NORM_LEN, BufferStorageMode::Private)?,
                 final_norm_out: create_bf16_buffer(&runtime, NORM_LEN, BufferStorageMode::Private)?,
-                logits_out: create_bf16_buffer(&runtime, vocab_size, BufferStorageMode::Private)?,
+                logits_out: create_bf16_buffer(&runtime, vocab_size, BufferStorageMode::Shared)?,
                 argmax_index_out: runtime
                     .create_buffer(size_of::<u32>(), BufferStorageMode::Shared)?,
                 generated_token_chunk_out: runtime.create_buffer(
@@ -3208,7 +3208,6 @@ impl ExactMetalTextRuntimeSession {
         )?))
     }
 
-    #[cfg(test)]
     fn read_shared_logits_greedy_token(&self) -> Result<MlxGreedyToken, Box<dyn Error>> {
         let runtime = self.session.runtime.clone();
         Ok(runtime.with_readable_buffer(
@@ -3249,8 +3248,9 @@ impl ExactMetalTextRuntimeSession {
         &mut self,
         hidden_buffer: &MetalBuffer,
     ) -> Result<MlxGreedyToken, Box<dyn Error>> {
-        self.dispatch_greedy_head_on_hidden_buffer(hidden_buffer)?;
-        self.read_device_greedy_token()
+        self.dispatch_final_text_norm_on_hidden_buffer(hidden_buffer)?;
+        self.dispatch_logits_projection_from_final_norm()?;
+        self.read_shared_logits_greedy_token()
     }
 
     fn eval_layer_hidden_state_core(
@@ -4610,7 +4610,8 @@ impl ExactMetalTextRuntimeSession {
             self.dequantize_token_embedding_into_buffer(token_id, &input_buffer)?;
             self.eval_token_hidden_state_core(None, position, false)?;
             let hidden_buffer = self.final_hidden_buffer()?;
-            self.dispatch_greedy_head_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_final_text_norm_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_logits_projection_from_final_norm()?;
             Ok(())
         })();
         if let Err(err) = batch_result {
@@ -4618,7 +4619,7 @@ impl ExactMetalTextRuntimeSession {
             return Err(err);
         }
         runtime.end_command_batch()?;
-        self.read_device_argmax_token_id()
+        Ok(self.read_shared_logits_greedy_token()?.token_id)
     }
 
     pub(crate) fn eval_token_greedy_from_token_id(
@@ -4633,7 +4634,8 @@ impl ExactMetalTextRuntimeSession {
             self.dequantize_token_embedding_into_buffer(token_id, &input_buffer)?;
             self.eval_token_hidden_state_core(None, position, false)?;
             let hidden_buffer = self.final_hidden_buffer()?;
-            self.dispatch_greedy_head_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_final_text_norm_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_logits_projection_from_final_norm()?;
             Ok(())
         })();
         if let Err(err) = batch_result {
@@ -4641,7 +4643,7 @@ impl ExactMetalTextRuntimeSession {
             return Err(err);
         }
         runtime.end_command_batch()?;
-        self.read_device_greedy_token()
+        self.read_shared_logits_greedy_token()
     }
 
     pub(crate) fn eval_token_greedy_token_chunk_from_token_id(
@@ -4708,7 +4710,8 @@ impl ExactMetalTextRuntimeSession {
                 self.eval_token_hidden_state_core(None, position, false)?;
             }
             let hidden_buffer = self.final_hidden_buffer()?;
-            self.dispatch_greedy_head_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_final_text_norm_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_logits_projection_from_final_norm()?;
             Ok(())
         })();
         if let Err(err) = batch_result {
@@ -4716,7 +4719,7 @@ impl ExactMetalTextRuntimeSession {
             return Err(err);
         }
         runtime.end_command_batch()?;
-        self.read_device_argmax_token_id()
+        Ok(self.read_shared_logits_greedy_token()?.token_id)
     }
 
     pub(crate) fn prefill_prompt_greedy_from_token_ids(
@@ -4740,7 +4743,8 @@ impl ExactMetalTextRuntimeSession {
                 self.eval_token_hidden_state_core(None, position, false)?;
             }
             let hidden_buffer = self.final_hidden_buffer()?;
-            self.dispatch_greedy_head_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_final_text_norm_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_logits_projection_from_final_norm()?;
             Ok(())
         })();
         if let Err(err) = batch_result {
@@ -4748,7 +4752,7 @@ impl ExactMetalTextRuntimeSession {
             return Err(err);
         }
         runtime.end_command_batch()?;
-        self.read_device_greedy_token()
+        self.read_shared_logits_greedy_token()
     }
 
     pub(crate) fn greedy_token_from_hidden_words(
@@ -4830,7 +4834,15 @@ impl ExactMetalGenerationCursor {
         if position == 0 {
             backend.reset_kv_caches();
         }
-        backend.eval_token_greedy_token_chunk_from_token_id(token_id, position, token_count)
+        let mut current_token = token_id;
+        let mut generated = Vec::with_capacity(token_count);
+        for step_idx in 0..token_count {
+            let next_token = backend
+                .eval_token_greedy_token_id_from_token_id(current_token, position + step_idx)?;
+            generated.push(next_token);
+            current_token = next_token;
+        }
+        Ok(generated)
     }
 
     fn ensure_prompt_prefilled_locked(

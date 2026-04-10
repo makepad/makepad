@@ -80,6 +80,8 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
 fn resolve_host_port(studio_override: Option<String>) -> Result<(String, u16), String> {
     let raw = if let Some(studio) = studio_override {
         studio
+    } else if let Ok(studio) = env::var("STUDIO_HOST") {
+        studio
     } else if let Ok(studio) = env::var("STUDIO") {
         studio
     } else {

@@ -309,6 +309,118 @@ unsafe fn get_intent_string_extra(
     Some(jstring_to_string(env, value))
 }
 
+const MAKEPAD_PREFS_NAME: &str = "makepad";
+const MAKEPAD_STUDIO_HOST_PREF_KEY: &str = "studio_host";
+const MAKEPAD_STUDIO_CRATE_PREF_KEY: &str = "studio_crate";
+const ANDROID_MODE_PRIVATE: i32 = 0;
+
+unsafe fn new_jstring(
+    env: *mut jni_sys::JNIEnv,
+    value: &str,
+) -> Option<jni_sys::jstring> {
+    let value = CString::new(value).ok()?;
+    let value = ((**env).NewStringUTF.unwrap())(env, value.as_ptr());
+    if value.is_null() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+unsafe fn get_prefs_object(
+    env: *mut jni_sys::JNIEnv,
+    activity: jni_sys::jobject,
+) -> Option<jni_sys::jobject> {
+    let prefs_name = new_jstring(env, MAKEPAD_PREFS_NAME)?;
+    let prefs = ndk_utils::call_object_method!(
+        env,
+        activity,
+        "getSharedPreferences",
+        "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
+        prefs_name,
+        ANDROID_MODE_PRIVATE
+    );
+    if prefs.is_null() {
+        None
+    } else {
+        Some(prefs)
+    }
+}
+
+unsafe fn get_persisted_string_pref(
+    env: *mut jni_sys::JNIEnv,
+    activity: jni_sys::jobject,
+    key: &str,
+) -> Option<String> {
+    let prefs = get_prefs_object(env, activity)?;
+    let key = new_jstring(env, key)?;
+    let default = new_jstring(env, "")?;
+    let value = ndk_utils::call_object_method!(
+        env,
+        prefs,
+        "getString",
+        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+        key,
+        default
+    );
+    if value.is_null() {
+        return None;
+    }
+
+    let value = jstring_to_string(env, value);
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+unsafe fn persist_string_pref(
+    env: *mut jni_sys::JNIEnv,
+    activity: jni_sys::jobject,
+    key: &str,
+    value: &str,
+) -> bool {
+    let prefs = match get_prefs_object(env, activity) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    let editor = ndk_utils::call_object_method!(
+        env,
+        prefs,
+        "edit",
+        "()Landroid/content/SharedPreferences$Editor;"
+    );
+    if editor.is_null() {
+        return false;
+    }
+
+    let key = match new_jstring(env, key) {
+        Some(v) => v,
+        None => return false,
+    };
+    let value = match new_jstring(env, value) {
+        Some(v) => v,
+        None => return false,
+    };
+    let editor = ndk_utils::call_object_method!(
+        env,
+        editor,
+        "putString",
+        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;",
+        key,
+        value
+    );
+    if editor.is_null() {
+        return false;
+    }
+
+    ndk_utils::call_void_method!(env, editor, "apply", "()V");
+    true
+}
+
 pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) {
     if activity.is_null() {
         return;
@@ -316,10 +428,42 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
     let env = attach_jni_env();
     let activity = activity as jni_sys::jobject;
 
-    if let Some(studio) =
-        get_intent_string_extra(env, activity, "makepad.STUDIO").filter(|v| !v.trim().is_empty())
+    std::env::remove_var("STUDIO");
+    std::env::remove_var("STUDIO_BUILD");
+    std::env::remove_var("STUDIO_HOST");
+    std::env::remove_var("STUDIO_CRATE");
+
+    let intent_studio_host = get_intent_string_extra(env, activity, "makepad.STUDIO_HOST")
+        .filter(|v| !v.trim().is_empty());
+    let intent_studio_crate = get_intent_string_extra(env, activity, "makepad.STUDIO_CRATE")
+        .filter(|v| !v.trim().is_empty());
+
+    if let Some(studio_host) = intent_studio_host {
+        let _ = persist_string_pref(
+            env,
+            activity,
+            MAKEPAD_STUDIO_HOST_PREF_KEY,
+            &studio_host,
+        );
+        std::env::set_var("STUDIO_HOST", &studio_host);
+    } else if let Some(studio_host) =
+        get_persisted_string_pref(env, activity, MAKEPAD_STUDIO_HOST_PREF_KEY)
     {
-        std::env::set_var("STUDIO", &studio);
+        std::env::set_var("STUDIO_HOST", &studio_host);
+    }
+
+    if let Some(studio_crate) = intent_studio_crate {
+        let _ = persist_string_pref(
+            env,
+            activity,
+            MAKEPAD_STUDIO_CRATE_PREF_KEY,
+            &studio_crate,
+        );
+        std::env::set_var("STUDIO_CRATE", &studio_crate);
+    } else if let Some(studio_crate) =
+        get_persisted_string_pref(env, activity, MAKEPAD_STUDIO_CRATE_PREF_KEY)
+    {
+        std::env::set_var("STUDIO_CRATE", &studio_crate);
     }
 }
 

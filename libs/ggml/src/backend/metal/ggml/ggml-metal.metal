@@ -10362,10 +10362,12 @@ template [[host_name("kernel_count_equal_i32")]] kernel kernel_count_equal_t ker
 #if defined(GGML_METAL_HAS_BF16)
 struct MlxAffineDequantRowArgs {
     uint n;
+    float embed_scale;
 };
 
 struct MlxAffineDequantTokenRowArgs {
     uint n;
+    float embed_scale;
     uint weight_words_per_row;
     uint qparams_per_row;
     uint vocab_size;
@@ -10494,6 +10496,11 @@ struct MlxGqaAttentionWeightedSumArgs {
 
 struct MlxAddRowArgs {
     uint n;
+};
+
+struct MlxScaleRowArgs {
+    uint n;
+    float scale;
 };
 
 struct MlxWeightedRowsArgs {
@@ -11254,9 +11261,10 @@ kernel void kernel_mlx_affine_dequant_row_bf16(
     const uint shift = (gid & 7u) << 2;
     const uint q = (weights[word_idx] >> shift) & 0xFu;
 
-    const bfloat scale = scales[group_idx];
-    const bfloat bias = biases[group_idx];
-    out[gid] = bfloat(q) * scale + bias;
+    const float scale = float(scales[group_idx]);
+    const float bias = float(biases[group_idx]);
+    const float dequantized = float(bfloat(float(q) * scale + bias));
+    out[gid] = bfloat(dequantized * args.embed_scale);
 }
 
 kernel void kernel_mlx_affine_dequant_row_from_token_buffer_bf16(
@@ -11287,9 +11295,10 @@ kernel void kernel_mlx_affine_dequant_row_from_token_buffer_bf16(
     const uint shift = (gid & 7u) << 2;
     const uint q = (weights[weight_base + word_idx] >> shift) & 0xFu;
 
-    const bfloat scale = scales[qparam_base + group_idx];
-    const bfloat bias = biases[qparam_base + group_idx];
-    out[gid] = bfloat(q) * scale + bias;
+    const float scale = float(scales[qparam_base + group_idx]);
+    const float bias = float(biases[qparam_base + group_idx]);
+    const float dequantized = float(bfloat(float(q) * scale + bias));
+    out[gid] = bfloat(dequantized * args.embed_scale);
 }
 
 kernel void kernel_mlx_affine_qproj_dot_bf16(
@@ -12404,6 +12413,17 @@ kernel void kernel_mlx_add_row_bf16(
         return;
     }
     out[gid] = bfloat(float(x[gid]) + float(y[gid]));
+}
+
+kernel void kernel_mlx_scale_row_bf16(
+        constant MlxScaleRowArgs & args [[buffer(0)]],
+        device const bfloat * x [[buffer(1)]],
+        device bfloat * out [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.n) {
+        return;
+    }
+    out[gid] = bfloat(float(x[gid]) * args.scale);
 }
 
 kernel void kernel_mlx_weighted_sum_rows_bf16(

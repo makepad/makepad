@@ -112,7 +112,10 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
     let build_id = QueryId::new(client_id, 100);
     let app_socket = LiveId::from_str("studio2.backend.app");
     let app_request = HttpRequest::new(
-        format!("ws://127.0.0.1:{port}/app/{}", build_id.0),
+        format!(
+            "ws://127.0.0.1:{port}/app?build={}&crate=makepad-example-xr",
+            build_id.0
+        ),
         HttpMethod::GET,
     );
     runtime
@@ -220,7 +223,10 @@ fn websocket_app_bridge_widget_query_roundtrip() {
     let build_id = QueryId::new(client_id, 100);
     let app_socket = LiveId::from_str("studio2.backend.app.query");
     let app_request = HttpRequest::new(
-        format!("ws://127.0.0.1:{port}/app/{}", build_id.0),
+        format!(
+            "ws://127.0.0.1:{port}/app?build={}&crate=makepad-example-xr",
+            build_id.0
+        ),
         HttpMethod::GET,
     );
     runtime
@@ -337,7 +343,10 @@ fn websocket_app_bridge_widget_snapshot_roundtrip() {
     let build_id = QueryId::new(client_id, 100);
     let app_socket = LiveId::from_str("studio2.backend.app.snapshot");
     let app_request = HttpRequest::new(
-        format!("ws://127.0.0.1:{port}/app/{}", build_id.0),
+        format!(
+            "ws://127.0.0.1:{port}/app?build={}&crate=makepad-example-xr",
+            build_id.0
+        ),
         HttpMethod::GET,
     );
     runtime

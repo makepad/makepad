@@ -1253,11 +1253,7 @@ impl Widget for Tank {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        let mut root = self.root_widget_ref(cx);
-        self.runtime.handle_event(&mut root, cx, event);
         self.node.handle_event(cx, event, scope);
-        let mut root = self.root_widget_ref(cx);
-        self.runtime.maintain(&mut root, cx);
     }
 
     fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
@@ -1266,6 +1262,18 @@ impl Widget for Tank {
 
     fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
         DrawStep::done()
+    }
+}
+
+impl Tank {
+    pub fn pre_ui_event(&mut self, cx: &mut Cx, event: &Event) {
+        let mut root = self.root_widget_ref(cx);
+        self.runtime.handle_event(&mut root, cx, event);
+    }
+
+    pub fn post_ui_event(&mut self, cx: &mut Cx) {
+        let mut root = self.root_widget_ref(cx);
+        self.runtime.maintain(&mut root, cx);
     }
 }
 
