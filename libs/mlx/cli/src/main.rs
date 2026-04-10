@@ -10,7 +10,7 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: mlx-cli [model.safetensors] [--max-new-tokens N] [--greedy]"
+    "Usage: mlx-cli [model.safetensors|model_dir] [--image PATH] [--max-new-tokens N] [--greedy]"
 }
 
 fn format_max_new_tokens(max_new_tokens: Option<usize>) -> String {
@@ -46,11 +46,17 @@ fn print_block(prefix: &str, text: &str) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let mut model_path = default_model_path();
+    let mut initial_image_path = None;
     let mut max_new_tokens = None;
     let mut decode_mode = GemmaChatDecodeMode::Sampled;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--image" => {
+                initial_image_path = Some(PathBuf::from(
+                    args.next().ok_or("--image requires a value")?,
+                ));
+            }
             "--max-new-tokens" => {
                 let value = args.next().ok_or("--max-new-tokens requires a value")?;
                 max_new_tokens = Some(value.parse::<usize>()?);
@@ -69,6 +75,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("loading model={}...", model_path.display());
     let mut session = GemmaChatSession::load_with_mode(&model_path, max_new_tokens, decode_mode)?;
+    if let Some(image_path) = initial_image_path {
+        session.set_image(image_path);
+    }
     println!("model={}", model_path.display());
     println!(
         "max_new_tokens={}",
@@ -81,7 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             GemmaChatDecodeMode::Greedy => "greedy",
         }
     );
-    println!("commands: /reset /history /exit");
+    if let Some(image_path) = session.current_image_path() {
+        println!("image={}", image_path.display());
+    }
+    println!("commands: /image PATH /clear-image /reset /history /exit");
     println!("ready");
 
     let stdin = io::stdin();
@@ -104,6 +116,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("history cleared");
                 continue;
             }
+            "/clear-image" => {
+                session.clear_image();
+                println!("image cleared");
+                continue;
+            }
             "/history" => {
                 for message in session.messages() {
                     let prefix = match message.role {
@@ -115,6 +132,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             _ => {}
+        }
+        if let Some(rest) = input.strip_prefix("/image ") {
+            let image_path = PathBuf::from(rest.trim());
+            session.set_image(image_path.clone());
+            println!("image={}", image_path.display());
+            continue;
         }
 
         print!("assistant> ");

@@ -3,7 +3,7 @@ use crate::text_runtime::{
 };
 use crate::MlxTokenizerConfig;
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,16 +47,31 @@ pub fn format_gemma4_chat_prompt(
     tokenizer_config: &MlxTokenizerConfig,
     messages: &[GemmaChatMessage],
 ) -> Result<String, Box<dyn Error>> {
+    format_gemma4_chat_prompt_with_image(tokenizer_config, messages, false)
+}
+
+pub fn format_gemma4_chat_prompt_with_image(
+    tokenizer_config: &MlxTokenizerConfig,
+    messages: &[GemmaChatMessage],
+    include_image_on_last_user_turn: bool,
+) -> Result<String, Box<dyn Error>> {
     if messages.is_empty() {
         return Err("chat prompt requires at least one message".into());
     }
 
     let mut prompt = String::new();
     prompt.push_str(&tokenizer_config.bos_token);
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         prompt.push_str(&tokenizer_config.sot_token);
         prompt.push_str(message.role.as_prompt_label());
         prompt.push('\n');
+        if include_image_on_last_user_turn
+            && index + 1 == messages.len()
+            && message.role == GemmaChatRole::User
+        {
+            prompt.push_str(&tokenizer_config.image_token);
+            prompt.push(' ');
+        }
         prompt.push_str(message.content.as_ref());
         prompt.push_str(&tokenizer_config.eot_token);
         prompt.push('\n');
@@ -122,6 +137,7 @@ pub struct GemmaChatSession {
     decode_mode: GemmaChatDecodeMode,
     sampling_options: GemmaTextSamplingOptions,
     messages: Vec<GemmaChatMessage>,
+    current_image_path: Option<PathBuf>,
 }
 
 impl GemmaChatSession {
@@ -146,6 +162,7 @@ impl GemmaChatSession {
             decode_mode,
             sampling_options,
             messages: Vec::new(),
+            current_image_path: None,
         })
     }
 
@@ -165,6 +182,18 @@ impl GemmaChatSession {
         self.messages.clear();
     }
 
+    pub fn set_image(&mut self, image_path: impl Into<PathBuf>) {
+        self.current_image_path = Some(image_path.into());
+    }
+
+    pub fn clear_image(&mut self) {
+        self.current_image_path = None;
+    }
+
+    pub fn current_image_path(&self) -> Option<&Path> {
+        self.current_image_path.as_deref()
+    }
+
     pub fn push_assistant_message(&mut self, content: impl Into<String>) {
         self.messages
             .push(GemmaChatMessage::new(GemmaChatRole::Assistant, content));
@@ -177,10 +206,22 @@ impl GemmaChatSession {
         let content = content.into();
         self.messages
             .push(GemmaChatMessage::new(GemmaChatRole::User, content));
-        let formatted_prompt =
-            format_gemma4_chat_prompt(self.model.tokenizer_config(), &self.messages)?;
-        let output = match self.decode_mode {
-            GemmaChatDecodeMode::Sampled => self
+        let formatted_prompt = format_gemma4_chat_prompt_with_image(
+            self.model.tokenizer_config(),
+            &self.messages,
+            self.current_image_path.is_some(),
+        )?;
+        let output = match (self.decode_mode, self.current_image_path.as_deref()) {
+            (GemmaChatDecodeMode::Sampled, Some(image_path)) => self
+                .model
+                .generate_preformatted_multimodal_with_rng_and_sampling(
+                    image_path,
+                    formatted_prompt,
+                    self.max_new_tokens,
+                    &self.sampling_options,
+                    &mut self.rng,
+                )?,
+            (GemmaChatDecodeMode::Sampled, None) => self
                 .model
                 .generate_preformatted_with_rng_and_sampling(
                     formatted_prompt,
@@ -188,7 +229,10 @@ impl GemmaChatSession {
                     &self.sampling_options,
                     &mut self.rng,
                 )?,
-            GemmaChatDecodeMode::Greedy => self
+            (GemmaChatDecodeMode::Greedy, Some(_)) => {
+                return Err("greedy multimodal chat is not wired yet".into());
+            }
+            (GemmaChatDecodeMode::Greedy, None) => self
                 .model
                 .generate_preformatted_greedy(formatted_prompt, self.max_new_tokens)?,
         };
@@ -210,10 +254,23 @@ impl GemmaChatSession {
         let content = content.into();
         self.messages
             .push(GemmaChatMessage::new(GemmaChatRole::User, content));
-        let formatted_prompt =
-            format_gemma4_chat_prompt(self.model.tokenizer_config(), &self.messages)?;
-        let output = match self.decode_mode {
-            GemmaChatDecodeMode::Sampled => self
+        let formatted_prompt = format_gemma4_chat_prompt_with_image(
+            self.model.tokenizer_config(),
+            &self.messages,
+            self.current_image_path.is_some(),
+        )?;
+        let output = match (self.decode_mode, self.current_image_path.as_deref()) {
+            (GemmaChatDecodeMode::Sampled, Some(image_path)) => self
+                .model
+                .stream_generate_preformatted_multimodal_with_rng_and_sampling(
+                    image_path,
+                    formatted_prompt,
+                    self.max_new_tokens,
+                    &self.sampling_options,
+                    &mut self.rng,
+                    on_text_delta,
+                )?,
+            (GemmaChatDecodeMode::Sampled, None) => self
                 .model
                 .stream_generate_preformatted_with_rng_and_sampling(
                     formatted_prompt,
@@ -222,7 +279,10 @@ impl GemmaChatSession {
                     &mut self.rng,
                     on_text_delta,
                 )?,
-            GemmaChatDecodeMode::Greedy => self
+            (GemmaChatDecodeMode::Greedy, Some(_)) => {
+                return Err("greedy multimodal chat is not wired yet".into());
+            }
+            (GemmaChatDecodeMode::Greedy, None) => self
                 .model
                 .stream_generate_preformatted_greedy(
                     formatted_prompt,

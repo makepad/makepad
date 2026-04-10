@@ -8,3 +8,6 @@ license = "MIT"
 [dependencies]
 makepad-ggml = { path = "../ggml" }
 makepad-micro-serde = { path = "../micro_serde" }
+makepad-zune-core = { path = "../zune/zune-core" }
+makepad-zune-jpeg = { path = "../zune/zune-jpeg" }
+makepad-zune-png = { path = "../zune/zune-png" }
