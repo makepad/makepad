@@ -1,6 +1,6 @@
+pub mod ai_manager;
 pub mod app_data;
 pub mod app_ui;
-pub mod ai_manager;
 pub mod desktop_code_editor;
 pub mod desktop_file_tree;
 pub mod desktop_log_view;
@@ -163,16 +163,32 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(ai_cancel_button)).clicked(actions) {
             self.cancel_ai_manager_prompt(cx);
         }
-        if self.ui.button(cx, ids!(ai_refresh_report_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(ai_refresh_report_button))
+            .clicked(actions)
+        {
             self.refresh_ai_manager_report(cx);
         }
-        if self.ui.button(cx, ids!(ai_add_task_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(ai_add_task_button))
+            .clicked(actions)
+        {
             self.add_ai_manager_task(cx);
         }
-        if self.ui.button(cx, ids!(ai_clear_tasks_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(ai_clear_tasks_button))
+            .clicked(actions)
+        {
             self.clear_ai_manager_tasks(cx);
         }
-        if self.ui.text_input(cx, ids!(ai_prompt_input)).escaped(actions) {
+        if self
+            .ui
+            .text_input(cx, ids!(ai_prompt_input))
+            .escaped(actions)
+        {
             self.cancel_ai_manager_prompt(cx);
         }
         if self

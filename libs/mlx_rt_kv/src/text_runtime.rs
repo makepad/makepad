@@ -1,13 +1,14 @@
+#[cfg(test)]
+use crate::layer0_cached_case::ExactMetalGenerationCursor;
 use crate::layer0_cached_case::{
     run_layer_sequence_from_inputs, CachedLayerInputs, ExactMetalGenerationGraph,
     ExactMetalGenerationStopReason, ExactMetalTextRuntimeSession, Layer0CachedArtifacts,
     Layer0CachedPlan, Layer0CachedStage,
 };
-#[cfg(test)]
-use crate::layer0_cached_case::ExactMetalGenerationCursor;
 use crate::GemmaKvCacheLayout;
 #[cfg(test)]
 use crate::{GemmaKvCacheSet, KvTensor, KvTensorShape};
+use makepad_ggml::backend::metal::MetalRuntimeCounters;
 #[cfg(test)]
 use makepad_mlx_rt_core::{MlxDType, MlxGemmaMoeExpertOutput, MlxRouterTopKOutput};
 use makepad_mlx_rt_core::{MlxGreedyToken, MlxIndexedSafetensors, MlxTokenizer};
@@ -15,6 +16,7 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct GemmaTextStepOutput {
@@ -169,6 +171,30 @@ pub struct GemmaTextGenerationOutput {
     pub generated_token_ids: Arc<[u32]>,
     pub generated_text: Arc<str>,
     pub stop_reason: GemmaStopReason,
+}
+
+#[derive(Clone, Debug)]
+pub struct GemmaTextBenchmarkOutput {
+    pub model_path: PathBuf,
+    pub prompt_text: Arc<str>,
+    pub formatted_prompt_text: Arc<str>,
+    pub prompt_token_ids: Arc<[u32]>,
+    pub max_new_tokens: usize,
+    pub warmup_iters: usize,
+    pub measured_iters: usize,
+    pub load_duration: Duration,
+    pub elapsed: Duration,
+    pub total_generated_tokens: usize,
+    pub time_to_first_token_elapsed: Duration,
+    pub steady_state_elapsed: Duration,
+    pub steady_state_generated_tokens: usize,
+    pub last_generated_token_ids: Arc<[u32]>,
+    pub last_generated_text: Arc<str>,
+    pub metal_counters: MetalRuntimeCounters,
+    pub prompt_prefill_tokens_per_second: f64,
+    pub steady_state_decode_tokens_per_second: f64,
+    pub decode_tokens_per_second: f64,
+    pub total_tokens_per_second: f64,
 }
 
 #[derive(Clone)]
@@ -433,7 +459,8 @@ impl GemmaLazyTextPlanInner {
     }
 
     fn generated_token_ids_up_to(&self, max_count: usize) -> Result<Arc<[u32]>, String> {
-        self.generation_graph()?.generated_token_ids_up_to(max_count)
+        self.generation_graph()?
+            .generated_token_ids_up_to(max_count)
     }
 
     fn generation(&self) -> Result<Arc<GemmaTextGenerationOutput>, String> {
@@ -489,6 +516,129 @@ pub fn generate_text(
     options: GemmaTextGenerationOptions,
 ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
     lazy_text_plan(model_path, prompt_text, options).eval_generate()
+}
+
+pub fn benchmark_text_generation(
+    model_path: PathBuf,
+    prompt_text: impl Into<String>,
+    options: GemmaTextGenerationOptions,
+    warmup_iters: usize,
+    measured_iters: usize,
+) -> Result<GemmaTextBenchmarkOutput, Box<dyn Error>> {
+    if measured_iters == 0 {
+        return Err("benchmark requires at least one measured iteration".into());
+    }
+
+    let prompt_text = Arc::<str>::from(prompt_text.into());
+    let load_started = Instant::now();
+    let runtime = GemmaTextRuntimeSession::load(&model_path).map_err(|err| err.to_string())?;
+    let load_duration = load_started.elapsed();
+    let formatted_prompt_text =
+        Arc::<str>::from(runtime.format_prompt_text(prompt_text.as_ref(), options.prompt_format));
+    let prompt_token_ids = runtime.tokenize_prompt(formatted_prompt_text.as_ref())?;
+
+    for _ in 0..warmup_iters {
+        runtime
+            .start_generation_graph(prompt_token_ids.clone(), options.max_new_tokens)?
+            .finish_snapshot()?;
+    }
+    runtime
+        .exact_backend
+        .lock()
+        .map_err(|_| "exact backend mutex poisoned".to_string())?
+        .reset_runtime_counters();
+
+    let started = Instant::now();
+    let mut total_generated_tokens = 0usize;
+    let mut time_to_first_token_elapsed = Duration::ZERO;
+    let mut steady_state_elapsed = Duration::ZERO;
+    let mut steady_state_generated_tokens = 0usize;
+    let mut last_generated_token_ids = Arc::<[u32]>::from(Vec::<u32>::new());
+    for _ in 0..measured_iters {
+        let ttft_started = Instant::now();
+        let graph =
+            runtime.start_generation_graph(prompt_token_ids.clone(), options.max_new_tokens)?;
+        let first_generated_token_ids = graph.generated_token_ids_up_to(1)?;
+        time_to_first_token_elapsed += ttft_started.elapsed();
+
+        let steady_started = Instant::now();
+        let snapshot = graph.finish_snapshot()?;
+        steady_state_elapsed += steady_started.elapsed();
+        total_generated_tokens += snapshot.generated_token_ids.len();
+        steady_state_generated_tokens += snapshot
+            .generated_token_ids
+            .len()
+            .saturating_sub(first_generated_token_ids.len());
+        last_generated_token_ids = snapshot.generated_token_ids.clone();
+    }
+    let elapsed = started.elapsed();
+    let last_generated_text = if last_generated_token_ids.is_empty() {
+        Arc::<str>::from("")
+    } else {
+        Arc::<str>::from(
+            runtime
+                .tokenizer
+                .decode(last_generated_token_ids.as_ref())
+                .map_err(|err| err.to_string())?,
+        )
+    };
+    let elapsed_secs = elapsed.as_secs_f64();
+    let decode_tokens_per_second = if elapsed_secs > 0.0 {
+        total_generated_tokens as f64 / elapsed_secs
+    } else {
+        0.0
+    };
+    let total_prompt_tokens = measured_iters
+        .checked_mul(prompt_token_ids.len())
+        .ok_or("benchmark prompt-token count overflow")?;
+    let total_tokens_processed = total_prompt_tokens
+        .checked_add(total_generated_tokens)
+        .ok_or("benchmark total token count overflow")?;
+    let total_tokens_per_second = if elapsed_secs > 0.0 {
+        total_tokens_processed as f64 / elapsed_secs
+    } else {
+        0.0
+    };
+    let ttft_elapsed_secs = time_to_first_token_elapsed.as_secs_f64();
+    let prompt_prefill_tokens_per_second = if ttft_elapsed_secs > 0.0 {
+        total_prompt_tokens as f64 / ttft_elapsed_secs
+    } else {
+        0.0
+    };
+    let steady_state_elapsed_secs = steady_state_elapsed.as_secs_f64();
+    let steady_state_decode_tokens_per_second = if steady_state_elapsed_secs > 0.0 {
+        steady_state_generated_tokens as f64 / steady_state_elapsed_secs
+    } else {
+        0.0
+    };
+    let metal_counters = runtime
+        .exact_backend
+        .lock()
+        .map_err(|_| "exact backend mutex poisoned".to_string())?
+        .runtime_counters();
+
+    Ok(GemmaTextBenchmarkOutput {
+        model_path: runtime.model_path.clone(),
+        prompt_text,
+        formatted_prompt_text,
+        prompt_token_ids,
+        max_new_tokens: options.max_new_tokens,
+        warmup_iters,
+        measured_iters,
+        load_duration,
+        elapsed,
+        total_generated_tokens,
+        time_to_first_token_elapsed,
+        steady_state_elapsed,
+        steady_state_generated_tokens,
+        last_generated_token_ids,
+        last_generated_text,
+        metal_counters,
+        prompt_prefill_tokens_per_second,
+        steady_state_decode_tokens_per_second,
+        decode_tokens_per_second,
+        total_tokens_per_second,
+    })
 }
 
 impl GemmaTextRuntimeSession {
@@ -2222,7 +2372,10 @@ mod tests {
         assert!(prefix2.len() <= 2);
         assert_eq!(&*prefix1, &prefix2[..prefix1.len()]);
         assert_eq!(&*prefix2, final_snapshot.generated_token_ids.as_ref());
-        assert_eq!(final_snapshot.processed_prompt_tokens, prompt_token_ids.len());
+        assert_eq!(
+            final_snapshot.processed_prompt_tokens,
+            prompt_token_ids.len()
+        );
         assert!(final_snapshot.position >= prompt_token_ids.len());
         assert!(
             final_snapshot.has_pending_next
@@ -2304,7 +2457,8 @@ mod tests {
         .eval_generate()
         .unwrap();
 
-        let expected_prompt_token_ids = [2, 105, 2364, 107, 30_468, 5_631, 106, 107, 105, 4_368, 107];
+        let expected_prompt_token_ids =
+            [2, 105, 2364, 107, 30_468, 5_631, 106, 107, 105, 4_368, 107];
         let expected_generated_token_ids = [11, 40, 20, 2, 2, 3, 2, 11];
 
         println!(
@@ -2316,7 +2470,50 @@ mod tests {
         );
 
         assert_eq!(output.prompt_token_ids.as_ref(), expected_prompt_token_ids);
-        assert_eq!(output.generated_token_ids.as_ref(), expected_generated_token_ids);
+        assert_eq!(
+            output.generated_token_ids.as_ref(),
+            expected_generated_token_ids
+        );
+        assert_eq!(output.stop_reason, GemmaStopReason::MaxNewTokens);
+    }
+
+    #[test]
+    #[ignore]
+    fn poem_prompt_32_token_prefix_matches_local_mlx() {
+        let output = lazy_text_plan(
+            default_model_path(),
+            "Write a poem in exactly 10 lines about unified memory, lazy evaluation, and metal at midnight. Keep each line concise.",
+            GemmaTextGenerationOptions {
+                max_new_tokens: 32,
+                prompt_format: GemmaPromptFormat::Gemma4UserTurn,
+            },
+        )
+        .eval_generate()
+        .unwrap();
+
+        let expected_prompt_token_ids = [
+            2, 105, 2364, 107, 6974, 496, 27355, 528, 7121, 236743, 236770, 236771, 4463, 1003,
+            44623, 6571, 236764, 31770, 12207, 236764, 532, 6211, 657, 38735, 236761, 17608, 1546,
+            1757, 63510, 236761, 106, 107, 105, 4368, 107,
+        ];
+        let expected_generated_token_ids = [
+            4, 2, 2, 4, 2, 4, 4, 4, 2, 13, 36, 40, 20, 2, 4, 2, 13, 2, 9, 17, 16, 20, 20, 34, 2, 2,
+            11, 2, 5, 2, 9, 2,
+        ];
+
+        println!(
+            "prompt_ids={:?} generated_ids={:?} generated_text={:?} stop_reason={:?}",
+            output.prompt_token_ids,
+            output.generated_token_ids,
+            output.generated_text,
+            output.stop_reason,
+        );
+
+        assert_eq!(output.prompt_token_ids.as_ref(), expected_prompt_token_ids);
+        assert_eq!(
+            output.generated_token_ids.as_ref(),
+            expected_generated_token_ids
+        );
         assert_eq!(output.stop_reason, GemmaStopReason::MaxNewTokens);
     }
 }

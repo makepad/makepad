@@ -1231,8 +1231,8 @@ impl LaidoutGlyph {
 mod tests {
     use super::{
         merge_segments_for_line_breaking, parse_text_atlas_size_value, Layouter, Size,
-        LAYOUT_CACHE_MAX_TEXT_LEN,
-        LAYOUT_CACHE_MULTILINE_LINE_COUNT, LAYOUT_CACHE_MULTILINE_TEXT_LEN,
+        LAYOUT_CACHE_MAX_TEXT_LEN, LAYOUT_CACHE_MULTILINE_LINE_COUNT,
+        LAYOUT_CACHE_MULTILINE_TEXT_LEN,
     };
     use unicode_segmentation::UnicodeSegmentation;
 
@@ -1258,10 +1258,7 @@ mod tests {
     /// Helper: split text by word bounds and return segment lengths,
     /// then apply merging, then reconstruct the segment strings.
     fn merged_segments(text: &str) -> Vec<String> {
-        let mut lens: Vec<usize> = text
-            .split_word_bounds()
-            .map(|s| s.len())
-            .collect();
+        let mut lens: Vec<usize> = text.split_word_bounds().map(|s| s.len()).collect();
         merge_segments_for_line_breaking(text, &mut lens);
         let mut result = Vec::new();
         let mut offset = 0;
@@ -1315,10 +1312,7 @@ mod tests {
 
     #[test]
     fn no_merge_for_plain_words() {
-        assert_eq!(
-            merged_segments("hello world"),
-            vec!["hello", " ", "world"]
-        );
+        assert_eq!(merged_segments("hello world"), vec!["hello", " ", "world"]);
     }
 
     #[test]

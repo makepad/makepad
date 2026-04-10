@@ -1,4 +1,6 @@
-use makepad_mlx_rt_core::{fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words, MlxSafetensorsHeader};
+use makepad_mlx_rt_core::{
+    fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words, MlxSafetensorsHeader,
+};
 use std::error::Error;
 use std::path::PathBuf;
 
@@ -90,8 +92,12 @@ fn qmm_variant(
 
 fn main() -> Result<(), Box<dyn Error>> {
     let header = MlxSafetensorsHeader::load(default_model_path())?;
-    let q_weight_entry = header.tensor(Q_WEIGHT_NAME).ok_or("missing q_proj weight entry")?;
-    let q_scales_entry = header.tensor(Q_SCALES_NAME).ok_or("missing q_proj scales entry")?;
+    let q_weight_entry = header
+        .tensor(Q_WEIGHT_NAME)
+        .ok_or("missing q_proj weight entry")?;
+    let q_scales_entry = header
+        .tensor(Q_SCALES_NAME)
+        .ok_or("missing q_proj scales entry")?;
     let weights = header.read_u32_tensor_words(Q_WEIGHT_NAME)?;
     let scales = header.read_bf16_tensor_words(Q_SCALES_NAME)?;
     let biases = header.read_bf16_tensor_words(Q_BIASES_NAME)?;
@@ -100,9 +106,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         .into_iter()
         .map(bf16_word_to_f32)
         .collect::<Vec<_>>();
-    let x_composed = header.rms_norm_weighted_f32(&gemma4_qproj_case_input_bf16_words(2816), RMS_WEIGHT_NAME, 1e-6)?;
+    let x_composed = header.rms_norm_weighted_f32(
+        &gemma4_qproj_case_input_bf16_words(2816),
+        RMS_WEIGHT_NAME,
+        1e-6,
+    )?;
 
-    for deq_mode in [DeqMode::FloatAffine, DeqMode::Bf16MulAdd, DeqMode::LoaderLike] {
+    for deq_mode in [
+        DeqMode::FloatAffine,
+        DeqMode::Bf16MulAdd,
+        DeqMode::LoaderLike,
+    ] {
         for round_prod in [false, true] {
             for round_sum in [false, true] {
                 let direct = qmm_variant(
@@ -130,12 +144,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     round_sum,
                 );
 
-                let direct_hash = fnv1a64_u32_words(
-                    &direct.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                );
-                let composed_hash = fnv1a64_u32_words(
-                    &composed.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                );
+                let direct_hash =
+                    fnv1a64_u32_words(&direct.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+                let composed_hash =
+                    fnv1a64_u32_words(&composed.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
                 println!(
                     "deq={deq_mode:?} round_prod={round_prod} round_sum={round_sum} direct=0x{direct_hash:016X} composed=0x{composed_hash:016X} direct_ok={} composed_ok={}",
                     direct_hash == DIRECT_EXPECTED_HASH,

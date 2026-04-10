@@ -268,7 +268,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         runtime.create_buffer_with_bytes(&input_norm_weight_bytes, BufferStorageMode::Private)?;
     let h_buf = runtime.create_buffer(NORM_LEN * 2, BufferStorageMode::Private)?;
 
-    let q_weight_buf = runtime.create_buffer_with_bytes(&q_weight_bytes, BufferStorageMode::Private)?;
+    let q_weight_buf =
+        runtime.create_buffer_with_bytes(&q_weight_bytes, BufferStorageMode::Private)?;
     let q_scales_buf =
         runtime.create_buffer_with_bytes(&q_scales_bytes, BufferStorageMode::Private)?;
     let q_biases_buf =
@@ -279,7 +280,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let q_norm_buf = runtime.create_buffer(q_out_len * 2, BufferStorageMode::Private)?;
     let q_rope_buf = runtime.create_buffer(q_out_len * 2, BufferStorageMode::Private)?;
 
-    let k_weight_buf = runtime.create_buffer_with_bytes(&k_weight_bytes, BufferStorageMode::Private)?;
+    let k_weight_buf =
+        runtime.create_buffer_with_bytes(&k_weight_bytes, BufferStorageMode::Private)?;
     let k_scales_buf =
         runtime.create_buffer_with_bytes(&k_scales_bytes, BufferStorageMode::Private)?;
     let k_biases_buf =
@@ -743,7 +745,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     run_once()?;
 
     let decode_bits = |bytes: Vec<u8>| {
-        bytes.chunks_exact(2)
+        bytes
+            .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .map(bf16_word_to_f32)
             .map(f32::to_bits)

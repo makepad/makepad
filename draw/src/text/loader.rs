@@ -231,7 +231,10 @@ mod tests {
             .join("../widgets/resources/jetbrains_mono_variable.ttf")
     }
 
-    fn outline_signature(font: &crate::text::font::Font, glyph_id: crate::text::font::GlyphId) -> u64 {
+    fn outline_signature(
+        font: &crate::text::font::Font,
+        glyph_id: crate::text::font::GlyphId,
+    ) -> u64 {
         use crate::text::glyph_outline::Command;
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};

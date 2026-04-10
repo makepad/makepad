@@ -13,5 +13,6 @@ metal-precompile = []
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 makepad-objc-sys = { path = "../objc-sys", version = "1.0.0" }
+smallvec = { path = "../smallvec" }
 
 [workspace]

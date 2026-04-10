@@ -593,8 +593,7 @@ impl PortalList {
                 // `last_item_pos` far short of the viewport bottom. Without
                 // this guard, `at_end` could become a false positive whenever
                 // a zero-size item appears in the middle of the visible range.
-                let drew_last_item = last_drawn_index
-                    == Some(self.range_end.saturating_sub(1));
+                let drew_last_item = last_drawn_index == Some(self.range_end.saturating_sub(1));
 
                 if list[0].index == self.range_start {
                     let mut total = 0.0;
@@ -1341,10 +1340,18 @@ impl PortalList {
         // When first_scroll is very negative, items with target_id > first_id
         // can still be above the viewport.
         let scroll_direction: f64 = if let Some(item_top) = item_top {
-            if item_top < 0.0 { 1.0 } else { -1.0 }
+            if item_top < 0.0 {
+                1.0
+            } else {
+                -1.0
+            }
         } else {
             // Height tree unavailable; fall back to index comparison.
-            if target_id > self.first_id { -1.0 } else { 1.0 }
+            if target_id > self.first_id {
+                -1.0
+            } else {
+                1.0
+            }
         };
 
         let starting_id: Option<usize>;
@@ -1799,8 +1806,10 @@ impl Widget for PortalList {
         );
         if self.suppress_child_events || is_scroll_animating {
             match event {
-                Event::TouchUpdate(_) | Event::MouseDown(_)
-                | Event::MouseMove(_) | Event::MouseUp(_) => {
+                Event::TouchUpdate(_)
+                | Event::MouseDown(_)
+                | Event::MouseMove(_)
+                | Event::MouseUp(_) => {
                     pass_through_to_children = false;
                 }
                 _ => {}
@@ -1945,7 +1954,8 @@ impl Widget for PortalList {
                             self.first_id = target_id;
                         }
 
-                        if let ScrollState::ScrollingTo { next_frame, .. } = &mut self.scroll_state {
+                        if let ScrollState::ScrollingTo { next_frame, .. } = &mut self.scroll_state
+                        {
                             *next_frame = cx.new_next_frame();
                         }
                         self.delta_top_scroll(cx, delta_val, true, false);
@@ -2223,9 +2233,7 @@ impl Widget for PortalList {
 
                             // Check if the drag threshold has been exceeded.
                             if !*committed {
-                                if (new_abs - *initial_abs).abs()
-                                    >= self.drag_scroll_threshold
-                                {
+                                if (new_abs - *initial_abs).abs() >= self.drag_scroll_threshold {
                                     *committed = true;
                                     self.suppress_child_events = true;
                                 } else {
@@ -2298,8 +2306,7 @@ impl Widget for PortalList {
                                 }
                             }
                             scaled_delta *= self.flick_scroll_scaling;
-                            if self.first_id == self.range_start && self.first_scroll > 0.0
-                            {
+                            if self.first_id == self.range_start && self.first_scroll > 0.0 {
                                 self.scroll_state = ScrollState::Pulldown {
                                     next_frame: cx.new_next_frame(),
                                 };
