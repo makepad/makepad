@@ -1,4 +1,5 @@
 use crate::chat::extract_gemma4_assistant_response_text;
+use crate::multimodal::{prepare_image_prompt, GemmaVisionRuntime, PreparedImagePrompt};
 const GREEDY_STREAM_BATCH_TOKENS: usize = 8;
 
 #[derive(Clone, Debug)]
@@ -210,6 +211,7 @@ pub struct GemmaTextBenchmarkOutput {
 #[derive(Clone)]
 pub struct GemmaTextModel {
     runtime: Arc<GemmaTextRuntimeSession>,
+    vision_runtime: Arc<Mutex<Option<GemmaVisionRuntime>>>,
 }
 
 #[derive(Clone)]
@@ -774,15 +776,24 @@ pub(crate) fn sample_token_from_softcapped_bf16_bytes(
     )
 }
 
-fn generate_sampled_token_ids<F>(
+fn generate_sampled_token_ids_with_prefill<P, F>(
     runtime: &Arc<GemmaTextRuntimeSession>,
     prompt_token_ids: Arc<[u32]>,
     max_new_tokens: Option<usize>,
     sampling_options: &GemmaTextSamplingOptions,
     rng: &mut MlxTextSamplingRng,
+    prefill: P,
     mut on_generated_ids: F,
 ) -> Result<(Arc<[u32]>, GemmaStopReason), String>
 where
+    P: FnOnce(
+        &mut ExactMetalTextRuntimeSession,
+        &[u32],
+        usize,
+        &[u32],
+        &GemmaTextSamplingOptions,
+        &mut MlxTextSamplingRng,
+    ) -> Result<MlxGreedyToken, Box<dyn Error>>,
     F: FnMut(&[u32]) -> Result<(), String>,
 {
     if prompt_token_ids.is_empty() {
@@ -798,15 +809,15 @@ where
         .map_err(|_| "exact backend mutex poisoned".to_string())?;
 
     let mut generated_token_ids = Vec::with_capacity(max_new_tokens.unwrap_or(32));
-    let mut next_token = backend
-        .prefill_prompt_sampled_from_token_ids(
-            prompt_token_ids.as_ref(),
-            0,
-            &sampling_state.disallowed_token_ids(&constraints, stop_tokens, sampling_options),
-            sampling_options,
-            rng,
-        )
-        .map_err(|err| err.to_string())?;
+    let mut next_token = prefill(
+        &mut backend,
+        prompt_token_ids.as_ref(),
+        0,
+        &sampling_state.disallowed_token_ids(&constraints, stop_tokens, sampling_options),
+        sampling_options,
+        rng,
+    )
+    .map_err(|err| err.to_string())?;
 
     loop {
         generated_token_ids.push(next_token.token_id);
@@ -841,6 +852,36 @@ where
             )
             .map_err(|err| err.to_string())?;
     }
+}
+
+fn generate_sampled_token_ids<F>(
+    runtime: &Arc<GemmaTextRuntimeSession>,
+    prompt_token_ids: Arc<[u32]>,
+    max_new_tokens: Option<usize>,
+    sampling_options: &GemmaTextSamplingOptions,
+    rng: &mut MlxTextSamplingRng,
+    on_generated_ids: F,
+) -> Result<(Arc<[u32]>, GemmaStopReason), String>
+where
+    F: FnMut(&[u32]) -> Result<(), String>,
+{
+    generate_sampled_token_ids_with_prefill(
+        runtime,
+        prompt_token_ids,
+        max_new_tokens,
+        sampling_options,
+        rng,
+        |backend, prompt_token_ids, start_position, disallowed_token_ids, sampling_options, rng| {
+            backend.prefill_prompt_sampled_from_token_ids(
+                prompt_token_ids,
+                start_position,
+                disallowed_token_ids,
+                sampling_options,
+                rng,
+            )
+        },
+        on_generated_ids,
+    )
 }
 
 #[derive(Clone)]
@@ -1095,6 +1136,7 @@ impl GemmaTextModel {
         Ok(Self {
             runtime: GemmaTextRuntimeSession::load(model_path.as_ref())
                 .map_err(|err| err.to_string())?,
+            vision_runtime: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1106,6 +1148,63 @@ impl GemmaTextModel {
         GemmaTextSamplingOptions::chat_from_generation_config(
             &self.runtime.weights.snapshot.generation_config,
         )
+    }
+
+    fn prepare_image_prompt(
+        &self,
+        image_path: &Path,
+        prompt_text: &str,
+        prompt_format: GemmaPromptFormat,
+    ) -> Result<PreparedImagePrompt, Box<dyn Error>> {
+        let prompt_with_image = format!(
+            "{} {}",
+            self.runtime.weights.snapshot.tokenizer_config.image_token,
+            prompt_text
+        );
+        let formatted_prompt_text =
+            self.runtime
+                .format_prompt_text(&prompt_with_image, prompt_format);
+        let mut vision_runtime = self
+            .vision_runtime
+            .lock()
+            .map_err(|_| "vision runtime mutex poisoned".to_string())?;
+        if vision_runtime.is_none() {
+            *vision_runtime = Some(GemmaVisionRuntime::load(&self.runtime.weights));
+        }
+        prepare_image_prompt(
+            &self.runtime.weights,
+            &self.runtime.tokenizer,
+            vision_runtime
+                .as_mut()
+                .ok_or_else(|| "vision runtime did not initialize".to_string())?,
+            &formatted_prompt_text,
+            image_path,
+        )
+        .map_err(|err| err.into())
+    }
+
+    fn prepare_preformatted_image_prompt(
+        &self,
+        image_path: &Path,
+        formatted_prompt_text: &str,
+    ) -> Result<PreparedImagePrompt, Box<dyn Error>> {
+        let mut vision_runtime = self
+            .vision_runtime
+            .lock()
+            .map_err(|_| "vision runtime mutex poisoned".to_string())?;
+        if vision_runtime.is_none() {
+            *vision_runtime = Some(GemmaVisionRuntime::load(&self.runtime.weights));
+        }
+        prepare_image_prompt(
+            &self.runtime.weights,
+            &self.runtime.tokenizer,
+            vision_runtime
+                .as_mut()
+                .ok_or_else(|| "vision runtime did not initialize".to_string())?,
+            formatted_prompt_text,
+            image_path,
+        )
+        .map_err(|err| err.into())
     }
 
     pub fn generate(
@@ -1128,6 +1227,114 @@ impl GemmaTextModel {
             ),
             &mut rng,
         )
+    }
+
+    pub fn generate_multimodal(
+        &self,
+        image_path: impl AsRef<Path>,
+        prompt_text: impl Into<String>,
+        options: GemmaTextGenerationOptions,
+    ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
+        let prompt_text = Arc::<str>::from(prompt_text.into());
+        let prepared = self.prepare_image_prompt(image_path.as_ref(), prompt_text.as_ref(), options.prompt_format)?;
+        let formatted_prompt_text = Arc::<str>::from(prepared.formatted_prompt_text.clone());
+        let prompt_token_ids = Arc::<[u32]>::from(prepared.prompt_token_ids);
+        let prompt_embedding_rows = prepared.prompt_embedding_rows;
+        let mut rng = MlxTextSamplingRng::new(0);
+        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_with_prefill(
+            &self.runtime,
+            prompt_token_ids.clone(),
+            Some(options.max_new_tokens),
+            &GemmaTextSamplingOptions::from_generation_config(
+                &self.runtime.weights.snapshot.generation_config,
+            ),
+            &mut rng,
+            |backend, _prompt_token_ids, start_position, disallowed_token_ids, sampling_options, rng| {
+                backend.prefill_prompt_sampled_from_embedding_rows(
+                    &prompt_embedding_rows,
+                    start_position,
+                    disallowed_token_ids,
+                    sampling_options,
+                    rng,
+                )
+            },
+            |_| Ok(()),
+        )?;
+        build_generation_output_from_token_ids(
+            &self.runtime,
+            prompt_text,
+            formatted_prompt_text,
+            prompt_token_ids,
+            generated_token_ids,
+            stop_reason,
+        )
+        .map_err(|err| err.into())
+    }
+
+    pub fn stream_generate_multimodal<F>(
+        &self,
+        image_path: impl AsRef<Path>,
+        prompt_text: impl Into<String>,
+        options: GemmaTextGenerationOptions,
+        mut on_text_delta: F,
+    ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>>
+    where
+        F: FnMut(&str) -> Result<(), Box<dyn Error>>,
+    {
+        let prompt_text = Arc::<str>::from(prompt_text.into());
+        let prepared = self.prepare_image_prompt(
+            image_path.as_ref(),
+            prompt_text.as_ref(),
+            options.prompt_format,
+        )?;
+        let formatted_prompt_text = Arc::<str>::from(prepared.formatted_prompt_text.clone());
+        let prompt_token_ids = Arc::<[u32]>::from(prepared.prompt_token_ids);
+        let prompt_embedding_rows = prepared.prompt_embedding_rows;
+        let sampling_options = GemmaTextSamplingOptions::from_generation_config(
+            &self.runtime.weights.snapshot.generation_config,
+        );
+        let mut rng = MlxTextSamplingRng::new(0);
+        let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
+        let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
+        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_with_prefill(
+            &self.runtime,
+            prompt_token_ids.clone(),
+            Some(options.max_new_tokens),
+            &sampling_options,
+            &mut rng,
+            |backend, _prompt_token_ids, start_position, disallowed_token_ids, sampling_options, rng| {
+                backend.prefill_prompt_sampled_from_embedding_rows(
+                    &prompt_embedding_rows,
+                    start_position,
+                    disallowed_token_ids,
+                    sampling_options,
+                    rng,
+                )
+            },
+            |generated_token_ids| {
+                let Some(&token_id) = generated_token_ids.last() else {
+                    return Ok(());
+                };
+                let delta = detokenizer.add_token(token_id, &skip_special_token_ids);
+                if !delta.is_empty() {
+                    on_text_delta(&delta).map_err(|err| err.to_string())?;
+                }
+                Ok(())
+            },
+        )?;
+        let final_delta = detokenizer.finalize();
+        if !final_delta.is_empty() {
+            on_text_delta(&final_delta)?;
+        }
+        build_generation_output_from_token_ids(
+            &self.runtime,
+            prompt_text,
+            formatted_prompt_text,
+            prompt_token_ids,
+            generated_token_ids,
+            stop_reason,
+        )
+        .map_err(|err| err.into())
     }
 
     pub fn generate_preformatted(
@@ -1170,6 +1377,50 @@ impl GemmaTextModel {
             sampling_options,
             rng,
         )
+    }
+
+    pub(crate) fn generate_preformatted_multimodal_with_rng_and_sampling(
+        &self,
+        image_path: impl AsRef<Path>,
+        formatted_prompt_text: impl Into<String>,
+        max_new_tokens: Option<usize>,
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+    ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
+        let formatted_prompt_text = Arc::<str>::from(formatted_prompt_text.into());
+        let prompt_text = formatted_prompt_text.clone();
+        let prepared = self.prepare_preformatted_image_prompt(
+            image_path.as_ref(),
+            formatted_prompt_text.as_ref(),
+        )?;
+        let prompt_token_ids = Arc::<[u32]>::from(prepared.prompt_token_ids);
+        let prompt_embedding_rows = prepared.prompt_embedding_rows;
+        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_with_prefill(
+            &self.runtime,
+            prompt_token_ids.clone(),
+            max_new_tokens,
+            sampling_options,
+            rng,
+            |backend, _prompt_token_ids, start_position, disallowed_token_ids, sampling_options, rng| {
+                backend.prefill_prompt_sampled_from_embedding_rows(
+                    &prompt_embedding_rows,
+                    start_position,
+                    disallowed_token_ids,
+                    sampling_options,
+                    rng,
+                )
+            },
+            |_| Ok(()),
+        )?;
+        build_generation_output_from_token_ids(
+            &self.runtime,
+            prompt_text,
+            formatted_prompt_text,
+            prompt_token_ids,
+            generated_token_ids,
+            stop_reason,
+        )
+        .map_err(|err| err.into())
     }
 
     pub(crate) fn generate_preformatted_greedy(
@@ -1313,6 +1564,69 @@ impl GemmaTextModel {
         Ok(output)
     }
 
+    pub(crate) fn stream_generate_preformatted_multimodal_with_rng_and_sampling<F>(
+        &self,
+        image_path: impl AsRef<Path>,
+        formatted_prompt_text: impl Into<String>,
+        max_new_tokens: Option<usize>,
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+        mut on_text_delta: F,
+    ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>>
+    where
+        F: FnMut(&str) -> Result<(), Box<dyn Error>>,
+    {
+        let formatted_prompt_text = Arc::<str>::from(formatted_prompt_text.into());
+        let prompt_text = formatted_prompt_text.clone();
+        let prepared = self.prepare_preformatted_image_prompt(
+            image_path.as_ref(),
+            formatted_prompt_text.as_ref(),
+        )?;
+        let prompt_token_ids = Arc::<[u32]>::from(prepared.prompt_token_ids);
+        let prompt_embedding_rows = prepared.prompt_embedding_rows;
+        let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
+        let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
+        let (generated_token_ids, stop_reason) = generate_sampled_token_ids_with_prefill(
+            &self.runtime,
+            prompt_token_ids.clone(),
+            max_new_tokens,
+            sampling_options,
+            rng,
+            |backend, _prompt_token_ids, start_position, disallowed_token_ids, sampling_options, rng| {
+                backend.prefill_prompt_sampled_from_embedding_rows(
+                    &prompt_embedding_rows,
+                    start_position,
+                    disallowed_token_ids,
+                    sampling_options,
+                    rng,
+                )
+            },
+            |generated_token_ids| {
+                let Some(&token_id) = generated_token_ids.last() else {
+                    return Ok(());
+                };
+                let delta = detokenizer.add_token(token_id, &skip_special_token_ids);
+                if !delta.is_empty() {
+                    on_text_delta(&delta).map_err(|err| err.to_string())?;
+                }
+                Ok(())
+            },
+        )?;
+        let final_delta = detokenizer.finalize();
+        if !final_delta.is_empty() {
+            on_text_delta(&final_delta)?;
+        }
+        build_generation_output_from_token_ids(
+            &self.runtime,
+            prompt_text,
+            formatted_prompt_text,
+            prompt_token_ids,
+            generated_token_ids,
+            stop_reason,
+        )
+        .map_err(|err| err.into())
+    }
+
     pub(crate) fn stream_generate_preformatted_greedy<F>(
         &self,
         formatted_prompt_text: impl Into<String>,
@@ -1429,6 +1743,15 @@ pub fn generate_text(
     options: GemmaTextGenerationOptions,
 ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
     lazy_text_plan(model_path, prompt_text, options).eval_generate()
+}
+
+pub fn generate_multimodal_text(
+    model_path: PathBuf,
+    image_path: impl AsRef<Path>,
+    prompt_text: impl Into<String>,
+    options: GemmaTextGenerationOptions,
+) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
+    GemmaTextModel::load(model_path)?.generate_multimodal(image_path, prompt_text, options)
 }
 
 pub fn benchmark_text_generation(

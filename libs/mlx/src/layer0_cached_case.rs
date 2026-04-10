@@ -2957,6 +2957,29 @@ impl ExactMetalTextRuntimeSession {
         Ok(())
     }
 
+    fn write_embedding_words_into_buffer(
+        &mut self,
+        words: &[u16],
+        dst: &MetalBuffer,
+    ) -> Result<(), Box<dyn Error>> {
+        if words.len() != NORM_LEN {
+            return Err(format!(
+                "expected {} bf16 embedding words, got {}",
+                NORM_LEN,
+                words.len()
+            )
+            .into());
+        }
+        let bytes = unsafe {
+            slice::from_raw_parts(
+                words.as_ptr() as *const u8,
+                words.len() * size_of::<u16>(),
+            )
+        };
+        self.session.runtime.write_buffer(dst, 0, bytes)?;
+        Ok(())
+    }
+
     fn dequantize_next_token_embedding_from_device_buffer(
         &mut self,
         dst: &MetalBuffer,
@@ -5001,6 +5024,42 @@ impl ExactMetalTextRuntimeSession {
         Ok(self.read_shared_logits_greedy_token()?.token_id)
     }
 
+    fn prefill_prompt_from_embedding_rows(
+        &mut self,
+        prompt_embedding_rows: &[Vec<u16>],
+        start_position: usize,
+        dispatch_final_head: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        if prompt_embedding_rows.is_empty() {
+            return Err("prompt prefill requires at least one embedding row".into());
+        }
+        if start_position == 0 {
+            self.reset_kv_caches();
+        }
+        let input_buffer = self.token_input_buffer()?;
+        let runtime = self.session.runtime.clone();
+        runtime.begin_command_batch()?;
+        let batch_result = (|| -> Result<(), Box<dyn Error>> {
+            for (offset, input_words) in prompt_embedding_rows.iter().enumerate() {
+                let position = start_position + offset;
+                self.write_embedding_words_into_buffer(input_words, &input_buffer)?;
+                self.eval_token_hidden_state_core(None, position, false)?;
+            }
+            if dispatch_final_head {
+                let hidden_buffer = self.final_hidden_buffer()?;
+                self.dispatch_final_text_norm_on_hidden_buffer(&hidden_buffer)?;
+                self.dispatch_logits_projection_from_final_norm()?;
+            }
+            Ok(())
+        })();
+        if let Err(err) = batch_result {
+            let _ = runtime.discard_command_batch();
+            return Err(err);
+        }
+        runtime.end_command_batch()?;
+        Ok(())
+    }
+
     pub(crate) fn prefill_prompt_logits_from_token_ids(
         &mut self,
         prompt_token_ids: &[u32],
@@ -5031,6 +5090,15 @@ impl ExactMetalTextRuntimeSession {
             return Err(err);
         }
         runtime.end_command_batch()?;
+        self.read_shared_logits_softcapped()
+    }
+
+    pub(crate) fn prefill_prompt_logits_from_embedding_rows(
+        &mut self,
+        prompt_embedding_rows: &[Vec<u16>],
+        start_position: usize,
+    ) -> Result<Vec<f32>, Box<dyn Error>> {
+        self.prefill_prompt_from_embedding_rows(prompt_embedding_rows, start_position, true)?;
         self.read_shared_logits_softcapped()
     }
 
@@ -5070,6 +5138,18 @@ impl ExactMetalTextRuntimeSession {
         self.sampled_token_from_logits(disallowed_token_ids, sampling_options, rng)
     }
 
+    pub(crate) fn prefill_prompt_sampled_from_embedding_rows(
+        &mut self,
+        prompt_embedding_rows: &[Vec<u16>],
+        start_position: usize,
+        disallowed_token_ids: &[u32],
+        sampling_options: &GemmaTextSamplingOptions,
+        rng: &mut MlxTextSamplingRng,
+    ) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        self.prefill_prompt_from_embedding_rows(prompt_embedding_rows, start_position, true)?;
+        self.sampled_token_from_logits(disallowed_token_ids, sampling_options, rng)
+    }
+
     pub(crate) fn prefill_prompt_hidden_words_from_token_ids(
         &mut self,
         prompt_token_ids: &[u32],
@@ -5097,6 +5177,16 @@ impl ExactMetalTextRuntimeSession {
             return Err(err);
         }
         runtime.end_command_batch()?;
+        let hidden_buffer = self.final_hidden_buffer()?;
+        self.read_hidden_words_from_buffer(&hidden_buffer)
+    }
+
+    pub(crate) fn prefill_prompt_hidden_words_from_embedding_rows(
+        &mut self,
+        prompt_embedding_rows: &[Vec<u16>],
+        start_position: usize,
+    ) -> Result<Vec<u16>, Box<dyn Error>> {
+        self.prefill_prompt_from_embedding_rows(prompt_embedding_rows, start_position, false)?;
         let hidden_buffer = self.final_hidden_buffer()?;
         self.read_hidden_words_from_buffer(&hidden_buffer)
     }
@@ -5131,6 +5221,15 @@ impl ExactMetalTextRuntimeSession {
             return Err(err);
         }
         runtime.end_command_batch()?;
+        self.read_shared_logits_greedy_token()
+    }
+
+    pub(crate) fn prefill_prompt_greedy_from_embedding_rows(
+        &mut self,
+        prompt_embedding_rows: &[Vec<u16>],
+        start_position: usize,
+    ) -> Result<MlxGreedyToken, Box<dyn Error>> {
+        self.prefill_prompt_from_embedding_rows(prompt_embedding_rows, start_position, true)?;
         self.read_shared_logits_greedy_token()
     }
 
