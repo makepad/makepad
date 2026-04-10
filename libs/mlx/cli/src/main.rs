@@ -2,6 +2,7 @@ use makepad_mlx::chat::{GemmaChatRole, GemmaChatSession};
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::time::Instant;
 
 fn default_model_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -10,6 +11,21 @@ fn default_model_path() -> PathBuf {
 
 fn usage() -> &'static str {
     "Usage: mlx-cli [model.safetensors] [--max-new-tokens N]"
+}
+
+fn format_max_new_tokens(max_new_tokens: Option<usize>) -> String {
+    max_new_tokens
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unbounded".to_owned())
+}
+
+fn format_stop_reason(stop_reason: makepad_mlx::text_runtime::GemmaStopReason) -> String {
+    match stop_reason {
+        makepad_mlx::text_runtime::GemmaStopReason::MaxNewTokens => "max_new_tokens".to_owned(),
+        makepad_mlx::text_runtime::GemmaStopReason::EosToken(token_id) => {
+            format!("eos({token_id})")
+        }
+    }
 }
 
 fn print_block(prefix: &str, text: &str) {
@@ -30,13 +46,13 @@ fn print_block(prefix: &str, text: &str) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let mut model_path = default_model_path();
-    let mut max_new_tokens = 128usize;
+    let mut max_new_tokens = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--max-new-tokens" => {
                 let value = args.next().ok_or("--max-new-tokens requires a value")?;
-                max_new_tokens = value.parse::<usize>()?;
+                max_new_tokens = Some(value.parse::<usize>()?);
             }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());
@@ -50,7 +66,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("loading model={}...", model_path.display());
     let mut session = GemmaChatSession::load(&model_path, max_new_tokens)?;
     println!("model={}", model_path.display());
-    println!("max_new_tokens={}", session.max_new_tokens());
+    println!(
+        "max_new_tokens={}",
+        format_max_new_tokens(session.max_new_tokens())
+    );
     println!("commands: /reset /history /exit");
     println!("ready");
 
@@ -89,16 +108,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         print!("assistant> ");
         io::stdout().flush()?;
+        let started = Instant::now();
         let output = session.send_user_message_streaming(input, |delta| {
             print!("{delta}");
             io::stdout().flush()?;
             Ok(())
         })?;
-        if output.generated_text.is_empty() {
-            println!();
+        println!();
+        let elapsed = started.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64();
+        let decode_tok_s = if elapsed_secs > 0.0 {
+            output.generated_token_ids.len() as f64 / elapsed_secs
         } else {
-            println!();
-        }
+            0.0
+        };
+        println!(
+            "[generated_tokens={} stop={} decode_tok_s={decode_tok_s:.3}]",
+            output.generated_token_ids.len(),
+            format_stop_reason(output.stop_reason),
+        );
     }
 
     Ok(())

@@ -54,7 +54,7 @@ pub(crate) struct ExactMetalGenerationCursor {
     backend: Arc<Mutex<ExactMetalTextRuntimeSession>>,
     prompt_token_ids: Arc<[u32]>,
     stop_tokens: BTreeSet<u32>,
-    max_new_tokens: usize,
+    max_new_tokens: Option<usize>,
     processed_prompt_tokens: usize,
     position: usize,
     pending_next: Option<u32>,
@@ -96,7 +96,7 @@ pub(crate) struct ExactMetalGenerationGraph {
     prompt_prefill: Arc<ExactMetalPromptPrefillNode>,
     step_nodes: Mutex<Vec<Arc<ExactMetalGenerationStepNode>>>,
     final_snapshot: OnceLock<Result<Arc<ExactMetalGenerationSnapshot>, String>>,
-    max_new_tokens: usize,
+    max_new_tokens: Option<usize>,
 }
 
 impl ExactMetalTextRuntimeSession {
@@ -265,7 +265,7 @@ impl ExactMetalTextRuntimeSession {
         backend: Arc<Mutex<Self>>,
         prompt_token_ids: Arc<[u32]>,
         stop_tokens: BTreeSet<u32>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
     ) -> Result<ExactMetalGenerationCursor, Box<dyn Error>> {
         if prompt_token_ids.is_empty() {
             return Err("generation requires at least one prompt token".into());
@@ -278,7 +278,9 @@ impl ExactMetalTextRuntimeSession {
             processed_prompt_tokens: 0,
             position: 0,
             pending_next: None,
-            generated_token_ids: Vec::with_capacity(max_new_tokens),
+            generated_token_ids: Vec::with_capacity(
+                max_new_tokens.unwrap_or(DEVICE_GREEDY_DECODE_CHUNK_TOKENS),
+            ),
             stop_reason: None,
         })
     }
@@ -287,7 +289,7 @@ impl ExactMetalTextRuntimeSession {
         backend: Arc<Mutex<Self>>,
         prompt_token_ids: Arc<[u32]>,
         stop_tokens: BTreeSet<u32>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
     ) -> Result<ExactMetalGenerationGraph, Box<dyn Error>> {
         ExactMetalGenerationGraph::new(Self::generation_cursor(
             backend,
