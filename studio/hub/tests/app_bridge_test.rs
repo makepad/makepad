@@ -60,6 +60,57 @@ fn wait_for_ws_binary(runtime: &NetworkRuntime, socket_id: LiveId, timeout: Dura
     }
 }
 
+fn wait_for_app_socket_registration(
+    runtime: &NetworkRuntime,
+    ui_socket: LiveId,
+    client_id: ClientId,
+    build_id: QueryId,
+) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut counter = 99u64;
+    while Instant::now() < deadline {
+        let request = ClientToHubEnvelope {
+            query_id: QueryId::new(client_id, counter),
+            msg: ClientToHub::ListAppSockets,
+        };
+        runtime
+            .ws_send(ui_socket, WsSend::Binary(request.serialize_bin()))
+            .expect("send app socket list request");
+        counter = counter.wrapping_add(1);
+
+        let Some(event) = wait_for_event(runtime, Duration::from_millis(50), |event| {
+            matches!(
+                event,
+                NetworkResponse::WsMessage {
+                    socket_id: id,
+                    message: WsMessage::Binary(_)
+                } if *id == ui_socket
+            )
+        }) else {
+            continue;
+        };
+
+        let NetworkResponse::WsMessage {
+            message: WsMessage::Binary(data),
+            ..
+        } = event
+        else {
+            continue;
+        };
+
+        let Ok(msg) = HubToClient::deserialize_bin(&data) else {
+            continue;
+        };
+        if let HubToClient::AppSockets { sockets } = msg {
+            if sockets.iter().any(|socket| socket.build_id == Some(build_id)) {
+                return;
+            }
+        }
+    }
+
+    panic!("app socket for build {} did not register", build_id.0);
+}
+
 #[test]
 fn websocket_app_bridge_widget_dump_roundtrip() {
     let dir = makepad_studio_hub::test_support::tempdir().unwrap();
@@ -127,6 +178,7 @@ fn websocket_app_bridge_widget_dump_roundtrip() {
         |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == app_socket),
     );
     assert!(app_opened.is_some(), "did not receive app WsOpened");
+    wait_for_app_socket_registration(&runtime, ui_socket, client_id, build_id);
 
     let query_id = QueryId::new(client_id, 1);
     let ui_request = ClientToHubEnvelope {
@@ -238,6 +290,7 @@ fn websocket_app_bridge_widget_query_roundtrip() {
         |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == app_socket),
     );
     assert!(app_opened.is_some(), "did not receive app WsOpened");
+    wait_for_app_socket_registration(&runtime, ui_socket, client_id, build_id);
 
     let query_id = QueryId::new(client_id, 2);
     let ui_request = ClientToHubEnvelope {
@@ -358,6 +411,7 @@ fn websocket_app_bridge_widget_snapshot_roundtrip() {
         |event| matches!(event, NetworkResponse::WsOpened { socket_id: id } if *id == app_socket),
     );
     assert!(app_opened.is_some(), "did not receive app WsOpened");
+    wait_for_app_socket_registration(&runtime, ui_socket, client_id, build_id);
 
     let query_id = QueryId::new(client_id, 3);
     let ui_request = ClientToHubEnvelope {
