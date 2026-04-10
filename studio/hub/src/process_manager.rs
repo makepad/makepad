@@ -352,18 +352,67 @@ fn script_value_to_query_id(
     ))
 }
 
-fn studio_url_for_app(base: Option<&str>, build_id: Option<QueryId>) -> String {
+fn normalize_studio_host(base: Option<&str>) -> String {
     let Some(base) = base.map(str::trim).filter(|base| !base.is_empty()) else {
         return String::new();
     };
-    let normalized = base.trim_end_matches('/').to_string();
+    let normalized = base.trim_end_matches('/');
+    let without_scheme = normalized
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(normalized);
+    let host_port = without_scheme
+        .split_once(['/', '?', '#'])
+        .map(|(host_port, _)| host_port)
+        .unwrap_or(without_scheme)
+        .trim();
+    host_port.to_string()
+}
+
+fn studio_query_value(studio: &str, key: &str) -> Option<String> {
+    let query = studio.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (pair_key, pair_value) = pair.split_once('=').unwrap_or((pair, ""));
+        if pair_key == key {
+            let pair_value = pair_value.trim();
+            if !pair_value.is_empty() {
+                return Some(pair_value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_studio_build_id(studio: &str) -> Option<String> {
+    studio_query_value(studio, "build").or_else(|| {
+        let studio = studio.trim().trim_end_matches('/');
+        let without_scheme = studio
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(studio);
+        let path = without_scheme
+            .split_once('/')
+            .map(|(_, path)| path)
+            .unwrap_or("");
+        let rest = path.strip_prefix("app/")?;
+        let build_id = rest.split('/').next()?.trim();
+        (!build_id.is_empty()).then(|| build_id.to_string())
+    })
+}
+
+fn extract_studio_crate_name(studio: &str) -> Option<String> {
+    studio_query_value(studio, "crate")
+}
+
+fn studio_url_for_app(base: Option<&str>, build_id: Option<QueryId>) -> String {
+    let normalized = normalize_studio_host(base);
+    if normalized.is_empty() {
+        return String::new();
+    }
     let Some(build_id) = build_id else {
         return normalized;
     };
-    if normalized.contains("/app/") {
-        return normalized;
-    }
-    format!("{normalized}/app/{}", build_id.0)
+    format!("{normalized}/app?build={}", build_id.0)
 }
 
 fn script_value_to_bool(value: ScriptValue) -> Option<bool> {
@@ -583,6 +632,20 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
 
     vm.add_method(
         hub,
+        id_lut!(studio_local_host),
+        script_args_def!(),
+        |vm, _args| {
+            let host = vm
+                .host
+                .downcast_ref::<ScriptBuildHost>()
+                .map(|host| normalize_studio_host(host.studio_local_addr.as_deref()))
+                .unwrap_or_default();
+            vm.new_string_with(|_vm, out| out.push_str(&host)).into()
+        },
+    );
+
+    vm.add_method(
+        hub,
         id_lut!(studio_ext),
         script_args_def!(build_id = NIL),
         |vm, args| {
@@ -601,6 +664,20 @@ fn install_hub_script_module(vm: &mut ScriptVm) {
                 .map(|host| studio_url_for_app(host.studio_ext_addr.as_deref(), build_id))
                 .unwrap_or_default();
             vm.new_string_with(|_vm, out| out.push_str(&url)).into()
+        },
+    );
+
+    vm.add_method(
+        hub,
+        id_lut!(studio_ext_host),
+        script_args_def!(),
+        |vm, _args| {
+            let host = vm
+                .host
+                .downcast_ref::<ScriptBuildHost>()
+                .map(|host| normalize_studio_host(host.studio_ext_addr.as_deref()))
+                .unwrap_or_default();
+            vm.new_string_with(|_vm, out| out.push_str(&host)).into()
         },
     );
 
@@ -899,14 +976,51 @@ impl ProcessManager {
             .entry("MAKEPAD".to_string())
             .or_insert_with(|| "lines".to_string());
 
-        let resolved_studio = child_env.get("STUDIO").map(String::as_str).or_else(|| {
-            inject_studio_env
-                .then_some(studio_addr.as_deref())
-                .flatten()
-        });
-        let resolved_studio = studio_url_for_app(resolved_studio, Some(build_id));
-        if !resolved_studio.is_empty() {
-            child_env.insert("STUDIO".to_string(), resolved_studio);
+        let resolved_studio_host = child_env
+            .get("STUDIO_HOST")
+            .map(String::as_str)
+            .map(|host| normalize_studio_host(Some(host)))
+            .filter(|host| !host.is_empty())
+            .or_else(|| {
+                child_env
+                    .get("STUDIO")
+                    .and_then(|studio| {
+                        let host = normalize_studio_host(Some(studio));
+                        (!host.is_empty()).then_some(host)
+                    })
+            })
+            .or_else(|| {
+                inject_studio_env
+                    .then_some(studio_addr.as_deref())
+                    .flatten()
+                    .map(|host| normalize_studio_host(Some(host)))
+                    .filter(|host| !host.is_empty())
+            });
+        if let Some(studio_host) = resolved_studio_host {
+            child_env.insert("STUDIO_HOST".to_string(), studio_host);
+            let studio_build = child_env
+                .get("STUDIO_BUILD")
+                .cloned()
+                .filter(|build| !build.trim().is_empty())
+                .or_else(|| {
+                    child_env
+                        .get("STUDIO")
+                        .and_then(|studio| extract_studio_build_id(studio))
+                })
+                .unwrap_or_else(|| build_id.0.to_string());
+            child_env.insert("STUDIO_BUILD".to_string(), studio_build);
+            let studio_crate = child_env
+                .get("STUDIO_CRATE")
+                .cloned()
+                .filter(|crate_name| !crate_name.trim().is_empty())
+                .or_else(|| {
+                    child_env
+                        .get("STUDIO")
+                        .and_then(|studio| extract_studio_crate_name(studio))
+                })
+                .unwrap_or_else(|| package.clone());
+            child_env.insert("STUDIO_CRATE".to_string(), studio_crate);
+            child_env.remove("STUDIO");
         }
         command.envs(child_env.iter());
 
@@ -1398,15 +1512,15 @@ mod tests {
     fn studio_url_for_app_appends_app_path_to_base_addr() {
         assert_eq!(
             studio_url_for_app(Some("127.0.0.1:8001"), Some(QueryId(7))),
-            "127.0.0.1:8001/app/7"
+            "127.0.0.1:8001/app?build=7"
         );
     }
 
     #[test]
-    fn studio_url_for_app_preserves_existing_app_path() {
+    fn studio_url_for_app_normalizes_existing_app_url() {
         assert_eq!(
-            studio_url_for_app(Some("127.0.0.1:8001/app/5"), Some(QueryId(9))),
-            "127.0.0.1:8001/app/5"
+            studio_url_for_app(Some("http://127.0.0.1:8001/app/5"), Some(QueryId(9))),
+            "127.0.0.1:8001/app?build=9"
         );
     }
 

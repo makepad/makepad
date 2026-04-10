@@ -1,0 +1,10 @@
+[package]
+name = "makepad-mlx"
+version = "0.1.0"
+edition = "2021"
+description = "Rust MLX runtime port for Gemma 4 on Apple Silicon"
+license = "MIT"
+
+[dependencies]
+makepad-ggml = { path = "../ggml" }
+makepad-micro-serde = { path = "../micro_serde" }

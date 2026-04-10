@@ -254,7 +254,7 @@ fn show_help() {
     );
     println!("    [options]:");
     println!("       --studio=127.0.0.1:8001                   Studio server ip:port");
-    println!("                                                 (or set STUDIO=127.0.0.1:8001)");
+    println!("                                                 (or set STUDIO_HOST=127.0.0.1:8001)");
     println!();
     println!();
 }

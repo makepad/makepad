@@ -575,7 +575,8 @@ pub struct BuildInfo {
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson)]
 pub struct AppSocketInfo {
     pub web_socket_id: u64,
-    pub build_id: QueryId,
+    pub build_id: Option<QueryId>,
+    pub crate_name: Option<String>,
     pub mount: Option<String>,
     pub package: Option<String>,
     pub build_active: bool,

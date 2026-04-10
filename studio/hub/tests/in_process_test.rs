@@ -1679,7 +1679,7 @@ fn run_item_spawns_cargo_run_for_clicked_name() {
     .unwrap();
     fs::write(
         dir.path().join("makepad.splash"),
-        "use mod.hub\nhub.set_run_items([{name:\"makepad-example-splash\" in_studio:true on_run:fn(){let name = self.name hub.run({\"STUDIO\":hub.studio_ip}, \"cargo\", [\"run\" \"-p\" name \"--release\" \"--message-format=json\" \"--\" \"--message-format=json\" \"--stdin-loop\"])}}])\n",
+        "use mod.hub\nhub.set_run_items([{name:\"makepad-example-splash\" in_studio:true on_run:fn(id){let name = self.name hub.run({\"STUDIO_HOST\":hub.studio_ip \"STUDIO_BUILD\":id.to_string() \"STUDIO_CRATE\":name}, \"cargo\", [\"run\" \"-p\" name \"--release\" \"--message-format=json\" \"--\" \"--message-format=json\" \"--stdin-loop\"])}}])\n",
     )
     .unwrap();
 

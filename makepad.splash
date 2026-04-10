@@ -10,7 +10,7 @@ let RunItem = {
 let RunQuest = RunItem{
     on_run: fn(id){
         hub.run( 
-            {"STUDIO": hub.studio_ext(id), "MAKEPAD": "vulkan"},
+            {"STUDIO_HOST": hub.studio_ext_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.run "MAKEPAD": "vulkan"},
             "cargo", 
             [
                 "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"
@@ -23,7 +23,7 @@ let RunQuest = RunItem{
 let RunAndroid = RunItem{
     on_run: fn(id){
         hub.run(
-            {"STUDIO": hub.studio_ext(id), "MAKEPAD": "vulkan"},
+            {"STUDIO_HOST": hub.studio_ext_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name "MAKEPAD": "vulkan"},
             "cargo", 
             [
                 "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"
@@ -36,7 +36,7 @@ let RunAndroid = RunItem{
 let RunStudioRelease = RunItem{
     on_run: fn(id){
         hub.run(
-            {"STUDIO": hub.studio_local(id)},
+            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
             "cargo", 
             ["run" "-p" self.name "--release" "--message-format=json" "--" "--message-format=json" "--stdin-loop"],
         )
@@ -46,7 +46,7 @@ let RunStudioRelease = RunItem{
 let RunRelease = RunItem{
     on_run: fn(id){
         hub.run(
-            {"STUDIO": hub.studio_local(id)},
+            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.run},
             "cargo", 
             ["run" "-p" self.run "--release" "--message-format=json" "--" "--message-format=json"],
         )
@@ -57,7 +57,7 @@ let RunRelease = RunItem{
 let RunStudio = RunItem{
     on_run: fn(id){
         hub.run(
-            {"STUDIO": hub.studio_local(id)},
+            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
             "cargo", 
             ["run" "-p" "makepad-studio" "--release" "--message-format=json" "--" "--message-format=json"  "--bind=0.0.0.0" "--stdin-loop"],
         )
@@ -67,7 +67,7 @@ let RunStudio = RunItem{
 let RunStudioExt = RunItem{
     on_run: fn(id){
         hub.run(
-            {"STUDIO": hub.studio_local(id)},
+            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
             "cargo", 
             ["run" "-p" "makepad-studio" "--release" "--message-format=json" "--" "--message-format=json" "--bind=0.0.0.0"],
         )

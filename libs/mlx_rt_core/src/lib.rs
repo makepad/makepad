@@ -3,6 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub type Result<T> = std::result::Result<T, MlxRtError>;
 
@@ -985,6 +986,7 @@ pub struct MlxSafetensorsHeader {
     pub header_len: u64,
     pub metadata: HashMap<String, String>,
     pub tensors: HashMap<String, MlxTensorEntry>,
+    file: Arc<Mutex<fs::File>>,
 }
 
 impl MlxSafetensorsHeader {
@@ -1091,6 +1093,7 @@ impl MlxSafetensorsHeader {
             header_len,
             metadata,
             tensors,
+            file: Arc::new(Mutex::new(file)),
         })
     }
 
@@ -1102,6 +1105,24 @@ impl MlxSafetensorsHeader {
         self.tensors.get(name)
     }
 
+    fn read_file_range(&self, start: u64, len: usize) -> Result<Vec<u8>> {
+        let mut file = self.file.lock().map_err(|_| MlxRtError::Io {
+            path: self.path.clone(),
+            message: "safetensors file mutex poisoned".to_string(),
+        })?;
+        file.seek(SeekFrom::Start(start))
+            .map_err(|err| MlxRtError::Io {
+                path: self.path.clone(),
+                message: err.to_string(),
+            })?;
+        let mut bytes = vec![0u8; len];
+        file.read_exact(&mut bytes).map_err(|err| MlxRtError::Io {
+            path: self.path.clone(),
+            message: err.to_string(),
+        })?;
+        Ok(bytes)
+    }
+
     pub fn read_tensor_bytes(&self, name: &str) -> Result<Vec<u8>> {
         let entry = self
             .tensor(name)
@@ -1110,21 +1131,7 @@ impl MlxSafetensorsHeader {
                 message: format!("tensor {} not found in header", name),
             })?;
         let file_offsets = entry.file_offsets(self.payload_base_offset());
-        let mut file = fs::File::open(&self.path).map_err(|err| MlxRtError::Io {
-            path: self.path.clone(),
-            message: err.to_string(),
-        })?;
-        file.seek(SeekFrom::Start(file_offsets[0]))
-            .map_err(|err| MlxRtError::Io {
-                path: self.path.clone(),
-                message: err.to_string(),
-            })?;
-        let mut bytes = vec![0u8; entry.data_len_bytes() as usize];
-        file.read_exact(&mut bytes).map_err(|err| MlxRtError::Io {
-            path: self.path.clone(),
-            message: err.to_string(),
-        })?;
-        Ok(bytes)
+        self.read_file_range(file_offsets[0], entry.data_len_bytes() as usize)
     }
 
     pub fn read_rank2_row_bytes(&self, name: &str, row: u64) -> Result<Vec<u8>> {
@@ -1156,21 +1163,7 @@ impl MlxSafetensorsHeader {
                 message: format!("tensor {} row {} extends past tensor payload", name, row),
             });
         }
-        let mut file = fs::File::open(&self.path).map_err(|err| MlxRtError::Io {
-            path: self.path.clone(),
-            message: err.to_string(),
-        })?;
-        file.seek(SeekFrom::Start(start))
-            .map_err(|err| MlxRtError::Io {
-                path: self.path.clone(),
-                message: err.to_string(),
-            })?;
-        let mut bytes = vec![0u8; row_bytes as usize];
-        file.read_exact(&mut bytes).map_err(|err| MlxRtError::Io {
-            path: self.path.clone(),
-            message: err.to_string(),
-        })?;
-        Ok(bytes)
+        self.read_file_range(start, row_bytes as usize)
     }
 
     pub fn read_rank2_row_u32_words(&self, name: &str, row: u64) -> Result<Vec<u32>> {
@@ -1273,21 +1266,7 @@ impl MlxSafetensorsHeader {
                 ),
             });
         }
-        let mut file = fs::File::open(&self.path).map_err(|err| MlxRtError::Io {
-            path: self.path.clone(),
-            message: err.to_string(),
-        })?;
-        file.seek(SeekFrom::Start(start))
-            .map_err(|err| MlxRtError::Io {
-                path: self.path.clone(),
-                message: err.to_string(),
-            })?;
-        let mut bytes = vec![0u8; plane_bytes as usize];
-        file.read_exact(&mut bytes).map_err(|err| MlxRtError::Io {
-            path: self.path.clone(),
-            message: err.to_string(),
-        })?;
-        Ok(bytes)
+        self.read_file_range(start, plane_bytes as usize)
     }
 
     pub fn read_rank3_plane_u32_words(&self, name: &str, plane: u64) -> Result<Vec<u32>> {

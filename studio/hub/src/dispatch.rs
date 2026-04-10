@@ -62,7 +62,8 @@ pub enum HubEvent {
         text: String,
     },
     AppConnected {
-        build_id: QueryId,
+        build_id: Option<QueryId>,
+        crate_name: Option<String>,
         web_socket_id: u64,
         sender: Sender<Vec<u8>>,
     },
@@ -178,7 +179,8 @@ struct UiClient {
 }
 
 struct AppSocket {
-    build_id: QueryId,
+    build_id: Option<QueryId>,
+    crate_name: Option<String>,
     sender: Sender<Vec<u8>>,
     mount: Option<String>,
     package: Option<String>,
@@ -408,19 +410,26 @@ impl HubCore {
             HubEvent::AppConnected {
                 web_socket_id,
                 build_id,
+                crate_name,
                 sender,
             } => {
-                let build_info = self.build_info_for_id(build_id);
+                let build_info = build_id.and_then(|build_id| self.build_info_for_id(build_id));
                 self.app_sockets.insert(
                     web_socket_id,
                     AppSocket {
                         build_id,
+                        crate_name: crate_name.clone(),
                         sender,
                         mount: build_info.as_ref().map(|info| info.mount.clone()),
-                        package: build_info.as_ref().map(|info| info.package.clone()),
+                        package: build_info
+                            .as_ref()
+                            .map(|info| info.package.clone())
+                            .or(crate_name),
                     },
                 );
-                self.flush_pending_forward_to_app(build_id);
+                if let Some(build_id) = build_id {
+                    self.flush_pending_forward_to_app(build_id);
+                }
             }
             HubEvent::AppDisconnected { web_socket_id } => {
                 self.app_sockets.remove(&web_socket_id);
@@ -429,11 +438,12 @@ impl HubCore {
                 web_socket_id,
                 data,
             } => {
-                let build_id = match self.app_sockets.get(&web_socket_id) {
-                    Some(socket) => socket.build_id,
-                    None => return true,
+                let Some(socket) = self.app_sockets.get(&web_socket_id) else {
+                    return true;
                 };
-                self.on_app_binary(build_id, data);
+                if let Some(build_id) = socket.build_id {
+                    self.on_app_binary(build_id, data);
+                }
             }
             HubEvent::ProcessAppMessage { build_id, msg } => {
                 self.on_process_app_message(build_id, msg)
@@ -2152,7 +2162,8 @@ impl HubCore {
             .app_sockets
             .iter()
             .filter_map(|(web_socket_id, socket)| {
-                (socket.build_id == build_id).then_some((*web_socket_id, socket.sender.clone()))
+                (socket.build_id == Some(build_id))
+                    .then_some((*web_socket_id, socket.sender.clone()))
             })
             .collect();
         candidates.sort_by_key(|(web_socket_id, _)| *web_socket_id);
@@ -2388,10 +2399,15 @@ impl HubCore {
             .app_sockets
             .iter()
             .map(|(web_socket_id, socket)| {
-                let build_info = self.build_info_for_id(socket.build_id);
+                let build_info = socket.build_id.and_then(|build_id| self.build_info_for_id(build_id));
                 AppSocketInfo {
                     web_socket_id: *web_socket_id,
                     build_id: socket.build_id,
+                    crate_name: socket
+                        .crate_name
+                        .clone()
+                        .or_else(|| build_info.as_ref().map(|info| info.package.clone()))
+                        .or_else(|| socket.package.clone()),
                     mount: build_info
                         .as_ref()
                         .map(|info| info.mount.clone())
@@ -2404,7 +2420,13 @@ impl HubCore {
                 }
             })
             .collect::<Vec<_>>();
-        sockets.sort_by_key(|socket| (socket.build_id.0, socket.web_socket_id));
+        sockets.sort_by_key(|socket| {
+            (
+                socket.crate_name.clone().unwrap_or_default(),
+                socket.build_id.map(|id| id.0).unwrap_or(u64::MAX),
+                socket.web_socket_id,
+            )
+        });
         sockets
     }
 
@@ -4605,7 +4627,8 @@ mod tests {
 
         let (app_tx, app_rx) = mpsc::channel::<Vec<u8>>();
         core.handle_event(HubEvent::AppConnected {
-            build_id,
+            build_id: Some(build_id),
+            crate_name: Some("makepad-example-xr".to_string()),
             web_socket_id: 77,
             sender: app_tx,
         });
@@ -4732,7 +4755,8 @@ mod tests {
 
         let (app_tx, app_rx) = mpsc::channel::<Vec<u8>>();
         core.handle_event(HubEvent::AppConnected {
-            build_id,
+            build_id: Some(build_id),
+            crate_name: Some("makepad-example-xr".to_string()),
             web_socket_id: 77,
             sender: app_tx,
         });
