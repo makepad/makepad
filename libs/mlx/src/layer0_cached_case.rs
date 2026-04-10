@@ -3353,6 +3353,34 @@ impl ExactMetalTextRuntimeSession {
         )?)
     }
 
+    fn read_shared_logits_softcapped(&self) -> Result<Vec<f32>, Box<dyn Error>> {
+        let runtime = self.session.runtime.clone();
+        Ok(runtime.with_readable_buffer(
+            &self.text_io.buffers.logits_out,
+            self.text_io.vocab_size * size_of::<u16>(),
+            |bytes| {
+                if bytes.len() != self.text_io.vocab_size * size_of::<u16>() {
+                    return Err(format!(
+                        "exact text IO logits byte length mismatch: {}",
+                        bytes.len()
+                    ));
+                }
+                let mut logits = Vec::with_capacity(self.text_io.vocab_size);
+                for word_bytes in bytes.chunks_exact(size_of::<u16>()) {
+                    let raw_logit =
+                        bf16_word_to_f32(u16::from_le_bytes([word_bytes[0], word_bytes[1]]));
+                    let logit = if let Some(softcap) = self.text_io.softcap {
+                        bf16_round_to_f32((raw_logit / softcap).tanh() * softcap)
+                    } else {
+                        raw_logit
+                    };
+                    logits.push(logit);
+                }
+                Ok(logits)
+            },
+        )?)
+    }
+
     fn greedy_token_from_hidden_buffer(
         &mut self,
         hidden_buffer: &MetalBuffer,
@@ -4788,6 +4816,30 @@ impl ExactMetalTextRuntimeSession {
         Ok(self.read_shared_logits_greedy_token()?.token_id)
     }
 
+    pub(crate) fn eval_token_logits_from_token_id(
+        &mut self,
+        token_id: u32,
+        position: usize,
+    ) -> Result<Vec<f32>, Box<dyn Error>> {
+        let input_buffer = self.token_input_buffer()?;
+        let runtime = self.session.runtime.clone();
+        runtime.begin_command_batch()?;
+        let batch_result = (|| -> Result<(), Box<dyn Error>> {
+            self.dequantize_token_embedding_into_buffer(token_id, &input_buffer)?;
+            self.eval_token_hidden_state_core(None, position, false)?;
+            let hidden_buffer = self.final_hidden_buffer()?;
+            self.dispatch_final_text_norm_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_logits_projection_from_final_norm()?;
+            Ok(())
+        })();
+        if let Err(err) = batch_result {
+            let _ = runtime.discard_command_batch();
+            return Err(err);
+        }
+        runtime.end_command_batch()?;
+        self.read_shared_logits_softcapped()
+    }
+
     pub(crate) fn eval_token_greedy_from_token_id(
         &mut self,
         token_id: u32,
@@ -4886,6 +4938,39 @@ impl ExactMetalTextRuntimeSession {
         }
         runtime.end_command_batch()?;
         Ok(self.read_shared_logits_greedy_token()?.token_id)
+    }
+
+    pub(crate) fn prefill_prompt_logits_from_token_ids(
+        &mut self,
+        prompt_token_ids: &[u32],
+        start_position: usize,
+    ) -> Result<Vec<f32>, Box<dyn Error>> {
+        if prompt_token_ids.is_empty() {
+            return Err("prompt prefill requires at least one token".into());
+        }
+        if start_position == 0 {
+            self.reset_kv_caches();
+        }
+        let input_buffer = self.token_input_buffer()?;
+        let runtime = self.session.runtime.clone();
+        runtime.begin_command_batch()?;
+        let batch_result = (|| -> Result<(), Box<dyn Error>> {
+            for (offset, token_id) in prompt_token_ids.iter().copied().enumerate() {
+                let position = start_position + offset;
+                self.dequantize_token_embedding_into_buffer(token_id, &input_buffer)?;
+                self.eval_token_hidden_state_core(None, position, false)?;
+            }
+            let hidden_buffer = self.final_hidden_buffer()?;
+            self.dispatch_final_text_norm_on_hidden_buffer(&hidden_buffer)?;
+            self.dispatch_logits_projection_from_final_norm()?;
+            Ok(())
+        })();
+        if let Err(err) = batch_result {
+            let _ = runtime.discard_command_batch();
+            return Err(err);
+        }
+        runtime.end_command_batch()?;
+        self.read_shared_logits_softcapped()
     }
 
     pub(crate) fn prefill_prompt_hidden_words_from_token_ids(
