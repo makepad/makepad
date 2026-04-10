@@ -1,5 +1,6 @@
 mod core;
 mod kv;
+pub mod multimodal;
 
 pub mod chat;
 pub mod layer0_cached_case;
