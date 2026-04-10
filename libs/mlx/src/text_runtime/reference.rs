@@ -65,7 +65,7 @@ impl GemmaTextRuntimeSession {
     fn start_generation_cursor(
         self: &Arc<Self>,
         prompt_token_ids: Arc<[u32]>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
     ) -> Result<ExactMetalGenerationCursor, String> {
         ExactMetalTextRuntimeSession::generation_cursor(
             self.exact_backend.clone(),
@@ -79,7 +79,7 @@ impl GemmaTextRuntimeSession {
     fn start_generation_graph(
         self: &Arc<Self>,
         prompt_token_ids: Arc<[u32]>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
     ) -> Result<ExactMetalGenerationGraph, String> {
         ExactMetalTextRuntimeSession::generation_graph(
             self.exact_backend.clone(),

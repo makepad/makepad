@@ -263,6 +263,7 @@ struct GemmaTextRuntimeSession {
     model_path: PathBuf,
     weights: MlxIndexedSafetensors,
     tokenizer: MlxTokenizer,
+    #[cfg_attr(not(test), allow(dead_code))]
     kv_layout: GemmaKvCacheLayout,
     stop_tokens: BTreeSet<u32>,
     exact_backend: Arc<Mutex<ExactMetalTextRuntimeSession>>,
@@ -476,8 +477,8 @@ impl GemmaLazyTextPlanInner {
         self.generation_graph.eval(|| {
             let runtime = self.runtime()?;
             let prompt_token_ids = self.prompt_token_ids()?;
-            let graph = runtime
-                .start_generation_graph(prompt_token_ids.clone(), self.options.max_new_tokens)?;
+        let graph = runtime
+            .start_generation_graph(prompt_token_ids.clone(), Some(self.options.max_new_tokens))?;
             Ok(Arc::new(graph))
         })
     }
@@ -529,14 +530,14 @@ impl GemmaTextModel {
         self.generate_from_formatted_arcs(
             prompt_text,
             formatted_prompt_text,
-            options.max_new_tokens,
+            Some(options.max_new_tokens),
         )
     }
 
     pub fn generate_preformatted(
         &self,
         formatted_prompt_text: impl Into<String>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
     ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
         let formatted_prompt_text = Arc::<str>::from(formatted_prompt_text.into());
         self.generate_from_formatted_arcs(
@@ -549,7 +550,7 @@ impl GemmaTextModel {
     pub fn stream_generate_preformatted<F>(
         &self,
         formatted_prompt_text: impl Into<String>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
         mut on_text_delta: F,
     ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>>
     where
@@ -567,7 +568,8 @@ impl GemmaTextModel {
             .map_err(|err| err.to_string())?;
 
         let mut streamed_text = String::new();
-        for count in 1..=max_new_tokens {
+        let mut count = 1usize;
+        loop {
             let generated_token_ids = graph
                 .generated_token_ids_up_to(count)
                 .map_err(|err| err.to_string())?;
@@ -581,6 +583,12 @@ impl GemmaTextModel {
             if generated_token_ids.len() < count {
                 break;
             }
+            if max_new_tokens == Some(count) {
+                break;
+            }
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| "generation token count overflow".to_string())?;
         }
 
         let snapshot = graph.finish_snapshot().map_err(|err| err.to_string())?;
@@ -603,7 +611,7 @@ impl GemmaTextModel {
         &self,
         prompt_text: Arc<str>,
         formatted_prompt_text: Arc<str>,
-        max_new_tokens: usize,
+        max_new_tokens: Option<usize>,
     ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
         let prompt_token_ids = self
             .runtime
@@ -680,7 +688,7 @@ pub fn benchmark_text_generation(
 
     for _ in 0..warmup_iters {
         runtime
-            .start_generation_graph(prompt_token_ids.clone(), options.max_new_tokens)?
+            .start_generation_graph(prompt_token_ids.clone(), Some(options.max_new_tokens))?
             .finish_snapshot()?;
     }
     runtime
@@ -697,8 +705,10 @@ pub fn benchmark_text_generation(
     let mut last_generated_token_ids = Arc::<[u32]>::from(Vec::<u32>::new());
     for _ in 0..measured_iters {
         let ttft_started = Instant::now();
-        let graph =
-            runtime.start_generation_graph(prompt_token_ids.clone(), options.max_new_tokens)?;
+        let graph = runtime.start_generation_graph(
+            prompt_token_ids.clone(),
+            Some(options.max_new_tokens),
+        )?;
         let first_generated_token_ids = graph.generated_token_ids_up_to(1)?;
         time_to_first_token_elapsed += ttft_started.elapsed();
 

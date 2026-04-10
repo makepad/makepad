@@ -3082,11 +3082,11 @@ fn dispatch_argsort_like(
     let src_nb1 = u64::try_from(src0.nb[1]).map_err(|_| "argsort nb01 exceeds u64".to_string())?;
     let src_nb2 = u64::try_from(src0.nb[2]).map_err(|_| "argsort nb02 exceeds u64".to_string())?;
     let src_nb3 = u64::try_from(src0.nb[3]).map_err(|_| "argsort nb03 exceeds u64".to_string())?;
-    let dst_nb1 =
+    let _dst_nb1 =
         u64::try_from(tensor.nb[1]).map_err(|_| "argsort dst nb1 exceeds u64".to_string())?;
-    let dst_nb2 =
+    let _dst_nb2 =
         u64::try_from(tensor.nb[2]).map_err(|_| "argsort dst nb2 exceeds u64".to_string())?;
-    let dst_nb3 =
+    let _dst_nb3 =
         u64::try_from(tensor.nb[3]).map_err(|_| "argsort dst nb3 exceeds u64".to_string())?;
     let tmp_row_bytes = ggml_type_size_for_type(TensorType::I32)
         * usize::try_from(src0.ne[0]).map_err(|_| "argsort temp row bytes overflow".to_string())?;
@@ -4156,6 +4156,7 @@ fn tail_node_buffer_ref<'a>(
     )
 }
 
+#[allow(dead_code)]
 fn dummy_buffer_ref<'a>(index: u64, buffer: &'a super::MetalBuffer) -> MetalBufferBindingRef<'a> {
     MetalBufferBindingRef {
         index,

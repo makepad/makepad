@@ -640,7 +640,7 @@ impl DeJsonState {
                     } else {
                         if self.cur == '\0' {
                             return Err(self.err_parse("string"));
-                        } else if self.cur != '$' {
+                        } else {
                             self.strbuf.push(self.cur);
                         }
                         self.next(i);
@@ -1243,5 +1243,11 @@ mod tests {
     fn deserialize_u128_integer() {
         let value: u128 = DeJson::deserialize_json("1000000000000000019884624838656").unwrap();
         assert_eq!(value, 1000000000000000019884624838656u128);
+    }
+
+    #[test]
+    fn deserialize_string_preserves_dollar_signs() {
+        let value: String = DeJson::deserialize_json("\"▁$($\"").unwrap();
+        assert_eq!(value, "▁$($");
     }
 }
