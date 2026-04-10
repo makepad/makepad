@@ -354,15 +354,15 @@ impl XrSceneSyncController {
         }
     }
 
-}
-
-impl Widget for XrSceneSyncController {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    pub fn pre_ui_event(&mut self, cx: &mut Cx, event: &Event) {
         let root = self.root_widget_ref(cx);
         if let Event::Actions(actions) = event {
             self.handle_actions(&root, cx, actions);
         }
-        self.view.handle_event(cx, event, scope);
+    }
+
+    pub fn post_ui_event(&mut self, cx: &mut Cx, event: &Event) {
+        let root = self.root_widget_ref(cx);
         if matches!(event, Event::Startup) {
             self.ensure_network_started(&root, cx);
         }
@@ -375,6 +375,12 @@ impl Widget for XrSceneSyncController {
         {
             self.publish_local_shared_object_states(&root, cx);
         }
+    }
+}
+
+impl Widget for XrSceneSyncController {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {

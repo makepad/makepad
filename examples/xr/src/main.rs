@@ -1,6 +1,7 @@
 pub use makepad_widgets_dll as makepad_widgets;
 
 use makepad_widgets::*;
+use makepad_xr::obj::Tank;
 use makepad_xr::scene::*;
 use std::fmt::Write as _;
 
@@ -917,6 +918,34 @@ pub struct App {
 }
 
 impl App {
+    fn run_scene_sync_pre_event(&self, cx: &mut Cx, event: &Event) {
+        let controller = self.ui.widget(cx, ids!(xr_scene_sync_controller));
+        if let Some(mut controller) = controller.borrow_mut::<XrSceneSyncController>() {
+            controller.pre_ui_event(cx, event);
+        };
+    }
+
+    fn run_scene_sync_post_event(&self, cx: &mut Cx, event: &Event) {
+        let controller = self.ui.widget(cx, ids!(xr_scene_sync_controller));
+        if let Some(mut controller) = controller.borrow_mut::<XrSceneSyncController>() {
+            controller.post_ui_event(cx, event);
+        };
+    }
+
+    fn run_tank_pre_event(&self, cx: &mut Cx, event: &Event) {
+        let tank = self.ui.widget(cx, ids!(tank_controller));
+        if let Some(mut tank) = tank.borrow_mut::<Tank>() {
+            tank.pre_ui_event(cx, event);
+        };
+    }
+
+    fn run_tank_post_event(&self, cx: &mut Cx) {
+        let tank = self.ui.widget(cx, ids!(tank_controller));
+        if let Some(mut tank) = tank.borrow_mut::<Tank>() {
+            tank.post_ui_event(cx);
+        };
+    }
+
     fn refresh_debug_fields(&mut self, cx: &mut Cx) {
         let now = Cx::time_now();
         if self
@@ -1171,7 +1200,11 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.run_scene_sync_pre_event(cx, event);
+        self.run_tank_pre_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        self.run_tank_post_event(cx);
+        self.run_scene_sync_post_event(cx, event);
         self.refresh_debug_fields(cx);
     }
 }
