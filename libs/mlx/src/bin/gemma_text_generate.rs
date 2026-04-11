@@ -1,5 +1,7 @@
 use makepad_mlx::text_runtime::{
-    generate_multimodal_text, generate_text, GemmaPromptFormat, GemmaTextGenerationOptions,
+    generate_multimodal_text_with_backend_config, generate_text_with_backend_config,
+    GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode, GemmaPromptFormat,
+    GemmaTextGenerationOptions,
 };
 use std::env;
 use std::path::PathBuf;
@@ -10,7 +12,7 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: gemma_text_generate [model.safetensors|model_dir] [--image PATH] [--raw-bos] [--max-new-tokens N] <prompt>"
+    "Usage: gemma_text_generate [model.safetensors|model_dir] [--image PATH] [--raw-bos] [--max-new-tokens N] [--rotor-k-cache] <prompt>"
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut image_path = None;
     let mut prompt_format = GemmaPromptFormat::Gemma4UserTurn;
     let mut max_new_tokens = 8usize;
+    let mut backend_config = GemmaExactMetalConfig::default();
     let mut prompt_parts = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -32,6 +35,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-new-tokens" => {
                 let value = args.next().ok_or("--max-new-tokens requires a value")?;
                 max_new_tokens = value.parse::<usize>()?;
+            }
+            "--rotor-k-cache" => {
+                backend_config.kv_compression =
+                    GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK;
             }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());
@@ -60,9 +67,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         prompt_format,
     };
     let output = if let Some(image_path) = image_path {
-        generate_multimodal_text(model_path, image_path, prompt, options)?
+        generate_multimodal_text_with_backend_config(
+            model_path,
+            image_path,
+            prompt,
+            options,
+            backend_config,
+        )?
     } else {
-        generate_text(model_path, prompt, options)?
+        generate_text_with_backend_config(model_path, prompt, options, backend_config)?
     };
 
     println!("prompt_ids={:?}", output.prompt_token_ids);

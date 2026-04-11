@@ -1,5 +1,6 @@
 use makepad_mlx::text_runtime::{
-    benchmark_text_generation, GemmaPromptFormat, GemmaTextGenerationOptions,
+    benchmark_text_generation_with_backend_config, GemmaExactMetalConfig,
+    GemmaExactMetalKvCompressionMode, GemmaPromptFormat, GemmaTextGenerationOptions,
 };
 use std::env;
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: gemma_text_bench [model.safetensors] [--raw-bos] [--greedy] [--max-new-tokens N] [--warmup N] [--iters N] <prompt>"
+    "Usage: gemma_text_bench [model.safetensors] [--raw-bos] [--greedy] [--max-new-tokens N] [--warmup N] [--iters N] [--rotor-k-cache] <prompt>"
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_new_tokens = 64usize;
     let mut warmup_iters = 1usize;
     let mut measured_iters = 3usize;
+    let mut backend_config = GemmaExactMetalConfig::default();
     let mut prompt_parts = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -42,6 +44,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--iters" => {
                 let value = args.next().ok_or("--iters requires a value")?;
                 measured_iters = value.parse::<usize>()?;
+            }
+            "--rotor-k-cache" => {
+                backend_config.kv_compression =
+                    GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK;
             }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());
@@ -65,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let prompt = prompt_parts.join(" ");
-    let output = benchmark_text_generation(
+    let output = benchmark_text_generation_with_backend_config(
         model_path,
         prompt,
         GemmaTextGenerationOptions {
@@ -75,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         greedy,
         warmup_iters,
         measured_iters,
+        backend_config,
     )?;
 
     println!("prompt_ids={:?}", output.prompt_token_ids);
