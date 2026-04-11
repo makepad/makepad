@@ -11,6 +11,13 @@ impl GemmaTextRuntimeSession {
     }
 
     fn load(model_path: &Path) -> Result<Arc<Self>, String> {
+        Self::load_with_backend_config(model_path, GemmaExactMetalConfig::default())
+    }
+
+    fn load_with_backend_config(
+        model_path: &Path,
+        backend_config: GemmaExactMetalConfig,
+    ) -> Result<Arc<Self>, String> {
         let model_root = model_root_dir(model_path).map_err(|err| err.to_string())?;
         let weights = MlxIndexedSafetensors::load(&model_root).map_err(|err| err.to_string())?;
         let tokenizer =
@@ -29,7 +36,10 @@ impl GemmaTextRuntimeSession {
             && Self::supports_exact_backend(&weights)
         {
             Some(Arc::new(Mutex::new(
-                ExactMetalTextRuntimeSession::load(model_path.to_path_buf())
+                ExactMetalTextRuntimeSession::load_with_config(
+                    model_path.to_path_buf(),
+                    backend_config.clone(),
+                )
                     .map_err(|err| err.to_string())?,
             )))
         } else {
@@ -37,6 +47,7 @@ impl GemmaTextRuntimeSession {
         };
         Ok(Arc::new(Self {
             model_path: model_path.to_path_buf(),
+            backend_config,
             weights,
             tokenizer,
             kv_layout,
