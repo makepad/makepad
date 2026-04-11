@@ -6,9 +6,15 @@ use std::ptr::{self, NonNull};
 
 pub type cudaError_t = c_int;
 pub type cudaStream_t = *mut c_void;
+pub type cudaGraph_t = *mut c_void;
+pub type cudaGraphExec_t = *mut c_void;
+pub type cudaStreamCaptureMode = c_int;
 
 pub const CUDA_SUCCESS: cudaError_t = 0;
 pub const CUDA_STREAM_NON_BLOCKING: c_uint = 1;
+pub const CUDA_STREAM_CAPTURE_MODE_GLOBAL: cudaStreamCaptureMode = 0;
+pub const CUDA_STREAM_CAPTURE_MODE_THREAD_LOCAL: cudaStreamCaptureMode = 1;
+pub const CUDA_STREAM_CAPTURE_MODE_RELAXED: cudaStreamCaptureMode = 2;
 
 pub const CUDA_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 pub const CUDA_MEMCPY_DEVICE_TO_HOST: c_int = 2;
@@ -35,7 +41,20 @@ unsafe extern "C" {
     pub fn cudaStreamCreateWithFlags(stream: *mut cudaStream_t, flags: c_uint) -> cudaError_t;
     pub fn cudaStreamDestroy(stream: cudaStream_t) -> cudaError_t;
     pub fn cudaStreamSynchronize(stream: cudaStream_t) -> cudaError_t;
+    pub fn cudaStreamBeginCapture(
+        stream: cudaStream_t,
+        mode: cudaStreamCaptureMode,
+    ) -> cudaError_t;
+    pub fn cudaStreamEndCapture(stream: cudaStream_t, graph: *mut cudaGraph_t) -> cudaError_t;
     pub fn cudaDeviceSynchronize() -> cudaError_t;
+    pub fn cudaGraphInstantiate(
+        graph_exec: *mut cudaGraphExec_t,
+        graph: cudaGraph_t,
+        flags: u64,
+    ) -> cudaError_t;
+    pub fn cudaGraphLaunch(graph_exec: cudaGraphExec_t, stream: cudaStream_t) -> cudaError_t;
+    pub fn cudaGraphDestroy(graph: cudaGraph_t) -> cudaError_t;
+    pub fn cudaGraphExecDestroy(graph_exec: cudaGraphExec_t) -> cudaError_t;
     pub fn cudaGetErrorString(error: cudaError_t) -> *const c_char;
 }
 
@@ -120,6 +139,21 @@ pub fn synchronize_stream(stream: cudaStream_t) -> Result<(), CudaError> {
     unsafe { check(cudaStreamSynchronize(stream)) }
 }
 
+pub fn begin_stream_capture(
+    stream: cudaStream_t,
+    mode: cudaStreamCaptureMode,
+) -> Result<(), CudaError> {
+    unsafe { check(cudaStreamBeginCapture(stream, mode)) }
+}
+
+pub fn end_stream_capture(stream: cudaStream_t) -> Result<CudaGraph, CudaError> {
+    let mut graph = ptr::null_mut();
+    unsafe {
+        check(cudaStreamEndCapture(stream, &mut graph))?;
+    }
+    Ok(CudaGraph { inner: graph })
+}
+
 pub fn device_synchronize() -> Result<(), CudaError> {
     unsafe { check(cudaDeviceSynchronize()) }
 }
@@ -162,4 +196,40 @@ pub unsafe fn memcpy_async_device_to_host(
         CUDA_MEMCPY_DEVICE_TO_HOST,
         stream,
     ))
+}
+
+pub struct CudaGraph {
+    inner: cudaGraph_t,
+}
+
+impl CudaGraph {
+    pub fn instantiate(self) -> Result<CudaGraphExec, CudaError> {
+        let mut graph_exec = ptr::null_mut();
+        unsafe {
+            check(cudaGraphInstantiate(&mut graph_exec, self.inner, 0))?;
+        }
+        Ok(CudaGraphExec { inner: graph_exec })
+    }
+}
+
+impl Drop for CudaGraph {
+    fn drop(&mut self) {
+        let _ = unsafe { check(cudaGraphDestroy(self.inner)) };
+    }
+}
+
+pub struct CudaGraphExec {
+    inner: cudaGraphExec_t,
+}
+
+impl CudaGraphExec {
+    pub fn launch(&self, stream: cudaStream_t) -> Result<(), CudaError> {
+        unsafe { check(cudaGraphLaunch(self.inner, stream)) }
+    }
+}
+
+impl Drop for CudaGraphExec {
+    fn drop(&mut self) {
+        let _ = unsafe { check(cudaGraphExecDestroy(self.inner)) };
+    }
 }
