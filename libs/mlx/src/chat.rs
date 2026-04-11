@@ -234,6 +234,20 @@ impl GemmaChatSession {
         self.decode_mode
     }
 
+    pub fn backend_label(&self) -> &'static str {
+        let sampling_options = match self.decode_mode {
+            GemmaChatDecodeMode::Sampled => self.sampling_options.clone(),
+            GemmaChatDecodeMode::Greedy => self.sampling_options.greedy_variant(),
+        };
+        if self.current_image_path.is_some() {
+            self.model
+                .multimodal_generation_backend_label(self.max_new_tokens, &sampling_options)
+        } else {
+            self.model
+                .generation_backend_label(self.max_new_tokens, &sampling_options)
+        }
+    }
+
     pub fn reset(&mut self) {
         self.messages.clear();
     }
