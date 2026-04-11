@@ -10,13 +10,14 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: gemma_text_bench [model.safetensors] [--raw-bos] [--max-new-tokens N] [--warmup N] [--iters N] <prompt>"
+    "Usage: gemma_text_bench [model.safetensors] [--raw-bos] [--greedy] [--max-new-tokens N] [--warmup N] [--iters N] <prompt>"
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let mut model_path = default_model_path();
     let mut prompt_format = GemmaPromptFormat::Gemma4UserTurn;
+    let mut greedy = false;
     let mut max_new_tokens = 64usize;
     let mut warmup_iters = 1usize;
     let mut measured_iters = 3usize;
@@ -26,6 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match arg.as_str() {
             "--raw-bos" => {
                 prompt_format = GemmaPromptFormat::RawBos;
+            }
+            "--greedy" => {
+                greedy = true;
             }
             "--max-new-tokens" => {
                 let value = args.next().ok_or("--max-new-tokens requires a value")?;
@@ -68,6 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_new_tokens,
             prompt_format,
         },
+        greedy,
         warmup_iters,
         measured_iters,
     )?;

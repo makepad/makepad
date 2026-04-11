@@ -345,8 +345,7 @@ impl MlxTextSamplingRng {
 
         for i in 0..(NN - MM) {
             let x = (self.state[i] & UM) | (self.state[i + 1] & LM);
-            self.state[i] =
-                self.state[i + MM] ^ (x >> 1) ^ if x & 1 != 0 { MATRIX_A } else { 0 };
+            self.state[i] = self.state[i + MM] ^ (x >> 1) ^ if x & 1 != 0 { MATRIX_A } else { 0 };
         }
         for i in (NN - MM)..(NN - 1) {
             let x = (self.state[i] & UM) | (self.state[i + 1] & LM);
@@ -354,8 +353,7 @@ impl MlxTextSamplingRng {
                 self.state[i + MM - NN] ^ (x >> 1) ^ if x & 1 != 0 { MATRIX_A } else { 0 };
         }
         let x = (self.state[NN - 1] & UM) | (self.state[0] & LM);
-        self.state[NN - 1] =
-            self.state[MM - 1] ^ (x >> 1) ^ if x & 1 != 0 { MATRIX_A } else { 0 };
+        self.state[NN - 1] = self.state[MM - 1] ^ (x >> 1) ^ if x & 1 != 0 { MATRIX_A } else { 0 };
         self.index = 0;
     }
 
@@ -412,8 +410,7 @@ fn push_sampled_candidate_top_k(
         let current = &candidates[candidate_index];
         let worst = &candidates[worst_index];
         let current_is_worse = current.scaled_logit < worst.scaled_logit
-            || (current.scaled_logit == worst.scaled_logit
-                && current.token_id > worst.token_id);
+            || (current.scaled_logit == worst.scaled_logit && current.token_id > worst.token_id);
         if current_is_worse {
             worst_index = candidate_index;
         }
@@ -679,7 +676,10 @@ fn finalize_sampled_candidates(
             }
         }
         candidates.truncate(keep_count.max(1));
-        let truncated_sum = candidates.iter().map(|candidate| candidate.prob).sum::<f64>();
+        let truncated_sum = candidates
+            .iter()
+            .map(|candidate| candidate.prob)
+            .sum::<f64>();
         for candidate in &mut candidates {
             candidate.prob /= truncated_sum;
         }
@@ -779,8 +779,7 @@ pub(crate) fn sample_token_from_softcapped_bf16_bytes(
         if token_is_disallowed(disallowed_token_ids, token_id) {
             continue;
         }
-        let raw_logit =
-            bf16_word_to_f32_local(u16::from_le_bytes([word_bytes[0], word_bytes[1]]));
+        let raw_logit = bf16_word_to_f32_local(u16::from_le_bytes([word_bytes[0], word_bytes[1]]));
         push_sampled_candidate_top_k(
             &mut candidates,
             SampledTokenCandidate {
@@ -1220,8 +1219,10 @@ impl GemmaLazyTextPlanInner {
         self.generation_graph.eval(|| {
             let runtime = self.runtime()?;
             let prompt_token_ids = self.prompt_token_ids()?;
-        let graph = runtime
-            .start_generation_graph(prompt_token_ids.clone(), Some(self.options.max_new_tokens))?;
+            let graph = runtime.start_generation_graph(
+                prompt_token_ids.clone(),
+                Some(self.options.max_new_tokens),
+            )?;
             Ok(Arc::new(graph))
         })
     }
@@ -1298,12 +1299,11 @@ impl GemmaTextModel {
     ) -> Result<PreparedImagePrompt, Box<dyn Error>> {
         let prompt_with_image = format!(
             "{} {}",
-            self.runtime.weights.snapshot.tokenizer_config.image_token,
-            prompt_text
+            self.runtime.weights.snapshot.tokenizer_config.image_token, prompt_text
         );
-        let formatted_prompt_text =
-            self.runtime
-                .format_prompt_text(&prompt_with_image, prompt_format);
+        let formatted_prompt_text = self
+            .runtime
+            .format_prompt_text(&prompt_with_image, prompt_format);
         let mut vision_runtime = self
             .vision_runtime
             .lock()
@@ -1376,7 +1376,11 @@ impl GemmaTextModel {
         options: GemmaTextGenerationOptions,
     ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
         let prompt_text = Arc::<str>::from(prompt_text.into());
-        let prepared = self.prepare_image_prompt(image_path.as_ref(), prompt_text.as_ref(), options.prompt_format)?;
+        let prepared = self.prepare_image_prompt(
+            image_path.as_ref(),
+            prompt_text.as_ref(),
+            options.prompt_format,
+        )?;
         let formatted_prompt_text = Arc::<str>::from(prepared.formatted_prompt_text.clone());
         let prompt_token_ids = Arc::<[u32]>::from(prepared.prompt_token_ids);
         let prompt_embedding_rows = prepared.prompt_embedding_rows;
@@ -1740,10 +1744,7 @@ impl GemmaTextModel {
         .map_err(|err| err.into())
     }
 
-    fn decode_generated_text(
-        &self,
-        generated_token_ids: &[u32],
-    ) -> Result<String, Box<dyn Error>> {
+    fn decode_generated_text(&self, generated_token_ids: &[u32]) -> Result<String, Box<dyn Error>> {
         if generated_token_ids.is_empty() {
             return Ok(String::new());
         }
@@ -1788,6 +1789,7 @@ pub fn benchmark_text_generation(
     model_path: PathBuf,
     prompt_text: impl Into<String>,
     options: GemmaTextGenerationOptions,
+    greedy: bool,
     warmup_iters: usize,
     measured_iters: usize,
 ) -> Result<GemmaTextBenchmarkOutput, Box<dyn Error>> {
@@ -1798,21 +1800,61 @@ pub fn benchmark_text_generation(
     let prompt_text = Arc::<str>::from(prompt_text.into());
     let load_started = Instant::now();
     let runtime = GemmaTextRuntimeSession::load(&model_path).map_err(|err| err.to_string())?;
-    let exact_backend = runtime.exact_backend()?;
-    let load_duration = load_started.elapsed();
     let formatted_prompt_text =
         Arc::<str>::from(runtime.format_prompt_text(prompt_text.as_ref(), options.prompt_format));
     let prompt_token_ids = runtime.tokenize_prompt(formatted_prompt_text.as_ref())?;
-
-    for _ in 0..warmup_iters {
-        runtime
-            .start_generation_graph(prompt_token_ids.clone(), Some(options.max_new_tokens))?
-            .finish_snapshot()?;
+    if greedy {
+        if let Some(output) = crate::text_runtime::cuda_exact::try_benchmark_cuda_nvfp4_greedy(
+            &runtime,
+            prompt_text.clone(),
+            formatted_prompt_text.clone(),
+            prompt_token_ids.clone(),
+            &options,
+            warmup_iters,
+            measured_iters,
+            load_started,
+        )? {
+            return Ok(output);
+        }
     }
-    exact_backend
-        .lock()
-        .map_err(|_| "exact backend mutex poisoned".to_string())?
-        .reset_runtime_counters();
+    let exact_backend = if runtime.has_exact_backend() {
+        Some(runtime.exact_backend()?)
+    } else {
+        None
+    };
+    let load_duration = load_started.elapsed();
+    let sampling_options = if greedy {
+        GemmaTextSamplingOptions::from_generation_config(&runtime.weights.snapshot.generation_config)
+            .greedy_variant()
+    } else {
+        GemmaTextSamplingOptions::from_generation_config(&runtime.weights.snapshot.generation_config)
+    };
+
+    if runtime.has_exact_backend() {
+        for _ in 0..warmup_iters {
+            runtime
+                .start_generation_graph(prompt_token_ids.clone(), Some(options.max_new_tokens))?
+                .finish_snapshot()?;
+        }
+        if let Some(exact_backend) = &exact_backend {
+            exact_backend
+                .lock()
+                .map_err(|_| "exact backend mutex poisoned".to_string())?
+                .reset_runtime_counters();
+        }
+    } else {
+        for _ in 0..warmup_iters {
+            let mut rng = MlxTextSamplingRng::new(0);
+            let _ = generate_sampled_token_ids(
+                &runtime,
+                prompt_token_ids.clone(),
+                Some(options.max_new_tokens),
+                &sampling_options,
+                &mut rng,
+                |_| Ok(()),
+            )?;
+        }
+    }
 
     let started = Instant::now();
     let mut total_generated_tokens = 0usize;
@@ -1820,24 +1862,53 @@ pub fn benchmark_text_generation(
     let mut steady_state_elapsed = Duration::ZERO;
     let mut steady_state_generated_tokens = 0usize;
     let mut last_generated_token_ids = Arc::<[u32]>::from(Vec::<u32>::new());
-    for _ in 0..measured_iters {
-        let ttft_started = Instant::now();
-        let graph = runtime.start_generation_graph(
-            prompt_token_ids.clone(),
-            Some(options.max_new_tokens),
-        )?;
-        let first_generated_token_ids = graph.generated_token_ids_up_to(1)?;
-        time_to_first_token_elapsed += ttft_started.elapsed();
+    if runtime.has_exact_backend() {
+        for _ in 0..measured_iters {
+            let ttft_started = Instant::now();
+            let graph = runtime
+                .start_generation_graph(prompt_token_ids.clone(), Some(options.max_new_tokens))?;
+            let first_generated_token_ids = graph.generated_token_ids_up_to(1)?;
+            time_to_first_token_elapsed += ttft_started.elapsed();
 
-        let steady_started = Instant::now();
-        let snapshot = graph.finish_snapshot()?;
-        steady_state_elapsed += steady_started.elapsed();
-        total_generated_tokens += snapshot.generated_token_ids.len();
-        steady_state_generated_tokens += snapshot
-            .generated_token_ids
-            .len()
-            .saturating_sub(first_generated_token_ids.len());
-        last_generated_token_ids = snapshot.generated_token_ids.clone();
+            let steady_started = Instant::now();
+            let snapshot = graph.finish_snapshot()?;
+            steady_state_elapsed += steady_started.elapsed();
+            total_generated_tokens += snapshot.generated_token_ids.len();
+            steady_state_generated_tokens += snapshot
+                .generated_token_ids
+                .len()
+                .saturating_sub(first_generated_token_ids.len());
+            last_generated_token_ids = snapshot.generated_token_ids.clone();
+        }
+    } else {
+        for _ in 0..measured_iters {
+            let iter_started = Instant::now();
+            let mut first_token_elapsed = None::<Duration>;
+            let mut rng = MlxTextSamplingRng::new(0);
+            let (generated_token_ids, _stop_reason) = generate_sampled_token_ids(
+                &runtime,
+                prompt_token_ids.clone(),
+                Some(options.max_new_tokens),
+                &sampling_options,
+                &mut rng,
+                |ids| {
+                    if first_token_elapsed.is_none() && !ids.is_empty() {
+                        first_token_elapsed = Some(iter_started.elapsed());
+                    }
+                    Ok(())
+                },
+            )?;
+            let iter_elapsed = iter_started.elapsed();
+            let ttft_elapsed = first_token_elapsed.unwrap_or(iter_elapsed);
+            let first_generated_count = usize::from(!generated_token_ids.is_empty());
+            time_to_first_token_elapsed += ttft_elapsed;
+            steady_state_elapsed += iter_elapsed.saturating_sub(ttft_elapsed);
+            total_generated_tokens += generated_token_ids.len();
+            steady_state_generated_tokens += generated_token_ids
+                .len()
+                .saturating_sub(first_generated_count);
+            last_generated_token_ids = generated_token_ids;
+        }
     }
     let elapsed = started.elapsed();
     let last_generated_text = if last_generated_token_ids.is_empty() {
@@ -1881,10 +1952,14 @@ pub fn benchmark_text_generation(
     } else {
         0.0
     };
-    let metal_counters = exact_backend
-        .lock()
-        .map_err(|_| "exact backend mutex poisoned".to_string())?
-        .runtime_counters();
+    let metal_counters = if let Some(exact_backend) = &exact_backend {
+        exact_backend
+            .lock()
+            .map_err(|_| "exact backend mutex poisoned".to_string())?
+            .runtime_counters()
+    } else {
+        MetalRuntimeCounters::default()
+    };
 
     Ok(GemmaTextBenchmarkOutput {
         model_path: runtime.model_path.clone(),
