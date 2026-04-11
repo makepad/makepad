@@ -3755,7 +3755,7 @@ mod imp {
             let n_head_log2 = if n_head <= 1 {
                 1i32
             } else {
-                let p = (usize::BITS - 1) - (n_head as u32).leading_zeros();
+                let p = (u32::BITS - 1) - (n_head as u32).leading_zeros();
                 (1u32 << p) as i32
             };
             let m0 = (2.0f32).powf(-(max_bias) / (n_head_log2 as f32));
@@ -4095,7 +4095,7 @@ mod imp {
             let n_head_log2 = if n_head <= 1 {
                 1i32
             } else {
-                let p = (usize::BITS - 1) - (n_head as u32).leading_zeros();
+                let p = (u32::BITS - 1) - (n_head as u32).leading_zeros();
                 (1u32 << p) as i32
             };
             let m0 = (2.0f32).powf(-(max_bias) / (n_head_log2 as f32));
