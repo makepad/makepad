@@ -320,28 +320,6 @@ impl Win32Window {
                     return DefWindowProcW(hwnd, msg, wparam, lparam);
                 }
                 if wparam == WPARAM(1) {
-                    // When wParam is TRUE, lparam points to an NCCALCSIZE_PARAMS:
-                    //   rgrc[0]: proposed new window rect → output: new client rect
-                    //   rgrc[1]: old window rect → output: source rect for BitBlt
-                    //   rgrc[2]: old client rect → output: dest rect for BitBlt
-                    //
-                    // During resize, Windows BitBlts old client content into the
-                    // new client area using rgrc[1] (source) and rgrc[2] (dest).
-                    // This produces the "rubber-banding" effect: old pixels are
-                    // shifted/stretched to predict the new layout, then replaced
-                    // once the app redraws. By zeroing both rects and returning
-                    // WVR_VALIDRECTS, we tell Windows there is no valid old
-                    // content to copy, so it skips the BitBlt entirely.
-                    #[repr(C)]
-                    struct NcCalcSizeParams {
-                        rgrc: [RECT; 3],
-                        _lppos: *mut core::ffi::c_void,
-                    }
-                    let params = &mut *(lparam.0 as *mut NcCalcSizeParams);
-                    let zero_rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-                    params.rgrc[1] = zero_rect;
-                    params.rgrc[2] = zero_rect;
-
                     let margins = MARGINS {
                         cxLeftWidth: 0,
                         cxRightWidth: 0,
@@ -349,8 +327,7 @@ impl Win32Window {
                         cyBottomHeight: 1,
                     };
                     DwmExtendFrameIntoClientArea(hwnd, &margins).unwrap();
-                    const WVR_VALIDRECTS: isize = 0x0400;
-                    return LRESULT(WVR_VALIDRECTS);
+                    return LRESULT(0);
                 }
             }
             WM_NCHITTEST => {
@@ -628,6 +605,14 @@ impl Win32Window {
             WM_EXITSIZEMOVE => {
                 with_win32_app(|app| app.stop_resize());
                 window.do_callback(Win32Event::WindowResizeLoopStop(window.window_id));
+            }
+            // WM_SIZING (0x0214) fires BEFORE the window is resized with
+            // the proposed new rect. By pre-rendering at this size, the
+            // swap chain frame is ready when DWM composites the window at
+            // the new size, eliminating the empty gap at growing edges.
+            0x0214 => {
+                let proposed_rect = &*(lparam.0 as *const RECT);
+                window.send_sizing_event(proposed_rect);
             }
             WM_SIZE | WM_DPICHANGED => {
                 window.send_change_event();
@@ -1142,6 +1127,40 @@ impl Win32Window {
             window_id: self.window_id,
             old_geom: old_geom,
             new_geom: new_geom,
+        }));
+        self.do_callback(Win32Event::Paint);
+    }
+
+    /// Pre-render at a proposed window size from WM_SIZING. This fires
+    /// BEFORE the window is actually resized, so the swap chain frame is
+    /// ready when DWM composites the window at the new size — eliminating
+    /// the empty-edge gap that appears when growing the window.
+    pub fn send_sizing_event(&mut self, proposed_rect: &RECT) {
+        let dpi = self.get_dpi_factor();
+        let proposed_size = Vec2d {
+            x: (proposed_rect.right - proposed_rect.left) as f64 / dpi,
+            y: (proposed_rect.bottom - proposed_rect.top) as f64 / dpi,
+        };
+
+        let mut new_geom = self.last_window_geom.clone();
+        // For custom chrome, inner size == outer size.
+        new_geom.inner_size = proposed_size;
+        new_geom.outer_size = proposed_size;
+        new_geom.position = Vec2d {
+            x: proposed_rect.left as f64,
+            y: proposed_rect.top as f64,
+        };
+
+        let old_geom = self.last_window_geom.clone();
+        if old_geom.inner_size == new_geom.inner_size {
+            return; // Size didn't change (e.g. just a move), nothing to pre-render.
+        }
+        self.last_window_geom = new_geom.clone();
+
+        self.do_callback(Win32Event::WindowGeomChange(WindowGeomChangeEvent {
+            window_id: self.window_id,
+            old_geom,
+            new_geom,
         }));
         self.do_callback(Win32Event::Paint);
     }

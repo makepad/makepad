@@ -87,7 +87,7 @@ use crate::{
                     },
                     CreateDXGIFactory2, IDXGIDevice1, IDXGIFactory2, IDXGIResource,
                     IDXGISwapChain1, DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_RGBA,
-                    DXGI_SCALING, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+                    DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
                     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 },
             },
@@ -705,11 +705,7 @@ impl D3d11Window {
                 Count: 1,
                 Quality: 0,
             },
-            // Use DXGI_SCALING_STRETCH (0) instead of DXGI_SCALING_NONE (1)
-            // so that during the brief gap between a window resize and the
-            // next presented frame, DWM stretches the old content to fill
-            // the new window size rather than showing a hard edge/gap.
-            Scaling: DXGI_SCALING(0),
+            Scaling: DXGI_SCALING_NONE,
             Stereo: FALSE,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
         };
@@ -771,7 +767,7 @@ impl D3d11Window {
                 Count: 1,
                 Quality: 0,
             },
-            Scaling: DXGI_SCALING(0), // DXGI_SCALING_STRETCH
+            Scaling: DXGI_SCALING_NONE,
             Stereo: FALSE,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
         };
@@ -811,6 +807,21 @@ impl D3d11Window {
     pub fn stop_resize(&mut self) {
         self.is_in_resize = false;
         self.alloc_size = Vec2d::default();
+    }
+
+    /// Update the swap chain's background color to match the pass clear
+    /// color. With DXGI_SCALING_NONE, any gap between the (old-size) swap
+    /// chain buffer and the (new-size) window is filled with this color.
+    /// By matching the app's background, the gap becomes invisible.
+    pub fn sync_background_color(&self, clear_color: crate::makepad_math::Vec4f) {
+        unsafe {
+            let _ = self.swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
+                r: clear_color.x as f32,
+                g: clear_color.y as f32,
+                b: clear_color.z as f32,
+                a: clear_color.w as f32,
+            });
+        }
     }
 
     pub fn resize_buffers(&mut self, d3d11_cx: &D3d11Cx) {

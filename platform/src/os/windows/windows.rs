@@ -370,6 +370,7 @@ impl Cx {
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
                         //let dpi_factor = window.window_geom.dpi_factor;
+                        window.sync_background_color(self.passes[*draw_pass_id].clear_color);
                         window.resize_buffers(&d3d11_cx);
                         self.draw_pass_to_window(*draw_pass_id, false, window, d3d11_cx);
                     }

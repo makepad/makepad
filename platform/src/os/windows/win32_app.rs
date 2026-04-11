@@ -43,7 +43,7 @@ use {
                     WindowsAndMessaging::{
                         DispatchMessageW, GetMessageW, IsGUIThread, IsProcessDPIAware, KillTimer,
                         LoadCursorW, LoadIconW, PeekMessageW, RegisterClassExW, SetCursor,
-                        SetTimer, ShowCursor, TranslateMessage, CS_HREDRAW, CS_OWNDC, CS_VREDRAW,
+                        SetTimer, ShowCursor, TranslateMessage, CS_OWNDC,
                         HICON, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO,
                         IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
                         IDI_WINLOGO, PM_REMOVE, WM_QUIT, WNDCLASSEXW,
@@ -155,7 +155,7 @@ impl Win32App {
         let (hicon_big, hicon_small) = Self::create_default_icons();
         let class = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
+            style: CS_OWNDC,
             lpfnWndProc: Some(Win32Window::window_class_proc),
             hInstance: unsafe { GetModuleHandleW(None).unwrap().into() },
             hIcon: hicon_big,
