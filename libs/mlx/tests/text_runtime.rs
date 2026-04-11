@@ -2,8 +2,10 @@
         apply_rope_rows_in_place, bf16_word_to_f32, compute_attention_output_f32, lazy_text_plan,
         quantized_matmul_tensor, rms_norm_rows_no_scale_f32, rms_norm_rows_weighted_f32,
         rms_norm_weighted_tensor, run_two_token_ids, run_two_token_prompt, single_token_tensor,
-        GemmaPromptFormat, GemmaStopReason, GemmaTextGenerationOptions, GemmaTextRuntimeSession,
-        GemmaTextStepOutput, RopeSpec, TextLayerTensorNames,
+        GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode, GemmaPromptFormat,
+        GemmaStopReason, GemmaTextGenerationOptions, GemmaTextModel, GemmaTextRuntimeSession,
+        GemmaTextSamplingOptions, GemmaTextStepOutput, MlxTextSamplingRng, RopeSpec,
+        TextLayerTensorNames,
     };
     use crate::GemmaKvCacheSet;
     use crate::fnv1a64_u32_words;
@@ -22,6 +24,31 @@
         assert_eq!(output.final_norm_bf16_words.len(), 2_816);
         assert!(output.next_token.logit.is_finite());
         assert!(!output.next_token_text.is_empty());
+    }
+
+    fn greedy_generate_with_backend_config(
+        prompt_text: &str,
+        max_new_tokens: usize,
+        backend_config: GemmaExactMetalConfig,
+    ) -> Arc<super::GemmaTextGenerationOutput> {
+        let model = GemmaTextModel::load_with_backend_config(default_model_path(), backend_config)
+            .unwrap();
+        let formatted_prompt_text =
+            model.runtime
+                .format_prompt_text(prompt_text, GemmaPromptFormat::Gemma4UserTurn);
+        let mut rng = MlxTextSamplingRng::new(0);
+        let sampling_options = GemmaTextSamplingOptions::from_generation_config(
+            &model.runtime.weights.snapshot.generation_config,
+        )
+        .greedy_variant();
+        model
+            .generate_preformatted_with_rng_and_sampling(
+                formatted_prompt_text,
+                Some(max_new_tokens),
+                &sampling_options,
+                &mut rng,
+            )
+            .unwrap()
     }
 
     #[test]
@@ -672,6 +699,58 @@
             expected_generated_token_ids
         );
         assert_eq!(output.stop_reason, GemmaStopReason::MaxNewTokens);
+    }
+
+    #[test]
+    #[ignore]
+    fn rotor_k_cache_reports_long_greedy_divergence_against_bf16_baseline() {
+        let prompt = "Write a detailed but readable memo for a team building a Metal inference runtime on Apple Silicon. Explain unified memory, lazy evaluation, quantized embeddings, KV cache updates, grouped query attention, routed experts, and command submission strategy. Then give a numbered checklist with ten concrete optimization ideas, and finish with a short warning section about correctness traps in BF16 rounding, rotary position handling, cache growth, and stop token logic. Keep the memo technically dense and continue until the checklist and warning section are complete.";
+        let max_new_tokens = 128;
+        let baseline = greedy_generate_with_backend_config(
+            prompt,
+            max_new_tokens,
+            GemmaExactMetalConfig::default(),
+        );
+        let rotor = greedy_generate_with_backend_config(
+            prompt,
+            max_new_tokens,
+            GemmaExactMetalConfig {
+                kv_compression: GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK,
+            },
+        );
+
+        assert_eq!(baseline.prompt_token_ids, rotor.prompt_token_ids);
+        assert_eq!(baseline.stop_reason, rotor.stop_reason);
+
+        let matched_prefix = baseline
+            .generated_token_ids
+            .iter()
+            .zip(rotor.generated_token_ids.iter())
+            .take_while(|(lhs, rhs)| lhs == rhs)
+            .count();
+        let mismatch = baseline
+            .generated_token_ids
+            .iter()
+            .zip(rotor.generated_token_ids.iter())
+            .enumerate()
+            .find(|(_, (lhs, rhs))| lhs != rhs)
+            .map(|(index, (lhs, rhs))| (index, *lhs, *rhs));
+
+        println!("prompt_ids={:?}", baseline.prompt_token_ids);
+        println!(
+            "baseline_generated_ids={:?}",
+            baseline.generated_token_ids
+        );
+        println!("rotor_generated_ids={:?}", rotor.generated_token_ids);
+        println!(
+            "matched_prefix_tokens={} mismatch={:?} baseline_len={} rotor_len={} baseline_stop={:?} rotor_stop={:?}",
+            matched_prefix,
+            mismatch,
+            baseline.generated_token_ids.len(),
+            rotor.generated_token_ids.len(),
+            baseline.stop_reason,
+            rotor.stop_reason
+        );
     }
 
     #[test]
