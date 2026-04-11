@@ -1666,8 +1666,14 @@
 
         {
             let kv_cache = runtime.kv_cache_for_layer(0).unwrap();
-            let full_k_bits =
-                read_exact_kv_cache_tensor_bits(&metal, &kv_cache, &kv_cache.key_buffer).unwrap();
+            let full_k_bits = read_exact_kv_cache_tensor_bits(
+                &metal,
+                &kv_cache,
+                kv_cache
+                    .key_buffer()
+                    .expect("stage hash dump expects bf16 key cache storage"),
+            )
+            .unwrap();
             let full_v_bits =
                 read_exact_kv_cache_tensor_bits(&metal, &kv_cache, &kv_cache.value_buffer).unwrap();
             print_bits("full_k", &full_k_bits);
