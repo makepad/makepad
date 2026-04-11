@@ -13199,4 +13199,35 @@ kernel void kernel_mlx_geglu_strided_rows_bf16(
 
     out[gid] = bfloat(gate_gelu * up_f);
 }
+
+kernel void kernel_mlx_geglu_strided_rows_f32(
+        constant MlxGegluStridedRowsArgs & args [[buffer(0)]],
+        device const float * gate_up [[buffer(1)]],
+        device float * out [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.n) {
+        return;
+    }
+
+    const uint slot = gid / args.row_width;
+    const uint row = gid % args.row_width;
+    const uint gate_idx = slot * args.input_row_stride + row;
+    const uint up_idx = gate_idx + args.input_split_offset;
+    const float gate_f = gate_up[gate_idx];
+    const float up_f = gate_up[up_idx];
+    const float coef_a = GELU_COEF_A;
+    const float sqrt_2_over_pi = SQRT_2_OVER_PI;
+
+    const float gate_sq = gate_f * gate_f;
+    const float gate_cubic = gate_sq * gate_f;
+    const float gate_scale = coef_a * gate_cubic;
+    const float gate_poly = gate_f + gate_scale;
+    const float gate_tanh_input = sqrt_2_over_pi * gate_poly;
+    const float gate_tanh = precise::tanh(gate_tanh_input);
+    const float gate_one_plus = 1.0f + gate_tanh;
+    const float gate_half = 0.5f * gate_f;
+    const float gate_gelu = gate_half * gate_one_plus;
+
+    out[gid] = gate_gelu * up_f;
+}
 #endif

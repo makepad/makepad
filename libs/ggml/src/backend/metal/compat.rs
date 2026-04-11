@@ -58,6 +58,24 @@ pub fn try_matmul_nt_ggml_bytes_add_bias(
     imp::try_matmul_nt_ggml_bytes_add_bias(a, bt_bytes, bt_ggml_type, m, k, n, bias)
 }
 
+pub fn try_vision_mlp_bf16_fused(
+    x: &[f32],
+    gate_up_weight_bytes: &[u8],
+    down_weight_bytes: &[u8],
+    rows: usize,
+    hidden_size: usize,
+    intermediate_size: usize,
+) -> Option<Vec<f32>> {
+    imp::try_vision_mlp_bf16_fused(
+        x,
+        gate_up_weight_bytes,
+        down_weight_bytes,
+        rows,
+        hidden_size,
+        intermediate_size,
+    )
+}
+
 pub fn try_flash_attn_f32_packed(
     q: &[f32],
     k: &[f32],
@@ -228,6 +246,17 @@ mod imp {
         _k: usize,
         _n: usize,
         _bias: &[f32],
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_vision_mlp_bf16_fused(
+        _x: &[f32],
+        _gate_up_weight_bytes: &[u8],
+        _down_weight_bytes: &[u8],
+        _rows: usize,
+        _hidden_size: usize,
+        _intermediate_size: usize,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -2991,6 +3020,65 @@ mod imp {
                 }
             }
 
+            self.end_command_encoder(encoder_handles)
+        }
+
+        fn dispatch_geglu_strided_rows_f32(
+            &mut self,
+            src_id: ObjcId,
+            dst_id: ObjcId,
+            row_count: usize,
+            row_width: usize,
+            input_row_stride: usize,
+            input_split_offset: usize,
+        ) -> Result<(), String> {
+            #[repr(C)]
+            struct MlxGegluStridedRowsArgsCompat {
+                n: u32,
+                row_width: u32,
+                input_row_stride: u32,
+                input_split_offset: u32,
+            }
+
+            let n = row_count
+                .checked_mul(row_width)
+                .ok_or_else(|| "overflow computing fused vision geglu size".to_string())?;
+            let base = "kernel_mlx_geglu_strided_rows_f32";
+            let (pipeline, _smem, _nr0, _nr1, _nsg) =
+                self.get_or_compile_cached_pipeline(base.to_string(), base, &[], 0, 0, 0, 0)?;
+            let args = MlxGegluStridedRowsArgsCompat {
+                n: n as u32,
+                row_width: row_width as u32,
+                input_row_stride: input_row_stride as u32,
+                input_split_offset: input_split_offset as u32,
+            };
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
+            unsafe {
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
+                let _: () = msg_send![
+                    encoder,
+                    setBytes: &args as *const MlxGegluStridedRowsArgsCompat as *const c_void
+                    length: std::mem::size_of::<MlxGegluStridedRowsArgsCompat>() as u64
+                    atIndex: 0u64
+                ];
+                let _: () = msg_send![encoder, setBuffer: src_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 2u64];
+                let tgs = MTLSize {
+                    width: (n as u64).div_ceil(256),
+                    height: 1,
+                    depth: 1,
+                };
+                let tpg = MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                };
+                let _: () = msg_send![
+                    encoder,
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
+            }
             self.end_command_encoder(encoder_handles)
         }
 
@@ -6025,6 +6113,92 @@ mod imp {
             self.read_f32_buffer(dst.as_id(), mr * nr)
         }
 
+        fn vision_mlp_bf16_fused(
+            &mut self,
+            x: &[f32],
+            gate_up_weight_bytes: &[u8],
+            down_weight_bytes: &[u8],
+            rows: usize,
+            hidden_size: usize,
+            intermediate_size: usize,
+        ) -> Result<Vec<f32>, String> {
+            let expected_x = rows
+                .checked_mul(hidden_size)
+                .ok_or_else(|| "overflow computing fused vision mlp input size".to_string())?;
+            if x.len() != expected_x {
+                return Err(format!(
+                    "fused vision mlp input len mismatch: got {}, expected {}",
+                    x.len(),
+                    expected_x
+                ));
+            }
+            let expected_gate_up_bytes = (intermediate_size * 2)
+                .checked_mul(hidden_size)
+                .and_then(|elems| elems.checked_mul(std::mem::size_of::<u16>()))
+                .ok_or_else(|| "overflow computing fused vision mlp gate_up bytes".to_string())?;
+            if gate_up_weight_bytes.len() != expected_gate_up_bytes {
+                return Err(format!(
+                    "fused vision mlp gate_up len mismatch: got {}, expected {}",
+                    gate_up_weight_bytes.len(),
+                    expected_gate_up_bytes
+                ));
+            }
+            let expected_down_bytes = hidden_size
+                .checked_mul(intermediate_size)
+                .and_then(|elems| elems.checked_mul(std::mem::size_of::<u16>()))
+                .ok_or_else(|| "overflow computing fused vision mlp down bytes".to_string())?;
+            if down_weight_bytes.len() != expected_down_bytes {
+                return Err(format!(
+                    "fused vision mlp down len mismatch: got {}, expected {}",
+                    down_weight_bytes.len(),
+                    expected_down_bytes
+                ));
+            }
+
+            let x_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    x.as_ptr() as *const u8,
+                    x.len() * std::mem::size_of::<f32>(),
+                )
+            };
+            let src1_buffer = self.new_buffer_with_bytes(x_bytes)?;
+            let geglu_bytes = rows
+                .checked_mul(intermediate_size)
+                .and_then(|elems| elems.checked_mul(std::mem::size_of::<f32>()))
+                .ok_or_else(|| "overflow computing fused vision mlp geglu bytes".to_string())?;
+
+            let down_buffer = self.with_batch(|this| {
+                let gate_up_buffer = this.matmul_nt_ggml_from_src1_buffer(
+                    src1_buffer.as_id(),
+                    gate_up_weight_bytes,
+                    GGML_TYPE_BF16,
+                    rows,
+                    hidden_size,
+                    intermediate_size * 2,
+                    Some(31u8),
+                )?;
+                let geglu_buffer = this.get_or_create_matmul_out_buffer(32u8, geglu_bytes)?;
+                this.dispatch_geglu_strided_rows_f32(
+                    gate_up_buffer.as_id(),
+                    geglu_buffer,
+                    rows,
+                    intermediate_size,
+                    intermediate_size * 2,
+                    intermediate_size,
+                )?;
+                this.matmul_nt_ggml_from_src1_buffer(
+                    geglu_buffer,
+                    down_weight_bytes,
+                    GGML_TYPE_BF16,
+                    rows,
+                    intermediate_size,
+                    hidden_size,
+                    Some(33u8),
+                )
+            })?;
+            self.read_f32_buffer(down_buffer.as_id(), rows * hidden_size)
+        }
+
         fn matmul_nt_ggml_bytes_add_bias(
             &mut self,
             a: &[f32],
@@ -6185,6 +6359,26 @@ mod imp {
     ) -> Option<Vec<f32>> {
         with_context(|ctx| {
             ctx.matmul_nt_ggml_bytes_add_bias(a, bt_bytes, bt_ggml_type, m, k, n, bias)
+        })
+    }
+
+    pub(super) fn try_vision_mlp_bf16_fused(
+        x: &[f32],
+        gate_up_weight_bytes: &[u8],
+        down_weight_bytes: &[u8],
+        rows: usize,
+        hidden_size: usize,
+        intermediate_size: usize,
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| {
+            ctx.vision_mlp_bf16_fused(
+                x,
+                gate_up_weight_bytes,
+                down_weight_bytes,
+                rows,
+                hidden_size,
+                intermediate_size,
+            )
         })
     }
 
