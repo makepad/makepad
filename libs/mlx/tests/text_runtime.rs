@@ -755,6 +755,58 @@
 
     #[test]
     #[ignore]
+    fn rotor_planar3_k_cache_reports_long_greedy_divergence_against_bf16_baseline() {
+        let prompt = "Write a detailed but readable memo for a team building a Metal inference runtime on Apple Silicon. Explain unified memory, lazy evaluation, quantized embeddings, KV cache updates, grouped query attention, routed experts, and command submission strategy. Then give a numbered checklist with ten concrete optimization ideas, and finish with a short warning section about correctness traps in BF16 rounding, rotary position handling, cache growth, and stop token logic. Keep the memo technically dense and continue until the checklist and warning section are complete.";
+        let max_new_tokens = 128;
+        let baseline = greedy_generate_with_backend_config(
+            prompt,
+            max_new_tokens,
+            GemmaExactMetalConfig::default(),
+        );
+        let rotor = greedy_generate_with_backend_config(
+            prompt,
+            max_new_tokens,
+            GemmaExactMetalConfig {
+                kv_compression: GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK,
+            },
+        );
+
+        assert_eq!(baseline.prompt_token_ids, rotor.prompt_token_ids);
+        assert_eq!(baseline.stop_reason, rotor.stop_reason);
+
+        let matched_prefix = baseline
+            .generated_token_ids
+            .iter()
+            .zip(rotor.generated_token_ids.iter())
+            .take_while(|(lhs, rhs)| lhs == rhs)
+            .count();
+        let mismatch = baseline
+            .generated_token_ids
+            .iter()
+            .zip(rotor.generated_token_ids.iter())
+            .enumerate()
+            .find(|(_, (lhs, rhs))| lhs != rhs)
+            .map(|(index, (lhs, rhs))| (index, *lhs, *rhs));
+
+        println!("prompt_ids={:?}", baseline.prompt_token_ids);
+        println!(
+            "baseline_generated_ids={:?}",
+            baseline.generated_token_ids
+        );
+        println!("rotor_planar3_generated_ids={:?}", rotor.generated_token_ids);
+        println!(
+            "matched_prefix_tokens={} mismatch={:?} baseline_len={} rotor_len={} baseline_stop={:?} rotor_stop={:?}",
+            matched_prefix,
+            mismatch,
+            baseline.generated_token_ids.len(),
+            rotor.generated_token_ids.len(),
+            baseline.stop_reason,
+            rotor.stop_reason
+        );
+    }
+
+    #[test]
+    #[ignore]
     fn formatted_say_hi_exact_backend_hash_manifest() {
         let runtime = Arc::unwrap_or_clone(GemmaTextRuntimeSession::load(&default_model_path()).unwrap());
         let formatted_prompt = runtime.format_prompt_text("say hi", GemmaPromptFormat::Gemma4UserTurn);
@@ -768,7 +820,7 @@
         let mut backend = exact_backend.lock().unwrap();
 
         for layer_idx in 0..num_layers {
-            backend.reset_kv_caches();
+            backend.reset_kv_caches().unwrap();
             let mut next_token_hidden_words = Vec::with_capacity(token_hidden_words.len());
             for (position, input_words) in token_hidden_words.iter().enumerate() {
                 let hidden_words = backend

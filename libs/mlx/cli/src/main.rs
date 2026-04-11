@@ -11,7 +11,7 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: mlx-cli [model.safetensors|model_dir] [--image PATH] [--max-new-tokens N] [--greedy] [--rotor-k-cache]"
+    "Usage: mlx-cli [model.safetensors|model_dir] [--image PATH] [--max-new-tokens N] [--greedy] [--rotor-k-cache] [--rotor-k-cache-planar3]"
 }
 
 fn format_max_new_tokens(max_new_tokens: Option<usize>) -> String {
@@ -70,6 +70,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 backend_config.kv_compression =
                     GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK;
             }
+            "--rotor-k-cache-planar3" => {
+                backend_config.kv_compression =
+                    GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK;
+            }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());
             }
@@ -105,6 +109,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "kv_compression={}",
         match backend_config.kv_compression {
             GemmaExactMetalKvCompressionMode::Disabled => "disabled",
+            GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK =>
+                "rotor_planar3_full_attention_k",
             GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK =>
                 "rotor_planar4_full_attention_k",
         }
