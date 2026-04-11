@@ -11,7 +11,7 @@ script_mod! {
 
     let self_ip = "192.0.2.48"
     let comfy_ip = "192.0.2.76:8000"
-    let llm_base = "http://127.0.0.1:8080"
+    let llm_base = "http://192.0.2.89:8080"
     let prompt_path = "/Users/me/prompt.txt"
     let auto_seconds = 60
     let Display = {mac:"" ip:"" landscape:false prompt:"empty"}.freeze_api()
