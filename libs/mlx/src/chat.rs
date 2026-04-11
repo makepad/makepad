@@ -1,5 +1,6 @@
 use crate::text_runtime::{
-    GemmaTextGenerationOutput, GemmaTextModel, GemmaTextSamplingOptions, MlxTextSamplingRng,
+    GemmaExactMetalConfig, GemmaTextGenerationOutput, GemmaTextModel, GemmaTextSamplingOptions,
+    MlxTextSamplingRng,
 };
 use crate::MlxTokenizerConfig;
 use std::error::Error;
@@ -153,7 +154,21 @@ impl GemmaChatSession {
         max_new_tokens: Option<usize>,
         decode_mode: GemmaChatDecodeMode,
     ) -> Result<Self, Box<dyn Error>> {
-        let model = GemmaTextModel::load(model_path)?;
+        Self::load_with_mode_and_backend_config(
+            model_path,
+            max_new_tokens,
+            decode_mode,
+            GemmaExactMetalConfig::default(),
+        )
+    }
+
+    pub fn load_with_mode_and_backend_config(
+        model_path: impl AsRef<Path>,
+        max_new_tokens: Option<usize>,
+        decode_mode: GemmaChatDecodeMode,
+        backend_config: GemmaExactMetalConfig,
+    ) -> Result<Self, Box<dyn Error>> {
+        let model = GemmaTextModel::load_with_backend_config(model_path, backend_config)?;
         let sampling_options = model.chat_sampling_options();
         Ok(Self {
             model,

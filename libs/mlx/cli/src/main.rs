@@ -1,4 +1,5 @@
 use makepad_mlx::chat::{GemmaChatDecodeMode, GemmaChatRole, GemmaChatSession};
+use makepad_mlx::text_runtime::{GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode};
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: mlx-cli [model.safetensors|model_dir] [--image PATH] [--max-new-tokens N] [--greedy]"
+    "Usage: mlx-cli [model.safetensors|model_dir] [--image PATH] [--max-new-tokens N] [--greedy] [--rotor-k-cache]"
 }
 
 fn format_max_new_tokens(max_new_tokens: Option<usize>) -> String {
@@ -49,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut initial_image_path = None;
     let mut max_new_tokens = None;
     let mut decode_mode = GemmaChatDecodeMode::Sampled;
+    let mut backend_config = GemmaExactMetalConfig::default();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -64,6 +66,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--greedy" => {
                 decode_mode = GemmaChatDecodeMode::Greedy;
             }
+            "--rotor-k-cache" => {
+                backend_config.kv_compression =
+                    GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK;
+            }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());
             }
@@ -74,7 +80,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!("loading model={}...", model_path.display());
-    let mut session = GemmaChatSession::load_with_mode(&model_path, max_new_tokens, decode_mode)?;
+    let mut session = GemmaChatSession::load_with_mode_and_backend_config(
+        &model_path,
+        max_new_tokens,
+        decode_mode,
+        backend_config.clone(),
+    )?;
     if let Some(image_path) = initial_image_path {
         session.set_image(image_path);
     }
@@ -88,6 +99,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match session.decode_mode() {
             GemmaChatDecodeMode::Sampled => "sampled",
             GemmaChatDecodeMode::Greedy => "greedy",
+        }
+    );
+    println!(
+        "kv_compression={}",
+        match backend_config.kv_compression {
+            GemmaExactMetalKvCompressionMode::Disabled => "disabled",
+            GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK =>
+                "rotor_planar4_full_attention_k",
         }
     );
     if let Some(image_path) = session.current_image_path() {

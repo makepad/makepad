@@ -1,4 +1,5 @@
 use crate::chat::extract_gemma4_assistant_response_text;
+pub use crate::layer0_cached_case::{GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode};
 use crate::multimodal::{prepare_image_prompt, GemmaVisionRuntime, PreparedImagePrompt};
 
 #[derive(Clone, Debug)]
@@ -992,6 +993,8 @@ where
 #[derive(Clone)]
 struct GemmaTextRuntimeSession {
     model_path: PathBuf,
+    #[cfg_attr(not(test), allow(dead_code))]
+    backend_config: GemmaExactMetalConfig,
     weights: MlxIndexedSafetensors,
     tokenizer: MlxTokenizer,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1274,8 +1277,18 @@ impl GemmaLazyTextPlanInner {
 
 impl GemmaTextModel {
     pub fn load(model_path: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
+        Self::load_with_backend_config(model_path, GemmaExactMetalConfig::default())
+    }
+
+    pub fn load_with_backend_config(
+        model_path: impl AsRef<Path>,
+        backend_config: GemmaExactMetalConfig,
+    ) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
-            runtime: GemmaTextRuntimeSession::load(model_path.as_ref())
+            runtime: GemmaTextRuntimeSession::load_with_backend_config(
+                model_path.as_ref(),
+                backend_config,
+            )
                 .map_err(|err| err.to_string())?,
             vision_runtime: Arc::new(Mutex::new(None)),
         })
@@ -1773,7 +1786,21 @@ pub fn generate_text(
     prompt_text: impl Into<String>,
     options: GemmaTextGenerationOptions,
 ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
-    GemmaTextModel::load(model_path)?.generate(prompt_text, options)
+    generate_text_with_backend_config(
+        model_path,
+        prompt_text,
+        options,
+        GemmaExactMetalConfig::default(),
+    )
+}
+
+pub fn generate_text_with_backend_config(
+    model_path: PathBuf,
+    prompt_text: impl Into<String>,
+    options: GemmaTextGenerationOptions,
+    backend_config: GemmaExactMetalConfig,
+) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
+    GemmaTextModel::load_with_backend_config(model_path, backend_config)?.generate(prompt_text, options)
 }
 
 pub fn generate_multimodal_text(
@@ -1782,7 +1809,24 @@ pub fn generate_multimodal_text(
     prompt_text: impl Into<String>,
     options: GemmaTextGenerationOptions,
 ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
-    GemmaTextModel::load(model_path)?.generate_multimodal(image_path, prompt_text, options)
+    generate_multimodal_text_with_backend_config(
+        model_path,
+        image_path,
+        prompt_text,
+        options,
+        GemmaExactMetalConfig::default(),
+    )
+}
+
+pub fn generate_multimodal_text_with_backend_config(
+    model_path: PathBuf,
+    image_path: impl AsRef<Path>,
+    prompt_text: impl Into<String>,
+    options: GemmaTextGenerationOptions,
+    backend_config: GemmaExactMetalConfig,
+) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
+    GemmaTextModel::load_with_backend_config(model_path, backend_config)?
+        .generate_multimodal(image_path, prompt_text, options)
 }
 
 pub fn benchmark_text_generation(
@@ -1793,13 +1837,34 @@ pub fn benchmark_text_generation(
     warmup_iters: usize,
     measured_iters: usize,
 ) -> Result<GemmaTextBenchmarkOutput, Box<dyn Error>> {
+    benchmark_text_generation_with_backend_config(
+        model_path,
+        prompt_text,
+        options,
+        greedy,
+        warmup_iters,
+        measured_iters,
+        GemmaExactMetalConfig::default(),
+    )
+}
+
+pub fn benchmark_text_generation_with_backend_config(
+    model_path: PathBuf,
+    prompt_text: impl Into<String>,
+    options: GemmaTextGenerationOptions,
+    greedy: bool,
+    warmup_iters: usize,
+    measured_iters: usize,
+    backend_config: GemmaExactMetalConfig,
+) -> Result<GemmaTextBenchmarkOutput, Box<dyn Error>> {
     if measured_iters == 0 {
         return Err("benchmark requires at least one measured iteration".into());
     }
 
     let prompt_text = Arc::<str>::from(prompt_text.into());
     let load_started = Instant::now();
-    let runtime = GemmaTextRuntimeSession::load(&model_path).map_err(|err| err.to_string())?;
+    let runtime = GemmaTextRuntimeSession::load_with_backend_config(&model_path, backend_config)
+        .map_err(|err| err.to_string())?;
     let formatted_prompt_text =
         Arc::<str>::from(runtime.format_prompt_text(prompt_text.as_ref(), options.prompt_format));
     let prompt_token_ids = runtime.tokenize_prompt(formatted_prompt_text.as_ref())?;
