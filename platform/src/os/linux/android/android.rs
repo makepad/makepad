@@ -1740,6 +1740,7 @@ impl Cx {
 
             //cx.maybe_warn_hardware_support();
 
+            cx.os.surface_alive = true;
             cx.os.display = Some(CxAndroidDisplay {
                 libegl,
                 libgl,
