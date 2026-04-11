@@ -117,6 +117,19 @@ impl Fonts {
             .unwrap_or(false)
     }
 
+    pub fn font_family_covers(&self, id: FontFamilyId, required_font_ids: &[FontId]) -> bool {
+        self.layouter
+            .loader
+            .font_family_definitions
+            .get(&id)
+            .map(|definition| {
+                required_font_ids
+                    .iter()
+                    .all(|font_id| definition.font_ids.contains(font_id))
+            })
+            .unwrap_or(required_font_ids.is_empty())
+    }
+
     pub fn is_font_known(&self, id: FontId) -> bool {
         self.layouter.is_font_known(id)
     }

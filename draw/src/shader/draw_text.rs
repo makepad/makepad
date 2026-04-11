@@ -900,13 +900,23 @@ impl FontFamily {
         (self.id.0).into()
     }
 
+    fn required_font_ids_for_text(&self, cx: &Cx, text: Option<&str>) -> Vec<FontId> {
+        self.members
+            .iter()
+            .filter(|member| font_member_is_needed_for_text(cx, member.handle, text))
+            .map(font_member_font_id)
+            .collect()
+    }
+
     fn update_font_definitions(&self, cx: &mut Cx, fonts: &mut Fonts, text: Option<&str>) {
         let mut font_ids = Vec::new();
+        let mut expected_member_count = 0;
 
         for member in &self.members {
             if !font_member_is_needed_for_text(cx, member.handle, text) {
                 continue;
             }
+            expected_member_count += 1;
             let font_id = font_member_font_id(member);
 
             if !fonts.is_font_known(font_id) {
@@ -936,7 +946,7 @@ impl FontFamily {
             self.to_font_family_id(),
             FontFamilyDefinition {
                 font_ids,
-                expected_member_count: self.members.len(),
+                expected_member_count,
             },
         );
     }
@@ -945,11 +955,12 @@ impl FontFamily {
         CxDraw::lazy_construct_fonts(cx);
 
         let family_id = self.to_font_family_id();
+        let required_font_ids = self.required_font_ids_for_text(cx, text);
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
 
         {
             let fonts_ref = fonts.borrow();
-            if fonts_ref.is_font_family_complete(family_id) {
+            if fonts_ref.font_family_covers(family_id, &required_font_ids) {
                 return;
             }
         }
@@ -963,7 +974,7 @@ impl FontFamily {
         }
         {
             let fonts_ref = fonts.borrow();
-            if fonts_ref.is_font_family_complete(family_id) {
+            if fonts_ref.font_family_covers(family_id, &required_font_ids) {
                 return;
             }
         }
