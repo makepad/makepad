@@ -1155,6 +1155,10 @@ impl Win32Window {
         if old_geom.inner_size == new_geom.inner_size {
             return; // Size didn't change (e.g. just a move), nothing to pre-render.
         }
+        // Skip degenerate sizes — ResizeBuffers rejects zero dimensions.
+        if proposed_size.x < 1.0 || proposed_size.y < 1.0 {
+            return;
+        }
         self.last_window_geom = new_geom.clone();
 
         self.do_callback(Win32Event::WindowGeomChange(WindowGeomChangeEvent {

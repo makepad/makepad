@@ -816,10 +816,10 @@ impl D3d11Window {
     pub fn sync_background_color(&self, clear_color: crate::makepad_math::Vec4f) {
         unsafe {
             let _ = self.swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
-                r: clear_color.x as f32,
-                g: clear_color.y as f32,
-                b: clear_color.z as f32,
-                a: clear_color.w as f32,
+                r: clear_color.x,
+                g: clear_color.y,
+                b: clear_color.z,
+                a: clear_color.w,
             });
         }
     }
@@ -827,6 +827,11 @@ impl D3d11Window {
     pub fn resize_buffers(&mut self, d3d11_cx: &D3d11Cx) {
         if self.alloc_size == self.window_geom.inner_size {
             return;
+        }
+        let inner = self.window_geom.inner_size;
+        let dpi = self.window_geom.dpi_factor;
+        if (inner.x * dpi) < 1.0 || (inner.y * dpi) < 1.0 {
+            return; // ResizeBuffers rejects zero dimensions.
         }
         self.alloc_size = self.window_geom.inner_size;
         self.swap_texture = None;
