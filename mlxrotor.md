@@ -67,9 +67,18 @@ Initial greedy decode benchmark:
 
 That means the phase-1 path is currently memory-oriented and roughly perf-neutral on this prompt.
 
+Longer greedy correctness probe:
+
+- Prompt: long Metal-runtime memo prompt, `128` generated tokens
+- Baseline BF16 vs `RotorPlanar4FullAttentionK`
+- Matched prefix: `26` generated tokens
+- First divergence: generated token index `26` (`9947` baseline vs `4819` rotor)
+
+That means the phase-1 path is not long-run exact yet. It is currently an optional memory mode, not a drop-in exact replacement for the BF16 cache on long greedy decodes.
+
 ## Next Steps
 
-1. Add correctness checks against the BF16 path on longer prompts and deeper decode prefixes.
+1. Localize the first long-run divergence against the BF16 path at the exact decode step / layer / head boundary.
 2. Add runtime reporting for estimated KV bytes with and without compression.
 3. Benchmark at 8K, 32K, and 128K context where the memory win is large enough to matter.
 4. If quality is stable, add a more aggressive mode:
