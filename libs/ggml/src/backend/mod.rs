@@ -2,6 +2,10 @@ use crate::core::Status;
 use crate::graph::Graph;
 use crate::tensor::Tensor;
 
+mod accel;
+
+pub use accel::*;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum BackendKind {
     Metal,
@@ -124,4 +128,5 @@ pub trait Backend {
     }
 }
 
+pub mod cuda;
 pub mod metal;

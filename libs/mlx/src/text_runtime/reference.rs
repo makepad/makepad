@@ -25,7 +25,9 @@ impl GemmaTextRuntimeSession {
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-        let exact_backend = if Self::supports_exact_backend(&weights) {
+        let exact_backend = if makepad_ggml::backend::metal::MetalRuntime::is_available()
+            && Self::supports_exact_backend(&weights)
+        {
             Some(Arc::new(Mutex::new(
                 ExactMetalTextRuntimeSession::load(model_path.to_path_buf())
                     .map_err(|err| err.to_string())?,
@@ -371,13 +373,38 @@ impl GemmaTextRuntimeSession {
             rms_norm_weighted_tensor(&self.weights, input_words, &names.input_norm_weight_name)?;
         let input_norm_words = f32s_to_bf16_words(&input_norm);
 
-        let q_raw = quantized_matmul_tensor(
-            &self.weights,
-            &input_norm_words,
-            &names.q.weight_name,
-            &names.q.scales_name,
-            &names.q.biases_name,
-        )?;
+        let mut qkv_specs = Vec::with_capacity(if is_kv_shared_layer {
+            1
+        } else if attention_k_eq_v {
+            2
+        } else {
+            3
+        });
+        qkv_specs.push(QuantizedTensorSpec {
+            weight_name: &names.q.weight_name,
+            scales_name: &names.q.scales_name,
+            biases_name: &names.q.biases_name,
+        });
+        if !is_kv_shared_layer {
+            qkv_specs.push(QuantizedTensorSpec {
+                weight_name: &names.k.weight_name,
+                scales_name: &names.k.scales_name,
+                biases_name: &names.k.biases_name,
+            });
+            if !attention_k_eq_v {
+                qkv_specs.push(QuantizedTensorSpec {
+                    weight_name: &names.v.weight_name,
+                    scales_name: &names.v.scales_name,
+                    biases_name: &names.v.biases_name,
+                });
+            }
+        }
+        let mut qkv_outs =
+            quantized_matmul_tensors_shared_input(&self.weights, &input_norm_words, &qkv_specs)?
+                .into_iter();
+        let q_raw = qkv_outs
+            .next()
+            .ok_or_else(|| format!("missing q projection output for layer {layer_idx}"))?;
         let q_norm_weight_name = names
             .q
             .norm_weight_name
@@ -403,13 +430,9 @@ impl GemmaTextRuntimeSession {
             )
             .map_err(|err| err.to_string())?
         } else {
-            let k_raw = quantized_matmul_tensor(
-                &self.weights,
-                &input_norm_words,
-                &names.k.weight_name,
-                &names.k.scales_name,
-                &names.k.biases_name,
-            )?;
+            let k_raw = qkv_outs
+                .next()
+                .ok_or_else(|| format!("missing k projection output for layer {layer_idx}"))?;
             let k_norm_weight_name = names
                 .k
                 .norm_weight_name
@@ -423,19 +446,14 @@ impl GemmaTextRuntimeSession {
                 rms_norm_rows_weighted_f32(&k_raw, k_head_count, head_dim, &k_norm_weights)?;
             apply_rope_rows_in_place(&mut k_norm, k_head_count, rope, position)?;
 
-            let v_raw = if attention_k_eq_v {
-                k_raw
+            let v_norm = if attention_k_eq_v {
+                rms_norm_rows_no_scale_f32(&k_raw, v_head_count, head_dim, config.rms_norm_eps)?
             } else {
-                quantized_matmul_tensor(
-                    &self.weights,
-                    &input_norm_words,
-                    &names.v.weight_name,
-                    &names.v.scales_name,
-                    &names.v.biases_name,
-                )?
+                let v_raw = qkv_outs
+                    .next()
+                    .ok_or_else(|| format!("missing v projection output for layer {layer_idx}"))?;
+                rms_norm_rows_no_scale_f32(&v_raw, v_head_count, head_dim, config.rms_norm_eps)?
             };
-            let v_norm =
-                rms_norm_rows_no_scale_f32(&v_raw, v_head_count, head_dim, config.rms_norm_eps)?;
 
             let k_tensor = single_token_tensor(k_head_count, head_dim, k_norm)
                 .map_err(|err| err.to_string())?;
@@ -480,20 +498,29 @@ impl GemmaTextRuntimeSession {
             &names.pre_feedforward_norm_weight_name,
         )?;
         let pre_feedforward_norm_words = f32s_to_bf16_words(&pre_feedforward_norm);
-        let dense_gate = quantized_matmul_tensor(
+        let mut dense_gate_up = quantized_matmul_tensors_shared_input(
             &self.weights,
             &pre_feedforward_norm_words,
-            &names.mlp_gate_weight_name,
-            &names.mlp_gate_scales_name,
-            &names.mlp_gate_biases_name,
-        )?;
-        let dense_up = quantized_matmul_tensor(
-            &self.weights,
-            &pre_feedforward_norm_words,
-            &names.mlp_up_weight_name,
-            &names.mlp_up_scales_name,
-            &names.mlp_up_biases_name,
-        )?;
+            &[
+                QuantizedTensorSpec {
+                    weight_name: &names.mlp_gate_weight_name,
+                    scales_name: &names.mlp_gate_scales_name,
+                    biases_name: &names.mlp_gate_biases_name,
+                },
+                QuantizedTensorSpec {
+                    weight_name: &names.mlp_up_weight_name,
+                    scales_name: &names.mlp_up_scales_name,
+                    biases_name: &names.mlp_up_biases_name,
+                },
+            ],
+        )?
+        .into_iter();
+        let dense_gate = dense_gate_up
+            .next()
+            .ok_or_else(|| format!("missing dense gate output for layer {layer_idx}"))?;
+        let dense_up = dense_gate_up
+            .next()
+            .ok_or_else(|| format!("missing dense up output for layer {layer_idx}"))?;
         let dense_geglu = geglu_f32(&dense_gate, &dense_up)?;
         let dense_geglu_words = f32s_to_bf16_words(&dense_geglu);
         let dense_down = quantized_matmul_tensor(
@@ -825,6 +852,57 @@ fn quantized_matmul_tensor(
         ));
     }
 
+    if weights.quantization_mode() == "nvfp4" {
+        let (rows, _, inner_dim) = weights
+            .nvfp4_rank2_layout(weight_name, scales_name)
+            .map_err(|err| err.to_string())?;
+        if input_words.len() != inner_dim {
+            return Err(format!(
+                "NVFP4 activation length mismatch: got {} expected {}",
+                input_words.len(),
+                inner_dim
+            ));
+        }
+
+        let root = weights.snapshot.paths.root_dir.to_string_lossy();
+        let weight_key = format!("{root}:{weight_name}");
+        if let Some(result) = try_matmul_nt_ggml_bytes_cached_bf16_words(
+            input_words,
+            GGML_TYPE_NVFP4,
+            1,
+            inner_dim,
+            rows,
+            root.as_ref(),
+            &weight_key,
+            || {
+                weights
+                    .repack_nvfp4_tensor_to_ggml_bytes(weight_name, scales_name)
+                    .map_err(|err| err.to_string())
+            },
+        ) {
+            return result;
+        }
+
+        let x = input_words
+            .iter()
+            .copied()
+            .map(bf16_word_to_f32)
+            .collect::<Vec<_>>();
+
+        let mut out = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let row_bytes = weights
+                .repack_nvfp4_row_to_ggml_bytes(weight_name, scales_name, row as u64)
+                .map_err(|err| err.to_string())?;
+            let mut sum = 0.0f32;
+            for (block, input_block) in row_bytes.chunks_exact(36).zip(x.chunks_exact(64)) {
+                sum += vec_dot_nvfp4_f32(block, input_block);
+            }
+            out.push(sum);
+        }
+        return Ok(out);
+    }
+
     let bits = weights.snapshot.config.quantization.bits;
     let group_size = weights.snapshot.config.quantization.group_size as u64;
     if bits == 0 || bits > 8 || (bits & (bits - 1)) != 0 {
@@ -879,12 +957,38 @@ fn quantized_matmul_tensor(
         return Err(format!("invalid words_per_group {words_per_group}"));
     }
 
-    if let Some(result) = try_affine_quantized_matmul_tensor_metal(
-        weights,
-        input_words,
-        weight_name,
-        scales_name,
-        biases_name,
+    let root = weights.snapshot.paths.root_dir.to_string_lossy();
+    let weight_key = format!("{root}:{weight_name}");
+    let scales_key = format!("{root}:{scales_name}");
+    let biases_key = format!("{root}:{biases_name}");
+    if let Some(result) = try_affine_quantized_matmul_bf16(
+        AffineQuantizedMatmulSpec {
+            input_bf16_words: input_words,
+            out_rows: weight_entry.shape[0] as usize,
+            weight_words_per_row: weight_entry.shape[1] as usize,
+            qparams_per_row: scales_entry.shape[1] as usize,
+            bits,
+            group_size,
+            cache_namespace: root.as_ref(),
+        },
+        &weight_key,
+        &scales_key,
+        &biases_key,
+        || {
+            weights
+                .read_tensor_bytes(weight_name)
+                .map_err(|err| err.to_string())
+        },
+        || {
+            weights
+                .read_tensor_bytes(scales_name)
+                .map_err(|err| err.to_string())
+        },
+        || {
+            weights
+                .read_tensor_bytes(biases_name)
+                .map_err(|err| err.to_string())
+        },
     ) {
         return result;
     }
@@ -947,6 +1051,122 @@ fn quantized_matmul_tensor(
     }
 
     Ok(out)
+}
+
+struct QuantizedTensorSpec<'a> {
+    weight_name: &'a str,
+    scales_name: &'a str,
+    biases_name: &'a str,
+}
+
+fn quantized_matmul_tensors_shared_input(
+    weights: &MlxIndexedSafetensors,
+    input_words: &[u16],
+    specs: &[QuantizedTensorSpec<'_>],
+) -> Result<Vec<Vec<f32>>, String> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    if specs.len() == 1 || weights.quantization_mode() != "nvfp4" {
+        return specs
+            .iter()
+            .map(|spec| {
+                quantized_matmul_tensor(
+                    weights,
+                    input_words,
+                    spec.weight_name,
+                    spec.scales_name,
+                    spec.biases_name,
+                )
+            })
+            .collect();
+    }
+
+    let mut total_rows = 0usize;
+    let mut row_counts = Vec::with_capacity(specs.len());
+    let mut tensor_pairs = Vec::with_capacity(specs.len());
+    let mut expected_inner_dim = None::<usize>;
+    for spec in specs {
+        let (rows, _, inner_dim) = weights
+            .nvfp4_rank2_layout(spec.weight_name, spec.scales_name)
+            .map_err(|err| err.to_string())?;
+        if input_words.len() != inner_dim {
+            return Err(format!(
+                "NVFP4 activation length mismatch for {}: got {} expected {}",
+                spec.weight_name,
+                input_words.len(),
+                inner_dim
+            ));
+        }
+        if let Some(expected) = expected_inner_dim {
+            if inner_dim != expected {
+                return Err(format!(
+                    "NVFP4 concatenation expects shared inner dim, got {} for {} vs {}",
+                    inner_dim, spec.weight_name, expected
+                ));
+            }
+        } else {
+            expected_inner_dim = Some(inner_dim);
+        }
+        total_rows = total_rows
+            .checked_add(rows)
+            .ok_or_else(|| "NVFP4 concatenated output row count overflow".to_string())?;
+        row_counts.push(rows);
+        tensor_pairs.push((spec.weight_name, spec.scales_name));
+    }
+
+    let inner_dim = expected_inner_dim.unwrap_or(0);
+    let root = weights.snapshot.paths.root_dir.to_string_lossy();
+    let mut cache_key = format!("{root}:nvfp4:");
+    for (index, spec) in specs.iter().enumerate() {
+        if index != 0 {
+            cache_key.push('|');
+        }
+        cache_key.push_str(spec.weight_name);
+    }
+    if let Some(result) = try_matmul_nt_ggml_bytes_cached_bf16_words(
+        input_words,
+        GGML_TYPE_NVFP4,
+        1,
+        inner_dim,
+        total_rows,
+        root.as_ref(),
+        &cache_key,
+        || {
+            weights
+                .repack_nvfp4_tensors_to_ggml_bytes(&tensor_pairs)
+                .map_err(|err| err.to_string())
+        },
+    ) {
+        let flat = result?;
+        if flat.len() != total_rows {
+            return Err(format!(
+                "NVFP4 concatenated output length mismatch: got {} expected {}",
+                flat.len(),
+                total_rows
+            ));
+        }
+        let mut outputs = Vec::with_capacity(row_counts.len());
+        let mut offset = 0usize;
+        for rows in row_counts {
+            outputs.push(flat[offset..offset + rows].to_vec());
+            offset += rows;
+        }
+        return Ok(outputs);
+    }
+
+    specs
+        .iter()
+        .map(|spec| {
+            quantized_matmul_tensor(
+                weights,
+                input_words,
+                spec.weight_name,
+                spec.scales_name,
+                spec.biases_name,
+            )
+        })
+        .collect()
 }
 
 fn dense_bf16_matmul_tensor(
@@ -1114,13 +1334,53 @@ fn quantized_matmul_rank3_plane_tensor(
         return Err(format!("invalid words_per_group {words_per_group}"));
     }
 
-    if let Some(result) = try_affine_quantized_matmul_rank3_plane_metal(
-        weights,
-        input_words,
-        weight_name,
-        scales_name,
-        biases_name,
-        plane,
+    let root = weights.snapshot.paths.root_dir.to_string_lossy();
+    let weight_key = format!("{root}:{weight_name}@{plane}");
+    let scales_key = format!("{root}:{scales_name}@{plane}");
+    let biases_key = format!("{root}:{biases_name}@{plane}");
+    if let Some(result) = try_affine_quantized_matmul_bf16(
+        AffineQuantizedMatmulSpec {
+            input_bf16_words: input_words,
+            out_rows: weight_entry.shape[1] as usize,
+            weight_words_per_row: weight_entry.shape[2] as usize,
+            qparams_per_row: scales_entry.shape[2] as usize,
+            bits,
+            group_size,
+            cache_namespace: root.as_ref(),
+        },
+        &weight_key,
+        &scales_key,
+        &biases_key,
+        || {
+            let header = weights
+                .header_for_tensor(weight_name)
+                .map_err(|err| err.to_string())?;
+            let words = header
+                .read_rank3_plane_u32_words(weight_name, plane)
+                .map_err(|err| err.to_string())?;
+            Ok(words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect::<Vec<_>>())
+        },
+        || {
+            let header = weights
+                .header_for_tensor(scales_name)
+                .map_err(|err| err.to_string())?;
+            let words = header
+                .read_rank3_plane_bf16_words(scales_name, plane)
+                .map_err(|err| err.to_string())?;
+            Ok(bf16_words_as_bytes(&words).to_vec())
+        },
+        || {
+            let header = weights
+                .header_for_tensor(biases_name)
+                .map_err(|err| err.to_string())?;
+            let words = header
+                .read_rank3_plane_bf16_words(biases_name, plane)
+                .map_err(|err| err.to_string())?;
+            Ok(bf16_words_as_bytes(&words).to_vec())
+        },
     ) {
         return result;
     }
