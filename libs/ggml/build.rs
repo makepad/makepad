@@ -1,12 +1,18 @@
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_METAL_PRECOMPILE");
+    println!("cargo:rerun-if-env-changed=MAKEPAD_GGML_CUDA_ARCH");
+    println!("cargo:rustc-check-cfg=cfg(makepad_ggml_cuda_kernels)");
 
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
         build_metallib();
+    }
+    if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "linux" {
+        build_cuda_backends();
     }
 }
 
@@ -87,4 +93,90 @@ fn build_metallib() {
     }
 
     println!("cargo:rustc-env=MAKEPAD_GGML_METALLIB={}", metallib_path);
+}
+
+fn build_cuda_backends() {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let src_paths = [
+        manifest_dir.join("src/backend/cuda/affine.cu"),
+        manifest_dir.join("src/backend/cuda/nvfp4.cu"),
+        manifest_dir.join("src/backend/cuda/ops.cu"),
+    ];
+    for src_path in &src_paths {
+        println!("cargo:rerun-if-changed={}", src_path.display());
+    }
+
+    let cuda_root = cuda_root().unwrap_or_else(|| PathBuf::from("/usr/local/cuda"));
+    let nvcc = cuda_root.join("bin/nvcc");
+    if !nvcc.exists() {
+        println!(
+            "cargo:warning=CUDA nvcc not found at {}; CUDA backends disabled",
+            nvcc.display()
+        );
+        return;
+    }
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let lib_path = out_dir.join("libggml_cuda_affine.a");
+    let arch = env::var("MAKEPAD_GGML_CUDA_ARCH").unwrap_or_else(|_| "120".to_string());
+
+    let mut obj_paths = Vec::new();
+    for src_path in &src_paths {
+        let stem = src_path.file_stem().unwrap().to_string_lossy();
+        let obj_path = out_dir.join(format!("ggml_cuda_{stem}.o"));
+        let status = Command::new(&nvcc)
+            .args([
+                "-std=c++17",
+                "-O3",
+                "-c",
+                "-Xcompiler",
+                "-fPIC",
+                "-I",
+                cuda_root.join("include").to_string_lossy().as_ref(),
+                "-gencode",
+                format!("arch=compute_{arch},code=sm_{arch}").as_str(),
+                "-o",
+                obj_path.to_string_lossy().as_ref(),
+                src_path.to_string_lossy().as_ref(),
+            ])
+            .status();
+
+        let ok = status.as_ref().is_ok_and(|s| s.success());
+        if !ok {
+            println!(
+                "cargo:warning=failed to compile CUDA backend source {}; CUDA path disabled",
+                src_path.display()
+            );
+            return;
+        }
+        obj_paths.push(obj_path);
+    }
+
+    let mut ar = Command::new("ar");
+    ar.arg("crus").arg(lib_path.to_string_lossy().as_ref());
+    for obj_path in &obj_paths {
+        ar.arg(obj_path.to_string_lossy().as_ref());
+    }
+    let ar_status = ar.status();
+    let ok = ar_status.as_ref().is_ok_and(|s| s.success());
+    if !ok {
+        println!("cargo:warning=failed to archive CUDA backends; CUDA path disabled");
+        return;
+    }
+
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=ggml_cuda_affine");
+    println!("cargo:rustc-link-lib=dylib=stdc++");
+    println!("cargo:rustc-cfg=makepad_ggml_cuda_kernels");
+}
+
+fn cuda_root() -> Option<PathBuf> {
+    env::var_os("CUDA_HOME")
+        .or_else(|| env::var_os("CUDA_PATH"))
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .or_else(|| {
+            let default = Path::new("/usr/local/cuda");
+            default.exists().then(|| default.to_path_buf())
+        })
 }
