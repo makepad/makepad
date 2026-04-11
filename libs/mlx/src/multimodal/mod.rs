@@ -5,7 +5,7 @@ use crate::{MlxIndexedSafetensors, MlxTokenizer};
 use std::path::Path;
 
 pub use image::{load_gemma_image, GemmaImagePixels};
-pub use vision::GemmaVisionRuntime;
+pub use vision::{GemmaVisionProfile, GemmaVisionRuntime};
 
 pub(crate) struct PreparedImagePrompt {
     pub formatted_prompt_text: String,
