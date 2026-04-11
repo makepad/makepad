@@ -131,6 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "rotor_planar4_full_attention_k",
         }
     );
+    println!("backend={}", session.backend_label());
     if let Some(image_path) = session.current_image_path() {
         println!("image={}", image_path.display());
     }
@@ -160,6 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/clear-image" => {
                 session.clear_image();
                 println!("image cleared");
+                println!("backend={}", session.backend_label());
                 continue;
             }
             "/history" => {
@@ -178,6 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let image_path = PathBuf::from(rest.trim());
             session.set_image(image_path.clone());
             println!("image={}", image_path.display());
+            println!("backend={}", session.backend_label());
             continue;
         }
 

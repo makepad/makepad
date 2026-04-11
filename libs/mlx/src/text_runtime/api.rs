@@ -2,7 +2,7 @@ use crate::chat::extract_gemma4_assistant_response_text;
 pub use crate::layer0_cached_case::{
     GemmaExactMetalBackendMode, GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode,
 };
-use crate::multimodal::{prepare_image_prompt, GemmaVisionRuntime, PreparedImagePrompt};
+use crate::multimodal::{GemmaVisionRuntime, PreparedImagePrompt, prepare_image_prompt};
 
 #[derive(Clone, Debug)]
 pub struct GemmaTextStepOutput {
@@ -912,6 +912,42 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextGenerationBackend {
+    MetalExact,
+    CudaExactGreedy,
+    Reference,
+}
+
+impl TextGenerationBackend {
+    fn label(self) -> &'static str {
+        match self {
+            Self::MetalExact => "metal-exact",
+            Self::CudaExactGreedy => "cuda-exact-greedy",
+            Self::Reference => "reference",
+        }
+    }
+}
+
+fn select_text_generation_backend(
+    runtime: &Arc<GemmaTextRuntimeSession>,
+    max_new_tokens: Option<usize>,
+    sampling_options: &GemmaTextSamplingOptions,
+    has_prompt_embedding_rows: bool,
+) -> TextGenerationBackend {
+    if runtime.has_exact_backend() {
+        TextGenerationBackend::MetalExact
+    } else if !has_prompt_embedding_rows
+        && runtime.has_cuda_exact_backend()
+        && max_new_tokens.is_some_and(|limit| limit > 0)
+        && (!sampling_options.do_sample || sampling_options.temperature <= 0.0)
+    {
+        TextGenerationBackend::CudaExactGreedy
+    } else {
+        TextGenerationBackend::Reference
+    }
+}
+
 fn generate_sampled_token_ids<F>(
     runtime: &Arc<GemmaTextRuntimeSession>,
     prompt_token_ids: Arc<[u32]>,
@@ -923,8 +959,8 @@ fn generate_sampled_token_ids<F>(
 where
     F: FnMut(&[u32]) -> Result<(), String>,
 {
-    if runtime.has_exact_backend() {
-        generate_sampled_token_ids_with_exact_prefill(
+    match select_text_generation_backend(runtime, max_new_tokens, sampling_options, false) {
+        TextGenerationBackend::MetalExact => generate_sampled_token_ids_with_exact_prefill(
             runtime,
             prompt_token_ids,
             max_new_tokens,
@@ -945,15 +981,22 @@ where
                 )
             },
             on_generated_ids,
-        )
-    } else {
-        runtime.generate_sampled_token_ids_reference(
+        ),
+        TextGenerationBackend::CudaExactGreedy => cuda_exact::try_generate_cuda_nvfp4_greedy(
+            runtime,
+            prompt_token_ids,
+            max_new_tokens,
+            sampling_options,
+            on_generated_ids,
+        )?
+        .ok_or_else(|| "CUDA exact backend selection unexpectedly fell back".to_string()),
+        TextGenerationBackend::Reference => runtime.generate_sampled_token_ids_reference(
             prompt_token_ids,
             max_new_tokens,
             sampling_options,
             rng,
             on_generated_ids,
-        )
+        ),
     }
 }
 
@@ -969,8 +1012,8 @@ fn generate_sampled_token_ids_from_embedding_rows<F>(
 where
     F: FnMut(&[u32]) -> Result<(), String>,
 {
-    if runtime.has_exact_backend() {
-        generate_sampled_token_ids_with_exact_prefill(
+    match select_text_generation_backend(runtime, max_new_tokens, sampling_options, true) {
+        TextGenerationBackend::MetalExact => generate_sampled_token_ids_with_exact_prefill(
             runtime,
             prompt_token_ids,
             max_new_tokens,
@@ -991,16 +1034,16 @@ where
                 )
             },
             on_generated_ids,
-        )
-    } else {
-        runtime.generate_sampled_token_ids_from_embedding_rows_reference(
-            prompt_token_ids,
-            prompt_embedding_rows,
-            max_new_tokens,
-            sampling_options,
-            rng,
-            on_generated_ids,
-        )
+        ),
+        TextGenerationBackend::CudaExactGreedy | TextGenerationBackend::Reference => runtime
+            .generate_sampled_token_ids_from_embedding_rows_reference(
+                prompt_token_ids,
+                prompt_embedding_rows,
+                max_new_tokens,
+                sampling_options,
+                rng,
+                on_generated_ids,
+            ),
     }
 }
 
@@ -1015,6 +1058,7 @@ struct GemmaTextRuntimeSession {
     kv_layout: GemmaKvCacheLayout,
     stop_tokens: BTreeSet<u32>,
     exact_backend: Option<Arc<Mutex<ExactMetalTextRuntimeSession>>>,
+    cuda_exact_backend: Option<Arc<Mutex<cuda_exact::CudaNvfp4TextRuntime>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1303,7 +1347,7 @@ impl GemmaTextModel {
                 model_path.as_ref(),
                 backend_config,
             )
-                .map_err(|err| err.to_string())?,
+            .map_err(|err| err.to_string())?,
             vision_runtime: Arc::new(Mutex::new(None)),
         })
     }
@@ -1326,6 +1370,24 @@ impl GemmaTextModel {
         GemmaTextSamplingOptions::from_generation_config(
             &self.runtime.weights.snapshot.generation_config,
         )
+    }
+
+    pub fn generation_backend_label(
+        &self,
+        max_new_tokens: Option<usize>,
+        sampling_options: &GemmaTextSamplingOptions,
+    ) -> &'static str {
+        select_text_generation_backend(&self.runtime, max_new_tokens, sampling_options, false)
+            .label()
+    }
+
+    pub fn multimodal_generation_backend_label(
+        &self,
+        max_new_tokens: Option<usize>,
+        sampling_options: &GemmaTextSamplingOptions,
+    ) -> &'static str {
+        select_text_generation_backend(&self.runtime, max_new_tokens, sampling_options, true)
+            .label()
     }
 
     fn prepare_image_prompt(
@@ -1824,7 +1886,8 @@ pub fn generate_text_with_backend_config(
     options: GemmaTextGenerationOptions,
     backend_config: GemmaExactMetalConfig,
 ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
-    GemmaTextModel::load_with_backend_config(model_path, backend_config)?.generate(prompt_text, options)
+    GemmaTextModel::load_with_backend_config(model_path, backend_config)?
+        .generate(prompt_text, options)
 }
 
 pub fn generate_multimodal_text(
@@ -1849,8 +1912,11 @@ pub fn generate_multimodal_text_with_backend_config(
     options: GemmaTextGenerationOptions,
     backend_config: GemmaExactMetalConfig,
 ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
-    GemmaTextModel::load_with_backend_config(model_path, backend_config)?
-        .generate_multimodal(image_path, prompt_text, options)
+    GemmaTextModel::load_with_backend_config(model_path, backend_config)?.generate_multimodal(
+        image_path,
+        prompt_text,
+        options,
+    )
 }
 
 pub fn probe_exact_prefill_with_backend_config(
@@ -1961,10 +2027,14 @@ pub fn benchmark_text_generation_with_backend_config(
     };
     let load_duration = load_started.elapsed();
     let sampling_options = if greedy {
-        GemmaTextSamplingOptions::from_generation_config(&runtime.weights.snapshot.generation_config)
-            .greedy_variant()
+        GemmaTextSamplingOptions::from_generation_config(
+            &runtime.weights.snapshot.generation_config,
+        )
+        .greedy_variant()
     } else {
-        GemmaTextSamplingOptions::from_generation_config(&runtime.weights.snapshot.generation_config)
+        GemmaTextSamplingOptions::from_generation_config(
+            &runtime.weights.snapshot.generation_config,
+        )
     };
 
     if runtime.has_exact_backend() {

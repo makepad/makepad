@@ -95,6 +95,15 @@ impl GemmaTextRuntimeSession {
                 )))
             }
         };
+        let cuda_exact_backend = if makepad_ggml::backend::cuda::is_available()
+            && crate::text_runtime::cuda_exact::supports_cuda_exact_greedy_weights(&weights)
+        {
+            Some(Arc::new(Mutex::new(
+                crate::text_runtime::cuda_exact::CudaNvfp4TextRuntime::new(),
+            )))
+        } else {
+            None
+        };
         Ok(Arc::new(Self {
             model_path: model_path.to_path_buf(),
             backend_config,
@@ -103,6 +112,7 @@ impl GemmaTextRuntimeSession {
             kv_layout,
             stop_tokens,
             exact_backend,
+            cuda_exact_backend,
         }))
     }
 
@@ -115,6 +125,17 @@ impl GemmaTextRuntimeSession {
             .as_ref()
             .cloned()
             .ok_or_else(|| "exact metal text runtime is unavailable for this Gemma family member".to_string())
+    }
+
+    fn has_cuda_exact_backend(&self) -> bool {
+        self.cuda_exact_backend.is_some()
+    }
+
+    fn cuda_exact_backend(&self) -> Result<Arc<Mutex<crate::text_runtime::cuda_exact::CudaNvfp4TextRuntime>>, String> {
+        self.cuda_exact_backend
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "exact CUDA text runtime is unavailable for this Gemma family member".to_string())
     }
 
     fn format_prompt_text(&self, prompt_text: &str, prompt_format: GemmaPromptFormat) -> String {
@@ -1848,21 +1869,45 @@ fn load_optional_scalar_f32(
     weights: &MlxIndexedSafetensors,
     tensor_name: &str,
 ) -> Result<Option<f32>, String> {
-    let tensor = match weights.tensor(tensor_name) {
-        Ok(tensor) => tensor,
+    let entry = match weights.tensor(tensor_name) {
+        Ok(entry) => entry,
         Err(_) => return Ok(None),
     };
-    if tensor.shape.iter().product::<u64>() != 1 {
+    if entry.shape.iter().product::<u64>() != 1 {
         return Err(format!("layer scalar tensor {} is not scalar", tensor_name));
     }
-    let words = weights
-        .read_bf16_tensor_words(tensor_name)
+    let bytes = weights
+        .read_tensor_bytes(tensor_name)
         .map_err(|err| err.to_string())?;
-    let word = words
-        .first()
-        .copied()
-        .ok_or_else(|| format!("layer scalar tensor {} is empty", tensor_name))?;
-    Ok(Some(bf16_word_to_f32(word)))
+    let value = match entry.dtype {
+        MlxDType::BF16 => {
+            if bytes.len() != size_of::<u16>() {
+                return Err(format!(
+                    "layer scalar tensor {} bf16 byte length mismatch: {}",
+                    tensor_name,
+                    bytes.len()
+                ));
+            }
+            bf16_word_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]))
+        }
+        MlxDType::F32 => {
+            if bytes.len() != size_of::<f32>() {
+                return Err(format!(
+                    "layer scalar tensor {} f32 byte length mismatch: {}",
+                    tensor_name,
+                    bytes.len()
+                ));
+            }
+            f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
+        other => {
+            return Err(format!(
+                "layer scalar tensor {} has unsupported dtype {:?}",
+                tensor_name, other
+            ))
+        }
+    };
+    Ok(Some(value))
 }
 
 fn rms_norm_rows_weighted_f32(
