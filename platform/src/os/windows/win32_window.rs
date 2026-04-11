@@ -320,6 +320,28 @@ impl Win32Window {
                     return DefWindowProcW(hwnd, msg, wparam, lparam);
                 }
                 if wparam == WPARAM(1) {
+                    // When wParam is TRUE, lparam points to an NCCALCSIZE_PARAMS:
+                    //   rgrc[0]: proposed new window rect → output: new client rect
+                    //   rgrc[1]: old window rect → output: source rect for BitBlt
+                    //   rgrc[2]: old client rect → output: dest rect for BitBlt
+                    //
+                    // During resize, Windows BitBlts old client content into the
+                    // new client area using rgrc[1] (source) and rgrc[2] (dest).
+                    // This produces the "rubber-banding" effect: old pixels are
+                    // shifted/stretched to predict the new layout, then replaced
+                    // once the app redraws. By zeroing both rects and returning
+                    // WVR_VALIDRECTS, we tell Windows there is no valid old
+                    // content to copy, so it skips the BitBlt entirely.
+                    #[repr(C)]
+                    struct NcCalcSizeParams {
+                        rgrc: [RECT; 3],
+                        _lppos: *mut core::ffi::c_void,
+                    }
+                    let params = &mut *(lparam.0 as *mut NcCalcSizeParams);
+                    let zero_rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                    params.rgrc[1] = zero_rect;
+                    params.rgrc[2] = zero_rect;
+
                     let margins = MARGINS {
                         cxLeftWidth: 0,
                         cxRightWidth: 0,
@@ -327,7 +349,8 @@ impl Win32Window {
                         cyBottomHeight: 1,
                     };
                     DwmExtendFrameIntoClientArea(hwnd, &margins).unwrap();
-                    return LRESULT(0);
+                    const WVR_VALIDRECTS: isize = 0x0400;
+                    return LRESULT(WVR_VALIDRECTS);
                 }
             }
             WM_NCHITTEST => {

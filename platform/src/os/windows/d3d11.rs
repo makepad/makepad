@@ -85,10 +85,10 @@ use crate::{
                         DXGI_FORMAT_R8_UNORM,
                         DXGI_SAMPLE_DESC,
                     },
-                    CreateDXGIFactory2, IDXGIFactory2, IDXGIResource, IDXGISwapChain1,
-                    DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_RGBA, DXGI_SCALING_NONE,
-                    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                    DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                    CreateDXGIFactory2, IDXGIDevice1, IDXGIFactory2, IDXGIResource,
+                    IDXGISwapChain1, DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_RGBA,
+                    DXGI_SCALING, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+                    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 },
             },
         },
@@ -650,6 +650,20 @@ fn texture_pixel_to_dx11_pixel(pix: &TexturePixel) -> DXGI_FORMAT {
     }
 }
 
+/// Calls DwmFlush to synchronize with the Desktop Window Manager compositor.
+/// This blocks until DWM has completed its current composition cycle, ensuring
+/// that a just-presented swap chain frame is picked up before the next desktop
+/// repaint. We ignore errors (e.g. DWM disabled on remote desktop sessions).
+fn dwm_flush() {
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmFlush() -> i32;
+    }
+    unsafe {
+        let _ = DwmFlush();
+    }
+}
+
 pub struct D3d11Window {
     pub window_id: WindowId,
     pub is_in_resize: bool,
@@ -691,7 +705,11 @@ impl D3d11Window {
                 Count: 1,
                 Quality: 0,
             },
-            Scaling: DXGI_SCALING_NONE,
+            // Use DXGI_SCALING_STRETCH (0) instead of DXGI_SCALING_NONE (1)
+            // so that during the brief gap between a window resize and the
+            // next presented frame, DWM stretches the old content to fill
+            // the new window size rather than showing a hard edge/gap.
+            Scaling: DXGI_SCALING(0),
             Stereo: FALSE,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
         };
@@ -753,7 +771,7 @@ impl D3d11Window {
                 Count: 1,
                 Quality: 0,
             },
-            Scaling: DXGI_SCALING_NONE,
+            Scaling: DXGI_SCALING(0), // DXGI_SCALING_STRETCH
             Stereo: FALSE,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
         };
@@ -831,7 +849,16 @@ impl D3d11Window {
         unsafe {
             self.swap_chain
                 .Present(if vsync { 1 } else { 0 }, DXGI_PRESENT(0))
-                .unwrap()
+                .unwrap();
+
+            // During an active window resize, synchronize with the DWM
+            // compositor so the freshly-presented frame is composited
+            // before the desktop is repainted at the new window size.
+            // This is analogous to Metal's waitUntilScheduled()+present()
+            // path used on macOS during live resize.
+            if self.is_in_resize {
+                dwm_flush();
+            }
         };
     }
 }
@@ -867,6 +894,17 @@ impl D3d11Cx {
 
             let device = device.unwrap();
             let context = context.unwrap();
+
+            // Reduce DXGI frame latency from the default of 3 to 1.
+            // This minimizes the presentation queue depth so that
+            // freshly-rendered frames reach DWM sooner, which is
+            // critical during window resize to avoid rubber-banding.
+            if let Ok(dxgi_device) = device.cast::<IDXGIDevice1>() {
+                let _ = (Interface::vtable(&dxgi_device).SetMaximumFrameLatency)(
+                    Interface::as_raw(&dxgi_device),
+                    1,
+                );
+            }
 
             device
                 .CreateQuery(
