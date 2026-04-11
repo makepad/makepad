@@ -1556,7 +1556,7 @@
             .unwrap();
 
         let mut backend = ExactMetalTextRuntimeSession::load(model_path).unwrap();
-        backend.reset_kv_caches();
+        backend.reset_kv_caches().unwrap();
         let mut backend_final_hidden_words = Vec::new();
         for (position, token_id) in prompt_token_ids.iter().copied().enumerate() {
             backend_final_hidden_words = backend
@@ -1623,7 +1623,7 @@
     fn formatted_say_hi_token0_layer0_active_stage_hashes() {
         let model_path = default_model_path();
         let mut runtime = ExactMetalTextRuntimeSession::load(model_path).unwrap();
-        runtime.reset_kv_caches();
+        runtime.reset_kv_caches().unwrap();
 
         let workspace = runtime.layer_workspace(0).unwrap();
         let input_buffer = runtime.token_input_buffer().unwrap();

@@ -11,7 +11,7 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: gemma_text_bench [model.safetensors] [--raw-bos] [--greedy] [--max-new-tokens N] [--warmup N] [--iters N] [--rotor-k-cache] <prompt>"
+    "Usage: gemma_text_bench [model.safetensors] [--raw-bos] [--greedy] [--max-new-tokens N] [--warmup N] [--iters N] [--rotor-k-cache] [--rotor-k-cache-planar3] <prompt>"
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,6 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--rotor-k-cache" => {
                 backend_config.kv_compression =
                     GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK;
+            }
+            "--rotor-k-cache-planar3" => {
+                backend_config.kv_compression =
+                    GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK;
             }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());

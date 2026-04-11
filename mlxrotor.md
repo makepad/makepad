@@ -49,7 +49,9 @@ Implemented:
 
 - Public optional Metal backend config
 - `--rotor-k-cache` flag in `mlx-cli`, `gemma_text_generate`, and `gemma_text_bench`
+- `--rotor-k-cache-planar3` flag in `mlx-cli`, `gemma_text_generate`, and `gemma_text_bench`
 - Exact Metal full-attention K-cache can now store compressed Planar4 rows instead of BF16
+- Exact Metal full-attention K-cache can also store compressed Planar3 rows instead of BF16
 - Metal append kernel quantizes K rows on insertion
 - Metal logits kernel reads compressed K rows directly and reconstructs them on the fly
 - Default path remains unchanged
@@ -75,6 +77,30 @@ Longer greedy correctness probe:
 - First divergence: generated token index `26` (`9947` baseline vs `4819` rotor)
 
 That means the phase-1 path is not long-run exact yet. It is currently an optional memory mode, not a drop-in exact replacement for the BF16 cache on long greedy decodes.
+
+## Planar3 Trial
+
+Implemented:
+
+- `RotorPlanar3FullAttentionK`
+- Same deferred-prefill behavior as the improved Planar4 path: prompt prefill stays BF16 and only bulk-converts full-attention K after prefill completes
+- Same storage shape as Planar4 for now: 1 packed byte per rotated pair plus 1 BF16 norm per token/head
+
+Current result:
+
+- Long greedy BF16 vs `RotorPlanar3FullAttentionK`
+- Matched prefix: `28` generated tokens
+- First divergence: generated token index `28` (`26745` baseline vs `157036` planar3)
+
+So on the current Gemma 4 memo prompt, Planar3 is not materially better than the improved Planar4 path.
+
+Short greedy perf check:
+
+- Prompt: `Please write a long poem about unified memory and midnight ducks.`
+- Baseline steady decode: `79.639 tok/s`
+- `--rotor-k-cache-planar3` steady decode: `78.588 tok/s`
+
+So the current Planar3 mode is also roughly perf-neutral to slightly slower. It remains useful as an optional experiment, but it is not currently the stronger default optional mode.
 
 ## Next Steps
 
