@@ -17,7 +17,7 @@ const QK_NVFP4: usize = 64;
 const Q8_1_BLOCK_BYTES: usize = 36;
 const CUDA_FINAL_TEXT_NORM_WEIGHT_NAME: &str = "language_model.model.norm.weight";
 const CUDA_DISALLOWED_TOKEN_IDS_CAPACITY: usize = 64;
-const CUDA_PREFILL_CHUNK_TOKENS: usize = 32;
+const CUDA_PREFILL_CHUNK_TOKENS: usize = 128;
 const CUDA_SESSION_MIN_CAPACITY: usize = 1024;
 
 pub(super) struct CudaNvfp4TextRuntime {
