@@ -384,6 +384,64 @@ static __launch_bounds__(128, 1) __global__ void makepad_ggml_cuda_nvfp4_nvfp4_m
     }
 }
 
+static __launch_bounds__(128, 1) __global__ void makepad_ggml_cuda_nvfp4_nvfp4_matmul_kernel(
+        const block_nvfp4 * __restrict__ input_nvfp4,
+        const block_nvfp4 * __restrict__ packed_weights_nvfp4,
+        float input_scale,
+        float * __restrict__ output_f32,
+        uint32_t blocks_per_row,
+        uint32_t out_rows,
+        uint32_t input_rows) {
+    constexpr int warp_size = 32;
+    constexpr int nwarps = 4;
+    constexpr int qi = QK_NVFP4 / (4 * 2);
+    constexpr int vdr = 4;
+    constexpr int blocks_per_iter = vdr * nwarps * warp_size / qi;
+
+    const uint32_t row = blockIdx.x;
+    const uint32_t input_row = blockIdx.y;
+    if (row >= out_rows || input_row >= input_rows) {
+        return;
+    }
+
+    const int lane = threadIdx.x;
+    const int warp = threadIdx.y;
+    const int tid = warp_size * warp + lane;
+    const int kbx_offset = static_cast<int>(row * blocks_per_row);
+    const block_nvfp4 * input_row_nvfp4 =
+        input_nvfp4 + static_cast<int>(input_row) * static_cast<int>(blocks_per_row);
+
+    float tmp = 0.0f;
+    for (int kbx = tid / 2; kbx < static_cast<int>(blocks_per_row); kbx += blocks_per_iter) {
+        const int kqs = vdr * (tid % 2);
+        tmp += makepad_ggml_cuda_vec_dot_nvfp4_nvfp4_modelopt(
+            packed_weights_nvfp4,
+            input_row_nvfp4 + kbx,
+            kbx_offset + kbx,
+            kqs);
+    }
+
+    __shared__ float tmp_shared[nwarps - 1][warp_size];
+    if (warp > 0) {
+        tmp_shared[warp - 1][lane] = tmp;
+    }
+    __syncthreads();
+
+    if (warp > 0) {
+        return;
+    }
+
+#pragma unroll
+    for (int w = 0; w < nwarps - 1; ++w) {
+        tmp += tmp_shared[w][lane];
+    }
+    tmp = makepad_ggml_cuda_warp_reduce_sum<warp_size>(tmp) * input_scale;
+
+    if (lane == 0) {
+        output_f32[input_row * out_rows + row] = tmp;
+    }
+}
+
 static __launch_bounds__(QK_NVFP4, 1) __global__ void makepad_ggml_cuda_quantize_nvfp4_f32_kernel(
         const float * __restrict__ input_f32,
         float input_scale,
@@ -546,6 +604,32 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_nvfp4_matvec(
         output_f32,
         nvfp4_blocks,
         out_rows
+    );
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_nvfp4_nvfp4_matmul(
+        const uint8_t * input_nvfp4_bytes,
+        const uint8_t * packed_weights_nvfp4_bytes,
+        float input_scale,
+        float * output_f32,
+        uint32_t nvfp4_blocks,
+        uint32_t out_rows,
+        uint32_t input_rows,
+        cudaStream_t stream) {
+    if (nvfp4_blocks == 0 || input_rows == 0) {
+        return cudaErrorInvalidValue;
+    }
+    const dim3 grid(out_rows, input_rows, 1);
+    const dim3 block(32, 4, 1);
+    makepad_ggml_cuda_nvfp4_nvfp4_matmul_kernel<<<grid, block, 0, stream>>>(
+        reinterpret_cast<const block_nvfp4 *>(input_nvfp4_bytes),
+        reinterpret_cast<const block_nvfp4 *>(packed_weights_nvfp4_bytes),
+        input_scale,
+        output_f32,
+        nvfp4_blocks,
+        out_rows,
+        input_rows
     );
     return cudaGetLastError();
 }

@@ -7,6 +7,10 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+const DEFAULT_CLI_MAX_NEW_TOKENS: usize = 512;
+const STREAM_FLUSH_CHARS: usize = 256;
+const STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(150);
+
 fn default_model_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../local/models/gemma-4-26b-mlx/model-00001-of-00003.safetensors")
@@ -89,6 +93,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 model_path = PathBuf::from(value);
             }
         }
+    }
+
+    if max_new_tokens.is_none() {
+        max_new_tokens = Some(DEFAULT_CLI_MAX_NEW_TOKENS);
     }
 
     eprintln!("loading model={}...", model_path.display());
@@ -186,14 +194,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         print!("assistant> ");
         io::stdout().flush()?;
-        let started = Instant::now();
         let mut buffered_output = String::new();
         let mut last_flush = Instant::now();
         let output = session.send_user_message_streaming(input, |delta| {
             buffered_output.push_str(delta);
-            if buffered_output.contains('\n')
-                || buffered_output.len() >= 64
-                || last_flush.elapsed() >= Duration::from_millis(50)
+            if buffered_output.len() >= STREAM_FLUSH_CHARS
+                || last_flush.elapsed() >= STREAM_FLUSH_INTERVAL
             {
                 print!("{buffered_output}");
                 buffered_output.clear();
@@ -206,17 +212,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("{buffered_output}");
         }
         println!();
-        let elapsed = started.elapsed();
-        let elapsed_secs = elapsed.as_secs_f64();
-        let decode_tok_s = if elapsed_secs > 0.0 {
-            output.generated_token_ids.len() as f64 / elapsed_secs
-        } else {
-            0.0
-        };
         println!(
-            "[generated_tokens={} stop={} decode_tok_s={decode_tok_s:.3}]",
+            "[generated_tokens={} stop={} prompt_prefill_tok_s={:.3} steady_decode_tok_s={:.3} overall_tok_s={:.3}]",
             output.generated_token_ids.len(),
             format_stop_reason(output.stop_reason),
+            output.metrics.prompt_prefill_tokens_per_second,
+            output.metrics.steady_state_decode_tokens_per_second,
+            output.metrics.decode_tokens_per_second,
         );
     }
 

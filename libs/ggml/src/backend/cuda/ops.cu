@@ -597,6 +597,101 @@ static __global__ void makepad_ggml_cuda_qkv_norm_rope_cache_f32_device_u32_kern
     }
 }
 
+static __global__ void makepad_ggml_cuda_qkv_norm_rope_cache_rows_f32_kernel(
+        const float * __restrict__ qkv,
+        const uint16_t * __restrict__ q_weights_bf16,
+        const uint16_t * __restrict__ k_weights_bf16,
+        float * __restrict__ q_out,
+        float * __restrict__ key_cache,
+        float * __restrict__ value_cache,
+        uint32_t q_head_count,
+        uint32_t k_head_count,
+        uint32_t head_dim,
+        uint32_t qkv_row_stride,
+        uint32_t q_out_row_stride,
+        uint32_t q_offset,
+        uint32_t k_offset,
+        uint32_t v_offset,
+        uint32_t rotary_dim,
+        float base,
+        uint32_t start_position,
+        float eps,
+        uint32_t max_tokens,
+        uint32_t start_slot,
+        uint32_t row_count) {
+    const uint32_t rows_per_token = q_head_count + 2u * k_head_count;
+    const uint32_t row_index = blockIdx.x;
+    if (row_index >= row_count * rows_per_token) {
+        return;
+    }
+
+    const uint32_t token_idx = row_index / rows_per_token;
+    const uint32_t row = row_index % rows_per_token;
+    const uint32_t position = start_position + token_idx;
+    const uint32_t slot = (start_slot + token_idx) % max_tokens;
+
+    const bool is_q = row < q_head_count;
+    const bool is_k = row >= q_head_count && row < q_head_count + k_head_count;
+    const uint32_t local_row = is_q ? row : (row - q_head_count) % k_head_count;
+    const uint32_t source_offset = is_q ? q_offset : (is_k ? k_offset : v_offset);
+    const float * row_in = qkv + token_idx * qkv_row_stride + source_offset + local_row * head_dim;
+
+    float sum = 0.0f;
+    for (uint32_t idx = threadIdx.x; idx < head_dim; idx += blockDim.x) {
+        const float value = row_in[idx];
+        sum += value * value;
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+
+    __shared__ float inv_rms;
+    if (threadIdx.x == 0) {
+        inv_rms = rsqrtf(sum / static_cast<float>(head_dim) + eps);
+    }
+    __syncthreads();
+
+    const uint32_t half = head_dim / 2u;
+    const uint32_t rotary_pairs = rotary_dim / 2u;
+    const uint32_t cache_row_base = local_row * max_tokens * head_dim + slot * head_dim;
+
+    for (uint32_t idx = threadIdx.x; idx < head_dim; idx += blockDim.x) {
+        if (!is_q && !is_k) {
+            value_cache[cache_row_base + idx] = makepad_ggml_cuda_bf16_round(row_in[idx] * inv_rms);
+            continue;
+        }
+
+        const uint16_t * weights_bf16 = is_q ? q_weights_bf16 : k_weights_bf16;
+        float out_value = 0.0f;
+        if (idx < rotary_pairs) {
+            const float exponent = (2.0f * static_cast<float>(idx)) / static_cast<float>(head_dim);
+            const float inv_freq = powf(base, -exponent);
+            const float theta = static_cast<float>(position) * inv_freq;
+            const float cos_theta = cosf(theta);
+            const float sin_theta = sinf(theta);
+            const float left = makepad_ggml_cuda_weighted_norm_f32(row_in, weights_bf16, idx, inv_rms);
+            const float right = makepad_ggml_cuda_weighted_norm_f32(row_in, weights_bf16, half + idx, inv_rms);
+            out_value = makepad_ggml_cuda_bf16_round(left * cos_theta - right * sin_theta);
+        } else if (idx >= half && idx < half + rotary_pairs) {
+            const uint32_t pair = idx - half;
+            const float exponent = (2.0f * static_cast<float>(pair)) / static_cast<float>(head_dim);
+            const float inv_freq = powf(base, -exponent);
+            const float theta = static_cast<float>(position) * inv_freq;
+            const float cos_theta = cosf(theta);
+            const float sin_theta = sinf(theta);
+            const float left = makepad_ggml_cuda_weighted_norm_f32(row_in, weights_bf16, pair, inv_rms);
+            const float right = makepad_ggml_cuda_weighted_norm_f32(row_in, weights_bf16, idx, inv_rms);
+            out_value = makepad_ggml_cuda_bf16_round(left * sin_theta + right * cos_theta);
+        } else {
+            out_value = makepad_ggml_cuda_weighted_norm_f32(row_in, weights_bf16, idx, inv_rms);
+        }
+
+        if (is_q) {
+            q_out[token_idx * q_out_row_stride + local_row * head_dim + idx] = out_value;
+        } else {
+            key_cache[cache_row_base + idx] = out_value;
+        }
+    }
+}
+
 static __global__ void makepad_ggml_cuda_attention_logits_seq_f32_kernel(
         const float * __restrict__ q,
         const float * __restrict__ key_cache,
@@ -800,6 +895,339 @@ static __global__ void makepad_ggml_cuda_attention_weighted_sum_f32_device_u32_k
     out[q_head * out_row_stride + dim] = acc;
 }
 
+static __global__ void makepad_ggml_cuda_attention_softmax_weighted_sum_f32_kernel(
+        const float * __restrict__ logits,
+        const float * __restrict__ value_cache,
+        float * __restrict__ out,
+        uint32_t q_head_count,
+        uint32_t q_heads_per_kv,
+        uint32_t head_dim,
+        uint32_t kv_row_stride,
+        uint32_t seq_len,
+        uint32_t start_slot,
+        uint32_t capacity,
+        uint32_t logits_row_stride,
+        uint32_t out_row_stride) {
+    const uint32_t q_head = blockIdx.y;
+    const uint32_t dim = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q_head >= q_head_count || dim >= head_dim) {
+        return;
+    }
+
+    const float * row_logits = logits + q_head * logits_row_stride;
+    float max_value = -CUDART_INF_F;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        const float value = row_logits[token];
+        max_value = value > max_value ? value : max_value;
+    }
+    max_value = makepad_ggml_cuda_block_reduce_max(max_value);
+
+    __shared__ float shared_max;
+    __shared__ float shared_sum;
+    if (threadIdx.x == 0) {
+        shared_max = max_value;
+    }
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        sum += expf(row_logits[token] - shared_max);
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    if (threadIdx.x == 0) {
+        shared_sum = sum;
+    }
+    __syncthreads();
+
+    const uint32_t kv_head = q_head / q_heads_per_kv;
+    const float * value_row = value_cache + kv_head * kv_row_stride;
+    float acc = 0.0f;
+    for (uint32_t token = 0; token < seq_len; ++token) {
+        const float prob = makepad_ggml_cuda_bf16_round(expf(row_logits[token] - shared_max) / shared_sum);
+        const uint32_t slot = (start_slot + token) % capacity;
+        const float value = value_row[slot * head_dim + dim];
+        acc = makepad_ggml_cuda_bf16_round(acc + makepad_ggml_cuda_bf16_round(prob * value));
+    }
+    out[q_head * out_row_stride + dim] = acc;
+}
+
+static __global__ void makepad_ggml_cuda_attention_softmax_weighted_sum_f32_device_u32_kernel(
+        const float * __restrict__ logits,
+        const float * __restrict__ value_cache,
+        float * __restrict__ out,
+        uint32_t q_head_count,
+        uint32_t q_heads_per_kv,
+        uint32_t head_dim,
+        uint32_t kv_row_stride,
+        const uint32_t * __restrict__ seq_len_device_u32,
+        uint32_t capacity,
+        uint32_t logits_row_stride,
+        uint32_t out_row_stride) {
+    const uint32_t seq_len = *seq_len_device_u32;
+    const uint32_t q_head = blockIdx.y;
+    const uint32_t dim = blockIdx.x * blockDim.x + threadIdx.x;
+    if (q_head >= q_head_count || dim >= head_dim) {
+        return;
+    }
+
+    const float * row_logits = logits + q_head * logits_row_stride;
+    float max_value = -CUDART_INF_F;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        const float value = row_logits[token];
+        max_value = value > max_value ? value : max_value;
+    }
+    max_value = makepad_ggml_cuda_block_reduce_max(max_value);
+
+    __shared__ float shared_max;
+    __shared__ float shared_sum;
+    if (threadIdx.x == 0) {
+        shared_max = max_value;
+    }
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        sum += expf(row_logits[token] - shared_max);
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    if (threadIdx.x == 0) {
+        shared_sum = sum;
+    }
+    __syncthreads();
+
+    const uint32_t kv_head = q_head / q_heads_per_kv;
+    const float * value_row = value_cache + kv_head * kv_row_stride;
+    float acc = 0.0f;
+    for (uint32_t token = 0; token < seq_len; ++token) {
+        const float prob = makepad_ggml_cuda_bf16_round(expf(row_logits[token] - shared_max) / shared_sum);
+        const float value = value_row[token * head_dim + dim];
+        acc = makepad_ggml_cuda_bf16_round(acc + makepad_ggml_cuda_bf16_round(prob * value));
+    }
+    out[q_head * out_row_stride + dim] = acc;
+}
+
+static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_kernel(
+        const float * __restrict__ q,
+        const float * __restrict__ key_cache,
+        const float * __restrict__ value_cache,
+        float * __restrict__ out,
+        uint32_t q_head_count,
+        uint32_t q_heads_per_kv,
+        uint32_t head_dim,
+        uint32_t kv_row_stride,
+        uint32_t seq_len,
+        uint32_t start_slot,
+        uint32_t capacity,
+        uint32_t out_row_stride) {
+    const uint32_t q_head = blockIdx.x;
+    if (q_head >= q_head_count) {
+        return;
+    }
+
+    extern __shared__ float shared_logits[];
+    const uint32_t kv_head = q_head / q_heads_per_kv;
+    const float * q_row = q + q_head * head_dim;
+    const float * key_row = key_cache + kv_head * kv_row_stride;
+    const float * value_row = value_cache + kv_head * kv_row_stride;
+
+    for (uint32_t token = 0; token < seq_len; ++token) {
+        const uint32_t slot = (start_slot + token) % capacity;
+        const float * k_row = key_row + slot * head_dim;
+        float sum = 0.0f;
+        for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
+            sum += q_row[dim] * k_row[dim];
+        }
+        sum = makepad_ggml_cuda_block_reduce_sum(sum);
+        if (threadIdx.x == 0) {
+            shared_logits[token] = makepad_ggml_cuda_bf16_round(sum);
+        }
+        __syncthreads();
+    }
+
+    float max_value = -CUDART_INF_F;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        const float value = shared_logits[token];
+        max_value = value > max_value ? value : max_value;
+    }
+    max_value = makepad_ggml_cuda_block_reduce_max(max_value);
+
+    __shared__ float shared_max;
+    __shared__ float shared_sum;
+    if (threadIdx.x == 0) {
+        shared_max = max_value;
+    }
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        sum += expf(shared_logits[token] - shared_max);
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    if (threadIdx.x == 0) {
+        shared_sum = sum;
+    }
+    __syncthreads();
+
+    for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
+        float acc = 0.0f;
+        for (uint32_t token = 0; token < seq_len; ++token) {
+            const float prob = makepad_ggml_cuda_bf16_round(expf(shared_logits[token] - shared_max) / shared_sum);
+            const uint32_t slot = (start_slot + token) % capacity;
+            const float value = value_row[slot * head_dim + dim];
+            acc = makepad_ggml_cuda_bf16_round(acc + makepad_ggml_cuda_bf16_round(prob * value));
+        }
+        out[q_head * out_row_stride + dim] = acc;
+    }
+}
+
+static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_device_u32_kernel(
+        const float * __restrict__ q,
+        const float * __restrict__ key_cache,
+        const float * __restrict__ value_cache,
+        float * __restrict__ out,
+        uint32_t q_head_count,
+        uint32_t q_heads_per_kv,
+        uint32_t head_dim,
+        uint32_t kv_row_stride,
+        const uint32_t * __restrict__ seq_len_device_u32,
+        uint32_t capacity,
+        uint32_t out_row_stride) {
+    const uint32_t seq_len = *seq_len_device_u32;
+    const uint32_t q_head = blockIdx.x;
+    if (q_head >= q_head_count) {
+        return;
+    }
+
+    extern __shared__ float shared_logits[];
+    const uint32_t kv_head = q_head / q_heads_per_kv;
+    const float * q_row = q + q_head * head_dim;
+    const float * key_row = key_cache + kv_head * kv_row_stride;
+    const float * value_row = value_cache + kv_head * kv_row_stride;
+
+    for (uint32_t token = 0; token < seq_len; ++token) {
+        const float * k_row = key_row + token * head_dim;
+        float sum = 0.0f;
+        for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
+            sum += q_row[dim] * k_row[dim];
+        }
+        sum = makepad_ggml_cuda_block_reduce_sum(sum);
+        if (threadIdx.x == 0) {
+            shared_logits[token] = makepad_ggml_cuda_bf16_round(sum);
+        }
+        __syncthreads();
+    }
+
+    float max_value = -CUDART_INF_F;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        const float value = shared_logits[token];
+        max_value = value > max_value ? value : max_value;
+    }
+    max_value = makepad_ggml_cuda_block_reduce_max(max_value);
+
+    __shared__ float shared_max;
+    __shared__ float shared_sum;
+    if (threadIdx.x == 0) {
+        shared_max = max_value;
+    }
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        sum += expf(shared_logits[token] - shared_max);
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    if (threadIdx.x == 0) {
+        shared_sum = sum;
+    }
+    __syncthreads();
+
+    for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
+        float acc = 0.0f;
+        for (uint32_t token = 0; token < seq_len; ++token) {
+            const float prob = makepad_ggml_cuda_bf16_round(expf(shared_logits[token] - shared_max) / shared_sum);
+            const float value = value_row[token * head_dim + dim];
+            acc = makepad_ggml_cuda_bf16_round(acc + makepad_ggml_cuda_bf16_round(prob * value));
+        }
+        out[q_head * out_row_stride + dim] = acc;
+    }
+}
+
+static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32_kernel(
+        const float * __restrict__ q,
+        const float * __restrict__ key_cache,
+        const float * __restrict__ value_cache,
+        float * __restrict__ out,
+        uint32_t query_count,
+        uint32_t q_head_count,
+        uint32_t q_heads_per_kv,
+        uint32_t head_dim,
+        uint32_t kv_row_stride,
+        uint32_t q_row_stride,
+        uint32_t out_row_stride,
+        uint32_t base_seq_len,
+        uint32_t capacity) {
+    const uint32_t q_head = blockIdx.x;
+    const uint32_t query_idx = blockIdx.y;
+    if (q_head >= q_head_count || query_idx >= query_count) {
+        return;
+    }
+
+    const uint32_t seq_len = min(base_seq_len + query_idx + 1u, capacity);
+    extern __shared__ float shared_logits[];
+    const uint32_t kv_head = q_head / q_heads_per_kv;
+    const float * q_row = q + query_idx * q_row_stride + q_head * head_dim;
+    const float * key_row = key_cache + kv_head * kv_row_stride;
+    const float * value_row = value_cache + kv_head * kv_row_stride;
+
+    for (uint32_t token = 0; token < seq_len; ++token) {
+        const float * k_row = key_row + token * head_dim;
+        float sum = 0.0f;
+        for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
+            sum += q_row[dim] * k_row[dim];
+        }
+        sum = makepad_ggml_cuda_block_reduce_sum(sum);
+        if (threadIdx.x == 0) {
+            shared_logits[token] = makepad_ggml_cuda_bf16_round(sum);
+        }
+        __syncthreads();
+    }
+
+    float max_value = -CUDART_INF_F;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        const float value = shared_logits[token];
+        max_value = value > max_value ? value : max_value;
+    }
+    max_value = makepad_ggml_cuda_block_reduce_max(max_value);
+
+    __shared__ float shared_max;
+    __shared__ float shared_sum;
+    if (threadIdx.x == 0) {
+        shared_max = max_value;
+    }
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        sum += expf(shared_logits[token] - shared_max);
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    if (threadIdx.x == 0) {
+        shared_sum = sum;
+    }
+    __syncthreads();
+
+    float * out_row = out + query_idx * out_row_stride + q_head * head_dim;
+    for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
+        float acc = 0.0f;
+        for (uint32_t token = 0; token < seq_len; ++token) {
+            const float prob = makepad_ggml_cuda_bf16_round(expf(shared_logits[token] - shared_max) / shared_sum);
+            const float value = value_row[token * head_dim + dim];
+            acc = makepad_ggml_cuda_bf16_round(acc + makepad_ggml_cuda_bf16_round(prob * value));
+        }
+        out_row[dim] = acc;
+    }
+}
+
 static __global__ void makepad_ggml_cuda_argmax_f32_kernel(
         const float * __restrict__ logits,
         uint32_t * __restrict__ out_index,
@@ -849,6 +1277,37 @@ static __device__ __forceinline__ bool makepad_ggml_cuda_token_is_disallowed(
         }
     }
     return false;
+}
+
+static __global__ void makepad_ggml_cuda_mask_indices_f32_kernel(
+        float * __restrict__ logits,
+        const uint32_t * __restrict__ disallowed_token_ids,
+        uint32_t disallowed_count,
+        uint32_t n) {
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= disallowed_count) {
+        return;
+    }
+    const uint32_t token_id = disallowed_token_ids[index];
+    if (token_id < n) {
+        logits[token_id] = -CUDART_INF_F;
+    }
+}
+
+static __global__ void makepad_ggml_cuda_mask_indices_f32_device_u32_kernel(
+        float * __restrict__ logits,
+        const uint32_t * __restrict__ disallowed_token_ids,
+        const uint32_t * __restrict__ disallowed_count_device_u32,
+        uint32_t n) {
+    const uint32_t disallowed_count = *disallowed_count_device_u32;
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= disallowed_count) {
+        return;
+    }
+    const uint32_t token_id = disallowed_token_ids[index];
+    if (token_id < n) {
+        logits[token_id] = -CUDART_INF_F;
+    }
 }
 
 static __device__ __forceinline__ bool makepad_ggml_cuda_argmax_candidate_is_better(
@@ -1225,6 +1684,58 @@ extern "C" cudaError_t makepad_ggml_cuda_qkv_norm_rope_cache_f32(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t makepad_ggml_cuda_qkv_norm_rope_cache_rows_f32(
+        const float * qkv,
+        const uint16_t * q_weights_bf16,
+        const uint16_t * k_weights_bf16,
+        float * q_out,
+        float * key_cache,
+        float * value_cache,
+        uint32_t q_head_count,
+        uint32_t k_head_count,
+        uint32_t head_dim,
+        uint32_t qkv_row_stride,
+        uint32_t q_out_row_stride,
+        uint32_t q_offset,
+        uint32_t k_offset,
+        uint32_t v_offset,
+        uint32_t rotary_dim,
+        float base,
+        uint32_t start_position,
+        float eps,
+        uint32_t max_tokens,
+        uint32_t start_slot,
+        uint32_t row_count,
+        cudaStream_t stream) {
+    if (row_count == 0 || max_tokens == 0) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t total_rows = row_count * (q_head_count + 2u * k_head_count);
+    makepad_ggml_cuda_qkv_norm_rope_cache_rows_f32_kernel<<<total_rows, 256, 0, stream>>>(
+        qkv,
+        q_weights_bf16,
+        k_weights_bf16,
+        q_out,
+        key_cache,
+        value_cache,
+        q_head_count,
+        k_head_count,
+        head_dim,
+        qkv_row_stride,
+        q_out_row_stride,
+        q_offset,
+        k_offset,
+        v_offset,
+        rotary_dim,
+        base,
+        start_position,
+        eps,
+        max_tokens,
+        start_slot,
+        row_count);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t makepad_ggml_cuda_qkv_norm_rope_cache_f32_device_u32(
         const float * qkv,
         const uint16_t * q_weights_bf16,
@@ -1367,6 +1878,30 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_weighted_sum_f32(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t makepad_ggml_cuda_attention_softmax_weighted_sum_f32(
+        const float * logits,
+        const float * value_cache,
+        float * out,
+        uint32_t q_head_count,
+        uint32_t q_heads_per_kv,
+        uint32_t head_dim,
+        uint32_t kv_row_stride,
+        uint32_t seq_len,
+        uint32_t start_slot,
+        uint32_t capacity,
+        uint32_t logits_row_stride,
+        uint32_t out_row_stride,
+        cudaStream_t stream) {
+    if (q_head_count == 0 || q_heads_per_kv == 0 || head_dim == 0 || seq_len == 0 || capacity == 0 || start_slot >= capacity || logits_row_stride < seq_len || out_row_stride < head_dim) {
+        return cudaErrorInvalidValue;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid((head_dim + block.x - 1) / block.x, q_head_count, 1);
+    makepad_ggml_cuda_attention_softmax_weighted_sum_f32_kernel<<<grid, block, 0, stream>>>(
+        logits, value_cache, out, q_head_count, q_heads_per_kv, head_dim, kv_row_stride, seq_len, start_slot, capacity, logits_row_stride, out_row_stride);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t makepad_ggml_cuda_attention_weighted_sum_f32_device_u32(
         const float * probs,
         const float * value_cache,
@@ -1387,6 +1922,116 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_weighted_sum_f32_device_u32(
     const dim3 grid((head_dim + block.x - 1) / block.x, q_head_count, 1);
     makepad_ggml_cuda_attention_weighted_sum_f32_device_u32_kernel<<<grid, block, 0, stream>>>(
         probs, value_cache, out, q_head_count, q_heads_per_kv, head_dim, kv_row_stride, seq_len_device_u32, capacity, probs_row_stride, out_row_stride);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_attention_softmax_weighted_sum_f32_device_u32(
+        const float * logits,
+        const float * value_cache,
+        float * out,
+        uint32_t q_head_count,
+        uint32_t q_heads_per_kv,
+        uint32_t head_dim,
+        uint32_t kv_row_stride,
+        const uint32_t * seq_len_device_u32,
+        uint32_t capacity,
+        uint32_t logits_row_stride,
+        uint32_t out_row_stride,
+        cudaStream_t stream) {
+    if (q_head_count == 0 || q_heads_per_kv == 0 || head_dim == 0 || capacity == 0 || logits_row_stride < capacity || out_row_stride < head_dim) {
+        return cudaErrorInvalidValue;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid((head_dim + block.x - 1) / block.x, q_head_count, 1);
+    makepad_ggml_cuda_attention_softmax_weighted_sum_f32_device_u32_kernel<<<grid, block, 0, stream>>>(
+        logits, value_cache, out, q_head_count, q_heads_per_kv, head_dim, kv_row_stride, seq_len_device_u32, capacity, logits_row_stride, out_row_stride);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32(
+        const float * q,
+        const float * key_cache,
+        const float * value_cache,
+        float * out,
+        uint32_t q_head_count,
+        uint32_t q_heads_per_kv,
+        uint32_t head_dim,
+        uint32_t kv_row_stride,
+        uint32_t seq_len,
+        uint32_t start_slot,
+        uint32_t capacity,
+        uint32_t out_row_stride,
+        cudaStream_t stream) {
+    if (q_head_count == 0 || q_heads_per_kv == 0 || head_dim == 0 || seq_len == 0 || capacity == 0 || start_slot >= capacity || out_row_stride < head_dim) {
+        return cudaErrorInvalidValue;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid(q_head_count, 1, 1);
+    const size_t shared_bytes = static_cast<size_t>(seq_len) * sizeof(float);
+    makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_kernel<<<grid, block, shared_bytes, stream>>>(
+        q, key_cache, value_cache, out, q_head_count, q_heads_per_kv, head_dim, kv_row_stride, seq_len, start_slot, capacity, out_row_stride);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32(
+        const float * q,
+        const float * key_cache,
+        const float * value_cache,
+        float * out,
+        uint32_t query_count,
+        uint32_t q_head_count,
+        uint32_t q_heads_per_kv,
+        uint32_t head_dim,
+        uint32_t kv_row_stride,
+        uint32_t q_row_stride,
+        uint32_t out_row_stride,
+        uint32_t base_seq_len,
+        uint32_t capacity,
+        cudaStream_t stream) {
+    if (query_count == 0 || q_head_count == 0 || head_dim == 0 || capacity == 0) {
+        return cudaErrorInvalidValue;
+    }
+    const dim3 grid(q_head_count, query_count, 1);
+    const dim3 block(256, 1, 1);
+    const size_t shared_bytes = static_cast<size_t>(min(base_seq_len + query_count, capacity)) * sizeof(float);
+    makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32_kernel<<<grid, block, shared_bytes, stream>>>(
+        q,
+        key_cache,
+        value_cache,
+        out,
+        query_count,
+        q_head_count,
+        q_heads_per_kv,
+        head_dim,
+        kv_row_stride,
+        q_row_stride,
+        out_row_stride,
+        base_seq_len,
+        capacity);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_device_u32(
+        const float * q,
+        const float * key_cache,
+        const float * value_cache,
+        float * out,
+        uint32_t q_head_count,
+        uint32_t q_heads_per_kv,
+        uint32_t head_dim,
+        uint32_t kv_row_stride,
+        const uint32_t * seq_len_device_u32,
+        uint32_t capacity,
+        uint32_t out_row_stride,
+        cudaStream_t stream) {
+    if (q_head_count == 0 || q_heads_per_kv == 0 || head_dim == 0 || capacity == 0 || out_row_stride < head_dim) {
+        return cudaErrorInvalidValue;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid(q_head_count, 1, 1);
+    const size_t shared_bytes = static_cast<size_t>(capacity) * sizeof(float);
+    makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_device_u32_kernel<<<grid, block, shared_bytes, stream>>>(
+        q, key_cache, value_cache, out, q_head_count, q_heads_per_kv, head_dim, kv_row_stride, seq_len_device_u32, capacity, out_row_stride);
     return cudaGetLastError();
 }
 
@@ -1412,12 +2057,19 @@ extern "C" cudaError_t makepad_ggml_cuda_masked_argmax_f32(
     if (n == 0) {
         return cudaErrorInvalidValue;
     }
-    makepad_ggml_cuda_masked_argmax_f32_kernel<<<1, 256, 0, stream>>>(
-        logits,
-        disallowed_token_ids,
-        disallowed_count,
-        out_index,
-        n);
+    if (disallowed_count != 0) {
+        const dim3 grid((disallowed_count + 255u) / 256u, 1, 1);
+        makepad_ggml_cuda_mask_indices_f32_kernel<<<grid, 256, 0, stream>>>(
+            const_cast<float *>(logits),
+            disallowed_token_ids,
+            disallowed_count,
+            n);
+        const cudaError_t status = cudaGetLastError();
+        if (status != cudaSuccess) {
+            return status;
+        }
+    }
+    makepad_ggml_cuda_argmax_f32_kernel<<<1, 256, 0, stream>>>(logits, out_index, n);
     return cudaGetLastError();
 }
 
@@ -1431,11 +2083,15 @@ extern "C" cudaError_t makepad_ggml_cuda_masked_argmax_f32_device_u32(
     if (n == 0) {
         return cudaErrorInvalidValue;
     }
-    makepad_ggml_cuda_masked_argmax_f32_device_u32_kernel<<<1, 256, 0, stream>>>(
-        logits,
+    makepad_ggml_cuda_mask_indices_f32_device_u32_kernel<<<1, 256, 0, stream>>>(
+        const_cast<float *>(logits),
         disallowed_token_ids,
         disallowed_count_device_u32,
-        out_index,
         n);
+    const cudaError_t status = cudaGetLastError();
+    if (status != cudaSuccess) {
+        return status;
+    }
+    makepad_ggml_cuda_argmax_f32_kernel<<<1, 256, 0, stream>>>(logits, out_index, n);
     return cudaGetLastError();
 }
