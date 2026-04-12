@@ -158,9 +158,29 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights(
+            input: *const f32,
+            weights_f32: *const f32,
+            output: *mut f32,
+            n: u32,
+            eps: f32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_rms_norm_rows_weighted_f32(
             input: *const f32,
             weights_bf16: *const u16,
+            output: *mut f32,
+            row_count: u32,
+            row_stride: u32,
+            n: u32,
+            eps: f32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights(
+            input: *const f32,
+            weights_f32: *const f32,
             output: *mut f32,
             row_count: u32,
             row_stride: u32,
@@ -206,8 +226,8 @@ mod imp {
         fn makepad_ggml_cuda_kv_append_f32(
             keys: *const f32,
             values: *const f32,
-            key_cache: *mut f32,
-            value_cache: *mut f32,
+            key_cache: *mut u16,
+            value_cache: *mut u16,
             kv_head_count: u32,
             head_dim: u32,
             max_tokens: u32,
@@ -218,8 +238,8 @@ mod imp {
         fn makepad_ggml_cuda_kv_append_f32_device_u32(
             keys: *const f32,
             values: *const f32,
-            key_cache: *mut f32,
-            value_cache: *mut f32,
+            key_cache: *mut u16,
+            value_cache: *mut u16,
             kv_head_count: u32,
             head_dim: u32,
             max_tokens: u32,
@@ -232,8 +252,8 @@ mod imp {
             q_weights_bf16: *const u16,
             k_weights_bf16: *const u16,
             q_out: *mut f32,
-            key_cache: *mut f32,
-            value_cache: *mut f32,
+            key_cache: *mut u16,
+            value_cache: *mut u16,
             q_head_count: u32,
             k_head_count: u32,
             head_dim: u32,
@@ -254,8 +274,8 @@ mod imp {
             q_weights_bf16: *const u16,
             k_weights_bf16: *const u16,
             q_out: *mut f32,
-            key_cache: *mut f32,
-            value_cache: *mut f32,
+            key_cache: *mut u16,
+            value_cache: *mut u16,
             q_head_count: u32,
             k_head_count: u32,
             head_dim: u32,
@@ -279,8 +299,8 @@ mod imp {
             q_weights_bf16: *const u16,
             k_weights_bf16: *const u16,
             q_out: *mut f32,
-            key_cache: *mut f32,
-            value_cache: *mut f32,
+            key_cache: *mut u16,
+            value_cache: *mut u16,
             q_head_count: u32,
             k_head_count: u32,
             head_dim: u32,
@@ -295,9 +315,34 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_qkv_norm_rope_cache_rows_f32_device_u32(
+            qkv: *const f32,
+            q_weights_bf16: *const u16,
+            k_weights_bf16: *const u16,
+            q_out: *mut f32,
+            key_cache: *mut u16,
+            value_cache: *mut u16,
+            q_head_count: u32,
+            k_head_count: u32,
+            head_dim: u32,
+            qkv_row_stride: u32,
+            q_out_row_stride: u32,
+            q_offset: u32,
+            k_offset: u32,
+            v_offset: u32,
+            rotary_dim: u32,
+            base: f32,
+            start_position_device_u32: *const u32,
+            eps: f32,
+            max_tokens: u32,
+            start_slot_device_u32: *const u32,
+            row_count: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_attention_logits_seq_f32(
             q: *const f32,
-            key_cache: *const f32,
+            key_cache: *const u16,
             logits: *mut f32,
             q_head_count: u32,
             q_heads_per_kv: u32,
@@ -312,7 +357,7 @@ mod imp {
 
         fn makepad_ggml_cuda_attention_logits_seq_f32_device_u32(
             q: *const f32,
-            key_cache: *const f32,
+            key_cache: *const u16,
             logits: *mut f32,
             q_head_count: u32,
             q_heads_per_kv: u32,
@@ -344,7 +389,7 @@ mod imp {
 
         fn makepad_ggml_cuda_attention_weighted_sum_f32(
             probs: *const f32,
-            value_cache: *const f32,
+            value_cache: *const u16,
             out: *mut f32,
             q_head_count: u32,
             q_heads_per_kv: u32,
@@ -360,7 +405,7 @@ mod imp {
 
         fn makepad_ggml_cuda_attention_softmax_weighted_sum_f32(
             logits: *const f32,
-            value_cache: *const f32,
+            value_cache: *const u16,
             out: *mut f32,
             q_head_count: u32,
             q_heads_per_kv: u32,
@@ -376,7 +421,7 @@ mod imp {
 
         fn makepad_ggml_cuda_attention_weighted_sum_f32_device_u32(
             probs: *const f32,
-            value_cache: *const f32,
+            value_cache: *const u16,
             out: *mut f32,
             q_head_count: u32,
             q_heads_per_kv: u32,
@@ -391,7 +436,7 @@ mod imp {
 
         fn makepad_ggml_cuda_attention_softmax_weighted_sum_f32_device_u32(
             logits: *const f32,
-            value_cache: *const f32,
+            value_cache: *const u16,
             out: *mut f32,
             q_head_count: u32,
             q_heads_per_kv: u32,
@@ -406,8 +451,8 @@ mod imp {
 
         fn makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32(
             q: *const f32,
-            key_cache: *const f32,
-            value_cache: *const f32,
+            key_cache: *const u16,
+            value_cache: *const u16,
             out: *mut f32,
             q_head_count: u32,
             q_heads_per_kv: u32,
@@ -422,8 +467,8 @@ mod imp {
 
         fn makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32(
             q: *const f32,
-            key_cache: *const f32,
-            value_cache: *const f32,
+            key_cache: *const u16,
+            value_cache: *const u16,
             out: *mut f32,
             query_count: u32,
             q_head_count: u32,
@@ -439,8 +484,8 @@ mod imp {
 
         fn makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_device_u32(
             q: *const f32,
-            key_cache: *const f32,
-            value_cache: *const f32,
+            key_cache: *const u16,
+            value_cache: *const u16,
             out: *mut f32,
             q_head_count: u32,
             q_heads_per_kv: u32,
@@ -449,6 +494,23 @@ mod imp {
             seq_len_device_u32: *const u32,
             capacity: u32,
             out_row_stride: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32_device_u32(
+            q: *const f32,
+            key_cache: *const u16,
+            value_cache: *const u16,
+            out: *mut f32,
+            query_count: u32,
+            q_head_count: u32,
+            q_heads_per_kv: u32,
+            head_dim: u32,
+            kv_row_stride: u32,
+            q_row_stride: u32,
+            out_row_stride: u32,
+            base_seq_len_device_u32: *const u32,
+            capacity: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
@@ -609,6 +671,69 @@ mod imp {
     impl Drop for DeviceBuffer {
         fn drop(&mut self) {
             let _ = unsafe { makepad_cuda::free(self.ptr) };
+        }
+    }
+
+    pub struct CudaMappedHostU32Buffer {
+        host_ptr: NonNull<u32>,
+        device_ptr: NonNull<c_void>,
+        len: usize,
+    }
+
+    impl CudaMappedHostU32Buffer {
+        fn new(len: usize) -> Result<Self, String> {
+            let size_bytes = len
+                .checked_mul(size_of::<u32>())
+                .ok_or_else(|| "CUDA mapped u32 buffer size overflow".to_string())?;
+            let host_ptr =
+                unsafe { makepad_cuda::host_alloc_mapped(size_bytes) }.map_err(|err| err.to_string())?;
+            let device_ptr =
+                unsafe { makepad_cuda::host_get_device_pointer(host_ptr) }.map_err(|err| err.to_string())?;
+            unsafe {
+                std::ptr::write_bytes(host_ptr.as_ptr(), 0, len);
+            }
+            Ok(Self {
+                host_ptr: host_ptr.cast::<u32>(),
+                device_ptr,
+                len,
+            })
+        }
+
+        pub fn device_u32_ptr(&self) -> *const u32 {
+            self.device_ptr.as_ptr().cast::<u32>()
+        }
+
+        pub fn device_u32_mut_ptr(&self) -> *mut u32 {
+            self.device_ptr.as_ptr().cast::<u32>()
+        }
+
+        pub fn write_u32(&self, index: usize, value: u32) -> Result<(), String> {
+            if index >= self.len {
+                return Err(format!(
+                    "CUDA mapped u32 buffer overflow on write: {} >= {}",
+                    index, self.len
+                ));
+            }
+            unsafe {
+                *self.host_ptr.as_ptr().add(index) = value;
+            }
+            Ok(())
+        }
+
+        pub fn read_u32(&self, index: usize) -> Result<u32, String> {
+            if index >= self.len {
+                return Err(format!(
+                    "CUDA mapped u32 buffer overflow on read: {} >= {}",
+                    index, self.len
+                ));
+            }
+            Ok(unsafe { *self.host_ptr.as_ptr().add(index) })
+        }
+    }
+
+    impl Drop for CudaMappedHostU32Buffer {
+        fn drop(&mut self) {
+            let _ = unsafe { makepad_cuda::free_host(self.host_ptr.cast::<c_void>()) };
         }
     }
 
@@ -1234,6 +1359,11 @@ mod imp {
             )
         }
 
+        pub fn alloc_mapped_u32(&self, len: usize) -> Result<CudaMappedHostU32Buffer, String> {
+            self.prepare_device()?;
+            CudaMappedHostU32Buffer::new(len)
+        }
+
         pub fn load_bytes(&self, bytes: &[u8]) -> Result<CudaBuffer, String> {
             let buffer = self.alloc_bytes(bytes.len())?;
             self.write_bytes(&buffer, bytes)?;
@@ -1347,13 +1477,28 @@ mod imp {
             n_cols: usize,
             row_index_device_u32: &CudaBuffer,
         ) -> Result<(), String> {
+            self.nvfp4_get_row_f32_device_u32_ptr(
+                weights_nvfp4,
+                output_f32,
+                n_cols,
+                row_index_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+            )
+        }
+
+        pub fn nvfp4_get_row_f32_device_u32_ptr(
+            &self,
+            weights_nvfp4: &CudaBuffer,
+            output_f32: &CudaBuffer,
+            n_cols: usize,
+            row_index_device_u32: *const u32,
+        ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_nvfp4_get_row_f32_device_u32(
                     weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     output_f32.inner.ptr.as_ptr().cast::<f32>(),
                     n_cols as u32,
-                    row_index_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    row_index_device_u32,
                     self.stream,
                 )
             };
@@ -1642,6 +1787,28 @@ mod imp {
             makepad_cuda::check(status).map_err(|err| err.to_string())
         }
 
+        pub fn rms_norm_row_weighted_f32_f32weights(
+            &self,
+            input: &CudaBuffer,
+            weights_f32: &CudaBuffer,
+            output: &CudaBuffer,
+            n: usize,
+            eps: f32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    weights_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    eps,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
         pub fn rms_norm_row_weighted_f32_input_offset(
             &self,
             input: &CudaBuffer,
@@ -1661,6 +1828,34 @@ mod imp {
                         .cast::<f32>()
                         .add(input_offset_elems),
                     weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    eps,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn rms_norm_row_weighted_f32_input_offset_f32weights(
+            &self,
+            input: &CudaBuffer,
+            input_offset_elems: usize,
+            weights_f32: &CudaBuffer,
+            output: &CudaBuffer,
+            n: usize,
+            eps: f32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights(
+                    input
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(input_offset_elems),
+                    weights_f32.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
                     n as u32,
                     eps,
@@ -1696,6 +1891,32 @@ mod imp {
             makepad_cuda::check(status).map_err(|err| err.to_string())
         }
 
+        pub fn rms_norm_rows_weighted_f32_f32weights(
+            &self,
+            input: &CudaBuffer,
+            weights_f32: &CudaBuffer,
+            output: &CudaBuffer,
+            row_count: usize,
+            row_stride: usize,
+            n: usize,
+            eps: f32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    weights_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    row_count as u32,
+                    row_stride as u32,
+                    n as u32,
+                    eps,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
         pub fn rms_norm_rows_weighted_f32_offset(
             &self,
             input: &CudaBuffer,
@@ -1718,6 +1939,44 @@ mod imp {
                         .cast::<f32>()
                         .add(input_offset_elems),
                     weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    output
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(output_offset_elems),
+                    row_count as u32,
+                    row_stride as u32,
+                    n as u32,
+                    eps,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn rms_norm_rows_weighted_f32_offset_f32weights(
+            &self,
+            input: &CudaBuffer,
+            input_offset_elems: usize,
+            weights_f32: &CudaBuffer,
+            output: &CudaBuffer,
+            output_offset_elems: usize,
+            row_count: usize,
+            row_stride: usize,
+            n: usize,
+            eps: f32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights(
+                    input
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(input_offset_elems),
+                    weights_f32.inner.ptr.as_ptr().cast::<f32>(),
                     output
                         .inner
                         .ptr
@@ -1866,8 +2125,8 @@ mod imp {
                 makepad_ggml_cuda_kv_append_f32(
                     keys.inner.ptr.as_ptr().cast::<f32>(),
                     values.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     kv_head_count as u32,
                     head_dim as u32,
                     max_tokens as u32,
@@ -1894,8 +2153,8 @@ mod imp {
                 makepad_ggml_cuda_kv_append_f32_device_u32(
                     keys.inner.ptr.as_ptr().cast::<f32>(),
                     values.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     kv_head_count as u32,
                     head_dim as u32,
                     max_tokens as u32,
@@ -1934,8 +2193,8 @@ mod imp {
                     q_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     k_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     q_out.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     q_head_count as u32,
                     k_head_count as u32,
                     head_dim as u32,
@@ -1986,8 +2245,8 @@ mod imp {
                     q_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     k_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     q_out.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     q_head_count as u32,
                     k_head_count as u32,
                     head_dim as u32,
@@ -2029,6 +2288,48 @@ mod imp {
             eps: f32,
             max_tokens: usize,
         ) -> Result<(), String> {
+            self.qkv_norm_rope_cache_f32_device_u32_ptr(
+                qkv,
+                q_weights_bf16,
+                k_weights_bf16,
+                q_out,
+                key_cache,
+                value_cache,
+                q_head_count,
+                k_head_count,
+                head_dim,
+                q_offset,
+                k_offset,
+                v_offset,
+                rotary_dim,
+                base,
+                position_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                eps,
+                max_tokens,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn qkv_norm_rope_cache_f32_device_u32_ptr(
+            &self,
+            qkv: &CudaBuffer,
+            q_weights_bf16: &CudaBuffer,
+            k_weights_bf16: &CudaBuffer,
+            q_out: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            q_head_count: usize,
+            k_head_count: usize,
+            head_dim: usize,
+            q_offset: usize,
+            k_offset: usize,
+            v_offset: usize,
+            rotary_dim: usize,
+            base: f32,
+            position_device_u32: *const u32,
+            eps: f32,
+            max_tokens: usize,
+        ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_qkv_norm_rope_cache_f32_device_u32(
@@ -2036,8 +2337,8 @@ mod imp {
                     q_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     k_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
                     q_out.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     q_head_count as u32,
                     k_head_count as u32,
                     head_dim as u32,
@@ -2046,9 +2347,64 @@ mod imp {
                     v_offset as u32,
                     rotary_dim as u32,
                     base,
-                    position_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    position_device_u32,
                     eps,
                     max_tokens as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn qkv_norm_rope_cache_rows_f32_device_u32(
+            &self,
+            qkv: &CudaBuffer,
+            q_weights_bf16: &CudaBuffer,
+            k_weights_bf16: &CudaBuffer,
+            q_out: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            q_head_count: usize,
+            k_head_count: usize,
+            head_dim: usize,
+            qkv_row_stride: usize,
+            q_out_row_stride: usize,
+            q_offset: usize,
+            k_offset: usize,
+            v_offset: usize,
+            rotary_dim: usize,
+            base: f32,
+            start_position_device_u32: &CudaBuffer,
+            eps: f32,
+            max_tokens: usize,
+            start_slot_device_u32: &CudaBuffer,
+            row_count: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qkv_norm_rope_cache_rows_f32_device_u32(
+                    qkv.inner.ptr.as_ptr().cast::<f32>(),
+                    q_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    k_weights_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    q_out.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    q_head_count as u32,
+                    k_head_count as u32,
+                    head_dim as u32,
+                    qkv_row_stride as u32,
+                    q_out_row_stride as u32,
+                    q_offset as u32,
+                    k_offset as u32,
+                    v_offset as u32,
+                    rotary_dim as u32,
+                    base,
+                    start_position_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    eps,
+                    max_tokens as u32,
+                    start_slot_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    row_count as u32,
                     self.stream,
                 )
             };
@@ -2073,7 +2429,7 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_logits_seq_f32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     q_head_count as u32,
                     q_heads_per_kv as u32,
@@ -2106,13 +2462,46 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_logits_seq_f32_device_u32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     q_head_count as u32,
                     q_heads_per_kv as u32,
                     head_dim as u32,
                     kv_row_stride as u32,
                     seq_len_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    capacity as u32,
+                    logits_row_stride as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_logits_seq_f32_device_u32_ptr(
+            &self,
+            q: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            logits: &CudaBuffer,
+            q_head_count: usize,
+            q_heads_per_kv: usize,
+            head_dim: usize,
+            kv_row_stride: usize,
+            seq_len_device_u32: *const u32,
+            capacity: usize,
+            logits_row_stride: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_attention_logits_seq_f32_device_u32(
+                    q.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    logits.inner.ptr.as_ptr().cast::<f32>(),
+                    q_head_count as u32,
+                    q_heads_per_kv as u32,
+                    head_dim as u32,
+                    kv_row_stride as u32,
+                    seq_len_device_u32,
                     capacity as u32,
                     logits_row_stride as u32,
                     self.stream,
@@ -2184,7 +2573,7 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_weighted_sum_f32(
                     probs.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     q_head_count as u32,
                     q_heads_per_kv as u32,
@@ -2221,7 +2610,7 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_weighted_sum_f32(
                     probs.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner
                         .ptr
                         .as_ptr()
@@ -2260,7 +2649,7 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_weighted_sum_f32_device_u32(
                     probs.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     q_head_count as u32,
                     q_heads_per_kv as u32,
@@ -2295,7 +2684,7 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_softmax_weighted_sum_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     q_head_count as u32,
                     q_heads_per_kv as u32,
@@ -2332,7 +2721,7 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_softmax_weighted_sum_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner
                         .ptr
                         .as_ptr()
@@ -2371,13 +2760,48 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_softmax_weighted_sum_f32_device_u32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     q_head_count as u32,
                     q_heads_per_kv as u32,
                     head_dim as u32,
                     kv_row_stride as u32,
                     seq_len_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    capacity as u32,
+                    logits_row_stride as u32,
+                    out_row_stride as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_softmax_weighted_sum_f32_device_u32_ptr(
+            &self,
+            logits: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            out: &CudaBuffer,
+            q_head_count: usize,
+            q_heads_per_kv: usize,
+            head_dim: usize,
+            kv_row_stride: usize,
+            seq_len_device_u32: *const u32,
+            capacity: usize,
+            logits_row_stride: usize,
+            out_row_stride: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_attention_softmax_weighted_sum_f32_device_u32(
+                    logits.inner.ptr.as_ptr().cast::<f32>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    out.inner.ptr.as_ptr().cast::<f32>(),
+                    q_head_count as u32,
+                    q_heads_per_kv as u32,
+                    head_dim as u32,
+                    kv_row_stride as u32,
+                    seq_len_device_u32,
                     capacity as u32,
                     logits_row_stride as u32,
                     out_row_stride as u32,
@@ -2406,8 +2830,8 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     q_head_count as u32,
                     q_heads_per_kv as u32,
@@ -2444,8 +2868,8 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     query_count as u32,
                     q_head_count as u32,
@@ -2482,8 +2906,8 @@ mod imp {
             let status = unsafe {
                 makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner
                         .ptr
                         .as_ptr()
@@ -2517,20 +2941,89 @@ mod imp {
             capacity: usize,
             out_row_stride: usize,
         ) -> Result<(), String> {
+            self.attention_seq_softmax_weighted_sum_f32_device_u32_ptr(
+                q,
+                key_cache,
+                value_cache,
+                out,
+                q_head_count,
+                q_heads_per_kv,
+                head_dim,
+                kv_row_stride,
+                seq_len_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                capacity,
+                out_row_stride,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_f32_device_u32_ptr(
+            &self,
+            q: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            out: &CudaBuffer,
+            q_head_count: usize,
+            q_heads_per_kv: usize,
+            head_dim: usize,
+            kv_row_stride: usize,
+            seq_len_device_u32: *const u32,
+            capacity: usize,
+            out_row_stride: usize,
+        ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_device_u32(
                     q.inner.ptr.as_ptr().cast::<f32>(),
-                    key_cache.inner.ptr.as_ptr().cast::<f32>(),
-                    value_cache.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     q_head_count as u32,
                     q_heads_per_kv as u32,
                     head_dim as u32,
                     kv_row_stride as u32,
-                    seq_len_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    seq_len_device_u32,
                     capacity as u32,
                     out_row_stride as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_rows_f32_device_u32(
+            &self,
+            q: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            out: &CudaBuffer,
+            query_count: usize,
+            q_head_count: usize,
+            q_heads_per_kv: usize,
+            head_dim: usize,
+            kv_row_stride: usize,
+            q_row_stride: usize,
+            out_row_stride: usize,
+            base_seq_len_device_u32: &CudaBuffer,
+            capacity: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows_f32_device_u32(
+                    q.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    out.inner.ptr.as_ptr().cast::<f32>(),
+                    query_count as u32,
+                    q_head_count as u32,
+                    q_heads_per_kv as u32,
+                    head_dim as u32,
+                    kv_row_stride as u32,
+                    q_row_stride as u32,
+                    out_row_stride as u32,
+                    base_seq_len_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    capacity as u32,
                     self.stream,
                 )
             };
@@ -2583,13 +3076,30 @@ mod imp {
             out_index: &CudaBuffer,
             n: usize,
         ) -> Result<(), String> {
+            self.masked_argmax_f32_device_u32_ptr(
+                logits,
+                disallowed_token_ids,
+                disallowed_count_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                out_index.inner.ptr.as_ptr().cast::<u32>(),
+                n,
+            )
+        }
+
+        pub fn masked_argmax_f32_device_u32_ptr(
+            &self,
+            logits: &CudaBuffer,
+            disallowed_token_ids: &CudaBuffer,
+            disallowed_count_device_u32: *const u32,
+            out_index: *mut u32,
+            n: usize,
+        ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_masked_argmax_f32_device_u32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     disallowed_token_ids.inner.ptr.as_ptr().cast::<u32>(),
-                    disallowed_count_device_u32.inner.ptr.as_ptr().cast::<u32>(),
-                    out_index.inner.ptr.as_ptr().cast::<u32>(),
+                    disallowed_count_device_u32,
+                    out_index,
                     n as u32,
                     self.stream,
                 )
@@ -2824,6 +3334,7 @@ mod imp {
     use crate::backend::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
     pub struct CudaBuffer;
+    pub struct CudaMappedHostU32Buffer;
     pub struct CudaGraph;
     pub struct CudaGraphExec;
 
@@ -2849,6 +3360,10 @@ mod imp {
         }
 
         pub fn alloc_u32(&self, _len: usize) -> Result<CudaBuffer, String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn alloc_mapped_u32(&self, _len: usize) -> Result<CudaMappedHostU32Buffer, String> {
             Err("CUDA runtime is unavailable".to_string())
         }
 
@@ -2919,6 +3434,16 @@ mod imp {
             _output_f32: &CudaBuffer,
             _n_cols: usize,
             _row_index_device_u32: &CudaBuffer,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn nvfp4_get_row_f32_device_u32_ptr(
+            &self,
+            _weights_nvfp4: &CudaBuffer,
+            _output_f32: &CudaBuffer,
+            _n_cols: usize,
+            _row_index_device_u32: *const u32,
         ) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
         }
@@ -3263,6 +3788,58 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        #[allow(clippy::too_many_arguments)]
+        pub fn qkv_norm_rope_cache_f32_device_u32_ptr(
+            &self,
+            _qkv: &CudaBuffer,
+            _q_weights_bf16: &CudaBuffer,
+            _k_weights_bf16: &CudaBuffer,
+            _q_out: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _q_head_count: usize,
+            _k_head_count: usize,
+            _head_dim: usize,
+            _q_offset: usize,
+            _k_offset: usize,
+            _v_offset: usize,
+            _rotary_dim: usize,
+            _base: f32,
+            _position_device_u32: *const u32,
+            _eps: f32,
+            _max_tokens: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn qkv_norm_rope_cache_rows_f32_device_u32(
+            &self,
+            _qkv: &CudaBuffer,
+            _q_weights_bf16: &CudaBuffer,
+            _k_weights_bf16: &CudaBuffer,
+            _q_out: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _q_head_count: usize,
+            _k_head_count: usize,
+            _head_dim: usize,
+            _qkv_row_stride: usize,
+            _q_out_row_stride: usize,
+            _q_offset: usize,
+            _k_offset: usize,
+            _v_offset: usize,
+            _rotary_dim: usize,
+            _base: f32,
+            _start_position_device_u32: &CudaBuffer,
+            _eps: f32,
+            _max_tokens: usize,
+            _start_slot_device_u32: &CudaBuffer,
+            _row_count: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn attention_logits_seq_f32(
             &self,
             _q: &CudaBuffer,
@@ -3290,6 +3867,23 @@ mod imp {
             _head_dim: usize,
             _kv_row_stride: usize,
             _seq_len_device_u32: &CudaBuffer,
+            _capacity: usize,
+            _logits_row_stride: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_logits_seq_f32_device_u32_ptr(
+            &self,
+            _q: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _logits: &CudaBuffer,
+            _q_head_count: usize,
+            _q_heads_per_kv: usize,
+            _head_dim: usize,
+            _kv_row_stride: usize,
+            _seq_len_device_u32: *const u32,
             _capacity: usize,
             _logits_row_stride: usize,
         ) -> Result<(), String> {
@@ -3426,6 +4020,24 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_softmax_weighted_sum_f32_device_u32_ptr(
+            &self,
+            _logits: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _out: &CudaBuffer,
+            _q_head_count: usize,
+            _q_heads_per_kv: usize,
+            _head_dim: usize,
+            _kv_row_stride: usize,
+            _seq_len_device_u32: *const u32,
+            _capacity: usize,
+            _logits_row_stride: usize,
+            _out_row_stride: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn attention_seq_softmax_weighted_sum_f32(
             &self,
             _q: &CudaBuffer,
@@ -3500,6 +4112,44 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_f32_device_u32_ptr(
+            &self,
+            _q: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _out: &CudaBuffer,
+            _q_head_count: usize,
+            _q_heads_per_kv: usize,
+            _head_dim: usize,
+            _kv_row_stride: usize,
+            _seq_len_device_u32: *const u32,
+            _capacity: usize,
+            _out_row_stride: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_rows_f32_device_u32(
+            &self,
+            _q: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _out: &CudaBuffer,
+            _query_count: usize,
+            _q_head_count: usize,
+            _q_heads_per_kv: usize,
+            _head_dim: usize,
+            _kv_row_stride: usize,
+            _q_row_stride: usize,
+            _out_row_stride: usize,
+            _base_seq_len_device_u32: &CudaBuffer,
+            _capacity: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn argmax_f32(
             &self,
             _logits: &CudaBuffer,
@@ -3526,6 +4176,17 @@ mod imp {
             _disallowed_token_ids: &CudaBuffer,
             _disallowed_count_device_u32: &CudaBuffer,
             _out_index: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn masked_argmax_f32_device_u32_ptr(
+            &self,
+            _logits: &CudaBuffer,
+            _disallowed_token_ids: &CudaBuffer,
+            _disallowed_count_device_u32: *const u32,
+            _out_index: *mut u32,
             _n: usize,
         ) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
