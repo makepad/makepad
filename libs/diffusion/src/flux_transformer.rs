@@ -14,6 +14,7 @@ use makepad_ggml::{
 use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 const FLUX_TIMESTEP_EMBED_DIM: i32 = 256;
 const FLUX_LAYER_NORM_EPSILON: f32 = 1.0e-6;
@@ -45,6 +46,13 @@ pub struct FluxTransformerGraph {
 pub struct CompiledFluxTransformerMetal {
     graph: FluxTransformerGraph,
     session: MetalGraphSession,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FluxTransformerCompileTiming {
+    pub graph_build_ms: f64,
+    pub graph_prepare_ms: f64,
+    pub session_create_ms: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -127,7 +135,19 @@ impl CompiledFluxTransformerMetal {
         conditioning: &FluxConditioning,
         latent_shape: FluxLatentShape,
     ) -> Result<Self> {
+        Ok(
+            Self::compile_with_runtime_profiled(runtime, weights, conditioning, latent_shape)?.0,
+        )
+    }
+
+    pub fn compile_with_runtime_profiled(
+        runtime: MetalRuntime,
+        weights: &mut LoadedFluxTransformerWeights,
+        conditioning: &FluxConditioning,
+        latent_shape: FluxLatentShape,
+    ) -> Result<(Self, FluxTransformerCompileTiming)> {
         for attempt in 0..=MAX_GRAPH_GROWTH_ATTEMPTS {
+            let build_start = Instant::now();
             let graph = match build_flux_transformer_graph(weights, conditioning, latent_shape) {
                 Ok(graph) => graph,
                 Err(err) if is_context_oom(&err) && attempt < MAX_GRAPH_GROWTH_ATTEMPTS => {
@@ -140,8 +160,12 @@ impl CompiledFluxTransformerMetal {
                 }
                 Err(err) => return Err(err),
             };
+            let graph_build_ms = build_start.elapsed().as_secs_f64() * 1000.0;
+            let prepare_start = Instant::now();
             let prepared = prepare_graph(&weights.ctx, &graph.graph, runtime.features())
                 .map_err(DiffusionError::model)?;
+            let graph_prepare_ms = prepare_start.elapsed().as_secs_f64() * 1000.0;
+            let session_start = Instant::now();
             let session = MetalGraphSession::from_runtime(
                 runtime.clone(),
                 &weights.ctx,
@@ -150,7 +174,15 @@ impl CompiledFluxTransformerMetal {
                 BufferStorageMode::Shared,
             )
             .map_err(DiffusionError::model)?;
-            return Ok(Self { graph, session });
+            let session_create_ms = session_start.elapsed().as_secs_f64() * 1000.0;
+            return Ok((
+                Self { graph, session },
+                FluxTransformerCompileTiming {
+                    graph_build_ms,
+                    graph_prepare_ms,
+                    session_create_ms,
+                },
+            ));
         }
 
         Err(DiffusionError::model(

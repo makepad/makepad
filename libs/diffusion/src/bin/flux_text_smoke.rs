@@ -112,12 +112,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prompts = FluxTokenizedPrompts::from_prompts(&plan.prompts)?;
     let mut weights = FluxLoadedTextEncoders::load_from_plan(&plan)?;
     let compiled = FluxCompiledTextEncodersMetal::compile(&mut weights, &prompts)?;
+    let t5_backend = compiled.t5_backend_name();
     let conditioning = compiled.execute(&weights, &prompts)?;
     let clip_summary = summarize(&conditioning.clip_pooled);
     let t5_summary = summarize(&conditioning.t5_hidden_states);
     let reference_conditioning = load_conditioning_override()?;
 
     println!("workflow: {}", workflow.path.display());
+    println!("t5xxl backend: {}", t5_backend);
     println!("prompt.clip_l: {}", plan.prompts.clip_l);
     println!("prompt.t5xxl: {}", plan.prompts.t5xxl);
     println!(

@@ -1,7 +1,7 @@
 use crate::flux::T5TextEncoderConfig;
 use crate::t5::T5TokenizedPrompt;
 use crate::{DiffusionError, Result};
-use makepad_ggml::backend::try_matmul_nt_ggml_bytes;
+use makepad_ggml::backend::{try_get_rows_ggml_bytes, try_matmul_nt_ggml_bytes};
 use makepad_ggml::backend::metal::{
     prepare_graph, try_add_f32, try_gelu_f32, try_matmul_nn_f32, try_matmul_nt_f32, try_mul_f32,
     try_rms_norm_mul_f32, BufferStorageMode, MetalGraphSession, MetalGraphTensorWrite,
@@ -77,6 +77,28 @@ pub struct LazyT5xxlMetal {
     token_count: usize,
     eos_index: usize,
     attention_bias: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum T5xxlExecutionMode {
+    Lazy,
+    Compiled,
+}
+
+impl T5xxlExecutionMode {
+    pub fn from_env() -> Self {
+        match std::env::var("FLUX_T5_MODE") {
+            Ok(value) if value.eq_ignore_ascii_case("compiled") => Self::Compiled,
+            _ => Self::Lazy,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lazy => "lazy",
+            Self::Compiled => "compiled",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -539,16 +561,24 @@ fn embed_t5_tokens(weights: &LoadedT5xxlWeights, token_ids: &[i32], model_dim: u
             model_dim, embedding.cols
         )));
     }
-    // Metal get_rows still has unresolved multi-row issues in our backend.
-    // T5 padding repeats the pad token heavily, so correctness matters more here than gather speed.
-    let values = get_rows_ggml_bytes_cpu(
+    let values = if let Some(values) = try_get_rows_ggml_bytes(
         embedding.bytes,
         embedding.ggml_type,
         embedding.cols,
         embedding.rows,
         token_ids,
-    )
-    .ok_or_else(|| DiffusionError::model("t5xxl embedding gather fallback failed"))?;
+    ) {
+        values
+    } else {
+        get_rows_ggml_bytes_cpu(
+            embedding.bytes,
+            embedding.ggml_type,
+            embedding.cols,
+            embedding.rows,
+            token_ids,
+        )
+        .ok_or_else(|| DiffusionError::model("t5xxl embedding gather fallback failed"))?
+    };
     RowsTensor::new(token_ids.len(), model_dim, values)
 }
 
