@@ -1068,10 +1068,15 @@ static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_
     }
     __syncthreads();
 
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        shared_logits[token] = makepad_ggml_cuda_bf16_round(expf(shared_logits[token] - shared_max) / shared_sum);
+    }
+    __syncthreads();
+
     for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
         float acc = 0.0f;
         for (uint32_t token = 0; token < seq_len; ++token) {
-            const float prob = makepad_ggml_cuda_bf16_round(expf(shared_logits[token] - shared_max) / shared_sum);
+            const float prob = shared_logits[token];
             const uint32_t slot = (start_slot + token) % capacity;
             const float value = value_row[slot * head_dim + dim];
             acc = makepad_ggml_cuda_bf16_round(acc + makepad_ggml_cuda_bf16_round(prob * value));
@@ -1141,10 +1146,15 @@ static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_f32_
     }
     __syncthreads();
 
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        shared_logits[token] = makepad_ggml_cuda_bf16_round(expf(shared_logits[token] - shared_max) / shared_sum);
+    }
+    __syncthreads();
+
     for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
         float acc = 0.0f;
         for (uint32_t token = 0; token < seq_len; ++token) {
-            const float prob = makepad_ggml_cuda_bf16_round(expf(shared_logits[token] - shared_max) / shared_sum);
+            const float prob = shared_logits[token];
             const float value = value_row[token * head_dim + dim];
             acc = makepad_ggml_cuda_bf16_round(acc + makepad_ggml_cuda_bf16_round(prob * value));
         }
@@ -1216,11 +1226,16 @@ static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows
     }
     __syncthreads();
 
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        shared_logits[token] = makepad_ggml_cuda_bf16_round(expf(shared_logits[token] - shared_max) / shared_sum);
+    }
+    __syncthreads();
+
     float * out_row = out + query_idx * out_row_stride + q_head * head_dim;
     for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
         float acc = 0.0f;
         for (uint32_t token = 0; token < seq_len; ++token) {
-            const float prob = makepad_ggml_cuda_bf16_round(expf(shared_logits[token] - shared_max) / shared_sum);
+            const float prob = shared_logits[token];
             const float value = value_row[token * head_dim + dim];
             acc = makepad_ggml_cuda_bf16_round(acc + makepad_ggml_cuda_bf16_round(prob * value));
         }
