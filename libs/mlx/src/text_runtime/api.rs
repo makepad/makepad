@@ -1,5 +1,7 @@
 use crate::chat::extract_gemma4_assistant_response_text;
-pub use crate::layer0_cached_case::{GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode};
+pub use crate::layer0_cached_case::{
+    GemmaExactMetalBackendMode, GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode,
+};
 use crate::multimodal::{prepare_image_prompt, GemmaVisionRuntime, PreparedImagePrompt};
 
 #[derive(Clone, Debug)]
@@ -122,6 +124,7 @@ fn run_two_token_ids_with_loaded(
 pub enum GemmaPromptFormat {
     RawBos,
     #[default]
+    AutoChat,
     Gemma4UserTurn,
 }
 
@@ -141,7 +144,7 @@ impl Default for GemmaTextGenerationOptions {
     fn default() -> Self {
         Self {
             max_new_tokens: 32,
-            prompt_format: GemmaPromptFormat::Gemma4UserTurn,
+            prompt_format: GemmaPromptFormat::AutoChat,
         }
     }
 }
@@ -191,6 +194,17 @@ pub struct GemmaTextGenerationOutput {
     pub generated_token_ids: Arc<[u32]>,
     pub generated_text: Arc<str>,
     pub stop_reason: GemmaStopReason,
+}
+
+#[derive(Clone, Debug)]
+pub struct GemmaExactPrefillProbeOutput {
+    pub model_path: PathBuf,
+    pub prompt_text: Arc<str>,
+    pub formatted_prompt_text: Arc<str>,
+    pub prompt_token_ids: Arc<[u32]>,
+    pub final_hidden_bf16_words: Arc<[u16]>,
+    pub next_token: MlxGreedyToken,
+    pub next_token_text: Arc<str>,
 }
 
 #[derive(Clone, Debug)]
@@ -1298,8 +1312,18 @@ impl GemmaTextModel {
         &self.runtime.weights.snapshot.tokenizer_config
     }
 
+    pub fn default_chat_prompt_format(&self) -> GemmaPromptFormat {
+        self.runtime.default_chat_prompt_format()
+    }
+
     pub fn chat_sampling_options(&self) -> GemmaTextSamplingOptions {
         GemmaTextSamplingOptions::chat_from_generation_config(
+            &self.runtime.weights.snapshot.generation_config,
+        )
+    }
+
+    pub fn default_sampling_options(&self) -> GemmaTextSamplingOptions {
+        GemmaTextSamplingOptions::from_generation_config(
             &self.runtime.weights.snapshot.generation_config,
         )
     }
@@ -1827,6 +1851,54 @@ pub fn generate_multimodal_text_with_backend_config(
 ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
     GemmaTextModel::load_with_backend_config(model_path, backend_config)?
         .generate_multimodal(image_path, prompt_text, options)
+}
+
+pub fn probe_exact_prefill_with_backend_config(
+    model_path: PathBuf,
+    prompt_text: impl Into<String>,
+    prompt_format: GemmaPromptFormat,
+    backend_config: GemmaExactMetalConfig,
+) -> Result<GemmaExactPrefillProbeOutput, Box<dyn Error>> {
+    let prompt_text = Arc::<str>::from(prompt_text.into());
+    let runtime = GemmaTextRuntimeSession::load_with_backend_config(&model_path, backend_config)
+        .map_err(|err| err.to_string())?;
+    let formatted_prompt_text =
+        Arc::<str>::from(runtime.format_prompt_text(prompt_text.as_ref(), prompt_format));
+    let prompt_token_ids = runtime
+        .tokenize_prompt(formatted_prompt_text.as_ref())
+        .map_err(|err| err.to_string())?;
+    let exact_backend = runtime
+        .exact_backend
+        .as_ref()
+        .cloned()
+        .ok_or("exact metal backend unavailable for prefill probe")?;
+    let mut backend = exact_backend
+        .lock()
+        .map_err(|_| "exact backend mutex poisoned".to_string())?;
+    let final_hidden_bf16_words = Arc::<[u16]>::from(
+        backend
+            .prefill_prompt_hidden_words_from_token_ids(prompt_token_ids.as_ref(), 0)
+            .map_err(|err| err.to_string())?,
+    );
+    let next_token = backend
+        .greedy_token_from_hidden_words(final_hidden_bf16_words.as_ref())
+        .map_err(|err| err.to_string())?;
+    let next_token_text = Arc::<str>::from(
+        runtime
+            .tokenizer
+            .decode(&[next_token.token_id])
+            .map_err(|err| err.to_string())?,
+    );
+
+    Ok(GemmaExactPrefillProbeOutput {
+        model_path: runtime.model_path.clone(),
+        prompt_text,
+        formatted_prompt_text,
+        prompt_token_ids,
+        final_hidden_bf16_words,
+        next_token,
+        next_token_text,
+    })
 }
 
 pub fn benchmark_text_generation(
