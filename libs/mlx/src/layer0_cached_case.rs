@@ -645,6 +645,7 @@ struct MlxAffineDequantTokenRowArgs {
 struct MlxRmsNormRowArgs {
     n: u32,
     eps: f32,
+    threadgroup_width: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -654,6 +655,7 @@ struct MlxRmsNormRowsArgs {
     row_stride: u32,
     row_count: u32,
     eps: f32,
+    threadgroup_width: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -860,8 +862,17 @@ pub enum GemmaExactMetalKvCompressionMode {
     RotorPlanar3FullAttentionK,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GemmaExactMetalBackendMode {
+    #[default]
+    Auto,
+    Force,
+    Disabled,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GemmaExactMetalConfig {
+    pub backend_mode: GemmaExactMetalBackendMode,
     pub kv_compression: GemmaExactMetalKvCompressionMode,
 }
 
@@ -2444,11 +2455,14 @@ impl ExactMetalQprojLayout {
     }
 
     fn uses_fast_qmv(self, n_in: u32) -> bool {
-        self.out_rows % 8 == 0 && n_in % self.fast_n_in_multiple == 0
+        self.quant_bits != 8
+            && self.out_rows % 8 == 0
+            && n_in % self.fast_n_in_multiple == 0
     }
 
     fn uses_fast_qmv_wide(self, n_in: u32) -> bool {
-        self.quant_bits == 8 && self.out_rows % 8 == 0 && n_in % 512 == 0
+        let _ = n_in;
+        false
     }
 
     fn qmv_variant(self, n_in: u32) -> ExactMetalQmvVariant {
@@ -2697,6 +2711,7 @@ struct ExactMetalTextIoPipelines {
 struct ExactMetalTextIoWorkspace {
     embed_weight_row_bytes: usize,
     embed_qparams_row_bytes: usize,
+    embed_scale: f32,
     logits_qproj: ExactMetalQprojLayout,
     vocab_size: usize,
     hidden_size: usize,
@@ -3679,6 +3694,7 @@ impl ExactMetalTextIoWorkspace {
         Ok(Self {
             embed_weight_row_bytes,
             embed_qparams_row_bytes,
+            embed_scale: bf16_round_to_f32((embed_weight_entry.shape[1] as f32).sqrt()),
             logits_qproj,
             vocab_size,
             hidden_size,
@@ -3752,6 +3768,19 @@ pub struct ExactMetalLayerProfile {
     pub attention: GemmaAttentionKind,
     pub elapsed: Duration,
     pub counters: MetalRuntimeCounters,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct ExactMetalLayerStageHashes {
+    pub input_norm: u64,
+    pub q_norm: u64,
+    pub q: u64,
+    pub k_norm: u64,
+    pub k: u64,
+    pub v: u64,
+    pub attention_out: u64,
+    pub attention_oproj: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -4238,7 +4267,7 @@ impl ExactMetalTextRuntimeSession {
         let owns_command_batch = !runtime.command_batch_is_active();
         let args = MlxAffineDequantRowArgs {
             n: self.text_io.hidden_size as u32,
-            embed_scale: bf16_round_to_f32((self.text_io.hidden_size as f32).sqrt()),
+            embed_scale: self.text_io.embed_scale,
         };
         if owns_command_batch {
             runtime.begin_command_batch()?;
@@ -4327,7 +4356,7 @@ impl ExactMetalTextRuntimeSession {
         let owns_command_batch = !runtime.command_batch_is_active();
         let args = MlxAffineDequantTokenRowArgs {
             n: self.text_io.hidden_size as u32,
-            embed_scale: bf16_round_to_f32((self.text_io.hidden_size as f32).sqrt()),
+            embed_scale: self.text_io.embed_scale,
             weight_words_per_row: self.text_io.logits_qproj.weight_words_per_row,
             qparams_per_row: self.text_io.logits_qproj.qparams_per_row,
             vocab_size: self.text_io.vocab_size as u32,
@@ -4456,13 +4485,14 @@ impl ExactMetalTextRuntimeSession {
     ) -> Result<(), Box<dyn Error>> {
         let runtime = self.session.runtime.clone();
         let owns_command_batch = !runtime.command_batch_is_active();
-        let n_reads = 4usize;
-        let simd_size = 32usize;
-        let rms_threadgroup_size =
-            simd_size * self.text_io.hidden_size.div_ceil(n_reads).div_ceil(simd_size);
+        let rms_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
+            self.text_io.hidden_size,
+            self.text_io.pipelines.rms.max_threads_per_threadgroup,
+        )?;
         let rms_args = MlxRmsNormRowArgs {
             n: self.text_io.hidden_size as u32,
             eps: self.text_io.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         if owns_command_batch {
             runtime.begin_command_batch()?;
@@ -4495,11 +4525,7 @@ impl ExactMetalTextRuntimeSession {
                 height: 1,
                 depth: 1,
             },
-            MetalSize {
-                width: rms_threadgroup_size as u64,
-                height: 1,
-                depth: 1,
-            },
+            rms_threads_per_threadgroup,
         )?;
         if owns_command_batch {
             runtime.end_command_batch()?;
@@ -4819,22 +4845,15 @@ impl ExactMetalTextRuntimeSession {
             );
         }
 
-        let n_reads = 4usize;
-        let simd_size = 32usize;
-        let rms_threadgroup_size =
-            simd_size * workspace.hidden_size.div_ceil(n_reads).div_ceil(simd_size);
-        let head_norm_threadgroup_size =
-            simd_size * workspace.head_dim.div_ceil(n_reads).div_ceil(simd_size);
         let rms_threadgroups = MetalSize {
             width: 1,
             height: 1,
             depth: 1,
         };
-        let rms_threads_per_threadgroup = MetalSize {
-            width: rms_threadgroup_size as u64,
-            height: 1,
-            depth: 1,
-        };
+        let rms_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
+            workspace.hidden_size,
+            workspace.pipelines.rms.max_threads_per_threadgroup,
+        )?;
         let proj_threads_per_threadgroup = MetalSize {
             width: 32,
             height: 2,
@@ -4865,11 +4884,10 @@ impl ExactMetalTextRuntimeSession {
             height: 1,
             depth: 1,
         };
-        let head_norm_threads_per_threadgroup = MetalSize {
-            width: head_norm_threadgroup_size as u64,
-            height: 1,
-            depth: 1,
-        };
+        let head_norm_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
+            workspace.head_dim,
+            workspace.pipelines.head_norm.max_threads_per_threadgroup,
+        )?;
         let q_rope_threadgroups = MetalSize {
             width: (workspace.head_dim as u64).div_ceil(32),
             height: workspace.q_head_count as u64,
@@ -4927,11 +4945,7 @@ impl ExactMetalTextRuntimeSession {
             height: 1,
             depth: 1,
         };
-        let router_scale_threads_per_threadgroup = MetalSize {
-            width: rms_threadgroup_size as u64,
-            height: 1,
-            depth: 1,
-        };
+        let router_scale_threads_per_threadgroup = rms_threads_per_threadgroup;
         let router_scale_threadgroups = MetalSize {
             width: 1,
             height: 1,
@@ -4982,6 +4996,7 @@ impl ExactMetalTextRuntimeSession {
         let rms_args = MlxRmsNormRowArgs {
             n: workspace.hidden_size as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         let qkv_proj_args = workspace.qkv_proj.row_args(workspace.hidden_size as u32);
         let o_proj_args = workspace.o_proj.row_args(workspace.q_proj.out_rows);
@@ -4990,18 +5005,21 @@ impl ExactMetalTextRuntimeSession {
             row_stride: workspace.head_dim as u32,
             row_count: workspace.q_head_count as u32,
             eps: workspace.eps,
+            threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
         };
         let k_head_norm_args = MlxRmsNormRowsArgs {
             n: workspace.head_dim as u32,
             row_stride: workspace.head_dim as u32,
             row_count: workspace.k_head_count as u32,
             eps: workspace.eps,
+            threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
         };
         let v_head_norm_args = MlxRmsNormRowsArgs {
             n: workspace.head_dim as u32,
             row_stride: workspace.head_dim as u32,
             row_count: workspace.v_head_count as u32,
             eps: workspace.eps,
+            threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
         };
         let q_rope_args = workspace.q_rope.args(position)?;
         let k_rope_args = workspace.k_rope.args(position)?;
@@ -5027,10 +5045,12 @@ impl ExactMetalTextRuntimeSession {
         let post_attention_norm_args = MlxRmsNormRowArgs {
             n: workspace.post_attention_norm_len as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         let pre_ffn_norm_args = MlxRmsNormRowArgs {
             n: workspace.pre_feedforward_norm_len as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         let mlp_gate_up_args = workspace
             .mlp_gate_up
@@ -5082,14 +5102,17 @@ impl ExactMetalTextRuntimeSession {
         let post_ffn_norm1_args = MlxRmsNormRowArgs {
             n: workspace.post_feedforward_norm1_len as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         let post_ffn_norm_args = MlxRmsNormRowArgs {
             n: workspace.post_feedforward_norm_len as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         let post_ffn_norm2_args = MlxRmsNormRowArgs {
             n: workspace.post_feedforward_norm2_len as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
 
         if let Some(input_words) = input_words {
@@ -6630,6 +6653,34 @@ impl ExactMetalTextRuntimeSession {
         let shared = self.read_shared_logits_greedy_token()?;
         Ok((device, shared))
     }
+
+    #[cfg(test)]
+    pub(crate) fn layer_stage_hashes(
+        &mut self,
+        layer_idx: usize,
+    ) -> Result<ExactMetalLayerStageHashes, Box<dyn Error>> {
+        let workspace = self.layer_workspace(layer_idx)?;
+        let hash_buffer = |buffer: &MetalBuffer, len_words: usize| -> Result<u64, Box<dyn Error>> {
+            Ok(fnv1a64_u32_words(&read_bf16_buffer_bits(
+                &self.session.runtime,
+                buffer,
+                len_words,
+            )?))
+        };
+        Ok(ExactMetalLayerStageHashes {
+            input_norm: hash_buffer(&workspace.buffers.h, workspace.hidden_size)?,
+            q_norm: hash_buffer(&workspace.buffers.q_norm, workspace.q_proj.out_len())?,
+            q: hash_buffer(&workspace.buffers.q_rope, workspace.q_proj.out_len())?,
+            k_norm: hash_buffer(&workspace.buffers.k_norm, workspace.k_proj.out_len())?,
+            k: hash_buffer(&workspace.buffers.k_rope, workspace.k_proj.out_len())?,
+            v: hash_buffer(&workspace.buffers.v_norm, workspace.k_proj.out_len())?,
+            attention_out: hash_buffer(&workspace.buffers.attn_out, workspace.q_proj.out_len())?,
+            attention_oproj: hash_buffer(
+                &workspace.buffers.o_proj_out,
+                workspace.o_proj.out_len(),
+            )?,
+        })
+    }
 }
 
 pub fn profile_decode_layers_after_prompt_token_ids(
@@ -7326,6 +7377,28 @@ fn mlx_softmax_threads_per_threadgroup(
     }
     Ok(MetalSize {
         width: threadgroup_width,
+        height: 1,
+        depth: 1,
+    })
+}
+
+fn mlx_norm_threads_per_threadgroup(
+    n: usize,
+    max_threads_per_threadgroup: u64,
+) -> Result<MetalSize, Box<dyn Error>> {
+    const MLX_NORM_N_READS: usize = 4;
+    const MLX_SIMD_WIDTH: usize = 32;
+
+    let max_threads = usize::try_from(max_threads_per_threadgroup)?;
+    let max_simd_groups = (max_threads / MLX_SIMD_WIDTH).max(1);
+    let needed_threads = n.max(1).div_ceil(MLX_NORM_N_READS);
+    let needed_simd_groups = needed_threads.div_ceil(MLX_SIMD_WIDTH).max(1);
+    let simd_groups = needed_simd_groups.min(max_simd_groups);
+    let threadgroup_width = MLX_SIMD_WIDTH
+        .checked_mul(simd_groups)
+        .ok_or("norm threadgroup size overflow")?;
+    Ok(MetalSize {
+        width: u64::try_from(threadgroup_width)?,
         height: 1,
         depth: 1,
     })
@@ -8533,6 +8606,7 @@ fn run_layer_plan_with_session_from_sequence(
     let model_path = session.model_path.clone();
     let weights = session.weights.clone();
     let runtime = session.runtime.clone();
+    let quantization = &weights.snapshot.config.quantization;
     let layer_type = weights
         .snapshot
         .config
@@ -8540,6 +8614,7 @@ fn run_layer_plan_with_session_from_sequence(
         .layer_types
         .get(layer_idx)
         .ok_or_else(|| format!("missing text layer type for layer {layer_idx}"))?;
+    let hidden_size = weights.snapshot.config.text_config.hidden_size as usize;
     let attention_k_eq_v =
         weights.snapshot.config.text_config.attention_k_eq_v && layer_type == "full_attention";
     let layer_names = LayerTensorNames::for_layer(layer_idx, attention_k_eq_v);
@@ -9045,29 +9120,29 @@ fn run_layer_plan_with_session_from_sequence(
         return Err("cached layer sequence requires at least one prefill input".into());
     }
     for (prefill_index, prefill_x_words) in prefill_input_words_list.iter().enumerate() {
-        if prefill_x_words.len() != NORM_LEN {
+        if prefill_x_words.len() != hidden_size {
             return Err(format!(
                 "prefill input length mismatch at index {}: got {} expected {}",
                 prefill_index,
                 prefill_x_words.len(),
-                NORM_LEN
+                hidden_size
             )
             .into());
         }
     }
-    if decode_x_words.len() != NORM_LEN {
+    if decode_x_words.len() != hidden_size {
         return Err(format!(
             "decode input length mismatch: got {} expected {}",
             decode_x_words.len(),
-            NORM_LEN
+            hidden_size
         )
         .into());
     }
     let kv_capacity = prefill_input_words_list.len() + 1;
-    let x_buf = runtime.create_buffer(NORM_LEN * 2, BufferStorageMode::Shared)?;
+    let x_buf = runtime.create_buffer(hidden_size * 2, BufferStorageMode::Shared)?;
     let input_norm_weight_buf =
         session.private_weight_buffer(&layer_names.input_norm_weight_name)?;
-    let h_buf = runtime.create_buffer(NORM_LEN * 2, BufferStorageMode::Private)?;
+    let h_buf = runtime.create_buffer(hidden_size * 2, BufferStorageMode::Private)?;
 
     let q_weight_buf = session.private_weight_buffer(&layer_names.q.weight_name)?;
     let q_scales_buf = session.private_weight_buffer(&layer_names.q.scales_name)?;
@@ -9391,8 +9466,8 @@ fn run_layer_plan_with_session_from_sequence(
         nsg: 0,
     })?;
     let proj_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-        cache_name: "kernel_mlx_affine_qmv_row_bf16".to_string(),
-        base_name: "kernel_mlx_affine_qmv_row_bf16".to_string(),
+        cache_name: exact_affine_qmv_pipeline_name(quantization.bits, false, false)?.to_string(),
+        base_name: exact_affine_qmv_pipeline_name(quantization.bits, false, false)?.to_string(),
         constants: Vec::new(),
         smem_bytes: 0,
         nr0: 0,
@@ -9468,8 +9543,10 @@ fn run_layer_plan_with_session_from_sequence(
         })?;
     let o_proj_fast_pipeline = if validate_oproj {
         Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-            cache_name: "kernel_mlx_affine_qmv_fast_row_bf16".to_string(),
-            base_name: "kernel_mlx_affine_qmv_fast_row_bf16".to_string(),
+            cache_name: exact_affine_qmv_pipeline_name(quantization.bits, true, false)?
+                .to_string(),
+            base_name: exact_affine_qmv_pipeline_name(quantization.bits, true, false)?
+                .to_string(),
             constants: Vec::new(),
             smem_bytes: 0,
             nr0: 0,
@@ -9533,8 +9610,10 @@ fn run_layer_plan_with_session_from_sequence(
     };
     let selected_expert_proj_pipeline = if validate_moe_expert_gate {
         Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-            cache_name: "kernel_mlx_affine_qmv_selected_experts_row_bf16".to_string(),
-            base_name: "kernel_mlx_affine_qmv_selected_experts_row_bf16".to_string(),
+            cache_name: exact_affine_qmv_pipeline_name(quantization.bits, false, true)?
+                .to_string(),
+            base_name: exact_affine_qmv_pipeline_name(quantization.bits, false, true)?
+                .to_string(),
             constants: Vec::new(),
             smem_bytes: 0,
             nr0: 0,
@@ -9545,33 +9624,34 @@ fn run_layer_plan_with_session_from_sequence(
         None
     };
 
-    let n_reads = 4usize;
-    let simd_size = 32usize;
-    let rms_threadgroup_needed = NORM_LEN.div_ceil(n_reads);
-    let rms_simds_needed = rms_threadgroup_needed.div_ceil(simd_size);
-    let rms_threadgroup_size = simd_size * rms_simds_needed;
-    let head_norm_threadgroup_needed = head_dim.div_ceil(n_reads);
-    let head_norm_simds_needed = head_norm_threadgroup_needed.div_ceil(simd_size);
-    let head_norm_threadgroup_size = simd_size * head_norm_simds_needed;
+    let rms_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
+        hidden_size,
+        rms_pipeline.max_threads_per_threadgroup,
+    )?;
+    let head_norm_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
+        head_dim,
+        head_norm_pipeline.max_threads_per_threadgroup,
+    )?;
 
     let rms_args = MlxRmsNormRowArgs {
-        n: NORM_LEN as u32,
+        n: hidden_size as u32,
         eps: EPS,
+        threadgroup_width: rms_threads_per_threadgroup.width as u32,
     };
     let q_proj_args = MlxAffineQprojRowArgs {
-        n_in: NORM_LEN as u32,
+        n_in: hidden_size as u32,
         weight_words_per_row: q_weight_entry.shape[1] as u32,
         qparams_per_row: q_scales_entry.shape[1] as u32,
         out_rows: q_out_len as u32,
     };
     let k_proj_args = MlxAffineQprojRowArgs {
-        n_in: NORM_LEN as u32,
+        n_in: hidden_size as u32,
         weight_words_per_row: k_weight_entry.shape[1] as u32,
         qparams_per_row: k_scales_entry.shape[1] as u32,
         out_rows: k_out_len as u32,
     };
     let v_proj_args = MlxAffineQprojRowArgs {
-        n_in: NORM_LEN as u32,
+        n_in: hidden_size as u32,
         weight_words_per_row: v_weight_entry.shape[1] as u32,
         qparams_per_row: v_scales_entry.shape[1] as u32,
         out_rows: v_out_len as u32,
@@ -9582,7 +9662,7 @@ fn run_layer_plan_with_session_from_sequence(
                 weight_entry.shape[1] as u32,
                 scales_entry.shape[1] as u32,
                 o_out_len as u32,
-                4,
+                quantization.bits,
             ))
         } else {
             None
@@ -9592,6 +9672,7 @@ fn run_layer_plan_with_session_from_sequence(
         Some(MlxRmsNormRowArgs {
             n: post_attention_norm_len as u32,
             eps: EPS,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         })
     } else {
         None
@@ -9607,6 +9688,7 @@ fn run_layer_plan_with_session_from_sequence(
         Some(MlxRmsNormRowArgs {
             n: pre_feedforward_norm_len as u32,
             eps: EPS,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         })
     } else {
         None
@@ -9696,6 +9778,7 @@ fn run_layer_plan_with_session_from_sequence(
         Some(MlxRmsNormRowArgs {
             n: pre_feedforward_norm2_len as u32,
             eps: EPS,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         })
     } else {
         None
@@ -9750,6 +9833,7 @@ fn run_layer_plan_with_session_from_sequence(
         Some(MlxRmsNormRowArgs {
             n: post_feedforward_norm1_len as u32,
             eps: EPS,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         })
     } else {
         None
@@ -9758,6 +9842,7 @@ fn run_layer_plan_with_session_from_sequence(
         Some(MlxRmsNormRowArgs {
             n: post_feedforward_norm2_len as u32,
             eps: EPS,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         })
     } else {
         None
@@ -9767,18 +9852,21 @@ fn run_layer_plan_with_session_from_sequence(
         row_stride: head_dim as u32,
         row_count: q_head_count as u32,
         eps: EPS,
+        threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
     };
     let k_head_norm_args = MlxRmsNormRowsArgs {
         n: head_dim as u32,
         row_stride: head_dim as u32,
         row_count: k_head_count as u32,
         eps: EPS,
+        threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
     };
     let v_head_norm_args = MlxRmsNormRowsArgs {
         n: head_dim as u32,
         row_stride: head_dim as u32,
         row_count: v_head_count as u32,
         eps: EPS,
+        threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
     };
 
     let rms_bindings = [
@@ -10445,11 +10533,6 @@ fn run_layer_plan_with_session_from_sequence(
         height: 1,
         depth: 1,
     };
-    let rms_threads_per_threadgroup = MetalSize {
-        width: rms_threadgroup_size as u64,
-        height: 1,
-        depth: 1,
-    };
     let q_proj_threadgroups = MetalSize {
         width: 1,
         height: (q_out_len as u64).div_ceil(8),
@@ -10462,11 +10545,6 @@ fn run_layer_plan_with_session_from_sequence(
     };
     let q_head_norm_threadgroups = MetalSize {
         width: q_head_count as u64,
-        height: 1,
-        depth: 1,
-    };
-    let q_head_norm_threads_per_threadgroup = MetalSize {
-        width: head_norm_threadgroup_size as u64,
         height: 1,
         depth: 1,
     };
@@ -10485,11 +10563,6 @@ fn run_layer_plan_with_session_from_sequence(
         height: 1,
         depth: 1,
     };
-    let k_head_norm_threads_per_threadgroup = MetalSize {
-        width: head_norm_threadgroup_size as u64,
-        height: 1,
-        depth: 1,
-    };
     let v_proj_threadgroups = MetalSize {
         width: 1,
         height: (v_out_len as u64).div_ceil(8),
@@ -10502,11 +10575,6 @@ fn run_layer_plan_with_session_from_sequence(
     };
     let v_head_norm_threadgroups = MetalSize {
         width: v_head_count as u64,
-        height: 1,
-        depth: 1,
-    };
-    let v_head_norm_threads_per_threadgroup = MetalSize {
-        width: head_norm_threadgroup_size as u64,
         height: 1,
         depth: 1,
     };
@@ -10575,11 +10643,10 @@ fn run_layer_plan_with_session_from_sequence(
         height: 2,
         depth: 1,
     };
-    let router_scale_threads_per_threadgroup = MetalSize {
-        width: rms_threadgroup_size as u64,
-        height: 1,
-        depth: 1,
-    };
+    let q_head_norm_threads_per_threadgroup = head_norm_threads_per_threadgroup;
+    let k_head_norm_threads_per_threadgroup = head_norm_threads_per_threadgroup;
+    let v_head_norm_threads_per_threadgroup = head_norm_threads_per_threadgroup;
+    let router_scale_threads_per_threadgroup = rms_threads_per_threadgroup;
     let router_scale_threadgroups = MetalSize {
         width: 1,
         height: 1,

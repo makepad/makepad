@@ -393,6 +393,8 @@ mod imp {
     use std::collections::HashMap;
     use std::ffi::{c_char, c_void, CStr};
     use std::ptr::NonNull;
+    use std::thread;
+    use std::time::Duration;
     use std::sync::OnceLock;
 
     const LOG_METAL_PIPELINES: bool = false;
@@ -428,13 +430,17 @@ mod imp {
     const SCRATCH_FLASH_PAD: u8 = 1;
     const SCRATCH_FLASH_BLK: u8 = 2;
     const SCRATCH_FLASH_TMP: u8 = 3;
+    const METAL_INIT_ATTEMPTS: usize = 12;
+    const METAL_INIT_RETRY_DELAY_MS: u64 = 100;
     const SCRATCH_FLASH_OUT: u8 = 4;
     const SCRATCH_FLASH_MASK: u8 = 5;
     const SCRATCH_ENC_NORM0: u8 = 10;
     const SCRATCH_ENC_NORM1: u8 = 11;
     const SCRATCH_DEC_NORM0: u8 = 12;
     const SCRATCH_DEC_NORM1: u8 = 13;
+    #[allow(dead_code)]
     const SCRATCH_ENC_FLASH_K_F16: u8 = 14;
+    #[allow(dead_code)]
     const SCRATCH_ENC_FLASH_V_F16: u8 = 15;
 
     const N_R0_Q4_0: i32 = 4;
@@ -491,6 +497,7 @@ mod imp {
         tag: u8,
     }
 
+    #[allow(non_camel_case_types)]
     #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
     enum Src0Type {
         F32,
@@ -587,6 +594,7 @@ mod imp {
         r3: i16,
     }
 
+    #[allow(dead_code)]
     #[repr(C)]
     #[derive(Copy, Clone)]
     struct KArgsCpy {
@@ -1398,49 +1406,64 @@ mod imp {
 
         fn new() -> Result<Self, String> {
             let _pool = AutoreleasePool::new();
-
-            let device = Self::create_device().ok_or_else(|| {
-                "unable to create Metal device (MTLCreateSystemDefaultDevice and MTLCopyAllDevices returned nil)"
-                    .to_string()
-            })?;
-
-            let command_queue_obj: ObjcId = unsafe { msg_send![device.as_id(), newCommandQueue] };
-            let command_queue = unsafe { StrongId::from_owned(command_queue_obj) }
-                .ok_or_else(|| "newCommandQueue returned nil".to_string())?;
-
-            let library = match Self::load_library_from_metallib(device.as_id()) {
-                Ok(Some(lib)) => lib,
-                Ok(None) => {
-                    let source = build_ggml_source();
-                    Self::compile_library(device.as_id(), &source)?
-                }
-                Err(err) => {
-                    eprintln!(
-                        "[ggml][metal] precompiled metallib load failed, compiling source: {}",
-                        err
+            let mut last_err = None;
+            for attempt in 0..METAL_INIT_ATTEMPTS {
+                let Some(device) = Self::create_device() else {
+                    last_err = Some(
+                        "unable to create Metal device (MTLCreateSystemDefaultDevice and MTLCopyAllDevices returned nil)"
+                            .to_string(),
                     );
-                    let source = build_ggml_source();
-                    Self::compile_library(device.as_id(), &source)?
-                }
-            };
+                    if attempt + 1 < METAL_INIT_ATTEMPTS {
+                        thread::sleep(Duration::from_millis(METAL_INIT_RETRY_DELAY_MS));
+                    }
+                    continue;
+                };
 
-            eprintln!("[ggml][metal] backend initialized (shared kernels)");
+                let command_queue_obj: ObjcId = unsafe { msg_send![device.as_id(), newCommandQueue] };
+                let Some(command_queue) = (unsafe { StrongId::from_owned(command_queue_obj) }) else {
+                    last_err = Some("newCommandQueue returned nil".to_string());
+                    if attempt + 1 < METAL_INIT_ATTEMPTS {
+                        thread::sleep(Duration::from_millis(METAL_INIT_RETRY_DELAY_MS));
+                    }
+                    continue;
+                };
 
-            Ok(Self {
-                device,
-                command_queue,
-                library,
-                pipeline_cache: HashMap::new(),
-                cached_weight_buffers: HashMap::new(),
-                scratch_buffers: HashMap::new(),
-                matmul_out_buffers: HashMap::new(),
-                decoder_kv_layers: HashMap::new(),
-                cross_kv_layers: HashMap::new(),
-                batch_depth: 0,
-                batch_command_buffer: None,
-                batch_encoder: None,
-                last_command_buffer: None,
-            })
+                let library = match Self::load_library_from_metallib(device.as_id()) {
+                    Ok(Some(lib)) => lib,
+                    Ok(None) => {
+                        let source = build_ggml_source();
+                        Self::compile_library(device.as_id(), &source)?
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "[ggml][metal] precompiled metallib load failed, compiling source: {}",
+                            err
+                        );
+                        let source = build_ggml_source();
+                        Self::compile_library(device.as_id(), &source)?
+                    }
+                };
+
+                eprintln!("[ggml][metal] backend initialized (shared kernels)");
+
+                return Ok(Self {
+                    device,
+                    command_queue,
+                    library,
+                    pipeline_cache: HashMap::new(),
+                    cached_weight_buffers: HashMap::new(),
+                    scratch_buffers: HashMap::new(),
+                    matmul_out_buffers: HashMap::new(),
+                    decoder_kv_layers: HashMap::new(),
+                    cross_kv_layers: HashMap::new(),
+                    batch_depth: 0,
+                    batch_command_buffer: None,
+                    batch_encoder: None,
+                    last_command_buffer: None,
+                });
+            }
+
+            Err(last_err.unwrap_or_else(|| "unable to create Metal backend".to_string()))
         }
 
         fn load_library_from_metallib(device: ObjcId) -> Result<Option<StrongId>, String> {
@@ -1821,6 +1844,7 @@ mod imp {
             self.copy_f32_buffer_contents_readable(buffer, elems)
         }
 
+        #[allow(dead_code)]
         fn read_f32_buffers3(
             &self,
             b0: ObjcId,
@@ -1835,6 +1859,7 @@ mod imp {
             Ok((o0, o1, o2))
         }
 
+        #[allow(dead_code)]
         fn get_or_create_cached_f32_buffer(
             &mut self,
             data: &[f32],
@@ -4673,6 +4698,7 @@ mod imp {
                 .ok_or_else(|| "flash-attn output buffer returned nil".to_string())
         }
 
+        #[allow(dead_code)]
         fn encoder_flash_kv_f16_buffer(
             &mut self,
             src_f32_id: ObjcId,
@@ -4716,6 +4742,7 @@ mod imp {
             Ok(dst_id)
         }
 
+        #[allow(dead_code)]
         #[allow(clippy::too_many_arguments)]
         fn linear_from_src_buffer(
             &mut self,
@@ -4763,6 +4790,7 @@ mod imp {
             Ok(dst)
         }
 
+        #[allow(dead_code)]
         #[allow(clippy::too_many_arguments)]
         fn encoder_attn_block_f32(
             &mut self,
@@ -4897,6 +4925,7 @@ mod imp {
             self.read_f32_buffer(proj_buf.as_id(), x_need)
         }
 
+        #[allow(dead_code)]
         #[allow(clippy::too_many_arguments)]
         fn encoder_ffn_block_f32(
             &mut self,
@@ -4999,6 +5028,7 @@ mod imp {
             self.read_f32_buffer(ff1_buf.as_id(), x_need)
         }
 
+        #[allow(dead_code)]
         #[allow(clippy::too_many_arguments)]
         fn encoder_layer_from_buffer_f32(
             &mut self,
@@ -5221,6 +5251,7 @@ mod imp {
             Ok(ff1_buf)
         }
 
+        #[allow(dead_code)]
         #[allow(clippy::too_many_arguments)]
         fn encoder_layer_f32(
             &mut self,
@@ -5293,6 +5324,7 @@ mod imp {
             self.read_f32_buffer(ff1_buf.as_id(), x_need)
         }
 
+        #[allow(dead_code)]
         #[allow(clippy::too_many_arguments)]
         fn decoder_self_qkv_step_f32(
             &mut self,
@@ -6051,9 +6083,11 @@ mod imp {
                     bt.len() * std::mem::size_of::<f32>(),
                 )
             };
-            let cache_tag = Some(1u8);
+            // Raw f32 RHS buffers are often transient activation vectors.
+            // Pointer-based caching is unsafe here because allocators can reuse the same address
+            // for different contents across layers or heads.
             let (dst, mr, nr) =
-                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, GGML_TYPE_F32, m, k, n, cache_tag)?;
+                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, GGML_TYPE_F32, m, k, n, None)?;
             self.read_f32_buffer(dst.as_id(), mr * nr)
         }
 
@@ -6066,7 +6100,7 @@ mod imp {
             n: usize,
         ) -> Result<Vec<f32>, String> {
             let (dst, mr, nr) =
-                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, GGML_TYPE_F32, m, k, n, Some(2u8))?;
+                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, GGML_TYPE_F32, m, k, n, None)?;
             self.read_f32_buffer(dst.as_id(), mr * nr)
         }
 
@@ -6079,7 +6113,7 @@ mod imp {
             n: usize,
         ) -> Result<Vec<f32>, String> {
             let (dst, mr, nr) =
-                self.matmul_nt_ggml_bytes_impl(a, bt_f16_bytes, GGML_TYPE_F16, m, k, n, Some(3u8))?;
+                self.matmul_nt_ggml_bytes_impl(a, bt_f16_bytes, GGML_TYPE_F16, m, k, n, None)?;
             self.read_f32_buffer(dst.as_id(), mr * nr)
         }
 
@@ -6510,6 +6544,7 @@ mod imp {
         with_context(|ctx| ctx.im2col_1d_f32(input, ic, iw, kw, stride, pad))
     }
 
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_encoder_attn_block_f32(
         x: &[f32],
@@ -6553,6 +6588,7 @@ mod imp {
         })
     }
 
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_encoder_ffn_block_f32(
         x: &[f32],
@@ -6584,6 +6620,7 @@ mod imp {
         })
     }
 
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_encoder_layer_f32(
         x: &[f32],
@@ -6643,6 +6680,7 @@ mod imp {
         })
     }
 
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_decoder_self_qkv_step_f32(
         x: &[f32],

@@ -1752,3 +1752,53 @@
             workspace.post_feedforward_norm1_len,
         );
     }
+
+    #[test]
+    #[ignore]
+    fn exact_token_embedding_matches_cpu_dequant() {
+        let model_path = default_model_path();
+        let model_root = super::model_root_dir(&model_path).unwrap();
+        let weights = MlxIndexedSafetensors::load(&model_root).unwrap();
+        let mut runtime = ExactMetalTextRuntimeSession::load(model_path).unwrap();
+
+        let token_id = 2u32;
+        let expected_words = weights.embed_token_bf16_words(token_id).unwrap();
+        let expected_bits = expected_words
+            .iter()
+            .copied()
+            .map(|word| (word as u32) << 16)
+            .collect::<Vec<_>>();
+
+        let input_buffer = runtime.token_input_buffer().unwrap();
+        runtime
+            .dequantize_token_embedding_into_buffer(token_id, &input_buffer)
+            .unwrap();
+        let got_bits = read_bf16_buffer_bits(
+            &runtime.session.runtime,
+            &input_buffer,
+            expected_words.len(),
+        )
+        .unwrap();
+
+        println!(
+            "token_id={} expected_fnv1a64=0x{:016X} got_fnv1a64=0x{:016X}",
+            token_id,
+            fnv1a64_u32_words(&expected_bits),
+            fnv1a64_u32_words(&got_bits)
+        );
+        if got_bits != expected_bits {
+            for idx in 0..16.min(expected_words.len()) {
+                let expected_word = expected_words[idx];
+                let got_word = (got_bits[idx] >> 16) as u16;
+                println!(
+                    "idx={} expected=0x{:04X} ({:.7}) got=0x{:04X} ({:.7})",
+                    idx,
+                    expected_word,
+                    super::bf16_word_to_f32(expected_word),
+                    got_word,
+                    super::bf16_word_to_f32(got_word),
+                );
+            }
+        }
+        assert_eq!(got_bits, expected_bits);
+    }

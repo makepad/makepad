@@ -1,0 +1,51 @@
+[package]
+name = "makepad-diffusion"
+version = "0.1.0"
+edition = "2021"
+description = "Diffusion pipeline scaffolding for Makepad ggml backends"
+license = "MIT"
+
+[dependencies]
+makepad-ggml = { path = "../ggml" }
+makepad-mlx = { path = "../mlx" }
+makepad-micro-serde = { path = "../micro_serde" }
+makepad-zune-core = { path = "../zune/zune-core" }
+makepad-zune-png = { path = "../zune/zune-png" }
+
+[workspace]
+
+[[bin]]
+name = "flux-smoke"
+path = "src/bin/flux_smoke.rs"
+
+[[bin]]
+name = "flux-tokenize"
+path = "src/bin/flux_tokenize.rs"
+
+[[bin]]
+name = "flux-clip-smoke"
+path = "src/bin/flux_clip_smoke.rs"
+
+[[bin]]
+name = "flux-t5-smoke"
+path = "src/bin/flux_t5_smoke.rs"
+
+[[bin]]
+name = "flux-text-smoke"
+path = "src/bin/flux_text_smoke.rs"
+
+[[bin]]
+name = "flux-transformer-smoke"
+path = "src/bin/flux_transformer_smoke.rs"
+
+[[bin]]
+name = "flux-generate"
+path = "src/bin/flux_generate.rs"
+
+[[bin]]
+name = "flux-t5-stage-compare"
+path = "src/bin/flux_t5_stage_compare.rs"
+
+[[bin]]
+name = "safetensors-query"
+path = "src/bin/safetensors_query.rs"

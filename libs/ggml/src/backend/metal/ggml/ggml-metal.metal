@@ -10409,6 +10409,7 @@ struct MlxPlanar3KvAppendArgs {
 struct MlxRmsNormRowArgs {
     uint n;
     float eps;
+    uint threadgroup_width;
 };
 
 struct MlxRmsNormRowsArgs {
@@ -10416,6 +10417,7 @@ struct MlxRmsNormRowsArgs {
     uint row_stride;
     uint row_count;
     float eps;
+    uint threadgroup_width;
 };
 
 struct MlxRopeSingleArgs {
@@ -12431,17 +12433,20 @@ kernel void kernel_mlx_rms_norm_row_bf16(
 
     float acc = 0.0f;
     const uint base = lid * N_READS;
-    if (base + N_READS <= args.n) {
-        for (uint i = 0; i < N_READS; ++i) {
-            const float xi = float(x[base + i]);
-            acc += xi * xi;
-        }
-    } else {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            if (idx < args.n) {
-                const float xi = float(x[idx]);
+    const uint stride = args.threadgroup_width * N_READS;
+    for (uint chunk_base = base; chunk_base < args.n; chunk_base += stride) {
+        if (chunk_base + N_READS <= args.n) {
+            for (uint i = 0; i < N_READS; ++i) {
+                const float xi = float(x[chunk_base + i]);
                 acc += xi * xi;
+            }
+        } else {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
+                if (idx < args.n) {
+                    const float xi = float(x[idx]);
+                    acc += xi * xi;
+                }
             }
         }
     }
@@ -12466,18 +12471,20 @@ kernel void kernel_mlx_rms_norm_row_bf16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const float inv_mean = local_inv_mean[0];
-    if (base + N_READS <= args.n) {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            const float normalized_f = float(bfloat(float(x[idx]) * inv_mean));
-            out[idx] = bfloat(normalized_f * float(w[idx]));
-        }
-    } else {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            if (idx < args.n) {
+    for (uint chunk_base = base; chunk_base < args.n; chunk_base += stride) {
+        if (chunk_base + N_READS <= args.n) {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
                 const float normalized_f = float(bfloat(float(x[idx]) * inv_mean));
                 out[idx] = bfloat(normalized_f * float(w[idx]));
+            }
+        } else {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
+                if (idx < args.n) {
+                    const float normalized_f = float(bfloat(float(x[idx]) * inv_mean));
+                    out[idx] = bfloat(normalized_f * float(w[idx]));
+                }
             }
         }
     }
@@ -12508,17 +12515,20 @@ kernel void kernel_mlx_rms_norm_rows_bf16(
 
     float acc = 0.0f;
     const uint base = lid * N_READS;
-    if (base + N_READS <= args.n) {
-        for (uint i = 0; i < N_READS; ++i) {
-            const float xi = float(row_x[base + i]);
-            acc += xi * xi;
-        }
-    } else {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            if (idx < args.n) {
-                const float xi = float(row_x[idx]);
+    const uint stride = args.threadgroup_width * N_READS;
+    for (uint chunk_base = base; chunk_base < args.n; chunk_base += stride) {
+        if (chunk_base + N_READS <= args.n) {
+            for (uint i = 0; i < N_READS; ++i) {
+                const float xi = float(row_x[chunk_base + i]);
                 acc += xi * xi;
+            }
+        } else {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
+                if (idx < args.n) {
+                    const float xi = float(row_x[idx]);
+                    acc += xi * xi;
+                }
             }
         }
     }
@@ -12543,18 +12553,20 @@ kernel void kernel_mlx_rms_norm_rows_bf16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const float inv_mean = local_inv_mean[0];
-    if (base + N_READS <= args.n) {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            const float normalized_f = float(bfloat(float(row_x[idx]) * inv_mean));
-            row_out[idx] = bfloat(normalized_f * float(w[idx]));
-        }
-    } else {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            if (idx < args.n) {
+    for (uint chunk_base = base; chunk_base < args.n; chunk_base += stride) {
+        if (chunk_base + N_READS <= args.n) {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
                 const float normalized_f = float(bfloat(float(row_x[idx]) * inv_mean));
                 row_out[idx] = bfloat(normalized_f * float(w[idx]));
+            }
+        } else {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
+                if (idx < args.n) {
+                    const float normalized_f = float(bfloat(float(row_x[idx]) * inv_mean));
+                    row_out[idx] = bfloat(normalized_f * float(w[idx]));
+                }
             }
         }
     }

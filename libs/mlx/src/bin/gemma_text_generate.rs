@@ -1,7 +1,7 @@
 use makepad_mlx::text_runtime::{
     generate_multimodal_text_with_backend_config, generate_text_with_backend_config,
-    GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode, GemmaPromptFormat,
-    GemmaTextGenerationOptions,
+    GemmaExactMetalBackendMode, GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode,
+    GemmaPromptFormat, GemmaTextGenerationOptions,
 };
 use std::env;
 use std::path::PathBuf;
@@ -12,14 +12,14 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: gemma_text_generate [model.safetensors|model_dir] [--image PATH] [--raw-bos] [--max-new-tokens N] [--rotor-k-cache] [--rotor-k-cache-planar3] <prompt>"
+    "Usage: gemma_text_generate [model.safetensors|model_dir] [--image PATH] [--raw-bos] [--max-new-tokens N] [--reference-text-backend] [--force-exact-text-backend] [--rotor-k-cache] [--rotor-k-cache-planar3] <prompt>"
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let mut model_path = default_model_path();
     let mut image_path = None;
-    let mut prompt_format = GemmaPromptFormat::Gemma4UserTurn;
+    let mut prompt_format = GemmaPromptFormat::AutoChat;
     let mut max_new_tokens = 8usize;
     let mut backend_config = GemmaExactMetalConfig::default();
     let mut prompt_parts = Vec::new();
@@ -35,6 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--max-new-tokens" => {
                 let value = args.next().ok_or("--max-new-tokens requires a value")?;
                 max_new_tokens = value.parse::<usize>()?;
+            }
+            "--reference-text-backend" => {
+                backend_config.backend_mode = GemmaExactMetalBackendMode::Disabled;
+            }
+            "--force-exact-text-backend" => {
+                backend_config.backend_mode = GemmaExactMetalBackendMode::Force;
             }
             "--rotor-k-cache" => {
                 backend_config.kv_compression =

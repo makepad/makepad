@@ -1,5 +1,7 @@
 use makepad_mlx::chat::{GemmaChatDecodeMode, GemmaChatRole, GemmaChatSession};
-use makepad_mlx::text_runtime::{GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode};
+use makepad_mlx::text_runtime::{
+    GemmaExactMetalBackendMode, GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode,
+};
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -11,7 +13,7 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: mlx-cli [model.safetensors|model_dir] [--image PATH] [--max-new-tokens N] [--greedy] [--rotor-k-cache] [--rotor-k-cache-planar3]"
+    "Usage: mlx-cli [model.safetensors|model_dir] [--image PATH] [--max-new-tokens N] [--greedy] [--reference-text-backend] [--force-exact-text-backend] [--rotor-k-cache] [--rotor-k-cache-planar3]"
 }
 
 fn format_max_new_tokens(max_new_tokens: Option<usize>) -> String {
@@ -66,6 +68,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--greedy" => {
                 decode_mode = GemmaChatDecodeMode::Greedy;
             }
+            "--reference-text-backend" => {
+                backend_config.backend_mode = GemmaExactMetalBackendMode::Disabled;
+            }
+            "--force-exact-text-backend" => {
+                backend_config.backend_mode = GemmaExactMetalBackendMode::Force;
+            }
             "--rotor-k-cache" => {
                 backend_config.kv_compression =
                     GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK;
@@ -103,6 +111,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match session.decode_mode() {
             GemmaChatDecodeMode::Sampled => "sampled",
             GemmaChatDecodeMode::Greedy => "greedy",
+        }
+    );
+    println!(
+        "text_backend={}",
+        match backend_config.backend_mode {
+            GemmaExactMetalBackendMode::Auto => "auto",
+            GemmaExactMetalBackendMode::Force => "force_exact",
+            GemmaExactMetalBackendMode::Disabled => "reference",
         }
     );
     println!(

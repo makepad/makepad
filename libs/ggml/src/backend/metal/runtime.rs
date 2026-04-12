@@ -301,6 +301,8 @@ mod imp {
     use std::ffi::{c_char, c_void, CStr};
     use std::ptr::NonNull;
     use std::rc::Rc;
+    use std::thread;
+    use std::time::Duration;
 
     pub type MetalResult<T> = Result<T, String>;
 
@@ -331,6 +333,8 @@ mod imp {
     const MTL_DATA_TYPE_BOOL: u64 = 53;
     const MTL_BARRIER_SCOPE_BUFFERS: u64 = 1;
     const MTL_DISPATCH_TYPE_CONCURRENT: u64 = 1;
+    const METAL_INIT_ATTEMPTS: usize = 12;
+    const METAL_INIT_RETRY_DELAY_MS: u64 = 100;
 
     const GGML_METAL_SOURCE_RAW: &str = include_str!("ggml/ggml-metal.metal");
     const GGML_COMMON_H: &str = include_str!("ggml/ggml-common.h");
@@ -673,80 +677,94 @@ mod imp {
 
         pub fn new() -> MetalResult<Self> {
             let _pool = AutoreleasePool::new();
-            let device = MetalContext::create_device()
-                .ok_or_else(|| "unable to create Metal device".to_string())?;
+            let mut last_err = None;
+            for attempt in 0..METAL_INIT_ATTEMPTS {
+                let Some(device) = MetalContext::create_device() else {
+                    last_err = Some("unable to create Metal device".to_string());
+                    if attempt + 1 < METAL_INIT_ATTEMPTS {
+                        thread::sleep(Duration::from_millis(METAL_INIT_RETRY_DELAY_MS));
+                    }
+                    continue;
+                };
 
-            let name_obj: ObjcId = unsafe { msg_send![device.as_id(), name] };
-            let name = nsstring_to_string(name_obj);
-            let max_buffer_size: u64 = unsafe { msg_send![device.as_id(), maxBufferLength] };
-            let features = metal_compile_feature_macros(device.as_id());
+                let command_queue_obj: ObjcId = unsafe { msg_send![device.as_id(), newCommandQueue] };
+                let Some(command_queue) = (unsafe { StrongId::from_owned(command_queue_obj) }) else {
+                    last_err = Some("newCommandQueue returned nil".to_string());
+                    if attempt + 1 < METAL_INIT_ATTEMPTS {
+                        thread::sleep(Duration::from_millis(METAL_INIT_RETRY_DELAY_MS));
+                    }
+                    continue;
+                };
 
-            let command_queue_obj: ObjcId = unsafe { msg_send![device.as_id(), newCommandQueue] };
-            let command_queue = unsafe { StrongId::from_owned(command_queue_obj) }
-                .ok_or_else(|| "newCommandQueue returned nil".to_string())?;
+                let name_obj: ObjcId = unsafe { msg_send![device.as_id(), name] };
+                let name = nsstring_to_string(name_obj);
+                let max_buffer_size: u64 = unsafe { msg_send![device.as_id(), maxBufferLength] };
+                let features = metal_compile_feature_macros(device.as_id());
+                let library = match MetalContext::load_library_from_metallib(device.as_id()) {
+                    Ok(Some(lib)) => lib,
+                    Ok(None) => {
+                        let source = build_ggml_source();
+                        MetalContext::compile_library(device.as_id(), &source)?
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "[ggml][metal] precompiled metallib load failed, compiling source: {}",
+                            err
+                        );
+                        let source = build_ggml_source();
+                        MetalContext::compile_library(device.as_id(), &source)?
+                    }
+                };
 
-            let library = match MetalContext::load_library_from_metallib(device.as_id()) {
-                Ok(Some(lib)) => lib,
-                Ok(None) => {
-                    let source = build_ggml_source();
-                    MetalContext::compile_library(device.as_id(), &source)?
-                }
-                Err(err) => {
-                    eprintln!(
-                        "[ggml][metal] precompiled metallib load failed, compiling source: {}",
-                        err
-                    );
-                    let source = build_ggml_source();
-                    MetalContext::compile_library(device.as_id(), &source)?
-                }
-            };
+                let info = BackendInfo {
+                    kind: BackendKind::Metal,
+                    name: name.clone(),
+                    description: format!("Apple Metal device '{}'", name),
+                    capabilities: BackendCapabilities {
+                        bf16: features.has_bfloat,
+                        tensor_cores: features.has_tensor,
+                        max_buffer_size: usize::try_from(max_buffer_size).ok(),
+                        max_threadgroup_memory: None,
+                        subgroup_width: None,
+                        asynchronous: false,
+                        host_buffer: false,
+                        buffer_from_host_ptr: false,
+                        events: false,
+                    },
+                };
 
-            let info = BackendInfo {
-                kind: BackendKind::Metal,
-                name: name.clone(),
-                description: format!("Apple Metal device '{}'", name),
-                capabilities: BackendCapabilities {
-                    bf16: features.has_bfloat,
-                    tensor_cores: features.has_tensor,
-                    max_buffer_size: usize::try_from(max_buffer_size).ok(),
-                    max_threadgroup_memory: None,
-                    subgroup_width: None,
-                    asynchronous: false,
-                    host_buffer: false,
-                    buffer_from_host_ptr: false,
-                    events: false,
-                },
-            };
+                return Ok(Self {
+                    ctx: Rc::new(RefCell::new(MetalContext {
+                        device,
+                        command_queue,
+                        library,
+                        pipeline_cache: HashMap::new(),
+                        active_command_buffer: None,
+                        active_compute_encoder: None,
+                        active_compute_encoder_fence: None,
+                        active_batch_uses_tracked_io: false,
+                        active_encoder_uses_tracked_io: false,
+                        active_encoder_inputs: HashSet::new(),
+                        active_encoder_outputs: HashSet::new(),
+                        tracked_prev_outputs: HashSet::new(),
+                        tracked_next_outputs: HashSet::new(),
+                        prev_encoder_output_fences: HashMap::new(),
+                        pending_fence_wait: None,
+                        last_command_buffer: None,
+                        submitted_command_buffers: Vec::new(),
+                        max_ops_per_command_buffer: max_ops_per_command_buffer(&name),
+                        max_bytes_per_command_buffer: max_mb_per_command_buffer(&name) << 20,
+                        active_command_buffer_ops: 0,
+                        active_command_buffer_bytes: 0,
+                        active_command_buffer_seen_buffers: HashSet::new(),
+                        counters: MetalRuntimeCounters::default(),
+                    })),
+                    info,
+                    features,
+                });
+            }
 
-            Ok(Self {
-                ctx: Rc::new(RefCell::new(MetalContext {
-                    device,
-                    command_queue,
-                    library,
-                    pipeline_cache: HashMap::new(),
-                    active_command_buffer: None,
-                    active_compute_encoder: None,
-                    active_compute_encoder_fence: None,
-                    active_batch_uses_tracked_io: false,
-                    active_encoder_uses_tracked_io: false,
-                    active_encoder_inputs: HashSet::new(),
-                    active_encoder_outputs: HashSet::new(),
-                    tracked_prev_outputs: HashSet::new(),
-                    tracked_next_outputs: HashSet::new(),
-                    prev_encoder_output_fences: HashMap::new(),
-                    pending_fence_wait: None,
-                    last_command_buffer: None,
-                    submitted_command_buffers: Vec::new(),
-                    max_ops_per_command_buffer: max_ops_per_command_buffer(&name),
-                    max_bytes_per_command_buffer: max_mb_per_command_buffer(&name) << 20,
-                    active_command_buffer_ops: 0,
-                    active_command_buffer_bytes: 0,
-                    active_command_buffer_seen_buffers: HashSet::new(),
-                    counters: MetalRuntimeCounters::default(),
-                })),
-                info,
-                features,
-            })
+            Err(last_err.unwrap_or_else(|| "unable to create Metal runtime".to_string()))
         }
 
         pub fn backend_info(&self) -> &BackendInfo {
@@ -1506,7 +1524,7 @@ mod imp {
         fn memory_barrier_buffers(&mut self) -> MetalResult<()> {
             if self.active_command_buffer.is_some() {
                 if self.active_batch_uses_tracked_io {
-                    if self.tracked_next_outputs.is_empty() {
+                    if self.tracked_next_outputs.is_empty() && self.tracked_prev_outputs.is_empty() {
                         return Ok(());
                     }
                     self.active_encoder_uses_tracked_io = true;
@@ -1518,7 +1536,9 @@ mod imp {
                             memoryBarrierWithScope: MTL_BARRIER_SCOPE_BUFFERS
                         ];
                     }
-                    self.tracked_prev_outputs = std::mem::take(&mut self.tracked_next_outputs);
+                    if !self.tracked_next_outputs.is_empty() {
+                        self.tracked_prev_outputs = std::mem::take(&mut self.tracked_next_outputs);
+                    }
                     return Ok(());
                 }
                 self.active_encoder_uses_tracked_io = self.active_batch_uses_tracked_io;
