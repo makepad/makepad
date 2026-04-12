@@ -1,9 +1,8 @@
 use super::{
     bf16_round_to_f32, bf16_words_as_bytes, extract_gemma4_assistant_response_text,
-    load_optional_scalar_f32, ChatSamplingConstraints, ChatSamplingState,
-    GemmaStopReason, GemmaTextBenchmarkOutput, GemmaTextGenerationOptions,
-    GemmaTextRuntimeSession, GemmaTextSamplingOptions, TextLayerTensorNames,
-    MlxIndexedSafetensors,
+    load_optional_scalar_f32, GemmaStopReason, GemmaTextBenchmarkOutput,
+    GemmaTextGenerationOptions, GemmaTextRuntimeSession, GemmaTextSamplingOptions,
+    TextLayerTensorNames, MlxIndexedSafetensors,
 };
 use crate::GemmaAttentionKind;
 use makepad_ggml::backend::cuda::{CudaBuffer, CudaGraphExec, CudaRuntime};
@@ -14,10 +13,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const QK_Q8_1: usize = 32;
+const QK_NVFP4: usize = 64;
 const Q8_1_BLOCK_BYTES: usize = 36;
 const CUDA_FINAL_TEXT_NORM_WEIGHT_NAME: &str = "language_model.model.norm.weight";
 const CUDA_DISALLOWED_TOKEN_IDS_CAPACITY: usize = 64;
 const CUDA_PREFILL_CHUNK_TOKENS: usize = 32;
+const CUDA_SESSION_MIN_CAPACITY: usize = 1024;
 
 pub(super) struct CudaNvfp4TextRuntime {
     session: Option<CudaNvfp4BenchmarkSession>,
@@ -33,13 +34,15 @@ impl CudaNvfp4TextRuntime {
         runtime: &Arc<GemmaTextRuntimeSession>,
         max_total_tokens: usize,
     ) -> Result<&'a mut CudaNvfp4BenchmarkSession, String> {
+        let target_capacity = grow_cuda_session_capacity(runtime, max_total_tokens)?;
         let needs_rebuild = self
             .session
             .as_ref()
-            .is_none_or(|session| session.max_total_tokens < max_total_tokens);
+            .is_none_or(|session| session.max_total_tokens < target_capacity);
         if needs_rebuild {
+            drop(self.session.take());
             self.session = Some(
-                CudaNvfp4BenchmarkSession::load(runtime.clone(), max_total_tokens)
+                CudaNvfp4BenchmarkSession::load(runtime.clone(), target_capacity)
                     .map_err(|err| err.to_string())?,
             );
         }
@@ -47,6 +50,36 @@ impl CudaNvfp4TextRuntime {
             .as_mut()
             .ok_or_else(|| "CUDA exact session did not initialize".to_string())
     }
+}
+
+fn cuda_exact_max_supported_tokens(runtime: &GemmaTextRuntimeSession) -> usize {
+    let text = &runtime.weights.snapshot.config.text_config;
+    if text
+        .layer_types
+        .iter()
+        .any(|layer_type| layer_type == "sliding_attention")
+    {
+        text.sliding_window as usize
+    } else {
+        usize::MAX
+    }
+}
+
+fn grow_cuda_session_capacity(
+    runtime: &GemmaTextRuntimeSession,
+    required_tokens: usize,
+) -> Result<usize, String> {
+    let max_supported = cuda_exact_max_supported_tokens(runtime);
+    if required_tokens > max_supported {
+        return Err(format!(
+            "CUDA exact path supports up to {max_supported} total tokens for this model, requested {required_tokens}"
+        ));
+    }
+    let min_capacity = required_tokens.max(CUDA_SESSION_MIN_CAPACITY);
+    Ok(min_capacity
+        .min(max_supported)
+        .checked_next_power_of_two()
+        .unwrap_or(min_capacity.min(max_supported)))
 }
 
 pub(super) fn supports_cuda_exact_greedy_generation(
@@ -99,73 +132,15 @@ where
         .lock()
         .map_err(|_| "CUDA exact backend mutex poisoned".to_string())?;
     let session = backend.session_mut(runtime, max_total_tokens)?;
-    session.reset();
-
-    let stop_tokens = &runtime.stop_tokens;
-    let constraints = ChatSamplingConstraints::from_runtime(runtime);
-    let mut sampling_state = ChatSamplingState::new();
-
-    let mut generated_token_ids = Vec::with_capacity(max_new_tokens);
-    let mut next_token_id = if prompt_token_ids.len() == 1 {
-        session
-            .generate_next_token_graph(
-                prompt_token_ids[0],
-                0,
-                &sampling_state.disallowed_token_ids(
-                    &constraints,
-                    stop_tokens,
-                    sampling_options,
-                ),
-            )
-            .map_err(|err| err.to_string())?
-    } else {
-        let (hidden_is_a, hidden_offset_elems) = session
-            .prefill_prompt_hidden_batched(prompt_token_ids.as_ref())
-            .map_err(|err| err.to_string())?;
-        session
-            .greedy_token_from_prefill_hidden_with_disallowed(
-                hidden_is_a,
-                hidden_offset_elems,
-                &sampling_state.disallowed_token_ids(
-                    &constraints,
-                    stop_tokens,
-                    sampling_options,
-                ),
-            )
-            .map_err(|err| err.to_string())?
-    };
-
-    loop {
-        generated_token_ids.push(next_token_id);
-        sampling_state.observe_token(next_token_id, &constraints);
-        on_generated_ids(&generated_token_ids)?;
-
-        if stop_tokens.contains(&next_token_id) {
-            return Ok(Some((
-                Arc::<[u32]>::from(generated_token_ids),
-                GemmaStopReason::EosToken(next_token_id),
-            )));
-        }
-        if generated_token_ids.len() >= max_new_tokens {
-            return Ok(Some((
-                Arc::<[u32]>::from(generated_token_ids),
-                GemmaStopReason::MaxNewTokens,
-            )));
-        }
-
-        let position = prompt_token_ids
-            .len()
-            .checked_add(generated_token_ids.len())
-            .and_then(|value| value.checked_sub(1))
-            .ok_or_else(|| "generation cursor position overflow".to_string())?;
-        next_token_id = session
-            .generate_next_token_graph(
-                next_token_id,
-                position,
-                &sampling_state.disallowed_token_ids(&constraints, stop_tokens, sampling_options),
-            )
-            .map_err(|err| err.to_string())?;
-    }
+    let metrics = session
+        .generate_greedy_with_callback(prompt_token_ids.as_ref(), max_new_tokens, |generated| {
+            on_generated_ids(generated)
+        })
+        .map_err(|err| err.to_string())?;
+    Ok(Some((
+        Arc::<[u32]>::from(metrics.generated_token_ids),
+        metrics.stop_reason,
+    )))
 }
 
 pub(super) fn try_benchmark_cuda_nvfp4_greedy(
@@ -285,6 +260,7 @@ pub(super) fn try_benchmark_cuda_nvfp4_greedy(
 
 struct GenerationMetrics {
     generated_token_ids: Vec<u32>,
+    stop_reason: GemmaStopReason,
     time_to_first_token_elapsed: Duration,
     steady_state_elapsed: Duration,
 }
@@ -348,13 +324,7 @@ struct CudaNvfp4Layer {
     mlp_down_weight: CudaBuffer,
     input_norm_out: CudaBuffer,
     qkv_out: CudaBuffer,
-    q_norm: CudaBuffer,
-    k_norm: CudaBuffer,
-    v_norm: CudaBuffer,
     q_rope: CudaBuffer,
-    k_rope: CudaBuffer,
-    attention_logits: CudaBuffer,
-    attention_probs: CudaBuffer,
     attn_out: CudaBuffer,
     o_proj_out: CudaBuffer,
     post_attention_norm_out: CudaBuffer,
@@ -390,6 +360,7 @@ struct CudaNvfp4PrefillBuffers {
     input_norm_out: CudaBuffer,
     q8_scratch: CudaBuffer,
     qkv_out: CudaBuffer,
+    q_rope: CudaBuffer,
     attn_out: CudaBuffer,
     o_proj_out: CudaBuffer,
     post_attention_norm_out: CudaBuffer,
@@ -567,7 +538,6 @@ impl CudaNvfp4BenchmarkSession {
                 head_dim
             };
             let kv_cache = CudaNvfp4KvCache::new(&cuda, k_head_count, head_dim, max_total_tokens)?;
-            let attention_row_stride = max_total_tokens;
             let v_offset = if attention_k_eq_v {
                 q_out_len
             } else {
@@ -641,13 +611,7 @@ impl CudaNvfp4BenchmarkSession {
                 mlp_down_weight,
                 input_norm_out: cuda.alloc_f32(hidden_size)?,
                 qkv_out: cuda.alloc_f32(qkv_out_len)?,
-                q_norm: cuda.alloc_f32(q_out_len)?,
-                k_norm: cuda.alloc_f32(k_head_count * head_dim)?,
-                v_norm: cuda.alloc_f32(k_head_count * head_dim)?,
                 q_rope: cuda.alloc_f32(q_out_len)?,
-                k_rope: cuda.alloc_f32(k_head_count * head_dim)?,
-                attention_logits: cuda.alloc_f32(q_head_count * attention_row_stride)?,
-                attention_probs: cuda.alloc_f32(q_head_count * attention_row_stride)?,
                 attn_out: cuda.alloc_f32(q_out_len)?,
                 o_proj_out: cuda.alloc_f32(hidden_size)?,
                 post_attention_norm_out: cuda.alloc_f32(hidden_size)?,
@@ -677,6 +641,7 @@ impl CudaNvfp4BenchmarkSession {
             input_norm_out: cuda.alloc_f32(prefill_chunk_tokens * hidden_size)?,
             q8_scratch: cuda.alloc_bytes(prefill_q8_scratch_bytes)?,
             qkv_out: cuda.alloc_f32(prefill_chunk_tokens * max_qkv_out_len)?,
+            q_rope: cuda.alloc_f32(prefill_chunk_tokens * max_q_out_len)?,
             attn_out: cuda.alloc_f32(prefill_chunk_tokens * max_q_out_len)?,
             o_proj_out: cuda.alloc_f32(prefill_chunk_tokens * hidden_size)?,
             post_attention_norm_out: cuda.alloc_f32(prefill_chunk_tokens * hidden_size)?,
@@ -699,6 +664,8 @@ impl CudaNvfp4BenchmarkSession {
             decode_graph: None,
         };
         session.decode_graph = Some(session.capture_decode_graph()?);
+        session.eval_next_token_graph(2, 0, &[])?;
+        session.reset();
         Ok(session)
     }
 
@@ -777,12 +744,12 @@ impl CudaNvfp4BenchmarkSession {
         }
     }
 
-    fn generate_next_token_graph(
+    fn eval_next_token_graph(
         &mut self,
         token_id: u32,
         position: usize,
         disallowed_token_ids: &[u32],
-    ) -> Result<u32, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         if disallowed_token_ids.len() > self.io.disallowed_token_capacity {
             return Err(format!(
                 "CUDA disallowed token set {} exceeds capacity {}",
@@ -811,7 +778,16 @@ impl CudaNvfp4BenchmarkSession {
             .write_u32(&decode_graph.disallowed_count, disallowed_token_ids.len() as u32)?;
         self.cuda.launch_graph(&decode_graph.exec)?;
         self.increment_kv_caches();
+        Ok(())
+    }
 
+    fn generate_next_token_graph(
+        &mut self,
+        token_id: u32,
+        position: usize,
+        disallowed_token_ids: &[u32],
+    ) -> Result<u32, Box<dyn Error>> {
+        self.eval_next_token_graph(token_id, position, disallowed_token_ids)?;
         let next_token = self.cuda.read_u32(&self.io.argmax_out)?;
         if next_token == u32::MAX {
             return Err("no selectable token remained after suppression".into());
@@ -928,16 +904,18 @@ impl CudaNvfp4BenchmarkSession {
             self.io.hidden_size,
             self.rms_norm_eps,
         )?;
-        self.cuda.quantize_q8_1_f32(
+        self.cuda.quantize_nvfp4_f32(
             &self.io.final_norm_out,
+            1.0,
             &self.io.q8_scratch,
             self.io.hidden_size,
         )?;
-        self.cuda.nvfp4_q8_1_matvec(
+        self.cuda.nvfp4_nvfp4_matvec(
             &self.io.q8_scratch,
             &self.io.embed_weight,
+            1.0,
             &self.io.logits_out,
-            self.io.hidden_size / QK_Q8_1,
+            self.io.hidden_size / QK_NVFP4,
             self.io.vocab_size,
         )?;
         if disallowed_token_ids.is_empty() {
@@ -968,6 +946,18 @@ impl CudaNvfp4BenchmarkSession {
     }
 
     fn generate_greedy(&mut self, prompt_token_ids: &[u32], max_new_tokens: usize) -> Result<GenerationMetrics, Box<dyn Error>> {
+        self.generate_greedy_with_callback(prompt_token_ids, max_new_tokens, |_| Ok(()))
+    }
+
+    fn generate_greedy_with_callback<F>(
+        &mut self,
+        prompt_token_ids: &[u32],
+        max_new_tokens: usize,
+        mut on_generated_ids: F,
+    ) -> Result<GenerationMetrics, Box<dyn Error>>
+    where
+        F: FnMut(&[u32]) -> Result<(), String>,
+    {
         if prompt_token_ids.is_empty() {
             return Err("generation requires at least one prompt token".into());
         }
@@ -987,23 +977,40 @@ impl CudaNvfp4BenchmarkSession {
         let time_to_first_token_elapsed = ttft_started.elapsed();
 
         let mut generated = Vec::with_capacity(max_new_tokens);
-        if !self.runtime_session.stop_tokens.contains(&first_token_id) {
-            generated.push(first_token_id);
+        if self.runtime_session.stop_tokens.contains(&first_token_id) {
+            return Ok(GenerationMetrics {
+                generated_token_ids: generated,
+                stop_reason: GemmaStopReason::EosToken(first_token_id),
+                time_to_first_token_elapsed,
+                steady_state_elapsed: Duration::ZERO,
+            });
         }
+
+        generated.push(first_token_id);
+        on_generated_ids(&generated)
+            .map_err(std::io::Error::other)?;
+
         let steady_started = Instant::now();
-        while !generated.is_empty() && generated.len() < max_new_tokens {
+        let stop_reason = loop {
+            if generated.len() >= max_new_tokens {
+                break GemmaStopReason::MaxNewTokens;
+            }
             let input_token = *generated
                 .last()
                 .ok_or("missing last generated token for CUDA decode")?;
             let position = prompt_token_ids.len() + generated.len() - 1;
             let next_token = self.generate_next_token_graph(input_token, position, &[])?;
             if self.runtime_session.stop_tokens.contains(&next_token) {
-                break;
+                break GemmaStopReason::EosToken(next_token);
             }
             generated.push(next_token);
-        }
+            on_generated_ids(&generated)
+                .map_err(std::io::Error::other)?;
+        };
+
         Ok(GenerationMetrics {
             generated_token_ids: generated,
+            stop_reason,
             time_to_first_token_elapsed,
             steady_state_elapsed: steady_started.elapsed(),
         })
@@ -1063,97 +1070,37 @@ impl CudaNvfp4BenchmarkSession {
             layer.hidden_size,
             eps,
         )?;
-        cuda.quantize_q8_1_f32(&layer.input_norm_out, q8_scratch, layer.hidden_size)?;
-        cuda.nvfp4_q8_1_matvec(
+        cuda.quantize_nvfp4_f32(&layer.input_norm_out, 1.0, q8_scratch, layer.hidden_size)?;
+        cuda.nvfp4_nvfp4_matvec(
             q8_scratch,
             &layer.qkv_weight,
+            1.0,
             &layer.qkv_out,
-            layer.hidden_size / QK_Q8_1,
+            layer.hidden_size / QK_NVFP4,
             layer.qkv_out_len,
         )?;
-        cuda.rms_norm_rows_weighted_f32_offset(
+        cuda.qkv_norm_rope_cache_f32_device_u32(
             &layer.qkv_out,
-            0,
             &layer.q_norm_weight,
-            &layer.q_norm,
-            0,
-            layer.q_head_count,
-            layer.head_dim,
-            layer.head_dim,
-            eps,
-        )?;
-        cuda.rms_norm_rows_weighted_f32_offset(
-            &layer.qkv_out,
-            layer.q_out_len,
             &layer.k_norm_weight,
-            &layer.k_norm,
-            0,
-            layer.k_head_count,
-            layer.head_dim,
-            layer.head_dim,
-            eps,
-        )?;
-        cuda.rms_norm_rows_no_scale_f32_offset(
-            &layer.qkv_out,
-            layer.v_offset,
-            &layer.v_norm,
-            0,
-            layer.k_head_count,
-            layer.head_dim,
-            layer.head_dim,
-            eps,
-        )?;
-        cuda.rope_rows_f32_device_u32(
-            &layer.q_norm,
             &layer.q_rope,
-            layer.q_head_count,
-            layer.head_dim,
-            layer.head_dim,
-            layer.rotary_dim,
-            layer.rope_base,
-            position,
-        )?;
-        cuda.rope_rows_f32_device_u32(
-            &layer.k_norm,
-            &layer.k_rope,
-            layer.k_head_count,
-            layer.head_dim,
-            layer.head_dim,
-            layer.rotary_dim,
-            layer.rope_base,
-            position,
-        )?;
-        cuda.kv_append_f32_device_u32(
-            &layer.k_rope,
-            &layer.v_norm,
             &layer.kv_cache.key,
             &layer.kv_cache.value,
+            layer.q_head_count,
             layer.k_head_count,
             layer.head_dim,
-            layer.kv_cache.max_tokens,
+            0,
+            layer.q_out_len,
+            layer.v_offset,
+            layer.rotary_dim,
+            layer.rope_base,
             position,
+            eps,
+            layer.kv_cache.max_tokens,
         )?;
-        cuda.attention_logits_seq_f32_device_u32(
+        cuda.attention_seq_softmax_weighted_sum_f32_device_u32(
             &layer.q_rope,
             &layer.kv_cache.key,
-            &layer.attention_logits,
-            layer.q_head_count,
-            layer.q_heads_per_kv,
-            layer.head_dim,
-            layer.kv_cache.row_stride(),
-            seq_len,
-            layer.kv_cache.max_tokens,
-            layer.kv_cache.max_tokens,
-        )?;
-        cuda.softmax_rows_f32_device_u32(
-            &layer.attention_logits,
-            &layer.attention_probs,
-            layer.q_head_count,
-            layer.kv_cache.max_tokens,
-            seq_len,
-        )?;
-        cuda.attention_weighted_sum_f32_device_u32(
-            &layer.attention_probs,
             &layer.kv_cache.value,
             &layer.attn_out,
             layer.q_head_count,
@@ -1162,15 +1109,15 @@ impl CudaNvfp4BenchmarkSession {
             layer.kv_cache.row_stride(),
             seq_len,
             layer.kv_cache.max_tokens,
-            layer.kv_cache.max_tokens,
             layer.head_dim,
         )?;
-        cuda.quantize_q8_1_f32(&layer.attn_out, q8_scratch, layer.q_out_len)?;
-        cuda.nvfp4_q8_1_matvec(
+        cuda.quantize_nvfp4_f32(&layer.attn_out, 1.0, q8_scratch, layer.q_out_len)?;
+        cuda.nvfp4_nvfp4_matvec(
             q8_scratch,
             &layer.o_weight,
+            1.0,
             &layer.o_proj_out,
-            layer.q_out_len / QK_Q8_1,
+            layer.q_out_len / QK_NVFP4,
             layer.hidden_size,
         )?;
         cuda.rms_norm_row_weighted_f32(
@@ -1193,12 +1140,18 @@ impl CudaNvfp4BenchmarkSession {
             layer.hidden_size,
             eps,
         )?;
-        cuda.quantize_q8_1_f32(&layer.pre_feedforward_norm_out, q8_scratch, layer.hidden_size)?;
-        cuda.nvfp4_q8_1_matvec(
+        cuda.quantize_nvfp4_f32(
+            &layer.pre_feedforward_norm_out,
+            1.0,
+            q8_scratch,
+            layer.hidden_size,
+        )?;
+        cuda.nvfp4_nvfp4_matvec(
             q8_scratch,
             &layer.mlp_gate_up_weight,
+            1.0,
             &layer.mlp_gate_up_out,
-            layer.hidden_size / QK_Q8_1,
+            layer.hidden_size / QK_NVFP4,
             layer.intermediate_size * 2,
         )?;
         cuda.geglu_split_f32(
@@ -1207,12 +1160,13 @@ impl CudaNvfp4BenchmarkSession {
             layer.intermediate_size,
             layer.intermediate_size,
         )?;
-        cuda.quantize_q8_1_f32(&layer.geglu_out, q8_scratch, layer.intermediate_size)?;
-        cuda.nvfp4_q8_1_matvec(
+        cuda.quantize_nvfp4_f32(&layer.geglu_out, 1.0, q8_scratch, layer.intermediate_size)?;
+        cuda.nvfp4_nvfp4_matvec(
             q8_scratch,
             &layer.mlp_down_weight,
+            1.0,
             &layer.mlp_down_out,
-            layer.intermediate_size / QK_Q8_1,
+            layer.intermediate_size / QK_NVFP4,
             layer.hidden_size,
         )?;
         cuda.rms_norm_row_weighted_f32(
@@ -1260,134 +1214,72 @@ impl CudaNvfp4BenchmarkSession {
             layer.hidden_size,
             eps,
         )?;
-        cuda.quantize_q8_1_f32(&prefill.input_norm_out, &prefill.q8_scratch, hidden_elems)?;
-        cuda.nvfp4_q8_1_matmul_batched(
+        cuda.quantize_q8_1_mmq_f32(
+            &prefill.input_norm_out,
+            &prefill.q8_scratch,
+            layer.hidden_size,
+            chunk_len,
+        )?;
+        cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.qkv_weight,
             &prefill.qkv_out,
-            layer.hidden_size / QK_Q8_1,
+            layer.hidden_size,
             layer.qkv_out_len,
             chunk_len,
         )?;
+        let chunk_start_slot = layer.kv_cache.stored_tokens;
+        cuda.qkv_norm_rope_cache_rows_f32(
+            &prefill.qkv_out,
+            &layer.q_norm_weight,
+            &layer.k_norm_weight,
+            &prefill.q_rope,
+            &layer.kv_cache.key,
+            &layer.kv_cache.value,
+            layer.q_head_count,
+            layer.k_head_count,
+            layer.head_dim,
+            layer.qkv_out_len,
+            layer.q_out_len,
+            0,
+            layer.q_out_len,
+            layer.v_offset,
+            layer.rotary_dim,
+            layer.rope_base,
+            chunk_start_position,
+            eps,
+            layer.kv_cache.max_tokens,
+            chunk_start_slot,
+            chunk_len,
+        )?;
+        cuda.attention_seq_softmax_weighted_sum_rows_f32(
+            &prefill.q_rope,
+            &layer.kv_cache.key,
+            &layer.kv_cache.value,
+            &prefill.attn_out,
+            chunk_len,
+            layer.q_head_count,
+            layer.q_heads_per_kv,
+            layer.head_dim,
+            layer.kv_cache.row_stride(),
+            layer.q_out_len,
+            layer.q_out_len,
+            chunk_start_slot,
+            layer.kv_cache.max_tokens,
+        )?;
+        layer.kv_cache.stored_tokens += chunk_len;
 
-        for token_idx in 0..chunk_len {
-            let qkv_row_offset = token_idx
-                .checked_mul(layer.qkv_out_len)
-                .ok_or("CUDA prefill qkv row offset overflow")?;
-            let position = chunk_start_position
-                .checked_add(token_idx)
-                .ok_or("CUDA prefill position overflow")?;
-            cuda.rms_norm_rows_weighted_f32_offset(
-                &prefill.qkv_out,
-                qkv_row_offset,
-                &layer.q_norm_weight,
-                &layer.q_norm,
-                0,
-                layer.q_head_count,
-                layer.head_dim,
-                layer.head_dim,
-                eps,
-            )?;
-            cuda.rms_norm_rows_weighted_f32_offset(
-                &prefill.qkv_out,
-                qkv_row_offset + layer.q_out_len,
-                &layer.k_norm_weight,
-                &layer.k_norm,
-                0,
-                layer.k_head_count,
-                layer.head_dim,
-                layer.head_dim,
-                eps,
-            )?;
-            cuda.rms_norm_rows_no_scale_f32_offset(
-                &prefill.qkv_out,
-                qkv_row_offset + layer.v_offset,
-                &layer.v_norm,
-                0,
-                layer.k_head_count,
-                layer.head_dim,
-                layer.head_dim,
-                eps,
-            )?;
-            cuda.rope_rows_f32(
-                &layer.q_norm,
-                &layer.q_rope,
-                layer.q_head_count,
-                layer.head_dim,
-                layer.head_dim,
-                layer.rotary_dim,
-                layer.rope_base,
-                position,
-            )?;
-            cuda.rope_rows_f32(
-                &layer.k_norm,
-                &layer.k_rope,
-                layer.k_head_count,
-                layer.head_dim,
-                layer.head_dim,
-                layer.rotary_dim,
-                layer.rope_base,
-                position,
-            )?;
-            let slot = layer.kv_cache.stored_tokens;
-            cuda.kv_append_f32(
-                &layer.k_rope,
-                &layer.v_norm,
-                &layer.kv_cache.key,
-                &layer.kv_cache.value,
-                layer.k_head_count,
-                layer.head_dim,
-                layer.kv_cache.max_tokens,
-                slot,
-            )?;
-            layer.kv_cache.stored_tokens += 1;
-            let seq_len = layer.kv_cache.stored_tokens;
-            cuda.attention_logits_seq_f32(
-                &layer.q_rope,
-                &layer.kv_cache.key,
-                &layer.attention_logits,
-                layer.q_head_count,
-                layer.q_heads_per_kv,
-                layer.head_dim,
-                layer.kv_cache.row_stride(),
-                seq_len,
-                0,
-                layer.kv_cache.max_tokens,
-                layer.kv_cache.max_tokens,
-            )?;
-            cuda.softmax_rows_f32(
-                &layer.attention_logits,
-                &layer.attention_probs,
-                layer.q_head_count,
-                layer.kv_cache.max_tokens,
-                seq_len,
-            )?;
-            cuda.attention_weighted_sum_f32_output_offset(
-                &layer.attention_probs,
-                &layer.kv_cache.value,
-                &prefill.attn_out,
-                token_idx * layer.q_out_len,
-                layer.q_head_count,
-                layer.q_heads_per_kv,
-                layer.head_dim,
-                layer.kv_cache.row_stride(),
-                seq_len,
-                0,
-                layer.kv_cache.max_tokens,
-                layer.kv_cache.max_tokens,
-                layer.head_dim,
-            )?;
-        }
-
-        let q_out_elems = chunk_len
-            .checked_mul(layer.q_out_len)
-            .ok_or("CUDA prefill attention output length overflow")?;
-        cuda.quantize_q8_1_f32(&prefill.attn_out, &prefill.q8_scratch, q_out_elems)?;
-        cuda.nvfp4_q8_1_matmul_batched(
+        cuda.quantize_q8_1_mmq_f32(
+            &prefill.attn_out,
+            &prefill.q8_scratch,
+            layer.q_out_len,
+            chunk_len,
+        )?;
+        cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.o_weight,
             &prefill.o_proj_out,
-            layer.q_out_len / QK_Q8_1,
+            layer.q_out_len,
             layer.hidden_size,
             chunk_len,
         )?;
@@ -1415,16 +1307,17 @@ impl CudaNvfp4BenchmarkSession {
             layer.hidden_size,
             eps,
         )?;
-        cuda.quantize_q8_1_f32(
+        cuda.quantize_q8_1_mmq_f32(
             &prefill.pre_feedforward_norm_out,
             &prefill.q8_scratch,
-            hidden_elems,
+            layer.hidden_size,
+            chunk_len,
         )?;
-        cuda.nvfp4_q8_1_matmul_batched(
+        cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.mlp_gate_up_weight,
             &prefill.mlp_gate_up_out,
-            layer.hidden_size / QK_Q8_1,
+            layer.hidden_size,
             layer.intermediate_size * 2,
             chunk_len,
         )?;
@@ -1436,15 +1329,17 @@ impl CudaNvfp4BenchmarkSession {
             layer.intermediate_size,
             layer.intermediate_size,
         )?;
-        let geglu_elems = chunk_len
-            .checked_mul(layer.intermediate_size)
-            .ok_or("CUDA prefill geglu length overflow")?;
-        cuda.quantize_q8_1_f32(&prefill.geglu_out, &prefill.q8_scratch, geglu_elems)?;
-        cuda.nvfp4_q8_1_matmul_batched(
+        cuda.quantize_q8_1_mmq_f32(
+            &prefill.geglu_out,
+            &prefill.q8_scratch,
+            layer.intermediate_size,
+            chunk_len,
+        )?;
+        cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.mlp_down_weight,
             &prefill.mlp_down_out,
-            layer.intermediate_size / QK_Q8_1,
+            layer.intermediate_size,
             layer.hidden_size,
             chunk_len,
         )?;
@@ -1487,12 +1382,13 @@ impl CudaNvfp4BenchmarkSession {
             self.rms_norm_eps,
         )?;
         self.cuda
-            .quantize_q8_1_f32(&self.io.final_norm_out, &self.io.q8_scratch, self.io.hidden_size)?;
-        self.cuda.nvfp4_q8_1_matvec(
+            .quantize_nvfp4_f32(&self.io.final_norm_out, 1.0, &self.io.q8_scratch, self.io.hidden_size)?;
+        self.cuda.nvfp4_nvfp4_matvec(
             &self.io.q8_scratch,
             &self.io.embed_weight,
+            1.0,
             &self.io.logits_out,
-            self.io.hidden_size / QK_Q8_1,
+            self.io.hidden_size / QK_NVFP4,
             self.io.vocab_size,
         )?;
         self.cuda.masked_argmax_f32_device_u32(

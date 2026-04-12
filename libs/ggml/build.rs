@@ -100,6 +100,7 @@ fn build_cuda_backends() {
     let src_paths = [
         manifest_dir.join("src/backend/cuda/affine.cu"),
         manifest_dir.join("src/backend/cuda/nvfp4.cu"),
+        manifest_dir.join("src/backend/cuda/nvfp4_mmq.cu"),
         manifest_dir.join("src/backend/cuda/ops.cu"),
     ];
     for src_path in &src_paths {

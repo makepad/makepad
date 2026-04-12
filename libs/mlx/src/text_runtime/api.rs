@@ -194,6 +194,18 @@ pub struct GemmaTextGenerationOutput {
     pub generated_token_ids: Arc<[u32]>,
     pub generated_text: Arc<str>,
     pub stop_reason: GemmaStopReason,
+    pub metrics: GemmaTextGenerationMetrics,
+}
+
+#[derive(Clone, Debug)]
+pub struct GemmaTextGenerationMetrics {
+    pub elapsed: Duration,
+    pub time_to_first_token_elapsed: Duration,
+    pub steady_state_elapsed: Duration,
+    pub steady_state_generated_tokens: usize,
+    pub prompt_prefill_tokens_per_second: f64,
+    pub steady_state_decode_tokens_per_second: f64,
+    pub decode_tokens_per_second: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +294,8 @@ fn build_generation_output(
     snapshot: Arc<crate::layer0_cached_case::ExactMetalGenerationSnapshot>,
 ) -> Result<Arc<GemmaTextGenerationOutput>, String> {
     let generated_token_ids = snapshot.generated_token_ids.clone();
+    let prompt_token_count = prompt_token_ids.len();
+    let generated_token_count = generated_token_ids.len();
     let stop_reason = match snapshot
         .stop_reason
         .ok_or_else(|| "generation graph completed without a stop reason".to_string())?
@@ -296,7 +310,47 @@ fn build_generation_output(
         prompt_token_ids,
         generated_token_ids,
         stop_reason,
+        build_generation_metrics(
+            Duration::ZERO,
+            prompt_token_count,
+            generated_token_count,
+            Duration::ZERO,
+        ),
     )
+}
+
+fn build_generation_metrics(
+    elapsed: Duration,
+    prompt_token_count: usize,
+    generated_token_count: usize,
+    time_to_first_token_elapsed: Duration,
+) -> GemmaTextGenerationMetrics {
+    let steady_state_generated_tokens = generated_token_count.saturating_sub(1);
+    let steady_state_elapsed = elapsed.saturating_sub(time_to_first_token_elapsed);
+    let ttft_secs = time_to_first_token_elapsed.as_secs_f64();
+    let elapsed_secs = elapsed.as_secs_f64();
+    let steady_secs = steady_state_elapsed.as_secs_f64();
+    GemmaTextGenerationMetrics {
+        elapsed,
+        time_to_first_token_elapsed,
+        steady_state_elapsed,
+        steady_state_generated_tokens,
+        prompt_prefill_tokens_per_second: if ttft_secs > 0.0 {
+            prompt_token_count as f64 / ttft_secs
+        } else {
+            0.0
+        },
+        steady_state_decode_tokens_per_second: if steady_secs > 0.0 {
+            steady_state_generated_tokens as f64 / steady_secs
+        } else {
+            0.0
+        },
+        decode_tokens_per_second: if elapsed_secs > 0.0 {
+            generated_token_count as f64 / elapsed_secs
+        } else {
+            0.0
+        },
+    }
 }
 
 fn build_generation_output_from_token_ids(
@@ -306,6 +360,7 @@ fn build_generation_output_from_token_ids(
     prompt_token_ids: Arc<[u32]>,
     generated_token_ids: Arc<[u32]>,
     stop_reason: GemmaStopReason,
+    metrics: GemmaTextGenerationMetrics,
 ) -> Result<Arc<GemmaTextGenerationOutput>, String> {
     let generated_text = if generated_token_ids.is_empty() {
         Arc::<str>::from("")
@@ -327,6 +382,7 @@ fn build_generation_output_from_token_ids(
         generated_token_ids,
         generated_text,
         stop_reason,
+        metrics,
     }))
 }
 
@@ -1320,6 +1376,8 @@ impl GemmaLazyTextPlanInner {
                     &mut rng,
                     |_| Ok(()),
                 )?;
+                let prompt_token_count = prompt_token_ids.len();
+                let generated_token_count = generated_token_ids.len();
                 build_generation_output_from_token_ids(
                     &runtime,
                     self.prompt_text.clone(),
@@ -1327,6 +1385,12 @@ impl GemmaLazyTextPlanInner {
                     prompt_token_ids,
                     generated_token_ids,
                     stop_reason,
+                    build_generation_metrics(
+                        Duration::ZERO,
+                        prompt_token_count,
+                        generated_token_count,
+                        Duration::ZERO,
+                    ),
                 )
             }
         })
@@ -1484,6 +1548,8 @@ impl GemmaTextModel {
         let prompt_token_ids = Arc::<[u32]>::from(prepared.prompt_token_ids);
         let prompt_embedding_rows = prepared.prompt_embedding_rows;
         let mut rng = MlxTextSamplingRng::new(0);
+        let started = Instant::now();
+        let mut time_to_first_token_elapsed = None;
         let (generated_token_ids, stop_reason) = generate_sampled_token_ids_from_embedding_rows(
             &self.runtime,
             prompt_token_ids.clone(),
@@ -1493,8 +1559,16 @@ impl GemmaTextModel {
                 &self.runtime.weights.snapshot.generation_config,
             ),
             &mut rng,
-            |_| Ok(()),
+            |generated_token_ids| {
+                if time_to_first_token_elapsed.is_none() && !generated_token_ids.is_empty() {
+                    time_to_first_token_elapsed = Some(started.elapsed());
+                }
+                Ok(())
+            },
         )?;
+        let elapsed = started.elapsed();
+        let prompt_token_count = prompt_token_ids.len();
+        let generated_token_count = generated_token_ids.len();
         build_generation_output_from_token_ids(
             &self.runtime,
             prompt_text,
@@ -1502,6 +1576,12 @@ impl GemmaTextModel {
             prompt_token_ids,
             generated_token_ids,
             stop_reason,
+            build_generation_metrics(
+                elapsed,
+                prompt_token_count,
+                generated_token_count,
+                time_to_first_token_elapsed.unwrap_or(elapsed),
+            ),
         )
         .map_err(|err| err.into())
     }
@@ -1531,6 +1611,8 @@ impl GemmaTextModel {
         let mut rng = MlxTextSamplingRng::new(0);
         let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
         let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
+        let started = Instant::now();
+        let mut time_to_first_token_elapsed = None;
         let (generated_token_ids, stop_reason) = generate_sampled_token_ids_from_embedding_rows(
             &self.runtime,
             prompt_token_ids.clone(),
@@ -1539,6 +1621,9 @@ impl GemmaTextModel {
             &sampling_options,
             &mut rng,
             |generated_token_ids| {
+                if time_to_first_token_elapsed.is_none() && !generated_token_ids.is_empty() {
+                    time_to_first_token_elapsed = Some(started.elapsed());
+                }
                 let Some(&token_id) = generated_token_ids.last() else {
                     return Ok(());
                 };
@@ -1553,6 +1638,9 @@ impl GemmaTextModel {
         if !final_delta.is_empty() {
             on_text_delta(&final_delta)?;
         }
+        let elapsed = started.elapsed();
+        let prompt_token_count = prompt_token_ids.len();
+        let generated_token_count = generated_token_ids.len();
         build_generation_output_from_token_ids(
             &self.runtime,
             prompt_text,
@@ -1560,6 +1648,12 @@ impl GemmaTextModel {
             prompt_token_ids,
             generated_token_ids,
             stop_reason,
+            build_generation_metrics(
+                elapsed,
+                prompt_token_count,
+                generated_token_count,
+                time_to_first_token_elapsed.unwrap_or(elapsed),
+            ),
         )
         .map_err(|err| err.into())
     }
@@ -1622,6 +1716,8 @@ impl GemmaTextModel {
         )?;
         let prompt_token_ids = Arc::<[u32]>::from(prepared.prompt_token_ids);
         let prompt_embedding_rows = prepared.prompt_embedding_rows;
+        let started = Instant::now();
+        let mut time_to_first_token_elapsed = None;
         let (generated_token_ids, stop_reason) = generate_sampled_token_ids_from_embedding_rows(
             &self.runtime,
             prompt_token_ids.clone(),
@@ -1629,8 +1725,16 @@ impl GemmaTextModel {
             max_new_tokens,
             sampling_options,
             rng,
-            |_| Ok(()),
+            |generated_token_ids| {
+                if time_to_first_token_elapsed.is_none() && !generated_token_ids.is_empty() {
+                    time_to_first_token_elapsed = Some(started.elapsed());
+                }
+                Ok(())
+            },
         )?;
+        let elapsed = started.elapsed();
+        let prompt_token_count = prompt_token_ids.len();
+        let generated_token_count = generated_token_ids.len();
         build_generation_output_from_token_ids(
             &self.runtime,
             prompt_text,
@@ -1638,6 +1742,12 @@ impl GemmaTextModel {
             prompt_token_ids,
             generated_token_ids,
             stop_reason,
+            build_generation_metrics(
+                elapsed,
+                prompt_token_count,
+                generated_token_count,
+                time_to_first_token_elapsed.unwrap_or(elapsed),
+            ),
         )
         .map_err(|err| err.into())
     }
@@ -1698,6 +1808,8 @@ impl GemmaTextModel {
             .runtime
             .tokenize_prompt(formatted_prompt_text.as_ref())
             .map_err(|err| err.to_string())?;
+        let started = Instant::now();
+        let mut time_to_first_token_elapsed = None;
         let (generated_token_ids, stop_reason) = if sampling_options.allow_thought {
             let mut streamed_text = String::new();
             generate_sampled_token_ids(
@@ -1707,6 +1819,9 @@ impl GemmaTextModel {
                 sampling_options,
                 rng,
                 |generated_token_ids| {
+                    if time_to_first_token_elapsed.is_none() && !generated_token_ids.is_empty() {
+                        time_to_first_token_elapsed = Some(started.elapsed());
+                    }
                     let partial_text = self
                         .decode_generated_text(generated_token_ids)
                         .map_err(|err| err.to_string())?;
@@ -1729,6 +1844,9 @@ impl GemmaTextModel {
                 sampling_options,
                 rng,
                 |generated_token_ids| {
+                    if time_to_first_token_elapsed.is_none() && !generated_token_ids.is_empty() {
+                        time_to_first_token_elapsed = Some(started.elapsed());
+                    }
                     let Some(&token_id) = generated_token_ids.last() else {
                         return Ok(());
                     };
@@ -1745,7 +1863,10 @@ impl GemmaTextModel {
             }
             (generated_token_ids, stop_reason)
         };
+        let elapsed = started.elapsed();
 
+        let prompt_token_count = prompt_token_ids.len();
+        let generated_token_count = generated_token_ids.len();
         let output = build_generation_output_from_token_ids(
             &self.runtime,
             prompt_text,
@@ -1753,6 +1874,12 @@ impl GemmaTextModel {
             prompt_token_ids,
             generated_token_ids,
             stop_reason,
+            build_generation_metrics(
+                elapsed,
+                prompt_token_count,
+                generated_token_count,
+                time_to_first_token_elapsed.unwrap_or(elapsed),
+            ),
         )?;
         Ok(output)
     }
@@ -1779,6 +1906,8 @@ impl GemmaTextModel {
         let prompt_embedding_rows = prepared.prompt_embedding_rows;
         let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
         let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
+        let started = Instant::now();
+        let mut time_to_first_token_elapsed = None;
         let (generated_token_ids, stop_reason) = generate_sampled_token_ids_from_embedding_rows(
             &self.runtime,
             prompt_token_ids.clone(),
@@ -1787,6 +1916,9 @@ impl GemmaTextModel {
             sampling_options,
             rng,
             |generated_token_ids| {
+                if time_to_first_token_elapsed.is_none() && !generated_token_ids.is_empty() {
+                    time_to_first_token_elapsed = Some(started.elapsed());
+                }
                 let Some(&token_id) = generated_token_ids.last() else {
                     return Ok(());
                 };
@@ -1801,6 +1933,9 @@ impl GemmaTextModel {
         if !final_delta.is_empty() {
             on_text_delta(&final_delta)?;
         }
+        let elapsed = started.elapsed();
+        let prompt_token_count = prompt_token_ids.len();
+        let generated_token_count = generated_token_ids.len();
         build_generation_output_from_token_ids(
             &self.runtime,
             prompt_text,
@@ -1808,6 +1943,12 @@ impl GemmaTextModel {
             prompt_token_ids,
             generated_token_ids,
             stop_reason,
+            build_generation_metrics(
+                elapsed,
+                prompt_token_count,
+                generated_token_count,
+                time_to_first_token_elapsed.unwrap_or(elapsed),
+            ),
         )
         .map_err(|err| err.into())
     }
@@ -1824,14 +1965,24 @@ impl GemmaTextModel {
             .runtime
             .tokenize_prompt(formatted_prompt_text.as_ref())
             .map_err(|err| err.to_string())?;
+        let started = Instant::now();
+        let mut time_to_first_token_elapsed = None;
         let (generated_token_ids, stop_reason) = generate_sampled_token_ids(
             &self.runtime,
             prompt_token_ids.clone(),
             max_new_tokens,
             sampling_options,
             rng,
-            |_| Ok(()),
+            |generated_token_ids| {
+                if time_to_first_token_elapsed.is_none() && !generated_token_ids.is_empty() {
+                    time_to_first_token_elapsed = Some(started.elapsed());
+                }
+                Ok(())
+            },
         )?;
+        let elapsed = started.elapsed();
+        let prompt_token_count = prompt_token_ids.len();
+        let generated_token_count = generated_token_ids.len();
         build_generation_output_from_token_ids(
             &self.runtime,
             prompt_text,
@@ -1839,6 +1990,12 @@ impl GemmaTextModel {
             prompt_token_ids,
             generated_token_ids,
             stop_reason,
+            build_generation_metrics(
+                elapsed,
+                prompt_token_count,
+                generated_token_count,
+                time_to_first_token_elapsed.unwrap_or(elapsed),
+            ),
         )
         .map_err(|err| err.into())
     }
