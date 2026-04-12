@@ -43,6 +43,10 @@ name = "flux-generate"
 path = "src/bin/flux_generate.rs"
 
 [[bin]]
+name = "flux-warm-bench"
+path = "src/bin/flux_warm_bench.rs"
+
+[[bin]]
 name = "flux-t5-stage-compare"
 path = "src/bin/flux_t5_stage_compare.rs"
 

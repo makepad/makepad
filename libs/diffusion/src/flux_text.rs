@@ -5,7 +5,9 @@ use crate::flux::{
     tokenize_flux_clip_l_prompt, tokenize_flux_t5xxl_prompt, FluxPromptToImagePlan, FluxResolvedBundle,
 };
 use crate::t5::T5TokenizedPrompt;
-use crate::t5_encoder::{LazyT5xxlMetal, LoadedT5xxlWeights};
+use crate::t5_encoder::{
+    CompiledT5xxlMetal, LazyT5xxlMetal, LoadedT5xxlWeights, T5xxlExecutionMode,
+};
 use crate::{DiffusionError, Result};
 use makepad_ggml::backend::metal::MetalRuntime;
 
@@ -34,7 +36,12 @@ pub struct FluxLoadedTextEncoders {
 
 pub struct FluxCompiledTextEncodersMetal {
     clip_l: CompiledClipLMetal,
-    t5xxl: LazyT5xxlMetal,
+    t5xxl: FluxCompiledT5xxlMetal,
+}
+
+enum FluxCompiledT5xxlMetal {
+    Lazy(LazyT5xxlMetal),
+    Compiled(CompiledT5xxlMetal),
 }
 
 impl FluxTokenizedPrompts {
@@ -90,18 +97,29 @@ impl FluxCompiledTextEncodersMetal {
         weights: &mut FluxLoadedTextEncoders,
         prompts: &FluxTokenizedPrompts,
     ) -> Result<Self> {
+        let t5xxl = match T5xxlExecutionMode::from_env() {
+            T5xxlExecutionMode::Lazy => FluxCompiledT5xxlMetal::Lazy(
+                LazyT5xxlMetal::compile_with_runtime(runtime.clone(), &mut weights.t5xxl, &prompts.t5xxl)?,
+            ),
+            T5xxlExecutionMode::Compiled => FluxCompiledT5xxlMetal::Compiled(
+                CompiledT5xxlMetal::compile_with_runtime(runtime.clone(), &mut weights.t5xxl, &prompts.t5xxl)?,
+            ),
+        };
         Ok(Self {
             clip_l: CompiledClipLMetal::compile_with_runtime(
                 runtime.clone(),
                 &mut weights.clip_l,
                 &prompts.clip_l,
             )?,
-            t5xxl: LazyT5xxlMetal::compile_with_runtime(
-                runtime,
-                &mut weights.t5xxl,
-                &prompts.t5xxl,
-            )?,
+            t5xxl,
         })
+    }
+
+    pub fn t5_backend_name(&self) -> &'static str {
+        match &self.t5xxl {
+            FluxCompiledT5xxlMetal::Lazy(_) => T5xxlExecutionMode::Lazy.as_str(),
+            FluxCompiledT5xxlMetal::Compiled(_) => T5xxlExecutionMode::Compiled.as_str(),
+        }
     }
 
     pub fn execute(
@@ -112,9 +130,14 @@ impl FluxCompiledTextEncodersMetal {
         let clip = self
             .clip_l
             .execute(&weights.clip_l, &prompts.clip_l.token_ids)?;
-        let t5 = self
-            .t5xxl
-            .execute(&weights.t5xxl, &prompts.t5xxl.token_ids)?;
+        let t5 = match &self.t5xxl {
+            FluxCompiledT5xxlMetal::Lazy(t5xxl) => {
+                t5xxl.execute(&weights.t5xxl, &prompts.t5xxl.token_ids)?
+            }
+            FluxCompiledT5xxlMetal::Compiled(t5xxl) => {
+                t5xxl.execute(&weights.t5xxl, &prompts.t5xxl.token_ids)?
+            }
+        };
 
         Ok(FluxConditioning {
             clip_pooled: clip.pooled,

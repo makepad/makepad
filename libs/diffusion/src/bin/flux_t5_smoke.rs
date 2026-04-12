@@ -1,6 +1,8 @@
 use makepad_diffusion::comfy::FluxWorkflow;
 use makepad_diffusion::flux::{tokenize_flux_t5xxl_prompt, ComfyModelRoots, FluxPromptToImagePlan};
-use makepad_diffusion::t5_encoder::{LazyT5xxlMetal, LoadedT5xxlWeights};
+use makepad_diffusion::t5_encoder::{
+    CompiledT5xxlMetal, LazyT5xxlMetal, LoadedT5xxlWeights, T5xxlExecutionMode,
+};
 use std::env;
 
 fn usage() -> ! {
@@ -23,11 +25,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokenized = tokenize_flux_t5xxl_prompt(&plan.prompts.t5xxl)?;
 
     let mut weights = LoadedT5xxlWeights::load(t5xxl_path)?;
-    let lazy = LazyT5xxlMetal::compile(&mut weights, &tokenized)?;
-    let run = lazy.execute(&weights, &tokenized.token_ids)?;
+    let mode = T5xxlExecutionMode::from_env();
+    let run = match mode {
+        T5xxlExecutionMode::Lazy => {
+            let lazy = LazyT5xxlMetal::compile(&mut weights, &tokenized)?;
+            lazy.execute(&weights, &tokenized.token_ids)?
+        }
+        T5xxlExecutionMode::Compiled => {
+            let compiled = CompiledT5xxlMetal::compile(&mut weights, &tokenized)?;
+            compiled.execute(&weights, &tokenized.token_ids)?
+        }
+    };
 
     println!("workflow: {}", workflow.path.display());
     println!("t5xxl model: {}", t5xxl_path.display());
+    println!("t5xxl backend: {}", mode.as_str());
     println!("prompt.t5xxl: {}", plan.prompts.t5xxl);
     println!(
         "t5xxl config: vocab={} d_model={} layers={} heads={} head_dim={} ffn={} buckets={}",
