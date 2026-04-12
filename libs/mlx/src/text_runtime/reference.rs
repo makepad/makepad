@@ -1,5 +1,20 @@
 impl GemmaTextRuntimeSession {
-    fn supports_exact_backend(weights: &MlxIndexedSafetensors) -> bool {
+    fn default_chat_prompt_format(&self) -> GemmaPromptFormat {
+        if self.weights.snapshot.config.text_config.enable_moe_block {
+            GemmaPromptFormat::Gemma4UserTurn
+        } else {
+            GemmaPromptFormat::AutoChat
+        }
+    }
+
+    fn format_plain_chat_prompt_text(&self, prompt_text: &str) -> String {
+        format!(
+            "{}User: {}\nAssistant:",
+            self.weights.snapshot.tokenizer_config.bos_token, prompt_text
+        )
+    }
+
+    fn supports_exact_backend_forced(weights: &MlxIndexedSafetensors) -> bool {
         let config = &weights.snapshot.config;
         let text_config = &config.text_config;
         config.quantization.mode == "affine"
@@ -8,6 +23,15 @@ impl GemmaTextRuntimeSession {
             && text_config.hidden_size_per_layer_input == 0
             && text_config.num_kv_shared_layers == 0
             && (!text_config.enable_moe_block || text_config.top_k_experts_or_zero() == 8)
+    }
+
+    fn supports_exact_backend_auto(weights: &MlxIndexedSafetensors) -> bool {
+        Self::supports_exact_backend_forced(weights)
+            && match weights.snapshot.config.quantization.bits {
+                4 => true,
+                8 => !weights.snapshot.config.text_config.enable_moe_block,
+                _ => false,
+            }
     }
 
     fn load(model_path: &Path) -> Result<Arc<Self>, String> {
@@ -32,18 +56,44 @@ impl GemmaTextRuntimeSession {
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-        let exact_backend = if makepad_ggml::backend::metal::MetalRuntime::is_available()
-            && Self::supports_exact_backend(&weights)
-        {
-            Some(Arc::new(Mutex::new(
-                ExactMetalTextRuntimeSession::load_with_config(
-                    model_path.to_path_buf(),
-                    backend_config.clone(),
-                )
+        let exact_backend = match backend_config.backend_mode {
+            GemmaExactMetalBackendMode::Disabled => None,
+            GemmaExactMetalBackendMode::Auto => {
+                if makepad_ggml::backend::metal::MetalRuntime::is_available()
+                    && Self::supports_exact_backend_auto(&weights)
+                {
+                    Some(Arc::new(Mutex::new(
+                        ExactMetalTextRuntimeSession::load_with_config(
+                            model_path.to_path_buf(),
+                            backend_config.clone(),
+                        )
+                        .map_err(|err| err.to_string())?,
+                    )))
+                } else {
+                    None
+                }
+            }
+            GemmaExactMetalBackendMode::Force => {
+                if !Self::supports_exact_backend_forced(&weights) {
+                    return Err(format!(
+                        "forced exact metal backend is unsupported for quantization={{mode:{} bits:{} group_size:{}}} text_config={{hidden_size_per_layer_input:{} num_kv_shared_layers:{} enable_moe_block:{} top_k_experts:{:?}}}",
+                        weights.snapshot.config.quantization.mode,
+                        weights.snapshot.config.quantization.bits,
+                        weights.snapshot.config.quantization.group_size,
+                        weights.snapshot.config.text_config.hidden_size_per_layer_input,
+                        weights.snapshot.config.text_config.num_kv_shared_layers,
+                        weights.snapshot.config.text_config.enable_moe_block,
+                        weights.snapshot.config.text_config.top_k_experts
+                    ));
+                }
+                Some(Arc::new(Mutex::new(
+                    ExactMetalTextRuntimeSession::load_with_config(
+                        model_path.to_path_buf(),
+                        backend_config.clone(),
+                    )
                     .map_err(|err| err.to_string())?,
-            )))
-        } else {
-            None
+                )))
+            }
         };
         Ok(Arc::new(Self {
             model_path: model_path.to_path_buf(),
@@ -73,15 +123,27 @@ impl GemmaTextRuntimeSession {
                 "{}{}",
                 self.weights.snapshot.tokenizer_config.bos_token, prompt_text
             ),
+            GemmaPromptFormat::AutoChat => {
+                if self.weights.snapshot.config.text_config.enable_moe_block {
+                    format!(
+                        "{}{}user\n{}{}\n{}model\n",
+                        self.weights.snapshot.tokenizer_config.bos_token,
+                        self.weights.snapshot.tokenizer_config.sot_token,
+                        prompt_text,
+                        self.weights.snapshot.tokenizer_config.eot_token,
+                        self.weights.snapshot.tokenizer_config.sot_token,
+                    )
+                } else {
+                    self.format_plain_chat_prompt_text(prompt_text)
+                }
+            }
             GemmaPromptFormat::Gemma4UserTurn => format!(
-                "{}{}user\n{}{}\n{}model\n{}thought\n{}",
+                "{}{}user\n{}{}\n{}model\n",
                 self.weights.snapshot.tokenizer_config.bos_token,
                 self.weights.snapshot.tokenizer_config.sot_token,
                 prompt_text,
                 self.weights.snapshot.tokenizer_config.eot_token,
                 self.weights.snapshot.tokenizer_config.sot_token,
-                self.weights.snapshot.tokenizer_config.soc_token,
-                self.weights.snapshot.tokenizer_config.eoc_token,
             ),
         }
     }

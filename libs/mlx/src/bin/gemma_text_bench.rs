@@ -1,6 +1,7 @@
 use makepad_mlx::text_runtime::{
-    benchmark_text_generation_with_backend_config, GemmaExactMetalConfig,
-    GemmaExactMetalKvCompressionMode, GemmaPromptFormat, GemmaTextGenerationOptions,
+    benchmark_text_generation_with_backend_config, GemmaExactMetalBackendMode,
+    GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode, GemmaPromptFormat,
+    GemmaTextGenerationOptions,
 };
 use std::env;
 use std::path::PathBuf;
@@ -11,13 +12,13 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: gemma_text_bench [model.safetensors] [--raw-bos] [--greedy] [--max-new-tokens N] [--warmup N] [--iters N] [--rotor-k-cache] [--rotor-k-cache-planar3] <prompt>"
+    "Usage: gemma_text_bench [model.safetensors] [--raw-bos] [--greedy] [--max-new-tokens N] [--warmup N] [--iters N] [--reference-text-backend] [--force-exact-text-backend] [--rotor-k-cache] [--rotor-k-cache-planar3] <prompt>"
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let mut model_path = default_model_path();
-    let mut prompt_format = GemmaPromptFormat::Gemma4UserTurn;
+    let mut prompt_format = GemmaPromptFormat::AutoChat;
     let mut greedy = false;
     let mut max_new_tokens = 64usize;
     let mut warmup_iters = 1usize;
@@ -44,6 +45,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--iters" => {
                 let value = args.next().ok_or("--iters requires a value")?;
                 measured_iters = value.parse::<usize>()?;
+            }
+            "--reference-text-backend" => {
+                backend_config.backend_mode = GemmaExactMetalBackendMode::Disabled;
+            }
+            "--force-exact-text-backend" => {
+                backend_config.backend_mode = GemmaExactMetalBackendMode::Force;
             }
             "--rotor-k-cache" => {
                 backend_config.kv_compression =

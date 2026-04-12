@@ -2,10 +2,10 @@
         apply_rope_rows_in_place, bf16_word_to_f32, compute_attention_output_f32, lazy_text_plan,
         quantized_matmul_tensor, rms_norm_rows_no_scale_f32, rms_norm_rows_weighted_f32,
         rms_norm_weighted_tensor, run_two_token_ids, run_two_token_prompt, single_token_tensor,
-        GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode, GemmaPromptFormat,
-        GemmaStopReason, GemmaTextGenerationOptions, GemmaTextModel, GemmaTextRuntimeSession,
-        GemmaTextSamplingOptions, GemmaTextStepOutput, MlxTextSamplingRng, RopeSpec,
-        TextLayerTensorNames,
+        GemmaExactMetalBackendMode, GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode,
+        GemmaPromptFormat, GemmaStopReason, GemmaTextGenerationOptions, GemmaTextModel,
+        GemmaTextRuntimeSession, GemmaTextSamplingOptions, GemmaTextStepOutput,
+        MlxTextSamplingRng, RopeSpec, TextLayerTensorNames,
     };
     use crate::GemmaKvCacheSet;
     use crate::fnv1a64_u32_words;
@@ -14,8 +14,16 @@
     use std::sync::Arc;
 
     fn default_model_path() -> PathBuf {
+        if let Ok(path) = std::env::var("MAKEPAD_MLX_TEST_MODEL") {
+            return PathBuf::from(path);
+        }
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../local/models/gemma-4-26b-mlx/model-00001-of-00003.safetensors")
+    }
+
+    fn gemma_31b_q8_model_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../local/models/gemma-4-31b-8b-mlx/model-00001-of-00007.safetensors")
     }
 
     fn assert_valid_step(output: &GemmaTextStepOutput) {
@@ -24,6 +32,13 @@
         assert_eq!(output.final_norm_bf16_words.len(), 2_816);
         assert!(output.next_token.logit.is_finite());
         assert!(!output.next_token_text.is_empty());
+    }
+
+    fn load_runtime_with_forced_exact_backend() -> Arc<GemmaTextRuntimeSession> {
+        let mut backend_config = GemmaExactMetalConfig::default();
+        backend_config.backend_mode = GemmaExactMetalBackendMode::Force;
+        GemmaTextRuntimeSession::load_with_backend_config(&default_model_path(), backend_config)
+            .unwrap()
     }
 
     fn greedy_generate_with_backend_config(
@@ -455,6 +470,193 @@
     }
 
     #[test]
+    #[ignore]
+    fn formatted_say_hi_layer0_last_prompt_token_stage_hashes_against_forced_exact() {
+        let runtime = load_runtime_with_forced_exact_backend();
+        let formatted_prompt = runtime.format_prompt_text("say hi", GemmaPromptFormat::Gemma4UserTurn);
+        let prompt_token_ids = runtime.tokenize_prompt(&formatted_prompt).unwrap();
+        let last_position = prompt_token_ids.len() - 1;
+        let last_token_id = prompt_token_ids[last_position];
+
+        let config = &runtime.weights.snapshot.config.text_config;
+        let layer_idx = 0usize;
+        let layer_type = config.layer_types.get(layer_idx).unwrap();
+        let attention_k_eq_v = config.attention_k_eq_v && layer_type == "full_attention";
+        let head_dim = if layer_type == "full_attention" {
+            config.global_head_dim as usize
+        } else {
+            config.head_dim as usize
+        };
+        let k_head_count = if attention_k_eq_v && layer_type == "full_attention" {
+            config.num_global_key_value_heads_or_default() as usize
+        } else {
+            config.num_key_value_heads as usize
+        };
+        let q_head_count = config.num_attention_heads as usize;
+        let v_head_count = k_head_count;
+        let q_heads_per_kv = q_head_count / k_head_count;
+        let rope_params = if layer_type == "full_attention" {
+            &config.rope_parameters.full_attention
+        } else {
+            &config.rope_parameters.sliding_attention
+        };
+        let rope_rotary_dim = if let Some(partial_factor) = rope_params.partial_rotary_factor {
+            (head_dim as f32 * partial_factor).round() as usize
+        } else {
+            head_dim
+        };
+        let rope = RopeSpec {
+            head_dim,
+            rotary_dim: rope_rotary_dim,
+            base: rope_params.rope_theta,
+        };
+        let names = TextLayerTensorNames::for_layer(layer_idx, attention_k_eq_v);
+        let q_norm_weights = runtime
+            .weights
+            .read_bf16_tensor_words(names.q.norm_weight_name.as_deref().unwrap())
+            .unwrap();
+        let k_norm_weights = runtime
+            .weights
+            .read_bf16_tensor_words(names.k.norm_weight_name.as_deref().unwrap())
+            .unwrap();
+
+        let hash_f32 = |values: &[f32]| {
+            let bits = values.iter().copied().map(f32::to_bits).collect::<Vec<_>>();
+            fnv1a64_u32_words(&bits)
+        };
+
+        let mut caches = GemmaKvCacheSet::<f32>::new(runtime.kv_layout.clone()).unwrap();
+        for (position, &token_id) in prompt_token_ids[..last_position].iter().enumerate() {
+            let hidden_words = runtime.weights.embed_token_bf16_words(token_id).unwrap();
+            runtime
+                .eval_layer_hidden_state(layer_idx, &hidden_words, None, position, &mut caches)
+                .unwrap();
+        }
+
+        let decode_hidden = runtime.weights.embed_token_bf16_words(last_token_id).unwrap();
+        let decode_input_norm = rms_norm_weighted_tensor(
+            &runtime.weights,
+            &decode_hidden,
+            &names.input_norm_weight_name,
+        )
+        .unwrap();
+        let decode_input_norm_words = decode_input_norm
+            .iter()
+            .copied()
+            .map(super::f32_to_bf16_word)
+            .collect::<Vec<_>>();
+        let decode_q_raw = quantized_matmul_tensor(
+            &runtime.weights,
+            &decode_input_norm_words,
+            &names.q.weight_name,
+            &names.q.scales_name,
+            &names.q.biases_name,
+        )
+        .unwrap();
+        let decode_q_norm =
+            rms_norm_rows_weighted_f32(&decode_q_raw, q_head_count, head_dim, &q_norm_weights)
+                .unwrap();
+        let mut decode_q = decode_q_norm.clone();
+        apply_rope_rows_in_place(&mut decode_q, q_head_count, rope, last_position).unwrap();
+        let decode_k_raw = quantized_matmul_tensor(
+            &runtime.weights,
+            &decode_input_norm_words,
+            &names.k.weight_name,
+            &names.k.scales_name,
+            &names.k.biases_name,
+        )
+        .unwrap();
+        let decode_k_norm =
+            rms_norm_rows_weighted_f32(&decode_k_raw, k_head_count, head_dim, &k_norm_weights)
+                .unwrap();
+        let mut decode_k = decode_k_norm.clone();
+        apply_rope_rows_in_place(&mut decode_k, k_head_count, rope, last_position).unwrap();
+        let decode_v_raw = if attention_k_eq_v {
+            decode_k_raw
+        } else {
+            quantized_matmul_tensor(
+                &runtime.weights,
+                &decode_input_norm_words,
+                &names.v.weight_name,
+                &names.v.scales_name,
+                &names.v.biases_name,
+            )
+            .unwrap()
+        };
+        let decode_v =
+            rms_norm_rows_no_scale_f32(&decode_v_raw, v_head_count, head_dim, config.rms_norm_eps)
+                .unwrap();
+        let layer_cache = caches.cache_for_layer_mut(layer_idx).unwrap();
+        layer_cache
+            .update_and_fetch(
+                single_token_tensor(k_head_count, head_dim, decode_k.clone())
+                    .unwrap()
+                    .view(),
+                single_token_tensor(v_head_count, head_dim, decode_v.clone())
+                    .unwrap()
+                    .view(),
+            )
+            .unwrap();
+        let attention_out = compute_attention_output_f32(
+            &decode_q,
+            layer_cache,
+            q_head_count,
+            q_heads_per_kv,
+            head_dim,
+        )
+        .unwrap();
+        let attention_out_words = attention_out
+            .iter()
+            .copied()
+            .map(super::f32_to_bf16_word)
+            .collect::<Vec<_>>();
+        let attention_oproj = quantized_matmul_tensor(
+            &runtime.weights,
+            &attention_out_words,
+            &names.o.weight_name,
+            &names.o.scales_name,
+            &names.o.biases_name,
+        )
+        .unwrap();
+
+        let exact_backend = runtime.exact_backend().unwrap();
+        let mut backend = exact_backend.lock().unwrap();
+        backend.reset_kv_caches().unwrap();
+        for (position, &token_id) in prompt_token_ids.iter().enumerate() {
+            let hidden_words = runtime.weights.embed_token_bf16_words(token_id).unwrap();
+            backend
+                .eval_layer_hidden_state(layer_idx, &hidden_words, position)
+                .unwrap();
+        }
+        let exact = backend.layer_stage_hashes(layer_idx).unwrap();
+
+        let stages = [
+            ("input_norm", hash_f32(&decode_input_norm), exact.input_norm),
+            ("q_norm", hash_f32(&decode_q_norm), exact.q_norm),
+            ("q", hash_f32(&decode_q), exact.q),
+            ("k_norm", hash_f32(&decode_k_norm), exact.k_norm),
+            ("k", hash_f32(&decode_k), exact.k),
+            ("v_proj", hash_f32(&decode_v_raw), exact.v),
+            ("v", hash_f32(&decode_v), exact.v),
+            ("attention_out", hash_f32(&attention_out), exact.attention_out),
+            ("attention_oproj", hash_f32(&attention_oproj), exact.attention_oproj),
+        ];
+        let first_stage_mismatch = stages
+            .iter()
+            .find(|(_, host_hash, exact_hash)| host_hash != exact_hash)
+            .map(|(stage, _, _)| *stage);
+
+        println!("prompt_ids={prompt_token_ids:?}");
+        println!("last_position={last_position} last_token_id={last_token_id}");
+        for (stage, host_hash, exact_hash) in stages {
+            println!(
+                "{stage} host=0x{host_hash:016X} exact=0x{exact_hash:016X}"
+            );
+        }
+        println!("first_stage_mismatch={first_stage_mismatch:?}");
+    }
+
+    #[test]
     fn lazy_plan_formats_gemma4_user_turn_prompt() {
         let runtime = GemmaTextRuntimeSession::load(&default_model_path()).unwrap();
         let tokenizer_config = &runtime.weights.snapshot.tokenizer_config;
@@ -716,6 +918,7 @@
             max_new_tokens,
             GemmaExactMetalConfig {
                 kv_compression: GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK,
+                ..GemmaExactMetalConfig::default()
             },
         );
 
@@ -768,6 +971,7 @@
             max_new_tokens,
             GemmaExactMetalConfig {
                 kv_compression: GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK,
+                ..GemmaExactMetalConfig::default()
             },
         );
 
@@ -847,7 +1051,7 @@
     #[test]
     #[ignore]
     fn formatted_say_hi_exact_prefill_final_hidden() {
-        let runtime = Arc::unwrap_or_clone(GemmaTextRuntimeSession::load(&default_model_path()).unwrap());
+        let runtime = load_runtime_with_forced_exact_backend();
         let formatted_prompt = runtime.format_prompt_text("say hi", GemmaPromptFormat::Gemma4UserTurn);
         let prompt_token_ids = runtime.tokenize_prompt(&formatted_prompt).unwrap();
         let exact_backend = runtime.exact_backend().unwrap();
@@ -871,4 +1075,140 @@
             "top1_token_id={} top1_logit={}",
             next_token.token_id, next_token.logit
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_31b_exact_prefill_final_hidden() {
+        let mut backend_config = GemmaExactMetalConfig::default();
+        backend_config.backend_mode = GemmaExactMetalBackendMode::Force;
+        let runtime =
+            GemmaTextRuntimeSession::load_with_backend_config(gemma_31b_q8_model_path(), backend_config)
+                .unwrap();
+        let formatted_prompt =
+            runtime.format_prompt_text("say hi", GemmaPromptFormat::Gemma4UserTurn);
+        let prompt_token_ids = runtime.tokenize_prompt(&formatted_prompt).unwrap();
+        let exact_backend = runtime.exact_backend().unwrap();
+        let mut backend = exact_backend.lock().unwrap();
+        let final_hidden_words = backend
+            .prefill_prompt_hidden_words_from_token_ids(prompt_token_ids.as_ref(), 0)
+            .unwrap();
+        let final_hidden_bits = final_hidden_words
+            .iter()
+            .copied()
+            .map(bf16_word_to_f32)
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        let next_token = backend.greedy_token_from_hidden_words(&final_hidden_words).unwrap();
+        println!("prompt_ids={:?}", prompt_token_ids);
+        println!(
+            "final_hidden_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&final_hidden_bits)
+        );
+        println!(
+            "top1_token_id={} top1_logit={}",
+            next_token.token_id, next_token.logit
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn formatted_say_hi_host_vs_exact_prefill_hash_manifest() {
+        let runtime = load_runtime_with_forced_exact_backend();
+        let formatted_prompt =
+            runtime.format_prompt_text("say hi", GemmaPromptFormat::Gemma4UserTurn);
+        let prompt_token_ids = runtime.tokenize_prompt(&formatted_prompt).unwrap();
+        let num_layers = runtime.weights.snapshot.config.text_config.num_hidden_layers as usize;
+
+        let mut caches = GemmaKvCacheSet::<f32>::new(runtime.kv_layout.clone()).unwrap();
+        let mut host_layer_hashes = Vec::with_capacity(num_layers);
+        let mut host_hidden_words = Vec::new();
+        for (position, &token_id) in prompt_token_ids.iter().enumerate() {
+            let mut hidden_words = runtime.weights.embed_token_bf16_words(token_id).unwrap();
+            for layer_idx in 0..num_layers {
+                hidden_words = runtime
+                    .eval_layer_hidden_state(layer_idx, &hidden_words, None, position, &mut caches)
+                    .unwrap();
+                if position + 1 == prompt_token_ids.len() {
+                    let hidden_bits = hidden_words
+                        .iter()
+                        .copied()
+                        .map(bf16_word_to_f32)
+                        .map(f32::to_bits)
+                        .collect::<Vec<_>>();
+                    host_layer_hashes.push(fnv1a64_u32_words(&hidden_bits));
+                }
+            }
+            if position + 1 == prompt_token_ids.len() {
+                host_hidden_words = hidden_words;
+            }
+        }
+        let host_hidden_bits = host_hidden_words
+            .iter()
+            .copied()
+            .map(bf16_word_to_f32)
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        let host_next = runtime.greedy_token_from_hidden(&host_hidden_words).unwrap();
+
+        let exact_backend = runtime.exact_backend().unwrap();
+        let mut backend = exact_backend.lock().unwrap();
+        backend.reset_kv_caches().unwrap();
+        let mut exact_token_hidden_words = prompt_token_ids
+            .iter()
+            .map(|&token_id| runtime.weights.embed_token_bf16_words(token_id).unwrap())
+            .collect::<Vec<_>>();
+        let mut exact_layer_hashes = Vec::with_capacity(num_layers);
+        for layer_idx in 0..num_layers {
+            backend.reset_kv_caches().unwrap();
+            let mut next_token_hidden_words = Vec::with_capacity(exact_token_hidden_words.len());
+            for (position, input_words) in exact_token_hidden_words.iter().enumerate() {
+                let hidden_words = backend
+                    .eval_layer_hidden_state(layer_idx, input_words, position)
+                    .unwrap();
+                if position + 1 == exact_token_hidden_words.len() {
+                    let hidden_bits = hidden_words
+                        .iter()
+                        .copied()
+                        .map(bf16_word_to_f32)
+                        .map(f32::to_bits)
+                        .collect::<Vec<_>>();
+                    exact_layer_hashes.push(fnv1a64_u32_words(&hidden_bits));
+                }
+                next_token_hidden_words.push(hidden_words);
+            }
+            exact_token_hidden_words = next_token_hidden_words;
+        }
+        let exact_hidden_words = exact_token_hidden_words
+            .last()
+            .cloned()
+            .expect("expected final token hidden words");
+        let exact_hidden_bits = exact_hidden_words
+            .iter()
+            .copied()
+            .map(bf16_word_to_f32)
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        let exact_next = backend.greedy_token_from_hidden_words(&exact_hidden_words).unwrap();
+
+        let first_layer_mismatch = host_layer_hashes
+            .iter()
+            .zip(exact_layer_hashes.iter())
+            .position(|(host_hash, exact_hash)| host_hash != exact_hash);
+        println!("prompt_ids={prompt_token_ids:?}");
+        println!(
+            "host_final_hidden_fnv1a64=0x{:016X} exact_final_hidden_fnv1a64=0x{:016X}",
+            fnv1a64_u32_words(&host_hidden_bits),
+            fnv1a64_u32_words(&exact_hidden_bits)
+        );
+        println!(
+            "host_next_token_id={} host_next_logit={} exact_next_token_id={} exact_next_logit={}",
+            host_next.token_id,
+            host_next.logit,
+            exact_next.token_id,
+            exact_next.logit
+        );
+        println!("host_layer_hashes={host_layer_hashes:#018X?}");
+        println!("exact_layer_hashes={exact_layer_hashes:#018X?}");
+        println!("first_layer_mismatch={first_layer_mismatch:?}");
     }

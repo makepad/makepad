@@ -1,6 +1,6 @@
 use crate::text_runtime::{
-    GemmaExactMetalConfig, GemmaTextGenerationOutput, GemmaTextModel, GemmaTextSamplingOptions,
-    MlxTextSamplingRng,
+    GemmaExactMetalConfig, GemmaPromptFormat, GemmaTextGenerationOutput, GemmaTextModel,
+    GemmaTextSamplingOptions, MlxTextSamplingRng,
 };
 use crate::MlxTokenizerConfig;
 use std::error::Error;
@@ -80,9 +80,45 @@ pub fn format_gemma4_chat_prompt_with_image(
     prompt.push_str(&tokenizer_config.sot_token);
     prompt.push_str(GemmaChatRole::Assistant.as_prompt_label());
     prompt.push('\n');
-    prompt.push_str(&tokenizer_config.soc_token);
-    prompt.push_str("thought\n");
-    prompt.push_str(&tokenizer_config.eoc_token);
+    Ok(prompt)
+}
+
+pub fn format_plain_chat_prompt(
+    tokenizer_config: &MlxTokenizerConfig,
+    messages: &[GemmaChatMessage],
+) -> Result<String, Box<dyn Error>> {
+    format_plain_chat_prompt_with_image(tokenizer_config, messages, false)
+}
+
+pub fn format_plain_chat_prompt_with_image(
+    tokenizer_config: &MlxTokenizerConfig,
+    messages: &[GemmaChatMessage],
+    include_image_on_last_user_turn: bool,
+) -> Result<String, Box<dyn Error>> {
+    if messages.is_empty() {
+        return Err("chat prompt requires at least one message".into());
+    }
+
+    let mut prompt = String::new();
+    prompt.push_str(&tokenizer_config.bos_token);
+    for (index, message) in messages.iter().enumerate() {
+        let role_label = match message.role {
+            GemmaChatRole::User => "User",
+            GemmaChatRole::Assistant => "Assistant",
+        };
+        prompt.push_str(role_label);
+        prompt.push_str(": ");
+        if include_image_on_last_user_turn
+            && index + 1 == messages.len()
+            && message.role == GemmaChatRole::User
+        {
+            prompt.push_str(&tokenizer_config.image_token);
+            prompt.push(' ');
+        }
+        prompt.push_str(message.content.as_ref());
+        prompt.push('\n');
+    }
+    prompt.push_str("Assistant:");
     Ok(prompt)
 }
 
@@ -169,7 +205,12 @@ impl GemmaChatSession {
         backend_config: GemmaExactMetalConfig,
     ) -> Result<Self, Box<dyn Error>> {
         let model = GemmaTextModel::load_with_backend_config(model_path, backend_config)?;
-        let sampling_options = model.chat_sampling_options();
+        let sampling_options = match model.default_chat_prompt_format() {
+            GemmaPromptFormat::Gemma4UserTurn => model.chat_sampling_options(),
+            GemmaPromptFormat::AutoChat | GemmaPromptFormat::RawBos => {
+                model.default_sampling_options()
+            }
+        };
         Ok(Self {
             model,
             max_new_tokens,
@@ -221,11 +262,23 @@ impl GemmaChatSession {
         let content = content.into();
         self.messages
             .push(GemmaChatMessage::new(GemmaChatRole::User, content));
-        let formatted_prompt = format_gemma4_chat_prompt_with_image(
-            self.model.tokenizer_config(),
-            &self.messages,
-            self.current_image_path.is_some(),
-        )?;
+        let formatted_prompt = match self.model.default_chat_prompt_format() {
+            GemmaPromptFormat::AutoChat => format_plain_chat_prompt_with_image(
+                self.model.tokenizer_config(),
+                &self.messages,
+                self.current_image_path.is_some(),
+            )?,
+            GemmaPromptFormat::Gemma4UserTurn => format_gemma4_chat_prompt_with_image(
+                self.model.tokenizer_config(),
+                &self.messages,
+                self.current_image_path.is_some(),
+            )?,
+            GemmaPromptFormat::RawBos => format_plain_chat_prompt_with_image(
+                self.model.tokenizer_config(),
+                &self.messages,
+                self.current_image_path.is_some(),
+            )?,
+        };
         let greedy_sampling_options = self.sampling_options.greedy_variant();
         let output = match (self.decode_mode, self.current_image_path.as_deref()) {
             (GemmaChatDecodeMode::Sampled, Some(image_path)) => self
@@ -281,11 +334,23 @@ impl GemmaChatSession {
         let content = content.into();
         self.messages
             .push(GemmaChatMessage::new(GemmaChatRole::User, content));
-        let formatted_prompt = format_gemma4_chat_prompt_with_image(
-            self.model.tokenizer_config(),
-            &self.messages,
-            self.current_image_path.is_some(),
-        )?;
+        let formatted_prompt = match self.model.default_chat_prompt_format() {
+            GemmaPromptFormat::AutoChat => format_plain_chat_prompt_with_image(
+                self.model.tokenizer_config(),
+                &self.messages,
+                self.current_image_path.is_some(),
+            )?,
+            GemmaPromptFormat::Gemma4UserTurn => format_gemma4_chat_prompt_with_image(
+                self.model.tokenizer_config(),
+                &self.messages,
+                self.current_image_path.is_some(),
+            )?,
+            GemmaPromptFormat::RawBos => format_plain_chat_prompt_with_image(
+                self.model.tokenizer_config(),
+                &self.messages,
+                self.current_image_path.is_some(),
+            )?,
+        };
         let greedy_sampling_options = self.sampling_options.greedy_variant();
         let output = match (self.decode_mode, self.current_image_path.as_deref()) {
             (GemmaChatDecodeMode::Sampled, Some(image_path)) => self
