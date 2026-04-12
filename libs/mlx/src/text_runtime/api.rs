@@ -2,7 +2,7 @@ use crate::chat::extract_gemma4_assistant_response_text;
 pub use crate::layer0_cached_case::{
     GemmaExactMetalBackendMode, GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode,
 };
-use crate::multimodal::{GemmaVisionRuntime, PreparedImagePrompt, prepare_image_prompt};
+use crate::multimodal::{prepare_image_prompt, GemmaVisionRuntime, PreparedImagePrompt};
 
 #[derive(Clone, Debug)]
 pub struct GemmaTextStepOutput {
@@ -1452,6 +1452,91 @@ impl GemmaTextModel {
     ) -> &'static str {
         select_text_generation_backend(&self.runtime, max_new_tokens, sampling_options, true)
             .label()
+    }
+
+    pub fn tokenize_formatted_prompt(&self, formatted_prompt: &str) -> Result<Arc<[u32]>, String> {
+        self.runtime.tokenize_prompt(formatted_prompt)
+    }
+
+    pub fn cuda_exact_supported_total_tokens(&self) -> Option<usize> {
+        self.runtime.has_cuda_exact_backend().then(|| {
+            crate::text_runtime::cuda_exact::cuda_exact_max_supported_tokens(&self.runtime)
+        })
+    }
+
+    pub fn prewarm_greedy_backend(&self, max_new_tokens: Option<usize>) -> Result<(), String> {
+        let sampling_options = self.chat_sampling_options().greedy_variant();
+        crate::text_runtime::cuda_exact::prewarm_cuda_nvfp4_greedy(
+            &self.runtime,
+            max_new_tokens,
+            &sampling_options,
+        )
+    }
+
+    pub(crate) fn decode_token_ids(&self, token_ids: &[u32]) -> Result<String, String> {
+        self.runtime
+            .tokenizer
+            .decode(token_ids)
+            .map_err(|err| err.to_string())
+    }
+
+    pub(crate) fn special_token_ids(&self) -> &[u32] {
+        self.runtime.tokenizer.special_token_ids()
+    }
+
+    pub(crate) fn streaming_detokenizer(
+        &self,
+        trim_space: bool,
+    ) -> crate::MlxStreamingDetokenizer<'_> {
+        self.runtime.tokenizer.streaming_detokenizer(trim_space)
+    }
+
+    pub(crate) fn generate_pretokenized_cuda_exact_greedy_with_callback<F>(
+        &self,
+        prompt_text: Arc<str>,
+        formatted_prompt_text: Arc<str>,
+        prompt_token_ids: Arc<[u32]>,
+        prompt_prefill_token_count: usize,
+        max_new_tokens: Option<usize>,
+        sampling_options: &GemmaTextSamplingOptions,
+        on_generated_ids: F,
+    ) -> Result<Option<Arc<GemmaTextGenerationOutput>>, Box<dyn Error>>
+    where
+        F: FnMut(&[u32]) -> Result<(), String>,
+    {
+        let Some(metrics) =
+            crate::text_runtime::cuda_exact::try_generate_cuda_nvfp4_greedy_incremental(
+                &self.runtime,
+                prompt_token_ids.clone(),
+                max_new_tokens,
+                sampling_options,
+                on_generated_ids,
+            )
+            .map_err(|err| err.to_string())?
+        else {
+            return Ok(None);
+        };
+        let generated_token_ids = Arc::<[u32]>::from(metrics.generated_token_ids);
+        let elapsed = metrics
+            .time_to_first_token_elapsed
+            .checked_add(metrics.steady_state_elapsed)
+            .unwrap_or(metrics.time_to_first_token_elapsed + metrics.steady_state_elapsed);
+        build_generation_output_from_token_ids(
+            &self.runtime,
+            prompt_text,
+            formatted_prompt_text,
+            prompt_token_ids,
+            generated_token_ids.clone(),
+            metrics.stop_reason,
+            build_generation_metrics(
+                elapsed,
+                prompt_prefill_token_count,
+                generated_token_ids.len(),
+                metrics.time_to_first_token_elapsed,
+            ),
+        )
+        .map(Some)
+        .map_err(|err| err.into())
     }
 
     fn prepare_image_prompt(

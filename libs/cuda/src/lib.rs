@@ -15,6 +15,7 @@ pub const CUDA_STREAM_NON_BLOCKING: c_uint = 1;
 pub const CUDA_STREAM_CAPTURE_MODE_GLOBAL: cudaStreamCaptureMode = 0;
 pub const CUDA_STREAM_CAPTURE_MODE_THREAD_LOCAL: cudaStreamCaptureMode = 1;
 pub const CUDA_STREAM_CAPTURE_MODE_RELAXED: cudaStreamCaptureMode = 2;
+pub const CUDA_HOST_ALLOC_MAPPED: c_uint = 2;
 
 pub const CUDA_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 pub const CUDA_MEMCPY_DEVICE_TO_HOST: c_int = 2;
@@ -25,6 +26,13 @@ unsafe extern "C" {
     pub fn cudaGetDevice(device: *mut c_int) -> cudaError_t;
     pub fn cudaMalloc(dev_ptr: *mut *mut c_void, size: usize) -> cudaError_t;
     pub fn cudaFree(dev_ptr: *mut c_void) -> cudaError_t;
+    pub fn cudaHostAlloc(host_ptr: *mut *mut c_void, size: usize, flags: c_uint) -> cudaError_t;
+    pub fn cudaFreeHost(ptr: *mut c_void) -> cudaError_t;
+    pub fn cudaHostGetDevicePointer(
+        device_ptr: *mut *mut c_void,
+        host_ptr: *mut c_void,
+        flags: c_uint,
+    ) -> cudaError_t;
     pub fn cudaMemcpyAsync(
         dst: *mut c_void,
         src: *const c_void,
@@ -166,6 +174,24 @@ pub unsafe fn malloc(size: usize) -> Result<NonNull<c_void>, CudaError> {
 
 pub unsafe fn free(ptr: NonNull<c_void>) -> Result<(), CudaError> {
     check(cudaFree(ptr.as_ptr()))
+}
+
+pub unsafe fn host_alloc_mapped(size: usize) -> Result<NonNull<c_void>, CudaError> {
+    let mut ptr = ptr::null_mut();
+    check(cudaHostAlloc(&mut ptr, size, CUDA_HOST_ALLOC_MAPPED))?;
+    NonNull::new(ptr).ok_or(CudaError { code: -1 })
+}
+
+pub unsafe fn free_host(ptr: NonNull<c_void>) -> Result<(), CudaError> {
+    check(cudaFreeHost(ptr.as_ptr()))
+}
+
+pub unsafe fn host_get_device_pointer(
+    host_ptr: NonNull<c_void>,
+) -> Result<NonNull<c_void>, CudaError> {
+    let mut device_ptr = ptr::null_mut();
+    check(cudaHostGetDevicePointer(&mut device_ptr, host_ptr.as_ptr(), 0))?;
+    NonNull::new(device_ptr).ok_or(CudaError { code: -1 })
 }
 
 pub unsafe fn memcpy_async_host_to_device(
