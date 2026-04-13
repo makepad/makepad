@@ -2605,19 +2605,16 @@ extern "C" cudaError_t makepad_ggml_cuda_masked_argmax_f32(
     if (n == 0) {
         return cudaErrorInvalidValue;
     }
-    if (disallowed_count != 0) {
-        const dim3 grid((disallowed_count + 255u) / 256u, 1, 1);
-        makepad_ggml_cuda_mask_indices_f32_kernel<<<grid, 256, 0, stream>>>(
-            const_cast<float *>(logits),
-            disallowed_token_ids,
-            disallowed_count,
-            n);
-        const cudaError_t status = cudaGetLastError();
-        if (status != cudaSuccess) {
-            return status;
-        }
+    if (disallowed_count == 0) {
+        makepad_ggml_cuda_argmax_f32_kernel<<<1, 256, 0, stream>>>(logits, out_index, n);
+        return cudaGetLastError();
     }
-    makepad_ggml_cuda_argmax_f32_kernel<<<1, 256, 0, stream>>>(logits, out_index, n);
+    makepad_ggml_cuda_masked_argmax_f32_kernel<<<1, 256, 0, stream>>>(
+        logits,
+        disallowed_token_ids,
+        disallowed_count,
+        out_index,
+        n);
     return cudaGetLastError();
 }
 
@@ -2631,15 +2628,11 @@ extern "C" cudaError_t makepad_ggml_cuda_masked_argmax_f32_device_u32(
     if (n == 0) {
         return cudaErrorInvalidValue;
     }
-    makepad_ggml_cuda_mask_indices_f32_device_u32_kernel<<<1, 256, 0, stream>>>(
-        const_cast<float *>(logits),
+    makepad_ggml_cuda_masked_argmax_f32_device_u32_kernel<<<1, 256, 0, stream>>>(
+        logits,
         disallowed_token_ids,
         disallowed_count_device_u32,
+        out_index,
         n);
-    const cudaError_t status = cudaGetLastError();
-    if (status != cudaSuccess) {
-        return status;
-    }
-    makepad_ggml_cuda_argmax_f32_kernel<<<1, 256, 0, stream>>>(logits, out_index, n);
     return cudaGetLastError();
 }
