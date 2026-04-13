@@ -606,6 +606,14 @@ impl Win32Window {
                 with_win32_app(|app| app.stop_resize());
                 window.do_callback(Win32Event::WindowResizeLoopStop(window.window_id));
             }
+            // WM_SIZING (0x0214) fires BEFORE the window is resized with
+            // the proposed new rect. By pre-rendering at this size, the
+            // swap chain frame is ready when DWM composites the window at
+            // the new size, eliminating the empty gap at growing edges.
+            0x0214 => {
+                let proposed_rect = &*(lparam.0 as *const RECT);
+                window.send_sizing_event(proposed_rect);
+            }
             WM_SIZE | WM_DPICHANGED => {
                 window.send_change_event();
             }
@@ -1119,6 +1127,44 @@ impl Win32Window {
             window_id: self.window_id,
             old_geom: old_geom,
             new_geom: new_geom,
+        }));
+        self.do_callback(Win32Event::Paint);
+    }
+
+    /// Pre-render at a proposed window size from WM_SIZING. This fires
+    /// BEFORE the window is actually resized, so the swap chain frame is
+    /// ready when DWM composites the window at the new size — eliminating
+    /// the empty-edge gap that appears when growing the window.
+    pub fn send_sizing_event(&mut self, proposed_rect: &RECT) {
+        let dpi = self.get_dpi_factor();
+        let proposed_size = Vec2d {
+            x: (proposed_rect.right - proposed_rect.left) as f64 / dpi,
+            y: (proposed_rect.bottom - proposed_rect.top) as f64 / dpi,
+        };
+
+        let mut new_geom = self.last_window_geom.clone();
+        // For custom chrome, inner size == outer size.
+        new_geom.inner_size = proposed_size;
+        new_geom.outer_size = proposed_size;
+        new_geom.position = Vec2d {
+            x: proposed_rect.left as f64,
+            y: proposed_rect.top as f64,
+        };
+
+        let old_geom = self.last_window_geom.clone();
+        if old_geom.inner_size == new_geom.inner_size {
+            return; // Size didn't change (e.g. just a move), nothing to pre-render.
+        }
+        // Skip degenerate sizes — ResizeBuffers rejects zero dimensions.
+        if proposed_size.x < 1.0 || proposed_size.y < 1.0 {
+            return;
+        }
+        self.last_window_geom = new_geom.clone();
+
+        self.do_callback(Win32Event::WindowGeomChange(WindowGeomChangeEvent {
+            window_id: self.window_id,
+            old_geom,
+            new_geom,
         }));
         self.do_callback(Win32Event::Paint);
     }
