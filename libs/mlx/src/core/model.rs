@@ -1,5 +1,12 @@
 pub type Result<T> = std::result::Result<T, MlxRtError>;
 
+use makepad_ggml::backend::{
+    try_get_rows_ggml_bytes_cached, try_matmul_nt_ggml_bytes_cached_bf16_words,
+};
+use makepad_ggml::quant::{
+    bf16_to_f32, get_rows_ggml_bytes_cpu, vec_dot_nvfp4_f32, GGML_TYPE_NVFP4,
+};
+
 pub struct MlxRouterTopKOutput {
     pub router_scaled: Vec<f32>,
     pub expert_scores: Vec<f32>,
@@ -150,21 +157,24 @@ impl MlxModelSnapshot {
             });
         }
         let bits = self.config.quantization.bits;
-        if bits == 0
-            || bits > 8
-            || (bits & (bits - 1)) != 0
-            || self.config.quantization.group_size != 64
-            || self.config.quantization.mode != "affine"
-        {
-            return Err(MlxRtError::InvalidModelDir {
-                path: self.paths.root_dir.clone(),
-                message: format!(
-                    "expected affine power-of-two quantization <= 8 bits with group_size=64, got bits={} group_size={} mode={}",
-                    self.config.quantization.bits,
-                    self.config.quantization.group_size,
-                    self.config.quantization.mode,
-                ),
-            });
+        match self.config.quantization.mode.as_str() {
+            "affine"
+                if bits != 0
+                    && bits <= 8
+                    && (bits & (bits - 1)) == 0
+                    && self.config.quantization.group_size == 64 => {}
+            "nvfp4" if bits == 4 && self.config.quantization.group_size == 16 => {}
+            _ => {
+                return Err(MlxRtError::InvalidModelDir {
+                    path: self.paths.root_dir.clone(),
+                    message: format!(
+                        "expected affine <=8-bit group_size=64 or nvfp4 4-bit group_size=16, got bits={} group_size={} mode={}",
+                        self.config.quantization.bits,
+                        self.config.quantization.group_size,
+                        self.config.quantization.mode,
+                    ),
+                });
+            }
         }
         if self.config.text_config.num_hidden_layers == 0 {
             return Err(MlxRtError::InvalidModelDir {
@@ -523,6 +533,239 @@ pub struct MlxIndexedSafetensors {
 }
 
 impl MlxIndexedSafetensors {
+    fn invalid_model_error(&self, message: impl Into<String>) -> MlxRtError {
+        MlxRtError::InvalidModelDir {
+            path: self.snapshot.paths.root_dir.clone(),
+            message: message.into(),
+        }
+    }
+
+    fn invalid_safetensors_error(
+        &self,
+        path: PathBuf,
+        message: impl Into<String>,
+    ) -> MlxRtError {
+        MlxRtError::InvalidSafetensors {
+            path,
+            message: message.into(),
+        }
+    }
+
+    pub fn quantization_mode(&self) -> &str {
+        self.snapshot.config.quantization.mode.as_str()
+    }
+
+    pub(crate) fn nvfp4_rank2_layout(
+        &self,
+        weight_name: &str,
+        scales_name: &str,
+    ) -> Result<(usize, usize, usize)> {
+        let weight_entry = self.tensor(weight_name)?;
+        let scales_entry = self.tensor(scales_name)?;
+        if weight_entry.dtype != MlxDType::U32 {
+            return Err(self.invalid_safetensors_error(
+                self.header_for_tensor(weight_name)?.path.clone(),
+                format!("tensor {weight_name} expected U32, got {:?}", weight_entry.dtype),
+            ));
+        }
+        if scales_entry.dtype != MlxDType::U8 {
+            return Err(self.invalid_safetensors_error(
+                self.header_for_tensor(scales_name)?.path.clone(),
+                format!("tensor {scales_name} expected U8, got {:?}", scales_entry.dtype),
+            ));
+        }
+        if weight_entry.shape.len() != 2 || scales_entry.shape.len() != 2 {
+            return Err(self.invalid_safetensors_error(
+                self.header_for_tensor(weight_name)?.path.clone(),
+                format!(
+                    "NVFP4 rank-2 tensors expected for {weight_name}/{scales_name}, got {:?}/{:?}",
+                    weight_entry.shape, scales_entry.shape
+                ),
+            ));
+        }
+        if weight_entry.shape[0] != scales_entry.shape[0] {
+            return Err(self.invalid_safetensors_error(
+                self.header_for_tensor(weight_name)?.path.clone(),
+                format!(
+                    "NVFP4 row count mismatch for {weight_name}/{scales_name}: {:?} vs {:?}",
+                    weight_entry.shape, scales_entry.shape
+                ),
+            ));
+        }
+        let rows = weight_entry.shape[0] as usize;
+        let blocks_per_row = scales_entry.shape[1] as usize;
+        if blocks_per_row == 0 || blocks_per_row % 4 != 0 {
+            return Err(self.invalid_safetensors_error(
+                self.header_for_tensor(scales_name)?.path.clone(),
+                format!(
+                    "NVFP4 scales for {scales_name} must be non-zero and divisible by 4, got {}",
+                    blocks_per_row
+                ),
+            ));
+        }
+        let weight_row_bytes = usize::try_from(
+            weight_entry.shape[1]
+                .checked_mul(weight_entry.dtype.byte_width())
+                .ok_or_else(|| {
+                    self.invalid_safetensors_error(
+                        self.header_for_tensor(weight_name)
+                            .map(|header| header.path.clone())
+                            .unwrap_or_default(),
+                        format!("NVFP4 weight row byte count overflow for {weight_name}"),
+                    )
+                })?,
+        )
+        .map_err(|_| {
+            self.invalid_safetensors_error(
+                self.header_for_tensor(weight_name)
+                    .map(|header| header.path.clone())
+                    .unwrap_or_default(),
+                format!("NVFP4 weight row byte count does not fit usize for {weight_name}"),
+            )
+        })?;
+        if weight_row_bytes != blocks_per_row * 8 {
+            return Err(self.invalid_safetensors_error(
+                self.header_for_tensor(weight_name)?.path.clone(),
+                format!(
+                    "NVFP4 packed weight row size mismatch for {weight_name}: got {} bytes expected {}",
+                    weight_row_bytes,
+                    blocks_per_row * 8
+                ),
+            ));
+        }
+        Ok((rows, blocks_per_row, blocks_per_row * 16))
+    }
+
+    fn repack_nvfp4_row_bytes(weight_row_bytes: &[u8], scale_row_bytes: &[u8]) -> Vec<u8> {
+        let blocks_per_row = scale_row_bytes.len();
+        let super_blocks = blocks_per_row / 4;
+        let mut out = vec![0u8; super_blocks * 36];
+        for super_block in 0..super_blocks {
+            let out_base = super_block * 36;
+            for sub in 0..4 {
+                out[out_base + sub] = scale_row_bytes[super_block * 4 + sub] & 0x7f;
+            }
+            for sub in 0..4 {
+                let src = &weight_row_bytes[(super_block * 4 + sub) * 8..(super_block * 4 + sub + 1) * 8];
+                let dst = &mut out[out_base + 4 + sub * 8..out_base + 4 + (sub + 1) * 8];
+                for j in 0..4 {
+                    let lo0 = src[j] & 0x0f;
+                    let hi0 = src[j] >> 4;
+                    let lo1 = src[j + 4] & 0x0f;
+                    let hi1 = src[j + 4] >> 4;
+                    dst[2 * j] = lo0 | (lo1 << 4);
+                    dst[2 * j + 1] = hi0 | (hi1 << 4);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn repack_nvfp4_row_to_ggml_bytes(
+        &self,
+        weight_name: &str,
+        scales_name: &str,
+        row: u64,
+    ) -> Result<Vec<u8>> {
+        let (rows, _, _) = self.nvfp4_rank2_layout(weight_name, scales_name)?;
+        if row as usize >= rows {
+            return Err(self.invalid_safetensors_error(
+                self.header_for_tensor(weight_name)?.path.clone(),
+                format!(
+                    "NVFP4 row {} out of range for tensor {} with {} rows",
+                    row, weight_name, rows
+                ),
+            ));
+        }
+        let weight_row_bytes = self
+            .header_for_tensor(weight_name)?
+            .read_rank2_row_bytes(weight_name, row)?;
+        let scale_row_bytes = self
+            .header_for_tensor(scales_name)?
+            .read_rank2_row_bytes(scales_name, row)?;
+        Ok(Self::repack_nvfp4_row_bytes(
+            &weight_row_bytes,
+            &scale_row_bytes,
+        ))
+    }
+
+    pub fn repack_nvfp4_tensor_to_ggml_bytes(
+        &self,
+        weight_name: &str,
+        scales_name: &str,
+    ) -> Result<Vec<u8>> {
+        let (rows, blocks_per_row, _) = self.nvfp4_rank2_layout(weight_name, scales_name)?;
+        let row_bytes = (blocks_per_row / 4) * 36;
+        let total_bytes = rows
+            .checked_mul(row_bytes)
+            .ok_or_else(|| self.invalid_model_error(format!("NVFP4 byte count overflow for {weight_name}")))?;
+        let mut out = Vec::with_capacity(total_bytes);
+        let weight_header = self.header_for_tensor(weight_name)?;
+        let scales_header = self.header_for_tensor(scales_name)?;
+        for row in 0..rows {
+            let weight_row_bytes = weight_header.read_rank2_row_bytes(weight_name, row as u64)?;
+            let scale_row_bytes = scales_header.read_rank2_row_bytes(scales_name, row as u64)?;
+            out.extend_from_slice(&Self::repack_nvfp4_row_bytes(
+                &weight_row_bytes,
+                &scale_row_bytes,
+            ));
+        }
+        Ok(out)
+    }
+
+    pub fn repack_nvfp4_tensors_to_ggml_bytes(
+        &self,
+        tensors: &[(&str, &str)],
+    ) -> Result<Vec<u8>> {
+        if tensors.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut expected_inner_dim = None::<usize>;
+        let mut total_bytes = 0usize;
+        let mut layouts = Vec::with_capacity(tensors.len());
+        for &(weight_name, scales_name) in tensors {
+            let (rows, blocks_per_row, inner_dim) = self.nvfp4_rank2_layout(weight_name, scales_name)?;
+            if let Some(expected) = expected_inner_dim {
+                if inner_dim != expected {
+                    return Err(self.invalid_model_error(format!(
+                        "NVFP4 concatenation expects shared inner dim, got {inner_dim} for {weight_name} vs {expected}"
+                    )));
+                }
+            } else {
+                expected_inner_dim = Some(inner_dim);
+            }
+            let row_bytes = (blocks_per_row / 4) * 36;
+            total_bytes = total_bytes
+                .checked_add(rows.checked_mul(row_bytes).ok_or_else(|| {
+                    self.invalid_model_error(format!(
+                        "NVFP4 byte count overflow for concatenated tensor {weight_name}"
+                    ))
+                })?)
+                .ok_or_else(|| {
+                    self.invalid_model_error(format!(
+                        "NVFP4 total byte count overflow while concatenating {weight_name}"
+                    ))
+                })?;
+            layouts.push((weight_name, scales_name, rows));
+        }
+
+        let mut out = Vec::with_capacity(total_bytes);
+        for (weight_name, scales_name, rows) in layouts {
+            let weight_header = self.header_for_tensor(weight_name)?;
+            let scales_header = self.header_for_tensor(scales_name)?;
+            for row in 0..rows {
+                let weight_row_bytes = weight_header.read_rank2_row_bytes(weight_name, row as u64)?;
+                let scale_row_bytes = scales_header.read_rank2_row_bytes(scales_name, row as u64)?;
+                out.extend_from_slice(&Self::repack_nvfp4_row_bytes(
+                    &weight_row_bytes,
+                    &scale_row_bytes,
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn load(root_dir: impl AsRef<Path>) -> Result<Self> {
         let snapshot = MlxModelSnapshot::load(root_dir)?;
         let mut shard_headers = HashMap::new();
@@ -606,6 +849,54 @@ impl MlxIndexedSafetensors {
     }
 
     pub fn embed_token_f32(&self, token_id: u32) -> Result<Vec<f32>> {
+        if self.quantization_mode() == "nvfp4" {
+            let (rows, _, hidden) =
+                self.nvfp4_rank2_layout(EMBED_TOKENS_WEIGHT_NAME, EMBED_TOKENS_SCALES_NAME)?;
+            if token_id as usize >= rows {
+                return Err(self.invalid_safetensors_error(
+                    self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?.path.clone(),
+                    format!(
+                        "token id {} out of range for {} rows",
+                        token_id, rows
+                    ),
+                ));
+            }
+            let root = self.snapshot.paths.root_dir.to_string_lossy();
+            let weight_key = format!("{root}:{EMBED_TOKENS_WEIGHT_NAME}");
+            let row_indices = [token_id as i32];
+            let mut embed = if let Some(result) = try_get_rows_ggml_bytes_cached(
+                GGML_TYPE_NVFP4,
+                hidden,
+                rows,
+                &row_indices,
+                root.as_ref(),
+                &weight_key,
+                || {
+                    self.repack_nvfp4_tensor_to_ggml_bytes(
+                        EMBED_TOKENS_WEIGHT_NAME,
+                        EMBED_TOKENS_SCALES_NAME,
+                    )
+                    .map_err(|err| err.to_string())
+                },
+            ) {
+                result.map_err(|err| self.invalid_model_error(err))?
+            } else {
+                let row_bytes = self.repack_nvfp4_row_to_ggml_bytes(
+                    EMBED_TOKENS_WEIGHT_NAME,
+                    EMBED_TOKENS_SCALES_NAME,
+                    token_id as u64,
+                )?;
+                get_rows_ggml_bytes_cpu(&row_bytes, GGML_TYPE_NVFP4, hidden, 1, &[0]).ok_or_else(
+                    || self.invalid_model_error("CPU NVFP4 get_rows fallback failed"),
+                )?
+            };
+            let embed_scale = bf16_round_to_f32((hidden as f32).sqrt());
+            for value in &mut embed {
+                *value = bf16_round_to_f32(*value * embed_scale);
+            }
+            return Ok(embed);
+        }
+
         let header = self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?;
         let embed_weight_entry =
             header
@@ -655,6 +946,24 @@ impl MlxIndexedSafetensors {
     }
 
     pub fn tied_text_logits_top1_f32(&self, hidden_bf16_words: &[u16]) -> Result<MlxGreedyToken> {
+        if self.quantization_mode() == "nvfp4" {
+            let logits = self.tied_text_logits_f32(hidden_bf16_words)?;
+            let mut best = MlxGreedyToken {
+                token_id: 0,
+                logit: f32::NEG_INFINITY,
+            };
+            for (token_id, &logit) in logits.iter().enumerate() {
+                let token_id = token_id as u32;
+                if logit > best.logit || (logit == best.logit && token_id < best.token_id) {
+                    best = MlxGreedyToken {
+                        token_id,
+                        logit,
+                    };
+                }
+            }
+            return Ok(best);
+        }
+
         let header = self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?;
         let softcap = Some(self.snapshot.config.text_config.final_logit_softcapping)
             .filter(|softcap| *softcap > 0.0);
@@ -670,6 +979,72 @@ impl MlxIndexedSafetensors {
     }
 
     pub fn tied_text_logits_f32(&self, hidden_bf16_words: &[u16]) -> Result<Vec<f32>> {
+        if self.quantization_mode() == "nvfp4" {
+            let (rows, _, hidden) =
+                self.nvfp4_rank2_layout(EMBED_TOKENS_WEIGHT_NAME, EMBED_TOKENS_SCALES_NAME)?;
+            if hidden_bf16_words.len() != hidden {
+                return Err(self.invalid_safetensors_error(
+                    self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?.path.clone(),
+                    format!(
+                        "NVFP4 logits activation length mismatch: got {} expected {}",
+                        hidden_bf16_words.len(),
+                        hidden
+                    ),
+                ));
+            }
+            let root = self.snapshot.paths.root_dir.to_string_lossy();
+            let weight_key = format!("{root}:{EMBED_TOKENS_WEIGHT_NAME}");
+            let mut logits = if let Some(result) = try_matmul_nt_ggml_bytes_cached_bf16_words(
+                hidden_bf16_words,
+                GGML_TYPE_NVFP4,
+                1,
+                hidden_bf16_words.len(),
+                rows,
+                root.as_ref(),
+                &weight_key,
+                || {
+                    self.repack_nvfp4_tensor_to_ggml_bytes(
+                        EMBED_TOKENS_WEIGHT_NAME,
+                        EMBED_TOKENS_SCALES_NAME,
+                    )
+                    .map_err(|err| err.to_string())
+                },
+            ) {
+                result.map_err(|err| self.invalid_model_error(err))?
+            } else {
+                let hidden = hidden_bf16_words
+                    .iter()
+                    .copied()
+                    .map(bf16_to_f32)
+                    .collect::<Vec<_>>();
+                let mut logits = Vec::with_capacity(rows);
+                for row in 0..rows {
+                    let row_bytes = self.repack_nvfp4_row_to_ggml_bytes(
+                        EMBED_TOKENS_WEIGHT_NAME,
+                        EMBED_TOKENS_SCALES_NAME,
+                        row as u64,
+                    )?;
+                    let mut sum = 0.0f32;
+                    for (block, input_block) in row_bytes
+                        .chunks_exact(36)
+                        .zip(hidden.chunks_exact(64))
+                    {
+                        sum += vec_dot_nvfp4_f32(block, input_block);
+                    }
+                    logits.push(sum);
+                }
+                logits
+            };
+            if let Some(softcap) = Some(self.snapshot.config.text_config.final_logit_softcapping)
+                .filter(|softcap| *softcap > 0.0)
+            {
+                for logit in &mut logits {
+                    *logit = bf16_round_to_f32((*logit / softcap).tanh() * softcap);
+                }
+            }
+            return Ok(logits);
+        }
+
         let header = self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?;
         let mut logits = header.affine_quantized_matmul_t_f32(
             hidden_bf16_words,

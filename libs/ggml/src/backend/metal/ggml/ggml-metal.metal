@@ -10388,9 +10388,28 @@ struct MlxKvAppendBf16Args {
     uint slot;
 };
 
+struct MlxPlanar4KvAppendArgs {
+    uint head_dim;
+    uint src_row_stride;
+    uint indices_row_stride;
+    uint norms_row_stride;
+    uint head_count;
+    uint slot;
+};
+
+struct MlxPlanar3KvAppendArgs {
+    uint head_dim;
+    uint src_row_stride;
+    uint indices_row_stride;
+    uint norms_row_stride;
+    uint head_count;
+    uint slot;
+};
+
 struct MlxRmsNormRowArgs {
     uint n;
     float eps;
+    uint threadgroup_width;
 };
 
 struct MlxRmsNormRowsArgs {
@@ -10398,6 +10417,7 @@ struct MlxRmsNormRowsArgs {
     uint row_stride;
     uint row_count;
     float eps;
+    uint threadgroup_width;
 };
 
 struct MlxRopeSingleArgs {
@@ -10454,6 +10474,30 @@ struct MlxGqaAttentionLogitsSeqArgs {
     uint seq_len;
     uint start_slot;
     uint capacity;
+};
+
+struct MlxPlanar4AttentionLogitsSeqArgs {
+    uint q_head_stride;
+    uint indices_row_stride;
+    uint norms_row_stride;
+    uint q_head_count;
+    uint q_heads_per_kv;
+    uint seq_len;
+    uint start_slot;
+    uint capacity;
+    uint pair_count;
+};
+
+struct MlxPlanar3AttentionLogitsSeqArgs {
+    uint q_head_stride;
+    uint indices_row_stride;
+    uint norms_row_stride;
+    uint q_head_count;
+    uint q_heads_per_kv;
+    uint seq_len;
+    uint start_slot;
+    uint capacity;
+    uint pair_count;
 };
 
 struct MlxGqaAttentionOutputSingleArgs {
@@ -12389,17 +12433,20 @@ kernel void kernel_mlx_rms_norm_row_bf16(
 
     float acc = 0.0f;
     const uint base = lid * N_READS;
-    if (base + N_READS <= args.n) {
-        for (uint i = 0; i < N_READS; ++i) {
-            const float xi = float(x[base + i]);
-            acc += xi * xi;
-        }
-    } else {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            if (idx < args.n) {
-                const float xi = float(x[idx]);
+    const uint stride = args.threadgroup_width * N_READS;
+    for (uint chunk_base = base; chunk_base < args.n; chunk_base += stride) {
+        if (chunk_base + N_READS <= args.n) {
+            for (uint i = 0; i < N_READS; ++i) {
+                const float xi = float(x[chunk_base + i]);
                 acc += xi * xi;
+            }
+        } else {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
+                if (idx < args.n) {
+                    const float xi = float(x[idx]);
+                    acc += xi * xi;
+                }
             }
         }
     }
@@ -12424,18 +12471,20 @@ kernel void kernel_mlx_rms_norm_row_bf16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const float inv_mean = local_inv_mean[0];
-    if (base + N_READS <= args.n) {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            const float normalized_f = float(bfloat(float(x[idx]) * inv_mean));
-            out[idx] = bfloat(normalized_f * float(w[idx]));
-        }
-    } else {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            if (idx < args.n) {
+    for (uint chunk_base = base; chunk_base < args.n; chunk_base += stride) {
+        if (chunk_base + N_READS <= args.n) {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
                 const float normalized_f = float(bfloat(float(x[idx]) * inv_mean));
                 out[idx] = bfloat(normalized_f * float(w[idx]));
+            }
+        } else {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
+                if (idx < args.n) {
+                    const float normalized_f = float(bfloat(float(x[idx]) * inv_mean));
+                    out[idx] = bfloat(normalized_f * float(w[idx]));
+                }
             }
         }
     }
@@ -12466,17 +12515,20 @@ kernel void kernel_mlx_rms_norm_rows_bf16(
 
     float acc = 0.0f;
     const uint base = lid * N_READS;
-    if (base + N_READS <= args.n) {
-        for (uint i = 0; i < N_READS; ++i) {
-            const float xi = float(row_x[base + i]);
-            acc += xi * xi;
-        }
-    } else {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            if (idx < args.n) {
-                const float xi = float(row_x[idx]);
+    const uint stride = args.threadgroup_width * N_READS;
+    for (uint chunk_base = base; chunk_base < args.n; chunk_base += stride) {
+        if (chunk_base + N_READS <= args.n) {
+            for (uint i = 0; i < N_READS; ++i) {
+                const float xi = float(row_x[chunk_base + i]);
                 acc += xi * xi;
+            }
+        } else {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
+                if (idx < args.n) {
+                    const float xi = float(row_x[idx]);
+                    acc += xi * xi;
+                }
             }
         }
     }
@@ -12501,18 +12553,20 @@ kernel void kernel_mlx_rms_norm_rows_bf16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const float inv_mean = local_inv_mean[0];
-    if (base + N_READS <= args.n) {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            const float normalized_f = float(bfloat(float(row_x[idx]) * inv_mean));
-            row_out[idx] = bfloat(normalized_f * float(w[idx]));
-        }
-    } else {
-        for (uint i = 0; i < N_READS; ++i) {
-            const uint idx = base + i;
-            if (idx < args.n) {
+    for (uint chunk_base = base; chunk_base < args.n; chunk_base += stride) {
+        if (chunk_base + N_READS <= args.n) {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
                 const float normalized_f = float(bfloat(float(row_x[idx]) * inv_mean));
                 row_out[idx] = bfloat(normalized_f * float(w[idx]));
+            }
+        } else {
+            for (uint i = 0; i < N_READS; ++i) {
+                const uint idx = chunk_base + i;
+                if (idx < args.n) {
+                    const float normalized_f = float(bfloat(float(row_x[idx]) * inv_mean));
+                    row_out[idx] = bfloat(normalized_f * float(w[idx]));
+                }
             }
         }
     }
@@ -12640,6 +12694,234 @@ kernel void kernel_mlx_kv_append_pair_bf16(
     const uint dst_index = head * args.dst_row_stride + args.slot * args.head_dim + col;
     dst_k[dst_index] = src_k[src_index];
     dst_v[dst_index] = src_v[src_index];
+}
+
+kernel void kernel_mlx_planar4_kv_append_bf16(
+        constant MlxPlanar4KvAppendArgs & args [[buffer(0)]],
+        device const bfloat * src [[buffer(1)]],
+        device const float2 * rotations [[buffer(2)]],
+        device const float * centroids [[buffer(3)]],
+        device uchar * dst_indices [[buffer(4)]],
+        device bfloat * dst_norms [[buffer(5)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint3 tid3 [[thread_position_in_threadgroup]],
+        uint3 threads_per_tg [[threads_per_threadgroup]]) {
+    const uint head = tgpig.y;
+    const uint pair_count = args.head_dim / 2u;
+    const uint tid = tid3.x;
+    if (head >= args.head_count) {
+        return;
+    }
+
+    threadgroup float sq_sums[256];
+    float x0 = 0.0f;
+    float x1 = 0.0f;
+    if (tid < pair_count) {
+        const uint base = head * args.src_row_stride + tid * 2u;
+        x0 = float(src[base]);
+        x1 = float(src[base + 1u]);
+        sq_sums[tid] = x0 * x0 + x1 * x1;
+    } else if (tid < 256u) {
+        sq_sums[tid] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = threads_per_tg.x / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride && tid + stride < 256u) {
+            sq_sums[tid] += sq_sums[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float norm = metal::sqrt(max(sq_sums[0], 1e-12f));
+    if (tid == 0u) {
+        dst_norms[head * args.norms_row_stride + args.slot] = bfloat(norm);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid >= pair_count) {
+        return;
+    }
+
+    const float inv_norm = 1.0f / norm;
+    const float2 cs = rotations[tid];
+    const float r0 = cs.x * (x0 * inv_norm) - cs.y * (x1 * inv_norm);
+    const float r1 = cs.y * (x0 * inv_norm) + cs.x * (x1 * inv_norm);
+
+    uint idx0 = 0u;
+    uint idx1 = 0u;
+    float best0 = abs(r0 - centroids[0]);
+    float best1 = abs(r1 - centroids[0]);
+    for (uint level = 1u; level < 16u; ++level) {
+        const float d0 = abs(r0 - centroids[level]);
+        const float d1 = abs(r1 - centroids[level]);
+        if (d0 < best0) {
+            best0 = d0;
+            idx0 = level;
+        }
+        if (d1 < best1) {
+            best1 = d1;
+            idx1 = level;
+        }
+    }
+
+    const uint dst_index = head * args.indices_row_stride + args.slot * pair_count + tid;
+    dst_indices[dst_index] = uchar(idx0 | (idx1 << 4u));
+}
+
+kernel void kernel_mlx_planar3_kv_append_bf16(
+        constant MlxPlanar3KvAppendArgs & args [[buffer(0)]],
+        device const bfloat * src [[buffer(1)]],
+        device const float2 * rotations [[buffer(2)]],
+        device const float * centroids [[buffer(3)]],
+        device uchar * dst_indices [[buffer(4)]],
+        device bfloat * dst_norms [[buffer(5)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint3 tid3 [[thread_position_in_threadgroup]],
+        uint3 threads_per_tg [[threads_per_threadgroup]]) {
+    const uint head = tgpig.y;
+    const uint pair_count = args.head_dim / 2u;
+    const uint tid = tid3.x;
+    if (head >= args.head_count) {
+        return;
+    }
+
+    threadgroup float sq_sums[256];
+    float x0 = 0.0f;
+    float x1 = 0.0f;
+    if (tid < pair_count) {
+        const uint base = head * args.src_row_stride + tid * 2u;
+        x0 = float(src[base]);
+        x1 = float(src[base + 1u]);
+        sq_sums[tid] = x0 * x0 + x1 * x1;
+    } else if (tid < 256u) {
+        sq_sums[tid] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = threads_per_tg.x / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride && tid + stride < 256u) {
+            sq_sums[tid] += sq_sums[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float norm = metal::sqrt(max(sq_sums[0], 1e-12f));
+    if (tid == 0u) {
+        dst_norms[head * args.norms_row_stride + args.slot] = bfloat(norm);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid >= pair_count) {
+        return;
+    }
+
+    const float inv_norm = 1.0f / norm;
+    const float2 cs = rotations[tid];
+    const float r0 = cs.x * (x0 * inv_norm) - cs.y * (x1 * inv_norm);
+    const float r1 = cs.y * (x0 * inv_norm) + cs.x * (x1 * inv_norm);
+
+    uint idx0 = 0u;
+    uint idx1 = 0u;
+    float best0 = abs(r0 - centroids[0]);
+    float best1 = abs(r1 - centroids[0]);
+    for (uint level = 1u; level < 8u; ++level) {
+        const float d0 = abs(r0 - centroids[level]);
+        const float d1 = abs(r1 - centroids[level]);
+        if (d0 < best0) {
+            best0 = d0;
+            idx0 = level;
+        }
+        if (d1 < best1) {
+            best1 = d1;
+            idx1 = level;
+        }
+    }
+
+    const uint dst_index = head * args.indices_row_stride + args.slot * pair_count + tid;
+    dst_indices[dst_index] = uchar(idx0 | (idx1 << 3u));
+}
+
+kernel void kernel_mlx_planar4_attention_logits_seq_bf16(
+        constant MlxPlanar4AttentionLogitsSeqArgs & args [[buffer(0)]],
+        device const bfloat * q [[buffer(1)]],
+        device const uchar * k_indices [[buffer(2)]],
+        device const bfloat * k_norms [[buffer(3)]],
+        device const float2 * rotations [[buffer(4)]],
+        device const float * centroids [[buffer(5)]],
+        device bfloat * out [[buffer(6)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort simd_lid [[thread_index_in_simdgroup]]) {
+    const uint token = tgpig.x;
+    const uint q_head = tgpig.y;
+    if (token >= args.seq_len || q_head >= args.q_head_count) {
+        return;
+    }
+
+    const uint kv_head = q_head / args.q_heads_per_kv;
+    const uint slot = (args.start_slot + token) % args.capacity;
+    const device bfloat * q_row = q + q_head * args.q_head_stride;
+    const device uchar * idx_row =
+        k_indices + kv_head * args.indices_row_stride + slot * args.pair_count;
+    const float norm = float(k_norms[kv_head * args.norms_row_stride + slot]);
+
+    float sum = 0.0f;
+    for (uint pair = simd_lid; pair < args.pair_count; pair += 32u) {
+        const uchar packed = idx_row[pair];
+        const float y0 = centroids[packed & 0x0Fu];
+        const float y1 = centroids[(packed >> 4u) & 0x0Fu];
+        const float2 cs = rotations[pair];
+        const float k0 = cs.x * y0 + cs.y * y1;
+        const float k1 = -cs.y * y0 + cs.x * y1;
+        const uint q_index = pair * 2u;
+        sum += float(q_row[q_index]) * (norm * k0);
+        sum += float(q_row[q_index + 1u]) * (norm * k1);
+    }
+    sum = simd_sum(sum);
+    if (simd_lid == 0u) {
+        out[q_head * args.capacity + token] = bfloat(sum);
+    }
+}
+
+kernel void kernel_mlx_planar3_attention_logits_seq_bf16(
+        constant MlxPlanar3AttentionLogitsSeqArgs & args [[buffer(0)]],
+        device const bfloat * q [[buffer(1)]],
+        device const uchar * k_indices [[buffer(2)]],
+        device const bfloat * k_norms [[buffer(3)]],
+        device const float2 * rotations [[buffer(4)]],
+        device const float * centroids [[buffer(5)]],
+        device bfloat * out [[buffer(6)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort simd_lid [[thread_index_in_simdgroup]]) {
+    const uint token = tgpig.x;
+    const uint q_head = tgpig.y;
+    if (token >= args.seq_len || q_head >= args.q_head_count) {
+        return;
+    }
+
+    const uint kv_head = q_head / args.q_heads_per_kv;
+    const uint slot = (args.start_slot + token) % args.capacity;
+    const device bfloat * q_row = q + q_head * args.q_head_stride;
+    const device uchar * idx_row =
+        k_indices + kv_head * args.indices_row_stride + slot * args.pair_count;
+    const float norm = float(k_norms[kv_head * args.norms_row_stride + slot]);
+
+    float sum = 0.0f;
+    for (uint pair = simd_lid; pair < args.pair_count; pair += 32u) {
+        const uchar packed = idx_row[pair];
+        const float y0 = centroids[packed & 0x07u];
+        const float y1 = centroids[(packed >> 3u) & 0x07u];
+        const float2 cs = rotations[pair];
+        const float k0 = cs.x * y0 + cs.y * y1;
+        const float k1 = -cs.y * y0 + cs.x * y1;
+        const uint q_index = pair * 2u;
+        sum += float(q_row[q_index]) * (norm * k0);
+        sum += float(q_row[q_index + 1u]) * (norm * k1);
+    }
+    sum = simd_sum(sum);
+    if (simd_lid == 0u) {
+        out[q_head * args.capacity + token] = bfloat(sum);
+    }
 }
 
 kernel void kernel_mlx_gqa_attention_output_single_bf16(
@@ -13198,5 +13480,36 @@ kernel void kernel_mlx_geglu_strided_rows_bf16(
     const float gate_gelu = mlx_bf16_round_float(gate_half * gate_one_plus);
 
     out[gid] = bfloat(gate_gelu * up_f);
+}
+
+kernel void kernel_mlx_geglu_strided_rows_f32(
+        constant MlxGegluStridedRowsArgs & args [[buffer(0)]],
+        device const float * gate_up [[buffer(1)]],
+        device float * out [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid >= args.n) {
+        return;
+    }
+
+    const uint slot = gid / args.row_width;
+    const uint row = gid % args.row_width;
+    const uint gate_idx = slot * args.input_row_stride + row;
+    const uint up_idx = gate_idx + args.input_split_offset;
+    const float gate_f = gate_up[gate_idx];
+    const float up_f = gate_up[up_idx];
+    const float coef_a = GELU_COEF_A;
+    const float sqrt_2_over_pi = SQRT_2_OVER_PI;
+
+    const float gate_sq = gate_f * gate_f;
+    const float gate_cubic = gate_sq * gate_f;
+    const float gate_scale = coef_a * gate_cubic;
+    const float gate_poly = gate_f + gate_scale;
+    const float gate_tanh_input = sqrt_2_over_pi * gate_poly;
+    const float gate_tanh = precise::tanh(gate_tanh_input);
+    const float gate_one_plus = 1.0f + gate_tanh;
+    const float gate_half = 0.5f * gate_f;
+    const float gate_gelu = gate_half * gate_one_plus;
+
+    out[gid] = gate_gelu * up_f;
 }
 #endif

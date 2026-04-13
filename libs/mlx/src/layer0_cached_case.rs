@@ -645,6 +645,7 @@ struct MlxAffineDequantTokenRowArgs {
 struct MlxRmsNormRowArgs {
     n: u32,
     eps: f32,
+    threadgroup_width: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -654,6 +655,7 @@ struct MlxRmsNormRowsArgs {
     row_stride: u32,
     row_count: u32,
     eps: f32,
+    threadgroup_width: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -800,6 +802,285 @@ struct MlxKvAppendBf16Args {
     dst_row_stride: u32,
     head_count: u32,
     slot: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxPlanar4KvAppendArgs {
+    head_dim: u32,
+    src_row_stride: u32,
+    indices_row_stride: u32,
+    norms_row_stride: u32,
+    head_count: u32,
+    slot: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxPlanar3KvAppendArgs {
+    head_dim: u32,
+    src_row_stride: u32,
+    indices_row_stride: u32,
+    norms_row_stride: u32,
+    head_count: u32,
+    slot: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxPlanar4AttentionLogitsSeqArgs {
+    q_head_stride: u32,
+    indices_row_stride: u32,
+    norms_row_stride: u32,
+    q_head_count: u32,
+    q_heads_per_kv: u32,
+    seq_len: u32,
+    start_slot: u32,
+    capacity: u32,
+    pair_count: u32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct MlxPlanar3AttentionLogitsSeqArgs {
+    q_head_stride: u32,
+    indices_row_stride: u32,
+    norms_row_stride: u32,
+    q_head_count: u32,
+    q_heads_per_kv: u32,
+    seq_len: u32,
+    start_slot: u32,
+    capacity: u32,
+    pair_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GemmaExactMetalKvCompressionMode {
+    #[default]
+    Disabled,
+    RotorPlanar4FullAttentionK,
+    RotorPlanar3FullAttentionK,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GemmaExactMetalBackendMode {
+    #[default]
+    Auto,
+    Force,
+    Disabled,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GemmaExactMetalConfig {
+    pub backend_mode: GemmaExactMetalBackendMode,
+    pub kv_compression: GemmaExactMetalKvCompressionMode,
+}
+
+#[derive(Clone)]
+struct ExactMetalPlanar4KCompressionResources {
+    head_dim: usize,
+    pair_count: usize,
+    rotation_buffer: MetalBuffer,
+    centroid_buffer: MetalBuffer,
+    kv_append_pipeline: MetalPipeline,
+    attention_logits_pipeline: MetalPipeline,
+}
+
+#[derive(Clone)]
+struct ExactMetalPlanar3KCompressionResources {
+    head_dim: usize,
+    pair_count: usize,
+    rotation_buffer: MetalBuffer,
+    centroid_buffer: MetalBuffer,
+    kv_append_pipeline: MetalPipeline,
+    attention_logits_pipeline: MetalPipeline,
+}
+
+fn gaussian_pdf_f64(x: f64, sigma: f64) -> f64 {
+    let variance = sigma * sigma;
+    let norm = (2.0 * std::f64::consts::PI * variance).sqrt();
+    (-x * x / (2.0 * variance)).exp() / norm
+}
+
+fn solve_rotor_gaussian_lloyd_max_centroids(head_dim: usize, bits: usize) -> Vec<f32> {
+    let levels = 1usize << bits;
+    const MAX_ITERS: usize = 64;
+    const SAMPLES_PER_INTERVAL: usize = 256;
+    const TOLERANCE: f64 = 1e-10;
+
+    let sigma = 1.0f64 / (head_dim as f64).sqrt();
+    let lo = -3.5 * sigma;
+    let hi = 3.5 * sigma;
+    let mut centroids = (0..levels)
+        .map(|index| lo + (hi - lo) * ((index as f64) + 0.5) / (levels as f64))
+        .collect::<Vec<_>>();
+
+    for _ in 0..MAX_ITERS {
+        let mut boundaries = Vec::with_capacity(levels - 1);
+        for index in 0..levels - 1 {
+            boundaries.push((centroids[index] + centroids[index + 1]) * 0.5);
+        }
+        let mut edges = Vec::with_capacity(levels + 1);
+        edges.push(lo * 3.0);
+        edges.extend(boundaries);
+        edges.push(hi * 3.0);
+
+        let mut max_shift = 0.0f64;
+        let mut next = Vec::with_capacity(levels);
+        for level in 0..levels {
+            let a = edges[level];
+            let b = edges[level + 1];
+            let width = (b - a) / SAMPLES_PER_INTERVAL as f64;
+            let mut weighted_sum = 0.0f64;
+            let mut weight = 0.0f64;
+            for sample_index in 0..SAMPLES_PER_INTERVAL {
+                let x = a + ((sample_index as f64) + 0.5) * width;
+                let pdf = gaussian_pdf_f64(x, sigma);
+                weighted_sum += x * pdf;
+                weight += pdf;
+            }
+            let updated = if weight > 0.0 {
+                weighted_sum / weight
+            } else {
+                centroids[level]
+            };
+            max_shift = max_shift.max((updated - centroids[level]).abs());
+            next.push(updated);
+        }
+        centroids = next;
+        if max_shift < TOLERANCE {
+            break;
+        }
+    }
+
+    centroids.into_iter().map(|value| value as f32).collect()
+}
+
+fn next_splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn make_rotor_rotation_pairs(head_dim: usize, seed: u64) -> Vec<f32> {
+    let pair_count = head_dim.div_ceil(2);
+    let mut state = seed;
+    let mut out = Vec::with_capacity(pair_count * 2);
+    for _ in 0..pair_count {
+        let bits = next_splitmix64(&mut state);
+        let unit = ((bits >> 11) as f64) / ((1u64 << 53) as f64);
+        let angle = unit * std::f64::consts::TAU;
+        out.push(angle.cos() as f32);
+        out.push(angle.sin() as f32);
+    }
+    out
+}
+
+fn load_planar_k_compression_artifacts(
+    runtime: &MetalRuntime,
+    head_dim: usize,
+    seed: u64,
+    bits: usize,
+    append_kernel_name: &str,
+    logits_kernel_name: &str,
+    mode_name: &str,
+) -> Result<
+    (
+        usize,
+        MetalBuffer,
+        MetalBuffer,
+        MetalPipeline,
+        MetalPipeline,
+    ),
+    Box<dyn Error>,
+> {
+    if head_dim == 0 || head_dim % 2 != 0 {
+        return Err(format!(
+            "{mode_name} K-cache compression requires a non-zero even head_dim, got {head_dim}"
+        )
+        .into());
+    }
+    let pair_count = head_dim / 2;
+    if pair_count > 256 {
+        return Err(format!(
+            "{mode_name} K-cache compression currently supports at most 256 pairs, got {} for head_dim {}",
+            pair_count, head_dim
+        )
+        .into());
+    }
+    let rotations = make_rotor_rotation_pairs(head_dim, seed);
+    let centroids = solve_rotor_gaussian_lloyd_max_centroids(head_dim, bits);
+    Ok((
+        pair_count,
+        runtime.create_buffer_with_bytes(
+            &bytes_from_f32_slice(&rotations),
+            BufferStorageMode::Private,
+        )?,
+        runtime.create_buffer_with_bytes(
+            &bytes_from_f32_slice(&centroids),
+            BufferStorageMode::Private,
+        )?,
+        compile_default_pipeline(runtime, append_kernel_name)?,
+        compile_default_pipeline(runtime, logits_kernel_name)?,
+    ))
+}
+
+impl ExactMetalPlanar4KCompressionResources {
+    fn load(runtime: &MetalRuntime, head_dim: usize, seed: u64) -> Result<Self, Box<dyn Error>> {
+        let (
+            pair_count,
+            rotation_buffer,
+            centroid_buffer,
+            kv_append_pipeline,
+            attention_logits_pipeline,
+        ) = load_planar_k_compression_artifacts(
+            runtime,
+            head_dim,
+            seed,
+            4,
+            "kernel_mlx_planar4_kv_append_bf16",
+            "kernel_mlx_planar4_attention_logits_seq_bf16",
+            "planar4",
+        )?;
+        Ok(Self {
+            head_dim,
+            pair_count,
+            rotation_buffer,
+            centroid_buffer,
+            kv_append_pipeline,
+            attention_logits_pipeline,
+        })
+    }
+}
+
+impl ExactMetalPlanar3KCompressionResources {
+    fn load(runtime: &MetalRuntime, head_dim: usize, seed: u64) -> Result<Self, Box<dyn Error>> {
+        let (
+            pair_count,
+            rotation_buffer,
+            centroid_buffer,
+            kv_append_pipeline,
+            attention_logits_pipeline,
+        ) = load_planar_k_compression_artifacts(
+            runtime,
+            head_dim,
+            seed,
+            3,
+            "kernel_mlx_planar3_kv_append_bf16",
+            "kernel_mlx_planar3_attention_logits_seq_bf16",
+            "planar3",
+        )?;
+        Ok(Self {
+            head_dim,
+            pair_count,
+            rotation_buffer,
+            centroid_buffer,
+            kv_append_pipeline,
+            attention_logits_pipeline,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1300,24 +1581,123 @@ impl LayerExecutionSession {
     }
 }
 
+enum ExactMetalKeyCacheStorage {
+    Bf16 {
+        buffer: MetalBuffer,
+    },
+    RotorPlanar3 {
+        index_buffer: MetalBuffer,
+        norm_buffer: MetalBuffer,
+        prefill_bf16_buffer: Option<MetalBuffer>,
+        resources: Arc<ExactMetalPlanar3KCompressionResources>,
+    },
+    RotorPlanar4 {
+        index_buffer: MetalBuffer,
+        norm_buffer: MetalBuffer,
+        prefill_bf16_buffer: Option<MetalBuffer>,
+        resources: Arc<ExactMetalPlanar4KCompressionResources>,
+    },
+}
+
 struct ExactMetalKvCache {
     spec: GemmaKvCacheSpec,
-    key_buffer: MetalBuffer,
+    key_storage: ExactMetalKeyCacheStorage,
     value_buffer: MetalBuffer,
     stored_tokens: usize,
     next_position: usize,
 }
 
 impl ExactMetalKvCache {
-    fn load(runtime: &MetalRuntime, spec: GemmaKvCacheSpec) -> Result<Self, Box<dyn Error>> {
+    fn load(
+        runtime: &MetalRuntime,
+        spec: GemmaKvCacheSpec,
+        config: &GemmaExactMetalConfig,
+        planar3_resources: Option<Arc<ExactMetalPlanar3KCompressionResources>>,
+        planar4_resources: Option<Arc<ExactMetalPlanar4KCompressionResources>>,
+    ) -> Result<Self, Box<dyn Error>> {
         let storage_words = spec
             .batch_size
             .checked_mul(spec.kv_head_count)
             .and_then(|value| value.checked_mul(spec.max_tokens))
             .and_then(|value| value.checked_mul(spec.head_dim))
             .ok_or("exact metal KV cache storage overflow")?;
+        let use_planar3 = config.kv_compression
+            == GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK
+            && spec.attention == GemmaAttentionKind::Full;
+        let use_planar4 = config.kv_compression
+            == GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK
+            && spec.attention == GemmaAttentionKind::Full;
+        let key_storage = if use_planar3 {
+            let resources = planar3_resources.ok_or(
+                "missing planar3 K-cache compression resources for full-attention cache",
+            )?;
+            if resources.head_dim != spec.head_dim {
+                return Err(format!(
+                    "planar3 resource head_dim mismatch: resource={} spec={}",
+                    resources.head_dim, spec.head_dim
+                )
+                .into());
+            }
+            let index_bytes = spec
+                .batch_size
+                .checked_mul(spec.kv_head_count)
+                .and_then(|value| value.checked_mul(spec.max_tokens))
+                .and_then(|value| value.checked_mul(resources.pair_count))
+                .ok_or("exact metal planar3 K cache storage overflow")?;
+            let norm_words = spec
+                .batch_size
+                .checked_mul(spec.kv_head_count)
+                .and_then(|value| value.checked_mul(spec.max_tokens))
+                .ok_or("exact metal planar3 K norm storage overflow")?;
+            ExactMetalKeyCacheStorage::RotorPlanar3 {
+                index_buffer: runtime.create_buffer(index_bytes, BufferStorageMode::Private)?,
+                norm_buffer: create_bf16_buffer(runtime, norm_words, BufferStorageMode::Private)?,
+                prefill_bf16_buffer: Some(create_bf16_buffer(
+                    runtime,
+                    storage_words,
+                    BufferStorageMode::Private,
+                )?),
+                resources,
+            }
+        } else if use_planar4 {
+            let resources = planar4_resources.ok_or(
+                "missing planar4 K-cache compression resources for full-attention cache",
+            )?;
+            if resources.head_dim != spec.head_dim {
+                return Err(format!(
+                    "planar4 resource head_dim mismatch: resource={} spec={}",
+                    resources.head_dim, spec.head_dim
+                )
+                .into());
+            }
+            let index_bytes = spec
+                .batch_size
+                .checked_mul(spec.kv_head_count)
+                .and_then(|value| value.checked_mul(spec.max_tokens))
+                .and_then(|value| value.checked_mul(resources.pair_count))
+                .ok_or("exact metal planar4 K cache storage overflow")?;
+            let norm_words = spec
+                .batch_size
+                .checked_mul(spec.kv_head_count)
+                .and_then(|value| value.checked_mul(spec.max_tokens))
+                .ok_or("exact metal planar4 K norm storage overflow")?;
+            ExactMetalKeyCacheStorage::RotorPlanar4 {
+                index_buffer: runtime.create_buffer(index_bytes, BufferStorageMode::Private)?,
+                norm_buffer: create_bf16_buffer(runtime, norm_words, BufferStorageMode::Private)?,
+                prefill_bf16_buffer: Some(create_bf16_buffer(
+                    runtime,
+                    storage_words,
+                    BufferStorageMode::Private,
+                )?),
+                resources,
+            }
+        } else {
+            ExactMetalKeyCacheStorage::Bf16 {
+                buffer: create_bf16_buffer(runtime, storage_words, BufferStorageMode::Private)?,
+            }
+        };
         Ok(Self {
-            key_buffer: create_bf16_buffer(runtime, storage_words, BufferStorageMode::Private)?,
+            key_storage,
             value_buffer: create_bf16_buffer(runtime, storage_words, BufferStorageMode::Private)?,
             spec,
             stored_tokens: 0,
@@ -1325,9 +1705,36 @@ impl ExactMetalKvCache {
         })
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self, runtime: &MetalRuntime) -> Result<(), Box<dyn Error>> {
+        match &mut self.key_storage {
+            ExactMetalKeyCacheStorage::RotorPlanar3 {
+                prefill_bf16_buffer,
+                ..
+            }
+            | ExactMetalKeyCacheStorage::RotorPlanar4 {
+                prefill_bf16_buffer,
+                ..
+            } => {
+                if prefill_bf16_buffer.is_none() {
+                    let storage_words = self
+                        .spec
+                        .batch_size
+                        .checked_mul(self.spec.kv_head_count)
+                        .and_then(|value| value.checked_mul(self.spec.max_tokens))
+                        .and_then(|value| value.checked_mul(self.spec.head_dim))
+                        .ok_or("exact metal deferred rotor prefill storage overflow")?;
+                    *prefill_bf16_buffer = Some(create_bf16_buffer(
+                        runtime,
+                        storage_words,
+                        BufferStorageMode::Private,
+                    )?);
+                }
+            }
+            ExactMetalKeyCacheStorage::Bf16 { .. } => {}
+        }
         self.stored_tokens = 0;
         self.next_position = 0;
+        Ok(())
     }
 
     fn capacity_tokens(&self) -> usize {
@@ -1353,6 +1760,52 @@ impl ExactMetalKvCache {
         self.stored_tokens
     }
 
+    fn uses_rotor_planar_k(&self) -> bool {
+        matches!(
+            self.key_storage,
+            ExactMetalKeyCacheStorage::RotorPlanar3 { .. }
+                | ExactMetalKeyCacheStorage::RotorPlanar4 { .. }
+        )
+    }
+
+    fn key_buffer(&self) -> Option<&MetalBuffer> {
+        match &self.key_storage {
+            ExactMetalKeyCacheStorage::Bf16 { buffer } => Some(buffer),
+            ExactMetalKeyCacheStorage::RotorPlanar3 { .. }
+            | ExactMetalKeyCacheStorage::RotorPlanar4 { .. } => None,
+        }
+    }
+
+    fn active_prefill_bf16_buffer(&self) -> Option<&MetalBuffer> {
+        match &self.key_storage {
+            ExactMetalKeyCacheStorage::RotorPlanar3 {
+                prefill_bf16_buffer: Some(buffer),
+                ..
+            }
+            | ExactMetalKeyCacheStorage::RotorPlanar4 {
+                prefill_bf16_buffer: Some(buffer),
+                ..
+            } => Some(buffer),
+            _ => None,
+        }
+    }
+
+    fn rotor_index_row_stride_bytes(&self) -> Result<usize, Box<dyn Error>> {
+        let pair_count = match &self.key_storage {
+            ExactMetalKeyCacheStorage::RotorPlanar3 { resources, .. } => resources.pair_count,
+            ExactMetalKeyCacheStorage::RotorPlanar4 {
+                resources, ..
+            } => resources.pair_count,
+            ExactMetalKeyCacheStorage::Bf16 { .. } => {
+                return Err("rotor K cache storage is unavailable".into())
+            }
+        };
+        self.spec
+            .max_tokens
+            .checked_mul(pair_count)
+            .ok_or_else(|| "exact metal rotor K row stride overflow".into())
+    }
+
     fn append_token_from_buffers(
         &mut self,
         runtime: &MetalRuntime,
@@ -1375,31 +1828,41 @@ impl ExactMetalKvCache {
         let row_stride_words = self.row_stride_words()?;
         let bytes_per_head = head_dim_words * size_of::<u16>();
 
-        for head in 0..self.spec.kv_head_count {
-            let src_offset = head
-                .checked_mul(bytes_per_head)
-                .ok_or("exact metal KV src offset overflow")?;
-            let dst_word_offset = head
-                .checked_mul(row_stride_words)
-                .and_then(|value| value.checked_add(slot * head_dim_words))
-                .ok_or("exact metal KV dst offset overflow")?;
-            let dst_offset = dst_word_offset
-                .checked_mul(size_of::<u16>())
-                .ok_or("exact metal KV dst byte offset overflow")?;
-            runtime.copy_buffer_range(
-                src_k,
-                src_offset,
-                &self.key_buffer,
-                dst_offset,
-                bytes_per_head,
-            )?;
-            runtime.copy_buffer_range(
-                src_v,
-                src_offset,
-                &self.value_buffer,
-                dst_offset,
-                bytes_per_head,
-            )?;
+        match &self.key_storage {
+            ExactMetalKeyCacheStorage::Bf16 { buffer } => {
+                for head in 0..self.spec.kv_head_count {
+                    let src_offset = head
+                        .checked_mul(bytes_per_head)
+                        .ok_or("exact metal KV src offset overflow")?;
+                    let dst_word_offset = head
+                        .checked_mul(row_stride_words)
+                        .and_then(|value| value.checked_add(slot * head_dim_words))
+                        .ok_or("exact metal KV dst offset overflow")?;
+                    let dst_offset = dst_word_offset
+                        .checked_mul(size_of::<u16>())
+                        .ok_or("exact metal KV dst byte offset overflow")?;
+                    runtime.copy_buffer_range(
+                        src_k,
+                        src_offset,
+                        buffer,
+                        dst_offset,
+                        bytes_per_head,
+                    )?;
+                    runtime.copy_buffer_range(
+                        src_v,
+                        src_offset,
+                        &self.value_buffer,
+                        dst_offset,
+                        bytes_per_head,
+                    )?;
+                }
+            }
+            ExactMetalKeyCacheStorage::RotorPlanar3 { .. }
+            | ExactMetalKeyCacheStorage::RotorPlanar4 { .. } => {
+                return Err(
+                    "direct host-copy append is unsupported for compressed rotor K cache".into(),
+                )
+            }
         }
 
         self.next_position = self
@@ -1416,7 +1879,8 @@ impl ExactMetalKvCache {
     fn append_token_from_buffers_compute(
         &mut self,
         runtime: &MetalRuntime,
-        append_pipeline: &MetalPipeline,
+        append_pair_pipeline: &MetalPipeline,
+        append_single_pipeline: &MetalPipeline,
         src_k: &MetalBuffer,
         src_v: &MetalBuffer,
     ) -> Result<(), Box<dyn Error>> {
@@ -1433,55 +1897,350 @@ impl ExactMetalKvCache {
 
         let slot = self.next_position % self.spec.max_tokens;
         let row_stride_words = self.row_stride_words()?;
-        let args = MlxKvAppendBf16Args {
-            head_dim: self.spec.head_dim as u32,
-            src_row_stride: self.spec.head_dim as u32,
-            dst_row_stride: row_stride_words as u32,
-            head_count: self.spec.kv_head_count as u32,
-            slot: slot as u32,
-        };
-        let threadgroups = MetalSize {
-            width: (self.spec.head_dim as u64).div_ceil(64),
-            height: self.spec.kv_head_count as u64,
-            depth: 1,
-        };
-        let threads_per_threadgroup = MetalSize {
-            width: 64,
-            height: 1,
-            depth: 1,
-        };
 
-        dispatch_compute_tracked_split(
-            runtime,
-            append_pipeline,
-            bytes_of(&args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: src_k,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: src_v,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &self.key_buffer,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 4,
-                    buffer: &self.value_buffer,
-                    offset_bytes: 0,
-                },
-            ],
-            2,
-            &[],
-            threadgroups,
-            threads_per_threadgroup,
-        )?;
+        match &self.key_storage {
+            ExactMetalKeyCacheStorage::Bf16 { buffer } => {
+                let args = MlxKvAppendBf16Args {
+                    head_dim: self.spec.head_dim as u32,
+                    src_row_stride: self.spec.head_dim as u32,
+                    dst_row_stride: row_stride_words as u32,
+                    head_count: self.spec.kv_head_count as u32,
+                    slot: slot as u32,
+                };
+                let threadgroups = MetalSize {
+                    width: (self.spec.head_dim as u64).div_ceil(64),
+                    height: self.spec.kv_head_count as u64,
+                    depth: 1,
+                };
+                let threads_per_threadgroup = MetalSize {
+                    width: 64,
+                    height: 1,
+                    depth: 1,
+                };
+
+                dispatch_compute_tracked_split(
+                    runtime,
+                    append_pair_pipeline,
+                    bytes_of(&args),
+                    [
+                        MetalBufferBindingRef {
+                            index: 1,
+                            buffer: src_k,
+                            offset_bytes: 0,
+                        },
+                        MetalBufferBindingRef {
+                            index: 2,
+                            buffer: src_v,
+                            offset_bytes: 0,
+                        },
+                        MetalBufferBindingRef {
+                            index: 3,
+                            buffer,
+                            offset_bytes: 0,
+                        },
+                        MetalBufferBindingRef {
+                            index: 4,
+                            buffer: &self.value_buffer,
+                            offset_bytes: 0,
+                        },
+                    ],
+                    2,
+                    &[],
+                    threadgroups,
+                    threads_per_threadgroup,
+                )?;
+            }
+            ExactMetalKeyCacheStorage::RotorPlanar3 {
+                index_buffer,
+                norm_buffer,
+                prefill_bf16_buffer,
+                resources,
+            } => {
+                if let Some(prefill_buffer) = prefill_bf16_buffer {
+                    let args = MlxKvAppendBf16Args {
+                        head_dim: self.spec.head_dim as u32,
+                        src_row_stride: self.spec.head_dim as u32,
+                        dst_row_stride: row_stride_words as u32,
+                        head_count: self.spec.kv_head_count as u32,
+                        slot: slot as u32,
+                    };
+                    dispatch_compute_tracked_split(
+                        runtime,
+                        append_pair_pipeline,
+                        bytes_of(&args),
+                        [
+                            MetalBufferBindingRef {
+                                index: 1,
+                                buffer: src_k,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 2,
+                                buffer: src_v,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 3,
+                                buffer: prefill_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 4,
+                                buffer: &self.value_buffer,
+                                offset_bytes: 0,
+                            },
+                        ],
+                        2,
+                        &[],
+                        MetalSize {
+                            width: (self.spec.head_dim as u64).div_ceil(64),
+                            height: self.spec.kv_head_count as u64,
+                            depth: 1,
+                        },
+                        MetalSize {
+                            width: 64,
+                            height: 1,
+                            depth: 1,
+                        },
+                    )?;
+                } else {
+                    let planar_args = MlxPlanar3KvAppendArgs {
+                        head_dim: self.spec.head_dim as u32,
+                        src_row_stride: self.spec.head_dim as u32,
+                        indices_row_stride: self.rotor_index_row_stride_bytes()? as u32,
+                        norms_row_stride: self.spec.max_tokens as u32,
+                        head_count: self.spec.kv_head_count as u32,
+                        slot: slot as u32,
+                    };
+                    let planar_threads = resources.pair_count.next_power_of_two().min(256) as u64;
+                    dispatch_compute_tracked_split(
+                        runtime,
+                        &resources.kv_append_pipeline,
+                        bytes_of(&planar_args),
+                        [
+                            MetalBufferBindingRef {
+                                index: 1,
+                                buffer: src_k,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 2,
+                                buffer: &resources.rotation_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 3,
+                                buffer: &resources.centroid_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 4,
+                                buffer: index_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 5,
+                                buffer: norm_buffer,
+                                offset_bytes: 0,
+                            },
+                        ],
+                        3,
+                        &[],
+                        MetalSize {
+                            width: 1,
+                            height: self.spec.kv_head_count as u64,
+                            depth: 1,
+                        },
+                        MetalSize {
+                            width: planar_threads,
+                            height: 1,
+                            depth: 1,
+                        },
+                    )?;
+                }
+                let value_args = MlxKvAppendBf16Args {
+                    head_dim: self.spec.head_dim as u32,
+                    src_row_stride: self.spec.head_dim as u32,
+                    dst_row_stride: row_stride_words as u32,
+                    head_count: self.spec.kv_head_count as u32,
+                    slot: slot as u32,
+                };
+                dispatch_compute_tracked_split(
+                    runtime,
+                    append_single_pipeline,
+                    bytes_of(&value_args),
+                    [
+                        MetalBufferBindingRef {
+                            index: 1,
+                            buffer: src_v,
+                            offset_bytes: 0,
+                        },
+                        MetalBufferBindingRef {
+                            index: 2,
+                            buffer: &self.value_buffer,
+                            offset_bytes: 0,
+                        },
+                    ],
+                    1,
+                    &[],
+                    MetalSize {
+                        width: (self.spec.head_dim as u64).div_ceil(64),
+                        height: self.spec.kv_head_count as u64,
+                        depth: 1,
+                    },
+                    MetalSize {
+                        width: 64,
+                        height: 1,
+                        depth: 1,
+                    },
+                )?;
+            }
+            ExactMetalKeyCacheStorage::RotorPlanar4 {
+                index_buffer,
+                norm_buffer,
+                prefill_bf16_buffer,
+                resources,
+            } => {
+                if let Some(prefill_buffer) = prefill_bf16_buffer {
+                    let args = MlxKvAppendBf16Args {
+                        head_dim: self.spec.head_dim as u32,
+                        src_row_stride: self.spec.head_dim as u32,
+                        dst_row_stride: row_stride_words as u32,
+                        head_count: self.spec.kv_head_count as u32,
+                        slot: slot as u32,
+                    };
+                    dispatch_compute_tracked_split(
+                        runtime,
+                        append_pair_pipeline,
+                        bytes_of(&args),
+                        [
+                            MetalBufferBindingRef {
+                                index: 1,
+                                buffer: src_k,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 2,
+                                buffer: src_v,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 3,
+                                buffer: prefill_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 4,
+                                buffer: &self.value_buffer,
+                                offset_bytes: 0,
+                            },
+                        ],
+                        2,
+                        &[],
+                        MetalSize {
+                            width: (self.spec.head_dim as u64).div_ceil(64),
+                            height: self.spec.kv_head_count as u64,
+                            depth: 1,
+                        },
+                        MetalSize {
+                            width: 64,
+                            height: 1,
+                            depth: 1,
+                        },
+                    )?;
+                } else {
+                    let planar_args = MlxPlanar4KvAppendArgs {
+                        head_dim: self.spec.head_dim as u32,
+                        src_row_stride: self.spec.head_dim as u32,
+                        indices_row_stride: self.rotor_index_row_stride_bytes()? as u32,
+                        norms_row_stride: self.spec.max_tokens as u32,
+                        head_count: self.spec.kv_head_count as u32,
+                        slot: slot as u32,
+                    };
+                    let planar_threads = resources.pair_count.next_power_of_two().min(256) as u64;
+                    dispatch_compute_tracked_split(
+                        runtime,
+                        &resources.kv_append_pipeline,
+                        bytes_of(&planar_args),
+                        [
+                            MetalBufferBindingRef {
+                                index: 1,
+                                buffer: src_k,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 2,
+                                buffer: &resources.rotation_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 3,
+                                buffer: &resources.centroid_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 4,
+                                buffer: index_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 5,
+                                buffer: norm_buffer,
+                                offset_bytes: 0,
+                            },
+                        ],
+                        3,
+                        &[],
+                        MetalSize {
+                            width: 1,
+                            height: self.spec.kv_head_count as u64,
+                            depth: 1,
+                        },
+                        MetalSize {
+                            width: planar_threads,
+                            height: 1,
+                            depth: 1,
+                        },
+                    )?;
+                }
+                let value_args = MlxKvAppendBf16Args {
+                    head_dim: self.spec.head_dim as u32,
+                    src_row_stride: self.spec.head_dim as u32,
+                    dst_row_stride: row_stride_words as u32,
+                    head_count: self.spec.kv_head_count as u32,
+                    slot: slot as u32,
+                };
+                dispatch_compute_tracked_split(
+                    runtime,
+                    append_single_pipeline,
+                    bytes_of(&value_args),
+                    [
+                        MetalBufferBindingRef {
+                            index: 1,
+                            buffer: src_v,
+                            offset_bytes: 0,
+                        },
+                        MetalBufferBindingRef {
+                            index: 2,
+                            buffer: &self.value_buffer,
+                            offset_bytes: 0,
+                        },
+                    ],
+                    1,
+                    &[],
+                    MetalSize {
+                        width: (self.spec.head_dim as u64).div_ceil(64),
+                        height: self.spec.kv_head_count as u64,
+                        depth: 1,
+                    },
+                    MetalSize {
+                        width: 64,
+                        height: 1,
+                        depth: 1,
+                    },
+                )?;
+            }
+        }
         self.next_position = self
             .next_position
             .checked_add(1)
@@ -1491,6 +2250,186 @@ impl ExactMetalKvCache {
             .saturating_add(1)
             .min(self.spec.max_tokens);
         Ok(())
+    }
+
+    fn finalize_prefill_to_rotor_compute(
+        &mut self,
+        runtime: &MetalRuntime,
+    ) -> Result<bool, Box<dyn Error>> {
+        let stored_tokens = self.stored_tokens;
+        let row_stride_words = self.row_stride_words()?;
+        enum RotorFinalizeKind {
+            Planar3(Arc<ExactMetalPlanar3KCompressionResources>),
+            Planar4(Arc<ExactMetalPlanar4KCompressionResources>),
+        }
+        let (prefill_buffer, index_buffer, norm_buffer, kind) = match &self.key_storage {
+            ExactMetalKeyCacheStorage::RotorPlanar3 {
+                index_buffer,
+                norm_buffer,
+                prefill_bf16_buffer: Some(prefill_buffer),
+                resources,
+            } => (
+                prefill_buffer.clone(),
+                index_buffer.clone(),
+                norm_buffer.clone(),
+                RotorFinalizeKind::Planar3(Arc::clone(resources)),
+            ),
+            ExactMetalKeyCacheStorage::RotorPlanar4 {
+                index_buffer,
+                norm_buffer,
+                prefill_bf16_buffer: Some(prefill_buffer),
+                resources,
+            } => (
+                prefill_buffer.clone(),
+                index_buffer.clone(),
+                norm_buffer.clone(),
+                RotorFinalizeKind::Planar4(Arc::clone(resources)),
+            ),
+            ExactMetalKeyCacheStorage::RotorPlanar3 { .. }
+            | ExactMetalKeyCacheStorage::RotorPlanar4 { .. } => return Ok(false),
+            ExactMetalKeyCacheStorage::Bf16 { .. } => return Ok(false),
+        };
+        let pair_count = match &kind {
+            RotorFinalizeKind::Planar3(resources) => resources.pair_count,
+            RotorFinalizeKind::Planar4(resources) => resources.pair_count,
+        };
+        let planar_threads = pair_count.next_power_of_two().min(256) as u64;
+        let bytes_per_token = self
+            .spec
+            .head_dim
+            .checked_mul(size_of::<u16>())
+            .ok_or("exact metal deferred rotor src offset overflow")?;
+
+        for slot in 0..stored_tokens {
+            let src_offset_bytes = slot
+                .checked_mul(bytes_per_token)
+                .ok_or("exact metal deferred rotor src offset overflow")?;
+            match &kind {
+                RotorFinalizeKind::Planar3(resources) => {
+                    let args = MlxPlanar3KvAppendArgs {
+                        head_dim: self.spec.head_dim as u32,
+                        src_row_stride: row_stride_words as u32,
+                        indices_row_stride: self.rotor_index_row_stride_bytes()? as u32,
+                        norms_row_stride: self.spec.max_tokens as u32,
+                        head_count: self.spec.kv_head_count as u32,
+                        slot: slot as u32,
+                    };
+                    dispatch_compute_tracked_split(
+                        runtime,
+                        &resources.kv_append_pipeline,
+                        bytes_of(&args),
+                        [
+                            MetalBufferBindingRef {
+                                index: 1,
+                                buffer: &prefill_buffer,
+                                offset_bytes: src_offset_bytes,
+                            },
+                            MetalBufferBindingRef {
+                                index: 2,
+                                buffer: &resources.rotation_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 3,
+                                buffer: &resources.centroid_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 4,
+                                buffer: &index_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 5,
+                                buffer: &norm_buffer,
+                                offset_bytes: 0,
+                            },
+                        ],
+                        3,
+                        &[],
+                        MetalSize {
+                            width: 1,
+                            height: self.spec.kv_head_count as u64,
+                            depth: 1,
+                        },
+                        MetalSize {
+                            width: planar_threads,
+                            height: 1,
+                            depth: 1,
+                        },
+                    )?;
+                }
+                RotorFinalizeKind::Planar4(resources) => {
+                    let args = MlxPlanar4KvAppendArgs {
+                        head_dim: self.spec.head_dim as u32,
+                        src_row_stride: row_stride_words as u32,
+                        indices_row_stride: self.rotor_index_row_stride_bytes()? as u32,
+                        norms_row_stride: self.spec.max_tokens as u32,
+                        head_count: self.spec.kv_head_count as u32,
+                        slot: slot as u32,
+                    };
+                    dispatch_compute_tracked_split(
+                        runtime,
+                        &resources.kv_append_pipeline,
+                        bytes_of(&args),
+                        [
+                            MetalBufferBindingRef {
+                                index: 1,
+                                buffer: &prefill_buffer,
+                                offset_bytes: src_offset_bytes,
+                            },
+                            MetalBufferBindingRef {
+                                index: 2,
+                                buffer: &resources.rotation_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 3,
+                                buffer: &resources.centroid_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 4,
+                                buffer: &index_buffer,
+                                offset_bytes: 0,
+                            },
+                            MetalBufferBindingRef {
+                                index: 5,
+                                buffer: &norm_buffer,
+                                offset_bytes: 0,
+                            },
+                        ],
+                        3,
+                        &[],
+                        MetalSize {
+                            width: 1,
+                            height: self.spec.kv_head_count as u64,
+                            depth: 1,
+                        },
+                        MetalSize {
+                            width: planar_threads,
+                            height: 1,
+                            depth: 1,
+                        },
+                    )?;
+                }
+            }
+        }
+
+        match &mut self.key_storage {
+            ExactMetalKeyCacheStorage::RotorPlanar3 {
+                prefill_bf16_buffer,
+                ..
+            }
+            | ExactMetalKeyCacheStorage::RotorPlanar4 {
+                prefill_bf16_buffer,
+                ..
+            } => {
+                *prefill_bf16_buffer = None;
+            }
+            ExactMetalKeyCacheStorage::Bf16 { .. } => {}
+        }
+        Ok(true)
     }
 }
 
@@ -1516,11 +2455,14 @@ impl ExactMetalQprojLayout {
     }
 
     fn uses_fast_qmv(self, n_in: u32) -> bool {
-        self.out_rows % 8 == 0 && n_in % self.fast_n_in_multiple == 0
+        self.quant_bits != 8
+            && self.out_rows % 8 == 0
+            && n_in % self.fast_n_in_multiple == 0
     }
 
     fn uses_fast_qmv_wide(self, n_in: u32) -> bool {
-        self.quant_bits == 8 && self.out_rows % 8 == 0 && n_in % 512 == 0
+        let _ = n_in;
+        false
     }
 
     fn qmv_variant(self, n_in: u32) -> ExactMetalQmvVariant {
@@ -1683,6 +2625,8 @@ struct ExactMetalLayerPipelines {
     head_norm: MetalPipeline,
     rope: MetalPipeline,
     attention_logits_seq: MetalPipeline,
+    attention_logits_seq_planar3: MetalPipeline,
+    attention_logits_seq_planar4: MetalPipeline,
     attention_softmax_rows: MetalPipeline,
     attention_weighted_sum: MetalPipeline,
     o_proj_fast: MetalPipeline,
@@ -1767,6 +2711,7 @@ struct ExactMetalTextIoPipelines {
 struct ExactMetalTextIoWorkspace {
     embed_weight_row_bytes: usize,
     embed_qparams_row_bytes: usize,
+    embed_scale: f32,
     logits_qproj: ExactMetalQprojLayout,
     vocab_size: usize,
     hidden_size: usize,
@@ -2583,6 +3528,14 @@ impl ExactMetalLayerWorkspace {
                 &runtime,
                 "kernel_mlx_gqa_attention_logits_seq_bf16",
             )?,
+            attention_logits_seq_planar3: compile_default_pipeline(
+                &runtime,
+                "kernel_mlx_planar3_attention_logits_seq_bf16",
+            )?,
+            attention_logits_seq_planar4: compile_default_pipeline(
+                &runtime,
+                "kernel_mlx_planar4_attention_logits_seq_bf16",
+            )?,
             attention_softmax_rows: compile_default_pipeline(
                 &runtime,
                 "kernel_mlx_softmax_rows_bf16",
@@ -2741,6 +3694,7 @@ impl ExactMetalTextIoWorkspace {
         Ok(Self {
             embed_weight_row_bytes,
             embed_qparams_row_bytes,
+            embed_scale: bf16_round_to_f32((embed_weight_entry.shape[1] as f32).sqrt()),
             logits_qproj,
             vocab_size,
             hidden_size,
@@ -2791,10 +3745,12 @@ impl ExactMetalTextIoWorkspace {
 }
 
 pub(crate) struct ExactMetalTextRuntimeSession {
+    config: GemmaExactMetalConfig,
     session: LayerExecutionSession,
     kv_layout: GemmaKvCacheLayout,
     kv_caches: Vec<RefCell<ExactMetalKvCache>>,
     kv_append_pipeline: MetalPipeline,
+    kv_append_single_pipeline: MetalPipeline,
     text_io: ExactMetalTextIoWorkspace,
     layer_workspaces: HashMap<usize, ExactMetalLayerWorkspace>,
 }
@@ -2812,6 +3768,19 @@ pub struct ExactMetalLayerProfile {
     pub attention: GemmaAttentionKind,
     pub elapsed: Duration,
     pub counters: MetalRuntimeCounters,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct ExactMetalLayerStageHashes {
+    pub input_norm: u64,
+    pub q_norm: u64,
+    pub q: u64,
+    pub k_norm: u64,
+    pub k: u64,
+    pub v: u64,
+    pub attention_out: u64,
+    pub attention_oproj: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -2933,31 +3902,91 @@ impl ExactMetalTextRuntimeSession {
     pub(crate) fn load(model_path: PathBuf) -> Result<Self, Box<dyn Error>> {
         let model_root = model_root_dir(&model_path)?;
         let weights = Arc::new(MlxIndexedSafetensors::load(&model_root)?);
-        Self::load_with_weights(model_path, weights)
+        Self::load_with_weights_and_config(model_path, weights, GemmaExactMetalConfig::default())
     }
 
     pub(crate) fn load_with_weights(
         model_path: PathBuf,
         weights: Arc<MlxIndexedSafetensors>,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::load_with_weights_and_config(model_path, weights, GemmaExactMetalConfig::default())
+    }
+
+    pub(crate) fn load_with_config(
+        model_path: PathBuf,
+        config: GemmaExactMetalConfig,
+    ) -> Result<Self, Box<dyn Error>> {
+        let model_root = model_root_dir(&model_path)?;
+        let weights = Arc::new(MlxIndexedSafetensors::load(&model_root)?);
+        Self::load_with_weights_and_config(model_path, weights, config)
+    }
+
+    pub(crate) fn load_with_weights_and_config(
+        model_path: PathBuf,
+        weights: Arc<MlxIndexedSafetensors>,
+        config: GemmaExactMetalConfig,
+    ) -> Result<Self, Box<dyn Error>> {
         let mut session = LayerExecutionSession::load_with_weights(model_path, weights)?;
         let text_io = ExactMetalTextIoWorkspace::load(&mut session)?;
         let kv_append_pipeline =
             compile_default_pipeline(&session.runtime, "kernel_mlx_kv_append_pair_bf16")?;
+        let kv_append_single_pipeline =
+            compile_default_pipeline(&session.runtime, "kernel_mlx_kv_append_bf16")?;
         let kv_layout =
             GemmaKvCacheLayout::from_text_config(&session.weights.snapshot.config.text_config, 1)?;
+        let mut planar3_resources_by_head_dim =
+            HashMap::<usize, Arc<ExactMetalPlanar3KCompressionResources>>::new();
+        let mut planar4_resources_by_head_dim =
+            HashMap::<usize, Arc<ExactMetalPlanar4KCompressionResources>>::new();
         let mut kv_caches = Vec::with_capacity(kv_layout.cache_specs.len());
         for spec in &kv_layout.cache_specs {
+            let planar3_resources = if config.kv_compression
+                == GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK
+                && spec.attention == GemmaAttentionKind::Full
+            {
+                if !planar3_resources_by_head_dim.contains_key(&spec.head_dim) {
+                    let resources = Arc::new(ExactMetalPlanar3KCompressionResources::load(
+                        &session.runtime,
+                        spec.head_dim,
+                        42,
+                    )?);
+                    planar3_resources_by_head_dim.insert(spec.head_dim, resources);
+                }
+                planar3_resources_by_head_dim.get(&spec.head_dim).cloned()
+            } else {
+                None
+            };
+            let planar4_resources = if config.kv_compression
+                == GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK
+                && spec.attention == GemmaAttentionKind::Full
+            {
+                if !planar4_resources_by_head_dim.contains_key(&spec.head_dim) {
+                    let resources = Arc::new(ExactMetalPlanar4KCompressionResources::load(
+                        &session.runtime,
+                        spec.head_dim,
+                        42,
+                    )?);
+                    planar4_resources_by_head_dim.insert(spec.head_dim, resources);
+                }
+                planar4_resources_by_head_dim.get(&spec.head_dim).cloned()
+            } else {
+                None
+            };
             kv_caches.push(RefCell::new(ExactMetalKvCache::load(
                 &session.runtime,
                 spec.clone(),
+                &config,
+                planar3_resources,
+                planar4_resources,
             )?));
         }
         let mut runtime = Self {
+            config,
             session,
             kv_layout,
             kv_caches,
             kv_append_pipeline,
+            kv_append_single_pipeline,
             text_io,
             layer_workspaces: HashMap::new(),
         };
@@ -2966,10 +3995,22 @@ impl ExactMetalTextRuntimeSession {
         Ok(runtime)
     }
 
-    pub(crate) fn reset_kv_caches(&mut self) {
+    pub(crate) fn reset_kv_caches(&mut self) -> Result<(), Box<dyn Error>> {
+        let runtime = self.session.runtime.clone();
         for cache in &self.kv_caches {
-            cache.borrow_mut().reset();
+            cache.borrow_mut().reset(&runtime)?;
         }
+        Ok(())
+    }
+
+    fn finalize_deferred_rotor_prefill(&mut self) -> Result<(), Box<dyn Error>> {
+        let runtime = self.session.runtime.clone();
+        for cache in &self.kv_caches {
+            cache
+                .borrow_mut()
+                .finalize_prefill_to_rotor_compute(&runtime)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn reset_runtime_counters(&self) {
@@ -3226,7 +4267,7 @@ impl ExactMetalTextRuntimeSession {
         let owns_command_batch = !runtime.command_batch_is_active();
         let args = MlxAffineDequantRowArgs {
             n: self.text_io.hidden_size as u32,
-            embed_scale: bf16_round_to_f32((self.text_io.hidden_size as f32).sqrt()),
+            embed_scale: self.text_io.embed_scale,
         };
         if owns_command_batch {
             runtime.begin_command_batch()?;
@@ -3315,7 +4356,7 @@ impl ExactMetalTextRuntimeSession {
         let owns_command_batch = !runtime.command_batch_is_active();
         let args = MlxAffineDequantTokenRowArgs {
             n: self.text_io.hidden_size as u32,
-            embed_scale: bf16_round_to_f32((self.text_io.hidden_size as f32).sqrt()),
+            embed_scale: self.text_io.embed_scale,
             weight_words_per_row: self.text_io.logits_qproj.weight_words_per_row,
             qparams_per_row: self.text_io.logits_qproj.qparams_per_row,
             vocab_size: self.text_io.vocab_size as u32,
@@ -3444,13 +4485,14 @@ impl ExactMetalTextRuntimeSession {
     ) -> Result<(), Box<dyn Error>> {
         let runtime = self.session.runtime.clone();
         let owns_command_batch = !runtime.command_batch_is_active();
-        let n_reads = 4usize;
-        let simd_size = 32usize;
-        let rms_threadgroup_size =
-            simd_size * self.text_io.hidden_size.div_ceil(n_reads).div_ceil(simd_size);
+        let rms_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
+            self.text_io.hidden_size,
+            self.text_io.pipelines.rms.max_threads_per_threadgroup,
+        )?;
         let rms_args = MlxRmsNormRowArgs {
             n: self.text_io.hidden_size as u32,
             eps: self.text_io.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         if owns_command_batch {
             runtime.begin_command_batch()?;
@@ -3483,11 +4525,7 @@ impl ExactMetalTextRuntimeSession {
                 height: 1,
                 depth: 1,
             },
-            MetalSize {
-                width: rms_threadgroup_size as u64,
-                height: 1,
-                depth: 1,
-            },
+            rms_threads_per_threadgroup,
         )?;
         if owns_command_batch {
             runtime.end_command_batch()?;
@@ -3807,22 +4845,15 @@ impl ExactMetalTextRuntimeSession {
             );
         }
 
-        let n_reads = 4usize;
-        let simd_size = 32usize;
-        let rms_threadgroup_size =
-            simd_size * workspace.hidden_size.div_ceil(n_reads).div_ceil(simd_size);
-        let head_norm_threadgroup_size =
-            simd_size * workspace.head_dim.div_ceil(n_reads).div_ceil(simd_size);
         let rms_threadgroups = MetalSize {
             width: 1,
             height: 1,
             depth: 1,
         };
-        let rms_threads_per_threadgroup = MetalSize {
-            width: rms_threadgroup_size as u64,
-            height: 1,
-            depth: 1,
-        };
+        let rms_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
+            workspace.hidden_size,
+            workspace.pipelines.rms.max_threads_per_threadgroup,
+        )?;
         let proj_threads_per_threadgroup = MetalSize {
             width: 32,
             height: 2,
@@ -3853,11 +4884,10 @@ impl ExactMetalTextRuntimeSession {
             height: 1,
             depth: 1,
         };
-        let head_norm_threads_per_threadgroup = MetalSize {
-            width: head_norm_threadgroup_size as u64,
-            height: 1,
-            depth: 1,
-        };
+        let head_norm_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
+            workspace.head_dim,
+            workspace.pipelines.head_norm.max_threads_per_threadgroup,
+        )?;
         let q_rope_threadgroups = MetalSize {
             width: (workspace.head_dim as u64).div_ceil(32),
             height: workspace.q_head_count as u64,
@@ -3877,11 +4907,6 @@ impl ExactMetalTextRuntimeSession {
             width: (workspace.head_dim as u64).div_ceil(64),
             height: 1,
             depth: workspace.q_head_count as u64,
-        };
-        let attention_logits_threads_per_threadgroup = MetalSize {
-            width: 32,
-            height: 1,
-            depth: 1,
         };
         let attention_output_threads_per_threadgroup = MetalSize {
             width: 32,
@@ -3920,11 +4945,7 @@ impl ExactMetalTextRuntimeSession {
             height: 1,
             depth: 1,
         };
-        let router_scale_threads_per_threadgroup = MetalSize {
-            width: rms_threadgroup_size as u64,
-            height: 1,
-            depth: 1,
-        };
+        let router_scale_threads_per_threadgroup = rms_threads_per_threadgroup;
         let router_scale_threadgroups = MetalSize {
             width: 1,
             height: 1,
@@ -3975,6 +4996,7 @@ impl ExactMetalTextRuntimeSession {
         let rms_args = MlxRmsNormRowArgs {
             n: workspace.hidden_size as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         let qkv_proj_args = workspace.qkv_proj.row_args(workspace.hidden_size as u32);
         let o_proj_args = workspace.o_proj.row_args(workspace.q_proj.out_rows);
@@ -3983,18 +5005,21 @@ impl ExactMetalTextRuntimeSession {
             row_stride: workspace.head_dim as u32,
             row_count: workspace.q_head_count as u32,
             eps: workspace.eps,
+            threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
         };
         let k_head_norm_args = MlxRmsNormRowsArgs {
             n: workspace.head_dim as u32,
             row_stride: workspace.head_dim as u32,
             row_count: workspace.k_head_count as u32,
             eps: workspace.eps,
+            threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
         };
         let v_head_norm_args = MlxRmsNormRowsArgs {
             n: workspace.head_dim as u32,
             row_stride: workspace.head_dim as u32,
             row_count: workspace.v_head_count as u32,
             eps: workspace.eps,
+            threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
         };
         let q_rope_args = workspace.q_rope.args(position)?;
         let k_rope_args = workspace.k_rope.args(position)?;
@@ -4020,10 +5045,12 @@ impl ExactMetalTextRuntimeSession {
         let post_attention_norm_args = MlxRmsNormRowArgs {
             n: workspace.post_attention_norm_len as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         let pre_ffn_norm_args = MlxRmsNormRowArgs {
             n: workspace.pre_feedforward_norm_len as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         let mlp_gate_up_args = workspace
             .mlp_gate_up
@@ -4075,14 +5102,17 @@ impl ExactMetalTextRuntimeSession {
         let post_ffn_norm1_args = MlxRmsNormRowArgs {
             n: workspace.post_feedforward_norm1_len as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         let post_ffn_norm_args = MlxRmsNormRowArgs {
             n: workspace.post_feedforward_norm_len as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
         let post_ffn_norm2_args = MlxRmsNormRowArgs {
             n: workspace.post_feedforward_norm2_len as u32,
             eps: workspace.eps,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         };
 
         if let Some(input_words) = input_words {
@@ -4279,13 +5309,13 @@ impl ExactMetalTextRuntimeSession {
             attention_seq_len,
             attention_start_slot,
             attention_kv_row_stride,
-            attention_key_buffer,
             attention_value_buffer,
         ) = {
             let mut layer_cache = self.kv_cache_for_layer(layer_idx)?;
             layer_cache.append_token_from_buffers_compute(
                 &runtime,
                 &self.kv_append_pipeline,
+                &self.kv_append_single_pipeline,
                 &workspace.buffers.k_rope,
                 &workspace.buffers.v_norm,
             )?;
@@ -4293,29 +5323,13 @@ impl ExactMetalTextRuntimeSession {
                 layer_cache.seq_len(),
                 layer_cache.start_slot(),
                 layer_cache.row_stride_words()?,
-                layer_cache.key_buffer.clone(),
                 layer_cache.value_buffer.clone(),
             )
-        };
-        let attention_logits_args = MlxGqaAttentionLogitsSeqArgs {
-            head_dim: workspace.head_dim as u32,
-            q_head_stride: workspace.head_dim as u32,
-            kv_row_stride: attention_kv_row_stride as u32,
-            q_head_count: workspace.q_head_count as u32,
-            q_heads_per_kv: workspace.q_heads_per_kv as u32,
-            seq_len: attention_seq_len as u32,
-            start_slot: attention_start_slot as u32,
-            capacity: workspace.kv_cache_capacity_tokens as u32,
         };
         let attention_softmax_args = MlxSoftmaxRowsArgs {
             row_stride: workspace.kv_cache_capacity_tokens as u32,
             row_count: workspace.q_head_count as u32,
             seq_len: attention_seq_len as u32,
-        };
-        let attention_logits_threadgroups = MetalSize {
-            width: attention_seq_len as u64,
-            height: workspace.q_head_count as u64,
-            depth: 1,
         };
         let attention_weighted_sum_args = MlxGqaAttentionWeightedSumArgs {
             probs_row_stride: workspace.kv_cache_capacity_tokens as u32,
@@ -4329,32 +5343,21 @@ impl ExactMetalTextRuntimeSession {
             capacity: workspace.kv_cache_capacity_tokens as u32,
         };
 
-        dispatch_compute_tracked_split(
-            &runtime,
-            &workspace.pipelines.attention_logits_seq,
-            bytes_of(&attention_logits_args),
-            [
-                MetalBufferBindingRef {
-                    index: 1,
-                    buffer: &workspace.buffers.q_rope,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 2,
-                    buffer: &attention_key_buffer,
-                    offset_bytes: 0,
-                },
-                MetalBufferBindingRef {
-                    index: 3,
-                    buffer: &workspace.buffers.attention_logits,
-                    offset_bytes: 0,
-                },
-            ],
-            2,
-            &[],
-            attention_logits_threadgroups,
-            attention_logits_threads_per_threadgroup,
-        )?;
+        {
+            let layer_cache = self.kv_cache_for_layer(layer_idx)?;
+            dispatch_cached_attention_logits(
+                &runtime,
+                &workspace.pipelines.attention_logits_seq,
+                &workspace.pipelines.attention_logits_seq_planar3,
+                &workspace.pipelines.attention_logits_seq_planar4,
+                &workspace.buffers.q_rope,
+                &layer_cache,
+                workspace.q_head_count,
+                workspace.q_heads_per_kv,
+                workspace.head_dim,
+                &workspace.buffers.attention_logits,
+            )?;
+        }
         dispatch_compute_tracked_split(
             &runtime,
             &workspace.pipelines.attention_softmax_rows,
@@ -5235,6 +6238,7 @@ impl ExactMetalTextRuntimeSession {
             let _ = runtime.discard_command_batch();
             return Err(err);
         }
+        self.finalize_deferred_rotor_prefill()?;
         runtime.end_command_batch()?;
         Ok(self.read_shared_logits_greedy_token()?.token_id)
     }
@@ -5331,7 +6335,7 @@ impl ExactMetalTextRuntimeSession {
             .into());
         }
         if position == 0 {
-            self.reset_kv_caches();
+            self.reset_kv_caches()?;
         }
         let input_buffer = self.token_input_buffer()?;
         let runtime = self.session.runtime.clone();
@@ -5366,7 +6370,7 @@ impl ExactMetalTextRuntimeSession {
             return Err("prompt prefill requires at least one token".into());
         }
         if start_position == 0 {
-            self.reset_kv_caches();
+            self.reset_kv_caches()?;
         }
         let input_buffer = self.token_input_buffer()?;
         let runtime = self.session.runtime.clone();
@@ -5400,7 +6404,7 @@ impl ExactMetalTextRuntimeSession {
             return Err("prompt prefill requires at least one embedding row".into());
         }
         if start_position == 0 {
-            self.reset_kv_caches();
+            self.reset_kv_caches()?;
         }
         let input_buffer = self.token_input_buffer()?;
         let runtime = self.session.runtime.clone();
@@ -5422,6 +6426,7 @@ impl ExactMetalTextRuntimeSession {
             let _ = runtime.discard_command_batch();
             return Err(err);
         }
+        self.finalize_deferred_rotor_prefill()?;
         runtime.end_command_batch()?;
         Ok(())
     }
@@ -5435,7 +6440,7 @@ impl ExactMetalTextRuntimeSession {
             return Err("prompt prefill requires at least one token".into());
         }
         if start_position == 0 {
-            self.reset_kv_caches();
+            self.reset_kv_caches()?;
         }
         let input_buffer = self.token_input_buffer()?;
         let runtime = self.session.runtime.clone();
@@ -5455,6 +6460,7 @@ impl ExactMetalTextRuntimeSession {
             let _ = runtime.discard_command_batch();
             return Err(err);
         }
+        self.finalize_deferred_rotor_prefill()?;
         runtime.end_command_batch()?;
         self.read_shared_logits_softcapped()
     }
@@ -5480,7 +6486,7 @@ impl ExactMetalTextRuntimeSession {
             return Err("prompt prefill requires at least one token".into());
         }
         if start_position == 0 {
-            self.reset_kv_caches();
+            self.reset_kv_caches()?;
         }
         let input_buffer = self.token_input_buffer()?;
         let runtime = self.session.runtime.clone();
@@ -5500,6 +6506,7 @@ impl ExactMetalTextRuntimeSession {
             let _ = runtime.discard_command_batch();
             return Err(err);
         }
+        self.finalize_deferred_rotor_prefill()?;
         runtime.end_command_batch()?;
         self.sampled_token_from_logits(disallowed_token_ids, sampling_options, rng)
     }
@@ -5525,7 +6532,7 @@ impl ExactMetalTextRuntimeSession {
             return Err("prompt prefill requires at least one token".into());
         }
         if start_position == 0 {
-            self.reset_kv_caches();
+            self.reset_kv_caches()?;
         }
         let input_buffer = self.token_input_buffer()?;
         let runtime = self.session.runtime.clone();
@@ -5542,6 +6549,7 @@ impl ExactMetalTextRuntimeSession {
             let _ = runtime.discard_command_batch();
             return Err(err);
         }
+        self.finalize_deferred_rotor_prefill()?;
         runtime.end_command_batch()?;
         let hidden_buffer = self.final_hidden_buffer()?;
         self.read_hidden_words_from_buffer(&hidden_buffer)
@@ -5566,7 +6574,7 @@ impl ExactMetalTextRuntimeSession {
             return Err("prompt prefill requires at least one token".into());
         }
         if start_position == 0 {
-            self.reset_kv_caches();
+            self.reset_kv_caches()?;
         }
         let input_buffer = self.token_input_buffer()?;
         let runtime = self.session.runtime.clone();
@@ -5586,6 +6594,7 @@ impl ExactMetalTextRuntimeSession {
             let _ = runtime.discard_command_batch();
             return Err(err);
         }
+        self.finalize_deferred_rotor_prefill()?;
         runtime.end_command_batch()?;
         self.read_shared_logits_greedy_token()
     }
@@ -5644,6 +6653,34 @@ impl ExactMetalTextRuntimeSession {
         let shared = self.read_shared_logits_greedy_token()?;
         Ok((device, shared))
     }
+
+    #[cfg(test)]
+    pub(crate) fn layer_stage_hashes(
+        &mut self,
+        layer_idx: usize,
+    ) -> Result<ExactMetalLayerStageHashes, Box<dyn Error>> {
+        let workspace = self.layer_workspace(layer_idx)?;
+        let hash_buffer = |buffer: &MetalBuffer, len_words: usize| -> Result<u64, Box<dyn Error>> {
+            Ok(fnv1a64_u32_words(&read_bf16_buffer_bits(
+                &self.session.runtime,
+                buffer,
+                len_words,
+            )?))
+        };
+        Ok(ExactMetalLayerStageHashes {
+            input_norm: hash_buffer(&workspace.buffers.h, workspace.hidden_size)?,
+            q_norm: hash_buffer(&workspace.buffers.q_norm, workspace.q_proj.out_len())?,
+            q: hash_buffer(&workspace.buffers.q_rope, workspace.q_proj.out_len())?,
+            k_norm: hash_buffer(&workspace.buffers.k_norm, workspace.k_proj.out_len())?,
+            k: hash_buffer(&workspace.buffers.k_rope, workspace.k_proj.out_len())?,
+            v: hash_buffer(&workspace.buffers.v_norm, workspace.k_proj.out_len())?,
+            attention_out: hash_buffer(&workspace.buffers.attn_out, workspace.q_proj.out_len())?,
+            attention_oproj: hash_buffer(
+                &workspace.buffers.o_proj_out,
+                workspace.o_proj.out_len(),
+            )?,
+        })
+    }
 }
 
 pub fn profile_decode_layers_after_prompt_token_ids(
@@ -5676,7 +6713,7 @@ impl ExactMetalGenerationCursor {
         position: usize,
     ) -> Result<u32, Box<dyn Error>> {
         if position == 0 {
-            backend.reset_kv_caches();
+            backend.reset_kv_caches()?;
         }
         backend.eval_token_greedy_token_id_from_token_id(token_id, position)
     }
@@ -6106,6 +7143,14 @@ fn bytes_from_bf16_words(words: &[u16]) -> Vec<u8> {
     out
 }
 
+fn bytes_from_f32_slice(values: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * size_of::<f32>());
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
 fn read_f32_file_as_bf16_words(path: &Path) -> Result<Vec<u16>, Box<dyn Error>> {
     let bytes = fs::read(path)?;
     if bytes.len() % size_of::<f32>() != 0 {
@@ -6337,9 +7382,266 @@ fn mlx_softmax_threads_per_threadgroup(
     })
 }
 
+fn mlx_norm_threads_per_threadgroup(
+    n: usize,
+    max_threads_per_threadgroup: u64,
+) -> Result<MetalSize, Box<dyn Error>> {
+    const MLX_NORM_N_READS: usize = 4;
+    const MLX_SIMD_WIDTH: usize = 32;
+
+    let max_threads = usize::try_from(max_threads_per_threadgroup)?;
+    let max_simd_groups = (max_threads / MLX_SIMD_WIDTH).max(1);
+    let needed_threads = n.max(1).div_ceil(MLX_NORM_N_READS);
+    let needed_simd_groups = needed_threads.div_ceil(MLX_SIMD_WIDTH).max(1);
+    let simd_groups = needed_simd_groups.min(max_simd_groups);
+    let threadgroup_width = MLX_SIMD_WIDTH
+        .checked_mul(simd_groups)
+        .ok_or("norm threadgroup size overflow")?;
+    Ok(MetalSize {
+        width: u64::try_from(threadgroup_width)?,
+        height: 1,
+        depth: 1,
+    })
+}
+
+fn dispatch_cached_attention_logits(
+    runtime: &MetalRuntime,
+    bf16_pipeline: &MetalPipeline,
+    planar3_pipeline: &MetalPipeline,
+    planar4_pipeline: &MetalPipeline,
+    q_buffer: &MetalBuffer,
+    cache: &ExactMetalKvCache,
+    q_head_count: usize,
+    q_heads_per_kv: usize,
+    head_dim: usize,
+    logits_buffer: &MetalBuffer,
+) -> Result<(), Box<dyn Error>> {
+    let seq_len = cache.seq_len();
+    if let Some(prefill_buffer) = cache.active_prefill_bf16_buffer() {
+        let args = MlxGqaAttentionLogitsSeqArgs {
+            head_dim: head_dim as u32,
+            q_head_stride: head_dim as u32,
+            kv_row_stride: cache.row_stride_words()? as u32,
+            q_head_count: q_head_count as u32,
+            q_heads_per_kv: q_heads_per_kv as u32,
+            seq_len: seq_len as u32,
+            start_slot: cache.start_slot() as u32,
+            capacity: cache.spec.max_tokens as u32,
+        };
+        dispatch_compute_tracked_split(
+            runtime,
+            bf16_pipeline,
+            bytes_of(&args),
+            [
+                MetalBufferBindingRef {
+                    index: 1,
+                    buffer: q_buffer,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 2,
+                    buffer: prefill_buffer,
+                    offset_bytes: 0,
+                },
+                MetalBufferBindingRef {
+                    index: 3,
+                    buffer: logits_buffer,
+                    offset_bytes: 0,
+                },
+            ],
+            2,
+            &[],
+            MetalSize {
+                width: seq_len as u64,
+                height: q_head_count as u64,
+                depth: 1,
+            },
+            MetalSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        )?;
+        return Ok(());
+    }
+
+    let threadgroups = MetalSize {
+        width: seq_len as u64,
+        height: q_head_count as u64,
+        depth: 1,
+    };
+    let threads_per_threadgroup = MetalSize {
+        width: 32,
+        height: 1,
+        depth: 1,
+    };
+
+    match &cache.key_storage {
+        ExactMetalKeyCacheStorage::Bf16 { buffer } => {
+            let args = MlxGqaAttentionLogitsSeqArgs {
+                head_dim: head_dim as u32,
+                q_head_stride: head_dim as u32,
+                kv_row_stride: cache.row_stride_words()? as u32,
+                q_head_count: q_head_count as u32,
+                q_heads_per_kv: q_heads_per_kv as u32,
+                seq_len: seq_len as u32,
+                start_slot: cache.start_slot() as u32,
+                capacity: cache.spec.max_tokens as u32,
+            };
+            dispatch_compute_tracked_split(
+                runtime,
+                bf16_pipeline,
+                bytes_of(&args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: q_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: logits_buffer,
+                        offset_bytes: 0,
+                    },
+                ],
+                2,
+                &[],
+                threadgroups,
+                threads_per_threadgroup,
+            )?;
+        }
+        ExactMetalKeyCacheStorage::RotorPlanar3 {
+            index_buffer,
+            norm_buffer,
+            resources,
+            ..
+        } => {
+            let args = MlxPlanar3AttentionLogitsSeqArgs {
+                q_head_stride: head_dim as u32,
+                indices_row_stride: cache.rotor_index_row_stride_bytes()? as u32,
+                norms_row_stride: cache.spec.max_tokens as u32,
+                q_head_count: q_head_count as u32,
+                q_heads_per_kv: q_heads_per_kv as u32,
+                seq_len: seq_len as u32,
+                start_slot: cache.start_slot() as u32,
+                capacity: cache.spec.max_tokens as u32,
+                pair_count: resources.pair_count as u32,
+            };
+            dispatch_compute_tracked_split(
+                runtime,
+                planar3_pipeline,
+                bytes_of(&args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: q_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: index_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: norm_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 4,
+                        buffer: &resources.rotation_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 5,
+                        buffer: &resources.centroid_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 6,
+                        buffer: logits_buffer,
+                        offset_bytes: 0,
+                    },
+                ],
+                5,
+                &[],
+                threadgroups,
+                threads_per_threadgroup,
+            )?;
+        }
+        ExactMetalKeyCacheStorage::RotorPlanar4 {
+            index_buffer,
+            norm_buffer,
+            resources,
+            ..
+        } => {
+            let args = MlxPlanar4AttentionLogitsSeqArgs {
+                q_head_stride: head_dim as u32,
+                indices_row_stride: cache.rotor_index_row_stride_bytes()? as u32,
+                norms_row_stride: cache.spec.max_tokens as u32,
+                q_head_count: q_head_count as u32,
+                q_heads_per_kv: q_heads_per_kv as u32,
+                seq_len: seq_len as u32,
+                start_slot: cache.start_slot() as u32,
+                capacity: cache.spec.max_tokens as u32,
+                pair_count: resources.pair_count as u32,
+            };
+            dispatch_compute_tracked_split(
+                runtime,
+                planar4_pipeline,
+                bytes_of(&args),
+                [
+                    MetalBufferBindingRef {
+                        index: 1,
+                        buffer: q_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 2,
+                        buffer: index_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 3,
+                        buffer: norm_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 4,
+                        buffer: &resources.rotation_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 5,
+                        buffer: &resources.centroid_buffer,
+                        offset_bytes: 0,
+                    },
+                    MetalBufferBindingRef {
+                        index: 6,
+                        buffer: logits_buffer,
+                        offset_bytes: 0,
+                    },
+                ],
+                5,
+                &[],
+                threadgroups,
+                threads_per_threadgroup,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn compute_cached_attention_metal(
     runtime: &MetalRuntime,
     logits_pipeline: &MetalPipeline,
+    logits_planar3_pipeline: &MetalPipeline,
+    logits_planar4_pipeline: &MetalPipeline,
     softmax_pipeline: &MetalPipeline,
     weighted_sum_pipeline: &MetalPipeline,
     q_buffer: &MetalBuffer,
@@ -6352,18 +7654,8 @@ fn compute_cached_attention_metal(
     out_buffer: &MetalBuffer,
 ) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>), Box<dyn Error>> {
     let seq_len = cache.seq_len();
-    let kv_row_stride = cache.row_stride_words()?;
     let logits_row_stride = cache.spec.max_tokens;
-    let logits_args = MlxGqaAttentionLogitsSeqArgs {
-        head_dim: head_dim as u32,
-        q_head_stride: head_dim as u32,
-        kv_row_stride: kv_row_stride as u32,
-        q_head_count: q_head_count as u32,
-        q_heads_per_kv: q_heads_per_kv as u32,
-        seq_len: seq_len as u32,
-        start_slot: cache.start_slot() as u32,
-        capacity: cache.spec.max_tokens as u32,
-    };
+    let kv_row_stride = cache.row_stride_words()?;
     let softmax_args = MlxSoftmaxRowsArgs {
         row_stride: logits_row_stride as u32,
         row_count: q_head_count as u32,
@@ -6380,22 +7672,12 @@ fn compute_cached_attention_metal(
         start_slot: cache.start_slot() as u32,
         capacity: cache.spec.max_tokens as u32,
     };
-    let threadgroups_logits = MetalSize {
-        width: seq_len as u64,
-        height: q_head_count as u64,
-        depth: 1,
-    };
     let softmax_threads_per_threadgroup =
         mlx_softmax_threads_per_threadgroup(seq_len, softmax_pipeline.max_threads_per_threadgroup)?;
     let threadgroups_output = MetalSize {
         width: (head_dim as u64).div_ceil(64),
         height: 1,
         depth: q_head_count as u64,
-    };
-    let logits_threads_per_threadgroup = MetalSize {
-        width: 32,
-        height: 1,
-        depth: 1,
     };
     let output_threads_per_threadgroup = MetalSize {
         width: 32,
@@ -6404,29 +7686,17 @@ fn compute_cached_attention_metal(
     };
 
     runtime.begin_command_batch()?;
-    runtime.dispatch_compute(
+    dispatch_cached_attention_logits(
+        runtime,
         logits_pipeline,
-        bytes_of(&logits_args),
-        &[
-            MetalBufferBindingRef {
-                index: 1,
-                buffer: q_buffer,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 2,
-                buffer: &cache.key_buffer,
-                offset_bytes: 0,
-            },
-            MetalBufferBindingRef {
-                index: 3,
-                buffer: logits_buffer,
-                offset_bytes: 0,
-            },
-        ],
-        &[],
-        threadgroups_logits,
-        logits_threads_per_threadgroup,
+        logits_planar3_pipeline,
+        logits_planar4_pipeline,
+        q_buffer,
+        cache,
+        q_head_count,
+        q_heads_per_kv,
+        head_dim,
+        logits_buffer,
     )?;
     runtime.memory_barrier_buffers()?;
     runtime.dispatch_compute(
@@ -7336,6 +8606,7 @@ fn run_layer_plan_with_session_from_sequence(
     let model_path = session.model_path.clone();
     let weights = session.weights.clone();
     let runtime = session.runtime.clone();
+    let quantization = &weights.snapshot.config.quantization;
     let layer_type = weights
         .snapshot
         .config
@@ -7343,6 +8614,7 @@ fn run_layer_plan_with_session_from_sequence(
         .layer_types
         .get(layer_idx)
         .ok_or_else(|| format!("missing text layer type for layer {layer_idx}"))?;
+    let hidden_size = weights.snapshot.config.text_config.hidden_size as usize;
     let attention_k_eq_v =
         weights.snapshot.config.text_config.attention_k_eq_v && layer_type == "full_attention";
     let layer_names = LayerTensorNames::for_layer(layer_idx, attention_k_eq_v);
@@ -7848,29 +9120,29 @@ fn run_layer_plan_with_session_from_sequence(
         return Err("cached layer sequence requires at least one prefill input".into());
     }
     for (prefill_index, prefill_x_words) in prefill_input_words_list.iter().enumerate() {
-        if prefill_x_words.len() != NORM_LEN {
+        if prefill_x_words.len() != hidden_size {
             return Err(format!(
                 "prefill input length mismatch at index {}: got {} expected {}",
                 prefill_index,
                 prefill_x_words.len(),
-                NORM_LEN
+                hidden_size
             )
             .into());
         }
     }
-    if decode_x_words.len() != NORM_LEN {
+    if decode_x_words.len() != hidden_size {
         return Err(format!(
             "decode input length mismatch: got {} expected {}",
             decode_x_words.len(),
-            NORM_LEN
+            hidden_size
         )
         .into());
     }
     let kv_capacity = prefill_input_words_list.len() + 1;
-    let x_buf = runtime.create_buffer(NORM_LEN * 2, BufferStorageMode::Shared)?;
+    let x_buf = runtime.create_buffer(hidden_size * 2, BufferStorageMode::Shared)?;
     let input_norm_weight_buf =
         session.private_weight_buffer(&layer_names.input_norm_weight_name)?;
-    let h_buf = runtime.create_buffer(NORM_LEN * 2, BufferStorageMode::Private)?;
+    let h_buf = runtime.create_buffer(hidden_size * 2, BufferStorageMode::Private)?;
 
     let q_weight_buf = session.private_weight_buffer(&layer_names.q.weight_name)?;
     let q_scales_buf = session.private_weight_buffer(&layer_names.q.scales_name)?;
@@ -8194,8 +9466,8 @@ fn run_layer_plan_with_session_from_sequence(
         nsg: 0,
     })?;
     let proj_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-        cache_name: "kernel_mlx_affine_qmv_row_bf16".to_string(),
-        base_name: "kernel_mlx_affine_qmv_row_bf16".to_string(),
+        cache_name: exact_affine_qmv_pipeline_name(quantization.bits, false, false)?.to_string(),
+        base_name: exact_affine_qmv_pipeline_name(quantization.bits, false, false)?.to_string(),
         constants: Vec::new(),
         smem_bytes: 0,
         nr0: 0,
@@ -8230,6 +9502,26 @@ fn run_layer_plan_with_session_from_sequence(
             nr1: 0,
             nsg: 0,
         })?;
+    let attention_logits_seq_planar3_pipeline =
+        runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+            cache_name: "kernel_mlx_planar3_attention_logits_seq_bf16".to_string(),
+            base_name: "kernel_mlx_planar3_attention_logits_seq_bf16".to_string(),
+            constants: Vec::new(),
+            smem_bytes: 0,
+            nr0: 0,
+            nr1: 0,
+            nsg: 0,
+        })?;
+    let attention_logits_seq_planar4_pipeline =
+        runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
+            cache_name: "kernel_mlx_planar4_attention_logits_seq_bf16".to_string(),
+            base_name: "kernel_mlx_planar4_attention_logits_seq_bf16".to_string(),
+            constants: Vec::new(),
+            smem_bytes: 0,
+            nr0: 0,
+            nr1: 0,
+            nsg: 0,
+        })?;
     let attention_softmax_pipeline = runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
         cache_name: "kernel_mlx_softmax_rows_bf16".to_string(),
         base_name: "kernel_mlx_softmax_rows_bf16".to_string(),
@@ -8251,8 +9543,10 @@ fn run_layer_plan_with_session_from_sequence(
         })?;
     let o_proj_fast_pipeline = if validate_oproj {
         Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-            cache_name: "kernel_mlx_affine_qmv_fast_row_bf16".to_string(),
-            base_name: "kernel_mlx_affine_qmv_fast_row_bf16".to_string(),
+            cache_name: exact_affine_qmv_pipeline_name(quantization.bits, true, false)?
+                .to_string(),
+            base_name: exact_affine_qmv_pipeline_name(quantization.bits, true, false)?
+                .to_string(),
             constants: Vec::new(),
             smem_bytes: 0,
             nr0: 0,
@@ -8316,8 +9610,10 @@ fn run_layer_plan_with_session_from_sequence(
     };
     let selected_expert_proj_pipeline = if validate_moe_expert_gate {
         Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-            cache_name: "kernel_mlx_affine_qmv_selected_experts_row_bf16".to_string(),
-            base_name: "kernel_mlx_affine_qmv_selected_experts_row_bf16".to_string(),
+            cache_name: exact_affine_qmv_pipeline_name(quantization.bits, false, true)?
+                .to_string(),
+            base_name: exact_affine_qmv_pipeline_name(quantization.bits, false, true)?
+                .to_string(),
             constants: Vec::new(),
             smem_bytes: 0,
             nr0: 0,
@@ -8328,33 +9624,34 @@ fn run_layer_plan_with_session_from_sequence(
         None
     };
 
-    let n_reads = 4usize;
-    let simd_size = 32usize;
-    let rms_threadgroup_needed = NORM_LEN.div_ceil(n_reads);
-    let rms_simds_needed = rms_threadgroup_needed.div_ceil(simd_size);
-    let rms_threadgroup_size = simd_size * rms_simds_needed;
-    let head_norm_threadgroup_needed = head_dim.div_ceil(n_reads);
-    let head_norm_simds_needed = head_norm_threadgroup_needed.div_ceil(simd_size);
-    let head_norm_threadgroup_size = simd_size * head_norm_simds_needed;
+    let rms_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
+        hidden_size,
+        rms_pipeline.max_threads_per_threadgroup,
+    )?;
+    let head_norm_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
+        head_dim,
+        head_norm_pipeline.max_threads_per_threadgroup,
+    )?;
 
     let rms_args = MlxRmsNormRowArgs {
-        n: NORM_LEN as u32,
+        n: hidden_size as u32,
         eps: EPS,
+        threadgroup_width: rms_threads_per_threadgroup.width as u32,
     };
     let q_proj_args = MlxAffineQprojRowArgs {
-        n_in: NORM_LEN as u32,
+        n_in: hidden_size as u32,
         weight_words_per_row: q_weight_entry.shape[1] as u32,
         qparams_per_row: q_scales_entry.shape[1] as u32,
         out_rows: q_out_len as u32,
     };
     let k_proj_args = MlxAffineQprojRowArgs {
-        n_in: NORM_LEN as u32,
+        n_in: hidden_size as u32,
         weight_words_per_row: k_weight_entry.shape[1] as u32,
         qparams_per_row: k_scales_entry.shape[1] as u32,
         out_rows: k_out_len as u32,
     };
     let v_proj_args = MlxAffineQprojRowArgs {
-        n_in: NORM_LEN as u32,
+        n_in: hidden_size as u32,
         weight_words_per_row: v_weight_entry.shape[1] as u32,
         qparams_per_row: v_scales_entry.shape[1] as u32,
         out_rows: v_out_len as u32,
@@ -8365,7 +9662,7 @@ fn run_layer_plan_with_session_from_sequence(
                 weight_entry.shape[1] as u32,
                 scales_entry.shape[1] as u32,
                 o_out_len as u32,
-                4,
+                quantization.bits,
             ))
         } else {
             None
@@ -8375,6 +9672,7 @@ fn run_layer_plan_with_session_from_sequence(
         Some(MlxRmsNormRowArgs {
             n: post_attention_norm_len as u32,
             eps: EPS,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         })
     } else {
         None
@@ -8390,6 +9688,7 @@ fn run_layer_plan_with_session_from_sequence(
         Some(MlxRmsNormRowArgs {
             n: pre_feedforward_norm_len as u32,
             eps: EPS,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         })
     } else {
         None
@@ -8479,6 +9778,7 @@ fn run_layer_plan_with_session_from_sequence(
         Some(MlxRmsNormRowArgs {
             n: pre_feedforward_norm2_len as u32,
             eps: EPS,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         })
     } else {
         None
@@ -8533,6 +9833,7 @@ fn run_layer_plan_with_session_from_sequence(
         Some(MlxRmsNormRowArgs {
             n: post_feedforward_norm1_len as u32,
             eps: EPS,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         })
     } else {
         None
@@ -8541,6 +9842,7 @@ fn run_layer_plan_with_session_from_sequence(
         Some(MlxRmsNormRowArgs {
             n: post_feedforward_norm2_len as u32,
             eps: EPS,
+            threadgroup_width: rms_threads_per_threadgroup.width as u32,
         })
     } else {
         None
@@ -8550,18 +9852,21 @@ fn run_layer_plan_with_session_from_sequence(
         row_stride: head_dim as u32,
         row_count: q_head_count as u32,
         eps: EPS,
+        threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
     };
     let k_head_norm_args = MlxRmsNormRowsArgs {
         n: head_dim as u32,
         row_stride: head_dim as u32,
         row_count: k_head_count as u32,
         eps: EPS,
+        threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
     };
     let v_head_norm_args = MlxRmsNormRowsArgs {
         n: head_dim as u32,
         row_stride: head_dim as u32,
         row_count: v_head_count as u32,
         eps: EPS,
+        threadgroup_width: head_norm_threads_per_threadgroup.width as u32,
     };
 
     let rms_bindings = [
@@ -9228,11 +10533,6 @@ fn run_layer_plan_with_session_from_sequence(
         height: 1,
         depth: 1,
     };
-    let rms_threads_per_threadgroup = MetalSize {
-        width: rms_threadgroup_size as u64,
-        height: 1,
-        depth: 1,
-    };
     let q_proj_threadgroups = MetalSize {
         width: 1,
         height: (q_out_len as u64).div_ceil(8),
@@ -9245,11 +10545,6 @@ fn run_layer_plan_with_session_from_sequence(
     };
     let q_head_norm_threadgroups = MetalSize {
         width: q_head_count as u64,
-        height: 1,
-        depth: 1,
-    };
-    let q_head_norm_threads_per_threadgroup = MetalSize {
-        width: head_norm_threadgroup_size as u64,
         height: 1,
         depth: 1,
     };
@@ -9268,11 +10563,6 @@ fn run_layer_plan_with_session_from_sequence(
         height: 1,
         depth: 1,
     };
-    let k_head_norm_threads_per_threadgroup = MetalSize {
-        width: head_norm_threadgroup_size as u64,
-        height: 1,
-        depth: 1,
-    };
     let v_proj_threadgroups = MetalSize {
         width: 1,
         height: (v_out_len as u64).div_ceil(8),
@@ -9285,11 +10575,6 @@ fn run_layer_plan_with_session_from_sequence(
     };
     let v_head_norm_threadgroups = MetalSize {
         width: v_head_count as u64,
-        height: 1,
-        depth: 1,
-    };
-    let v_head_norm_threads_per_threadgroup = MetalSize {
-        width: head_norm_threadgroup_size as u64,
         height: 1,
         depth: 1,
     };
@@ -9358,11 +10643,10 @@ fn run_layer_plan_with_session_from_sequence(
         height: 2,
         depth: 1,
     };
-    let router_scale_threads_per_threadgroup = MetalSize {
-        width: rms_threadgroup_size as u64,
-        height: 1,
-        depth: 1,
-    };
+    let q_head_norm_threads_per_threadgroup = head_norm_threads_per_threadgroup;
+    let k_head_norm_threads_per_threadgroup = head_norm_threads_per_threadgroup;
+    let v_head_norm_threads_per_threadgroup = head_norm_threads_per_threadgroup;
+    let router_scale_threads_per_threadgroup = rms_threads_per_threadgroup;
     let router_scale_threadgroups = MetalSize {
         width: 1,
         height: 1,
@@ -9612,11 +10896,17 @@ fn run_layer_plan_with_session_from_sequence(
     let mut kv_cache = ExactMetalKvCache::load(
         &runtime,
         GemmaKvCacheSpec::new(layer_attention_kind, 1, k_head_count, head_dim, kv_capacity)?,
+        &GemmaExactMetalConfig::default(),
+        None,
+        None,
     )?;
     let mut prefill_attention_cache = if validate_post_ffn_residual {
         Some(ExactMetalKvCache::load(
             &runtime,
             GemmaKvCacheSpec::new(layer_attention_kind, 1, k_head_count, head_dim, kv_capacity)?,
+            &GemmaExactMetalConfig::default(),
+            None,
+            None,
         )?)
     } else {
         None
@@ -9645,6 +10935,8 @@ fn run_layer_plan_with_session_from_sequence(
                     compute_cached_attention_metal(
                         &runtime,
                         &attention_logits_seq_pipeline,
+                        &attention_logits_seq_planar3_pipeline,
+                        &attention_logits_seq_planar4_pipeline,
                         &attention_softmax_pipeline,
                         &attention_weighted_sum_pipeline,
                         &q_rope_buf,
@@ -9678,12 +10970,20 @@ fn run_layer_plan_with_session_from_sequence(
 
     kv_cache.append_token_from_buffers(&runtime, &k_rope_buf, &v_norm_buf)?;
 
-    let full_k_bits = read_exact_kv_cache_tensor_bits(&runtime, &kv_cache, &kv_cache.key_buffer)?;
+    let full_k_bits = read_exact_kv_cache_tensor_bits(
+        &runtime,
+        &kv_cache,
+        kv_cache
+            .key_buffer()
+            .ok_or("full K readback requires bf16 key cache storage")?,
+    )?;
     let full_v_bits = read_exact_kv_cache_tensor_bits(&runtime, &kv_cache, &kv_cache.value_buffer)?;
     let (attention_score_bits, attention_prob_bits, attention_out_bits) =
         compute_cached_attention_metal(
             &runtime,
             &attention_logits_seq_pipeline,
+            &attention_logits_seq_planar3_pipeline,
+            &attention_logits_seq_planar4_pipeline,
             &attention_softmax_pipeline,
             &attention_weighted_sum_pipeline,
             &q_rope_buf,

@@ -1,8 +1,15 @@
 use makepad_mlx::chat::{GemmaChatDecodeMode, GemmaChatRole, GemmaChatSession};
+use makepad_mlx::text_runtime::{
+    GemmaExactMetalBackendMode, GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode,
+};
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+const DEFAULT_CLI_MAX_NEW_TOKENS: usize = 512;
+const STREAM_FLUSH_CHARS: usize = 256;
+const STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 
 fn default_model_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -10,7 +17,7 @@ fn default_model_path() -> PathBuf {
 }
 
 fn usage() -> &'static str {
-    "Usage: mlx-cli [model.safetensors|model_dir] [--image PATH] [--max-new-tokens N] [--greedy]"
+    "Usage: mlx-cli [model.safetensors|model_dir] [--image PATH] [--max-new-tokens N] [--greedy] [--reference-text-backend] [--force-exact-text-backend] [--rotor-k-cache] [--rotor-k-cache-planar3]"
 }
 
 fn format_max_new_tokens(max_new_tokens: Option<usize>) -> String {
@@ -49,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut initial_image_path = None;
     let mut max_new_tokens = None;
     let mut decode_mode = GemmaChatDecodeMode::Sampled;
+    let mut backend_config = GemmaExactMetalConfig::default();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -64,6 +72,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--greedy" => {
                 decode_mode = GemmaChatDecodeMode::Greedy;
             }
+            "--reference-text-backend" => {
+                backend_config.backend_mode = GemmaExactMetalBackendMode::Disabled;
+            }
+            "--force-exact-text-backend" => {
+                backend_config.backend_mode = GemmaExactMetalBackendMode::Force;
+            }
+            "--rotor-k-cache" => {
+                backend_config.kv_compression =
+                    GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK;
+            }
+            "--rotor-k-cache-planar3" => {
+                backend_config.kv_compression =
+                    GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK;
+            }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());
             }
@@ -73,8 +95,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if max_new_tokens.is_none() {
+        max_new_tokens = Some(DEFAULT_CLI_MAX_NEW_TOKENS);
+    }
+
     eprintln!("loading model={}...", model_path.display());
-    let mut session = GemmaChatSession::load_with_mode(&model_path, max_new_tokens, decode_mode)?;
+    let mut session = GemmaChatSession::load_with_mode_and_backend_config(
+        &model_path,
+        max_new_tokens,
+        decode_mode,
+        backend_config.clone(),
+    )?;
     if let Some(image_path) = initial_image_path {
         session.set_image(image_path);
     }
@@ -90,6 +121,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             GemmaChatDecodeMode::Greedy => "greedy",
         }
     );
+    println!(
+        "text_backend={}",
+        match backend_config.backend_mode {
+            GemmaExactMetalBackendMode::Auto => "auto",
+            GemmaExactMetalBackendMode::Force => "force_exact",
+            GemmaExactMetalBackendMode::Disabled => "reference",
+        }
+    );
+    println!(
+        "kv_compression={}",
+        match backend_config.kv_compression {
+            GemmaExactMetalKvCompressionMode::Disabled => "disabled",
+            GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK =>
+                "rotor_planar3_full_attention_k",
+            GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK =>
+                "rotor_planar4_full_attention_k",
+        }
+    );
+    println!("backend={}", session.backend_label());
     if let Some(image_path) = session.current_image_path() {
         println!("image={}", image_path.display());
     }
@@ -119,6 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/clear-image" => {
                 session.clear_image();
                 println!("image cleared");
+                println!("backend={}", session.backend_label());
                 continue;
             }
             "/history" => {
@@ -137,19 +188,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let image_path = PathBuf::from(rest.trim());
             session.set_image(image_path.clone());
             println!("image={}", image_path.display());
+            println!("backend={}", session.backend_label());
             continue;
         }
 
         print!("assistant> ");
         io::stdout().flush()?;
-        let started = Instant::now();
         let mut buffered_output = String::new();
         let mut last_flush = Instant::now();
         let output = session.send_user_message_streaming(input, |delta| {
             buffered_output.push_str(delta);
-            if buffered_output.contains('\n')
-                || buffered_output.len() >= 64
-                || last_flush.elapsed() >= Duration::from_millis(50)
+            if buffered_output.len() >= STREAM_FLUSH_CHARS
+                || last_flush.elapsed() >= STREAM_FLUSH_INTERVAL
             {
                 print!("{buffered_output}");
                 buffered_output.clear();
@@ -162,17 +212,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("{buffered_output}");
         }
         println!();
-        let elapsed = started.elapsed();
-        let elapsed_secs = elapsed.as_secs_f64();
-        let decode_tok_s = if elapsed_secs > 0.0 {
-            output.generated_token_ids.len() as f64 / elapsed_secs
-        } else {
-            0.0
-        };
         println!(
-            "[generated_tokens={} stop={} decode_tok_s={decode_tok_s:.3}]",
+            "[generated_tokens={} stop={} prompt_prefill_tok_s={:.3} steady_decode_tok_s={:.3} overall_tok_s={:.3}]",
             output.generated_token_ids.len(),
             format_stop_reason(output.stop_reason),
+            output.metrics.prompt_prefill_tokens_per_second,
+            output.metrics.steady_state_decode_tokens_per_second,
+            output.metrics.decode_tokens_per_second,
         );
     }
 
