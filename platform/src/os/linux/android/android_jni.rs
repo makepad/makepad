@@ -1827,19 +1827,9 @@ pub unsafe fn to_java_update_tex_image(
     env: *mut jni_sys::JNIEnv,
     video_decoder_ref: jni_sys::jobject,
 ) -> bool {
-    let class = (**env).GetObjectClass.unwrap()(env, video_decoder_ref);
-    let update_tex_image_cstring = CString::new("maybeUpdateTexImage").unwrap();
-    let signature_cstring = CString::new("()Z").unwrap();
-    let mid_update_tex_image = (**env).GetMethodID.unwrap()(
-        env,
-        class,
-        update_tex_image_cstring.as_ptr(),
-        signature_cstring.as_ptr(),
+    let updated = ndk_utils::call_bool_method!(
+        env, video_decoder_ref, "maybeUpdateTexImage", "()Z"
     );
-
-    let updated = (**env).CallBooleanMethod.unwrap()(env, video_decoder_ref, mid_update_tex_image);
-    (**env).DeleteLocalRef.unwrap()(env, class);
-
     updated != 0
 }
 
