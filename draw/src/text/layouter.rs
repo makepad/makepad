@@ -10,7 +10,7 @@ use {
         rasterizer::{self, RasterizedGlyph, Rasterizer},
         sdfer,
         selection::{Cursor, CursorPosition, Selection},
-        shaper::{self, ShapedGlyph, ShapedText},
+        shaper::{self, ShapedText},
         substr::Substr,
     },
     fxhash::FxHashMap,
@@ -564,11 +564,9 @@ impl LayoutContext {
 #[derive(Debug)]
 struct Fitter {
     text: Substr,
+    font_family: Rc<FontFamily>,
     lens: Vec<usize>,
     widths_in_lpxs: Vec<f32>,
-    /// Pre-shaped text for each segment, cached from the constructor so that
-    /// `fit()` can concatenate them without re-invoking the HarfBuzz shaper.
-    shaped_segments: Vec<Rc<ShapedText>>,
 }
 
 impl Fitter {
@@ -588,7 +586,6 @@ impl Fitter {
         if matches!(segment_kind, SegmentKind::Word) {
             merge_segments_for_line_breaking(&text, &mut lens);
         }
-        let mut shaped_segments = Vec::with_capacity(lens.len());
         let widths_in_lpxs: Vec<_> = lens
             .iter()
             .copied()
@@ -597,16 +594,15 @@ impl Fitter {
                 let end = start + len;
                 let segment = font_family.get_or_shape(text.substr(start..end));
                 let width_in_lpxs = segment.width_in_ems * font_size_in_lpxs;
-                shaped_segments.push(segment);
                 *state = end;
                 Some(width_in_lpxs)
             })
             .collect();
         Self {
             text,
+            font_family,
             lens,
             widths_in_lpxs,
-            shaped_segments,
         }
     }
 
@@ -632,48 +628,14 @@ impl Fitter {
             }
         }
         if let Some(best_count) = best_count {
-            let best_len: usize = self.lens[..best_count].iter().sum();
-            // Concatenate the pre-shaped segments instead of reshaping the
-            // cumulative substring. This avoids a full HarfBuzz shape call
-            // per line (these cumulative substrings are unique and always
-            // miss the shaper cache). Inter-word kerning is lost, but this
-            // is negligible for virtually all text.
-            let best_text = Rc::new(Self::concat_shaped(
-                &self.shaped_segments[..best_count],
-                self.text.substr(0..best_len),
-            ));
+            let best_len = self.lens[..best_count].iter().sum();
+            let best_text = self.font_family.get_or_shape(self.text.substr(0..best_len));
             self.lens.drain(..best_count);
             self.widths_in_lpxs.drain(..best_count);
-            self.shaped_segments.drain(..best_count);
             self.text = self.text.substr(best_len..);
             Some(best_text)
         } else {
             None
-        }
-    }
-
-    /// Concatenates multiple individually-shaped segments into a single
-    /// `ShapedText`, adjusting cluster offsets so they're relative to the
-    /// combined text.
-    fn concat_shaped(segments: &[Rc<ShapedText>], combined_text: Substr) -> ShapedText {
-        let total_glyphs: usize = segments.iter().map(|s| s.glyphs.len()).sum();
-        let mut glyphs = Vec::with_capacity(total_glyphs);
-        let mut byte_offset = 0usize;
-        let mut total_width = 0.0f32;
-        for seg in segments {
-            for glyph in &seg.glyphs {
-                glyphs.push(ShapedGlyph {
-                    cluster: glyph.cluster + byte_offset,
-                    ..glyph.clone()
-                });
-            }
-            byte_offset += seg.text.len();
-            total_width += seg.width_in_ems;
-        }
-        ShapedText {
-            text: combined_text,
-            width_in_ems: total_width,
-            glyphs,
         }
     }
 
@@ -687,7 +649,7 @@ impl Fitter {
         // The sum of individual segment widths is a close approximation of the
         // actual shaped width (it doesn't account for inter-word kerning, but
         // that's negligible for wrap-width decisions). The final shaped text
-        // in `fit()` uses the cached per-segment shapes concatenated together.
+        // in `fit()` uses get_or_shape() for the exact result.
         let estimated_width_in_lpxs: f32 = self.widths_in_lpxs[..count].iter().sum();
         estimated_width_in_lpxs <= wrap_width_in_lpxs
     }
@@ -695,7 +657,6 @@ impl Fitter {
     fn pop(&mut self) -> usize {
         let len = self.lens.remove(0);
         self.widths_in_lpxs.remove(0);
-        self.shaped_segments.remove(0);
         self.text = self.text.substr(len..);
         len
     }
