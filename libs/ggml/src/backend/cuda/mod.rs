@@ -93,6 +93,16 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_nvfp4_get_rows_f32_device_u32(
+            packed_weights_nvfp4_bytes: *const u8,
+            row_indices_device_u32: *const u32,
+            output_f32: *mut f32,
+            n_cols: u32,
+            row_count: u32,
+            output_row_stride: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_quantize_q8_1_f32(
             input_f32: *const f32,
             output_q8_1_bytes: *mut u8,
@@ -1499,6 +1509,49 @@ mod imp {
                     output_f32.inner.ptr.as_ptr().cast::<f32>(),
                     n_cols as u32,
                     row_index_device_u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn nvfp4_get_rows_f32_device_u32(
+            &self,
+            weights_nvfp4: &CudaBuffer,
+            row_indices_device_u32: &CudaBuffer,
+            output_f32: &CudaBuffer,
+            n_cols: usize,
+            row_count: usize,
+            output_row_stride: usize,
+        ) -> Result<(), String> {
+            self.nvfp4_get_rows_f32_device_u32_ptr(
+                weights_nvfp4,
+                row_indices_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                output_f32,
+                n_cols,
+                row_count,
+                output_row_stride,
+            )
+        }
+
+        pub fn nvfp4_get_rows_f32_device_u32_ptr(
+            &self,
+            weights_nvfp4: &CudaBuffer,
+            row_indices_device_u32: *const u32,
+            output_f32: &CudaBuffer,
+            n_cols: usize,
+            row_count: usize,
+            output_row_stride: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_nvfp4_get_rows_f32_device_u32(
+                    weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
+                    row_indices_device_u32,
+                    output_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    n_cols as u32,
+                    row_count as u32,
+                    output_row_stride as u32,
                     self.stream,
                 )
             };
@@ -3444,6 +3497,30 @@ mod imp {
             _output_f32: &CudaBuffer,
             _n_cols: usize,
             _row_index_device_u32: *const u32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn nvfp4_get_rows_f32_device_u32(
+            &self,
+            _weights_nvfp4: &CudaBuffer,
+            _row_indices_device_u32: &CudaBuffer,
+            _output_f32: &CudaBuffer,
+            _n_cols: usize,
+            _row_count: usize,
+            _output_row_stride: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn nvfp4_get_rows_f32_device_u32_ptr(
+            &self,
+            _weights_nvfp4: &CudaBuffer,
+            _row_indices_device_u32: *const u32,
+            _output_f32: &CudaBuffer,
+            _n_cols: usize,
+            _row_count: usize,
+            _output_row_stride: usize,
         ) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
         }
