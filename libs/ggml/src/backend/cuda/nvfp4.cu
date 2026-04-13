@@ -535,6 +535,28 @@ static __global__ void makepad_ggml_cuda_nvfp4_get_row_f32_device_u32_kernel(
     output_f32[base + QK_NVFP4_SUB / 2 + j] = d * (float) KVALUES_MXFP4_X2[packed >> 4];
 }
 
+static __global__ void makepad_ggml_cuda_nvfp4_get_rows_f32_device_u32_kernel(
+        const block_nvfp4 * __restrict__ packed_weights_nvfp4,
+        const uint32_t * __restrict__ row_indices_device_u32,
+        uint32_t blocks_per_row,
+        float * __restrict__ output_f32,
+        uint32_t output_row_stride) {
+    const uint32_t block_idx = blockIdx.x;
+    const uint32_t row_slot = blockIdx.y;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t row_index = row_indices_device_u32[row_slot];
+    const block_nvfp4 & xb = packed_weights_nvfp4[row_index * blocks_per_row + block_idx];
+
+    const uint32_t sub = tid / (QK_NVFP4_SUB / 2);
+    const uint32_t j = tid % (QK_NVFP4_SUB / 2);
+    const float d = makepad_ggml_cuda_ue4m3_to_fp32(xb.d[sub]);
+    const uint8_t packed = xb.qs[sub * (QK_NVFP4_SUB / 2) + j];
+    const uint32_t base = row_slot * output_row_stride + block_idx * QK_NVFP4 + sub * QK_NVFP4_SUB;
+
+    output_f32[base + j] = d * (float) KVALUES_MXFP4_X2[packed & 0x0F];
+    output_f32[base + QK_NVFP4_SUB / 2 + j] = d * (float) KVALUES_MXFP4_X2[packed >> 4];
+}
+
 extern "C" cudaError_t makepad_ggml_cuda_nvfp4_q8_1_matvec(
         const uint8_t * input_q8_1_bytes,
         const uint8_t * packed_weights_nvfp4_bytes,
@@ -685,6 +707,29 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_get_row_f32_device_u32(
         row_index_device_u32,
         blocks_per_row,
         output_f32
+    );
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_nvfp4_get_rows_f32_device_u32(
+        const uint8_t * packed_weights_nvfp4_bytes,
+        const uint32_t * row_indices_device_u32,
+        float * output_f32,
+        uint32_t n_cols,
+        uint32_t row_count,
+        uint32_t output_row_stride,
+        cudaStream_t stream) {
+    if ((n_cols % QK_NVFP4) != 0 || row_count == 0 || output_row_stride < n_cols) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t blocks_per_row = n_cols / QK_NVFP4;
+    const dim3 grid(blocks_per_row, row_count, 1);
+    makepad_ggml_cuda_nvfp4_get_rows_f32_device_u32_kernel<<<grid, 32, 0, stream>>>(
+        reinterpret_cast<const block_nvfp4 *>(packed_weights_nvfp4_bytes),
+        row_indices_device_u32,
+        blocks_per_row,
+        output_f32,
+        output_row_stride
     );
     return cudaGetLastError();
 }

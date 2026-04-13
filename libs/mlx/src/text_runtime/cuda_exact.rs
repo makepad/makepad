@@ -20,7 +20,7 @@ const QK_NVFP4: usize = 64;
 const Q8_1_BLOCK_BYTES: usize = 36;
 const CUDA_FINAL_TEXT_NORM_WEIGHT_NAME: &str = "language_model.model.norm.weight";
 const CUDA_DISALLOWED_TOKEN_IDS_CAPACITY: usize = 64;
-const CUDA_PREFILL_CHUNK_TOKENS: usize = 128;
+const CUDA_PREFILL_CHUNK_TOKENS: usize = 256;
 const CUDA_SESSION_MIN_CAPACITY: usize = 1024;
 
 fn bf16_words_to_f32_bytes(words: &[u16]) -> Vec<u8> {
@@ -413,6 +413,7 @@ struct CudaNvfp4TextIo {
 
 struct CudaNvfp4PrefillBuffers {
     chunk_tokens: usize,
+    token_ids: CudaBuffer,
     hidden_a: CudaBuffer,
     hidden_b: CudaBuffer,
     input_norm_out: CudaBuffer,
@@ -700,6 +701,7 @@ impl CudaNvfp4BenchmarkSession {
             .ok_or("CUDA prefill q8 scratch byte size overflow")?;
         let prefill = CudaNvfp4PrefillBuffers {
             chunk_tokens: prefill_chunk_tokens,
+            token_ids: cuda.alloc_u32(prefill_chunk_tokens)?,
             hidden_a: cuda.alloc_f32(prefill_chunk_tokens * hidden_size)?,
             hidden_b: cuda.alloc_f32(prefill_chunk_tokens * hidden_size)?,
             input_norm_out: cuda.alloc_f32(prefill_chunk_tokens * hidden_size)?,
@@ -846,6 +848,7 @@ impl CudaNvfp4BenchmarkSession {
     ) -> Result<(), Box<dyn Error>> {
         let prefill = &self.prefill;
         let chunk_len = prefill.chunk_tokens;
+        self.load_prefill_embeddings_device_u32(&prefill.token_ids, chunk_len)?;
         let mut input_is_a = true;
         for layer in &mut self.layers {
             let (input_hidden, output_hidden) = if input_is_a {
@@ -940,24 +943,50 @@ impl CudaNvfp4BenchmarkSession {
         Ok(next_token)
     }
 
-    fn load_prefill_embeddings(&self, token_ids: &[u32]) -> Result<(), Box<dyn Error>> {
-        for (row_idx, &token_id) in token_ids.iter().enumerate() {
+    fn write_prefill_token_ids(&self, token_ids: &[u32]) -> Result<(), Box<dyn Error>> {
+        if token_ids.len() > self.prefill.chunk_tokens {
+            return Err(format!(
+                "CUDA prefill token slice {} exceeds chunk capacity {}",
+                token_ids.len(),
+                self.prefill.chunk_tokens
+            )
+            .into());
+        }
+        for &token_id in token_ids {
             if token_id as usize >= self.io.vocab_size {
                 return Err(format!("token id {} exceeds vocab {}", token_id, self.io.vocab_size).into());
             }
-            self.cuda.nvfp4_get_row_f32_offset(
-                &self.io.embed_weight,
-                &self.prefill.hidden_a,
-                row_idx * self.io.hidden_size,
-                self.io.hidden_size,
-                token_id as usize,
-            )?;
         }
+        let token_bytes = unsafe {
+            std::slice::from_raw_parts(
+                token_ids.as_ptr().cast::<u8>(),
+                token_ids
+                    .len()
+                    .checked_mul(size_of::<u32>())
+                    .ok_or("CUDA prefill token-id byte size overflow")?,
+            )
+        };
+        self.cuda.write_bytes(&self.prefill.token_ids, token_bytes)?;
+        Ok(())
+    }
+
+    fn load_prefill_embeddings_device_u32(
+        &self,
+        token_ids_device_u32: &CudaBuffer,
+        token_count: usize,
+    ) -> Result<(), Box<dyn Error>> {
+        self.cuda.nvfp4_get_rows_f32_device_u32(
+            &self.io.embed_weight,
+            token_ids_device_u32,
+            &self.prefill.hidden_a,
+            self.io.hidden_size,
+            token_count,
+            self.io.hidden_size,
+        )?;
         self.cuda.scale_f32_inplace(
             &self.prefill.hidden_a,
             self.io.embed_scale,
-            token_ids
-                .len()
+            token_count
                 .checked_mul(self.io.hidden_size)
                 .ok_or("CUDA prefill embedding scale length overflow")?,
         )?;
@@ -982,7 +1011,8 @@ impl CudaNvfp4BenchmarkSession {
         let mut final_row_offset_elems = 0usize;
         while chunk_start < prompt_token_ids.len() {
             let chunk_len = (prompt_token_ids.len() - chunk_start).min(chunk_capacity);
-            self.load_prefill_embeddings(&prompt_token_ids[chunk_start..chunk_start + chunk_len])?;
+            let chunk_token_ids = &prompt_token_ids[chunk_start..chunk_start + chunk_len];
+            self.write_prefill_token_ids(chunk_token_ids)?;
             let chunk_position = base_position
                 .checked_add(chunk_start)
                 .ok_or("CUDA prefill chunk position overflow")?;
@@ -999,6 +1029,7 @@ impl CudaNvfp4BenchmarkSession {
                 continue;
             }
 
+            self.load_prefill_embeddings_device_u32(&self.prefill.token_ids, chunk_len)?;
             let prefill = &self.prefill;
             let mut input_is_a = true;
             for layer in &mut self.layers {
