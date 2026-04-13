@@ -427,7 +427,7 @@ impl Cx {
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
 
                     // Draw popup window passes as overlays on the same MTKView
-                    for popup_pass_id in &passes_todo.clone() {
+                    for popup_pass_id in &passes_todo {
                         if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent
                         {
                             let pw = &self.windows[pw_id];

@@ -23,22 +23,46 @@ macro_rules! new_object {
 }
 
 #[macro_export]
+/// Call a JNI method on `$obj` with the given name and signature.
+///
+/// Method IDs are cached per call site in a `static AtomicPtr`, so subsequent
+/// calls skip `GetObjectClass`, `CString` allocation, and `GetMethodID` entirely.
+/// This is safe because JNI method IDs are stable for the lifetime of the class
+/// (which on Android is the lifetime of the process), and each macro invocation
+/// expands to its own `static`, giving each call site its own cache slot.
 macro_rules! call_method {
     ($fn:tt, $env:expr, $obj:expr, $method:expr, $sig:expr $(, $args:expr)*) => {{
-        let get_object_class = (**$env).GetObjectClass.unwrap();
-        let get_method_id = (**$env).GetMethodID.unwrap();
-        let call_object_method = (**$env).$fn.unwrap();
+        use std::sync::atomic::{AtomicPtr, Ordering};
 
-        let method = std::ffi::CString::new($method).unwrap();
-        let sig = std::ffi::CString::new($sig).unwrap();
-        let class = get_object_class($env, $obj);
+        // Each macro expansion gets its own static — one cache slot per call site.
+        static CACHED_MID: AtomicPtr<std::ffi::c_void> =
+            AtomicPtr::new(std::ptr::null_mut());
 
-        assert!(!class.is_null());
+        let mid = {
+            let cached = CACHED_MID.load(Ordering::Relaxed);
+            if !cached.is_null() {
+                cached
+            } else {
+                let get_object_class = (**$env).GetObjectClass.unwrap();
+                let get_method_id = (**$env).GetMethodID.unwrap();
+                let method_cstr = std::ffi::CString::new($method).unwrap();
+                let sig_cstr = std::ffi::CString::new($sig).unwrap();
+                let class = get_object_class($env, $obj);
+                assert!(!class.is_null());
+                let resolved = get_method_id(
+                    $env, class,
+                    method_cstr.as_ptr() as _,
+                    sig_cstr.as_ptr() as _,
+                );
+                assert!(!resolved.is_null());
+                CACHED_MID.store(resolved as *mut std::ffi::c_void, Ordering::Relaxed);
+                (**$env).DeleteLocalRef.unwrap()($env, class);
+                resolved as *mut std::ffi::c_void
+            }
+        };
 
-        let method = get_method_id($env, class, method.as_ptr() as _, sig.as_ptr() as _);
-        assert!(!method.is_null());
-
-        call_object_method($env, $obj, method, $($args,)*)
+        let call_fn = (**$env).$fn.unwrap();
+        call_fn($env, $obj, mid as _, $($args,)*)
     }};
 }
 
