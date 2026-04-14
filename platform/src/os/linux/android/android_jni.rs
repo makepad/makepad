@@ -15,13 +15,69 @@ use {
     },
     makepad_android_state::{get_activity, get_java_vm},
     std::ffi::c_uint,
-    std::sync::Mutex,
+    std::sync::{Arc, Condvar, Mutex},
+    std::time::Duration,
     std::{
         cell::Cell,
         ffi::CString,
         sync::mpsc::{self, Sender},
     },
 };
+
+/// Synchronous-handshake primitive used by the JNI layer to wait for the
+/// render thread to acknowledge a `SurfaceDestroyed` event before returning to
+/// Java.
+///
+/// On Android, when `SurfaceHolder.Callback.surfaceDestroyed` returns, the
+/// system is free to release the underlying buffer queue immediately. If our
+/// render thread is mid-frame when that happens, it will issue GL/Vulkan calls
+/// against torn-down buffers and the GPU driver will SIGSEGV. The standard
+/// fix (used by `android.opengl.GLSurfaceView` and every well-behaved native
+/// renderer) is to make `surfaceDestroyed` block on the render thread until
+/// it has finished its current frame and released the surface.
+///
+/// We give the render thread a 2-second budget — well under Android's 5-second
+/// ANR threshold — and silently fall through if it misses the deadline. A
+/// missed deadline is logged so it shows up in logcat for diagnosis.
+pub type SurfaceAck = Arc<(Mutex<bool>, Condvar)>;
+
+/// Maximum time the JNI thread will wait for the render thread to ack a
+/// `SurfaceDestroyed`. Must stay safely below the Android ANR threshold (5s).
+pub const SURFACE_DESTROYED_ACK_TIMEOUT: Duration = Duration::from_millis(2000);
+
+pub fn new_surface_ack() -> SurfaceAck {
+    Arc::new((Mutex::new(false), Condvar::new()))
+}
+
+/// Called by the render thread once it has finished tearing down the surface.
+pub fn signal_surface_ack(ack: &SurfaceAck) {
+    let (lock, cvar) = &**ack;
+    if let Ok(mut done) = lock.lock() {
+        *done = true;
+        cvar.notify_all();
+    }
+}
+
+/// Called by the JNI thread inside `surfaceOnSurfaceDestroyed` to wait for the
+/// render thread's acknowledgement. Returns `true` if the render thread acked
+/// in time, `false` if the wait timed out.
+pub fn wait_surface_ack(ack: &SurfaceAck, timeout: Duration) -> bool {
+    let (lock, cvar) = &**ack;
+    let Ok(guard) = lock.lock() else {
+        return false;
+    };
+    let result = cvar.wait_timeout_while(guard, timeout, |done| !*done);
+    match result {
+        Ok((guard, wait_result)) => {
+            if wait_result.timed_out() {
+                false
+            } else {
+                *guard
+            }
+        }
+        Err(_) => false,
+    }
+}
 
 #[derive(Debug)]
 pub enum TouchPhase {
@@ -44,7 +100,13 @@ pub enum FromJavaMessage {
     SurfaceCreated {
         window: *mut ndk_sys::ANativeWindow,
     },
-    SurfaceDestroyed,
+    /// Sent by the JNI layer when Android invokes
+    /// `SurfaceHolder.Callback.surfaceDestroyed`. The `ack` channel lets the
+    /// render thread tell the JNI thread when it's safe to return to Java —
+    /// i.e. when the surface has been fully torn down on our side.
+    SurfaceDestroyed {
+        ack: SurfaceAck,
+    },
     RenderLoop,
     LongClick {
         abs: Vec2d,
@@ -247,6 +309,118 @@ unsafe fn get_intent_string_extra(
     Some(jstring_to_string(env, value))
 }
 
+const MAKEPAD_PREFS_NAME: &str = "makepad";
+const MAKEPAD_STUDIO_HOST_PREF_KEY: &str = "studio_host";
+const MAKEPAD_STUDIO_CRATE_PREF_KEY: &str = "studio_crate";
+const ANDROID_MODE_PRIVATE: i32 = 0;
+
+unsafe fn new_jstring(
+    env: *mut jni_sys::JNIEnv,
+    value: &str,
+) -> Option<jni_sys::jstring> {
+    let value = CString::new(value).ok()?;
+    let value = ((**env).NewStringUTF.unwrap())(env, value.as_ptr());
+    if value.is_null() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+unsafe fn get_prefs_object(
+    env: *mut jni_sys::JNIEnv,
+    activity: jni_sys::jobject,
+) -> Option<jni_sys::jobject> {
+    let prefs_name = new_jstring(env, MAKEPAD_PREFS_NAME)?;
+    let prefs = ndk_utils::call_object_method!(
+        env,
+        activity,
+        "getSharedPreferences",
+        "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
+        prefs_name,
+        ANDROID_MODE_PRIVATE
+    );
+    if prefs.is_null() {
+        None
+    } else {
+        Some(prefs)
+    }
+}
+
+unsafe fn get_persisted_string_pref(
+    env: *mut jni_sys::JNIEnv,
+    activity: jni_sys::jobject,
+    key: &str,
+) -> Option<String> {
+    let prefs = get_prefs_object(env, activity)?;
+    let key = new_jstring(env, key)?;
+    let default = new_jstring(env, "")?;
+    let value = ndk_utils::call_object_method!(
+        env,
+        prefs,
+        "getString",
+        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+        key,
+        default
+    );
+    if value.is_null() {
+        return None;
+    }
+
+    let value = jstring_to_string(env, value);
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+unsafe fn persist_string_pref(
+    env: *mut jni_sys::JNIEnv,
+    activity: jni_sys::jobject,
+    key: &str,
+    value: &str,
+) -> bool {
+    let prefs = match get_prefs_object(env, activity) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    let editor = ndk_utils::call_object_method!(
+        env,
+        prefs,
+        "edit",
+        "()Landroid/content/SharedPreferences$Editor;"
+    );
+    if editor.is_null() {
+        return false;
+    }
+
+    let key = match new_jstring(env, key) {
+        Some(v) => v,
+        None => return false,
+    };
+    let value = match new_jstring(env, value) {
+        Some(v) => v,
+        None => return false,
+    };
+    let editor = ndk_utils::call_object_method!(
+        env,
+        editor,
+        "putString",
+        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;",
+        key,
+        value
+    );
+    if editor.is_null() {
+        return false;
+    }
+
+    ndk_utils::call_void_method!(env, editor, "apply", "()V");
+    true
+}
+
 pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) {
     if activity.is_null() {
         return;
@@ -254,10 +428,42 @@ pub unsafe fn apply_studio_env_from_activity(activity: *const std::ffi::c_void) 
     let env = attach_jni_env();
     let activity = activity as jni_sys::jobject;
 
-    if let Some(studio) =
-        get_intent_string_extra(env, activity, "makepad.STUDIO").filter(|v| !v.trim().is_empty())
+    std::env::remove_var("STUDIO");
+    std::env::remove_var("STUDIO_BUILD");
+    std::env::remove_var("STUDIO_HOST");
+    std::env::remove_var("STUDIO_CRATE");
+
+    let intent_studio_host = get_intent_string_extra(env, activity, "makepad.STUDIO_HOST")
+        .filter(|v| !v.trim().is_empty());
+    let intent_studio_crate = get_intent_string_extra(env, activity, "makepad.STUDIO_CRATE")
+        .filter(|v| !v.trim().is_empty());
+
+    if let Some(studio_host) = intent_studio_host {
+        let _ = persist_string_pref(
+            env,
+            activity,
+            MAKEPAD_STUDIO_HOST_PREF_KEY,
+            &studio_host,
+        );
+        std::env::set_var("STUDIO_HOST", &studio_host);
+    } else if let Some(studio_host) =
+        get_persisted_string_pref(env, activity, MAKEPAD_STUDIO_HOST_PREF_KEY)
     {
-        std::env::set_var("STUDIO", &studio);
+        std::env::set_var("STUDIO_HOST", &studio_host);
+    }
+
+    if let Some(studio_crate) = intent_studio_crate {
+        let _ = persist_string_pref(
+            env,
+            activity,
+            MAKEPAD_STUDIO_CRATE_PREF_KEY,
+            &studio_crate,
+        );
+        std::env::set_var("STUDIO_CRATE", &studio_crate);
+    } else if let Some(studio_crate) =
+        get_persisted_string_pref(env, activity, MAKEPAD_STUDIO_CRATE_PREF_KEY)
+    {
+        std::env::set_var("STUDIO_CRATE", &studio_crate);
     }
 }
 
@@ -494,7 +700,22 @@ extern "C" fn Java_dev_makepad_android_MakepadNative_surfaceOnSurfaceDestroyed(
     _: *mut jni_sys::JNIEnv,
     _: jni_sys::jobject,
 ) {
-    send_from_java_message(FromJavaMessage::SurfaceDestroyed);
+    // Synchronously hand off to the render thread and wait until it confirms
+    // it has released the EGL/Vulkan window surface. Without this, Android
+    // would be free to recycle the underlying buffer queue the moment we
+    // return, while the render thread is still issuing GL draw calls against
+    // it — which crashes Mali/Adreno drivers (SIGSEGV inside `render_view`).
+    let ack = new_surface_ack();
+    send_from_java_message(FromJavaMessage::SurfaceDestroyed { ack: ack.clone() });
+    if !wait_surface_ack(&ack, SURFACE_DESTROYED_ACK_TIMEOUT) {
+        // Render thread didn't ack in time. Don't hang the UI thread further;
+        // log so the missed deadline shows up in logcat.
+        crate::log!(
+            "surfaceOnSurfaceDestroyed: render thread did not acknowledge within {:?}; \
+             returning to Android anyway",
+            SURFACE_DESTROYED_ACK_TIMEOUT
+        );
+    }
 }
 
 #[no_mangle]
@@ -1606,19 +1827,9 @@ pub unsafe fn to_java_update_tex_image(
     env: *mut jni_sys::JNIEnv,
     video_decoder_ref: jni_sys::jobject,
 ) -> bool {
-    let class = (**env).GetObjectClass.unwrap()(env, video_decoder_ref);
-    let update_tex_image_cstring = CString::new("maybeUpdateTexImage").unwrap();
-    let signature_cstring = CString::new("()Z").unwrap();
-    let mid_update_tex_image = (**env).GetMethodID.unwrap()(
-        env,
-        class,
-        update_tex_image_cstring.as_ptr(),
-        signature_cstring.as_ptr(),
+    let updated = ndk_utils::call_bool_method!(
+        env, video_decoder_ref, "maybeUpdateTexImage", "()Z"
     );
-
-    let updated = (**env).CallBooleanMethod.unwrap()(env, video_decoder_ref, mid_update_tex_image);
-    (**env).DeleteLocalRef.unwrap()(env, class);
-
     updated != 0
 }
 

@@ -3,8 +3,8 @@
 //! By default, the tooltip has a black background color and white text.
 
 use crate::{
-    label::*, makepad_derive_widget::*, makepad_draw::*, view::*, widget::*, TooltipRef,
-    TooltipWidgetExt,
+    label::*, makepad_derive_widget::*, makepad_draw::*, view::*, widget::*,
+    widget_match_event::WidgetMatchEvent, TooltipRef, TooltipWidgetExt,
 };
 
 script_mod! {
@@ -155,6 +155,14 @@ pub enum TooltipPosition {
 }
 
 /// A tooltip widget that a callout pointing towards the referenced widget.
+///
+/// `CalloutTooltip` automatically listens for `TooltipAction::HoverIn` and
+/// `TooltipAction::HoverOut` events from any widget in the action batch and
+/// shows or hides itself accordingly. Apps generally do **not** need to
+/// handle `TooltipAction` themselves — it is enough to instantiate one
+/// `CalloutTooltip` somewhere in the widget tree and have hover-aware
+/// widgets emit `TooltipAction::HoverIn` from their `handle_event` (e.g.
+/// inside a `Hit::FingerHoverIn` arm).
 #[derive(Script, ScriptHook, Widget)]
 pub struct CalloutTooltip {
     #[source]
@@ -191,11 +199,60 @@ impl Widget for CalloutTooltip {
             }
         }
 
+        // Auto-process `TooltipAction`s emitted by other widgets in the
+        // action batch via the `WidgetMatchEvent` impl below.
+        self.widget_match_event(cx, event, scope);
+
         self.view.handle_event(cx, event, scope);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.view.draw_walk(cx, scope, walk)
+    }
+}
+
+impl WidgetMatchEvent for CalloutTooltip {
+    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
+        // Reduce all `TooltipAction`s in this batch to a single final state.
+        // Widget tree traversal order means a `HoverIn` for a new button can
+        // arrive before a `HoverOut` for the old button in the same batch;
+        // applying them in queue order would show then immediately hide.
+        // Rule: latest `HoverIn` wins; a `HoverOut` only clears the buffer
+        // if its `widget_uid` matches the buffered `HoverIn`.
+        let mut buffered: Option<(WidgetUid, String, Rect, CalloutTooltipOptions)> = None;
+        let mut had_tooltip_event = false;
+
+        for action in actions {
+            match action.as_widget_action().cast() {
+                TooltipAction::HoverIn { text, widget_rect, options } => {
+                    had_tooltip_event = true;
+                    if let Some(uid) = action.as_widget_action().map(|wa| wa.widget_uid) {
+                        buffered = Some((uid, text, widget_rect, options));
+                    }
+                }
+                TooltipAction::HoverOut => {
+                    had_tooltip_event = true;
+                    if let Some(uid) = action.as_widget_action().map(|wa| wa.widget_uid) {
+                        if let Some((cur_uid, _, _, _)) = &buffered {
+                            if *cur_uid == uid {
+                                buffered = None;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !had_tooltip_event {
+            return;
+        }
+
+        if let Some((_uid, text, widget_rect, options)) = buffered {
+            self.show_with_options(cx, &text, widget_rect, options, false);
+        } else {
+            self.hide(cx);
+        }
     }
 }
 

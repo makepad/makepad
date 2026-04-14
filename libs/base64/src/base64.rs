@@ -91,9 +91,83 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64DecodeError> {
         i += 4;
         o += 3;
     }
+    if input[input.len() - 1] == b'=' {
+        o -= 1; // single padding: 2 bytes encoded in last 4-char group
+    }
     if input[input.len() - 2] == b'=' {
-        o -= 1;
+        o -= 1; // double padding: 1 byte encoded in last 4-char group
     }
     out.resize(o, 0u8);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_no_padding() {
+        // 3 bytes → 4 base64 chars, no padding
+        let input = b"abc";
+        let encoded = base64_encode(input, &BASE64_STANDARD);
+        let decoded = base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn roundtrip_single_padding() {
+        // 2 bytes → 4 base64 chars with single '=' padding
+        let input = b"ab";
+        let encoded = base64_encode(input, &BASE64_STANDARD);
+        assert_eq!(encoded.last(), Some(&b'='));
+        assert_ne!(encoded[encoded.len() - 2], b'='); // single, not double
+        let decoded = base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, input, "Single-padding roundtrip failed");
+    }
+
+    #[test]
+    fn roundtrip_double_padding() {
+        // 1 byte → 4 base64 chars with '==' padding
+        let input = b"a";
+        let encoded = base64_encode(input, &BASE64_STANDARD);
+        assert_eq!(&encoded[encoded.len() - 2..], b"==");
+        let decoded = base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, input, "Double-padding roundtrip failed");
+    }
+
+    #[test]
+    fn roundtrip_empty() {
+        let input = b"";
+        let encoded = base64_encode(input, &BASE64_STANDARD);
+        assert!(encoded.is_empty() || base64_decode(&encoded).unwrap().is_empty());
+    }
+
+    #[test]
+    fn roundtrip_various_lengths() {
+        // Test lengths 1-20 to cover all padding cases
+        for len in 1..=20 {
+            let input: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let encoded = base64_encode(&input, &BASE64_STANDARD);
+            let decoded = base64_decode(&encoded).unwrap();
+            assert_eq!(decoded, input, "Roundtrip failed for length {}", len);
+        }
+    }
+
+    #[test]
+    fn roundtrip_binary_data() {
+        // All byte values
+        let input: Vec<u8> = (0..=255).collect();
+        let encoded = base64_encode(&input, &BASE64_STANDARD);
+        let decoded = base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn roundtrip_url_safe() {
+        let input = b"hello world!";
+        let encoded = base64_encode(input, &BASE64_URL_SAFE);
+        // URL-safe uses - and _ instead of + and /
+        let decoded = base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, input);
+    }
 }

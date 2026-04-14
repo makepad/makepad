@@ -79,6 +79,7 @@ impl Cx {
         d3d11_windows: &mut Vec<D3d11Window>,
     ) -> EventFlow {
         if let EventFlow::Exit = self.handle_platform_ops(d3d11_windows, d3d11_cx) {
+            self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit;
         }
 
@@ -369,6 +370,9 @@ impl Cx {
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
                         //let dpi_factor = window.window_geom.dpi_factor;
+                        if window.is_in_resize {
+                            window.sync_background_color(self.passes[*draw_pass_id].clear_color);
+                        }
                         window.resize_buffers(&d3d11_cx);
                         self.draw_pass_to_window(*draw_pass_id, false, window, d3d11_cx);
                     }
@@ -494,7 +498,6 @@ impl Cx {
                         d3d11_windows[index].win32_window.close_window();
                         d3d11_windows.remove(index);
                         if d3d11_windows.len() == 0 {
-                            self.call_event_handler(&Event::Shutdown);
                             ret = EventFlow::Exit
                         }
                     }
@@ -797,15 +800,10 @@ impl CxGameInputApi for Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
-        if let Some(_item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
-            //    self.live_registry.borrow_mut().package_root = Some(item.to_string());
+        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
+            self.package_root = Some(item.to_string());
         }
 
-        //self.live_expand();
-        //if std::env::args().find( | v | v == "--stdin-loop").is_none() {
-        //    self.start_disk_live_file_watcher(100);
-        //}
-        //self.live_scan_dependencies();
         self.native_load_dependencies();
 
         self.os.windows_game_input = Some(WindowsGameInput::init());

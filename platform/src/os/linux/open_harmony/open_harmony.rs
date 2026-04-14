@@ -84,6 +84,7 @@ impl Cx {
                 }
             }
         }
+        self.call_event_handler(&Event::Shutdown);
     }
 
     fn handle_all_pending_messages(&mut self, from_ohos_rx: &mpsc::Receiver<FromOhosMessage>) {
@@ -594,9 +595,8 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
-        self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
-        self.live_expand();
-        self.live_scan_dependencies();
+        self.package_root = Some("makepad".to_string());
+        self.native_load_dependencies();
     }
 
     fn spawn_thread<F>(&mut self, f: F)

@@ -262,6 +262,8 @@ impl PlistValues {
                 <string>{version}</string>
                 <key>CFBundleShortVersionString</key>
                 <string>{version}</string>
+                <key>CFBundleDevelopmentRegion</key>
+                <string>en</string>
                 <key>CFBundleIconName</key>
                 <string>AppIcon</string>
                 <key>UILaunchStoryboardName</key>
@@ -688,6 +690,9 @@ pub fn build(
     let mut rust_env = vec![
         ("RUST_BACKTRACE", "1"),
         ("MAKEPAD", if stable { "" } else { "lines" }),
+        // The aws-lc-sys crate requires the cmake builder (not the cc builder)
+        // for iOS/tvOS cross-compilation targets.
+        ("AWS_LC_SYS_CMAKE_BUILDER", "1"),
     ];
     if matches!(apple_target.os(), AppleOs::Ios) {
         rust_env.push(("IPHONEOS_DEPLOYMENT_TARGET", IOS_DEPLOYMENT_TARGET));

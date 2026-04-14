@@ -427,7 +427,7 @@ impl Cx {
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::MTKView(mtk_view));
 
                     // Draw popup window passes as overlays on the same MTKView
-                    for popup_pass_id in &passes_todo.clone() {
+                    for popup_pass_id in &passes_todo {
                         if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent
                         {
                             let pw = &self.windows[pw_id];
@@ -953,10 +953,10 @@ impl Cx {
                 }
                 CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::FullscreenWindow(_window_id) => {
-                    with_ios_app(|app| app.set_fullscreen(true));
+                    IosApp::set_fullscreen(true);
                 }
                 CxOsOp::NormalizeWindow(_window_id) => {
-                    with_ios_app(|app| app.set_fullscreen(false));
+                    IosApp::set_fullscreen(false);
                 }
                 CxOsOp::SetCursor(_) => {
                     // no need
@@ -999,18 +999,20 @@ impl Cx {
                     visible,
                 } => {
                     let rect = area.clipped_rect(self);
-                    with_ios_app(|app| {
-                        let Some(mtk_view) = app.mtk_view else {
-                            return;
-                        };
+                    // Extract mtk_view inside a short borrow, then do UIKit
+                    // view hierarchy ops outside — addSubview/removeFromSuperview/
+                    // setFrame can trigger layout callbacks that re-enter IOS_APP.
+                    let mtk_view = with_ios_app(|app| app.mtk_view);
+                    if let Some(mtk_view) = mtk_view {
                         let host_view: ObjcId = unsafe { msg_send![mtk_view, superview] };
-                        if host_view == nil {
-                            return;
+                        if host_view != nil {
+                            if let Some(browser) =
+                                self.os.system_browsers.get_mut(&browser_id)
+                            {
+                                browser.update(host_view, rect, visible);
+                            }
                         }
-                        if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
-                            browser.update(host_view, rect, visible);
-                        }
-                    });
+                    }
                 }
                 CxOsOp::DetachSystemBrowser { browser_id } => {
                     if let Some(browser) = self.os.system_browsers.get_mut(&browser_id) {
