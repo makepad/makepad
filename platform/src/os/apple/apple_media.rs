@@ -8,7 +8,7 @@ use {
     std::sync::{Arc, Mutex},
 };
 
-#[cfg(all(feature = "hotreload", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 use std::{ffi::c_void, sync::OnceLock};
 
 #[derive(Default)]
@@ -90,7 +90,7 @@ struct AppleH264Probe {
     decode_software: bool,
 }
 
-#[cfg(all(feature = "hotreload", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 unsafe fn videotoolbox_symbol(name: &'static [u8]) -> Option<*mut c_void> {
     static VIDEOTOOLBOX_FRAMEWORK: OnceLock<usize> = OnceLock::new();
 
@@ -114,7 +114,7 @@ unsafe fn videotoolbox_symbol(name: &'static [u8]) -> Option<*mut c_void> {
     Some(symbol)
 }
 
-#[cfg(all(feature = "hotreload", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 unsafe fn vt_is_hardware_encode_supported(codec_type: u32) -> bool {
     type VtIsHardwareSupportedFn = unsafe extern "C" fn(u32) -> BOOL;
 
@@ -125,12 +125,12 @@ unsafe fn vt_is_hardware_encode_supported(codec_type: u32) -> bool {
     unsafe { func(codec_type) == YES }
 }
 
-#[cfg(not(all(feature = "hotreload", target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 unsafe fn vt_is_hardware_encode_supported(codec_type: u32) -> bool {
     VTIsHardwareEncodeSupported(codec_type) == YES
 }
 
-#[cfg(all(feature = "hotreload", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 unsafe fn vt_is_hardware_decode_supported(codec_type: u32) -> bool {
     type VtIsHardwareSupportedFn = unsafe extern "C" fn(u32) -> BOOL;
 
@@ -141,7 +141,7 @@ unsafe fn vt_is_hardware_decode_supported(codec_type: u32) -> bool {
     unsafe { func(codec_type) == YES }
 }
 
-#[cfg(not(all(feature = "hotreload", target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 unsafe fn vt_is_hardware_decode_supported(codec_type: u32) -> bool {
     VTIsHardwareDecodeSupported(codec_type) == YES
 }
