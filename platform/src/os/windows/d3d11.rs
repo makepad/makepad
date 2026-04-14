@@ -85,10 +85,10 @@ use crate::{
                         DXGI_FORMAT_R8_UNORM,
                         DXGI_SAMPLE_DESC,
                     },
-                    CreateDXGIFactory2, IDXGIFactory2, IDXGIResource, IDXGISwapChain1,
-                    DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_RGBA, DXGI_SCALING_NONE,
-                    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                    DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                    CreateDXGIFactory2, IDXGIDevice1, IDXGIFactory2, IDXGIResource,
+                    IDXGISwapChain1, DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_RGBA,
+                    DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+                    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 },
             },
         },
@@ -650,6 +650,20 @@ fn texture_pixel_to_dx11_pixel(pix: &TexturePixel) -> DXGI_FORMAT {
     }
 }
 
+/// Calls DwmFlush to synchronize with the Desktop Window Manager compositor.
+/// This blocks until DWM has completed its current composition cycle, ensuring
+/// that a just-presented swap chain frame is picked up before the next desktop
+/// repaint. We ignore errors (e.g. DWM disabled on remote desktop sessions).
+fn dwm_flush() {
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmFlush() -> i32;
+    }
+    unsafe {
+        let _ = DwmFlush();
+    }
+}
+
 pub struct D3d11Window {
     pub window_id: WindowId,
     pub is_in_resize: bool,
@@ -795,9 +809,29 @@ impl D3d11Window {
         self.alloc_size = Vec2d::default();
     }
 
+    /// Update the swap chain's background color to match the pass clear
+    /// color. With DXGI_SCALING_NONE, any gap between the (old-size) swap
+    /// chain buffer and the (new-size) window is filled with this color.
+    /// By matching the app's background, the gap becomes invisible.
+    pub fn sync_background_color(&self, clear_color: crate::makepad_math::Vec4f) {
+        unsafe {
+            let _ = self.swap_chain.SetBackgroundColor(&mut DXGI_RGBA {
+                r: clear_color.x,
+                g: clear_color.y,
+                b: clear_color.z,
+                a: clear_color.w,
+            });
+        }
+    }
+
     pub fn resize_buffers(&mut self, d3d11_cx: &D3d11Cx) {
         if self.alloc_size == self.window_geom.inner_size {
             return;
+        }
+        let inner = self.window_geom.inner_size;
+        let dpi = self.window_geom.dpi_factor;
+        if (inner.x * dpi) < 1.0 || (inner.y * dpi) < 1.0 {
+            return; // ResizeBuffers rejects zero dimensions.
         }
         self.alloc_size = self.window_geom.inner_size;
         self.swap_texture = None;
@@ -831,7 +865,16 @@ impl D3d11Window {
         unsafe {
             self.swap_chain
                 .Present(if vsync { 1 } else { 0 }, DXGI_PRESENT(0))
-                .unwrap()
+                .unwrap();
+
+            // During an active window resize, synchronize with the DWM
+            // compositor so the freshly-presented frame is composited
+            // before the desktop is repainted at the new window size.
+            // This is analogous to Metal's waitUntilScheduled()+present()
+            // path used on macOS during live resize.
+            if self.is_in_resize {
+                dwm_flush();
+            }
         };
     }
 }
@@ -867,6 +910,17 @@ impl D3d11Cx {
 
             let device = device.unwrap();
             let context = context.unwrap();
+
+            // Reduce DXGI frame latency from the default of 3 to 1.
+            // This minimizes the presentation queue depth so that
+            // freshly-rendered frames reach DWM sooner, which is
+            // critical during window resize to avoid rubber-banding.
+            if let Ok(dxgi_device) = device.cast::<IDXGIDevice1>() {
+                let _ = (Interface::vtable(&dxgi_device).SetMaximumFrameLatency)(
+                    Interface::as_raw(&dxgi_device),
+                    1,
+                );
+            }
 
             device
                 .CreateQuery(

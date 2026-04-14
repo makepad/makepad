@@ -533,14 +533,15 @@ pub fn define_textfield_delegate() -> *const Class {
     }
     extern "C" fn input_mode_did_change(_: &Object, _: Sel, _notif: ObjcId) {
         // When keyboard language changes, reload input views so iOS re-queries
-        // autocorrectionType (which dynamically checks CJK vs non-CJK)
-        try_with_ios_app(|app| {
-            if let Some(text_input_view) = app.text_input_view {
-                unsafe {
-                    let () = msg_send![text_input_view, reloadInputViews];
-                }
+        // autocorrectionType (which dynamically checks CJK vs non-CJK).
+        // Extract the view pointer first; reloadInputViews can trigger
+        // synchronous UIKit callbacks that re-enter IOS_APP.
+        let view = try_with_ios_app(|app| app.text_input_view).flatten();
+        if let Some(text_input_view) = view {
+            unsafe {
+                let () = msg_send![text_input_view, reloadInputViews];
             }
-        });
+        }
     }
 
     unsafe {

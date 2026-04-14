@@ -43,6 +43,7 @@ fn show_studio_help() {
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  echo '{{\"ListBuilds\":[]}}' | cargo makepad studio");
+    eprintln!("  echo '{{\"ListAppSockets\":[]}}' | cargo makepad studio");
 }
 
 pub fn handle_studio(args: &[String]) -> Result<(), String> {
@@ -78,6 +79,8 @@ pub fn handle_studio(args: &[String]) -> Result<(), String> {
 
 fn resolve_host_port(studio_override: Option<String>) -> Result<(String, u16), String> {
     let raw = if let Some(studio) = studio_override {
+        studio
+    } else if let Ok(studio) = env::var("STUDIO_HOST") {
         studio
     } else if let Ok(studio) = env::var("STUDIO") {
         studio
@@ -499,6 +502,7 @@ fn should_emit_protocol_response(msg: &HubToClient) -> bool {
             | HubToClient::FindFileResults { .. }
             | HubToClient::SearchFileResults { .. }
             | HubToClient::Builds { .. }
+            | HubToClient::AppSockets { .. }
             | HubToClient::RunItems { .. }
             | HubToClient::BuildStarted { .. }
             | HubToClient::BuildStopped { .. }

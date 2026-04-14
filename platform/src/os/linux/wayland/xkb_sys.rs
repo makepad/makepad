@@ -404,6 +404,9 @@ extern "C" {
     // Key repeat
     pub fn xkb_keymap_key_repeats(keymap: *mut xkb_keymap, key: xkb_keycode_t) -> c_int;
 
+    // Get keymap from state
+    pub fn xkb_state_get_keymap(state: *mut xkb_state) -> *mut xkb_keymap;
+
     // Keysym utilities
     pub fn xkb_keysym_get_name(keysym: xkb_keysym_t, buffer: *mut c_char, size: usize) -> c_int;
 
@@ -700,6 +703,14 @@ impl XkbState {
             None
         } else {
             Some(XkbState { ptr })
+        }
+    }
+
+    /// Check if a key should repeat according to the keymap
+    pub fn key_repeats(&self, keycode: u32) -> bool {
+        unsafe {
+            let keymap = xkb_state_get_keymap(self.ptr);
+            xkb_keymap_key_repeats(keymap, keycode) != 0
         }
     }
 
