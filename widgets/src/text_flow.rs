@@ -1021,7 +1021,7 @@ impl TextFlow {
         cx.begin_turtle(walk, self.layout);
         self.draw_state.set(DrawState::Drawing);
         self.draw_block.append_to_draw_call(cx);
-        self.draw_text.begin_many_instances(cx);
+        self.draw_text.begin_deferred_slug_flush();
         self.clear_stacks();
         self.lines_drawn = 0;
         self.content_truncated = false;
@@ -1076,7 +1076,7 @@ impl TextFlow {
     }
 
     pub fn end(&mut self, cx: &mut Cx2d) {
-        self.draw_text.end_many_instances(cx);
+        self.draw_text.end_deferred_slug_flush(cx);
 
         // Draw selection highlight before finishing the turtle
         self.draw_selection_rects(cx);

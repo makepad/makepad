@@ -614,7 +614,7 @@ pub struct DrawText {
     #[rust]
     pending_slug_flush_generation: u64,
     #[rust]
-    pending_slug_flush_generation_pad: u64,
+    slug_flush_defer_depth: u64,
     #[live]
     pub text_style: TextStyle,
     #[live(1.0)]
@@ -718,9 +718,27 @@ impl DrawText {
 
     pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
         if let Some(instances) = self.many_instances.take() {
-            self.flush_slug_textures_if_needed(cx);
+            self.flush_slug_textures_if_allowed(cx);
             self.finish_many_instances(cx, instances);
         }
+    }
+
+    /// Defers SLUG atlas uploads while preserving the original draw-call order.
+    ///
+    /// This is useful for composite text widgets like `TextFlow`, which issue
+    /// many separate `DrawText` runs interleaved with non-text draw calls. Those
+    /// widgets need the glyph uploads to be coalesced, but cannot safely hold a
+    /// single `many_instances` batch open across the whole widget.
+    pub fn begin_deferred_slug_flush(&mut self) {
+        self.slug_flush_defer_depth = self.slug_flush_defer_depth.saturating_add(1);
+    }
+
+    pub fn end_deferred_slug_flush(&mut self, cx: &mut Cx2d) {
+        if self.slug_flush_defer_depth == 0 {
+            return;
+        }
+        self.slug_flush_defer_depth -= 1;
+        self.flush_slug_textures_if_allowed(cx);
     }
 
     pub fn draw_rasterized_glyphs_abs(
@@ -1086,8 +1104,15 @@ impl DrawText {
                 &mut instances.instances,
             );
         }
-        self.flush_slug_textures_if_needed(cx);
+        self.flush_slug_textures_if_allowed(cx);
         self.finish_many_instances(cx, instances);
+    }
+
+    fn flush_slug_textures_if_allowed(&mut self, cx: &mut Cx2d) {
+        if self.slug_flush_defer_depth != 0 {
+            return;
+        }
+        self.flush_slug_textures_if_needed(cx);
     }
 
     fn flush_slug_textures_if_needed(&mut self, cx: &mut Cx2d) {
