@@ -2047,6 +2047,18 @@ impl CxTexture {
     /// Note: This method assumes that the texture format doesn't change between updates.
     /// This is safe because when allocating textures at the Cx level, there are compatibility checks.
     pub fn update_vec_texture(&mut self, gl: &LibGl, _os_type: &OsType) {
+        fn gl_unpack_alignment(bytes_per_pixel: usize) -> i32 {
+            if bytes_per_pixel % 8 == 0 {
+                8
+            } else if bytes_per_pixel % 4 == 0 {
+                4
+            } else if bytes_per_pixel % 2 == 0 {
+                2
+            } else {
+                1
+            }
+        }
+
         let mut needs_realloc = false;
         if self.alloc_vec() {
             if let Some(previous) = self.previous_platform_resource.take() {
@@ -2283,10 +2295,11 @@ impl CxTexture {
                 _ => panic!("Unsupported texture format"),
             };
 
-            // Partial texture updates don't (yet) work on OHOS simulators/emulators.
-
-            // DISABLE PARTIAL TEXTURE UPDATES ENTIRELY. Its broken.
-            const DO_PARTIAL_TEXTURE_UPDATES: bool = false; //cfg!(not(ohos_sim));
+            // Partial texture uploads are critical for append-only SLUG float atlases on
+            // Linux desktop. OHOS simulators/emulators still need the conservative full
+            // upload path.
+            const DO_PARTIAL_TEXTURE_UPDATES: bool = cfg!(not(ohos_sim));
+            let unpack_alignment = gl_unpack_alignment(bytes_per_pixel);
 
             match updated {
                 TextureUpdated::Partial(rect) if DO_PARTIAL_TEXTURE_UPDATES => {
@@ -2304,7 +2317,7 @@ impl CxTexture {
                         );
                     }
 
-                    (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                    (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
                     (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
                     (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, rect.origin.x as i32);
                     (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, rect.origin.y as i32);
@@ -2322,7 +2335,7 @@ impl CxTexture {
                 }
                 // Note: this `Partial(_)` case will only match if `DO_PARTIAL_TEXTURE_UPDATES` is false.
                 TextureUpdated::Partial(_) | TextureUpdated::Full => {
-                    (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, bytes_per_pixel);
+                    (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, unpack_alignment);
                     (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, width as _);
                     (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
                     (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
@@ -2340,6 +2353,11 @@ impl CxTexture {
                 }
                 TextureUpdated::Empty => panic!("already asserted that updated is not empty"),
             };
+
+            (gl.glPixelStorei)(gl_sys::UNPACK_ALIGNMENT, 4);
+            (gl.glPixelStorei)(gl_sys::UNPACK_ROW_LENGTH, 0);
+            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_PIXELS, 0);
+            (gl.glPixelStorei)(gl_sys::UNPACK_SKIP_ROWS, 0);
 
             (gl.glTexParameteri)(
                 gl_sys::TEXTURE_2D,
