@@ -330,6 +330,12 @@ pub struct CxVulkan {
 }
 
 impl CxVulkan {
+    pub(crate) fn has_drawable_surface(&self) -> bool {
+        !self.window.is_null()
+            && self.surface != vk::SurfaceKHR::null()
+            && self.swapchain != vk::SwapchainKHR::null()
+    }
+
     fn geometry_id_is_live(cx: &Cx, geometry_id: GeometryId) -> bool {
         let slot_index = geometry_id.slot_index();
         cx.geometries
