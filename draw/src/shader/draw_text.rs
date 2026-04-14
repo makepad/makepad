@@ -73,26 +73,87 @@ script_mod! {
 
         radius: uniform(float)
         cutoff: uniform(float)
+        aa_pad_px: uniform(float(1.0))
+        slug_matrix_0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        slug_matrix_1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
+        slug_matrix_3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        slug_viewport_px: uniform(vec2(1.0, 1.0))
         total_chars: instance(1000000.0)
 
         grayscale_texture: texture_2d(float)
         color_texture: texture_2d(float)
         msdf_texture: texture_2d(float)
+        curve_texture: texture_2d(float)
+        band_texture: texture_2d(float)
+
+        saturate: fn(v: float) -> float {
+            return clamp(v, 0.0, 1.0)
+        }
+
+        slug_dilate: fn(pos: vec2, tex: vec2, jac: vec4, normal: vec2) -> vec4 {
+            let n = normalize(normal)
+            let s = dot(self.slug_matrix_3.xy, pos) + self.slug_matrix_3.w
+            let t = dot(self.slug_matrix_3.xy, n)
+
+            let u = (
+                s * dot(self.slug_matrix_0.xy, n)
+                    - t * (dot(self.slug_matrix_0.xy, pos) + self.slug_matrix_0.w)
+            ) * self.slug_viewport_px.x
+            let v = (
+                s * dot(self.slug_matrix_1.xy, n)
+                    - t * (dot(self.slug_matrix_1.xy, pos) + self.slug_matrix_1.w)
+            ) * self.slug_viewport_px.y
+
+            let s2 = s * s
+            let st = s * t
+            let uv = u * u + v * v
+            let d = normal * (
+                s2 * (st + sqrt(uv)) / max(uv - st * st, 0.0000001)
+            ) * self.aa_pad_px
+
+            let vpos = pos + d
+            let vtex = vec2(tex.x + dot(d, jac.xy), tex.y + dot(d, jac.zw))
+            return vec4(vtex.x, vtex.y, vpos.x, vpos.y)
+        }
 
         vertex: fn() {
-            let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-            let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw)
-            let p_normalized = (p_clipped - self.rect_pos) / self.rect_size
+            let use_slug = if self.texture_index > 2.5 {1.0} else {0.0}
 
-            self.pos = p_normalized;
-            self.t = mix(self.t_min, self.t_max, p_normalized.xy)
+            let p_raster = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
+            let p_clipped_raster = clamp(p_raster, self.draw_clip.xy, self.draw_clip.zw)
+            let p_normalized_raster = (p_clipped_raster - self.rect_pos) / self.rect_size
+
+            let pad_lpx = self.aa_pad_px / max(self.draw_pass.dpi_factor, 0.0001)
+            let content_rect_pos = self.rect_pos + vec2(pad_lpx, pad_lpx)
+            let content_rect_size = vec2(
+                max(self.rect_size.x - 2.0 * pad_lpx, 0.0001),
+                max(self.rect_size.y - 2.0 * pad_lpx, 0.0001)
+            )
+            let p_slug = mix(content_rect_pos, content_rect_pos + content_rect_size, self.geom.pos)
+            let jac = vec4(1.0 / content_rect_size.x, 0.0, 0.0, 1.0 / content_rect_size.y)
+            let corner = self.geom.pos * 2.0 - 1.0
+            let normal = if dot(corner, corner) > 0.000001 {
+                corner
+            } else {
+                vec2(1.0, 0.0)
+            }
+            let dilated = self.slug_dilate(p_slug, self.geom.pos, jac, normal)
+            let p_clipped_slug = clamp(dilated.zw, self.draw_clip.xy, self.draw_clip.zw)
+            let pos_slug = vec2(
+                dilated.x + (p_clipped_slug.x - dilated.z) * jac.x,
+                dilated.y + (p_clipped_slug.y - dilated.w) * jac.w
+            )
+
+            self.pos = mix(p_normalized_raster, pos_slug, use_slug)
+            self.t = mix(self.t_min, self.t_max, p_normalized_raster.xy)
+            let final_pos = mix(p_clipped_raster, p_clipped_slug, use_slug)
             self.world = self.draw_list.view_transform * vec4(
-                p_clipped.x,
-                p_clipped.y,
+                final_pos.x,
+                final_pos.y,
                 self.glyph_depth + self.draw_call.zbias,
                 1.
             )
-            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * (self.world))
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
         }
 
         sdf: fn(scale, p, color) {
@@ -141,6 +202,330 @@ script_mod! {
             return a
         }
 
+        fetch_curve_texel: fn(texel_idx: float) -> vec4 {
+            let tex_size = self.curve_texture.size()
+            let row = floor(texel_idx / tex_size.x)
+            let col = texel_idx - row * tex_size.x
+            let uv = vec2(
+                (col + 0.5) / tex_size.x,
+                (row + 0.5) / tex_size.y
+            )
+            return self.curve_texture.sample_nearest(uv)
+        }
+
+        fetch_band_texel: fn(texel_idx: float) -> vec4 {
+            let tex_size = self.band_texture.size()
+            let row = floor(texel_idx / tex_size.x)
+            let col = texel_idx - row * tex_size.x
+            let uv = vec2(
+                (col + 0.5) / tex_size.x,
+                (row + 0.5) / tex_size.y
+            )
+            return self.band_texture.sample_nearest(uv)
+        }
+
+        pick_channel: fn(v: vec4, channel: float) -> float {
+            if channel < 0.5 {
+                return v.x
+            }
+            if channel < 1.5 {
+                return v.y
+            }
+            if channel < 2.5 {
+                return v.z
+            }
+            return v.w
+        }
+
+        calc_root_code: fn(y1: float, y2: float, y3: float) -> u32 {
+            let i1 = asuint(y1) >> u32(31)
+            let i2 = asuint(y2) >> u32(30)
+            let i3 = asuint(y3) >> u32(29)
+
+            let shift = (i1 & u32(1)) | (i2 & u32(2)) | (i3 & u32(4))
+            return (u32(11892) >> shift) & u32(257)
+        }
+
+        solve_horiz_poly: fn(p12: vec4, p3: vec2) -> vec2 {
+            let a = p12.xy - p12.zw * 2.0 + p3
+            let b = p12.xy - p12.zw
+            let ra = 1.0 / a.y
+            let rb = 0.5 / b.y
+
+            let d = sqrt(max(b.y * b.y - a.y * p12.y, 0.0))
+            let mut t1 = (b.y - d) * ra
+            let mut t2 = (b.y + d) * ra
+            if abs(a.y) < 1.0 / 65536.0 {
+                t1 = p12.y * rb
+                t2 = t1
+            }
+            return vec2(
+                (a.x * t1 - b.x * 2.0) * t1 + p12.x,
+                (a.x * t2 - b.x * 2.0) * t2 + p12.x
+            )
+        }
+
+        solve_vert_poly: fn(p12: vec4, p3: vec2) -> vec2 {
+            let a = p12.xy - p12.zw * 2.0 + p3
+            let b = p12.xy - p12.zw
+            let ra = 1.0 / a.x
+            let rb = 0.5 / b.x
+
+            let d = sqrt(max(b.x * b.x - a.x * p12.x, 0.0))
+            let mut t1 = (b.x - d) * ra
+            let mut t2 = (b.x + d) * ra
+            if abs(a.x) < 1.0 / 65536.0 {
+                t1 = p12.x * rb
+                t2 = t1
+            }
+            return vec2(
+                (a.y * t1 - b.y * 2.0) * t1 + p12.y,
+                (a.y * t2 - b.y * 2.0) * t2 + p12.y
+            )
+        }
+
+        scan_horizontal_list: fn(list_offset: float, list_count: float, sample: vec2, px_size: float) -> vec2 {
+            let limit = floor(list_count + 0.5)
+            var coverage = 0.0
+            var weight = 0.0
+
+            var j = 0.0
+            loop {
+                if j >= limit { break }
+
+                let packed_idx = floor(j * 0.25)
+                let channel = j - packed_idx * 4.0
+                let idx_data = self.fetch_band_texel(list_offset + packed_idx)
+                let curve_idx = self.pick_channel(idx_data, channel)
+
+                let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
+                let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
+                if max(max(p12.x, p12.z), p3.x) / px_size < -0.5 { break }
+
+                let code = self.calc_root_code(p12.y, p12.w, p3.y)
+                if code != u32(0) {
+                    let r = self.solve_horiz_poly(p12, p3) / px_size
+                    if (code & u32(1)) != u32(0) {
+                        coverage = coverage + self.saturate(r.x + 0.5)
+                        weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
+                    }
+                    if code > u32(1) {
+                        coverage = coverage - self.saturate(r.y + 0.5)
+                        weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
+                    }
+                }
+
+                j = j + 1.0
+            }
+
+            return vec2(coverage, weight)
+        }
+
+        scan_vertical_list: fn(list_offset: float, list_count: float, sample: vec2, px_size: float) -> vec2 {
+            let limit = floor(list_count + 0.5)
+            var coverage = 0.0
+            var weight = 0.0
+
+            var j = 0.0
+            loop {
+                if j >= limit { break }
+
+                let packed_idx = floor(j * 0.25)
+                let channel = j - packed_idx * 4.0
+                let idx_data = self.fetch_band_texel(list_offset + packed_idx)
+                let curve_idx = self.pick_channel(idx_data, channel)
+
+                let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
+                let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
+                if max(max(p12.y, p12.w), p3.y) / px_size < -0.5 { break }
+
+                let code = self.calc_root_code(p12.x, p12.z, p3.x)
+                if code != u32(0) {
+                    let r = self.solve_vert_poly(p12, p3) / px_size
+                    if (code & u32(1)) != u32(0) {
+                        coverage = coverage - self.saturate(r.x + 0.5)
+                        weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
+                    }
+                    if code > u32(1) {
+                        coverage = coverage + self.saturate(r.y + 0.5)
+                        weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
+                    }
+                }
+
+                j = j + 1.0
+            }
+
+            return vec2(coverage, weight)
+        }
+
+        scan_horizontal_all: fn(sample: vec2, px_size: float) -> vec2 {
+            let limit = floor(self.curve_count + 0.5)
+            var coverage = 0.0
+            var weight = 0.0
+
+            var i = 0.0
+            loop {
+                if i >= limit { break }
+
+                let curve_idx = self.curve_offset + i
+                let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
+                let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
+                let code = self.calc_root_code(p12.y, p12.w, p3.y)
+                if code != u32(0) {
+                    let r = self.solve_horiz_poly(p12, p3) / px_size
+                    if (code & u32(1)) != u32(0) {
+                        coverage = coverage + self.saturate(r.x + 0.5)
+                        weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
+                    }
+                    if code > u32(1) {
+                        coverage = coverage - self.saturate(r.y + 0.5)
+                        weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
+                    }
+                }
+
+                i = i + 1.0
+            }
+
+            return vec2(coverage, weight)
+        }
+
+        scan_vertical_all: fn(sample: vec2, px_size: float) -> vec2 {
+            let limit = floor(self.curve_count + 0.5)
+            var coverage = 0.0
+            var weight = 0.0
+
+            var i = 0.0
+            loop {
+                if i >= limit { break }
+
+                let curve_idx = self.curve_offset + i
+                let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
+                let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
+                let code = self.calc_root_code(p12.x, p12.z, p3.x)
+                if code != u32(0) {
+                    let r = self.solve_vert_poly(p12, p3) / px_size
+                    if (code & u32(1)) != u32(0) {
+                        coverage = coverage - self.saturate(r.x + 0.5)
+                        weight = max(weight, self.saturate(1.0 - abs(r.x) * 2.0))
+                    }
+                    if code > u32(1) {
+                        coverage = coverage + self.saturate(r.y + 0.5)
+                        weight = max(weight, self.saturate(1.0 - abs(r.y) * 2.0))
+                    }
+                }
+
+                i = i + 1.0
+            }
+
+            return vec2(coverage, weight)
+        }
+
+        calc_coverage: fn(xcov: float, ycov: float, xwgt: float, ywgt: float) -> float {
+            let coverage = max(
+                abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536.0),
+                min(abs(xcov), abs(ycov))
+            )
+            if self.fill_flags >= 4096.0 {
+                return 1.0 - abs(1.0 - fract(coverage * 0.5) * 2.0)
+            }
+            return self.saturate(coverage)
+        }
+
+        alpha_at: fn(sample: vec2, px_x: float, px_y: float) -> float {
+            var coverage_x = 0.0
+            var coverage_y = 0.0
+            var weight_x = 0.0
+            var weight_y = 0.0
+
+            if self.band_count > 0.5 {
+                let num_bands = max(floor(self.band_count + 0.5), 1.0)
+                let h_band_idx = clamp(floor(sample.y * num_bands), 0.0, num_bands - 1.0)
+                let v_band_idx = clamp(floor(sample.x * num_bands), 0.0, num_bands - 1.0)
+
+                let h_band_info = self.fetch_band_texel(self.band_offset + h_band_idx)
+                let h_band = self.scan_horizontal_list(
+                    floor(h_band_info.x + 0.5),
+                    h_band_info.y,
+                    sample,
+                    px_x,
+                )
+                coverage_x = h_band.x
+                weight_x = h_band.y
+
+                let v_band_info = self.fetch_band_texel(self.band_offset + num_bands + v_band_idx)
+                let v_band = self.scan_vertical_list(
+                    floor(v_band_info.x + 0.5),
+                    v_band_info.y,
+                    sample,
+                    px_y,
+                )
+                coverage_y = v_band.x
+                weight_y = v_band.y
+            } else {
+                let x_scan = self.scan_horizontal_all(sample, px_x)
+                coverage_x = x_scan.x
+                weight_x = x_scan.y
+
+                let y_scan = self.scan_vertical_all(sample, px_y)
+                coverage_y = y_scan.x
+                weight_y = y_scan.y
+            }
+
+            return self.calc_coverage(coverage_x, coverage_y, weight_x, weight_y)
+        }
+
+        sample_slug_pixel: fn() {
+            if self.curve_count < 0.5 {
+                return vec4(0.0, 0.0, 0.0, 0.0)
+            }
+
+            let sample = self.pos
+            let px_x = max(abs(dFdx(sample.x)) + abs(dFdy(sample.x)), 0.00001)
+            let px_y = max(abs(dFdx(sample.y)) + abs(dFdy(sample.y)), 0.00001)
+            let alpha_base = if self.aa_4x4 > 0.5 {
+                let x0 = px_x * 0.125
+                let x1 = px_x * 0.375
+                let y0 = px_y * 0.125
+                let y1 = px_y * 0.375
+                let a0 = self.alpha_at(sample + vec2(-x1, -y1), px_x, px_y)
+                let a1 = self.alpha_at(sample + vec2(-x0, -y1), px_x, px_y)
+                let a2 = self.alpha_at(sample + vec2( x0, -y1), px_x, px_y)
+                let a3 = self.alpha_at(sample + vec2( x1, -y1), px_x, px_y)
+                let a4 = self.alpha_at(sample + vec2(-x1, -y0), px_x, px_y)
+                let a5 = self.alpha_at(sample + vec2(-x0, -y0), px_x, px_y)
+                let a6 = self.alpha_at(sample + vec2( x0, -y0), px_x, px_y)
+                let a7 = self.alpha_at(sample + vec2( x1, -y0), px_x, px_y)
+                let a8 = self.alpha_at(sample + vec2(-x1,  y0), px_x, px_y)
+                let a9 = self.alpha_at(sample + vec2(-x0,  y0), px_x, px_y)
+                let a10 = self.alpha_at(sample + vec2( x0,  y0), px_x, px_y)
+                let a11 = self.alpha_at(sample + vec2( x1,  y0), px_x, px_y)
+                let a12 = self.alpha_at(sample + vec2(-x1,  y1), px_x, px_y)
+                let a13 = self.alpha_at(sample + vec2(-x0,  y1), px_x, px_y)
+                let a14 = self.alpha_at(sample + vec2( x0,  y1), px_x, px_y)
+                let a15 = self.alpha_at(sample + vec2( x1,  y1), px_x, px_y)
+                clamp(
+                    (a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15)
+                        * 0.0625,
+                    0.0,
+                    1.0
+                )
+            } else if self.aa_2x2 > 0.5 {
+                let offset = vec2(px_x * 0.25, px_y * 0.25)
+                let a0 = self.alpha_at(sample + vec2(-offset.x, -offset.y), px_x, px_y)
+                let a1 = self.alpha_at(sample + vec2(offset.x, -offset.y), px_x, px_y)
+                let a2 = self.alpha_at(sample + vec2(-offset.x, offset.y), px_x, px_y)
+                let a3 = self.alpha_at(sample + vec2(offset.x, offset.y), px_x, px_y)
+                clamp((a0 + a1 + a2 + a3) * 0.25, 0.0, 1.0)
+            } else {
+                self.alpha_at(sample, px_x, px_y)
+            }
+            let darken = clamp(max(px_x, px_y) * self.stem_darken, 0.0, self.stem_darken_max)
+            let edge_weight = clamp(1.0 - abs(alpha_base * 2.0 - 1.0), 0.0, 1.0)
+            let alpha = clamp(alpha_base + darken * edge_weight, 0.0, 1.0)
+            let color = self.get_color()
+            return vec4(color.rgb * color.a * alpha, color.a * alpha)
+        }
+
         get_color: fn() {
             return self.color
         }
@@ -150,9 +535,9 @@ script_mod! {
         }
 
         sample_text_pixel: fn() {
-            let dxt = length(dFdx(self.t))
-            let dyt = length(dFdy(self.t))
-            if self.texture_index == 0 {
+            if self.texture_index < 0.5 {
+                let dxt = length(dFdx(self.t))
+                let dyt = length(dFdy(self.t))
                 let c = self.get_color()
                 let scale = (dxt + dyt) * self.grayscale_texture.size().x * 0.5
                 let tex_size = self.grayscale_texture.size()
@@ -160,13 +545,15 @@ script_mod! {
                 let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
                 let s = self.sdf(scale, p, c)
                 return s * vec4(c.rgb * c.a, c.a)
-            } else if self.texture_index == 1 {
+            } else if self.texture_index < 1.5 {
                 let tex_size = self.color_texture.size()
                 let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
                 let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
                 let c = self.color_texture.sample_as_bgra(p)
                 return vec4(c.rgb * c.a, c.a)
-            } else {
+            } else if self.texture_index < 2.5 {
+                let dxt = length(dFdx(self.t))
+                let dyt = length(dFdy(self.t))
                 let c = self.get_color()
                 let scale = (dxt + dyt) * self.msdf_texture.size().x * 0.5
                 let tex_size = self.msdf_texture.size()
@@ -174,6 +561,8 @@ script_mod! {
                 let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
                 let s = self.msdf(scale, p, c)
                 return s * vec4(c.rgb * c.a, c.a)
+            } else {
+                return self.sample_slug_pixel()
             }
         }
 
@@ -260,6 +649,32 @@ pub struct DrawText {
     pub atlas_plane: f32,
     #[live]
     pub pad1: f32,
+    #[live]
+    pub curve_offset: f32,
+    #[live]
+    pub curve_count: f32,
+    #[live]
+    pub band_offset: f32,
+    #[live]
+    pub band_count: f32,
+    #[live(0.0)]
+    pub fill_flags: f32,
+    #[live(0.0)]
+    pub aa_2x2: f32,
+    #[live(0.0)]
+    pub aa_4x4: f32,
+    #[live(0.2)]
+    pub stem_darken: f32,
+    #[live(0.125)]
+    pub stem_darken_max: f32,
+    // Keep the base DrawText instance payload 16-byte aligned so repr(C)
+    // subclasses with Vec4 fields don't pick up implicit Rust padding.
+    #[live(0.0)]
+    pub pad2: f32,
+    #[live(0.0)]
+    pub pad3: f32,
+    #[live(0.0)]
+    pub pad4: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -408,7 +823,11 @@ impl DrawText {
         if max_width_in_lpxs.is_none()
             && (self.text_overflow == TextOverflow::Ellipsis || self.max_lines > 0)
         {
-            if let crate::turtle::Size::Fit { max: Some(max_bound), .. } = walk.width {
+            if let crate::turtle::Size::Fit {
+                max: Some(max_bound),
+                ..
+            } = walk.width
+            {
                 if let Some(resolved) = max_bound.eval_width(cx) {
                     let padding = cx.turtle().padding();
                     max_width_in_lpxs =
@@ -682,6 +1101,32 @@ impl DrawText {
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());
         self.draw_vars.texture_slots[1] = Some(fonts.color_texture().clone());
         self.draw_vars.texture_slots[2] = Some(fonts.msdf_texture().clone());
+        self.draw_vars.texture_slots[3] = Some(fonts.slug_curve_texture().clone());
+        self.draw_vars.texture_slots[4] = Some(fonts.slug_band_texture().clone());
+
+        let pass_id = cx.pass_stack.last().unwrap().pass_id;
+        let draw_list_id = *cx.draw_list_stack.last().unwrap();
+        let pass_uniforms = cx.passes[pass_id].pass_uniforms.clone();
+        let view_transform = cx.draw_lists[draw_list_id]
+            .draw_list_uniforms
+            .view_transform;
+        let model_view = Mat4f::mul(&pass_uniforms.camera_view, &view_transform);
+        let slug_matrix = Mat4f::mul(&pass_uniforms.camera_projection, &model_view);
+        let viewport = cx.current_pass_size();
+        let dpi_factor = cx.current_dpi_factor() as f32;
+        let viewport_px = [
+            (viewport.x as f32 * dpi_factor).max(1.0),
+            (viewport.y as f32 * dpi_factor).max(1.0),
+        ];
+
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(slug_matrix_0), &mat4_row(&slug_matrix, 0));
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(slug_matrix_1), &mat4_row(&slug_matrix, 1));
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(slug_matrix_3), &mat4_row(&slug_matrix, 3));
+        self.draw_vars
+            .set_uniform(cx.cx, live_id!(slug_viewport_px), &viewport_px);
     }
 
     fn draw_row(
@@ -746,19 +1191,92 @@ impl DrawText {
         output: &mut Vec<f32>,
     ) {
         use crate::text::geom::Point;
+        let glyph_origin = Point::new(
+            origin_in_lpxs.x + glyph.offset_in_lpxs() * self.font_scale,
+            origin_in_lpxs.y,
+        );
+
+        let slug_glyph = {
+            cx.fonts
+                .borrow_mut()
+                .get_or_cache_slug_glyph(glyph.font.as_ref(), glyph.id)
+        };
+        if let Some(slug_glyph) = slug_glyph {
+            self.draw_slug_glyph(
+                cx,
+                glyph_origin,
+                glyph.font_size_in_lpxs,
+                glyph.color,
+                slug_glyph,
+                output,
+            );
+            return;
+        }
+
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         if let Some(rasterized_glyph) = glyph.rasterize(font_size_in_dpxs) {
             self.draw_rasterized_glyph(
-                Point::new(
-                    origin_in_lpxs.x + glyph.offset_in_lpxs() * self.font_scale,
-                    origin_in_lpxs.y,
-                ),
+                glyph_origin,
                 glyph.font_size_in_lpxs,
                 glyph.color,
                 rasterized_glyph,
                 output,
             );
         }
+    }
+
+    fn draw_slug_glyph(
+        &mut self,
+        cx: &mut Cx2d,
+        origin_in_lpxs: Point<f32>,
+        font_size_in_lpxs: f32,
+        color: Option<Color>,
+        glyph: crate::text::slug_atlas::SlugGlyphInfo,
+        output: &mut Vec<f32>,
+    ) {
+        let bounds_in_lpxs = TextRect::new(
+            Point::new(
+                origin_in_lpxs.x + glyph.origin_in_ems.x * font_size_in_lpxs * self.font_scale,
+                origin_in_lpxs.y
+                    + (-glyph.origin_in_ems.y - glyph.size_in_ems.height)
+                        * font_size_in_lpxs
+                        * self.font_scale,
+            ),
+            Size::new(
+                glyph.size_in_ems.width * font_size_in_lpxs * self.font_scale,
+                glyph.size_in_ems.height * font_size_in_lpxs * self.font_scale,
+            ),
+        );
+
+        let pad = (self.get_aa_pad_px(cx.cx) / cx.current_dpi_factor() as f32).max(0.0);
+        self.rect_pos = vec2(bounds_in_lpxs.origin.x - pad, bounds_in_lpxs.origin.y - pad)
+            + vec2(0.0, self.temp_y_shift * font_size_in_lpxs);
+        self.rect_size = vec2(
+            bounds_in_lpxs.size.width + pad * 2.0,
+            bounds_in_lpxs.size.height + pad * 2.0,
+        );
+        if let Some(color) = color {
+            self.color = vec4(
+                color.r as f32,
+                color.g as f32,
+                color.b as f32,
+                color.a as f32,
+            ) / 255.0;
+        }
+        self.texture_index = 3.0;
+        self.atlas_plane = 0.0;
+        self.t_min = vec2(0.0, 0.0);
+        self.t_max = vec2(0.0, 0.0);
+        self.curve_offset = glyph.curve_offset as f32;
+        self.curve_count = glyph.curve_count as f32;
+        self.band_offset = glyph.band_offset as f32;
+        self.band_count = glyph.band_count as f32;
+        self.fill_flags = glyph.fill_flags as f32;
+        let slice = self.draw_vars.as_slice();
+
+        output.extend_from_slice(slice);
+        self.glyph_depth += 0.000001;
+        self.char_index += 1.0;
     }
 
     fn draw_rasterized_glyph(
@@ -820,6 +1338,11 @@ impl DrawText {
         self.atlas_plane = glyph.atlas_plane as f32;
         self.t_min = vec2(t_min.x, t_min.y);
         self.t_max = vec2(t_max.x, t_max.y);
+        self.curve_offset = 0.0;
+        self.curve_count = 0.0;
+        self.band_offset = 0.0;
+        self.band_count = 0.0;
+        self.fill_flags = 0.0;
         let slice = self.draw_vars.as_slice();
 
         output.extend_from_slice(slice);
@@ -849,6 +1372,17 @@ impl DrawText {
     pub fn append_to_draw_call(&self, cx: &mut Cx2d) {
         cx.append_to_draw_call(&self.draw_vars);
     }
+
+    pub fn get_aa_pad_px(&self, cx: &mut Cx) -> f32 {
+        let mut value = [0.0];
+        self.draw_vars
+            .get_uniform(cx, live_id!(aa_pad_px), &mut value);
+        value[0]
+    }
+}
+
+fn mat4_row(mat: &Mat4f, row: usize) -> [f32; 4] {
+    [mat.v[row], mat.v[row + 4], mat.v[row + 8], mat.v[row + 12]]
 }
 
 #[derive(Debug, Clone, Script, ScriptHook)]

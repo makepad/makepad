@@ -1220,7 +1220,11 @@ impl GlShader {
                 let pixel_hash = Self::shader_source_hash(pixel);
 
                 #[cfg(target_os = "android")]
-                if matches!(os_type, OsType::Android(_)) {
+                let log_shader_builds = matches!(os_type, OsType::Android(_))
+                    && std::env::var_os("MAKEPAD_LOG_GL_SHADER_BUILDS").is_some();
+
+                #[cfg(target_os = "android")]
+                if log_shader_builds {
                     crate::log!(
                         "GL shader build start renderer={} vertex_hash={:016x} vertex_len={} fragment_hash={:016x} fragment_len={} vertex_preview={:?} fragment_preview={:?}",
                         get_gl_string(gl, gl_sys::RENDERER),
@@ -1238,7 +1242,7 @@ impl GlShader {
                 let vertex_ptrs = [vertex_ptr];
                 let vertex_lengths = [vertex_len];
                 #[cfg(target_os = "android")]
-                if matches!(os_type, OsType::Android(_)) {
+                if log_shader_builds {
                     crate::log!(
                         "GL shader upload vertex shader={} hash={:016x} len={}",
                         vs,
@@ -1248,7 +1252,7 @@ impl GlShader {
                 }
                 (gl.glShaderSource)(vs, 1, vertex_ptrs.as_ptr(), vertex_lengths.as_ptr());
                 #[cfg(target_os = "android")]
-                if matches!(os_type, OsType::Android(_)) {
+                if log_shader_builds {
                     crate::log!(
                         "GL shader compile vertex shader={} hash={:016x}",
                         vs,
@@ -1265,7 +1269,7 @@ impl GlShader {
                 let pixel_ptrs = [pixel_ptr];
                 let pixel_lengths = [pixel_len];
                 #[cfg(target_os = "android")]
-                if matches!(os_type, OsType::Android(_)) {
+                if log_shader_builds {
                     crate::log!(
                         "GL shader upload fragment shader={} hash={:016x} len={}",
                         fs,
@@ -1275,7 +1279,7 @@ impl GlShader {
                 }
                 (gl.glShaderSource)(fs, 1, pixel_ptrs.as_ptr(), pixel_lengths.as_ptr());
                 #[cfg(target_os = "android")]
-                if matches!(os_type, OsType::Android(_)) {
+                if log_shader_builds {
                     crate::log!(
                         "GL shader compile fragment shader={} hash={:016x}",
                         fs,
@@ -2159,6 +2163,7 @@ impl CxTexture {
                 data,
                 bytes_per_pixel,
                 use_mipmaps,
+                use_nearest_filter,
             ) = match &mut self.format {
                 TextureFormat::VecBGRAu8_32 {
                     width,
@@ -2177,6 +2182,7 @@ impl CxTexture {
                         data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                         4,
                         false,
+                        false,
                     )
                 }
                 TextureFormat::VecMipBGRAu8_32 {
@@ -2194,6 +2200,7 @@ impl CxTexture {
                     data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                     4,
                     true,
+                    false,
                 ),
                 TextureFormat::VecRGBAf32 {
                     width,
@@ -2203,12 +2210,13 @@ impl CxTexture {
                 } => (
                     *width,
                     *height,
-                    gl_sys::RGBA,
+                    gl_sys::RGBA32F,
                     gl_sys::RGBA,
                     gl_sys::FLOAT,
                     data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                     16,
                     false,
+                    true,
                 ),
                 TextureFormat::VecRu8 {
                     width,
@@ -2229,6 +2237,7 @@ impl CxTexture {
                         gl_sys::UNSIGNED_BYTE,
                         data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                         1,
+                        false,
                         false,
                     )
                 }
@@ -2252,6 +2261,7 @@ impl CxTexture {
                         data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                         2,
                         false,
+                        false,
                     )
                 }
                 TextureFormat::VecRf32 {
@@ -2262,12 +2272,13 @@ impl CxTexture {
                 } => (
                     *width,
                     *height,
-                    gl_sys::RED,
+                    gl_sys::R32F,
                     gl_sys::RED,
                     gl_sys::FLOAT,
                     data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
                     4,
                     false,
+                    true,
                 ),
                 _ => panic!("Unsupported texture format"),
             };
@@ -2333,7 +2344,9 @@ impl CxTexture {
             (gl.glTexParameteri)(
                 gl_sys::TEXTURE_2D,
                 gl_sys::TEXTURE_MIN_FILTER,
-                if use_mipmaps {
+                if use_nearest_filter {
+                    gl_sys::NEAREST
+                } else if use_mipmaps {
                     gl_sys::LINEAR_MIPMAP_LINEAR
                 } else {
                     gl_sys::LINEAR
@@ -2342,7 +2355,11 @@ impl CxTexture {
             (gl.glTexParameteri)(
                 gl_sys::TEXTURE_2D,
                 gl_sys::TEXTURE_MAG_FILTER,
-                gl_sys::LINEAR as i32,
+                if use_nearest_filter {
+                    gl_sys::NEAREST
+                } else {
+                    gl_sys::LINEAR
+                } as i32,
             );
 
             if use_mipmaps {

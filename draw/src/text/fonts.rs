@@ -1,12 +1,13 @@
 use {
     super::{
-        font::FontId,
+        font::{Font, FontId, GlyphId},
         font_family::{FontFamily, FontFamilyId},
         image::{Bgra, Image},
         layouter::{self, LaidoutText, LayoutParams, Layouter},
         loader::{FontDefinition, FontFamilyDefinition},
         msdfer::Msdfer,
         rasterizer::{CompletedMsdfJob, OutlineRasterizationMode, QueuedMsdfJob, Rasterizer},
+        slug_atlas::{SlugAtlas, SlugGlyphInfo},
     },
     crate::makepad_platform::*,
     std::{cell::RefCell, mem::ManuallyDrop, rc::Rc},
@@ -16,6 +17,7 @@ pub struct Fonts {
     layouter: Layouter,
     needs_prepare_atlases: bool,
     atlas_texture: Texture,
+    slug_atlas: SlugAtlas,
     msdf_job_sender: FromUISender<QueuedMsdfJob>,
     msdf_result_receiver: ToUIReceiver<CompletedMsdfJob>,
 }
@@ -69,6 +71,7 @@ impl Fonts {
                     updated: TextureUpdated::Empty,
                 },
             ),
+            slug_atlas: SlugAtlas::new(cx),
             msdf_job_sender,
             msdf_result_receiver,
         }
@@ -102,6 +105,22 @@ impl Fonts {
 
     pub fn msdf_texture(&self) -> &Texture {
         &self.atlas_texture
+    }
+
+    pub fn slug_curve_texture(&self) -> &Texture {
+        self.slug_atlas.curve_texture()
+    }
+
+    pub fn slug_band_texture(&self) -> &Texture {
+        self.slug_atlas.band_texture()
+    }
+
+    pub fn get_or_cache_slug_glyph(
+        &mut self,
+        font: &Font,
+        glyph_id: GlyphId,
+    ) -> Option<SlugGlyphInfo> {
+        self.slug_atlas.get_or_cache_glyph(font, glyph_id)
     }
 
     pub fn is_font_family_known(&self, id: FontFamilyId) -> bool {
@@ -158,6 +177,10 @@ impl Fonts {
             cx.redraw_all();
         }
         self.dispatch_msdf_jobs();
+        let slug_changed = self.slug_atlas.prepare_textures(cx);
+        if slug_changed {
+            cx.redraw_all();
+        }
         self.prepare_atlas_texture(cx);
         self.needs_prepare_atlases = true;
         true

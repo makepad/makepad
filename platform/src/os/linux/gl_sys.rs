@@ -100,8 +100,10 @@ pub const TEXTURE_BORDER_COLOR: GLenum = 0x1004;
 pub const DEBUG_OUTPUT: GLenum = 0x92E0;
 
 pub const RGBA: GLenum = 0x1908;
+pub const RGBA32F: GLenum = 0x8814;
 pub const BGRA: GLenum = 0x80E1;
 pub const RED: GLenum = 0x1903;
+pub const R32F: GLenum = 0x822E;
 pub const RG: GLenum = 0x8227;
 pub const R8: GLenum = 0x8229;
 pub const UNSIGNED_BYTE: GLenum = 0x1401;
