@@ -1,6 +1,7 @@
 package dev.makepad.android;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
@@ -11,9 +12,12 @@ import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.Manifest;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
@@ -37,6 +41,7 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.PixelCopy;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -59,6 +64,7 @@ import android.text.InputType;
 import android.text.Selection;
 import android.text.SpannableStringBuilder;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 
 import java.io.BufferedReader;
@@ -172,12 +178,25 @@ class MakepadSurface
     public void surfaceCreated(SurfaceHolder holder) {
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
+        Log.i("Makepad", "[" + SystemClock.uptimeMillis() + "] surfaceCreated"
+            + " size=" + getWidth() + "x" + getHeight()
+            + " surfaceValid=" + (surface != null && surface.isValid()));
         MakepadNative.surfaceOnSurfaceCreated(surface);
     }
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
+        Context context = getContext();
+        if (context instanceof MakepadActivity) {
+            MakepadActivity activity = (MakepadActivity) context;
+            if (activity.hasRecoverySnapshotAvailable()) {
+                activity.setSurfaceCoverVisible(true);
+            }
+        }
         Surface surface = holder.getSurface();
+        Log.i("Makepad", "[" + SystemClock.uptimeMillis() + "] surfaceDestroyed"
+            + " size=" + getWidth() + "x" + getHeight()
+            + " surfaceValid=" + (surface != null && surface.isValid()));
         MakepadNative.surfaceOnSurfaceDestroyed(surface);
     }
 
@@ -188,6 +207,10 @@ class MakepadSurface
                                int height) {
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
+        Log.i("Makepad", "[" + SystemClock.uptimeMillis() + "] surfaceChanged"
+            + " size=" + width + "x" + height
+            + " format=" + format
+            + " surfaceValid=" + (surface != null && surface.isValid()));
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
 
     }
@@ -610,9 +633,9 @@ class ResizingLayout
 
     public ResizingLayout(Context context){
         super(context);
-        // When viewing in landscape mode with keyboard shown, there are
-        // gaps on both sides so we fill the negative space with black.
-        setBackgroundColor(Color.BLACK);
+        // Keep a stable non-black fallback behind the SurfaceView for task snapshots
+        // and system transition frames that cannot capture the separate surface layer.
+        setBackgroundResource(R.drawable.makepad_launch_background);
         setOnApplyWindowInsetsListener(this);
     }
 
@@ -643,6 +666,12 @@ public class MakepadActivity
     implements MidiManager.OnDeviceOpenedListener
 {
     private static final String LOG_TAG = "Makepad";
+    private static final long SURFACE_COVER_FADE_OUT_MS = 100;
+    private static final long WARM_RESUME_SNAPSHOT_MAX_AGE_MS = 10000;
+    private static final int TASK_DESCRIPTION_BACKGROUND_COLOR = 0xFFF5F7FA;
+    private static Bitmap sWarmResumeSurfaceSnapshot;
+    private static long sWarmResumeSurfaceSnapshotUptimeMs;
+    private static int sWarmResumeSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
     //% MAIN_ACTIVITY_BODY
 
     private MakepadSurface view;
@@ -669,8 +698,14 @@ public class MakepadActivity
 
     // native camera preview overlays
     private FrameLayout mRootLayout;
+    private FrameLayout mSurfaceCoverOverlay;
+    private ImageView mSurfaceSnapshotBackdrop;
+    private ImageView mSurfaceSnapshotOverlay;
     private FrameLayout mCameraPreviewOverlay;
     private HashMap<Long, CameraPreviewSurface> mCameraPreviewViews = new HashMap<>();
+    private Bitmap mLatestSurfaceSnapshot;
+    private int mLatestSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
+    private boolean mSurfaceRecoveryOverlayVisible = false;
 
     // selection handles overlay
     private static final int SELECTION_HANDLE_START = 0;
@@ -687,7 +722,101 @@ public class MakepadActivity
         System.loadLibrary("makepad");
     }
 
+    private String orientationSummary() {
+        int orientation = getResources().getConfiguration().orientation;
+        if (orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
+            return "landscape";
+        }
+        if (orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT) {
+            return "portrait";
+        }
+        return "undefined";
+    }
+
+    private String visibilitySummary(int visibility) {
+        if (visibility == View.VISIBLE) {
+            return "VISIBLE";
+        }
+        if (visibility == View.INVISIBLE) {
+            return "INVISIBLE";
+        }
+        if (visibility == View.GONE) {
+            return "GONE";
+        }
+        return Integer.toString(visibility);
+    }
+
     private void logLifecycle(String message) {
+        Surface surface = null;
+        if (view != null && view.getHolder() != null) {
+            surface = view.getHolder().getSurface();
+        }
+        String surfaceSummary = view == null
+            ? "view=null"
+            : "view="
+                + view.getWidth() + "x" + view.getHeight()
+                + " vis=" + visibilitySummary(view.getVisibility())
+                + " surfaceValid=" + (surface != null && surface.isValid());
+        Log.i(LOG_TAG,
+            "[" + SystemClock.uptimeMillis() + "] "
+                + message
+                + " orient=" + orientationSummary()
+                + " focus=" + hasWindowFocus()
+                + " recovery=" + mSurfaceRecoveryOverlayVisible
+                + " snapshot=" + (mLatestSurfaceSnapshot != null)
+                + " " + surfaceSummary
+        );
+    }
+
+    private void cacheWarmResumeSurfaceSnapshot(Bitmap snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        sWarmResumeSurfaceSnapshot = snapshot;
+        sWarmResumeSurfaceSnapshotUptimeMs = SystemClock.uptimeMillis();
+        sWarmResumeSurfaceSnapshotOrientation = getResources().getConfiguration().orientation;
+    }
+
+    private boolean canRestoreWarmResumeSurfaceSnapshot() {
+        if (sWarmResumeSurfaceSnapshot == null) {
+            return false;
+        }
+        if (SystemClock.uptimeMillis() - sWarmResumeSurfaceSnapshotUptimeMs > WARM_RESUME_SNAPSHOT_MAX_AGE_MS) {
+            return false;
+        }
+        int orientation = getResources().getConfiguration().orientation;
+        return sWarmResumeSurfaceSnapshotOrientation == android.content.res.Configuration.ORIENTATION_UNDEFINED
+            || sWarmResumeSurfaceSnapshotOrientation == orientation;
+    }
+
+    private void clearWarmResumeSurfaceSnapshot() {
+        sWarmResumeSurfaceSnapshot = null;
+        sWarmResumeSurfaceSnapshotUptimeMs = 0;
+        sWarmResumeSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
+    }
+
+    boolean hasRecoverySnapshotAvailable() {
+        return mLatestSurfaceSnapshot != null;
+    }
+
+    private boolean hasCurrentOrientationRecoverySnapshot() {
+        if (mLatestSurfaceSnapshot == null) {
+            return false;
+        }
+        int orientation = getResources().getConfiguration().orientation;
+        return mLatestSurfaceSnapshotOrientation == android.content.res.Configuration.ORIENTATION_UNDEFINED
+            || mLatestSurfaceSnapshotOrientation == orientation;
+    }
+
+    private void restoreWarmResumeSurfaceSnapshotIfAvailable() {
+        if (!canRestoreWarmResumeSurfaceSnapshot()) {
+            return;
+        }
+        mLatestSurfaceSnapshot = sWarmResumeSurfaceSnapshot;
+        mLatestSurfaceSnapshotOrientation = getResources().getConfiguration().orientation;
+        updateSurfaceSnapshotBackdrop();
+        clearWarmResumeSurfaceSnapshot();
+        logLifecycle("restoreWarmResumeSurfaceSnapshotIfAvailable success");
     }
 
     @Override
@@ -701,9 +830,9 @@ public class MakepadActivity
 
         // On API 30+, Theme.NoTitleBar.Fullscreen sets FLAG_FULLSCREEN which positions
         // the window below the status bar, conflicting with the modern WindowInsetsController.
-        // Switch to a non-fullscreen theme and handle fullscreen programmatically.
+        // Switch from the launch theme to the app theme and handle fullscreen programmatically.
         if (Build.VERSION.SDK_INT >= 30) {
-            setTheme(android.R.style.Theme_DeviceDefault_NoActionBar);
+            setTheme(R.style.MakepadAppTheme);
         }
         
         super.onCreate(savedInstanceState);
@@ -718,10 +847,59 @@ public class MakepadActivity
         view = new MakepadSurface(this);
         // Put it inside a parent layout which can resize it using padding
         ResizingLayout layout = new ResizingLayout(this);
-        layout.addView(view);
+        FrameLayout surfaceContentLayout = new FrameLayout(this);
+        surfaceContentLayout.setLayoutParams(new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        surfaceContentLayout.setBackgroundResource(R.drawable.makepad_launch_background);
+
+        mSurfaceSnapshotBackdrop = new ImageView(this);
+        mSurfaceSnapshotBackdrop.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        mSurfaceSnapshotBackdrop.setBackgroundResource(R.drawable.makepad_launch_background);
+        mSurfaceSnapshotBackdrop.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        mSurfaceSnapshotBackdrop.setClickable(false);
+        mSurfaceSnapshotBackdrop.setFocusable(false);
+        mSurfaceSnapshotBackdrop.setVisibility(View.GONE);
+        surfaceContentLayout.addView(mSurfaceSnapshotBackdrop);
+
+        view.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        surfaceContentLayout.addView(view);
+        layout.addView(surfaceContentLayout);
 
         mRootLayout = new FrameLayout(this);
         mRootLayout.addView(layout);
+
+        mSurfaceCoverOverlay = new FrameLayout(this);
+        mSurfaceCoverOverlay.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        mSurfaceCoverOverlay.setBackgroundResource(R.drawable.makepad_launch_background);
+        mSurfaceCoverOverlay.setClickable(false);
+        mSurfaceCoverOverlay.setFocusable(false);
+        mSurfaceCoverOverlay.setAlpha(1.0f);
+        mSurfaceCoverOverlay.setVisibility(View.GONE);
+        mRootLayout.addView(mSurfaceCoverOverlay);
+
+        mSurfaceSnapshotOverlay = new ImageView(this);
+        mSurfaceSnapshotOverlay.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        mSurfaceSnapshotOverlay.setBackgroundResource(R.drawable.makepad_launch_background);
+        mSurfaceSnapshotOverlay.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        mSurfaceSnapshotOverlay.setClickable(false);
+        mSurfaceSnapshotOverlay.setFocusable(false);
+        mSurfaceSnapshotOverlay.setAlpha(1.0f);
+        mSurfaceSnapshotOverlay.setVisibility(View.GONE);
+        mRootLayout.addView(mSurfaceSnapshotOverlay);
 
         mCameraPreviewOverlay = new FrameLayout(this);
         mRootLayout.addView(mCameraPreviewOverlay);
@@ -745,6 +923,8 @@ public class MakepadActivity
         mSelectionHandleOverlay.addView(mSelectionHandleEnd);
 
         setContentView(mRootLayout);
+        restoreWarmResumeSurfaceSnapshotIfAvailable();
+        updateTaskDescription();
 
         logLifecycle("calling MakepadNative.activityOnCreate");
         MakepadNative.activityOnCreate(this);
@@ -781,6 +961,7 @@ public class MakepadActivity
     @Override
     protected void onStart() {
         super.onStart();
+        restoreSurfaceViewForWarmResumeIfNeeded();
         logLifecycle("onStart");
         MakepadNative.activityOnStart();
     }
@@ -788,13 +969,16 @@ public class MakepadActivity
     @Override
     protected void onResume() {
         super.onResume();
+        restoreSurfaceViewForWarmResumeIfNeeded();
         logLifecycle("onResume");
+        updateTaskDescription();
         MakepadNative.activityOnResume();
 
         //% MAIN_ACTIVITY_ON_RESUME
     }
     @Override
     protected void onPause() {
+        prepareSurfaceSnapshotOverlayForPause();
         super.onPause();
         logLifecycle("onPause");
         MakepadNative.activityOnPause();
@@ -825,6 +1009,21 @@ public class MakepadActivity
             mSelectionHandleStart = null;
             mSelectionHandleEnd = null;
         }
+        if (mSurfaceCoverOverlay != null) {
+            mRootLayout.removeView(mSurfaceCoverOverlay);
+            mSurfaceCoverOverlay = null;
+        }
+        if (mSurfaceSnapshotBackdrop != null) {
+            mSurfaceSnapshotBackdrop.setImageBitmap(null);
+            mSurfaceSnapshotBackdrop = null;
+        }
+        if (mSurfaceSnapshotOverlay != null) {
+            mSurfaceSnapshotOverlay.setImageBitmap(null);
+            mRootLayout.removeView(mSurfaceSnapshotOverlay);
+            mSurfaceSnapshotOverlay = null;
+        }
+        mLatestSurfaceSnapshot = null;
+        mLatestSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
         cleanupVideoPlaybackState();
         shutdownVideoPlaybackThread();
         if (!mIsSwitchingActivity) {
@@ -847,6 +1046,20 @@ public class MakepadActivity
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         MakepadNative.activityOnWindowFocusChanged(hasFocus);
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        prepareSurfaceSnapshotOverlayForPause();
+        super.onUserLeaveHint();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        restoreSurfaceViewForWarmResumeIfNeeded();
+        logLifecycle("onNewIntent");
     }
 
     @Override
@@ -920,6 +1133,288 @@ public class MakepadActivity
                     applyFullScreen(fullscreen);
                 }
             });
+    }
+
+    private boolean canCaptureSurfaceSnapshot() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return false;
+        }
+        if (view == null || view.getWidth() <= 0 || view.getHeight() <= 0) {
+            return false;
+        }
+        Surface surface = view.getHolder().getSurface();
+        return surface != null && surface.isValid();
+    }
+
+    private void refreshSurfaceSnapshotCache() {
+        if (!canCaptureSurfaceSnapshot()) {
+            logLifecycle("refreshSurfaceSnapshotCache skipped");
+            return;
+        }
+
+        final Bitmap snapshot = Bitmap.createBitmap(
+            view.getWidth(),
+            view.getHeight(),
+            Bitmap.Config.ARGB_8888
+        );
+        PixelCopy.request(view, snapshot, copyResult -> {
+            if (copyResult != PixelCopy.SUCCESS) {
+                logLifecycle("refreshSurfaceSnapshotCache failed result=" + copyResult);
+                return;
+            }
+            mLatestSurfaceSnapshot = snapshot;
+            mLatestSurfaceSnapshotOrientation = getResources().getConfiguration().orientation;
+            cacheWarmResumeSurfaceSnapshot(snapshot);
+            logLifecycle("refreshSurfaceSnapshotCache success");
+            updateSurfaceSnapshotBackdrop();
+            if (mSurfaceRecoveryOverlayVisible) {
+                showSurfaceRecoverySnapshotIfAvailable();
+            }
+        }, new Handler(Looper.getMainLooper()));
+    }
+
+    private void prepareSurfaceSnapshotOverlayForPause() {
+        logLifecycle("prepareSurfaceSnapshotOverlayForPause begin");
+        if (!hasRecoverySnapshotAvailable()) {
+            refreshSurfaceSnapshotCache();
+            logLifecycle("prepareSurfaceSnapshotOverlayForPause no snapshot");
+            return;
+        }
+        mSurfaceRecoveryOverlayVisible = true;
+        cacheWarmResumeSurfaceSnapshot(mLatestSurfaceSnapshot);
+        updateSurfaceSnapshotBackdrop();
+        if (view != null) {
+            view.setVisibility(View.INVISIBLE);
+        }
+        showSurfaceRecoverySnapshotIfAvailable();
+        refreshSurfaceSnapshotCache();
+        logLifecycle("prepareSurfaceSnapshotOverlayForPause end");
+    }
+
+    private void restoreSurfaceViewForWarmResumeIfNeeded() {
+        if (!mSurfaceRecoveryOverlayVisible || view == null) {
+            return;
+        }
+
+        Surface surface = view.getHolder().getSurface();
+        boolean surfaceValid = surface != null && surface.isValid();
+        if (view.getVisibility() == View.VISIBLE && surfaceValid) {
+            return;
+        }
+
+        // Keep the recovery overlay visible, but restore the SurfaceView itself
+        // so Android can recreate its surface on same-activity warm resumes.
+        view.setVisibility(View.VISIBLE);
+        if (!showSurfaceRecoverySnapshotIfAvailable() && mSurfaceCoverOverlay != null) {
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            mSurfaceCoverOverlay.setVisibility(View.VISIBLE);
+            mSurfaceCoverOverlay.bringToFront();
+        }
+        updateSurfaceSnapshotBackdrop();
+        logLifecycle("restoreSurfaceViewForWarmResumeIfNeeded");
+    }
+
+    private Bitmap createTaskDescriptionIconBitmap() {
+        int iconResId = getApplicationIconResId();
+        if (iconResId == 0) {
+            return null;
+        }
+        Drawable drawable = getDrawable(iconResId);
+        if (drawable == null) {
+            return null;
+        }
+        int width = Math.max(1, drawable.getIntrinsicWidth());
+        int height = Math.max(1, drawable.getIntrinsicHeight());
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        drawable.setBounds(0, 0, width, height);
+        drawable.draw(canvas);
+        return bitmap;
+    }
+
+    @SuppressWarnings("deprecation")
+    private void updateTaskDescription() {
+        try {
+            String label = getApplicationName();
+            int iconResId = getApplicationIconResId();
+            ActivityManager.TaskDescription taskDescription;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                taskDescription = new ActivityManager.TaskDescription.Builder()
+                    .setLabel(label)
+                    .setIcon(iconResId)
+                    .setPrimaryColor(TASK_DESCRIPTION_BACKGROUND_COLOR)
+                    .setBackgroundColor(TASK_DESCRIPTION_BACKGROUND_COLOR)
+                    .build();
+            }
+            else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                taskDescription = new ActivityManager.TaskDescription(
+                    label,
+                    iconResId,
+                    TASK_DESCRIPTION_BACKGROUND_COLOR
+                );
+            }
+            else {
+                taskDescription = new ActivityManager.TaskDescription(
+                    label,
+                    createTaskDescriptionIconBitmap(),
+                    TASK_DESCRIPTION_BACKGROUND_COLOR
+                );
+            }
+            setTaskDescription(taskDescription);
+        }
+        catch (Throwable throwable) {
+            Log.w(LOG_TAG, "Failed to update task description", throwable);
+        }
+    }
+
+    private void updateSurfaceSnapshotBackdrop() {
+        if (mSurfaceSnapshotBackdrop == null) {
+            return;
+        }
+
+        if (hasCurrentOrientationRecoverySnapshot()) {
+            mSurfaceSnapshotBackdrop.setImageBitmap(mLatestSurfaceSnapshot);
+            mSurfaceSnapshotBackdrop.setVisibility(View.VISIBLE);
+            return;
+        }
+
+        mSurfaceSnapshotBackdrop.setImageBitmap(null);
+        mSurfaceSnapshotBackdrop.setVisibility(View.GONE);
+    }
+
+    private boolean showSurfaceRecoverySnapshotIfAvailable() {
+        if (mSurfaceSnapshotOverlay == null || mSurfaceCoverOverlay == null) {
+            return false;
+        }
+
+        if (hasCurrentOrientationRecoverySnapshot()) {
+            mSurfaceSnapshotOverlay.setImageBitmap(mLatestSurfaceSnapshot);
+            mSurfaceSnapshotOverlay.setAlpha(1.0f);
+            mSurfaceSnapshotOverlay.setVisibility(View.VISIBLE);
+            mSurfaceSnapshotOverlay.bringToFront();
+            mSurfaceCoverOverlay.setVisibility(View.GONE);
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            return true;
+        }
+
+        mSurfaceSnapshotOverlay.setImageBitmap(null);
+        mSurfaceSnapshotOverlay.setVisibility(View.GONE);
+        return false;
+    }
+
+    private void applySurfaceCoverVisibility(boolean visible) {
+        if (mSurfaceCoverOverlay == null || mSurfaceSnapshotOverlay == null) {
+            return;
+        }
+
+        logLifecycle("applySurfaceCoverVisibility visible=" + visible);
+        if (visible && !hasRecoverySnapshotAvailable()) {
+            mSurfaceRecoveryOverlayVisible = false;
+            if (view != null) {
+                view.setVisibility(View.VISIBLE);
+            }
+            return;
+        }
+        mSurfaceRecoveryOverlayVisible = visible;
+        if (view != null) {
+            view.setVisibility(visible ? View.INVISIBLE : view.getVisibility());
+        }
+        if (visible) {
+            refreshSurfaceSnapshotCache();
+        }
+
+        mSurfaceCoverOverlay.animate().cancel();
+        mSurfaceSnapshotOverlay.animate().cancel();
+        if (visible) {
+            if (showSurfaceRecoverySnapshotIfAvailable()) {
+                return;
+            }
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            mSurfaceCoverOverlay.setVisibility(View.VISIBLE);
+            mSurfaceCoverOverlay.bringToFront();
+            return;
+        }
+
+        if (mSurfaceCoverOverlay.getVisibility() != View.VISIBLE
+            && mSurfaceSnapshotOverlay.getVisibility() != View.VISIBLE) {
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            mSurfaceSnapshotOverlay.setAlpha(1.0f);
+            if (view != null) {
+                view.setVisibility(View.VISIBLE);
+            }
+            clearWarmResumeSurfaceSnapshot();
+            return;
+        }
+
+        final FrameLayout surfaceCoverOverlay = mSurfaceCoverOverlay;
+        final ImageView surfaceSnapshotOverlay = mSurfaceSnapshotOverlay;
+        if (surfaceSnapshotOverlay.getVisibility() == View.VISIBLE) {
+            surfaceCoverOverlay.setVisibility(View.GONE);
+            surfaceCoverOverlay.setAlpha(1.0f);
+            surfaceSnapshotOverlay.animate()
+                .alpha(0.0f)
+                .setDuration(SURFACE_COVER_FADE_OUT_MS)
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (mSurfaceCoverOverlay != surfaceCoverOverlay
+                            || mSurfaceSnapshotOverlay != surfaceSnapshotOverlay) {
+                            return;
+                        }
+                        surfaceSnapshotOverlay.setVisibility(View.GONE);
+                        surfaceSnapshotOverlay.setAlpha(1.0f);
+                        if (view != null) {
+                            view.setVisibility(View.VISIBLE);
+                        }
+                        clearWarmResumeSurfaceSnapshot();
+                    }
+                });
+            return;
+        }
+
+        surfaceCoverOverlay.animate()
+            .alpha(0.0f)
+            .setDuration(SURFACE_COVER_FADE_OUT_MS)
+            .withEndAction(new Runnable() {
+                @Override
+                public void run() {
+                    if (mSurfaceCoverOverlay != surfaceCoverOverlay) {
+                        return;
+                    }
+                    surfaceCoverOverlay.setVisibility(View.GONE);
+                    surfaceCoverOverlay.setAlpha(1.0f);
+                    if (view != null) {
+                        view.setVisibility(View.VISIBLE);
+                    }
+                    clearWarmResumeSurfaceSnapshot();
+                }
+            });
+    }
+
+    public void setSurfaceCoverVisible(final boolean visible) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            applySurfaceCoverVisibility(visible);
+            return;
+        }
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                applySurfaceCoverVisibility(visible);
+            }
+        });
+    }
+
+    public void requestSurfaceSnapshotRefresh() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            refreshSurfaceSnapshotCache();
+            return;
+        }
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                refreshSurfaceSnapshotCache();
+            }
+        });
     }
 
     @SuppressWarnings("deprecation")
@@ -1112,6 +1607,11 @@ public class MakepadActivity
         ApplicationInfo applicationInfo = getApplicationContext().getApplicationInfo();
         CharSequence appName = applicationInfo.loadLabel(getPackageManager());
         return appName.toString();
+    }
+
+    private int getApplicationIconResId() {
+        ApplicationInfo applicationInfo = getApplicationContext().getApplicationInfo();
+        return applicationInfo.icon;
     }
 
     public void showClipboardActions(final boolean hasSelection, final int left, final int top, final int right, final int bottom, final int keyboardShift) {

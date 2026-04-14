@@ -441,6 +441,26 @@ impl Cx {
         self.redraw_all();
     }
 
+    fn hide_android_surface_cover_after_first_present_if_needed(&mut self) {
+        if !self.os.hide_surface_cover_after_first_present || self.os.in_xr_mode {
+            return;
+        }
+        self.os.hide_surface_cover_after_first_present = false;
+        unsafe {
+            android_jni::to_java_set_surface_cover_visible(false);
+        }
+    }
+
+    fn request_android_surface_snapshot_refresh_after_present_if_needed(&mut self) {
+        if !self.os.refresh_surface_snapshot_after_first_present || self.os.in_xr_mode {
+            return;
+        }
+        self.os.refresh_surface_snapshot_after_first_present = false;
+        unsafe {
+            android_jni::to_java_request_surface_snapshot_refresh();
+        }
+    }
+
     pub(crate) fn handle_message(&mut self, msg: FromJavaMessage) {
         match msg {
             FromJavaMessage::SwitchedActivity(activity_handle, activity_thread_id) => {
@@ -510,6 +530,11 @@ impl Cx {
                 // Ensure the next time the surface becomes drawable, we force
                 // a full redraw to avoid a black screen.
                 self.os.needs_first_draw = true;
+                // The Java host shows its placeholder cover before sending
+                // SurfaceDestroyed, so only arm the hide-on-present path for
+                // genuine surface teardown/rebuild cycles, not cold start.
+                self.os.hide_surface_cover_after_first_present = true;
+                self.os.refresh_surface_snapshot_after_first_present = true;
 
                 #[cfg(not(use_vulkan))]
                 unsafe {
@@ -1121,6 +1146,12 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, true);
                     }
                 }
+                // Java may keep a cached snapshot overlay visible across any
+                // pause/resume transition, even when Android never tears down
+                // the underlying SurfaceView. Always hide that overlay on the
+                // first successful present after resume.
+                self.os.hide_surface_cover_after_first_present = true;
+                self.os.refresh_surface_snapshot_after_first_present = true;
                 self.redraw_all();
                 self.reinitialise_media();
                 self.call_event_handler(&Event::Resume);
@@ -1336,8 +1367,16 @@ impl Cx {
                 let mut vulkan = self.os.vulkan.take().unwrap();
                 let result = vulkan.draw_pass_and_present(self, draw_pass_id);
                 self.os.vulkan = Some(vulkan);
-                if let Err(err) = result {
-                    crate::error!("Android Vulkan draw/present failed: {err}");
+                match result {
+                    Ok(presented) => {
+                        if presented {
+                            self.hide_android_surface_cover_after_first_present_if_needed();
+                            self.request_android_surface_snapshot_refresh_after_present_if_needed();
+                        }
+                    }
+                    Err(err) => {
+                        crate::error!("Android Vulkan draw/present failed: {err}");
+                    }
                 }
             } else {
                 self.draw_pass_to_fullscreen(draw_pass_id);
@@ -1388,10 +1427,14 @@ impl Cx {
                         // implementation when the underlying buffer queue is
                         // already gone.
                         if display.is_surface_alive() {
-                            (display.libegl.eglSwapBuffers.unwrap())(
+                            let swapped = (display.libegl.eglSwapBuffers.unwrap())(
                                 display.egl_display,
                                 display.surface,
                             );
+                            if swapped != 0 {
+                                self.hide_android_surface_cover_after_first_present_if_needed();
+                                self.request_android_surface_snapshot_refresh_after_present_if_needed();
+                            }
                         }
                     }
                 }
@@ -1403,10 +1446,14 @@ impl Cx {
         unsafe {
             if let Some(display) = &mut self.os.display {
                 if display.is_surface_alive() {
-                    (display.libegl.eglSwapBuffers.unwrap())(
+                    let swapped = (display.libegl.eglSwapBuffers.unwrap())(
                         display.egl_display,
                         display.surface,
                     );
+                    if swapped != 0 {
+                        self.hide_android_surface_cover_after_first_present_if_needed();
+                        self.request_android_surface_snapshot_refresh_after_present_if_needed();
+                    }
                 }
             }
         }
@@ -3006,6 +3053,8 @@ impl Default for CxOs {
             start_time: Instant::now(),
             first_after_resize: true,
             needs_first_draw: true,
+            hide_surface_cover_after_first_present: false,
+            refresh_surface_snapshot_after_first_present: true,
             frame_time: 0,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
@@ -3078,6 +3127,14 @@ pub struct CxOs {
     /// can start up showing a black screen if the initial redraw request was
     /// consumed before the surface was available.
     pub needs_first_draw: bool,
+    /// Tracks whether the Java-side surface cover overlay should remain visible
+    /// until the next successful present reaches the rebuilt Android surface.
+    pub hide_surface_cover_after_first_present: bool,
+    /// Tracks whether Java should refresh its cached `SurfaceView` snapshot
+    /// after the next successful present. This keeps the task snapshot path
+    /// from falling back to black when Android backgrounds/resumes the app
+    /// without destroying the surface.
+    pub refresh_surface_snapshot_after_first_present: bool,
     pub display_size: Vec2d,
     pub dpi_factor: f64,
     pub safe_area_insets: crate::event::SafeAreaInsets,
