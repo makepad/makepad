@@ -237,6 +237,26 @@ script_mod! {
             return v.w
         }
 
+        slug_curve_offset: fn() -> float {
+            return self.t_min.x
+        }
+
+        slug_curve_count: fn() -> float {
+            return self.t_min.y
+        }
+
+        slug_band_offset: fn() -> float {
+            return self.t_max.x
+        }
+
+        slug_band_count: fn() -> float {
+            return self.t_max.y
+        }
+
+        slug_fill_flags: fn() -> float {
+            return self.atlas_plane
+        }
+
         calc_root_code: fn(y1: float, y2: float, y3: float) -> u32 {
             let i1 = asuint(y1) >> u32(31)
             let i2 = asuint(y2) >> u32(30)
@@ -359,7 +379,7 @@ script_mod! {
         }
 
         scan_horizontal_all: fn(sample: vec2, px_size: float) -> vec2 {
-            let limit = floor(self.curve_count + 0.5)
+            let limit = floor(self.slug_curve_count() + 0.5)
             var coverage = 0.0
             var weight = 0.0
 
@@ -367,7 +387,7 @@ script_mod! {
             loop {
                 if i >= limit { break }
 
-                let curve_idx = self.curve_offset + i
+                let curve_idx = self.slug_curve_offset() + i
                 let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
                 let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
                 let code = self.calc_root_code(p12.y, p12.w, p3.y)
@@ -390,7 +410,7 @@ script_mod! {
         }
 
         scan_vertical_all: fn(sample: vec2, px_size: float) -> vec2 {
-            let limit = floor(self.curve_count + 0.5)
+            let limit = floor(self.slug_curve_count() + 0.5)
             var coverage = 0.0
             var weight = 0.0
 
@@ -398,7 +418,7 @@ script_mod! {
             loop {
                 if i >= limit { break }
 
-                let curve_idx = self.curve_offset + i
+                let curve_idx = self.slug_curve_offset() + i
                 let p12 = self.fetch_curve_texel(curve_idx * 2.0) - vec4(sample.x, sample.y, sample.x, sample.y)
                 let p3 = self.fetch_curve_texel(curve_idx * 2.0 + 1.0).xy - sample
                 let code = self.calc_root_code(p12.x, p12.z, p3.x)
@@ -425,7 +445,7 @@ script_mod! {
                 abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536.0),
                 min(abs(xcov), abs(ycov))
             )
-            if self.fill_flags >= 4096.0 {
+            if self.slug_fill_flags() >= 4096.0 {
                 return 1.0 - abs(1.0 - fract(coverage * 0.5) * 2.0)
             }
             return self.saturate(coverage)
@@ -437,12 +457,12 @@ script_mod! {
             var weight_x = 0.0
             var weight_y = 0.0
 
-            if self.band_count > 0.5 {
-                let num_bands = max(floor(self.band_count + 0.5), 1.0)
+            if self.slug_band_count() > 0.5 {
+                let num_bands = max(floor(self.slug_band_count() + 0.5), 1.0)
                 let h_band_idx = clamp(floor(sample.y * num_bands), 0.0, num_bands - 1.0)
                 let v_band_idx = clamp(floor(sample.x * num_bands), 0.0, num_bands - 1.0)
 
-                let h_band_info = self.fetch_band_texel(self.band_offset + h_band_idx)
+                let h_band_info = self.fetch_band_texel(self.slug_band_offset() + h_band_idx)
                 let h_band = self.scan_horizontal_list(
                     floor(h_band_info.x + 0.5),
                     h_band_info.y,
@@ -452,7 +472,9 @@ script_mod! {
                 coverage_x = h_band.x
                 weight_x = h_band.y
 
-                let v_band_info = self.fetch_band_texel(self.band_offset + num_bands + v_band_idx)
+                let v_band_info = self.fetch_band_texel(
+                    self.slug_band_offset() + num_bands + v_band_idx
+                )
                 let v_band = self.scan_vertical_list(
                     floor(v_band_info.x + 0.5),
                     v_band_info.y,
@@ -475,7 +497,7 @@ script_mod! {
         }
 
         sample_slug_pixel: fn() {
-            if self.curve_count < 0.5 {
+            if self.slug_curve_count() < 0.5 {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
 
@@ -649,16 +671,6 @@ pub struct DrawText {
     pub atlas_plane: f32,
     #[live]
     pub pad1: f32,
-    #[live]
-    pub curve_offset: f32,
-    #[live]
-    pub curve_count: f32,
-    #[live]
-    pub band_offset: f32,
-    #[live]
-    pub band_count: f32,
-    #[live(0.0)]
-    pub fill_flags: f32,
     #[live(0.0)]
     pub aa_2x2: f32,
     #[live(0.0)]
@@ -667,14 +679,6 @@ pub struct DrawText {
     pub stem_darken: f32,
     #[live(0.125)]
     pub stem_darken_max: f32,
-    // Keep the base DrawText instance payload 16-byte aligned so repr(C)
-    // subclasses with Vec4 fields don't pick up implicit Rust padding.
-    #[live(0.0)]
-    pub pad2: f32,
-    #[live(0.0)]
-    pub pad3: f32,
-    #[live(0.0)]
-    pub pad4: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -1062,6 +1066,7 @@ impl DrawText {
                     &mut instances.instances,
                 );
             }
+            self.flush_slug_textures(cx);
             self.many_instances = Some(instances);
             return;
         }
@@ -1077,7 +1082,13 @@ impl DrawText {
                 &mut instances.instances,
             );
         }
+        self.flush_slug_textures(cx);
         self.finish_many_instances(cx, instances);
+    }
+
+    fn flush_slug_textures(&mut self, cx: &mut Cx2d) {
+        let fonts = cx.fonts.clone();
+        fonts.borrow_mut().flush_slug_textures(cx.cx);
     }
 
     fn finish_many_instances(&mut self, cx: &mut Cx2d, instances: ManyInstances) {
@@ -1264,14 +1275,9 @@ impl DrawText {
             ) / 255.0;
         }
         self.texture_index = 3.0;
-        self.atlas_plane = 0.0;
-        self.t_min = vec2(0.0, 0.0);
-        self.t_max = vec2(0.0, 0.0);
-        self.curve_offset = glyph.curve_offset as f32;
-        self.curve_count = glyph.curve_count as f32;
-        self.band_offset = glyph.band_offset as f32;
-        self.band_count = glyph.band_count as f32;
-        self.fill_flags = glyph.fill_flags as f32;
+        self.atlas_plane = glyph.fill_flags as f32;
+        self.t_min = vec2(glyph.curve_offset as f32, glyph.curve_count as f32);
+        self.t_max = vec2(glyph.band_offset as f32, glyph.band_count as f32);
         let slice = self.draw_vars.as_slice();
 
         output.extend_from_slice(slice);
@@ -1338,11 +1344,6 @@ impl DrawText {
         self.atlas_plane = glyph.atlas_plane as f32;
         self.t_min = vec2(t_min.x, t_min.y);
         self.t_max = vec2(t_max.x, t_max.y);
-        self.curve_offset = 0.0;
-        self.curve_count = 0.0;
-        self.band_offset = 0.0;
-        self.band_count = 0.0;
-        self.fill_flags = 0.0;
         let slice = self.draw_vars.as_slice();
 
         output.extend_from_slice(slice);
@@ -1669,5 +1670,15 @@ impl ScriptHook for FontFamily {
         // to hundreds of widgets.
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DrawText;
+
+    #[test]
+    fn draw_text_size_stays_16_byte_aligned() {
+        assert_eq!(std::mem::size_of::<DrawText>() % 16, 0);
     }
 }

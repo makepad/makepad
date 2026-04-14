@@ -123,6 +123,12 @@ impl Fonts {
         self.slug_atlas.get_or_cache_glyph(font, glyph_id)
     }
 
+    /// Uploads any newly appended SLUG curve/band data immediately so draw calls
+    /// in the current frame can see glyphs cached during the draw loop.
+    pub fn flush_slug_textures(&mut self, cx: &mut Cx) -> bool {
+        self.slug_atlas.prepare_textures(cx)
+    }
+
     pub fn is_font_family_known(&self, id: FontFamilyId) -> bool {
         self.layouter.is_font_family_known(id)
     }
@@ -177,7 +183,7 @@ impl Fonts {
             cx.redraw_all();
         }
         self.dispatch_msdf_jobs();
-        let slug_changed = self.slug_atlas.prepare_textures(cx);
+        let slug_changed = self.flush_slug_textures(cx);
         if slug_changed {
             cx.redraw_all();
         }
