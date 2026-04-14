@@ -14,6 +14,7 @@ const BAND_TEX_WIDTH: usize = 2048;
 const DEFAULT_NUM_BANDS: usize = 24;
 const CUBIC_TO_QUAD_TOLERANCE: f32 = 0.05;
 const MAX_CUBIC_SPLIT_DEPTH: usize = 12;
+const RGBA_F32_TEXEL_FLOATS: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SlugGlyphKey {
@@ -39,6 +40,8 @@ pub struct SlugAtlas {
     band_texture: Texture,
     curve_dirty: bool,
     band_dirty: bool,
+    curve_uploaded_floats: usize,
+    band_uploaded_floats: usize,
     cache_generation: u64,
     uploaded_generation: u64,
     cached_glyphs: FxHashMap<SlugGlyphKey, SlugGlyphInfo>,
@@ -69,6 +72,8 @@ impl SlugAtlas {
             ),
             curve_dirty: false,
             band_dirty: false,
+            curve_uploaded_floats: 0,
+            band_uploaded_floats: 0,
             cache_generation: 0,
             uploaded_generation: 0,
             cached_glyphs: FxHashMap::default(),
@@ -110,51 +115,25 @@ impl SlugAtlas {
         let mut changed = false;
 
         if self.curve_dirty {
-            let width = if self.curve_data.is_empty() {
-                1
-            } else {
-                CURVE_TEX_WIDTH.max(1)
-            };
-            let texels = (self.curve_data.len() / 4).max(1);
-            let height = texels.div_ceil(width);
-            let mut data = if self.curve_data.is_empty() {
-                vec![0.0f32; width * height * 4]
-            } else {
-                self.curve_data.clone()
-            };
-            data.resize(width * height * 4, 0.0);
-            *self.curve_texture.get_format(cx) = TextureFormat::VecRGBAf32 {
-                width,
-                height,
-                data: Some(data),
-                updated: TextureUpdated::Full,
-            };
+            changed |= Self::prepare_append_only_rgba_f32_texture(
+                cx,
+                &self.curve_texture,
+                CURVE_TEX_WIDTH,
+                &self.curve_data,
+                &mut self.curve_uploaded_floats,
+            );
             self.curve_dirty = false;
-            changed = true;
         }
 
         if self.band_dirty {
-            let width = if self.band_data.is_empty() {
-                1
-            } else {
-                BAND_TEX_WIDTH.max(1)
-            };
-            let texels = (self.band_data.len() / 4).max(1);
-            let height = texels.div_ceil(width);
-            let mut data = if self.band_data.is_empty() {
-                vec![0.0f32; width * height * 4]
-            } else {
-                self.band_data.clone()
-            };
-            data.resize(width * height * 4, 0.0);
-            *self.band_texture.get_format(cx) = TextureFormat::VecRGBAf32 {
-                width,
-                height,
-                data: Some(data),
-                updated: TextureUpdated::Full,
-            };
+            changed |= Self::prepare_append_only_rgba_f32_texture(
+                cx,
+                &self.band_texture,
+                BAND_TEX_WIDTH,
+                &self.band_data,
+                &mut self.band_uploaded_floats,
+            );
             self.band_dirty = false;
-            changed = true;
         }
 
         if changed {
@@ -162,6 +141,85 @@ impl SlugAtlas {
         }
 
         changed
+    }
+
+    fn prepare_append_only_rgba_f32_texture(
+        cx: &mut Cx,
+        texture: &Texture,
+        preferred_width: usize,
+        source: &[f32],
+        uploaded_floats: &mut usize,
+    ) -> bool {
+        debug_assert_eq!(source.len() % RGBA_F32_TEXEL_FLOATS, 0);
+
+        let new_width = if source.is_empty() { 1 } else { preferred_width.max(1) };
+        let new_texels = (source.len() / RGBA_F32_TEXEL_FLOATS).max(1);
+        let new_height = new_texels.div_ceil(new_width);
+        let old_uploaded_floats = (*uploaded_floats).min(source.len());
+
+        let format = texture.get_format(cx);
+        let (width, height, data, updated) = match format {
+            TextureFormat::VecRGBAf32 {
+                width,
+                height,
+                data,
+                updated,
+            } => (width, height, data, updated),
+            _ => panic!("expected VecRGBAf32 texture format for SLUG atlas"),
+        };
+
+        let dims_changed = *width != new_width || *height != new_height;
+        let mut texture_data = data.take().unwrap_or_default();
+        let had_texture_data = !texture_data.is_empty();
+        let new_capacity = new_width * new_height * RGBA_F32_TEXEL_FLOATS;
+        texture_data.resize(new_capacity, 0.0);
+
+        if !had_texture_data || *width != new_width || old_uploaded_floats > source.len() {
+            texture_data.fill(0.0);
+            if !source.is_empty() {
+                texture_data[..source.len()].copy_from_slice(source);
+            }
+        } else if old_uploaded_floats < source.len() {
+            texture_data[old_uploaded_floats..source.len()]
+                .copy_from_slice(&source[old_uploaded_floats..]);
+        }
+
+        *width = new_width;
+        *height = new_height;
+        *data = Some(texture_data);
+        *updated = if !had_texture_data || dims_changed || old_uploaded_floats > source.len() {
+            TextureUpdated::Full
+        } else {
+            updated.update(Self::appended_dirty_rect(
+                new_width,
+                old_uploaded_floats / RGBA_F32_TEXEL_FLOATS,
+                source.len() / RGBA_F32_TEXEL_FLOATS,
+            ))
+        };
+        *uploaded_floats = source.len();
+        true
+    }
+
+    fn appended_dirty_rect(width: usize, old_texels: usize, new_texels: usize) -> Option<RectUsize> {
+        if width == 0 || new_texels <= old_texels {
+            return None;
+        }
+
+        let start_row = old_texels / width;
+        let start_col = old_texels % width;
+        let end_row = (new_texels - 1) / width;
+
+        if start_row == end_row {
+            return Some(RectUsize::new(
+                PointUsize::new(start_col, start_row),
+                SizeUsize::new(new_texels - old_texels, 1),
+            ));
+        }
+
+        Some(RectUsize::new(
+            PointUsize::new(0, start_row),
+            SizeUsize::new(width, end_row - start_row + 1),
+        ))
     }
 
     fn build_glyph(&mut self, font: &Font, outline: &GlyphOutline) -> Option<SlugGlyphInfo> {
@@ -511,4 +569,27 @@ fn cubic_to_quads_recursive(
 
     cubic_to_quads_recursive(p0, p01, p012, p0123, depth + 1, bounds, inv_w, inv_h, out);
     cubic_to_quads_recursive(p0123, p123, p23, p3, depth + 1, bounds, inv_w, inv_h, out);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SlugAtlas;
+
+    #[test]
+    fn appended_dirty_rect_stays_tight_within_one_row() {
+        let rect = SlugAtlas::appended_dirty_rect(8, 3, 6).expect("expected dirty rect");
+        assert_eq!(rect.origin.x, 3);
+        assert_eq!(rect.origin.y, 0);
+        assert_eq!(rect.size.width, 3);
+        assert_eq!(rect.size.height, 1);
+    }
+
+    #[test]
+    fn appended_dirty_rect_expands_to_full_rows_when_tail_crosses_rows() {
+        let rect = SlugAtlas::appended_dirty_rect(8, 6, 11).expect("expected dirty rect");
+        assert_eq!(rect.origin.x, 0);
+        assert_eq!(rect.origin.y, 0);
+        assert_eq!(rect.size.width, 8);
+        assert_eq!(rect.size.height, 2);
+    }
 }
