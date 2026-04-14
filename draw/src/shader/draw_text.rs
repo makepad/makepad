@@ -27,6 +27,158 @@ use {
     },
 };
 
+#[cfg(target_os = "linux")]
+script_mod! {
+    use mod.pod.*
+    use mod.math.*
+    use mod.shader.*
+    use mod.draw
+    use mod.geom
+    use mod.res.*
+
+    mod.text = {
+        let text = me
+        FontFamily: mod.std.set_type_default() do #(FontFamily::script_component(vm))
+        FontMember: mod.std.set_type_default() do #(FontMember::script_api(vm))
+        TextOverflow: mod.std.set_type_default() do #(TextOverflow::script_api(vm)),
+        ..me.TextOverflow,
+        TextStyle: mod.std.set_type_default() do #(TextStyle::script_api(vm)){
+            font_size: 10
+            font_family: text.FontFamily{
+                latin := text.FontMember{res: crate_resource("self:../../widgets/resources/IBMPlexSans-Text.ttf") asc:-0.1 desc:0.0}
+            }
+            line_spacing: 1.2
+        }
+    }
+
+    use mod.text.*
+
+    mod.draw.DrawText = mod.std.set_type_default() do #(DrawText::script_shader(vm)){
+
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+
+        color: #fff
+        sdf_sharpness: 1.0
+        sdf_luma_bias: 0.03
+
+        pos: varying(vec2f)
+        t: varying(vec2f)
+        world: varying(vec4f)
+
+        radius: uniform(float)
+        cutoff: uniform(float)
+        total_chars: instance(1000000.0)
+
+        grayscale_texture: texture_2d(float)
+        color_texture: texture_2d(float)
+        msdf_texture: texture_2d(float)
+
+        vertex: fn() {
+            let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
+            let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw)
+            let p_normalized = (p_clipped - self.rect_pos) / self.rect_size
+
+            self.pos = p_normalized
+            self.t = mix(self.t_min, self.t_max, p_normalized.xy)
+            self.world = self.draw_list.view_transform * vec4(
+                p_clipped.x,
+                p_clipped.y,
+                self.glyph_depth + self.draw_call.zbias,
+                1.
+            )
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * (self.world))
+        }
+
+        sdf: fn(scale, p, color) {
+            let sampled = self.grayscale_texture.sample_as_bgra(p)
+            let s = if self.atlas_plane < 0.5 {
+                sampled.r
+            } else if self.atlas_plane < 1.5 {
+                sampled.g
+            } else if self.atlas_plane < 2.5 {
+                sampled.b
+            } else {
+                sampled.a
+            }
+            let safe_scale = max(scale, 0.0001)
+            let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114))
+            var a = clamp(
+                (s - (1.0 - self.cutoff)) * self.radius / safe_scale * self.sdf_sharpness + 0.5,
+                0.0,
+                1.0,
+            )
+            let bias = (0.5 - luma) * self.sdf_luma_bias
+            a = clamp(a - bias, 0.0, 1.0)
+            return a
+        }
+
+        msdf: fn(scale, p, color) {
+            let s = self.msdf_texture.sample_as_bgra(p)
+            let dist = s.a
+            let safe_scale = max(scale, 0.0001)
+            let luma = dot(color.rgb, vec3(0.299, 0.587, 0.114))
+            var a = clamp(
+                (dist - (1.0 - self.cutoff)) * self.radius / safe_scale * self.sdf_sharpness + 0.5,
+                0.0,
+                1.0,
+            )
+            let bias = (0.5 - luma) * self.sdf_luma_bias
+            if a > self.sdf_luma_bias * 0.5 {
+                a = clamp(a - bias, 0.0, 1.0)
+            }
+            return a
+        }
+
+        get_color: fn() {
+            return self.color
+        }
+
+        fragment: fn() {
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
+        }
+
+        sample_text_pixel: fn() {
+            let dxt = length(dFdx(self.t))
+            let dyt = length(dFdy(self.t))
+            if self.texture_index < 0.5 {
+                let c = self.get_color()
+                let scale = (dxt + dyt) * self.grayscale_texture.size().x * 0.5
+                let tex_size = self.grayscale_texture.size()
+                let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+                let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
+                let s = self.sdf(scale, p, c)
+                return s * vec4(c.rgb * c.a, c.a)
+            } else if self.texture_index < 1.5 {
+                let tex_size = self.color_texture.size()
+                let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+                let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
+                let c = self.color_texture.sample_as_bgra(p)
+                return vec4(c.rgb * c.a, c.a)
+            } else {
+                let c = self.get_color()
+                let scale = (dxt + dyt) * self.msdf_texture.size().x * 0.5
+                let tex_size = self.msdf_texture.size()
+                let half_texel = vec2(0.5 / tex_size.x, 0.5 / tex_size.y)
+                let p = clamp(self.t.xy, self.t_min + half_texel, self.t_max - half_texel)
+                let s = self.msdf(scale, p, c)
+                return s * vec4(c.rgb * c.a, c.a)
+            }
+        }
+
+        pixel: fn() {
+            return self.sample_text_pixel()
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
 script_mod! {
     use mod.pod.*
     use mod.math.*
@@ -1240,12 +1392,13 @@ impl DrawText {
         output: &mut Vec<f32>,
     ) {
         use crate::text::geom::Point;
+        let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         let glyph_origin = Point::new(
             origin_in_lpxs.x + glyph.offset_in_lpxs() * self.font_scale,
             origin_in_lpxs.y,
         );
 
-        let slug_glyph = {
+        let slug_glyph = if cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs) {
             let mut fonts = cx.fonts.borrow_mut();
             let generation_before = fonts.slug_cache_generation();
             let slug_glyph = fonts.get_or_cache_slug_glyph(glyph.font.as_ref(), glyph.id);
@@ -1255,6 +1408,8 @@ impl DrawText {
                     self.pending_slug_flush_generation.max(generation_after);
             }
             slug_glyph
+        } else {
+            None
         };
         if let Some(slug_glyph) = slug_glyph {
             self.draw_slug_glyph(
@@ -1268,7 +1423,6 @@ impl DrawText {
             return;
         }
 
-        let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
         if let Some(rasterized_glyph) = glyph.rasterize(font_size_in_dpxs) {
             self.draw_rasterized_glyph(
                 glyph_origin,

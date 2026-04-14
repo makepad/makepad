@@ -13,11 +13,21 @@ use {
     std::{cell::RefCell, mem::ManuallyDrop, rc::Rc},
 };
 
+fn default_slug_min_dpxs_per_em(cx: &Cx) -> f32 {
+    const LINUX_DESKTOP_DEFAULT: f32 = 1_000_000.0;
+
+    match cx.os_type() {
+        OsType::LinuxWindow(_) | OsType::LinuxDirect => LINUX_DESKTOP_DEFAULT,
+        _ => 0.0,
+    }
+}
+
 pub struct Fonts {
     layouter: Layouter,
     needs_prepare_atlases: bool,
     atlas_texture: Texture,
     slug_atlas: SlugAtlas,
+    slug_min_dpxs_per_em: f32,
     msdf_job_sender: FromUISender<QueuedMsdfJob>,
     msdf_result_receiver: ToUIReceiver<CompletedMsdfJob>,
 }
@@ -72,6 +82,7 @@ impl Fonts {
                 },
             ),
             slug_atlas: SlugAtlas::new(cx),
+            slug_min_dpxs_per_em: default_slug_min_dpxs_per_em(cx),
             msdf_job_sender,
             msdf_result_receiver,
         }
@@ -113,6 +124,10 @@ impl Fonts {
 
     pub fn slug_band_texture(&self) -> &Texture {
         self.slug_atlas.band_texture()
+    }
+
+    pub fn should_use_slug_glyph(&self, dpxs_per_em: f32) -> bool {
+        dpxs_per_em >= self.slug_min_dpxs_per_em
     }
 
     pub fn get_or_cache_slug_glyph(
