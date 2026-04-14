@@ -123,6 +123,14 @@ impl Fonts {
         self.slug_atlas.get_or_cache_glyph(font, glyph_id)
     }
 
+    pub fn slug_cache_generation(&self) -> u64 {
+        self.slug_atlas.cache_generation()
+    }
+
+    pub fn slug_uploaded_generation(&self) -> u64 {
+        self.slug_atlas.uploaded_generation()
+    }
+
     /// Uploads any newly appended SLUG curve/band data immediately so draw calls
     /// in the current frame can see glyphs cached during the draw loop.
     pub fn flush_slug_textures(&mut self, cx: &mut Cx) -> bool {

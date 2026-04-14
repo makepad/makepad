@@ -611,6 +611,10 @@ pub enum TextOverflow {
 pub struct DrawText {
     #[rust]
     pub many_instances: Option<ManyInstances>,
+    #[rust]
+    pending_slug_flush_generation: u64,
+    #[rust]
+    pending_slug_flush_generation_pad: u64,
     #[live]
     pub text_style: TextStyle,
     #[live(1.0)]
@@ -714,6 +718,7 @@ impl DrawText {
 
     pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
         if let Some(instances) = self.many_instances.take() {
+            self.flush_slug_textures_if_needed(cx);
             self.finish_many_instances(cx, instances);
         }
     }
@@ -1066,7 +1071,6 @@ impl DrawText {
                     &mut instances.instances,
                 );
             }
-            self.flush_slug_textures(cx);
             self.many_instances = Some(instances);
             return;
         }
@@ -1082,13 +1086,22 @@ impl DrawText {
                 &mut instances.instances,
             );
         }
-        self.flush_slug_textures(cx);
+        self.flush_slug_textures_if_needed(cx);
         self.finish_many_instances(cx, instances);
     }
 
-    fn flush_slug_textures(&mut self, cx: &mut Cx2d) {
+    fn flush_slug_textures_if_needed(&mut self, cx: &mut Cx2d) {
+        if self.pending_slug_flush_generation == 0 {
+            return;
+        }
         let fonts = cx.fonts.clone();
-        fonts.borrow_mut().flush_slug_textures(cx.cx);
+        let mut fonts = fonts.borrow_mut();
+        if fonts.slug_uploaded_generation() < self.pending_slug_flush_generation {
+            fonts.flush_slug_textures(cx.cx);
+        }
+        if fonts.slug_uploaded_generation() >= self.pending_slug_flush_generation {
+            self.pending_slug_flush_generation = 0;
+        }
     }
 
     fn finish_many_instances(&mut self, cx: &mut Cx2d, instances: ManyInstances) {
@@ -1208,9 +1221,15 @@ impl DrawText {
         );
 
         let slug_glyph = {
-            cx.fonts
-                .borrow_mut()
-                .get_or_cache_slug_glyph(glyph.font.as_ref(), glyph.id)
+            let mut fonts = cx.fonts.borrow_mut();
+            let generation_before = fonts.slug_cache_generation();
+            let slug_glyph = fonts.get_or_cache_slug_glyph(glyph.font.as_ref(), glyph.id);
+            let generation_after = fonts.slug_cache_generation();
+            if generation_after != generation_before {
+                self.pending_slug_flush_generation =
+                    self.pending_slug_flush_generation.max(generation_after);
+            }
+            slug_glyph
         };
         if let Some(slug_glyph) = slug_glyph {
             self.draw_slug_glyph(

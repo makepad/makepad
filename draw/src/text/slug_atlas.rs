@@ -39,6 +39,8 @@ pub struct SlugAtlas {
     band_texture: Texture,
     curve_dirty: bool,
     band_dirty: bool,
+    cache_generation: u64,
+    uploaded_generation: u64,
     cached_glyphs: FxHashMap<SlugGlyphKey, SlugGlyphInfo>,
 }
 
@@ -67,6 +69,8 @@ impl SlugAtlas {
             ),
             curve_dirty: false,
             band_dirty: false,
+            cache_generation: 0,
+            uploaded_generation: 0,
             cached_glyphs: FxHashMap::default(),
         }
     }
@@ -77,6 +81,14 @@ impl SlugAtlas {
 
     pub fn band_texture(&self) -> &Texture {
         &self.band_texture
+    }
+
+    pub fn cache_generation(&self) -> u64 {
+        self.cache_generation
+    }
+
+    pub fn uploaded_generation(&self) -> u64 {
+        self.uploaded_generation
     }
 
     pub fn get_or_cache_glyph(&mut self, font: &Font, glyph_id: GlyphId) -> Option<SlugGlyphInfo> {
@@ -145,6 +157,10 @@ impl SlugAtlas {
             changed = true;
         }
 
+        if changed {
+            self.uploaded_generation = self.cache_generation;
+        }
+
         changed
     }
 
@@ -169,6 +185,7 @@ impl SlugAtlas {
         let (band_offset, band_count) = self.build_bands(curve_offset, &curves, DEFAULT_NUM_BANDS);
         self.curve_dirty = true;
         self.band_dirty = true;
+        self.cache_generation = self.cache_generation.wrapping_add(1);
 
         Some(SlugGlyphInfo {
             origin_in_ems: bounds.origin,
