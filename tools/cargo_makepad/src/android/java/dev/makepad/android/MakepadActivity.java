@@ -178,9 +178,6 @@ class MakepadSurface
     public void surfaceCreated(SurfaceHolder holder) {
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
-        Log.i("Makepad", "[" + SystemClock.uptimeMillis() + "] surfaceCreated"
-            + " size=" + getWidth() + "x" + getHeight()
-            + " surfaceValid=" + (surface != null && surface.isValid()));
         MakepadNative.surfaceOnSurfaceCreated(surface);
     }
 
@@ -194,9 +191,6 @@ class MakepadSurface
             }
         }
         Surface surface = holder.getSurface();
-        Log.i("Makepad", "[" + SystemClock.uptimeMillis() + "] surfaceDestroyed"
-            + " size=" + getWidth() + "x" + getHeight()
-            + " surfaceValid=" + (surface != null && surface.isValid()));
         MakepadNative.surfaceOnSurfaceDestroyed(surface);
     }
 
@@ -207,10 +201,6 @@ class MakepadSurface
                                int height) {
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
-        Log.i("Makepad", "[" + SystemClock.uptimeMillis() + "] surfaceChanged"
-            + " size=" + width + "x" + height
-            + " format=" + format
-            + " surfaceValid=" + (surface != null && surface.isValid()));
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
 
     }
@@ -722,52 +712,6 @@ public class MakepadActivity
         System.loadLibrary("makepad");
     }
 
-    private String orientationSummary() {
-        int orientation = getResources().getConfiguration().orientation;
-        if (orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
-            return "landscape";
-        }
-        if (orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT) {
-            return "portrait";
-        }
-        return "undefined";
-    }
-
-    private String visibilitySummary(int visibility) {
-        if (visibility == View.VISIBLE) {
-            return "VISIBLE";
-        }
-        if (visibility == View.INVISIBLE) {
-            return "INVISIBLE";
-        }
-        if (visibility == View.GONE) {
-            return "GONE";
-        }
-        return Integer.toString(visibility);
-    }
-
-    private void logLifecycle(String message) {
-        Surface surface = null;
-        if (view != null && view.getHolder() != null) {
-            surface = view.getHolder().getSurface();
-        }
-        String surfaceSummary = view == null
-            ? "view=null"
-            : "view="
-                + view.getWidth() + "x" + view.getHeight()
-                + " vis=" + visibilitySummary(view.getVisibility())
-                + " surfaceValid=" + (surface != null && surface.isValid());
-        Log.i(LOG_TAG,
-            "[" + SystemClock.uptimeMillis() + "] "
-                + message
-                + " orient=" + orientationSummary()
-                + " focus=" + hasWindowFocus()
-                + " recovery=" + mSurfaceRecoveryOverlayVisible
-                + " snapshot=" + (mLatestSurfaceSnapshot != null)
-                + " " + surfaceSummary
-        );
-    }
-
     private void cacheWarmResumeSurfaceSnapshot(Bitmap snapshot) {
         if (snapshot == null) {
             return;
@@ -816,12 +760,10 @@ public class MakepadActivity
         mLatestSurfaceSnapshotOrientation = getResources().getConfiguration().orientation;
         updateSurfaceSnapshotBackdrop();
         clearWarmResumeSurfaceSnapshot();
-        logLifecycle("restoreWarmResumeSurfaceSnapshotIfAvailable success");
     }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        logLifecycle("onCreate begin");
         if (mWebSocketsThread == null || !mWebSocketsThread.isAlive()) {
             mWebSocketsThread = new HandlerThread("WebSocketsThread");
             mWebSocketsThread.start();
@@ -836,7 +778,6 @@ public class MakepadActivity
         }
         
         super.onCreate(savedInstanceState);
-        logLifecycle("onCreate after super");
         
         this.requestWindowFeature(Window.FEATURE_NO_TITLE);
 
@@ -926,9 +867,7 @@ public class MakepadActivity
         restoreWarmResumeSurfaceSnapshotIfAvailable();
         updateTaskDescription();
 
-        logLifecycle("calling MakepadNative.activityOnCreate");
         MakepadNative.activityOnCreate(this);
-        logLifecycle("returned from MakepadNative.activityOnCreate");
 
         mVideoPlaybackThread = new HandlerThread("VideoPlayerThread");
         mVideoPlaybackThread.start(); // TODO: only start this if its needed.
@@ -953,7 +892,6 @@ public class MakepadActivity
 
         float refreshRate = getDeviceRefreshRate();
         MakepadNative.initChoreographer(refreshRate, sdkVersion);
-        logLifecycle("onCreate complete");
         //% MAIN_ACTIVITY_ON_CREATE
         
     }
@@ -962,7 +900,6 @@ public class MakepadActivity
     protected void onStart() {
         super.onStart();
         restoreSurfaceViewForWarmResumeIfNeeded();
-        logLifecycle("onStart");
         MakepadNative.activityOnStart();
     }
 
@@ -970,7 +907,6 @@ public class MakepadActivity
     protected void onResume() {
         super.onResume();
         restoreSurfaceViewForWarmResumeIfNeeded();
-        logLifecycle("onResume");
         updateTaskDescription();
         MakepadNative.activityOnResume();
 
@@ -980,7 +916,6 @@ public class MakepadActivity
     protected void onPause() {
         prepareSurfaceSnapshotOverlayForPause();
         super.onPause();
-        logLifecycle("onPause");
         MakepadNative.activityOnPause();
 
         //% MAIN_ACTIVITY_ON_PAUSE
@@ -989,13 +924,11 @@ public class MakepadActivity
     @Override
     protected void onStop() {
         super.onStop();
-        logLifecycle("onStop");
         MakepadNative.activityOnStop();
     }
 
     @Override
     protected void onDestroy() {
-        logLifecycle("onDestroy begin switching=" + mIsSwitchingActivity);
         if (mCameraPreviewOverlay != null) {
             for (Long videoId : mCameraPreviewViews.keySet()) {
                 MakepadNative.onCameraPreviewSurfaceDestroyed(videoId);
@@ -1032,7 +965,6 @@ public class MakepadActivity
         }
         super.onDestroy();
         MakepadNative.activityOnDestroy();
-        logLifecycle("onDestroy complete");
     }
 
     @Override
@@ -1059,7 +991,6 @@ public class MakepadActivity
         super.onNewIntent(intent);
         setIntent(intent);
         restoreSurfaceViewForWarmResumeIfNeeded();
-        logLifecycle("onNewIntent");
     }
 
     @Override
@@ -1148,7 +1079,6 @@ public class MakepadActivity
 
     private void refreshSurfaceSnapshotCache() {
         if (!canCaptureSurfaceSnapshot()) {
-            logLifecycle("refreshSurfaceSnapshotCache skipped");
             return;
         }
 
@@ -1159,13 +1089,11 @@ public class MakepadActivity
         );
         PixelCopy.request(view, snapshot, copyResult -> {
             if (copyResult != PixelCopy.SUCCESS) {
-                logLifecycle("refreshSurfaceSnapshotCache failed result=" + copyResult);
                 return;
             }
             mLatestSurfaceSnapshot = snapshot;
             mLatestSurfaceSnapshotOrientation = getResources().getConfiguration().orientation;
             cacheWarmResumeSurfaceSnapshot(snapshot);
-            logLifecycle("refreshSurfaceSnapshotCache success");
             updateSurfaceSnapshotBackdrop();
             if (mSurfaceRecoveryOverlayVisible) {
                 showSurfaceRecoverySnapshotIfAvailable();
@@ -1174,10 +1102,8 @@ public class MakepadActivity
     }
 
     private void prepareSurfaceSnapshotOverlayForPause() {
-        logLifecycle("prepareSurfaceSnapshotOverlayForPause begin");
         if (!hasRecoverySnapshotAvailable()) {
             refreshSurfaceSnapshotCache();
-            logLifecycle("prepareSurfaceSnapshotOverlayForPause no snapshot");
             return;
         }
         mSurfaceRecoveryOverlayVisible = true;
@@ -1188,7 +1114,6 @@ public class MakepadActivity
         }
         showSurfaceRecoverySnapshotIfAvailable();
         refreshSurfaceSnapshotCache();
-        logLifecycle("prepareSurfaceSnapshotOverlayForPause end");
     }
 
     private void restoreSurfaceViewForWarmResumeIfNeeded() {
@@ -1211,7 +1136,6 @@ public class MakepadActivity
             mSurfaceCoverOverlay.bringToFront();
         }
         updateSurfaceSnapshotBackdrop();
-        logLifecycle("restoreSurfaceViewForWarmResumeIfNeeded");
     }
 
     private Bitmap createTaskDescriptionIconBitmap() {
@@ -1307,7 +1231,6 @@ public class MakepadActivity
             return;
         }
 
-        logLifecycle("applySurfaceCoverVisibility visible=" + visible);
         if (visible && !hasRecoverySnapshotAvailable()) {
             mSurfaceRecoveryOverlayVisible = false;
             if (view != null) {
