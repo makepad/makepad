@@ -1,7 +1,7 @@
+use crate::clip::{ClipTokenizedPrompt, ClipTokenizer};
 use crate::comfy::{
     FluxGenerationConfig, FluxPrompts, FluxWorkflow, FluxWorkflowFiles, FluxWorkflowKind,
 };
-use crate::clip::{ClipTokenizedPrompt, ClipTokenizer};
 use crate::t5::{T5TokenizedPrompt, T5Tokenizer};
 use crate::{DiffusionError, Result};
 use makepad_mlx::{MlxSafetensorsHeader, MlxTensorEntry};
@@ -212,7 +212,12 @@ pub fn pack_flux_latents_nchw(
     if latents.len() != expected {
         return Err(DiffusionError::workflow(format!(
             "FLUX latent pack expected {} values for {}x{}x{}x{}, got {}",
-            expected, batch_size, channels, latent_height, latent_width, latents.len()
+            expected,
+            batch_size,
+            channels,
+            latent_height,
+            latent_width,
+            latents.len()
         )));
     }
 
@@ -267,7 +272,9 @@ pub fn unpack_flux_latents_nchw(
     if packed.len() != expected {
         return Err(DiffusionError::workflow(format!(
             "FLUX latent unpack expected {} packed values for {} tokens, got {}",
-            expected, tokens, packed.len()
+            expected,
+            tokens,
+            packed.len()
         )));
     }
 
@@ -308,9 +315,12 @@ pub struct FluxPromptToImagePlan {
 
 impl FluxPromptToImagePlan {
     pub fn from_workflow(workflow: &FluxWorkflow, roots: &ComfyModelRoots) -> Result<Self> {
-        let bundle = FluxResolvedBundle::from_workflow_files(workflow.kind, &workflow.files, roots)?;
-        let latent_shape =
-            FluxLatentShape::from_image_size(workflow.generation.width, workflow.generation.height)?;
+        let bundle =
+            FluxResolvedBundle::from_workflow_files(workflow.kind, &workflow.files, roots)?;
+        let latent_shape = FluxLatentShape::from_image_size(
+            workflow.generation.width,
+            workflow.generation.height,
+        )?;
 
         Ok(Self {
             workflow_path: workflow.path.clone(),
@@ -342,20 +352,26 @@ impl FluxResolvedBundle {
             FluxWorkflowKind::SplitModel => Ok(Self {
                 kind,
                 diffusion_model_path: require_file(
-                    roots.unet_dir.join(require_name(&files.unet_name, "unet_name")?),
+                    roots
+                        .unet_dir
+                        .join(require_name(&files.unet_name, "unet_name")?),
                     "diffusion model",
                 )?,
                 vae_path: Some(require_file(
-                    roots.vae_dir.join(require_name(&files.vae_name, "vae_name")?),
+                    roots
+                        .vae_dir
+                        .join(require_name(&files.vae_name, "vae_name")?),
                     "VAE",
                 )?),
                 clip_l_path: Some(require_file(
-                    roots.text_encoders_dir
+                    roots
+                        .text_encoders_dir
                         .join(require_name(&files.clip_l_name, "clip_l_name")?),
                     "clip_l",
                 )?),
                 t5xxl_path: Some(require_file(
-                    roots.text_encoders_dir
+                    roots
+                        .text_encoders_dir
                         .join(require_name(&files.t5xxl_name, "t5xxl_name")?),
                     "t5xxl",
                 )?),
@@ -363,7 +379,8 @@ impl FluxResolvedBundle {
             FluxWorkflowKind::Checkpoint => Ok(Self {
                 kind,
                 diffusion_model_path: require_file(
-                    roots.checkpoints_dir
+                    roots
+                        .checkpoints_dir
                         .join(require_name(&files.checkpoint_name, "ckpt_name")?),
                     "checkpoint",
                 )?,
@@ -454,9 +471,11 @@ impl FluxTransformerInspection {
             } else if canonical == "final_layer.linear.weight" {
                 out_channels = shape_dim(entry, 0);
             } else if let Some(index) = block_index(&canonical, "double_blocks.") {
-                max_double_block = Some(max_double_block.map_or(index, |current| current.max(index)));
+                max_double_block =
+                    Some(max_double_block.map_or(index, |current| current.max(index)));
             } else if let Some(index) = block_index(&canonical, "single_blocks.") {
-                max_single_block = Some(max_single_block.map_or(index, |current| current.max(index)));
+                max_single_block =
+                    Some(max_single_block.map_or(index, |current| current.max(index)));
             }
         }
 
@@ -564,8 +583,9 @@ impl ClipLTextEncoderConfig {
             max_position_embeddings: shape_dim(pos_embedding, 0).ok_or_else(|| {
                 DiffusionError::model("clip_l position embedding missing sequence dimension")
             })?,
-            intermediate_size: shape_dim(mlp_fc1, 0)
-                .ok_or_else(|| DiffusionError::model("clip_l MLP missing intermediate dimension"))?,
+            intermediate_size: shape_dim(mlp_fc1, 0).ok_or_else(|| {
+                DiffusionError::model("clip_l MLP missing intermediate dimension")
+            })?,
             layer_count: max_layer.map_or(0, |value| value + 1),
         })
     }
@@ -609,9 +629,9 @@ impl T5TextEncoderConfig {
 }
 
 fn require_name<'a>(value: &'a Option<String>, field: &str) -> Result<&'a str> {
-    value
-        .as_deref()
-        .ok_or_else(|| DiffusionError::workflow(format!("missing '{}' in resolved workflow", field)))
+    value.as_deref().ok_or_else(|| {
+        DiffusionError::workflow(format!("missing '{}' in resolved workflow", field))
+    })
 }
 
 fn require_file(path: PathBuf, label: &str) -> Result<PathBuf> {
@@ -817,7 +837,11 @@ fn with_suffix_index(mapped: &str, index: u32) -> String {
 }
 
 fn shape_dim(entry: &MlxTensorEntry, index: usize) -> Option<u32> {
-    entry.shape.get(index).copied().and_then(|value| u32::try_from(value).ok())
+    entry
+        .shape
+        .get(index)
+        .copied()
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 #[cfg(test)]
@@ -853,9 +877,7 @@ mod tests {
     #[test]
     fn canonicalizes_diffusers_flux_names() {
         assert_eq!(
-            canonicalize_flux_diffusion_tensor_name(
-                "transformer_blocks.0.attn.add_k_proj.weight"
-            ),
+            canonicalize_flux_diffusion_tensor_name("transformer_blocks.0.attn.add_k_proj.weight"),
             "double_blocks.0.txt_attn.qkv.weight.1"
         );
         assert_eq!(
@@ -879,7 +901,9 @@ mod tests {
         let batch = 1u32;
         let h = 4u32;
         let w = 4u32;
-        let latents: Vec<f32> = (0..(batch * 16 * h * w)).map(|value| value as f32).collect();
+        let latents: Vec<f32> = (0..(batch * 16 * h * w))
+            .map(|value| value as f32)
+            .collect();
 
         let packed = pack_flux_latents_nchw(&latents, batch, h, w).unwrap();
         assert_eq!(packed.len(), 4 * 64);

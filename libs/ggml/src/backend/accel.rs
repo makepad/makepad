@@ -143,13 +143,9 @@ where
             Ok(bytes) => bytes,
             Err(err) => return Some(Err(err)),
         };
-        if let Some(out) = metal::try_get_rows_ggml_bytes(
-            &src_bytes,
-            src_ggml_type,
-            n_cols,
-            n_rows,
-            row_indices,
-        ) {
+        if let Some(out) =
+            metal::try_get_rows_ggml_bytes(&src_bytes, src_ggml_type, n_cols, n_rows, row_indices)
+        {
             return Some(Ok(out));
         }
         return None;

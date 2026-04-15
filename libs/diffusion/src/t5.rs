@@ -32,8 +32,9 @@ impl T5Tokenizer {
     }
 
     pub fn from_json(text: &str) -> Result<Self> {
-        let root = HashMap::<String, JsonValue>::deserialize_json(text)
-            .map_err(|err| DiffusionError::model(format!("invalid t5 tokenizer json: {:?}", err)))?;
+        let root = HashMap::<String, JsonValue>::deserialize_json(text).map_err(|err| {
+            DiffusionError::model(format!("invalid t5 tokenizer json: {:?}", err))
+        })?;
 
         let pre_tokenizer = json_object(root.get("pre_tokenizer"), "t5.pre_tokenizer")?;
         let pre_tokenizer_type = json_string(pre_tokenizer.get("type"), "t5.pre_tokenizer.type")?;
@@ -77,8 +78,9 @@ impl T5Tokenizer {
             }
             let piece = json_string(pair.first(), &format!("t5.model.vocab[{index}][0]"))?;
             let score = json_f32(pair.get(1), &format!("t5.model.vocab[{index}][1]"))?;
-            let token_id = i32::try_from(index)
-                .map_err(|_| DiffusionError::model(format!("t5 vocab index {} exceeds i32", index)))?;
+            let token_id = i32::try_from(index).map_err(|_| {
+                DiffusionError::model(format!("t5 vocab index {} exceeds i32", index))
+            })?;
             piece_char_lens.push(piece.chars().count());
             if let Some(first_char) = piece.chars().next() {
                 prefix_index.entry(first_char).or_default().push(token_id);
@@ -99,7 +101,10 @@ impl T5Tokenizer {
         let mut special_tokens = Vec::new();
         for (index, token) in added_tokens.iter().enumerate() {
             let token = json_object(Some(token), &format!("t5.added_tokens[{index}]"))?;
-            if !json_bool(token.get("special"), &format!("t5.added_tokens[{index}].special"))? {
+            if !json_bool(
+                token.get("special"),
+                &format!("t5.added_tokens[{index}].special"),
+            )? {
                 continue;
             }
             special_tokens.push(json_string(
@@ -158,11 +163,14 @@ impl T5Tokenizer {
         Ok(token_ids)
     }
 
-    pub fn tokenize(&self, text: &str, max_length: usize, padding: bool) -> Result<T5TokenizedPrompt> {
+    pub fn tokenize(
+        &self,
+        text: &str,
+        max_length: usize,
+        padding: bool,
+    ) -> Result<T5TokenizedPrompt> {
         if max_length == 0 {
-            return Err(DiffusionError::workflow(
-                "t5 max_length must be at least 1",
-            ));
+            return Err(DiffusionError::workflow("t5 max_length must be at least 1"));
         }
 
         let raw_token_ids = self.encode(text)?;
@@ -205,7 +213,10 @@ impl T5Tokenizer {
             return Ok(Vec::new());
         }
 
-        let mut char_offsets = text.char_indices().map(|(offset, _)| offset).collect::<Vec<_>>();
+        let mut char_offsets = text
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
         char_offsets.push(text.len());
         let char_count = char_offsets.len() - 1;
         let mut best_scores = vec![f32::NEG_INFINITY; char_count + 1];
@@ -235,7 +246,8 @@ impl T5Tokenizer {
             }
 
             if best_paths[index].is_none() {
-                best_scores[index] = self.scores[self.unk_token_id as usize] + best_scores[index + 1];
+                best_scores[index] =
+                    self.scores[self.unk_token_id as usize] + best_scores[index + 1];
                 best_paths[index] = Some((self.unk_token_id, index + 1));
             }
         }
@@ -276,7 +288,10 @@ fn split_with_special_tokens(text: &str, special_tokens: &[String]) -> Vec<Strin
     let mut cursor = 0usize;
     while cursor < text.len() {
         let rest = &text[cursor..];
-        if let Some(token) = special_tokens.iter().find(|token| rest.starts_with(token.as_str())) {
+        if let Some(token) = special_tokens
+            .iter()
+            .find(|token| rest.starts_with(token.as_str()))
+        {
             if !plain.is_empty() {
                 chunks.push(std::mem::take(&mut plain));
             }
@@ -301,14 +316,20 @@ fn json_object<'a>(
 ) -> Result<&'a HashMap<String, JsonValue>> {
     match value {
         Some(JsonValue::Object(object)) => Ok(object),
-        _ => Err(DiffusionError::model(format!("expected {} to be an object", path))),
+        _ => Err(DiffusionError::model(format!(
+            "expected {} to be an object",
+            path
+        ))),
     }
 }
 
 fn json_array<'a>(value: Option<&'a JsonValue>, path: &str) -> Result<&'a [JsonValue]> {
     match value {
         Some(JsonValue::Array(array)) => Ok(array),
-        _ => Err(DiffusionError::model(format!("expected {} to be an array", path))),
+        _ => Err(DiffusionError::model(format!(
+            "expected {} to be an array",
+            path
+        ))),
     }
 }
 
@@ -316,14 +337,20 @@ fn json_string(value: Option<&JsonValue>, path: &str) -> Result<String> {
     match value {
         Some(JsonValue::String(text)) => Ok(text.clone()),
         Some(JsonValue::BareIdent(text)) => Ok(text.clone()),
-        _ => Err(DiffusionError::model(format!("expected {} to be a string", path))),
+        _ => Err(DiffusionError::model(format!(
+            "expected {} to be a string",
+            path
+        ))),
     }
 }
 
 fn json_bool(value: Option<&JsonValue>, path: &str) -> Result<bool> {
     match value {
         Some(JsonValue::Bool(flag)) => Ok(*flag),
-        _ => Err(DiffusionError::model(format!("expected {} to be a bool", path))),
+        _ => Err(DiffusionError::model(format!(
+            "expected {} to be a bool",
+            path
+        ))),
     }
 }
 
@@ -337,7 +364,10 @@ fn json_i32(value: Option<&JsonValue>, path: &str) -> Result<i32> {
             .map_err(|_| DiffusionError::model(format!("{} does not fit in i32", path))),
         Some(JsonValue::U128(number)) => i32::try_from(*number)
             .map_err(|_| DiffusionError::model(format!("{} does not fit in i32", path))),
-        _ => Err(DiffusionError::model(format!("expected {} to be an integer", path))),
+        _ => Err(DiffusionError::model(format!(
+            "expected {} to be an integer",
+            path
+        ))),
     }
 }
 
@@ -348,7 +378,10 @@ fn json_f32(value: Option<&JsonValue>, path: &str) -> Result<f32> {
         Some(JsonValue::I128(number)) => Ok(*number as f32),
         Some(JsonValue::U64(number)) => Ok(*number as f32),
         Some(JsonValue::U128(number)) => Ok(*number as f32),
-        _ => Err(DiffusionError::model(format!("expected {} to be a number", path))),
+        _ => Err(DiffusionError::model(format!(
+            "expected {} to be a number",
+            path
+        ))),
     }
 }
 

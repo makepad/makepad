@@ -222,6 +222,19 @@ impl GemmaChatSession {
                 == "cuda-exact-greedy"
     }
 
+    fn append_cuda_exact_response_prefix(
+        tokenizer_config: &MlxTokenizerConfig,
+        prompt_format: GemmaPromptFormat,
+        prompt: &mut String,
+    ) {
+        if prompt_format == GemmaPromptFormat::Gemma4UserTurn {
+            prompt.push_str(&tokenizer_config.soc_token);
+            prompt.push_str("thought\n");
+            prompt.push_str(&tokenizer_config.eoc_token);
+            prompt.push('\n');
+        }
+    }
+
     fn format_cuda_exact_chat_turn_suffix(
         tokenizer_config: &MlxTokenizerConfig,
         prompt_format: GemmaPromptFormat,
@@ -246,9 +259,11 @@ impl GemmaChatSession {
                 prompt.push_str(&tokenizer_config.sot_token);
                 prompt.push_str(GemmaChatRole::Assistant.as_prompt_label());
                 prompt.push('\n');
-                prompt.push_str(&tokenizer_config.soc_token);
-                prompt.push_str("thought\n");
-                prompt.push_str(&tokenizer_config.eoc_token);
+                Self::append_cuda_exact_response_prefix(
+                    tokenizer_config,
+                    prompt_format,
+                    &mut prompt,
+                );
             }
             GemmaPromptFormat::AutoChat | GemmaPromptFormat::RawBos => {
                 if include_previous_assistant_terminator {
@@ -263,6 +278,54 @@ impl GemmaChatSession {
             }
         }
         prompt
+    }
+
+    fn format_current_generation_prompt_untrimmed(&self) -> Result<String, Box<dyn Error>> {
+        let prompt_format = self.model.default_chat_prompt_format();
+        match prompt_format {
+            GemmaPromptFormat::AutoChat => {
+                format_plain_chat_prompt(self.model.tokenizer_config(), &self.messages)
+            }
+            GemmaPromptFormat::Gemma4UserTurn => {
+                format_gemma4_chat_prompt(self.model.tokenizer_config(), &self.messages)
+            }
+            GemmaPromptFormat::RawBos => {
+                format_plain_chat_prompt(self.model.tokenizer_config(), &self.messages)
+            }
+        }
+    }
+
+    fn cuda_exact_window_prompt(
+        &self,
+        prompt_text: String,
+        prompt_token_ids: Vec<u32>,
+        prompt_token_limit: usize,
+        reusable_suffix_token_count: Option<usize>,
+    ) -> Result<(Arc<str>, Arc<[u32]>, usize), Box<dyn Error>> {
+        if prompt_token_ids.len() <= prompt_token_limit {
+            let prefill_token_count =
+                reusable_suffix_token_count.unwrap_or(prompt_token_ids.len());
+            return Ok((
+                Arc::<str>::from(prompt_text),
+                Arc::<[u32]>::from(prompt_token_ids),
+                prefill_token_count,
+            ));
+        }
+        if prompt_token_limit == 0 {
+            return Err("CUDA exact chat prompt token limit is zero".into());
+        }
+
+        let keep_start = prompt_token_ids.len() - prompt_token_limit;
+        let windowed_token_ids = prompt_token_ids[keep_start..].to_vec();
+        let windowed_prompt_text = self
+            .model
+            .decode_token_ids(&windowed_token_ids)
+            .map_err(|err| err.to_string())?;
+        Ok((
+            Arc::<str>::from(windowed_prompt_text),
+            Arc::<[u32]>::from(windowed_token_ids),
+            prompt_token_limit,
+        ))
     }
 
     fn prepare_cuda_exact_generation_prompt(
@@ -298,40 +361,35 @@ impl GemmaChatSession {
                 .len()
                 .checked_add(suffix_token_ids.len())
                 .ok_or("CUDA chat prompt token count overflow")?;
-            if next_prompt_token_count <= prompt_token_limit {
-                let mut next_prompt_text =
-                    String::with_capacity(raw_prompt_text.len() + suffix_text.len());
-                next_prompt_text.push_str(raw_prompt_text);
-                next_prompt_text.push_str(&suffix_text);
-                let mut next_prompt_token_ids = Vec::with_capacity(next_prompt_token_count);
-                next_prompt_token_ids.extend_from_slice(raw_prompt_token_ids);
-                next_prompt_token_ids.extend_from_slice(suffix_token_ids.as_ref());
-                return Ok((
-                    Arc::<str>::from(next_prompt_text),
-                    Arc::<[u32]>::from(next_prompt_token_ids),
-                    suffix_token_ids.len(),
-                ));
-            }
+            let mut next_prompt_text =
+                String::with_capacity(raw_prompt_text.len() + suffix_text.len());
+            next_prompt_text.push_str(raw_prompt_text);
+            next_prompt_text.push_str(&suffix_text);
+            let mut next_prompt_token_ids = Vec::with_capacity(next_prompt_token_count);
+            next_prompt_token_ids.extend_from_slice(raw_prompt_token_ids);
+            next_prompt_token_ids.extend_from_slice(suffix_token_ids.as_ref());
+            return self.cuda_exact_window_prompt(
+                next_prompt_text,
+                next_prompt_token_ids,
+                prompt_token_limit,
+                Some(suffix_token_ids.len()),
+            );
         }
 
         self.clear_cuda_exact_prompt_cache();
-        let formatted_prompt = self.prepare_generation_prompt()?;
+        let mut formatted_prompt = self.format_current_generation_prompt_untrimmed()?;
+        Self::append_cuda_exact_response_prefix(
+            self.model.tokenizer_config(),
+            prompt_format,
+            &mut formatted_prompt,
+        );
         let prompt_token_ids = self.model.tokenize_formatted_prompt(&formatted_prompt)?;
-        if prompt_token_ids.len() > prompt_token_limit {
-            return Err(format!(
-                "chat prompt requires {} tokens but CUDA exact allows only {} prompt tokens with max_new_tokens={}",
-                prompt_token_ids.len(),
-                prompt_token_limit,
-                max_new_tokens
-            )
-            .into());
-        }
-        let prompt_token_count = prompt_token_ids.len();
-        Ok((
-            Arc::<str>::from(formatted_prompt),
-            prompt_token_ids,
-            prompt_token_count,
-        ))
+        self.cuda_exact_window_prompt(
+            formatted_prompt,
+            prompt_token_ids.to_vec(),
+            prompt_token_limit,
+            None,
+        )
     }
 
     fn finish_cuda_exact_generation(

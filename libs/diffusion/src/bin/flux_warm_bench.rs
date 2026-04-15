@@ -1,6 +1,6 @@
 use makepad_diffusion::comfy::FluxWorkflow;
 use makepad_diffusion::flux::{ComfyModelRoots, FluxPromptToImagePlan};
-use makepad_diffusion::flux_pipeline::{encode_png_rgb, FluxPipelineMetal};
+use makepad_diffusion::flux_pipeline::{encode_png_rgb, FluxPipeline};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -15,11 +15,26 @@ fn usage() -> ! {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow_path = env::args().nth(1).unwrap_or_else(|| usage());
     let root = env::args().nth(2).unwrap_or_else(|| usage());
-    let width = env::args().nth(3).map(|value| value.parse::<u32>()).transpose()?;
-    let height = env::args().nth(4).map(|value| value.parse::<u32>()).transpose()?;
-    let steps = env::args().nth(5).map(|value| value.parse::<usize>()).transpose()?;
-    let warmup_runs = env::args().nth(6).map(|value| value.parse::<usize>()).transpose()?;
-    let measured_runs = env::args().nth(7).map(|value| value.parse::<usize>()).transpose()?;
+    let width = env::args()
+        .nth(3)
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
+    let height = env::args()
+        .nth(4)
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
+    let steps = env::args()
+        .nth(5)
+        .map(|value| value.parse::<usize>())
+        .transpose()?;
+    let warmup_runs = env::args()
+        .nth(6)
+        .map(|value| value.parse::<usize>())
+        .transpose()?;
+    let measured_runs = env::args()
+        .nth(7)
+        .map(|value| value.parse::<usize>())
+        .transpose()?;
     let output_path = env::args().nth(8);
 
     let workflow = FluxWorkflow::from_file(&workflow_path)?;
@@ -31,18 +46,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let warmup_runs = warmup_runs.unwrap_or(1);
     let measured_runs = measured_runs.unwrap_or(1).max(1);
 
-    let (pipeline, load_timing) = FluxPipelineMetal::load(plan.clone(), Some(width), Some(height))?;
+    let (pipeline, load_timing) = FluxPipeline::load(plan.clone(), Some(width), Some(height))?;
     println!("workflow: {}", workflow.path.display());
     println!("size: {}x{} steps={}", width, height, steps);
     println!("prompt: {}", plan.prompts.t5xxl);
     println!("t5xxl backend: {}", pipeline.t5_backend_name());
+    println!("transformer backend: {}", pipeline.transformer_backend_name());
+    println!("vae backend: {}", pipeline.vae_backend_name());
     println!("load.runtime_init_ms={:.3}", load_timing.runtime_init_ms);
     println!("load.text_tokenize_ms={:.3}", load_timing.text_tokenize_ms);
     println!("load.text_load_ms={:.3}", load_timing.text_load_ms);
     println!("load.text_compile_ms={:.3}", load_timing.text_compile_ms);
     println!("load.text_execute_ms={:.3}", load_timing.text_execute_ms);
-    println!("load.transformer_load_ms={:.3}", load_timing.transformer_load_ms);
-    println!("load.transformer_compile_ms={:.3}", load_timing.transformer_compile_ms);
+    println!(
+        "load.transformer_load_ms={:.3}",
+        load_timing.transformer_load_ms
+    );
+    println!(
+        "load.transformer_compile_ms={:.3}",
+        load_timing.transformer_compile_ms
+    );
     println!(
         "load.transformer_graph_build_ms={:.3}",
         load_timing.transformer_graph_build_ms
@@ -106,14 +129,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "measured.summary.total_ms.mean={:.3}",
         total_ms / measured_runs as f64
     );
-    println!(
-        "measured.summary.total_ms.best={:.3}",
-        best_total_ms
-    );
-    println!(
-        "measured.summary.total_ms.worst={:.3}",
-        worst_total_ms
-    );
+    println!("measured.summary.total_ms.best={:.3}", best_total_ms);
+    println!("measured.summary.total_ms.worst={:.3}", worst_total_ms);
     println!(
         "measured.summary.denoise_ms.mean={:.3}",
         total_denoise_ms / measured_runs as f64

@@ -3,8 +3,7 @@ use makepad_diffusion::flux::{
     unpack_flux_latents_nchw, ComfyModelRoots, FluxLatentShape, FluxPromptToImagePlan,
 };
 use makepad_diffusion::flux_schedule::{FLUX_VAE_SCALING_FACTOR, FLUX_VAE_SHIFT_FACTOR};
-use makepad_diffusion::flux_vae::{CompiledFluxVaeMetal, LoadedFluxVaeWeights};
-use makepad_ggml::backend::metal::MetalRuntime;
+use makepad_diffusion::flux_vae::{CompiledFluxVae, LoadedFluxVaeWeights};
 use makepad_zune_core::bit_depth::BitDepth;
 use makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_core::options::EncoderOptions;
@@ -25,8 +24,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = env::args().nth(2).unwrap_or_else(|| usage());
     let latent_path = env::args().nth(3).unwrap_or_else(|| usage());
     let output_path = env::args().nth(4).unwrap_or_else(|| usage());
-    let width = env::args().nth(5).map(|value| value.parse::<u32>()).transpose()?;
-    let height = env::args().nth(6).map(|value| value.parse::<u32>()).transpose()?;
+    let width = env::args()
+        .nth(5)
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
+    let height = env::args()
+        .nth(6)
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
 
     let workflow = FluxWorkflow::from_file(&workflow_path)?;
     let roots = ComfyModelRoots::new(root);
@@ -89,9 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .vae_path
         .as_ref()
         .ok_or("workflow bundle does not include vae")?;
-    let runtime = MetalRuntime::new().map_err(|err| format!("vae metal runtime init failed: {err}"))?;
     let mut vae = LoadedFluxVaeWeights::load(vae_path)?;
-    let compiled = CompiledFluxVaeMetal::compile_with_runtime(runtime, &mut vae, latent_shape)?;
+    let compiled = CompiledFluxVae::compile(&mut vae, latent_shape)?;
     let image = compiled.execute(&vae, &latents_whcb)?;
     fs::write(
         Path::new(&output_path),
@@ -101,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("workflow: {}", workflow.path.display());
     println!("latent: {}", latent_path);
     println!("format: {}", latent_format);
+    println!("vae backend: {}", compiled.backend_name());
     println!("output: {}", output_path);
     println!("size: {}x{}", width, height);
 
@@ -109,11 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn f32_bytes_to_vec(bytes: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     if bytes.len() % std::mem::size_of::<f32>() != 0 {
-        return Err(format!(
-            "expected f32 byte length, got {} bytes",
-            bytes.len()
-        )
-        .into());
+        return Err(format!("expected f32 byte length, got {} bytes", bytes.len()).into());
     }
     Ok(bytes
         .chunks_exact(4)
@@ -140,7 +141,11 @@ fn nchw_to_whcb(
     Ok(input.to_vec())
 }
 
-fn encode_png_rgb(image_whcb: &[f32], width: usize, height: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn encode_png_rgb(
+    image_whcb: &[f32],
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let expected = width * height * 3;
     if image_whcb.len() != expected {
         return Err(format!(
