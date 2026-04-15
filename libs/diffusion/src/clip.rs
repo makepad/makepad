@@ -257,10 +257,7 @@ impl ClipTokenizer {
             let mut new_word = Vec::with_capacity(word.len());
             let mut index = 0usize;
             while index < word.len() {
-                if word[index] == *first
-                    && index + 1 < word.len()
-                    && word[index + 1] == *second
-                {
+                if word[index] == *first && index + 1 < word.len() && word[index + 1] == *second {
                     new_word.push(format!("{first}{second}"));
                     index += 2;
                 } else {
@@ -465,7 +462,7 @@ fn first_eos_index(token_ids: &[i32]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClipTokenizer, ClipTokenizedPrompt};
+    use super::{ClipTokenizedPrompt, ClipTokenizer};
     use crate::assets::{CLIP_MERGES_UTF8, T5_TOKENIZER_JSON};
 
     #[test]
@@ -491,7 +488,10 @@ mod tests {
         assert_eq!(tokenized.raw_token_ids.len(), 1);
         assert_eq!(tokenized.chunks.len(), 1);
         assert_eq!(tokenized.chunks[0].token_ids.len(), 77);
-        assert_eq!(tokenized.chunks[0].token_ids[0], ClipTokenizer::BOS_TOKEN_ID);
+        assert_eq!(
+            tokenized.chunks[0].token_ids[0],
+            ClipTokenizer::BOS_TOKEN_ID
+        );
         assert_eq!(tokenized.chunks[0].eos_index, 2);
         assert_eq!(
             &tokenized.chunks[0].token_ids[..5],
@@ -505,17 +505,29 @@ mod tests {
         let long_prompt = vec!["test"; 90].join(" ");
         let tokenized = tokenizer.tokenize_chunks(&long_prompt, 77, true).unwrap();
         assert_eq!(tokenized.chunks.len(), 2);
-        assert_eq!(tokenized.chunks[0].token_ids[0], ClipTokenizer::BOS_TOKEN_ID);
-        assert_eq!(tokenized.chunks[1].token_ids[0], ClipTokenizer::BOS_TOKEN_ID);
-        assert_eq!(tokenized.chunks[0].token_ids[76], ClipTokenizer::EOS_TOKEN_ID);
+        assert_eq!(
+            tokenized.chunks[0].token_ids[0],
+            ClipTokenizer::BOS_TOKEN_ID
+        );
+        assert_eq!(
+            tokenized.chunks[1].token_ids[0],
+            ClipTokenizer::BOS_TOKEN_ID
+        );
+        assert_eq!(
+            tokenized.chunks[0].token_ids[76],
+            ClipTokenizer::EOS_TOKEN_ID
+        );
         assert!(tokenized.chunks[1].eos_index < 76);
     }
 
     #[test]
     fn decode_approx_round_trips_simple_prompt() {
         let tokenizer = ClipTokenizer::new().unwrap();
-        let ClipTokenizedPrompt { chunks, .. } = tokenizer.tokenize_chunks("hello world", 77, true).unwrap();
-        let decoded = tokenizer.decode_approx(&chunks[0].token_ids[..chunks[0].eos_index]).unwrap();
+        let ClipTokenizedPrompt { chunks, .. } =
+            tokenizer.tokenize_chunks("hello world", 77, true).unwrap();
+        let decoded = tokenizer
+            .decode_approx(&chunks[0].token_ids[..chunks[0].eos_index])
+            .unwrap();
         assert_eq!(decoded, "hello world");
     }
 }

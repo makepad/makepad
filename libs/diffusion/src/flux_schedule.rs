@@ -45,7 +45,12 @@ impl FluxSchedule {
     }
 }
 
-pub fn euler_step(sample: &mut [f32], model_output: &[f32], sigma: f32, sigma_next: f32) -> Result<()> {
+pub fn euler_step(
+    sample: &mut [f32],
+    model_output: &[f32],
+    sigma: f32,
+    sigma_next: f32,
+) -> Result<()> {
     if sample.len() != model_output.len() {
         return Err(DiffusionError::workflow(format!(
             "flux euler step length mismatch: sample {} vs model_output {}",
@@ -84,7 +89,11 @@ mod tests {
         assert!((schedule.sigmas[0] - 1.0).abs() < 1.0e-6);
 
         let step = FLUX_T_MAX / 19.0;
-        let expected = flux_time_shift(FLUX_SHIFT_WITH_GUIDANCE, 1.0, (FLUX_T_MAX - step + 1.0) / FLUX_TIMESTEPS);
+        let expected = flux_time_shift(
+            FLUX_SHIFT_WITH_GUIDANCE,
+            1.0,
+            (FLUX_T_MAX - step + 1.0) / FLUX_TIMESTEPS,
+        );
         assert!((schedule.sigmas[1] - expected).abs() < 1.0e-6);
         assert_eq!(schedule.sigmas[20], 0.0);
     }
@@ -93,7 +102,11 @@ mod tests {
     fn matches_flux1_unguided_discrete_schedule() {
         let schedule = FluxSchedule::for_flux1(20, false).unwrap();
         let step = FLUX_T_MAX / 19.0;
-        let expected = flux_time_shift(FLUX_SHIFT_NO_GUIDANCE, 1.0, (FLUX_T_MAX - step + 1.0) / FLUX_TIMESTEPS);
+        let expected = flux_time_shift(
+            FLUX_SHIFT_NO_GUIDANCE,
+            1.0,
+            (FLUX_T_MAX - step + 1.0) / FLUX_TIMESTEPS,
+        );
         assert!((schedule.sigmas[1] - expected).abs() < 1.0e-6);
     }
 

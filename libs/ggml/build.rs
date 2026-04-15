@@ -119,16 +119,15 @@ fn build_cuda_backends() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let lib_path = out_dir.join("libggml_cuda_affine.a");
-    let arch = env::var("MAKEPAD_GGML_CUDA_ARCH").unwrap_or_else(|_| "120".to_string());
+    let arch = env::var("MAKEPAD_GGML_CUDA_ARCH").unwrap_or_else(|_| "120a".to_string());
 
     let mut obj_paths = Vec::new();
     for src_path in &src_paths {
         let stem = src_path.file_stem().unwrap().to_string_lossy();
         let obj_path = out_dir.join(format!("ggml_cuda_{stem}.o"));
         let status = Command::new(&nvcc)
+            .args(["-std=c++17", "-O3"])
             .args([
-                "-std=c++17",
-                "-O3",
                 "-c",
                 "-Xcompiler",
                 "-fPIC",

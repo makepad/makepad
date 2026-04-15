@@ -9,6 +9,12 @@ pub type cudaStream_t = *mut c_void;
 pub type cudaGraph_t = *mut c_void;
 pub type cudaGraphExec_t = *mut c_void;
 pub type cudaStreamCaptureMode = c_int;
+pub type cublasStatus_t = c_int;
+pub type cublasHandle_t = *mut c_void;
+pub type cublasOperation_t = c_int;
+pub type cudaDataType = c_int;
+pub type cublasComputeType_t = c_int;
+pub type cublasGemmAlgo_t = c_int;
 
 pub const CUDA_SUCCESS: cudaError_t = 0;
 pub const CUDA_STREAM_NON_BLOCKING: c_uint = 1;
@@ -19,6 +25,14 @@ pub const CUDA_HOST_ALLOC_MAPPED: c_uint = 2;
 
 pub const CUDA_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 pub const CUDA_MEMCPY_DEVICE_TO_HOST: c_int = 2;
+pub const CUBLAS_STATUS_SUCCESS: cublasStatus_t = 0;
+pub const CUBLAS_OP_N: cublasOperation_t = 0;
+pub const CUBLAS_OP_T: cublasOperation_t = 1;
+pub const CUDA_R_32F: cudaDataType = 0;
+pub const CUDA_R_16BF: cudaDataType = 14;
+pub const CUBLAS_COMPUTE_32F: cublasComputeType_t = 68;
+pub const CUBLAS_COMPUTE_32F_FAST_16BF: cublasComputeType_t = 75;
+pub const CUBLAS_GEMM_DEFAULT: cublasGemmAlgo_t = -1;
 
 unsafe extern "C" {
     pub fn cudaGetDeviceCount(count: *mut c_int) -> cudaError_t;
@@ -49,10 +63,8 @@ unsafe extern "C" {
     pub fn cudaStreamCreateWithFlags(stream: *mut cudaStream_t, flags: c_uint) -> cudaError_t;
     pub fn cudaStreamDestroy(stream: cudaStream_t) -> cudaError_t;
     pub fn cudaStreamSynchronize(stream: cudaStream_t) -> cudaError_t;
-    pub fn cudaStreamBeginCapture(
-        stream: cudaStream_t,
-        mode: cudaStreamCaptureMode,
-    ) -> cudaError_t;
+    pub fn cudaStreamBeginCapture(stream: cudaStream_t, mode: cudaStreamCaptureMode)
+        -> cudaError_t;
     pub fn cudaStreamEndCapture(stream: cudaStream_t, graph: *mut cudaGraph_t) -> cudaError_t;
     pub fn cudaDeviceSynchronize() -> cudaError_t;
     pub fn cudaGraphInstantiate(
@@ -64,6 +76,56 @@ unsafe extern "C" {
     pub fn cudaGraphDestroy(graph: cudaGraph_t) -> cudaError_t;
     pub fn cudaGraphExecDestroy(graph_exec: cudaGraphExec_t) -> cudaError_t;
     pub fn cudaGetErrorString(error: cudaError_t) -> *const c_char;
+
+    pub fn cublasCreate_v2(handle: *mut cublasHandle_t) -> cublasStatus_t;
+    pub fn cublasDestroy_v2(handle: cublasHandle_t) -> cublasStatus_t;
+    pub fn cublasSetStream_v2(handle: cublasHandle_t, stream: cudaStream_t) -> cublasStatus_t;
+    pub fn cublasSetWorkspace_v2(
+        handle: cublasHandle_t,
+        workspace: *mut c_void,
+        workspace_size_in_bytes: usize,
+    ) -> cublasStatus_t;
+    pub fn cublasSgemm_v2(
+        handle: cublasHandle_t,
+        transa: cublasOperation_t,
+        transb: cublasOperation_t,
+        m: c_int,
+        n: c_int,
+        k: c_int,
+        alpha: *const f32,
+        a: *const f32,
+        lda: c_int,
+        b: *const f32,
+        ldb: c_int,
+        beta: *const f32,
+        c: *mut f32,
+        ldc: c_int,
+    ) -> cublasStatus_t;
+    pub fn cublasGemmStridedBatchedEx(
+        handle: cublasHandle_t,
+        transa: cublasOperation_t,
+        transb: cublasOperation_t,
+        m: c_int,
+        n: c_int,
+        k: c_int,
+        alpha: *const c_void,
+        a: *const c_void,
+        atype: cudaDataType,
+        lda: c_int,
+        stride_a: i64,
+        b: *const c_void,
+        btype: cudaDataType,
+        ldb: c_int,
+        stride_b: i64,
+        beta: *const c_void,
+        c: *mut c_void,
+        ctype: cudaDataType,
+        ldc: c_int,
+        stride_c: i64,
+        batch_count: c_int,
+        compute_type: cublasComputeType_t,
+        algo: cublasGemmAlgo_t,
+    ) -> cublasStatus_t;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,12 +157,40 @@ impl fmt::Display for CudaError {
 
 impl std::error::Error for CudaError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CublasError {
+    code: cublasStatus_t,
+}
+
+impl CublasError {
+    pub fn code(self) -> cublasStatus_t {
+        self.code
+    }
+}
+
+impl fmt::Display for CublasError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cuBLAS error code {}", self.code)
+    }
+}
+
+impl std::error::Error for CublasError {}
+
 #[inline]
 pub fn check(status: cudaError_t) -> Result<(), CudaError> {
     if status == CUDA_SUCCESS {
         Ok(())
     } else {
         Err(CudaError { code: status })
+    }
+}
+
+#[inline]
+pub fn check_cublas(status: cublasStatus_t) -> Result<(), CublasError> {
+    if status == CUBLAS_STATUS_SUCCESS {
+        Ok(())
+    } else {
+        Err(CublasError { code: status })
     }
 }
 
@@ -162,6 +252,115 @@ pub fn end_stream_capture(stream: cudaStream_t) -> Result<CudaGraph, CudaError> 
     Ok(CudaGraph { inner: graph })
 }
 
+pub fn cublas_create() -> Result<cublasHandle_t, CublasError> {
+    let mut handle = ptr::null_mut();
+    unsafe {
+        check_cublas(cublasCreate_v2(&mut handle))?;
+    }
+    Ok(handle)
+}
+
+pub fn cublas_destroy(handle: cublasHandle_t) -> Result<(), CublasError> {
+    unsafe { check_cublas(cublasDestroy_v2(handle)) }
+}
+
+pub fn cublas_set_stream(handle: cublasHandle_t, stream: cudaStream_t) -> Result<(), CublasError> {
+    unsafe { check_cublas(cublasSetStream_v2(handle, stream)) }
+}
+
+pub fn cublas_set_workspace(
+    handle: cublasHandle_t,
+    workspace: NonNull<c_void>,
+    workspace_size_in_bytes: usize,
+) -> Result<(), CublasError> {
+    unsafe {
+        check_cublas(cublasSetWorkspace_v2(
+            handle,
+            workspace.as_ptr(),
+            workspace_size_in_bytes,
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cublas_sgemm(
+    handle: cublasHandle_t,
+    transa: cublasOperation_t,
+    transb: cublasOperation_t,
+    m: i32,
+    n: i32,
+    k: i32,
+    alpha: &f32,
+    a: *const f32,
+    lda: i32,
+    b: *const f32,
+    ldb: i32,
+    beta: &f32,
+    c: *mut f32,
+    ldc: i32,
+) -> Result<(), CublasError> {
+    unsafe {
+        check_cublas(cublasSgemm_v2(
+            handle, transa, transb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc,
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cublas_gemm_strided_batched_ex(
+    handle: cublasHandle_t,
+    transa: cublasOperation_t,
+    transb: cublasOperation_t,
+    m: i32,
+    n: i32,
+    k: i32,
+    alpha: &f32,
+    a: *const c_void,
+    atype: cudaDataType,
+    lda: i32,
+    stride_a: i64,
+    b: *const c_void,
+    btype: cudaDataType,
+    ldb: i32,
+    stride_b: i64,
+    beta: &f32,
+    c: *mut c_void,
+    ctype: cudaDataType,
+    ldc: i32,
+    stride_c: i64,
+    batch_count: i32,
+    compute_type: cublasComputeType_t,
+    algo: cublasGemmAlgo_t,
+) -> Result<(), CublasError> {
+    unsafe {
+        check_cublas(cublasGemmStridedBatchedEx(
+            handle,
+            transa,
+            transb,
+            m,
+            n,
+            k,
+            alpha as *const f32 as *const c_void,
+            a,
+            atype,
+            lda,
+            stride_a,
+            b,
+            btype,
+            ldb,
+            stride_b,
+            beta as *const f32 as *const c_void,
+            c,
+            ctype,
+            ldc,
+            stride_c,
+            batch_count,
+            compute_type,
+            algo,
+        ))
+    }
+}
+
 pub fn device_synchronize() -> Result<(), CudaError> {
     unsafe { check(cudaDeviceSynchronize()) }
 }
@@ -190,7 +389,11 @@ pub unsafe fn host_get_device_pointer(
     host_ptr: NonNull<c_void>,
 ) -> Result<NonNull<c_void>, CudaError> {
     let mut device_ptr = ptr::null_mut();
-    check(cudaHostGetDevicePointer(&mut device_ptr, host_ptr.as_ptr(), 0))?;
+    check(cudaHostGetDevicePointer(
+        &mut device_ptr,
+        host_ptr.as_ptr(),
+        0,
+    ))?;
     NonNull::new(device_ptr).ok_or(CudaError { code: -1 })
 }
 

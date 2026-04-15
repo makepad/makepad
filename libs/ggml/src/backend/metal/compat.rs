@@ -152,6 +152,16 @@ pub fn try_rms_norm_mul_f32(
     imp::try_rms_norm_mul_f32(x, x_shape, mul, mul_shape, eps)
 }
 
+pub fn try_attention_softmax_weighted_sum_f32(
+    logits: &[f32],
+    values: &[f32],
+    query_count: usize,
+    seq_len: usize,
+    head_dim: usize,
+) -> Option<Vec<f32>> {
+    imp::try_attention_softmax_weighted_sum_f32(logits, values, query_count, seq_len, head_dim)
+}
+
 pub fn try_layer_norm_mul_add_f32(
     x: &[f32],
     x_shape: &[usize],
@@ -185,26 +195,301 @@ pub fn try_im2col_1d_f32(
     imp::try_im2col_1d_f32(input, ic, iw, kw, stride, pad)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        try_add_f32, try_attention_softmax_weighted_sum_f32, try_gelu_f32, try_mul_f32,
+        try_rms_norm_f32, try_rms_norm_mul_f32,
+    };
+
+    // The non-macOS path currently routes through CUDA kernels that do not
+    // match the CPU reference bit-for-bit on these tiny synthetic cases.
+    const RMS_NORM_TOLERANCE: f32 = 1.0e-2;
+
+    fn assert_close(actual: &[f32], expected: &[f32], tol: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (a - e).abs() <= tol,
+                "mismatch: actual={} expected={} tol={}",
+                a,
+                e,
+                tol
+            );
+        }
+    }
+
+    #[test]
+    fn add_f32_matches_cpu_when_backend_available() {
+        let a = vec![1.0, -2.0, 3.5, 0.25, 4.0, -1.5];
+        let b = vec![0.5, 3.0, -1.5, 1.75, -2.0, 2.5];
+        let expected = a
+            .iter()
+            .zip(b.iter())
+            .map(|(lhs, rhs)| lhs + rhs)
+            .collect::<Vec<_>>();
+        let Some(actual) = try_add_f32(&a, &[2, 3], &b, &[2, 3]) else {
+            return;
+        };
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn mul_f32_matches_cpu_when_backend_available() {
+        let a = vec![1.0, -2.0, 3.5, 0.25, 4.0, -1.5];
+        let b = vec![0.5, 3.0, -1.5, 1.75, -2.0, 2.5];
+        let expected = a
+            .iter()
+            .zip(b.iter())
+            .map(|(lhs, rhs)| lhs * rhs)
+            .collect::<Vec<_>>();
+        let Some(actual) = try_mul_f32(&a, &[2, 3], &b, &[2, 3]) else {
+            return;
+        };
+        assert_close(&actual, &expected, RMS_NORM_TOLERANCE);
+    }
+
+    #[test]
+    fn gelu_f32_matches_cpu_when_backend_available() {
+        let input = vec![-2.0, -0.5, 0.0, 0.5, 1.5, 3.0];
+        let expected = input.iter().copied().map(cpu_gelu).collect::<Vec<_>>();
+        let Some(actual) = try_gelu_f32(&input, &[2, 3]) else {
+            return;
+        };
+        assert_close(&actual, &expected, RMS_NORM_TOLERANCE);
+    }
+
+    #[test]
+    fn rms_norm_f32_matches_cpu_when_backend_available() {
+        let x = vec![1.0, -2.0, 3.0, 0.5, -1.0, 2.5];
+        let eps = 1.0e-5;
+        let expected = x
+            .chunks_exact(3)
+            .flat_map(|row| {
+                let mean_square =
+                    row.iter().map(|value| value * value).sum::<f32>() / row.len() as f32;
+                let inv_rms = 1.0 / (mean_square + eps).sqrt();
+                row.iter().map(move |value| value * inv_rms)
+            })
+            .collect::<Vec<_>>();
+        let Some(actual) = try_rms_norm_f32(&x, &[2, 3], eps) else {
+            return;
+        };
+        assert_close(&actual, &expected, RMS_NORM_TOLERANCE);
+    }
+
+    #[test]
+    fn rms_norm_mul_f32_matches_cpu_when_backend_available() {
+        let x = vec![1.0, -2.0, 3.0, 0.5, -1.0, 2.5];
+        let mul = vec![0.25, 1.5, -0.75];
+        let eps = 1.0e-5;
+        let expected = x
+            .chunks_exact(3)
+            .flat_map(|row| {
+                let mean_square =
+                    row.iter().map(|value| value * value).sum::<f32>() / row.len() as f32;
+                let inv_rms = 1.0 / (mean_square + eps).sqrt();
+                row.iter()
+                    .zip(mul.iter())
+                    .map(move |(value, scale)| value * inv_rms * scale)
+            })
+            .collect::<Vec<_>>();
+        let Some(actual) = try_rms_norm_mul_f32(&x, &[2, 3], &mul, &[3], eps) else {
+            return;
+        };
+        assert_close(&actual, &expected, RMS_NORM_TOLERANCE);
+    }
+
+    #[test]
+    fn attention_softmax_weighted_sum_matches_cpu_when_backend_available() {
+        let logits = vec![
+            0.5, -0.25, 1.0, //
+            -0.5, 0.25, 0.75,
+        ];
+        let values = vec![
+            1.0, 0.5, //
+            -0.25, 2.0, //
+            0.75, -1.5,
+        ];
+        let expected = cpu_attention_softmax_weighted_sum(&logits, &values, 2, 3, 2);
+        let Some(actual) = try_attention_softmax_weighted_sum_f32(&logits, &values, 2, 3, 2) else {
+            return;
+        };
+        assert_close(&actual, &expected, RMS_NORM_TOLERANCE);
+    }
+
+    fn cpu_attention_softmax_weighted_sum(
+        logits: &[f32],
+        values: &[f32],
+        query_count: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Vec<f32> {
+        let mut output = vec![0.0f32; query_count * head_dim];
+        for query_idx in 0..query_count {
+            let logits_row = &logits[query_idx * seq_len..(query_idx + 1) * seq_len];
+            let max_logit = logits_row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let probs = logits_row
+                .iter()
+                .copied()
+                .map(|value| (value - max_logit).exp())
+                .collect::<Vec<_>>();
+            let denom = probs.iter().copied().sum::<f32>();
+            for token_idx in 0..seq_len {
+                let prob = probs[token_idx] / denom;
+                let value_row = &values[token_idx * head_dim..(token_idx + 1) * head_dim];
+                for dim_idx in 0..head_dim {
+                    output[query_idx * head_dim + dim_idx] += prob * value_row[dim_idx];
+                }
+            }
+        }
+        output
+    }
+
+    fn cpu_gelu(value: f32) -> f32 {
+        let squared = value * value;
+        let cubic = squared * value;
+        let poly = value + 0.044715 * cubic;
+        let tanh_input = 0.7978846 * poly;
+        0.5 * value * (1.0 + tanh_input.tanh())
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 mod imp {
+    use crate::backend::cuda;
+    use std::cell::RefCell;
+    use std::mem::size_of;
+
+    thread_local! {
+        static CUDA_RUNTIME: RefCell<Option<cuda::CudaRuntime>> = const { RefCell::new(None) };
+    }
+
+    fn with_cuda_runtime<T, F>(f: F) -> Option<T>
+    where
+        F: FnOnce(&cuda::CudaRuntime) -> Result<T, String>,
+    {
+        if !cuda::is_available() {
+            return None;
+        }
+
+        CUDA_RUNTIME.with(|runtime| {
+            let mut runtime = runtime.borrow_mut();
+            if runtime.is_none() {
+                *runtime = Some(cuda::CudaRuntime::load().ok()?);
+            }
+            f(runtime.as_ref()?).ok()
+        })
+    }
+
+    fn f32s_as_bytes(values: &[f32]) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                values.as_ptr().cast::<u8>(),
+                values.len() * size_of::<f32>(),
+            )
+        }
+    }
+
+    fn f32_to_bf16_word(value: f32) -> u16 {
+        let bits = value.to_bits();
+        let lsb = (bits >> 16) & 1;
+        let rounding_bias = 0x7FFF + lsb;
+        ((bits.wrapping_add(rounding_bias)) >> 16) as u16
+    }
+
+    fn f32s_to_bf16_words(values: &[f32]) -> Vec<u16> {
+        values.iter().copied().map(f32_to_bf16_word).collect()
+    }
+
+    fn u16_words_as_le_bytes(words: &[u16]) -> &[u8] {
+        #[cfg(target_endian = "little")]
+        unsafe {
+            std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), words.len() * size_of::<u16>())
+        }
+
+        #[cfg(not(target_endian = "little"))]
+        {
+            unreachable!("u16 byte reinterpreting currently assumes little-endian targets")
+        }
+    }
+
+    fn shape_numel(shape: &[usize]) -> Option<usize> {
+        shape
+            .iter()
+            .copied()
+            .try_fold(1usize, |acc, dim| acc.checked_mul(dim))
+    }
+
+    fn rows_cols_for_last_dim(shape: &[usize], len: usize) -> Option<(usize, usize)> {
+        let cols = *shape.last()?;
+        let numel = shape_numel(shape)?;
+        if numel != len {
+            return None;
+        }
+        if cols == 0 {
+            return Some((0, 0));
+        }
+        Some((numel / cols, cols))
+    }
+
+    fn is_last_dim_vector(shape: &[usize], cols: usize, len: usize) -> bool {
+        if shape.is_empty() || len != cols || *shape.last().unwrap() != cols {
+            return false;
+        }
+        shape[..shape.len() - 1].iter().all(|&dim| dim == 1)
+    }
+
     pub(super) fn try_matmul_nn_f32(
-        _a: &[f32],
-        _b: &[f32],
-        _m: usize,
-        _k: usize,
-        _n: usize,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
     ) -> Option<Vec<f32>> {
-        None
+        if a.len() != m.checked_mul(k)? || b.len() != k.checked_mul(n)? {
+            return None;
+        }
+        if a.is_empty() || b.is_empty() {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let a_buf = cuda.load_bytes(f32s_as_bytes(a))?;
+            let b_buf = cuda.load_bytes(f32s_as_bytes(b))?;
+            let out_len = m
+                .checked_mul(n)
+                .ok_or_else(|| "CUDA matmul output length overflow".to_string())?;
+            let out_buf = cuda.alloc_f32(out_len)?;
+            cuda.matmul_nn_f32(&a_buf, &b_buf, &out_buf, m, k, n)?;
+            cuda.read_f32s(&out_buf, out_len)
+        })
     }
 
     pub(super) fn try_matmul_nt_f32(
-        _a: &[f32],
-        _bt: &[f32],
-        _m: usize,
-        _k: usize,
-        _n: usize,
+        a: &[f32],
+        bt: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
     ) -> Option<Vec<f32>> {
-        None
+        if a.len() != m.checked_mul(k)? || bt.len() != n.checked_mul(k)? {
+            return None;
+        }
+        if a.is_empty() || bt.is_empty() {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let a_buf = cuda.load_bytes(f32s_as_bytes(a))?;
+            let bt_buf = cuda.load_bytes(f32s_as_bytes(bt))?;
+            let out_len = m
+                .checked_mul(n)
+                .ok_or_else(|| "CUDA matmul output length overflow".to_string())?;
+            let out_buf = cuda.alloc_f32(out_len)?;
+            cuda.matmul_nt_f32(&a_buf, &bt_buf, &out_buf, m, k, n)?;
+            cuda.read_f32s(&out_buf, out_len)
+        })
     }
 
     pub(super) fn try_matmul_nt_f32_bytes(
@@ -306,43 +591,156 @@ mod imp {
     }
 
     pub(super) fn try_add_f32(
-        _a: &[f32],
-        _a_shape: &[usize],
-        _b: &[f32],
-        _b_shape: &[usize],
+        a: &[f32],
+        a_shape: &[usize],
+        b: &[f32],
+        b_shape: &[usize],
     ) -> Option<Vec<f32>> {
-        None
+        if shape_numel(a_shape)? != a.len()
+            || shape_numel(b_shape)? != b.len()
+            || a_shape != b_shape
+        {
+            return None;
+        }
+        if a.is_empty() {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let a_buf = cuda.load_bytes(f32s_as_bytes(a))?;
+            let b_buf = cuda.load_bytes(f32s_as_bytes(b))?;
+            let out_buf = cuda.alloc_f32(a.len())?;
+            cuda.add_f32(&a_buf, &b_buf, &out_buf, a.len())?;
+            cuda.read_f32s(&out_buf, a.len())
+        })
     }
 
     pub(super) fn try_mul_f32(
-        _a: &[f32],
-        _a_shape: &[usize],
-        _b: &[f32],
-        _b_shape: &[usize],
+        a: &[f32],
+        a_shape: &[usize],
+        b: &[f32],
+        b_shape: &[usize],
     ) -> Option<Vec<f32>> {
-        None
+        if shape_numel(a_shape)? != a.len()
+            || shape_numel(b_shape)? != b.len()
+            || a_shape != b_shape
+        {
+            return None;
+        }
+        if a.is_empty() {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let a_buf = cuda.load_bytes(f32s_as_bytes(a))?;
+            let b_buf = cuda.load_bytes(f32s_as_bytes(b))?;
+            let out_buf = cuda.alloc_f32(a.len())?;
+            cuda.mul_f32(&a_buf, &b_buf, &out_buf, a.len())?;
+            cuda.read_f32s(&out_buf, a.len())
+        })
     }
 
-    pub(super) fn try_gelu_f32(_a: &[f32], _shape: &[usize]) -> Option<Vec<f32>> {
-        None
+    pub(super) fn try_gelu_f32(a: &[f32], shape: &[usize]) -> Option<Vec<f32>> {
+        if shape_numel(shape)? != a.len() {
+            return None;
+        }
+        if a.is_empty() {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let input_buf = cuda.load_bytes(f32s_as_bytes(a))?;
+            let out_buf = cuda.alloc_f32(a.len())?;
+            cuda.gelu_f32(&input_buf, &out_buf, a.len())?;
+            cuda.read_f32s(&out_buf, a.len())
+        })
     }
 
     pub(super) fn try_layer_norm_f32(_x: &[f32], _shape: &[usize], _eps: f32) -> Option<Vec<f32>> {
         None
     }
 
-    pub(super) fn try_rms_norm_f32(_x: &[f32], _shape: &[usize], _eps: f32) -> Option<Vec<f32>> {
-        None
+    pub(super) fn try_rms_norm_f32(x: &[f32], shape: &[usize], eps: f32) -> Option<Vec<f32>> {
+        let (rows, cols) = rows_cols_for_last_dim(shape, x.len())?;
+        if x.is_empty() {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let x_buf = cuda.load_bytes(f32s_as_bytes(x))?;
+            let out_buf = cuda.alloc_f32(x.len())?;
+            cuda.rms_norm_rows_no_scale_f32(&x_buf, &out_buf, rows, cols, cols, eps)?;
+            cuda.read_f32s(&out_buf, x.len())
+        })
     }
 
     pub(super) fn try_rms_norm_mul_f32(
-        _x: &[f32],
-        _x_shape: &[usize],
-        _mul: &[f32],
-        _mul_shape: &[usize],
-        _eps: f32,
+        x: &[f32],
+        x_shape: &[usize],
+        mul: &[f32],
+        mul_shape: &[usize],
+        eps: f32,
     ) -> Option<Vec<f32>> {
-        None
+        let (rows, cols) = rows_cols_for_last_dim(x_shape, x.len())?;
+        if !is_last_dim_vector(mul_shape, cols, mul.len()) {
+            return None;
+        }
+        if x.is_empty() {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let x_buf = cuda.load_bytes(f32s_as_bytes(x))?;
+            let mul_buf = cuda.load_bytes(f32s_as_bytes(mul))?;
+            let out_buf = cuda.alloc_f32(x.len())?;
+            cuda.rms_norm_rows_weighted_f32_f32weights(
+                &x_buf, &mul_buf, &out_buf, rows, cols, cols, eps,
+            )?;
+            cuda.read_f32s(&out_buf, x.len())
+        })
+    }
+
+    pub(super) fn try_attention_softmax_weighted_sum_f32(
+        logits: &[f32],
+        values: &[f32],
+        query_count: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Option<Vec<f32>> {
+        if logits.len() != query_count.checked_mul(seq_len)? {
+            return None;
+        }
+        if values.len() != seq_len.checked_mul(head_dim)? {
+            return None;
+        }
+        if logits.is_empty() || values.is_empty() {
+            return Some(Vec::new());
+        }
+
+        with_cuda_runtime(|cuda| {
+            let logits_buf = cuda.load_bytes(f32s_as_bytes(logits))?;
+            let value_words = f32s_to_bf16_words(values);
+            let values_buf = cuda.load_bytes(u16_words_as_le_bytes(&value_words))?;
+            let out_len = query_count
+                .checked_mul(head_dim)
+                .ok_or_else(|| "CUDA attention output length overflow".to_string())?;
+            let out_buf = cuda.alloc_f32(out_len)?;
+            cuda.attention_softmax_weighted_sum_f32(
+                &logits_buf,
+                &values_buf,
+                &out_buf,
+                query_count,
+                query_count,
+                head_dim,
+                head_dim,
+                seq_len,
+                0,
+                seq_len,
+                seq_len,
+                head_dim,
+            )?;
+            cuda.read_f32s(&out_buf, out_len)
+        })
     }
 
     pub(super) fn try_layer_norm_mul_add_f32(
@@ -393,9 +791,9 @@ mod imp {
     use std::collections::HashMap;
     use std::ffi::{c_char, c_void, CStr};
     use std::ptr::NonNull;
+    use std::sync::OnceLock;
     use std::thread;
     use std::time::Duration;
-    use std::sync::OnceLock;
 
     const LOG_METAL_PIPELINES: bool = false;
     const DISABLE_GGML_METAL_BF16: bool = false;
@@ -1419,8 +1817,10 @@ mod imp {
                     continue;
                 };
 
-                let command_queue_obj: ObjcId = unsafe { msg_send![device.as_id(), newCommandQueue] };
-                let Some(command_queue) = (unsafe { StrongId::from_owned(command_queue_obj) }) else {
+                let command_queue_obj: ObjcId =
+                    unsafe { msg_send![device.as_id(), newCommandQueue] };
+                let Some(command_queue) = (unsafe { StrongId::from_owned(command_queue_obj) })
+                else {
                     last_err = Some("newCommandQueue returned nil".to_string());
                     if attempt + 1 < METAL_INIT_ATTEMPTS {
                         thread::sleep(Duration::from_millis(METAL_INIT_RETRY_DELAY_MS));
@@ -6509,6 +6909,16 @@ mod imp {
         eps: f32,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| ctx.rms_norm_mul_f32(x, x_shape, mul, mul_shape, eps))
+    }
+
+    pub(super) fn try_attention_softmax_weighted_sum_f32(
+        _logits: &[f32],
+        _values: &[f32],
+        _query_count: usize,
+        _seq_len: usize,
+        _head_dim: usize,
+    ) -> Option<Vec<f32>> {
+        None
     }
 
     pub(super) fn try_layer_norm_mul_add_f32(

@@ -232,13 +232,8 @@ pub fn get_rows_ggml_bytes_cpu(
     let row_bytes = match src_ggml_type {
         GGML_TYPE_F32 => n_cols.checked_mul(4)?,
         GGML_TYPE_F16 | GGML_TYPE_BF16 => n_cols.checked_mul(2)?,
-        GGML_TYPE_Q4_0
-        | GGML_TYPE_Q4_1
-        | GGML_TYPE_Q5_0
-        | GGML_TYPE_Q5_1
-        | GGML_TYPE_Q8_0
-        | GGML_TYPE_Q5_K
-        | GGML_TYPE_NVFP4 => {
+        GGML_TYPE_Q4_0 | GGML_TYPE_Q4_1 | GGML_TYPE_Q5_0 | GGML_TYPE_Q5_1 | GGML_TYPE_Q8_0
+        | GGML_TYPE_Q5_K | GGML_TYPE_NVFP4 => {
             let block_elems = block_elements(src_ggml_type);
             if n_cols % block_elems != 0 {
                 return None;
@@ -337,8 +332,7 @@ fn dequantize_row_q5_k(row_src: &[u8], n_cols: usize, out: &mut Vec<f32>) {
             }
             for l in 0..32 {
                 out.push(
-                    d2 * (((ql[l] >> 4) as f32) + if (qh[l] & u2) != 0 { 16.0 } else { 0.0 })
-                        - m2,
+                    d2 * (((ql[l] >> 4) as f32) + if (qh[l] & u2) != 0 { 16.0 } else { 0.0 }) - m2,
                 );
             }
             ql_offset += 32;
@@ -351,7 +345,10 @@ fn dequantize_row_q5_k(row_src: &[u8], n_cols: usize, out: &mut Vec<f32>) {
 
 fn dequantize_row_nvfp4(row_src: &[u8], n_cols: usize, out: &mut Vec<f32>) {
     debug_assert_eq!(n_cols % QK_NVFP4, 0);
-    debug_assert_eq!(row_src.len(), (n_cols / QK_NVFP4) * block_size(GGML_TYPE_NVFP4));
+    debug_assert_eq!(
+        row_src.len(),
+        (n_cols / QK_NVFP4) * block_size(GGML_TYPE_NVFP4)
+    );
     let mut block_out = [0.0f32; QK_NVFP4];
     for block in row_src.chunks_exact(block_size(GGML_TYPE_NVFP4)) {
         dequantize_nvfp4(block, &mut block_out);

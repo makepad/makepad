@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 static __device__ __forceinline__ float bf16_round_f32(const float value) {
-    return __bfloat162float(__float2bfloat16_rn(value));
+    return __uint_as_float(__float_as_uint(value) & 0xFFFF0000u);
 }
 
 template <int BITS>

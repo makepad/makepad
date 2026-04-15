@@ -71,10 +71,16 @@ mod imp {
             input_q8_1_mmq_bytes: *const u8,
             packed_weights_nvfp4_bytes: *const u8,
             output_f32: *mut f32,
+            tmp_fixup_f32: *mut f32,
+            tmp_fixup_f32_len: u32,
             n_cols: u32,
             out_rows: u32,
             input_rows: u32,
             stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_nvfp4_q8_1_mmq_fixup_f32_len(
+            len_out: *mut u32,
         ) -> cudaError_t;
 
         fn makepad_ggml_cuda_nvfp4_get_row_f32(
@@ -118,6 +124,15 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_quantize_q8_1_mmq_f32_padded(
+            input_f32: *const f32,
+            output_q8_1_mmq_bytes: *mut u8,
+            n_cols: u32,
+            n_rows: u32,
+            padded_rows: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_quantize_nvfp4_f32(
             input_f32: *const f32,
             input_scale: f32,
@@ -133,9 +148,31 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_f32_to_bf16(
+            input: *const f32,
+            output: *mut u16,
+            n: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_add_f32(
             left: *const f32,
             right: *const f32,
+            out: *mut f32,
+            n: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_mul_f32(
+            left: *const f32,
+            right: *const f32,
+            out: *mut f32,
+            n: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_gelu_f32(
+            input: *const f32,
             out: *mut f32,
             n: u32,
             stream: cudaStream_t,
@@ -394,6 +431,48 @@ mod imp {
             row_count: u32,
             row_stride: u32,
             seq_len_device_u32: *const u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_softmax_rows_causal_f32(
+            logits: *mut f32,
+            query_count: u32,
+            row_count: u32,
+            row_stride: u32,
+            base_seq_len: u32,
+            max_seq_len: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_softmax_rows_causal_f32_device_u32(
+            logits: *mut f32,
+            query_count: u32,
+            row_count: u32,
+            row_stride: u32,
+            base_seq_len_device_u32: *const u32,
+            max_seq_len: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_softmax_rows_causal_bf16(
+            logits: *const f32,
+            probs: *mut u16,
+            query_count: u32,
+            row_count: u32,
+            row_stride: u32,
+            base_seq_len: u32,
+            max_seq_len: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_softmax_rows_causal_bf16_device_u32(
+            logits: *const f32,
+            probs: *mut u16,
+            query_count: u32,
+            row_count: u32,
+            row_stride: u32,
+            base_seq_len_device_u32: *const u32,
+            max_seq_len: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
@@ -695,10 +774,10 @@ mod imp {
             let size_bytes = len
                 .checked_mul(size_of::<u32>())
                 .ok_or_else(|| "CUDA mapped u32 buffer size overflow".to_string())?;
-            let host_ptr =
-                unsafe { makepad_cuda::host_alloc_mapped(size_bytes) }.map_err(|err| err.to_string())?;
-            let device_ptr =
-                unsafe { makepad_cuda::host_get_device_pointer(host_ptr) }.map_err(|err| err.to_string())?;
+            let host_ptr = unsafe { makepad_cuda::host_alloc_mapped(size_bytes) }
+                .map_err(|err| err.to_string())?;
+            let device_ptr = unsafe { makepad_cuda::host_get_device_pointer(host_ptr) }
+                .map_err(|err| err.to_string())?;
             unsafe {
                 std::ptr::write_bytes(host_ptr.as_ptr(), 0, len);
             }
@@ -1127,7 +1206,9 @@ mod imp {
                 return Ok(Vec::new());
             }
             if k % QK != 0 || k % QK_NVFP4 != 0 {
-                return Err(format!("CUDA NVFP4 matmul expects k divisible by 64, got {k}"));
+                return Err(format!(
+                    "CUDA NVFP4 matmul expects k divisible by 64, got {k}"
+                ));
             }
 
             self.prepare_device()?;
@@ -1146,12 +1227,7 @@ mod imp {
                     .as_ptr()
                     .cast::<u8>()
             };
-            let output_ptr = {
-                self.ensure_output_buffer_f32(n)?
-                    .ptr
-                    .as_ptr()
-                    .cast::<f32>()
-            };
+            let output_ptr = { self.ensure_output_buffer_f32(n)?.ptr.as_ptr().cast::<f32>() };
             let q8_1_blocks = k / QK;
 
             let status = unsafe {
@@ -1198,7 +1274,9 @@ mod imp {
                 return Ok(Vec::new());
             }
             if k % QK != 0 || k % QK_NVFP4 != 0 {
-                return Err(format!("CUDA NVFP4 matmul expects k divisible by 64, got {k}"));
+                return Err(format!(
+                    "CUDA NVFP4 matmul expects k divisible by 64, got {k}"
+                ));
             }
 
             self.prepare_device()?;
@@ -1217,12 +1295,7 @@ mod imp {
                     .as_ptr()
                     .cast::<u8>()
             };
-            let output_ptr = {
-                self.ensure_output_buffer_f32(n)?
-                    .ptr
-                    .as_ptr()
-                    .cast::<f32>()
-            };
+            let output_ptr = { self.ensure_output_buffer_f32(n)?.ptr.as_ptr().cast::<f32>() };
             let q8_1_blocks = k / QK;
 
             let status = unsafe {
@@ -1329,6 +1402,7 @@ mod imp {
     pub struct CudaRuntime {
         device: i32,
         stream: cudaStream_t,
+        blas: makepad_cuda::cublasHandle_t,
     }
 
     impl CudaRuntime {
@@ -1341,7 +1415,23 @@ mod imp {
             makepad_cuda::set_device(device).map_err(|err| err.to_string())?;
             let stream =
                 makepad_cuda::create_non_blocking_stream().map_err(|err| err.to_string())?;
-            Ok(Self { device, stream })
+            let blas = match makepad_cuda::cublas_create() {
+                Ok(handle) => handle,
+                Err(err) => {
+                    let _ = makepad_cuda::destroy_stream(stream);
+                    return Err(format!("cuBLAS create failed: {err}"));
+                }
+            };
+            if let Err(err) = makepad_cuda::cublas_set_stream(blas, stream) {
+                let _ = makepad_cuda::cublas_destroy(blas);
+                let _ = makepad_cuda::destroy_stream(stream);
+                return Err(format!("cuBLAS set stream failed: {err}"));
+            }
+            Ok(Self {
+                device,
+                stream,
+                blas,
+            })
         }
 
         fn prepare_device(&self) -> Result<(), String> {
@@ -1408,6 +1498,68 @@ mod imp {
         pub fn read_bytes(&self, buffer: &CudaBuffer, len: usize) -> Result<Vec<u8>, String> {
             self.prepare_device()?;
             buffer.inner.read_bytes(len, self.stream)
+        }
+
+        pub fn matmul_nt_f32(
+            &self,
+            a: &CudaBuffer,
+            bt: &CudaBuffer,
+            out: &CudaBuffer,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let alpha = 1.0f32;
+            let beta = 0.0f32;
+            makepad_cuda::cublas_sgemm(
+                self.blas,
+                makepad_cuda::CUBLAS_OP_T,
+                makepad_cuda::CUBLAS_OP_N,
+                n as i32,
+                m as i32,
+                k as i32,
+                &alpha,
+                bt.inner.ptr.as_ptr().cast::<f32>(),
+                k as i32,
+                a.inner.ptr.as_ptr().cast::<f32>(),
+                k as i32,
+                &beta,
+                out.inner.ptr.as_ptr().cast::<f32>(),
+                n as i32,
+            )
+            .map_err(|err| format!("cuBLAS matmul_nt_f32 failed: m={m} k={k} n={n}: {err}"))
+        }
+
+        pub fn matmul_nn_f32(
+            &self,
+            a: &CudaBuffer,
+            b: &CudaBuffer,
+            out: &CudaBuffer,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let alpha = 1.0f32;
+            let beta = 0.0f32;
+            makepad_cuda::cublas_sgemm(
+                self.blas,
+                makepad_cuda::CUBLAS_OP_N,
+                makepad_cuda::CUBLAS_OP_N,
+                n as i32,
+                m as i32,
+                k as i32,
+                &alpha,
+                b.inner.ptr.as_ptr().cast::<f32>(),
+                n as i32,
+                a.inner.ptr.as_ptr().cast::<f32>(),
+                k as i32,
+                &beta,
+                out.inner.ptr.as_ptr().cast::<f32>(),
+                n as i32,
+            )
+            .map_err(|err| format!("cuBLAS matmul_nn_f32 failed: m={m} k={k} n={n}: {err}"))
         }
 
         pub fn synchronize(&self) -> Result<(), String> {
@@ -1596,6 +1748,36 @@ mod imp {
             makepad_cuda::check(status).map_err(|err| err.to_string())
         }
 
+        pub fn quantize_q8_1_mmq_f32_padded(
+            &self,
+            input_f32: &CudaBuffer,
+            output_q8_1_mmq: &CudaBuffer,
+            n_cols: usize,
+            n_rows: usize,
+            padded_rows: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_quantize_q8_1_mmq_f32_padded(
+                    input_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    output_q8_1_mmq.inner.ptr.as_ptr().cast::<u8>(),
+                    n_cols as u32,
+                    n_rows as u32,
+                    padded_rows as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn nvfp4_q8_1_mmq_fixup_f32_len(&self) -> Result<usize, String> {
+            self.prepare_device()?;
+            let mut len = 0u32;
+            let status = unsafe { makepad_ggml_cuda_nvfp4_q8_1_mmq_fixup_f32_len(&mut len) };
+            makepad_cuda::check(status).map_err(|err| err.to_string())?;
+            Ok(len as usize)
+        }
+
         pub fn quantize_nvfp4_f32(
             &self,
             input_f32: &CudaBuffer,
@@ -1717,6 +1899,8 @@ mod imp {
             input_q8_1_mmq: &CudaBuffer,
             packed_weights_nvfp4: &CudaBuffer,
             output_f32: &CudaBuffer,
+            tmp_fixup_f32: &CudaBuffer,
+            tmp_fixup_f32_len: usize,
             n_cols: usize,
             out_rows: usize,
             input_rows: usize,
@@ -1727,6 +1911,8 @@ mod imp {
                     input_q8_1_mmq.inner.ptr.as_ptr().cast::<u8>(),
                     packed_weights_nvfp4.inner.ptr.as_ptr().cast::<u8>(),
                     output_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    tmp_fixup_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    tmp_fixup_f32_len as u32,
                     n_cols as u32,
                     out_rows as u32,
                     input_rows as u32,
@@ -1754,6 +1940,24 @@ mod imp {
             makepad_cuda::check(status).map_err(|err| err.to_string())
         }
 
+        pub fn f32_to_bf16(
+            &self,
+            input: &CudaBuffer,
+            output: &CudaBuffer,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_f32_to_bf16(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<u16>(),
+                    n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
         pub fn add_f32(
             &self,
             left: &CudaBuffer,
@@ -1766,6 +1970,44 @@ mod imp {
                 makepad_ggml_cuda_add_f32(
                     left.inner.ptr.as_ptr().cast::<f32>(),
                     right.inner.ptr.as_ptr().cast::<f32>(),
+                    out.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn mul_f32(
+            &self,
+            left: &CudaBuffer,
+            right: &CudaBuffer,
+            out: &CudaBuffer,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_mul_f32(
+                    left.inner.ptr.as_ptr().cast::<f32>(),
+                    right.inner.ptr.as_ptr().cast::<f32>(),
+                    out.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn gelu_f32(
+            &self,
+            input: &CudaBuffer,
+            out: &CudaBuffer,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_gelu_f32(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     n as u32,
                     self.stream,
@@ -2607,6 +2849,453 @@ mod imp {
             makepad_cuda::check(status).map_err(|err| err.to_string())
         }
 
+        pub fn softmax_rows_causal_f32(
+            &self,
+            logits: &CudaBuffer,
+            query_count: usize,
+            row_count: usize,
+            row_stride: usize,
+            base_seq_len: usize,
+            max_seq_len: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_softmax_rows_causal_f32(
+                    logits.inner.ptr.as_ptr().cast::<f32>(),
+                    query_count as u32,
+                    row_count as u32,
+                    row_stride as u32,
+                    base_seq_len as u32,
+                    max_seq_len as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn softmax_rows_causal_f32_device_u32_ptr(
+            &self,
+            logits: &CudaBuffer,
+            query_count: usize,
+            row_count: usize,
+            row_stride: usize,
+            base_seq_len_device_u32: *const u32,
+            max_seq_len: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_softmax_rows_causal_f32_device_u32(
+                    logits.inner.ptr.as_ptr().cast::<f32>(),
+                    query_count as u32,
+                    row_count as u32,
+                    row_stride as u32,
+                    base_seq_len_device_u32,
+                    max_seq_len as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn softmax_rows_causal_bf16(
+            &self,
+            logits: &CudaBuffer,
+            probs: &CudaBuffer,
+            query_count: usize,
+            row_count: usize,
+            row_stride: usize,
+            base_seq_len: usize,
+            max_seq_len: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_softmax_rows_causal_bf16(
+                    logits.inner.ptr.as_ptr().cast::<f32>(),
+                    probs.inner.ptr.as_ptr().cast::<u16>(),
+                    query_count as u32,
+                    row_count as u32,
+                    row_stride as u32,
+                    base_seq_len as u32,
+                    max_seq_len as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn softmax_rows_causal_bf16_device_u32_ptr(
+            &self,
+            logits: &CudaBuffer,
+            probs: &CudaBuffer,
+            query_count: usize,
+            row_count: usize,
+            row_stride: usize,
+            base_seq_len_device_u32: *const u32,
+            max_seq_len: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_softmax_rows_causal_bf16_device_u32(
+                    logits.inner.ptr.as_ptr().cast::<f32>(),
+                    probs.inner.ptr.as_ptr().cast::<u16>(),
+                    query_count as u32,
+                    row_count as u32,
+                    row_stride as u32,
+                    base_seq_len_device_u32,
+                    max_seq_len as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn attention_seq_softmax_weighted_sum_rows_blas_f32_inner(
+            &self,
+            q: &CudaBuffer,
+            q_bf16: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            logits: &CudaBuffer,
+            probs_bf16: &CudaBuffer,
+            out: &CudaBuffer,
+            query_count: usize,
+            q_head_count: usize,
+            q_heads_per_kv: usize,
+            head_dim: usize,
+            kv_row_stride: usize,
+            q_row_stride: usize,
+            out_row_stride: usize,
+            base_seq_len: usize,
+            base_seq_len_device_u32: Option<*const u32>,
+            capacity: usize,
+            max_seq_len: usize,
+        ) -> Result<(), String> {
+            if query_count == 0
+                || q_head_count == 0
+                || q_heads_per_kv == 0
+                || head_dim == 0
+                || capacity == 0
+                || max_seq_len == 0
+                || max_seq_len > capacity
+                || q_head_count % q_heads_per_kv != 0
+                || q_row_stride < q_head_count * head_dim
+                || out_row_stride < q_head_count * head_dim
+                || kv_row_stride < capacity * head_dim
+            {
+                return Err("invalid CUDA BLAS prefill attention shape".to_string());
+            }
+            let logits_len = q_head_count
+                .checked_mul(query_count)
+                .and_then(|len| len.checked_mul(capacity))
+                .ok_or_else(|| "CUDA BLAS prefill attention logits size overflow".to_string())?;
+            let logits_bytes = logits_len
+                .checked_mul(size_of::<f32>())
+                .ok_or_else(|| "CUDA BLAS prefill attention logits byte size overflow".to_string())?;
+            if logits.size_bytes() < logits_bytes {
+                return Err(format!(
+                    "CUDA BLAS prefill attention logits buffer too small: {} < {}",
+                    logits.size_bytes(),
+                    logits_bytes
+                ));
+            }
+            let probs_bytes = logits_len
+                .checked_mul(size_of::<u16>())
+                .ok_or_else(|| "CUDA BLAS prefill attention probs byte size overflow".to_string())?;
+            if probs_bf16.size_bytes() < probs_bytes {
+                return Err(format!(
+                    "CUDA BLAS prefill attention probs buffer too small: {} < {}",
+                    probs_bf16.size_bytes(),
+                    probs_bytes
+                ));
+            }
+            let q_bf16_len = query_count
+                .checked_mul(q_row_stride)
+                .ok_or_else(|| "CUDA BLAS prefill attention Q bf16 size overflow".to_string())?;
+            let q_bf16_bytes = q_bf16_len
+                .checked_mul(size_of::<u16>())
+                .ok_or_else(|| "CUDA BLAS prefill attention Q bf16 byte size overflow".to_string())?;
+            if q_bf16.size_bytes() < q_bf16_bytes {
+                return Err(format!(
+                    "CUDA BLAS prefill attention Q bf16 buffer too small: {} < {}",
+                    q_bf16.size_bytes(),
+                    q_bf16_bytes
+                ));
+            }
+
+            self.prepare_device()?;
+            self.f32_to_bf16(q, q_bf16, q_bf16_len)?;
+            let alpha = 1.0f32;
+            let beta = 0.0f32;
+            let k_head_count = q_head_count / q_heads_per_kv;
+            let logits_head_stride = query_count
+                .checked_mul(capacity)
+                .ok_or_else(|| "CUDA BLAS prefill attention head stride overflow".to_string())?;
+            let batch_count = q_heads_per_kv as i32;
+            let compute_type = makepad_cuda::CUBLAS_COMPUTE_32F_FAST_16BF;
+
+            for kv_head in 0..k_head_count {
+                let q_head_base = kv_head * q_heads_per_kv;
+                unsafe {
+                    makepad_cuda::cublas_gemm_strided_batched_ex(
+                        self.blas,
+                        makepad_cuda::CUBLAS_OP_T,
+                        makepad_cuda::CUBLAS_OP_N,
+                        max_seq_len as i32,
+                        query_count as i32,
+                        head_dim as i32,
+                        &alpha,
+                        key_cache
+                            .inner
+                            .ptr
+                            .as_ptr()
+                            .cast::<u16>()
+                            .add(kv_head * kv_row_stride)
+                            .cast::<c_void>() as *const c_void,
+                        makepad_cuda::CUDA_R_16BF,
+                        head_dim as i32,
+                        0,
+                        q_bf16
+                            .inner
+                            .ptr
+                            .as_ptr()
+                            .cast::<u16>()
+                            .add(q_head_base * head_dim)
+                            .cast::<c_void>() as *const c_void,
+                        makepad_cuda::CUDA_R_16BF,
+                        q_row_stride as i32,
+                        head_dim as i64,
+                        &beta,
+                        logits
+                            .inner
+                            .ptr
+                            .as_ptr()
+                            .cast::<f32>()
+                            .add(q_head_base * logits_head_stride)
+                            .cast::<c_void>(),
+                        makepad_cuda::CUDA_R_32F,
+                        capacity as i32,
+                        logits_head_stride as i64,
+                        batch_count,
+                        compute_type,
+                        makepad_cuda::CUBLAS_GEMM_DEFAULT,
+                    )
+                    .map_err(|err| {
+                        format!(
+                            "cuBLAS prefill QK gemm failed: kv_head={kv_head} m={max_seq_len} n={query_count} k={head_dim} batch={q_heads_per_kv}: {err}"
+                        )
+                    })?;
+                }
+            }
+
+            let row_count = q_head_count
+                .checked_mul(query_count)
+                .ok_or_else(|| "CUDA BLAS prefill attention row count overflow".to_string())?;
+            if let Some(base_seq_len_device_u32) = base_seq_len_device_u32 {
+                self.softmax_rows_causal_bf16_device_u32_ptr(
+                    logits,
+                    probs_bf16,
+                    query_count,
+                    row_count,
+                    capacity,
+                    base_seq_len_device_u32,
+                    max_seq_len,
+                )?;
+            } else {
+                self.softmax_rows_causal_bf16(
+                    logits,
+                    probs_bf16,
+                    query_count,
+                    row_count,
+                    capacity,
+                    base_seq_len,
+                    max_seq_len,
+                )?;
+            }
+
+            for kv_head in 0..k_head_count {
+                let q_head_base = kv_head * q_heads_per_kv;
+                unsafe {
+                    makepad_cuda::cublas_gemm_strided_batched_ex(
+                        self.blas,
+                        makepad_cuda::CUBLAS_OP_T,
+                        makepad_cuda::CUBLAS_OP_N,
+                        head_dim as i32,
+                        query_count as i32,
+                        max_seq_len as i32,
+                        &alpha,
+                        value_cache
+                            .inner
+                            .ptr
+                            .as_ptr()
+                            .cast::<u16>()
+                            .add(kv_head * kv_row_stride)
+                            .cast::<c_void>() as *const c_void,
+                        makepad_cuda::CUDA_R_16BF,
+                        capacity as i32,
+                        0,
+                        probs_bf16
+                            .inner
+                            .ptr
+                            .as_ptr()
+                            .cast::<u16>()
+                            .add(q_head_base * logits_head_stride)
+                            .cast::<c_void>() as *const c_void,
+                        makepad_cuda::CUDA_R_16BF,
+                        capacity as i32,
+                        logits_head_stride as i64,
+                        &beta,
+                        out.inner
+                            .ptr
+                            .as_ptr()
+                            .cast::<f32>()
+                            .add(q_head_base * head_dim)
+                            .cast::<c_void>(),
+                        makepad_cuda::CUDA_R_32F,
+                        out_row_stride as i32,
+                        head_dim as i64,
+                        batch_count,
+                        compute_type,
+                        makepad_cuda::CUBLAS_GEMM_DEFAULT,
+                    )
+                    .map_err(|err| {
+                        format!(
+                            "cuBLAS prefill PV gemm failed: kv_head={kv_head} m={head_dim} n={query_count} k={max_seq_len} batch={q_heads_per_kv}: {err}"
+                        )
+                    })?;
+                }
+            }
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_rows_blas_f32(
+            &self,
+            q: &CudaBuffer,
+            q_bf16: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            logits: &CudaBuffer,
+            probs_bf16: &CudaBuffer,
+            out: &CudaBuffer,
+            query_count: usize,
+            q_head_count: usize,
+            q_heads_per_kv: usize,
+            head_dim: usize,
+            kv_row_stride: usize,
+            q_row_stride: usize,
+            out_row_stride: usize,
+            base_seq_len: usize,
+            capacity: usize,
+        ) -> Result<(), String> {
+            let max_seq_len = base_seq_len
+                .checked_add(query_count)
+                .ok_or_else(|| "CUDA BLAS prefill attention sequence length overflow".to_string())?
+                .min(capacity);
+            self.attention_seq_softmax_weighted_sum_rows_blas_f32_inner(
+                q,
+                q_bf16,
+                key_cache,
+                value_cache,
+                logits,
+                probs_bf16,
+                out,
+                query_count,
+                q_head_count,
+                q_heads_per_kv,
+                head_dim,
+                kv_row_stride,
+                q_row_stride,
+                out_row_stride,
+                base_seq_len,
+                None,
+                capacity,
+                max_seq_len,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_rows_blas_f32_device_u32(
+            &self,
+            q: &CudaBuffer,
+            q_bf16: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            logits: &CudaBuffer,
+            probs_bf16: &CudaBuffer,
+            out: &CudaBuffer,
+            query_count: usize,
+            q_head_count: usize,
+            q_heads_per_kv: usize,
+            head_dim: usize,
+            kv_row_stride: usize,
+            q_row_stride: usize,
+            out_row_stride: usize,
+            base_seq_len_device_u32: &CudaBuffer,
+            capacity: usize,
+        ) -> Result<(), String> {
+            self.attention_seq_softmax_weighted_sum_rows_blas_f32_device_u32_ptr(
+                q,
+                q_bf16,
+                key_cache,
+                value_cache,
+                logits,
+                probs_bf16,
+                out,
+                query_count,
+                q_head_count,
+                q_heads_per_kv,
+                head_dim,
+                kv_row_stride,
+                q_row_stride,
+                out_row_stride,
+                base_seq_len_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                capacity,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_rows_blas_f32_device_u32_ptr(
+            &self,
+            q: &CudaBuffer,
+            q_bf16: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            logits: &CudaBuffer,
+            probs_bf16: &CudaBuffer,
+            out: &CudaBuffer,
+            query_count: usize,
+            q_head_count: usize,
+            q_heads_per_kv: usize,
+            head_dim: usize,
+            kv_row_stride: usize,
+            q_row_stride: usize,
+            out_row_stride: usize,
+            base_seq_len_device_u32: *const u32,
+            capacity: usize,
+        ) -> Result<(), String> {
+            self.attention_seq_softmax_weighted_sum_rows_blas_f32_inner(
+                q,
+                q_bf16,
+                key_cache,
+                value_cache,
+                logits,
+                probs_bf16,
+                out,
+                query_count,
+                q_head_count,
+                q_heads_per_kv,
+                head_dim,
+                kv_row_stride,
+                q_row_stride,
+                out_row_stride,
+                0,
+                Some(base_seq_len_device_u32),
+                capacity,
+                capacity,
+            )
+        }
+
         pub fn attention_weighted_sum_f32(
             &self,
             probs: &CudaBuffer,
@@ -3083,12 +3772,35 @@ mod imp {
             makepad_cuda::check(status).map_err(|err| err.to_string())
         }
 
-        pub fn argmax_f32(&self, logits: &CudaBuffer, out_index: &CudaBuffer, n: usize) -> Result<(), String> {
+        pub fn argmax_f32(
+            &self,
+            logits: &CudaBuffer,
+            out_index: &CudaBuffer,
+            n: usize,
+        ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_argmax_f32(
                     logits.inner.ptr.as_ptr().cast::<f32>(),
                     out_index.inner.ptr.as_ptr().cast::<u32>(),
+                    n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn argmax_f32_ptr(
+            &self,
+            logits: &CudaBuffer,
+            out_index_device_u32: *mut u32,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_argmax_f32(
+                    logits.inner.ptr.as_ptr().cast::<f32>(),
+                    out_index_device_u32,
                     n as u32,
                     self.stream,
                 )
@@ -3163,6 +3875,7 @@ mod imp {
 
     impl Drop for CudaRuntime {
         fn drop(&mut self) {
+            let _ = makepad_cuda::cublas_destroy(self.blas);
             let _ = makepad_cuda::destroy_stream(self.stream);
         }
     }
@@ -3444,6 +4157,30 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        pub fn matmul_nt_f32(
+            &self,
+            _a: &CudaBuffer,
+            _bt: &CudaBuffer,
+            _out: &CudaBuffer,
+            _m: usize,
+            _k: usize,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn matmul_nn_f32(
+            &self,
+            _a: &CudaBuffer,
+            _b: &CudaBuffer,
+            _out: &CudaBuffer,
+            _m: usize,
+            _k: usize,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn synchronize(&self) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
         }
@@ -3544,6 +4281,21 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        pub fn quantize_q8_1_mmq_f32_padded(
+            &self,
+            _input_f32: &CudaBuffer,
+            _output_q8_1_mmq: &CudaBuffer,
+            _n_cols: usize,
+            _n_rows: usize,
+            _padded_rows: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn nvfp4_q8_1_mmq_fixup_f32_len(&self) -> Result<usize, String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn quantize_nvfp4_f32(
             &self,
             _input_f32: &CudaBuffer,
@@ -3607,6 +4359,8 @@ mod imp {
             _input_q8_1_mmq: &CudaBuffer,
             _packed_weights_nvfp4: &CudaBuffer,
             _output_f32: &CudaBuffer,
+            _tmp_fixup_f32: &CudaBuffer,
+            _tmp_fixup_f32_len: usize,
             _n_cols: usize,
             _out_rows: usize,
             _input_rows: usize,
@@ -3627,6 +4381,25 @@ mod imp {
             &self,
             _left: &CudaBuffer,
             _right: &CudaBuffer,
+            _out: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn mul_f32(
+            &self,
+            _left: &CudaBuffer,
+            _right: &CudaBuffer,
+            _out: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn gelu_f32(
+            &self,
+            _input: &CudaBuffer,
             _out: &CudaBuffer,
             _n: usize,
         ) -> Result<(), String> {
@@ -4231,6 +5004,15 @@ mod imp {
             &self,
             _logits: &CudaBuffer,
             _out_index: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn argmax_f32_ptr(
+            &self,
+            _logits: &CudaBuffer,
+            _out_index_device_u32: *mut u32,
             _n: usize,
         ) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())

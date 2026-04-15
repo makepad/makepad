@@ -57,7 +57,12 @@ fn f16_to_f32(bits: u16) -> f32 {
     f32::from_bits(out_bits)
 }
 
-fn dequantize_q8_1_mmq_row(bytes: &[u8], hidden_size: usize, row_index: usize, row_count: usize) -> Vec<f32> {
+fn dequantize_q8_1_mmq_row(
+    bytes: &[u8],
+    hidden_size: usize,
+    row_index: usize,
+    row_count: usize,
+) -> Vec<f32> {
     let block_groups = hidden_size / (4 * QK_Q8_1);
     let mut out = vec![0.0f32; hidden_size];
     for block_group in 0..block_groups {
@@ -79,7 +84,12 @@ fn dequantize_q8_1_mmq_row(bytes: &[u8], hidden_size: usize, row_index: usize, r
     out
 }
 
-fn dequantize_q8_1_row(bytes: &[u8], hidden_size: usize, row_index: usize, row_count: usize) -> Vec<f32> {
+fn dequantize_q8_1_row(
+    bytes: &[u8],
+    hidden_size: usize,
+    row_index: usize,
+    row_count: usize,
+) -> Vec<f32> {
     let blocks_per_row = hidden_size / QK_Q8_1;
     let mut out = vec![0.0f32; hidden_size];
     for block_idx in 0..blocks_per_row {
@@ -172,7 +182,12 @@ fn cpu_q8_reference(
     out
 }
 
-fn run_case(cuda: &CudaRuntime, hidden_size: usize, out_rows: usize, input_rows: usize) -> Result<(), String> {
+fn run_case(
+    cuda: &CudaRuntime,
+    hidden_size: usize,
+    out_rows: usize,
+    input_rows: usize,
+) -> Result<(), String> {
     let input: Vec<f32> = (0..input_rows * hidden_size)
         .map(|i| ((i % 19) as f32 - 9.0) * 0.0625f32)
         .collect();
@@ -200,6 +215,8 @@ fn run_case(cuda: &CudaRuntime, hidden_size: usize, out_rows: usize, input_rows:
     let weights_nvfp4 = cuda.alloc_bytes(nvfp4_bytes)?;
     let out_ref = cuda.alloc_f32(output_len)?;
     let out_mmq = cuda.alloc_f32(output_len)?;
+    let mmq_fixup_len = cuda.nvfp4_q8_1_mmq_fixup_f32_len()?;
+    let mmq_fixup = cuda.alloc_f32(mmq_fixup_len)?;
 
     println!("case input_rows={input_rows} quantize_weights");
     cuda.quantize_nvfp4_f32(&weights_f32, 1.0, &weights_nvfp4, out_rows * hidden_size)?;
@@ -221,6 +238,8 @@ fn run_case(cuda: &CudaRuntime, hidden_size: usize, out_rows: usize, input_rows:
         &q8_mmq,
         &weights_nvfp4,
         &out_mmq,
+        &mmq_fixup,
+        mmq_fixup_len,
         hidden_size,
         out_rows,
         input_rows,
@@ -294,10 +313,7 @@ fn run_case(cuda: &CudaRuntime, hidden_size: usize, out_rows: usize, input_rows:
     );
     println!(
         "case input_rows={input_rows} ref cpu max_abs_diff={:.6} idx={} cpu_ref={:.6} ref={:.6}",
-        max_ref_cpu_diff,
-        max_ref_cpu_idx,
-        cpu_ref_vals[max_ref_cpu_idx],
-        ref_vals[max_ref_cpu_idx]
+        max_ref_cpu_diff, max_ref_cpu_idx, cpu_ref_vals[max_ref_cpu_idx], ref_vals[max_ref_cpu_idx]
     );
     println!(
         "case input_rows={input_rows} cpu max_abs_diff={:.6} idx={} cpu={:.6} mmq={:.6}",
