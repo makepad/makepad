@@ -96,6 +96,7 @@ impl Shaper {
         } else {
             self.shape_recursive(
                 &params.text,
+                &params.fonts[0],
                 &params.fonts,
                 &params.features,
                 params.direction,
@@ -129,6 +130,7 @@ impl Shaper {
     fn shape_recursive(
         &mut self,
         text: &str,
+        primary_font: &Rc<Font>,
         fonts: &[Rc<Font>],
         features: &[(u32, u32)],
         direction: Direction,
@@ -136,14 +138,14 @@ impl Shaper {
         end: usize,
         out_glyphs: &mut Vec<ShapedGlyph>,
     ) {
-        let (font, fonts) = fonts.split_first().unwrap();
+        let (font, remaining_fonts) = fonts.split_first().unwrap();
         let mut glyphs = self.reusable_glyphs.pop().unwrap_or_default();
         self.shape_step(text, font, features, direction, start, end, &mut glyphs);
         let mut glyph_groups = glyphs
             .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
             .peekable();
         while let Some(glyph_group) = glyph_groups.next() {
-            if glyph_group.iter().any(|glyph| glyph.id == 0) && !fonts.is_empty() {
+            if glyph_group.iter().any(|glyph| glyph.id == 0) && !remaining_fonts.is_empty() {
                 let missing_start = glyph_group[0].cluster;
                 while glyph_groups
                     .peek()
@@ -156,7 +158,8 @@ impl Shaper {
                     .map_or(end, |next_glyph_group| next_glyph_group[0].cluster);
                 self.shape_recursive(
                     text,
-                    fonts,
+                    primary_font,
+                    remaining_fonts,
                     features,
                     direction,
                     missing_start,
@@ -164,7 +167,22 @@ impl Shaper {
                     out_glyphs,
                 );
             } else {
-                out_glyphs.extend(glyph_group.iter().cloned());
+                // If we've exhausted all fallback fonts and still have
+                // unmapped glyphs (id == 0), use the primary font's .notdef
+                // so a visible placeholder is rendered instead of nothing.
+                if glyph_group.iter().any(|glyph| glyph.id == 0)
+                    && !Rc::ptr_eq(font, primary_font)
+                {
+                    out_glyphs.extend(glyph_group.iter().map(|glyph| {
+                        let mut g = glyph.clone();
+                        if g.id == 0 {
+                            g.font = primary_font.clone();
+                        }
+                        g
+                    }));
+                } else {
+                    out_glyphs.extend(glyph_group.iter().cloned());
+                }
             }
         }
         drop(glyph_groups);
