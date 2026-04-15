@@ -191,6 +191,15 @@ impl GemmaChatSession {
         }
     }
 
+    fn cuda_exact_sampling_options(&self) -> GemmaTextSamplingOptions {
+        let mut options = self.active_sampling_options();
+        // The CUDA exact logits are still sensitive around Gemma4's empty thought
+        // prefix for short prompts like "write a poem". Let the model emit its
+        // control channel naturally and strip that span from user-visible output.
+        options.allow_thought = true;
+        options
+    }
+
     fn prune_oldest_turn(messages: &mut Vec<GemmaChatMessage>) -> bool {
         if messages.is_empty() {
             return false;
@@ -222,19 +231,6 @@ impl GemmaChatSession {
                 == "cuda-exact-greedy"
     }
 
-    fn append_cuda_exact_response_prefix(
-        tokenizer_config: &MlxTokenizerConfig,
-        prompt_format: GemmaPromptFormat,
-        prompt: &mut String,
-    ) {
-        if prompt_format == GemmaPromptFormat::Gemma4UserTurn {
-            prompt.push_str(&tokenizer_config.soc_token);
-            prompt.push_str("thought\n");
-            prompt.push_str(&tokenizer_config.eoc_token);
-            prompt.push('\n');
-        }
-    }
-
     fn format_cuda_exact_chat_turn_suffix(
         tokenizer_config: &MlxTokenizerConfig,
         prompt_format: GemmaPromptFormat,
@@ -259,11 +255,6 @@ impl GemmaChatSession {
                 prompt.push_str(&tokenizer_config.sot_token);
                 prompt.push_str(GemmaChatRole::Assistant.as_prompt_label());
                 prompt.push('\n');
-                Self::append_cuda_exact_response_prefix(
-                    tokenizer_config,
-                    prompt_format,
-                    &mut prompt,
-                );
             }
             GemmaPromptFormat::AutoChat | GemmaPromptFormat::RawBos => {
                 if include_previous_assistant_terminator {
@@ -377,12 +368,7 @@ impl GemmaChatSession {
         }
 
         self.clear_cuda_exact_prompt_cache();
-        let mut formatted_prompt = self.format_current_generation_prompt_untrimmed()?;
-        Self::append_cuda_exact_response_prefix(
-            self.model.tokenizer_config(),
-            prompt_format,
-            &mut formatted_prompt,
-        );
+        let formatted_prompt = self.format_current_generation_prompt_untrimmed()?;
         let prompt_token_ids = self.model.tokenize_formatted_prompt(&formatted_prompt)?;
         self.cuda_exact_window_prompt(
             formatted_prompt,
@@ -596,6 +582,7 @@ impl GemmaChatSession {
         }
         let greedy_sampling_options = self.active_sampling_options();
         if self.uses_cuda_exact_greedy_chat_path() {
+            let cuda_sampling_options = self.cuda_exact_sampling_options();
             let user_content = self
                 .messages
                 .last()
@@ -612,7 +599,7 @@ impl GemmaChatSession {
                     prompt_token_ids.clone(),
                     prompt_prefill_token_count,
                     self.max_new_tokens,
-                    &greedy_sampling_options,
+                    &cuda_sampling_options,
                     |_| Ok(()),
                 )?
             {
@@ -684,6 +671,7 @@ impl GemmaChatSession {
             self.clear_cuda_exact_prompt_cache();
         }
         if self.uses_cuda_exact_greedy_chat_path() {
+            let cuda_sampling_options = self.cuda_exact_sampling_options();
             let user_content = self
                 .messages
                 .last()
@@ -692,8 +680,9 @@ impl GemmaChatSession {
                 .clone();
             let (prompt_text, prompt_token_ids, prompt_prefill_token_count) =
                 self.prepare_cuda_exact_generation_prompt(user_content.as_ref())?;
-            let mut detokenizer = self.model.streaming_detokenizer(true);
-            let skip_special_token_ids = self.model.special_token_ids().to_vec();
+            let model = self.model.clone();
+            let tokenizer_config = self.model.tokenizer_config().clone();
+            let mut streamed_text = String::new();
             if let Some(output) = self
                 .model
                 .generate_pretokenized_cuda_exact_greedy_with_callback(
@@ -702,22 +691,27 @@ impl GemmaChatSession {
                     prompt_token_ids.clone(),
                     prompt_prefill_token_count,
                     self.max_new_tokens,
-                    &greedy_sampling_options,
+                    &cuda_sampling_options,
                     |generated_token_ids| {
-                        let Some(&token_id) = generated_token_ids.last() else {
-                            return Ok(());
-                        };
-                        let delta = detokenizer.add_token(token_id, &skip_special_token_ids);
-                        if !delta.is_empty() {
-                            on_text_delta(&delta).map_err(|err| err.to_string())?;
+                        let raw_text = model.decode_token_ids(generated_token_ids)?;
+                        let partial_text = extract_gemma4_assistant_response_text(
+                            &tokenizer_config,
+                            &raw_text,
+                        );
+                        if let Some(delta) = partial_text.strip_prefix(&streamed_text) {
+                            if !delta.is_empty() {
+                                on_text_delta(delta).map_err(|err| err.to_string())?;
+                                streamed_text.push_str(delta);
+                            }
                         }
                         Ok(())
                     },
                 )?
             {
-                let final_delta = detokenizer.finalize();
-                if !final_delta.is_empty() {
-                    on_text_delta(&final_delta)?;
+                if let Some(delta) = output.generated_text.strip_prefix(&streamed_text) {
+                    if !delta.is_empty() {
+                        on_text_delta(delta)?;
+                    }
                 }
                 self.finish_cuda_exact_generation(&prompt_text, &prompt_token_ids, &output)?;
                 self.messages.push(GemmaChatMessage::new(
