@@ -1271,6 +1271,15 @@ pub struct DrawText {
     #[cfg(target_os = "linux")]
     #[rust]
     slug_draw: Option<DrawTextLinuxSlug>,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    linux_slug_promotion: LinuxSlugPromotionState,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    linux_slug_sync_plan: LinuxSlugDrawSyncPlan,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    linux_slug_layout_pad: u64,
     #[live]
     pub text_style: TextStyle,
     #[live(1.0)]
@@ -1421,6 +1430,103 @@ struct LinuxSlugPromotionState {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Default)]
+struct LinuxSlugDrawSyncPlan {
+    source_shader_id: Option<usize>,
+    target_shader_id: Option<usize>,
+    instance_ids: Vec<LiveId>,
+    uniform_ids: Vec<LiveId>,
+    source_has_color_2: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxSlugDrawSyncPlan {
+    fn ensure(
+        &mut self,
+        cx: &Cx,
+        source_shader_id: usize,
+        target_shader_id: usize,
+    ) {
+        if self.source_shader_id == Some(source_shader_id)
+            && self.target_shader_id == Some(target_shader_id)
+        {
+            return;
+        }
+
+        self.source_shader_id = Some(source_shader_id);
+        self.target_shader_id = Some(target_shader_id);
+        self.instance_ids.clear();
+        self.uniform_ids.clear();
+
+        let source_shader = &cx.draw_shaders.shaders[source_shader_id];
+        let target_shader = &cx.draw_shaders.shaders[target_shader_id];
+        let source_dyn_instances = &source_shader.mapping.dyn_instances.inputs;
+        let target_dyn_instances = &target_shader.mapping.dyn_instances.inputs;
+        let source_dyn_uniforms = &source_shader.mapping.dyn_uniforms.inputs;
+        let target_dyn_uniforms = &target_shader.mapping.dyn_uniforms.inputs;
+
+        let source_has_instance = |id| source_dyn_instances.iter().any(|input| input.id == id);
+        let target_has_instance = |id| target_dyn_instances.iter().any(|input| input.id == id);
+        let source_has_uniform = |id| source_dyn_uniforms.iter().any(|input| input.id == id);
+        let target_has_uniform = |id| target_dyn_uniforms.iter().any(|input| input.id == id);
+
+        for id in [
+            live_id!(hover),
+            live_id!(focus),
+            live_id!(down),
+            live_id!(disabled),
+            live_id!(empty),
+            live_id!(active),
+            live_id!(drag),
+            live_id!(pressed),
+            live_id!(opened),
+            live_id!(focussed),
+            live_id!(is_even),
+            live_id!(is_folder),
+            live_id!(scale),
+            live_id!(total_chars),
+        ] {
+            if source_has_instance(id) && target_has_instance(id) {
+                self.instance_ids.push(id);
+            }
+        }
+
+        for id in [
+            live_id!(aa_pad_px),
+            live_id!(color_hover),
+            live_id!(color_focus),
+            live_id!(color_down),
+            live_id!(color_disabled),
+            live_id!(color_empty),
+            live_id!(color_empty_hover),
+            live_id!(color_empty_focus),
+            live_id!(color_active),
+            live_id!(color_drag),
+            live_id!(color_pressed),
+            live_id!(color_2),
+            live_id!(color_2_hover),
+            live_id!(color_2_focus),
+            live_id!(color_2_down),
+            live_id!(color_2_disabled),
+            live_id!(color_2_empty),
+            live_id!(color_2_empty_hover),
+            live_id!(color_2_empty_focus),
+            live_id!(color_2_active),
+            live_id!(color_2_drag),
+            live_id!(color_2_pressed),
+            live_id!(color_dither),
+            live_id!(gradient_fill_horizontal),
+        ] {
+            if source_has_uniform(id) && target_has_uniform(id) {
+                self.uniform_ids.push(id);
+            }
+        }
+
+        self.source_has_color_2 = source_has_uniform(live_id!(color_2));
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn linux_slug_try_consume_helper_build_budget(cx: &mut Cx) -> bool {
     let redraw_id = cx.redraw_id;
     let state = cx.global::<LinuxSlugHelperWarmupState>();
@@ -1513,16 +1619,14 @@ impl DrawText {
         let mut all_slug_candidates_ready = true;
         let mut pending_slug_generation = 0;
 
-        {
-            let state = cx.cx.global::<LinuxSlugPromotionState>();
-            if state.redraw_id != redraw_id {
-                state.allow_slug_this_redraw = state.redraw_id != 0
-                    && state.saw_slug_candidates_this_redraw
-                    && !state.saw_unready_this_redraw;
-                state.redraw_id = redraw_id;
-                state.saw_slug_candidates_this_redraw = false;
-                state.saw_unready_this_redraw = false;
-            }
+        if self.linux_slug_promotion.redraw_id != redraw_id {
+            self.linux_slug_promotion.allow_slug_this_redraw =
+                self.linux_slug_promotion.redraw_id != 0
+                    && self.linux_slug_promotion.saw_slug_candidates_this_redraw
+                    && !self.linux_slug_promotion.saw_unready_this_redraw;
+            self.linux_slug_promotion.redraw_id = redraw_id;
+            self.linux_slug_promotion.saw_slug_candidates_this_redraw = false;
+            self.linux_slug_promotion.saw_unready_this_redraw = false;
         }
 
         for row in &text.rows {
@@ -1564,37 +1668,28 @@ impl DrawText {
             return false;
         }
 
-        {
-            let state = cx.cx.global::<LinuxSlugPromotionState>();
-            state.saw_slug_candidates_this_redraw = true;
-        }
+        self.linux_slug_promotion.saw_slug_candidates_this_redraw = true;
 
         if !all_slug_candidates_ready {
-            let state = cx.cx.global::<LinuxSlugPromotionState>();
-            state.saw_unready_this_redraw = true;
+            self.linux_slug_promotion.saw_unready_this_redraw = true;
             cx.redraw_all();
             return false;
         }
 
         if !linux_slug_maybe_prewarm_helper(cx) {
-            let state = cx.cx.global::<LinuxSlugPromotionState>();
-            state.saw_unready_this_redraw = true;
+            self.linux_slug_promotion.saw_unready_this_redraw = true;
             return false;
         }
 
         if !self.ensure_linux_slug_draw(cx) {
-            let state = cx.cx.global::<LinuxSlugPromotionState>();
-            state.saw_unready_this_redraw = true;
+            self.linux_slug_promotion.saw_unready_this_redraw = true;
             cx.redraw_all();
             return false;
         }
 
-        {
-            let state = cx.cx.global::<LinuxSlugPromotionState>();
-            if !state.allow_slug_this_redraw {
-                cx.redraw_all();
-                return false;
-            }
+        if !self.linux_slug_promotion.allow_slug_this_redraw {
+            cx.redraw_all();
+            return false;
         }
 
         true
@@ -1612,6 +1707,8 @@ impl ScriptHook for DrawText {
     ) {
         if apply.is_from_script() {
             self.slug_draw = None;
+            self.linux_slug_promotion = Default::default();
+            self.linux_slug_sync_plan = Default::default();
         }
     }
 }
@@ -1846,110 +1943,27 @@ impl DrawText {
         else {
             return;
         };
-
-        let source_dyn_instances: Vec<_> = cx.cx.draw_shaders.shaders[source_shader_id.index]
-            .mapping
-            .dyn_instances
-            .inputs
-            .iter()
-            .map(|input| input.id)
-            .collect();
-        let target_dyn_instances: Vec<_> = cx.cx.draw_shaders.shaders[target_shader_id.index]
-            .mapping
-            .dyn_instances
-            .inputs
-            .iter()
-            .map(|input| input.id)
-            .collect();
-        let source_dyn_uniforms: Vec<_> = cx.cx.draw_shaders.shaders[source_shader_id.index]
-            .mapping
-            .dyn_uniforms
-            .inputs
-            .iter()
-            .map(|input| input.id)
-            .collect();
-        let target_dyn_uniforms: Vec<_> = cx.cx.draw_shaders.shaders[target_shader_id.index]
-            .mapping
-            .dyn_uniforms
-            .inputs
-            .iter()
-            .map(|input| input.id)
-            .collect();
+        self.linux_slug_sync_plan
+            .ensure(cx.cx, source_shader_id.index, target_shader_id.index);
         let Some(slug_draw) = self.slug_draw.as_mut() else {
             return;
         };
         slug_draw.draw_vars.options = self.draw_vars.options.clone();
 
-        let copy_instance =
-            |draw_vars: &DrawVars, slug_draw: &mut DrawTextLinuxSlug, cx: &mut Cx2d, id: LiveId| {
-                if !source_dyn_instances.contains(&id) || !target_dyn_instances.contains(&id) {
-                    return;
-                }
-                let mut value = [0.0; 4];
-                draw_vars.get_instance(cx.cx, id, &mut value);
-                slug_draw.draw_vars.set_dyn_instance(cx.cx, id, &value);
-            };
-
-        let copy_uniform =
-            |draw_vars: &DrawVars, slug_draw: &mut DrawTextLinuxSlug, cx: &mut Cx2d, id: LiveId| {
-                if !source_dyn_uniforms.contains(&id) || !target_dyn_uniforms.contains(&id) {
-                    return;
-                }
-                let mut value = [0.0; 4];
-                draw_vars.get_uniform(cx.cx, id, &mut value);
-                slug_draw.draw_vars.set_uniform(cx.cx, id, &value);
-            };
-
-        for id in [
-            live_id!(hover),
-            live_id!(focus),
-            live_id!(down),
-            live_id!(disabled),
-            live_id!(empty),
-            live_id!(active),
-            live_id!(drag),
-            live_id!(pressed),
-            live_id!(opened),
-            live_id!(focussed),
-            live_id!(is_even),
-            live_id!(is_folder),
-            live_id!(scale),
-            live_id!(total_chars),
-        ] {
-            copy_instance(&self.draw_vars, slug_draw, cx, id);
+        for &id in &self.linux_slug_sync_plan.instance_ids {
+            let mut value = [0.0; 4];
+            self.draw_vars.get_instance(cx.cx, id, &mut value);
+            slug_draw.draw_vars.set_dyn_instance(cx.cx, id, &value);
         }
 
-        for id in [
-            live_id!(aa_pad_px),
-            live_id!(color_hover),
-            live_id!(color_focus),
-            live_id!(color_down),
-            live_id!(color_disabled),
-            live_id!(color_empty),
-            live_id!(color_empty_hover),
-            live_id!(color_empty_focus),
-            live_id!(color_active),
-            live_id!(color_drag),
-            live_id!(color_pressed),
-            live_id!(color_2),
-            live_id!(color_2_hover),
-            live_id!(color_2_focus),
-            live_id!(color_2_down),
-            live_id!(color_2_disabled),
-            live_id!(color_2_empty),
-            live_id!(color_2_empty_hover),
-            live_id!(color_2_empty_focus),
-            live_id!(color_2_active),
-            live_id!(color_2_drag),
-            live_id!(color_2_pressed),
-            live_id!(color_dither),
-            live_id!(gradient_fill_horizontal),
-        ] {
-            copy_uniform(&self.draw_vars, slug_draw, cx, id);
+        for &id in &self.linux_slug_sync_plan.uniform_ids {
+            let mut value = [0.0; 4];
+            self.draw_vars.get_uniform(cx.cx, id, &mut value);
+            slug_draw.draw_vars.set_uniform(cx.cx, id, &value);
         }
 
         let mut color_2 = [-1.0; 4];
-        if source_dyn_uniforms.contains(&live_id!(color_2)) {
+        if self.linux_slug_sync_plan.source_has_color_2 {
             self.draw_vars.get_uniform(cx.cx, live_id!(color_2), &mut color_2);
         }
         slug_draw.draw_vars.set_uniform(
@@ -2383,6 +2397,7 @@ impl DrawText {
                     match self.resolve_glyph(cx, glyph) {
                         Some(ResolvedGlyph::Slug(slug_glyph)) => {
                             let mut drew_slug = false;
+                            let mut needs_raster_fallback = shadow_slug_this_frame;
                             if self.ensure_linux_slug_draw(cx) {
                                 if let Some(instances) = raster_instances.take() {
                                     self.finish_many_instances(cx, instances);
@@ -2409,22 +2424,11 @@ impl DrawText {
                                     self.slug_draw = Some(slug_draw);
                                 }
                             }
-                            if shadow_slug_this_frame {
-                                if raster_instances.is_none() {
-                                    raster_instances =
-                                        cx.begin_many_aligned_instances(&self.draw_vars);
-                                }
-                                if let Some(instances) = raster_instances.as_mut() {
-                                    drew_raster_this_frame |= self.draw_linux_raster_fallback_glyph(
-                                        cx,
-                                        glyph_origin,
-                                        glyph,
-                                        &mut instances.instances,
-                                    );
-                                }
-                            }
                             if !drew_slug {
+                                needs_raster_fallback = true;
                                 cx.redraw_all();
+                            }
+                            if needs_raster_fallback {
                                 if raster_instances.is_none() {
                                     raster_instances =
                                         cx.begin_many_aligned_instances(&self.draw_vars);
