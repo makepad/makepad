@@ -1,3 +1,4 @@
+use crate::backend::{new_runtime, runtime_available};
 use crate::flux::{
     pack_flux_latents_nchw, unpack_flux_latents_nchw, FluxLatentShape, FluxPromptToImagePlan,
 };
@@ -5,14 +6,11 @@ use crate::flux_schedule::{
     euler_step, FluxSchedule, FLUX_VAE_SCALING_FACTOR, FLUX_VAE_SHIFT_FACTOR,
 };
 use crate::flux_text::{
-    FluxCompiledTextEncodersMetal, FluxConditioning, FluxLoadedTextEncoders, FluxTokenizedPrompts,
+    FluxCompiledTextEncoders, FluxConditioning, FluxLoadedTextEncoders, FluxTokenizedPrompts,
 };
-use crate::flux_transformer::{
-    CompiledFluxTransformerMetal, LoadedFluxTransformerWeights,
-};
-use crate::flux_vae::{CompiledFluxVaeMetal, FluxVaeDecodeRun, LoadedFluxVaeWeights};
+use crate::flux_transformer::{CompiledFluxTransformer, LoadedFluxTransformerWeights};
+use crate::flux_vae::{CompiledFluxVae, FluxVaeDecodeRun, LoadedFluxVaeWeights};
 use crate::{DiffusionError, Result};
-use makepad_ggml::backend::metal::MetalRuntime;
 use makepad_zune_core::bit_depth::BitDepth;
 use makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_core::options::EncoderOptions;
@@ -54,18 +52,23 @@ pub struct FluxPipelineGenerateRun {
     pub timing: FluxPipelineRunTiming,
 }
 
-pub struct FluxPipelineMetal {
+pub struct FluxPipeline {
     plan: FluxPromptToImagePlan,
     latent_shape: FluxLatentShape,
     conditioning: FluxConditioning,
+    clip_backend_name: String,
     t5_backend_name: String,
+    transformer_backend_name: String,
     transformer_weights: LoadedFluxTransformerWeights,
-    transformer: CompiledFluxTransformerMetal,
+    transformer: CompiledFluxTransformer,
+    vae_backend_name: String,
     vae_weights: LoadedFluxVaeWeights,
-    vae: CompiledFluxVaeMetal,
+    vae: CompiledFluxVae,
 }
 
-impl FluxPipelineMetal {
+pub type FluxPipelineMetal = FluxPipeline;
+
+impl FluxPipeline {
     pub fn load(
         plan: FluxPromptToImagePlan,
         image_width: Option<u32>,
@@ -76,10 +79,6 @@ impl FluxPipelineMetal {
         let height = image_height.unwrap_or(width);
         let latent_shape = FluxLatentShape::from_image_size(width, height)?;
 
-        let runtime_start = Instant::now();
-        let runtime = MetalRuntime::new().map_err(DiffusionError::model)?;
-        let runtime_init_ms = elapsed_ms(runtime_start);
-
         let tokenize_start = Instant::now();
         let prompts = FluxTokenizedPrompts::from_prompts(&plan.prompts)?;
         let text_tokenize_ms = elapsed_ms(tokenize_start);
@@ -89,17 +88,26 @@ impl FluxPipelineMetal {
         let text_load_ms = elapsed_ms(text_load_start);
 
         let text_compile_start = Instant::now();
-        let text = FluxCompiledTextEncodersMetal::compile_with_runtime(
-            runtime.clone(),
-            &mut text_weights,
-            &prompts,
-        )?;
+        let text = FluxCompiledTextEncoders::compile(&mut text_weights, &prompts)?;
         let text_compile_ms = elapsed_ms(text_compile_start);
+        let clip_backend_name = text.clip_backend_name().to_string();
         let t5_backend_name = text.t5_backend_name().to_string();
 
         let text_execute_start = Instant::now();
         let conditioning = text.execute(&text_weights, &prompts)?;
         let text_execute_ms = elapsed_ms(text_execute_start);
+
+        let runtime_start = Instant::now();
+        let runtime = if runtime_available() {
+            Some(new_runtime()?)
+        } else {
+            None
+        };
+        let runtime_init_ms = if runtime.is_some() {
+            elapsed_ms(runtime_start)
+        } else {
+            0.0
+        };
 
         let transformer_load_start = Instant::now();
         let mut transformer_weights =
@@ -107,14 +115,21 @@ impl FluxPipelineMetal {
         let transformer_load_ms = elapsed_ms(transformer_load_start);
 
         let transformer_compile_start = Instant::now();
-        let (transformer, transformer_compile) =
-            CompiledFluxTransformerMetal::compile_with_runtime_profiled(
-                runtime.clone(),
+        let (transformer, transformer_compile) = match runtime.clone() {
+            Some(runtime) => CompiledFluxTransformer::compile_with_runtime_profiled(
+                runtime,
                 &mut transformer_weights,
                 &conditioning,
                 latent_shape,
-            )?;
+            )?,
+            None => CompiledFluxTransformer::compile_profiled(
+                &mut transformer_weights,
+                &conditioning,
+                latent_shape,
+            )?,
+        };
         let transformer_compile_ms = elapsed_ms(transformer_compile_start);
+        let transformer_backend_name = transformer.backend_name().to_string();
 
         let vae_path = plan
             .bundle
@@ -126,17 +141,26 @@ impl FluxPipelineMetal {
         let vae_load_ms = elapsed_ms(vae_load_start);
 
         let vae_compile_start = Instant::now();
-        let vae = CompiledFluxVaeMetal::compile_with_runtime(runtime, &mut vae_weights, latent_shape)?;
+        let vae = match runtime {
+            Some(runtime) => {
+                CompiledFluxVae::compile_with_runtime(runtime, &mut vae_weights, latent_shape)?
+            }
+            None => CompiledFluxVae::compile(&mut vae_weights, latent_shape)?,
+        };
         let vae_compile_ms = elapsed_ms(vae_compile_start);
+        let vae_backend_name = vae.backend_name().to_string();
 
         Ok((
             Self {
                 plan,
                 latent_shape,
                 conditioning,
+                clip_backend_name,
                 t5_backend_name,
+                transformer_backend_name,
                 transformer_weights,
                 transformer,
+                vae_backend_name,
                 vae_weights,
                 vae,
             },
@@ -164,6 +188,18 @@ impl FluxPipelineMetal {
 
     pub fn t5_backend_name(&self) -> &str {
         &self.t5_backend_name
+    }
+
+    pub fn clip_backend_name(&self) -> &str {
+        &self.clip_backend_name
+    }
+
+    pub fn transformer_backend_name(&self) -> &str {
+        &self.transformer_backend_name
+    }
+
+    pub fn vae_backend_name(&self) -> &str {
+        &self.vae_backend_name
     }
 
     pub fn default_seed(&self) -> u64 {

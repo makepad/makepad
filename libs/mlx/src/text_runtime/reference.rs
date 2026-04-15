@@ -1,6 +1,6 @@
 impl GemmaTextRuntimeSession {
     fn default_chat_prompt_format(&self) -> GemmaPromptFormat {
-        if self.weights.snapshot.config.text_config.enable_moe_block {
+        if self.weights.snapshot.config.model_type == "gemma4" {
             GemmaPromptFormat::Gemma4UserTurn
         } else {
             GemmaPromptFormat::AutoChat
@@ -145,7 +145,7 @@ impl GemmaTextRuntimeSession {
                 self.weights.snapshot.tokenizer_config.bos_token, prompt_text
             ),
             GemmaPromptFormat::AutoChat => {
-                if self.weights.snapshot.config.text_config.enable_moe_block {
+                if self.weights.snapshot.config.model_type == "gemma4" {
                     format!(
                         "{}{}user\n{}{}\n{}model\n",
                         self.weights.snapshot.tokenizer_config.bos_token,

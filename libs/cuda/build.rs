@@ -14,6 +14,9 @@ fn main() {
         if lib_dir.join("libcudart.so").exists() {
             println!("cargo:rustc-link-search=native={}", lib_dir.display());
             println!("cargo:rustc-link-lib=dylib=cudart");
+            if lib_dir.join("libcublas.so").exists() {
+                println!("cargo:rustc-link-lib=dylib=cublas");
+            }
         }
     }
 }

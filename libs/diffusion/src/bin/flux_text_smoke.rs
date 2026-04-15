@@ -1,7 +1,7 @@
 use makepad_diffusion::comfy::FluxWorkflow;
 use makepad_diffusion::flux::{ComfyModelRoots, FluxPromptToImagePlan};
 use makepad_diffusion::flux_text::{
-    FluxCompiledTextEncodersMetal, FluxConditioning, FluxLoadedTextEncoders, FluxTokenizedPrompts,
+    FluxCompiledTextEncoders, FluxConditioning, FluxLoadedTextEncoders, FluxTokenizedPrompts,
 };
 use std::{env, fs, path::Path};
 
@@ -102,6 +102,43 @@ fn load_conditioning_override() -> Result<Option<FluxConditioning>, Box<dyn std:
     }))
 }
 
+fn f32s_to_le_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn maybe_dump_conditioning(
+    conditioning: &FluxConditioning,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = match env::var("FLUX_DUMP_COND_DIR") {
+        Ok(dir) => dir,
+        Err(env::VarError::NotPresent) => return Ok(()),
+        Err(err) => return Err(Box::new(err)),
+    };
+    let dir_path = Path::new(&dir);
+    fs::create_dir_all(dir_path)?;
+    fs::write(
+        dir_path.join("flux_clip_pooled.bin"),
+        f32s_to_le_bytes(&conditioning.clip_pooled),
+    )?;
+    fs::write(
+        dir_path.join("flux_t5_hidden.bin"),
+        f32s_to_le_bytes(&conditioning.t5_hidden_states),
+    )?;
+    fs::write(
+        dir_path.join("flux_t5_meta.txt"),
+        format!(
+            "hidden_size={}\ntoken_count={}\neos_index={}\n",
+            conditioning.t5_hidden_size, conditioning.t5_token_count, conditioning.t5_eos_index
+        ),
+    )?;
+    println!("conditioning_dump: {}", dir_path.display());
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow_path = env::args().nth(1).unwrap_or_else(|| usage());
     let root = env::args().nth(2).unwrap_or_else(|| usage());
@@ -111,14 +148,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plan = FluxPromptToImagePlan::from_workflow(&workflow, &roots)?;
     let prompts = FluxTokenizedPrompts::from_prompts(&plan.prompts)?;
     let mut weights = FluxLoadedTextEncoders::load_from_plan(&plan)?;
-    let compiled = FluxCompiledTextEncodersMetal::compile(&mut weights, &prompts)?;
+    let compiled = FluxCompiledTextEncoders::compile(&mut weights, &prompts)?;
+    let clip_backend = compiled.clip_backend_name();
     let t5_backend = compiled.t5_backend_name();
     let conditioning = compiled.execute(&weights, &prompts)?;
+    maybe_dump_conditioning(&conditioning)?;
     let clip_summary = summarize(&conditioning.clip_pooled);
     let t5_summary = summarize(&conditioning.t5_hidden_states);
     let reference_conditioning = load_conditioning_override()?;
 
     println!("workflow: {}", workflow.path.display());
+    println!("clip_l backend: {}", clip_backend);
     println!("t5xxl backend: {}", t5_backend);
     println!("prompt.clip_l: {}", plan.prompts.clip_l);
     println!("prompt.t5xxl: {}", plan.prompts.t5xxl);
@@ -164,7 +204,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "t5_eos_hidden[0..8]: {:?}",
         &conditioning.t5_hidden_states[eos_start..eos_end]
     );
-    let pad_index = conditioning.t5_eos_index.saturating_add(1).min(conditioning.t5_token_count.saturating_sub(1));
+    let pad_index = conditioning
+        .t5_eos_index
+        .saturating_add(1)
+        .min(conditioning.t5_token_count.saturating_sub(1));
     let pad_start = pad_index * conditioning.t5_hidden_size;
     let pad_end = pad_start + conditioning.t5_hidden_size.min(8);
     println!(
@@ -173,8 +216,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &conditioning.t5_hidden_states[pad_start..pad_end]
     );
     if let Some(reference_conditioning) = reference_conditioning.as_ref() {
-        let (clip_max_abs, clip_mean_abs) =
-            diff_stats(&conditioning.clip_pooled, &reference_conditioning.clip_pooled)?;
+        let (clip_max_abs, clip_mean_abs) = diff_stats(
+            &conditioning.clip_pooled,
+            &reference_conditioning.clip_pooled,
+        )?;
         let (t5_max_abs, t5_mean_abs) = diff_stats(
             &conditioning.t5_hidden_states,
             &reference_conditioning.t5_hidden_states,

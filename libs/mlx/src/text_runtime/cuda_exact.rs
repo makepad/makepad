@@ -2,7 +2,7 @@ use super::{
     bf16_round_to_f32, bf16_words_as_bytes, extract_gemma4_assistant_response_text,
     load_optional_scalar_f32, GemmaStopReason, GemmaTextBenchmarkOutput,
     GemmaTextGenerationOptions, GemmaTextRuntimeSession, GemmaTextSamplingOptions,
-    TextLayerTensorNames, MlxIndexedSafetensors,
+    ChatSamplingConstraints, ChatSamplingState, TextLayerTensorNames, MlxIndexedSafetensors,
 };
 use crate::GemmaAttentionKind;
 use makepad_ggml::backend::cuda::{
@@ -10,6 +10,7 @@ use makepad_ggml::backend::cuda::{
 };
 use makepad_ggml::bf16_to_f32;
 use std::cmp::max;
+use std::collections::HashMap;
 use std::error::Error;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -20,8 +21,34 @@ const QK_NVFP4: usize = 64;
 const Q8_1_BLOCK_BYTES: usize = 36;
 const CUDA_FINAL_TEXT_NORM_WEIGHT_NAME: &str = "language_model.model.norm.weight";
 const CUDA_DISALLOWED_TOKEN_IDS_CAPACITY: usize = 64;
-const CUDA_PREFILL_CHUNK_TOKENS: usize = 256;
+const CUDA_PREFILL_CHUNK_TOKENS: usize = 512;
 const CUDA_SESSION_MIN_CAPACITY: usize = 1024;
+
+fn cuda_mmq_granularity(mmq_x: usize) -> usize {
+    if mmq_x >= 48 { 16 } else { 8 }
+}
+
+fn cuda_prefill_mmq_x(input_rows: usize) -> usize {
+    let mut best = 0usize;
+    let mut best_tiles = usize::MAX;
+    let mut mmq_x = 8usize;
+    while mmq_x <= 128 && best_tiles > 1 {
+        if mmq_x % cuda_mmq_granularity(mmq_x) == 0 {
+            let tiles = input_rows.div_ceil(mmq_x);
+            if tiles < best_tiles {
+                best = mmq_x;
+                best_tiles = tiles;
+            }
+        }
+        mmq_x += 8;
+    }
+    best
+}
+
+fn cuda_prefill_mmq_rows(input_rows: usize) -> usize {
+    let mmq_x = cuda_prefill_mmq_x(input_rows);
+    input_rows.div_ceil(mmq_x) * mmq_x
+}
 
 fn bf16_words_to_f32_bytes(words: &[u16]) -> Vec<u8> {
     let values: Vec<f32> = words.iter().copied().map(bf16_to_f32).collect();
@@ -157,9 +184,12 @@ where
     backend.invalidate_active_prompt();
     let session = backend.session_mut(runtime, max_total_tokens)?;
     let metrics = session
-        .generate_greedy_with_callback(prompt_token_ids.as_ref(), max_new_tokens, |generated| {
-            on_generated_ids(generated)
-        })
+        .generate_greedy_with_callback(
+            prompt_token_ids.as_ref(),
+            max_new_tokens,
+            sampling_options,
+            |generated| on_generated_ids(generated),
+        )
         .map_err(|err| err.to_string())?;
     Ok(Some((
         Arc::<[u32]>::from(metrics.generated_token_ids),
@@ -216,9 +246,17 @@ pub(super) fn try_benchmark_cuda_nvfp4_greedy(
         .session_mut(runtime, max_total_tokens)
         .map_err(|err| err.to_string())?;
     let load_duration = load_started.elapsed();
+    let sampling_options = GemmaTextSamplingOptions::from_generation_config(
+        &runtime.weights.snapshot.generation_config,
+    )
+    .greedy_variant();
 
     for _ in 0..warmup_iters {
-        let _ = session.generate_greedy(prompt_token_ids.as_ref(), options.max_new_tokens)?;
+        let _ = session.generate_greedy(
+            prompt_token_ids.as_ref(),
+            options.max_new_tokens,
+            &sampling_options,
+        )?;
     }
 
     let started = Instant::now();
@@ -228,7 +266,11 @@ pub(super) fn try_benchmark_cuda_nvfp4_greedy(
     let mut steady_state_generated_tokens = 0usize;
     let mut last_generated_token_ids = Arc::<[u32]>::from(Vec::<u32>::new());
     for _ in 0..measured_iters {
-        let metrics = session.generate_greedy(prompt_token_ids.as_ref(), options.max_new_tokens)?;
+        let metrics = session.generate_greedy(
+            prompt_token_ids.as_ref(),
+            options.max_new_tokens,
+            &sampling_options,
+        )?;
         total_generated_tokens += metrics.generated_token_ids.len();
         time_to_first_token_elapsed += metrics.time_to_first_token_elapsed;
         steady_state_elapsed += metrics.steady_state_elapsed;
@@ -418,8 +460,13 @@ struct CudaNvfp4PrefillBuffers {
     hidden_b: CudaBuffer,
     input_norm_out: CudaBuffer,
     q8_scratch: CudaBuffer,
+    mmq_fixup: CudaBuffer,
+    mmq_fixup_f32_len: usize,
     qkv_out: CudaBuffer,
     q_rope: CudaBuffer,
+    q_rope_bf16: CudaBuffer,
+    attention_logits: CudaBuffer,
+    attention_probs_bf16: CudaBuffer,
     attn_out: CudaBuffer,
     o_proj_out: CudaBuffer,
     post_attention_norm_out: CudaBuffer,
@@ -440,13 +487,14 @@ struct CudaNvfp4GraphTokenState {
 struct CudaNvfp4DecodeGraph {
     exec: CudaGraphExec,
     token_state: CudaNvfp4GraphTokenState,
-    disallowed_count: CudaMappedHostU32Buffer,
     argmax_out: CudaMappedHostU32Buffer,
+    disallowed_count: CudaMappedHostU32Buffer,
 }
 
 struct CudaNvfp4PrefillGraph {
     exec: CudaGraphExec,
     chunk_position: CudaBuffer,
+    chunk_len: usize,
 }
 
 struct CudaNvfp4BenchmarkSession {
@@ -458,7 +506,7 @@ struct CudaNvfp4BenchmarkSession {
     rms_norm_eps: f32,
     max_total_tokens: usize,
     decode_graph: Option<CudaNvfp4DecodeGraph>,
-    prefill_graph: Option<CudaNvfp4PrefillGraph>,
+    prefill_graphs: HashMap<usize, CudaNvfp4PrefillGraph>,
 }
 
 impl CudaNvfp4BenchmarkSession {
@@ -699,6 +747,7 @@ impl CudaNvfp4BenchmarkSession {
             .ok_or("CUDA prefill q8 scratch block count underflow")?
             .checked_mul(Q8_1_BLOCK_BYTES)
             .ok_or("CUDA prefill q8 scratch byte size overflow")?;
+        let mmq_fixup_f32_len = cuda.nvfp4_q8_1_mmq_fixup_f32_len()?;
         let prefill = CudaNvfp4PrefillBuffers {
             chunk_tokens: prefill_chunk_tokens,
             token_ids: cuda.alloc_u32(prefill_chunk_tokens)?,
@@ -706,8 +755,29 @@ impl CudaNvfp4BenchmarkSession {
             hidden_b: cuda.alloc_f32(prefill_chunk_tokens * hidden_size)?,
             input_norm_out: cuda.alloc_f32(prefill_chunk_tokens * hidden_size)?,
             q8_scratch: cuda.alloc_bytes(prefill_q8_scratch_bytes)?,
+            mmq_fixup: cuda.alloc_f32(mmq_fixup_f32_len)?,
+            mmq_fixup_f32_len,
             qkv_out: cuda.alloc_f32(prefill_chunk_tokens * max_qkv_out_len)?,
             q_rope: cuda.alloc_f32(prefill_chunk_tokens * max_q_out_len)?,
+            q_rope_bf16: cuda.alloc_bytes(
+                prefill_chunk_tokens
+                    .checked_mul(max_q_out_len)
+                    .and_then(|len| len.checked_mul(size_of::<u16>()))
+                    .ok_or("CUDA prefill q rope bf16 size overflow")?,
+            )?,
+            attention_logits: cuda.alloc_f32(
+                prefill_chunk_tokens
+                    .checked_mul(text.num_attention_heads as usize)
+                    .and_then(|len| len.checked_mul(max_total_tokens))
+                    .ok_or("CUDA prefill attention logits size overflow")?,
+            )?,
+            attention_probs_bf16: cuda.alloc_bytes(
+                prefill_chunk_tokens
+                    .checked_mul(text.num_attention_heads as usize)
+                    .and_then(|len| len.checked_mul(max_total_tokens))
+                    .and_then(|len| len.checked_mul(size_of::<u16>()))
+                    .ok_or("CUDA prefill attention probs bf16 size overflow")?,
+            )?,
             attn_out: cuda.alloc_f32(prefill_chunk_tokens * max_q_out_len)?,
             o_proj_out: cuda.alloc_f32(prefill_chunk_tokens * hidden_size)?,
             post_attention_norm_out: cuda.alloc_f32(prefill_chunk_tokens * hidden_size)?,
@@ -728,11 +798,13 @@ impl CudaNvfp4BenchmarkSession {
             rms_norm_eps,
             max_total_tokens,
             decode_graph: None,
-            prefill_graph: None,
+            prefill_graphs: HashMap::new(),
         };
         session.decode_graph = Some(session.capture_decode_graph()?);
         if session.prefill.chunk_tokens == CUDA_PREFILL_CHUNK_TOKENS {
-            session.prefill_graph = Some(session.capture_prefill_graph()?);
+            let chunk_len = session.prefill.chunk_tokens;
+            let graph = session.capture_prefill_graph(chunk_len)?;
+            session.prefill_graphs.insert(chunk_len, graph);
         }
         session.eval_next_token_graph(2, 0, &[])?;
         session.reset();
@@ -788,10 +860,10 @@ impl CudaNvfp4BenchmarkSession {
 
     fn capture_decode_graph(&mut self) -> Result<CudaNvfp4DecodeGraph, Box<dyn Error>> {
         let token_state = self.alloc_graph_token_state()?;
-        let disallowed_count = self.cuda.alloc_mapped_u32(1)?;
         let argmax_out = self.cuda.alloc_mapped_u32(1)?;
-        disallowed_count.write_u32(0, 0)?;
+        let disallowed_count = self.cuda.alloc_mapped_u32(1)?;
         argmax_out.write_u32(0, 0)?;
+        disallowed_count.write_u32(0, 0)?;
         self.reset();
         self.cuda.begin_capture()?;
         let hidden_is_a = self.eval_token_hidden_from_token_id_graph(
@@ -799,7 +871,7 @@ impl CudaNvfp4BenchmarkSession {
             token_state.position.device_u32_ptr(),
             token_state.seq_len.device_u32_ptr(),
         )?;
-        self.greedy_token_from_hidden_with_disallowed_graph(
+        self.greedy_token_from_hidden_graph(
             hidden_is_a,
             disallowed_count.device_u32_ptr(),
             argmax_out.device_u32_mut_ptr(),
@@ -809,22 +881,30 @@ impl CudaNvfp4BenchmarkSession {
         Ok(CudaNvfp4DecodeGraph {
             exec,
             token_state,
-            disallowed_count,
             argmax_out,
+            disallowed_count,
         })
     }
 
-    fn capture_prefill_graph(&mut self) -> Result<CudaNvfp4PrefillGraph, Box<dyn Error>> {
+    fn capture_prefill_graph(&mut self, chunk_len: usize) -> Result<CudaNvfp4PrefillGraph, Box<dyn Error>> {
+        if chunk_len == 0 || chunk_len > self.prefill.chunk_tokens {
+            return Err(format!(
+                "CUDA prefill graph chunk length {chunk_len} exceeds capacity {}",
+                self.prefill.chunk_tokens
+            )
+            .into());
+        }
         let chunk_position = self.cuda.alloc_u32(1)?;
         self.cuda.write_u32(&chunk_position, 0)?;
         self.reset();
         self.cuda.begin_capture()?;
-        self.eval_prefill_chunk_graph_body(&chunk_position)?;
+        self.eval_prefill_chunk_graph_body(&chunk_position, chunk_len)?;
         let exec = self.cuda.end_capture()?.instantiate().map_err(|err| err.to_string())?;
         self.reset();
         Ok(CudaNvfp4PrefillGraph {
             exec,
             chunk_position,
+            chunk_len,
         })
     }
 
@@ -845,9 +925,9 @@ impl CudaNvfp4BenchmarkSession {
     fn eval_prefill_chunk_graph_body(
         &mut self,
         chunk_position_device_u32: &CudaBuffer,
+        chunk_len: usize,
     ) -> Result<(), Box<dyn Error>> {
         let prefill = &self.prefill;
-        let chunk_len = prefill.chunk_tokens;
         self.load_prefill_embeddings_device_u32(&prefill.token_ids, chunk_len)?;
         let mut input_is_a = true;
         for layer in &mut self.layers {
@@ -874,15 +954,21 @@ impl CudaNvfp4BenchmarkSession {
     fn eval_prefill_chunk_graph(
         &mut self,
         chunk_start_position: usize,
+        chunk_len: usize,
     ) -> Result<(), Box<dyn Error>> {
-        let prefill_graph = self
-            .prefill_graph
-            .as_ref()
-            .ok_or("CUDA prefill graph did not initialize")?;
-        self.cuda
-            .write_u32(&prefill_graph.chunk_position, chunk_start_position as u32)?;
-        self.cuda.launch_graph(&prefill_graph.exec)?;
-        self.increment_kv_caches_by(self.prefill.chunk_tokens);
+        {
+            let prefill_graph = self
+                .prefill_graphs
+                .get(&chunk_len)
+                .ok_or("CUDA prefill graph did not initialize")?;
+            if prefill_graph.chunk_len != chunk_len {
+                return Err("CUDA prefill graph chunk length mismatch".into());
+            }
+            self.cuda
+                .write_u32(&prefill_graph.chunk_position, chunk_start_position as u32)?;
+            self.cuda.launch_graph(&prefill_graph.exec)?;
+        }
+        self.increment_kv_caches_by(chunk_len);
         Ok(())
     }
 
@@ -892,34 +978,18 @@ impl CudaNvfp4BenchmarkSession {
         position: usize,
         disallowed_token_ids: &[u32],
     ) -> Result<(), Box<dyn Error>> {
-        if disallowed_token_ids.len() > self.io.disallowed_token_capacity {
-            return Err(format!(
-                "CUDA disallowed token set {} exceeds capacity {}",
-                disallowed_token_ids.len(),
-                self.io.disallowed_token_capacity
-            )
-            .into());
+        self.write_disallowed_token_ids(disallowed_token_ids)?;
+        {
+            let decode_graph = self
+                .decode_graph
+                .as_ref()
+                .ok_or("CUDA decode graph did not initialize")?;
+            decode_graph
+                .disallowed_count
+                .write_u32(0, disallowed_token_ids.len() as u32)?;
+            self.write_graph_token_state(&decode_graph.token_state, token_id, position)?;
+            self.cuda.launch_graph(&decode_graph.exec)?;
         }
-
-        let decode_graph = self
-            .decode_graph
-            .as_ref()
-            .ok_or("CUDA decode graph did not initialize")?;
-        self.write_graph_token_state(&decode_graph.token_state, token_id, position)?;
-        if !disallowed_token_ids.is_empty() {
-            let disallowed_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    disallowed_token_ids.as_ptr().cast::<u8>(),
-                    disallowed_token_ids.len() * size_of::<u32>(),
-                )
-            };
-            self.cuda
-                .write_bytes(&self.io.disallowed_token_ids, disallowed_bytes)?;
-        }
-        decode_graph
-            .disallowed_count
-            .write_u32(0, disallowed_token_ids.len() as u32)?;
-        self.cuda.launch_graph(&decode_graph.exec)?;
         self.increment_kv_caches();
         Ok(())
     }
@@ -993,6 +1063,27 @@ impl CudaNvfp4BenchmarkSession {
         Ok(())
     }
 
+    fn prepare_prefill_graphs_for_prompt(&mut self, prompt_len: usize) -> Result<(), Box<dyn Error>> {
+        if prompt_len <= 1 {
+            return Ok(());
+        }
+        let chunk_capacity = self.prefill.chunk_tokens;
+        if chunk_capacity == 0 {
+            return Err("CUDA prefill chunk capacity is zero".into());
+        }
+
+        let mut chunk_start = 0usize;
+        while chunk_start < prompt_len {
+            let chunk_len = (prompt_len - chunk_start).min(chunk_capacity);
+            if !self.prefill_graphs.contains_key(&chunk_len) {
+                let graph = self.capture_prefill_graph(chunk_len)?;
+                self.prefill_graphs.insert(chunk_len, graph);
+            }
+            chunk_start += chunk_len;
+        }
+        Ok(())
+    }
+
     fn prefill_prompt_hidden_batched(
         &mut self,
         prompt_token_ids: &[u32],
@@ -1017,8 +1108,8 @@ impl CudaNvfp4BenchmarkSession {
                 .checked_add(chunk_start)
                 .ok_or("CUDA prefill chunk position overflow")?;
 
-            if chunk_len == chunk_capacity && self.prefill_graph.is_some() {
-                self.eval_prefill_chunk_graph(chunk_position)?;
+            if self.prefill_graphs.contains_key(&chunk_len) {
+                self.eval_prefill_chunk_graph(chunk_position, chunk_len)?;
                 final_hidden_is_a = self.prefill_output_hidden_is_a();
                 final_row_offset_elems = chunk_len
                     .checked_sub(1)
@@ -1061,28 +1152,12 @@ impl CudaNvfp4BenchmarkSession {
         Ok((final_hidden_is_a, final_row_offset_elems))
     }
 
-    fn greedy_token_from_prefill_hidden(
-        &mut self,
-        hidden_is_a: bool,
-        hidden_offset_elems: usize,
-    ) -> Result<u32, Box<dyn Error>> {
-        self.greedy_token_from_prefill_hidden_with_disallowed(hidden_is_a, hidden_offset_elems, &[])
-    }
-
     fn greedy_token_from_prefill_hidden_with_disallowed(
         &mut self,
         hidden_is_a: bool,
         hidden_offset_elems: usize,
         disallowed_token_ids: &[u32],
     ) -> Result<u32, Box<dyn Error>> {
-        if disallowed_token_ids.len() > self.io.disallowed_token_capacity {
-            return Err(format!(
-                "CUDA disallowed token set {} exceeds capacity {}",
-                disallowed_token_ids.len(),
-                self.io.disallowed_token_capacity
-            )
-            .into());
-        }
         let hidden = if hidden_is_a {
             &self.prefill.hidden_a
         } else {
@@ -1114,14 +1189,7 @@ impl CudaNvfp4BenchmarkSession {
             self.cuda
                 .argmax_f32(&self.io.logits_out, &self.io.argmax_out, self.io.vocab_size)?;
         } else {
-            let disallowed_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    disallowed_token_ids.as_ptr().cast::<u8>(),
-                    disallowed_token_ids.len() * size_of::<u32>(),
-                )
-            };
-            self.cuda
-                .write_bytes(&self.io.disallowed_token_ids, disallowed_bytes)?;
+            self.write_disallowed_token_ids(disallowed_token_ids)?;
             self.cuda.masked_argmax_f32(
                 &self.io.logits_out,
                 &self.io.disallowed_token_ids,
@@ -1137,14 +1205,43 @@ impl CudaNvfp4BenchmarkSession {
         Ok(token_id)
     }
 
-    fn generate_greedy(&mut self, prompt_token_ids: &[u32], max_new_tokens: usize) -> Result<CudaNvfp4GenerationMetrics, Box<dyn Error>> {
-        self.generate_greedy_with_callback(prompt_token_ids, max_new_tokens, |_| Ok(()))
+    fn write_disallowed_token_ids(&self, disallowed_token_ids: &[u32]) -> Result<(), Box<dyn Error>> {
+        if disallowed_token_ids.len() > self.io.disallowed_token_capacity {
+            return Err(format!(
+                "CUDA disallowed token set {} exceeds capacity {}",
+                disallowed_token_ids.len(),
+                self.io.disallowed_token_capacity
+            )
+            .into());
+        }
+        if disallowed_token_ids.is_empty() {
+            return Ok(());
+        }
+        let disallowed_bytes = unsafe {
+            std::slice::from_raw_parts(
+                disallowed_token_ids.as_ptr().cast::<u8>(),
+                disallowed_token_ids.len() * size_of::<u32>(),
+            )
+        };
+        self.cuda
+            .write_bytes(&self.io.disallowed_token_ids, disallowed_bytes)?;
+        Ok(())
+    }
+
+    fn generate_greedy(
+        &mut self,
+        prompt_token_ids: &[u32],
+        max_new_tokens: usize,
+        sampling_options: &GemmaTextSamplingOptions,
+    ) -> Result<CudaNvfp4GenerationMetrics, Box<dyn Error>> {
+        self.generate_greedy_with_callback(prompt_token_ids, max_new_tokens, sampling_options, |_| Ok(()))
     }
 
     fn generate_greedy_with_callback<F>(
         &mut self,
         prompt_token_ids: &[u32],
         max_new_tokens: usize,
+        sampling_options: &GemmaTextSamplingOptions,
         mut on_generated_ids: F,
     ) -> Result<CudaNvfp4GenerationMetrics, Box<dyn Error>>
     where
@@ -1156,15 +1253,28 @@ impl CudaNvfp4BenchmarkSession {
         if prompt_token_ids.len() + max_new_tokens > self.max_total_tokens {
             return Err("benchmark token budget exceeds CUDA session capacity".into());
         }
+        self.prepare_prefill_graphs_for_prompt(prompt_token_ids.len())?;
         self.reset();
+
+        let constraints = ChatSamplingConstraints::from_runtime(&self.runtime_session);
+        let mut sampling_state = ChatSamplingState::new();
+        let mut disallowed_token_ids = sampling_state.disallowed_token_ids(
+            &constraints,
+            &self.runtime_session.stop_tokens,
+            sampling_options,
+        );
 
         let ttft_started = Instant::now();
         let first_token_id = if prompt_token_ids.len() == 1 {
-            self.generate_next_token_graph(prompt_token_ids[0], 0, &[])?
+            self.generate_next_token_graph(prompt_token_ids[0], 0, &disallowed_token_ids)?
         } else {
             let (hidden_is_a, hidden_offset_elems) =
                 self.prefill_prompt_hidden_batched(prompt_token_ids, 0)?;
-            self.greedy_token_from_prefill_hidden(hidden_is_a, hidden_offset_elems)?
+            self.greedy_token_from_prefill_hidden_with_disallowed(
+                hidden_is_a,
+                hidden_offset_elems,
+                &disallowed_token_ids,
+            )?
         };
         let time_to_first_token_elapsed = ttft_started.elapsed();
 
@@ -1179,6 +1289,7 @@ impl CudaNvfp4BenchmarkSession {
         }
 
         generated.push(first_token_id);
+        sampling_state.observe_token(first_token_id, &constraints);
         on_generated_ids(&generated)
             .map_err(std::io::Error::other)?;
 
@@ -1191,11 +1302,18 @@ impl CudaNvfp4BenchmarkSession {
                 .last()
                 .ok_or("missing last generated token for CUDA decode")?;
             let position = prompt_token_ids.len() + generated.len() - 1;
-            let next_token = self.generate_next_token_graph(input_token, position, &[])?;
+            disallowed_token_ids = sampling_state.disallowed_token_ids(
+                &constraints,
+                &self.runtime_session.stop_tokens,
+                sampling_options,
+            );
+            let next_token =
+                self.generate_next_token_graph(input_token, position, &disallowed_token_ids)?;
             if self.runtime_session.stop_tokens.contains(&next_token) {
                 break GemmaStopReason::EosToken(next_token);
             }
             generated.push(next_token);
+            sampling_state.observe_token(next_token, &constraints);
             on_generated_ids(&generated)
                 .map_err(std::io::Error::other)?;
         };
@@ -1213,6 +1331,7 @@ impl CudaNvfp4BenchmarkSession {
         prompt_token_ids: &[u32],
         processed_prefix_len: usize,
         max_new_tokens: usize,
+        sampling_options: &GemmaTextSamplingOptions,
         mut on_generated_ids: F,
     ) -> Result<CudaNvfp4GenerationMetrics, Box<dyn Error>>
     where
@@ -1227,15 +1346,29 @@ impl CudaNvfp4BenchmarkSession {
         if prompt_token_ids.len() + max_new_tokens > self.max_total_tokens {
             return Err("benchmark token budget exceeds CUDA session capacity".into());
         }
+        if processed_prefix_len == 0 {
+            self.reset();
+        }
 
         let prompt_suffix = &prompt_token_ids[processed_prefix_len..];
+        let constraints = ChatSamplingConstraints::from_runtime(&self.runtime_session);
+        let mut sampling_state = ChatSamplingState::new();
+        let mut disallowed_token_ids = sampling_state.disallowed_token_ids(
+            &constraints,
+            &self.runtime_session.stop_tokens,
+            sampling_options,
+        );
         let ttft_started = Instant::now();
         let first_token_id = if prompt_suffix.len() == 1 {
-            self.generate_next_token_graph(prompt_suffix[0], processed_prefix_len, &[])?
+            self.generate_next_token_graph(prompt_suffix[0], processed_prefix_len, &disallowed_token_ids)?
         } else {
             let (hidden_is_a, hidden_offset_elems) =
                 self.prefill_prompt_hidden_batched(prompt_suffix, processed_prefix_len)?;
-            self.greedy_token_from_prefill_hidden(hidden_is_a, hidden_offset_elems)?
+            self.greedy_token_from_prefill_hidden_with_disallowed(
+                hidden_is_a,
+                hidden_offset_elems,
+                &disallowed_token_ids,
+            )?
         };
         let time_to_first_token_elapsed = ttft_started.elapsed();
 
@@ -1250,6 +1383,7 @@ impl CudaNvfp4BenchmarkSession {
         }
 
         generated.push(first_token_id);
+        sampling_state.observe_token(first_token_id, &constraints);
         on_generated_ids(&generated)
             .map_err(std::io::Error::other)?;
 
@@ -1262,11 +1396,18 @@ impl CudaNvfp4BenchmarkSession {
                 .last()
                 .ok_or("missing last generated token for CUDA decode")?;
             let position = prompt_token_ids.len() + generated.len() - 1;
-            let next_token = self.generate_next_token_graph(input_token, position, &[])?;
+            disallowed_token_ids = sampling_state.disallowed_token_ids(
+                &constraints,
+                &self.runtime_session.stop_tokens,
+                sampling_options,
+            );
+            let next_token =
+                self.generate_next_token_graph(input_token, position, &disallowed_token_ids)?;
             if self.runtime_session.stop_tokens.contains(&next_token) {
                 break GemmaStopReason::EosToken(next_token);
             }
             generated.push(next_token);
+            sampling_state.observe_token(next_token, &constraints);
             on_generated_ids(&generated)
                 .map_err(std::io::Error::other)?;
         };
@@ -1482,6 +1623,7 @@ impl CudaNvfp4BenchmarkSession {
         let hidden_elems = chunk_len
             .checked_mul(layer.hidden_size)
             .ok_or("CUDA prefill hidden length overflow")?;
+        let mmq_rows = cuda_prefill_mmq_rows(chunk_len);
         cuda.rms_norm_rows_weighted_f32_f32weights(
             input_hidden,
             &layer.input_norm_weight,
@@ -1491,19 +1633,22 @@ impl CudaNvfp4BenchmarkSession {
             layer.hidden_size,
             eps,
         )?;
-        cuda.quantize_q8_1_mmq_f32(
+        cuda.quantize_q8_1_mmq_f32_padded(
             &prefill.input_norm_out,
             &prefill.q8_scratch,
             layer.hidden_size,
             chunk_len,
+            mmq_rows,
         )?;
         cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.qkv_weight,
             &prefill.qkv_out,
+            &prefill.mmq_fixup,
+            prefill.mmq_fixup_f32_len,
             layer.hidden_size,
             layer.qkv_out_len,
-            chunk_len,
+            mmq_rows,
         )?;
         let chunk_start_slot = layer.kv_cache.stored_tokens;
         cuda.qkv_norm_rope_cache_rows_f32(
@@ -1529,10 +1674,13 @@ impl CudaNvfp4BenchmarkSession {
             chunk_start_slot,
             chunk_len,
         )?;
-        cuda.attention_seq_softmax_weighted_sum_rows_f32(
+        cuda.attention_seq_softmax_weighted_sum_rows_blas_f32(
             &prefill.q_rope,
+            &prefill.q_rope_bf16,
             &layer.kv_cache.key,
             &layer.kv_cache.value,
+            &prefill.attention_logits,
+            &prefill.attention_probs_bf16,
             &prefill.attn_out,
             chunk_len,
             layer.q_head_count,
@@ -1546,19 +1694,22 @@ impl CudaNvfp4BenchmarkSession {
         )?;
         layer.kv_cache.stored_tokens += chunk_len;
 
-        cuda.quantize_q8_1_mmq_f32(
+        cuda.quantize_q8_1_mmq_f32_padded(
             &prefill.attn_out,
             &prefill.q8_scratch,
             layer.q_out_len,
             chunk_len,
+            mmq_rows,
         )?;
         cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.o_weight,
             &prefill.o_proj_out,
+            &prefill.mmq_fixup,
+            prefill.mmq_fixup_f32_len,
             layer.q_out_len,
             layer.hidden_size,
-            chunk_len,
+            mmq_rows,
         )?;
         cuda.rms_norm_rows_weighted_f32_f32weights(
             &prefill.o_proj_out,
@@ -1584,19 +1735,22 @@ impl CudaNvfp4BenchmarkSession {
             layer.hidden_size,
             eps,
         )?;
-        cuda.quantize_q8_1_mmq_f32(
+        cuda.quantize_q8_1_mmq_f32_padded(
             &prefill.pre_feedforward_norm_out,
             &prefill.q8_scratch,
             layer.hidden_size,
             chunk_len,
+            mmq_rows,
         )?;
         cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.mlp_gate_up_weight,
             &prefill.mlp_gate_up_out,
+            &prefill.mmq_fixup,
+            prefill.mmq_fixup_f32_len,
             layer.hidden_size,
             layer.intermediate_size * 2,
-            chunk_len,
+            mmq_rows,
         )?;
         cuda.geglu_split_f32_rows(
             &prefill.mlp_gate_up_out,
@@ -1606,19 +1760,22 @@ impl CudaNvfp4BenchmarkSession {
             layer.intermediate_size,
             layer.intermediate_size,
         )?;
-        cuda.quantize_q8_1_mmq_f32(
+        cuda.quantize_q8_1_mmq_f32_padded(
             &prefill.geglu_out,
             &prefill.q8_scratch,
             layer.intermediate_size,
             chunk_len,
+            mmq_rows,
         )?;
         cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.mlp_down_weight,
             &prefill.mlp_down_out,
+            &prefill.mmq_fixup,
+            prefill.mmq_fixup_f32_len,
             layer.intermediate_size,
             layer.hidden_size,
-            chunk_len,
+            mmq_rows,
         )?;
         cuda.rms_norm_rows_weighted_f32_f32weights(
             &prefill.mlp_down_out,
@@ -1658,6 +1815,7 @@ impl CudaNvfp4BenchmarkSession {
         let hidden_elems = chunk_len
             .checked_mul(layer.hidden_size)
             .ok_or("CUDA prefill hidden length overflow")?;
+        let mmq_rows = cuda_prefill_mmq_rows(chunk_len);
         cuda.rms_norm_rows_weighted_f32_f32weights(
             input_hidden,
             &layer.input_norm_weight,
@@ -1667,19 +1825,22 @@ impl CudaNvfp4BenchmarkSession {
             layer.hidden_size,
             eps,
         )?;
-        cuda.quantize_q8_1_mmq_f32(
+        cuda.quantize_q8_1_mmq_f32_padded(
             &prefill.input_norm_out,
             &prefill.q8_scratch,
             layer.hidden_size,
             chunk_len,
+            mmq_rows,
         )?;
         cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.qkv_weight,
             &prefill.qkv_out,
+            &prefill.mmq_fixup,
+            prefill.mmq_fixup_f32_len,
             layer.hidden_size,
             layer.qkv_out_len,
-            chunk_len,
+            mmq_rows,
         )?;
         cuda.qkv_norm_rope_cache_rows_f32_device_u32(
             &prefill.qkv_out,
@@ -1704,10 +1865,13 @@ impl CudaNvfp4BenchmarkSession {
             chunk_position_device_u32,
             chunk_len,
         )?;
-        cuda.attention_seq_softmax_weighted_sum_rows_f32_device_u32(
+        cuda.attention_seq_softmax_weighted_sum_rows_blas_f32_device_u32(
             &prefill.q_rope,
+            &prefill.q_rope_bf16,
             &layer.kv_cache.key,
             &layer.kv_cache.value,
+            &prefill.attention_logits,
+            &prefill.attention_probs_bf16,
             &prefill.attn_out,
             chunk_len,
             layer.q_head_count,
@@ -1720,19 +1884,22 @@ impl CudaNvfp4BenchmarkSession {
             layer.kv_cache.max_tokens,
         )?;
 
-        cuda.quantize_q8_1_mmq_f32(
+        cuda.quantize_q8_1_mmq_f32_padded(
             &prefill.attn_out,
             &prefill.q8_scratch,
             layer.q_out_len,
             chunk_len,
+            mmq_rows,
         )?;
         cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.o_weight,
             &prefill.o_proj_out,
+            &prefill.mmq_fixup,
+            prefill.mmq_fixup_f32_len,
             layer.q_out_len,
             layer.hidden_size,
-            chunk_len,
+            mmq_rows,
         )?;
         cuda.rms_norm_rows_weighted_f32_f32weights(
             &prefill.o_proj_out,
@@ -1758,19 +1925,22 @@ impl CudaNvfp4BenchmarkSession {
             layer.hidden_size,
             eps,
         )?;
-        cuda.quantize_q8_1_mmq_f32(
+        cuda.quantize_q8_1_mmq_f32_padded(
             &prefill.pre_feedforward_norm_out,
             &prefill.q8_scratch,
             layer.hidden_size,
             chunk_len,
+            mmq_rows,
         )?;
         cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.mlp_gate_up_weight,
             &prefill.mlp_gate_up_out,
+            &prefill.mmq_fixup,
+            prefill.mmq_fixup_f32_len,
             layer.hidden_size,
             layer.intermediate_size * 2,
-            chunk_len,
+            mmq_rows,
         )?;
         cuda.geglu_split_f32_rows(
             &prefill.mlp_gate_up_out,
@@ -1780,19 +1950,22 @@ impl CudaNvfp4BenchmarkSession {
             layer.intermediate_size,
             layer.intermediate_size,
         )?;
-        cuda.quantize_q8_1_mmq_f32(
+        cuda.quantize_q8_1_mmq_f32_padded(
             &prefill.geglu_out,
             &prefill.q8_scratch,
             layer.intermediate_size,
             chunk_len,
+            mmq_rows,
         )?;
         cuda.nvfp4_q8_1_mmq_matmul_batched(
             &prefill.q8_scratch,
             &layer.mlp_down_weight,
             &prefill.mlp_down_out,
+            &prefill.mmq_fixup,
+            prefill.mmq_fixup_f32_len,
             layer.intermediate_size,
             layer.hidden_size,
-            chunk_len,
+            mmq_rows,
         )?;
         cuda.rms_norm_rows_weighted_f32_f32weights(
             &prefill.mlp_down_out,
@@ -1815,7 +1988,7 @@ impl CudaNvfp4BenchmarkSession {
         Ok(())
     }
 
-    fn greedy_token_from_hidden_with_disallowed_graph(
+    fn greedy_token_from_hidden_graph(
         &mut self,
         hidden_is_a: bool,
         disallowed_count_device_u32: *const u32,
@@ -1880,8 +2053,18 @@ where
     let mut backend = cuda_exact_backend
         .lock()
         .map_err(|_| "CUDA exact backend mutex poisoned".to_string())?;
-    let common_prefix_len = common_prefix_len(&backend.active_prompt_token_ids, prompt_token_ids.as_ref());
-    let can_reuse_existing_prompt = common_prefix_len == backend.active_prompt_token_ids.len()
+    let target_capacity = grow_cuda_session_capacity(runtime, max_total_tokens)?;
+    let needs_rebuild = backend
+        .session
+        .as_ref()
+        .is_none_or(|session| session.max_total_tokens < target_capacity);
+    let common_prefix_len = common_prefix_len(
+        &backend.active_prompt_token_ids,
+        prompt_token_ids.as_ref(),
+    );
+    let can_reuse_existing_prompt = !needs_rebuild
+        && !backend.active_prompt_token_ids.is_empty()
+        && common_prefix_len == backend.active_prompt_token_ids.len()
         && common_prefix_len < prompt_token_ids.len();
     let session = backend.session_mut(runtime, max_total_tokens)?;
     let metrics = if can_reuse_existing_prompt {
@@ -1890,17 +2073,19 @@ where
                 prompt_token_ids.as_ref(),
                 common_prefix_len,
                 max_new_tokens,
+                sampling_options,
                 |generated| on_generated_ids(generated),
             )
             .map_err(|err| err.to_string())?
     } else {
-        session.reset();
-        let metrics = session
-            .generate_greedy_with_callback(prompt_token_ids.as_ref(), max_new_tokens, |generated| {
-                on_generated_ids(generated)
-            })
-            .map_err(|err| err.to_string())?;
-        metrics
+        session
+            .generate_greedy_with_callback(
+                prompt_token_ids.as_ref(),
+                max_new_tokens,
+                sampling_options,
+                |generated| on_generated_ids(generated),
+            )
+            .map_err(|err| err.to_string())?
     };
     backend.active_prompt_token_ids.clear();
     backend

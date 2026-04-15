@@ -2074,7 +2074,11 @@ fn dispatch_cumsum(
     runtime.dispatch_compute(
         &aux_stage.pipeline,
         bytes_of(&blk_args),
-        &[buffer_ref(compiled, 1, src0_id), tmp_ref.clone(), dst_ref.clone()],
+        &[
+            buffer_ref(compiled, 1, src0_id),
+            tmp_ref.clone(),
+            dst_ref.clone(),
+        ],
         &[(0, smem)],
         MetalSize {
             width: u64::try_from(net0 * src0_layout.ne[1])
@@ -2208,7 +2212,10 @@ fn dispatch_diag(
     runtime.dispatch_compute(
         &stage.pipeline,
         bytes_of(&args),
-        &[buffer_ref(compiled, 1, src0_id), buffer_ref(compiled, 2, tensor.id)],
+        &[
+            buffer_ref(compiled, 1, src0_id),
+            buffer_ref(compiled, 2, tensor.id),
+        ],
         &[],
         MetalSize {
             width: dst_shape.ne[1].max(1) as u64,
@@ -2258,13 +2265,18 @@ fn dispatch_pad(
     runtime.dispatch_compute(
         &stage.pipeline,
         bytes_of(&args),
-        &[buffer_ref(compiled, 1, src0_id), buffer_ref(compiled, 2, tensor.id)],
+        &[
+            buffer_ref(compiled, 1, src0_id),
+            buffer_ref(compiled, 2, tensor.id),
+        ],
         &[],
         MetalSize {
-            width: u64::try_from(dst_layout.ne[1]).map_err(|_| "pad width exceeds u64".to_string())?,
+            width: u64::try_from(dst_layout.ne[1])
+                .map_err(|_| "pad width exceeds u64".to_string())?,
             height: u64::try_from(dst_layout.ne[2])
                 .map_err(|_| "pad height exceeds u64".to_string())?,
-            depth: u64::try_from(dst_layout.ne[3]).map_err(|_| "pad depth exceeds u64".to_string())?,
+            depth: u64::try_from(dst_layout.ne[3])
+                .map_err(|_| "pad depth exceeds u64".to_string())?,
         },
         MetalSize {
             width: u64::try_from(std::cmp::min(1024_i64, dst_layout.ne[0].max(1)))
@@ -2317,7 +2329,10 @@ fn dispatch_tri(
     runtime.dispatch_compute(
         &stage.pipeline,
         bytes_of(&args),
-        &[buffer_ref(compiled, 1, src0_id), buffer_ref(compiled, 2, tensor.id)],
+        &[
+            buffer_ref(compiled, 1, src0_id),
+            buffer_ref(compiled, 2, tensor.id),
+        ],
         &[],
         MetalSize {
             width: src0_shape.ne[1].max(1) as u64,
@@ -2443,7 +2458,10 @@ fn dispatch_repeat(
     runtime.dispatch_compute(
         &stage.pipeline,
         bytes_of(&args),
-        &[buffer_ref(compiled, 1, src0_id), buffer_ref(compiled, 2, tensor.id)],
+        &[
+            buffer_ref(compiled, 1, src0_id),
+            buffer_ref(compiled, 2, tensor.id),
+        ],
         &[],
         MetalSize {
             width: dst_shape.ne[1] as u64,
@@ -2928,9 +2946,7 @@ fn dispatch_im2col(
             kh_kw, max_threads
         ));
     }
-    let ntptg0 = (max_threads / kh_kw)
-        .min(n.max(1) as u64)
-        .max(1);
+    let ntptg0 = (max_threads / kh_kw).min(n.max(1) as u64).max(1);
 
     runtime.dispatch_compute(
         &stage.pipeline,
@@ -3013,7 +3029,8 @@ fn dispatch_conv_2d(
     };
 
     let nth = std::cmp::min(256u64, stage.pipeline.max_threads_per_threadgroup).max(1);
-    let n_out = u64::try_from(tensor.nelements()).map_err(|_| "conv_2d output size overflow".to_string())?;
+    let n_out = u64::try_from(tensor.nelements())
+        .map_err(|_| "conv_2d output size overflow".to_string())?;
     let tg = ((n_out + nth - 1) / nth).max(1);
 
     runtime.dispatch_compute(
@@ -4481,7 +4498,8 @@ fn dispatch_flash_attn_ext(
     let bc_mask = has_mask && mask_shape.ne[1] % 8 != 0;
 
     if has_kvpad {
-        let stage_pad = stage_pad.ok_or_else(|| "flash_attn_ext is missing pad stage".to_string())?;
+        let stage_pad =
+            stage_pad.ok_or_else(|| "flash_attn_ext is missing pad stage".to_string())?;
         let pad_ncpsg = constant_i32(&stage_pad.descriptor.constants, FC_FLASH_ATTN_EXT_PAD + 25)?;
         let args = KArgsFlashAttnExtPad {
             ne11: k_shape.ne[1],
@@ -4626,8 +4644,7 @@ fn dispatch_flash_attn_ext(
         ],
         &[(0, stage_main.pipeline.smem_bytes)],
         MetalSize {
-            width: ((q_shape.ne[1] + OP_FLASH_ATTN_EXT_NQPSG - 1) / OP_FLASH_ATTN_EXT_NQPSG)
-                as u64,
+            width: ((q_shape.ne[1] + OP_FLASH_ATTN_EXT_NQPSG - 1) / OP_FLASH_ATTN_EXT_NQPSG) as u64,
             height: q_shape.ne[2] as u64,
             depth: q_shape.ne[3] as u64,
         },
@@ -5707,7 +5724,13 @@ mod tests {
             )
             .unwrap();
         let q_cont = ctx
-            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .new_tensor_3d(
+                TensorType::F32,
+                d,
+                n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let positions = ctx
             .new_tensor_1d(TensorType::I32, 4 * n_tokens, BufferUsage::Activations)
@@ -5836,7 +5859,13 @@ mod tests {
             )
             .unwrap();
         let q_cont = ctx
-            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .new_tensor_3d(
+                TensorType::F32,
+                d,
+                n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let q_interleaved = ctx
             .view_3d(
@@ -5880,8 +5909,11 @@ mod tests {
             BufferStorageMode::Shared,
         )
         .unwrap();
-        let execution = session.execute(&ctx, &[], &[q_interleaved_dense, q_cont]).unwrap();
-        let interleaved_values = bytes_to_f32s(execution.outputs.get(&q_interleaved_dense).unwrap());
+        let execution = session
+            .execute(&ctx, &[], &[q_interleaved_dense, q_cont])
+            .unwrap();
+        let interleaved_values =
+            bytes_to_f32s(execution.outputs.get(&q_interleaved_dense).unwrap());
         let cont_values = bytes_to_f32s(execution.outputs.get(&q_cont).unwrap());
 
         assert_eq!(interleaved_values.len(), cont_values.len());
@@ -5921,7 +5953,13 @@ mod tests {
             )
             .unwrap();
         let q_cont = ctx
-            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .new_tensor_3d(
+                TensorType::F32,
+                d,
+                n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let k_base = ctx
             .new_tensor_3d(
@@ -6019,14 +6057,9 @@ mod tests {
                 BufferUsage::Activations,
             )
             .unwrap();
-        let q_interleaved_attn = build_flash_attn_like_mha(
-            &mut ctx,
-            q_interleaved_rope,
-            k_rope,
-            v_base,
-            Some(mask),
-        )
-        .unwrap();
+        let q_interleaved_attn =
+            build_flash_attn_like_mha(&mut ctx, q_interleaved_rope, k_rope, v_base, Some(mask))
+                .unwrap();
         let q_cont_attn =
             build_flash_attn_like_mha(&mut ctx, q_cont_rope, k_rope, v_base, Some(mask)).unwrap();
 
@@ -6062,7 +6095,9 @@ mod tests {
         ctx.write_tensor_data(mask, &mask_bytes).unwrap();
 
         let mut graph = Graph::new();
-        graph.build_forward_expand(&ctx, q_interleaved_attn).unwrap();
+        graph
+            .build_forward_expand(&ctx, q_interleaved_attn)
+            .unwrap();
         graph.build_forward_expand(&ctx, q_cont_attn).unwrap();
 
         let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
@@ -6253,7 +6288,13 @@ mod tests {
             )
             .unwrap();
         let q_cont = full_ctx
-            .new_tensor_3d(TensorType::F32, d, n_head, n_tokens, BufferUsage::Activations)
+            .new_tensor_3d(
+                TensorType::F32,
+                d,
+                n_head,
+                n_tokens,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let weight = full_ctx
             .new_tensor_1d(TensorType::F32, d, BufferUsage::Weights)
@@ -6306,11 +6347,15 @@ mod tests {
         full_graph
             .build_forward_expand(&full_ctx, interleaved_norm)
             .unwrap();
-        full_graph.build_forward_expand(&full_ctx, cont_norm).unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, cont_norm)
+            .unwrap();
         full_graph
             .build_forward_expand(&full_ctx, interleaved_scaled)
             .unwrap();
-        full_graph.build_forward_expand(&full_ctx, cont_scaled).unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, cont_scaled)
+            .unwrap();
 
         let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
         let full_session = MetalGraphSession::from_runtime(
@@ -6388,13 +6433,23 @@ mod tests {
             .rms_norm_eps(q_interleaved_step, eps, BufferUsage::Activations)
             .unwrap();
         let interleaved_scaled_step = step_ctx
-            .binary_like_a(Op::Mul, interleaved_norm_step, weight_step, BufferUsage::Activations)
+            .binary_like_a(
+                Op::Mul,
+                interleaved_norm_step,
+                weight_step,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let cont_norm_step = step_ctx
             .rms_norm_eps(q_cont_step, eps, BufferUsage::Activations)
             .unwrap();
         let cont_scaled_step = step_ctx
-            .binary_like_a(Op::Mul, cont_norm_step, weight_step, BufferUsage::Activations)
+            .binary_like_a(
+                Op::Mul,
+                cont_norm_step,
+                weight_step,
+                BufferUsage::Activations,
+            )
             .unwrap();
 
         let q_step_values = {
@@ -6468,8 +6523,12 @@ mod tests {
         let step_interleaved_norm =
             bytes_to_f32s(step_execution.outputs.get(&interleaved_norm_step).unwrap());
         let step_cont_norm = bytes_to_f32s(step_execution.outputs.get(&cont_norm_step).unwrap());
-        let step_interleaved =
-            bytes_to_f32s(step_execution.outputs.get(&interleaved_scaled_step).unwrap());
+        let step_interleaved = bytes_to_f32s(
+            step_execution
+                .outputs
+                .get(&interleaved_scaled_step)
+                .unwrap(),
+        );
         let step_cont = bytes_to_f32s(step_execution.outputs.get(&cont_scaled_step).unwrap());
 
         assert_eq!(step_interleaved_norm.len(), step_cont_norm.len());
@@ -6538,7 +6597,8 @@ mod tests {
             .unary(conv_full, UnaryOp::Silu, BufferUsage::Activations)
             .unwrap();
 
-        let src_full_values = patterned_f32s((src_tokens * d_inner * n_seqs) as usize, -0.11, 0.0007);
+        let src_full_values =
+            patterned_f32s((src_tokens * d_inner * n_seqs) as usize, -0.11, 0.0007);
         let kernel_values = patterned_f32s((d_conv * d_inner) as usize, 0.09, -0.0005);
         full_ctx
             .write_tensor_data(src_full, &f32s_to_bytes(&src_full_values))
@@ -6548,8 +6608,12 @@ mod tests {
             .unwrap();
 
         let mut full_graph = Graph::new();
-        full_graph.build_forward_expand(&full_ctx, conv_full).unwrap();
-        full_graph.build_forward_expand(&full_ctx, silu_full).unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, conv_full)
+            .unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, silu_full)
+            .unwrap();
 
         let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
         let full_session = MetalGraphSession::from_runtime(
@@ -6598,8 +6662,12 @@ mod tests {
             .unwrap();
 
         let mut step_graph = Graph::new();
-        step_graph.build_forward_expand(&step_ctx, conv_step).unwrap();
-        step_graph.build_forward_expand(&step_ctx, silu_step).unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, conv_step)
+            .unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, silu_step)
+            .unwrap();
 
         let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
         let step_session = MetalGraphSession::from_runtime(
@@ -6621,8 +6689,9 @@ mod tests {
                 let seq_base = seq * (src_tokens as usize) * (d_inner as usize);
                 for row in 0..(d_inner as usize) {
                     let row_base = seq_base + row * src_row_width;
-                    src_step_values
-                        .extend_from_slice(&src_full_values[row_base + token..row_base + token + d_conv as usize]);
+                    src_step_values.extend_from_slice(
+                        &src_full_values[row_base + token..row_base + token + d_conv as usize],
+                    );
                 }
             }
             let src_step_bytes = f32s_to_bytes(&src_step_values);
@@ -6702,9 +6771,7 @@ mod tests {
             )
             .unwrap();
         let qkv_t = ctx.transpose(qkv).unwrap();
-        let qkv_flat = ctx
-            .cont_2d(qkv, qkv_dim * n_tokens, n_seqs)
-            .unwrap();
+        let qkv_flat = ctx.cont_2d(qkv, qkv_dim * n_tokens, n_seqs).unwrap();
         let conv_input = ctx
             .concat(conv_states, qkv_t, 0, BufferUsage::Activations)
             .unwrap();
@@ -6795,15 +6862,15 @@ mod tests {
         let rows = ctx
             .new_tensor_1d(TensorType::I32, gather_rows, BufferUsage::Activations)
             .unwrap();
-        let gathered = ctx
-            .get_rows(src, rows, BufferUsage::Activations)
-            .unwrap();
+        let gathered = ctx.get_rows(src, rows, BufferUsage::Activations).unwrap();
         let gathered = ctx.cont_2d(gathered, width, gather_rows).unwrap();
 
         let src_values = patterned_f32s((width * source_rows) as usize, -0.31, 0.002);
         let row_values = [1_i32, 4_i32];
-        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values)).unwrap();
-        ctx.write_tensor_data(rows, &i32s_to_bytes(&row_values)).unwrap();
+        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values))
+            .unwrap();
+        ctx.write_tensor_data(rows, &i32s_to_bytes(&row_values))
+            .unwrap();
 
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, gathered).unwrap();
@@ -6869,7 +6936,9 @@ mod tests {
             .unwrap();
 
         let mut full_graph = Graph::new();
-        full_graph.build_forward_expand(&full_ctx, gathered_full).unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, gathered_full)
+            .unwrap();
         let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
         let full_session = MetalGraphSession::from_runtime(
             runtime,
@@ -6879,7 +6948,9 @@ mod tests {
             BufferStorageMode::Shared,
         )
         .unwrap();
-        let full_execution = full_session.execute(&full_ctx, &[], &[gathered_full]).unwrap();
+        let full_execution = full_session
+            .execute(&full_ctx, &[], &[gathered_full])
+            .unwrap();
         let full_values = bytes_to_f32s(full_execution.outputs.get(&gathered_full).unwrap());
 
         let runtime = match MetalRuntime::new() {
@@ -6908,7 +6979,9 @@ mod tests {
             .unwrap();
 
         let mut step_graph = Graph::new();
-        step_graph.build_forward_expand(&step_ctx, gathered_step).unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, gathered_step)
+            .unwrap();
         let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
         let step_session = MetalGraphSession::from_runtime(
             runtime,
@@ -6975,9 +7048,7 @@ mod tests {
 
         let src_bytes = patterned_q5k_tensor_bytes(source_rows as usize, width as usize);
         let row_values = [1_i32, 4_i32];
-        full_ctx
-            .write_tensor_data(src, &src_bytes)
-            .unwrap();
+        full_ctx.write_tensor_data(src, &src_bytes).unwrap();
         full_ctx
             .write_tensor_data(rows_full, &i32s_to_bytes(&row_values))
             .unwrap();
@@ -7051,9 +7122,7 @@ mod tests {
             .unwrap();
         let gathered_step_cont = step_ctx.cont_2d(gathered_step_raw, width, 1).unwrap();
 
-        step_ctx
-            .write_tensor_data(step_src, &src_bytes)
-            .unwrap();
+        step_ctx.write_tensor_data(step_src, &src_bytes).unwrap();
 
         let mut step_graph = Graph::new();
         step_graph
@@ -7160,7 +7229,12 @@ mod tests {
         let top_k = 4_i64;
 
         let logits = ctx
-            .new_tensor_2d(TensorType::F32, source_rows, tokens, BufferUsage::Activations)
+            .new_tensor_2d(
+                TensorType::F32,
+                source_rows,
+                tokens,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let sorted = ctx.argsort(logits, BufferUsage::Activations).unwrap();
         ctx.tensor_mut(sorted)
@@ -7182,20 +7256,25 @@ mod tests {
             .unwrap();
 
         let src = ctx
-            .new_tensor_3d(TensorType::F32, width, source_rows, tokens, BufferUsage::Weights)
+            .new_tensor_3d(
+                TensorType::F32,
+                width,
+                source_rows,
+                tokens,
+                BufferUsage::Weights,
+            )
             .unwrap();
-        let gathered = ctx
-            .get_rows(src, ids, BufferUsage::Activations)
-            .unwrap();
+        let gathered = ctx.get_rows(src, ids, BufferUsage::Activations).unwrap();
 
         let logits_values = vec![
-            0.1, 0.4, 1.2, -0.3, 0.9, 0.7, -0.2, 1.1, 0.6, 0.5, 0.3, 0.2, 1.0, -0.4, 0.8, 0.0,
-            0.2, 1.3, 0.7, 0.1, -0.2, 0.5, 1.1, 0.4, 0.9, 0.8, 0.6, 0.3, 0.0, -0.1, 1.2, 1.0,
+            0.1, 0.4, 1.2, -0.3, 0.9, 0.7, -0.2, 1.1, 0.6, 0.5, 0.3, 0.2, 1.0, -0.4, 0.8, 0.0, 0.2,
+            1.3, 0.7, 0.1, -0.2, 0.5, 1.1, 0.4, 0.9, 0.8, 0.6, 0.3, 0.0, -0.1, 1.2, 1.0,
         ];
         let src_values = patterned_f32s((width * source_rows * tokens) as usize, -0.21, 0.031);
         ctx.write_tensor_data(logits, &f32s_to_bytes(&logits_values))
             .unwrap();
-        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values)).unwrap();
+        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values))
+            .unwrap();
 
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, gathered).unwrap();
@@ -7399,8 +7478,7 @@ mod tests {
             .mul_mat(weights, input, BufferUsage::Activations)
             .unwrap();
 
-        let weight_values =
-            hashed_f32s((width * rows) as usize, 0x3b92dc1f, 0.45, 0.03, 0.9);
+        let weight_values = hashed_f32s((width * rows) as usize, 0x3b92dc1f, 0.45, 0.03, 0.9);
         let input_values = hashed_f32s((width * tokens) as usize, 0x91e10da5, 0.65, -0.02, 0.6);
         ctx.write_tensor_data(weights, &f32s_to_bytes(&weight_values))
             .unwrap();
@@ -7491,8 +7569,15 @@ mod tests {
             .unwrap();
         let v_set = {
             let v_tensor = ctx.tensor(v_base).unwrap().clone();
-            ctx.set_inplace(v_base, o_ch, v_tensor.nb[1], v_tensor.nb[2], v_tensor.nb[3], 0)
-                .unwrap()
+            ctx.set_inplace(
+                v_base,
+                o_ch,
+                v_tensor.nb[1],
+                v_tensor.nb[2],
+                v_tensor.nb[3],
+                0,
+            )
+            .unwrap()
         };
         let output = ctx
             .view_4d(
@@ -7510,13 +7595,16 @@ mod tests {
         let output = ctx.permute(output, [0, 2, 1, 3]).unwrap();
         let output_cont = ctx.cont_2d(output, s_v * h_v, n_tokens * n_seqs).unwrap();
 
-        let v_base_values =
-            patterned_f32s((s_v * chunk_size * n_chunks * h_v * n_seqs) as usize, -0.15, 0.001);
-        let o_ch_values =
-            patterned_f32s((s_v * chunk_size * h_v * n_seqs) as usize, 0.12, -0.0007);
+        let v_base_values = patterned_f32s(
+            (s_v * chunk_size * n_chunks * h_v * n_seqs) as usize,
+            -0.15,
+            0.001,
+        );
+        let o_ch_values = patterned_f32s((s_v * chunk_size * h_v * n_seqs) as usize, 0.12, -0.0007);
         ctx.write_tensor_data(v_base, &f32s_to_bytes(&v_base_values))
             .unwrap();
-        ctx.write_tensor_data(o_ch, &f32s_to_bytes(&o_ch_values)).unwrap();
+        ctx.write_tensor_data(o_ch, &f32s_to_bytes(&o_ch_values))
+            .unwrap();
 
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, v_set).unwrap();
@@ -7555,7 +7643,8 @@ mod tests {
                 for head in 0..(h_v as usize) {
                     let head_base = seq_base + head * head_stride;
                     let token_base = head_base + token * chunk_width;
-                    expected_output.extend_from_slice(&o_ch_values[token_base..token_base + chunk_width]);
+                    expected_output
+                        .extend_from_slice(&o_ch_values[token_base..token_base + chunk_width]);
                 }
             }
         }
@@ -7630,7 +7719,13 @@ mod tests {
         .unwrap();
         let execution = session.execute(&ctx, &[], &[out]).unwrap();
         let actual = bytes_to_f32s(execution.outputs.get(&out).unwrap());
-        let expected = cpu_solve_tri_f32(&a_values, &b_values, n as usize, k as usize, batches as usize);
+        let expected = cpu_solve_tri_f32(
+            &a_values,
+            &b_values,
+            n as usize,
+            k as usize,
+            batches as usize,
+        );
 
         assert_eq!(actual.len(), expected.len());
         for (a, e) in actual.iter().zip(expected.iter()) {
@@ -7709,8 +7804,20 @@ mod tests {
         let execution = session.execute(&ctx, &[], &[out_dim1, out_dim0]).unwrap();
         let actual_dim1 = bytes_to_f32s(execution.outputs.get(&out_dim1).unwrap());
         let actual_dim0 = bytes_to_f32s(execution.outputs.get(&out_dim0).unwrap());
-        let expected_dim1 = cpu_broadcast_mul_dim1(&a_dim1_values, &b_dim1_values, cs as usize, s as usize, h as usize);
-        let expected_dim0 = cpu_broadcast_mul_dim0(&a_dim0_values, &b_dim0_values, s as usize, cs as usize, h as usize);
+        let expected_dim1 = cpu_broadcast_mul_dim1(
+            &a_dim1_values,
+            &b_dim1_values,
+            cs as usize,
+            s as usize,
+            h as usize,
+        );
+        let expected_dim0 = cpu_broadcast_mul_dim0(
+            &a_dim0_values,
+            &b_dim0_values,
+            s as usize,
+            cs as usize,
+            h as usize,
+        );
 
         assert_eq!(actual_dim1.len(), expected_dim1.len());
         for (a, e) in actual_dim1.iter().zip(expected_dim1.iter()) {
@@ -8637,15 +8744,15 @@ mod tests {
             .glu_split(gate, up, GluOp::Swiglu, BufferUsage::Activations)
             .unwrap();
         let gate_values = vec![
-            -2.0, -0.5, 0.0, 0.5, 1.0, 1.5, -1.2, 2.0,
-            0.3, -1.1, 2.2, -0.7, 1.8, -2.4, 0.9, 0.4,
+            -2.0, -0.5, 0.0, 0.5, 1.0, 1.5, -1.2, 2.0, 0.3, -1.1, 2.2, -0.7, 1.8, -2.4, 0.9, 0.4,
         ];
         let up_values = vec![
-            1.0, -0.3, 0.8, 1.1, -1.4, 0.2, 2.0, -0.6,
-            -0.7, 1.3, -1.5, 0.4, 0.9, -0.8, 1.7, -2.1,
+            1.0, -0.3, 0.8, 1.1, -1.4, 0.2, 2.0, -0.6, -0.7, 1.3, -1.5, 0.4, 0.9, -0.8, 1.7, -2.1,
         ];
-        ctx.write_tensor_data(gate, &f32s_to_bytes(&gate_values)).unwrap();
-        ctx.write_tensor_data(up, &f32s_to_bytes(&up_values)).unwrap();
+        ctx.write_tensor_data(gate, &f32s_to_bytes(&gate_values))
+            .unwrap();
+        ctx.write_tensor_data(up, &f32s_to_bytes(&up_values))
+            .unwrap();
 
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, out).unwrap();
@@ -8715,7 +8822,9 @@ mod tests {
             .unwrap();
 
         let mut full_graph = Graph::new();
-        full_graph.build_forward_expand(&full_ctx, out_full).unwrap();
+        full_graph
+            .build_forward_expand(&full_ctx, out_full)
+            .unwrap();
         let full_prepared = prepare_graph(&full_ctx, &full_graph, runtime.features()).unwrap();
         let full_session = MetalGraphSession::from_runtime(
             runtime,
@@ -8758,7 +8867,9 @@ mod tests {
             .unwrap();
 
         let mut step_graph = Graph::new();
-        step_graph.build_forward_expand(&step_ctx, out_step).unwrap();
+        step_graph
+            .build_forward_expand(&step_ctx, out_step)
+            .unwrap();
         let step_prepared = prepare_graph(&step_ctx, &step_graph, runtime.features()).unwrap();
         let step_session = MetalGraphSession::from_runtime(
             runtime,
@@ -9131,7 +9242,12 @@ mod tests {
         let tokens = 2_i64;
 
         let logits = ctx
-            .new_tensor_2d(TensorType::F32, expert_count, tokens, BufferUsage::Activations)
+            .new_tensor_2d(
+                TensorType::F32,
+                expert_count,
+                tokens,
+                BufferUsage::Activations,
+            )
             .unwrap();
         let sorted = ctx.argsort(logits, BufferUsage::Activations).unwrap();
         ctx.tensor_mut(sorted)
@@ -9153,7 +9269,13 @@ mod tests {
             .unwrap();
 
         let experts = ctx
-            .new_tensor_3d(TensorType::F32, in_dim, out_dim, expert_count, BufferUsage::Weights)
+            .new_tensor_3d(
+                TensorType::F32,
+                in_dim,
+                out_dim,
+                expert_count,
+                BufferUsage::Weights,
+            )
             .unwrap();
         let input = ctx
             .new_tensor_3d(TensorType::F32, in_dim, 1, tokens, BufferUsage::Activations)
@@ -9163,8 +9285,8 @@ mod tests {
             .unwrap();
 
         let logits_values = vec![
-            0.1, 0.4, 1.2, -0.3, 0.9, 0.7, -0.2, 1.1, 0.6, 0.5, 0.3, 0.2, 1.0, -0.4, 0.8, 0.0,
-            0.2, 1.3, 0.7, 0.1, -0.2, 0.5, 1.1, 0.4, 0.9, 0.8, 0.6, 0.3, 0.0, -0.1, 1.2, 1.0,
+            0.1, 0.4, 1.2, -0.3, 0.9, 0.7, -0.2, 1.1, 0.6, 0.5, 0.3, 0.2, 1.0, -0.4, 0.8, 0.0, 0.2,
+            1.3, 0.7, 0.1, -0.2, 0.5, 1.1, 0.4, 0.9, 0.8, 0.6, 0.3, 0.0, -0.1, 1.2, 1.0,
         ];
         let expert_values = patterned_f32s((in_dim * out_dim * expert_count) as usize, -0.3, 0.05);
         let input_values = vec![
@@ -9597,7 +9719,9 @@ mod tests {
             .new_tensor_1d(TensorType::F32, 4, BufferUsage::Activations)
             .unwrap();
         let reshaped = ctx.reshape(vector, &[1, 1, 4, 1]).unwrap();
-        let out = ctx.repeat(reshaped, shape_of, BufferUsage::Activations).unwrap();
+        let out = ctx
+            .repeat(reshaped, shape_of, BufferUsage::Activations)
+            .unwrap();
 
         let vector_values = vec![-0.35f32, 0.125, 0.7, -1.1];
         ctx.write_tensor_data(vector, &f32s_to_bytes(&vector_values))
@@ -9671,7 +9795,8 @@ mod tests {
         let src_values = patterned_f32s(8 * 6 * 4, -0.45, 0.017);
         let scale_values = vec![0.8f32, -0.35, 1.25, 0.5];
         let bias_values = vec![-0.2f32, 0.9, 0.15, -0.6];
-        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values)).unwrap();
+        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values))
+            .unwrap();
         ctx.write_tensor_data(scale_vector, &f32s_to_bytes(&scale_values))
             .unwrap();
         ctx.write_tensor_data(bias_vector, &f32s_to_bytes(&bias_values))
@@ -9758,7 +9883,9 @@ mod tests {
             )
             .unwrap();
         let bias_reshaped = ctx.reshape(bias_vector, &[1, 1, 3, 1]).unwrap();
-        let bias = ctx.repeat(bias_reshaped, conv, BufferUsage::Activations).unwrap();
+        let bias = ctx
+            .repeat(bias_reshaped, conv, BufferUsage::Activations)
+            .unwrap();
         let out = ctx
             .binary_like_a(Op::Add, conv, bias, BufferUsage::Activations)
             .unwrap();
@@ -9766,7 +9893,8 @@ mod tests {
         let src_values = patterned_f32s(64 * 48 * 4, -0.3, 0.0007);
         let weight_values = patterned_f32s(3 * 3 * 4 * 3, -0.12, 0.003);
         let bias_values = vec![0.05f32, -0.15, 0.3];
-        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values)).unwrap();
+        ctx.write_tensor_data(src, &f32s_to_bytes(&src_values))
+            .unwrap();
         ctx.write_tensor_data(weights, &f32s_to_bytes(&weight_values))
             .unwrap();
         ctx.write_tensor_data(bias_vector, &f32s_to_bytes(&bias_values))
@@ -9856,7 +9984,13 @@ mod tests {
             .group_norm(src, groups as i32, 1.0e-6, BufferUsage::Activations)
             .unwrap();
 
-        let values = hashed_f32s(width * height * channels * batch, 0x1234_5678, 0.85, -0.1, 0.7);
+        let values = hashed_f32s(
+            width * height * channels * batch,
+            0x1234_5678,
+            0.85,
+            -0.1,
+            0.7,
+        );
         ctx.write_tensor_data(src, &f32s_to_bytes(&values)).unwrap();
 
         let mut graph = Graph::new();
@@ -9919,7 +10053,13 @@ mod tests {
             .unary(src, UnaryOp::Silu, BufferUsage::Activations)
             .unwrap();
 
-        let values = hashed_f32s(width * height * channels * batch, 0x8765_4321, 1.1, 0.0, 1.3);
+        let values = hashed_f32s(
+            width * height * channels * batch,
+            0x8765_4321,
+            1.1,
+            0.0,
+            1.3,
+        );
         ctx.write_tensor_data(src, &f32s_to_bytes(&values)).unwrap();
 
         let mut graph = Graph::new();
@@ -10029,8 +10169,7 @@ mod tests {
                                     let ix = ix - pad_x;
                                     let weight_idx =
                                         (((out_channel * ic + in_channel) * kh + ky) * kw) + kx;
-                                    let input_idx =
-                                        (((n * ic + in_channel) * ih + iy) * iw) + ix;
+                                    let input_idx = (((n * ic + in_channel) * ih + iy) * iw) + ix;
                                     acc += weights[weight_idx] * input[input_idx];
                                 }
                             }
@@ -10121,8 +10260,7 @@ mod tests {
                         let src_x = x / scale;
                         let src_y = y / scale;
                         let src_idx = (((b * channels + c) * height + src_y) * width) + src_x;
-                        let dst_idx =
-                            (((b * channels + c) * out_height + y) * out_width) + x;
+                        let dst_idx = (((b * channels + c) * out_height + y) * out_width) + x;
                         out[dst_idx] = input[src_idx];
                     }
                 }
@@ -10152,11 +10290,10 @@ mod tests {
                     let src_y = y % src_height;
                     for x in 0..dst_width {
                         let src_x = x % src_width;
-                        let src_idx =
-                            (((src_b * src_channels + src_c) * src_height + src_y) * src_width)
-                                + src_x;
-                        let dst_idx =
-                            (((b * dst_channels + c) * dst_height + y) * dst_width) + x;
+                        let src_idx = (((src_b * src_channels + src_c) * src_height + src_y)
+                            * src_width)
+                            + src_x;
+                        let dst_idx = (((b * dst_channels + c) * dst_height + y) * dst_width) + x;
                         out[dst_idx] = input[src_idx];
                     }
                 }
@@ -10325,8 +10462,7 @@ mod tests {
                     out[block_base + 16 + i] = ((row * 29 + block * 19 + i * 7) & 0xFF) as u8;
                 }
                 for i in 0..128 {
-                    out[block_base + 48 + i] =
-                        ((row * 37 + block * 23 + i * 5) & 0xFF) as u8;
+                    out[block_base + 48 + i] = ((row * 37 + block * 23 + i * 5) & 0xFF) as u8;
                 }
             }
         }
@@ -10688,7 +10824,8 @@ mod tests {
                     for idx in 0..row {
                         sum += a_batch[row * n + idx] * out_batch[col + idx * k];
                     }
-                    out_batch[col + row * k] = (b_batch[col + row * k] - sum) / a_batch[row * n + row];
+                    out_batch[col + row * k] =
+                        (b_batch[col + row * k] - sum) / a_batch[row * n + row];
                 }
             }
         }

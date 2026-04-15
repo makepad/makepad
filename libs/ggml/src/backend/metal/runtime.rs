@@ -687,8 +687,10 @@ mod imp {
                     continue;
                 };
 
-                let command_queue_obj: ObjcId = unsafe { msg_send![device.as_id(), newCommandQueue] };
-                let Some(command_queue) = (unsafe { StrongId::from_owned(command_queue_obj) }) else {
+                let command_queue_obj: ObjcId =
+                    unsafe { msg_send![device.as_id(), newCommandQueue] };
+                let Some(command_queue) = (unsafe { StrongId::from_owned(command_queue_obj) })
+                else {
                     last_err = Some("newCommandQueue returned nil".to_string());
                     if attempt + 1 < METAL_INIT_ATTEMPTS {
                         thread::sleep(Duration::from_millis(METAL_INIT_RETRY_DELAY_MS));
@@ -1297,10 +1299,7 @@ mod imp {
             }
         }
 
-        fn apply_pending_fence_wait_to_compute_encoder(
-            &mut self,
-            encoder: &StrongId,
-        ) {
+        fn apply_pending_fence_wait_to_compute_encoder(&mut self, encoder: &StrongId) {
             if let Some(fence) = self.pending_fence_wait.take() {
                 self.counters.fence_waits += 1;
                 unsafe {
@@ -1309,10 +1308,7 @@ mod imp {
             }
         }
 
-        fn apply_pending_fence_wait_to_blit_encoder(
-            &mut self,
-            encoder: &StrongId,
-        ) {
+        fn apply_pending_fence_wait_to_blit_encoder(&mut self, encoder: &StrongId) {
             if let Some(fence) = self.pending_fence_wait.take() {
                 self.counters.fence_waits += 1;
                 unsafe {
@@ -1460,9 +1456,13 @@ mod imp {
 
         fn account_completed_command_buffers_gpu_time(&mut self) {
             for command_buffer in self.submitted_command_buffers.drain(..) {
-                let gpu_start_time: f64 = unsafe { msg_send![command_buffer.as_id(), GPUStartTime] };
+                let gpu_start_time: f64 =
+                    unsafe { msg_send![command_buffer.as_id(), GPUStartTime] };
                 let gpu_end_time: f64 = unsafe { msg_send![command_buffer.as_id(), GPUEndTime] };
-                if gpu_end_time > gpu_start_time && gpu_start_time.is_finite() && gpu_end_time.is_finite() {
+                if gpu_end_time > gpu_start_time
+                    && gpu_start_time.is_finite()
+                    && gpu_end_time.is_finite()
+                {
                     let gpu_elapsed_ns = ((gpu_end_time - gpu_start_time) * 1e9).max(0.0) as u64;
                     self.counters.gpu_elapsed_ns =
                         self.counters.gpu_elapsed_ns.saturating_add(gpu_elapsed_ns);
@@ -1478,10 +1478,9 @@ mod imp {
                 return Ok(());
             }
             self.end_active_compute_encoder();
-            let command_buffer = self
-                .active_command_buffer
-                .take()
-                .ok_or_else(|| "Metal command batch disappeared during encoder rollover".to_string())?;
+            let command_buffer = self.active_command_buffer.take().ok_or_else(|| {
+                "Metal command batch disappeared during encoder rollover".to_string()
+            })?;
             self.commit_command_buffer(command_buffer);
             self.active_command_buffer = Some(self.new_command_buffer()?);
             self.active_command_buffer_ops = 0;
@@ -1524,7 +1523,8 @@ mod imp {
         fn memory_barrier_buffers(&mut self) -> MetalResult<()> {
             if self.active_command_buffer.is_some() {
                 if self.active_batch_uses_tracked_io {
-                    if self.tracked_next_outputs.is_empty() && self.tracked_prev_outputs.is_empty() {
+                    if self.tracked_next_outputs.is_empty() && self.tracked_prev_outputs.is_empty()
+                    {
                         return Ok(());
                     }
                     self.active_encoder_uses_tracked_io = true;

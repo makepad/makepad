@@ -19,7 +19,10 @@ fn usage() -> ! {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow_path = env::args().nth(1).unwrap_or_else(|| usage());
     let root = env::args().nth(2).unwrap_or_else(|| usage());
-    let ggml_debug_dir = env::args().nth(3).map(PathBuf::from).unwrap_or_else(|| usage());
+    let ggml_debug_dir = env::args()
+        .nth(3)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| usage());
     let layer = env::args()
         .nth(4)
         .map(|value| value.parse::<usize>())
@@ -286,7 +289,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compare_head_dims,
     )?;
 
-    let attn_proj_full = read_f32_file(&ggml_debug_dir.join(format!("{block_prefix}_attn_proj.bin")))?;
+    let attn_proj_full =
+        read_f32_file(&ggml_debug_dir.join(format!("{block_prefix}_attn_proj.bin")))?;
     let hidden_after_attn = add_tensors(&block_input, &attn_proj_full)?;
     let norm2_weight = vector_tensor(&weights, &format!("{ff_prefix}.layer_norm.weight"))?;
     let norm2 = rms_norm_all_tokens(
@@ -344,8 +348,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compare_head_dims,
     )?;
 
-    let wi0_linear_full = read_f32_file(&ggml_debug_dir.join(format!("{block_prefix}_wi0_linear.bin")))?;
-    let wi0_gelu = gelu_first_dims_all_tokens(&wi0_linear_full, usize::try_from(weights.config.feedforward_dim)?, token_count, compare_head_dims);
+    let wi0_linear_full =
+        read_f32_file(&ggml_debug_dir.join(format!("{block_prefix}_wi0_linear.bin")))?;
+    let wi0_gelu = gelu_first_dims_all_tokens(
+        &wi0_linear_full,
+        usize::try_from(weights.config.feedforward_dim)?,
+        token_count,
+        compare_head_dims,
+    );
     compare_stage_2d(
         &ggml_debug_dir.join(format!("{block_prefix}_wi0_gelu.bin")),
         &format!("{block_prefix}_wi0_gelu"),
@@ -356,7 +366,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compare_head_dims,
     )?;
 
-    let wi1_linear_full = read_f32_file(&ggml_debug_dir.join(format!("{block_prefix}_wi1_linear.bin")))?;
+    let wi1_linear_full =
+        read_f32_file(&ggml_debug_dir.join(format!("{block_prefix}_wi1_linear.bin")))?;
     let gated = mul_first_dims_all_tokens(
         &read_f32_file(&ggml_debug_dir.join(format!("{block_prefix}_wi0_gelu.bin")))?,
         &wi1_linear_full,
@@ -402,26 +413,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "compared T5 block {} slices: token_count={} hidden_size={} heads={} head_dim={} head={}",
-        layer,
-        token_count,
-        hidden_size,
-        head_count,
-        head_dim,
-        HEAD_INDEX
+        layer, token_count, hidden_size, head_count, head_dim, HEAD_INDEX
     );
 
     Ok(())
 }
 
-fn embedding_all_tokens(weights: &LoadedT5xxlWeights, token_ids: &[i32]) -> Result<Vec<f32>, String> {
+fn embedding_all_tokens(
+    weights: &LoadedT5xxlWeights,
+    token_ids: &[i32],
+) -> Result<Vec<f32>, String> {
     let tensor = named_tensor(weights, "shared.weight")?;
-    let width = usize::try_from(tensor.ne[0]).map_err(|_| "shared.weight width exceeds usize".to_string())?;
-    let rows = usize::try_from(tensor.ne[1]).map_err(|_| "shared.weight rows exceeds usize".to_string())?;
+    let width = usize::try_from(tensor.ne[0])
+        .map_err(|_| "shared.weight width exceeds usize".to_string())?;
+    let rows = usize::try_from(tensor.ne[1])
+        .map_err(|_| "shared.weight rows exceeds usize".to_string())?;
     let mut out = vec![0.0f32; width * token_ids.len()];
     for (token_index, &token_id) in token_ids.iter().enumerate() {
-        let row = usize::try_from(token_id).map_err(|_| format!("negative token id {}", token_id))?;
+        let row =
+            usize::try_from(token_id).map_err(|_| format!("negative token id {}", token_id))?;
         if row >= rows {
-            return Err(format!("token id {} exceeds shared.weight rows {}", row, rows));
+            return Err(format!(
+                "token id {} exceeds shared.weight rows {}",
+                row, rows
+            ));
         }
         for dim in 0..width {
             out[dim + token_index * width] = tensor_value_2d(weights, "shared.weight", dim, row)?;
@@ -460,8 +475,10 @@ fn linear_selected_outputs(
     token_limit: Option<usize>,
 ) -> Result<Vec<f32>, String> {
     let tensor = named_tensor(weights, weight_name)?;
-    let in_features = usize::try_from(tensor.ne[0]).map_err(|_| format!("{weight_name} in_features exceeds usize"))?;
-    let out_features = usize::try_from(tensor.ne[1]).map_err(|_| format!("{weight_name} out_features exceeds usize"))?;
+    let in_features = usize::try_from(tensor.ne[0])
+        .map_err(|_| format!("{weight_name} in_features exceeds usize"))?;
+    let out_features = usize::try_from(tensor.ne[1])
+        .map_err(|_| format!("{weight_name} out_features exceeds usize"))?;
     if in_features != input_size {
         return Err(format!(
             "{weight_name} input size mismatch: weight={} input={}",
@@ -643,8 +660,7 @@ fn compare_stage_scores(
     mean_abs /= preview_len as f32;
     println!(
         "{name}: max_abs={max_abs:.8} mean_abs={mean_abs:.8}\n  ggml={:?}\n  cpu ={:#?}",
-        ggml_preview,
-        cpu_preview
+        ggml_preview, cpu_preview
     );
     Ok(())
 }
@@ -727,7 +743,8 @@ fn tensor_value_2d(
         .tensor(tensor_id)
         .ok_or_else(|| format!("invalid tensor '{name}' id {}", tensor_id))?;
     let width = usize::try_from(tensor.ne[0]).map_err(|_| format!("{name} width exceeds usize"))?;
-    let height = usize::try_from(tensor.ne[1]).map_err(|_| format!("{name} height exceeds usize"))?;
+    let height =
+        usize::try_from(tensor.ne[1]).map_err(|_| format!("{name} height exceeds usize"))?;
     if x >= width || y >= height {
         return Err(format!(
             "{name} index ({x}, {y}) exceeds ({width}, {height})"
@@ -775,7 +792,8 @@ fn tensor_value_from_bytes(bytes: &[u8], ty: TensorType, index: usize) -> Result
 }
 
 fn read_f32_file(path: &Path) -> Result<Vec<f32>, String> {
-    let bytes = fs::read(path).map_err(|err| format!("failed to read {}: {}", path.display(), err))?;
+    let bytes =
+        fs::read(path).map_err(|err| format!("failed to read {}: {}", path.display(), err))?;
     if bytes.len() % 4 != 0 {
         return Err(format!(
             "file {} length {} is not divisible by 4",
@@ -790,10 +808,7 @@ fn read_f32_file(path: &Path) -> Result<Vec<f32>, String> {
 }
 
 fn softmax(values: &[f32]) -> Vec<f32> {
-    let max = values
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut out = Vec::with_capacity(values.len());
     let mut sum = 0.0f32;
     for &value in values {
@@ -819,7 +834,8 @@ fn relative_position_bucket(
         .and_then(|key| i64::try_from(query_position).map(|query| key - query))
         .map_err(|_| "relative position exceeds i64".to_string())?;
     let positive_bucket_base = if relative_position > 0 {
-        usize::try_from(half_bucket_count).map_err(|_| "positive bucket base exceeds usize".to_string())?
+        usize::try_from(half_bucket_count)
+            .map_err(|_| "positive bucket base exceeds usize".to_string())?
     } else {
         0
     };
@@ -833,8 +849,7 @@ fn relative_position_bucket(
         let half_bucket_count_f = half_bucket_count as f32;
         let max_distance_f = max_distance as f32;
         let scaled = max_exact_f
-            + (relative_position / max_exact_f).ln()
-                / (max_distance_f / max_exact_f).ln()
+            + (relative_position / max_exact_f).ln() / (max_distance_f / max_exact_f).ln()
                 * (half_bucket_count_f - max_exact_f);
         scaled.floor().min((half_bucket_count - 1) as f32) as i32
     };

@@ -499,11 +499,8 @@ impl Context {
             .tensor(a)
             .ok_or_else(|| format!("invalid tensor id {}", a))?;
         let layout = TensorLayout::for_ggml(src.desc.ty, src.desc.layout.extents())?;
-        let id = self.new_op_tensor(
-            TensorDesc::new(src.desc.ty, layout, usage),
-            Op::Unary,
-            &[a],
-        )?;
+        let id =
+            self.new_op_tensor(TensorDesc::new(src.desc.ty, layout, usage), Op::Unary, &[a])?;
         self.tensor_mut(id).unwrap().set_unary_op(unary);
         Ok(id)
     }
@@ -591,7 +588,11 @@ impl Context {
         };
         let layout = TensorLayout::for_ggml(src0.desc.ty, &ne)?;
         let id = if let Some(b) = b {
-            self.new_op_tensor(TensorDesc::new(src0.desc.ty, layout, usage), Op::Glu, &[a, b])?
+            self.new_op_tensor(
+                TensorDesc::new(src0.desc.ty, layout, usage),
+                Op::Glu,
+                &[a, b],
+            )?
         } else {
             self.new_op_tensor(TensorDesc::new(src0.desc.ty, layout, usage), Op::Glu, &[a])?
         };
@@ -624,11 +625,7 @@ impl Context {
             .tensor(a)
             .ok_or_else(|| format!("invalid tensor id {}", a))?;
         let layout = TensorLayout::for_ggml(src.desc.ty, src.desc.layout.extents())?;
-        self.new_op_tensor(
-            TensorDesc::new(src.desc.ty, layout, usage),
-            op,
-            &[a, b],
-        )
+        self.new_op_tensor(TensorDesc::new(src.desc.ty, layout, usage), op, &[a, b])
     }
 
     pub fn mul_mat(
@@ -1412,7 +1409,11 @@ impl Context {
             .tensor(src)
             .ok_or_else(|| format!("invalid tensor id {}", src))?;
         let id = self.new_view_op_tensor(
-            TensorDesc::new(tensor.desc.ty, tensor.desc.layout.clone(), tensor.desc.usage),
+            TensorDesc::new(
+                tensor.desc.ty,
+                tensor.desc.layout.clone(),
+                tensor.desc.usage,
+            ),
             Op::Norm,
             src,
             0,
@@ -1453,7 +1454,11 @@ impl Context {
             .tensor(src)
             .ok_or_else(|| format!("invalid tensor id {}", src))?;
         let id = self.new_view_op_tensor(
-            TensorDesc::new(tensor.desc.ty, tensor.desc.layout.clone(), tensor.desc.usage),
+            TensorDesc::new(
+                tensor.desc.ty,
+                tensor.desc.layout.clone(),
+                tensor.desc.usage,
+            ),
             Op::GroupNorm,
             src,
             0,
@@ -1700,7 +1705,11 @@ impl Context {
             if is_2d { b_tensor.ne[3] } else { 1 },
         ];
         let layout = TensorLayout::for_ggml(dst_type, &ne)?;
-        let id = self.new_op_tensor(TensorDesc::new(dst_type, layout, usage), Op::Im2col, &[a, b])?;
+        let id = self.new_op_tensor(
+            TensorDesc::new(dst_type, layout, usage),
+            Op::Im2col,
+            &[a, b],
+        )?;
         let tensor = self.tensor_mut(id).unwrap();
         tensor.set_op_param_i32(0, s0);
         tensor.set_op_param_i32(1, s1);
@@ -1745,7 +1754,8 @@ impl Context {
                 ow, oh
             ));
         }
-        let layout = TensorLayout::for_ggml(TensorType::F32, &[ow, oh, a_tensor.ne[3], b_tensor.ne[3]])?;
+        let layout =
+            TensorLayout::for_ggml(TensorType::F32, &[ow, oh, a_tensor.ne[3], b_tensor.ne[3]])?;
         let id = self.new_op_tensor(
             TensorDesc::new(TensorType::F32, layout, usage),
             Op::Conv2d,
@@ -1782,7 +1792,8 @@ impl Context {
         }
         let ow = calc_conv_transpose_output_size(b_tensor.ne[0], a_tensor.ne[0], stride, 0)?;
         let oh = calc_conv_transpose_output_size(b_tensor.ne[1], a_tensor.ne[1], stride, 0)?;
-        let layout = TensorLayout::for_ggml(TensorType::F32, &[ow, oh, a_tensor.ne[2], b_tensor.ne[3]])?;
+        let layout =
+            TensorLayout::for_ggml(TensorType::F32, &[ow, oh, a_tensor.ne[2], b_tensor.ne[3]])?;
         let id = self.new_op_tensor(
             TensorDesc::new(TensorType::F32, layout, usage),
             Op::ConvTranspose2d,
@@ -2002,7 +2013,10 @@ impl Context {
         tensor.set_op_param_i32(0, i32::try_from(nb1).map_err(|_| "set nb1 exceeds i32")?);
         tensor.set_op_param_i32(1, i32::try_from(nb2).map_err(|_| "set nb2 exceeds i32")?);
         tensor.set_op_param_i32(2, i32::try_from(nb3).map_err(|_| "set nb3 exceeds i32")?);
-        tensor.set_op_param_i32(3, i32::try_from(offset).map_err(|_| "set offset exceeds i32")?);
+        tensor.set_op_param_i32(
+            3,
+            i32::try_from(offset).map_err(|_| "set offset exceeds i32")?,
+        );
         tensor.set_op_param_i32(4, if inplace { 1 } else { 0 });
         Ok(id)
     }
@@ -2047,7 +2061,9 @@ impl Context {
         if sx_tensor.desc.layout.rank() != 3
             && !(sx_tensor.desc.layout.rank() == 4 && sx_tensor.ne[3] == 1)
         {
-            return Err("ssm_conv requires a 3D source tensor or padded 4D source tensor".to_string());
+            return Err(
+                "ssm_conv requires a 3D source tensor or padded 4D source tensor".to_string(),
+            );
         }
         if c_tensor.desc.layout.rank() != 2 {
             return Err("ssm_conv requires a 2D kernel tensor".to_string());
@@ -2204,7 +2220,11 @@ impl Context {
         } else {
             TensorLayout::for_ggml(src_tensor.desc.ty, src_tensor.desc.layout.extents())?
         };
-        let desc = TensorDesc::new(src_tensor.desc.ty, layout, usage.unwrap_or(src_tensor.desc.usage));
+        let desc = TensorDesc::new(
+            src_tensor.desc.ty,
+            layout,
+            usage.unwrap_or(src_tensor.desc.usage),
+        );
         let mut srcs = Vec::with_capacity(3);
         srcs.push(src);
         srcs.push(positions);
@@ -2601,17 +2621,7 @@ mod tests {
             )
             .unwrap();
         let conv = ctx
-            .conv_2d(
-                kernel,
-                input,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                BufferUsage::Activations,
-            )
+            .conv_2d(kernel, input, 1, 1, 1, 1, 1, 1, BufferUsage::Activations)
             .unwrap();
 
         let im2col_tensor = ctx.tensor(im2col).unwrap();

@@ -5,11 +5,10 @@ use makepad_diffusion::flux::{
 };
 use makepad_diffusion::flux_schedule::euler_step;
 use makepad_diffusion::flux_text::{
-    FluxCompiledTextEncodersMetal, FluxConditioning, FluxLoadedTextEncoders,
-    FluxTokenizedPrompts,
+    FluxCompiledTextEncoders, FluxConditioning, FluxLoadedTextEncoders, FluxTokenizedPrompts,
 };
 use makepad_diffusion::flux_transformer::{
-    CompiledFluxTransformerMetal, FluxTransformerStageOutput, LoadedFluxTransformerWeights,
+    CompiledFluxTransformer, FluxTransformerStageOutput, LoadedFluxTransformerWeights,
 };
 use makepad_ggml::{bf16_to_f32, f16_to_f32};
 use makepad_mlx::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
@@ -32,8 +31,14 @@ fn usage() -> ! {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow_path = env::args().nth(1).unwrap_or_else(|| usage());
     let root = env::args().nth(2).unwrap_or_else(|| usage());
-    let width = env::args().nth(3).map(|value| value.parse::<u32>()).transpose()?;
-    let height = env::args().nth(4).map(|value| value.parse::<u32>()).transpose()?;
+    let width = env::args()
+        .nth(3)
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
+    let height = env::args()
+        .nth(4)
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
 
     let workflow = FluxWorkflow::from_file(&workflow_path)?;
     let roots = ComfyModelRoots::new(root);
@@ -48,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let prompts = FluxTokenizedPrompts::from_prompts(&plan.prompts)?;
         let mut text_weights = FluxLoadedTextEncoders::load_from_plan(&plan)?;
-        let text = FluxCompiledTextEncodersMetal::compile(&mut text_weights, &prompts)?;
+        let text = FluxCompiledTextEncoders::compile(&mut text_weights, &prompts)?;
         text.execute(&text_weights, &prompts)?
     };
 
@@ -68,8 +73,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(reference_step.output_nchw),
         )
     } else {
-        let latents =
-            seeded_latents(latent_shape.latent_width, latent_shape.latent_height, plan.generation.seed);
+        let latents = seeded_latents(
+            latent_shape.latent_width,
+            latent_shape.latent_height,
+            plan.generation.seed,
+        );
         (
             pack_flux_latents_nchw(
                 &latents,
@@ -82,12 +90,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    let transformer_path = plan
-        .bundle
-        .diffusion_model_path
-        .as_path();
+    let transformer_path = plan.bundle.diffusion_model_path.as_path();
     let mut transformer = LoadedFluxTransformerWeights::load(transformer_path)?;
-    let compiled = CompiledFluxTransformerMetal::compile(&mut transformer, &conditioning, latent_shape)?;
+    let compiled = CompiledFluxTransformer::compile(&mut transformer, &conditioning, latent_shape)?;
     let dump_stages = env::var_os("FLUX_DEBUG_TRANSFORMER_STAGES").is_some();
     let run = if dump_stages {
         let debug = compiled.execute_with_debug(
@@ -137,6 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         transformer.config.depth_single_blocks,
         transformer.config.guidance_embed
     );
+    println!("transformer backend: {}", compiled.backend_name());
     println!(
         "conditioning: clip_pooled={} t5_hidden={}x{} guidance={} timestep={}",
         conditioning.clip_pooled.len(),
@@ -156,7 +162,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .prediction
         .iter()
         .fold(0.0f32, |acc, value| acc.max(value.abs()));
-    println!("prediction[0..{}]: {:?}", preview_len, &run.prediction[..preview_len]);
+    println!(
+        "prediction[0..{}]: {:?}",
+        preview_len,
+        &run.prediction[..preview_len]
+    );
     println!("prediction max_abs: {}", max_abs);
     if env::var_os("FLUX_CHECK_REUSE").is_some() {
         let rerun = compiled.execute(
@@ -208,7 +218,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let (max_abs_diff, mean_abs_diff) =
                 diff_stats(&run.prediction, &reference_packed_output)?;
-            let preview_len = run.prediction.len().min(reference_packed_output.len()).min(8);
+            let preview_len = run
+                .prediction
+                .len()
+                .min(reference_packed_output.len())
+                .min(8);
             println!(
                 "reference.final.output[0..{}]: {:?}",
                 preview_len,
@@ -261,7 +275,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             let (max_abs_diff, mean_abs_diff) =
                 diff_stats(&stepped_nchw, &reference_post_step_nchw)?;
-            let preview_len = stepped_nchw.len().min(reference_post_step_nchw.len()).min(8);
+            let preview_len = stepped_nchw
+                .len()
+                .min(reference_post_step_nchw.len())
+                .min(8);
             println!(
                 "reference.post_step[0..{}]: {:?}",
                 preview_len,
@@ -301,7 +318,8 @@ fn print_stage_summaries(
             &stage.values[..preview_len]
         );
         if let Some(reference_stage_dir) = reference_stage_dir {
-            if let Some(reference_values) = load_reference_stage(reference_stage_dir, &stage.name)? {
+            if let Some(reference_values) = load_reference_stage(reference_stage_dir, &stage.name)?
+            {
                 let (max_abs_diff, mean_abs_diff) = diff_stats(&stage.values, &reference_values)?;
                 let ref_preview_len = reference_values.len().min(4);
                 println!(
@@ -336,12 +354,7 @@ fn summarize(values: &[f32]) -> (f32, f32, f32) {
 
 fn diff_stats(lhs: &[f32], rhs: &[f32]) -> Result<(f32, f32), Box<dyn std::error::Error>> {
     if lhs.len() != rhs.len() {
-        return Err(format!(
-            "diff length mismatch: {} vs {}",
-            lhs.len(),
-            rhs.len()
-        )
-        .into());
+        return Err(format!("diff length mismatch: {} vs {}", lhs.len(), rhs.len()).into());
     }
     let mut max_abs = 0.0f32;
     let mut sum_abs = 0.0f64;
@@ -410,7 +423,8 @@ fn load_reference_step_conditioning(
     };
     let clip_pooled = load_exact_reference_source(dir, "flux_input_pooled")?
         .ok_or("reference step conditioning is missing flux_input_pooled.bin")?;
-    let meta_text = fs::read_to_string(Path::new(dir).join("flux_step_meta.txt")).unwrap_or_default();
+    let meta_text =
+        fs::read_to_string(Path::new(dir).join("flux_step_meta.txt")).unwrap_or_default();
     let hidden_size = parse_meta_usize(&meta_text, "context_hidden_size").unwrap_or(4096);
     let token_count = parse_meta_usize(&meta_text, "context_token_count")
         .unwrap_or_else(|| t5_hidden_states.len() / hidden_size.max(1));
@@ -449,15 +463,16 @@ fn load_reference_step(
     };
     let dir_path = Path::new(&dir);
     let meta_text = fs::read_to_string(dir_path.join("flux_step_meta.txt"))?;
-    let input_width = parse_meta_usize(&meta_text, "input_width").unwrap_or(latent_shape.latent_width as usize);
+    let input_width =
+        parse_meta_usize(&meta_text, "input_width").unwrap_or(latent_shape.latent_width as usize);
     let input_height =
         parse_meta_usize(&meta_text, "input_height").unwrap_or(latent_shape.latent_height as usize);
     let input_channels = parse_meta_usize(&meta_text, "input_channels").unwrap_or(16);
     let input_batch = parse_meta_usize(&meta_text, "input_batch").unwrap_or(1);
     let output_width =
         parse_meta_usize(&meta_text, "output_width").unwrap_or(latent_shape.latent_width as usize);
-    let output_height =
-        parse_meta_usize(&meta_text, "output_height").unwrap_or(latent_shape.latent_height as usize);
+    let output_height = parse_meta_usize(&meta_text, "output_height")
+        .unwrap_or(latent_shape.latent_height as usize);
     let output_channels = parse_meta_usize(&meta_text, "output_channels").unwrap_or(16);
     let output_batch = parse_meta_usize(&meta_text, "output_batch").unwrap_or(1);
     let sigma = parse_meta_f32(&meta_text, "sigma").unwrap_or(1.0);
@@ -568,18 +583,17 @@ fn compare_reference_source(
     fallback_stage_name: Option<&str>,
     actual: &[f32],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let reference_values = if let Some(reference_values) =
-        load_exact_reference_source(dir, exact_name)?
-    {
-        reference_values
-    } else if let Some(stage_name) = fallback_stage_name {
-        let Some(reference_values) = load_reference_stage(dir, stage_name)? else {
+    let reference_values =
+        if let Some(reference_values) = load_exact_reference_source(dir, exact_name)? {
+            reference_values
+        } else if let Some(stage_name) = fallback_stage_name {
+            let Some(reference_values) = load_reference_stage(dir, stage_name)? else {
+                return Ok(());
+            };
+            reference_values
+        } else {
             return Ok(());
         };
-        reference_values
-    } else {
-        return Ok(());
-    };
     let (max_abs_diff, mean_abs_diff) = diff_stats(actual, &reference_values)?;
     let preview_len = actual.len().min(reference_values.len()).min(4);
     println!(
@@ -662,7 +676,8 @@ fn compare_direct_debug_stages(
     stages: &[FluxTransformerStageOutput],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let header = MlxSafetensorsHeader::load(transformer_path)?;
-    let input_hidden = cpu_linear_projection(&header, "img_in.weight", "img_in.bias", packed_latents)?;
+    let input_hidden =
+        cpu_linear_projection(&header, "img_in.weight", "img_in.bias", packed_latents)?;
     compare_direct_stage(
         "direct.input.hidden",
         input_hidden.clone(),
@@ -740,7 +755,8 @@ fn compare_direct_double_block0(
     let txt_shift_mlp = cpu_chunk(&txt_mod, hidden_size, 6, 3)?;
     let txt_scale_mlp = cpu_chunk(&txt_mod, hidden_size, 6, 4)?;
 
-    let norm_hidden = cpu_modulated_layer_norm(hidden, hidden_size, &img_scale_msa, &img_shift_msa)?;
+    let norm_hidden =
+        cpu_modulated_layer_norm(hidden, hidden_size, &img_scale_msa, &img_shift_msa)?;
     let norm_encoder_hidden =
         cpu_modulated_layer_norm(encoder_hidden, hidden_size, &txt_scale_msa, &txt_shift_msa)?;
     compare_direct_stage(
@@ -1235,11 +1251,14 @@ fn load_canonical_parts<'a>(
                     suffix_index: 0,
                 })
             } else if let Some(suffix) = canonical.strip_prefix(&format!("{base_name}.")) {
-                suffix.parse::<usize>().ok().map(|suffix_index| CanonicalTensorPart {
-                    original_name: name.as_str(),
-                    entry,
-                    suffix_index,
-                })
+                suffix
+                    .parse::<usize>()
+                    .ok()
+                    .map(|suffix_index| CanonicalTensorPart {
+                        original_name: name.as_str(),
+                        entry,
+                        suffix_index,
+                    })
             } else {
                 None
             }

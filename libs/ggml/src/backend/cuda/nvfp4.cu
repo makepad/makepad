@@ -1,5 +1,9 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#if CUDART_VERSION >= 11080
+#include <cuda_fp8.h>
+#define MAKEPAD_GGML_CUDA_FP8_AVAILABLE
+#endif
 #include <stdint.h>
 
 static constexpr uint32_t QK8_1 = 32;
@@ -28,6 +32,11 @@ __device__ __forceinline__ float makepad_ggml_cuda_f16_to_f32(uint16_t word) {
 }
 
 static __device__ __forceinline__ float makepad_ggml_cuda_ue4m3_to_fp32(uint8_t x) {
+#if defined(MAKEPAD_GGML_CUDA_FP8_AVAILABLE)
+    const uint32_t bits = x * (x != 0x7F && x != 0xFF);
+    const __nv_fp8_e4m3 xf = *reinterpret_cast<const __nv_fp8_e4m3 *>(&bits);
+    return static_cast<float>(xf) * 0.5f;
+#else
     if (x == 0 || x == 0x7F || x == 0xFF) {
         return 0.0f;
     }
@@ -35,6 +44,7 @@ static __device__ __forceinline__ float makepad_ggml_cuda_ue4m3_to_fp32(uint8_t 
     const int man = x & 0x7;
     const float raw = exp == 0 ? ldexpf((float) man, -9) : ldexpf(1.0f + (float) man / 8.0f, exp - 7);
     return raw * 0.5f;
+#endif
 }
 
 __device__ __constant__ int8_t KVALUES_MXFP4_X2[16] = {
@@ -94,6 +104,11 @@ static __device__ __forceinline__ float makepad_ggml_cuda_warp_reduce_max(float 
 }
 
 static __device__ __forceinline__ float makepad_ggml_cuda_e4m3fn_to_fp32(uint8_t x) {
+#if defined(MAKEPAD_GGML_CUDA_FP8_AVAILABLE)
+    const uint32_t bits = x * (x != 0x7F && x != 0xFF);
+    const __nv_fp8_e4m3 xf = *reinterpret_cast<const __nv_fp8_e4m3 *>(&bits);
+    return static_cast<float>(xf);
+#else
     if (x == 0 || x == 0x7F || x == 0xFF) {
         return 0.0f;
     }
@@ -103,9 +118,13 @@ static __device__ __forceinline__ float makepad_ggml_cuda_e4m3fn_to_fp32(uint8_t
         return ldexpf(static_cast<float>(man), -9);
     }
     return ldexpf(1.0f + static_cast<float>(man) / 8.0f, exp - 7);
+#endif
 }
 
 static __device__ __forceinline__ uint8_t makepad_ggml_cuda_fp32_to_e4m3fn(float x) {
+#if CUDART_VERSION >= 12080
+    return __nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3);
+#else
     if (!(x > 0.0f)) {
         return 0;
     }
@@ -122,6 +141,7 @@ static __device__ __forceinline__ uint8_t makepad_ggml_cuda_fp32_to_e4m3fn(float
         }
     }
     return best;
+#endif
 }
 
 static __device__ __forceinline__ uint8_t makepad_ggml_cuda_float_to_fp4_e2m1(float x, float e) {
@@ -633,17 +653,30 @@ extern "C" cudaError_t makepad_ggml_cuda_nvfp4_nvfp4_matvec(
     if (nvfp4_blocks == 0) {
         return cudaErrorInvalidValue;
     }
-    constexpr uint32_t rows_per_block = 1;
-    const dim3 grid((out_rows + rows_per_block - 1) / rows_per_block, 1, 1);
     const dim3 block(32, 4, 1);
-    makepad_ggml_cuda_nvfp4_nvfp4_matvec_kernel<rows_per_block><<<grid, block, 0, stream>>>(
-        reinterpret_cast<const block_nvfp4 *>(input_nvfp4_bytes),
-        reinterpret_cast<const block_nvfp4 *>(packed_weights_nvfp4_bytes),
-        input_scale,
-        output_f32,
-        nvfp4_blocks,
-        out_rows
-    );
+    if (out_rows >= 32768) {
+        constexpr uint32_t rows_per_block = 4;
+        const dim3 grid((out_rows + rows_per_block - 1) / rows_per_block, 1, 1);
+        makepad_ggml_cuda_nvfp4_nvfp4_matvec_kernel<rows_per_block><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const block_nvfp4 *>(input_nvfp4_bytes),
+            reinterpret_cast<const block_nvfp4 *>(packed_weights_nvfp4_bytes),
+            input_scale,
+            output_f32,
+            nvfp4_blocks,
+            out_rows
+        );
+    } else {
+        constexpr uint32_t rows_per_block = 1;
+        const dim3 grid((out_rows + rows_per_block - 1) / rows_per_block, 1, 1);
+        makepad_ggml_cuda_nvfp4_nvfp4_matvec_kernel<rows_per_block><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const block_nvfp4 *>(input_nvfp4_bytes),
+            reinterpret_cast<const block_nvfp4 *>(packed_weights_nvfp4_bytes),
+            input_scale,
+            output_f32,
+            nvfp4_blocks,
+            out_rows
+        );
+    }
     return cudaGetLastError();
 }
 

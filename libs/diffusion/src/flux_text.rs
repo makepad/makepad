@@ -1,15 +1,14 @@
+use crate::backend::Runtime;
 use crate::clip::ClipTokenChunk;
-use crate::clip_l::{CompiledClipLMetal, LoadedClipLWeights};
+use crate::clip_l::{ClipLExecutionMode, CompiledClipL, LoadedClipLWeights};
 use crate::comfy::FluxPrompts;
 use crate::flux::{
-    tokenize_flux_clip_l_prompt, tokenize_flux_t5xxl_prompt, FluxPromptToImagePlan, FluxResolvedBundle,
+    tokenize_flux_clip_l_prompt, tokenize_flux_t5xxl_prompt, FluxPromptToImagePlan,
+    FluxResolvedBundle,
 };
 use crate::t5::T5TokenizedPrompt;
-use crate::t5_encoder::{
-    CompiledT5xxlMetal, LazyT5xxlMetal, LoadedT5xxlWeights, T5xxlExecutionMode,
-};
+use crate::t5_encoder::{CompiledT5xxl, LazyT5xxl, LoadedT5xxlWeights, T5xxlExecutionMode};
 use crate::{DiffusionError, Result};
-use makepad_ggml::backend::metal::MetalRuntime;
 
 #[derive(Clone, Debug)]
 pub struct FluxTokenizedPrompts {
@@ -34,15 +33,17 @@ pub struct FluxLoadedTextEncoders {
     pub t5xxl: LoadedT5xxlWeights,
 }
 
-pub struct FluxCompiledTextEncodersMetal {
-    clip_l: CompiledClipLMetal,
-    t5xxl: FluxCompiledT5xxlMetal,
+pub struct FluxCompiledTextEncoders {
+    clip_l: CompiledClipL,
+    t5xxl: FluxCompiledT5xxl,
 }
 
-enum FluxCompiledT5xxlMetal {
-    Lazy(LazyT5xxlMetal),
-    Compiled(CompiledT5xxlMetal),
+enum FluxCompiledT5xxl {
+    Lazy(LazyT5xxl),
+    Compiled(CompiledT5xxl),
 }
+
+pub type FluxCompiledTextEncodersMetal = FluxCompiledTextEncoders;
 
 impl FluxTokenizedPrompts {
     pub fn from_prompts(prompts: &FluxPrompts) -> Result<Self> {
@@ -83,42 +84,70 @@ impl FluxLoadedTextEncoders {
     }
 }
 
-impl FluxCompiledTextEncodersMetal {
+impl FluxCompiledTextEncoders {
     pub fn compile(
         weights: &mut FluxLoadedTextEncoders,
         prompts: &FluxTokenizedPrompts,
     ) -> Result<Self> {
-        let runtime = MetalRuntime::new().map_err(DiffusionError::model)?;
-        Self::compile_with_runtime(runtime, weights, prompts)
+        let clip_mode = ClipLExecutionMode::from_env();
+        let t5_mode = T5xxlExecutionMode::from_env();
+        let runtime = if matches!(clip_mode, ClipLExecutionMode::Compiled)
+            || matches!(t5_mode, T5xxlExecutionMode::Compiled)
+        {
+            Some(crate::backend::new_runtime()?)
+        } else {
+            None
+        };
+        Self::compile_with_optional_runtime(runtime, weights, prompts)
     }
 
     pub fn compile_with_runtime(
-        runtime: MetalRuntime,
+        runtime: Runtime,
         weights: &mut FluxLoadedTextEncoders,
         prompts: &FluxTokenizedPrompts,
     ) -> Result<Self> {
-        let t5xxl = match T5xxlExecutionMode::from_env() {
-            T5xxlExecutionMode::Lazy => FluxCompiledT5xxlMetal::Lazy(
-                LazyT5xxlMetal::compile_with_runtime(runtime.clone(), &mut weights.t5xxl, &prompts.t5xxl)?,
-            ),
-            T5xxlExecutionMode::Compiled => FluxCompiledT5xxlMetal::Compiled(
-                CompiledT5xxlMetal::compile_with_runtime(runtime.clone(), &mut weights.t5xxl, &prompts.t5xxl)?,
-            ),
+        Self::compile_with_optional_runtime(Some(runtime), weights, prompts)
+    }
+
+    fn compile_with_optional_runtime(
+        runtime: Option<Runtime>,
+        weights: &mut FluxLoadedTextEncoders,
+        prompts: &FluxTokenizedPrompts,
+    ) -> Result<Self> {
+        let clip_mode = ClipLExecutionMode::from_env();
+        let t5_mode = T5xxlExecutionMode::from_env();
+        let clip_l = CompiledClipL::compile_for_mode(
+            clip_mode,
+            runtime.clone(),
+            &mut weights.clip_l,
+            &prompts.clip_l,
+        )?;
+        let t5xxl = match t5_mode {
+            T5xxlExecutionMode::Lazy => {
+                FluxCompiledT5xxl::Lazy(LazyT5xxl::compile(&mut weights.t5xxl, &prompts.t5xxl)?)
+            }
+            T5xxlExecutionMode::Compiled => {
+                let runtime = runtime.ok_or_else(|| {
+                    DiffusionError::model("t5xxl compiled mode requires a backend runtime")
+                })?;
+                FluxCompiledT5xxl::Compiled(CompiledT5xxl::compile_with_runtime(
+                    runtime,
+                    &mut weights.t5xxl,
+                    &prompts.t5xxl,
+                )?)
+            }
         };
-        Ok(Self {
-            clip_l: CompiledClipLMetal::compile_with_runtime(
-                runtime.clone(),
-                &mut weights.clip_l,
-                &prompts.clip_l,
-            )?,
-            t5xxl,
-        })
+        Ok(Self { clip_l, t5xxl })
+    }
+
+    pub fn clip_backend_name(&self) -> &'static str {
+        self.clip_l.backend_name()
     }
 
     pub fn t5_backend_name(&self) -> &'static str {
         match &self.t5xxl {
-            FluxCompiledT5xxlMetal::Lazy(_) => T5xxlExecutionMode::Lazy.as_str(),
-            FluxCompiledT5xxlMetal::Compiled(_) => T5xxlExecutionMode::Compiled.as_str(),
+            FluxCompiledT5xxl::Lazy(_) => T5xxlExecutionMode::Lazy.as_str(),
+            FluxCompiledT5xxl::Compiled(_) => T5xxlExecutionMode::Compiled.as_str(),
         }
     }
 
@@ -131,10 +160,10 @@ impl FluxCompiledTextEncodersMetal {
             .clip_l
             .execute(&weights.clip_l, &prompts.clip_l.token_ids)?;
         let t5 = match &self.t5xxl {
-            FluxCompiledT5xxlMetal::Lazy(t5xxl) => {
+            FluxCompiledT5xxl::Lazy(t5xxl) => {
                 t5xxl.execute(&weights.t5xxl, &prompts.t5xxl.token_ids)?
             }
-            FluxCompiledT5xxlMetal::Compiled(t5xxl) => {
+            FluxCompiledT5xxl::Compiled(t5xxl) => {
                 t5xxl.execute(&weights.t5xxl, &prompts.t5xxl.token_ids)?
             }
         };
