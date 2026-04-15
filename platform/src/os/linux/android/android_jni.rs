@@ -1309,6 +1309,27 @@ pub unsafe fn to_java_set_full_screen(env: *mut jni_sys::JNIEnv, fullscreen: boo
     );
 }
 
+pub unsafe fn to_java_set_surface_cover_visible(visible: bool) {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "setSurfaceCoverVisible",
+        "(Z)V",
+        visible as i32
+    );
+}
+
+pub unsafe fn to_java_request_surface_snapshot_refresh() {
+    let env = attach_jni_env();
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "requestSurfaceSnapshotRefresh",
+        "()V"
+    );
+}
+
 pub unsafe fn to_java_switch_activity(env: *mut jni_sys::JNIEnv) {
     ndk_utils::call_void_method!(env, get_activity(), "switchActivity", "()V");
 }
