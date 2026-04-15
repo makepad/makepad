@@ -183,50 +183,10 @@ script_mod! {
             quote_fg_color: theme.color_label_inner
             code_color: theme.color_bg_highlight
             selection_color: theme.color_selection_focus
+            table_header_bg_color: theme.color_bg_highlight
+            table_border_color: theme.color_shadow
             space_1: uniform(theme.space_1)
             space_2: uniform(theme.space_2)
-
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                match self.block_type {
-                    FlowBlockType.Quote => {
-                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
-                        sdf.fill(self.quote_bg_color)
-                        sdf.box(self.space_1 self.space_1 self.space_1 self.rect_size.y-self.space_2 1.5)
-                        sdf.fill(self.quote_fg_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.Sep => {
-                        sdf.box(0. 1. self.rect_size.x-1. self.rect_size.y-2. 2.)
-                        sdf.fill(self.sep_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.Code => {
-                        sdf.box(0. 0. self.rect_size.x self.rect_size.y 2.)
-                        sdf.fill(self.code_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.InlineCode => {
-                        sdf.box(1. 1. self.rect_size.x-2. self.rect_size.y-2. 2.)
-                        sdf.fill(self.code_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.Underline => {
-                        sdf.box(0. self.rect_size.y-2. self.rect_size.x 2.0 0.5)
-                        sdf.fill(self.line_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.Strikethrough => {
-                        sdf.box(0. self.rect_size.y * 0.45 self.rect_size.x 2.0 0.5)
-                        sdf.fill(self.line_color)
-                        return sdf.result
-                    }
-                    FlowBlockType.Selection => {
-                        return vec4(self.selection_color.rgb * self.selection_color.a, self.selection_color.a)
-                    }
-                }
-                return #f00
-            }
         }
 
         link := mod.widgets.MarkdownLink{}
@@ -575,29 +535,41 @@ impl Markdown {
                 MdEvent::TaskListMarker(_) => {
                     // TODO: Implement task list markers
                 }
-                MdEvent::Start(Tag::Table(_)) => {
-                    // TODO: Implement table support
+                MdEvent::Start(Tag::Table(alignments)) => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+                    tf.begin_table(cx, alignments.len());
                 }
                 MdEvent::End(TagEnd::Table) => {
-                    // TODO: Implement table support
+                    tf.end_table(cx);
+                    tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                 }
                 MdEvent::Start(Tag::TableHead) => {
-                    // TODO: Implement table header support
+                    tf.begin_table_header_row(cx);
                 }
                 MdEvent::End(TagEnd::TableHead) => {
-                    // TODO: Implement table header support
+                    tf.end_table_row(cx);
+                    tf.in_table_header = false;
                 }
                 MdEvent::Start(Tag::TableRow) => {
-                    // TODO: Implement table row support
+                    tf.begin_table_row(cx);
                 }
                 MdEvent::End(TagEnd::TableRow) => {
-                    // TODO: Implement table row support
+                    tf.end_table_row(cx);
                 }
                 MdEvent::Start(Tag::TableCell) => {
-                    // TODO: Implement table cell support
+                    tf.begin_table_cell(cx);
+                    if tf.in_table_header {
+                        tf.bold.push();
+                    }
                 }
                 MdEvent::End(TagEnd::TableCell) => {
-                    // TODO: Implement table cell support
+                    if tf.in_table_header {
+                        tf.bold.pop();
+                    }
+                    tf.end_table_cell(cx);
                 }
                 _ => {} // Unimplemented or unnecessary events
             }
