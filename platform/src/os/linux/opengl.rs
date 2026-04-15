@@ -2088,11 +2088,13 @@ impl CxOsDrawShader {
             vec4 depth_clip(vec4 w, vec4 c, float clip);
             vec4 sample2d(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
             vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){return textureLod(sampler, vec2(pos.x, pos.y), lod);}
-            vec4 sample2d_bgra(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
+            // GLES drivers are inconsistent about BGRA texture upload support.
+            // Upload BGRA-backed textures as RGBA on Android and swizzle them back here.
+            vec4 sample2d_bgra(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y)).bgra;}
             vec4 sample2d_rt(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, 1.0 - pos.y));}
             vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
             vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){return textureLod(sampler, dir, lod);}
-            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
+            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir).bgra;}
             ";
         #[cfg(not(target_os = "android"))]
         let sampler_helpers = "
@@ -2464,6 +2466,9 @@ impl CxTexture {
                     data,
                     ..
                 } => {
+                    #[cfg(target_os = "android")]
+                    let (internal_format, format) = (gl_sys::RGBA, gl_sys::RGBA);
+                    #[cfg(not(target_os = "android"))]
                     let (internal_format, format) = (gl_sys::BGRA, gl_sys::BGRA);
 
                     (
@@ -2484,17 +2489,24 @@ impl CxTexture {
                     data,
                     max_level: _,
                     ..
-                } => (
-                    *width,
-                    *height,
-                    gl_sys::BGRA,
-                    gl_sys::BGRA,
-                    gl_sys::UNSIGNED_BYTE,
-                    data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
-                    4,
-                    true,
-                    false,
-                ),
+                } => {
+                    #[cfg(target_os = "android")]
+                    let (internal_format, format) = (gl_sys::RGBA, gl_sys::RGBA);
+                    #[cfg(not(target_os = "android"))]
+                    let (internal_format, format) = (gl_sys::BGRA, gl_sys::BGRA);
+
+                    (
+                        *width,
+                        *height,
+                        internal_format,
+                        format,
+                        gl_sys::UNSIGNED_BYTE,
+                        data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
+                        4,
+                        true,
+                        false,
+                    )
+                }
                 TextureFormat::VecRGBAf32 {
                     width,
                     height,
