@@ -4,11 +4,22 @@ version = "1.0.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["hotreload"]
 hotreload = ["makepad-widgets/hotreload"]
+web = []
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
 
+# Lets add wasm-bindgen to our dependencies, but only for the web target
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.118"
+
 [dev-dependencies]
 makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }
+
+[profile.dev]
+opt-level = 1
+lto = "off"
+[profile.dev.package."*"]
+opt-level = 0
