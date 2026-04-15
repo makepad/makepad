@@ -218,6 +218,47 @@ This phase must still obey the same invariants:
    - CUDA sampled and greedy decode measurements are both understood
    - the next bottleneck after matvec parity is measured, not guessed
 
+## CUDA Long-Context KV Plan
+
+The Gemma4 NVFP4 text model advertises `max_position_embeddings=262144`. The CUDA exact path must not impose an arbitrary lower frontend cap. Any context restriction must come from an explicit memory/workspace policy, and the normal chat path must keep KV resident and growing/reusing on GPU.
+
+### Current State
+
+- Sliding-attention layers use a fixed 1024-token rolling KV cache.
+- Full-attention layers currently use contiguous BF16 KV allocation sized to the CUDA session capacity.
+- CUDA exact now reports the model text limit instead of a hard 32K limit.
+- Fast batched prefill workspace is capped independently from supported context. Host-side CUDA BLAS prefill uses the active sequence length as its logits/prob stride, not the full session capacity.
+- When active prefill length exceeds the current fast workspace, correctness can fall back to decode-graph ingestion. That is not the final performance path.
+
+### Required Paged/Compressed Design
+
+1. Introduce a CUDA KV cache manager that separates logical token positions from physical storage.
+2. Keep sliding layers as ring-cache pages with fixed 1024-token logical length.
+3. Store full-attention V in growable/paged BF16 storage.
+4. Store full-attention K with rotor planar compression by default for long-context CUDA:
+   - start with rotor planar3 for memory efficiency
+   - keep planar4 available only as an explicit quality/perf comparison mode
+   - do not compress K on CPU
+5. Keep decode and prefill attention kernels page-aware so they gather by logical token index without repacking or copying KV.
+6. Replace the remaining sequential long-prefill correctness path with tiled/paged prefill attention:
+   - process query chunks and key tiles
+   - maintain streaming softmax state per row
+   - never materialize `chunk_tokens * heads * total_context` logits/probs
+7. Make capacity growth incremental:
+   - allocate additional pages as chat grows
+   - do not rebuild the whole session just because the conversation crossed a power-of-two boundary
+   - preserve existing KV pages across growth
+8. Keep the frontend API unchanged. Backend selection should remain `cuda` vs `metal`; cache details must not leak into `mlx` chat/session code.
+
+### Non-Negotiable Performance/Correctness Rules
+
+- No host KV staging for CUDA long context.
+- No CPU dequantization or CPU-side NVFP4 conversion in the hot path.
+- No extra full-context buffer copies when growing capacity.
+- No full logits/probs materialization proportional to total context during prefill.
+- Decode speed must stay comparable to llama.cpp at long context, not just at short prompts.
+- Rotor K compression is allowed only as an explicit backend cache representation; it must not alter Metal behavior.
+
 ## Verification Requirements
 
 Abstraction work is only acceptable if we verify both structure and invariants:

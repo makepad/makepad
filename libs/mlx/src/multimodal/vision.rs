@@ -2,13 +2,15 @@ use crate::multimodal::GemmaImagePixels;
 use crate::MlxDType;
 use crate::{MlxIndexedSafetensors, MlxRtError, Result};
 use makepad_ggml::backend::metal::{
-    try_add_f32, try_flash_attn_f32_packed, try_gelu_f32, try_matmul_nt_ggml_bytes, try_mul_f32,
-    try_rms_norm_f32, try_rms_norm_mul_f32, try_vision_mlp_bf16_fused, BufferStorageMode,
-    MetalBuffer, MetalBufferBindingRef, MetalPipeline, MetalPipelineDescriptor, MetalRuntime,
-    MetalSize,
+    try_add_f32, try_gelu_f32, try_mul_f32, try_rms_norm_f32, try_rms_norm_mul_f32,
+    try_vision_mlp_bf16_fused, BufferStorageMode, MetalBuffer, MetalBufferBindingRef,
+    MetalPipeline, MetalPipelineDescriptor, MetalRuntime, MetalSize,
 };
-use makepad_ggml::backend::{try_affine_quantized_matmul_bf16_rows, AffineQuantizedMatmulRowsSpec};
-use makepad_ggml::quant::GGML_TYPE_BF16;
+use makepad_ggml::backend::{
+    try_affine_quantized_matmul_bf16_rows, try_flash_attn_f32_packed, try_matmul_nt_ggml_bytes,
+    try_matmul_nt_ggml_bytes_cached, AffineQuantizedMatmulRowsSpec,
+};
+use makepad_ggml::quant::{GGML_TYPE_BF16, GGML_TYPE_NVFP4};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -84,16 +86,20 @@ impl GemmaVisionRuntime {
         let stage_started = Instant::now();
         let mut hidden = self.patch_embed(image, patch_size, num_real_patches)?;
         profile.patch_embed = stage_started.elapsed();
+        trace_vision_stage("patch_embed", profile.patch_embed);
         let patch_positions = patch_positions(image.patch_grid_width, image.patch_grid_height);
         let rope_cache = Rope2DCache::new(&patch_positions, head_dim, rope_theta);
         let layers_started = Instant::now();
         for layer_idx in 0..num_hidden_layers {
+            let layer_started = Instant::now();
             hidden = self.apply_vision_layer(layer_idx, &hidden, &rope_cache, &mut profile)?;
+            trace_vision_stage(&format!("layer_{layer_idx}"), layer_started.elapsed());
         }
         profile.layers_total = layers_started.elapsed();
         let pool_started = Instant::now();
         let pooled = self.pool_hidden_states(&hidden, &patch_positions)?;
         profile.pool = pool_started.elapsed();
+        trace_vision_stage("pool", profile.pool);
         if pooled.rows != image.soft_token_count {
             return Err(invalid_model(format!(
                 "vision pooler token count mismatch: expected {} got {}",
@@ -104,6 +110,7 @@ impl GemmaVisionRuntime {
             let standardize_started = Instant::now();
             let out = self.standardize_hidden_states(&pooled)?;
             profile.standardize = standardize_started.elapsed();
+            trace_vision_stage("standardize", profile.standardize);
             out
         } else {
             pooled
@@ -111,6 +118,7 @@ impl GemmaVisionRuntime {
         let project_started = Instant::now();
         let projected = self.project_soft_tokens_to_text_space(&standardized)?;
         profile.project = project_started.elapsed();
+        trace_vision_stage("project", profile.project);
         Ok((projected, profile))
     }
 
@@ -419,7 +427,17 @@ impl GemmaVisionRuntime {
         let biases_name = "embed_vision.embedding_projection.biases";
         let text_hidden = self.weights.snapshot.config.text_config.hidden_size as usize;
         let eps = self.weights.snapshot.config.vision_config.rms_norm_eps;
-        let hidden_words = hidden
+        let normalized_hidden =
+            if let Some(data) = try_rms_norm_f32(&hidden.data, &[hidden.rows, hidden.cols], eps) {
+                RowsTensor::new(hidden.rows, hidden.cols, data)?
+            } else {
+                let mut data = Vec::with_capacity(hidden.data.len());
+                for row in hidden.rows_iter() {
+                    data.extend(rms_norm_no_scale_row(row, eps));
+                }
+                RowsTensor::new(hidden.rows, hidden.cols, data)?
+            };
+        let hidden_words = normalized_hidden
             .data
             .iter()
             .copied()
@@ -427,85 +445,117 @@ impl GemmaVisionRuntime {
             .collect::<Vec<_>>();
         let weight_entry = self.weights.tensor(weight_name)?;
         let scales_entry = self.weights.tensor(scales_name)?;
-        let biases_entry = self.weights.tensor(biases_name)?;
-        let bits = self.weights.snapshot.config.quantization.bits;
-        let group_size = self.weights.snapshot.config.quantization.group_size as u64;
-        if self.weights.snapshot.config.quantization.mode == "affine"
+        if self.weights.snapshot.config.quantization.mode == "nvfp4"
             && weight_entry.dtype == MlxDType::U32
-            && scales_entry.dtype == MlxDType::BF16
-            && biases_entry.dtype == MlxDType::BF16
-            && weight_entry.shape.len() == 2
-            && scales_entry.shape.len() == 2
-            && biases_entry.shape.len() == 2
-            && scales_entry.shape == biases_entry.shape
-            && weight_entry.shape[0] == scales_entry.shape[0]
-            && matches!(bits, 4 | 8)
-            && group_size == 64
+            && scales_entry.dtype == MlxDType::U8
         {
-            let values_per_word = 32 / bits as u64;
-            let inner_dim = weight_entry.shape[1] * values_per_word;
-            if inner_dim == hidden.cols as u64 && inner_dim == scales_entry.shape[1] * group_size {
+            let (rows, _, inner_dim) = self.weights.nvfp4_rank2_layout(weight_name, scales_name)?;
+            if rows == text_hidden && inner_dim == normalized_hidden.cols {
                 let root = self.weights.snapshot.paths.root_dir.to_string_lossy();
                 let weight_key = format!("{root}:{weight_name}");
-                let scales_key = format!("{root}:{scales_name}");
-                let biases_key = format!("{root}:{biases_name}");
-                let projected = try_affine_quantized_matmul_bf16_rows(
-                    AffineQuantizedMatmulRowsSpec {
-                        input_bf16_words: &hidden_words,
-                        input_rows: hidden.rows,
-                        out_rows: weight_entry.shape[0] as usize,
-                        weight_words_per_row: weight_entry.shape[1] as usize,
-                        qparams_per_row: scales_entry.shape[1] as usize,
-                        bits,
-                        group_size,
-                        cache_namespace: root.as_ref(),
-                    },
-                    &weight_key,
-                    &scales_key,
-                    &biases_key,
-                    || {
-                        self.weights
-                            .read_tensor_bytes(weight_name)
-                            .map_err(|err| err.to_string())
-                    },
-                    || {
-                        self.weights
-                            .read_tensor_bytes(scales_name)
-                            .map_err(|err| err.to_string())
-                    },
-                    || {
-                        self.weights
-                            .read_tensor_bytes(biases_name)
-                            .map_err(|err| err.to_string())
-                    },
-                );
-                if let Some(projected) = projected {
-                    let projected = projected.map_err(|err| invalid_model(err))?;
-                    if projected.len() != hidden.rows * text_hidden {
-                        return Err(invalid_model(format!(
-                            "embed_vision projected {} values, expected {}",
-                            projected.len(),
-                            hidden.rows * text_hidden
-                        )));
-                    }
-                    let normalized = try_rms_norm_f32(&projected, &[hidden.rows, text_hidden], eps)
-                        .unwrap_or_else(|| {
-                            let mut out = Vec::with_capacity(projected.len());
-                            for row in projected.chunks_exact(text_hidden) {
-                                out.extend(rms_norm_no_scale_row(row, eps));
-                            }
-                            out
-                        });
-                    return Ok(normalized
+                let mut projected = Vec::with_capacity(hidden.rows * text_hidden);
+                for row in normalized_hidden.rows_iter() {
+                    let row_out = try_matmul_nt_ggml_bytes_cached(
+                        row,
+                        GGML_TYPE_NVFP4,
+                        1,
+                        normalized_hidden.cols,
+                        text_hidden,
+                        root.as_ref(),
+                        &weight_key,
+                        || {
+                            self.weights
+                                .repack_nvfp4_tensor_to_ggml_bytes(weight_name, scales_name)
+                                .map_err(|err| err.to_string())
+                        },
+                    );
+                    let Some(row_out) = row_out else {
+                        break;
+                    };
+                    projected.extend(row_out.map_err(|err| invalid_model(err))?);
+                }
+                if projected.len() == hidden.rows * text_hidden {
+                    return Ok(projected
                         .chunks_exact(text_hidden)
                         .map(|row| row.iter().copied().map(f32_to_bf16).collect())
                         .collect());
                 }
             }
         }
+        let bits = self.weights.snapshot.config.quantization.bits;
+        let group_size = self.weights.snapshot.config.quantization.group_size as u64;
+        if self.weights.snapshot.config.quantization.mode == "affine"
+            && weight_entry.dtype == MlxDType::U32
+            && scales_entry.dtype == MlxDType::BF16
+            && weight_entry.shape.len() == 2
+            && scales_entry.shape.len() == 2
+            && weight_entry.shape[0] == scales_entry.shape[0]
+            && matches!(bits, 4 | 8)
+            && group_size == 64
+        {
+            if let Ok(biases_entry) = self.weights.tensor(biases_name) {
+                let values_per_word = 32 / bits as u64;
+                let inner_dim = weight_entry.shape[1] * values_per_word;
+                if biases_entry.dtype == MlxDType::BF16
+                    && biases_entry.shape.len() == 2
+                    && scales_entry.shape == biases_entry.shape
+                    && inner_dim == normalized_hidden.cols as u64
+                    && inner_dim == scales_entry.shape[1] * group_size
+                {
+                    let root = self.weights.snapshot.paths.root_dir.to_string_lossy();
+                    let weight_key = format!("{root}:{weight_name}");
+                    let scales_key = format!("{root}:{scales_name}");
+                    let biases_key = format!("{root}:{biases_name}");
+                    let projected = try_affine_quantized_matmul_bf16_rows(
+                        AffineQuantizedMatmulRowsSpec {
+                            input_bf16_words: &hidden_words,
+                            input_rows: hidden.rows,
+                            out_rows: weight_entry.shape[0] as usize,
+                            weight_words_per_row: weight_entry.shape[1] as usize,
+                            qparams_per_row: scales_entry.shape[1] as usize,
+                            bits,
+                            group_size,
+                            cache_namespace: root.as_ref(),
+                        },
+                        &weight_key,
+                        &scales_key,
+                        &biases_key,
+                        || {
+                            self.weights
+                                .read_tensor_bytes(weight_name)
+                                .map_err(|err| err.to_string())
+                        },
+                        || {
+                            self.weights
+                                .read_tensor_bytes(scales_name)
+                                .map_err(|err| err.to_string())
+                        },
+                        || {
+                            self.weights
+                                .read_tensor_bytes(biases_name)
+                                .map_err(|err| err.to_string())
+                        },
+                    );
+                    if let Some(projected) = projected {
+                        let projected = projected.map_err(|err| invalid_model(err))?;
+                        if projected.len() != hidden.rows * text_hidden {
+                            return Err(invalid_model(format!(
+                                "embed_vision projected {} values, expected {}",
+                                projected.len(),
+                                hidden.rows * text_hidden
+                            )));
+                        }
+                        return Ok(projected
+                            .chunks_exact(text_hidden)
+                            .map(|row| row.iter().copied().map(f32_to_bf16).collect())
+                            .collect());
+                    }
+                }
+            }
+        }
 
         let mut out = Vec::with_capacity(hidden.rows);
-        for row in hidden.rows_iter() {
+        for row in normalized_hidden.rows_iter() {
             let row_words = row.iter().copied().map(f32_to_bf16).collect::<Vec<_>>();
             let projected = self
                 .weights
@@ -525,8 +575,7 @@ impl GemmaVisionRuntime {
                     text_hidden
                 )));
             }
-            let normalized = rms_norm_no_scale_row(&projected, eps);
-            out.push(normalized.into_iter().map(f32_to_bf16).collect());
+            out.push(projected.into_iter().map(f32_to_bf16).collect());
         }
         Ok(out)
     }
@@ -762,6 +811,10 @@ fn linear_bf16_rows(
     if rows == 0 {
         return RowsTensor::new(0, out_dim, Vec::new());
     }
+    if std::env::var_os("MAKEPAD_VISION_TRACE").is_some() {
+        eprintln!("vision linear start: rows={rows} in={in_dim} out={out_dim}");
+    }
+    let accel_started = Instant::now();
     if let Some(out_flat) = try_matmul_nt_ggml_bytes(
         &flat_input,
         weight_bytes,
@@ -770,8 +823,10 @@ fn linear_bf16_rows(
         in_dim,
         out_dim,
     ) {
+        trace_vision_stage("linear_accel", accel_started.elapsed());
         return RowsTensor::new(rows, out_dim, out_flat);
     }
+    trace_vision_stage("linear_accel_miss", accel_started.elapsed());
 
     let mut out_data = vec![0.0f32; rows * out_dim];
     for row_idx in 0..rows {
@@ -1331,5 +1386,11 @@ fn invalid_model(message: impl Into<String>) -> MlxRtError {
     MlxRtError::InvalidModelDir {
         path: PathBuf::new(),
         message: message.into(),
+    }
+}
+
+fn trace_vision_stage(stage: &str, elapsed: Duration) {
+    if std::env::var_os("MAKEPAD_VISION_TRACE").is_some() {
+        eprintln!("vision {stage}: {:.3}s", elapsed.as_secs_f64());
     }
 }
