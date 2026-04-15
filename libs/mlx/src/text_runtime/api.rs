@@ -1480,17 +1480,6 @@ impl GemmaTextModel {
             .map_err(|err| err.to_string())
     }
 
-    pub(crate) fn special_token_ids(&self) -> &[u32] {
-        self.runtime.tokenizer.special_token_ids()
-    }
-
-    pub(crate) fn streaming_detokenizer(
-        &self,
-        trim_space: bool,
-    ) -> crate::MlxStreamingDetokenizer<'_> {
-        self.runtime.tokenizer.streaming_detokenizer(trim_space)
-    }
-
     pub(crate) fn generate_pretokenized_cuda_exact_greedy_with_callback<F>(
         &self,
         prompt_text: Arc<str>,
