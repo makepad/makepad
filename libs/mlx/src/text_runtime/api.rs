@@ -989,15 +989,15 @@ fn select_text_generation_backend(
     runtime: &Arc<GemmaTextRuntimeSession>,
     max_new_tokens: Option<usize>,
     sampling_options: &GemmaTextSamplingOptions,
-    has_prompt_embedding_rows: bool,
+    _has_prompt_embedding_rows: bool,
 ) -> TextGenerationBackend {
     if runtime.has_exact_backend() {
         TextGenerationBackend::MetalExact
-    } else if !has_prompt_embedding_rows
-        && runtime.has_cuda_exact_backend()
-        && max_new_tokens.is_some_and(|limit| limit > 0)
-        && (!sampling_options.do_sample || sampling_options.temperature <= 0.0)
-    {
+    } else if cuda_exact::supports_cuda_exact_greedy_generation(
+        runtime,
+        max_new_tokens,
+        sampling_options,
+    ) {
         TextGenerationBackend::CudaExactGreedy
     } else {
         TextGenerationBackend::Reference
@@ -1091,7 +1091,20 @@ where
             },
             on_generated_ids,
         ),
-        TextGenerationBackend::CudaExactGreedy | TextGenerationBackend::Reference => runtime
+        TextGenerationBackend::CudaExactGreedy => {
+            let mut cuda_sampling_options = sampling_options.clone();
+            cuda_sampling_options.allow_thought = true;
+            cuda_exact::try_generate_cuda_nvfp4_greedy_from_embedding_rows(
+                runtime,
+                prompt_token_ids,
+                prompt_embedding_rows,
+                max_new_tokens,
+                &cuda_sampling_options,
+                on_generated_ids,
+            )?
+            .ok_or_else(|| "CUDA exact backend selection unexpectedly fell back".to_string())
+        }
+        TextGenerationBackend::Reference => runtime
             .generate_sampled_token_ids_from_embedding_rows_reference(
                 prompt_token_ids,
                 prompt_embedding_rows,
@@ -1682,9 +1695,20 @@ impl GemmaTextModel {
         let sampling_options = GemmaTextSamplingOptions::from_generation_config(
             &self.runtime.weights.snapshot.generation_config,
         );
+        let stream_extracted_response = sampling_options.allow_thought
+            || matches!(
+                select_text_generation_backend(
+                    &self.runtime,
+                    Some(options.max_new_tokens),
+                    &sampling_options,
+                    true,
+                ),
+                TextGenerationBackend::CudaExactGreedy
+            );
         let mut rng = MlxTextSamplingRng::new(0);
         let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
         let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
+        let mut streamed_text = String::new();
         let started = Instant::now();
         let mut time_to_first_token_elapsed = None;
         let (generated_token_ids, stop_reason) = generate_sampled_token_ids_from_embedding_rows(
@@ -1698,19 +1722,33 @@ impl GemmaTextModel {
                 if time_to_first_token_elapsed.is_none() && !generated_token_ids.is_empty() {
                     time_to_first_token_elapsed = Some(started.elapsed());
                 }
-                let Some(&token_id) = generated_token_ids.last() else {
-                    return Ok(());
-                };
-                let delta = detokenizer.add_token(token_id, &skip_special_token_ids);
-                if !delta.is_empty() {
-                    on_text_delta(&delta).map_err(|err| err.to_string())?;
+                if stream_extracted_response {
+                    let partial_text = self
+                        .decode_generated_text(generated_token_ids)
+                        .map_err(|err| err.to_string())?;
+                    if let Some(delta) = partial_text.strip_prefix(&streamed_text) {
+                        if !delta.is_empty() {
+                            on_text_delta(delta).map_err(|err| err.to_string())?;
+                            streamed_text.push_str(delta);
+                        }
+                    }
+                } else {
+                    let Some(&token_id) = generated_token_ids.last() else {
+                        return Ok(());
+                    };
+                    let delta = detokenizer.add_token(token_id, &skip_special_token_ids);
+                    if !delta.is_empty() {
+                        on_text_delta(&delta).map_err(|err| err.to_string())?;
+                    }
                 }
                 Ok(())
             },
         )?;
-        let final_delta = detokenizer.finalize();
-        if !final_delta.is_empty() {
-            on_text_delta(&final_delta)?;
+        if !stream_extracted_response {
+            let final_delta = detokenizer.finalize();
+            if !final_delta.is_empty() {
+                on_text_delta(&final_delta)?;
+            }
         }
         let elapsed = started.elapsed();
         let prompt_token_count = prompt_token_ids.len();
@@ -1978,8 +2016,14 @@ impl GemmaTextModel {
         )?;
         let prompt_token_ids = Arc::<[u32]>::from(prepared.prompt_token_ids);
         let prompt_embedding_rows = prepared.prompt_embedding_rows;
+        let stream_extracted_response = sampling_options.allow_thought
+            || matches!(
+                select_text_generation_backend(&self.runtime, max_new_tokens, sampling_options, true),
+                TextGenerationBackend::CudaExactGreedy
+            );
         let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
         let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
+        let mut streamed_text = String::new();
         let started = Instant::now();
         let mut time_to_first_token_elapsed = None;
         let (generated_token_ids, stop_reason) = generate_sampled_token_ids_from_embedding_rows(
@@ -1993,19 +2037,33 @@ impl GemmaTextModel {
                 if time_to_first_token_elapsed.is_none() && !generated_token_ids.is_empty() {
                     time_to_first_token_elapsed = Some(started.elapsed());
                 }
-                let Some(&token_id) = generated_token_ids.last() else {
-                    return Ok(());
-                };
-                let delta = detokenizer.add_token(token_id, &skip_special_token_ids);
-                if !delta.is_empty() {
-                    on_text_delta(&delta).map_err(|err| err.to_string())?;
+                if stream_extracted_response {
+                    let partial_text = self
+                        .decode_generated_text(generated_token_ids)
+                        .map_err(|err| err.to_string())?;
+                    if let Some(delta) = partial_text.strip_prefix(&streamed_text) {
+                        if !delta.is_empty() {
+                            on_text_delta(delta).map_err(|err| err.to_string())?;
+                            streamed_text.push_str(delta);
+                        }
+                    }
+                } else {
+                    let Some(&token_id) = generated_token_ids.last() else {
+                        return Ok(());
+                    };
+                    let delta = detokenizer.add_token(token_id, &skip_special_token_ids);
+                    if !delta.is_empty() {
+                        on_text_delta(&delta).map_err(|err| err.to_string())?;
+                    }
                 }
                 Ok(())
             },
         )?;
-        let final_delta = detokenizer.finalize();
-        if !final_delta.is_empty() {
-            on_text_delta(&final_delta)?;
+        if !stream_extracted_response {
+            let final_delta = detokenizer.finalize();
+            if !final_delta.is_empty() {
+                on_text_delta(&final_delta)?;
+            }
         }
         let elapsed = started.elapsed();
         let prompt_token_count = prompt_token_ids.len();
