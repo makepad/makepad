@@ -170,6 +170,17 @@ impl Font {
             .borrow_mut()
             .rasterize_glyph(self, glyph_id, dpxs_per_em)
     }
+
+    pub fn rasterize_glyph_stable_fallback(
+        &self,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
+        self.rasterizer
+            .borrow_mut()
+            .rasterize_glyph_stable_fallback(self, glyph_id, dpxs_per_em)
+    }
+
 }
 
 impl Eq for Font {}

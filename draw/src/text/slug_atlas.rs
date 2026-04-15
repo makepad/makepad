@@ -5,7 +5,7 @@ use {
         glyph_outline::{Command, GlyphOutline},
     },
     crate::makepad_platform::*,
-    fxhash::FxHashMap,
+    fxhash::{FxHashMap, FxHashSet},
     std::cmp::Ordering,
 };
 
@@ -33,6 +33,20 @@ pub struct SlugGlyphInfo {
     pub fill_flags: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CachedSlugGlyphInfo {
+    generation: u64,
+    info: SlugGlyphInfo,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SlugGlyphCacheResult {
+    Ready(SlugGlyphInfo),
+    NeedsUpload { generation: u64, glyph: SlugGlyphInfo },
+    Deferred,
+    Unavailable,
+}
+
 pub struct SlugAtlas {
     curve_data: Vec<f32>,
     band_data: Vec<f32>,
@@ -44,7 +58,8 @@ pub struct SlugAtlas {
     band_uploaded_floats: usize,
     cache_generation: u64,
     uploaded_generation: u64,
-    cached_glyphs: FxHashMap<SlugGlyphKey, SlugGlyphInfo>,
+    cached_glyphs: FxHashMap<SlugGlyphKey, CachedSlugGlyphInfo>,
+    missing_glyphs: FxHashSet<SlugGlyphKey>,
 }
 
 impl SlugAtlas {
@@ -77,6 +92,7 @@ impl SlugAtlas {
             cache_generation: 0,
             uploaded_generation: 0,
             cached_glyphs: FxHashMap::default(),
+            missing_glyphs: FxHashSet::default(),
         }
     }
 
@@ -96,19 +112,47 @@ impl SlugAtlas {
         self.uploaded_generation
     }
 
-    pub fn get_or_cache_glyph(&mut self, font: &Font, glyph_id: GlyphId) -> Option<SlugGlyphInfo> {
+    pub fn get_or_cache_glyph(
+        &mut self,
+        font: &Font,
+        glyph_id: GlyphId,
+        can_build: bool,
+    ) -> SlugGlyphCacheResult {
         let key = SlugGlyphKey {
             font_id: font.id(),
             glyph_id,
         };
-        if let Some(info) = self.cached_glyphs.get(&key).copied() {
-            return Some(info);
+        if let Some(cached) = self.cached_glyphs.get(&key).copied() {
+            if cached.generation <= self.uploaded_generation {
+                return SlugGlyphCacheResult::Ready(cached.info);
+            }
+            return SlugGlyphCacheResult::NeedsUpload {
+                generation: cached.generation,
+                glyph: cached.info,
+            };
+        }
+        if self.missing_glyphs.contains(&key) {
+            return SlugGlyphCacheResult::Unavailable;
+        }
+        if !can_build {
+            return SlugGlyphCacheResult::Deferred;
         }
 
-        let outline = font.glyph_outline(glyph_id)?;
-        let info = self.build_glyph(font, &outline)?;
-        self.cached_glyphs.insert(key, info);
-        Some(info)
+        let Some(outline) = font.glyph_outline(glyph_id) else {
+            self.missing_glyphs.insert(key);
+            return SlugGlyphCacheResult::Unavailable;
+        };
+        let Some(info) = self.build_glyph(font, &outline) else {
+            self.missing_glyphs.insert(key);
+            return SlugGlyphCacheResult::Unavailable;
+        };
+        let generation = self.cache_generation;
+        self.cached_glyphs
+            .insert(key, CachedSlugGlyphInfo { generation, info });
+        SlugGlyphCacheResult::NeedsUpload {
+            generation,
+            glyph: info,
+        }
     }
 
     pub fn prepare_textures(&mut self, cx: &mut Cx) -> bool {
@@ -152,7 +196,11 @@ impl SlugAtlas {
     ) -> bool {
         debug_assert_eq!(source.len() % RGBA_F32_TEXEL_FLOATS, 0);
 
-        let new_width = if source.is_empty() { 1 } else { preferred_width.max(1) };
+        let new_width = if source.is_empty() {
+            1
+        } else {
+            preferred_width.max(1)
+        };
         let new_texels = (source.len() / RGBA_F32_TEXEL_FLOATS).max(1);
         let new_height = new_texels.div_ceil(new_width);
         let old_uploaded_floats = (*uploaded_floats).min(source.len());
@@ -200,7 +248,11 @@ impl SlugAtlas {
         true
     }
 
-    fn appended_dirty_rect(width: usize, old_texels: usize, new_texels: usize) -> Option<RectUsize> {
+    fn appended_dirty_rect(
+        width: usize,
+        old_texels: usize,
+        new_texels: usize,
+    ) -> Option<RectUsize> {
         if width == 0 || new_texels <= old_texels {
             return None;
         }
@@ -573,7 +625,160 @@ fn cubic_to_quads_recursive(
 
 #[cfg(test)]
 mod tests {
-    use super::SlugAtlas;
+    use super::{SlugAtlas, SlugGlyphCacheResult};
+    use crate::{
+        makepad_platform::{Cx, SharedBytes},
+        text::{
+            font::FontId,
+            layouter,
+            loader::{FontDefinition, Loader},
+        },
+    };
+    use std::path::PathBuf;
+
+    #[derive(Clone, Copy, Debug)]
+    struct TestCurve {
+        p0: (f32, f32),
+        p1: (f32, f32),
+        p2: (f32, f32),
+    }
+
+    fn calc_root_code(y1: f32, y2: f32, y3: f32) -> u32 {
+        let i1 = y1.to_bits() >> 31;
+        let i2 = y2.to_bits() >> 30;
+        let i3 = y3.to_bits() >> 29;
+        let shift = (i1 & 1) | (i2 & 2) | (i3 & 4);
+        (11892u32 >> shift) & 257
+    }
+
+    fn solve_horiz_poly(p12: [f32; 4], p3: [f32; 2]) -> (f32, f32) {
+        let a = [p12[0] - p12[2] * 2.0 + p3[0], p12[1] - p12[3] * 2.0 + p3[1]];
+        let b = [p12[0] - p12[2], p12[1] - p12[3]];
+        let ra = 1.0 / a[1];
+        let rb = 0.5 / b[1];
+        let d = (b[1] * b[1] - a[1] * p12[1]).max(0.0).sqrt();
+        let (mut t1, mut t2) = ((b[1] - d) * ra, (b[1] + d) * ra);
+        if a[1].abs() < 1.0 / 65536.0 {
+            t1 = p12[1] * rb;
+            t2 = t1;
+        }
+        (
+            (a[0] * t1 - b[0] * 2.0) * t1 + p12[0],
+            (a[0] * t2 - b[0] * 2.0) * t2 + p12[0],
+        )
+    }
+
+    fn solve_vert_poly(p12: [f32; 4], p3: [f32; 2]) -> (f32, f32) {
+        let a = [p12[0] - p12[2] * 2.0 + p3[0], p12[1] - p12[3] * 2.0 + p3[1]];
+        let b = [p12[0] - p12[2], p12[1] - p12[3]];
+        let ra = 1.0 / a[0];
+        let rb = 0.5 / b[0];
+        let d = (b[0] * b[0] - a[0] * p12[0]).max(0.0).sqrt();
+        let (mut t1, mut t2) = ((b[0] - d) * ra, (b[0] + d) * ra);
+        if a[0].abs() < 1.0 / 65536.0 {
+            t1 = p12[0] * rb;
+            t2 = t1;
+        }
+        (
+            (a[1] * t1 - b[1] * 2.0) * t1 + p12[1],
+            (a[1] * t2 - b[1] * 2.0) * t2 + p12[1],
+        )
+    }
+
+    fn saturate(v: f32) -> f32 {
+        v.clamp(0.0, 1.0)
+    }
+
+    fn calc_coverage(xcov: f32, ycov: f32, xwgt: f32, ywgt: f32) -> f32 {
+        let coverage = ((xcov * xwgt + ycov * ywgt).abs() / (xwgt + ywgt).max(1.0 / 65536.0))
+            .max(xcov.abs().min(ycov.abs()));
+        saturate(coverage)
+    }
+
+    fn alpha_at_full_scan(curves: &[TestCurve], sample: (f32, f32), px_x: f32, px_y: f32) -> f32 {
+        let mut coverage_x = 0.0;
+        let mut weight_x: f32 = 0.0;
+        let mut coverage_y = 0.0;
+        let mut weight_y: f32 = 0.0;
+
+        for curve in curves {
+            let p12 = [
+                curve.p0.0 - sample.0,
+                curve.p0.1 - sample.1,
+                curve.p1.0 - sample.0,
+                curve.p1.1 - sample.1,
+            ];
+            let p3 = [curve.p2.0 - sample.0, curve.p2.1 - sample.1];
+
+            let h_code = calc_root_code(p12[1], p12[3], p3[1]);
+            if h_code != 0 {
+                let (r0, r1) = solve_horiz_poly(p12, p3);
+                let r0 = r0 / px_x;
+                let r1 = r1 / px_x;
+                if (h_code & 1) != 0 {
+                    coverage_x += saturate(r0 + 0.5);
+                    weight_x = weight_x.max(saturate(1.0 - r0.abs() * 2.0));
+                }
+                if h_code > 1 {
+                    coverage_x -= saturate(r1 + 0.5);
+                    weight_x = weight_x.max(saturate(1.0 - r1.abs() * 2.0));
+                }
+            }
+
+            let v_code = calc_root_code(p12[0], p12[2], p3[0]);
+            if v_code != 0 {
+                let (r0, r1) = solve_vert_poly(p12, p3);
+                let r0 = r0 / px_y;
+                let r1 = r1 / px_y;
+                if (v_code & 1) != 0 {
+                    coverage_y -= saturate(r0 + 0.5);
+                    weight_y = weight_y.max(saturate(1.0 - r0.abs() * 2.0));
+                }
+                if v_code > 1 {
+                    coverage_y += saturate(r1 + 0.5);
+                    weight_y = weight_y.max(saturate(1.0 - r1.abs() * 2.0));
+                }
+            }
+        }
+
+        calc_coverage(coverage_x, coverage_y, weight_x, weight_y)
+    }
+
+    fn curves_for_glyph(atlas: &SlugAtlas, curve_offset: usize, curve_count: usize) -> Vec<TestCurve> {
+        let mut curves = Vec::with_capacity(curve_count);
+        for i in 0..curve_count {
+            let base = (curve_offset + i) * 8;
+            curves.push(TestCurve {
+                p0: (atlas.curve_data[base], atlas.curve_data[base + 1]),
+                p1: (atlas.curve_data[base + 2], atlas.curve_data[base + 3]),
+                p2: (atlas.curve_data[base + 4], atlas.curve_data[base + 5]),
+            });
+        }
+        curves
+    }
+
+    fn bundled_font_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources/IBMPlexSans-Text.ttf")
+    }
+
+    fn load_test_font() -> std::rc::Rc<crate::text::font::Font> {
+        let mut loader = Loader::new(layouter::Settings::default().loader);
+        let font_id: FontId = 0x5151_0001_u64.into();
+        let font_data =
+            SharedBytes::from_file_mmap_or_read(bundled_font_path()).expect("font bytes should load");
+        loader.define_font(
+            font_id,
+            FontDefinition {
+                data: font_data,
+                index: 0,
+                ascender_fudge_in_ems: -0.1,
+                descender_fudge_in_ems: 0.0,
+                weight: None,
+                variations: Vec::new(),
+            },
+        );
+        loader.get_or_load_font(font_id).clone()
+    }
 
     #[test]
     fn appended_dirty_rect_stays_tight_within_one_row() {
@@ -591,5 +796,66 @@ mod tests {
         assert_eq!(rect.origin.y, 0);
         assert_eq!(rect.size.width, 8);
         assert_eq!(rect.size.height, 2);
+    }
+
+    #[test]
+    fn builds_slug_glyphs_for_uizoo_demo_letters() {
+        let font = load_test_font();
+        let face = rustybuzz::ttf_parser::Face::parse(font.data().as_slice(), 0)
+            .expect("font face should parse");
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut atlas = SlugAtlas::new(&mut cx);
+
+        for ch in ['A', 'g', 'W', 'S', 'L'] {
+            let glyph_id = face
+                .glyph_index(ch)
+                .unwrap_or_else(|| panic!("missing glyph for {ch:?}"))
+                .0;
+            let result = atlas.get_or_cache_glyph(font.as_ref(), glyph_id, true);
+            match result {
+                SlugGlyphCacheResult::NeedsUpload { glyph, .. }
+                | SlugGlyphCacheResult::Ready(glyph) => {
+                    assert!(glyph.curve_count > 0, "expected curves for {ch:?}");
+                    assert!(glyph.size_in_ems.width > 0.0, "expected width for {ch:?}");
+                    assert!(glyph.size_in_ems.height > 0.0, "expected height for {ch:?}");
+                }
+                SlugGlyphCacheResult::Deferred => {
+                    panic!("unexpected deferred result for {ch:?}");
+                }
+                SlugGlyphCacheResult::Unavailable => {
+                    panic!("unexpected unavailable result for {ch:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn uizoo_demo_letters_produce_nonzero_slug_coverage() {
+        let font = load_test_font();
+        let face = rustybuzz::ttf_parser::Face::parse(font.data().as_slice(), 0)
+            .expect("font face should parse");
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut atlas = SlugAtlas::new(&mut cx);
+
+        for ch in ['A', 'g', 'W', 'S', 'L'] {
+            let glyph_id = face
+                .glyph_index(ch)
+                .unwrap_or_else(|| panic!("missing glyph for {ch:?}"))
+                .0;
+            let glyph = match atlas.get_or_cache_glyph(font.as_ref(), glyph_id, true) {
+                SlugGlyphCacheResult::NeedsUpload { glyph, .. }
+                | SlugGlyphCacheResult::Ready(glyph) => glyph,
+                other => panic!("unexpected glyph build result for {ch:?}: {other:?}"),
+            };
+            let curves = curves_for_glyph(&atlas, glyph.curve_offset, glyph.curve_count);
+            let mut max_alpha: f32 = 0.0;
+            for y in 0..33 {
+                for x in 0..33 {
+                    let sample = (x as f32 / 32.0, y as f32 / 32.0);
+                    max_alpha = max_alpha.max(alpha_at_full_scan(&curves, sample, 1.0 / 192.0, 1.0 / 192.0));
+                }
+            }
+            assert!(max_alpha > 0.2, "expected visible SLUG coverage for {ch:?}, got {max_alpha}");
+        }
     }
 }

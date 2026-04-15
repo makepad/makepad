@@ -7,17 +7,24 @@ use {
         loader::{FontDefinition, FontFamilyDefinition},
         msdfer::Msdfer,
         rasterizer::{CompletedMsdfJob, OutlineRasterizationMode, QueuedMsdfJob, Rasterizer},
-        slug_atlas::{SlugAtlas, SlugGlyphInfo},
+        slug_atlas::{SlugAtlas, SlugGlyphCacheResult},
     },
     crate::makepad_platform::*,
     std::{cell::RefCell, mem::ManuallyDrop, rc::Rc},
 };
 
-fn default_slug_min_dpxs_per_em(cx: &Cx) -> f32 {
-    const LINUX_DESKTOP_DEFAULT: f32 = 1_000_000.0;
-
+fn default_slug_new_glyphs_per_redraw(cx: &Cx) -> usize {
     match cx.os_type() {
-        OsType::LinuxWindow(_) | OsType::LinuxDirect => LINUX_DESKTOP_DEFAULT,
+        OsType::LinuxWindow(_) | OsType::LinuxDirect => 1,
+        _ => usize::MAX,
+    }
+}
+
+fn default_slug_min_dpxs_per_em(cx: &Cx, rasterizer: &Rasterizer) -> f32 {
+    match cx.os_type() {
+        OsType::LinuxWindow(_) | OsType::LinuxDirect => {
+            rasterizer.msdf_resolution().max_dpxs_per_em
+        }
         _ => 0.0,
     }
 }
@@ -28,6 +35,9 @@ pub struct Fonts {
     atlas_texture: Texture,
     slug_atlas: SlugAtlas,
     slug_min_dpxs_per_em: f32,
+    slug_new_glyphs_per_redraw: usize,
+    slug_budget_redraw_id: u64,
+    slug_built_glyphs_this_redraw: usize,
     msdf_job_sender: FromUISender<QueuedMsdfJob>,
     msdf_result_receiver: ToUIReceiver<CompletedMsdfJob>,
 }
@@ -35,11 +45,12 @@ pub struct Fonts {
 impl Fonts {
     pub fn new(cx: &mut Cx, settings: layouter::Settings) -> Self {
         let layouter = Layouter::new(settings);
-        let (atlas_size, msdfer_settings) = {
+        let (atlas_size, msdfer_settings, slug_min_dpxs_per_em) = {
             let rasterizer = layouter.rasterizer().borrow();
             (
                 rasterizer.color_atlas().size(),
                 rasterizer.msdfer().settings(),
+                default_slug_min_dpxs_per_em(cx, &rasterizer),
             )
         };
 
@@ -82,7 +93,10 @@ impl Fonts {
                 },
             ),
             slug_atlas: SlugAtlas::new(cx),
-            slug_min_dpxs_per_em: default_slug_min_dpxs_per_em(cx),
+            slug_min_dpxs_per_em,
+            slug_new_glyphs_per_redraw: default_slug_new_glyphs_per_redraw(cx),
+            slug_budget_redraw_id: 0,
+            slug_built_glyphs_this_redraw: 0,
             msdf_job_sender,
             msdf_result_receiver,
         }
@@ -130,12 +144,37 @@ impl Fonts {
         dpxs_per_em >= self.slug_min_dpxs_per_em
     }
 
+    pub fn max_rasterized_glyph_dpxs_per_em(&self) -> f32 {
+        self.layouter
+            .rasterizer()
+            .borrow()
+            .msdf_resolution()
+            .max_dpxs_per_em
+    }
+
     pub fn get_or_cache_slug_glyph(
         &mut self,
+        redraw_id: u64,
         font: &Font,
         glyph_id: GlyphId,
-    ) -> Option<SlugGlyphInfo> {
-        self.slug_atlas.get_or_cache_glyph(font, glyph_id)
+    ) -> SlugGlyphCacheResult {
+        match self.slug_atlas.get_or_cache_glyph(font, glyph_id, false) {
+            SlugGlyphCacheResult::Deferred => {}
+            result => return result,
+        }
+
+        if self.slug_new_glyphs_per_redraw != usize::MAX {
+            if self.slug_budget_redraw_id != redraw_id {
+                self.slug_budget_redraw_id = redraw_id;
+                self.slug_built_glyphs_this_redraw = 0;
+            }
+            if self.slug_built_glyphs_this_redraw >= self.slug_new_glyphs_per_redraw {
+                return SlugGlyphCacheResult::Deferred;
+            }
+            self.slug_built_glyphs_this_redraw += 1;
+        }
+
+        self.slug_atlas.get_or_cache_glyph(font, glyph_id, true)
     }
 
     pub fn slug_cache_generation(&self) -> u64 {

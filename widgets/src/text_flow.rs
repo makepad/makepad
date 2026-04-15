@@ -4,9 +4,8 @@ use crate::makepad_draw::text::{
     selection::{Cursor, Selection},
 };
 use crate::{
-    animator::*, makepad_derive_widget::*, makepad_draw::*,
-    makepad_draw::shader::draw_text::TextOverflow,
-    widget::*, widget_tree::CxWidgetExt,
+    animator::*, makepad_derive_widget::*, makepad_draw::shader::draw_text::TextOverflow,
+    makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
 };
 use std::rc::Rc;
 
@@ -928,7 +927,7 @@ impl Widget for TextFlow {
                 }
                 // Update shader directly and request redraw for the area
                 self.draw_text.set_total_chars(cx, self.animated_chars);
-                self.draw_text.draw_vars.area.redraw(cx);
+                self.draw_text.redraw_areas(cx);
             }
 
             // Keep animation alive if streaming or not done fading
