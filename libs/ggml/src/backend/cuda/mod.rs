@@ -2,7 +2,7 @@
 mod imp {
     use crate::backend::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
     use crate::quant::{
-        quantize_bf16_to_q8_1, quantize_f32_to_q8_1, GGML_TYPE_NVFP4, QK, QK_NVFP4,
+        quantize_bf16_to_q8_1, quantize_f32_to_q8_1, GGML_TYPE_BF16, GGML_TYPE_NVFP4, QK, QK_NVFP4,
     };
     use makepad_cuda::{self, cudaError_t, cudaStream_t};
     use std::cell::RefCell;
@@ -79,9 +79,7 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_ggml_cuda_nvfp4_q8_1_mmq_fixup_f32_len(
-            len_out: *mut u32,
-        ) -> cudaError_t;
+        fn makepad_ggml_cuda_nvfp4_q8_1_mmq_fixup_f32_len(len_out: *mut u32) -> cudaError_t;
 
         fn makepad_ggml_cuda_nvfp4_get_row_f32(
             packed_weights_nvfp4_bytes: *const u8,
@@ -411,6 +409,7 @@ mod imp {
             head_dim: u32,
             kv_row_stride: u32,
             seq_len_device_u32: *const u32,
+            start_slot_device_u32: *const u32,
             capacity: u32,
             logits_row_stride: u32,
             stream: cudaStream_t,
@@ -476,6 +475,20 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_softmax_rows_causal_vision_bf16(
+            logits: *const f32,
+            probs: *mut u16,
+            query_count: u32,
+            row_count: u32,
+            row_stride: u32,
+            base_seq_len: u32,
+            max_seq_len: u32,
+            chunk_start_position: u32,
+            vision_start_position: u32,
+            vision_end_position: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_attention_weighted_sum_f32(
             probs: *const f32,
             value_cache: *const u16,
@@ -532,6 +545,7 @@ mod imp {
             head_dim: u32,
             kv_row_stride: u32,
             seq_len_device_u32: *const u32,
+            start_slot_device_u32: *const u32,
             capacity: u32,
             logits_row_stride: u32,
             out_row_stride: u32,
@@ -600,6 +614,18 @@ mod imp {
             out_row_stride: u32,
             base_seq_len_device_u32: *const u32,
             capacity: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_flash_attn_f32_packed(
+            q: *const f32,
+            k: *const f32,
+            v: *const f32,
+            out: *mut f32,
+            seq_len: u32,
+            num_heads: u32,
+            head_dim: u32,
+            scale: f32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
@@ -2750,6 +2776,7 @@ mod imp {
             head_dim: usize,
             kv_row_stride: usize,
             seq_len_device_u32: &CudaBuffer,
+            start_slot_device_u32: &CudaBuffer,
             capacity: usize,
             logits_row_stride: usize,
         ) -> Result<(), String> {
@@ -2764,6 +2791,7 @@ mod imp {
                     head_dim as u32,
                     kv_row_stride as u32,
                     seq_len_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    start_slot_device_u32.inner.ptr.as_ptr().cast::<u32>(),
                     capacity as u32,
                     logits_row_stride as u32,
                     self.stream,
@@ -2783,6 +2811,7 @@ mod imp {
             head_dim: usize,
             kv_row_stride: usize,
             seq_len_device_u32: *const u32,
+            start_slot_device_u32: *const u32,
             capacity: usize,
             logits_row_stride: usize,
         ) -> Result<(), String> {
@@ -2797,6 +2826,7 @@ mod imp {
                     head_dim as u32,
                     kv_row_stride as u32,
                     seq_len_device_u32,
+                    start_slot_device_u32,
                     capacity as u32,
                     logits_row_stride as u32,
                     self.stream,
@@ -2950,6 +2980,39 @@ mod imp {
         }
 
         #[allow(clippy::too_many_arguments)]
+        pub fn softmax_rows_causal_vision_bf16(
+            &self,
+            logits: &CudaBuffer,
+            probs: &CudaBuffer,
+            query_count: usize,
+            row_count: usize,
+            row_stride: usize,
+            base_seq_len: usize,
+            max_seq_len: usize,
+            chunk_start_position: usize,
+            vision_start_position: usize,
+            vision_end_position: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_softmax_rows_causal_vision_bf16(
+                    logits.inner.ptr.as_ptr().cast::<f32>(),
+                    probs.inner.ptr.as_ptr().cast::<u16>(),
+                    query_count as u32,
+                    row_count as u32,
+                    row_stride as u32,
+                    base_seq_len as u32,
+                    max_seq_len as u32,
+                    chunk_start_position as u32,
+                    vision_start_position as u32,
+                    vision_end_position as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
         fn attention_seq_softmax_weighted_sum_rows_blas_f32_inner(
             &self,
             q: &CudaBuffer,
@@ -2970,6 +3033,7 @@ mod imp {
             base_seq_len_device_u32: Option<*const u32>,
             capacity: usize,
             max_seq_len: usize,
+            vision_mask: Option<(usize, usize, usize)>,
         ) -> Result<(), String> {
             if query_count == 0
                 || q_head_count == 0
@@ -2985,13 +3049,14 @@ mod imp {
             {
                 return Err("invalid CUDA BLAS prefill attention shape".to_string());
             }
+            let workspace_seq_stride = max_seq_len;
             let logits_len = q_head_count
                 .checked_mul(query_count)
-                .and_then(|len| len.checked_mul(capacity))
+                .and_then(|len| len.checked_mul(workspace_seq_stride))
                 .ok_or_else(|| "CUDA BLAS prefill attention logits size overflow".to_string())?;
-            let logits_bytes = logits_len
-                .checked_mul(size_of::<f32>())
-                .ok_or_else(|| "CUDA BLAS prefill attention logits byte size overflow".to_string())?;
+            let logits_bytes = logits_len.checked_mul(size_of::<f32>()).ok_or_else(|| {
+                "CUDA BLAS prefill attention logits byte size overflow".to_string()
+            })?;
             if logits.size_bytes() < logits_bytes {
                 return Err(format!(
                     "CUDA BLAS prefill attention logits buffer too small: {} < {}",
@@ -2999,9 +3064,9 @@ mod imp {
                     logits_bytes
                 ));
             }
-            let probs_bytes = logits_len
-                .checked_mul(size_of::<u16>())
-                .ok_or_else(|| "CUDA BLAS prefill attention probs byte size overflow".to_string())?;
+            let probs_bytes = logits_len.checked_mul(size_of::<u16>()).ok_or_else(|| {
+                "CUDA BLAS prefill attention probs byte size overflow".to_string()
+            })?;
             if probs_bf16.size_bytes() < probs_bytes {
                 return Err(format!(
                     "CUDA BLAS prefill attention probs buffer too small: {} < {}",
@@ -3012,9 +3077,9 @@ mod imp {
             let q_bf16_len = query_count
                 .checked_mul(q_row_stride)
                 .ok_or_else(|| "CUDA BLAS prefill attention Q bf16 size overflow".to_string())?;
-            let q_bf16_bytes = q_bf16_len
-                .checked_mul(size_of::<u16>())
-                .ok_or_else(|| "CUDA BLAS prefill attention Q bf16 byte size overflow".to_string())?;
+            let q_bf16_bytes = q_bf16_len.checked_mul(size_of::<u16>()).ok_or_else(|| {
+                "CUDA BLAS prefill attention Q bf16 byte size overflow".to_string()
+            })?;
             if q_bf16.size_bytes() < q_bf16_bytes {
                 return Err(format!(
                     "CUDA BLAS prefill attention Q bf16 buffer too small: {} < {}",
@@ -3029,7 +3094,7 @@ mod imp {
             let beta = 0.0f32;
             let k_head_count = q_head_count / q_heads_per_kv;
             let logits_head_stride = query_count
-                .checked_mul(capacity)
+                .checked_mul(workspace_seq_stride)
                 .ok_or_else(|| "CUDA BLAS prefill attention head stride overflow".to_string())?;
             let batch_count = q_heads_per_kv as i32;
             let compute_type = makepad_cuda::CUBLAS_COMPUTE_32F_FAST_16BF;
@@ -3074,7 +3139,7 @@ mod imp {
                             .add(q_head_base * logits_head_stride)
                             .cast::<c_void>(),
                         makepad_cuda::CUDA_R_32F,
-                        capacity as i32,
+                        workspace_seq_stride as i32,
                         logits_head_stride as i64,
                         batch_count,
                         compute_type,
@@ -3091,13 +3156,34 @@ mod imp {
             let row_count = q_head_count
                 .checked_mul(query_count)
                 .ok_or_else(|| "CUDA BLAS prefill attention row count overflow".to_string())?;
-            if let Some(base_seq_len_device_u32) = base_seq_len_device_u32 {
+            if let Some((chunk_start_position, vision_start_position, vision_end_position)) =
+                vision_mask
+            {
+                if base_seq_len_device_u32.is_some() {
+                    return Err(
+                        "CUDA vision prefill attention does not support device sequence length"
+                            .to_string(),
+                    );
+                }
+                self.softmax_rows_causal_vision_bf16(
+                    logits,
+                    probs_bf16,
+                    query_count,
+                    row_count,
+                    workspace_seq_stride,
+                    base_seq_len,
+                    max_seq_len,
+                    chunk_start_position,
+                    vision_start_position,
+                    vision_end_position,
+                )?;
+            } else if let Some(base_seq_len_device_u32) = base_seq_len_device_u32 {
                 self.softmax_rows_causal_bf16_device_u32_ptr(
                     logits,
                     probs_bf16,
                     query_count,
                     row_count,
-                    capacity,
+                    workspace_seq_stride,
                     base_seq_len_device_u32,
                     max_seq_len,
                 )?;
@@ -3107,7 +3193,7 @@ mod imp {
                     probs_bf16,
                     query_count,
                     row_count,
-                    capacity,
+                    workspace_seq_stride,
                     base_seq_len,
                     max_seq_len,
                 )?;
@@ -3142,7 +3228,7 @@ mod imp {
                             .add(q_head_base * logits_head_stride)
                             .cast::<c_void>() as *const c_void,
                         makepad_cuda::CUDA_R_16BF,
-                        capacity as i32,
+                        workspace_seq_stride as i32,
                         logits_head_stride as i64,
                         &beta,
                         out.inner
@@ -3211,6 +3297,61 @@ mod imp {
                 None,
                 capacity,
                 max_seq_len,
+                None,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_rows_blas_f32_vision(
+            &self,
+            q: &CudaBuffer,
+            q_bf16: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            logits: &CudaBuffer,
+            probs_bf16: &CudaBuffer,
+            out: &CudaBuffer,
+            query_count: usize,
+            q_head_count: usize,
+            q_heads_per_kv: usize,
+            head_dim: usize,
+            kv_row_stride: usize,
+            q_row_stride: usize,
+            out_row_stride: usize,
+            base_seq_len: usize,
+            capacity: usize,
+            chunk_start_position: usize,
+            vision_start_position: usize,
+            vision_end_position: usize,
+        ) -> Result<(), String> {
+            let max_seq_len = base_seq_len
+                .checked_add(query_count)
+                .ok_or_else(|| "CUDA BLAS prefill attention sequence length overflow".to_string())?
+                .min(capacity);
+            self.attention_seq_softmax_weighted_sum_rows_blas_f32_inner(
+                q,
+                q_bf16,
+                key_cache,
+                value_cache,
+                logits,
+                probs_bf16,
+                out,
+                query_count,
+                q_head_count,
+                q_heads_per_kv,
+                head_dim,
+                kv_row_stride,
+                q_row_stride,
+                out_row_stride,
+                base_seq_len,
+                None,
+                capacity,
+                max_seq_len,
+                Some((
+                    chunk_start_position,
+                    vision_start_position,
+                    vision_end_position,
+                )),
             )
         }
 
@@ -3293,6 +3434,7 @@ mod imp {
                 Some(base_seq_len_device_u32),
                 capacity,
                 capacity,
+                None,
             )
         }
 
@@ -3494,6 +3636,7 @@ mod imp {
             head_dim: usize,
             kv_row_stride: usize,
             seq_len_device_u32: &CudaBuffer,
+            start_slot_device_u32: &CudaBuffer,
             capacity: usize,
             logits_row_stride: usize,
             out_row_stride: usize,
@@ -3509,6 +3652,7 @@ mod imp {
                     head_dim as u32,
                     kv_row_stride as u32,
                     seq_len_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    start_slot_device_u32.inner.ptr.as_ptr().cast::<u32>(),
                     capacity as u32,
                     logits_row_stride as u32,
                     out_row_stride as u32,
@@ -3529,6 +3673,7 @@ mod imp {
             head_dim: usize,
             kv_row_stride: usize,
             seq_len_device_u32: *const u32,
+            start_slot_device_u32: *const u32,
             capacity: usize,
             logits_row_stride: usize,
             out_row_stride: usize,
@@ -3544,6 +3689,7 @@ mod imp {
                     head_dim as u32,
                     kv_row_stride as u32,
                     seq_len_device_u32,
+                    start_slot_device_u32,
                     capacity as u32,
                     logits_row_stride as u32,
                     out_row_stride as u32,
@@ -3766,6 +3912,34 @@ mod imp {
                     out_row_stride as u32,
                     base_seq_len_device_u32.inner.ptr.as_ptr().cast::<u32>(),
                     capacity as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn flash_attn_f32_packed(
+            &self,
+            q: &CudaBuffer,
+            k: &CudaBuffer,
+            v: &CudaBuffer,
+            out: &CudaBuffer,
+            seq_len: usize,
+            num_heads: usize,
+            head_dim: usize,
+            scale: f32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_flash_attn_f32_packed(
+                    q.inner.ptr.as_ptr().cast::<f32>(),
+                    k.inner.ptr.as_ptr().cast::<f32>(),
+                    v.inner.ptr.as_ptr().cast::<f32>(),
+                    out.inner.ptr.as_ptr().cast::<f32>(),
+                    seq_len as u32,
+                    num_heads as u32,
+                    head_dim as u32,
+                    scale,
                     self.stream,
                 )
             };
@@ -4002,6 +4176,120 @@ mod imp {
         })
     }
 
+    pub fn try_matmul_nt_ggml_bytes(
+        a: &[f32],
+        bt_bytes: &[u8],
+        bt_ggml_type: u32,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Option<Vec<f32>> {
+        if bt_ggml_type != GGML_TYPE_BF16 {
+            return None;
+        }
+        if a.len() != m.checked_mul(k)? {
+            return None;
+        }
+        if bt_bytes.len() != n.checked_mul(k)?.checked_mul(size_of::<u16>())? {
+            return None;
+        }
+
+        thread_local! {
+            static F32_CUDA_BACKEND: RefCell<Option<CudaRuntime>> = const { RefCell::new(None) };
+        }
+
+        let result = F32_CUDA_BACKEND.with(|backend| -> Result<Vec<f32>, String> {
+            let mut backend = backend.borrow_mut();
+            if backend.is_none() {
+                *backend = Some(CudaRuntime::load()?);
+            }
+            let cuda = backend
+                .as_ref()
+                .ok_or_else(|| "CUDA runtime did not initialize".to_string())?;
+            let input_bytes = unsafe {
+                std::slice::from_raw_parts(a.as_ptr().cast::<u8>(), a.len() * size_of::<f32>())
+            };
+            let mut bt_f32 = Vec::with_capacity(n * k);
+            for bytes in bt_bytes.chunks_exact(size_of::<u16>()) {
+                let word = u16::from_le_bytes([bytes[0], bytes[1]]);
+                bt_f32.push(bf16_word_to_f32(word));
+            }
+            let bt_f32_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    bt_f32.as_ptr().cast::<u8>(),
+                    bt_f32.len() * size_of::<f32>(),
+                )
+            };
+            let out_len = m
+                .checked_mul(n)
+                .ok_or_else(|| "CUDA BF16 matmul output length overflow".to_string())?;
+            let input = cuda.load_bytes(input_bytes)?;
+            let weight = cuda.load_bytes(bt_f32_bytes)?;
+            let output = cuda.alloc_f32(out_len)?;
+            cuda.matmul_nt_f32(&input, &weight, &output, m, k, n)?;
+            cuda.read_f32s(&output, out_len)
+        });
+        match result {
+            Ok(out) => Some(out),
+            Err(err) => {
+                if std::env::var_os("MAKEPAD_CUDA_TRACE").is_some() {
+                    eprintln!("CUDA BF16 matmul_nt fallback failed: m={m} k={k} n={n}: {err}");
+                }
+                None
+            }
+        }
+    }
+
+    pub fn try_flash_attn_f32_packed(
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n_q: usize,
+        n_kv: usize,
+        n_head: usize,
+        d: usize,
+        scale: f32,
+    ) -> Option<Vec<f32>> {
+        if n_q != n_kv || q.len() != n_q.checked_mul(n_head)?.checked_mul(d)? {
+            return None;
+        }
+        let len = q.len();
+        if k.len() != len || v.len() != len {
+            return None;
+        }
+
+        thread_local! {
+            static FLASH_ATTN_CUDA_BACKEND: RefCell<Option<CudaRuntime>> = const { RefCell::new(None) };
+        }
+
+        let result = FLASH_ATTN_CUDA_BACKEND.with(|backend| -> Result<Vec<f32>, String> {
+            let mut backend = backend.borrow_mut();
+            if backend.is_none() {
+                *backend = Some(CudaRuntime::load()?);
+            }
+            let cuda = backend
+                .as_ref()
+                .ok_or_else(|| "CUDA runtime did not initialize".to_string())?;
+            let q_buf = cuda.load_bytes(f32s_as_bytes(q))?;
+            let k_buf = cuda.load_bytes(f32s_as_bytes(k))?;
+            let v_buf = cuda.load_bytes(f32s_as_bytes(v))?;
+            let out = cuda.alloc_f32(len)?;
+            cuda.flash_attn_f32_packed(&q_buf, &k_buf, &v_buf, &out, n_q, n_head, d, scale)?;
+            cuda.read_f32s(&out, len)
+        });
+        match result {
+            Ok(out) => Some(out),
+            Err(err) => {
+                if std::env::var_os("MAKEPAD_CUDA_TRACE").is_some() {
+                    eprintln!(
+                        "CUDA flash attention fallback failed: n={n_q} heads={n_head} d={d}: {err}"
+                    );
+                }
+                None
+            }
+        }
+    }
+
     pub fn try_matmul_nt_ggml_bytes_cached_bf16_words<F>(
         input_bf16_words: &[u16],
         bt_ggml_type: u32,
@@ -4085,6 +4373,21 @@ mod imp {
         #[cfg(not(target_endian = "little"))]
         {
             unreachable!("u16 byte reinterpreting currently assumes little-endian targets")
+        }
+    }
+
+    fn f32s_as_bytes(values: &[f32]) -> &[u8] {
+        #[cfg(target_endian = "little")]
+        unsafe {
+            std::slice::from_raw_parts(
+                values.as_ptr().cast::<u8>(),
+                values.len() * size_of::<f32>(),
+            )
+        }
+
+        #[cfg(not(target_endian = "little"))]
+        {
+            unreachable!("f32 byte reinterpreting currently assumes little-endian targets")
         }
     }
 
@@ -4717,6 +5020,7 @@ mod imp {
             _head_dim: usize,
             _kv_row_stride: usize,
             _seq_len_device_u32: &CudaBuffer,
+            _start_slot_device_u32: &CudaBuffer,
             _capacity: usize,
             _logits_row_stride: usize,
         ) -> Result<(), String> {
@@ -4734,6 +5038,7 @@ mod imp {
             _head_dim: usize,
             _kv_row_stride: usize,
             _seq_len_device_u32: *const u32,
+            _start_slot_device_u32: *const u32,
             _capacity: usize,
             _logits_row_stride: usize,
         ) -> Result<(), String> {
@@ -4863,6 +5168,7 @@ mod imp {
             _head_dim: usize,
             _kv_row_stride: usize,
             _seq_len_device_u32: &CudaBuffer,
+            _start_slot_device_u32: &CudaBuffer,
             _capacity: usize,
             _logits_row_stride: usize,
             _out_row_stride: usize,
@@ -4881,6 +5187,7 @@ mod imp {
             _head_dim: usize,
             _kv_row_stride: usize,
             _seq_len_device_u32: *const u32,
+            _start_slot_device_u32: *const u32,
             _capacity: usize,
             _logits_row_stride: usize,
             _out_row_stride: usize,
@@ -4921,6 +5228,101 @@ mod imp {
             _q_row_stride: usize,
             _out_row_stride: usize,
             _base_seq_len: usize,
+            _capacity: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_rows_blas_f32(
+            &self,
+            _q: &CudaBuffer,
+            _q_bf16: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _logits: &CudaBuffer,
+            _probs_bf16: &CudaBuffer,
+            _out: &CudaBuffer,
+            _query_count: usize,
+            _q_head_count: usize,
+            _q_heads_per_kv: usize,
+            _head_dim: usize,
+            _kv_row_stride: usize,
+            _q_row_stride: usize,
+            _out_row_stride: usize,
+            _base_seq_len: usize,
+            _capacity: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_rows_blas_f32_vision(
+            &self,
+            _q: &CudaBuffer,
+            _q_bf16: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _logits: &CudaBuffer,
+            _probs_bf16: &CudaBuffer,
+            _out: &CudaBuffer,
+            _query_count: usize,
+            _q_head_count: usize,
+            _q_heads_per_kv: usize,
+            _head_dim: usize,
+            _kv_row_stride: usize,
+            _q_row_stride: usize,
+            _out_row_stride: usize,
+            _base_seq_len: usize,
+            _capacity: usize,
+            _chunk_start_position: usize,
+            _vision_start_position: usize,
+            _vision_end_position: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_rows_blas_f32_device_u32(
+            &self,
+            _q: &CudaBuffer,
+            _q_bf16: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _logits: &CudaBuffer,
+            _probs_bf16: &CudaBuffer,
+            _out: &CudaBuffer,
+            _query_count: usize,
+            _q_head_count: usize,
+            _q_heads_per_kv: usize,
+            _head_dim: usize,
+            _kv_row_stride: usize,
+            _q_row_stride: usize,
+            _out_row_stride: usize,
+            _base_seq_len_device_u32: &CudaBuffer,
+            _capacity: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn attention_seq_softmax_weighted_sum_rows_blas_f32_device_u32_ptr(
+            &self,
+            _q: &CudaBuffer,
+            _q_bf16: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _logits: &CudaBuffer,
+            _probs_bf16: &CudaBuffer,
+            _out: &CudaBuffer,
+            _query_count: usize,
+            _q_head_count: usize,
+            _q_heads_per_kv: usize,
+            _head_dim: usize,
+            _kv_row_stride: usize,
+            _q_row_stride: usize,
+            _out_row_stride: usize,
+            _base_seq_len_device_u32: *const u32,
             _capacity: usize,
         ) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
@@ -5108,6 +5510,30 @@ mod imp {
         F: FnOnce() -> Result<Vec<u8>, String>,
     {
         Err("CUDA ggml matmul backend is unavailable".to_string())
+    }
+
+    pub fn try_matmul_nt_ggml_bytes(
+        _a: &[f32],
+        _bt_bytes: &[u8],
+        _bt_ggml_type: u32,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub fn try_flash_attn_f32_packed(
+        _q: &[f32],
+        _k: &[f32],
+        _v: &[f32],
+        _n_q: usize,
+        _n_kv: usize,
+        _n_head: usize,
+        _d: usize,
+        _scale: f32,
+    ) -> Option<Vec<f32>> {
+        None
     }
 
     pub fn try_matmul_nt_ggml_bytes_cached_bf16_words<F>(

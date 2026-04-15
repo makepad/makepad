@@ -32,7 +32,10 @@ pub fn try_matmul_nt_ggml_bytes(
     k: usize,
     n: usize,
 ) -> Option<Vec<f32>> {
-    metal::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n)
+    if let Some(out) = metal::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n) {
+        return Some(out);
+    }
+    cuda::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n)
 }
 
 pub fn try_matmul_nt_ggml_bytes_cached<F>(
@@ -114,6 +117,22 @@ where
         ));
     }
     None
+}
+
+pub fn try_flash_attn_f32_packed(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    n_q: usize,
+    n_kv: usize,
+    n_head: usize,
+    d: usize,
+    scale: f32,
+) -> Option<Vec<f32>> {
+    if let Some(out) = metal::try_flash_attn_f32_packed(q, k, v, n_q, n_kv, n_head, d, scale) {
+        return Some(out);
+    }
+    cuda::try_flash_attn_f32_packed(q, k, v, n_q, n_kv, n_head, d, scale)
 }
 
 pub fn try_get_rows_ggml_bytes(

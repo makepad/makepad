@@ -623,9 +623,10 @@ static __global__ void makepad_ggml_cuda_qkv_norm_rope_cache_f32_device_u32_kern
         float eps,
         uint32_t max_tokens) {
     const uint32_t position = *position_device_u32;
-    if (position >= max_tokens) {
+    if (max_tokens == 0) {
         return;
     }
+    const uint32_t slot = position % max_tokens;
 
     const uint32_t row = blockIdx.x;
     const uint32_t total_rows = q_head_count + 2u * k_head_count;
@@ -655,11 +656,11 @@ static __global__ void makepad_ggml_cuda_qkv_norm_rope_cache_f32_device_u32_kern
     const uint32_t half = head_dim / 2u;
     const uint32_t rotary_pairs = rotary_dim / 2u;
     const uint32_t cache_head_base = local_row * max_tokens * head_dim;
-    const uint32_t cache_key_base = cache_head_base + position * head_dim;
+    const uint32_t cache_key_base = cache_head_base + slot * head_dim;
 
     for (uint32_t idx = threadIdx.x; idx < head_dim; idx += blockDim.x) {
         if (!is_q && !is_k) {
-            value_cache[cache_head_base + idx * max_tokens + position] =
+            value_cache[cache_head_base + idx * max_tokens + slot] =
                 makepad_ggml_cuda_f32_to_bf16_bits(row_in[idx] * inv_rms);
             continue;
         }
@@ -934,6 +935,7 @@ static __global__ void makepad_ggml_cuda_attention_logits_seq_f32_device_u32_ker
         uint32_t head_dim,
         uint32_t kv_row_stride,
         const uint32_t * __restrict__ seq_len_device_u32,
+        const uint32_t * __restrict__ start_slot_device_u32,
         uint32_t capacity,
         uint32_t logits_row_stride) {
     const uint32_t q_head = blockIdx.x;
@@ -941,6 +943,7 @@ static __global__ void makepad_ggml_cuda_attention_logits_seq_f32_device_u32_ker
         return;
     }
     const uint32_t seq_len = *seq_len_device_u32;
+    const uint32_t start_slot = *start_slot_device_u32;
     const uint32_t token_base = blockIdx.y * tokens_per_block;
     if (token_base >= seq_len) {
         return;
@@ -960,7 +963,8 @@ static __global__ void makepad_ggml_cuda_attention_logits_seq_f32_device_u32_ker
         if (token >= seq_len) {
             break;
         }
-        const uint16_t * k_row = key_row + token * head_dim;
+        const uint32_t slot = (start_slot + token) % capacity;
+        const uint16_t * k_row = key_row + slot * head_dim;
         float sum = 0.0f;
         if (cache_q) {
             if (threadIdx.x < head_dim) {
@@ -989,6 +993,7 @@ static __global__ void makepad_ggml_cuda_attention_logits_seq_f32_device_u32_vec
         uint32_t head_dim,
         uint32_t kv_row_stride,
         const uint32_t * __restrict__ seq_len_device_u32,
+        const uint32_t * __restrict__ start_slot_device_u32,
         uint32_t capacity,
         uint32_t logits_row_stride) {
     const uint32_t q_head = blockIdx.x;
@@ -996,6 +1001,7 @@ static __global__ void makepad_ggml_cuda_attention_logits_seq_f32_device_u32_vec
         return;
     }
     const uint32_t seq_len = *seq_len_device_u32;
+    const uint32_t start_slot = *start_slot_device_u32;
     const uint32_t token_base = blockIdx.y * tokens_per_block;
     if (token_base >= seq_len) {
         return;
@@ -1011,7 +1017,8 @@ static __global__ void makepad_ggml_cuda_attention_logits_seq_f32_device_u32_vec
         if (token >= seq_len) {
             break;
         }
-        const uint32_t * k_row_u32 = reinterpret_cast<const uint32_t *>(key_row + token * head_dim);
+        const uint32_t slot = (start_slot + token) % capacity;
+        const uint32_t * k_row_u32 = reinterpret_cast<const uint32_t *>(key_row + slot * head_dim);
         float sum = 0.0f;
         for (uint32_t pair = threadIdx.x; pair < head_dim_pairs; pair += blockDim.x) {
             const float2 qv = q_row[pair];
@@ -1301,6 +1308,73 @@ static __global__ void makepad_ggml_cuda_softmax_rows_causal_bf16_device_u32_ker
     }
 }
 
+static __global__ void makepad_ggml_cuda_softmax_rows_causal_vision_bf16_kernel(
+        const float * __restrict__ logits,
+        uint16_t * __restrict__ probs,
+        uint32_t query_count,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t base_seq_len,
+        uint32_t max_seq_len,
+        uint32_t chunk_start_position,
+        uint32_t vision_start_position,
+        uint32_t vision_end_position) {
+    const uint32_t row = blockIdx.x;
+    if (row >= row_count) {
+        return;
+    }
+    const uint32_t query_idx = row % query_count;
+    const uint32_t query_position = chunk_start_position + query_idx;
+    const bool query_is_vision =
+        query_position >= vision_start_position && query_position <= vision_end_position;
+    const uint32_t causal_seq_len = min(base_seq_len + query_idx + 1u, max_seq_len);
+    const float * row_logits = logits + row * row_stride;
+    uint16_t * row_probs = probs + row * row_stride;
+
+    float max_value = -CUDART_INF_F;
+    for (uint32_t idx = threadIdx.x; idx < max_seq_len; idx += blockDim.x) {
+        const bool same_vision_group =
+            query_is_vision && idx >= vision_start_position && idx <= vision_end_position;
+        const bool allowed = idx < causal_seq_len || same_vision_group;
+        if (allowed) {
+            const float value = makepad_ggml_cuda_bf16_round(row_logits[idx]);
+            max_value = value > max_value ? value : max_value;
+        }
+    }
+    max_value = makepad_ggml_cuda_block_reduce_max(max_value);
+    __shared__ float shared_max;
+    __shared__ float shared_sum;
+    if (threadIdx.x == 0) {
+        shared_max = max_value;
+    }
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (uint32_t idx = threadIdx.x; idx < max_seq_len; idx += blockDim.x) {
+        const bool same_vision_group =
+            query_is_vision && idx >= vision_start_position && idx <= vision_end_position;
+        const bool allowed = idx < causal_seq_len || same_vision_group;
+        if (allowed) {
+            sum += expf(makepad_ggml_cuda_bf16_round(row_logits[idx]) - shared_max);
+        }
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    if (threadIdx.x == 0) {
+        shared_sum = sum;
+    }
+    __syncthreads();
+
+    for (uint32_t idx = threadIdx.x; idx < max_seq_len; idx += blockDim.x) {
+        const bool same_vision_group =
+            query_is_vision && idx >= vision_start_position && idx <= vision_end_position;
+        const bool allowed = idx < causal_seq_len || same_vision_group;
+        const float value = allowed
+            ? expf(makepad_ggml_cuda_bf16_round(row_logits[idx]) - shared_max) / shared_sum
+            : 0.0f;
+        row_probs[idx] = makepad_ggml_cuda_f32_to_bf16_bits(value);
+    }
+}
+
 static __global__ void makepad_ggml_cuda_attention_weighted_sum_f32_kernel(
         const float * __restrict__ probs,
         const uint16_t * __restrict__ value_cache,
@@ -1434,6 +1508,7 @@ static __global__ void makepad_ggml_cuda_attention_softmax_weighted_sum_f32_devi
         uint32_t head_dim,
         uint32_t kv_row_stride,
         const uint32_t * __restrict__ seq_len_device_u32,
+        const uint32_t * __restrict__ start_slot_device_u32,
         uint32_t capacity,
         uint32_t logits_row_stride,
         uint32_t out_row_stride) {
@@ -1445,6 +1520,7 @@ static __global__ void makepad_ggml_cuda_attention_softmax_weighted_sum_f32_devi
         return;
     }
     const bool valid_dim = dim < head_dim;
+    const uint32_t start_slot = *start_slot_device_u32;
 
     const float * row_logits = logits + q_head * logits_row_stride;
     float max_value = -CUDART_INF_F;
@@ -1482,7 +1558,8 @@ static __global__ void makepad_ggml_cuda_attention_softmax_weighted_sum_f32_devi
         float acc = 0.0f;
         for (uint32_t token = 0; token < seq_len; ++token) {
             const float prob = shared_probs[token];
-            const float value = makepad_ggml_cuda_bf16_to_f32(value_row[dim * capacity + token]);
+            const uint32_t slot = (start_slot + token) % capacity;
+            const float value = makepad_ggml_cuda_bf16_to_f32(value_row[dim * capacity + slot]);
             acc += prob * value;
         }
         out[q_head * out_row_stride + dim] = makepad_ggml_cuda_bf16_round(acc);
@@ -1497,6 +1574,7 @@ static __global__ void makepad_ggml_cuda_attention_softmax_weighted_sum_pair_f32
         uint32_t head_dim,
         uint32_t kv_row_stride,
         const uint32_t * __restrict__ seq_len_device_u32,
+        const uint32_t * __restrict__ start_slot_device_u32,
         uint32_t capacity,
         uint32_t logits_row_stride,
         uint32_t out_row_stride) {
@@ -1505,6 +1583,7 @@ static __global__ void makepad_ggml_cuda_attention_softmax_weighted_sum_pair_f32
     float * shared_probs_1 = shared_probs + capacity;
 
     const uint32_t seq_len = *seq_len_device_u32;
+    const uint32_t start_slot = *start_slot_device_u32;
     const uint32_t kv_head = blockIdx.y;
     const uint32_t dim = blockIdx.x * blockDim.x + threadIdx.x;
     if (kv_head >= kv_head_count) {
@@ -1562,7 +1641,8 @@ static __global__ void makepad_ggml_cuda_attention_softmax_weighted_sum_pair_f32
         float acc_0 = 0.0f;
         float acc_1 = 0.0f;
         for (uint32_t token = 0; token < seq_len; ++token) {
-            const float value = makepad_ggml_cuda_bf16_to_f32(value_row[dim * capacity + token]);
+            const uint32_t slot = (start_slot + token) % capacity;
+            const float value = makepad_ggml_cuda_bf16_to_f32(value_row[dim * capacity + slot]);
             acc_0 += shared_probs_0[token] * value;
             acc_1 += shared_probs_1[token] * value;
         }
@@ -1579,6 +1659,7 @@ static __global__ void makepad_ggml_cuda_attention_weighted_sum_transposed_pair_
         uint32_t head_dim,
         uint32_t kv_row_stride,
         const uint32_t * __restrict__ seq_len_device_u32,
+        const uint32_t * __restrict__ start_slot_device_u32,
         uint32_t capacity,
         uint32_t probs_row_stride,
         uint32_t out_row_stride) {
@@ -1589,6 +1670,7 @@ static __global__ void makepad_ggml_cuda_attention_weighted_sum_transposed_pair_
     }
 
     const uint32_t seq_len = *seq_len_device_u32;
+    const uint32_t start_slot = *start_slot_device_u32;
     const uint32_t q_head_0 = kv_head * 2;
     const uint32_t q_head_1 = q_head_0 + 1;
     const float * row_probs_0 = probs + q_head_0 * probs_row_stride;
@@ -1598,7 +1680,8 @@ static __global__ void makepad_ggml_cuda_attention_weighted_sum_transposed_pair_
     float acc_0 = 0.0f;
     float acc_1 = 0.0f;
     for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
-        const float value = makepad_ggml_cuda_bf16_to_f32(value_row[token]);
+        const uint32_t slot = (start_slot + token) % capacity;
+        const float value = makepad_ggml_cuda_bf16_to_f32(value_row[slot]);
         acc_0 += row_probs_0[token] * value;
         acc_1 += row_probs_1[token] * value;
     }
@@ -1621,6 +1704,7 @@ static __global__ void makepad_ggml_cuda_attention_weighted_sum_transposed_group
         uint32_t head_dim,
         uint32_t kv_row_stride,
         const uint32_t * __restrict__ seq_len_device_u32,
+        const uint32_t * __restrict__ start_slot_device_u32,
         uint32_t capacity,
         uint32_t probs_row_stride,
         uint32_t out_row_stride) {
@@ -1631,6 +1715,7 @@ static __global__ void makepad_ggml_cuda_attention_weighted_sum_transposed_group
     }
 
     const uint32_t seq_len = *seq_len_device_u32;
+    const uint32_t start_slot = *start_slot_device_u32;
     const uint32_t q_head_base = kv_head * 8;
     const float * row_probs[8];
 #pragma unroll
@@ -1641,7 +1726,8 @@ static __global__ void makepad_ggml_cuda_attention_weighted_sum_transposed_group
 
     float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
-        const float value = makepad_ggml_cuda_bf16_to_f32(value_row[token]);
+        const uint32_t slot = (start_slot + token) % capacity;
+        const float value = makepad_ggml_cuda_bf16_to_f32(value_row[slot]);
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
             acc[i] += row_probs[i][token] * value;
@@ -1948,7 +2034,10 @@ static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows
         return;
     }
 
-    const uint32_t seq_len = min(base_seq_len + query_idx + 1u, capacity);
+    const uint32_t query_seq_len = base_seq_len + query_idx + 1u;
+    const uint32_t seq_len = min(query_seq_len, capacity);
+    const bool wraps = query_seq_len > capacity;
+    const uint32_t start_slot = wraps ? (query_seq_len - seq_len) % capacity : 0u;
     extern __shared__ float shared_logits[];
     const uint32_t kv_head = q_head / q_heads_per_kv;
     const float * q_row = q + query_idx * q_row_stride + q_head * head_dim;
@@ -1958,7 +2047,8 @@ static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows
     const float q_value = cache_q && threadIdx.x < head_dim ? q_row[threadIdx.x] : 0.0f;
 
     for (uint32_t token = 0; token < seq_len; ++token) {
-        const uint16_t * k_row = key_row + token * head_dim;
+        const uint32_t slot = wraps ? (start_slot + token) % capacity : token;
+        const uint16_t * k_row = key_row + slot * head_dim;
         float sum = 0.0f;
         if (cache_q) {
             if (threadIdx.x < head_dim) {
@@ -2010,7 +2100,8 @@ static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows
         float acc = 0.0f;
         for (uint32_t token = 0; token < seq_len; ++token) {
             const float prob = shared_logits[token];
-            const float value = makepad_ggml_cuda_bf16_to_f32(value_row[dim * capacity + token]);
+            const uint32_t slot = wraps ? (start_slot + token) % capacity : token;
+            const float value = makepad_ggml_cuda_bf16_to_f32(value_row[dim * capacity + slot]);
             acc = makepad_ggml_cuda_bf16_round(acc + makepad_ggml_cuda_bf16_round(prob * value));
         }
         out_row[dim] = acc;
@@ -2038,7 +2129,10 @@ static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows
     }
 
     const uint32_t base_seq_len = *base_seq_len_device_u32;
-    const uint32_t seq_len = min(base_seq_len + query_idx + 1u, capacity);
+    const uint32_t query_seq_len = base_seq_len + query_idx + 1u;
+    const uint32_t seq_len = min(query_seq_len, capacity);
+    const bool wraps = query_seq_len > capacity;
+    const uint32_t start_slot = wraps ? (query_seq_len - seq_len) % capacity : 0u;
     extern __shared__ float shared_logits[];
     const uint32_t kv_head = q_head / q_heads_per_kv;
     const float * q_row = q + query_idx * q_row_stride + q_head * head_dim;
@@ -2048,7 +2142,8 @@ static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows
     const float q_value = cache_q && threadIdx.x < head_dim ? q_row[threadIdx.x] : 0.0f;
 
     for (uint32_t token = 0; token < seq_len; ++token) {
-        const uint16_t * k_row = key_row + token * head_dim;
+        const uint32_t slot = wraps ? (start_slot + token) % capacity : token;
+        const uint16_t * k_row = key_row + slot * head_dim;
         float sum = 0.0f;
         if (cache_q) {
             if (threadIdx.x < head_dim) {
@@ -2100,8 +2195,76 @@ static __global__ void makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows
         float acc = 0.0f;
         for (uint32_t token = 0; token < seq_len; ++token) {
             const float prob = shared_logits[token];
-            const float value = makepad_ggml_cuda_bf16_to_f32(value_row[dim * capacity + token]);
+            const uint32_t slot = wraps ? (start_slot + token) % capacity : token;
+            const float value = makepad_ggml_cuda_bf16_to_f32(value_row[dim * capacity + slot]);
             acc = makepad_ggml_cuda_bf16_round(acc + makepad_ggml_cuda_bf16_round(prob * value));
+        }
+        out_row[dim] = acc;
+    }
+}
+
+static __global__ void makepad_ggml_cuda_flash_attn_f32_packed_kernel(
+        const float * __restrict__ q,
+        const float * __restrict__ k,
+        const float * __restrict__ v,
+        float * __restrict__ out,
+        uint32_t seq_len,
+        uint32_t num_heads,
+        uint32_t head_dim,
+        float scale) {
+    const uint32_t head = blockIdx.x;
+    const uint32_t query = blockIdx.y;
+    if (head >= num_heads || query >= seq_len) {
+        return;
+    }
+
+    extern __shared__ float shared_logits[];
+    const uint32_t row_stride = num_heads * head_dim;
+    const float * q_row = q + query * row_stride + head * head_dim;
+    for (uint32_t token = 0; token < seq_len; ++token) {
+        const float * k_row = k + token * row_stride + head * head_dim;
+        float sum = 0.0f;
+        for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
+            sum += q_row[dim] * k_row[dim];
+        }
+        sum = makepad_ggml_cuda_block_reduce_sum(sum);
+        if (threadIdx.x == 0) {
+            shared_logits[token] = sum * scale;
+        }
+        __syncthreads();
+    }
+
+    float max_value = -CUDART_INF_F;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        const float value = shared_logits[token];
+        max_value = value > max_value ? value : max_value;
+    }
+    max_value = makepad_ggml_cuda_block_reduce_max(max_value);
+
+    __shared__ float shared_max;
+    __shared__ float shared_sum;
+    if (threadIdx.x == 0) {
+        shared_max = max_value;
+    }
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (uint32_t token = threadIdx.x; token < seq_len; token += blockDim.x) {
+        sum += expf(shared_logits[token] - shared_max);
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    if (threadIdx.x == 0) {
+        shared_sum = sum;
+    }
+    __syncthreads();
+
+    float * out_row = out + query * row_stride + head * head_dim;
+    for (uint32_t dim = threadIdx.x; dim < head_dim; dim += blockDim.x) {
+        float acc = 0.0f;
+        for (uint32_t token = 0; token < seq_len; ++token) {
+            const float prob = expf(shared_logits[token] - shared_max) / shared_sum;
+            const float value = v[token * row_stride + head * head_dim + dim];
+            acc += prob * value;
         }
         out_row[dim] = acc;
     }
@@ -2822,6 +2985,7 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_logits_seq_f32_device_u32(
         uint32_t head_dim,
         uint32_t kv_row_stride,
         const uint32_t * seq_len_device_u32,
+        const uint32_t * start_slot_device_u32,
         uint32_t capacity,
         uint32_t logits_row_stride,
         cudaStream_t stream) {
@@ -2831,7 +2995,7 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_logits_seq_f32_device_u32(
     constexpr uint32_t tokens_per_block = 4;
     const dim3 grid(q_head_count, (capacity + tokens_per_block - 1) / tokens_per_block, 1);
     makepad_ggml_cuda_attention_logits_seq_f32_device_u32_vec2_kernel<tokens_per_block><<<grid, 128, 0, stream>>>(
-        q, key_cache, logits, q_head_count, q_heads_per_kv, head_dim, kv_row_stride, seq_len_device_u32, capacity, logits_row_stride);
+        q, key_cache, logits, q_head_count, q_heads_per_kv, head_dim, kv_row_stride, seq_len_device_u32, start_slot_device_u32, capacity, logits_row_stride);
     return cudaGetLastError();
 }
 
@@ -2931,6 +3095,39 @@ extern "C" cudaError_t makepad_ggml_cuda_softmax_rows_causal_bf16_device_u32(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t makepad_ggml_cuda_softmax_rows_causal_vision_bf16(
+        const float * logits,
+        uint16_t * probs,
+        uint32_t query_count,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t base_seq_len,
+        uint32_t max_seq_len,
+        uint32_t chunk_start_position,
+        uint32_t vision_start_position,
+        uint32_t vision_end_position,
+        cudaStream_t stream) {
+    if (query_count == 0
+            || row_count == 0
+            || row_stride < max_seq_len
+            || max_seq_len == 0
+            || vision_start_position > vision_end_position) {
+        return cudaErrorInvalidValue;
+    }
+    makepad_ggml_cuda_softmax_rows_causal_vision_bf16_kernel<<<row_count, 256, 0, stream>>>(
+        logits,
+        probs,
+        query_count,
+        row_count,
+        row_stride,
+        base_seq_len,
+        max_seq_len,
+        chunk_start_position,
+        vision_start_position,
+        vision_end_position);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t makepad_ggml_cuda_attention_weighted_sum_f32(
         const float * probs,
         const uint16_t * value_cache,
@@ -3012,6 +3209,7 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_softmax_weighted_sum_f32_devi
         uint32_t head_dim,
         uint32_t kv_row_stride,
         const uint32_t * seq_len_device_u32,
+        const uint32_t * start_slot_device_u32,
         uint32_t capacity,
         uint32_t logits_row_stride,
         uint32_t out_row_stride,
@@ -3030,12 +3228,23 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_softmax_weighted_sum_f32_devi
         const dim3 pv_block(128, 1, 1);
         const dim3 pv_grid(head_dim, q_head_count / 2, 1);
         makepad_ggml_cuda_attention_weighted_sum_transposed_pair_f32_device_u32_kernel<<<pv_grid, pv_block, 0, stream>>>(
-            logits, value_cache, out, q_head_count / 2, head_dim, kv_row_stride, seq_len_device_u32, capacity, logits_row_stride, out_row_stride);
+            logits, value_cache, out, q_head_count / 2, head_dim, kv_row_stride, seq_len_device_u32, start_slot_device_u32, capacity, logits_row_stride, out_row_stride);
+    } else if (q_heads_per_kv == 8 && (q_head_count % 8) == 0) {
+        makepad_ggml_cuda_softmax_rows_f32_device_u32_kernel<<<q_head_count, 256, 0, stream>>>(
+            logits, const_cast<float *>(logits), q_head_count, logits_row_stride, seq_len_device_u32);
+        cudaError_t status = cudaGetLastError();
+        if (status != cudaSuccess) {
+            return status;
+        }
+        const dim3 pv_block(128, 1, 1);
+        const dim3 pv_grid(head_dim, q_head_count / 8, 1);
+        makepad_ggml_cuda_attention_weighted_sum_transposed_group8_f32_device_u32_kernel<<<pv_grid, pv_block, 0, stream>>>(
+            logits, value_cache, out, q_head_count / 8, head_dim, kv_row_stride, seq_len_device_u32, start_slot_device_u32, capacity, logits_row_stride, out_row_stride);
     } else {
         const dim3 grid((head_dim + block.x - 1) / block.x, q_head_count, 1);
         const size_t shared_bytes = static_cast<size_t>(capacity) * sizeof(float);
         makepad_ggml_cuda_attention_softmax_weighted_sum_f32_device_u32_kernel<<<grid, block, shared_bytes, stream>>>(
-            logits, value_cache, out, q_head_count, q_heads_per_kv, head_dim, kv_row_stride, seq_len_device_u32, capacity, logits_row_stride, out_row_stride);
+            logits, value_cache, out, q_head_count, q_heads_per_kv, head_dim, kv_row_stride, seq_len_device_u32, start_slot_device_u32, capacity, logits_row_stride, out_row_stride);
     }
     return cudaGetLastError();
 }
@@ -3162,6 +3371,27 @@ extern "C" cudaError_t makepad_ggml_cuda_attention_seq_softmax_weighted_sum_rows
         out_row_stride,
         base_seq_len_device_u32,
         capacity);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_flash_attn_f32_packed(
+        const float * q,
+        const float * k,
+        const float * v,
+        float * out,
+        uint32_t seq_len,
+        uint32_t num_heads,
+        uint32_t head_dim,
+        float scale,
+        cudaStream_t stream) {
+    if (seq_len == 0 || num_heads == 0 || head_dim == 0) {
+        return cudaErrorInvalidValue;
+    }
+    const dim3 grid(num_heads, seq_len, 1);
+    const dim3 block(256, 1, 1);
+    const size_t shared_bytes = static_cast<size_t>(seq_len) * sizeof(float);
+    makepad_ggml_cuda_flash_attn_f32_packed_kernel<<<grid, block, shared_bytes, stream>>>(
+        q, k, v, out, seq_len, num_heads, head_dim, scale);
     return cudaGetLastError();
 }
 
