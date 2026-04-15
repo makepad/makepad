@@ -132,10 +132,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(config) = &inspection.t5xxl {
         println!(
             "t5xxl config: vocab={} d_model={} layers={} ffn={}",
-            config.vocab_size,
-            config.model_dim,
-            config.layer_count,
-            config.feedforward_dim
+            config.vocab_size, config.model_dim, config.layer_count, config.feedforward_dim
         );
     }
 

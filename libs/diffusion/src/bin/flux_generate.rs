@@ -1,3 +1,4 @@
+use makepad_diffusion::backend::{new_runtime, runtime_available};
 use makepad_diffusion::comfy::FluxWorkflow;
 use makepad_diffusion::flux::{
     pack_flux_latents_nchw, unpack_flux_latents_nchw, ComfyModelRoots, FluxLatentShape,
@@ -7,15 +8,12 @@ use makepad_diffusion::flux_schedule::{
     euler_step, FluxSchedule, FLUX_VAE_SCALING_FACTOR, FLUX_VAE_SHIFT_FACTOR,
 };
 use makepad_diffusion::flux_text::{
-    FluxCompiledTextEncodersMetal, FluxConditioning, FluxLoadedTextEncoders, FluxTokenizedPrompts,
+    FluxCompiledTextEncoders, FluxConditioning, FluxLoadedTextEncoders, FluxTokenizedPrompts,
 };
 use makepad_diffusion::flux_transformer::{
-    CompiledFluxTransformerMetal, FluxTransformerCompileTiming, LoadedFluxTransformerWeights,
+    CompiledFluxTransformer, FluxTransformerCompileTiming, LoadedFluxTransformerWeights,
 };
-use makepad_diffusion::flux_vae::{
-    CompiledFluxVaeMetal, FluxVaeStageOutput, LoadedFluxVaeWeights,
-};
-use makepad_ggml::backend::metal::MetalRuntime;
+use makepad_diffusion::flux_vae::{CompiledFluxVae, FluxVaeStageOutput, LoadedFluxVaeWeights};
 use makepad_zune_core::bit_depth::BitDepth;
 use makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_core::options::EncoderOptions;
@@ -37,9 +35,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow_path = env::args().nth(1).unwrap_or_else(|| usage());
     let root = env::args().nth(2).unwrap_or_else(|| usage());
     let output_path = env::args().nth(3).unwrap_or_else(|| usage());
-    let width = env::args().nth(4).map(|value| value.parse::<u32>()).transpose()?;
-    let height = env::args().nth(5).map(|value| value.parse::<u32>()).transpose()?;
-    let steps = env::args().nth(6).map(|value| value.parse::<u32>()).transpose()?;
+    let width = env::args()
+        .nth(4)
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
+    let height = env::args()
+        .nth(5)
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
+    let steps = env::args()
+        .nth(6)
+        .map(|value| value.parse::<u32>())
+        .transpose()?;
 
     let plan_start = Instant::now();
     let workflow = FluxWorkflow::from_file(&workflow_path)?;
@@ -47,16 +54,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plan = FluxPromptToImagePlan::from_workflow(&workflow, &roots)?;
     let plan_ms = elapsed_ms(plan_start);
     let runtime_start = Instant::now();
-    let shared_runtime =
-        MetalRuntime::new().map_err(|err| format!("metal runtime init failed: {err}"))?;
-    let runtime_init_ms = elapsed_ms(runtime_start);
-    let skip_denoise = env::var_os("FLUX_SKIP_DENOISE").is_some();
-    let mut conditioning_source = if skip_denoise {
-        "skipped"
+    let shared_runtime = if runtime_available() {
+        Some(new_runtime().map_err(|err| format!("backend runtime init failed: {err}"))?)
     } else {
-        "native"
-    }
-    .to_string();
+        None
+    };
+    let runtime_init_ms = if shared_runtime.is_some() {
+        elapsed_ms(runtime_start)
+    } else {
+        0.0
+    };
+    let skip_denoise = env::var_os("FLUX_SKIP_DENOISE").is_some();
+    let mut conditioning_source = if skip_denoise { "skipped" } else { "native" }.to_string();
     let mut t5_backend = "skipped".to_string();
     let mut conditioning_override_ms = 0.0;
     let mut text_tokenize_ms = 0.0;
@@ -81,11 +90,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut text_weights = FluxLoadedTextEncoders::load_from_plan(&plan)?;
                 text_load_ms = elapsed_ms(text_load_start);
                 let text_compile_start = Instant::now();
-                let text = FluxCompiledTextEncodersMetal::compile_with_runtime(
-                    shared_runtime.clone(),
-                    &mut text_weights,
-                    &prompts,
-                )?;
+                let text = match shared_runtime.clone() {
+                    Some(runtime) => FluxCompiledTextEncoders::compile_with_runtime(
+                        runtime,
+                        &mut text_weights,
+                        &prompts,
+                    )?,
+                    None => FluxCompiledTextEncoders::compile(&mut text_weights, &prompts)?,
+                };
                 text_compile_ms = elapsed_ms(text_compile_start);
                 t5_backend = text.t5_backend_name().to_string();
                 let text_execute_start = Instant::now();
@@ -97,10 +109,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if let Some(conditioning) = conditioning.as_ref() {
         if let Some(compare_dir) = env::var_os("FLUX_COMPARE_COND_DIR") {
-            let reference_conditioning =
-                load_conditioning_from_dir(Path::new(&compare_dir))?;
-            let (clip_max_abs, clip_mean_abs) =
-                diff_stats(&conditioning.clip_pooled, &reference_conditioning.clip_pooled)?;
+            let reference_conditioning = load_conditioning_from_dir(Path::new(&compare_dir))?;
+            let (clip_max_abs, clip_mean_abs) = diff_stats(
+                &conditioning.clip_pooled,
+                &reference_conditioning.clip_pooled,
+            )?;
             let (t5_max_abs, t5_mean_abs) = diff_stats(
                 &conditioning.t5_hidden_states,
                 &reference_conditioning.t5_hidden_states,
@@ -144,6 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut transformer_graph_build_ms = 0.0;
     let mut transformer_graph_prepare_ms = 0.0;
     let mut transformer_session_create_ms = 0.0;
+    let mut transformer_backend = "skipped".to_string();
     let mut denoise_ms = 0.0;
     if let Some(conditioning) = conditioning.as_ref() {
         let transformer_load_start = Instant::now();
@@ -155,13 +169,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for step_index in 0..steps {
                 let sigma = schedule.sigmas[step_index];
                 let sigma_next = schedule.sigmas[step_index + 1];
-                let (transformer_compiled, compile_timing) =
-                    CompiledFluxTransformerMetal::compile_with_runtime_profiled(
-                    shared_runtime.clone(),
-                    &mut transformer,
-                    conditioning,
-                    latent_shape,
-                )?;
+                let (transformer_compiled, compile_timing) = match shared_runtime.clone() {
+                    Some(runtime) => CompiledFluxTransformer::compile_with_runtime_profiled(
+                        runtime,
+                        &mut transformer,
+                        conditioning,
+                        latent_shape,
+                    )?,
+                    None => CompiledFluxTransformer::compile_profiled(
+                        &mut transformer,
+                        conditioning,
+                        latent_shape,
+                    )?,
+                };
+                transformer_backend = transformer_compiled.backend_name().to_string();
                 accumulate_transformer_compile_timing(
                     &compile_timing,
                     &mut transformer_compile_ms,
@@ -180,13 +201,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             denoise_ms = elapsed_ms(denoise_start);
         } else {
-            let (transformer_compiled, compile_timing) =
-                CompiledFluxTransformerMetal::compile_with_runtime_profiled(
-                shared_runtime.clone(),
-                &mut transformer,
-                conditioning,
-                latent_shape,
-            )?;
+            let (transformer_compiled, compile_timing) = match shared_runtime.clone() {
+                Some(runtime) => CompiledFluxTransformer::compile_with_runtime_profiled(
+                    runtime,
+                    &mut transformer,
+                    conditioning,
+                    latent_shape,
+                )?,
+                None => CompiledFluxTransformer::compile_profiled(
+                    &mut transformer,
+                    conditioning,
+                    latent_shape,
+                )?,
+            };
+            transformer_backend = transformer_compiled.backend_name().to_string();
             accumulate_transformer_compile_timing(
                 &compile_timing,
                 &mut transformer_compile_ms,
@@ -243,9 +271,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut vae = LoadedFluxVaeWeights::load(vae_path)?;
     let vae_load_ms = elapsed_ms(vae_load_start);
     let vae_compile_start = Instant::now();
-    let vae_compiled =
-        CompiledFluxVaeMetal::compile_with_runtime(shared_runtime, &mut vae, latent_shape)?;
+    let vae_compiled = match shared_runtime {
+        Some(runtime) => CompiledFluxVae::compile_with_runtime(runtime, &mut vae, latent_shape)?,
+        None => CompiledFluxVae::compile(&mut vae, latent_shape)?,
+    };
     let vae_compile_ms = elapsed_ms(vae_compile_start);
+    let vae_backend = vae_compiled.backend_name().to_string();
     let dump_vae_stages = env::var_os("FLUX_DEBUG_VAE_STAGES").is_some();
     let vae_execute_start = Instant::now();
     let (image, stage_outputs) = if dump_vae_stages {
@@ -282,6 +313,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("output: {}", output_path);
     println!("conditioning.source: {}", conditioning_source);
     println!("t5xxl backend: {}", t5_backend);
+    println!("transformer backend: {}", transformer_backend);
+    println!("vae backend: {}", vae_backend);
     println!(
         "size: {}x{} steps={} seed={} guidance={}",
         width, height, steps, plan.generation.seed, plan.generation.guidance
@@ -289,7 +322,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("prompt: {}", plan.prompts.t5xxl);
     println!("timing.plan_ms={:.3}", plan_ms);
     println!("timing.runtime_init_ms={:.3}", runtime_init_ms);
-    println!("timing.conditioning_override_ms={:.3}", conditioning_override_ms);
+    println!(
+        "timing.conditioning_override_ms={:.3}",
+        conditioning_override_ms
+    );
     println!("timing.text_tokenize_ms={:.3}", text_tokenize_ms);
     println!("timing.text_load_ms={:.3}", text_load_ms);
     println!("timing.text_compile_ms={:.3}", text_compile_ms);
@@ -297,7 +333,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("timing.noise_ms={:.3}", noise_ms);
     println!("timing.pack_ms={:.3}", pack_ms);
     println!("timing.transformer_load_ms={:.3}", transformer_load_ms);
-    println!("timing.transformer_compile_ms={:.3}", transformer_compile_ms);
+    println!(
+        "timing.transformer_compile_ms={:.3}",
+        transformer_compile_ms
+    );
     println!(
         "timing.transformer_graph_build_ms={:.3}",
         transformer_graph_build_ms
@@ -371,11 +410,7 @@ fn parse_meta_usize(text: &str, key: &str) -> Option<usize> {
 
 fn f32_bytes_to_vec(bytes: &[u8]) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     if bytes.len() % std::mem::size_of::<f32>() != 0 {
-        return Err(format!(
-            "expected f32 byte length, got {} bytes",
-            bytes.len()
-        )
-        .into());
+        return Err(format!("expected f32 byte length, got {} bytes", bytes.len()).into());
     }
     Ok(bytes
         .chunks_exact(4)
@@ -477,7 +512,11 @@ fn nchw_to_whcb(
     Ok(input.to_vec())
 }
 
-fn encode_png_rgb(image_whcb: &[f32], width: usize, height: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn encode_png_rgb(
+    image_whcb: &[f32],
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let expected = width * height * 3;
     if image_whcb.len() != expected {
         return Err(format!(
@@ -495,7 +534,7 @@ fn encode_png_rgb(image_whcb: &[f32], width: usize, height: usize) -> Result<Vec
             let r = to_u8(image_whcb[pixel]);
             let g = to_u8(image_whcb[plane + pixel]);
             let b = to_u8(image_whcb[plane * 2 + pixel]);
-        pixels.extend_from_slice(&[r, g, b, 255]);
+            pixels.extend_from_slice(&[r, g, b, 255]);
         }
     }
     let options = EncoderOptions::default()
@@ -607,7 +646,12 @@ fn encode_activation_rms_png(
     encode_png_rgba_bytes(&pixels, width, height)
 }
 
-fn activation_half_stats(values: &[f32], width: usize, height: usize, channels: usize) -> (f32, f32, f32) {
+fn activation_half_stats(
+    values: &[f32],
+    width: usize,
+    height: usize,
+    channels: usize,
+) -> (f32, f32, f32) {
     let plane = width * height;
     let split = width / 2;
     let mut left_sum = 0.0f32;

@@ -55,8 +55,8 @@ pub struct FluxWorkflow {
 impl FluxWorkflow {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let text = fs::read_to_string(&path)
-            .map_err(|err| DiffusionError::io(&path, err.to_string()))?;
+        let text =
+            fs::read_to_string(&path).map_err(|err| DiffusionError::io(&path, err.to_string()))?;
         Self::from_json_str(&path, &text)
     }
 
@@ -99,7 +99,8 @@ impl FluxWorkflow {
         }
 
         if let Some((_, vae_decode_node)) = find_first_node(&nodes, "VAEDecode") {
-            if let Some(vae_node) = input_ref_node_opt(&nodes, vae_decode_node, "vae", &path_hint)? {
+            if let Some(vae_node) = input_ref_node_opt(&nodes, vae_decode_node, "vae", &path_hint)?
+            {
                 if node_class_type(vae_node, &path_hint)? == "VAELoader" {
                     files.vae_name = Some(input_string(vae_node, "vae_name", &path_hint)?);
                 }
@@ -201,11 +202,16 @@ fn normalize_prompt(text: &str) -> String {
         .to_string()
 }
 
-fn find_first_node<'a>(nodes: &'a WorkflowNodes, class_type: &str) -> Option<(&'a str, &'a JsonObject)> {
+fn find_first_node<'a>(
+    nodes: &'a WorkflowNodes,
+    class_type: &str,
+) -> Option<(&'a str, &'a JsonObject)> {
     nodes.iter().find_map(|(id, value)| {
         let node = value.object()?;
         match node.get("class_type") {
-            Some(JsonValue::String(node_class)) if node_class == class_type => Some((id.as_str(), node)),
+            Some(JsonValue::String(node_class)) if node_class == class_type => {
+                Some((id.as_str(), node))
+            }
             _ => None,
         }
     })
@@ -233,7 +239,11 @@ fn input_ref_node_opt<'a>(
     Ok(Some(node_object(nodes, &node_id, path_hint)?))
 }
 
-fn node_object<'a>(nodes: &'a WorkflowNodes, node_id: &str, path_hint: &Path) -> Result<&'a JsonObject> {
+fn node_object<'a>(
+    nodes: &'a WorkflowNodes,
+    node_id: &str,
+    path_hint: &Path,
+) -> Result<&'a JsonObject> {
     let value = nodes.get(node_id).ok_or_else(|| {
         DiffusionError::workflow(format!(
             "workflow {} references missing node '{}'",
@@ -251,9 +261,9 @@ fn node_object<'a>(nodes: &'a WorkflowNodes, node_id: &str, path_hint: &Path) ->
 }
 
 fn node_class_type<'a>(node: &'a JsonObject, path_hint: &Path) -> Result<&'a str> {
-    let value = node
-        .get("class_type")
-        .ok_or_else(|| DiffusionError::workflow(format!("missing class_type in {}", path_hint.display())))?;
+    let value = node.get("class_type").ok_or_else(|| {
+        DiffusionError::workflow(format!("missing class_type in {}", path_hint.display()))
+    })?;
     json_str(value).ok_or_else(|| {
         DiffusionError::workflow(format!(
             "class_type must be a string in {}",
@@ -328,15 +338,21 @@ fn input_ref_id_opt(node: &JsonObject, key: &str, path_hint: &Path) -> Result<Op
 }
 
 fn input_value<'a>(node: &'a JsonObject, key: &str, path_hint: &Path) -> Result<&'a JsonValue> {
-    inputs_object(node, path_hint)?
-        .get(key)
-        .ok_or_else(|| DiffusionError::workflow(format!("missing input '{}' in {}", key, path_hint.display())))
+    inputs_object(node, path_hint)?.get(key).ok_or_else(|| {
+        DiffusionError::workflow(format!(
+            "missing input '{}' in {}",
+            key,
+            path_hint.display()
+        ))
+    })
 }
 
 fn inputs_object<'a>(node: &'a JsonObject, path_hint: &Path) -> Result<&'a JsonObject> {
     node.get("inputs")
         .and_then(JsonValue::object)
-        .ok_or_else(|| DiffusionError::workflow(format!("missing inputs object in {}", path_hint.display())))
+        .ok_or_else(|| {
+            DiffusionError::workflow(format!("missing inputs object in {}", path_hint.display()))
+        })
 }
 
 fn json_str(value: &JsonValue) -> Option<&str> {
@@ -391,10 +407,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(workflow.kind, FluxWorkflowKind::SplitModel);
-        assert_eq!(workflow.files.unet_name.as_deref(), Some("flux1-dev.safetensors"));
+        assert_eq!(
+            workflow.files.unet_name.as_deref(),
+            Some("flux1-dev.safetensors")
+        );
         assert_eq!(workflow.files.vae_name.as_deref(), Some("ae.safetensors"));
-        assert_eq!(workflow.files.clip_l_name.as_deref(), Some("clip_l.safetensors"));
-        assert_eq!(workflow.files.t5xxl_name.as_deref(), Some("t5xxl_fp16.safetensors"));
+        assert_eq!(
+            workflow.files.clip_l_name.as_deref(),
+            Some("clip_l.safetensors")
+        );
+        assert_eq!(
+            workflow.files.t5xxl_name.as_deref(),
+            Some("t5xxl_fp16.safetensors")
+        );
         assert_eq!(workflow.prompts.clip_l, "test");
         assert_eq!(workflow.prompts.t5xxl, "test");
         assert_eq!(workflow.prompts.negative, "");

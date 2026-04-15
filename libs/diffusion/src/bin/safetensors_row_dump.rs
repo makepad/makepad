@@ -17,11 +17,12 @@ fn bf16_to_f32(bits: u16) -> f32 {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = env::args().nth(1).unwrap_or_else(|| usage());
     let tensor_name = env::args().nth(2).unwrap_or_else(|| usage());
-    let row_index: usize = env::args()
-        .nth(3)
-        .unwrap_or_else(|| usage())
-        .parse()?;
-    let count: usize = env::args().nth(4).map(|value| value.parse()).transpose()?.unwrap_or(8);
+    let row_index: usize = env::args().nth(3).unwrap_or_else(|| usage()).parse()?;
+    let count: usize = env::args()
+        .nth(4)
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(8);
 
     let header = MlxSafetensorsHeader::load(&path)?;
     let entry = header

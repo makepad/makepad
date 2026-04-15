@@ -25,7 +25,7 @@ use {
         ndk_sys,
     },
     crate::{
-        cx::{Cx, OsType},
+        cx::{AndroidParams, Cx, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace, XrFrameCpuBreakdown},
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
@@ -283,9 +283,15 @@ impl Cx {
     /// It handles all incoming messages, processes other events, and manages drawing operations.
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         self.gpu_info.performance = GpuPerformance::Tier1;
-        // Populate display_context and script heap with safe area insets
-        // BEFORE Startup, so app script_mod! definitions can use them.
+        // Populate display_context and script heap with the initial display
+        // metrics BEFORE Startup, so app script_mod! definitions can use them.
         let insets = self.os.safe_area_insets;
+        let dpi_factor = if self.os.dpi_factor > 0.0 {
+            self.os.dpi_factor
+        } else {
+            1.0
+        };
+        self.display_context.screen_size = self.os.display_size / dpi_factor;
         self.display_context.safe_area_insets = insets;
         self.update_safe_inset_script_values(insets);
         self.call_event_handler(&Event::Startup);
@@ -402,6 +408,59 @@ impl Cx {
         from_java_messages_clear()
     }
 
+    fn sync_android_surface_alive_from_backend(&mut self) {
+        #[cfg(not(use_vulkan))]
+        {
+            self.os.surface_alive = self
+                .os
+                .display
+                .as_ref()
+                .map(|d| d.is_surface_alive())
+                .unwrap_or(false);
+        }
+
+        #[cfg(use_vulkan)]
+        {
+            self.os.surface_alive = if self.os.in_xr_mode && self.os.openxr.session.is_some() {
+                self.os.vulkan.is_some()
+            } else {
+                self.os
+                    .vulkan
+                    .as_ref()
+                    .map(|vulkan| vulkan.has_drawable_surface())
+                    .unwrap_or(false)
+            };
+        }
+    }
+
+    fn request_android_surface_redraw(&mut self) {
+        // A newly created/recreated surface starts with undefined contents.
+        // Always re-arm the first full redraw instead of relying on a later
+        // size-change callback to do it for us.
+        self.os.needs_first_draw = true;
+        self.redraw_all();
+    }
+
+    fn hide_android_surface_cover_after_first_present_if_needed(&mut self) {
+        if !self.os.hide_surface_cover_after_first_present || self.os.in_xr_mode {
+            return;
+        }
+        self.os.hide_surface_cover_after_first_present = false;
+        unsafe {
+            android_jni::to_java_set_surface_cover_visible(false);
+        }
+    }
+
+    fn request_android_surface_snapshot_refresh_after_present_if_needed(&mut self) {
+        if !self.os.refresh_surface_snapshot_after_first_present || self.os.in_xr_mode {
+            return;
+        }
+        self.os.refresh_surface_snapshot_after_first_present = false;
+        unsafe {
+            android_jni::to_java_request_surface_snapshot_refresh();
+        }
+    }
+
     pub(crate) fn handle_message(&mut self, msg: FromJavaMessage) {
         match msg {
             FromJavaMessage::SwitchedActivity(activity_handle, activity_thread_id) => {
@@ -430,15 +489,6 @@ impl Cx {
                     unsafe {
                         self.os.display.as_mut().unwrap().update_surface(window);
                     }
-                    // Only mark the surface alive if `update_surface` actually
-                    // succeeded — otherwise we'd lie to the renderer and it
-                    // would try to draw against a null EGL surface.
-                    self.os.surface_alive = self
-                        .os
-                        .display
-                        .as_ref()
-                        .map(|d| d.is_surface_alive())
-                        .unwrap_or(false);
                 }
 
                 #[cfg(use_vulkan)]
@@ -457,10 +507,15 @@ impl Cx {
                             let height = self.os.display_size.y.max(1.0) as u32;
                             if let Err(err) = vulkan.update_surface(window, width, height) {
                                 crate::error!("Android Vulkan surface create/update failed: {err}");
-                            } else {
-                                self.os.surface_alive = true;
                             }
                         }
+                    }
+                }
+
+                if !self.os.in_xr_mode {
+                    self.sync_android_surface_alive_from_backend();
+                    if self.os.surface_alive {
+                        self.request_android_surface_redraw();
                     }
                 }
             }
@@ -475,6 +530,11 @@ impl Cx {
                 // Ensure the next time the surface becomes drawable, we force
                 // a full redraw to avoid a black screen.
                 self.os.needs_first_draw = true;
+                // The Java host shows its placeholder cover before sending
+                // SurfaceDestroyed, so only arm the hide-on-present path for
+                // genuine surface teardown/rebuild cycles, not cold start.
+                self.os.hide_surface_cover_after_first_present = true;
+                self.os.refresh_surface_snapshot_after_first_present = true;
 
                 #[cfg(not(use_vulkan))]
                 unsafe {
@@ -564,16 +624,6 @@ impl Cx {
                     unsafe {
                         self.os.display.as_mut().unwrap().update_surface(window);
                     }
-                    // SurfaceChanged is the canonical "surface is good now"
-                    // signal — it's also how the very first surface is
-                    // delivered. Mark the surface alive only if the EGL window
-                    // surface actually got created.
-                    self.os.surface_alive = self
-                        .os
-                        .display
-                        .as_ref()
-                        .map(|d| d.is_surface_alive())
-                        .unwrap_or(false);
                 }
 
                 #[cfg(use_vulkan)]
@@ -596,14 +646,11 @@ impl Cx {
                         if let Some(vulkan) = self.os.vulkan.as_mut() {
                             if let Err(err) = vulkan.update_surface(window, width_u32, height_u32) {
                                 crate::error!("Android Vulkan surface update failed: {err}");
-                            } else {
-                                self.os.surface_alive = true;
                             }
                         } else {
                             match CxVulkan::new(window, width_u32, height_u32) {
                                 Ok(vulkan) => {
                                     self.os.vulkan = Some(vulkan);
-                                    self.os.surface_alive = true;
                                 }
                                 Err(err) => {
                                     crate::error!(
@@ -612,6 +659,13 @@ impl Cx {
                                 }
                             }
                         }
+                    }
+                }
+
+                if !self.os.in_xr_mode {
+                    self.sync_android_surface_alive_from_backend();
+                    if self.os.surface_alive {
+                        self.request_android_surface_redraw();
                     }
                 }
 
@@ -1092,6 +1146,12 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, true);
                     }
                 }
+                // Java may keep a cached snapshot overlay visible across any
+                // pause/resume transition, even when Android never tears down
+                // the underlying SurfaceView. Always hide that overlay on the
+                // first successful present after resume.
+                self.os.hide_surface_cover_after_first_present = true;
+                self.os.refresh_surface_snapshot_after_first_present = true;
                 self.redraw_all();
                 self.reinitialise_media();
                 self.call_event_handler(&Event::Resume);
@@ -1307,8 +1367,16 @@ impl Cx {
                 let mut vulkan = self.os.vulkan.take().unwrap();
                 let result = vulkan.draw_pass_and_present(self, draw_pass_id);
                 self.os.vulkan = Some(vulkan);
-                if let Err(err) = result {
-                    crate::error!("Android Vulkan draw/present failed: {err}");
+                match result {
+                    Ok(presented) => {
+                        if presented {
+                            self.hide_android_surface_cover_after_first_present_if_needed();
+                            self.request_android_surface_snapshot_refresh_after_present_if_needed();
+                        }
+                    }
+                    Err(err) => {
+                        crate::error!("Android Vulkan draw/present failed: {err}");
+                    }
                 }
             } else {
                 self.draw_pass_to_fullscreen(draw_pass_id);
@@ -1359,10 +1427,14 @@ impl Cx {
                         // implementation when the underlying buffer queue is
                         // already gone.
                         if display.is_surface_alive() {
-                            (display.libegl.eglSwapBuffers.unwrap())(
+                            let swapped = (display.libegl.eglSwapBuffers.unwrap())(
                                 display.egl_display,
                                 display.surface,
                             );
+                            if swapped != 0 {
+                                self.hide_android_surface_cover_after_first_present_if_needed();
+                                self.request_android_surface_snapshot_refresh_after_present_if_needed();
+                            }
                         }
                     }
                 }
@@ -1374,10 +1446,14 @@ impl Cx {
         unsafe {
             if let Some(display) = &mut self.os.display {
                 if display.is_surface_alive() {
-                    (display.libegl.eglSwapBuffers.unwrap())(
+                    let swapped = (display.libegl.eglSwapBuffers.unwrap())(
                         display.egl_display,
                         display.surface,
                     );
+                    if swapped != 0 {
+                        self.hide_android_surface_cover_after_first_present_if_needed();
+                        self.request_android_surface_snapshot_refresh_after_present_if_needed();
+                    }
                 }
             }
         }
@@ -1692,24 +1768,62 @@ impl Cx {
             cx.os.render_thread_id =
                 Some(unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 });
 
-            let window = loop {
+            let mut initial_params: Option<AndroidParams> = None;
+            let mut initial_surface: Option<(*mut ndk_sys::ANativeWindow, i32, i32)> = None;
+
+            let (window, width, height, android_params) = loop {
                 // Here use blocking method `recv` to reduce CPU usage during cold start.
                 match from_java_rx.recv() {
                     Ok(FromJavaMessage::Init(params)) => {
-                        cx.os.dpi_factor = params.density;
-                        cx.os_type = OsType::Android(params);
+                        initial_params = Some(params);
+                    }
+                    Ok(FromJavaMessage::SurfaceCreated { window }) => {
+                        // Bootstrap off the first SurfaceChanged so we have a
+                        // real size. SurfaceCreated still hands us an acquired
+                        // ANativeWindow ref, so release it immediately here to
+                        // avoid leaking the unused bootstrap callback.
+                        unsafe {
+                            if !window.is_null() {
+                                ndk_sys::ANativeWindow_release(window);
+                            }
+                        }
                     }
                     Ok(FromJavaMessage::SurfaceChanged {
                         window,
                         width,
                         height,
                     }) => {
-                        cx.os.display_size = dvec2(width as f64, height as f64);
-                        break window;
+                        if let Some((old_window, _, _)) = initial_surface.replace((window, width, height)) {
+                            unsafe {
+                                if !old_window.is_null() {
+                                    ndk_sys::ANativeWindow_release(old_window);
+                                }
+                            }
+                        }
+                    }
+                    Ok(FromJavaMessage::SurfaceDestroyed { ack }) => {
+                        if let Some((old_window, _, _)) = initial_surface.take() {
+                            unsafe {
+                                if !old_window.is_null() {
+                                    ndk_sys::ANativeWindow_release(old_window);
+                                }
+                            }
+                        }
+                        signal_surface_ack(&ack);
                     }
                     _ => (),
                 }
+
+                if initial_params.is_some() && initial_surface.is_some() {
+                    let android_params = initial_params.take().unwrap();
+                    let (window, width, height) = initial_surface.take().unwrap();
+                    break (window, width, height, android_params);
+                }
             };
+
+            cx.os.dpi_factor = android_params.density;
+            cx.os_type = OsType::Android(android_params);
+            cx.os.display_size = dvec2(width as f64, height as f64);
 
             // SAFETY:
             // The LibEgl instance (libegl) has been properly loaded and initialized earlier.
@@ -1811,6 +1925,11 @@ impl Cx {
                     }
                 }
             }
+
+            // The initial SurfaceChanged was consumed during bootstrap so the
+            // regular lifecycle handler will not get a second chance to seed
+            // drawable-surface state for the first frame. Do it explicitly here.
+            cx.sync_android_surface_alive_from_backend();
 
             cx.main_loop(from_java_rx);
             cx.stop_studio_websocket();
@@ -2934,6 +3053,8 @@ impl Default for CxOs {
             start_time: Instant::now(),
             first_after_resize: true,
             needs_first_draw: true,
+            hide_surface_cover_after_first_present: false,
+            refresh_surface_snapshot_after_first_present: true,
             frame_time: 0,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
@@ -3006,6 +3127,14 @@ pub struct CxOs {
     /// can start up showing a black screen if the initial redraw request was
     /// consumed before the surface was available.
     pub needs_first_draw: bool,
+    /// Tracks whether the Java-side surface cover overlay should remain visible
+    /// until the next successful present reaches the rebuilt Android surface.
+    pub hide_surface_cover_after_first_present: bool,
+    /// Tracks whether Java should refresh its cached `SurfaceView` snapshot
+    /// after the next successful present. This keeps the task snapshot path
+    /// from falling back to black when Android backgrounds/resumes the app
+    /// without destroying the surface.
+    pub refresh_surface_snapshot_after_first_present: bool,
     pub display_size: Vec2d,
     pub dpi_factor: f64,
     pub safe_area_insets: crate::event::SafeAreaInsets,
@@ -3114,13 +3243,11 @@ impl CxOs {
         {
             // Non-XR Vulkan: the EGL surface is a 1x1 pbuffer kept alive only
             // for GL interop, so the relevant question is whether the Vulkan
-            // backend has a usable native window.
-            self.vulkan.is_some()
-                && self
-                    .display
-                    .as_ref()
-                    .map(|d| !d.window.is_null())
-                    .unwrap_or(false)
+            // backend still has a live Android window surface + swapchain.
+            self.vulkan
+                .as_ref()
+                .map(|vulkan| vulkan.has_drawable_surface())
+                .unwrap_or(false)
         }
     }
 }
