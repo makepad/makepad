@@ -330,6 +330,12 @@ pub struct CxVulkan {
 }
 
 impl CxVulkan {
+    pub(crate) fn has_drawable_surface(&self) -> bool {
+        !self.window.is_null()
+            && self.surface != vk::SurfaceKHR::null()
+            && self.swapchain != vk::SwapchainKHR::null()
+    }
+
     fn geometry_id_is_live(cx: &Cx, geometry_id: GeometryId) -> bool {
         let slot_index = geometry_id.slot_index();
         cx.geometries
@@ -2533,24 +2539,24 @@ impl CxVulkan {
         &mut self,
         cx: &mut Cx,
         draw_pass_id: DrawPassId,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if self.surface == vk::SurfaceKHR::null() || self.swapchain == vk::SwapchainKHR::null() {
-            return Ok(());
+            return Ok(false);
         }
 
         let draw_list_id = if let Some(id) = cx.passes[draw_pass_id].main_draw_list_id {
             id
         } else {
-            return Ok(());
+            return Ok(false);
         };
 
         let dpi_factor = cx.passes[draw_pass_id].dpi_factor.unwrap_or(1.0);
         let pass_rect = match cx.get_pass_rect(draw_pass_id, dpi_factor) {
             Some(rect) => rect,
-            None => return Ok(()),
+            None => return Ok(false),
         };
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
-            return Ok(());
+            return Ok(false);
         }
 
         {
@@ -2593,11 +2599,11 @@ impl CxVulkan {
             Ok(v) => v,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.recreate_swapchain()?;
-                return Ok(());
+                return Ok(false);
             }
             Err(vk::Result::ERROR_SURFACE_LOST_KHR) => {
                 self.suspend_surface();
-                return Ok(());
+                return Ok(false);
             }
             Err(err) => {
                 return Err(format!("acquire_next_image failed: {err:?}"));
@@ -2854,11 +2860,11 @@ impl CxVulkan {
             Ok(suboptimal) => suboptimal,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.recreate_swapchain()?;
-                return Ok(());
+                return Ok(false);
             }
             Err(vk::Result::ERROR_SURFACE_LOST_KHR) => {
                 self.suspend_surface();
-                return Ok(());
+                return Ok(false);
             }
             Err(err) => {
                 return Err(format!("queue_present failed: {err:?}"));
@@ -2869,7 +2875,7 @@ impl CxVulkan {
             self.recreate_swapchain()?;
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn ensure_pass_color_target(

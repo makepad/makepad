@@ -68,6 +68,7 @@ impl AndroidVariant {
                     android:name=".{class_name}"
                     android:configChanges="orientation|screenSize|keyboardHidden"
                     android:exported="true"
+                    android:launchMode="singleTask"
                     android:theme="@style/MakepadLaunchTheme">
                     <intent-filter>
                         <action android:name="android.intent.action.MAIN" />
@@ -598,6 +599,7 @@ mod tests {
             AndroidVariant::Default.manifest_xml("App", "MakepadApp", "dev.makepad.app", 33, true);
         assert!(xml.contains("android:theme=\"@style/MakepadAppTheme\""));
         assert!(xml.contains("android:theme=\"@style/MakepadLaunchTheme\""));
+        assert!(xml.contains("android:launchMode=\"singleTask\""));
     }
 
     #[test]
