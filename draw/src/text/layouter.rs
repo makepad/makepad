@@ -565,7 +565,6 @@ impl LayoutContext {
 struct Fitter {
     text: Substr,
     font_family: Rc<FontFamily>,
-    font_size_in_lpxs: f32,
     lens: Vec<usize>,
     widths_in_lpxs: Vec<f32>,
 }
@@ -602,7 +601,6 @@ impl Fitter {
         Self {
             text,
             font_family,
-            font_size_in_lpxs,
             lens,
             widths_in_lpxs,
         }
@@ -642,17 +640,18 @@ impl Fitter {
     }
 
     fn can_fit(&self, count: usize, wrap_width_in_lpxs: f32) -> bool {
-        let len = self.lens[..count].iter().sum();
+        // Use the pre-computed per-segment widths to estimate whether `count`
+        // segments fit within the wrap width. This avoids calling get_or_shape()
+        // on progressively longer substrings during the binary search — those
+        // cumulative substrings are unique and always miss the shaper cache,
+        // making each call a full HarfBuzz shape operation.
+        //
+        // The sum of individual segment widths is a close approximation of the
+        // actual shaped width (it doesn't account for inter-word kerning, but
+        // that's negligible for wrap-width decisions). The final shaped text
+        // in `fit()` uses get_or_shape() for the exact result.
         let estimated_width_in_lpxs: f32 = self.widths_in_lpxs[..count].iter().sum();
-        if 0.5 * estimated_width_in_lpxs > wrap_width_in_lpxs {
-            return false;
-        }
-        let text = self.font_family.get_or_shape(self.text.substr(0..len));
-        let actual_width_in_lpxs = text.width_in_ems * self.font_size_in_lpxs;
-        if actual_width_in_lpxs > wrap_width_in_lpxs {
-            return false;
-        }
-        true
+        estimated_width_in_lpxs <= wrap_width_in_lpxs
     }
 
     fn pop(&mut self) -> usize {

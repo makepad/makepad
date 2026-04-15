@@ -449,7 +449,7 @@ pub struct PortalList {
     #[rust]
     items: ComponentMap<usize, WidgetItem>,
     #[rust]
-    reusable_items: Vec<WidgetItem>,
+    reusable_items: HashMap<LiveId, Vec<WidgetItem>>,
 
     #[rust(ScrollState::Stopped)]
     scroll_state: ScrollState,
@@ -806,8 +806,8 @@ impl PortalList {
             let selection_range = self.get_selection_range();
             if self.reuse_items {
                 let reusable_items = &mut self.reusable_items;
-                self.items.retain_visible_with(|v| {
-                    reusable_items.push(v);
+                self.items.retain_visible_with(|v: WidgetItem| {
+                    reusable_items.entry(v.template).or_default().push(v);
                 });
             } else if let Some((start, end)) = selection_range {
                 self.items
@@ -1090,12 +1090,12 @@ impl PortalList {
                     if occ.get().template == template {
                         (occ.get().widget.clone(), true)
                     } else {
-                        let widget_ref = if let Some(pos) = self
+                        let widget_ref = if let Some(reused) = self
                             .reusable_items
-                            .iter()
-                            .position(|v| v.template == template)
+                            .get_mut(&template)
+                            .and_then(|pool| pool.pop())
                         {
-                            let widget_ref = self.reusable_items.remove(pos).widget;
+                            let widget_ref = reused.widget;
                             // Reused items must be reset to template defaults, otherwise
                             // stale instance/animator state (e.g. selected) can leak to a new entry.
                             cx.with_vm(|vm| {
@@ -1124,12 +1124,12 @@ impl PortalList {
                     }
                 }
                 Entry::Vacant(vac) => {
-                    let widget_ref = if let Some(pos) = self
+                    let widget_ref = if let Some(reused) = self
                         .reusable_items
-                        .iter()
-                        .position(|v| v.template == template)
+                        .get_mut(&template)
+                        .and_then(|pool| pool.pop())
                     {
-                        let widget_ref = self.reusable_items.remove(pos).widget;
+                        let widget_ref = reused.widget;
                         // Reused items must be reset to template defaults, otherwise
                         // stale instance/animator state (e.g. selected) can leak to a new entry.
                         cx.with_vm(|vm| {
@@ -2219,8 +2219,9 @@ impl Widget for PortalList {
                             self.update_item_selections(cx);
                         }
                     } else {
-                        // Don't override cursor when over interactive items (they set their own)
-                        if !self.point_hits_interactive_item(cx, e.abs) {
+                        // Only update cursor for mouse — skip the expensive
+                        // interactive-widget hit test for touch events entirely.
+                        if !e.device.is_touch() && !self.point_hits_interactive_item(cx, e.abs) {
                             cx.set_cursor(MouseCursor::Default);
                         }
                         if let ScrollState::Drag {
