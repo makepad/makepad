@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentCallbacks2;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
@@ -665,7 +666,7 @@ public class MakepadActivity
     //% MAIN_ACTIVITY_BODY
 
     private MakepadSurface view;
-    Handler mHandler;
+    private final Handler mHandler = new Handler(Looper.getMainLooper());
 
     // video playback
     Handler mVideoPlaybackHandler;
@@ -695,6 +696,7 @@ public class MakepadActivity
     private HashMap<Long, CameraPreviewSurface> mCameraPreviewViews = new HashMap<>();
     private Bitmap mLatestSurfaceSnapshot;
     private int mLatestSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
+    private boolean mSurfaceSnapshotCopyInFlight = false;
     private boolean mSurfaceRecoveryOverlayVisible = false;
 
     // selection handles overlay
@@ -726,6 +728,7 @@ public class MakepadActivity
             return false;
         }
         if (SystemClock.uptimeMillis() - sWarmResumeSurfaceSnapshotUptimeMs > WARM_RESUME_SNAPSHOT_MAX_AGE_MS) {
+            clearWarmResumeSurfaceSnapshot();
             return false;
         }
         int orientation = getResources().getConfiguration().orientation;
@@ -737,6 +740,33 @@ public class MakepadActivity
         sWarmResumeSurfaceSnapshot = null;
         sWarmResumeSurfaceSnapshotUptimeMs = 0;
         sWarmResumeSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
+    }
+
+    private void clearLatestSurfaceSnapshot() {
+        mLatestSurfaceSnapshot = null;
+        mLatestSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
+    }
+
+    private void trimSurfaceSnapshotCaches() {
+        clearWarmResumeSurfaceSnapshot();
+        clearLatestSurfaceSnapshot();
+
+        if (mSurfaceSnapshotBackdrop != null) {
+            mSurfaceSnapshotBackdrop.setImageBitmap(null);
+            mSurfaceSnapshotBackdrop.setVisibility(View.GONE);
+        }
+        if (mSurfaceSnapshotOverlay != null) {
+            mSurfaceSnapshotOverlay.animate().cancel();
+            mSurfaceSnapshotOverlay.setImageBitmap(null);
+            mSurfaceSnapshotOverlay.setAlpha(1.0f);
+            mSurfaceSnapshotOverlay.setVisibility(View.GONE);
+        }
+        if (mSurfaceRecoveryOverlayVisible && mSurfaceCoverOverlay != null) {
+            mSurfaceCoverOverlay.animate().cancel();
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            mSurfaceCoverOverlay.setVisibility(View.VISIBLE);
+            mSurfaceCoverOverlay.bringToFront();
+        }
     }
 
     boolean hasRecoverySnapshotAvailable() {
@@ -955,8 +985,8 @@ public class MakepadActivity
             mRootLayout.removeView(mSurfaceSnapshotOverlay);
             mSurfaceSnapshotOverlay = null;
         }
-        mLatestSurfaceSnapshot = null;
-        mLatestSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
+        clearLatestSurfaceSnapshot();
+        mSurfaceSnapshotCopyInFlight = false;
         cleanupVideoPlaybackState();
         shutdownVideoPlaybackThread();
         if (!mIsSwitchingActivity) {
@@ -965,6 +995,29 @@ public class MakepadActivity
         }
         super.onDestroy();
         MakepadNative.activityOnDestroy();
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        switch (level) {
+            case ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE:
+            case ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW:
+            case ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL:
+            case ComponentCallbacks2.TRIM_MEMORY_BACKGROUND:
+            case ComponentCallbacks2.TRIM_MEMORY_MODERATE:
+            case ComponentCallbacks2.TRIM_MEMORY_COMPLETE:
+                trimSurfaceSnapshotCaches();
+                break;
+            default:
+                break;
+        }
+    }
+
+    @Override
+    public void onLowMemory() {
+        super.onLowMemory();
+        trimSurfaceSnapshotCaches();
     }
 
     @Override
@@ -1078,9 +1131,10 @@ public class MakepadActivity
     }
 
     private void refreshSurfaceSnapshotCache() {
-        if (!canCaptureSurfaceSnapshot()) {
+        if (!canCaptureSurfaceSnapshot() || mSurfaceSnapshotCopyInFlight) {
             return;
         }
+        mSurfaceSnapshotCopyInFlight = true;
 
         final Bitmap snapshot = Bitmap.createBitmap(
             view.getWidth(),
@@ -1088,6 +1142,7 @@ public class MakepadActivity
             Bitmap.Config.ARGB_8888
         );
         PixelCopy.request(view, snapshot, copyResult -> {
+            mSurfaceSnapshotCopyInFlight = false;
             if (copyResult != PixelCopy.SUCCESS) {
                 return;
             }
@@ -1098,10 +1153,13 @@ public class MakepadActivity
             if (mSurfaceRecoveryOverlayVisible) {
                 showSurfaceRecoverySnapshotIfAvailable();
             }
-        }, new Handler(Looper.getMainLooper()));
+        }, mHandler);
     }
 
     private void prepareSurfaceSnapshotOverlayForPause() {
+        if (mSurfaceRecoveryOverlayVisible && view != null && view.getVisibility() != View.VISIBLE) {
+            return;
+        }
         if (!hasRecoverySnapshotAvailable()) {
             refreshSurfaceSnapshotCache();
             return;
@@ -1231,10 +1289,22 @@ public class MakepadActivity
             return;
         }
 
+        boolean wasRecoveryOverlayVisible = mSurfaceRecoveryOverlayVisible;
         if (visible && !hasRecoverySnapshotAvailable()) {
-            mSurfaceRecoveryOverlayVisible = false;
+            mSurfaceRecoveryOverlayVisible = true;
             if (view != null) {
-                view.setVisibility(View.VISIBLE);
+                view.setVisibility(View.INVISIBLE);
+            }
+            mSurfaceCoverOverlay.animate().cancel();
+            mSurfaceSnapshotOverlay.animate().cancel();
+            mSurfaceSnapshotOverlay.setImageBitmap(null);
+            mSurfaceSnapshotOverlay.setVisibility(View.GONE);
+            mSurfaceSnapshotOverlay.setAlpha(1.0f);
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            mSurfaceCoverOverlay.setVisibility(View.VISIBLE);
+            mSurfaceCoverOverlay.bringToFront();
+            if (!wasRecoveryOverlayVisible) {
+                refreshSurfaceSnapshotCache();
             }
             return;
         }
@@ -1242,7 +1312,7 @@ public class MakepadActivity
         if (view != null) {
             view.setVisibility(visible ? View.INVISIBLE : view.getVisibility());
         }
-        if (visible) {
+        if (visible && !wasRecoveryOverlayVisible) {
             refreshSurfaceSnapshotCache();
         }
 
@@ -1939,7 +2009,7 @@ public class MakepadActivity
                     if(device.getType() == BluetoothDevice.DEVICE_TYPE_LE){
                         String name =device.getName();
                         bt_names.add(name);
-                        mm.openBluetoothDevice(device, this, new Handler(Looper.getMainLooper()));
+                        mm.openBluetoothDevice(device, this, mHandler);
                     }
                 }
                 // this appears to give you nonworking BLE midi devices. So we skip those by name (not perfect but ok)
@@ -1953,7 +2023,7 @@ public class MakepadActivity
                         }
                     }
                     if(!found){
-                        mm.openDevice(info, this, new Handler(Looper.getMainLooper()));
+                        mm.openDevice(info, this, mHandler);
                     }
                 }
             }
