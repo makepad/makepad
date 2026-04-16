@@ -1,8 +1,148 @@
 use crate::chat::extract_gemma4_assistant_response_text;
-pub use crate::layer0_cached_case::{
-    GemmaExactMetalBackendMode, GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode,
+use crate::layer0_cached_case::{
+    GemmaExactMetalBackendMode as ExactMetalBackendMode,
+    GemmaExactMetalConfig as ExactMetalConfig,
+    GemmaExactMetalKvCompressionMode as ExactMetalKvCompressionMode,
 };
 use crate::multimodal::{prepare_image_prompt, GemmaVisionRuntime, PreparedImagePrompt};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GemmaTextKvCompressionMode {
+    #[default]
+    Disabled,
+    RotorPlanar4FullAttentionK,
+    RotorPlanar3FullAttentionK,
+}
+
+impl GemmaTextKvCompressionMode {
+    fn exact_metal(self) -> ExactMetalKvCompressionMode {
+        match self {
+            Self::Disabled => ExactMetalKvCompressionMode::Disabled,
+            Self::RotorPlanar4FullAttentionK => {
+                ExactMetalKvCompressionMode::RotorPlanar4FullAttentionK
+            }
+            Self::RotorPlanar3FullAttentionK => {
+                ExactMetalKvCompressionMode::RotorPlanar3FullAttentionK
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GemmaTextBackendMode {
+    #[default]
+    Auto,
+    Force,
+    Disabled,
+}
+
+impl GemmaTextBackendMode {
+    fn exact_metal(self) -> ExactMetalBackendMode {
+        match self {
+            Self::Auto => ExactMetalBackendMode::Auto,
+            Self::Force => ExactMetalBackendMode::Force,
+            Self::Disabled => ExactMetalBackendMode::Disabled,
+        }
+    }
+
+    fn exact_backends_disabled(self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+
+    fn exact_backends_required(self) -> bool {
+        matches!(self, Self::Force)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GemmaTextBackendConfig {
+    pub backend_mode: GemmaTextBackendMode,
+    pub kv_compression: GemmaTextKvCompressionMode,
+}
+
+impl GemmaTextBackendConfig {
+    fn exact_metal(&self) -> ExactMetalConfig {
+        ExactMetalConfig {
+            backend_mode: self.backend_mode.exact_metal(),
+            kv_compression: self.kv_compression.exact_metal(),
+        }
+    }
+}
+
+pub type GemmaExactMetalBackendMode = GemmaTextBackendMode;
+pub type GemmaExactMetalConfig = GemmaTextBackendConfig;
+pub type GemmaExactMetalKvCompressionMode = GemmaTextKvCompressionMode;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GemmaTextBackendKind {
+    MetalExact,
+    CudaExactGreedy,
+    #[default]
+    Reference,
+}
+
+impl GemmaTextBackendKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MetalExact => "metal-exact",
+            Self::CudaExactGreedy => "cuda-exact-greedy",
+            Self::Reference => "reference",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum GemmaTextBackendCounters {
+    #[default]
+    None,
+    Metal(MetalRuntimeCounters),
+}
+
+impl GemmaTextBackendCounters {
+    pub fn as_metal(&self) -> Option<&MetalRuntimeCounters> {
+        match self {
+            Self::None => None,
+            Self::Metal(counters) => Some(counters),
+        }
+    }
+}
+
+#[cfg(test)]
+mod backend_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn neutral_backend_config_maps_to_exact_metal_config() {
+        let config = GemmaTextBackendConfig {
+            backend_mode: GemmaTextBackendMode::Force,
+            kv_compression: GemmaTextKvCompressionMode::RotorPlanar3FullAttentionK,
+        };
+        let exact = config.exact_metal();
+        assert_eq!(exact.backend_mode, ExactMetalBackendMode::Force);
+        assert_eq!(
+            exact.kv_compression,
+            ExactMetalKvCompressionMode::RotorPlanar3FullAttentionK
+        );
+    }
+
+    #[test]
+    fn backend_kind_labels_stay_stable() {
+        assert_eq!(GemmaTextBackendKind::MetalExact.label(), "metal-exact");
+        assert_eq!(
+            GemmaTextBackendKind::CudaExactGreedy.label(),
+            "cuda-exact-greedy"
+        );
+        assert_eq!(GemmaTextBackendKind::Reference.label(), "reference");
+    }
+
+    #[test]
+    fn backend_counters_only_expose_metal_when_present() {
+        assert!(GemmaTextBackendCounters::None.as_metal().is_none());
+        let counters = MetalRuntimeCounters::default();
+        let backend_counters = GemmaTextBackendCounters::Metal(counters.clone());
+        assert_eq!(backend_counters.as_metal(), Some(&counters));
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct GemmaTextStepOutput {
@@ -221,6 +361,8 @@ pub struct GemmaExactPrefillProbeOutput {
 
 #[derive(Clone, Debug)]
 pub struct GemmaTextBenchmarkOutput {
+    pub backend_kind: GemmaTextBackendKind,
+    pub backend_counters: GemmaTextBackendCounters,
     pub model_path: PathBuf,
     pub prompt_text: Arc<str>,
     pub formatted_prompt_text: Arc<str>,
@@ -236,7 +378,6 @@ pub struct GemmaTextBenchmarkOutput {
     pub steady_state_generated_tokens: usize,
     pub last_generated_token_ids: Arc<[u32]>,
     pub last_generated_text: Arc<str>,
-    pub metal_counters: MetalRuntimeCounters,
     pub prompt_prefill_tokens_per_second: f64,
     pub steady_state_decode_tokens_per_second: f64,
     pub decode_tokens_per_second: f64,
@@ -968,39 +1109,24 @@ where
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TextGenerationBackend {
-    MetalExact,
-    CudaExactGreedy,
-    Reference,
-}
-
-impl TextGenerationBackend {
-    fn label(self) -> &'static str {
-        match self {
-            Self::MetalExact => "metal-exact",
-            Self::CudaExactGreedy => "cuda-exact-greedy",
-            Self::Reference => "reference",
-        }
-    }
-}
-
 fn select_text_generation_backend(
     runtime: &Arc<GemmaTextRuntimeSession>,
     max_new_tokens: Option<usize>,
     sampling_options: &GemmaTextSamplingOptions,
     _has_prompt_embedding_rows: bool,
-) -> TextGenerationBackend {
+) -> Result<GemmaTextBackendKind, String> {
     if runtime.has_exact_backend() {
-        TextGenerationBackend::MetalExact
+        Ok(GemmaTextBackendKind::MetalExact)
     } else if cuda_exact::supports_cuda_exact_greedy_generation(
         runtime,
         max_new_tokens,
         sampling_options,
     ) {
-        TextGenerationBackend::CudaExactGreedy
+        Ok(GemmaTextBackendKind::CudaExactGreedy)
+    } else if runtime.backend_config.backend_mode.exact_backends_required() {
+        Err("forced exact text backend is unavailable for this request".to_string())
     } else {
-        TextGenerationBackend::Reference
+        Ok(GemmaTextBackendKind::Reference)
     }
 }
 
@@ -1015,8 +1141,8 @@ fn generate_sampled_token_ids<F>(
 where
     F: FnMut(&[u32]) -> Result<(), String>,
 {
-    match select_text_generation_backend(runtime, max_new_tokens, sampling_options, false) {
-        TextGenerationBackend::MetalExact => generate_sampled_token_ids_with_exact_prefill(
+    match select_text_generation_backend(runtime, max_new_tokens, sampling_options, false)? {
+        GemmaTextBackendKind::MetalExact => generate_sampled_token_ids_with_exact_prefill(
             runtime,
             prompt_token_ids,
             max_new_tokens,
@@ -1038,7 +1164,7 @@ where
             },
             on_generated_ids,
         ),
-        TextGenerationBackend::CudaExactGreedy => cuda_exact::try_generate_cuda_nvfp4_greedy(
+        GemmaTextBackendKind::CudaExactGreedy => cuda_exact::try_generate_cuda_nvfp4_greedy(
             runtime,
             prompt_token_ids,
             max_new_tokens,
@@ -1046,7 +1172,7 @@ where
             on_generated_ids,
         )?
         .ok_or_else(|| "CUDA exact backend selection unexpectedly fell back".to_string()),
-        TextGenerationBackend::Reference => runtime.generate_sampled_token_ids_reference(
+        GemmaTextBackendKind::Reference => runtime.generate_sampled_token_ids_reference(
             prompt_token_ids,
             max_new_tokens,
             sampling_options,
@@ -1068,8 +1194,8 @@ fn generate_sampled_token_ids_from_embedding_rows<F>(
 where
     F: FnMut(&[u32]) -> Result<(), String>,
 {
-    match select_text_generation_backend(runtime, max_new_tokens, sampling_options, true) {
-        TextGenerationBackend::MetalExact => generate_sampled_token_ids_with_exact_prefill(
+    match select_text_generation_backend(runtime, max_new_tokens, sampling_options, true)? {
+        GemmaTextBackendKind::MetalExact => generate_sampled_token_ids_with_exact_prefill(
             runtime,
             prompt_token_ids,
             max_new_tokens,
@@ -1091,7 +1217,7 @@ where
             },
             on_generated_ids,
         ),
-        TextGenerationBackend::CudaExactGreedy => {
+        GemmaTextBackendKind::CudaExactGreedy => {
             let mut cuda_sampling_options = sampling_options.clone();
             cuda_sampling_options.allow_thought = true;
             cuda_exact::try_generate_cuda_nvfp4_greedy_from_embedding_rows(
@@ -1104,7 +1230,7 @@ where
             )?
             .ok_or_else(|| "CUDA exact backend selection unexpectedly fell back".to_string())
         }
-        TextGenerationBackend::Reference => runtime
+        GemmaTextBackendKind::Reference => runtime
             .generate_sampled_token_ids_from_embedding_rows_reference(
                 prompt_token_ids,
                 prompt_embedding_rows,
@@ -1120,7 +1246,7 @@ where
 struct GemmaTextRuntimeSession {
     model_path: PathBuf,
     #[cfg_attr(not(test), allow(dead_code))]
-    backend_config: GemmaExactMetalConfig,
+    backend_config: GemmaTextBackendConfig,
     weights: MlxIndexedSafetensors,
     tokenizer: MlxTokenizer,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1412,12 +1538,12 @@ impl GemmaLazyTextPlanInner {
 
 impl GemmaTextModel {
     pub fn load(model_path: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
-        Self::load_with_backend_config(model_path, GemmaExactMetalConfig::default())
+        Self::load_with_backend_config(model_path, GemmaTextBackendConfig::default())
     }
 
     pub fn load_with_backend_config(
         model_path: impl AsRef<Path>,
-        backend_config: GemmaExactMetalConfig,
+        backend_config: GemmaTextBackendConfig,
     ) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             runtime: GemmaTextRuntimeSession::load_with_backend_config(
@@ -1455,7 +1581,8 @@ impl GemmaTextModel {
         sampling_options: &GemmaTextSamplingOptions,
     ) -> &'static str {
         select_text_generation_backend(&self.runtime, max_new_tokens, sampling_options, false)
-            .label()
+            .map(GemmaTextBackendKind::label)
+            .unwrap_or("exact-unavailable")
     }
 
     pub fn multimodal_generation_backend_label(
@@ -1464,26 +1591,75 @@ impl GemmaTextModel {
         sampling_options: &GemmaTextSamplingOptions,
     ) -> &'static str {
         select_text_generation_backend(&self.runtime, max_new_tokens, sampling_options, true)
-            .label()
+            .map(GemmaTextBackendKind::label)
+            .unwrap_or("exact-unavailable")
+    }
+
+    pub(crate) fn generation_backend_kind(
+        &self,
+        max_new_tokens: Option<usize>,
+        sampling_options: &GemmaTextSamplingOptions,
+        has_prompt_embedding_rows: bool,
+    ) -> Result<GemmaTextBackendKind, String> {
+        select_text_generation_backend(
+            &self.runtime,
+            max_new_tokens,
+            sampling_options,
+            has_prompt_embedding_rows,
+        )
+    }
+
+    pub(crate) fn uses_incremental_greedy_backend(
+        &self,
+        max_new_tokens: Option<usize>,
+        sampling_options: &GemmaTextSamplingOptions,
+    ) -> bool {
+        matches!(
+            self.generation_backend_kind(max_new_tokens, sampling_options, false),
+            Ok(GemmaTextBackendKind::CudaExactGreedy)
+        )
     }
 
     pub fn tokenize_formatted_prompt(&self, formatted_prompt: &str) -> Result<Arc<[u32]>, String> {
         self.runtime.tokenize_prompt(formatted_prompt)
     }
 
+    pub fn exact_greedy_supported_total_tokens(
+        &self,
+        max_new_tokens: Option<usize>,
+        sampling_options: &GemmaTextSamplingOptions,
+    ) -> Option<usize> {
+        matches!(
+            self.generation_backend_kind(max_new_tokens, sampling_options, false),
+            Ok(GemmaTextBackendKind::CudaExactGreedy)
+        )
+        .then(|| crate::text_runtime::cuda_exact::cuda_exact_max_supported_tokens(&self.runtime))
+    }
+
     pub fn cuda_exact_supported_total_tokens(&self) -> Option<usize> {
-        self.runtime.has_cuda_exact_backend().then(|| {
-            crate::text_runtime::cuda_exact::cuda_exact_max_supported_tokens(&self.runtime)
-        })
+        self.exact_greedy_supported_total_tokens(
+            None,
+            &GemmaTextSamplingOptions::from_generation_config(
+                &self.runtime.weights.snapshot.generation_config,
+            )
+            .greedy_variant(),
+        )
     }
 
     pub fn prewarm_greedy_backend(&self, max_new_tokens: Option<usize>) -> Result<(), String> {
         let sampling_options = self.chat_sampling_options().greedy_variant();
-        crate::text_runtime::cuda_exact::prewarm_cuda_nvfp4_greedy(
-            &self.runtime,
-            max_new_tokens,
-            &sampling_options,
-        )
+        if matches!(
+            self.generation_backend_kind(max_new_tokens, &sampling_options, false)?,
+            GemmaTextBackendKind::CudaExactGreedy
+        ) {
+            crate::text_runtime::cuda_exact::prewarm_cuda_nvfp4_greedy(
+                &self.runtime,
+                max_new_tokens,
+                &sampling_options,
+            )
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn decode_token_ids(&self, token_ids: &[u32]) -> Result<String, String> {
@@ -1703,7 +1879,7 @@ impl GemmaTextModel {
                     &sampling_options,
                     true,
                 ),
-                TextGenerationBackend::CudaExactGreedy
+                Ok(GemmaTextBackendKind::CudaExactGreedy)
             );
         let mut rng = MlxTextSamplingRng::new(0);
         let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
@@ -2018,8 +2194,13 @@ impl GemmaTextModel {
         let prompt_embedding_rows = prepared.prompt_embedding_rows;
         let stream_extracted_response = sampling_options.allow_thought
             || matches!(
-                select_text_generation_backend(&self.runtime, max_new_tokens, sampling_options, true),
-                TextGenerationBackend::CudaExactGreedy
+                select_text_generation_backend(
+                    &self.runtime,
+                    max_new_tokens,
+                    sampling_options,
+                    true,
+                ),
+                Ok(GemmaTextBackendKind::CudaExactGreedy)
             );
         let mut detokenizer = self.runtime.tokenizer.streaming_detokenizer(true);
         let skip_special_token_ids = self.runtime.tokenizer.special_token_ids().to_vec();
@@ -2165,7 +2346,7 @@ pub fn generate_text(
         model_path,
         prompt_text,
         options,
-        GemmaExactMetalConfig::default(),
+        GemmaTextBackendConfig::default(),
     )
 }
 
@@ -2173,7 +2354,7 @@ pub fn generate_text_with_backend_config(
     model_path: PathBuf,
     prompt_text: impl Into<String>,
     options: GemmaTextGenerationOptions,
-    backend_config: GemmaExactMetalConfig,
+    backend_config: GemmaTextBackendConfig,
 ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
     GemmaTextModel::load_with_backend_config(model_path, backend_config)?
         .generate(prompt_text, options)
@@ -2190,7 +2371,7 @@ pub fn generate_multimodal_text(
         image_path,
         prompt_text,
         options,
-        GemmaExactMetalConfig::default(),
+        GemmaTextBackendConfig::default(),
     )
 }
 
@@ -2199,7 +2380,7 @@ pub fn generate_multimodal_text_with_backend_config(
     image_path: impl AsRef<Path>,
     prompt_text: impl Into<String>,
     options: GemmaTextGenerationOptions,
-    backend_config: GemmaExactMetalConfig,
+    backend_config: GemmaTextBackendConfig,
 ) -> Result<Arc<GemmaTextGenerationOutput>, Box<dyn Error>> {
     GemmaTextModel::load_with_backend_config(model_path, backend_config)?.generate_multimodal(
         image_path,
@@ -2212,7 +2393,7 @@ pub fn probe_exact_prefill_with_backend_config(
     model_path: PathBuf,
     prompt_text: impl Into<String>,
     prompt_format: GemmaPromptFormat,
-    backend_config: GemmaExactMetalConfig,
+    backend_config: GemmaTextBackendConfig,
 ) -> Result<GemmaExactPrefillProbeOutput, Box<dyn Error>> {
     let prompt_text = Arc::<str>::from(prompt_text.into());
     let runtime = GemmaTextRuntimeSession::load_with_backend_config(&model_path, backend_config)
@@ -2271,7 +2452,7 @@ pub fn benchmark_text_generation(
         greedy,
         warmup_iters,
         measured_iters,
-        GemmaExactMetalConfig::default(),
+        GemmaTextBackendConfig::default(),
     )
 }
 
@@ -2282,7 +2463,7 @@ pub fn benchmark_text_generation_with_backend_config(
     greedy: bool,
     warmup_iters: usize,
     measured_iters: usize,
-    backend_config: GemmaExactMetalConfig,
+    backend_config: GemmaTextBackendConfig,
 ) -> Result<GemmaTextBenchmarkOutput, Box<dyn Error>> {
     if measured_iters == 0 {
         return Err("benchmark requires at least one measured iteration".into());
@@ -2448,16 +2629,25 @@ pub fn benchmark_text_generation_with_backend_config(
     } else {
         0.0
     };
-    let metal_counters = if let Some(exact_backend) = &exact_backend {
-        exact_backend
-            .lock()
-            .map_err(|_| "exact backend mutex poisoned".to_string())?
-            .runtime_counters()
+    let backend_counters = if let Some(exact_backend) = &exact_backend {
+        GemmaTextBackendCounters::Metal(
+            exact_backend
+                .lock()
+                .map_err(|_| "exact backend mutex poisoned".to_string())?
+                .runtime_counters(),
+        )
     } else {
-        MetalRuntimeCounters::default()
+        GemmaTextBackendCounters::None
     };
 
     Ok(GemmaTextBenchmarkOutput {
+        backend_kind: select_text_generation_backend(
+            &runtime,
+            Some(options.max_new_tokens),
+            &sampling_options,
+            false,
+        )?,
+        backend_counters,
         model_path: runtime.model_path.clone(),
         prompt_text,
         formatted_prompt_text,
@@ -2473,7 +2663,6 @@ pub fn benchmark_text_generation_with_backend_config(
         steady_state_generated_tokens,
         last_generated_token_ids,
         last_generated_text,
-        metal_counters,
         prompt_prefill_tokens_per_second,
         steady_state_decode_tokens_per_second,
         decode_tokens_per_second,
