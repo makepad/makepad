@@ -433,10 +433,10 @@ impl IosApp {
         }
     }
 
-    pub fn draw_size_will_change(_view: ObjcId, _size: NSSize) {
+    pub fn draw_size_will_change(view: ObjcId, size: NSSize) {
         // Avoid re-entrant calls by checking if we're already in a with_ios_app call.
-        // We must drop the borrow *before* calling check_window_geom, because
-        // check_window_geom calls with_ios_app which tries to borrow_mut again.
+        // We must drop the borrow *before* calling apply_new_window_geom, because
+        // it calls with_ios_app which tries to borrow_mut again.
         let should_call = IOS_APP
             .try_with(|app| {
                 match app.try_borrow_mut() {
@@ -445,45 +445,104 @@ impl IosApp {
                 }
             })
             .unwrap_or(false);
-        if should_call {
-            Self::check_window_geom();
+        if !should_call {
+            return;
+        }
+
+        // `size` is the authoritative new drawable size in physical pixels, delivered
+        // by UIKit at the exact moment the view is resizing. Using it (rather than
+        // re-reading UIScreen.bounds or even the view's own bounds) is the only way
+        // to be race-free across device rotation, iPad Split View / Slide Over /
+        // Stage Manager resizes, and multi-scene transitions, where other sources can
+        // briefly lag the actual geometry by one layout pass.
+        //
+        // We pull scale and safeAreaInsets from the same `view` pointer so they are
+        // guaranteed consistent with the size we just received.
+        unsafe {
+            let scale: f64 = msg_send![view, contentScaleFactor];
+            let inner_size = if scale > 0.0 {
+                dvec2(size.width / scale, size.height / scale)
+            } else {
+                // `contentScaleFactor` should never be 0 in practice, but don't
+                // divide by zero if it somehow is — fall through to raw pixels.
+                dvec2(size.width, size.height)
+            };
+            let insets: UIEdgeInsets = msg_send![view, safeAreaInsets];
+            let safe_area_insets = crate::event::SafeAreaInsets {
+                top: insets.top,
+                right: insets.right,
+                bottom: insets.bottom,
+                left: insets.left,
+            };
+            Self::apply_new_window_geom(inner_size, scale, safe_area_insets);
         }
     }
 
     pub fn check_window_geom() {
-        let main_screen: ObjcId = unsafe { msg_send![class!(UIScreen), mainScreen] };
-        let screen_rect: NSRect = unsafe { msg_send![main_screen, bounds] };
-        let dpi_factor: f64 = unsafe { msg_send![main_screen, scale] };
-        let new_size = dvec2(
-            screen_rect.size.width as f64,
-            screen_rect.size.height as f64,
-        );
-
-        // Query safe area insets from the MTKView (accounts for notch/Dynamic Island,
-        // home indicator, rounded corners, etc.)
-        let safe_area_insets = with_ios_app(|app| {
-            if let Some(mtk_view) = app.mtk_view {
-                unsafe {
-                    let insets: UIEdgeInsets = msg_send![mtk_view, safeAreaInsets];
+        // Read geometry from the MTKView: its `bounds` are in logical points and
+        // share the exact coordinate space that UITouch `locationInView:` returns,
+        // so touches and layout cannot drift.
+        //
+        // Reading from `UIScreen.mainScreen.bounds` here would be wrong: UIScreen
+        // describes the *physical screen*, not the app's drawing surface. On iPad
+        // with Split View / Slide Over / Stage Manager, and on multi-scene apps,
+        // the window is a fraction of the screen — using UIScreen would introduce
+        // a constant offset between where we draw and where touches land.
+        let read = with_ios_app(|app| {
+            app.mtk_view.map(|mtk_view| unsafe {
+                let bounds: NSRect = msg_send![mtk_view, bounds];
+                let scale: f64 = msg_send![mtk_view, contentScaleFactor];
+                let insets: UIEdgeInsets = msg_send![mtk_view, safeAreaInsets];
+                (
+                    dvec2(bounds.size.width as f64, bounds.size.height as f64),
+                    scale,
                     crate::event::SafeAreaInsets {
                         top: insets.top,
                         right: insets.right,
                         bottom: insets.bottom,
                         left: insets.left,
-                    }
-                }
-            } else {
-                crate::event::SafeAreaInsets::default()
-            }
+                    },
+                )
+            })
         });
+        let (inner_size, dpi_factor, safe_area_insets) = match read {
+            Some(v) => v,
+            None => {
+                // MTKView has not been created yet — this is only reachable during
+                // early init, before `create_window` wires up `app.mtk_view`. Fall
+                // back to UIScreen so callers can still get a sensible initial geom;
+                // the first real MTKView callback will replace it with the correct
+                // values.
+                unsafe {
+                    let main_screen: ObjcId = msg_send![class!(UIScreen), mainScreen];
+                    let screen_rect: NSRect = msg_send![main_screen, bounds];
+                    let scale: f64 = msg_send![main_screen, scale];
+                    (
+                        dvec2(
+                            screen_rect.size.width as f64,
+                            screen_rect.size.height as f64,
+                        ),
+                        scale,
+                        crate::event::SafeAreaInsets::default(),
+                    )
+                }
+            }
+        };
+        Self::apply_new_window_geom(inner_size, dpi_factor, safe_area_insets);
+    }
 
+    fn apply_new_window_geom(
+        inner_size: DVec2,
+        dpi_factor: f64,
+        safe_area_insets: crate::event::SafeAreaInsets,
+    ) {
         let new_geom = WindowGeom {
             xr_is_presenting: false,
             is_topmost: false,
             is_fullscreen: true,
             can_fullscreen: false,
-            inner_size: new_size,
-            outer_size: new_size,
+            inner_size,
+            outer_size: inner_size,
             dpi_factor,
             position: dvec2(0.0, 0.0),
             safe_area_insets,
