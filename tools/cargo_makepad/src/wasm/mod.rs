@@ -50,6 +50,9 @@ fn parse_wasm_option(config: &mut WasmConfig, v: &str) -> bool {
     } else if v == "--bindgen" {
         config.bindgen = true;
         true
+    } else if v == "--no-bindgen" {
+        config.bindgen = false;
+        true
     } else if v == "--no-threads" {
         config.threads = false;
         true
@@ -82,7 +85,7 @@ pub fn handle_wasm(mut args: &[String]) -> Result<(), String> {
         brotli: false,
         port: None,
         small_fonts: false,
-        bindgen: false,
+        bindgen: true,
         threads: true,
         optimize_size: false,
         wasm_opt: false,
@@ -147,7 +150,7 @@ mod tests {
                 brotli: false,
                 port: None,
                 small_fonts: false,
-                bindgen: false,
+                bindgen: true,
                 threads: true,
                 optimize_size: false,
                 wasm_opt: false,
@@ -181,7 +184,7 @@ mod tests {
                 brotli: false,
                 port: None,
                 small_fonts: false,
-                bindgen: false,
+                bindgen: true,
                 threads: true,
                 optimize_size: false,
                 wasm_opt: false,
@@ -209,7 +212,7 @@ mod tests {
             brotli: false,
             port: None,
             small_fonts: false,
-            bindgen: false,
+            bindgen: true,
             threads: true,
             optimize_size: false,
             wasm_opt: false,

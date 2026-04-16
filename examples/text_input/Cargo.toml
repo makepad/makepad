@@ -2,6 +2,7 @@
 name = "makepad-example-text-input"
 version = "1.0.0"
 edition = "2021"
+build = "build.rs"
 
 [features]
 default = ["hotreload"]
@@ -11,9 +12,13 @@ web = []
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0" }
 
-# Lets add wasm-bindgen to our dependencies, but only for the web target
+# `dx` reads the wasm-bindgen crate version from the dependency graph. For Makepad wasm, run
+# `tools/install_dx_wasm_bindgen_shim.sh <version>` after Dioxus installs wasm-bindgen (strips
+# `target_features`, patches JS). `build.rs` copies wasm bridge + platform web assets + `widgets/resources`
+# into `public/` (`public/makepad_widgets/resources/`, matching `cargo makepad` wasm). `public/index.html`
+# adds the Makepad canvas + `WasmWebGL` bootstrap.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2.118"
+wasm-bindgen = "=0.2.117"
 
 [dev-dependencies]
 makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }
