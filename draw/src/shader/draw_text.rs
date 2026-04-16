@@ -1632,6 +1632,9 @@ impl DrawText {
         for row in &text.rows {
             for glyph in &row.glyphs {
                 let font_size_in_dpxs = glyph.font_size_in_lpxs * dpi_factor;
+                if glyph.font.has_glyph_raster_image(glyph.id, font_size_in_dpxs) {
+                    continue;
+                }
                 if !cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs) {
                     continue;
                 }
@@ -2684,7 +2687,8 @@ impl DrawText {
 
     fn resolve_glyph(&mut self, cx: &mut Cx2d, glyph: &LaidoutGlyph) -> Option<ResolvedGlyph> {
         let font_size_in_dpxs = glyph.font_size_in_lpxs * cx.current_dpi_factor() as f32;
-        if cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs) {
+        let glyph_prefers_raster_image = glyph.font.has_glyph_raster_image(glyph.id, font_size_in_dpxs);
+        if !glyph_prefers_raster_image && cx.fonts.borrow().should_use_slug_glyph(font_size_in_dpxs) {
             let slug_lookup = {
                 let mut fonts = cx.fonts.borrow_mut();
                 fonts.get_or_cache_slug_glyph(cx.cx.redraw_id, glyph.font.as_ref(), glyph.id)
