@@ -28,7 +28,7 @@ pub fn register_signal_handler(flag: &HotReloadFlag) {
 
 pub fn connect_once() {
     HOTRELOAD_CONNECT_ONCE.call_once(|| {
-        let Some(endpoint) = dioxus_cli_config::devserver_ws_endpoint() else {
+        let Some(endpoint) = devserver_ws_endpoint_fallback() else {
             return;
         };
 
@@ -80,11 +80,39 @@ pub fn connect_once() {
     });
 }
 
+fn devserver_ws_endpoint_fallback() -> Option<String> {
+    if let Some(endpoint) = dioxus_cli_config::devserver_ws_endpoint() {
+        return Some(endpoint);
+    }
+
+    // On iOS/tvOS, the CLI environment variables are often not available at runtime.
+    // Fall back to compile-time values that `dx` can set during the build.
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
+    return Some(format!(
+        "ws://{}:{}/_dioxus",
+        option_env!("DIOXUS_DEVSERVER_IP").unwrap_or("127.0.0.1"),
+        option_env!("DIOXUS_DEVSERVER_PORT").unwrap_or("8080"),
+    ));
+
+    #[cfg(not(any(target_os = "ios", target_os = "tvos")))]
+    None
+}
+
 fn hotreload_request(endpoint: String) -> HttpRequest {
+    let build_id = dioxus_cli_config::build_id();
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
+    let build_id = if build_id != 0 {
+        build_id
+    } else {
+        option_env!("DIOXUS_BUILD_ID")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    };
+
     let url = format!(
         "{endpoint}?aslr_reference={}&build_id={}&pid={}",
         subsecond::aslr_reference(),
-        dioxus_cli_config::build_id(),
+        build_id,
         std::process::id()
     );
     HttpRequest::new(url, HttpMethod::GET)

@@ -44,7 +44,13 @@ mod geometry;
 mod gpu_info;
 #[cfg(all(
     feature = "hotreload",
-    any(target_os = "macos", target_os = "windows", target_os = "linux")
+    any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "ios",
+        target_os = "tvos"
+    )
 ))]
 pub mod hotreload;
 mod id_pool;

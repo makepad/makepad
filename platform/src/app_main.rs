@@ -253,14 +253,26 @@ where
 {
     #[cfg(all(
         feature = "hotreload",
-        any(target_os = "macos", target_os = "windows", target_os = "linux")
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
     ))]
     {
         crate::hotreload::subsecond::HotFn::current(<T as AppMain>::script_mod).call((vm,))
     }
     #[cfg(not(all(
         feature = "hotreload",
-        any(target_os = "macos", target_os = "windows", target_os = "linux")
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
     )))]
     {
         <T as AppMain>::script_mod(vm)
@@ -304,14 +316,26 @@ where
 {
     #[cfg(all(
         feature = "hotreload",
-        any(target_os = "macos", target_os = "windows", target_os = "linux")
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
     ))]
     {
         crate::hotreload::subsecond::call(|| <dyn AppMain>::handle_event(app, cx, event));
     }
     #[cfg(not(all(
         feature = "hotreload",
-        any(target_os = "macos", target_os = "windows", target_os = "linux")
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
     )))]
     {
         <dyn AppMain>::handle_event(app, cx, event);
@@ -322,7 +346,13 @@ where
 pub fn register_hotreload_handler(_flag: &Arc<AtomicBool>) {
     #[cfg(all(
         feature = "hotreload",
-        any(target_os = "macos", target_os = "windows", target_os = "linux")
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
     ))]
     crate::hotreload::register_signal_handler(_flag);
 }
