@@ -1,7 +1,7 @@
 use makepad_mlx::text_runtime::{
-    benchmark_text_generation_with_backend_config, GemmaExactMetalBackendMode,
-    GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode, GemmaPromptFormat,
-    GemmaTextGenerationOptions,
+    benchmark_text_generation_with_backend_config, GemmaPromptFormat,
+    GemmaTextBackendConfig, GemmaTextBackendMode, GemmaTextGenerationOptions,
+    GemmaTextKvCompressionMode,
 };
 use std::env;
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_new_tokens = 64usize;
     let mut warmup_iters = 1usize;
     let mut measured_iters = 3usize;
-    let mut backend_config = GemmaExactMetalConfig::default();
+    let mut backend_config = GemmaTextBackendConfig::default();
     let mut prompt_parts = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -47,18 +47,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 measured_iters = value.parse::<usize>()?;
             }
             "--reference-text-backend" => {
-                backend_config.backend_mode = GemmaExactMetalBackendMode::Disabled;
+                backend_config.backend_mode = GemmaTextBackendMode::Disabled;
             }
             "--force-exact-text-backend" => {
-                backend_config.backend_mode = GemmaExactMetalBackendMode::Force;
+                backend_config.backend_mode = GemmaTextBackendMode::Force;
             }
             "--rotor-k-cache" => {
                 backend_config.kv_compression =
-                    GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK;
+                    GemmaTextKvCompressionMode::RotorPlanar4FullAttentionK;
             }
             "--rotor-k-cache-planar3" => {
                 backend_config.kv_compression =
-                    GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK;
+                    GemmaTextKvCompressionMode::RotorPlanar3FullAttentionK;
             }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());
@@ -129,60 +129,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "steady_decode_tok_s={:.3}",
         output.steady_state_decode_tokens_per_second
     );
-    println!(
-        "metal_command_batches={}",
-        output.metal_counters.command_batches_begun
-    );
-    println!(
-        "metal_batch_commits={}",
-        output.metal_counters.command_batches_committed
-    );
-    println!(
-        "metal_command_buffer_commits={}",
-        output.metal_counters.command_buffer_commits
-    );
-    println!(
-        "metal_compute_dispatches={}",
-        output.metal_counters.compute_dispatches
-    );
-    println!(
-        "metal_buffer_barriers={}",
-        output.metal_counters.buffer_barriers
-    );
-    println!(
-        "metal_encoder_starts={}",
-        output.metal_counters.compute_encoder_starts
-    );
-    println!(
-        "metal_encoder_ends={}",
-        output.metal_counters.compute_encoder_ends
-    );
-    println!(
-        "metal_blit_copies={}",
-        output.metal_counters.blit_copy_calls
-    );
-    println!("metal_fence_waits={}", output.metal_counters.fence_waits);
-    println!(
-        "metal_fence_updates={}",
-        output.metal_counters.fence_updates
-    );
-    println!(
-        "metal_wait_idle_calls={}",
-        output.metal_counters.wait_idle_calls
-    );
-    println!(
-        "metal_completion_wait_calls={}",
-        output.metal_counters.completion_wait_calls
-    );
-    println!("metal_readbacks={}", output.metal_counters.readback_calls);
-    println!(
-        "metal_gpu_elapsed_s={:.6}",
-        output.metal_counters.gpu_elapsed_ns as f64 / 1e9
-    );
-    println!(
-        "metal_cpu_gap_s={:.6}",
-        (output.elapsed.as_secs_f64() - output.metal_counters.gpu_elapsed_ns as f64 / 1e9).max(0.0)
-    );
+    println!("backend={}", output.backend_kind.label());
+    if let Some(counters) = output.backend_counters.as_metal() {
+        println!("backend_command_batches={}", counters.command_batches_begun);
+        println!("backend_batch_commits={}", counters.command_batches_committed);
+        println!(
+            "backend_command_buffer_commits={}",
+            counters.command_buffer_commits
+        );
+        println!("backend_compute_dispatches={}", counters.compute_dispatches);
+        println!("backend_buffer_barriers={}", counters.buffer_barriers);
+        println!("backend_encoder_starts={}", counters.compute_encoder_starts);
+        println!("backend_encoder_ends={}", counters.compute_encoder_ends);
+        println!("backend_blit_copies={}", counters.blit_copy_calls);
+        println!("backend_fence_waits={}", counters.fence_waits);
+        println!("backend_fence_updates={}", counters.fence_updates);
+        println!("backend_wait_idle_calls={}", counters.wait_idle_calls);
+        println!(
+            "backend_completion_wait_calls={}",
+            counters.completion_wait_calls
+        );
+        println!("backend_readbacks={}", counters.readback_calls);
+        println!("backend_gpu_elapsed_s={:.6}", counters.gpu_elapsed_ns as f64 / 1e9);
+        println!(
+            "backend_cpu_gap_s={:.6}",
+            (output.elapsed.as_secs_f64() - counters.gpu_elapsed_ns as f64 / 1e9).max(0.0)
+        );
+    }
     println!("decode_tok_s={:.3}", output.decode_tokens_per_second);
     println!("total_tok_s={:.3}", output.total_tokens_per_second);
 

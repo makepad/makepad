@@ -1,6 +1,6 @@
 use makepad_mlx::chat::{GemmaChatDecodeMode, GemmaChatRole, GemmaChatSession};
 use makepad_mlx::text_runtime::{
-    GemmaExactMetalBackendMode, GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode,
+    GemmaTextBackendConfig, GemmaTextBackendMode, GemmaTextKvCompressionMode,
 };
 use std::env;
 use std::io::{self, Write};
@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut initial_image_path = None;
     let mut max_new_tokens = None;
     let mut decode_mode = GemmaChatDecodeMode::Sampled;
-    let mut backend_config = GemmaExactMetalConfig::default();
+    let mut backend_config = GemmaTextBackendConfig::default();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -73,18 +73,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 decode_mode = GemmaChatDecodeMode::Greedy;
             }
             "--reference-text-backend" => {
-                backend_config.backend_mode = GemmaExactMetalBackendMode::Disabled;
+                backend_config.backend_mode = GemmaTextBackendMode::Disabled;
             }
             "--force-exact-text-backend" => {
-                backend_config.backend_mode = GemmaExactMetalBackendMode::Force;
+                backend_config.backend_mode = GemmaTextBackendMode::Force;
             }
             "--rotor-k-cache" => {
                 backend_config.kv_compression =
-                    GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK;
+                    GemmaTextKvCompressionMode::RotorPlanar4FullAttentionK;
             }
             "--rotor-k-cache-planar3" => {
                 backend_config.kv_compression =
-                    GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK;
+                    GemmaTextKvCompressionMode::RotorPlanar3FullAttentionK;
             }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());
@@ -124,18 +124,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "text_backend={}",
         match backend_config.backend_mode {
-            GemmaExactMetalBackendMode::Auto => "auto",
-            GemmaExactMetalBackendMode::Force => "force_exact",
-            GemmaExactMetalBackendMode::Disabled => "reference",
+            GemmaTextBackendMode::Auto => "auto",
+            GemmaTextBackendMode::Force => "force_exact",
+            GemmaTextBackendMode::Disabled => "reference",
         }
     );
     println!(
         "kv_compression={}",
         match backend_config.kv_compression {
-            GemmaExactMetalKvCompressionMode::Disabled => "disabled",
-            GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK =>
+            GemmaTextKvCompressionMode::Disabled => "disabled",
+            GemmaTextKvCompressionMode::RotorPlanar3FullAttentionK =>
                 "rotor_planar3_full_attention_k",
-            GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK =>
+            GemmaTextKvCompressionMode::RotorPlanar4FullAttentionK =>
                 "rotor_planar4_full_attention_k",
         }
     );

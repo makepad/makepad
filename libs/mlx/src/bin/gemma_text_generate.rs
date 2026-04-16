@@ -1,7 +1,7 @@
 use makepad_mlx::text_runtime::{
     generate_multimodal_text_with_backend_config, generate_text_with_backend_config,
-    GemmaExactMetalBackendMode, GemmaExactMetalConfig, GemmaExactMetalKvCompressionMode,
-    GemmaPromptFormat, GemmaTextGenerationOptions,
+    GemmaPromptFormat, GemmaTextBackendConfig, GemmaTextBackendMode,
+    GemmaTextGenerationOptions, GemmaTextKvCompressionMode,
 };
 use std::env;
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut image_path = None;
     let mut prompt_format = GemmaPromptFormat::AutoChat;
     let mut max_new_tokens = 8usize;
-    let mut backend_config = GemmaExactMetalConfig::default();
+    let mut backend_config = GemmaTextBackendConfig::default();
     let mut prompt_parts = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -37,18 +37,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_new_tokens = value.parse::<usize>()?;
             }
             "--reference-text-backend" => {
-                backend_config.backend_mode = GemmaExactMetalBackendMode::Disabled;
+                backend_config.backend_mode = GemmaTextBackendMode::Disabled;
             }
             "--force-exact-text-backend" => {
-                backend_config.backend_mode = GemmaExactMetalBackendMode::Force;
+                backend_config.backend_mode = GemmaTextBackendMode::Force;
             }
             "--rotor-k-cache" => {
                 backend_config.kv_compression =
-                    GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK;
+                    GemmaTextKvCompressionMode::RotorPlanar4FullAttentionK;
             }
             "--rotor-k-cache-planar3" => {
                 backend_config.kv_compression =
-                    GemmaExactMetalKvCompressionMode::RotorPlanar3FullAttentionK;
+                    GemmaTextKvCompressionMode::RotorPlanar3FullAttentionK;
             }
             value if value.starts_with("--") => {
                 return Err(format!("unknown option: {value}\n{}", usage()).into());
