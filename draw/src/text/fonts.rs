@@ -15,14 +15,14 @@ use {
 
 fn default_slug_new_glyphs_per_redraw(cx: &Cx) -> usize {
     match cx.os_type() {
-        OsType::LinuxWindow(_) | OsType::LinuxDirect => 1,
+        OsType::LinuxWindow(_) | OsType::LinuxDirect | OsType::Windows => 1,
         _ => usize::MAX,
     }
 }
 
 fn default_slug_min_dpxs_per_em(cx: &Cx, rasterizer: &Rasterizer) -> f32 {
     match cx.os_type() {
-        OsType::LinuxWindow(_) | OsType::LinuxDirect => {
+        OsType::LinuxWindow(_) | OsType::LinuxDirect | OsType::Windows => {
             rasterizer.msdf_resolution().max_dpxs_per_em
         }
         _ => 0.0,
