@@ -176,43 +176,6 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
     data.to_vec()
 }
 
-/// Strip LLVM's `target_features` custom section before `wasm-bindgen`.
-///
-/// Rust/LLVM can emit `reference-types` in that section even when the module does not use wasm-bindgen's
-/// `__wbindgen_placeholder__` imports. `wasm-bindgen` then enables its `externref` transform and fails with
-/// `failed to find intrinsics to enable clone_ref function`. Removing the section avoids that pass; engines
-/// do not require it for typical Makepad wasm.
-fn try_strip_target_features_before_wasm_bindgen(raw_wasm: &Path) {
-    let Some(in_s) = raw_wasm.to_str() else {
-        println!("wasm-opt --strip-target-features: skipped (non-utf8 path)");
-        return;
-    };
-    let out = raw_wasm.with_extension("strip_target_features.wasm");
-    let Some(out_s) = out.to_str() else {
-        println!("wasm-opt --strip-target-features: skipped (non-utf8 path)");
-        return;
-    };
-    let status = Command::new("wasm-opt")
-        .args(["--strip-target-features", in_s, "-o", out_s])
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            if fs::rename(&out, raw_wasm).is_err() {
-                println!("wasm-opt --strip-target-features: skipped (rename failed)");
-                let _ = fs::remove_file(&out);
-            }
-        }
-        Ok(_) => {
-            println!("wasm-opt --strip-target-features: skipped (wasm-opt failed)");
-            let _ = fs::remove_file(&out);
-        }
-        Err(e) => {
-            println!("wasm-opt --strip-target-features: skipped ({e})");
-            let _ = fs::remove_file(&out);
-        }
-    }
-}
-
 fn print_brotli_size_report(
     wasm_bytes: usize,
     wasm_brotli_bytes: usize,
@@ -577,9 +540,10 @@ pub fn cp_brotli(
 
 const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
-const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--import-undefined -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
+const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
 const WASM_RUSTFLAGS_SINGLE_THREADED: &str =
-    "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--import-undefined -C opt-level=z";
+    "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C opt-level=z";
+
 fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, String> {
     let target_spec_dir = if threaded {
         cwd.join("target/makepad-wasm-target/threads")
@@ -819,7 +783,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         }
     }
     let wasm_source = if config.bindgen {
-        try_strip_target_features_before_wasm_bindgen(&build_dir.join(format!("{build_crate}.wasm")));
         shell(
             build_dir.as_path(),
             "wasm-bindgen",
@@ -832,76 +795,55 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             ],
         )?;
         let jsfile = build_dir.join("bindgen.js");
-        let patch_py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../patch_makepad_wasm_bindgen_js.py");
-        let py_ok = Command::new("python3")
-            .arg(&patch_py)
-            .arg(&jsfile)
-            .arg("--sibling-public")
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !py_ok {
-            let mut patched = std::fs::read_to_string(&jsfile)
-                .map_err(|e| format!("Unable to find wasm-bidngen generated file {e:?}"))?
-                .replace("import * as __wbg_star0 from 'env';", "")
-                .replace("imports['env'] = __wbg_star0;", "");
-            if !patched.contains("function __wbg_finalize_init") {
-                patched = patched.replace("return wasm;\n}", "return instance;\n}");
-            }
-            patched = patched
-                .replace(
-                    "__wbg_init(module_or_path, memory) {",
-                    "__wbg_init(module_or_path, env) {let memory;",
-                )
-                .replace(
-                    "__wbg_init(module_or_path) {",
-                    "__wbg_init(module_or_path, env) {let memory;",
-                )
-                .replace(
-                    "async function __wbg_init(module_or_path) {",
-                    "async function __wbg_init(module_or_path, env) {",
-                )
-                .replace(
-                    "function initSync(module) {",
-                    "function initSync(module, env) {",
-                )
-                .replace(
-                    "imports = __wbg_get_imports();",
-                    "imports = __wbg_get_imports(); imports.env = env;",
-                )
-                .replace(
-                    "const imports=__wbg_get_imports(memory);",
-                    "const imports=__wbg_get_imports(memory);imports.env=env;",
-                )
-                .replace(
-                    "const imports = __wbg_get_imports(memory);",
-                    "const imports = __wbg_get_imports(memory); imports.env = env;",
-                );
-            let patched = patched
-                .lines()
-                .filter(|line| {
-                    let trimmed = line.trim();
-                    let is_env_import = (trimmed.starts_with("import * as __wbg_star")
-                        || trimmed.starts_with("import*as import")
-                        || trimmed.starts_with("import * as import"))
-                        && (trimmed.contains("from 'env'")
-                            || trimmed.contains("from\"env\"")
-                            || trimmed.contains("from \"env\""));
-                    let is_env_mapping = (trimmed.starts_with("\"env\":")
-                        || trimmed.starts_with("'env':"))
-                        && trimmed.contains("import");
-                    !is_env_import && !is_env_mapping
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            std::fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&jsfile)
-                .unwrap()
-                .write(patched.as_bytes())
-                .unwrap();
-        }
+        let patched = std::fs::read_to_string(&jsfile)
+            .map_err(|e| format!("Unable to find wasm-bidngen generated file {e:?}"))?
+            .replace("import * as __wbg_star0 from 'env';", "")
+            .replace("imports['env'] = __wbg_star0;", "")
+            .replace("return wasm;\n}", "return instance;\n}")
+            .replace(
+                "__wbg_init(module_or_path, memory) {",
+                "__wbg_init(module_or_path, env) {let memory;",
+            )
+            .replace(
+                "__wbg_init(module_or_path) {",
+                "__wbg_init(module_or_path, env) {let memory;",
+            )
+            .replace(
+                "imports = __wbg_get_imports();",
+                "imports = __wbg_get_imports(); imports.env = env;",
+            )
+            .replace(
+                "const imports=__wbg_get_imports(memory);",
+                "const imports=__wbg_get_imports(memory);imports.env=env;",
+            )
+            .replace(
+                "const imports = __wbg_get_imports(memory);",
+                "const imports = __wbg_get_imports(memory); imports.env = env;",
+            );
+        let patched = patched
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                let is_env_import = (trimmed.starts_with("import * as __wbg_star")
+                    || trimmed.starts_with("import*as import")
+                    || trimmed.starts_with("import * as import"))
+                    && (trimmed.contains("from 'env'")
+                        || trimmed.contains("from\"env\"")
+                        || trimmed.contains("from \"env\""));
+                let is_env_mapping = (trimmed.starts_with("\"env\":")
+                    || trimmed.starts_with("'env':"))
+                    && trimmed.contains("import");
+                !is_env_import && !is_env_mapping
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&jsfile)
+            .unwrap()
+            .write(patched.as_bytes())
+            .unwrap();
         cp_brotli(&jsfile, &app_dir.join("bindgen.js"), false, config.brotli)?;
 
         build_dir.join("bindgen_bg.wasm")

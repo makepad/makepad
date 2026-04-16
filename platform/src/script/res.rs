@@ -541,36 +541,6 @@ fn normalize_manifest_relative_path(path: &Path) -> Option<String> {
     normalize_dependency_file_path(&path.to_string_lossy().replace('\\', "/"))
 }
 
-/// `ScriptMod.cargo_manifest_path` is `CARGO_MANIFEST_DIR` (crate root).
-///
-/// - Paths like `resources/foo` are relative to that directory (same as native `push` in
-///   [`resolve_crate_resource_paths`] for non-wasm).
-/// - Paths starting with `..` (e.g. `../../widgets/...` in `draw`) are authored relative to the
-///   manifest **file**; join `.../Cargo.toml/` first so `..` does not walk above the crate from
-///   the wrong base.
-#[cfg(target_arch = "wasm32")]
-fn wasm_abs_path_for_crate_resource(manifest_dir: &str, file_path: &str) -> String {
-    let fp = strip_crate_resource_leading_slashes(file_path);
-    let base = Path::new(manifest_dir);
-    let joined = if fp.starts_with("..") {
-        base.join("Cargo.toml").join(fp)
-    } else {
-        base.join(fp)
-    };
-    normalize_path(&joined)
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| {
-            let mut fallback = manifest_dir.trim_end_matches('/').to_string();
-            if fp.starts_with("..") {
-                fallback.push_str("/Cargo.toml/");
-            } else {
-                fallback.push('/');
-            }
-            fallback.push_str(fp);
-            fallback
-        })
-}
-
 #[cfg(target_arch = "wasm32")]
 fn resolve_dependency_path_from_manifests(
     abs_path: &str,
@@ -590,21 +560,20 @@ fn resolve_dependency_path_from_manifests(
     }
 
     for (crate_name, manifest_path) in candidates {
-        // `manifest_path` is `CARGO_MANIFEST_DIR` for each crate.
-        let Some(crate_root_norm) = normalize_path(Path::new(&manifest_path)) else {
+        let Some(manifest_norm) = normalize_path(Path::new(&manifest_path)) else {
             continue;
         };
-        let Ok(rel) = abs_norm.strip_prefix(&crate_root_norm) else {
+        let Ok(rel) = abs_norm.strip_prefix(&manifest_norm) else {
             continue;
         };
         let Some(rel_norm) = normalize_manifest_relative_path(rel) else {
             continue;
         };
         let dep_path = format!("{}/{}", crate_name, rel_norm);
-        let prefix_len = crate_root_norm.to_string_lossy().len();
+        let manifest_len = manifest_norm.to_string_lossy().len();
         match &best {
-            Some((best_len, _)) if *best_len >= prefix_len => {}
-            _ => best = Some((prefix_len, dep_path)),
+            Some((best_len, _)) if *best_len >= manifest_len => {}
+            _ => best = Some((manifest_len, dep_path)),
         }
     }
 
@@ -633,7 +602,14 @@ fn resolve_crate_resource_paths(
             ScriptSource::Mod(script_mod) => script_mod,
             _ => return None,
         };
-        let abs_path = wasm_abs_path_for_crate_resource(&script_mod.cargo_manifest_path, file_path);
+        let abs_path = normalize_path(&Path::new(&script_mod.cargo_manifest_path).join(file_path))
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| {
+                let mut fallback = script_mod.cargo_manifest_path.clone();
+                fallback.push('/');
+                fallback.push_str(file_path);
+                fallback
+            });
         let crate_name = script_mod
             .module_path
             .split("::")
@@ -648,7 +624,14 @@ fn resolve_crate_resource_paths(
     } else {
         let crate_name = crate_part.replace('-', "_");
         let manifest_path = manifests.get(&crate_name)?.clone();
-        let abs_path = wasm_abs_path_for_crate_resource(&manifest_path, file_path);
+        let abs_path = normalize_path(&Path::new(&manifest_path).join(file_path))
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| {
+                let mut fallback = manifest_path.clone();
+                fallback.push('/');
+                fallback.push_str(file_path);
+                fallback
+            });
         (abs_path, Some(crate_name), Some(manifest_path))
     };
 
