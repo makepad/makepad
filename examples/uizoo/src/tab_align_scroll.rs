@@ -34,7 +34,10 @@ script_mod! {
                 width: Fill height: 200.
                 flow: Down
                 align: Align{x: 0.5 y: 0.5}
-                scroll_bars: ScrollBars{show_scroll_x: false show_scroll_y: true}
+                scroll_bars: ScrollBars{
+                    show_scroll_x: false show_scroll_y: true
+                    scroll_bar_y.drag_scrolling: true
+                }
                 AlignScrollBox{width: 120. height: 80. P{width: Fit text: "Box 1"}}
                 AlignScrollBox{width: 120. height: 80. P{width: Fit text: "Box 2"}}
                 AlignScrollBox{width: 120. height: 80. P{width: Fit text: "Box 3"}}
@@ -51,7 +54,10 @@ script_mod! {
                 width: 250. height: Fit
                 flow: Down
                 align: Align{x: 0.5 y: 0.0}
-                scroll_bars: ScrollBars{show_scroll_x: true show_scroll_y: false}
+                scroll_bars: ScrollBars{
+                    show_scroll_x: true show_scroll_y: false
+                    scroll_bar_x.drag_scrolling: true
+                }
                 AlignScrollBox{width: 400. height: 40. P{width: Fit text: "Wide box 1 — 400px in a 250px container"}}
                 AlignScrollBox{width: 150. height: 40. P{width: Fit text: "Narrow box 2"}}
                 AlignScrollBox{width: 400. height: 40. P{width: Fit text: "Wide box 3 — also 400px wide"}}
@@ -66,7 +72,10 @@ script_mod! {
                 width: Fill height: 150.
                 flow: Right
                 align: Align{x: 0.0 y: 0.5}
-                scroll_bars: ScrollBars{show_scroll_x: false show_scroll_y: true}
+                scroll_bars: ScrollBars{
+                    show_scroll_x: false show_scroll_y: true
+                    scroll_bar_y.drag_scrolling: true
+                }
                 AlignScrollBox{width: 100. height: 50. P{width: Fit text: "Short"}}
                 AlignScrollBox{width: 100. height: 250. P{width: Fit text: "Tall (250px)"}}
                 AlignScrollBox{width: 100. height: 50. P{width: Fit text: "Short"}}
@@ -81,7 +90,10 @@ script_mod! {
                 width: 300. height: Fit
                 flow: Right
                 align: Align{x: 0.5 y: 0.5}
-                scroll_bars: ScrollBars{show_scroll_x: true show_scroll_y: false}
+                scroll_bars: ScrollBars{
+                    show_scroll_x: true show_scroll_y: false
+                    scroll_bar_x.drag_scrolling: true
+                }
                 AlignScrollBox{width: 100. height: 60. P{width: Fit text: "A"}}
                 AlignScrollBox{width: 100. height: 60. P{width: Fit text: "B"}}
                 AlignScrollBox{width: 100. height: 60. P{width: Fit text: "C"}}
@@ -98,7 +110,11 @@ script_mod! {
                 width: 250. height: 150.
                 flow: Overlay
                 align: Align{x: 0.5 y: 0.5}
-                scroll_bars: ScrollBars{show_scroll_x: true show_scroll_y: true}
+                scroll_bars: ScrollBars{
+                    show_scroll_x: true show_scroll_y: true
+                    scroll_bar_x.drag_scrolling: true
+                    scroll_bar_y.drag_scrolling: true
+                }
                 AlignScrollBox{
                     width: 400. height: 300.
                     P{width: Fit text: "400x300 box in a 250x150 container.\nScroll both directions to see all content."}
@@ -114,7 +130,10 @@ script_mod! {
                 width: Fill height: 150.
                 flow: Down
                 align: Align{x: 0.5 y: 0.5}
-                scroll_bars: ScrollBars{show_scroll_x: false show_scroll_y: true}
+                scroll_bars: ScrollBars{
+                    show_scroll_x: false show_scroll_y: true
+                    scroll_bar_y.drag_scrolling: true
+                }
                 AlignScrollBox{width: 120. height: 40. P{width: Fit text: "Centered"}}
             }
         }

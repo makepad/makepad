@@ -207,16 +207,36 @@ impl Rasterizer {
         glyph_id: GlyphId,
         dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
-        if let Some(rasterized_glyph) = self.rasterize_glyph_outline(font, glyph_id, dpxs_per_em) {
-            return Some(rasterized_glyph);
-        };
         if let Some(rasterized_glyph) =
             self.rasterize_glyph_raster_image(font, glyph_id, dpxs_per_em)
         {
             return Some(rasterized_glyph);
         }
+        if let Some(rasterized_glyph) = self.rasterize_glyph_outline(font, glyph_id, dpxs_per_em) {
+            return Some(rasterized_glyph);
+        }
         None
     }
+
+    pub fn rasterize_glyph_stable_fallback(
+        &mut self,
+        font: &Font,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
+        if let Some(rasterized_glyph) =
+            self.rasterize_glyph_raster_image(font, glyph_id, dpxs_per_em)
+        {
+            return Some(rasterized_glyph);
+        }
+        if let Some(rasterized_glyph) =
+            self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em)
+        {
+            return Some(rasterized_glyph);
+        }
+        None
+    }
+
     /*
     pub fn save_to_png(item:&Image<R>, path: impl AsRef<Path>) {
         let file = File::create(path).unwrap();

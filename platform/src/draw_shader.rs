@@ -347,6 +347,7 @@ pub struct DrawShaderFlags {
     pub debug_code: bool,
     pub draw_call_nocompare: bool,
     pub draw_call_always: bool,
+    pub async_compile: bool,
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -498,6 +499,10 @@ impl CxDrawShaderMapping {
             == Some(true);
         let debug_code = heap
             .value(source.as_object(), id!(debug_code).into(), NoTrap)
+            .as_bool()
+            == Some(true);
+        let async_compile = heap
+            .value(source.as_object(), id!(async_compile).into(), NoTrap)
             .as_bool()
             == Some(true);
         // Use attribute packing for instances (they're vertex attributes)
@@ -801,6 +806,7 @@ impl CxDrawShaderMapping {
                 debug_draw,
                 debug_layout,
                 debug_code,
+                async_compile,
                 ..DrawShaderFlags::default()
             },
             instances,

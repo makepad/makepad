@@ -293,8 +293,20 @@ impl Widget for DemoFileTree {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let root_path: PathBuf = PathBuf::from(".");
-                    let root = FileNodeData::Directory {
-                        entries: get_directory_entries(&root_path, false).unwrap(),
+                    let root = match get_directory_entries(&root_path, false) {
+                        Ok(entries) => FileNodeData::Directory { entries },
+                        Err(err) => {
+                            let message = match err {
+                                FileError::Unknown(s) | FileError::CannotOpen(s) => s,
+                            };
+                            log!("DemoFileTree: cannot read `{}`: {}", root_path.display(), message);
+                            FileNodeData::Directory {
+                                entries: vec![DirectoryEntry {
+                                    name: format!("<cannot access filesystem: {}>", message),
+                                    node: FileNodeData::File { data: None },
+                                }],
+                            }
+                        }
                     };
                     let file_tree_data = FileTreeData {
                         root_path: "".into(),

@@ -1,6 +1,5 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::*,
-    makepad_draw::shader::draw_text::TextOverflow,
+    makepad_derive_widget::*, makepad_draw::shader::draw_text::TextOverflow, makepad_draw::*,
     widget::*, widget_async::ScriptAsyncResult,
 };
 
