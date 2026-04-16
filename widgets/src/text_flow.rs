@@ -4,9 +4,8 @@ use crate::makepad_draw::text::{
     selection::{Cursor, Selection},
 };
 use crate::{
-    animator::*, makepad_derive_widget::*, makepad_draw::*,
-    makepad_draw::shader::draw_text::TextOverflow,
-    widget::*, widget_tree::CxWidgetExt,
+    animator::*, makepad_derive_widget::*, makepad_draw::shader::draw_text::TextOverflow,
+    makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
 };
 use std::rc::Rc;
 
@@ -976,7 +975,7 @@ impl Widget for TextFlow {
                 }
                 // Update shader directly and request redraw for the area
                 self.draw_text.set_total_chars(cx, self.animated_chars);
-                self.draw_text.draw_vars.area.redraw(cx);
+                self.draw_text.redraw_areas(cx);
             }
 
             // Keep animation alive if streaming or not done fading
@@ -1069,6 +1068,7 @@ impl TextFlow {
         cx.begin_turtle(walk, self.layout);
         self.draw_state.set(DrawState::Drawing);
         self.draw_block.append_to_draw_call(cx);
+        self.draw_text.begin_deferred_slug_flush();
         self.clear_stacks();
         self.lines_drawn = 0;
         self.content_truncated = false;
@@ -1128,6 +1128,8 @@ impl TextFlow {
     }
 
     pub fn end(&mut self, cx: &mut Cx2d) {
+        self.draw_text.end_deferred_slug_flush(cx);
+
         // Draw selection highlight before finishing the turtle
         self.draw_selection_rects(cx);
 

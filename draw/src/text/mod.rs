@@ -18,6 +18,7 @@ pub mod sdfer;
 pub mod selection;
 pub mod shaper;
 pub mod slice;
+pub mod slug_atlas;
 pub mod substr;
 
 // Debug test commented out - requires png encoder

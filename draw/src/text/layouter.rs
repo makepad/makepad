@@ -552,13 +552,12 @@ impl LayoutContext {
     /// Finishes any pending glyphs into a row (without a newline).
     /// Always ensures at least one row exists.
     fn finish_current_row_if_pending(&mut self) {
-        let has_pending_content = self.current_row_start != self.current_row_end
-            || !self.glyphs.is_empty();
+        let has_pending_content =
+            self.current_row_start != self.current_row_end || !self.glyphs.is_empty();
         if has_pending_content || self.rows.is_empty() {
             self.finish_current_row(false);
         }
     }
-
 }
 
 #[derive(Debug)]
@@ -951,8 +950,7 @@ impl PartialEq for LayoutOptions {
         self.first_row_indent_in_lpxs.to_bits() == other.first_row_indent_in_lpxs.to_bits()
             && self.first_row_min_line_spacing_below_in_lpxs.to_bits()
                 == other.first_row_min_line_spacing_below_in_lpxs.to_bits()
-            && self.max_width_in_lpxs.map(f32::to_bits)
-                == other.max_width_in_lpxs.map(f32::to_bits)
+            && self.max_width_in_lpxs.map(f32::to_bits) == other.max_width_in_lpxs.map(f32::to_bits)
             && self.wrap == other.wrap
             && self.align.to_bits() == other.align.to_bits()
             && self.line_spacing_scale.to_bits() == other.line_spacing_scale.to_bits()
