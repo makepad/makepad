@@ -2083,20 +2083,6 @@ impl CxOsDrawShader {
         let nop_depth_clip = "
             vec4 depth_clip(vec4 w, vec4 c, float clip){return c;}
         ";
-        #[cfg(target_os = "android")]
-        let sampler_helpers = "
-            vec4 depth_clip(vec4 w, vec4 c, float clip);
-            vec4 sample2d(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
-            vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){return textureLod(sampler, vec2(pos.x, pos.y), lod);}
-            // GLES drivers are inconsistent about BGRA texture upload support.
-            // Upload BGRA-backed textures as RGBA on Android and swizzle them back here.
-            vec4 sample2d_bgra(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y)).bgra;}
-            vec4 sample2d_rt(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, 1.0 - pos.y));}
-            vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
-            vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){return textureLod(sampler, dir, lod);}
-            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir).bgra;}
-            ";
-        #[cfg(not(target_os = "android"))]
         let sampler_helpers = "
             vec4 depth_clip(vec4 w, vec4 c, float clip);
             vec4 sample2d(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
@@ -2342,6 +2328,21 @@ impl CxTexture {
             }
         }
 
+        // Check for pending updates BEFORE calling alloc_vec(). alloc_vec() has
+        // the side effect of marking the texture as allocated (self.alloc = Some)
+        // and generating a GL texture name. If we bail out early on an empty
+        // update after alloc_vec(), the next non-empty update sees the texture
+        // as already allocated (needs_realloc = false) and takes the partial
+        // update path, which calls glTexSubImage2D on GL storage that was never
+        // allocated via glTexImage2D. On Android GLES this silently fails and
+        // leaves the texture sampling as opaque black — e.g. emoji renders as
+        // black boxes because on Android-with-SLUG the color atlas's very first
+        // dirty rect is zero-sized (text goes through SLUG, not the atlas).
+        let updated = self.take_updated();
+        if updated.is_empty() {
+            return;
+        }
+
         let mut needs_realloc = false;
         if self.alloc_vec() {
             if let Some(previous) = self.previous_platform_resource.take() {
@@ -2356,11 +2357,6 @@ impl CxTexture {
                 }
             }
             needs_realloc = true;
-        }
-
-        let updated = self.take_updated();
-        if updated.is_empty() {
-            return;
         }
 
         if let TextureFormat::VecCubeBGRAu8_32 {
@@ -2465,48 +2461,34 @@ impl CxTexture {
                     height,
                     data,
                     ..
-                } => {
-                    #[cfg(target_os = "android")]
-                    let (internal_format, format) = (gl_sys::RGBA, gl_sys::RGBA);
-                    #[cfg(not(target_os = "android"))]
-                    let (internal_format, format) = (gl_sys::BGRA, gl_sys::BGRA);
-
-                    (
-                        *width,
-                        *height,
-                        internal_format,
-                        format,
-                        gl_sys::UNSIGNED_BYTE,
-                        data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
-                        4,
-                        false,
-                        false,
-                    )
-                }
+                } => (
+                    *width,
+                    *height,
+                    gl_sys::BGRA,
+                    gl_sys::BGRA,
+                    gl_sys::UNSIGNED_BYTE,
+                    data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
+                    4,
+                    false,
+                    false,
+                ),
                 TextureFormat::VecMipBGRAu8_32 {
                     width,
                     height,
                     data,
                     max_level: _,
                     ..
-                } => {
-                    #[cfg(target_os = "android")]
-                    let (internal_format, format) = (gl_sys::RGBA, gl_sys::RGBA);
-                    #[cfg(not(target_os = "android"))]
-                    let (internal_format, format) = (gl_sys::BGRA, gl_sys::BGRA);
-
-                    (
-                        *width,
-                        *height,
-                        internal_format,
-                        format,
-                        gl_sys::UNSIGNED_BYTE,
-                        data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
-                        4,
-                        true,
-                        false,
-                    )
-                }
+                } => (
+                    *width,
+                    *height,
+                    gl_sys::BGRA,
+                    gl_sys::BGRA,
+                    gl_sys::UNSIGNED_BYTE,
+                    data.as_ref().unwrap().as_ptr() as *const std::ffi::c_void,
+                    4,
+                    true,
+                    false,
+                ),
                 TextureFormat::VecRGBAf32 {
                     width,
                     height,
