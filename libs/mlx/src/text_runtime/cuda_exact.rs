@@ -1,8 +1,9 @@
 use super::{
     bf16_round_to_f32, bf16_words_as_bytes, extract_gemma4_assistant_response_text,
     load_optional_scalar_f32, ChatSamplingConstraints, ChatSamplingState, GemmaStopReason,
-    GemmaTextBenchmarkOutput, GemmaTextGenerationOptions, GemmaTextRuntimeSession,
-    GemmaTextSamplingOptions, MlxIndexedSafetensors, TextLayerTensorNames,
+    GemmaTextBackendCounters, GemmaTextBackendKind, GemmaTextBenchmarkOutput,
+    GemmaTextGenerationOptions, GemmaTextRuntimeSession, GemmaTextSamplingOptions,
+    MlxIndexedSafetensors, TextLayerTensorNames,
 };
 use crate::GemmaAttentionKind;
 use makepad_ggml::backend::cuda::{
@@ -411,6 +412,8 @@ pub(super) fn try_benchmark_cuda_nvfp4_greedy(
     };
 
     Ok(Some(GemmaTextBenchmarkOutput {
+        backend_kind: GemmaTextBackendKind::CudaExactGreedy,
+        backend_counters: GemmaTextBackendCounters::None,
         model_path: runtime.model_path.clone(),
         prompt_text,
         formatted_prompt_text,
@@ -426,7 +429,6 @@ pub(super) fn try_benchmark_cuda_nvfp4_greedy(
         steady_state_generated_tokens,
         last_generated_token_ids,
         last_generated_text,
-        metal_counters: Default::default(),
         prompt_prefill_tokens_per_second,
         steady_state_decode_tokens_per_second,
         decode_tokens_per_second,

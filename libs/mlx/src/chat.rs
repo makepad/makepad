@@ -1,5 +1,5 @@
 use crate::text_runtime::{
-    GemmaExactMetalConfig, GemmaPromptFormat, GemmaTextGenerationOutput, GemmaTextModel,
+    GemmaPromptFormat, GemmaTextBackendConfig, GemmaTextGenerationOutput, GemmaTextModel,
     GemmaTextSamplingOptions, MlxTextSamplingRng,
 };
 use crate::MlxTokenizerConfig;
@@ -179,8 +179,8 @@ pub struct GemmaChatSession {
     sampling_options: GemmaTextSamplingOptions,
     messages: Vec<GemmaChatMessage>,
     current_image_path: Option<PathBuf>,
-    cuda_exact_raw_prompt_text: Option<String>,
-    cuda_exact_raw_prompt_token_ids: Option<Vec<u32>>,
+    incremental_prompt_text: Option<String>,
+    incremental_prompt_token_ids: Option<Vec<u32>>,
 }
 
 impl GemmaChatSession {
@@ -191,11 +191,12 @@ impl GemmaChatSession {
         }
     }
 
-    fn cuda_exact_sampling_options(&self) -> GemmaTextSamplingOptions {
+    fn incremental_chat_sampling_options(&self) -> GemmaTextSamplingOptions {
         let mut options = self.active_sampling_options();
-        // The CUDA exact logits are still sensitive around Gemma4's empty thought
-        // prefix for short prompts like "write a poem". Let the model emit its
-        // control channel naturally and strip that span from user-visible output.
+        // The incremental exact path is still sensitive around Gemma4's empty
+        // thought prefix for short prompts like "write a poem". Let the model
+        // emit its control channel naturally and strip that span from the
+        // user-visible output.
         options.allow_thought = true;
         options
     }
@@ -216,22 +217,22 @@ impl GemmaChatSession {
         true
     }
 
-    fn clear_cuda_exact_prompt_cache(&mut self) {
-        self.cuda_exact_raw_prompt_text = None;
-        self.cuda_exact_raw_prompt_token_ids = None;
+    fn clear_incremental_prompt_cache(&mut self) {
+        self.incremental_prompt_text = None;
+        self.incremental_prompt_token_ids = None;
     }
 
-    fn uses_cuda_exact_greedy_chat_path(&self) -> bool {
+    fn uses_incremental_greedy_chat_path(&self) -> bool {
         self.current_image_path.is_none()
             && self.decode_mode == GemmaChatDecodeMode::Greedy
             && self.max_new_tokens.is_some()
-            && self
-                .model
-                .generation_backend_label(self.max_new_tokens, &self.active_sampling_options())
-                == "cuda-exact-greedy"
+            && self.model.uses_incremental_greedy_backend(
+                self.max_new_tokens,
+                &self.active_sampling_options(),
+            )
     }
 
-    fn format_cuda_exact_chat_turn_suffix(
+    fn format_incremental_chat_turn_suffix(
         tokenizer_config: &MlxTokenizerConfig,
         prompt_format: GemmaPromptFormat,
         content: &str,
@@ -286,7 +287,7 @@ impl GemmaChatSession {
         }
     }
 
-    fn cuda_exact_window_prompt(
+    fn incremental_window_prompt(
         &self,
         prompt_text: String,
         prompt_token_ids: Vec<u32>,
@@ -303,7 +304,7 @@ impl GemmaChatSession {
             ));
         }
         if prompt_token_limit == 0 {
-            return Err("CUDA exact chat prompt token limit is zero".into());
+            return Err("incremental exact chat prompt token limit is zero".into());
         }
 
         let keep_start = prompt_token_ids.len() - prompt_token_limit;
@@ -319,18 +320,21 @@ impl GemmaChatSession {
         ))
     }
 
-    fn prepare_cuda_exact_generation_prompt(
+    fn prepare_incremental_generation_prompt(
         &mut self,
         user_content: &str,
     ) -> Result<(Arc<str>, Arc<[u32]>, usize), Box<dyn Error>> {
         let prompt_format = self.model.default_chat_prompt_format();
-        let Some(total_limit) = self.model.cuda_exact_supported_total_tokens() else {
-            return Err("missing CUDA exact token limit".into());
+        let Some(total_limit) = self.model.exact_greedy_supported_total_tokens(
+            self.max_new_tokens,
+            &self.active_sampling_options(),
+        ) else {
+            return Err("missing exact greedy token limit".into());
         };
         let max_new_tokens = self.max_new_tokens.unwrap_or(0);
         if max_new_tokens >= total_limit {
             return Err(format!(
-                "max_new_tokens {} exceeds CUDA exact token limit {}",
+                "max_new_tokens {} exceeds exact greedy token limit {}",
                 max_new_tokens, total_limit
             )
             .into());
@@ -338,10 +342,10 @@ impl GemmaChatSession {
         let prompt_token_limit = total_limit - max_new_tokens;
 
         if let (Some(raw_prompt_text), Some(raw_prompt_token_ids)) = (
-            self.cuda_exact_raw_prompt_text.as_ref(),
-            self.cuda_exact_raw_prompt_token_ids.as_ref(),
+            self.incremental_prompt_text.as_ref(),
+            self.incremental_prompt_token_ids.as_ref(),
         ) {
-            let suffix_text = Self::format_cuda_exact_chat_turn_suffix(
+            let suffix_text = Self::format_incremental_chat_turn_suffix(
                 self.model.tokenizer_config(),
                 prompt_format,
                 user_content,
@@ -359,7 +363,7 @@ impl GemmaChatSession {
             let mut next_prompt_token_ids = Vec::with_capacity(next_prompt_token_count);
             next_prompt_token_ids.extend_from_slice(raw_prompt_token_ids);
             next_prompt_token_ids.extend_from_slice(suffix_token_ids.as_ref());
-            return self.cuda_exact_window_prompt(
+            return self.incremental_window_prompt(
                 next_prompt_text,
                 next_prompt_token_ids,
                 prompt_token_limit,
@@ -367,10 +371,10 @@ impl GemmaChatSession {
             );
         }
 
-        self.clear_cuda_exact_prompt_cache();
+        self.clear_incremental_prompt_cache();
         let formatted_prompt = self.format_current_generation_prompt_untrimmed()?;
         let prompt_token_ids = self.model.tokenize_formatted_prompt(&formatted_prompt)?;
-        self.cuda_exact_window_prompt(
+        self.incremental_window_prompt(
             formatted_prompt,
             prompt_token_ids.to_vec(),
             prompt_token_limit,
@@ -378,7 +382,7 @@ impl GemmaChatSession {
         )
     }
 
-    fn finish_cuda_exact_generation(
+    fn finish_incremental_generation(
         &mut self,
         prompt_text: &Arc<str>,
         prompt_token_ids: &Arc<[u32]>,
@@ -400,8 +404,8 @@ impl GemmaChatSession {
         );
         next_prompt_token_ids.extend_from_slice(prompt_token_ids.as_ref());
         next_prompt_token_ids.extend_from_slice(output.generated_token_ids.as_ref());
-        self.cuda_exact_raw_prompt_text = Some(next_prompt_text);
-        self.cuda_exact_raw_prompt_token_ids = Some(next_prompt_token_ids);
+        self.incremental_prompt_text = Some(next_prompt_text);
+        self.incremental_prompt_token_ids = Some(next_prompt_token_ids);
         Ok(())
     }
 
@@ -433,22 +437,22 @@ impl GemmaChatSession {
             let needs_trim = !include_image
                 && self
                     .model
-                    .generation_backend_label(self.max_new_tokens, &sampling_options)
-                    == "cuda-exact-greedy"
+                    .uses_incremental_greedy_backend(self.max_new_tokens, &sampling_options)
                 && self.max_new_tokens.is_some();
             if !needs_trim {
                 self.messages = messages;
                 return Ok(formatted_prompt);
             }
 
-            let total_limit = self
-                .model
-                .cuda_exact_supported_total_tokens()
-                .ok_or("missing CUDA exact token limit")?;
+            let total_limit = self.model.exact_greedy_supported_total_tokens(
+                self.max_new_tokens,
+                &sampling_options,
+            )
+            .ok_or("missing exact greedy token limit")?;
             let max_new_tokens = self.max_new_tokens.unwrap_or(0);
             if max_new_tokens >= total_limit {
                 return Err(format!(
-                    "max_new_tokens {} exceeds CUDA exact token limit {}",
+                    "max_new_tokens {} exceeds exact greedy token limit {}",
                     max_new_tokens, total_limit
                 )
                 .into());
@@ -464,7 +468,7 @@ impl GemmaChatSession {
             }
             if messages.len() <= 1 || !Self::prune_oldest_turn(&mut messages) {
                 return Err(format!(
-                    "chat prompt requires {} tokens but CUDA exact allows only {} prompt tokens with max_new_tokens={}",
+                    "chat prompt requires {} tokens but exact greedy allows only {} prompt tokens with max_new_tokens={}",
                     prompt_token_count, prompt_token_limit, max_new_tokens
                 )
                 .into());
@@ -488,7 +492,7 @@ impl GemmaChatSession {
             model_path,
             max_new_tokens,
             decode_mode,
-            GemmaExactMetalConfig::default(),
+            GemmaTextBackendConfig::default(),
         )
     }
 
@@ -496,7 +500,7 @@ impl GemmaChatSession {
         model_path: impl AsRef<Path>,
         max_new_tokens: Option<usize>,
         decode_mode: GemmaChatDecodeMode,
-        backend_config: GemmaExactMetalConfig,
+        backend_config: GemmaTextBackendConfig,
     ) -> Result<Self, Box<dyn Error>> {
         let model = GemmaTextModel::load_with_backend_config(model_path, backend_config)?;
         let sampling_options = match model.default_chat_prompt_format() {
@@ -513,8 +517,8 @@ impl GemmaChatSession {
             sampling_options,
             messages: Vec::new(),
             current_image_path: None,
-            cuda_exact_raw_prompt_text: None,
-            cuda_exact_raw_prompt_token_ids: None,
+            incremental_prompt_text: None,
+            incremental_prompt_token_ids: None,
         };
         if decode_mode == GemmaChatDecodeMode::Greedy {
             let _ = session.model.prewarm_greedy_backend(max_new_tokens);
@@ -547,17 +551,17 @@ impl GemmaChatSession {
 
     pub fn reset(&mut self) {
         self.messages.clear();
-        self.clear_cuda_exact_prompt_cache();
+        self.clear_incremental_prompt_cache();
     }
 
     pub fn set_image(&mut self, image_path: impl Into<PathBuf>) {
         self.current_image_path = Some(image_path.into());
-        self.clear_cuda_exact_prompt_cache();
+        self.clear_incremental_prompt_cache();
     }
 
     pub fn clear_image(&mut self) {
         self.current_image_path = None;
-        self.clear_cuda_exact_prompt_cache();
+        self.clear_incremental_prompt_cache();
     }
 
     pub fn current_image_path(&self) -> Option<&Path> {
@@ -567,7 +571,7 @@ impl GemmaChatSession {
     pub fn push_assistant_message(&mut self, content: impl Into<String>) {
         self.messages
             .push(GemmaChatMessage::new(GemmaChatRole::Assistant, content));
-        self.clear_cuda_exact_prompt_cache();
+        self.clear_incremental_prompt_cache();
     }
 
     pub fn send_user_message(
@@ -577,12 +581,12 @@ impl GemmaChatSession {
         let content = content.into();
         self.messages
             .push(GemmaChatMessage::new(GemmaChatRole::User, content));
-        if !self.uses_cuda_exact_greedy_chat_path() {
-            self.clear_cuda_exact_prompt_cache();
+        if !self.uses_incremental_greedy_chat_path() {
+            self.clear_incremental_prompt_cache();
         }
         let greedy_sampling_options = self.active_sampling_options();
-        if self.uses_cuda_exact_greedy_chat_path() {
-            let cuda_sampling_options = self.cuda_exact_sampling_options();
+        if self.uses_incremental_greedy_chat_path() {
+            let exact_sampling_options = self.incremental_chat_sampling_options();
             let user_content = self
                 .messages
                 .last()
@@ -590,7 +594,7 @@ impl GemmaChatSession {
                 .content
                 .clone();
             let (prompt_text, prompt_token_ids, prompt_prefill_token_count) =
-                self.prepare_cuda_exact_generation_prompt(user_content.as_ref())?;
+                self.prepare_incremental_generation_prompt(user_content.as_ref())?;
             if let Some(output) = self
                 .model
                 .generate_pretokenized_cuda_exact_greedy_with_callback(
@@ -599,11 +603,11 @@ impl GemmaChatSession {
                     prompt_token_ids.clone(),
                     prompt_prefill_token_count,
                     self.max_new_tokens,
-                    &cuda_sampling_options,
+                    &exact_sampling_options,
                     |_| Ok(()),
                 )?
             {
-                self.finish_cuda_exact_generation(&prompt_text, &prompt_token_ids, &output)?;
+                self.finish_incremental_generation(&prompt_text, &prompt_token_ids, &output)?;
                 self.messages.push(GemmaChatMessage::new(
                     GemmaChatRole::Assistant,
                     output.generated_text.as_ref(),
@@ -667,11 +671,11 @@ impl GemmaChatSession {
         self.messages
             .push(GemmaChatMessage::new(GemmaChatRole::User, content));
         let greedy_sampling_options = self.active_sampling_options();
-        if !self.uses_cuda_exact_greedy_chat_path() {
-            self.clear_cuda_exact_prompt_cache();
+        if !self.uses_incremental_greedy_chat_path() {
+            self.clear_incremental_prompt_cache();
         }
-        if self.uses_cuda_exact_greedy_chat_path() {
-            let cuda_sampling_options = self.cuda_exact_sampling_options();
+        if self.uses_incremental_greedy_chat_path() {
+            let exact_sampling_options = self.incremental_chat_sampling_options();
             let user_content = self
                 .messages
                 .last()
@@ -679,7 +683,7 @@ impl GemmaChatSession {
                 .content
                 .clone();
             let (prompt_text, prompt_token_ids, prompt_prefill_token_count) =
-                self.prepare_cuda_exact_generation_prompt(user_content.as_ref())?;
+                self.prepare_incremental_generation_prompt(user_content.as_ref())?;
             let model = self.model.clone();
             let tokenizer_config = self.model.tokenizer_config().clone();
             let mut streamed_text = String::new();
@@ -691,7 +695,7 @@ impl GemmaChatSession {
                     prompt_token_ids.clone(),
                     prompt_prefill_token_count,
                     self.max_new_tokens,
-                    &cuda_sampling_options,
+                    &exact_sampling_options,
                     |generated_token_ids| {
                         let raw_text = model.decode_token_ids(generated_token_ids)?;
                         let partial_text = extract_gemma4_assistant_response_text(
@@ -713,7 +717,7 @@ impl GemmaChatSession {
                         on_text_delta(delta)?;
                     }
                 }
-                self.finish_cuda_exact_generation(&prompt_text, &prompt_token_ids, &output)?;
+                self.finish_incremental_generation(&prompt_text, &prompt_token_ids, &output)?;
                 self.messages.push(GemmaChatMessage::new(
                     GemmaChatRole::Assistant,
                     output.generated_text.as_ref(),

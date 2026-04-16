@@ -35,12 +35,12 @@ impl GemmaTextRuntimeSession {
     }
 
     fn load(model_path: &Path) -> Result<Arc<Self>, String> {
-        Self::load_with_backend_config(model_path, GemmaExactMetalConfig::default())
+        Self::load_with_backend_config(model_path, GemmaTextBackendConfig::default())
     }
 
     fn load_with_backend_config(
         model_path: &Path,
-        backend_config: GemmaExactMetalConfig,
+        backend_config: GemmaTextBackendConfig,
     ) -> Result<Arc<Self>, String> {
         let model_root = model_root_dir(model_path).map_err(|err| err.to_string())?;
         let weights = MlxIndexedSafetensors::load(&model_root).map_err(|err| err.to_string())?;
@@ -56,16 +56,17 @@ impl GemmaTextRuntimeSession {
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
+        let exact_metal_config = backend_config.exact_metal();
         let exact_backend = match backend_config.backend_mode {
-            GemmaExactMetalBackendMode::Disabled => None,
-            GemmaExactMetalBackendMode::Auto => {
+            GemmaTextBackendMode::Disabled => None,
+            GemmaTextBackendMode::Auto => {
                 if makepad_ggml::backend::metal::MetalRuntime::is_available()
                     && Self::supports_exact_backend_auto(&weights)
                 {
                     Some(Arc::new(Mutex::new(
                         ExactMetalTextRuntimeSession::load_with_config(
                             model_path.to_path_buf(),
-                            backend_config.clone(),
+                            exact_metal_config.clone(),
                         )
                         .map_err(|err| err.to_string())?,
                     )))
@@ -73,29 +74,24 @@ impl GemmaTextRuntimeSession {
                     None
                 }
             }
-            GemmaExactMetalBackendMode::Force => {
-                if !Self::supports_exact_backend_forced(&weights) {
-                    return Err(format!(
-                        "forced exact metal backend is unsupported for quantization={{mode:{} bits:{} group_size:{}}} text_config={{hidden_size_per_layer_input:{} num_kv_shared_layers:{} enable_moe_block:{} top_k_experts:{:?}}}",
-                        weights.snapshot.config.quantization.mode,
-                        weights.snapshot.config.quantization.bits,
-                        weights.snapshot.config.quantization.group_size,
-                        weights.snapshot.config.text_config.hidden_size_per_layer_input,
-                        weights.snapshot.config.text_config.num_kv_shared_layers,
-                        weights.snapshot.config.text_config.enable_moe_block,
-                        weights.snapshot.config.text_config.top_k_experts
-                    ));
+            GemmaTextBackendMode::Force => {
+                if makepad_ggml::backend::metal::MetalRuntime::is_available()
+                    && Self::supports_exact_backend_forced(&weights)
+                {
+                    Some(Arc::new(Mutex::new(
+                        ExactMetalTextRuntimeSession::load_with_config(
+                            model_path.to_path_buf(),
+                            exact_metal_config.clone(),
+                        )
+                        .map_err(|err| err.to_string())?,
+                    )))
+                } else {
+                    None
                 }
-                Some(Arc::new(Mutex::new(
-                    ExactMetalTextRuntimeSession::load_with_config(
-                        model_path.to_path_buf(),
-                        backend_config.clone(),
-                    )
-                    .map_err(|err| err.to_string())?,
-                )))
             }
         };
-        let cuda_exact_backend = if makepad_ggml::backend::cuda::is_available()
+        let cuda_exact_backend = if !backend_config.backend_mode.exact_backends_disabled()
+            && makepad_ggml::backend::cuda::is_available()
             && crate::text_runtime::cuda_exact::supports_cuda_exact_greedy_weights(&weights)
         {
             Some(Arc::new(Mutex::new(
@@ -104,6 +100,21 @@ impl GemmaTextRuntimeSession {
         } else {
             None
         };
+        if backend_config.backend_mode.exact_backends_required()
+            && exact_backend.is_none()
+            && cuda_exact_backend.is_none()
+        {
+            return Err(format!(
+                "forced exact text backend is unsupported for quantization={{mode:{} bits:{} group_size:{}}} text_config={{hidden_size_per_layer_input:{} num_kv_shared_layers:{} enable_moe_block:{} top_k_experts:{:?}}}",
+                weights.snapshot.config.quantization.mode,
+                weights.snapshot.config.quantization.bits,
+                weights.snapshot.config.quantization.group_size,
+                weights.snapshot.config.text_config.hidden_size_per_layer_input,
+                weights.snapshot.config.text_config.num_kv_shared_layers,
+                weights.snapshot.config.text_config.enable_moe_block,
+                weights.snapshot.config.text_config.top_k_experts
+            ));
+        }
         Ok(Arc::new(Self {
             model_path: model_path.to_path_buf(),
             backend_config,

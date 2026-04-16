@@ -1083,7 +1083,7 @@
         let mut backend_config = GemmaExactMetalConfig::default();
         backend_config.backend_mode = GemmaExactMetalBackendMode::Force;
         let runtime =
-            GemmaTextRuntimeSession::load_with_backend_config(gemma_31b_q8_model_path(), backend_config)
+            GemmaTextRuntimeSession::load_with_backend_config(&gemma_31b_q8_model_path(), backend_config)
                 .unwrap();
         let formatted_prompt =
             runtime.format_prompt_text("say hi", GemmaPromptFormat::Gemma4UserTurn);
