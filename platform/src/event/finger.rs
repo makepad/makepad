@@ -970,19 +970,16 @@ impl Event {
                             }
 
                             let rect = area.clipped_rect(&cx);
-                            // Add touch radius to the margin to account for finger size
-                            let margin_with_radius = if t.radius.x > 0.0 || t.radius.y > 0.0 {
-                                let base_margin = options.margin.unwrap_or_default();
-                                Some(Inset {
-                                    left: base_margin.left + t.radius.x,
-                                    top: base_margin.top + t.radius.y,
-                                    right: base_margin.right + t.radius.x,
-                                    bottom: base_margin.bottom + t.radius.y,
-                                })
-                            } else {
-                                options.margin
-                            };
-                            if !hit_test(t.abs, &rect, &margin_with_radius) {
+                            // Hit-test against the touch centroid only — do NOT inflate the
+                            // widget rect by `t.radius`. UITouch.majorRadius (and the Android
+                            // equivalent) is the contact area's radius, not a "give me extra
+                            // hit padding" instruction, and inflating by it leads to surprising
+                            // captures: the iOS Simulator reports a `majorRadius` of ~25-40pt
+                            // for mouse-as-touch, which makes every button capture clicks ~30pt
+                            // outside its visible bounds. UIKit/AppKit hit-test on the centroid;
+                            // we match that. Apps that genuinely need a larger hit zone should
+                            // pass it explicitly via `HitOptions::margin`.
+                            if !hit_test(t.abs, &rect, &options.margin) {
                                 continue;
                             }
 
@@ -1010,18 +1007,9 @@ impl Event {
                             let tap_count = cx.fingers.tap_count();
                             let rect = area.clipped_rect(&cx);
                             if let Some(capture) = cx.fingers.find_area_capture(area) {
-                                // Check if finger is over the widget using touch radius if available
-                                let rect_check = if t.radius.x > 0.0 || t.radius.y > 0.0 {
-                                    let margin = Inset {
-                                        left: t.radius.x,
-                                        top: t.radius.y,
-                                        right: t.radius.x,
-                                        bottom: t.radius.y,
-                                    };
-                                    Inset::rect_contains_with_inset(t.abs, &rect, &Some(margin))
-                                } else {
-                                    rect.contains(t.abs)
-                                };
+                                // See the note in TouchState::Start above: hit-test on the
+                                // touch centroid only, without inflating by `t.radius`.
+                                let rect_check = rect.contains(t.abs);
 
                                 // Layout shift fallback: also treat as "over" if finger didn't move
                                 // significantly from start (handles keyboard dismissal moving widgets)
