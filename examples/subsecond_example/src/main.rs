@@ -68,7 +68,7 @@ script_mod! {
                         }
 
                         render_button := Button{
-                            text: "Render"
+                            text: "Renders"
                         }
                     }
                 }
