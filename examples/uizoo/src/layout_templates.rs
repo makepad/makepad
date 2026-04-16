@@ -21,7 +21,10 @@ script_mod! {
 
             flow: Down
             spacing: theme.space_2
-            scroll_bars: ScrollBars{show_scroll_x: false show_scroll_y: true}
+            scroll_bars: ScrollBars{
+                show_scroll_x: false show_scroll_y: true
+                scroll_bar_y.drag_scrolling: true
+            }
         }
 
         demos := View{
@@ -30,7 +33,10 @@ script_mod! {
             spacing: theme.space_2
             padding: theme.mspace_3{right: (theme.space_2 * 3.0)}
             margin: theme.mspace_v_2
-            scroll_bars: ScrollBars{show_scroll_x: false show_scroll_y: true}
+            scroll_bars: ScrollBars{
+                show_scroll_x: false show_scroll_y: true
+                scroll_bar_y.drag_scrolling: true
+            }
         }
     }
 

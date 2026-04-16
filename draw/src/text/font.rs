@@ -165,11 +165,29 @@ impl Font {
         })
     }
 
+    pub fn has_glyph_raster_image(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> bool {
+        self.with_ttf_parser_face(|face| {
+            let glyph_id = ttf_parser::GlyphId(glyph_id);
+            face.glyph_raster_image(glyph_id, dpxs_per_em as u16).is_some()
+        })
+    }
+
     pub fn rasterize_glyph(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> Option<RasterizedGlyph> {
         self.rasterizer
             .borrow_mut()
             .rasterize_glyph(self, glyph_id, dpxs_per_em)
     }
+
+    pub fn rasterize_glyph_stable_fallback(
+        &self,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
+        self.rasterizer
+            .borrow_mut()
+            .rasterize_glyph_stable_fallback(self, glyph_id, dpxs_per_em)
+    }
+
 }
 
 impl Eq for Font {}
@@ -187,3 +205,57 @@ impl PartialEq for Font {
 }
 
 pub type GlyphId = u16;
+
+#[cfg(test)]
+mod tests {
+    use super::{Font, FontId};
+    use crate::{
+        makepad_platform::SharedBytes,
+        text::{
+            font_face::FontFace,
+            layouter,
+            loader::FontData,
+            rasterizer::{AtlasKind, Rasterizer},
+        },
+    };
+    use std::{cell::RefCell, path::PathBuf, rc::Rc};
+
+    fn bundled_emoji_font_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources/NotoColorEmoji.ttf")
+    }
+
+    fn load_font_data(path: PathBuf) -> FontData {
+        SharedBytes::from_file_mmap_or_read(path).expect("font bytes should load")
+    }
+
+    fn make_font(path: PathBuf) -> Font {
+        Font::new(
+            FontId::from(0xE0E1_u64),
+            Rc::new(RefCell::new(Rasterizer::new(
+                layouter::Settings::default().loader.rasterizer,
+            ))),
+            FontFace::from_data_and_index(load_font_data(path), 0).expect("font face should load"),
+            0.0,
+            0.0,
+        )
+    }
+
+    #[test]
+    fn noto_color_emoji_prefers_raster_images() {
+        let font = make_font(bundled_emoji_font_path());
+        let glyph_id = font
+            .with_ttf_parser_face(|face| face.glyph_index('😀').map(|glyph| glyph.0))
+            .expect("emoji glyph should exist");
+        let dpxs_per_em = 128.0;
+
+        assert!(
+            font.has_glyph_raster_image(glyph_id, dpxs_per_em),
+            "emoji glyph should expose a raster image"
+        );
+
+        let rasterized = font
+            .rasterize_glyph(glyph_id, dpxs_per_em)
+            .expect("emoji glyph should rasterize");
+        assert_eq!(rasterized.atlas_kind, AtlasKind::Color);
+    }
+}
