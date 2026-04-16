@@ -26,6 +26,6 @@ dx serve --hotpatch --macos --package makepad-example-subsecond-example
 
 ### Notes
 
-- This example intentionally **does not use camera/microphone**, so it should not need extra iOS privacy keys.
+- Even though this example doesn’t explicitly use camera/microphone, iOS can terminate the app if the process enumerates capture devices without usage strings. We include them via `Dioxus.toml` `[permissions]` to avoid TCC crashes.
 - If you see `Hot-patching: ...` in the `dx` logs, the client handshake is working.
 

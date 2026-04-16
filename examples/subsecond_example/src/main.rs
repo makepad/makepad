@@ -31,12 +31,12 @@ script_mod! {
                     padding: 20
 
                     title := Label{
-                        text: " he example"
+                        text: "econd hotpatch example"
                         draw_text.text_style.font_size: 24
                     }
 
                     note := Label{
-                        text: "Edit hotpatch_message() in Rust, save, and watch the text update without restarting."
+                        text: "Edit () in Rust, save, and watch the text update without restarting."
                         draw_text.text_style.font_size: 12
                     }
 
@@ -51,7 +51,7 @@ script_mod! {
                                 draw_text.text_style.font_size: 16
                             }
                             clicks := Label{
-                                text: "Clickss: " + state.clicks
+                                text: "Clicks: " + state.clicks
                                 draw_text.text_style.font_size: 16
                             }
                         }
