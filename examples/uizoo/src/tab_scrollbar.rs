@@ -16,7 +16,10 @@ script_mod! {
                     color_2: uniform(#f00)
                 }
             }
-            scroll_bars: ScrollBars{}
+            scroll_bars: ScrollBars{
+                scroll_bar_x.drag_scrolling: true
+                scroll_bar_y.drag_scrolling: true
+            }
         }
     }
 }
