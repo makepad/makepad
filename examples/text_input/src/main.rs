@@ -19,7 +19,7 @@ script_mod! {
 
                         Label{
                             draw_text.text_style.font_size: 16.0
-                            text: "TextInput IME Configuration Testss"
+                            text: "TextInput IME Configuration Test"
                         }
 
                         // 1. Default multiline with autocorrect
