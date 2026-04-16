@@ -593,12 +593,116 @@ impl Cx {
     }
 
     pub(crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
+        let cache_dir = shader_cache_dir();
+
+        // Step 1: adopt any background compiles that finished since the last
+        // call. The worker thread writes the DXBC into the on-disk cache
+        // before sending the completion, so CxOsDrawShader::new takes the
+        // cache-hit path (disk read + D3D11 object creation — a few ms).
+        // The scoped block below keeps the immutable borrow of
+        // draw_shaders.shaders short so we can mutate it afterwards to set
+        // os_shader_id; that avoids the explicit mapping/bindings clones
+        // an earlier revision used.
+        let ready_async = self.os.async_hlsl_compile.drain_ready();
+        let mut any_async_ready = false;
+        for result in ready_async {
+            any_async_ready = true;
+            if let Err(msg) = &result.vs_status {
+                crate::error!(
+                    "Background vertex-shader compile failed for shader id {}: {}",
+                    result.shader_id, msg
+                );
+                continue;
+            }
+            if let Err(msg) = &result.ps_status {
+                crate::error!(
+                    "Background pixel-shader compile failed for shader id {}: {}",
+                    result.shader_id, msg
+                );
+                continue;
+            }
+            let shader_id = result.shader_id;
+            let shp = {
+                let cx_shader = &self.draw_shaders.shaders[shader_id];
+                let CxDrawShaderCode::Combined { code } = &cx_shader.mapping.code else {
+                    continue;
+                };
+                CxOsDrawShader::new(
+                    d3d11_cx,
+                    code,
+                    cache_dir,
+                    &cx_shader.mapping,
+                    &cx_shader.mapping.uniform_buffer_bindings,
+                )
+            };
+            if let Some(shp) = shp {
+                let cx_shader = &mut self.draw_shaders.shaders[shader_id];
+                cx_shader.os_shader_id = Some(self.draw_shaders.os_shaders.len());
+                self.draw_shaders.os_shaders.push(shp);
+            }
+        }
+        if any_async_ready {
+            // Widgets that skipped their draw call because the shader wasn't
+            // ready need one more redraw to materialize now that it is.
+            self.redraw_all();
+        }
+
         if self.draw_shaders.compile_set.is_empty() {
             return;
         }
         let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
-        let cache_dir = shader_cache_dir();
-        for draw_shader_id in compile_set {
+
+        // Step 2: partition by cache state, computing the cache key once.
+        //
+        // Cache hit  → sync path: disk read + D3D11 object creation, a few
+        //              ms total. Faster than thread/channel overhead.
+        // Cache miss → async path: D3DCompile can burn 100ms-multiple
+        //              seconds per shader, so it must not block the frame.
+        // `async_compile: true` (the SLUG helper) still forces async even
+        // on a cache hit, matching the Linux flag semantics — the one-frame
+        // latency on warm cache is acceptable, and this keeps behavior
+        // consistent across platforms.
+        let mut async_items: Vec<(usize, u64)> = Vec::new();
+        let mut sync_ids: Vec<usize> = Vec::new();
+        for id in compile_set {
+            let sh = &self.draw_shaders.shaders[id];
+            let code = match &sh.mapping.code {
+                CxDrawShaderCode::Combined { code } => code,
+                CxDrawShaderCode::Separate { .. } => {
+                    crate::error!("D3D11 does not support separate vertex/fragment sources");
+                    continue;
+                }
+            };
+            let cache_key = hlsl_cache_key(code);
+            let cached = shader_bytes_cached(cache_dir, cache_key);
+            let force_async = sh.mapping.flags.async_compile;
+            if force_async || !cached {
+                async_items.push((id, cache_key));
+            } else {
+                sync_ids.push(id);
+            }
+        }
+
+        // Step 3: dispatch background compiles. The window presents this
+        // frame without waiting; widgets whose shader isn't ready skip
+        // their draw call via the `sh.os_shader_id.is_none()` guard in
+        // render_view. When workers finish, the next hlsl_compile_shaders
+        // call drains them and triggers a redraw.
+        for (id, cache_key) in async_items {
+            let hlsl = {
+                let sh = &self.draw_shaders.shaders[id];
+                let CxDrawShaderCode::Combined { code } = &sh.mapping.code else {
+                    continue;
+                };
+                code.clone()
+            };
+            self.os
+                .async_hlsl_compile
+                .spawn(id, hlsl, cache_key, cache_dir);
+        }
+
+        // Step 4: serial D3D11 object creation for the cache-hit shaders.
+        for draw_shader_id in sync_ids {
             let shp = {
                 let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
                 if cx_shader.mapping.flags.debug_code {
@@ -606,19 +710,16 @@ impl Cx {
                         crate::log!("{}", code);
                     }
                 }
-                match &cx_shader.mapping.code {
-                    CxDrawShaderCode::Separate { .. } => {
-                        crate::error!("D3D11 does not support separate vertex/fragment sources");
-                        None
-                    }
-                    CxDrawShaderCode::Combined { code } => CxOsDrawShader::new(
-                        d3d11_cx,
-                        code,
-                        cache_dir,
-                        &cx_shader.mapping,
-                        &cx_shader.mapping.uniform_buffer_bindings,
-                    ),
-                }
+                let CxDrawShaderCode::Combined { code } = &cx_shader.mapping.code else {
+                    continue;
+                };
+                CxOsDrawShader::new(
+                    d3d11_cx,
+                    code,
+                    cache_dir,
+                    &cx_shader.mapping,
+                    &cx_shader.mapping.uniform_buffer_bindings,
+                )
             };
             if let Some(shp) = shp {
                 let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
@@ -632,6 +733,14 @@ impl Cx {
         let cxtexture = &mut self.textures[texture.texture_id()];
         cxtexture.update_shared_texture(self.os.d3d11_device.as_ref().unwrap());
         cxtexture.os.shared_handle.0 as u64
+    }
+
+    // HLSL shaders compile synchronously via `hlsl_compile_shaders`, so a shader
+    // is "window-ready" iff its OS-level shader entry has been allocated.
+    // Used by the shared SLUG helper path that also runs on Linux (where GL may
+    // async-compile) to decide whether to draw or fall back to raster.
+    pub fn is_draw_shader_window_ready(&self, shader_id: DrawShaderId) -> bool {
+        self.draw_shaders.shaders[shader_id.index].os_shader_id.is_some()
     }
 }
 
@@ -1892,6 +2001,221 @@ fn shader_cache_dir() -> Option<&'static std::path::Path> {
     .as_deref()
 }
 
+// FNV-1a 64-bit hash of the HLSL source — used as the on-disk cache key.
+// The leading seed byte lets us invalidate every cache entry by bumping
+// CACHE_KEY_VERSION whenever the compile flags or entry points change, which
+// would otherwise leave stale bytecode on disk that no longer matches what
+// the runtime expects.
+fn hlsl_cache_key(hlsl: &str) -> u64 {
+    const CACHE_KEY_VERSION: u8 = 2;
+    let mut hash: u64 = 0xcbf29ce484222325;
+    hash ^= CACHE_KEY_VERSION as u64;
+    hash = hash.wrapping_mul(0x100000001b3);
+    for byte in hlsl.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+// Invoke D3DCompile (fxcompiler) on one stage. Thread-safe (pure CPU work)
+// so can be called from a background thread to parallelize startup compile.
+//
+// We pass D3DCOMPILE_SKIP_OPTIMIZATION because FXC's optimizer is what makes
+// shader compile times explode — it can spend many seconds on a single text
+// shader with loops. UI shaders are short-lived per frame and the win from
+// FXC-level optimization is tiny for this workload, while the cold-cache
+// startup cost is huge. If a specific shader is later shown to be a runtime
+// hotspot, it should be recompiled with optimizations on a background thread
+// and hot-swapped — that's a cleaner solution than paying the cost upfront
+// for every shader in the app.
+fn d3d_compile_hlsl(target: &str, entry: &str, shader: &str) -> Result<Vec<u8>, String> {
+    const D3DCOMPILE_SKIP_OPTIMIZATION: u32 = 1 << 2;
+    const D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY: u32 = 1 << 12;
+    const FLAGS: u32 = D3DCOMPILE_SKIP_OPTIMIZATION | D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY;
+    unsafe {
+        let shader_bytes = shader.as_bytes();
+        let mut blob = None;
+        let mut errors = None;
+        if D3DCompile(
+            shader_bytes.as_ptr() as *const _,
+            shader_bytes.len(),
+            PCSTR("makepad_shader\0".as_ptr()),
+            None,
+            None,
+            PCSTR(entry.as_ptr()),
+            PCSTR(target.as_ptr()),
+            FLAGS,
+            0,
+            &mut blob,
+            Some(&mut errors),
+        )
+        .is_ok()
+        {
+            let blob = blob.unwrap();
+            let ptr = blob.GetBufferPointer() as *const u8;
+            let len = blob.GetBufferSize();
+            return Ok(std::slice::from_raw_parts(ptr, len).to_vec());
+        }
+        let error = errors.unwrap();
+        let pointer = error.GetBufferPointer();
+        let size = error.GetBufferSize();
+        let slice = std::slice::from_raw_parts(pointer as *const u8, size as usize);
+        Err(String::from_utf8_lossy(slice).into_owned())
+    }
+}
+
+// Cheap existence check used to decide whether a shader can go through the
+// synchronous fast path (disk reads only) or needs the async background
+// compile path. We only check existence, not contents — if the files are
+// present but corrupt/short, the subsequent read path will catch that.
+fn shader_bytes_cached(cache_dir: Option<&std::path::Path>, cache_key: u64) -> bool {
+    let Some(dir) = cache_dir else {
+        return false;
+    };
+    let vs = dir.join(format!("{:016x}_vs.dxbc", cache_key));
+    let ps = dir.join(format!("{:016x}_ps.dxbc", cache_key));
+    vs.exists() && ps.exists()
+}
+
+// Read the DXBC blob from the on-disk cache if present, otherwise compile and
+// write it. Disk I/O and D3DCompile are both thread-safe so this can run on a
+// worker thread.
+fn get_or_compile_shader_bytes(
+    cache_dir: Option<&std::path::Path>,
+    cache_key: u64,
+    suffix: &str,
+    target: &str,
+    entry: &str,
+    hlsl: &str,
+) -> Result<Vec<u8>, String> {
+    if let Some(dir) = cache_dir {
+        let path = dir.join(format!("{:016x}{}.dxbc", cache_key, suffix));
+        if let Ok(bytes) = std::fs::read(&path) {
+            return Ok(bytes);
+        }
+        let bytes = d3d_compile_hlsl(target, entry, hlsl)?;
+        let _ = std::fs::write(&path, &bytes);
+        return Ok(bytes);
+    }
+    d3d_compile_hlsl(target, entry, hlsl)
+}
+
+/// Result of a background D3DCompile for one shader.
+///
+/// The worker writes the compiled bytes to the on-disk cache before sending
+/// this result, so the main thread picks them back up via the disk cache in
+/// `CxOsDrawShader::new`. We only carry status (not the bytes themselves) so
+/// the channel doesn't ferry hundreds of KB of DXBC — the SLUG helper alone
+/// is ~240 KB. Error strings are kept for diagnostic output when a compile
+/// fails.
+struct AsyncCompileResult {
+    shader_id: usize,
+    vs_status: Result<(), String>,
+    ps_status: Result<(), String>,
+}
+
+/// Background HLSL compile queue used for `async_compile: true` shaders.
+///
+/// The DrawTextSlug helper is by far the most expensive shader to compile on
+/// Windows (hundreds of KB of DXBC, multiple seconds with the default FXC
+/// settings) and it is the primary motivation for this path — without it the
+/// SLUG helper blocks the main thread the first time a SLUG glyph is needed.
+/// Other shaders stay on the synchronous parallel-precompile path so the app
+/// still renders its widgets immediately on the first frame.
+///
+/// The worker threads call `D3DCompile`, write the resulting bytecode into
+/// the on-disk shader cache, then send a lightweight result to the main
+/// thread via an mpsc channel. The main thread drains completed results
+/// each paint tick, creates the D3D11 shader objects, and requests a redraw
+/// so the now-ready widgets get a chance to render.
+pub struct AsyncHlslCompile {
+    inner: std::sync::Mutex<AsyncHlslCompileInner>,
+}
+
+struct AsyncHlslCompileInner {
+    tx: std::sync::mpsc::Sender<AsyncCompileResult>,
+    rx: std::sync::mpsc::Receiver<AsyncCompileResult>,
+    pending: std::collections::HashSet<usize>,
+}
+
+impl Default for AsyncHlslCompile {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            inner: std::sync::Mutex::new(AsyncHlslCompileInner {
+                tx,
+                rx,
+                pending: std::collections::HashSet::new(),
+            }),
+        }
+    }
+}
+
+impl AsyncHlslCompile {
+    /// Start a background compile for `shader_id`. No-op if that shader is
+    /// already being compiled. Returns true if a new worker was spawned.
+    fn spawn(
+        &self,
+        shader_id: usize,
+        hlsl: String,
+        cache_key: u64,
+        cache_dir: Option<&'static std::path::Path>,
+    ) -> bool {
+        let tx = {
+            let mut inner = self.inner.lock().unwrap();
+            if !inner.pending.insert(shader_id) {
+                return false;
+            }
+            inner.tx.clone()
+        };
+        std::thread::Builder::new()
+            .name(format!("hlsl-compile-{}", shader_id))
+            .spawn(move || {
+                // Discard the bytes once they hit the disk cache — the main
+                // thread re-reads them via CxOsDrawShader::new, and keeping
+                // them here would pin hundreds of KB per shader until the
+                // result is drained.
+                let vs_status = get_or_compile_shader_bytes(
+                    cache_dir,
+                    cache_key,
+                    "_vs",
+                    "vs_5_0\0",
+                    "vertex_main\0",
+                    &hlsl,
+                )
+                .map(drop);
+                let ps_status = get_or_compile_shader_bytes(
+                    cache_dir,
+                    cache_key,
+                    "_ps",
+                    "ps_5_0\0",
+                    "pixel_main\0",
+                    &hlsl,
+                )
+                .map(drop);
+                let _ = tx.send(AsyncCompileResult {
+                    shader_id,
+                    vs_status,
+                    ps_status,
+                });
+            })
+            .expect("failed to spawn HLSL compile worker");
+        true
+    }
+
+    /// Drain any workers that have finished since the last call.
+    fn drain_ready(&self) -> Vec<AsyncCompileResult> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut out = Vec::new();
+        while let Ok(result) = inner.rx.try_recv() {
+            inner.pending.remove(&result.shader_id);
+            out.push(result);
+        }
+        out
+    }
+}
+
 #[derive(Clone)]
 pub struct CxOsDrawShader {
     pub const_table_uniforms: D3d11Buffer,
@@ -1919,69 +2243,6 @@ impl CxOsDrawShader {
         mapping: &CxDrawShaderMapping,
         bindings: &UniformBufferBindings,
     ) -> Option<Self> {
-        fn compile_shader(target: &str, entry: &str, shader: &str) -> Result<Vec<u8>, String> {
-            const D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY: u32 = 1 << 12;
-            unsafe {
-                let shader_bytes = shader.as_bytes();
-                let mut blob = None;
-                let mut errors = None;
-                if D3DCompile(
-                    shader_bytes.as_ptr() as *const _,
-                    shader_bytes.len(),
-                    PCSTR("makepad_shader\0".as_ptr()), // sourcename
-                    None,                               // defines
-                    None,                               // include
-                    PCSTR(entry.as_ptr()),              // entry point
-                    PCSTR(target.as_ptr()),             // target
-                    D3DCOMPILE_ENABLE_BACKWARDS_COMPATIBILITY,
-                    0, // flags2
-                    &mut blob,
-                    Some(&mut errors),
-                )
-                .is_ok()
-                {
-                    let blob = blob.unwrap();
-                    let ptr = blob.GetBufferPointer() as *const u8;
-                    let len = blob.GetBufferSize();
-                    return Ok(std::slice::from_raw_parts(ptr, len).to_vec());
-                };
-                let error = errors.unwrap();
-                let pointer = error.GetBufferPointer();
-                let size = error.GetBufferSize();
-                let slice = std::slice::from_raw_parts(pointer as *const u8, size as usize);
-                return Err(String::from_utf8_lossy(slice).into_owned());
-            }
-        }
-
-        fn hlsl_cache_key(hlsl: &str) -> u64 {
-            // FNV-1a 64-bit hash — stable across Rust versions
-            let mut hash: u64 = 0xcbf29ce484222325;
-            for byte in hlsl.bytes() {
-                hash ^= byte as u64;
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
-            hash
-        }
-
-        fn get_shader_bytes(
-            cache_dir: Option<&std::path::Path>,
-            cache_key: u64,
-            suffix: &str,
-            target: &str,
-            entry: &str,
-            hlsl: &str,
-        ) -> Result<Vec<u8>, String> {
-            if let Some(dir) = cache_dir {
-                let path = dir.join(format!("{:016x}{}.dxbc", cache_key, suffix));
-                if let Ok(bytes) = std::fs::read(&path) {
-                    return Ok(bytes);
-                }
-                let bytes = compile_shader(target, entry, hlsl)?;
-                let _ = std::fs::write(&path, &bytes);
-                return Ok(bytes);
-            }
-            compile_shader(target, entry, hlsl)
-        }
         fn split_source(src: &str) -> String {
             let mut r = String::new();
             let split = src.split("\n");
@@ -2037,13 +2298,19 @@ impl CxOsDrawShader {
                 }
             }
         }
-        fn index_to_char(index: usize) -> char {
-            std::char::from_u32(index as u32 + 65).unwrap_or('?')
-        }
+        // Use the same semantic suffix scheme as the HLSL generator so the
+        // InputLayout semantic names match what the compiled vertex shader
+        // declares. Single-char `A`..`Z` for the first 26 inputs, then
+        // `AA`..`AZ`, `BA`..., which is valid HLSL and keeps names aligned
+        // across any number of inputs. Naive `index + 'A'` produces invalid
+        // chars (`[`, `\\`, ...) past Z and fails CreateInputLayout with
+        // E_INVALIDARG — surfaced by text helpers that have many instance
+        // slots.
+        use makepad_script::shader_hlsl::index_to_semantic;
 
         let cache_key = hlsl_cache_key(hlsl);
 
-        let vs_bytes = match get_shader_bytes(
+        let vs_bytes = match get_or_compile_shader_bytes(
             cache_dir,
             cache_key,
             "_vs",
@@ -2062,7 +2329,7 @@ impl CxOsDrawShader {
             Ok(bytes) => bytes,
         };
 
-        let ps_bytes = match get_shader_bytes(
+        let ps_bytes = match get_or_compile_shader_bytes(
             cache_dir,
             cache_key,
             "_ps",
@@ -2118,7 +2385,7 @@ impl CxOsDrawShader {
 
         let mut geom_sem_index = 0usize;
         for geom in &mapping.geometries.inputs {
-            strings.push(format!("GEOM{}\0", index_to_char(geom_sem_index)));
+            strings.push(format!("GEOM{}\0", index_to_semantic(geom_sem_index)));
             let semantic_name = PCSTR(strings.last().unwrap().as_ptr());
             let mut slot_offset = 0usize;
             for (semantic_chunk_index, chunk_slots) in
@@ -2148,7 +2415,7 @@ impl CxOsDrawShader {
 
         let mut inst_sem_index = 0usize;
         for inst in &mapping.instances.inputs {
-            strings.push(format!("INST{}\0", index_to_char(inst_sem_index)));
+            strings.push(format!("INST{}\0", index_to_semantic(inst_sem_index)));
             let semantic_name = PCSTR(strings.last().unwrap().as_ptr());
             let mut slot_offset = 0usize;
             for (semantic_chunk_index, chunk_slots) in

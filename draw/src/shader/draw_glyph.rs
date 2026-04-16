@@ -113,7 +113,7 @@ script_mod! {
                 (col + 0.5) / tex_size.x,
                 (row + 0.5) / tex_size.y
             )
-            return self.curve_texture.sample(uv)
+            return self.curve_texture.sample_nearest(uv)
         }
 
         fetch_band_texel: fn(texel_idx: float) -> vec4 {
@@ -124,7 +124,7 @@ script_mod! {
                 (col + 0.5) / tex_size.x,
                 (row + 0.5) / tex_size.y
             )
-            return self.band_texture.sample(uv)
+            return self.band_texture.sample_nearest(uv)
         }
 
         pick_channel: fn(v: vec4, channel: float) -> float {
