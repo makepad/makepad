@@ -18,8 +18,11 @@ pub(super) fn try_cuda_generation_backend(
     if !makepad_ggml::backend::cuda::is_available() {
         return Ok(None);
     }
-    let backend = QwenCudaGenerationBackend::new(runtime_session, capacity_tokens, do_sample)?;
-    Ok(Some(Box::new(backend)))
+    Ok(Some(Box::new(QwenCudaGenerationBackend::new(
+        runtime_session,
+        capacity_tokens,
+        do_sample,
+    )?)))
 }
 
 #[allow(dead_code)]
@@ -444,11 +447,15 @@ struct CudaQwenWorkspace {
     moe_shared_act: CudaBuffer,
     moe_shared_down: CudaBuffer,
     moe_expert_gate_up: CudaBuffer,
+    moe_expert_gate_up_batch: CudaBuffer,
     moe_expert_gate: CudaBuffer,
     moe_expert_up: CudaBuffer,
     moe_expert_act: CudaBuffer,
+    moe_expert_act_batch: CudaBuffer,
     moe_expert_down: CudaBuffer,
+    moe_expert_down_batch: CudaBuffer,
     moe_expert_act_bf16: CudaBuffer,
+    moe_expert_act_bf16_batch: CudaBuffer,
     recurrent_qkv: CudaBuffer,
     recurrent_gate_z: CudaBuffer,
     recurrent_beta_logits: CudaBuffer,
@@ -1085,13 +1092,29 @@ impl CudaQwenTextRuntime {
             moe_shared_act: self.cuda.alloc_f32(self.shared_expert_intermediate)?,
             moe_shared_down: self.cuda.alloc_f32(self.hidden_size)?,
             moe_expert_gate_up: self.cuda.alloc_f32(self.expert_intermediate * 2)?,
+            moe_expert_gate_up_batch: self
+                .cuda
+                .alloc_f32(self.experts_used_count * self.expert_intermediate * 2)?,
             moe_expert_gate: self.cuda.alloc_f32(self.expert_intermediate)?,
             moe_expert_up: self.cuda.alloc_f32(self.expert_intermediate)?,
             moe_expert_act: self.cuda.alloc_f32(self.expert_intermediate)?,
+            moe_expert_act_batch: self
+                .cuda
+                .alloc_f32(self.experts_used_count * self.expert_intermediate)?,
             moe_expert_down: self.cuda.alloc_f32(self.hidden_size)?,
+            moe_expert_down_batch: self
+                .cuda
+                .alloc_f32(self.experts_used_count * self.hidden_size)?,
             moe_expert_act_bf16: self
                 .cuda
                 .alloc_bytes(self.expert_intermediate * std::mem::size_of::<u16>())?,
+            moe_expert_act_bf16_batch: self
+                .cuda
+                .alloc_bytes(
+                    self.experts_used_count
+                        * self.expert_intermediate
+                        * std::mem::size_of::<u16>(),
+                )?,
             recurrent_qkv: self.cuda.alloc_f32(self.recurrent_qkv_width)?,
             recurrent_gate_z: self.cuda.alloc_f32(self.recurrent_v_width)?,
             recurrent_beta_logits: self.cuda.alloc_f32(self.recurrent_num_v_heads)?,
@@ -2707,7 +2730,58 @@ impl CudaQwenTextRuntime {
             eprintln!("[qwen-moe-trace] topk");
         }
         zero_buffer_f32(&self.cuda, &workspace.moe_routed_accum, self.hidden_size)?;
+        let use_batched_experts = moe.ffn_gate_up_exps.is_some()
+            && self.experts_used_count > 1
+            && self.experts_used_count <= 8;
+        if use_batched_experts {
+            if trace_moe {
+                eprintln!("[qwen-moe-trace] batched_gate_up");
+            }
+            moe.ffn_gate_up_exps
+                .as_ref()
+                .ok_or_else(|| "missing merged expert gate/up weights".to_string())?
+                .matvec_planes_device_indices(
+                    &self.cuda,
+                    &workspace.hidden_bf16,
+                    &workspace.moe_expert_gate_up_batch,
+                    &workspace.moe_route_indices,
+                    self.experts_used_count,
+                )?;
+            self.cuda.qwen_swiglu_split_batched_f32(
+                &workspace.moe_expert_gate_up_batch,
+                &workspace.moe_expert_act_batch,
+                self.expert_intermediate,
+                self.expert_intermediate,
+                self.experts_used_count,
+            )?;
+            self.cuda.f32_to_bf16(
+                &workspace.moe_expert_act_batch,
+                &workspace.moe_expert_act_bf16_batch,
+                self.experts_used_count * self.expert_intermediate,
+            )?;
+            if trace_moe {
+                eprintln!("[qwen-moe-trace] batched_down");
+            }
+            moe.ffn_down_exps.matvec_planes_device_indices_input_strided(
+                &self.cuda,
+                &workspace.moe_expert_act_bf16_batch,
+                self.expert_intermediate,
+                &workspace.moe_expert_down_batch,
+                &workspace.moe_route_indices,
+                self.experts_used_count,
+            )?;
+            self.cuda.weighted_sum_rows_f32(
+                &workspace.moe_expert_down_batch,
+                &workspace.moe_route_weights,
+                &workspace.moe_routed_accum,
+                self.hidden_size,
+                self.experts_used_count,
+            )?;
+        }
         for route_slot in 0..self.experts_used_count {
+            if use_batched_experts {
+                break;
+            }
             if trace_moe {
                 eprintln!("[qwen-moe-trace] slot={route_slot} gate_up");
             }
@@ -2999,6 +3073,62 @@ impl CudaAffineTensor {
             &self.biases,
             plane_indices_u32,
             plane_slot,
+            output_f32,
+            self.row_width(),
+            self.weight_words_per_row,
+            self.qparams_per_row,
+            self.out_rows,
+            self.weight_words_per_plane,
+            self.qparams_words_per_plane,
+            self.plane_count,
+            self.bits,
+        )
+    }
+
+    fn matvec_planes_device_indices(
+        &self,
+        cuda: &CudaRuntime,
+        input_bf16: &CudaBuffer,
+        output_f32: &CudaBuffer,
+        plane_indices_u32: &CudaBuffer,
+        selected_count: usize,
+    ) -> CudaResult<()> {
+        cuda.affine_qmv_bf16_to_f32_select_planes_precise(
+            input_bf16,
+            &self.packed_weights,
+            &self.scales,
+            &self.biases,
+            plane_indices_u32,
+            selected_count,
+            output_f32,
+            self.row_width(),
+            self.weight_words_per_row,
+            self.qparams_per_row,
+            self.out_rows,
+            self.weight_words_per_plane,
+            self.qparams_words_per_plane,
+            self.plane_count,
+            self.bits,
+        )
+    }
+
+    fn matvec_planes_device_indices_input_strided(
+        &self,
+        cuda: &CudaRuntime,
+        input_bf16: &CudaBuffer,
+        input_words_per_slot: usize,
+        output_f32: &CudaBuffer,
+        plane_indices_u32: &CudaBuffer,
+        selected_count: usize,
+    ) -> CudaResult<()> {
+        cuda.affine_qmv_bf16_to_f32_select_planes_input_offsets_precise(
+            input_bf16,
+            input_words_per_slot,
+            &self.packed_weights,
+            &self.scales,
+            &self.biases,
+            plane_indices_u32,
+            selected_count,
             output_f32,
             self.row_width(),
             self.weight_words_per_row,
@@ -4555,6 +4685,87 @@ mod tests {
         )
         .unwrap();
         assert_close("affine_selected_plane", &actual, &expected, 1.0e-5);
+    }
+
+    #[test]
+    fn cuda_affine_selected_planes_match_reference() {
+        if !makepad_ggml::backend::cuda::is_available() {
+            return;
+        }
+        let cuda = CudaRuntime::load().unwrap();
+        let input = (1..=64)
+            .map(|value| qwen_f32_to_bf16_word(value as f32))
+            .collect::<Vec<_>>();
+        let input_buf = cuda.load_bytes(&u16_bytes(&input)).unwrap();
+
+        let row_plane0 = vec![0x0101_0101u32; 16];
+        let row_plane1 = vec![0x0202_0202u32; 16];
+        let packed_weights = row_plane0
+            .iter()
+            .copied()
+            .chain(row_plane0.iter().copied())
+            .chain(row_plane1.iter().copied())
+            .chain(row_plane1.iter().copied())
+            .collect::<Vec<_>>();
+        let scales = vec![
+            qwen_f32_to_bf16_word(1.0),
+            qwen_f32_to_bf16_word(1.0),
+            qwen_f32_to_bf16_word(1.0),
+            qwen_f32_to_bf16_word(1.0),
+        ];
+        let biases = vec![
+            qwen_f32_to_bf16_word(0.0),
+            qwen_f32_to_bf16_word(0.0),
+            qwen_f32_to_bf16_word(0.0),
+            qwen_f32_to_bf16_word(0.0),
+        ];
+        let tensor = CudaAffineTensor {
+            packed_weights: cuda.load_bytes(&u32_bytes(&packed_weights)).unwrap(),
+            scales: cuda.load_bytes(&u16_bytes(&scales)).unwrap(),
+            biases: cuda.load_bytes(&u16_bytes(&biases)).unwrap(),
+            bits: 8,
+            out_rows: 2,
+            weight_words_per_row: 16,
+            qparams_per_row: 1,
+            plane_count: 2,
+            weight_words_per_plane: 32,
+            qparams_words_per_plane: 2,
+        };
+        let plane_indices = cuda.load_bytes(&u32_bytes(&[1u32, 0u32])).unwrap();
+        let out_buf = cuda.alloc_f32(4).unwrap();
+        tensor
+            .matvec_planes_device_indices(&cuda, &input_buf, &out_buf, &plane_indices, 2)
+            .unwrap();
+        let actual = cuda.read_f32s(&out_buf, 4).unwrap();
+        let expected_plane1 = affine_quantized_matmul_fallback(
+            &input,
+            &packed_weights[32..64],
+            &scales[2..4],
+            &biases[2..4],
+            2,
+            16,
+            1,
+            64,
+            8,
+        )
+        .unwrap();
+        let expected_plane0 = affine_quantized_matmul_fallback(
+            &input,
+            &packed_weights[0..32],
+            &scales[0..2],
+            &biases[0..2],
+            2,
+            16,
+            1,
+            64,
+            8,
+        )
+        .unwrap();
+        let expected = expected_plane1
+            .into_iter()
+            .chain(expected_plane0)
+            .collect::<Vec<_>>();
+        assert_close("affine_selected_planes", &actual, &expected, 1.0e-5);
     }
 
     #[test]

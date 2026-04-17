@@ -3591,4 +3591,37 @@ mod tests {
         );
         assert!(!output.generated_token_ids.is_empty());
     }
+
+    #[test]
+    #[ignore]
+    fn qwen_real_generation_no_output_warm_bench_smoke() {
+        let Some(model_dir) = real_qwen_model_dir() else {
+            return;
+        };
+        let runtime = MlxQwen35MoeRuntimeSession::load(&model_dir).unwrap();
+        let prompt = runtime
+            .format_chat_prompt(
+                &[QwenChatMessage::new(
+                    QwenChatRole::User,
+                    "Write a short haiku about rain.",
+                )],
+                false,
+            )
+            .unwrap();
+        let warmup = runtime
+            .generate_preformatted_streaming(prompt.clone().into(), Some(1), false, |_| Ok(()))
+            .unwrap();
+        assert!(!warmup.generated_token_ids.is_empty());
+        let output = runtime
+            .generate_preformatted_streaming(prompt.into(), Some(16), false, |_| Ok(()))
+            .unwrap();
+        eprintln!(
+            "qwen_no_output_warm prompt_prefill_tok_s={:.3} steady_decode_tok_s={:.3} overall_tok_s={:.3} generated_tokens={}",
+            output.metrics.prompt_prefill_tokens_per_second,
+            output.metrics.steady_state_decode_tokens_per_second,
+            output.metrics.decode_tokens_per_second,
+            output.generated_token_ids.len(),
+        );
+        assert!(!output.generated_token_ids.is_empty());
+    }
 }
