@@ -27,6 +27,77 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_affine_qmv_f32(
+            input_bf16_words: *const u16,
+            packed_weights_u32: *const u32,
+            scales_bf16_words: *const u16,
+            biases_bf16_words: *const u16,
+            output_f32: *mut f32,
+            n_in: u32,
+            weight_words_per_row: u32,
+            qparams_per_row: u32,
+            out_rows: u32,
+            bits: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_affine_qmv_f32_precise(
+            input_bf16_words: *const u16,
+            packed_weights_u32: *const u32,
+            scales_bf16_words: *const u16,
+            biases_bf16_words: *const u16,
+            output_f32: *mut f32,
+            n_in: u32,
+            weight_words_per_row: u32,
+            qparams_per_row: u32,
+            out_rows: u32,
+            bits: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
+            input_bf16_words: *const u16,
+            packed_weights_u32: *const u32,
+            scales_bf16_words: *const u16,
+            biases_bf16_words: *const u16,
+            plane_indices_u32: *const u32,
+            plane_slot: u32,
+            output_f32: *mut f32,
+            n_in: u32,
+            weight_words_per_row: u32,
+            qparams_per_row: u32,
+            out_rows: u32,
+            weight_words_per_plane: u32,
+            qparams_words_per_plane: u32,
+            plane_count: u32,
+            bits: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_affine_get_row_f32(
+            packed_weights_u32: *const u32,
+            scales_bf16_words: *const u16,
+            biases_bf16_words: *const u16,
+            output_f32: *mut f32,
+            weight_words_per_row: u32,
+            qparams_per_row: u32,
+            row_index: u32,
+            bits: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_affine_get_row_f32_device_u32(
+            packed_weights_u32: *const u32,
+            scales_bf16_words: *const u16,
+            biases_bf16_words: *const u16,
+            output_f32: *mut f32,
+            weight_words_per_row: u32,
+            qparams_per_row: u32,
+            row_index_device_u32: *const u32,
+            bits: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_nvfp4_q8_1_matvec(
             input_q8_1_bytes: *const u8,
             packed_weights_nvfp4_bytes: *const u8,
@@ -146,6 +217,14 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_scale_f32_inplace_device_f32_index(
+            values: *mut f32,
+            scales: *const f32,
+            scale_index: u32,
+            n: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_f32_to_bf16(
             input: *const f32,
             output: *mut u16,
@@ -166,6 +245,117 @@ mod imp {
             right: *const f32,
             out: *mut f32,
             n: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_split_interleaved_query_gate_f32(
+            input: *const f32,
+            query: *mut f32,
+            gate: *mut f32,
+            head_count: u32,
+            head_dim: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_split_recurrent_qkv_f32(
+            input: *const f32,
+            q: *mut f32,
+            k: *mut f32,
+            v: *mut f32,
+            q_width: u32,
+            v_width: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_sigmoid_f32(
+            input: *const f32,
+            output: *mut f32,
+            n: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_sigmoid_mul_f32(
+            values: *const f32,
+            gate: *const f32,
+            output: *mut f32,
+            n: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_silu_mul_f32(
+            values: *const f32,
+            gate: *const f32,
+            output: *mut f32,
+            n: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_swiglu_split_f32(
+            gate_up: *const f32,
+            output: *mut f32,
+            n: u32,
+            split_offset: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_decay_gate_f32(
+            a_log: *const f32,
+            alpha: *const f32,
+            dt_bias: *const f32,
+            output: *mut f32,
+            n: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_ssm_conv_with_state_f32(
+            current: *const f32,
+            state: *mut f32,
+            kernel: *const f32,
+            output: *mut f32,
+            d_conv: u32,
+            d_inner: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_mrope_rows_f32(
+            input: *const f32,
+            output: *mut f32,
+            row_count: u32,
+            row_stride: u32,
+            rotary_dim: u32,
+            rope_theta: f32,
+            position0: u32,
+            position1: u32,
+            position2: u32,
+            position3: u32,
+            section0: u32,
+            section1: u32,
+            section2: u32,
+            section3: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_mrope_rows_f32_device_u32(
+            input: *const f32,
+            output: *mut f32,
+            row_count: u32,
+            row_stride: u32,
+            rotary_dim: u32,
+            rope_theta: f32,
+            position_device_u32: *const u32,
+            section0: u32,
+            section1: u32,
+            section2: u32,
+            section3: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_qwen_softmax_topk_routes_f32(
+            logits: *const f32,
+            topk_indices: *mut u32,
+            topk_weights: *mut f32,
+            n: u32,
+            top_k: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
@@ -256,6 +446,15 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights_precise(
+            input: *const f32,
+            weights_f32: *const f32,
+            output: *mut f32,
+            n: u32,
+            eps: f32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_rms_norm_rows_weighted_f32(
             input: *const f32,
             weights_bf16: *const u16,
@@ -278,7 +477,28 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_precise(
+            input: *const f32,
+            weights_f32: *const f32,
+            output: *mut f32,
+            row_count: u32,
+            row_stride: u32,
+            n: u32,
+            eps: f32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_ggml_cuda_rms_norm_rows_no_scale_f32(
+            input: *const f32,
+            output: *mut f32,
+            row_count: u32,
+            row_stride: u32,
+            n: u32,
+            eps: f32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_rms_norm_rows_no_scale_f32_precise(
             input: *const f32,
             output: *mut f32,
             row_count: u32,
@@ -1467,6 +1687,14 @@ mod imp {
         pub fn size_bytes(&self) -> usize {
             self.inner.size_bytes
         }
+
+        pub fn device_u32_ptr(&self) -> *const u32 {
+            self.inner.ptr.as_ptr().cast::<u32>()
+        }
+
+        pub fn device_u32_mut_ptr(&self) -> *mut u32 {
+            self.inner.ptr.as_ptr().cast::<u32>()
+        }
     }
 
     pub struct CudaRuntime {
@@ -1545,6 +1773,18 @@ mod imp {
             buffer.inner.write(bytes, self.stream)
         }
 
+        pub fn zero_bytes(&self, buffer: &CudaBuffer, len: usize) -> Result<(), String> {
+            self.prepare_device()?;
+            if len > buffer.inner.size_bytes {
+                return Err(format!(
+                    "CUDA buffer overflow on zero: {} > {}",
+                    len, buffer.inner.size_bytes
+                ));
+            }
+            unsafe { makepad_cuda::memset_async(buffer.inner.ptr, 0, len, self.stream) }
+                .map_err(|err| err.to_string())
+        }
+
         pub fn write_u32(&self, buffer: &CudaBuffer, value: u32) -> Result<(), String> {
             self.prepare_device()?;
             buffer.inner.write(&value.to_le_bytes(), self.stream)
@@ -1558,6 +1798,11 @@ mod imp {
                 .into_iter()
                 .next()
                 .ok_or_else(|| "missing CUDA u32 readback value".to_string())
+        }
+
+        pub fn read_u32s(&self, buffer: &CudaBuffer, len: usize) -> Result<Vec<u32>, String> {
+            self.prepare_device()?;
+            buffer.inner.read_u32s(len, self.stream)
         }
 
         pub fn read_f32s(&self, buffer: &CudaBuffer, len: usize) -> Result<Vec<f32>, String> {
@@ -2010,6 +2255,26 @@ mod imp {
             makepad_cuda::check(status).map_err(|err| err.to_string())
         }
 
+        pub fn scale_f32_inplace_device_f32_index(
+            &self,
+            values: &CudaBuffer,
+            scales: &CudaBuffer,
+            scale_index: usize,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_scale_f32_inplace_device_f32_index(
+                    values.inner.ptr.as_ptr().cast::<f32>(),
+                    scales.inner.ptr.as_ptr().cast::<f32>(),
+                    scale_index as u32,
+                    n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
         pub fn f32_to_bf16(
             &self,
             input: &CudaBuffer,
@@ -2022,6 +2287,297 @@ mod imp {
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<u16>(),
                     n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn affine_qmv_bf16_to_f32(
+            &self,
+            input_bf16: &CudaBuffer,
+            packed_weights_u32: &CudaBuffer,
+            scales_bf16: &CudaBuffer,
+            biases_bf16: &CudaBuffer,
+            output_f32: &CudaBuffer,
+            n_in: usize,
+            weight_words_per_row: usize,
+            qparams_per_row: usize,
+            out_rows: usize,
+            bits: u32,
+        ) -> Result<(), String> {
+            self.affine_qmv_bf16_to_f32_offsets(
+                input_bf16,
+                packed_weights_u32,
+                0,
+                scales_bf16,
+                0,
+                biases_bf16,
+                0,
+                output_f32,
+                n_in,
+                weight_words_per_row,
+                qparams_per_row,
+                out_rows,
+                bits,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn affine_qmv_bf16_to_f32_offsets(
+            &self,
+            input_bf16: &CudaBuffer,
+            packed_weights_u32: &CudaBuffer,
+            packed_weight_word_offset: usize,
+            scales_bf16: &CudaBuffer,
+            scale_word_offset: usize,
+            biases_bf16: &CudaBuffer,
+            bias_word_offset: usize,
+            output_f32: &CudaBuffer,
+            n_in: usize,
+            weight_words_per_row: usize,
+            qparams_per_row: usize,
+            out_rows: usize,
+            bits: u32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_affine_qmv_f32(
+                    input_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    packed_weights_u32
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<u32>()
+                        .add(packed_weight_word_offset),
+                    scales_bf16
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<u16>()
+                        .add(scale_word_offset),
+                    biases_bf16
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<u16>()
+                        .add(bias_word_offset),
+                    output_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    n_in as u32,
+                    weight_words_per_row as u32,
+                    qparams_per_row as u32,
+                    out_rows as u32,
+                    bits,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn affine_qmv_bf16_to_f32_precise(
+            &self,
+            input_bf16: &CudaBuffer,
+            packed_weights_u32: &CudaBuffer,
+            scales_bf16: &CudaBuffer,
+            biases_bf16: &CudaBuffer,
+            output_f32: &CudaBuffer,
+            n_in: usize,
+            weight_words_per_row: usize,
+            qparams_per_row: usize,
+            out_rows: usize,
+            bits: u32,
+        ) -> Result<(), String> {
+            self.affine_qmv_bf16_to_f32_offsets_precise(
+                input_bf16,
+                packed_weights_u32,
+                0,
+                scales_bf16,
+                0,
+                biases_bf16,
+                0,
+                output_f32,
+                n_in,
+                weight_words_per_row,
+                qparams_per_row,
+                out_rows,
+                bits,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn affine_qmv_bf16_to_f32_offsets_precise(
+            &self,
+            input_bf16: &CudaBuffer,
+            packed_weights_u32: &CudaBuffer,
+            packed_weight_word_offset: usize,
+            scales_bf16: &CudaBuffer,
+            scale_word_offset: usize,
+            biases_bf16: &CudaBuffer,
+            bias_word_offset: usize,
+            output_f32: &CudaBuffer,
+            n_in: usize,
+            weight_words_per_row: usize,
+            qparams_per_row: usize,
+            out_rows: usize,
+            bits: u32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_affine_qmv_f32_precise(
+                    input_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    packed_weights_u32
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<u32>()
+                        .add(packed_weight_word_offset),
+                    scales_bf16
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<u16>()
+                        .add(scale_word_offset),
+                    biases_bf16
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<u16>()
+                        .add(bias_word_offset),
+                    output_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    n_in as u32,
+                    weight_words_per_row as u32,
+                    qparams_per_row as u32,
+                    out_rows as u32,
+                    bits,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn affine_qmv_bf16_to_f32_select_plane_precise(
+            &self,
+            input_bf16: &CudaBuffer,
+            packed_weights_u32: &CudaBuffer,
+            scales_bf16: &CudaBuffer,
+            biases_bf16: &CudaBuffer,
+            plane_indices_u32: &CudaBuffer,
+            plane_slot: usize,
+            output_f32: &CudaBuffer,
+            n_in: usize,
+            weight_words_per_row: usize,
+            qparams_per_row: usize,
+            out_rows: usize,
+            weight_words_per_plane: usize,
+            qparams_words_per_plane: usize,
+            plane_count: usize,
+            bits: u32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
+                    input_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    biases_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    plane_indices_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    plane_slot as u32,
+                    output_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    n_in as u32,
+                    weight_words_per_row as u32,
+                    qparams_per_row as u32,
+                    out_rows as u32,
+                    weight_words_per_plane as u32,
+                    qparams_words_per_plane as u32,
+                    plane_count as u32,
+                    bits,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn affine_get_row_f32(
+            &self,
+            packed_weights_u32: &CudaBuffer,
+            scales_bf16: &CudaBuffer,
+            biases_bf16: &CudaBuffer,
+            output_f32: &CudaBuffer,
+            weight_words_per_row: usize,
+            qparams_per_row: usize,
+            row_index: usize,
+            bits: u32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_affine_get_row_f32(
+                    packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    biases_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    output_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    weight_words_per_row as u32,
+                    qparams_per_row as u32,
+                    row_index as u32,
+                    bits,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn affine_get_row_f32_device_u32(
+            &self,
+            packed_weights_u32: &CudaBuffer,
+            scales_bf16: &CudaBuffer,
+            biases_bf16: &CudaBuffer,
+            output_f32: &CudaBuffer,
+            weight_words_per_row: usize,
+            qparams_per_row: usize,
+            row_index_device_u32: &CudaBuffer,
+            bits: u32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_affine_get_row_f32_device_u32(
+                    packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    biases_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    output_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    weight_words_per_row as u32,
+                    qparams_per_row as u32,
+                    row_index_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    bits,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn affine_get_row_f32_device_u32_ptr(
+            &self,
+            packed_weights_u32: &CudaBuffer,
+            scales_bf16: &CudaBuffer,
+            biases_bf16: &CudaBuffer,
+            output_f32: &CudaBuffer,
+            weight_words_per_row: usize,
+            qparams_per_row: usize,
+            row_index_device_u32: *const u32,
+            bits: u32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_affine_get_row_f32_device_u32(
+                    packed_weights_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    scales_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    biases_bf16.inner.ptr.as_ptr().cast::<u16>(),
+                    output_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    weight_words_per_row as u32,
+                    qparams_per_row as u32,
+                    row_index_device_u32,
+                    bits,
                     self.stream,
                 )
             };
@@ -2062,6 +2618,297 @@ mod imp {
                     right.inner.ptr.as_ptr().cast::<f32>(),
                     out.inner.ptr.as_ptr().cast::<f32>(),
                     n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn qwen_split_interleaved_query_gate_f32(
+            &self,
+            input: &CudaBuffer,
+            query: &CudaBuffer,
+            gate: &CudaBuffer,
+            head_count: usize,
+            head_dim: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_split_interleaved_query_gate_f32(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    query.inner.ptr.as_ptr().cast::<f32>(),
+                    gate.inner.ptr.as_ptr().cast::<f32>(),
+                    head_count as u32,
+                    head_dim as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn qwen_split_recurrent_qkv_f32(
+            &self,
+            input: &CudaBuffer,
+            q: &CudaBuffer,
+            k: &CudaBuffer,
+            v: &CudaBuffer,
+            q_width: usize,
+            v_width: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_split_recurrent_qkv_f32(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    q.inner.ptr.as_ptr().cast::<f32>(),
+                    k.inner.ptr.as_ptr().cast::<f32>(),
+                    v.inner.ptr.as_ptr().cast::<f32>(),
+                    q_width as u32,
+                    v_width as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn qwen_sigmoid_f32(
+            &self,
+            input: &CudaBuffer,
+            output: &CudaBuffer,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_sigmoid_f32(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn qwen_sigmoid_mul_f32(
+            &self,
+            values: &CudaBuffer,
+            gate: &CudaBuffer,
+            output: &CudaBuffer,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_sigmoid_mul_f32(
+                    values.inner.ptr.as_ptr().cast::<f32>(),
+                    gate.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn qwen_silu_mul_f32(
+            &self,
+            values: &CudaBuffer,
+            gate: &CudaBuffer,
+            output: &CudaBuffer,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_silu_mul_f32(
+                    values.inner.ptr.as_ptr().cast::<f32>(),
+                    gate.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn qwen_swiglu_split_f32(
+            &self,
+            gate_up: &CudaBuffer,
+            output: &CudaBuffer,
+            n: usize,
+            split_offset: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_swiglu_split_f32(
+                    gate_up.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    split_offset as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn qwen_decay_gate_f32(
+            &self,
+            a_log: &CudaBuffer,
+            alpha: &CudaBuffer,
+            dt_bias: &CudaBuffer,
+            output: &CudaBuffer,
+            n: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_decay_gate_f32(
+                    a_log.inner.ptr.as_ptr().cast::<f32>(),
+                    alpha.inner.ptr.as_ptr().cast::<f32>(),
+                    dt_bias.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn qwen_ssm_conv_with_state_f32(
+            &self,
+            current: &CudaBuffer,
+            state: &CudaBuffer,
+            kernel: &CudaBuffer,
+            output: &CudaBuffer,
+            d_conv: usize,
+            d_inner: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_ssm_conv_with_state_f32(
+                    current.inner.ptr.as_ptr().cast::<f32>(),
+                    state.inner.ptr.as_ptr().cast::<f32>(),
+                    kernel.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    d_conv as u32,
+                    d_inner as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn qwen_mrope_rows_f32(
+            &self,
+            input: &CudaBuffer,
+            output: &CudaBuffer,
+            row_count: usize,
+            row_stride: usize,
+            rotary_dim: usize,
+            rope_theta: f32,
+            positions: [u32; 4],
+            sections: [u32; 4],
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_mrope_rows_f32(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    row_count as u32,
+                    row_stride as u32,
+                    rotary_dim as u32,
+                    rope_theta,
+                    positions[0],
+                    positions[1],
+                    positions[2],
+                    positions[3],
+                    sections[0],
+                    sections[1],
+                    sections[2],
+                    sections[3],
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn qwen_mrope_rows_f32_device_u32(
+            &self,
+            input: &CudaBuffer,
+            output: &CudaBuffer,
+            row_count: usize,
+            row_stride: usize,
+            rotary_dim: usize,
+            rope_theta: f32,
+            position_device_u32: &CudaBuffer,
+            sections: [u32; 4],
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_mrope_rows_f32_device_u32(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    row_count as u32,
+                    row_stride as u32,
+                    rotary_dim as u32,
+                    rope_theta,
+                    position_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    sections[0],
+                    sections[1],
+                    sections[2],
+                    sections[3],
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn qwen_mrope_rows_f32_device_u32_ptr(
+            &self,
+            input: &CudaBuffer,
+            output: &CudaBuffer,
+            row_count: usize,
+            row_stride: usize,
+            rotary_dim: usize,
+            rope_theta: f32,
+            position_device_u32: *const u32,
+            sections: [u32; 4],
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_mrope_rows_f32_device_u32(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    row_count as u32,
+                    row_stride as u32,
+                    rotary_dim as u32,
+                    rope_theta,
+                    position_device_u32,
+                    sections[0],
+                    sections[1],
+                    sections[2],
+                    sections[3],
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn qwen_softmax_topk_routes_f32(
+            &self,
+            logits: &CudaBuffer,
+            topk_indices: &CudaBuffer,
+            topk_weights: &CudaBuffer,
+            n: usize,
+            top_k: usize,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_qwen_softmax_topk_routes_f32(
+                    logits.inner.ptr.as_ptr().cast::<f32>(),
+                    topk_indices.inner.ptr.as_ptr().cast::<u32>(),
+                    topk_weights.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    top_k as u32,
                     self.stream,
                 )
             };
@@ -2227,6 +3074,70 @@ mod imp {
             makepad_cuda::check(status).map_err(|err| err.to_string())
         }
 
+        #[allow(clippy::too_many_arguments)]
+        pub fn gated_delta_net_f32_state_offset(
+            &self,
+            q: &CudaBuffer,
+            k: &CudaBuffer,
+            v: &CudaBuffer,
+            g: &CudaBuffer,
+            beta: &CudaBuffer,
+            state_and_dst: &CudaBuffer,
+            state_offset_elems: usize,
+            sv: usize,
+            h: usize,
+            n_tokens: usize,
+            n_seqs: usize,
+            sq1: usize,
+            sq2: usize,
+            sq3: usize,
+            sv1: usize,
+            sv2: usize,
+            sv3: usize,
+            sb1: usize,
+            sb2: usize,
+            sb3: usize,
+            neqk1: usize,
+            rq3: usize,
+            kda: bool,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_gated_delta_net_f32(
+                    q.inner.ptr.as_ptr().cast::<f32>(),
+                    k.inner.ptr.as_ptr().cast::<f32>(),
+                    v.inner.ptr.as_ptr().cast::<f32>(),
+                    g.inner.ptr.as_ptr().cast::<f32>(),
+                    beta.inner.ptr.as_ptr().cast::<f32>(),
+                    state_and_dst
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(state_offset_elems),
+                    state_and_dst.inner.ptr.as_ptr().cast::<f32>(),
+                    sv as u32,
+                    h as u32,
+                    n_tokens as u32,
+                    n_seqs as u32,
+                    sq1 as u32,
+                    sq2 as u32,
+                    sq3 as u32,
+                    sv1 as u32,
+                    sv2 as u32,
+                    sv3 as u32,
+                    sb1 as u32,
+                    sb2 as u32,
+                    sb3 as u32,
+                    neqk1 as u32,
+                    rq3 as u32,
+                    u32::from(kda),
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
         pub fn rms_norm_row_weighted_f32(
             &self,
             input: &CudaBuffer,
@@ -2260,6 +3171,28 @@ mod imp {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    weights_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    n as u32,
+                    eps,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn rms_norm_row_weighted_f32_f32weights_precise(
+            &self,
+            input: &CudaBuffer,
+            weights_f32: &CudaBuffer,
+            output: &CudaBuffer,
+            n: usize,
+            eps: f32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights_precise(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     weights_f32.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
@@ -2379,6 +3312,32 @@ mod imp {
             makepad_cuda::check(status).map_err(|err| err.to_string())
         }
 
+        pub fn rms_norm_rows_weighted_f32_f32weights_precise(
+            &self,
+            input: &CudaBuffer,
+            weights_f32: &CudaBuffer,
+            output: &CudaBuffer,
+            row_count: usize,
+            row_stride: usize,
+            n: usize,
+            eps: f32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_precise(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    weights_f32.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    row_count as u32,
+                    row_stride as u32,
+                    n as u32,
+                    eps,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
         pub fn rms_norm_rows_weighted_f32_offset(
             &self,
             input: &CudaBuffer,
@@ -2467,6 +3426,30 @@ mod imp {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_rms_norm_rows_no_scale_f32(
+                    input.inner.ptr.as_ptr().cast::<f32>(),
+                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    row_count as u32,
+                    row_stride as u32,
+                    n as u32,
+                    eps,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn rms_norm_rows_no_scale_f32_precise(
+            &self,
+            input: &CudaBuffer,
+            output: &CudaBuffer,
+            row_count: usize,
+            row_stride: usize,
+            n: usize,
+            eps: f32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_rms_norm_rows_no_scale_f32_precise(
                     input.inner.ptr.as_ptr().cast::<f32>(),
                     output.inner.ptr.as_ptr().cast::<f32>(),
                     row_count as u32,
@@ -2621,6 +3604,34 @@ mod imp {
                     head_dim as u32,
                     max_tokens as u32,
                     slot_device_u32.inner.ptr.as_ptr().cast::<u32>(),
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn kv_append_f32_device_u32_ptr(
+            &self,
+            keys: &CudaBuffer,
+            values: &CudaBuffer,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            kv_head_count: usize,
+            head_dim: usize,
+            max_tokens: usize,
+            slot_device_u32: *const u32,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_kv_append_f32_device_u32(
+                    keys.inner.ptr.as_ptr().cast::<f32>(),
+                    values.inner.ptr.as_ptr().cast::<f32>(),
+                    key_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    value_cache.inner.ptr.as_ptr().cast::<u16>(),
+                    kv_head_count as u32,
+                    head_dim as u32,
+                    max_tokens as u32,
+                    slot_device_u32,
                     self.stream,
                 )
             };
@@ -4552,6 +5563,14 @@ mod imp {
         pub fn size_bytes(&self) -> usize {
             0
         }
+
+        pub fn device_u32_ptr(&self) -> *const u32 {
+            std::ptr::null()
+        }
+
+        pub fn device_u32_mut_ptr(&self) -> *mut u32 {
+            std::ptr::null_mut()
+        }
     }
 
     pub struct CudaRuntime;
@@ -4585,11 +5604,19 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        pub fn zero_bytes(&self, _buffer: &CudaBuffer, _len: usize) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn write_u32(&self, _buffer: &CudaBuffer, _value: u32) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
         }
 
         pub fn read_u32(&self, _buffer: &CudaBuffer) -> Result<u32, String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn read_u32s(&self, _buffer: &CudaBuffer, _len: usize) -> Result<Vec<u32>, String> {
             Err("CUDA runtime is unavailable".to_string())
         }
 
@@ -4821,6 +5848,163 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        pub fn scale_f32_inplace_device_f32_index(
+            &self,
+            _values: &CudaBuffer,
+            _scales: &CudaBuffer,
+            _scale_index: usize,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn f32_to_bf16(
+            &self,
+            _input: &CudaBuffer,
+            _output: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn affine_qmv_bf16_to_f32(
+            &self,
+            _input_bf16: &CudaBuffer,
+            _packed_weights_u32: &CudaBuffer,
+            _scales_bf16: &CudaBuffer,
+            _biases_bf16: &CudaBuffer,
+            _output_f32: &CudaBuffer,
+            _n_in: usize,
+            _weight_words_per_row: usize,
+            _qparams_per_row: usize,
+            _out_rows: usize,
+            _bits: u32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn affine_qmv_bf16_to_f32_offsets(
+            &self,
+            _input_bf16: &CudaBuffer,
+            _packed_weights_u32: &CudaBuffer,
+            _packed_weight_word_offset: usize,
+            _scales_bf16: &CudaBuffer,
+            _scale_word_offset: usize,
+            _biases_bf16: &CudaBuffer,
+            _bias_word_offset: usize,
+            _output_f32: &CudaBuffer,
+            _n_in: usize,
+            _weight_words_per_row: usize,
+            _qparams_per_row: usize,
+            _out_rows: usize,
+            _bits: u32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn affine_qmv_bf16_to_f32_precise(
+            &self,
+            _input_bf16: &CudaBuffer,
+            _packed_weights_u32: &CudaBuffer,
+            _scales_bf16: &CudaBuffer,
+            _biases_bf16: &CudaBuffer,
+            _output_f32: &CudaBuffer,
+            _n_in: usize,
+            _weight_words_per_row: usize,
+            _qparams_per_row: usize,
+            _out_rows: usize,
+            _bits: u32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn affine_qmv_bf16_to_f32_offsets_precise(
+            &self,
+            _input_bf16: &CudaBuffer,
+            _packed_weights_u32: &CudaBuffer,
+            _packed_weight_word_offset: usize,
+            _scales_bf16: &CudaBuffer,
+            _scale_word_offset: usize,
+            _biases_bf16: &CudaBuffer,
+            _bias_word_offset: usize,
+            _output_f32: &CudaBuffer,
+            _n_in: usize,
+            _weight_words_per_row: usize,
+            _qparams_per_row: usize,
+            _out_rows: usize,
+            _bits: u32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn affine_qmv_bf16_to_f32_select_plane_precise(
+            &self,
+            _input_bf16: &CudaBuffer,
+            _packed_weights_u32: &CudaBuffer,
+            _scales_bf16: &CudaBuffer,
+            _biases_bf16: &CudaBuffer,
+            _plane_indices_u32: &CudaBuffer,
+            _plane_slot: usize,
+            _output_f32: &CudaBuffer,
+            _n_in: usize,
+            _weight_words_per_row: usize,
+            _qparams_per_row: usize,
+            _out_rows: usize,
+            _weight_words_per_plane: usize,
+            _qparams_words_per_plane: usize,
+            _plane_count: usize,
+            _bits: u32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn affine_get_row_f32(
+            &self,
+            _packed_weights_u32: &CudaBuffer,
+            _scales_bf16: &CudaBuffer,
+            _biases_bf16: &CudaBuffer,
+            _output_f32: &CudaBuffer,
+            _weight_words_per_row: usize,
+            _qparams_per_row: usize,
+            _row_index: usize,
+            _bits: u32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn affine_get_row_f32_device_u32(
+            &self,
+            _packed_weights_u32: &CudaBuffer,
+            _scales_bf16: &CudaBuffer,
+            _biases_bf16: &CudaBuffer,
+            _output_f32: &CudaBuffer,
+            _weight_words_per_row: usize,
+            _qparams_per_row: usize,
+            _row_index_device_u32: &CudaBuffer,
+            _bits: u32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn affine_get_row_f32_device_u32_ptr(
+            &self,
+            _packed_weights_u32: &CudaBuffer,
+            _scales_bf16: &CudaBuffer,
+            _biases_bf16: &CudaBuffer,
+            _output_f32: &CudaBuffer,
+            _weight_words_per_row: usize,
+            _qparams_per_row: usize,
+            _row_index_device_u32: *const u32,
+            _bits: u32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn add_f32(
             &self,
             _left: &CudaBuffer,
@@ -4837,6 +6021,147 @@ mod imp {
             _right: &CudaBuffer,
             _out: &CudaBuffer,
             _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn qwen_split_interleaved_query_gate_f32(
+            &self,
+            _input: &CudaBuffer,
+            _query: &CudaBuffer,
+            _gate: &CudaBuffer,
+            _head_count: usize,
+            _head_dim: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn qwen_split_recurrent_qkv_f32(
+            &self,
+            _input: &CudaBuffer,
+            _q: &CudaBuffer,
+            _k: &CudaBuffer,
+            _v: &CudaBuffer,
+            _q_width: usize,
+            _v_width: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn qwen_sigmoid_f32(
+            &self,
+            _input: &CudaBuffer,
+            _output: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn qwen_sigmoid_mul_f32(
+            &self,
+            _values: &CudaBuffer,
+            _gate: &CudaBuffer,
+            _output: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn qwen_silu_mul_f32(
+            &self,
+            _values: &CudaBuffer,
+            _gate: &CudaBuffer,
+            _output: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn qwen_swiglu_split_f32(
+            &self,
+            _gate_up: &CudaBuffer,
+            _output: &CudaBuffer,
+            _n: usize,
+            _split_offset: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn qwen_decay_gate_f32(
+            &self,
+            _a_log: &CudaBuffer,
+            _alpha: &CudaBuffer,
+            _dt_bias: &CudaBuffer,
+            _output: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn qwen_ssm_conv_with_state_f32(
+            &self,
+            _current: &CudaBuffer,
+            _state: &CudaBuffer,
+            _kernel: &CudaBuffer,
+            _output: &CudaBuffer,
+            _d_conv: usize,
+            _d_inner: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn qwen_mrope_rows_f32(
+            &self,
+            _input: &CudaBuffer,
+            _output: &CudaBuffer,
+            _row_count: usize,
+            _row_stride: usize,
+            _rotary_dim: usize,
+            _rope_theta: f32,
+            _positions: [u32; 4],
+            _sections: [u32; 4],
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn qwen_mrope_rows_f32_device_u32(
+            &self,
+            _input: &CudaBuffer,
+            _output: &CudaBuffer,
+            _row_count: usize,
+            _row_stride: usize,
+            _rotary_dim: usize,
+            _rope_theta: f32,
+            _position_device_u32: &CudaBuffer,
+            _sections: [u32; 4],
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn qwen_mrope_rows_f32_device_u32_ptr(
+            &self,
+            _input: &CudaBuffer,
+            _output: &CudaBuffer,
+            _row_count: usize,
+            _row_stride: usize,
+            _rotary_dim: usize,
+            _rope_theta: f32,
+            _position_device_u32: *const u32,
+            _sections: [u32; 4],
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn qwen_softmax_topk_routes_f32(
+            &self,
+            _logits: &CudaBuffer,
+            _topk_indices: &CudaBuffer,
+            _topk_weights: &CudaBuffer,
+            _n: usize,
+            _top_k: usize,
         ) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
         }
@@ -4922,10 +6247,62 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        #[allow(clippy::too_many_arguments)]
+        pub fn gated_delta_net_f32_state_offset(
+            &self,
+            _q: &CudaBuffer,
+            _k: &CudaBuffer,
+            _v: &CudaBuffer,
+            _g: &CudaBuffer,
+            _beta: &CudaBuffer,
+            _state_and_dst: &CudaBuffer,
+            _state_offset_elems: usize,
+            _sv: usize,
+            _h: usize,
+            _n_tokens: usize,
+            _n_seqs: usize,
+            _sq1: usize,
+            _sq2: usize,
+            _sq3: usize,
+            _sv1: usize,
+            _sv2: usize,
+            _sv3: usize,
+            _sb1: usize,
+            _sb2: usize,
+            _sb3: usize,
+            _neqk1: usize,
+            _rq3: usize,
+            _kda: bool,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn rms_norm_row_weighted_f32(
             &self,
             _input: &CudaBuffer,
             _weights_bf16: &CudaBuffer,
+            _output: &CudaBuffer,
+            _n: usize,
+            _eps: f32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn rms_norm_row_weighted_f32_f32weights(
+            &self,
+            _input: &CudaBuffer,
+            _weights_f32: &CudaBuffer,
+            _output: &CudaBuffer,
+            _n: usize,
+            _eps: f32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn rms_norm_row_weighted_f32_f32weights_precise(
+            &self,
+            _input: &CudaBuffer,
+            _weights_f32: &CudaBuffer,
             _output: &CudaBuffer,
             _n: usize,
             _eps: f32,
@@ -4958,6 +6335,47 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        pub fn rms_norm_rows_weighted_f32_f32weights(
+            &self,
+            _input: &CudaBuffer,
+            _weights_f32: &CudaBuffer,
+            _output: &CudaBuffer,
+            _row_count: usize,
+            _row_stride: usize,
+            _n: usize,
+            _eps: f32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn rms_norm_rows_weighted_f32_f32weights_precise(
+            &self,
+            _input: &CudaBuffer,
+            _weights_f32: &CudaBuffer,
+            _output: &CudaBuffer,
+            _row_count: usize,
+            _row_stride: usize,
+            _n: usize,
+            _eps: f32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn rms_norm_rows_weighted_f32_offset_f32weights(
+            &self,
+            _input: &CudaBuffer,
+            _input_offset_elems: usize,
+            _weights_f32: &CudaBuffer,
+            _output: &CudaBuffer,
+            _output_offset_elems: usize,
+            _row_count: usize,
+            _row_stride: usize,
+            _n: usize,
+            _eps: f32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn rms_norm_rows_weighted_f32_offset(
             &self,
             _input: &CudaBuffer,
@@ -4974,6 +6392,18 @@ mod imp {
         }
 
         pub fn rms_norm_rows_no_scale_f32(
+            &self,
+            _input: &CudaBuffer,
+            _output: &CudaBuffer,
+            _row_count: usize,
+            _row_stride: usize,
+            _n: usize,
+            _eps: f32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn rms_norm_rows_no_scale_f32_precise(
             &self,
             _input: &CudaBuffer,
             _output: &CudaBuffer,
@@ -5051,6 +6481,20 @@ mod imp {
             _head_dim: usize,
             _max_tokens: usize,
             _slot_device_u32: &CudaBuffer,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn kv_append_f32_device_u32_ptr(
+            &self,
+            _keys: &CudaBuffer,
+            _values: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _kv_head_count: usize,
+            _head_dim: usize,
+            _max_tokens: usize,
+            _slot_device_u32: *const u32,
         ) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
         }

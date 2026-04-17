@@ -54,6 +54,12 @@ unsafe extern "C" {
         kind: c_int,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn cudaMemsetAsync(
+        dst: *mut c_void,
+        value: c_int,
+        count: usize,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn cudaMemcpy(
         dst: *mut c_void,
         src: *const c_void,
@@ -425,6 +431,15 @@ pub unsafe fn memcpy_async_device_to_host(
         CUDA_MEMCPY_DEVICE_TO_HOST,
         stream,
     ))
+}
+
+pub unsafe fn memset_async(
+    dst: NonNull<c_void>,
+    value: c_int,
+    size: usize,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    check(cudaMemsetAsync(dst.as_ptr(), value, size, stream))
 }
 
 pub struct CudaGraph {
