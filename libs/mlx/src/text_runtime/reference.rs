@@ -1145,9 +1145,7 @@ fn quantized_matmul_tensor(
                     group_sum += xi;
                     group_accum += xi * q;
                     x_index += 1;
-                    if bits != 8 {
-                        packed_word >>= bits;
-                    }
+                    packed_word >>= bits;
                 }
             }
             total += bf16_round_to_f32(scale * group_accum) + bf16_round_to_f32(bias * group_sum);
@@ -1536,9 +1534,7 @@ fn quantized_matmul_rank3_plane_tensor(
                     let prod = bf16_round_to_f32(x[x_index] * deq);
                     sum = bf16_round_to_f32(sum + prod);
                     x_index += 1;
-                    if bits != 8 {
-                        packed_word >>= bits;
-                    }
+                    packed_word >>= bits;
                 }
             }
         }

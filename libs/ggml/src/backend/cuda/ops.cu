@@ -122,6 +122,19 @@ static __global__ void makepad_ggml_cuda_scale_f32_kernel(
     values[idx] = makepad_ggml_cuda_bf16_round(values[idx] * scale);
 }
 
+static __global__ void makepad_ggml_cuda_scale_f32_device_f32_index_kernel(
+        float * __restrict__ values,
+        const float * __restrict__ scales,
+        uint32_t scale_index,
+        uint32_t n) {
+    const float scale = scales[scale_index];
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) {
+        return;
+    }
+    values[idx] = makepad_ggml_cuda_bf16_round(values[idx] * scale);
+}
+
 static __global__ void makepad_ggml_cuda_f32_to_bf16_kernel(
         const float * __restrict__ input,
         uint16_t * __restrict__ output,
@@ -270,6 +283,28 @@ static __global__ void makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights_ke
     }
 }
 
+static __global__ void makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights_precise_kernel(
+        const float * __restrict__ input,
+        const float * __restrict__ weights_f32,
+        float * __restrict__ output,
+        uint32_t n,
+        float eps) {
+    float sum = 0.0f;
+    for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
+        const float v = input[idx];
+        sum += v * v;
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    __shared__ float inv_rms;
+    if (threadIdx.x == 0) {
+        inv_rms = rsqrtf(sum / static_cast<float>(n) + eps);
+    }
+    __syncthreads();
+    for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
+        output[idx] = input[idx] * inv_rms * weights_f32[idx];
+    }
+}
+
 static __global__ void makepad_ggml_cuda_rms_norm_rows_weighted_f32_kernel(
         const float * __restrict__ input,
         const uint16_t * __restrict__ weights_bf16,
@@ -333,6 +368,36 @@ static __global__ void makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_k
     }
 }
 
+static __global__ void makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_precise_kernel(
+        const float * __restrict__ input,
+        const float * __restrict__ weights_f32,
+        float * __restrict__ output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t n,
+        float eps) {
+    const uint32_t row = blockIdx.x;
+    if (row >= row_count) {
+        return;
+    }
+    const float * row_in = input + row * row_stride;
+    float * row_out = output + row * row_stride;
+    float sum = 0.0f;
+    for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
+        const float v = row_in[idx];
+        sum += v * v;
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    __shared__ float inv_rms;
+    if (threadIdx.x == 0) {
+        inv_rms = rsqrtf(sum / static_cast<float>(n) + eps);
+    }
+    __syncthreads();
+    for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
+        row_out[idx] = row_in[idx] * inv_rms * weights_f32[idx];
+    }
+}
+
 static __global__ void makepad_ggml_cuda_rms_norm_rows_no_scale_f32_kernel(
         const float * __restrict__ input,
         float * __restrict__ output,
@@ -359,6 +424,35 @@ static __global__ void makepad_ggml_cuda_rms_norm_rows_no_scale_f32_kernel(
     __syncthreads();
     for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
         row_out[idx] = makepad_ggml_cuda_bf16_round(row_in[idx] * inv_rms);
+    }
+}
+
+static __global__ void makepad_ggml_cuda_rms_norm_rows_no_scale_f32_precise_kernel(
+        const float * __restrict__ input,
+        float * __restrict__ output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t n,
+        float eps) {
+    const uint32_t row = blockIdx.x;
+    if (row >= row_count) {
+        return;
+    }
+    const float * row_in = input + row * row_stride;
+    float * row_out = output + row * row_stride;
+    float sum = 0.0f;
+    for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
+        const float v = row_in[idx];
+        sum += v * v;
+    }
+    sum = makepad_ggml_cuda_block_reduce_sum(sum);
+    __shared__ float inv_rms;
+    if (threadIdx.x == 0) {
+        inv_rms = rsqrtf(sum / static_cast<float>(n) + eps);
+    }
+    __syncthreads();
+    for (uint32_t idx = threadIdx.x; idx < n; idx += blockDim.x) {
+        row_out[idx] = row_in[idx] * inv_rms;
     }
 }
 
@@ -2494,6 +2588,25 @@ extern "C" cudaError_t makepad_ggml_cuda_scale_f32_inplace(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t makepad_ggml_cuda_scale_f32_inplace_device_f32_index(
+        float * values,
+        const float * scales,
+        uint32_t scale_index,
+        uint32_t n,
+        cudaStream_t stream) {
+    if (n == 0) {
+        return cudaSuccess;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid((n + block.x - 1) / block.x, 1, 1);
+    makepad_ggml_cuda_scale_f32_device_f32_index_kernel<<<grid, block, 0, stream>>>(
+        values,
+        scales,
+        scale_index,
+        n);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t makepad_ggml_cuda_f32_to_bf16(
         const float * input,
         uint16_t * output,
@@ -2622,6 +2735,22 @@ extern "C" cudaError_t makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights_precise(
+        const float * input,
+        const float * weights_f32,
+        float * output,
+        uint32_t n,
+        float eps,
+        cudaStream_t stream) {
+    if (n == 0) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t block = n < 1024 ? 256 : 1024;
+    makepad_ggml_cuda_rms_norm_row_weighted_f32_f32weights_precise_kernel<<<1, block, 0, stream>>>(
+        input, weights_f32, output, n, eps);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t makepad_ggml_cuda_rms_norm_rows_weighted_f32(
         const float * input,
         const uint16_t * weights_bf16,
@@ -2658,6 +2787,24 @@ extern "C" cudaError_t makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_precise(
+        const float * input,
+        const float * weights_f32,
+        float * output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t n,
+        float eps,
+        cudaStream_t stream) {
+    if (row_count == 0 || n == 0 || row_stride < n) {
+        return cudaErrorInvalidValue;
+    }
+    const uint32_t block = n < 1024 ? 256 : 1024;
+    makepad_ggml_cuda_rms_norm_rows_weighted_f32_f32weights_precise_kernel<<<row_count, block, 0, stream>>>(
+        input, weights_f32, output, row_count, row_stride, n, eps);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t makepad_ggml_cuda_rms_norm_rows_no_scale_f32(
         const float * input,
         float * output,
@@ -2670,6 +2817,22 @@ extern "C" cudaError_t makepad_ggml_cuda_rms_norm_rows_no_scale_f32(
         return cudaErrorInvalidValue;
     }
     makepad_ggml_cuda_rms_norm_rows_no_scale_f32_kernel<<<row_count, 256, 0, stream>>>(
+        input, output, row_count, row_stride, n, eps);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_rms_norm_rows_no_scale_f32_precise(
+        const float * input,
+        float * output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t n,
+        float eps,
+        cudaStream_t stream) {
+    if (row_count == 0 || n == 0 || row_stride < n) {
+        return cudaErrorInvalidValue;
+    }
+    makepad_ggml_cuda_rms_norm_rows_no_scale_f32_precise_kernel<<<row_count, 256, 0, stream>>>(
         input, output, row_count, row_stride, n, eps);
     return cudaGetLastError();
 }

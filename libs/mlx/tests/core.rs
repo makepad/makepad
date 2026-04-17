@@ -7,8 +7,9 @@ use super::{
 };
 use crate::chat::{MlxChatDecodeMode, MlxChatRole, MlxChatSession};
 use crate::{
-    extract_qwen35moe_assistant_response_text, MlxModelLayerRole, MlxQwen35MoeRuntimeSession,
-    QwenChatMessage, QwenChatRole,
+    extract_qwen35moe_assistant_response_text, format_qwen35moe_chat_prompt_with_options,
+    MlxModelLayerRole, MlxQwen35MoeRuntimeSession, QwenChatMessage, QwenChatPromptOptions,
+    QwenChatRole, QwenThinkingMode,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -730,7 +731,21 @@ fn qwen35moe_chat_prompt_and_extractors_match_expected_control_tokens() {
         .unwrap();
     assert!(prompt.contains("<|im_start|>system\nYou are terse.<|im_end|>\n"));
     assert!(prompt.contains("<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Describe the duck.<|im_end|>\n"));
-    assert!(prompt.ends_with("<|im_start|>assistant\n"));
+    assert!(prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+
+    let think_prompt = format_qwen35moe_chat_prompt_with_options(
+        session.tokenizer_config(),
+        &[
+            QwenChatMessage::new(QwenChatRole::System, "You are terse."),
+            QwenChatMessage::new(QwenChatRole::User, "Describe the duck."),
+        ],
+        QwenChatPromptOptions {
+            thinking_mode: QwenThinkingMode::Enabled,
+            ..QwenChatPromptOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(think_prompt.ends_with("<|im_start|>assistant\n<think>\n"));
 
     let text = extract_qwen35moe_assistant_response_text(
         session.tokenizer_config(),

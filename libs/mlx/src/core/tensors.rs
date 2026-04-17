@@ -659,9 +659,7 @@ impl MlxSafetensorsHeader {
                         let prod = bf16_round_to_f32(x[x_index] * deq);
                         sum = bf16_round_to_f32(sum + prod);
                         x_index += 1;
-                        if bits != 8 {
-                            packed_word >>= bits;
-                        }
+                        packed_word >>= bits;
                     }
                 }
             }
@@ -882,9 +880,7 @@ impl MlxSafetensorsHeader {
                         let prod = bf16_round_to_f32(x[x_index] * deq);
                         sum = bf16_round_to_f32(sum + prod);
                         x_index += 1;
-                        if bits != 8 {
-                            packed_word >>= bits;
-                        }
+                        packed_word >>= bits;
                     }
                 }
             }
@@ -1062,9 +1058,7 @@ impl MlxSafetensorsHeader {
                         let prod = bf16_round_to_f32(x[x_index] * deq);
                         sum = bf16_round_to_f32(sum + prod);
                         x_index += 1;
-                        if bits != 8 {
-                            packed_word >>= bits;
-                        }
+                        packed_word >>= bits;
                     }
                 }
             }

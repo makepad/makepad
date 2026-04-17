@@ -38,7 +38,8 @@ static __global__ void makepad_ggml_cuda_gated_delta_net_f32_kernel(
     float * state_shared = smem;
     float * reduce_shared = smem + sv;
 
-    const uint32_t iq1 = head_idx % neqk1;
+    const uint32_t v_heads_per_k = h / neqk1;
+    const uint32_t iq1 = head_idx / v_heads_per_k;
     const uint32_t iq3 = seq_idx / rq3;
 
     const uint32_t attn_elems = sv * h * n_tokens * n_seqs;
