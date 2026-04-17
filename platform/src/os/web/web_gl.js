@@ -292,8 +292,18 @@ export class WasmWebGL extends WasmWebBrowser {
       ) {
         return;
       }
+
+      // Poll all pending startup shader compiles so loader gating does not
+      // depend on individual draw/VAO paths being exercised.
+      for (let shader_id = 0; shader_id < this.draw_shaders.length; shader_id++) {
+        let shader = this.draw_shaders[shader_id];
+        if (shader && shader._pending && shader._startup_pending) {
+          this._try_finalize_shader(shader_id, false);
+        }
+      }
+
       this.to_wasm.ToWasmRedrawAll();
-      this.do_wasm_pump();
+      this.schedule_wasm_pump();
       if (this.pending_startup_shader_compiles > 0) {
         this.schedule_startup_shader_warmup();
       }
