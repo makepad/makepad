@@ -158,6 +158,23 @@ static __global__ void makepad_ggml_cuda_add_f32_kernel(
     out[idx] = makepad_ggml_cuda_bf16_round(left[idx] + right[idx]);
 }
 
+static __global__ void makepad_ggml_cuda_weighted_sum_rows_f32_kernel(
+        const float * __restrict__ batched_inputs,
+        const float * __restrict__ weights,
+        float * __restrict__ output,
+        uint32_t row_count,
+        uint32_t input_count) {
+    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= row_count) {
+        return;
+    }
+    float total = 0.0f;
+    for (uint32_t slot = 0; slot < input_count; ++slot) {
+        total += batched_inputs[slot * row_count + row] * weights[slot];
+    }
+    output[row] = makepad_ggml_cuda_bf16_round(total);
+}
+
 static __global__ void makepad_ggml_cuda_mul_f32_kernel(
         const float * __restrict__ left,
         const float * __restrict__ right,
@@ -2633,6 +2650,27 @@ extern "C" cudaError_t makepad_ggml_cuda_add_f32(
     const dim3 block(256, 1, 1);
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
     makepad_ggml_cuda_add_f32_kernel<<<grid, block, 0, stream>>>(left, right, out, n);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_weighted_sum_rows_f32(
+        const float * batched_inputs,
+        const float * weights,
+        float * output,
+        uint32_t row_count,
+        uint32_t input_count,
+        cudaStream_t stream) {
+    if (row_count == 0 || input_count == 0) {
+        return cudaSuccess;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid((row_count + block.x - 1) / block.x, 1, 1);
+    makepad_ggml_cuda_weighted_sum_rows_f32_kernel<<<grid, block, 0, stream>>>(
+        batched_inputs,
+        weights,
+        output,
+        row_count,
+        input_count);
     return cudaGetLastError();
 }
 

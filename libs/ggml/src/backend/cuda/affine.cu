@@ -6,6 +6,16 @@ static __device__ __forceinline__ float bf16_round_f32(const float value) {
     return __uint_as_float(__float_as_uint(value) & 0xFFFF0000u);
 }
 
+static inline uint32_t makepad_ggml_cuda_affine_block_size(const uint32_t qparams_per_row) {
+    if (qparams_per_row <= 32) {
+        return 32;
+    }
+    if (qparams_per_row <= 64) {
+        return 64;
+    }
+    return 128;
+}
+
 template <int BITS>
 static __global__ void makepad_ggml_cuda_affine_qmv_kernel(
     const uint16_t * input_bf16_words,
@@ -356,6 +366,320 @@ static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_plane_precise_ker
     }
 }
 
+template <int BITS, int MAX_SLOTS>
+static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel(
+    const uint16_t * input_bf16_words,
+    const uint32_t * packed_weights_u32,
+    const uint16_t * scales_bf16_words,
+    const uint16_t * biases_bf16_words,
+    const uint32_t * plane_indices_u32,
+    const uint32_t selected_count,
+    float * output_f32,
+    const uint32_t n_in,
+    const uint32_t weight_words_per_row,
+    const uint32_t qparams_per_row,
+    const uint32_t out_rows,
+    const uint32_t weight_words_per_plane,
+    const uint32_t qparams_words_per_plane,
+    const uint32_t plane_count
+) {
+    const uint32_t row = blockIdx.x;
+    if (row >= out_rows) {
+        return;
+    }
+
+    constexpr uint32_t pack_factor = 32 / BITS;
+    constexpr uint32_t group_size = 64;
+    constexpr uint32_t words_per_group = group_size / pack_factor;
+    constexpr uint32_t mask = (1u << BITS) - 1u;
+
+    __shared__ float partial[MAX_SLOTS * 128];
+
+    const uint32_t tid = threadIdx.x;
+    uint32_t planes[MAX_SLOTS];
+    bool plane_valid[MAX_SLOTS];
+    float thread_total[MAX_SLOTS];
+
+    #pragma unroll
+    for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+        planes[slot] = 0;
+        plane_valid[slot] = false;
+        thread_total[slot] = 0.0f;
+        if (slot < selected_count) {
+            planes[slot] = plane_indices_u32[slot];
+            plane_valid[slot] = planes[slot] < plane_count;
+        }
+    }
+
+    for (uint32_t group = tid; group < qparams_per_row; group += blockDim.x) {
+        float group_sum = 0.0f;
+        float group_accum[MAX_SLOTS];
+        float scales[MAX_SLOTS];
+        float biases[MAX_SLOTS];
+
+        #pragma unroll
+        for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+            group_accum[slot] = 0.0f;
+            scales[slot] = 0.0f;
+            biases[slot] = 0.0f;
+            if (plane_valid[slot]) {
+                const uint32_t qparam_row_start =
+                    planes[slot] * qparams_words_per_plane + row * qparams_per_row;
+                scales[slot] = __bfloat162float(*reinterpret_cast<const __nv_bfloat16 *>(
+                    scales_bf16_words + qparam_row_start + group
+                ));
+                biases[slot] = __bfloat162float(*reinterpret_cast<const __nv_bfloat16 *>(
+                    biases_bf16_words + qparam_row_start + group
+                ));
+            }
+        }
+
+        const uint32_t weight_group_offset = group * words_per_group;
+        uint32_t x_index = group * group_size;
+
+        #pragma unroll
+        for (uint32_t word_offset = 0; word_offset < words_per_group; ++word_offset) {
+            uint32_t packed[MAX_SLOTS];
+            #pragma unroll
+            for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+                packed[slot] = 0;
+                if (plane_valid[slot]) {
+                    const uint32_t weight_row_start =
+                        planes[slot] * weight_words_per_plane + row * weight_words_per_row;
+                    packed[slot] = packed_weights_u32[
+                        weight_row_start + weight_group_offset + word_offset
+                    ];
+                }
+            }
+
+            #pragma unroll
+            for (uint32_t elem = 0; elem < pack_factor; ++elem) {
+                if (x_index >= n_in) {
+                    break;
+                }
+
+                const float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16 *>(
+                    input_bf16_words + x_index
+                ));
+                group_sum = __fadd_rn(group_sum, x);
+
+                #pragma unroll
+                for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+                    if (plane_valid[slot]) {
+                        group_accum[slot] = __fadd_rn(
+                            group_accum[slot],
+                            __fmul_rn(x, static_cast<float>(packed[slot] & mask))
+                        );
+                        packed[slot] >>= BITS;
+                    }
+                }
+
+                ++x_index;
+            }
+        }
+
+        #pragma unroll
+        for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+            if (plane_valid[slot]) {
+                thread_total[slot] = __fadd_rn(
+                    thread_total[slot],
+                    __fadd_rn(
+                        __fmul_rn(scales[slot], group_accum[slot]),
+                        __fmul_rn(biases[slot], group_sum)
+                    )
+                );
+            }
+        }
+    }
+
+    #pragma unroll
+    for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+        partial[slot * 128 + tid] = thread_total[slot];
+    }
+    __syncthreads();
+
+    for (uint32_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            #pragma unroll
+            for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+                partial[slot * 128 + tid] = __fadd_rn(
+                    partial[slot * 128 + tid],
+                    partial[slot * 128 + tid + stride]
+                );
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        #pragma unroll
+        for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+            if (slot < selected_count) {
+                output_f32[slot * out_rows + row] = plane_valid[slot]
+                    ? partial[slot * 128]
+                    : 0.0f;
+            }
+        }
+    }
+}
+
+template <int BITS, int MAX_SLOTS>
+static __global__ void makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel(
+    const uint16_t * input_bf16_words,
+    const uint32_t input_words_per_slot,
+    const uint32_t * packed_weights_u32,
+    const uint16_t * scales_bf16_words,
+    const uint16_t * biases_bf16_words,
+    const uint32_t * plane_indices_u32,
+    const uint32_t selected_count,
+    float * output_f32,
+    const uint32_t n_in,
+    const uint32_t weight_words_per_row,
+    const uint32_t qparams_per_row,
+    const uint32_t out_rows,
+    const uint32_t weight_words_per_plane,
+    const uint32_t qparams_words_per_plane,
+    const uint32_t plane_count
+) {
+    const uint32_t row = blockIdx.x;
+    if (row >= out_rows) {
+        return;
+    }
+
+    constexpr uint32_t pack_factor = 32 / BITS;
+    constexpr uint32_t group_size = 64;
+    constexpr uint32_t words_per_group = group_size / pack_factor;
+    constexpr uint32_t mask = (1u << BITS) - 1u;
+
+    __shared__ float partial[MAX_SLOTS * 128];
+
+    const uint32_t tid = threadIdx.x;
+    uint32_t planes[MAX_SLOTS];
+    bool plane_valid[MAX_SLOTS];
+    float thread_total[MAX_SLOTS];
+
+    #pragma unroll
+    for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+        planes[slot] = 0;
+        plane_valid[slot] = false;
+        thread_total[slot] = 0.0f;
+        if (slot < selected_count) {
+            planes[slot] = plane_indices_u32[slot];
+            plane_valid[slot] = planes[slot] < plane_count;
+        }
+    }
+
+    for (uint32_t group = tid; group < qparams_per_row; group += blockDim.x) {
+        float group_accum[MAX_SLOTS];
+        float group_sum[MAX_SLOTS];
+        float scales[MAX_SLOTS];
+        float biases[MAX_SLOTS];
+
+        #pragma unroll
+        for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+            group_accum[slot] = 0.0f;
+            group_sum[slot] = 0.0f;
+            scales[slot] = 0.0f;
+            biases[slot] = 0.0f;
+            if (plane_valid[slot]) {
+                const uint32_t qparam_row_start =
+                    planes[slot] * qparams_words_per_plane + row * qparams_per_row;
+                scales[slot] = __bfloat162float(*reinterpret_cast<const __nv_bfloat16 *>(
+                    scales_bf16_words + qparam_row_start + group
+                ));
+                biases[slot] = __bfloat162float(*reinterpret_cast<const __nv_bfloat16 *>(
+                    biases_bf16_words + qparam_row_start + group
+                ));
+            }
+        }
+
+        const uint32_t weight_group_offset = group * words_per_group;
+        const uint32_t group_input_offset = group * group_size;
+
+        #pragma unroll
+        for (uint32_t word_offset = 0; word_offset < words_per_group; ++word_offset) {
+            uint32_t packed[MAX_SLOTS];
+            #pragma unroll
+            for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+                packed[slot] = 0;
+                if (plane_valid[slot]) {
+                    const uint32_t weight_row_start =
+                        planes[slot] * weight_words_per_plane + row * weight_words_per_row;
+                    packed[slot] = packed_weights_u32[
+                        weight_row_start + weight_group_offset + word_offset
+                    ];
+                }
+            }
+
+            #pragma unroll
+            for (uint32_t elem = 0; elem < pack_factor; ++elem) {
+                const uint32_t x_index = group_input_offset + word_offset * pack_factor + elem;
+                if (x_index >= n_in) {
+                    break;
+                }
+
+                #pragma unroll
+                for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+                    if (plane_valid[slot]) {
+                        const float x = __bfloat162float(*reinterpret_cast<const __nv_bfloat16 *>(
+                            input_bf16_words + slot * input_words_per_slot + x_index
+                        ));
+                        group_sum[slot] = __fadd_rn(group_sum[slot], x);
+                        group_accum[slot] = __fadd_rn(
+                            group_accum[slot],
+                            __fmul_rn(x, static_cast<float>(packed[slot] & mask))
+                        );
+                        packed[slot] >>= BITS;
+                    }
+                }
+            }
+        }
+
+        #pragma unroll
+        for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+            if (plane_valid[slot]) {
+                thread_total[slot] = __fadd_rn(
+                    thread_total[slot],
+                    __fadd_rn(
+                        __fmul_rn(scales[slot], group_accum[slot]),
+                        __fmul_rn(biases[slot], group_sum[slot])
+                    )
+                );
+            }
+        }
+    }
+
+    #pragma unroll
+    for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+        partial[slot * 128 + tid] = thread_total[slot];
+    }
+    __syncthreads();
+
+    for (uint32_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            #pragma unroll
+            for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+                partial[slot * 128 + tid] = __fadd_rn(
+                    partial[slot * 128 + tid],
+                    partial[slot * 128 + tid + stride]
+                );
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        #pragma unroll
+        for (uint32_t slot = 0; slot < MAX_SLOTS; ++slot) {
+            if (slot < selected_count) {
+                output_f32[slot * out_rows + row] = plane_valid[slot]
+                    ? partial[slot * 128]
+                    : 0.0f;
+            }
+        }
+    }
+}
+
 extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_bf16(
     const uint16_t * input_bf16_words,
     const uint32_t * packed_weights_u32,
@@ -369,7 +693,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_bf16(
     uint32_t bits,
     cudaStream_t stream
 ) {
-    dim3 block(128, 1, 1);
+    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
@@ -419,7 +743,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32(
     uint32_t bits,
     cudaStream_t stream
 ) {
-    dim3 block(128, 1, 1);
+    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
@@ -469,7 +793,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_precise(
     uint32_t bits,
     cudaStream_t stream
 ) {
-    dim3 block(128, 1, 1);
+    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
@@ -528,7 +852,7 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
         return cudaSuccess;
     }
 
-    dim3 block(128, 1, 1);
+    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
     dim3 grid(out_rows, 1, 1);
 
     switch (bits) {
@@ -567,6 +891,231 @@ extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_plane_precise(
                 qparams_words_per_plane,
                 plane_count
             );
+            break;
+        default:
+            return cudaErrorInvalidValue;
+    }
+
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_precise(
+    const uint16_t * input_bf16_words,
+    const uint32_t * packed_weights_u32,
+    const uint16_t * scales_bf16_words,
+    const uint16_t * biases_bf16_words,
+    const uint32_t * plane_indices_u32,
+    uint32_t selected_count,
+    float * output_f32,
+    uint32_t n_in,
+    uint32_t weight_words_per_row,
+    uint32_t qparams_per_row,
+    uint32_t out_rows,
+    uint32_t weight_words_per_plane,
+    uint32_t qparams_words_per_plane,
+    uint32_t plane_count,
+    uint32_t bits,
+    cudaStream_t stream
+) {
+    if (out_rows == 0 || selected_count == 0) {
+        return cudaSuccess;
+    }
+    if (selected_count > 8) {
+        return cudaErrorInvalidValue;
+    }
+
+    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 grid(out_rows, 1, 1);
+
+    switch (bits) {
+        case 4:
+            if (selected_count <= 4) {
+                makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel<4, 4><<<grid, block, 0, stream>>>(
+                    input_bf16_words,
+                    packed_weights_u32,
+                    scales_bf16_words,
+                    biases_bf16_words,
+                    plane_indices_u32,
+                    selected_count,
+                    output_f32,
+                    n_in,
+                    weight_words_per_row,
+                    qparams_per_row,
+                    out_rows,
+                    weight_words_per_plane,
+                    qparams_words_per_plane,
+                    plane_count
+                );
+            } else {
+                makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel<4, 8><<<grid, block, 0, stream>>>(
+                    input_bf16_words,
+                    packed_weights_u32,
+                    scales_bf16_words,
+                    biases_bf16_words,
+                    plane_indices_u32,
+                    selected_count,
+                    output_f32,
+                    n_in,
+                    weight_words_per_row,
+                    qparams_per_row,
+                    out_rows,
+                    weight_words_per_plane,
+                    qparams_words_per_plane,
+                    plane_count
+                );
+            }
+            break;
+        case 8:
+            if (selected_count <= 4) {
+                makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel<8, 4><<<grid, block, 0, stream>>>(
+                    input_bf16_words,
+                    packed_weights_u32,
+                    scales_bf16_words,
+                    biases_bf16_words,
+                    plane_indices_u32,
+                    selected_count,
+                    output_f32,
+                    n_in,
+                    weight_words_per_row,
+                    qparams_per_row,
+                    out_rows,
+                    weight_words_per_plane,
+                    qparams_words_per_plane,
+                    plane_count
+                );
+            } else {
+                makepad_ggml_cuda_affine_qmv_f32_select_planes_precise_kernel<8, 8><<<grid, block, 0, stream>>>(
+                    input_bf16_words,
+                    packed_weights_u32,
+                    scales_bf16_words,
+                    biases_bf16_words,
+                    plane_indices_u32,
+                    selected_count,
+                    output_f32,
+                    n_in,
+                    weight_words_per_row,
+                    qparams_per_row,
+                    out_rows,
+                    weight_words_per_plane,
+                    qparams_words_per_plane,
+                    plane_count
+                );
+            }
+            break;
+        default:
+            return cudaErrorInvalidValue;
+    }
+
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise(
+    const uint16_t * input_bf16_words,
+    uint32_t input_words_per_slot,
+    const uint32_t * packed_weights_u32,
+    const uint16_t * scales_bf16_words,
+    const uint16_t * biases_bf16_words,
+    const uint32_t * plane_indices_u32,
+    uint32_t selected_count,
+    float * output_f32,
+    uint32_t n_in,
+    uint32_t weight_words_per_row,
+    uint32_t qparams_per_row,
+    uint32_t out_rows,
+    uint32_t weight_words_per_plane,
+    uint32_t qparams_words_per_plane,
+    uint32_t plane_count,
+    uint32_t bits,
+    cudaStream_t stream
+) {
+    if (out_rows == 0 || selected_count == 0) {
+        return cudaSuccess;
+    }
+    if (selected_count > 8) {
+        return cudaErrorInvalidValue;
+    }
+
+    dim3 block(makepad_ggml_cuda_affine_block_size(qparams_per_row), 1, 1);
+    dim3 grid(out_rows, 1, 1);
+
+    switch (bits) {
+        case 4:
+            if (selected_count <= 4) {
+                makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<4, 4><<<grid, block, 0, stream>>>(
+                    input_bf16_words,
+                    input_words_per_slot,
+                    packed_weights_u32,
+                    scales_bf16_words,
+                    biases_bf16_words,
+                    plane_indices_u32,
+                    selected_count,
+                    output_f32,
+                    n_in,
+                    weight_words_per_row,
+                    qparams_per_row,
+                    out_rows,
+                    weight_words_per_plane,
+                    qparams_words_per_plane,
+                    plane_count
+                );
+            } else {
+                makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<4, 8><<<grid, block, 0, stream>>>(
+                    input_bf16_words,
+                    input_words_per_slot,
+                    packed_weights_u32,
+                    scales_bf16_words,
+                    biases_bf16_words,
+                    plane_indices_u32,
+                    selected_count,
+                    output_f32,
+                    n_in,
+                    weight_words_per_row,
+                    qparams_per_row,
+                    out_rows,
+                    weight_words_per_plane,
+                    qparams_words_per_plane,
+                    plane_count
+                );
+            }
+            break;
+        case 8:
+            if (selected_count <= 4) {
+                makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<8, 4><<<grid, block, 0, stream>>>(
+                    input_bf16_words,
+                    input_words_per_slot,
+                    packed_weights_u32,
+                    scales_bf16_words,
+                    biases_bf16_words,
+                    plane_indices_u32,
+                    selected_count,
+                    output_f32,
+                    n_in,
+                    weight_words_per_row,
+                    qparams_per_row,
+                    out_rows,
+                    weight_words_per_plane,
+                    qparams_words_per_plane,
+                    plane_count
+                );
+            } else {
+                makepad_ggml_cuda_affine_qmv_f32_select_planes_input_offsets_precise_kernel<8, 8><<<grid, block, 0, stream>>>(
+                    input_bf16_words,
+                    input_words_per_slot,
+                    packed_weights_u32,
+                    scales_bf16_words,
+                    biases_bf16_words,
+                    plane_indices_u32,
+                    selected_count,
+                    output_f32,
+                    n_in,
+                    weight_words_per_row,
+                    qparams_per_row,
+                    out_rows,
+                    weight_words_per_plane,
+                    qparams_words_per_plane,
+                    plane_count
+                );
+            }
             break;
         default:
             return cudaErrorInvalidValue;

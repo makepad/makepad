@@ -112,6 +112,25 @@ static __global__ void makepad_ggml_cuda_qwen_swiglu_split_f32_kernel(
     output[idx] = qwen_silu_f32(gate_up[idx]) * gate_up[idx + split_offset];
 }
 
+static __global__ void makepad_ggml_cuda_qwen_swiglu_split_batched_f32_kernel(
+    const float * __restrict__ gate_up,
+    float * __restrict__ output,
+    uint32_t n,
+    uint32_t split_offset,
+    uint32_t batch_count
+) {
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t total = n * batch_count;
+    if (idx >= total) {
+        return;
+    }
+    const uint32_t batch = idx / n;
+    const uint32_t inner = idx - batch * n;
+    const uint32_t input_base = batch * (n + split_offset);
+    output[idx] = qwen_silu_f32(gate_up[input_base + inner])
+        * gate_up[input_base + split_offset + inner];
+}
+
 static __global__ void makepad_ggml_cuda_qwen_decay_gate_f32_kernel(
     const float * __restrict__ a_log,
     const float * __restrict__ alpha,
@@ -410,6 +429,26 @@ extern "C" cudaError_t makepad_ggml_cuda_qwen_swiglu_split_f32(
     const dim3 grid((n + block.x - 1) / block.x, 1, 1);
     makepad_ggml_cuda_qwen_swiglu_split_f32_kernel<<<grid, block, 0, stream>>>(
         gate_up, output, n, split_offset
+    );
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_qwen_swiglu_split_batched_f32(
+    const float * gate_up,
+    float * output,
+    uint32_t n,
+    uint32_t split_offset,
+    uint32_t batch_count,
+    cudaStream_t stream
+) {
+    const uint32_t total = n * batch_count;
+    if (total == 0) {
+        return cudaSuccess;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid((total + block.x - 1) / block.x, 1, 1);
+    makepad_ggml_cuda_qwen_swiglu_split_batched_f32_kernel<<<grid, block, 0, stream>>>(
+        gate_up, output, n, split_offset, batch_count
     );
     return cudaGetLastError();
 }
