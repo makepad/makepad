@@ -362,6 +362,9 @@ fn emit_nodes_fill_only(
             }
             SvgNode::Line(_) => {}
             SvgNode::Use(use_node) => emit_use_fill_only(dg, use_node, defs, parent_xf),
+            // DrawSvgGlyph uses SVG vector shapes as a font-glyph cache (icons);
+            // runtime text shaping isn't meaningful here, so skip <text>.
+            SvgNode::Text(_) => {}
         }
     }
 }

@@ -9,13 +9,17 @@ pub mod color;
 pub mod document;
 pub mod gradient;
 pub mod parse;
+pub mod edge;
 pub mod path_data;
 pub mod style;
+pub mod text;
 pub mod transform;
 pub mod units;
 
 pub use document::*;
+pub use edge::{collect_edges, SvgEdge};
 pub use paint::*;
 pub use parse::parse_svg;
 pub use path::*;
 pub use tessellate::*;
+pub use text::{collect_text_cmds, SvgTextCmd};

@@ -88,6 +88,12 @@ fn apply_presentation_attrs(walker: &HtmlWalker, style: &mut SvgStyle) {
     if let Some(v) = walker.find_attr_lc(live_id!(filter)) {
         style.filter = parse_filter_ref(v);
     }
+    if let Some(v) = walker.find_attr_lc(live_id!(marker - end)) {
+        // `marker-end="url(#id)"` — parse_filter_ref already handles the
+        // generic `url(#id)` → `id` shape, and both filter + marker are
+        // opaque string IDs at the style layer.
+        style.marker_end = parse_filter_ref(v);
+    }
 }
 
 fn apply_inline_style(style_str: &str, style: &mut SvgStyle) {

@@ -285,6 +285,7 @@ fn parse_node(walker: &mut HtmlWalker, parent_style: &SvgStyle) -> Option<SvgNod
         t if t == live_id!(polyline) => Some(parse_polyline(walker, parent_style)),
         t if t == live_id!(polygon) => Some(parse_polygon(walker, parent_style)),
         t if t == live_id!(use) => Some(parse_use(walker, parent_style)),
+        t if t == live_id!(text) => Some(parse_text(walker, parent_style)),
         _ => {
             walker.jump_to_close();
             walker.walk();
@@ -670,4 +671,98 @@ fn parse_use(walker: &mut HtmlWalker, parent_style: &SvgStyle) -> SvgNode {
     );
     walker.walk();
     SvgNode::Use(svg_use)
+}
+
+/// Parse an SVG `<text>` element. First-pass: extracts `x`, `y`, `font-size`,
+/// `font-family`, `text-anchor`, the child text content (including flattened
+/// `<tspan>` text), plus `<animate>` children. Nested `<tspan>` positioning
+/// (dx / dy / per-run x,y) is intentionally ignored here; text collapses to a
+/// single run. Good enough for rusty-mermaid output, which emits one `<tspan>`
+/// per line wrapped in a single `<text>` node.
+fn parse_text(walker: &mut HtmlWalker, parent_style: &SvgStyle) -> SvgNode {
+    let style = parse_style_from_element(walker, parent_style);
+    let (id, transform) = parse_common_attrs(walker);
+    let x = walker
+        .find_attr_lc(live_id!(x))
+        .and_then(parse_number)
+        .unwrap_or(0.0);
+    let y = walker
+        .find_attr_lc(live_id!(y))
+        .and_then(parse_number)
+        .unwrap_or(0.0);
+    let font_size = walker
+        .find_attr_lc(live_id!(font - size))
+        .and_then(parse_length)
+        .unwrap_or(16.0);
+    let font_family = walker
+        .find_attr_lc(live_id!(font - family))
+        .map(|s| s.to_string());
+    let text_anchor = walker
+        .find_attr_lc(live_id!(text - anchor))
+        .map(|s| match s.trim() {
+            "middle" => SvgTextAnchor::Middle,
+            "end" => SvgTextAnchor::End,
+            _ => SvgTextAnchor::Start,
+        })
+        .unwrap_or_default();
+
+    let mut content = String::new();
+    let mut animations = Vec::new();
+    let mut animate_transforms = Vec::new();
+
+    walker.walk();
+    while !walker.done() {
+        // Top-level </text> closes us.
+        if walker.close_tag_lc() == Some(live_id!(text)) {
+            walker.walk();
+            break;
+        }
+        // Collect raw text runs (both direct children and tspan descendants).
+        if let Some(s) = walker.text() {
+            content.push_str(s);
+        }
+        if let Some(tag) = walker.open_tag_lc() {
+            if tag == live_id!(animate) {
+                animations.push(parse_animate_element(walker));
+                walker.walk();
+                continue;
+            }
+            if tag == live_id!(animatetransform) {
+                animate_transforms.push(parse_animate_transform_element(walker));
+                walker.walk();
+                continue;
+            }
+            // `<tspan>` runs. rusty-mermaid emits one tspan per visual line
+            // (with `dy` on subsequent tspans) to render multi-line labels
+            // from `<br/>`. We don't parse each tspan's x/dy, but we DO
+            // insert `\n` between consecutive tspans so the downstream text
+            // collector can split lines and offset them vertically. Without
+            // this the two lines collapse into one long run that overflows
+            // the node box.
+            if tag == live_id!(tspan) {
+                if !content.is_empty() && !content.ends_with('\n') {
+                    content.push('\n');
+                }
+                walker.walk();
+                continue;
+            }
+            // Unknown child element: skip its subtree.
+            walker.jump_to_close();
+        }
+        walker.walk();
+    }
+
+    SvgNode::Text(SvgText {
+        id,
+        style,
+        transform,
+        x,
+        y,
+        font_size,
+        font_family,
+        text_anchor,
+        content,
+        animations,
+        animate_transforms,
+    })
 }

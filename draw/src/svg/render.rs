@@ -78,6 +78,9 @@ fn render_nodes(
             SvgNode::Polyline(poly) => render_polyline(dv, poly, defs, parent_xf, time, grad_map),
             SvgNode::Polygon(poly) => render_polygon(dv, poly, defs, parent_xf, time, grad_map),
             SvgNode::Use(use_node) => render_use(dv, use_node, defs, parent_xf, time, grad_map),
+            // Text is handled out-of-band via collect_text_cmds + DrawText.
+            // DrawVector cannot shape glyphs, so we skip it in the geometry pass.
+            SvgNode::Text(_) => {}
         }
     }
 }
@@ -248,6 +251,97 @@ fn render_path(
         &bbox,
         grad_map,
     );
+
+    // `marker-end="url(#...)"` on a <path>: draw a triangle arrowhead at the
+    // path's final point, oriented along the last segment's tangent. This is
+    // a simplified implementation — the referenced `<marker>` body isn't
+    // parsed, we just synthesise a solid triangle sized relative to stroke
+    // width and coloured to match the stroke. Good enough for mermaid edges.
+    if style.marker_end.is_some() {
+        emit_end_marker_triangle(dv, use_path, &style, &xf);
+    }
+}
+
+fn emit_end_marker_triangle(
+    dv: &mut DrawVector,
+    path: &VectorPath,
+    style: &SvgStyle,
+    xf: &Transform2d,
+) {
+    let Some((ex, ey, tx, ty)) = path_end_tangent_world(path, xf) else {
+        return;
+    };
+    // Arrow size: 4× stroke_width in world space. Matches rusty-mermaid's
+    // markerWidth=8 on stroke_width=2 (ratio 4) and generalises.
+    let size = (style.stroke_width * xf.scale_factor() * 4.0).max(4.0);
+    // Tip, then two back-wings offset by ±half_w perpendicular to tangent.
+    let back_x = ex - tx * size;
+    let back_y = ey - ty * size;
+    let half_w = size * 0.45;
+    let perp_x = -ty;
+    let perp_y = tx;
+    let left_x = back_x + perp_x * half_w;
+    let left_y = back_y + perp_y * half_w;
+    let right_x = back_x - perp_x * half_w;
+    let right_y = back_y - perp_y * half_w;
+
+    // Colour from stroke paint; fall back to CSS `color` (currentColor) or
+    // black so we never draw an invisible arrow when stroke wasn't RGB.
+    let (r, g, b, a) = match &style.stroke {
+        Some(SvgPaint::Color(r, g, b, a)) => (*r, *g, *b, *a),
+        Some(SvgPaint::CurrentColor) => style.color,
+        _ => (style.color.0, style.color.1, style.color.2, 1.0),
+    };
+    let alpha = a * style.opacity * style.stroke_opacity;
+    if alpha <= 0.0 {
+        return;
+    }
+
+    dv.set_color(r, g, b, alpha);
+    dv.cur_gradient_row_v = -1.0;
+    dv.move_to(ex, ey);
+    dv.line_to(left_x, left_y);
+    dv.line_to(right_x, right_y);
+    dv.close();
+    dv.fill();
+    dv.path.clear();
+}
+
+/// Given a path in local coords, return its final point + unit tangent of the
+/// last segment, transformed to world coords via `xf`. Returns `None` for
+/// empty or zero-length paths.
+fn path_end_tangent_world(
+    path: &VectorPath,
+    xf: &Transform2d,
+) -> Option<(f32, f32, f32, f32)> {
+    let mut last: Option<(f32, f32)> = None;
+    let mut prev: Option<(f32, f32)> = None;
+    for cmd in &path.cmds {
+        match cmd {
+            PathCmd::MoveTo(x, y) | PathCmd::LineTo(x, y) => {
+                prev = last;
+                last = Some((*x, *y));
+            }
+            PathCmd::BezierTo(_, _, cx2, cy2, x, y) => {
+                // Second-to-last control point gives the right tangent at
+                // the endpoint of a cubic bezier.
+                prev = Some((*cx2, *cy2));
+                last = Some((*x, *y));
+            }
+            PathCmd::Close | PathCmd::Winding(_) => {}
+        }
+    }
+    let (ex, ey) = last?;
+    let (px, py) = prev?;
+    let (wex, wey) = xf.apply(ex, ey);
+    let (wpx, wpy) = xf.apply(px, py);
+    let dx = wex - wpx;
+    let dy = wey - wpy;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-4 {
+        return None;
+    }
+    Some((wex, wey, dx / len, dy / len))
 }
 
 fn render_rect(
