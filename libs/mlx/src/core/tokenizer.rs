@@ -226,9 +226,6 @@ impl MlxTokenizer {
                 &format!("tokenizer.added_tokens[{index}].special"),
                 token.get("special"),
             )?;
-            if !special {
-                continue;
-            }
             let content = tokenizer_string(
                 &paths.tokenizer_json,
                 &format!("tokenizer.added_tokens[{index}].content"),
@@ -239,6 +236,24 @@ impl MlxTokenizer {
                 &format!("tokenizer.added_tokens[{index}].id"),
                 token.get("id"),
             )?;
+            if token_id as usize >= tokens_by_id.len() {
+                tokens_by_id.resize(token_id as usize + 1, String::new());
+            }
+            let slot = &mut tokens_by_id[token_id as usize];
+            if !slot.is_empty() && slot != &content {
+                return Err(MlxRtError::InvalidModelDir {
+                    path: paths.tokenizer_json.clone(),
+                    message: format!(
+                        "token id {} maps to conflicting strings {:?} vs {:?}",
+                        token_id, slot, content
+                    ),
+                });
+            }
+            *slot = content.clone();
+            vocab.entry(content.clone()).or_insert(token_id);
+            if !special {
+                continue;
+            }
             special_tokens.push((content, token_id));
         }
         special_tokens.sort_by(|lhs, rhs| {
