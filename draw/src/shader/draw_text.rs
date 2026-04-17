@@ -2368,7 +2368,13 @@ impl DrawText {
                 .unwrap_or(true);
             let shadow_slug_this_frame = use_slug_this_frame && slug_area_was_empty;
 
-            let mut raster_instances = None::<ManyInstances>;
+            // If the caller opened an outer raster batch via
+            // DrawText::begin_many_instances, adopt it here. A nested
+            // cx.begin_many_aligned_instances on the same draw_item would
+            // otherwise panic, because the outer open already swapped the
+            // draw_item's `instances` Vec into its ManyInstances.
+            let mut raster_instances = self.many_instances.take();
+            let mut raster_instances_is_outer = raster_instances.is_some();
             let mut drew_raster_this_frame = false;
             let mut drew_slug_this_frame = false;
 
@@ -2386,6 +2392,7 @@ impl DrawText {
                     if !use_slug_this_frame {
                         if raster_instances.is_none() {
                             raster_instances = cx.begin_many_aligned_instances(&self.draw_vars);
+                            raster_instances_is_outer = false;
                         }
                         if let Some(instances) = raster_instances.as_mut() {
                             drew_raster_this_frame |= self.draw_slug_raster_fallback_glyph(
@@ -2404,6 +2411,7 @@ impl DrawText {
                             if self.ensure_slug_draw(cx) {
                                 if let Some(instances) = raster_instances.take() {
                                     self.finish_many_instances(cx, instances);
+                                    raster_instances_is_outer = false;
                                 }
                                 self.sync_slug_draw_state(cx);
                                 if let Some(mut slug_draw) = self.slug_draw.take() {
@@ -2435,6 +2443,7 @@ impl DrawText {
                                 if raster_instances.is_none() {
                                     raster_instances =
                                         cx.begin_many_aligned_instances(&self.draw_vars);
+                                    raster_instances_is_outer = false;
                                 }
                                 if let Some(instances) = raster_instances.as_mut() {
                                     drew_raster_this_frame |= self.draw_slug_raster_fallback_glyph(
@@ -2456,6 +2465,7 @@ impl DrawText {
 
                             if raster_instances.is_none() {
                                 raster_instances = cx.begin_many_aligned_instances(&self.draw_vars);
+                                raster_instances_is_outer = false;
                             }
                             let Some(instances) = raster_instances.as_mut() else {
                                 continue;
@@ -2482,7 +2492,13 @@ impl DrawText {
 
             self.flush_slug_textures_if_allowed(cx);
             if let Some(instances) = raster_instances.take() {
-                self.finish_many_instances(cx, instances);
+                if raster_instances_is_outer {
+                    // Hand the outer batch back so the caller's eventual
+                    // end_many_instances can finalize it.
+                    self.many_instances = Some(instances);
+                } else {
+                    self.finish_many_instances(cx, instances);
+                }
             }
             if let Some(mut slug_draw) = self.slug_draw.take() {
                 if slug_draw.has_open_batch() {
@@ -2497,7 +2513,8 @@ impl DrawText {
                 }
                 self.slug_draw = Some(slug_draw);
             }
-            if !drew_raster_this_frame {
+            // Don't clobber the outer batch's area if we've handed it back.
+            if !drew_raster_this_frame && self.many_instances.is_none() {
                 let old_area = self.draw_vars.area;
                 if !old_area.is_empty() {
                     cx.cx.redraw_area_in_draw(old_area);
