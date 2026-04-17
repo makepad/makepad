@@ -16,6 +16,9 @@ export class WasmWebGL extends WasmWebBrowser {
     this._missing_shader_ids = new Set();
     this._gl_error_reports = new Set();
     this.video_players = {};
+    this.parallel_compile_ext = null;
+    this.pending_startup_shader_compiles = 0;
+    this.pending_startup_shader_frame_id = 0;
     this.init_webgl_context();
 
     this.load_deps();
@@ -267,18 +270,105 @@ export class WasmWebGL extends WasmWebBrowser {
     console.error("Missing shader in " + where, shader_id, vao_id);
   }
 
-  FromWasmCompileWebGLShader(args) {
+  should_keep_startup_loader() {
+    return this.pending_startup_shader_compiles > 0;
+  }
+
+  schedule_startup_shader_warmup() {
+    if (
+      this.loader_removed ||
+      this.wasm == null ||
+      this.pending_startup_shader_frame_id ||
+      this.pending_startup_shader_compiles === 0
+    ) {
+      return;
+    }
+    this.pending_startup_shader_frame_id = window.requestAnimationFrame(() => {
+      this.pending_startup_shader_frame_id = 0;
+      if (
+        this.loader_removed ||
+        this.wasm == null ||
+        this.pending_startup_shader_compiles === 0
+      ) {
+        return;
+      }
+      this.to_wasm.ToWasmRedrawAll();
+      this.do_wasm_pump();
+      if (this.pending_startup_shader_compiles > 0) {
+        this.schedule_startup_shader_warmup();
+      }
+    });
+  }
+
+  mark_startup_shader_complete(pending) {
+    if (!pending || !pending._startup_pending) {
+      return;
+    }
+    pending._startup_pending = false;
+    this.pending_startup_shader_compiles = Math.max(
+      0,
+      this.pending_startup_shader_compiles - 1,
+    );
+  }
+
+  // Resolve a pending parallel shader compile. Returns true when done
+  // (either success or failure), false when still compiling.
+  _try_finalize_shader(shader_id, wait = false) {
+    var gl = this.gl;
+    var pending = this.draw_shaders[shader_id];
+    if (!pending || !pending._pending) return true;
+
+    var ext = this.parallel_compile_ext;
+    if (ext && pending._parallel_compile && !wait) {
+      // Non-blocking check — returns false until the driver is done.
+      if (!gl.getProgramParameter(pending.program, ext.COMPLETION_STATUS_KHR)) {
+        if (pending._startup_pending) {
+          this.schedule_startup_shader_warmup();
+        }
+        return false;
+      }
+    }
+    // At this point compilation is complete (or no extension, so it was
+    // synchronous and we fall through immediately).
+    var { program, vsh, fsh, args } = pending;
+
+    if (!gl.getShaderParameter(vsh, gl.COMPILE_STATUS)) {
+      let message = "webgl.compile_fail.vertex " + shader_id + " " + gl.getShaderInfoLog(vsh);
+      console.error(message);
+      gl.deleteShader(vsh); gl.deleteShader(fsh); gl.deleteProgram(program);
+      this.mark_startup_shader_complete(pending);
+      this.draw_shaders[shader_id] = { compile_failed: true };
+      return true;
+    }
+    if (!gl.getShaderParameter(fsh, gl.COMPILE_STATUS)) {
+      let message = "webgl.compile_fail.fragment " + shader_id + " " + gl.getShaderInfoLog(fsh);
+      console.error(message);
+      gl.deleteShader(vsh); gl.deleteShader(fsh); gl.deleteProgram(program);
+      this.mark_startup_shader_complete(pending);
+      this.draw_shaders[shader_id] = { compile_failed: true };
+      return true;
+    }
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      let message = "webgl.compile_fail.link " + shader_id + " " + gl.getProgramInfoLog(program);
+      console.error(message);
+      gl.deleteShader(vsh); gl.deleteShader(fsh); gl.deleteProgram(program);
+      this.mark_startup_shader_complete(pending);
+      this.draw_shaders[shader_id] = { compile_failed: true };
+      return true;
+    }
+
+    gl.deleteShader(vsh);
+    gl.deleteShader(fsh);
+
     function get_attrib_locations(gl, program, base, slots) {
       let attrib_locs = [];
       let attribs = slots >> 2;
-      let stride = slots * 4;
       if ((slots & 3) != 0) attribs++;
       for (let i = 0; i < attribs; i++) {
         let size = slots - i * 4;
         if (size > 4) size = 4;
-        let name = base + i;
         attrib_locs.push({
-          loc: gl.getAttribLocation(program, name),
+          loc: gl.getAttribLocation(program, base + i),
           offset: i * 16,
           size: size,
           stride: slots * 4,
@@ -289,116 +379,27 @@ export class WasmWebGL extends WasmWebBrowser {
       return attrib_locs;
     }
 
-    var gl = this.gl;
-    var vsh = gl.createShader(gl.VERTEX_SHADER);
-
-    gl.shaderSource(vsh, args.vertex);
-    gl.compileShader(vsh);
-    if (!gl.getShaderParameter(vsh, gl.COMPILE_STATUS)) {
-      let message =
-        "webgl.compile_fail.vertex " +
-        args.shader_id +
-        " " +
-        gl.getShaderInfoLog(vsh);
-      console.error(message);
-      gl.deleteShader(vsh);
-      this.draw_shaders[args.shader_id] = { compile_failed: true };
-      return;
-    }
-
-    // compile pixelshader
-    var fsh = gl.createShader(gl.FRAGMENT_SHADER);
-    gl.shaderSource(fsh, args.pixel);
-    gl.compileShader(fsh);
-    if (!gl.getShaderParameter(fsh, gl.COMPILE_STATUS)) {
-      let message =
-        "webgl.compile_fail.fragment " +
-        args.shader_id +
-        " " +
-        gl.getShaderInfoLog(fsh);
-      console.error(message);
-      gl.deleteShader(vsh);
-      gl.deleteShader(fsh);
-      this.draw_shaders[args.shader_id] = { compile_failed: true };
-      return;
-    }
-    var program = gl.createProgram();
-    gl.attachShader(program, vsh);
-    gl.attachShader(program, fsh);
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      let message =
-        "webgl.compile_fail.link " +
-        args.shader_id +
-        " " +
-        gl.getProgramInfoLog(program);
-      console.error(message);
-      gl.deleteShader(vsh);
-      gl.deleteShader(fsh);
-      gl.deleteProgram(program);
-      this.draw_shaders[args.shader_id] = { compile_failed: true };
-      return;
-    }
-
-    gl.deleteShader(vsh);
-    gl.deleteShader(fsh);
-    this.assert_no_gl_error(gl, "compile_shader");
-
     let texture_locs = [];
     for (let i = 0; i < args.textures.length; i++) {
       let tex_name = args.textures[i].name;
       let loc = gl.getUniformLocation(program, "tex_" + tex_name);
       if (loc === null) {
-        // Keep old fallback names for non-script shaders.
         loc = gl.getUniformLocation(program, "ds_" + tex_name);
       }
-      texture_locs.push({
-        name: tex_name,
-        ty: args.textures[i].ty,
-        loc: loc,
-      });
+      texture_locs.push({ name: tex_name, ty: args.textures[i].ty, loc: loc });
     }
 
-    let pass_uniforms_binding = this.get_uniform_block_binding(
-      program,
-      "passUniforms",
-    );
-    let draw_list_uniforms_binding = this.get_uniform_block_binding(
-      program,
-      "draw_listUniforms",
-    );
-    let draw_call_uniforms_binding = this.get_uniform_block_binding(
-      program,
-      "draw_callUniforms",
-    );
-    let user_uniforms_binding = this.get_uniform_block_binding(
-      program,
-      "userUniforms",
-    );
-    let live_uniforms_binding = this.get_uniform_block_binding(
-      program,
-      "liveUniforms",
-    );
-    this.draw_shaders[args.shader_id] = {
+    this.mark_startup_shader_complete(pending);
+    this.draw_shaders[shader_id] = {
       vertex: args.vertex,
       pixel: args.pixel,
-      geom_attribs: get_attrib_locations(
-        gl,
-        program,
-        "packed_geometry_",
-        args.geometry_slots,
-      ),
-      inst_attribs: get_attrib_locations(
-        gl,
-        program,
-        "packed_instance_",
-        args.instance_slots,
-      ),
-      pass_uniforms_binding: pass_uniforms_binding,
-      draw_list_uniforms_binding: draw_list_uniforms_binding,
-      draw_call_uniforms_binding: draw_call_uniforms_binding,
-      user_uniforms_binding: user_uniforms_binding,
-      live_uniforms_binding: live_uniforms_binding,
+      geom_attribs: get_attrib_locations(gl, program, "packed_geometry_", args.geometry_slots),
+      inst_attribs: get_attrib_locations(gl, program, "packed_instance_", args.instance_slots),
+      pass_uniforms_binding: this.get_uniform_block_binding(program, "passUniforms"),
+      draw_list_uniforms_binding: this.get_uniform_block_binding(program, "draw_listUniforms"),
+      draw_call_uniforms_binding: this.get_uniform_block_binding(program, "draw_callUniforms"),
+      user_uniforms_binding: this.get_uniform_block_binding(program, "userUniforms"),
+      live_uniforms_binding: this.get_uniform_block_binding(program, "liveUniforms"),
       pass_uniform_buf: gl.createBuffer(),
       draw_list_uniform_buf: gl.createBuffer(),
       draw_call_uniform_buf: gl.createBuffer(),
@@ -409,7 +410,50 @@ export class WasmWebGL extends WasmWebBrowser {
       instance_slots: args.instance_slots,
       program: program,
     };
-    this.assert_no_gl_error(gl, "compile_shader_end");
+    return true;
+  }
+
+  FromWasmCompileWebGLShader(args) {
+    var gl = this.gl;
+    var vsh = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vsh, args.vertex);
+    gl.compileShader(vsh);
+
+    var fsh = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fsh, args.pixel);
+    gl.compileShader(fsh);
+
+    var program = gl.createProgram();
+    gl.attachShader(program, vsh);
+    gl.attachShader(program, fsh);
+    gl.linkProgram(program);
+
+    const use_parallel_compile = !!this.parallel_compile_ext && !this.loader_removed;
+
+    // Store as pending. If the extension is absent _try_finalize_shader will
+    // resolve it synchronously on the first call (the blocking checks above
+    // already completed by then). If the extension is present the driver
+    // compiles in the background and we poll via COMPLETION_STATUS_KHR.
+    this.draw_shaders[args.shader_id] = {
+      _pending: true,
+      program: program,
+      vsh: vsh,
+      fsh: fsh,
+      args: args,
+      _parallel_compile: use_parallel_compile,
+      _startup_pending: use_parallel_compile,
+    };
+
+    if (use_parallel_compile) {
+      this.pending_startup_shader_compiles += 1;
+      this.schedule_startup_shader_warmup();
+    }
+
+    // Without the extension we must resolve now (compileShader was synchronous
+    // but the status checks were skipped above).
+    if (!use_parallel_compile) {
+      this._try_finalize_shader(args.shader_id, true);
+    }
   }
 
   FromWasmAllocIndexBuffer(args) {
@@ -471,6 +515,16 @@ export class WasmWebGL extends WasmWebBrowser {
 
     gl.bindVertexArray(vao.gl_vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[args.geom_vb_id].gl_buf);
+
+    // Try to finalise a pending parallel compile. If still compiling, skip
+    // this VAO setup — it will be retried the next time a draw call needs it.
+    const wait_for_shader = this.loader_removed;
+    if (!this._try_finalize_shader(args.shader_id, wait_for_shader)) {
+      gl.bindVertexArray(null);
+      // Mark VAO as needing re-setup.
+      this.vaos[args.vao_id]._needs_setup = true;
+      return;
+    }
 
     let shader = this.draw_shaders[args.shader_id];
     if (!shader || shader.compile_failed) {
@@ -549,6 +603,13 @@ export class WasmWebGL extends WasmWebBrowser {
   FromWasmDrawCall(args) {
     var gl = this.gl;
 
+    // Attempt to finalise a pending parallel shader compile. If the driver
+    // hasn’t finished yet, skip this draw call silently — the next frame will
+    // retry.
+    if (!this._try_finalize_shader(args.shader_id, this.loader_removed)) {
+      return;
+    }
+
     let shader = this.draw_shaders[args.shader_id];
     if (!shader || shader.compile_failed) {
       this.report_missing_shader_once(
@@ -557,6 +618,20 @@ export class WasmWebGL extends WasmWebBrowser {
         args.vao_id,
       );
       return;
+    }
+
+    // If the VAO setup was deferred (shader was still pending at alloc time),
+    // redo it now.
+    let vao_entry = this.vaos[args.vao_id];
+    if (vao_entry && vao_entry._needs_setup) {
+      delete vao_entry._needs_setup;
+      this.FromWasmAllocVao({
+        vao_id: args.vao_id,
+        shader_id: args.shader_id,
+        geom_ib_id: vao_entry.geom_ib_id,
+        geom_vb_id: vao_entry.geom_vb_id,
+        inst_vb_id: vao_entry.inst_vb_id,
+      });
     }
 
     gl.useProgram(shader.program);
@@ -1265,6 +1340,12 @@ export class WasmWebGL extends WasmWebBrowser {
         debug_info.UNMASKED_RENDERER_WEBGL,
       );
     }
+
+    // KHR_parallel_shader_compile lets the browser compile shaders on background
+    // threads. Without it every getShaderParameter(COMPILE_STATUS) stalls the
+    // main thread until the driver finishes. With it we can batch all compiles
+    // and poll in subsequent frames.
+    this.parallel_compile_ext = gl.getExtension("KHR_parallel_shader_compile");
   }
 }
 

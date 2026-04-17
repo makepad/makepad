@@ -122,6 +122,10 @@ export class WasmWebBrowser extends WasmBridge {
         if (this.loader_removed) {
             return;
         }
+        if (this.should_keep_startup_loader()) {
+            this.schedule_loader_fallback();
+            return;
+        }
         this.loader_removed = true;
         if (this.loader_after_presented_frame_id) {
             window.cancelAnimationFrame(this.loader_after_presented_frame_id);
@@ -148,6 +152,11 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         this.loader_fallback_timer = window.setTimeout(() => {
+            this.loader_fallback_timer = null;
+            if (this.should_keep_startup_loader()) {
+                this.schedule_loader_fallback();
+                return;
+            }
             this.remove_canvas_loader();
         }, 1500);
     }
@@ -181,6 +190,11 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         this.schedule_loader_fallback();
+        if (this.should_keep_startup_loader()) {
+            this.loader_quiet_animation_frames = 0;
+            this.cancel_loader_after_presented_frame();
+            return;
+        }
         if (!this.in_animation_frame) {
             if (this.loader_seen_animation_frame) {
                 this.loader_quiet_animation_frames = 0;
@@ -203,6 +217,10 @@ export class WasmWebBrowser extends WasmBridge {
         else {
             this.cancel_loader_after_presented_frame();
         }
+    }
+
+    should_keep_startup_loader() {
+        return false;
     }
 
     FromWasmOpenUrl(args) {
