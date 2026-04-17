@@ -18,6 +18,9 @@ struct OpenAiStreamChunk {
     model: Option<String>,
     choices: Vec<OpenAiStreamChoice>,
     usage: Option<OpenAiUsage>,
+    // Present in modern OpenAI / Moonshot / Kimi chunks; ignored.
+    #[allow(dead_code)]
+    system_fingerprint: Option<String>,
 }
 
 #[derive(DeJson, Debug)]
@@ -26,6 +29,10 @@ struct OpenAiStreamChoice {
     index: Option<u32>,
     delta: Option<OpenAiDelta>,
     finish_reason: Option<String>,
+    // Some providers (Kimi) put usage inside the final choice rather than
+    // at the chunk root. Accept either location.
+    #[allow(dead_code)]
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(DeJson, Debug)]
@@ -34,6 +41,10 @@ struct OpenAiDelta {
     role: Option<String>,
     content: Option<String>,
     tool_calls: Option<Vec<OpenAiToolCallDelta>>,
+    // Kimi K2.5 / DeepSeek R1 style "thinking" stream. We don't surface it
+    // to the UI, but we must accept the field so the chunk parses.
+    #[allow(dead_code)]
+    reasoning_content: Option<String>,
 }
 
 #[derive(DeJson, Debug)]
@@ -58,6 +69,33 @@ struct OpenAiUsage {
     completion_tokens: Option<u32>,
     #[allow(dead_code)]
     total_tokens: Option<u32>,
+    // Extensions seen on Kimi / Moonshot / newer OpenAI responses.
+    #[allow(dead_code)]
+    cached_tokens: Option<u32>,
+    #[allow(dead_code)]
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+    #[allow(dead_code)]
+    completion_tokens_details: Option<OpenAiCompletionTokensDetails>,
+}
+
+#[derive(DeJson, Debug, Clone)]
+struct OpenAiPromptTokensDetails {
+    #[allow(dead_code)]
+    cached_tokens: Option<u32>,
+    #[allow(dead_code)]
+    audio_tokens: Option<u32>,
+}
+
+#[derive(DeJson, Debug, Clone)]
+struct OpenAiCompletionTokensDetails {
+    #[allow(dead_code)]
+    reasoning_tokens: Option<u32>,
+    #[allow(dead_code)]
+    audio_tokens: Option<u32>,
+    #[allow(dead_code)]
+    accepted_prediction_tokens: Option<u32>,
+    #[allow(dead_code)]
+    rejected_prediction_tokens: Option<u32>,
 }
 
 // === In-flight Request Tracking ===
@@ -74,6 +112,9 @@ struct InFlightRequest {
     tool_calls: Vec<ToolCallAccumulator>,
     usage: Option<OpenAiUsage>,
     finish_reason: Option<String>,
+    /// Raw SSE bytes that haven't formed a complete `\n\n`-terminated event yet.
+    /// HTTP recv() boundaries don't align with SSE event boundaries, so we buffer.
+    sse_buffer: String,
 }
 
 // === OpenAI Backend Implementation ===
@@ -245,8 +286,20 @@ impl OpenAiBackend {
 
         let request_id = in_flight.request_id;
 
+        // HTTP recv boundaries don't align with SSE event boundaries. Accumulate
+        // into `sse_buffer`, consume every complete `\n\n`-terminated event, and
+        // leave the (possibly-partial) tail in the buffer for the next call.
+        in_flight.sse_buffer.push_str(data);
+        let last_boundary = in_flight.sse_buffer.rfind("\n\n");
+        let complete_end = match last_boundary {
+            Some(idx) => idx + 2,
+            None => return events, // no full event yet; wait for more bytes
+        };
+        let complete = in_flight.sse_buffer[..complete_end].to_string();
+        in_flight.sse_buffer.drain(..complete_end);
+
         // OpenAI uses "data: <json>\n\n" format with "data: [DONE]" at end
-        for chunk in data.split("\n\n") {
+        for chunk in complete.split("\n\n") {
             let chunk = chunk.trim();
             if chunk.is_empty() {
                 continue;
@@ -354,6 +407,7 @@ impl AiBackend for OpenAiBackend {
                 tool_calls: vec![],
                 usage: None,
                 finish_reason: None,
+                sse_buffer: String::new(),
             },
         );
 

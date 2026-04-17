@@ -10,3 +10,11 @@ license = "MIT OR Apache-2.0"
 makepad-widgets = { path = "../../widgets", features = ["maps", "pdf"] }
 makepad-code-editor = { path = "../../code_editor" }
 makepad-ai = { path = "../../old/studio/ai" }
+# NOTE: path dep (not git) because streaming-markdown-kit transitively
+# depends on streaming-markdown-sanitizer which isn't yet published. To
+# build this example, clone both sibling repos next to `makepad/`:
+#     .../
+#     ├── makepad/                       (this repo)
+#     ├── streaming-markdown-kit/        (git@github.com:Project-Robius-China/streaming-markdown-kit)
+#     └── streaming-markdown-sanitizer/  (TODO: publish)
+streaming-markdown-kit = { path = "../../../../streaming-markdown-kit", features = ["mermaid"] }

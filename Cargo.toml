@@ -18,7 +18,7 @@ workspace.members = [
     "examples/shader",
     "examples/text_input",
     "examples/text_selection",
-    "examples/markdown_codeview_verify",
+#    "examples/markdown_codeview_verify",
     "examples/counter",
     "examples/browser",
     "examples/camera",

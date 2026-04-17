@@ -43,3 +43,6 @@ CLAUDE.md
 **/*.obsidian
 /xr/util/dumps/
 .claude/settings.local.json
+
+# aichat example saves real user/AI chat history here
+examples/aichat/aichat_history.json
