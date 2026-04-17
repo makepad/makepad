@@ -1,7 +1,7 @@
 use makepad_mlx::text_runtime::{
     generate_multimodal_text_with_backend_config, generate_text_with_backend_config,
-    GemmaPromptFormat, GemmaTextBackendConfig, GemmaTextBackendMode,
-    GemmaTextGenerationOptions, GemmaTextKvCompressionMode,
+    GemmaPromptFormat, GemmaTextBackendConfig, GemmaTextBackendMode, GemmaTextGenerationOptions,
+    GemmaTextKvCompressionMode,
 };
 use std::env;
 use std::path::PathBuf;
@@ -27,7 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--image" => {
-                image_path = Some(PathBuf::from(args.next().ok_or("--image requires a value")?));
+                image_path = Some(PathBuf::from(
+                    args.next().ok_or("--image requires a value")?,
+                ));
             }
             "--raw-bos" => {
                 prompt_format = GemmaPromptFormat::RawBos;

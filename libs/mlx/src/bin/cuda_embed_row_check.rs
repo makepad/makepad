@@ -59,8 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!(
             "row={row} max_abs_diff={max_abs_diff:.8} index={max_index} gpu={:.8} cpu={:.8}",
-            gpu[max_index],
-            cpu[max_index]
+            gpu[max_index], cpu[max_index]
         );
     }
 
