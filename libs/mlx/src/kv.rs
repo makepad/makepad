@@ -970,7 +970,6 @@ fn copy_tokens_into_storage<T: Copy>(
     Ok(())
 }
 
-
 #[cfg(test)]
 #[path = "../tests/kv.rs"]
 mod tests;

@@ -1,8 +1,8 @@
 use crate::{MlxImageProcessorConfig, MlxModelSnapshot, MlxRtError, Result};
 use makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_core::options::DecoderOptions;
-use makepad_zune_png::PngDecoder;
 use makepad_zune_jpeg::JpegDecoder;
+use makepad_zune_png::PngDecoder;
 use std::fs;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,10 @@ pub struct GemmaImagePixels {
     pub soft_token_count: usize,
 }
 
-pub fn load_gemma_image(snapshot: &MlxModelSnapshot, image_path: &Path) -> Result<GemmaImagePixels> {
+pub fn load_gemma_image(
+    snapshot: &MlxModelSnapshot,
+    image_path: &Path,
+) -> Result<GemmaImagePixels> {
     let decoded = decode_image_rgb8(image_path)?;
     let processed = preprocess_image(&snapshot.processor_config.image_processor, decoded)?;
     if processed.soft_token_count == 0 {
@@ -61,18 +64,22 @@ fn decode_jpeg_rgb8(path: &Path) -> Result<DecodedRgbImage> {
     let reader = BufReader::new(file);
     let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
     let mut decoder = JpegDecoder::new_with_options(reader, options);
-    decoder.decode_headers().map_err(|err| MlxRtError::InvalidModelDir {
-        path: path.to_path_buf(),
-        message: err.to_string(),
-    })?;
+    decoder
+        .decode_headers()
+        .map_err(|err| MlxRtError::InvalidModelDir {
+            path: path.to_path_buf(),
+            message: err.to_string(),
+        })?;
     let info = decoder.info().ok_or_else(|| MlxRtError::InvalidModelDir {
         path: path.to_path_buf(),
         message: "jpeg decoder did not expose image info".to_string(),
     })?;
-    let pixels = decoder.decode().map_err(|err| MlxRtError::InvalidModelDir {
-        path: path.to_path_buf(),
-        message: err.to_string(),
-    })?;
+    let pixels = decoder
+        .decode()
+        .map_err(|err| MlxRtError::InvalidModelDir {
+            path: path.to_path_buf(),
+            message: err.to_string(),
+        })?;
     Ok(DecodedRgbImage {
         width: info.width as usize,
         height: info.height as usize,
@@ -88,22 +95,31 @@ fn decode_png_rgb8(path: &Path) -> Result<DecodedRgbImage> {
     let reader = BufReader::new(file);
     let options = DecoderOptions::default().png_set_strip_to_8bit(true);
     let mut decoder = PngDecoder::new_with_options(reader, options);
-    decoder.decode_headers().map_err(|err| MlxRtError::InvalidModelDir {
-        path: path.to_path_buf(),
-        message: err.to_string(),
-    })?;
-    let info = decoder.info().cloned().ok_or_else(|| MlxRtError::InvalidModelDir {
-        path: path.to_path_buf(),
-        message: "png decoder did not expose image info".to_string(),
-    })?;
-    let colorspace = decoder.colorspace().ok_or_else(|| MlxRtError::InvalidModelDir {
-        path: path.to_path_buf(),
-        message: "png decoder did not expose colorspace".to_string(),
-    })?;
-    let pixels = decoder.decode_raw().map_err(|err| MlxRtError::InvalidModelDir {
-        path: path.to_path_buf(),
-        message: err.to_string(),
-    })?;
+    decoder
+        .decode_headers()
+        .map_err(|err| MlxRtError::InvalidModelDir {
+            path: path.to_path_buf(),
+            message: err.to_string(),
+        })?;
+    let info = decoder
+        .info()
+        .cloned()
+        .ok_or_else(|| MlxRtError::InvalidModelDir {
+            path: path.to_path_buf(),
+            message: "png decoder did not expose image info".to_string(),
+        })?;
+    let colorspace = decoder
+        .colorspace()
+        .ok_or_else(|| MlxRtError::InvalidModelDir {
+            path: path.to_path_buf(),
+            message: "png decoder did not expose colorspace".to_string(),
+        })?;
+    let pixels = decoder
+        .decode_raw()
+        .map_err(|err| MlxRtError::InvalidModelDir {
+            path: path.to_path_buf(),
+            message: err.to_string(),
+        })?;
     let rgb_pixels = convert_to_rgb8(path, colorspace, &pixels)?;
     Ok(DecodedRgbImage {
         width: info.width as usize,
@@ -149,11 +165,13 @@ fn preprocess_image(
     config: &MlxImageProcessorConfig,
     image: DecodedRgbImage,
 ) -> Result<GemmaImagePixels> {
-    let side_multiple = usize::try_from(config.patch_size.saturating_mul(config.pooling_kernel_size))
-        .map_err(|_| MlxRtError::InvalidModelDir {
-            path: PathBuf::new(),
-            message: "image processor side_multiple overflow".to_string(),
-        })?;
+    let side_multiple = usize::try_from(
+        config.patch_size.saturating_mul(config.pooling_kernel_size),
+    )
+    .map_err(|_| MlxRtError::InvalidModelDir {
+        path: PathBuf::new(),
+        message: "image processor side_multiple overflow".to_string(),
+    })?;
     let max_patches = usize::try_from(
         config
             .max_soft_tokens
@@ -181,15 +199,22 @@ fn preprocess_image(
     let resized_pixels = if target_width == image.width && target_height == image.height {
         image.pixels
     } else {
-        resize_rgb8_bicubic(&image.pixels, image.width, image.height, target_width, target_height)
+        resize_rgb8_bicubic(
+            &image.pixels,
+            image.width,
+            image.height,
+            target_width,
+            target_height,
+        )
     };
 
-    let pixel_count = target_width
-        .checked_mul(target_height)
-        .ok_or_else(|| MlxRtError::InvalidModelDir {
-            path: PathBuf::new(),
-            message: "image pixel count overflow".to_string(),
-        })?;
+    let pixel_count =
+        target_width
+            .checked_mul(target_height)
+            .ok_or_else(|| MlxRtError::InvalidModelDir {
+                path: PathBuf::new(),
+                message: "image pixel count overflow".to_string(),
+            })?;
     let mut pixels_chw = vec![0.0f32; pixel_count * 3];
     for y in 0..target_height {
         for x in 0..target_width {
@@ -239,17 +264,18 @@ fn aspect_ratio_preserving_resize_dims(
 ) -> Result<(usize, usize)> {
     let target_pixels = (max_patches * patch_size * patch_size) as f64;
     let factor = (target_pixels / (width as f64 * height as f64)).sqrt();
-    let mut target_height = ((factor * height as f64) / side_multiple as f64).floor() as usize
-        * side_multiple;
-    let mut target_width = ((factor * width as f64) / side_multiple as f64).floor() as usize
-        * side_multiple;
+    let mut target_height =
+        ((factor * height as f64) / side_multiple as f64).floor() as usize * side_multiple;
+    let mut target_width =
+        ((factor * width as f64) / side_multiple as f64).floor() as usize * side_multiple;
     if target_height == 0 && target_width == 0 {
         return Err(MlxRtError::InvalidModelDir {
             path: PathBuf::new(),
             message: "attempting to resize to a 0x0 image".to_string(),
         });
     }
-    let max_side_length = (max_patches / (pooling_kernel_size * pooling_kernel_size)) * side_multiple;
+    let max_side_length =
+        (max_patches / (pooling_kernel_size * pooling_kernel_size)) * side_multiple;
     if target_height == 0 {
         target_height = side_multiple;
         target_width = (((width as f64 / height as f64).floor() as usize).max(1) * side_multiple)

@@ -1,9 +1,7 @@
 use makepad_ggml::backend::metal::{
     BufferStorageMode, MetalBufferBindingRef, MetalPipelineDescriptor, MetalRuntime, MetalSize,
 };
-use makepad_mlx::{
-    fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words, MlxSafetensorsHeader,
-};
+use makepad_mlx::{fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words, MlxSafetensorsHeader};
 use std::env;
 use std::error::Error;
 use std::mem::size_of;

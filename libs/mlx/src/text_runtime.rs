@@ -12,8 +12,7 @@ use crate::{MlxGreedyToken, MlxIndexedSafetensors, MlxTokenizer};
 use makepad_ggml::backend::metal::MetalRuntimeCounters;
 use makepad_ggml::backend::{
     try_affine_quantized_matmul_bf16, try_matmul_nt_ggml_bytes,
-    try_matmul_nt_ggml_bytes_cached_bf16_words,
-    AffineQuantizedMatmulSpec,
+    try_matmul_nt_ggml_bytes_cached_bf16_words, AffineQuantizedMatmulSpec,
 };
 use makepad_ggml::quant::{vec_dot_nvfp4_f32, GGML_TYPE_BF16, GGML_TYPE_NVFP4};
 use std::collections::BTreeSet;

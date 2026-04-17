@@ -1,9 +1,7 @@
 use makepad_ggml::backend::metal::{
     BufferStorageMode, MetalBufferBindingRef, MetalPipelineDescriptor, MetalRuntime, MetalSize,
 };
-use makepad_mlx::{
-    fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words, MlxSafetensorsHeader,
-};
+use makepad_mlx::{fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words, MlxSafetensorsHeader};
 use std::env;
 use std::error::Error;
 use std::io::{self, Write};
@@ -1296,9 +1294,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let simd_size = 32usize;
     let rms_threadgroup_needed = norm_len.div_ceil(n_reads);
     let rms_simds_needed = rms_threadgroup_needed.div_ceil(simd_size);
-    let rms_threadgroup_size = (simd_size * rms_simds_needed).min(
-        ((rms_pipeline.max_threads_per_threadgroup as usize) / simd_size).max(1) * simd_size,
-    );
+    let rms_threadgroup_size = (simd_size * rms_simds_needed)
+        .min(((rms_pipeline.max_threads_per_threadgroup as usize) / simd_size).max(1) * simd_size);
     let head_norm_threadgroup_needed = head_dim.div_ceil(n_reads);
     let head_norm_simds_needed = head_norm_threadgroup_needed.div_ceil(simd_size);
     let head_norm_threadgroup_size = simd_size * head_norm_simds_needed;

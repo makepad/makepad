@@ -1,8 +1,12 @@
 use crate::text_runtime::{
-    GemmaPromptFormat, GemmaTextBackendConfig, GemmaTextGenerationOutput, GemmaTextModel,
-    GemmaTextSamplingOptions, MlxTextSamplingRng,
+    GemmaPromptFormat, GemmaStopReason, GemmaTextBackendConfig, GemmaTextGenerationOutput,
+    GemmaTextModel, GemmaTextSamplingOptions, MlxTextSamplingRng,
 };
-use crate::MlxTokenizerConfig;
+use crate::{
+    MlxModelFamily, MlxModelManifest, MlxQwen35MoeGenerationOutput,
+    MlxQwen35MoeRuntimeSession, MlxQwen35MoeStopReason, MlxTokenizerConfig, QwenChatMessage,
+    QwenChatRole,
+};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +44,139 @@ impl GemmaChatMessage {
         Self {
             role,
             content: Arc::<str>::from(content.into()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MlxChatDecodeMode {
+    #[default]
+    Sampled,
+    Greedy,
+}
+
+impl From<MlxChatDecodeMode> for GemmaChatDecodeMode {
+    fn from(value: MlxChatDecodeMode) -> Self {
+        match value {
+            MlxChatDecodeMode::Sampled => GemmaChatDecodeMode::Sampled,
+            MlxChatDecodeMode::Greedy => GemmaChatDecodeMode::Greedy,
+        }
+    }
+}
+
+impl From<GemmaChatDecodeMode> for MlxChatDecodeMode {
+    fn from(value: GemmaChatDecodeMode) -> Self {
+        match value {
+            GemmaChatDecodeMode::Sampled => MlxChatDecodeMode::Sampled,
+            GemmaChatDecodeMode::Greedy => MlxChatDecodeMode::Greedy,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MlxChatRole {
+    System,
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MlxChatMessage {
+    pub role: MlxChatRole,
+    pub content: Arc<str>,
+}
+
+impl MlxChatMessage {
+    pub fn new(role: MlxChatRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: Arc::<str>::from(content.into()),
+        }
+    }
+}
+
+impl From<&GemmaChatMessage> for MlxChatMessage {
+    fn from(value: &GemmaChatMessage) -> Self {
+        Self {
+            role: match value.role {
+                GemmaChatRole::User => MlxChatRole::User,
+                GemmaChatRole::Assistant => MlxChatRole::Assistant,
+            },
+            content: value.content.clone(),
+        }
+    }
+}
+
+impl From<&QwenChatMessage> for MlxChatMessage {
+    fn from(value: &QwenChatMessage) -> Self {
+        Self {
+            role: match value.role {
+                QwenChatRole::System => MlxChatRole::System,
+                QwenChatRole::User => MlxChatRole::User,
+                QwenChatRole::Assistant => MlxChatRole::Assistant,
+            },
+            content: value.content.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MlxChatStopReason {
+    MaxNewTokens,
+    EosToken(u32),
+}
+
+#[derive(Clone, Debug)]
+pub struct MlxChatGenerationMetrics {
+    pub prompt_prefill_tokens_per_second: f64,
+    pub steady_state_decode_tokens_per_second: f64,
+    pub decode_tokens_per_second: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct MlxChatGenerationOutput {
+    pub generated_text: Arc<str>,
+    pub generated_token_ids: Arc<[u32]>,
+    pub stop_reason: MlxChatStopReason,
+    pub metrics: MlxChatGenerationMetrics,
+}
+
+impl MlxChatGenerationOutput {
+    fn from_gemma(output: &GemmaTextGenerationOutput) -> Self {
+        Self {
+            generated_text: output.generated_text.clone(),
+            generated_token_ids: output.generated_token_ids.clone(),
+            stop_reason: match output.stop_reason {
+                GemmaStopReason::MaxNewTokens => MlxChatStopReason::MaxNewTokens,
+                GemmaStopReason::EosToken(token_id) => MlxChatStopReason::EosToken(token_id),
+            },
+            metrics: MlxChatGenerationMetrics {
+                prompt_prefill_tokens_per_second: output.metrics.prompt_prefill_tokens_per_second,
+                steady_state_decode_tokens_per_second: output
+                    .metrics
+                    .steady_state_decode_tokens_per_second,
+                decode_tokens_per_second: output.metrics.decode_tokens_per_second,
+            },
+        }
+    }
+
+    fn from_qwen(output: &MlxQwen35MoeGenerationOutput) -> Self {
+        Self {
+            generated_text: output.generated_text.clone(),
+            generated_token_ids: output.generated_token_ids.clone(),
+            stop_reason: match output.stop_reason {
+                MlxQwen35MoeStopReason::MaxNewTokens => MlxChatStopReason::MaxNewTokens,
+                MlxQwen35MoeStopReason::EosToken(token_id) => {
+                    MlxChatStopReason::EosToken(token_id)
+                }
+            },
+            metrics: MlxChatGenerationMetrics {
+                prompt_prefill_tokens_per_second: output.metrics.prompt_prefill_tokens_per_second,
+                steady_state_decode_tokens_per_second: output
+                    .metrics
+                    .steady_state_decode_tokens_per_second,
+                decode_tokens_per_second: output.metrics.decode_tokens_per_second,
+            },
         }
     }
 }
@@ -295,8 +432,7 @@ impl GemmaChatSession {
         reusable_suffix_token_count: Option<usize>,
     ) -> Result<(Arc<str>, Arc<[u32]>, usize), Box<dyn Error>> {
         if prompt_token_ids.len() <= prompt_token_limit {
-            let prefill_token_count =
-                reusable_suffix_token_count.unwrap_or(prompt_token_ids.len());
+            let prefill_token_count = reusable_suffix_token_count.unwrap_or(prompt_token_ids.len());
             return Ok((
                 Arc::<str>::from(prompt_text),
                 Arc::<[u32]>::from(prompt_token_ids),
@@ -444,11 +580,10 @@ impl GemmaChatSession {
                 return Ok(formatted_prompt);
             }
 
-            let total_limit = self.model.exact_greedy_supported_total_tokens(
-                self.max_new_tokens,
-                &sampling_options,
-            )
-            .ok_or("missing exact greedy token limit")?;
+            let total_limit = self
+                .model
+                .exact_greedy_supported_total_tokens(self.max_new_tokens, &sampling_options)
+                .ok_or("missing exact greedy token limit")?;
             let max_new_tokens = self.max_new_tokens.unwrap_or(0);
             if max_new_tokens >= total_limit {
                 return Err(format!(
@@ -698,10 +833,8 @@ impl GemmaChatSession {
                     &exact_sampling_options,
                     |generated_token_ids| {
                         let raw_text = model.decode_token_ids(generated_token_ids)?;
-                        let partial_text = extract_gemma4_assistant_response_text(
-                            &tokenizer_config,
-                            &raw_text,
-                        );
+                        let partial_text =
+                            extract_gemma4_assistant_response_text(&tokenizer_config, &raw_text);
                         if let Some(delta) = partial_text.strip_prefix(&streamed_text) {
                             if !delta.is_empty() {
                                 on_text_delta(delta).map_err(|err| err.to_string())?;
@@ -771,5 +904,268 @@ impl GemmaChatSession {
             output.generated_text.as_ref(),
         ));
         Ok(output)
+    }
+}
+
+#[derive(Clone)]
+pub struct MlxQwen35MoeChatSession {
+    runtime: Arc<MlxQwen35MoeRuntimeSession>,
+    max_new_tokens: Option<usize>,
+    decode_mode: MlxChatDecodeMode,
+    messages: Vec<QwenChatMessage>,
+    current_image_path: Option<PathBuf>,
+}
+
+impl MlxQwen35MoeChatSession {
+    pub fn load(
+        model_path: impl AsRef<Path>,
+        max_new_tokens: Option<usize>,
+        decode_mode: MlxChatDecodeMode,
+    ) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            runtime: MlxQwen35MoeRuntimeSession::load(model_path.as_ref())?,
+            max_new_tokens,
+            decode_mode,
+            messages: Vec::new(),
+            current_image_path: None,
+        })
+    }
+
+    pub fn max_new_tokens(&self) -> Option<usize> {
+        self.max_new_tokens
+    }
+
+    pub fn decode_mode(&self) -> MlxChatDecodeMode {
+        self.decode_mode
+    }
+
+    pub fn messages(&self) -> &[QwenChatMessage] {
+        &self.messages
+    }
+
+    pub fn backend_label(&self) -> &'static str {
+        self.runtime.backend_label()
+    }
+
+    pub fn reset(&mut self) {
+        self.messages.clear();
+    }
+
+    pub fn set_image(&mut self, image_path: impl Into<PathBuf>) {
+        self.current_image_path = Some(image_path.into());
+    }
+
+    pub fn clear_image(&mut self) {
+        self.current_image_path = None;
+    }
+
+    pub fn current_image_path(&self) -> Option<&Path> {
+        self.current_image_path.as_deref()
+    }
+
+    fn generate_user_message_streaming<F>(
+        &mut self,
+        content: String,
+        on_text_delta: F,
+    ) -> Result<Arc<MlxChatGenerationOutput>, Box<dyn Error>>
+    where
+        F: FnMut(&str) -> Result<(), Box<dyn Error>>,
+    {
+        if self.current_image_path.is_some() {
+            return Err("Qwen multimodal generation is not wired yet".into());
+        }
+        let user_message = QwenChatMessage::new(QwenChatRole::User, content);
+        let mut messages = self.messages.clone();
+        messages.push(user_message.clone());
+        let prompt_text = Arc::<str>::from(
+            self.runtime
+                .format_chat_prompt(&messages, false)?,
+        );
+        let output = self.runtime.generate_preformatted_streaming(
+            prompt_text,
+            self.max_new_tokens,
+            self.decode_mode == MlxChatDecodeMode::Sampled,
+            on_text_delta,
+        )?;
+        self.messages = messages;
+        self.messages.push(QwenChatMessage::new(
+            QwenChatRole::Assistant,
+            output.generated_text.as_ref(),
+        ));
+        Ok(Arc::new(MlxChatGenerationOutput::from_qwen(output.as_ref())))
+    }
+
+    pub fn send_user_message(
+        &mut self,
+        content: impl Into<String>,
+    ) -> Result<Arc<MlxChatGenerationOutput>, Box<dyn Error>> {
+        self.generate_user_message_streaming(content.into(), |_| Ok(()))
+    }
+
+    pub fn send_user_message_streaming<F>(
+        &mut self,
+        content: impl Into<String>,
+        on_text_delta: F,
+    ) -> Result<Arc<MlxChatGenerationOutput>, Box<dyn Error>>
+    where
+        F: FnMut(&str) -> Result<(), Box<dyn Error>>,
+    {
+        self.generate_user_message_streaming(content.into(), on_text_delta)
+    }
+}
+
+#[derive(Clone)]
+pub enum MlxChatSession {
+    Gemma(GemmaChatSession),
+    Qwen35Moe(MlxQwen35MoeChatSession),
+}
+
+impl MlxChatSession {
+    pub fn load(
+        model_path: impl AsRef<Path>,
+        max_new_tokens: Option<usize>,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::load_with_mode(model_path, max_new_tokens, MlxChatDecodeMode::Sampled)
+    }
+
+    pub fn load_with_mode(
+        model_path: impl AsRef<Path>,
+        max_new_tokens: Option<usize>,
+        decode_mode: MlxChatDecodeMode,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::load_with_mode_and_backend_config(
+            model_path,
+            max_new_tokens,
+            decode_mode,
+            GemmaTextBackendConfig::default(),
+        )
+    }
+
+    pub fn load_with_mode_and_backend_config(
+        model_path: impl AsRef<Path>,
+        max_new_tokens: Option<usize>,
+        decode_mode: MlxChatDecodeMode,
+        backend_config: GemmaTextBackendConfig,
+    ) -> Result<Self, Box<dyn Error>> {
+        let model_path = model_path.as_ref();
+        match MlxModelManifest::load(model_path)?.family {
+            MlxModelFamily::Gemma4 => Ok(Self::Gemma(
+                GemmaChatSession::load_with_mode_and_backend_config(
+                    model_path,
+                    max_new_tokens,
+                    decode_mode.into(),
+                    backend_config,
+                )?,
+            )),
+            MlxModelFamily::Qwen35Moe => Ok(Self::Qwen35Moe(MlxQwen35MoeChatSession::load(
+                model_path,
+                max_new_tokens,
+                decode_mode,
+            )?)),
+        }
+    }
+
+    pub fn family(&self) -> MlxModelFamily {
+        match self {
+            Self::Gemma(_) => MlxModelFamily::Gemma4,
+            Self::Qwen35Moe(_) => MlxModelFamily::Qwen35Moe,
+        }
+    }
+
+    pub fn max_new_tokens(&self) -> Option<usize> {
+        match self {
+            Self::Gemma(session) => session.max_new_tokens(),
+            Self::Qwen35Moe(session) => session.max_new_tokens(),
+        }
+    }
+
+    pub fn decode_mode(&self) -> MlxChatDecodeMode {
+        match self {
+            Self::Gemma(session) => session.decode_mode().into(),
+            Self::Qwen35Moe(session) => session.decode_mode(),
+        }
+    }
+
+    pub fn backend_label(&self) -> &'static str {
+        match self {
+            Self::Gemma(session) => session.backend_label(),
+            Self::Qwen35Moe(session) => session.backend_label(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        match self {
+            Self::Gemma(session) => session.reset(),
+            Self::Qwen35Moe(session) => session.reset(),
+        }
+    }
+
+    pub fn set_image(&mut self, image_path: impl Into<PathBuf>) {
+        let image_path = image_path.into();
+        match self {
+            Self::Gemma(session) => session.set_image(image_path.clone()),
+            Self::Qwen35Moe(session) => session.set_image(image_path),
+        }
+    }
+
+    pub fn clear_image(&mut self) {
+        match self {
+            Self::Gemma(session) => session.clear_image(),
+            Self::Qwen35Moe(session) => session.clear_image(),
+        }
+    }
+
+    pub fn current_image_path(&self) -> Option<&Path> {
+        match self {
+            Self::Gemma(session) => session.current_image_path(),
+            Self::Qwen35Moe(session) => session.current_image_path(),
+        }
+    }
+
+    pub fn messages(&self) -> Vec<MlxChatMessage> {
+        match self {
+            Self::Gemma(session) => session
+                .messages()
+                .iter()
+                .map(MlxChatMessage::from)
+                .collect(),
+            Self::Qwen35Moe(session) => session
+                .messages()
+                .iter()
+                .map(MlxChatMessage::from)
+                .collect(),
+        }
+    }
+
+    pub fn send_user_message(
+        &mut self,
+        content: impl Into<String>,
+    ) -> Result<Arc<MlxChatGenerationOutput>, Box<dyn Error>> {
+        let content = content.into();
+        match self {
+            Self::Gemma(session) => Ok(Arc::new(MlxChatGenerationOutput::from_gemma(
+                session.send_user_message(content)?.as_ref(),
+            ))),
+            Self::Qwen35Moe(session) => session.send_user_message(content),
+        }
+    }
+
+    pub fn send_user_message_streaming<F>(
+        &mut self,
+        content: impl Into<String>,
+        on_text_delta: F,
+    ) -> Result<Arc<MlxChatGenerationOutput>, Box<dyn Error>>
+    where
+        F: FnMut(&str) -> Result<(), Box<dyn Error>>,
+    {
+        let content = content.into();
+        match self {
+            Self::Gemma(session) => Ok(Arc::new(MlxChatGenerationOutput::from_gemma(
+                session
+                    .send_user_message_streaming(content, on_text_delta)?
+                    .as_ref(),
+            ))),
+            Self::Qwen35Moe(session) => session.send_user_message_streaming(content, on_text_delta),
+        }
     }
 }

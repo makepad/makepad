@@ -65,10 +65,41 @@ pub struct MlxModelPaths {
     pub root_dir: PathBuf,
     pub config_json: PathBuf,
     pub generation_config_json: PathBuf,
-    pub processor_config_json: PathBuf,
+    pub processor_config_json: Option<PathBuf>,
     pub tokenizer_json: PathBuf,
     pub tokenizer_config_json: PathBuf,
     pub model_safetensors_index_json: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MlxModelFamily {
+    Gemma4,
+    Qwen35Moe,
+}
+
+impl MlxModelFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gemma4 => "gemma4",
+            Self::Qwen35Moe => "qwen3_5_moe",
+        }
+    }
+
+    fn from_model_type(model_type: &str) -> Option<Self> {
+        match model_type {
+            "gemma4" => Some(Self::Gemma4),
+            "qwen3_5_moe" => Some(Self::Qwen35Moe),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MlxModelManifest {
+    pub paths: MlxModelPaths,
+    pub family: MlxModelFamily,
+    pub tokenizer_config: MlxTokenizerConfig,
+    pub weight_index: MlxWeightIndex,
 }
 
 impl MlxModelPaths {
@@ -81,10 +112,22 @@ impl MlxModelPaths {
             });
         }
 
+        let processor_config_json = {
+            let processor_config_json = root_dir.join("processor_config.json");
+            if processor_config_json.is_file() {
+                Some(processor_config_json)
+            } else {
+                let preprocessor_config_json = root_dir.join("preprocessor_config.json");
+                preprocessor_config_json
+                    .is_file()
+                    .then_some(preprocessor_config_json)
+            }
+        };
+
         let paths = Self {
             config_json: root_dir.join("config.json"),
             generation_config_json: root_dir.join("generation_config.json"),
-            processor_config_json: root_dir.join("processor_config.json"),
+            processor_config_json,
             tokenizer_json: root_dir.join("tokenizer.json"),
             tokenizer_config_json: root_dir.join("tokenizer_config.json"),
             model_safetensors_index_json: root_dir.join("model.safetensors.index.json"),
@@ -98,7 +141,6 @@ impl MlxModelPaths {
         for path in [
             &self.config_json,
             &self.generation_config_json,
-            &self.processor_config_json,
             &self.tokenizer_json,
             &self.tokenizer_config_json,
             &self.model_safetensors_index_json,
@@ -107,7 +149,27 @@ impl MlxModelPaths {
                 return Err(MlxRtError::MissingFile { path: path.clone() });
             }
         }
+        if let Some(path) = &self.processor_config_json {
+            if !path.is_file() {
+                return Err(MlxRtError::MissingFile { path: path.clone() });
+            }
+        }
         Ok(())
+    }
+}
+
+impl MlxModelManifest {
+    pub fn load(root_dir: impl AsRef<Path>) -> Result<Self> {
+        let paths = MlxModelPaths::from_dir(root_dir)?;
+        let family = detect_model_family(&paths.config_json)?;
+        let tokenizer_config = MlxTokenizerConfig::load(&paths.tokenizer_config_json)?;
+        let weight_index = load_json::<MlxWeightIndex>(&paths.model_safetensors_index_json)?;
+        Ok(Self {
+            paths,
+            family,
+            tokenizer_config,
+            weight_index,
+        })
     }
 }
 
@@ -123,19 +185,34 @@ pub struct MlxModelSnapshot {
 
 impl MlxModelSnapshot {
     pub fn load(root_dir: impl AsRef<Path>) -> Result<Self> {
-        let paths = MlxModelPaths::from_dir(root_dir)?;
+        let manifest = MlxModelManifest::load(root_dir)?;
+        if manifest.family != MlxModelFamily::Gemma4 {
+            return Err(MlxRtError::InvalidModelDir {
+                path: manifest.paths.root_dir.clone(),
+                message: format!(
+                    "model family {} is not supported by the Gemma runtime; load it through the model-family front door instead",
+                    manifest.family.as_str()
+                ),
+            });
+        }
+        let paths = manifest.paths;
         let config = load_json::<MlxModelConfig>(&paths.config_json)?;
         let generation_config = load_json::<MlxGenerationConfig>(&paths.generation_config_json)?;
-        let processor_config = load_json::<MlxProcessorConfig>(&paths.processor_config_json)?;
-        let tokenizer_config = load_json::<MlxTokenizerConfig>(&paths.tokenizer_config_json)?;
-        let weight_index = load_json::<MlxWeightIndex>(&paths.model_safetensors_index_json)?;
+        let processor_config_path =
+            paths
+                .processor_config_json
+                .clone()
+                .ok_or_else(|| MlxRtError::MissingFile {
+                    path: paths.root_dir.join("processor_config.json"),
+                })?;
+        let processor_config = load_json::<MlxProcessorConfig>(&processor_config_path)?;
         let snapshot = Self {
             paths,
             config,
             generation_config,
             processor_config,
-            tokenizer_config,
-            weight_index,
+            tokenizer_config: manifest.tokenizer_config,
+            weight_index: manifest.weight_index,
         };
         snapshot.validate()?;
         Ok(snapshot)
@@ -230,7 +307,11 @@ impl MlxModelSnapshot {
         }
         let last_layer_o_proj =
             format!("language_model.model.layers.{last_text_layer_idx}.self_attn.o_proj.weight");
-        if !self.weight_index.weight_map.contains_key(last_layer_o_proj.as_str()) {
+        if !self
+            .weight_index
+            .weight_map
+            .contains_key(last_layer_o_proj.as_str())
+        {
             return Err(MlxRtError::InvalidModelDir {
                 path: self.paths.model_safetensors_index_json.clone(),
                 message: format!("missing required tensor key {}", last_layer_o_proj),
@@ -251,6 +332,116 @@ fn load_json<T: DeJson>(path: &Path) -> Result<T> {
     })
 }
 
+fn detect_model_family(config_json: &Path) -> Result<MlxModelFamily> {
+    let text = fs::read_to_string(config_json).map_err(|err| MlxRtError::Io {
+        path: config_json.to_path_buf(),
+        message: err.to_string(),
+    })?;
+    let root =
+        HashMap::<String, JsonValue>::deserialize_json(&text).map_err(|err| MlxRtError::Json {
+            path: config_json.to_path_buf(),
+            message: format!("{:?}", err),
+        })?;
+    let model_type = root
+        .get("model_type")
+        .and_then(tokenizer_json_string_opt)
+        .ok_or_else(|| MlxRtError::InvalidModelDir {
+            path: config_json.to_path_buf(),
+            message: "config.json is missing string field model_type".to_string(),
+        })?;
+    MlxModelFamily::from_model_type(model_type).ok_or_else(|| MlxRtError::InvalidModelDir {
+        path: config_json.to_path_buf(),
+        message: format!("unsupported model_type {}", model_type),
+    })
+}
+
+fn tokenizer_json_string_opt(value: &JsonValue) -> Option<&str> {
+    match value {
+        JsonValue::String(text) => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+fn tokenizer_json_token_string_opt(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(text) => Some(text.clone()),
+        JsonValue::Object(object) => object
+            .get("content")
+            .and_then(tokenizer_json_string_opt)
+            .map(str::to_owned),
+        JsonValue::Null | JsonValue::Undefined => None,
+        _ => None,
+    }
+}
+
+fn tokenizer_string_array_opt(value: &JsonValue) -> Option<Vec<String>> {
+    let array = match value {
+        JsonValue::Array(array) => array,
+        _ => return None,
+    };
+    let mut out = Vec::with_capacity(array.len());
+    for item in array {
+        out.push(tokenizer_json_string_opt(item)?.to_owned());
+    }
+    Some(out)
+}
+
+fn tokenizer_extra_special_token_map(value: &JsonValue) -> Option<HashMap<String, String>> {
+    let object = match value {
+        JsonValue::Object(object) => object,
+        _ => return None,
+    };
+    let mut out = HashMap::with_capacity(object.len());
+    for (key, value) in object {
+        out.insert(key.clone(), tokenizer_json_token_string_opt(value)?);
+    }
+    Some(out)
+}
+
+fn root_string_or(
+    root: &HashMap<String, JsonValue>,
+    key: &str,
+    fallback: Option<String>,
+) -> String {
+    root.get(key)
+        .and_then(tokenizer_json_string_opt)
+        .map(str::to_owned)
+        .or(fallback)
+        .unwrap_or_default()
+}
+
+fn root_token_string_or(
+    root: &HashMap<String, JsonValue>,
+    key: &str,
+    fallback: Option<String>,
+) -> String {
+    root.get(key)
+        .and_then(tokenizer_json_token_string_opt)
+        .or(fallback)
+        .unwrap_or_default()
+}
+
+fn root_bool_or(root: &HashMap<String, JsonValue>, key: &str, default: bool) -> bool {
+    root.get(key)
+        .and_then(|value| match value {
+            JsonValue::Bool(flag) => Some(*flag),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+fn root_u128_or(root: &HashMap<String, JsonValue>, key: &str, default: u128) -> u128 {
+    root.get(key)
+        .and_then(|value| match value {
+            JsonValue::U64(number) => Some(*number as u128),
+            JsonValue::U128(number) => Some(*number),
+            JsonValue::I64(number) => u128::try_from(*number).ok(),
+            JsonValue::I128(number) => u128::try_from(*number).ok(),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MlxTokenIdList(pub Vec<u32>);
 
@@ -268,23 +459,27 @@ impl DeJson for MlxTokenIdList {
         match s.tok {
             makepad_micro_serde::DeJsonTok::U64(value) => {
                 s.next_tok(i)?;
-                Ok(Self(vec![u32::try_from(value)
-                    .map_err(|_| s.err_msg("token id does not fit in u32"))?]))
+                Ok(Self(vec![
+                    u32::try_from(value).map_err(|_| s.err_msg("token id does not fit in u32"))?
+                ]))
             }
             makepad_micro_serde::DeJsonTok::U128(value) => {
                 s.next_tok(i)?;
-                Ok(Self(vec![u32::try_from(value)
-                    .map_err(|_| s.err_msg("token id does not fit in u32"))?]))
+                Ok(Self(vec![
+                    u32::try_from(value).map_err(|_| s.err_msg("token id does not fit in u32"))?
+                ]))
             }
             makepad_micro_serde::DeJsonTok::I64(value) => {
                 s.next_tok(i)?;
-                Ok(Self(vec![u32::try_from(value)
-                    .map_err(|_| s.err_msg("token id must be a non-negative u32"))?]))
+                Ok(Self(vec![u32::try_from(value).map_err(|_| {
+                    s.err_msg("token id must be a non-negative u32")
+                })?]))
             }
             makepad_micro_serde::DeJsonTok::I128(value) => {
                 s.next_tok(i)?;
-                Ok(Self(vec![u32::try_from(value)
-                    .map_err(|_| s.err_msg("token id must be a non-negative u32"))?]))
+                Ok(Self(vec![u32::try_from(value).map_err(|_| {
+                    s.err_msg("token id must be a non-negative u32")
+                })?]))
             }
             makepad_micro_serde::DeJsonTok::BlockOpen => Ok(Self(Vec::<u32>::de_json(s, i)?)),
             _ => Err(s.err_msg("expected token id or token id array")),
@@ -317,7 +512,7 @@ pub struct MlxModelConfig {
     pub vision_soft_tokens_per_image: u32,
 }
 
-#[derive(Clone, Debug, DeJson)]
+#[derive(Clone, Debug, DeJson, PartialEq, Eq)]
 pub struct MlxQuantizationConfig {
     pub group_size: u32,
     pub bits: u32,
@@ -441,7 +636,7 @@ pub struct MlxGenerationConfig {
     pub temperature: f32,
     pub top_k: u32,
     pub top_p: f32,
-    pub transformers_version: String,
+    pub transformers_version: Option<String>,
 }
 
 #[derive(Clone, Debug, DeJson)]
@@ -478,7 +673,7 @@ pub struct MlxImageProcessorSize {
     pub width: u32,
 }
 
-#[derive(Clone, Debug, DeJson)]
+#[derive(Clone, Debug, Default)]
 pub struct MlxTokenizerConfig {
     pub audio_token: String,
     pub backend: String,
@@ -512,6 +707,103 @@ pub struct MlxTokenizerConfig {
     pub think_token: String,
     pub tokenizer_class: String,
     pub unk_token: String,
+    pub chat_template: String,
+    pub pretokenize_regex: String,
+}
+
+impl MlxTokenizerConfig {
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path).map_err(|err| MlxRtError::Io {
+            path: path.to_path_buf(),
+            message: err.to_string(),
+        })?;
+        let root = HashMap::<String, JsonValue>::deserialize_json(&text).map_err(|err| {
+            MlxRtError::Json {
+                path: path.to_path_buf(),
+                message: format!("{:?}", err),
+            }
+        })?;
+
+        let extra_special_tokens = root
+            .get("extra_special_tokens")
+            .and_then(tokenizer_extra_special_token_map)
+            .unwrap_or_default();
+
+        let mut extra_special_token_values =
+            extra_special_tokens.values().cloned().collect::<Vec<_>>();
+        if let Some(additional_special) = root
+            .get("additional_special_tokens")
+            .and_then(tokenizer_string_array_opt)
+        {
+            extra_special_token_values.extend(additional_special);
+        }
+        extra_special_token_values.sort();
+        extra_special_token_values.dedup();
+
+        Ok(Self {
+            audio_token: root_string_or(
+                &root,
+                "audio_token",
+                extra_special_tokens.get("audio_token").cloned(),
+            ),
+            backend: root_string_or(&root, "backend", None),
+            boa_token: root_string_or(
+                &root,
+                "boa_token",
+                extra_special_tokens.get("audio_bos_token").cloned(),
+            ),
+            boi_token: root_string_or(
+                &root,
+                "boi_token",
+                extra_special_tokens.get("vision_bos_token").cloned(),
+            ),
+            bos_token: root_token_string_or(&root, "bos_token", None),
+            eoa_token: root_string_or(
+                &root,
+                "eoa_token",
+                extra_special_tokens.get("audio_eos_token").cloned(),
+            ),
+            eoc_token: root_string_or(&root, "eoc_token", None),
+            eoi_token: root_string_or(
+                &root,
+                "eoi_token",
+                extra_special_tokens.get("vision_eos_token").cloned(),
+            ),
+            eos_token: root_token_string_or(&root, "eos_token", None),
+            eot_token: root_string_or(&root, "eot_token", None),
+            escape_token: root_string_or(&root, "escape_token", None),
+            etc_token: root_string_or(&root, "etc_token", None),
+            etd_token: root_string_or(&root, "etd_token", None),
+            etr_token: root_string_or(&root, "etr_token", None),
+            extra_special_tokens: extra_special_token_values,
+            image_token: root_string_or(
+                &root,
+                "image_token",
+                extra_special_tokens.get("image_token").cloned(),
+            ),
+            is_local: root_bool_or(&root, "is_local", false),
+            mask_token: root_token_string_or(&root, "mask_token", None),
+            model_max_length: root_u128_or(&root, "model_max_length", 0),
+            model_specific_special_tokens: root
+                .get("model_specific_special_tokens")
+                .and_then(tokenizer_extra_special_token_map)
+                .unwrap_or_default(),
+            pad_token: root_token_string_or(&root, "pad_token", None),
+            padding_side: root_string_or(&root, "padding_side", Some("right".to_string())),
+            processor_class: root_string_or(&root, "processor_class", None),
+            response_schema: root.get("response_schema").cloned(),
+            soc_token: root_string_or(&root, "soc_token", None),
+            sot_token: root_string_or(&root, "sot_token", None),
+            stc_token: root_string_or(&root, "stc_token", None),
+            std_token: root_string_or(&root, "std_token", None),
+            str_token: root_string_or(&root, "str_token", None),
+            think_token: root_string_or(&root, "think_token", None),
+            tokenizer_class: root_string_or(&root, "tokenizer_class", None),
+            unk_token: root_token_string_or(&root, "unk_token", None),
+            chat_template: root_string_or(&root, "chat_template", None),
+            pretokenize_regex: root_string_or(&root, "pretokenize_regex", None),
+        })
+    }
 }
 
 #[derive(Clone, Debug, DeJson)]
@@ -520,9 +812,41 @@ pub struct MlxWeightIndex {
     pub weight_map: HashMap<String, String>,
 }
 
-#[derive(Clone, Debug, DeJson)]
+#[derive(Clone, Debug)]
 pub struct MlxWeightIndexMetadata {
     pub total_size: u64,
+}
+
+impl DeJson for MlxWeightIndexMetadata {
+    fn de_json(
+        s: &mut DeJsonState,
+        i: &mut std::str::Chars,
+    ) -> std::result::Result<Self, DeJsonErr> {
+        let root = HashMap::<String, JsonValue>::de_json(s, i)?;
+        let total_size = match root.get("total_size") {
+            Some(JsonValue::U64(number)) => *number,
+            Some(JsonValue::U128(number)) => {
+                u64::try_from(*number).map_err(|_| s.err_msg("total_size does not fit in u64"))?
+            }
+            Some(JsonValue::I64(number)) => u64::try_from(*number)
+                .map_err(|_| s.err_msg("total_size must be a non-negative integer"))?,
+            Some(JsonValue::I128(number)) => u64::try_from(*number)
+                .map_err(|_| s.err_msg("total_size must be a non-negative integer"))?,
+            Some(JsonValue::F64(number))
+                if *number >= 0.0 && number.fract() == 0.0 && *number <= u64::MAX as f64 =>
+            {
+                *number as u64
+            }
+            Some(other) => {
+                return Err(s.err_msg(&format!(
+                    "total_size expected integer-compatible value, got {:?}",
+                    other
+                )))
+            }
+            None => return Err(s.err_msg("total_size missing from metadata")),
+        };
+        Ok(Self { total_size })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -540,11 +864,7 @@ impl MlxIndexedSafetensors {
         }
     }
 
-    fn invalid_safetensors_error(
-        &self,
-        path: PathBuf,
-        message: impl Into<String>,
-    ) -> MlxRtError {
+    fn invalid_safetensors_error(&self, path: PathBuf, message: impl Into<String>) -> MlxRtError {
         MlxRtError::InvalidSafetensors {
             path,
             message: message.into(),
@@ -565,13 +885,19 @@ impl MlxIndexedSafetensors {
         if weight_entry.dtype != MlxDType::U32 {
             return Err(self.invalid_safetensors_error(
                 self.header_for_tensor(weight_name)?.path.clone(),
-                format!("tensor {weight_name} expected U32, got {:?}", weight_entry.dtype),
+                format!(
+                    "tensor {weight_name} expected U32, got {:?}",
+                    weight_entry.dtype
+                ),
             ));
         }
         if scales_entry.dtype != MlxDType::U8 {
             return Err(self.invalid_safetensors_error(
                 self.header_for_tensor(scales_name)?.path.clone(),
-                format!("tensor {scales_name} expected U8, got {:?}", scales_entry.dtype),
+                format!(
+                    "tensor {scales_name} expected U8, got {:?}",
+                    scales_entry.dtype
+                ),
             ));
         }
         if weight_entry.shape.len() != 2 || scales_entry.shape.len() != 2 {
@@ -646,7 +972,8 @@ impl MlxIndexedSafetensors {
                 out[out_base + sub] = scale_row_bytes[super_block * 4 + sub] & 0x7f;
             }
             for sub in 0..4 {
-                let src = &weight_row_bytes[(super_block * 4 + sub) * 8..(super_block * 4 + sub + 1) * 8];
+                let src =
+                    &weight_row_bytes[(super_block * 4 + sub) * 8..(super_block * 4 + sub + 1) * 8];
                 let dst = &mut out[out_base + 4 + sub * 8..out_base + 4 + (sub + 1) * 8];
                 for j in 0..4 {
                     let lo0 = src[j] & 0x0f;
@@ -696,9 +1023,9 @@ impl MlxIndexedSafetensors {
     ) -> Result<Vec<u8>> {
         let (rows, blocks_per_row, _) = self.nvfp4_rank2_layout(weight_name, scales_name)?;
         let row_bytes = (blocks_per_row / 4) * 36;
-        let total_bytes = rows
-            .checked_mul(row_bytes)
-            .ok_or_else(|| self.invalid_model_error(format!("NVFP4 byte count overflow for {weight_name}")))?;
+        let total_bytes = rows.checked_mul(row_bytes).ok_or_else(|| {
+            self.invalid_model_error(format!("NVFP4 byte count overflow for {weight_name}"))
+        })?;
         let mut out = Vec::with_capacity(total_bytes);
         let weight_header = self.header_for_tensor(weight_name)?;
         let scales_header = self.header_for_tensor(scales_name)?;
@@ -713,10 +1040,7 @@ impl MlxIndexedSafetensors {
         Ok(out)
     }
 
-    pub fn repack_nvfp4_tensors_to_ggml_bytes(
-        &self,
-        tensors: &[(&str, &str)],
-    ) -> Result<Vec<u8>> {
+    pub fn repack_nvfp4_tensors_to_ggml_bytes(&self, tensors: &[(&str, &str)]) -> Result<Vec<u8>> {
         if tensors.is_empty() {
             return Ok(Vec::new());
         }
@@ -725,7 +1049,8 @@ impl MlxIndexedSafetensors {
         let mut total_bytes = 0usize;
         let mut layouts = Vec::with_capacity(tensors.len());
         for &(weight_name, scales_name) in tensors {
-            let (rows, blocks_per_row, inner_dim) = self.nvfp4_rank2_layout(weight_name, scales_name)?;
+            let (rows, blocks_per_row, inner_dim) =
+                self.nvfp4_rank2_layout(weight_name, scales_name)?;
             if let Some(expected) = expected_inner_dim {
                 if inner_dim != expected {
                     return Err(self.invalid_model_error(format!(
@@ -755,8 +1080,10 @@ impl MlxIndexedSafetensors {
             let weight_header = self.header_for_tensor(weight_name)?;
             let scales_header = self.header_for_tensor(scales_name)?;
             for row in 0..rows {
-                let weight_row_bytes = weight_header.read_rank2_row_bytes(weight_name, row as u64)?;
-                let scale_row_bytes = scales_header.read_rank2_row_bytes(scales_name, row as u64)?;
+                let weight_row_bytes =
+                    weight_header.read_rank2_row_bytes(weight_name, row as u64)?;
+                let scale_row_bytes =
+                    scales_header.read_rank2_row_bytes(scales_name, row as u64)?;
                 out.extend_from_slice(&Self::repack_nvfp4_row_bytes(
                     &weight_row_bytes,
                     &scale_row_bytes,
@@ -854,11 +1181,10 @@ impl MlxIndexedSafetensors {
                 self.nvfp4_rank2_layout(EMBED_TOKENS_WEIGHT_NAME, EMBED_TOKENS_SCALES_NAME)?;
             if token_id as usize >= rows {
                 return Err(self.invalid_safetensors_error(
-                    self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?.path.clone(),
-                    format!(
-                        "token id {} out of range for {} rows",
-                        token_id, rows
-                    ),
+                    self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?
+                        .path
+                        .clone(),
+                    format!("token id {} out of range for {} rows", token_id, rows),
                 ));
             }
             let root = self.snapshot.paths.root_dir.to_string_lossy();
@@ -886,9 +1212,8 @@ impl MlxIndexedSafetensors {
                     EMBED_TOKENS_SCALES_NAME,
                     token_id as u64,
                 )?;
-                get_rows_ggml_bytes_cpu(&row_bytes, GGML_TYPE_NVFP4, hidden, 1, &[0]).ok_or_else(
-                    || self.invalid_model_error("CPU NVFP4 get_rows fallback failed"),
-                )?
+                get_rows_ggml_bytes_cpu(&row_bytes, GGML_TYPE_NVFP4, hidden, 1, &[0])
+                    .ok_or_else(|| self.invalid_model_error("CPU NVFP4 get_rows fallback failed"))?
             };
             let embed_scale = bf16_round_to_f32((hidden as f32).sqrt());
             for value in &mut embed {
@@ -898,13 +1223,12 @@ impl MlxIndexedSafetensors {
         }
 
         let header = self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?;
-        let embed_weight_entry =
-            header
-                .tensor(EMBED_TOKENS_WEIGHT_NAME)
-                .ok_or_else(|| MlxRtError::InvalidSafetensors {
-                    path: header.path.clone(),
-                    message: format!("tensor {} not found in header", EMBED_TOKENS_WEIGHT_NAME),
-                })?;
+        let embed_weight_entry = header.tensor(EMBED_TOKENS_WEIGHT_NAME).ok_or_else(|| {
+            MlxRtError::InvalidSafetensors {
+                path: header.path.clone(),
+                message: format!("tensor {} not found in header", EMBED_TOKENS_WEIGHT_NAME),
+            }
+        })?;
         let mut embed = header.affine_dequantize_row_f32(
             EMBED_TOKENS_WEIGHT_NAME,
             EMBED_TOKENS_SCALES_NAME,
@@ -955,10 +1279,7 @@ impl MlxIndexedSafetensors {
             for (token_id, &logit) in logits.iter().enumerate() {
                 let token_id = token_id as u32;
                 if logit > best.logit || (logit == best.logit && token_id < best.token_id) {
-                    best = MlxGreedyToken {
-                        token_id,
-                        logit,
-                    };
+                    best = MlxGreedyToken { token_id, logit };
                 }
             }
             return Ok(best);
@@ -984,7 +1305,9 @@ impl MlxIndexedSafetensors {
                 self.nvfp4_rank2_layout(EMBED_TOKENS_WEIGHT_NAME, EMBED_TOKENS_SCALES_NAME)?;
             if hidden_bf16_words.len() != hidden {
                 return Err(self.invalid_safetensors_error(
-                    self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?.path.clone(),
+                    self.header_for_tensor(EMBED_TOKENS_WEIGHT_NAME)?
+                        .path
+                        .clone(),
                     format!(
                         "NVFP4 logits activation length mismatch: got {} expected {}",
                         hidden_bf16_words.len(),
@@ -1025,9 +1348,8 @@ impl MlxIndexedSafetensors {
                         row as u64,
                     )?;
                     let mut sum = 0.0f32;
-                    for (block, input_block) in row_bytes
-                        .chunks_exact(36)
-                        .zip(hidden.chunks_exact(64))
+                    for (block, input_block) in
+                        row_bytes.chunks_exact(36).zip(hidden.chunks_exact(64))
                     {
                         sum += vec_dot_nvfp4_f32(block, input_block);
                     }
