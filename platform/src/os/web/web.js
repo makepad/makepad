@@ -36,6 +36,10 @@ export class WasmWebBrowser extends WasmBridge {
         this.workers = [];
         this.thread_stack_size = 2 * 1024 * 1024;
         this.buffer_upload_serial = 0;
+        this.pending_wasm_pump_id = 0;
+        this.signal_poll_timer = 0;
+        this.text_input_style = null;
+        this.audio_resume_hook = null;
         this.loader_removed = false;
         this.loader_seen_animation_frame = false;
         this.loader_quiet_animation_frames = 0;
@@ -249,26 +253,46 @@ export class WasmWebBrowser extends WasmBridge {
                 return
             }
         }
-        var timer = { timer_id, repeats: args.repeats };
+        var timer = { timer_id, repeats: args.repeats, active: true, sys_id: 0 };
+        let interval_ms = args.interval * 1000.0;
+        let remove_timer = () => {
+            for (let i = 0; i < this.timers.length; i++) {
+                if (this.timers[i].timer_id == timer_id) {
+                    this.timers.splice(i, 1);
+                    break;
+                }
+            }
+        };
         if (args.repeats === true) {
-
-            timer.sys_id = window.setInterval(e => {
+            let fire = () => {
+                if (!timer.active || this.wasm == null) {
+                    timer.active = false;
+                    remove_timer();
+                    return;
+                }
                 this.to_wasm.ToWasmTimerFired({ timer_id });
-                this.do_wasm_pump();
-            }, args.interval * 1000.0);
+                this.schedule_wasm_pump();
+                if (!timer.active || this.wasm == null) {
+                    timer.active = false;
+                    remove_timer();
+                    return;
+                }
+                timer.sys_id = window.setTimeout(fire, interval_ms);
+            };
+            timer.sys_id = window.setTimeout(fire, interval_ms);
         }
         else {
             timer.sys_id = window.setTimeout(e => {
-                for (let i = 0; i < this.timers.length; i++) {
-                    let timer = this.timers[i];
-                    if (timer.timer_id == timer_id) {
-                        this.timers.splice(i, 1);
-                        break;
-                    }
+                if (!timer.active || this.wasm == null) {
+                    timer.active = false;
+                    remove_timer();
+                    return;
                 }
+                timer.active = false;
+                remove_timer();
                 this.to_wasm.ToWasmTimerFired({ timer_id });
-                this.do_wasm_pump();
-            }, args.interval * 1000.0);
+                this.schedule_wasm_pump();
+            }, interval_ms);
         }
         this.timers.push(timer)
     }
@@ -277,12 +301,8 @@ export class WasmWebBrowser extends WasmBridge {
         for (let i = 0; i < this.timers.length; i++) {
             let timer = this.timers[i];
             if (timer.timer_id == args.timer_id) {
-                if (timer.repeats) {
-                    window.clearInterval(timer.sys_id);
-                }
-                else {
-                    window.clearTimeout(timer.sys_id);
-                }
+                timer.active = false;
+                window.clearTimeout(timer.sys_id);
                 this.timers.splice(i, 1);
                 return
             }
@@ -324,10 +344,10 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         this.req_anim_frame_id = window.requestAnimationFrame(time => {
+            this.req_anim_frame_id = 0;
             if (this.wasm == null) {
                 return
             }
-            this.req_anim_frame_id = 0;
             if (this.xr !== undefined) {
                 return
             }
@@ -336,6 +356,19 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
             this.in_animation_frame = false;
         })
+    }
+
+    schedule_wasm_pump() {
+        if (this.wasm == null || this.req_anim_frame_id || this.pending_wasm_pump_id) {
+            return;
+        }
+        this.pending_wasm_pump_id = window.requestAnimationFrame(() => {
+            this.pending_wasm_pump_id = 0;
+            if (this.wasm == null) {
+                return;
+            }
+            this.do_wasm_pump();
+        });
     }
 
     FromWasmSetDocumentTitle(args) {
@@ -469,18 +502,20 @@ export class WasmWebBrowser extends WasmBridge {
             return audio_worklet;
         };
 
-        let user_interact_hook = (arg) => {
-            if (this.audio_context.state === "suspended") {
-                this.audio_context.resume();
-            }
+        if (!this.audio_resume_hook) {
+            this.audio_resume_hook = () => {
+                if (this.audio_context && this.audio_context.state === "suspended") {
+                    this.audio_context.resume();
+                }
+            };
+            window.addEventListener('mousedown', this.audio_resume_hook, { passive: true });
+            window.addEventListener('touchstart', this.audio_resume_hook, { passive: true });
         }
         this.audio_context = new AudioContext({
             latencyHint: "interactive",
             sampleRate: 48000
         });
         start_worklet().catch(err => console.error(err));
-        window.addEventListener('mousedown', user_interact_hook)
-        window.addEventListener('touchstart', user_interact_hook)
     }
 
     FromWasmQueryAudioDevices(args) {
@@ -658,13 +693,24 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     start_signal_poll() {
-        this.poll_timer = window.setInterval(e => {
+        if (this.signal_poll_timer) {
+            return;
+        }
+        let poll = () => {
+            this.signal_poll_timer = 0;
+            if (this.wasm == null) {
+                return;
+            }
             let flags = this.exports.wasm_check_signal();
             if (flags != 0) {
                 this.to_wasm.ToWasmSignal({ flags });
-                this.do_wasm_pump();
+                this.schedule_wasm_pump();
             }
-        }, 0.016 * 1000.0);
+            if (this.wasm != null) {
+                this.signal_poll_timer = window.setTimeout(poll, 0.016 * 1000.0);
+            }
+        };
+        this.signal_poll_timer = window.setTimeout(poll, 0.016 * 1000.0);
     }
 
     parse_and_set_headers(request, headers_string) {
@@ -747,7 +793,9 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }
 
-        console.log("[makepad][http][req]", method, url);
+        if (window.makepad_log_http === true) {
+            console.log("[makepad][http][req]", method, url);
+        }
         fetch(url, {
             method,
             headers,
@@ -761,7 +809,9 @@ export class WasmWebBrowser extends WasmBridge {
             let response_body = new Uint8Array(await response.arrayBuffer());
             let headers_u8 = this.string_to_u8(response_headers);
             let body_u8 = this.array_to_u8(response_body);
-            console.log("[makepad][http][res]", response.status, url, response_body.length);
+            if (window.makepad_log_http === true) {
+                console.log("[makepad][http][res]", response.status, url, response_body.length);
+            }
             this.exports.wasm_network_http_response(
                 request_id_lo,
                 request_id_hi,
@@ -871,9 +921,7 @@ export class WasmWebBrowser extends WasmBridge {
         req.responseType = "arraybuffer";
         this.parse_and_set_headers(req, args.headers);
 
-        // TODO decode in appropiate format
-        const decoder = new TextDecoder('UTF-8', { fatal: true });
-        let body = decoder.decode(this.clone_data_u8(args.body));
+        let body = args.body.len > 0 ? this.clone_data_u8(args.body) : undefined;
 
         req.addEventListener("load", event => {
             let responseEvent = event.target;
@@ -950,7 +998,7 @@ export class WasmWebBrowser extends WasmBridge {
                     loaded: event.loaded,
                     total: event.total,
                 });
-                this.do_wasm_pump();
+                this.schedule_wasm_pump();
             }
         });
 
@@ -962,7 +1010,7 @@ export class WasmWebBrowser extends WasmBridge {
                     loaded: event.loaded,
                     total: event.total,
                 });
-                this.do_wasm_pump();
+                this.schedule_wasm_pump();
             }
         });
 
@@ -1120,6 +1168,10 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     do_wasm_pump() {
+        if (this.pending_wasm_pump_id) {
+            window.cancelAnimationFrame(this.pending_wasm_pump_id);
+            this.pending_wasm_pump_id = 0;
+        }
         let started = performance.now();
         this.buffer_upload_serial += 1;
         let to_wasm = this.to_wasm;
@@ -1350,8 +1402,6 @@ export class WasmWebBrowser extends WasmBridge {
         }
 
         this.handlers.on_mouse_move = e => {
-            document.body.scrollTop = 0;
-            document.body.scrollLeft = 0;
             this.to_wasm.ToWasmMouseMove({ was_out: false, mouse: mouse_to_wasm_wmouse(e) });
             this.do_wasm_pump();
         }
@@ -1496,45 +1546,50 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
 
+        if (this.text_area && this.text_area.parentNode) {
+            this.text_area.parentNode.removeChild(this.text_area);
+        }
+        this.text_area = null;
+
         var ta = this.text_area = document.createElement('textarea')
         ta.className = "cx_webgl_textinput"
         ta.setAttribute('autocomplete', 'off')
         ta.setAttribute('autocorrect', 'off')
         ta.setAttribute('autocapitalize', 'off')
         ta.setAttribute('spellcheck', 'false')
-        var style = document.createElement('style')
-
-        style.innerHTML = "\n"
-            + "textarea.cx_webgl_textinput {\n"
-            + "z-index: 1000;\n"
-            + "position: absolute;\n"
-            + "opacity: 0;\n"
-            + "border-radius: 4px;\n"
-            + "color:white;\n"
-            + "font-size: 6;\n"
-            + "background: gray;\n"
-            + "-moz-appearance: none;\n"
-            + "appearance:none;\n"
-            + "border:none;\n"
-            + "resize: none;\n"
-            + "outline: none;\n"
-            + "overflow: hidden;\n"
-            + "text-indent: 0px;\n"
-            + "padding: 0 0px;\n"
-            + "margin: 0 -1px;\n"
-            + "text-indent: 0px;\n"
-            + "-ms-user-select: text;\n"
-            + "-moz-user-select: text;\n"
-            + "-webkit-user-select: text;\n"
-            + "user-select: text;\n"
-            + "white-space: pre!important;\n"
-            + "}\n"
-            + "textarea: focus.cx_webgl_textinput {\n"
-            + "outline: 0px !important;\n"
-            + "-webkit-appearance: none;\n"
-            + "}"
-
-        document.body.appendChild(style)
+        if (!this.text_input_style) {
+            this.text_input_style = document.createElement('style')
+            this.text_input_style.innerHTML = "\n"
+                + "textarea.cx_webgl_textinput {\n"
+                + "z-index: 1000;\n"
+                + "position: absolute;\n"
+                + "opacity: 0;\n"
+                + "border-radius: 4px;\n"
+                + "color:white;\n"
+                + "font-size: 6;\n"
+                + "background: gray;\n"
+                + "-moz-appearance: none;\n"
+                + "appearance:none;\n"
+                + "border:none;\n"
+                + "resize: none;\n"
+                + "outline: none;\n"
+                + "overflow: hidden;\n"
+                + "text-indent: 0px;\n"
+                + "padding: 0 0px;\n"
+                + "margin: 0 -1px;\n"
+                + "text-indent: 0px;\n"
+                + "-ms-user-select: text;\n"
+                + "-moz-user-select: text;\n"
+                + "-webkit-user-select: text;\n"
+                + "user-select: text;\n"
+                + "white-space: pre!important;\n"
+                + "}\n"
+                + "textarea: focus.cx_webgl_textinput {\n"
+                + "outline: 0px !important;\n"
+                + "-webkit-appearance: none;\n"
+                + "}"
+            document.body.appendChild(this.text_input_style)
+        }
         ta.style.left = -100 + 'px'
         ta.style.top = -100 + 'px'
         ta.style.height = 1 + 'px'
@@ -1715,7 +1770,6 @@ export class WasmWebBrowser extends WasmBridge {
             var ta = this.text_area;
             if (ugly_ime_hack) {
                 ugly_ime_hack = false;
-                document.body.removeChild(ta);
                 this.bind_keyboard();
                 this.update_text_area_pos();
             }

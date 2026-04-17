@@ -61,10 +61,6 @@ impl Cx {
                     continue;
                 }
 
-                if sh.mapping.uses_time {
-                    self.demo_time_repaint = true;
-                }
-
                 if draw_call.instance_dirty || draw_item.os.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
                     if draw_item.os.inst_vb_id.is_none() {

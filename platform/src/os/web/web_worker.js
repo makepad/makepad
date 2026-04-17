@@ -172,7 +172,9 @@ onmessage = async function (e) {
                 body,
                 signal: controller.signal,
             }).then(async response => {
-                console.log("[makepad][http][req]", method, url);
+                if (globalThis.makepad_log_http === true) {
+                    console.log("[makepad][http][req]", method, url);
+                }
                 let response_headers = "";
                 response.headers.forEach((value, key) => {
                     response_headers += `${key}: ${value}\r\n`;
@@ -180,7 +182,9 @@ onmessage = async function (e) {
                 let response_body = new Uint8Array(await response.arrayBuffer());
                 let headers_u8 = string_to_u8(response_headers);
                 let body_u8 = array_to_u8(response_body);
-                console.log("[makepad][http][res]", response.status, url, response_body.length);
+                if (globalThis.makepad_log_http === true) {
+                    console.log("[makepad][http][res]", response.status, url, response_body.length);
+                }
                 wasm.exports.wasm_network_http_response(
                     request_id_lo,
                     request_id_hi,
@@ -332,9 +336,13 @@ onmessage = async function (e) {
                 wasm.exports.__wbindgen_start();
             }
             if (thread_info.timer > 0) {
-                this.setInterval(() => {
-                    wasm.exports.wasm_thread_timer_entrypoint(thread_info.context_ptr);
-                }, thread_info.timer);
+                const timer_tick = () => {
+                    this.setTimeout(() => {
+                        wasm.exports.wasm_thread_timer_entrypoint(thread_info.context_ptr);
+                        timer_tick();
+                    }, thread_info.timer);
+                };
+                timer_tick();
             }
             else {
                 wasm.exports.wasm_thread_entrypoint(thread_info.context_ptr);

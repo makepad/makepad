@@ -962,6 +962,9 @@ export class WasmWebGL extends WasmWebBrowser {
       video_id_lo: args.video_id_lo,
       video_id_hi: args.video_id_hi,
       playing: false,
+      use_video_frame_callback:
+        typeof video.requestVideoFrameCallback === "function",
+      video_frame_callback_id: 0,
       texture_initialized: false,
     };
 
@@ -982,6 +985,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
     video.addEventListener("ended", () => {
       player.playing = false;
+      this.cancel_video_frame_callback(player);
       this.to_wasm.ToWasmVideoPlaybackCompleted({
         video_id_lo: args.video_id_lo,
         video_id_hi: args.video_id_hi,
@@ -991,11 +995,12 @@ export class WasmWebGL extends WasmWebBrowser {
 
     video.addEventListener("play", () => {
       player.playing = true;
-      this.ensure_video_animation_frame();
+      this.schedule_video_texture_updates(player);
     });
 
     video.addEventListener("pause", () => {
       player.playing = false;
+      this.cancel_video_frame_callback(player);
     });
 
     video.src = args.source_url;
@@ -1064,10 +1069,11 @@ export class WasmWebGL extends WasmWebBrowser {
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
+      player.playing = false;
+      this.cancel_video_frame_callback(player);
       player.video.pause();
       player.video.removeAttribute("src");
       player.video.load();
-      player.playing = false;
       delete this.video_players[key];
 
       this.to_wasm.ToWasmVideoPlaybackResourcesReleased({
@@ -1088,60 +1094,113 @@ export class WasmWebGL extends WasmWebBrowser {
     });
   }
 
-  update_video_textures() {
+  schedule_video_texture_updates(player) {
+    if (!player || !player.playing) {
+      return;
+    }
+    if (player.use_video_frame_callback) {
+      if (player.video_frame_callback_id) {
+        return;
+      }
+      let key = player.video_id_lo + "_" + player.video_id_hi;
+      player.video_frame_callback_id = player.video.requestVideoFrameCallback(
+        () => {
+          player.video_frame_callback_id = 0;
+          if (!player.playing || this.video_players[key] !== player) {
+            return;
+          }
+          if (this.update_video_texture(player)) {
+            this.do_wasm_pump();
+          }
+          if (player.playing && this.video_players[key] === player) {
+            this.schedule_video_texture_updates(player);
+          }
+        },
+      );
+      return;
+    }
+    this.ensure_video_animation_frame();
+  }
+
+  cancel_video_frame_callback(player) {
+    if (!player || !player.video_frame_callback_id) {
+      return;
+    }
+    if (
+      player.use_video_frame_callback &&
+      typeof player.video.cancelVideoFrameCallback === "function"
+    ) {
+      player.video.cancelVideoFrameCallback(player.video_frame_callback_id);
+    }
+    player.video_frame_callback_id = 0;
+  }
+
+  update_video_texture(player) {
     let gl = this.gl;
-    let any_playing = false;
+    let video = player.video;
+    if (video.readyState < 2) {
+      return false;
+    }
+
+    let gl_tex = this.textures[player.texture_id];
+    if (!gl_tex) {
+      gl_tex = gl.createTexture();
+      this.textures[player.texture_id] = gl_tex;
+    }
+
+    gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+
+    if (!player.texture_initialized) {
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      player.texture_initialized = true;
+    }
+
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      video,
+    );
+
+    let current_ms = Math.round(video.currentTime * 1000);
+    this.to_wasm.ToWasmVideoTextureUpdated({
+      video_id_lo: player.video_id_lo,
+      video_id_hi: player.video_id_hi,
+      current_position_lo: current_ms & 0xFFFFFFFF,
+      current_position_hi: Math.floor(current_ms / 0x100000000),
+    });
+
+    return true;
+  }
+
+  update_video_textures() {
+    let any_fallback_playing = false;
     let any_updated = false;
 
     for (let key in this.video_players) {
       let player = this.video_players[key];
       if (!player.playing) continue;
 
-      any_playing = true;
-
-      let video = player.video;
-      if (video.readyState < 2) continue;
-
-      any_updated = true;
-
-      let gl_tex = this.textures[player.texture_id];
-      if (!gl_tex) {
-        gl_tex = gl.createTexture();
-        this.textures[player.texture_id] = gl_tex;
+      if (player.use_video_frame_callback) {
+        continue;
       }
 
-      gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+      any_fallback_playing = true;
 
-      if (!player.texture_initialized) {
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        player.texture_initialized = true;
+      if (this.update_video_texture(player)) {
+        any_updated = true;
       }
-
-      gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RGBA,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        video,
-      );
-
-      let current_ms = Math.round(video.currentTime * 1000);
-      this.to_wasm.ToWasmVideoTextureUpdated({
-        video_id_lo: player.video_id_lo,
-        video_id_hi: player.video_id_hi,
-        current_position_lo: current_ms & 0xFFFFFFFF,
-        current_position_hi: Math.floor(current_ms / 0x100000000),
-      });
     }
 
     if (any_updated) {
       this.do_wasm_pump();
     }
-    if (any_playing) {
+    if (any_fallback_playing) {
       this.ensure_video_animation_frame();
     }
   }

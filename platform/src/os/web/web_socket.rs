@@ -10,6 +10,7 @@ pub struct OsWebSocket {
     id: u64,
 }
 
+#[link(wasm_import_module = "env")]
 extern "C" {
     pub fn js_open_web_socket(id: u32, url_ptr: u32, url_len: u32);
     pub fn js_web_socket_send_string(id: u32, str_ptr: u32, url_len: u32);

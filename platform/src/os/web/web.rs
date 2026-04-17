@@ -487,7 +487,6 @@ impl Cx {
         if self.any_passes_dirty()
             || self.need_redrawing()
             || self.new_next_frames.len() != 0
-            || self.demo_time_repaint
         {
             self.os.from_wasm(FromWasmRequestAnimationFrame {});
         }
@@ -1024,6 +1023,7 @@ impl Cx {
     }
 }
 
+#[link(wasm_import_module = "env")]
 extern "C" {
     pub fn js_time_now() -> f64;
 }

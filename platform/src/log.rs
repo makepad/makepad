@@ -60,6 +60,7 @@ pub(crate) fn log_with_level_makepad_platform(
     // lets send out our log message on the studio websocket
     #[cfg(target_arch = "wasm32")]
     {
+        #[link(wasm_import_module = "env")]
         extern "C" {
             pub fn js_console_log(u8_ptr: u32, len: u32);
             pub fn js_console_error(u8_ptr: u32, len: u32);
