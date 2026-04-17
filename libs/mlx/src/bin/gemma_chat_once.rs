@@ -39,11 +39,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut session = GemmaChatSession::load_with_mode(
-        &model_path,
-        Some(max_new_tokens),
-        decode_mode,
-    )?;
+    let mut session =
+        GemmaChatSession::load_with_mode(&model_path, Some(max_new_tokens), decode_mode)?;
     let output = session.send_user_message(prompt)?;
     println!("backend={}", session.backend_label());
     println!("prompt_token_count={}", output.prompt_token_ids.len());

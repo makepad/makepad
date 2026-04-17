@@ -127,11 +127,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "total_image_pipeline_s_avg={:.6}",
         avg_duration(total_total, measured_iters).as_secs_f64()
     );
-    println!("profile_patch_embed_s={:.6}", last_profile.patch_embed.as_secs_f64());
-    println!("profile_layers_total_s={:.6}", last_profile.layers_total.as_secs_f64());
+    println!(
+        "profile_patch_embed_s={:.6}",
+        last_profile.patch_embed.as_secs_f64()
+    );
+    println!(
+        "profile_layers_total_s={:.6}",
+        last_profile.layers_total.as_secs_f64()
+    );
     println!("profile_pool_s={:.6}", last_profile.pool.as_secs_f64());
-    println!("profile_standardize_s={:.6}", last_profile.standardize.as_secs_f64());
-    println!("profile_project_s={:.6}", last_profile.project.as_secs_f64());
+    println!(
+        "profile_standardize_s={:.6}",
+        last_profile.standardize.as_secs_f64()
+    );
+    println!(
+        "profile_project_s={:.6}",
+        last_profile.project.as_secs_f64()
+    );
     println!(
         "profile_layer_input_norm_s={:.6}",
         last_profile.layer_input_norm.as_secs_f64()
@@ -170,7 +182,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "profile_layer_down_proj_post_norm_residual_s={:.6}",
-        last_profile.layer_down_proj_post_norm_residual.as_secs_f64()
+        last_profile
+            .layer_down_proj_post_norm_residual
+            .as_secs_f64()
     );
     println!(
         "profile_layer_fused_mlp_s={:.6}",
