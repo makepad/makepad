@@ -72,10 +72,26 @@ script_mod! {
                 FlowBlockType.TableCell => {
                     sdf.rect(0. 0. self.rect_size.x self.rect_size.y)
                     sdf.fill(self.table_header_bg_color)
-                    sdf.rect(self.rect_size.x-1. 0. 1. self.rect_size.y)
-                    sdf.fill(self.table_border_color)
-                    sdf.rect(0. self.rect_size.y-1. self.rect_size.x 1.)
-                    sdf.fill(self.table_border_color)
+                    // Draw the right/bottom 1px borders as hard-edged
+                    // lines rather than SDF rects, so they stay crisp and
+                    // fully opaque on low-DPI screens where a 1px SDF rect
+                    // gets AA'd across both edges and fades.
+                    //
+                    // Match whichever pixel actually sits in the rightmost
+                    // column / bottom row of the rasterized rect (pos > size - 1)
+                    // rather than a floor-snapped position. Cell dimensions
+                    // can be fractional (total table width isn't always a
+                    // multiple of the column count), and in that case the
+                    // last shaded pixel's local pos exceeds floor(size) by
+                    // a fraction — so floor-snapping would either leave a
+                    // seam at that pixel (gap) or place the line inside,
+                    // leaving a stub past the junction.
+                    let pos = self.pos * self.rect_size
+                    if pos.x > self.rect_size.x - 1.0
+                        || pos.y > self.rect_size.y - 1.0
+                    {
+                        return self.table_border_color
+                    }
                     return sdf.result
                 }
             }
@@ -627,6 +643,11 @@ pub struct TextFlow {
     area_stack: SmallVec<[Area; 4]>,
     #[rust]
     pub font_sizes: SmallVec<[f32; 8]>,
+    /// Per-run vertical baseline shifts, in multiples of the run's font size.
+    /// Positive values shift glyphs down; negative values shift them up.
+    /// Used to render `<sub>` / `<sup>` at a raised or lowered baseline.
+    #[rust]
+    pub y_shift_scales: SmallVec<[f32; 4]>,
     #[rust]
     pub font_colors: SmallVec<[Vec4f; 8]>,
     #[rust]
@@ -693,6 +714,11 @@ pub struct TextFlow {
     table_cell_layout: Layout,
     #[rust]
     pub table_num_columns: usize,
+    /// Horizontal text alignment applied by the layouter within the
+    /// currently active table cell. Set by `begin_table_cell`, cleared
+    /// by `end_table_cell`. Outside a cell it is always 0.0 (left).
+    #[rust]
+    pub cell_text_align_x: f64,
     #[rust]
     pub in_table_header: bool,
     #[rust]
@@ -1106,6 +1132,7 @@ impl TextFlow {
         self.strikethrough.clear();
         self.inline_code.clear();
         self.font_sizes.clear();
+        self.y_shift_scales.clear();
         self.font_colors.clear();
         self.area_stack.clear();
         self.combine_spaces.clear();
@@ -1116,6 +1143,7 @@ impl TextFlow {
         self.table_row_cell_rects.clear();
         self.table_row_is_header = false;
         self.table_is_first_row = false;
+        self.cell_text_align_x = 0.0;
     }
 
     pub fn push_size_rel_scale(&mut self, scale: f64) {
@@ -1513,7 +1541,12 @@ impl TextFlow {
         self.table_is_first_row = false;
     }
 
-    pub fn begin_table_cell(&mut self, cx: &mut Cx2d) {
+    /// Begin a table cell with horizontal alignment of its contents.
+    ///
+    /// `align_x` follows `Layout::align.x` semantics: 0.0 = left, 0.5 = center,
+    /// 1.0 = right. For wrapped multi-row content, the whole content block is
+    /// shifted by the same amount (not aligned per-row).
+    pub fn begin_table_cell(&mut self, cx: &mut Cx2d, align_x: f64) {
         let cell_width = if self.table_num_columns > 0 {
             cx.turtle().inner_width() / self.table_num_columns as f64
         } else {
@@ -1524,13 +1557,17 @@ impl TextFlow {
             height: Size::Fit { min: None, max: None },
             ..Walk::default()
         };
-        cx.begin_turtle(walk, self.table_cell_layout);
+        let mut layout = self.table_cell_layout;
+        layout.align.x = align_x;
+        cx.begin_turtle(walk, layout);
         self.first_thing_on_a_line = true;
+        self.cell_text_align_x = align_x;
     }
 
     pub fn end_table_cell(&mut self, cx: &mut Cx2d) {
         let cell_rect = cx.end_turtle();
         self.table_row_cell_rects.push(cell_rect);
+        self.cell_text_align_x = 0.0;
     }
 
     pub fn draw_item_counted(&mut self, cx: &mut Cx2d, template: LiveId) -> LiveId {
@@ -1759,7 +1796,12 @@ impl TextFlow {
             let font_color = self.font_colors.last().unwrap_or(&self.font_color);
             self.draw_text.text_style.font_size = *font_size as _;
             self.draw_text.color = *font_color;
-            self.draw_text.temp_y_shift = top_drop;
+            let y_shift_scale = self.y_shift_scales.last().copied().unwrap_or(0.0);
+            self.draw_text.temp_y_shift = top_drop + y_shift_scale;
+            self.draw_text.layout_align = Align {
+                x: self.cell_text_align_x,
+                y: 0.0,
+            };
 
             // Widget-level max_lines: compute how many layouter rows this run
             // is allowed. A "continuation" run starts mid-line (turtle x > left
@@ -1811,7 +1853,7 @@ impl TextFlow {
                     row_height,
                     max_width,
                     wrap,
-                    Align::default(),
+                    dt.layout_align,
                     text,
                 );
 
