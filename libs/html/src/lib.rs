@@ -322,7 +322,22 @@ pub fn parse_html(
                     Ok(entity) => {
                         *in_entity = None;
                         decoded.truncate(start);
-                        decoded.push(std::char::from_u32(entity).unwrap());
+                        let ch = std::char::from_u32(entity).unwrap();
+                        decoded.push(ch);
+                        // While the entity body was being scanned, each
+                        // character was appended to `decoded` and (if
+                        // non-whitespace) advanced `last_non_whitespace`.
+                        // After truncating, that index is now stale and
+                        // must be corrected — otherwise the next real
+                        // whitespace char collapses against a phantom
+                        // non-whitespace position past the buffer end, and
+                        // gets silently dropped.
+                        if ch.is_whitespace() {
+                            *last_non_whitespace =
+                                (*last_non_whitespace).min(start);
+                        } else {
+                            *last_non_whitespace = decoded.len();
+                        }
                         return;
                     }
                 }

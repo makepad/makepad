@@ -1513,7 +1513,49 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             }
             Flow::Right { wrap: true, .. } => {
                 if turtle.deferred_fills.is_empty() {
-                    // TODO
+                    // Horizontal alignment for a wrapping row flow. This only
+                    // shifts walks whose reported `outer_size.x` is narrower
+                    // than the inner width. Text-heavy callers usually want
+                    // per-row text alignment, which the text layouter handles
+                    // via its own `align` option (see `DrawText::layout`).
+                    if turtle.align().x != 0.0 {
+                        let inner_effective_width = turtle.effective_inner_width();
+                        let align_x = turtle.align().x;
+                        let finished_rows_start = turtle.finished_rows_start;
+                        let finished_rows_end = self.finished_rows.len();
+
+                        let mut row_walks_start = turtle_walks_start;
+                        for row_idx in finished_rows_start..finished_rows_end {
+                            let row_walks_end = self.finished_rows[row_idx];
+
+                            let mut row_width = 0.0_f64;
+                            for walk_idx in row_walks_start..row_walks_end {
+                                row_width += self.finished_walks[walk_idx].outer_size.x;
+                            }
+                            let row_unused_width =
+                                (inner_effective_width - row_width).max(0.0);
+                            let dx = align_x * row_unused_width;
+
+                            if dx != 0.0 {
+                                for walk_idx in row_walks_start..row_walks_end {
+                                    let align_list_start =
+                                        self.finished_walks[walk_idx].align_list_start;
+                                    let align_list_end =
+                                        self.finished_walk_align_list_end(walk_idx);
+                                    self.move_align_list(
+                                        align_list_start,
+                                        align_list_end,
+                                        dx,
+                                        0.0,
+                                        false,
+                                    );
+                                    turtle = self.turtles.last_mut().unwrap();
+                                }
+                            }
+
+                            row_walks_start = row_walks_end;
+                        }
+                    }
                 } else {
                     panic!()
                 }

@@ -330,9 +330,19 @@ impl Html {
 
             some_id!(sub) => {
                 tf.push_size_rel_scale(0.7);
+                // Shift the subscript baseline downward, relative to the
+                // subscript's own (smaller) font size. The value has to
+                // also cancel the natural upward drift that comes from a
+                // smaller font having a smaller ascender.
+                tf.y_shift_scales.push(0.55);
             }
             some_id!(sup) => {
                 tf.push_size_rel_scale(0.7);
+                // Shift the superscript baseline upward, relative to the
+                // superscript's own (smaller) font size. Smaller-than-the
+                // subscript shift because the smaller ascender already
+                // raises the baseline a bit on its own.
+                tf.y_shift_scales.push(-0.2);
             }
             some_id!(ul) => {
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
@@ -417,12 +427,12 @@ impl Html {
             }
             some_id!(th) => {
                 tf.table_row_is_header = true;
-                tf.begin_table_cell(cx);
+                tf.begin_table_cell(cx, cell_align_x(node));
                 tf.bold.push();
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             some_id!(td) => {
-                tf.begin_table_cell(cx);
+                tf.begin_table_cell(cx, cell_align_x(node));
                 trim_whitespace_in_text = TrimWhitespaceInText::Trim;
             }
             Some(x) => return (Some(x), trim_whitespace_in_text),
@@ -476,9 +486,11 @@ impl Html {
             }
             some_id!(sub) => {
                 tf.font_sizes.pop();
+                tf.y_shift_scales.pop();
             }
             some_id!(sup) => {
                 tf.font_sizes.pop();
+                tf.y_shift_scales.pop();
             }
             some_id!(ul) | some_id!(ol) => {
                 list_stack.pop();
@@ -966,5 +978,40 @@ pub fn to_roman_numeral(mut count: i32) -> Option<String> {
         Some(output)
     } else {
         None
+    }
+}
+
+/// Returns the horizontal alignment (`Layout::align.x`) for a `<td>` / `<th>`
+/// cell, based on an inline `style="text-align: ..."` declaration or the
+/// legacy HTML `align` attribute. `style` wins when both are set, matching
+/// CSS precedence over presentational attributes. Defaults to left (0.0)
+/// when unspecified or unrecognized.
+fn cell_align_x(node: &HtmlWalker) -> f64 {
+    if let Some(style) = node.find_attr_lc(live_id!(style)) {
+        for decl in style.split(';') {
+            let Some((prop, value)) = decl.split_once(':') else {
+                continue;
+            };
+            if prop.trim().eq_ignore_ascii_case("text-align") {
+                if let Some(x) = align_keyword_to_x(value.trim()) {
+                    return x;
+                }
+            }
+        }
+    }
+    if let Some(align) = node.find_attr_lc(live_id!(align)) {
+        if let Some(x) = align_keyword_to_x(align) {
+            return x;
+        }
+    }
+    0.0
+}
+
+fn align_keyword_to_x(keyword: &str) -> Option<f64> {
+    match keyword.trim().to_ascii_lowercase().as_str() {
+        "left" | "start" | "justify" => Some(0.0),
+        "center" => Some(0.5),
+        "right" | "end" => Some(1.0),
+        _ => None,
     }
 }

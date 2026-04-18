@@ -1292,6 +1292,13 @@ pub struct DrawText {
     #[live]
     pub temp_y_shift: f32,
 
+    /// Per-row horizontal alignment applied by the text layouter when the
+    /// text does not fill the full `max_width_in_lpxs`. `x: 0.0` = left,
+    /// `0.5` = center, `1.0` = right. `y` is currently unused by the
+    /// layouter. Reset to `Align::default()` per draw by callers that care.
+    #[rust]
+    pub layout_align: Align,
+
     /// Maximum number of lines to display. 0 means unlimited (default).
     /// When text exceeds this many lines, excess lines are hidden.
     /// Combined with `text_overflow: Ellipsis`, an ellipsis is appended
@@ -2230,7 +2237,7 @@ impl DrawText {
             row_height as f32,
             max_width_in_lpxs,
             wrap,
-            Align::default(),
+            self.layout_align,
             text_str,
         );
         self.draw_text(cx, origin_in_lpxs, &text);
