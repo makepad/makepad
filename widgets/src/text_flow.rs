@@ -1143,6 +1143,7 @@ impl TextFlow {
         self.table_row_cell_rects.clear();
         self.table_row_is_header = false;
         self.table_is_first_row = false;
+        self.cell_text_align_x = 0.0;
     }
 
     pub fn push_size_rel_scale(&mut self, scale: f64) {
@@ -1852,7 +1853,7 @@ impl TextFlow {
                     row_height,
                     max_width,
                     wrap,
-                    Align::default(),
+                    dt.layout_align,
                     text,
                 );
 

@@ -982,15 +982,11 @@ pub fn to_roman_numeral(mut count: i32) -> Option<String> {
 }
 
 /// Returns the horizontal alignment (`Layout::align.x`) for a `<td>` / `<th>`
-/// cell, based on the HTML `align` attribute or an inline
-/// `style="text-align: ..."` declaration. Defaults to left (0.0) when
-/// unspecified or unrecognized.
+/// cell, based on an inline `style="text-align: ..."` declaration or the
+/// legacy HTML `align` attribute. `style` wins when both are set, matching
+/// CSS precedence over presentational attributes. Defaults to left (0.0)
+/// when unspecified or unrecognized.
 fn cell_align_x(node: &HtmlWalker) -> f64 {
-    if let Some(align) = node.find_attr_lc(live_id!(align)) {
-        if let Some(x) = align_keyword_to_x(align) {
-            return x;
-        }
-    }
     if let Some(style) = node.find_attr_lc(live_id!(style)) {
         for decl in style.split(';') {
             let Some((prop, value)) = decl.split_once(':') else {
@@ -1001,6 +997,11 @@ fn cell_align_x(node: &HtmlWalker) -> f64 {
                     return x;
                 }
             }
+        }
+    }
+    if let Some(align) = node.find_attr_lc(live_id!(align)) {
+        if let Some(x) = align_keyword_to_x(align) {
+            return x;
         }
     }
     0.0
