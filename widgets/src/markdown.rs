@@ -3,7 +3,9 @@ use crate::{
     widget::*, WidgetMatchEvent,
 };
 
-use pulldown_cmark::{CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    Alignment, CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -268,6 +270,10 @@ impl Markdown {
         // Track state for nested formatting
         let mut list_stack: Vec<ListState> = Vec::new();
         let mut is_first_block = true;
+        // Per-column alignments for the current table, and the current cell's
+        // column index within its row. Both are reset when a new table starts.
+        let mut table_alignments: Vec<Alignment> = Vec::new();
+        let mut table_cell_index: usize = 0;
 
         let parser = Parser::new_ext(
             self.body.as_ref(),
@@ -541,13 +547,18 @@ impl Markdown {
                     }
                     is_first_block = false;
                     tf.begin_table(cx, alignments.len());
+                    table_alignments = alignments;
+                    table_cell_index = 0;
                 }
                 MdEvent::End(TagEnd::Table) => {
                     tf.end_table(cx);
                     tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    table_alignments.clear();
+                    table_cell_index = 0;
                 }
                 MdEvent::Start(Tag::TableHead) => {
                     tf.begin_table_header_row(cx);
+                    table_cell_index = 0;
                 }
                 MdEvent::End(TagEnd::TableHead) => {
                     tf.end_table_row(cx);
@@ -555,12 +566,17 @@ impl Markdown {
                 }
                 MdEvent::Start(Tag::TableRow) => {
                     tf.begin_table_row(cx);
+                    table_cell_index = 0;
                 }
                 MdEvent::End(TagEnd::TableRow) => {
                     tf.end_table_row(cx);
                 }
                 MdEvent::Start(Tag::TableCell) => {
-                    tf.begin_table_cell(cx);
+                    let align_x = table_alignments
+                        .get(table_cell_index)
+                        .map(alignment_to_x)
+                        .unwrap_or(0.0);
+                    tf.begin_table_cell(cx, align_x);
                     if tf.in_table_header {
                         tf.bold.push();
                     }
@@ -570,10 +586,44 @@ impl Markdown {
                         tf.bold.pop();
                     }
                     tf.end_table_cell(cx);
+                    table_cell_index += 1;
+                }
+                MdEvent::InlineHtml(text) => {
+                    // Support a handful of inline HTML tags that have no
+                    // CommonMark equivalent. Anything not matched is ignored,
+                    // matching the pre-existing behavior.
+                    match text.trim().to_ascii_lowercase().as_str() {
+                        "<sub>" => {
+                            tf.push_size_rel_scale(0.7);
+                            tf.y_shift_scales.push(0.55);
+                        }
+                        "</sub>" => {
+                            tf.font_sizes.pop();
+                            tf.y_shift_scales.pop();
+                        }
+                        "<sup>" => {
+                            tf.push_size_rel_scale(0.7);
+                            tf.y_shift_scales.push(-0.2);
+                        }
+                        "</sup>" => {
+                            tf.font_sizes.pop();
+                            tf.y_shift_scales.pop();
+                        }
+                        _ => {}
+                    }
                 }
                 _ => {} // Unimplemented or unnecessary events
             }
         }
+    }
+}
+
+/// Maps pulldown_cmark table-column alignment to `Layout::align.x`.
+fn alignment_to_x(alignment: &Alignment) -> f64 {
+    match alignment {
+        Alignment::None | Alignment::Left => 0.0,
+        Alignment::Center => 0.5,
+        Alignment::Right => 1.0,
     }
 }
 
