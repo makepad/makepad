@@ -133,12 +133,36 @@ script_mod! {
 
         a := mod.widgets.HtmlLink{}
 
-        // Triangle that expands/collapses a <details> section. The lowercase
-        // tag name `details_arrow` is the template id used by the Html widget
-        // when it encounters a <summary> tag.
+        // Triangle that expands/collapses a <details> section.
+        //
+        // The default FoldButton shader draws a hard-coded 5-wide triangle at
+        // x=5, which doesn't scale with the button's rect. We override the
+        // pixel function so the triangle is centered in `rect_size` and sized
+        // proportionally, letting the widget set the walk at runtime based on
+        // the surrounding summary font size. Width, height, and margin are
+        // computed per-draw and passed via `draw_walk_fold_button`.
         details_arrow := mod.widgets.FoldButton{
-            width: 14 height: 14
-            margin: Inset{left: 0., right: 3., top: 3., bottom: 0.}
+            draw_bg +: {
+                pixel: fn() {
+                    let c = self.rect_size * 0.5
+                    let sz = self.rect_size.y * 0.28
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.clear(vec4(0.))
+                    sdf.rotate(self.active * 0.5 * PI + 0.5 * PI, c.x, c.y)
+                    sdf.move_to(c.x - sz, c.y + sz)
+                    sdf.line_to(c.x, c.y - sz)
+                    sdf.line_to(c.x + sz, c.y + sz)
+                    sdf.close_path()
+                    sdf.fill(
+                        mix(
+                            mix(self.color, self.color_hover, self.hover)
+                            mix(self.color_active, self.color_hover, self.hover)
+                            self.active
+                        )
+                    )
+                    return sdf.result * self.fade
+                }
+            }
         }
 
         draw_block +: {
@@ -266,6 +290,19 @@ impl ScriptHook for Html {
 }
 
 impl Html {
+    /// Vertical spacing inserted before a `<details>` opens and after it
+    /// closes, in pixels, scaled by the current font size. Keeps the block
+    /// from butting up against surrounding content. A single helper so the
+    /// open and close handlers can't drift out of sync.
+    fn details_margin_em(&self) -> f64 {
+        let fs = *self
+            .text_flow
+            .font_sizes
+            .last()
+            .unwrap_or(&self.text_flow.font_size) as f64;
+        fs * 0.22
+    }
+
     fn count_table_columns(nodes: &[HtmlNode], start_index: usize) -> usize {
         let mut count = 0;
         let mut in_first_row = false;
@@ -723,7 +760,12 @@ impl Widget for Html {
                         id: details_id,
                         is_open: initial_open,
                     });
-                    self.text_flow.new_line_collapsed(cx);
+                    // Small top margin so a `<details>` doesn't butt up
+                    // against the preceding content. Scaled by the current
+                    // font size so it tracks headings, sub/superscript, etc.
+                    // A matching bottom margin is applied at `</details>`.
+                    self.text_flow
+                        .new_line_collapsed_with_spacing(cx, self.details_margin_em());
                     node.walk();
                     continue;
                 }
@@ -745,15 +787,42 @@ impl Widget for Html {
                                 .font_colors
                                 .last()
                                 .unwrap_or(&self.text_flow.font_color);
+                            let font_size = *self
+                                .text_flow
+                                .font_sizes
+                                .last()
+                                .unwrap_or(&self.text_flow.font_size)
+                                as f64;
                             let needs_seed =
                                 !self.seen_details.contains(&details_id);
+                            // Walk scaled to the current summary font size so
+                            // the triangle tracks headings, `<sub>`, etc. The
+                            // right margin is the gap between triangle and
+                            // summary text. The top margin pushes the box
+                            // down so the triangle's center lines up with
+                            // the text's optical middle — `Flow::Right` uses
+                            // `RowAlign::Top`, and a font_size-tall box on
+                            // its own sits above the text baseline.
+                            let triangle_walk = Walk {
+                                abs_pos: None,
+                                width: Size::Fixed(font_size),
+                                height: Size::Fixed(font_size),
+                                margin: Inset {
+                                    left: 0.0,
+                                    right: font_size * 0.2,
+                                    top: font_size * 0.25,
+                                    bottom: 0.0,
+                                },
+                                metrics: Metrics::default(),
+                            };
                             // One borrow for all FoldButton mutations: seed
                             // the animator state on first sight (so the
                             // `open` HTML attribute is honored before any
                             // user click), override the triangle color so it
-                            // matches the summary text, and read the current
+                            // matches the summary text, read the current
                             // open state back so `</summary>` knows whether
-                            // to enter skip mode.
+                            // to enter skip mode, and draw the triangle with
+                            // a runtime-computed walk.
                             if let Some(mut fb) = fb_ref.borrow_mut::<FoldButton>() {
                                 if needs_seed {
                                     fb.set_is_open(cx, initial_open, Animate::No);
@@ -763,12 +832,11 @@ impl Widget for Html {
                                 if let Some(dl) = self.details_stack.last_mut() {
                                     dl.is_open = is_open;
                                 }
+                                fb.draw_walk_fold_button(cx, triangle_walk);
                             }
                             if needs_seed {
                                 self.seen_details.insert(details_id);
                             }
-                            // Draw the triangle inline on the current line.
-                            fb_ref.draw_all(cx, &mut Scope::empty());
                         }
                     }
                     // Start tracking the glyph rects that get drawn for the
@@ -851,7 +919,9 @@ impl Widget for Html {
                 }
                 if close_tag == live_id!(details) {
                     self.details_stack.pop();
-                    self.text_flow.new_line_collapsed(cx);
+                    // Matching bottom margin (see `<details>` open handler).
+                    self.text_flow
+                        .new_line_collapsed_with_spacing(cx, self.details_margin_em());
                     node.walk();
                     continue;
                 }
