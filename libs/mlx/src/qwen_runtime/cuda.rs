@@ -379,14 +379,12 @@ struct CudaQwenRecurrentLayer {
 }
 
 struct CudaQwenMoeLayer {
-    ffn_gate_inp: CudaAffineTensor,
+    ffn_gate_inp_shared: CudaAffineTensor,
     ffn_gate_up_exps: Option<CudaAffineTensor>,
     ffn_gate_exps: Option<CudaAffineTensor>,
     ffn_up_exps: Option<CudaAffineTensor>,
     ffn_down_exps: CudaAffineTensor,
-    ffn_gate_inp_shexp: CudaAffineTensor,
-    ffn_gate_shexp: CudaAffineTensor,
-    ffn_up_shexp: CudaAffineTensor,
+    ffn_gate_up_shexp: CudaAffineTensor,
     ffn_down_shexp: CudaAffineTensor,
 }
 
@@ -442,8 +440,7 @@ struct CudaQwenWorkspace {
     moe_routed_accum: CudaBuffer,
     moe_output: CudaBuffer,
     moe_shared_gate_scalar: CudaBuffer,
-    moe_shared_gate: CudaBuffer,
-    moe_shared_up: CudaBuffer,
+    moe_shared_gate_up: CudaBuffer,
     moe_shared_act: CudaBuffer,
     moe_shared_down: CudaBuffer,
     moe_expert_gate_up: CudaBuffer,
@@ -480,6 +477,7 @@ struct CudaQwenDecodeSession {
     capacity_tokens: usize,
     layer_states: Vec<CudaQwenLayerState>,
     workspace: CudaQwenWorkspace,
+    token_state: CudaQwenGraphTokenState,
     disallowed_count: usize,
 }
 
@@ -506,8 +504,8 @@ struct CudaQwenPrefillGraph {
 
 struct CudaQwenDecodeGraph {
     exec: CudaGraphExec,
-    token_state: CudaQwenGraphTokenState,
-    argmax_out: CudaMappedHostU32Buffer,
+    token_state: CudaQwenDeviceTokenState,
+    argmax_out: CudaBuffer,
 }
 
 struct CudaQwenDecodeChunkGraph {
@@ -1081,14 +1079,15 @@ impl CudaQwenTextRuntime {
             attn_proj: self.cuda.alloc_f32(self.hidden_size)?,
             residual: self.cuda.alloc_f32(self.hidden_size)?,
             ffn_input: self.cuda.alloc_f32(self.hidden_size)?,
-            moe_router_logits: self.cuda.alloc_f32(self.expert_count)?,
+            moe_router_logits: self.cuda.alloc_f32(self.expert_count + 1)?,
             moe_route_indices: self.cuda.alloc_u32(self.experts_used_count)?,
             moe_route_weights: self.cuda.alloc_f32(self.experts_used_count)?,
             moe_routed_accum: self.cuda.alloc_f32(self.hidden_size)?,
             moe_output: self.cuda.alloc_f32(self.hidden_size)?,
             moe_shared_gate_scalar: self.cuda.alloc_f32(1)?,
-            moe_shared_gate: self.cuda.alloc_f32(self.shared_expert_intermediate)?,
-            moe_shared_up: self.cuda.alloc_f32(self.shared_expert_intermediate)?,
+            moe_shared_gate_up: self
+                .cuda
+                .alloc_f32(self.shared_expert_intermediate * 2)?,
             moe_shared_act: self.cuda.alloc_f32(self.shared_expert_intermediate)?,
             moe_shared_down: self.cuda.alloc_f32(self.hidden_size)?,
             moe_expert_gate_up: self.cuda.alloc_f32(self.expert_intermediate * 2)?,
@@ -1140,6 +1139,7 @@ impl CudaQwenTextRuntime {
             capacity_tokens,
             layer_states,
             workspace,
+            token_state: self.alloc_graph_token_state()?,
             disallowed_count: disallowed_token_ids.len(),
         })
     }
@@ -1259,13 +1259,19 @@ impl CudaQwenTextRuntime {
         &self,
         session: &mut CudaQwenDecodeSession,
     ) -> CudaResult<CudaQwenDecodeGraph> {
-        let token_state = self.alloc_graph_token_state()?;
-        let argmax_out = self.cuda.alloc_mapped_u32(1)?;
+        let token_state = self.alloc_device_token_state()?;
+        let argmax_out = self.cuda.alloc_u32(1)?;
         self.reset_decode_session(session)?;
-        self.write_graph_token_state(&token_state, 0, 0, 0)?;
-        argmax_out.write_u32(0, 0)?;
+        self.write_device_token_state(&token_state, 0, 0, 0)?;
+        self.cuda.write_u32(&argmax_out, 0)?;
         self.cuda.begin_capture()?;
-        self.eval_token_logits_graph(session, &token_state)?;
+        self.eval_token_logits_graph_ptrs(
+            session,
+            token_state.token_id.device_u32_ptr(),
+            token_state.position.device_u32_ptr(),
+            token_state.seq_len.device_u32_ptr(),
+            token_state.start_slot.device_u32_ptr(),
+        )?;
         self.cuda.masked_argmax_f32_device_u32_ptr(
             &session.workspace.logits,
             &session.workspace.disallowed_token_ids,
@@ -1413,7 +1419,7 @@ impl CudaQwenTextRuntime {
                 session.capacity_tokens, position
             ));
         }
-        self.write_graph_token_state(
+        self.write_device_token_state(
             &decode_graph.token_state,
             token_id,
             position,
@@ -1429,7 +1435,7 @@ impl CudaQwenTextRuntime {
             return sample_token_from_logits_f32(logits.as_slice(), disallowed_token_ids, sampling, rng)
                 .map(|token| token.token_id);
         }
-        decode_graph.argmax_out.read_u32(0)
+        self.cuda.read_u32(&decode_graph.argmax_out)
     }
 
     fn eval_token_chunk_graph(
@@ -1478,6 +1484,23 @@ impl CudaQwenTextRuntime {
                 "qwen cuda session capacity {} exceeded by position {}",
                 session.capacity_tokens, position
             ));
+        }
+        if !trace_layers {
+            self.write_graph_token_state(
+                &session.token_state,
+                token_id,
+                position,
+                session.disallowed_count,
+            )?;
+            self.eval_token_logits_graph_ptrs(
+                session,
+                session.token_state.token_id.device_u32_ptr(),
+                session.token_state.position.device_u32_ptr(),
+                session.token_state.seq_len.device_u32_ptr(),
+                session.token_state.start_slot.device_u32_ptr(),
+            )?;
+            self.set_attention_stored_tokens(session, position + 1);
+            return Ok(());
         }
         self.token_embd.get_row(
             &self.cuda,
@@ -1900,9 +1923,12 @@ impl CudaQwenTextRuntime {
                     .read_f32s(&session.workspace.ffn_input, self.hidden_size)?;
                 let exact_router_logits = self
                     .cuda
-                    .read_f32s(&session.workspace.moe_router_logits, self.expert_count)?;
+                    .read_f32s(&session.workspace.moe_router_logits, self.expert_count + 1)?;
                 let (_exact_router_probabilities, exact_routes) =
-                    softmax_top_k_routes(&exact_router_logits, self.experts_used_count)?;
+                    softmax_top_k_routes(
+                        &exact_router_logits[..self.expert_count],
+                        self.experts_used_count,
+                    )?;
                 let exact_routed_output = self
                     .cuda
                     .read_f32s(&session.workspace.moe_routed_accum, self.hidden_size)?;
@@ -2379,7 +2405,7 @@ impl CudaQwenTextRuntime {
             &workspace.residual,
             self.hidden_size,
         )?;
-        self.eval_moe(
+        self.eval_moe_device(
             &layer.moe,
             &layer.post_attention_norm,
             workspace,
@@ -2557,16 +2583,20 @@ impl CudaQwenTextRuntime {
         )?;
         self.cuda
             .f32_to_bf16(&workspace.ffn_input, &workspace.hidden_bf16, self.hidden_size)?;
-        moe.ffn_gate_inp
+        moe.ffn_gate_inp_shared
             .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_router_logits)?;
         if trace_moe {
             eprintln!("[qwen-moe-trace] router");
         }
         let router_logits = self
             .cuda
-            .read_f32s(&workspace.moe_router_logits, self.expert_count)?;
+            .read_f32s(&workspace.moe_router_logits, self.expert_count + 1)?;
+        let shared_gate_logit = router_logits
+            .get(self.expert_count)
+            .copied()
+            .ok_or_else(|| "missing qwen moe shared gate logit".to_string())?;
         let (_router_probabilities, routed_experts) =
-            softmax_top_k_routes(&router_logits, self.experts_used_count)?;
+            softmax_top_k_routes(&router_logits[..self.expert_count], self.experts_used_count)?;
         if trace_moe {
             eprintln!("[qwen-moe-trace] topk");
         }
@@ -2646,16 +2676,12 @@ impl CudaQwenTextRuntime {
         if trace_moe {
             eprintln!("[qwen-moe-trace] shared");
         }
-        moe.ffn_gate_inp_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate_scalar)?;
-        moe.ffn_gate_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate)?;
-        moe.ffn_up_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_up)?;
-        self.cuda.qwen_silu_mul_f32(
-            &workspace.moe_shared_up,
-            &workspace.moe_shared_gate,
+        moe.ffn_gate_up_shexp
+            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate_up)?;
+        self.cuda.qwen_swiglu_split_f32(
+            &workspace.moe_shared_gate_up,
             &workspace.moe_shared_act,
+            self.shared_expert_intermediate,
             self.shared_expert_intermediate,
         )?;
         self.cuda.f32_to_bf16(
@@ -2668,15 +2694,9 @@ impl CudaQwenTextRuntime {
             &workspace.moe_expert_act_bf16,
             &workspace.moe_shared_down,
         )?;
-        let shared_gate = self
-            .cuda
-            .read_f32s(&workspace.moe_shared_gate_scalar, 1)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| "missing qwen moe shared gate scalar".to_string())?;
         self.cuda.scale_f32_inplace(
             &workspace.moe_shared_down,
-            sigmoid_f32(shared_gate),
+            sigmoid_f32(shared_gate_logit),
             self.hidden_size,
         )?;
         self.cuda.add_f32(
@@ -2714,7 +2734,7 @@ impl CudaQwenTextRuntime {
         )?;
         self.cuda
             .f32_to_bf16(&workspace.ffn_input, &workspace.hidden_bf16, self.hidden_size)?;
-        moe.ffn_gate_inp
+        moe.ffn_gate_inp_shared
             .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_router_logits)?;
         if trace_moe {
             eprintln!("[qwen-moe-trace] router");
@@ -2861,16 +2881,12 @@ impl CudaQwenTextRuntime {
         if trace_moe {
             eprintln!("[qwen-moe-trace] shared");
         }
-        moe.ffn_gate_inp_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate_scalar)?;
-        moe.ffn_gate_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate)?;
-        moe.ffn_up_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_up)?;
-        self.cuda.qwen_silu_mul_f32(
-            &workspace.moe_shared_up,
-            &workspace.moe_shared_gate,
+        moe.ffn_gate_up_shexp
+            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate_up)?;
+        self.cuda.qwen_swiglu_split_f32(
+            &workspace.moe_shared_gate_up,
             &workspace.moe_shared_act,
+            self.shared_expert_intermediate,
             self.shared_expert_intermediate,
         )?;
         self.cuda.f32_to_bf16(
@@ -2883,9 +2899,11 @@ impl CudaQwenTextRuntime {
             &workspace.moe_expert_act_bf16,
             &workspace.moe_shared_down,
         )?;
-        self.cuda.qwen_sigmoid_f32(
+        self.cuda.qwen_sigmoid_f32_offsets(
+            &workspace.moe_router_logits,
+            self.expert_count,
             &workspace.moe_shared_gate_scalar,
-            &workspace.moe_shared_gate_scalar,
+            0,
             1,
         )?;
         self.cuda.scale_f32_inplace_device_f32_index(
@@ -3000,6 +3018,247 @@ impl CudaAffineTensor {
             )?,
             bits: quantization.bits,
             out_rows,
+            weight_words_per_row,
+            qparams_per_row,
+            plane_count,
+            weight_words_per_plane,
+            qparams_words_per_plane,
+        })
+    }
+
+    fn load_concat_rows(
+        cuda: &CudaRuntime,
+        weights: &MlxQwen35MoeIndexedSafetensors,
+        weight_names: &[&str],
+    ) -> CudaResult<Self> {
+        if weight_names.is_empty() {
+            return Err("concat affine load requires at least one tensor".to_string());
+        }
+
+        struct ConcatAffineSource {
+            packed_weights: Vec<u8>,
+            scales: Vec<u8>,
+            biases: Vec<u8>,
+            plane_count: usize,
+            weight_words_per_row: usize,
+            qparams_per_row: usize,
+            weight_words_per_plane: usize,
+            qparams_words_per_plane: usize,
+        }
+
+        let mut sources = Vec::with_capacity(weight_names.len());
+        let mut bits = None;
+        let mut weight_words_per_row = None;
+        let mut qparams_per_row = None;
+        let mut plane_count = None;
+        let mut total_rows = 0usize;
+
+        for &weight_name in weight_names {
+            let quantization = weights
+                .quantization_for_tensor(weight_name)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("tensor {weight_name} is missing quantization config"))?;
+            if quantization.mode != "affine" || !matches!(quantization.bits, 4 | 8) {
+                return Err(format!(
+                    "tensor {weight_name} uses unsupported quantization {:?}",
+                    quantization
+                ));
+            }
+            let weight_entry = weights.tensor(weight_name).map_err(|err| err.to_string())?;
+            if weight_entry.dtype != MlxDType::U32 {
+                return Err(format!(
+                    "tensor {weight_name} expected U32, got {:?}",
+                    weight_entry.dtype
+                ));
+            }
+            let actual_weight_name = weights
+                .actual_tensor_name(weight_name)
+                .map_err(|err| err.to_string())?;
+            let (actual_scales_name, actual_biases_name) = actual_affine_qparam_names(actual_weight_name);
+            let scales_entry = weights
+                .tensor(&actual_scales_name)
+                .map_err(|err| err.to_string())?;
+            let biases_entry = weights
+                .tensor(&actual_biases_name)
+                .map_err(|err| err.to_string())?;
+            if scales_entry.dtype != MlxDType::BF16 || biases_entry.dtype != MlxDType::BF16 {
+                return Err(format!(
+                    "tensor {weight_name} qparams expected BF16, got {:?} / {:?}",
+                    scales_entry.dtype, biases_entry.dtype
+                ));
+            }
+            let (current_plane_count, rows, cols, current_qparams_per_row) =
+                match weight_entry.shape.as_slice() {
+                    [rows, cols] => (
+                        1usize,
+                        *rows as usize,
+                        *cols as usize,
+                        *scales_entry.shape.get(1).ok_or_else(|| {
+                            format!("tensor {weight_name} scales missing rank-2 dim")
+                        })? as usize,
+                    ),
+                    [planes, rows, cols] => (
+                        *planes as usize,
+                        *rows as usize,
+                        *cols as usize,
+                        *scales_entry.shape.get(2).ok_or_else(|| {
+                            format!("tensor {weight_name} scales missing rank-3 dim")
+                        })? as usize,
+                    ),
+                    other => {
+                        return Err(format!(
+                            "tensor {weight_name} expected rank 2 or 3 for concat load, got {:?}",
+                            other
+                        ))
+                    }
+                };
+            let current_weight_words_per_row = cols;
+            match bits {
+                Some(existing) if existing != quantization.bits => {
+                    return Err(format!(
+                        "concat affine tensors use mismatched bits: {} vs {}",
+                        existing, quantization.bits
+                    ))
+                }
+                None => bits = Some(quantization.bits),
+                _ => {}
+            }
+            match weight_words_per_row {
+                Some(existing) if existing != current_weight_words_per_row => {
+                    return Err(format!(
+                        "concat affine tensors use mismatched row widths: {} vs {}",
+                        existing, current_weight_words_per_row
+                    ))
+                }
+                None => weight_words_per_row = Some(current_weight_words_per_row),
+                _ => {}
+            }
+            match qparams_per_row {
+                Some(existing) if existing != current_qparams_per_row => {
+                    return Err(format!(
+                        "concat affine tensors use mismatched qparams rows: {} vs {}",
+                        existing, current_qparams_per_row
+                    ))
+                }
+                None => qparams_per_row = Some(current_qparams_per_row),
+                _ => {}
+            }
+            match plane_count {
+                Some(existing) if existing != current_plane_count => {
+                    return Err(format!(
+                        "concat affine tensors use mismatched plane counts: {} vs {}",
+                        existing, current_plane_count
+                    ))
+                }
+                None => plane_count = Some(current_plane_count),
+                _ => {}
+            }
+            let current_weight_words_per_plane = rows
+                .checked_mul(current_weight_words_per_row)
+                .ok_or_else(|| format!("tensor {weight_name} plane weight size overflow"))?;
+            let current_qparams_words_per_plane = rows
+                .checked_mul(current_qparams_per_row)
+                .ok_or_else(|| format!("tensor {weight_name} plane qparam size overflow"))?;
+            total_rows = total_rows
+                .checked_add(rows)
+                .ok_or_else(|| "concat affine total row count overflow".to_string())?;
+            sources.push(ConcatAffineSource {
+                packed_weights: weights
+                    .read_tensor_bytes(actual_weight_name)
+                    .map_err(|err| err.to_string())?,
+                scales: weights
+                    .read_tensor_bytes(&actual_scales_name)
+                    .map_err(|err| err.to_string())?,
+                biases: weights
+                    .read_tensor_bytes(&actual_biases_name)
+                    .map_err(|err| err.to_string())?,
+                plane_count: current_plane_count,
+                weight_words_per_row: current_weight_words_per_row,
+                qparams_per_row: current_qparams_per_row,
+                weight_words_per_plane: current_weight_words_per_plane,
+                qparams_words_per_plane: current_qparams_words_per_plane,
+            });
+        }
+
+        let bits = bits.ok_or_else(|| "missing concat affine quantization bits".to_string())?;
+        let weight_words_per_row =
+            weight_words_per_row.ok_or_else(|| "missing concat affine row width".to_string())?;
+        let qparams_per_row =
+            qparams_per_row.ok_or_else(|| "missing concat affine qparams row width".to_string())?;
+        let plane_count = plane_count.ok_or_else(|| "missing concat affine plane count".to_string())?;
+        let weight_words_per_plane = total_rows
+            .checked_mul(weight_words_per_row)
+            .ok_or_else(|| "concat affine plane weight size overflow".to_string())?;
+        let qparams_words_per_plane = total_rows
+            .checked_mul(qparams_per_row)
+            .ok_or_else(|| "concat affine plane qparam size overflow".to_string())?;
+        let mut packed_weights = Vec::with_capacity(
+            plane_count
+                .checked_mul(weight_words_per_plane)
+                .and_then(|words| words.checked_mul(std::mem::size_of::<u32>()))
+                .ok_or_else(|| "concat affine packed weight byte size overflow".to_string())?,
+        );
+        let mut scales = Vec::with_capacity(
+            plane_count
+                .checked_mul(qparams_words_per_plane)
+                .and_then(|words| words.checked_mul(std::mem::size_of::<u16>()))
+                .ok_or_else(|| "concat affine scale byte size overflow".to_string())?,
+        );
+        let mut biases = Vec::with_capacity(
+            plane_count
+                .checked_mul(qparams_words_per_plane)
+                .and_then(|words| words.checked_mul(std::mem::size_of::<u16>()))
+                .ok_or_else(|| "concat affine bias byte size overflow".to_string())?,
+        );
+
+        if plane_count == 1 {
+            for source in &sources {
+                packed_weights.extend_from_slice(&source.packed_weights);
+                scales.extend_from_slice(&source.scales);
+                biases.extend_from_slice(&source.biases);
+            }
+        } else {
+            for plane in 0..plane_count {
+                for source in &sources {
+                    if source.plane_count != plane_count
+                        || source.weight_words_per_row != weight_words_per_row
+                        || source.qparams_per_row != qparams_per_row
+                    {
+                        return Err("concat affine source metadata drifted unexpectedly".to_string());
+                    }
+                    let weight_plane_bytes = source
+                        .weight_words_per_plane
+                        .checked_mul(std::mem::size_of::<u32>())
+                        .ok_or_else(|| "concat affine weight plane byte size overflow".to_string())?;
+                    let qparam_plane_bytes = source
+                        .qparams_words_per_plane
+                        .checked_mul(std::mem::size_of::<u16>())
+                        .ok_or_else(|| "concat affine qparam plane byte size overflow".to_string())?;
+                    let weight_start = plane
+                        .checked_mul(weight_plane_bytes)
+                        .ok_or_else(|| "concat affine weight plane offset overflow".to_string())?;
+                    let qparam_start = plane
+                        .checked_mul(qparam_plane_bytes)
+                        .ok_or_else(|| "concat affine qparam plane offset overflow".to_string())?;
+                    packed_weights.extend_from_slice(
+                        &source.packed_weights[weight_start..weight_start + weight_plane_bytes],
+                    );
+                    scales.extend_from_slice(
+                        &source.scales[qparam_start..qparam_start + qparam_plane_bytes],
+                    );
+                    biases.extend_from_slice(
+                        &source.biases[qparam_start..qparam_start + qparam_plane_bytes],
+                    );
+                }
+            }
+        }
+
+        Ok(Self {
+            packed_weights: cuda.load_bytes(&packed_weights)?,
+            scales: cuda.load_bytes(&scales)?,
+            biases: cuda.load_bytes(&biases)?,
+            bits,
+            out_rows: total_rows,
             weight_words_per_row,
             qparams_per_row,
             plane_count,
@@ -3219,27 +3478,48 @@ impl CudaQwenMoeLayer {
         weights: &MlxQwen35MoeIndexedSafetensors,
         moe: &crate::MlxQwen35MoeMoeTensors,
     ) -> CudaResult<Self> {
+        let ffn_gate_up_exps = if let Some(name) = moe.ffn_gate_up_exps.as_ref() {
+            Some(CudaAffineTensor::load(cuda, weights, name)?)
+        } else if let (Some(gate_name), Some(up_name)) =
+            (moe.ffn_gate_exps.as_ref(), moe.ffn_up_exps.as_ref())
+        {
+            Some(CudaAffineTensor::load_concat_rows(
+                cuda,
+                weights,
+                &[gate_name, up_name],
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
-            ffn_gate_inp: CudaAffineTensor::load(cuda, weights, &moe.ffn_gate_inp)?,
-            ffn_gate_up_exps: moe
-                .ffn_gate_up_exps
-                .as_ref()
-                .map(|name| CudaAffineTensor::load(cuda, weights, name))
-                .transpose()?,
-            ffn_gate_exps: moe
-                .ffn_gate_exps
-                .as_ref()
-                .map(|name| CudaAffineTensor::load(cuda, weights, name))
-                .transpose()?,
-            ffn_up_exps: moe
-                .ffn_up_exps
-                .as_ref()
-                .map(|name| CudaAffineTensor::load(cuda, weights, name))
-                .transpose()?,
+            ffn_gate_inp_shared: CudaAffineTensor::load_concat_rows(
+                cuda,
+                weights,
+                &[&moe.ffn_gate_inp, &moe.ffn_gate_inp_shexp],
+            )?,
+            ffn_gate_up_exps,
+            ffn_gate_exps: if moe.ffn_gate_up_exps.is_some() {
+                moe.ffn_gate_exps
+                    .as_ref()
+                    .map(|name| CudaAffineTensor::load(cuda, weights, name))
+                    .transpose()?
+            } else {
+                None
+            },
+            ffn_up_exps: if moe.ffn_gate_up_exps.is_some() {
+                moe.ffn_up_exps
+                    .as_ref()
+                    .map(|name| CudaAffineTensor::load(cuda, weights, name))
+                    .transpose()?
+            } else {
+                None
+            },
             ffn_down_exps: CudaAffineTensor::load(cuda, weights, &moe.ffn_down_exps)?,
-            ffn_gate_inp_shexp: CudaAffineTensor::load(cuda, weights, &moe.ffn_gate_inp_shexp)?,
-            ffn_gate_shexp: CudaAffineTensor::load(cuda, weights, &moe.ffn_gate_shexp)?,
-            ffn_up_shexp: CudaAffineTensor::load(cuda, weights, &moe.ffn_up_shexp)?,
+            ffn_gate_up_shexp: CudaAffineTensor::load_concat_rows(
+                cuda,
+                weights,
+                &[&moe.ffn_gate_shexp, &moe.ffn_up_shexp],
+            )?,
             ffn_down_shexp: CudaAffineTensor::load(cuda, weights, &moe.ffn_down_shexp)?,
         })
     }
@@ -3441,13 +3721,17 @@ impl CudaQwenTextRuntime {
             .write_bytes(&workspace.ffn_input, f32s_as_le_bytes(ffn_input))?;
         self.cuda
             .f32_to_bf16(&workspace.ffn_input, &workspace.hidden_bf16, self.hidden_size)?;
-        moe.ffn_gate_inp
+        moe.ffn_gate_inp_shared
             .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_router_logits)?;
         let router_logits = self
             .cuda
-            .read_f32s(&workspace.moe_router_logits, self.expert_count)?;
+            .read_f32s(&workspace.moe_router_logits, self.expert_count + 1)?;
+        let shared_gate_logit = router_logits
+            .get(self.expert_count)
+            .copied()
+            .ok_or_else(|| "missing shared gate logit".to_string())?;
         let (router_probabilities, routed_experts) =
-            softmax_top_k_routes(&router_logits, self.experts_used_count)?;
+            softmax_top_k_routes(&router_logits[..self.expert_count], self.experts_used_count)?;
         zero_buffer_f32(&self.cuda, &workspace.moe_routed_accum, self.hidden_size)?;
         for route in &routed_experts {
             if let Some(merged) = &moe.ffn_gate_up_exps {
@@ -3518,16 +3802,12 @@ impl CudaQwenTextRuntime {
             .cuda
             .read_f32s(&workspace.moe_routed_accum, self.hidden_size)?;
 
-        moe.ffn_gate_inp_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate_scalar)?;
-        moe.ffn_gate_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate)?;
-        moe.ffn_up_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_up)?;
-        self.cuda.qwen_silu_mul_f32(
-            &workspace.moe_shared_up,
-            &workspace.moe_shared_gate,
+        moe.ffn_gate_up_shexp
+            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate_up)?;
+        self.cuda.qwen_swiglu_split_f32(
+            &workspace.moe_shared_gate_up,
             &workspace.moe_shared_act,
+            self.shared_expert_intermediate,
             self.shared_expert_intermediate,
         )?;
         self.cuda.f32_to_bf16(
@@ -3540,15 +3820,9 @@ impl CudaQwenTextRuntime {
             &workspace.moe_expert_act_bf16,
             &workspace.moe_shared_down,
         )?;
-        let shared_gate = self
-            .cuda
-            .read_f32s(&workspace.moe_shared_gate_scalar, 1)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| "missing shared gate scalar".to_string())?;
         self.cuda.scale_f32_inplace(
             &workspace.moe_shared_down,
-            sigmoid_f32(shared_gate),
+            sigmoid_f32(shared_gate_logit),
             self.hidden_size,
         )?;
         let shared_output = self
@@ -3568,7 +3842,7 @@ impl CudaQwenTextRuntime {
             router_probabilities,
             routed_experts,
             routed_output,
-            shared_gate: sigmoid_f32(shared_gate),
+            shared_gate: sigmoid_f32(shared_gate_logit),
             shared_output,
             output,
         })
