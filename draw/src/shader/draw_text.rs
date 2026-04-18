@@ -2148,11 +2148,10 @@ impl DrawText {
             }
         }
 
-        let wrap = cx.turtle().layout().flow
-            == Flow::Right {
-                row_align: RowAlign::Top,
-                wrap: true,
-            };
+        let wrap = matches!(
+            cx.turtle().layout().flow,
+            Flow::Right { wrap: true, .. }
+        );
 
         let text = self.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, align, text);
         self.draw_walk_laidout(cx, walk, &text)
@@ -2208,29 +2207,37 @@ impl DrawText {
     /// Draws text within the current turtle flow, calling `f` for each laid-out row.
     /// Returns `(row_count, is_truncated)`: the number of rows produced, and whether
     /// the text was truncated (e.g., by `max_lines` / ellipsis).
+    ///
+    /// When text wraps to multiple visual rows, each row is emitted as its own
+    /// `FinishedWalk` with a single-row `outer_size.y`. Between rows,
+    /// `turtle_new_line_with_spacing` is called to finish the previous visual
+    /// row (triggering `finish_row` → `RowAlign::Center`, etc.) and position
+    /// the turtle for the next row. This lets per-row alignment work correctly
+    /// when inline block widgets (pills, badges, etc.) share a visual row with
+    /// text of a different height.
     pub fn draw_walk_resumable_with(
         &mut self,
         cx: &mut Cx2d,
         text_str: &str,
         mut f: impl FnMut(&mut Cx2d, Rect, f32),
     ) -> (usize, bool) {
+        // ── Layout parameters ──
         let turtle_pos = cx.turtle().pos();
         let turtle_rect = cx.turtle().inner_rect();
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
         let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
         let row_height = cx.turtle().next_row_offset();
-
         let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
             Some(turtle_rect.size.x as f32)
         } else {
             None
         };
-        let wrap = cx.turtle().layout().flow
-            == Flow::Right {
-                row_align: RowAlign::Top,
-                wrap: true,
-            };
+        let wrap = matches!(
+            cx.turtle().layout().flow,
+            Flow::Right { wrap: true, .. }
+        );
 
+        // ── Text layout ──
         let text = self.layout(
             cx,
             first_row_indent_in_lpxs,
@@ -2240,84 +2247,201 @@ impl DrawText {
             self.layout_align,
             text_str,
         );
-        self.draw_text(cx, origin_in_lpxs, &text);
 
+        // ── Common computations ──
         let last_row = text.rows.last().unwrap();
-        let new_turtle_pos = origin_in_lpxs
-            + Size::new(
-                last_row.width_in_lpxs,
-                last_row.origin_in_lpxs.y - last_row.ascender_in_lpxs,
-            ) * self.font_scale;
+        let new_turtle_pos = {
+            let p = origin_in_lpxs
+                + Size::new(
+                    last_row.width_in_lpxs,
+                    last_row.origin_in_lpxs.y - last_row.ascender_in_lpxs,
+                ) * self.font_scale;
+            dvec2(p.x as f64, p.y as f64)
+        };
         let used_size_in_lpxs = text.size_in_lpxs * self.font_scale;
-        // Account for temp_y_shift in the allocated height so that shifted
-        // glyphs (e.g., from top_drop) don't get clipped by their container.
-        let shift_extra_height = if self.temp_y_shift != 0.0 {
-            let fs = text
-                .rows
-                .first()
-                .and_then(|r| r.glyphs.first())
-                .map(|g| g.font_size_in_lpxs)
-                .unwrap_or(0.0);
-            (self.temp_y_shift * fs * self.font_scale).abs() as f64
-        } else {
-            0.0
-        };
-        let new_turtle_pos = dvec2(new_turtle_pos.x as f64, new_turtle_pos.y as f64);
-        let turtle = cx.turtle_mut();
+        let shift_y = text.rows.first()
+            .and_then(|r| r.glyphs.first())
+            .map(|g| g.font_size_in_lpxs * self.temp_y_shift)
+            .unwrap_or(0.0);
 
-        turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
-        turtle.allocate_width(used_size_in_lpxs.width as f64);
-        turtle.allocate_height(used_size_in_lpxs.height as f64 + shift_extra_height);
-        turtle.move_to(new_turtle_pos);
+        // ── Decide whether to use per-row glyph batching ──
+        // Per-row batching gives each visual row its own AlignEntry so that
+        // finish_row alignment shifts apply independently per row. This
+        // requires a fresh draw (no `many_instances` reuse buffer).
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        let per_row = self.many_instances.is_none() && text.rows.len() > 1;
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        let per_row = false;
 
-        turtle.set_wrap_spacing(
-            (last_row.ascender_in_lpxs * last_row.line_spacing_scale - last_row.ascender_in_lpxs)
-                as f64,
-        );
+        if per_row {
+            // ── PER-ROW path ──
+            // Draw each visual row as a separate instance batch so its glyphs
+            // get their own AlignEntry. Emit a FinishedWalk per row and call
+            // turtle_new_line between rows so finish_row runs at each row
+            // boundary — enabling RowAlign::Center to center text relative to
+            // any inline widget (pill) on the same visual row.
 
-        cx.emit_turtle_walk(Rect {
-            pos: new_turtle_pos,
-            size: dvec2(
-                used_size_in_lpxs.width as f64,
-                used_size_in_lpxs.height as f64 + shift_extra_height,
-            ),
-        });
+            self.update_draw_vars(cx);
+            self.glyph_depth = self.draw_depth;
+            let saved_extend_area = self.extend_area;
 
-        let shift = if let Some(row) = text.rows.first() {
-            if let Some(glyph) = row.glyphs.first() {
-                glyph.font_size_in_lpxs * self.temp_y_shift
-            } else {
-                0.0
+            for (row_idx, row) in text.rows.iter().enumerate() {
+                let row_h =
+                    ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale) as f64;
+
+                // Between rows: finish the previous visual row (triggers
+                // finish_row → RowAlign::Center) and position for the next.
+                if row_idx > 0 {
+                    let ws = cx.turtle().wrap_spacing();
+                    cx.turtle_new_line_with_spacing(ws);
+                    self.extend_area = true;
+                }
+
+                // Compute row_origin: for row 0 (continuation row), use the
+                // layouter's position (correct indent on the existing line).
+                // For wrapped rows (1+), use the TURTLE's current position so
+                // glyphs land where the turtle tracks — not at the layouter's
+                // position which doesn't account for taller inline widgets
+                // (pills) inflating the previous row's height.
+                let row_origin = if row_idx == 0 {
+                    origin_in_lpxs + Size::from(row.origin_in_lpxs) * self.font_scale
+                } else {
+                    let tp = cx.turtle().pos();
+                    Point::new(
+                        tp.x as f32 + row.origin_in_lpxs.x * self.font_scale,
+                        tp.y as f32 + row.ascender_in_lpxs * self.font_scale,
+                    )
+                };
+                let row_top_y = (row_origin.y - row.ascender_in_lpxs * self.font_scale) as f64;
+
+                // Draw this row's glyphs as a separate aligned-instance batch.
+                let row_als = cx.align_list_len();
+                if let Some(mut instances) =
+                    cx.begin_many_aligned_instances(&self.draw_vars)
+                {
+                    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                    self.draw_row(cx, row_origin, row, &mut instances.instances);
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
+                    let _ = (row_origin, row, &mut instances.instances);
+                    self.finish_many_instances(cx, instances);
+                }
+
+                // Update turtle allocation for this row.
+                if row_idx == 0 {
+                    let turtle = cx.turtle_mut();
+                    turtle.move_to(dvec2(
+                        origin_in_lpxs.x as f64,
+                        origin_in_lpxs.y as f64,
+                    ));
+                    turtle.allocate_width(used_size_in_lpxs.width as f64);
+                    turtle.allocate_height(row_h);
+                } else {
+                    let turtle = cx.turtle_mut();
+                    turtle.allocate_height(row_h);
+                    turtle.allocate_width(
+                        (row.width_in_lpxs * self.font_scale) as f64,
+                    );
+                }
+
+                // Set wrap spacing from this row's line-spacing metrics.
+                cx.turtle_mut().set_wrap_spacing(
+                    (row.ascender_in_lpxs * row.line_spacing_scale
+                        - row.ascender_in_lpxs) as f64,
+                );
+
+                // Call the `f` callback for this row (draws inline-code bg,
+                // strikethrough, underline, or plain area tracking).
+                let (sx, ex) = row_span_x_bounds_in_lpxs(
+                    row,
+                    row_idx == 0,
+                    row_idx + 1 == text.rows.len(),
+                );
+                f(
+                    cx,
+                    rect(
+                        (row_origin.x + sx * self.font_scale) as f64,
+                        row_top_y + shift_y as f64,
+                        ((ex - sx) * self.font_scale) as f64,
+                        row_h,
+                    ),
+                    row.ascender_in_lpxs,
+                );
+
+                // Emit a per-row FinishedWalk covering this row's glyphs +
+                // callback rect-areas.
+                cx.emit_turtle_walk(
+                    Rect {
+                        pos: dvec2(row_origin.x as f64, row_top_y),
+                        size: dvec2(
+                            (row.width_in_lpxs * self.font_scale) as f64,
+                            row_h,
+                        ),
+                    },
+                    row_als,
+                );
             }
-        } else {
-            0.0
-        };
 
-        for (row_index, row) in text.rows.iter().enumerate() {
-            let (start_x_in_lpxs, end_x_in_lpxs) =
-                row_span_x_bounds_in_lpxs(row, row_index == 0, row_index + 1 == text.rows.len());
-            let rect_in_lpxs = TextRect::new(
-                Point::new(
-                    origin_in_lpxs.x + (row.origin_in_lpxs.x + start_x_in_lpxs) * self.font_scale,
-                    origin_in_lpxs.y
-                        + (row.origin_in_lpxs.y - row.ascender_in_lpxs) * self.font_scale,
-                ),
-                Size::new(
-                    (end_x_in_lpxs - start_x_in_lpxs) * self.font_scale,
-                    (row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale,
-                ),
+            // Position turtle at end of last row for subsequent inline content.
+            // pos.y is already at the last row's top (from turtle_new_line).
+            // Advance pos.x past the last row's text width.
+            let last = text.rows.last().unwrap();
+            let end_x = cx.turtle().pos().x
+                + (last.width_in_lpxs * self.font_scale) as f64;
+            let end_y = cx.turtle().pos().y;
+            cx.turtle_mut().move_to(dvec2(end_x, end_y));
+            self.extend_area = saved_extend_area;
+            self.flush_slug_textures_if_allowed(cx);
+        } else {
+            // ── SINGLE-WALK path (single-row text, reuse mode, or Linux/Win) ──
+            let align_list_start = cx.align_list_len();
+            self.draw_text(cx, origin_in_lpxs, &text);
+
+            let turtle = cx.turtle_mut();
+            turtle.move_to(dvec2(origin_in_lpxs.x as f64, origin_in_lpxs.y as f64));
+            turtle.allocate_width(used_size_in_lpxs.width as f64);
+            turtle.allocate_height(used_size_in_lpxs.height as f64);
+            turtle.move_to(new_turtle_pos);
+            turtle.set_wrap_spacing(
+                (last_row.ascender_in_lpxs * last_row.line_spacing_scale
+                    - last_row.ascender_in_lpxs) as f64,
             );
-            f(
-                cx,
-                rect(
-                    rect_in_lpxs.origin.x as f64,
-                    rect_in_lpxs.origin.y as f64 + shift as f64,
-                    rect_in_lpxs.size.width as f64,
-                    rect_in_lpxs.size.height as f64,
-                ),
-                row.ascender_in_lpxs,
-            )
+
+            cx.emit_turtle_walk(
+                Rect {
+                    pos: new_turtle_pos,
+                    size: dvec2(
+                        used_size_in_lpxs.width as f64,
+                        used_size_in_lpxs.height as f64,
+                    ),
+                },
+                align_list_start,
+            );
+
+            for (row_index, row) in text.rows.iter().enumerate() {
+                let (sx, ex) = row_span_x_bounds_in_lpxs(
+                    row,
+                    row_index == 0,
+                    row_index + 1 == text.rows.len(),
+                );
+                f(
+                    cx,
+                    rect(
+                        (origin_in_lpxs.x
+                            + (row.origin_in_lpxs.x + sx) * self.font_scale)
+                            as f64,
+                        (origin_in_lpxs.y
+                            + (row.origin_in_lpxs.y - row.ascender_in_lpxs)
+                                * self.font_scale) as f64
+                            + shift_y as f64,
+                        ((ex - sx) * self.font_scale) as f64,
+                        ((row.ascender_in_lpxs - row.descender_in_lpxs)
+                            * self.font_scale) as f64,
+                    ),
+                    row.ascender_in_lpxs,
+                );
+            }
         }
+
         (text.rows.len(), text.is_truncated)
     }
 

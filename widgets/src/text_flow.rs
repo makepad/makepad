@@ -1845,7 +1845,10 @@ impl TextFlow {
                 } else {
                     None
                 };
-                let wrap = cx.turtle().layout().flow == Flow::right_wrap();
+                let wrap = matches!(
+                    cx.turtle().layout().flow,
+                    Flow::Right { wrap: true, .. }
+                );
 
                 let laidout_text = dt.layout(
                     cx,
@@ -1869,12 +1872,21 @@ impl TextFlow {
                     let rect = TextFlow::walk_margin(cx, self.inline_code_margin.left);
                     areas_tracker.track_rect(cx, rect);
                 }
+                let code_pad_h = (self.inline_code_padding.top
+                    + self.inline_code_padding.bottom
+                    + self.inline_code_margin.top
+                    + self.inline_code_margin.bottom) as f64;
                 let result = dt.draw_walk_resumable_with(cx, text, |cx, mut rect, _| {
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
                     db.draw_abs(cx, rect);
                     areas_tracker.track_rect(cx, rect);
                 });
+                // The inline_code padding/margin extends the visual rect
+                // beyond what draw_walk_resumable_with allocated in the
+                // turtle. Grow used_height so the next row starts below the
+                // padded area instead of overlapping it.
+                cx.turtle_mut().allocate_height(code_pad_h);
                 let rect = TextFlow::walk_margin(cx, self.inline_code_margin.right);
                 areas_tracker.track_rect(cx, rect);
                 result
