@@ -2312,7 +2312,10 @@ impl DrawText {
                 if let Some(mut instances) =
                     cx.begin_many_aligned_instances(&self.draw_vars)
                 {
+                    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                     self.draw_row(cx, row_origin, row, &mut instances.instances);
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
+                    let _ = (row_origin, row, &mut instances.instances);
                     self.finish_many_instances(cx, instances);
                 }
 
