@@ -591,11 +591,14 @@ impl Widget for Html {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Route clicks on the summary line to the matching FoldButton so the
         // whole summary toggles, not just the triangle. Hit-test on the
-        // transparent DrawQuad area that was emitted over the summary rect
-        // — that's an `Area::Instance` so `event.hits` handles mouse/touch
-        // capture uniformly, the same way HtmlLink does.
+        // transparent DrawQuad areas emitted over each summary rect — those
+        // are `Area::Instance`s, so `event.hits` handles mouse/touch capture
+        // uniformly, the same way HtmlLink does.
+        //
+        // `LiveId` and `Area` are both `Copy`, so we can iterate by value
+        // without cloning the Vec.
         let mut details_toggle: Option<LiveId> = None;
-        for (details_id, area) in self.summary_click_areas.clone() {
+        for &(details_id, area) in &self.summary_click_areas {
             match event.hits(cx, area) {
                 Hit::FingerHoverIn(_) => {
                     cx.set_cursor(MouseCursor::Hand);
@@ -612,27 +615,54 @@ impl Widget for Html {
 
         if let Some(details_id) = details_toggle {
             let fb_ref = self.text_flow.existing_item(details_id);
-            if let Some(mut fb) = fb_ref.borrow_mut::<FoldButton>() {
-                let new_state = !fb.is_open(cx);
-                fb.set_is_open(cx, new_state, Animate::Yes);
+            // Scope the RefMut so it drops before we reborrow text_flow for
+            // redraw. The `drop(fb)` trick won't satisfy the borrow checker
+            // here — an explicit block cleanly ends the borrow.
+            let toggled = {
+                if let Some(mut fb) = fb_ref.borrow_mut::<FoldButton>() {
+                    let new_state = !fb.is_open(cx);
+                    fb.set_is_open(cx, new_state, Animate::Yes);
+                    true
+                } else {
+                    false
+                }
+            };
+            if toggled {
+                self.text_flow.redraw(cx);
             }
-            self.text_flow.redraw(cx);
         }
 
         self.text_flow.handle_event(cx, event, scope);
 
-        // When a <details> FoldButton toggles from its own click handler,
-        // redraw so collapsed-body content appears/disappears. Animator frames
-        // fire Animating actions too, but those already drive FoldButton's own
-        // redraw; we only need to rebuild the TextFlow on the open/close edge.
+        // When a `<details>` FoldButton toggles from its own click handler,
+        // redraw so the collapsed body appears/disappears. We filter by
+        // widget_uid so an unrelated FoldButton elsewhere in the app doesn't
+        // trigger an Html redraw. Animator frames fire `Animating` actions
+        // too, but those already drive the FoldButton's own redraw — we only
+        // need to rebuild the TextFlow on the open/close edge.
         if let Event::Actions(actions) = event {
-            for action in actions {
-                if let Some(widget_action) = action.as_widget_action() {
-                    if matches!(
-                        widget_action.cast::<FoldButtonAction>(),
-                        FoldButtonAction::Opening | FoldButtonAction::Closing
-                    ) {
+            'outer: for action in actions {
+                let Some(widget_action) = action.as_widget_action() else {
+                    continue;
+                };
+                if !matches!(
+                    widget_action.cast::<FoldButtonAction>(),
+                    FoldButtonAction::Opening | FoldButtonAction::Closing
+                ) {
+                    continue;
+                }
+                // Scan our own fold buttons for a uid match. `seen_details`
+                // is the set of details ids we've instantiated buttons for,
+                // and existing_item resolves each to its WidgetRef without
+                // going through the global widget tree. Typical details
+                // counts per Html are small (<10), so this is cheap.
+                let ids: SmallVec<[LiveId; 8]> =
+                    self.seen_details.iter().copied().collect();
+                for id in ids {
+                    let fb_ref = self.text_flow.existing_item(id);
+                    if fb_ref.widget_uid() == widget_action.widget_uid {
                         self.text_flow.redraw(cx);
+                        break 'outer;
                     }
                 }
             }
@@ -708,31 +738,34 @@ impl Widget for Html {
                             live_id!(details_arrow),
                         );
                         if let Some(fb_ref) = fb_ref {
-                            // Seed the FoldButton's animator state from the
-                            // `open` HTML attribute on first creation only —
-                            // subsequent redraws must respect user clicks.
-                            if !self.seen_details.contains(&details_id) {
-                                if let Some(mut fb) = fb_ref.borrow_mut::<FoldButton>() {
-                                    fb.set_is_open(cx, initial_open, Animate::No);
-                                }
-                                self.seen_details.insert(details_id);
-                            }
-                            // Read the current open state back from the widget
-                            // so the post-summary skip decision uses the truth.
-                            // Also override the triangle color to match the
-                            // current summary text color so the two read as a
-                            // single unit.
+                            // Read these before borrowing fb so we don't
+                            // hold two borrows of self.text_flow at once.
                             let summary_color = *self
                                 .text_flow
                                 .font_colors
                                 .last()
                                 .unwrap_or(&self.text_flow.font_color);
+                            let needs_seed =
+                                !self.seen_details.contains(&details_id);
+                            // One borrow for all FoldButton mutations: seed
+                            // the animator state on first sight (so the
+                            // `open` HTML attribute is honored before any
+                            // user click), override the triangle color so it
+                            // matches the summary text, and read the current
+                            // open state back so `</summary>` knows whether
+                            // to enter skip mode.
                             if let Some(mut fb) = fb_ref.borrow_mut::<FoldButton>() {
+                                if needs_seed {
+                                    fb.set_is_open(cx, initial_open, Animate::No);
+                                }
+                                fb.set_draw_color(cx, summary_color);
                                 let is_open = fb.is_open(cx);
                                 if let Some(dl) = self.details_stack.last_mut() {
                                     dl.is_open = is_open;
                                 }
-                                fb.set_draw_color(cx, summary_color);
+                            }
+                            if needs_seed {
+                                self.seen_details.insert(details_id);
                             }
                             // Draw the triangle inline on the current line.
                             fb_ref.draw_all(cx, &mut Scope::empty());
@@ -806,11 +839,11 @@ impl Widget for Html {
                             self.summary_click_areas.push((dl.id, new_area));
                         }
                     }
-                    if self
-                        .details_stack
-                        .last()
-                        .map_or(true, |dl| !dl.is_open)
-                    {
+                    // Only enter skip mode when there is an enclosing
+                    // `<details>` that is collapsed. A stray `<summary>` with
+                    // no parent `<details>` must not skip to the end of the
+                    // document, which is what `map_or(true, ...)` would do.
+                    if matches!(self.details_stack.last(), Some(dl) if !dl.is_open) {
                         self.skip_details_depth = Some(0);
                     }
                     node.walk();
@@ -1128,7 +1161,7 @@ impl HtmlLinkRef {
 }
 
 /// The state of a single `<details>` element as tracked during a draw walk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct DetailsLevel {
     /// Stable per-document-position id, also used as the LiveId for this
     /// details element's embedded FoldButton in the TextFlow item map.
