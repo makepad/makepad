@@ -1867,6 +1867,39 @@ mod imp {
             buffer.inner.read_f32s(len, self.stream)
         }
 
+        pub fn read_f32s_offset(
+            &self,
+            buffer: &CudaBuffer,
+            offset_elems: usize,
+            len: usize,
+        ) -> Result<Vec<f32>, String> {
+            self.prepare_device()?;
+            let mut out = vec![0.0f32; len];
+            let byte_len = len
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "CUDA read_f32s_offset byte size overflow".to_string())?;
+            unsafe {
+                let src = std::ptr::NonNull::new_unchecked(
+                    buffer
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(offset_elems)
+                        .cast::<c_void>(),
+                );
+                makepad_cuda::memcpy_async_device_to_host(
+                    out.as_mut_ptr().cast::<c_void>(),
+                    src,
+                    byte_len,
+                    self.stream,
+                )
+                .map_err(|err| err.to_string())?;
+            }
+            self.synchronize()?;
+            Ok(out)
+        }
+
         pub fn read_bytes(&self, buffer: &CudaBuffer, len: usize) -> Result<Vec<u8>, String> {
             self.prepare_device()?;
             buffer.inner.read_bytes(len, self.stream)
@@ -2898,11 +2931,32 @@ mod imp {
             output: &CudaBuffer,
             n: usize,
         ) -> Result<(), String> {
+            self.qwen_sigmoid_f32_offsets(input, 0, output, 0, n)
+        }
+
+        pub fn qwen_sigmoid_f32_offsets(
+            &self,
+            input: &CudaBuffer,
+            input_offset_elems: usize,
+            output: &CudaBuffer,
+            output_offset_elems: usize,
+            n: usize,
+        ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_qwen_sigmoid_f32(
-                    input.inner.ptr.as_ptr().cast::<f32>(),
-                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    input
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(input_offset_elems),
+                    output
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(output_offset_elems),
                     n as u32,
                     self.stream,
                 )
@@ -2937,12 +2991,35 @@ mod imp {
             output: &CudaBuffer,
             n: usize,
         ) -> Result<(), String> {
+            self.qwen_silu_mul_f32_offsets(values, 0, gate, 0, output, 0, n)
+        }
+
+        pub fn qwen_silu_mul_f32_offsets(
+            &self,
+            values: &CudaBuffer,
+            values_offset_elems: usize,
+            gate: &CudaBuffer,
+            gate_offset_elems: usize,
+            output: &CudaBuffer,
+            output_offset_elems: usize,
+            n: usize,
+        ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_qwen_silu_mul_f32(
-                    values.inner.ptr.as_ptr().cast::<f32>(),
-                    gate.inner.ptr.as_ptr().cast::<f32>(),
-                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    values
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(values_offset_elems),
+                    gate.inner.ptr.as_ptr().cast::<f32>().add(gate_offset_elems),
+                    output
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(output_offset_elems),
                     n as u32,
                     self.stream,
                 )
@@ -3000,13 +3077,48 @@ mod imp {
             output: &CudaBuffer,
             n: usize,
         ) -> Result<(), String> {
+            self.qwen_decay_gate_f32_offsets(a_log, 0, alpha, 0, dt_bias, 0, output, 0, n)
+        }
+
+        pub fn qwen_decay_gate_f32_offsets(
+            &self,
+            a_log: &CudaBuffer,
+            a_log_offset_elems: usize,
+            alpha: &CudaBuffer,
+            alpha_offset_elems: usize,
+            dt_bias: &CudaBuffer,
+            dt_bias_offset_elems: usize,
+            output: &CudaBuffer,
+            output_offset_elems: usize,
+            n: usize,
+        ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_qwen_decay_gate_f32(
-                    a_log.inner.ptr.as_ptr().cast::<f32>(),
-                    alpha.inner.ptr.as_ptr().cast::<f32>(),
-                    dt_bias.inner.ptr.as_ptr().cast::<f32>(),
-                    output.inner.ptr.as_ptr().cast::<f32>(),
+                    a_log
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(a_log_offset_elems),
+                    alpha
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(alpha_offset_elems),
+                    dt_bias
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(dt_bias_offset_elems),
+                    output
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(output_offset_elems),
                     n as u32,
                     self.stream,
                 )
@@ -3809,11 +3921,44 @@ mod imp {
             max_tokens: usize,
             slot: usize,
         ) -> Result<(), String> {
+            self.kv_append_f32_offsets(
+                keys,
+                0,
+                values,
+                0,
+                key_cache,
+                value_cache,
+                kv_head_count,
+                head_dim,
+                max_tokens,
+                slot,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn kv_append_f32_offsets(
+            &self,
+            keys: &CudaBuffer,
+            key_offset_elems: usize,
+            values: &CudaBuffer,
+            value_offset_elems: usize,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            kv_head_count: usize,
+            head_dim: usize,
+            max_tokens: usize,
+            slot: usize,
+        ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_kv_append_f32(
-                    keys.inner.ptr.as_ptr().cast::<f32>(),
-                    values.inner.ptr.as_ptr().cast::<f32>(),
+                    keys.inner.ptr.as_ptr().cast::<f32>().add(key_offset_elems),
+                    values
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(value_offset_elems),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     kv_head_count as u32,
@@ -3865,11 +4010,44 @@ mod imp {
             max_tokens: usize,
             slot_device_u32: *const u32,
         ) -> Result<(), String> {
+            self.kv_append_f32_device_u32_ptr_offsets(
+                keys,
+                0,
+                values,
+                0,
+                key_cache,
+                value_cache,
+                kv_head_count,
+                head_dim,
+                max_tokens,
+                slot_device_u32,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn kv_append_f32_device_u32_ptr_offsets(
+            &self,
+            keys: &CudaBuffer,
+            key_offset_elems: usize,
+            values: &CudaBuffer,
+            value_offset_elems: usize,
+            key_cache: &CudaBuffer,
+            value_cache: &CudaBuffer,
+            kv_head_count: usize,
+            head_dim: usize,
+            max_tokens: usize,
+            slot_device_u32: *const u32,
+        ) -> Result<(), String> {
             self.prepare_device()?;
             let status = unsafe {
                 makepad_ggml_cuda_kv_append_f32_device_u32(
-                    keys.inner.ptr.as_ptr().cast::<f32>(),
-                    values.inner.ptr.as_ptr().cast::<f32>(),
+                    keys.inner.ptr.as_ptr().cast::<f32>().add(key_offset_elems),
+                    values
+                        .inner
+                        .ptr
+                        .as_ptr()
+                        .cast::<f32>()
+                        .add(value_offset_elems),
                     key_cache.inner.ptr.as_ptr().cast::<u16>(),
                     value_cache.inner.ptr.as_ptr().cast::<u16>(),
                     kv_head_count as u32,
@@ -5868,6 +6046,15 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        pub fn read_f32s_offset(
+            &self,
+            _buffer: &CudaBuffer,
+            _offset_elems: usize,
+            _len: usize,
+        ) -> Result<Vec<f32>, String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn read_bytes(&self, _buffer: &CudaBuffer, _len: usize) -> Result<Vec<u8>, String> {
             Err("CUDA runtime is unavailable".to_string())
         }
@@ -6381,6 +6568,17 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        pub fn qwen_sigmoid_f32_offsets(
+            &self,
+            _input: &CudaBuffer,
+            _input_offset_elems: usize,
+            _output: &CudaBuffer,
+            _output_offset_elems: usize,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn qwen_sigmoid_mul_f32(
             &self,
             _values: &CudaBuffer,
@@ -6396,6 +6594,19 @@ mod imp {
             _values: &CudaBuffer,
             _gate: &CudaBuffer,
             _output: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        pub fn qwen_silu_mul_f32_offsets(
+            &self,
+            _values: &CudaBuffer,
+            _values_offset_elems: usize,
+            _gate: &CudaBuffer,
+            _gate_offset_elems: usize,
+            _output: &CudaBuffer,
+            _output_offset_elems: usize,
             _n: usize,
         ) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
@@ -6428,6 +6639,22 @@ mod imp {
             _alpha: &CudaBuffer,
             _dt_bias: &CudaBuffer,
             _output: &CudaBuffer,
+            _n: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn qwen_decay_gate_f32_offsets(
+            &self,
+            _a_log: &CudaBuffer,
+            _a_log_offset_elems: usize,
+            _alpha: &CudaBuffer,
+            _alpha_offset_elems: usize,
+            _dt_bias: &CudaBuffer,
+            _dt_bias_offset_elems: usize,
+            _output: &CudaBuffer,
+            _output_offset_elems: usize,
             _n: usize,
         ) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
@@ -6806,6 +7033,23 @@ mod imp {
             Err("CUDA runtime is unavailable".to_string())
         }
 
+        #[allow(clippy::too_many_arguments)]
+        pub fn kv_append_f32_offsets(
+            &self,
+            _keys: &CudaBuffer,
+            _key_offset_elems: usize,
+            _values: &CudaBuffer,
+            _value_offset_elems: usize,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _kv_head_count: usize,
+            _head_dim: usize,
+            _max_tokens: usize,
+            _slot: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
         pub fn kv_append_f32_device_u32(
             &self,
             _keys: &CudaBuffer,
@@ -6824,6 +7068,23 @@ mod imp {
             &self,
             _keys: &CudaBuffer,
             _values: &CudaBuffer,
+            _key_cache: &CudaBuffer,
+            _value_cache: &CudaBuffer,
+            _kv_head_count: usize,
+            _head_dim: usize,
+            _max_tokens: usize,
+            _slot_device_u32: *const u32,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn kv_append_f32_device_u32_ptr_offsets(
+            &self,
+            _keys: &CudaBuffer,
+            _key_offset_elems: usize,
+            _values: &CudaBuffer,
+            _value_offset_elems: usize,
             _key_cache: &CudaBuffer,
             _value_cache: &CudaBuffer,
             _kv_head_count: usize,

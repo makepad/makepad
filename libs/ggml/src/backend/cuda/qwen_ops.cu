@@ -297,47 +297,62 @@ static __global__ void makepad_ggml_cuda_qwen_softmax_topk_routes_f32_kernel(
 ) {
     __shared__ float shared_logits[256];
     __shared__ float selected_logits[256];
-    if (threadIdx.x != 0) {
-        return;
-    }
 
-    for (uint32_t expert = 0; expert < n; ++expert) {
+    const uint32_t tid = threadIdx.x;
+    for (uint32_t expert = tid; expert < n; expert += blockDim.x) {
         shared_logits[expert] = logits[expert];
     }
+    __syncwarp();
 
     for (uint32_t slot = 0; slot < top_k; ++slot) {
-        float best_logit = -INFINITY;
-        uint32_t best_index = 0;
-        for (uint32_t expert = 0; expert < n; ++expert) {
+        float local_best_logit = -INFINITY;
+        uint32_t local_best_index = 0;
+        for (uint32_t expert = tid; expert < n; expert += blockDim.x) {
             const float candidate_logit = shared_logits[expert];
-            if (candidate_logit > best_logit ||
-                    (candidate_logit == best_logit && expert < best_index)) {
-                best_logit = candidate_logit;
-                best_index = expert;
+            if (candidate_logit > local_best_logit ||
+                    (candidate_logit == local_best_logit && expert < local_best_index)) {
+                local_best_logit = candidate_logit;
+                local_best_index = expert;
             }
         }
-        topk_indices[slot] = best_index;
-        selected_logits[slot] = best_logit;
-        shared_logits[best_index] = -INFINITY;
+
+        for (uint32_t offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+            const float other_logit = __shfl_down_sync(0xFFFFFFFFu, local_best_logit, offset);
+            const uint32_t other_index = __shfl_down_sync(0xFFFFFFFFu, local_best_index, offset);
+            if (other_logit > local_best_logit ||
+                    (other_logit == local_best_logit && other_index < local_best_index)) {
+                local_best_logit = other_logit;
+                local_best_index = other_index;
+            }
+        }
+
+        if (tid == 0) {
+            topk_indices[slot] = local_best_index;
+            selected_logits[slot] = local_best_logit;
+            shared_logits[local_best_index] = -INFINITY;
+        }
+        __syncwarp();
     }
 
-    float selected_max_logit = selected_logits[0];
-    for (uint32_t slot = 1; slot < top_k; ++slot) {
-        selected_max_logit = fmaxf(selected_max_logit, selected_logits[slot]);
-    }
+    if (tid == 0) {
+        float selected_max_logit = selected_logits[0];
+        for (uint32_t slot = 1; slot < top_k; ++slot) {
+            selected_max_logit = fmaxf(selected_max_logit, selected_logits[slot]);
+        }
 
-    double selected_sum = 0.0;
-    for (uint32_t slot = 0; slot < top_k; ++slot) {
-        const float selected_prob = static_cast<float>(
-            exp(static_cast<double>(selected_logits[slot] - selected_max_logit)));
-        topk_weights[slot] = selected_prob;
-        selected_sum += static_cast<double>(selected_prob);
-    }
+        double selected_sum = 0.0;
+        for (uint32_t slot = 0; slot < top_k; ++slot) {
+            const float selected_prob = static_cast<float>(
+                exp(static_cast<double>(selected_logits[slot] - selected_max_logit)));
+            topk_weights[slot] = selected_prob;
+            selected_sum += static_cast<double>(selected_prob);
+        }
 
-    const float inv_selected_sum =
-        selected_sum > 0.0 && isfinite(selected_sum) ? static_cast<float>(1.0 / selected_sum) : 0.0f;
-    for (uint32_t slot = 0; slot < top_k; ++slot) {
-        topk_weights[slot] *= inv_selected_sum;
+        const float inv_selected_sum =
+            selected_sum > 0.0 && isfinite(selected_sum) ? static_cast<float>(1.0 / selected_sum) : 0.0f;
+        for (uint32_t slot = 0; slot < top_k; ++slot) {
+            topk_weights[slot] *= inv_selected_sum;
+        }
     }
 }
 
@@ -574,7 +589,7 @@ extern "C" cudaError_t makepad_ggml_cuda_qwen_softmax_topk_routes_f32(
     if (n == 0 || top_k == 0 || top_k > n || n > 256) {
         return cudaErrorInvalidValue;
     }
-    makepad_ggml_cuda_qwen_softmax_topk_routes_f32_kernel<<<1, 256, 0, stream>>>(
+    makepad_ggml_cuda_qwen_softmax_topk_routes_f32_kernel<<<1, 32, 0, stream>>>(
         logits,
         topk_indices,
         topk_weights,
