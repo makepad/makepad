@@ -1,5 +1,8 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    fold_button::{FoldButton, FoldButtonAction},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_html::*,
@@ -130,6 +133,38 @@ script_mod! {
 
         a := mod.widgets.HtmlLink{}
 
+        // Triangle that expands/collapses a <details> section.
+        //
+        // The default FoldButton shader draws a hard-coded 5-wide triangle at
+        // x=5, which doesn't scale with the button's rect. We override the
+        // pixel function so the triangle is centered in `rect_size` and sized
+        // proportionally, letting the widget set the walk at runtime based on
+        // the surrounding summary font size. Width, height, and margin are
+        // computed per-draw and passed via `draw_walk_fold_button`.
+        details_arrow := mod.widgets.FoldButton{
+            draw_bg +: {
+                pixel: fn() {
+                    let c = self.rect_size * 0.5
+                    let sz = self.rect_size.y * 0.28
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.clear(vec4(0.))
+                    sdf.rotate(self.active * 0.5 * PI + 0.5 * PI, c.x, c.y)
+                    sdf.move_to(c.x - sz, c.y + sz)
+                    sdf.line_to(c.x, c.y - sz)
+                    sdf.line_to(c.x + sz, c.y + sz)
+                    sdf.close_path()
+                    sdf.fill(
+                        mix(
+                            mix(self.color, self.color_hover, self.hover)
+                            mix(self.color_active, self.color_hover, self.hover)
+                            self.active
+                        )
+                    )
+                    return sdf.result * self.fade
+                }
+            }
+        }
+
         draw_block +: {
             line_color: theme.color_label_inner
             sep_color: theme.color_shadow
@@ -184,6 +219,41 @@ pub struct Html {
     /// The stack of list levels encountered so far, used to track nested lists.
     #[rust]
     list_stack: Vec<ListLevel>,
+
+    /// The stack of currently-open `<details>` tags while traversing the
+    /// document. Rebuilt on each draw.
+    #[rust]
+    details_stack: Vec<DetailsLevel>,
+
+    /// IDs of `<details>` FoldButtons whose initial open/closed state has
+    /// already been seeded from their HTML `open` attribute. Persists across
+    /// redraws so user clicks aren't overwritten.
+    #[rust]
+    seen_details: HashSet<LiveId>,
+
+    /// When `Some`, the draw walk is skipping nodes because the enclosing
+    /// `<details>` is collapsed. The inner counter tracks the nested open-tag
+    /// depth while skipping, so the matching `</details>` can be recognized.
+    #[rust]
+    skip_details_depth: Option<i32>,
+
+    /// Transparent DrawQuad emitted over each `<summary>` so the whole summary
+    /// line is clickable, not just the fold triangle. The quad's default
+    /// shader produces `#0000`, so it's invisible but its instance area
+    /// participates in normal `event.hits` hit-testing.
+    #[live]
+    draw_summary_hit: DrawQuad,
+
+    /// Per-draw list of `(details_id, hit_area)` for each `<summary>` we
+    /// rendered, used by `handle_event` to route clicks on the summary line
+    /// to the matching FoldButton.
+    #[rust]
+    summary_click_areas: Vec<(LiveId, Area)>,
+
+    /// Previous-frame hit area per details id, used to preserve hover/capture
+    /// state across redraws via `update_area_refs`.
+    #[rust]
+    summary_area_cache: HashMap<LiveId, Area>,
 }
 
 impl ScriptHook for Html {
@@ -210,6 +280,8 @@ impl ScriptHook for Html {
         if new_doc != self.doc {
             self.doc = new_doc;
             self.text_flow.clear_items();
+            self.seen_details.clear();
+            self.summary_area_cache.clear();
         }
         if errors.as_ref().unwrap().len() > 0 {
             log!("HTML parser returned errors {:?}", errors)
@@ -218,6 +290,19 @@ impl ScriptHook for Html {
 }
 
 impl Html {
+    /// Vertical spacing inserted before a `<details>` opens and after it
+    /// closes, in pixels, scaled by the current font size. Keeps the block
+    /// from butting up against surrounding content. A single helper so the
+    /// open and close handlers can't drift out of sync.
+    fn details_margin_em(&self) -> f64 {
+        let fs = *self
+            .text_flow
+            .font_sizes
+            .last()
+            .unwrap_or(&self.text_flow.font_size) as f64;
+        fs * 0.22
+    }
+
     fn count_table_columns(nodes: &[HtmlNode], start_index: usize) -> usize {
         let mut count = 0;
         let mut in_first_row = false;
@@ -541,15 +626,309 @@ impl Html {
 
 impl Widget for Html {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // Route clicks on the summary line to the matching FoldButton so the
+        // whole summary toggles, not just the triangle. Hit-test on the
+        // transparent DrawQuad areas emitted over each summary rect — those
+        // are `Area::Instance`s, so `event.hits` handles mouse/touch capture
+        // uniformly, the same way HtmlLink does.
+        //
+        // `LiveId` and `Area` are both `Copy`, so we can iterate by value
+        // without cloning the Vec.
+        let mut details_toggle: Option<LiveId> = None;
+        for &(details_id, area) in &self.summary_click_areas {
+            match event.hits(cx, area) {
+                Hit::FingerHoverIn(_) => {
+                    cx.set_cursor(MouseCursor::Hand);
+                }
+                Hit::FingerUp(fu)
+                    if fu.is_over && fu.is_primary_hit() && fu.was_tap() =>
+                {
+                    details_toggle = Some(details_id);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(details_id) = details_toggle {
+            let fb_ref = self.text_flow.existing_item(details_id);
+            // Scope the RefMut so it drops before we reborrow text_flow for
+            // redraw. The `drop(fb)` trick won't satisfy the borrow checker
+            // here — an explicit block cleanly ends the borrow.
+            let toggled = {
+                if let Some(mut fb) = fb_ref.borrow_mut::<FoldButton>() {
+                    let new_state = !fb.is_open(cx);
+                    fb.set_is_open(cx, new_state, Animate::Yes);
+                    true
+                } else {
+                    false
+                }
+            };
+            if toggled {
+                self.text_flow.redraw(cx);
+            }
+        }
+
         self.text_flow.handle_event(cx, event, scope);
+
+        // When a `<details>` FoldButton toggles from its own click handler,
+        // redraw so the collapsed body appears/disappears. We filter by
+        // widget_uid so an unrelated FoldButton elsewhere in the app doesn't
+        // trigger an Html redraw. Animator frames fire `Animating` actions
+        // too, but those already drive the FoldButton's own redraw — we only
+        // need to rebuild the TextFlow on the open/close edge.
+        if let Event::Actions(actions) = event {
+            'outer: for action in actions {
+                let Some(widget_action) = action.as_widget_action() else {
+                    continue;
+                };
+                if !matches!(
+                    widget_action.cast::<FoldButtonAction>(),
+                    FoldButtonAction::Opening | FoldButtonAction::Closing
+                ) {
+                    continue;
+                }
+                // Scan our own fold buttons for a uid match. `seen_details`
+                // is the set of details ids we've instantiated buttons for,
+                // and existing_item resolves each to its WidgetRef without
+                // going through the global widget tree. Typical details
+                // counts per Html are small (<10), so this is cheap.
+                let ids: SmallVec<[LiveId; 8]> =
+                    self.seen_details.iter().copied().collect();
+                for id in ids {
+                    let fb_ref = self.text_flow.existing_item(id);
+                    if fb_ref.widget_uid() == widget_action.widget_uid {
+                        self.text_flow.redraw(cx);
+                        break 'outer;
+                    }
+                }
+            }
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let tf = &mut self.text_flow;
-        tf.begin(cx, walk);
+        self.text_flow.begin(cx, walk);
         let mut node = self.doc.new_walker();
-        let mut auto_id = 0;
+        let mut auto_id: u64 = 0;
+        let mut details_auto_id: u64 = 0;
+        self.details_stack.clear();
+        self.skip_details_depth = None;
+        self.summary_click_areas.clear();
         while !node.done() {
+            // If the enclosing <details> is collapsed, fast-skip nodes until
+            // the matching </details> close tag at depth 0.
+            if let Some(depth) = self.skip_details_depth.as_mut() {
+                if node.open_tag_lc().is_some() {
+                    *depth += 1;
+                    node.walk();
+                    continue;
+                } else if let Some(close_tag) = node.close_tag_lc() {
+                    if *depth == 0 && close_tag == live_id!(details) {
+                        // Reached the matching </details>; leave skip mode and
+                        // fall through so the close handler runs normally.
+                        self.skip_details_depth = None;
+                    } else {
+                        if *depth > 0 {
+                            *depth -= 1;
+                        }
+                        node.walk();
+                        continue;
+                    }
+                } else {
+                    node.walk();
+                    continue;
+                }
+            }
+
+            // Intercept <details> / <summary> open tags before the generic
+            // handler, so <details> never falls through to handle_custom_widget
+            // (which would jump_to_close and hide all content).
+            if let Some(tag) = node.open_tag_lc() {
+                if tag == live_id!(details) {
+                    let details_id =
+                        if let Some(id_str) = node.find_attr_lc(live_id!(id)) {
+                            LiveId::from_str(id_str)
+                        } else {
+                            details_auto_id += 1;
+                            // Offset into the high bits to avoid colliding with
+                            // HtmlLink's auto_id (small ints) in the items map.
+                            LiveId(0xd37a_115_0000_0000u64
+                                .wrapping_add(details_auto_id))
+                        };
+                    let initial_open = node.find_attr_lc(live_id!(open)).is_some();
+                    self.details_stack.push(DetailsLevel {
+                        id: details_id,
+                        is_open: initial_open,
+                    });
+                    // Small top margin so a `<details>` doesn't butt up
+                    // against the preceding content. Scaled by the current
+                    // font size so it tracks headings, sub/superscript, etc.
+                    // A matching bottom margin is applied at `</details>`.
+                    self.text_flow
+                        .new_line_collapsed_with_spacing(cx, self.details_margin_em());
+                    node.walk();
+                    continue;
+                }
+                if tag == live_id!(summary) {
+                    if let Some(&DetailsLevel { id: details_id, is_open: initial_open }) =
+                        self.details_stack.last()
+                    {
+                        let fb_ref = self.text_flow.item_with_scope(
+                            cx,
+                            &mut Scope::empty(),
+                            details_id,
+                            live_id!(details_arrow),
+                        );
+                        if let Some(fb_ref) = fb_ref {
+                            // Read these before borrowing fb so we don't
+                            // hold two borrows of self.text_flow at once.
+                            let summary_color = *self
+                                .text_flow
+                                .font_colors
+                                .last()
+                                .unwrap_or(&self.text_flow.font_color);
+                            let font_size = *self
+                                .text_flow
+                                .font_sizes
+                                .last()
+                                .unwrap_or(&self.text_flow.font_size)
+                                as f64;
+                            let needs_seed =
+                                !self.seen_details.contains(&details_id);
+                            // Walk scaled to the current summary font size so
+                            // the triangle tracks headings, `<sub>`, etc. The
+                            // right margin is the gap between triangle and
+                            // summary text. The top margin pushes the box
+                            // down so the triangle's center lines up with
+                            // the text's optical middle — `Flow::Right` uses
+                            // `RowAlign::Top`, and a font_size-tall box on
+                            // its own sits above the text baseline.
+                            let triangle_walk = Walk {
+                                abs_pos: None,
+                                width: Size::Fixed(font_size),
+                                height: Size::Fixed(font_size),
+                                margin: Inset {
+                                    left: 0.0,
+                                    right: font_size * 0.2,
+                                    top: font_size * 0.25,
+                                    bottom: 0.0,
+                                },
+                                metrics: Metrics::default(),
+                            };
+                            // One borrow for all FoldButton mutations: seed
+                            // the animator state on first sight (so the
+                            // `open` HTML attribute is honored before any
+                            // user click), override the triangle color so it
+                            // matches the summary text, read the current
+                            // open state back so `</summary>` knows whether
+                            // to enter skip mode, and draw the triangle with
+                            // a runtime-computed walk.
+                            if let Some(mut fb) = fb_ref.borrow_mut::<FoldButton>() {
+                                if needs_seed {
+                                    fb.set_is_open(cx, initial_open, Animate::No);
+                                }
+                                fb.set_draw_color(cx, summary_color);
+                                let is_open = fb.is_open(cx);
+                                if let Some(dl) = self.details_stack.last_mut() {
+                                    dl.is_open = is_open;
+                                }
+                                fb.draw_walk_fold_button(cx, triangle_walk);
+                            }
+                            if needs_seed {
+                                self.seen_details.insert(details_id);
+                            }
+                        }
+                    }
+                    // Start tracking the glyph rects that get drawn for the
+                    // summary text (excluding the FoldButton, which doesn't
+                    // feed into areas_tracker) so the whole line becomes a
+                    // click target in handle_event.
+                    self.text_flow.areas_tracker.push_tracker();
+                    self.text_flow.bold.push();
+                    node.walk();
+                    continue;
+                }
+            }
+
+            // Intercept </summary> and </details> close tags.
+            if let Some(close_tag) = node.close_tag_lc() {
+                if close_tag == live_id!(summary) {
+                    self.text_flow.bold.pop();
+                    let (start, end) = self.text_flow.areas_tracker.pop_tracker();
+                    if let Some(dl) = self.details_stack.last() {
+                        // Compute the bounding rect from the laid-out glyph
+                        // rects so we know where to put the invisible hit
+                        // target quad. We use `Area::rect` (raw) not
+                        // `clipped_rect`, because the draw_clip on rect-areas
+                        // isn't populated inside a nested turtle.
+                        let mut bounds: Option<Rect> = None;
+                        for a in &self.text_flow.areas_tracker.areas[start..end] {
+                            let r = a.rect(cx);
+                            if r.size.x > 0.0 && r.size.y > 0.0 {
+                                bounds = Some(match bounds {
+                                    None => r,
+                                    Some(b) => {
+                                        let x0 = b.pos.x.min(r.pos.x);
+                                        let y0 = b.pos.y.min(r.pos.y);
+                                        let x1 = (b.pos.x + b.size.x)
+                                            .max(r.pos.x + r.size.x);
+                                        let y1 = (b.pos.y + b.size.y)
+                                            .max(r.pos.y + r.size.y);
+                                        Rect {
+                                            pos: dvec2(x0, y0),
+                                            size: dvec2(x1 - x0, y1 - y0),
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        if let Some(b) = bounds {
+                            // Emit an invisible DrawQuad covering the summary
+                            // line. Its `Area::Instance` has valid rect_pos
+                            // and rect_size in the shader instance data, so
+                            // `event.hits` can hit-test it correctly — unlike
+                            // the glyph-run rect-areas, which need the outer
+                            // pass turtle to close before their draw_clip is
+                            // populated.
+                            //
+                            // Seeding `draw_vars.area` from the cache lets
+                            // `update_area_refs` (called inside `draw_abs`)
+                            // carry hover/capture state from the previous
+                            // frame to the fresh instance.
+                            let prev_area = self
+                                .summary_area_cache
+                                .get(&dl.id)
+                                .copied()
+                                .unwrap_or(Area::Empty);
+                            self.draw_summary_hit.draw_vars.area = prev_area;
+                            self.draw_summary_hit.draw_abs(cx, b);
+                            let new_area = self.draw_summary_hit.draw_vars.area;
+                            self.summary_area_cache.insert(dl.id, new_area);
+                            self.summary_click_areas.push((dl.id, new_area));
+                        }
+                    }
+                    // Only enter skip mode when there is an enclosing
+                    // `<details>` that is collapsed. A stray `<summary>` with
+                    // no parent `<details>` must not skip to the end of the
+                    // document, which is what `map_or(true, ...)` would do.
+                    if matches!(self.details_stack.last(), Some(dl) if !dl.is_open) {
+                        self.skip_details_depth = Some(0);
+                    }
+                    node.walk();
+                    continue;
+                }
+                if close_tag == live_id!(details) {
+                    self.details_stack.pop();
+                    // Matching bottom margin (see `<details>` open handler).
+                    self.text_flow
+                        .new_line_collapsed_with_spacing(cx, self.details_margin_em());
+                    node.walk();
+                    continue;
+                }
+            }
+
+            // Regular tag/text handling for everything else.
+            let tf = &mut self.text_flow;
             let mut trim = TrimWhitespaceInText::default();
             match Self::handle_open_tag(
                 cx,
@@ -567,13 +946,11 @@ impl Widget for Html {
                     trim = tws;
                 }
             }
-            match Self::handle_close_tag(cx, tf, &mut node, &mut self.list_stack) {
-                _ => (),
-            }
+            let _ = Self::handle_close_tag(cx, tf, &mut node, &mut self.list_stack);
             Self::handle_text_node(cx, tf, &mut node, trim);
             node.walk();
         }
-        tf.end(cx);
+        self.text_flow.end(cx);
         DrawStep::done()
     }
 
@@ -585,6 +962,8 @@ impl Widget for Html {
         self.body.set(v);
         let mut errors = Some(Vec::new());
         self.doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
+        self.seen_details.clear();
+        self.summary_area_cache.clear();
         if errors.as_ref().unwrap().len() > 0 {
             log!("HTML parser returned errors {:?}", errors)
         }
@@ -849,6 +1228,18 @@ impl HtmlLinkRef {
             None
         }
     }
+}
+
+/// The state of a single `<details>` element as tracked during a draw walk.
+#[derive(Debug, Clone, Copy)]
+struct DetailsLevel {
+    /// Stable per-document-position id, also used as the LiveId for this
+    /// details element's embedded FoldButton in the TextFlow item map.
+    id: LiveId,
+    /// Set at `<summary>` time to the current FoldButton animator state.
+    /// Controls whether the body content between `</summary>` and
+    /// `</details>` is drawn or skipped.
+    is_open: bool,
 }
 
 /// The format and metadata of a list at a given nesting level.
