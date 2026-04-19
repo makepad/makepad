@@ -1590,24 +1590,6 @@ impl App {
         self.ui.redraw(cx);
     }
 
-    /// Open a URL in the system browser. Platform-dispatched via std::process::Command
-    /// so we don't pull a new crate dependency. Returns Err if the process couldn't be
-    /// spawned; caller may ignore.
-    fn open_url_in_browser(url: &str) -> std::io::Result<()> {
-        #[cfg(target_os = "macos")]
-        let cmd = std::process::Command::new("open").arg(url).spawn();
-        #[cfg(target_os = "linux")]
-        let cmd = std::process::Command::new("xdg-open").arg(url).spawn();
-        #[cfg(target_os = "windows")]
-        let cmd = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        let cmd: std::io::Result<std::process::Child> = Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "unsupported platform",
-        ));
-        cmd.map(|_| ())
-    }
-
     fn cancel_request(&mut self, cx: &mut Cx) {
         if let (Some(agent), Some(prompt_id)) = (&mut self.agent, self.current_prompt.take()) {
             agent.cancel_prompt(cx, prompt_id);
@@ -1639,14 +1621,29 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        // Markdown link click — open the URL in the system browser only
-        // when Cmd (macOS) / Super (Linux/Windows) was held. Plain clicks
-        // are reserved for drag-selection inside the Markdown widget.
+        // Markdown link click — dispatch through robius-open for cross-platform
+        // coverage (macOS/Linux/Windows/iOS/Android/WASM). Desktop requires a
+        // modifier (Cmd on macOS, Cmd/Ctrl elsewhere) so plain clicks stay
+        // available for drag-selection inside the Markdown widget; mobile &
+        // web have no modifier concept, so a plain tap opens the URL.
         for action in actions {
             if let Some(md_action) = action.downcast_ref::<makepad_widgets::markdown::MarkdownAction>() {
                 if let makepad_widgets::markdown::MarkdownAction::LinkNavigated { url, modifiers } = md_action {
-                    if modifiers.logo {
-                        let _ = Self::open_url_in_browser(url);
+                    let should_open = {
+                        #[cfg(any(target_os = "ios", target_os = "android", target_arch = "wasm32"))]
+                        {
+                            let _ = modifiers;
+                            true
+                        }
+                        #[cfg(not(any(target_os = "ios", target_os = "android", target_arch = "wasm32")))]
+                        {
+                            modifiers.logo || modifiers.control
+                        }
+                    };
+                    if should_open {
+                        if let Err(e) = robius_open::Uri::new(url).open() {
+                            log::warn!("failed to open URL {}: {:?}", url, e);
+                        }
                     }
                 }
             }

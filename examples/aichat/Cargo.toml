@@ -18,3 +18,8 @@ makepad-ai = { path = "../../old/studio/ai" }
 #     ├── streaming-markdown-kit/        (git@github.com:Project-Robius-China/streaming-markdown-kit)
 #     └── streaming-markdown-sanitizer/  (TODO: publish)
 streaming-markdown-kit = { path = "../../../../streaming-markdown-kit", features = ["mermaid"] }
+# Cross-platform URL opener. std::process::Command only works on desktop —
+# iOS/Android/WASM need platform-specific plumbing (UIApplication, Intent,
+# window.open). robius-open is the Robius-ecosystem standard for this
+# (used by robrix and moly).
+robius-open = { git = "https://github.com/project-robius/robius" }
