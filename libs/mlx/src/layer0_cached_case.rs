@@ -1,16 +1,16 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
+use crate::text_runtime::{
+    sample_token_from_softcapped_bf16_bytes, GemmaTextSamplingOptions, MlxTextSamplingRng,
+};
+use crate::{
+    fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words_with_phase, MlxDType, MlxGreedyToken,
+    MlxIndexedSafetensors,
+};
 use crate::{GemmaAttentionKind, GemmaKvCacheLayout, GemmaKvCacheSpec, KvTensor, KvTensorShape};
 use makepad_ggml::backend::metal::{
     BufferStorageMode, MetalBuffer, MetalBufferBindingRef, MetalPipeline, MetalPipelineDescriptor,
     MetalRuntime, MetalRuntimeCounters, MetalSize,
-};
-use crate::{
-    fnv1a64_u32_words, gemma4_qproj_case_input_bf16_words_with_phase, MlxDType,
-    MlxGreedyToken, MlxIndexedSafetensors,
-};
-use crate::text_runtime::{
-    sample_token_from_softcapped_bf16_bytes, GemmaTextSamplingOptions, MlxTextSamplingRng,
 };
 use std::cell::{RefCell, RefMut};
 use std::collections::{BTreeSet, HashMap};
@@ -1628,9 +1628,8 @@ impl ExactMetalKvCache {
             == GemmaExactMetalKvCompressionMode::RotorPlanar4FullAttentionK
             && spec.attention == GemmaAttentionKind::Full;
         let key_storage = if use_planar3 {
-            let resources = planar3_resources.ok_or(
-                "missing planar3 K-cache compression resources for full-attention cache",
-            )?;
+            let resources = planar3_resources
+                .ok_or("missing planar3 K-cache compression resources for full-attention cache")?;
             if resources.head_dim != spec.head_dim {
                 return Err(format!(
                     "planar3 resource head_dim mismatch: resource={} spec={}",
@@ -1660,9 +1659,8 @@ impl ExactMetalKvCache {
                 resources,
             }
         } else if use_planar4 {
-            let resources = planar4_resources.ok_or(
-                "missing planar4 K-cache compression resources for full-attention cache",
-            )?;
+            let resources = planar4_resources
+                .ok_or("missing planar4 K-cache compression resources for full-attention cache")?;
             if resources.head_dim != spec.head_dim {
                 return Err(format!(
                     "planar4 resource head_dim mismatch: resource={} spec={}",
@@ -1793,9 +1791,7 @@ impl ExactMetalKvCache {
     fn rotor_index_row_stride_bytes(&self) -> Result<usize, Box<dyn Error>> {
         let pair_count = match &self.key_storage {
             ExactMetalKeyCacheStorage::RotorPlanar3 { resources, .. } => resources.pair_count,
-            ExactMetalKeyCacheStorage::RotorPlanar4 {
-                resources, ..
-            } => resources.pair_count,
+            ExactMetalKeyCacheStorage::RotorPlanar4 { resources, .. } => resources.pair_count,
             ExactMetalKeyCacheStorage::Bf16 { .. } => {
                 return Err("rotor K cache storage is unavailable".into())
             }
@@ -2455,9 +2451,7 @@ impl ExactMetalQprojLayout {
     }
 
     fn uses_fast_qmv(self, n_in: u32) -> bool {
-        self.quant_bits != 8
-            && self.out_rows % 8 == 0
-            && n_in % self.fast_n_in_multiple == 0
+        self.quant_bits != 8 && self.out_rows % 8 == 0 && n_in % self.fast_n_in_multiple == 0
     }
 
     fn uses_fast_qmv_wide(self, n_in: u32) -> bool {
@@ -3016,39 +3010,38 @@ impl ExactMetalLayerWorkspace {
         } else {
             qproj_layout_dummy()
         };
-        let (expert_gate, _expert_up, expert_gate_up, expert_down) =
-            if let (
-                Some(gate_weight_entry),
-                Some(gate_scales_entry),
-                Some(up_weight_entry),
-                Some(up_scales_entry),
-                Some(down_weight_entry),
-                Some(down_scales_entry),
-            ) = (
-                expert_gate_weight_entry,
-                expert_gate_scales_entry,
-                expert_up_weight_entry,
-                expert_up_scales_entry,
-                expert_down_weight_entry,
-                expert_down_scales_entry,
-            ) {
-                let expert_gate = exact_qproj_layout(
-                    gate_weight_entry.shape[2] as u32,
-                    gate_scales_entry.shape[2] as u32,
-                    u32::try_from(gate_weight_entry.shape[1])?,
-                    quantization.bits,
-                );
-                let expert_up = exact_qproj_layout(
-                    up_weight_entry.shape[2] as u32,
-                    up_scales_entry.shape[2] as u32,
-                    u32::try_from(up_weight_entry.shape[1])?,
-                    quantization.bits,
-                );
-                if expert_gate.weight_words_per_row != expert_up.weight_words_per_row
-                    || expert_gate.qparams_per_row != expert_up.qparams_per_row
-                    || expert_gate.out_rows != expert_up.out_rows
-                {
-                    return Err(format!(
+        let (expert_gate, _expert_up, expert_gate_up, expert_down) = if let (
+            Some(gate_weight_entry),
+            Some(gate_scales_entry),
+            Some(up_weight_entry),
+            Some(up_scales_entry),
+            Some(down_weight_entry),
+            Some(down_scales_entry),
+        ) = (
+            expert_gate_weight_entry,
+            expert_gate_scales_entry,
+            expert_up_weight_entry,
+            expert_up_scales_entry,
+            expert_down_weight_entry,
+            expert_down_scales_entry,
+        ) {
+            let expert_gate = exact_qproj_layout(
+                gate_weight_entry.shape[2] as u32,
+                gate_scales_entry.shape[2] as u32,
+                u32::try_from(gate_weight_entry.shape[1])?,
+                quantization.bits,
+            );
+            let expert_up = exact_qproj_layout(
+                up_weight_entry.shape[2] as u32,
+                up_scales_entry.shape[2] as u32,
+                u32::try_from(up_weight_entry.shape[1])?,
+                quantization.bits,
+            );
+            if expert_gate.weight_words_per_row != expert_up.weight_words_per_row
+                || expert_gate.qparams_per_row != expert_up.qparams_per_row
+                || expert_gate.out_rows != expert_up.out_rows
+            {
+                return Err(format!(
                         "expert gate/up layout mismatch in layer {layer_idx}: gate=({}, {}, {}) up=({}, {}, {})",
                         expert_gate.weight_words_per_row,
                         expert_gate.qparams_per_row,
@@ -3058,27 +3051,27 @@ impl ExactMetalLayerWorkspace {
                         expert_up.out_rows,
                     )
                     .into());
-                }
-                let expert_gate_up = exact_qproj_layout(
-                    expert_gate.weight_words_per_row,
-                    expert_gate.qparams_per_row,
-                    expert_gate
-                        .out_rows
-                        .checked_add(expert_up.out_rows)
-                        .ok_or("expert gate/up combined out_rows overflow")?,
-                    quantization.bits,
-                );
-                let expert_down = exact_qproj_layout(
-                    down_weight_entry.shape[2] as u32,
-                    down_scales_entry.shape[2] as u32,
-                    u32::try_from(down_weight_entry.shape[1])?,
-                    quantization.bits,
-                );
-                (expert_gate, expert_up, expert_gate_up, expert_down)
-            } else {
-                let dummy = qproj_layout_dummy();
-                (dummy, dummy, dummy, dummy)
-            };
+            }
+            let expert_gate_up = exact_qproj_layout(
+                expert_gate.weight_words_per_row,
+                expert_gate.qparams_per_row,
+                expert_gate
+                    .out_rows
+                    .checked_add(expert_up.out_rows)
+                    .ok_or("expert gate/up combined out_rows overflow")?,
+                quantization.bits,
+            );
+            let expert_down = exact_qproj_layout(
+                down_weight_entry.shape[2] as u32,
+                down_scales_entry.shape[2] as u32,
+                u32::try_from(down_weight_entry.shape[1])?,
+                quantization.bits,
+            );
+            (expert_gate, expert_up, expert_gate_up, expert_down)
+        } else {
+            let dummy = qproj_layout_dummy();
+            (dummy, dummy, dummy, dummy)
+        };
 
         let post_attention_norm_len = usize::try_from(
             indexed
@@ -3264,15 +3257,14 @@ impl ExactMetalLayerWorkspace {
                 pre_feedforward_norm2_len.max(1),
                 BufferStorageMode::Private,
             )?,
-            moe_top_k_indices: runtime
-                .create_buffer(
-                    if use_moe_block {
-                        ROUTER_TOP_K * size_of::<u32>()
-                    } else {
-                        size_of::<u32>()
-                    },
-                    BufferStorageMode::Private,
-                )?,
+            moe_top_k_indices: runtime.create_buffer(
+                if use_moe_block {
+                    ROUTER_TOP_K * size_of::<u32>()
+                } else {
+                    size_of::<u32>()
+                },
+                BufferStorageMode::Private,
+            )?,
             moe_top_k_weights: create_bf16_buffer(
                 &runtime,
                 if use_moe_block { ROUTER_TOP_K } else { 1 },
@@ -3560,7 +3552,10 @@ impl ExactMetalLayerWorkspace {
                 "kernel_mlx_router_scale_pair_bf16",
             )?,
             router_topk: compile_default_pipeline(&runtime, "kernel_mlx_router_topk_bf16")?,
-            selected_expert_proj: compile_default_pipeline(&runtime, selected_expert_pipeline_name)?,
+            selected_expert_proj: compile_default_pipeline(
+                &runtime,
+                selected_expert_pipeline_name,
+            )?,
             selected_expert_proj_fast: compile_default_pipeline(
                 &runtime,
                 selected_expert_fast_pipeline_name,
@@ -3707,8 +3702,16 @@ impl ExactMetalTextIoWorkspace {
                     hidden_size,
                     BufferStorageMode::Private,
                 )?,
-                hidden_scratch: create_bf16_buffer(&runtime, hidden_size, BufferStorageMode::Private)?,
-                final_norm_out: create_bf16_buffer(&runtime, hidden_size, BufferStorageMode::Private)?,
+                hidden_scratch: create_bf16_buffer(
+                    &runtime,
+                    hidden_size,
+                    BufferStorageMode::Private,
+                )?,
+                final_norm_out: create_bf16_buffer(
+                    &runtime,
+                    hidden_size,
+                    BufferStorageMode::Private,
+                )?,
                 logits_out: create_bf16_buffer(&runtime, vocab_size, BufferStorageMode::Shared)?,
                 argmax_index_out: runtime
                     .create_buffer(size_of::<u32>(), BufferStorageMode::Shared)?,
@@ -3731,7 +3734,10 @@ impl ExactMetalTextIoWorkspace {
                 )?,
                 rms: compile_default_pipeline(&runtime, "kernel_mlx_rms_norm_row_bf16")?,
                 logits_proj: compile_default_pipeline(&runtime, logits_proj_pipeline_name)?,
-                logits_proj_fast: compile_default_pipeline(&runtime, logits_proj_fast_pipeline_name)?,
+                logits_proj_fast: compile_default_pipeline(
+                    &runtime,
+                    logits_proj_fast_pipeline_name,
+                )?,
                 logits_proj_fast_wide: logits_proj_fast_wide_pipeline_name
                     .map(|name| compile_default_pipeline(&runtime, name))
                     .transpose()?,
@@ -4331,10 +4337,7 @@ impl ExactMetalTextRuntimeSession {
             .into());
         }
         let bytes = unsafe {
-            slice::from_raw_parts(
-                words.as_ptr() as *const u8,
-                words.len() * size_of::<u16>(),
-            )
+            slice::from_raw_parts(words.as_ptr() as *const u8, words.len() * size_of::<u16>())
         };
         self.session.runtime.write_buffer(dst, 0, bytes)?;
         Ok(())
@@ -6698,8 +6701,9 @@ impl ExactMetalGenerationCursor {
     }
 
     fn remaining_generation_limit(&self) -> usize {
-        self.max_new_tokens
-            .map_or(usize::MAX, |limit| limit.saturating_sub(self.generated_token_ids.len()))
+        self.max_new_tokens.map_or(usize::MAX, |limit| {
+            limit.saturating_sub(self.generated_token_ids.len())
+        })
     }
 
     fn reached_generation_limit(&self) -> bool {
@@ -9543,10 +9547,8 @@ fn run_layer_plan_with_session_from_sequence(
         })?;
     let o_proj_fast_pipeline = if validate_oproj {
         Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-            cache_name: exact_affine_qmv_pipeline_name(quantization.bits, true, false)?
-                .to_string(),
-            base_name: exact_affine_qmv_pipeline_name(quantization.bits, true, false)?
-                .to_string(),
+            cache_name: exact_affine_qmv_pipeline_name(quantization.bits, true, false)?.to_string(),
+            base_name: exact_affine_qmv_pipeline_name(quantization.bits, true, false)?.to_string(),
             constants: Vec::new(),
             smem_bytes: 0,
             nr0: 0,
@@ -9610,10 +9612,8 @@ fn run_layer_plan_with_session_from_sequence(
     };
     let selected_expert_proj_pipeline = if validate_moe_expert_gate {
         Some(runtime.get_or_compile_pipeline(&MetalPipelineDescriptor {
-            cache_name: exact_affine_qmv_pipeline_name(quantization.bits, false, true)?
-                .to_string(),
-            base_name: exact_affine_qmv_pipeline_name(quantization.bits, false, true)?
-                .to_string(),
+            cache_name: exact_affine_qmv_pipeline_name(quantization.bits, false, true)?.to_string(),
+            base_name: exact_affine_qmv_pipeline_name(quantization.bits, false, true)?.to_string(),
             constants: Vec::new(),
             smem_bytes: 0,
             nr0: 0,
@@ -9624,14 +9624,10 @@ fn run_layer_plan_with_session_from_sequence(
         None
     };
 
-    let rms_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
-        hidden_size,
-        rms_pipeline.max_threads_per_threadgroup,
-    )?;
-    let head_norm_threads_per_threadgroup = mlx_norm_threads_per_threadgroup(
-        head_dim,
-        head_norm_pipeline.max_threads_per_threadgroup,
-    )?;
+    let rms_threads_per_threadgroup =
+        mlx_norm_threads_per_threadgroup(hidden_size, rms_pipeline.max_threads_per_threadgroup)?;
+    let head_norm_threads_per_threadgroup =
+        mlx_norm_threads_per_threadgroup(head_dim, head_norm_pipeline.max_threads_per_threadgroup)?;
 
     let rms_args = MlxRmsNormRowArgs {
         n: hidden_size as u32,
@@ -12581,7 +12577,6 @@ pub fn run_layer_sequence_from_inputs(
     }
     Ok(outputs)
 }
-
 
 #[cfg(test)]
 #[path = "../tests/layer0_cached_case.rs"]

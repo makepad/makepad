@@ -1,7 +1,6 @@
 use makepad_mlx::text_runtime::{
-    benchmark_text_generation_with_backend_config, GemmaPromptFormat,
-    GemmaTextBackendConfig, GemmaTextBackendMode, GemmaTextGenerationOptions,
-    GemmaTextKvCompressionMode,
+    benchmark_text_generation_with_backend_config, GemmaPromptFormat, GemmaTextBackendConfig,
+    GemmaTextBackendMode, GemmaTextGenerationOptions, GemmaTextKvCompressionMode,
 };
 use std::env;
 use std::path::PathBuf;
@@ -132,7 +131,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("backend={}", output.backend_kind.label());
     if let Some(counters) = output.backend_counters.as_metal() {
         println!("backend_command_batches={}", counters.command_batches_begun);
-        println!("backend_batch_commits={}", counters.command_batches_committed);
+        println!(
+            "backend_batch_commits={}",
+            counters.command_batches_committed
+        );
         println!(
             "backend_command_buffer_commits={}",
             counters.command_buffer_commits
@@ -150,7 +152,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             counters.completion_wait_calls
         );
         println!("backend_readbacks={}", counters.readback_calls);
-        println!("backend_gpu_elapsed_s={:.6}", counters.gpu_elapsed_ns as f64 / 1e9);
+        println!(
+            "backend_gpu_elapsed_s={:.6}",
+            counters.gpu_elapsed_ns as f64 / 1e9
+        );
         println!(
             "backend_cpu_gap_s={:.6}",
             (output.elapsed.as_secs_f64() - counters.gpu_elapsed_ns as f64 / 1e9).max(0.0)

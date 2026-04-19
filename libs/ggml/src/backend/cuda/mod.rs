@@ -1,4 +1,4 @@
-#[cfg(all(target_os = "linux", makepad_ggml_cuda_kernels))]
+#[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ggml_cuda_kernels))]
 mod imp {
     use crate::backend::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
     use crate::quant::{
@@ -191,6 +191,50 @@ mod imp {
             row_stride: u32,
             n: u32,
             split_offset: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_ssm_conv_f32(
+            src0: *const f32,
+            src1: *const f32,
+            dst: *mut f32,
+            d_conv: u32,
+            d_inner: u32,
+            n_tokens: u32,
+            n_seqs: u32,
+            src0_token_stride: u32,
+            src0_seq_stride: u32,
+            src1_inner_stride: u32,
+            dst_token_stride: u32,
+            dst_seq_stride: u32,
+            apply_silu: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_ggml_cuda_gated_delta_net_f32(
+            q: *const f32,
+            k: *const f32,
+            v: *const f32,
+            g: *const f32,
+            beta: *const f32,
+            state: *const f32,
+            dst: *mut f32,
+            sv: u32,
+            h: u32,
+            n_tokens: u32,
+            n_seqs: u32,
+            sq1: u32,
+            sq2: u32,
+            sq3: u32,
+            sv1: u32,
+            sv2: u32,
+            sv3: u32,
+            sb1: u32,
+            sb2: u32,
+            sb3: u32,
+            neqk1: u32,
+            rq3: u32,
+            kda: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
@@ -2080,6 +2124,103 @@ mod imp {
                     row_stride as u32,
                     n as u32,
                     split_offset as u32,
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        pub fn ssm_conv_f32(
+            &self,
+            src0: &CudaBuffer,
+            src1: &CudaBuffer,
+            dst: &CudaBuffer,
+            d_conv: usize,
+            d_inner: usize,
+            n_tokens: usize,
+            n_seqs: usize,
+            src0_token_stride: usize,
+            src0_seq_stride: usize,
+            src1_inner_stride: usize,
+            dst_token_stride: usize,
+            dst_seq_stride: usize,
+            apply_silu: bool,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_ssm_conv_f32(
+                    src0.inner.ptr.as_ptr().cast::<f32>(),
+                    src1.inner.ptr.as_ptr().cast::<f32>(),
+                    dst.inner.ptr.as_ptr().cast::<f32>(),
+                    d_conv as u32,
+                    d_inner as u32,
+                    n_tokens as u32,
+                    n_seqs as u32,
+                    src0_token_stride as u32,
+                    src0_seq_stride as u32,
+                    src1_inner_stride as u32,
+                    dst_token_stride as u32,
+                    dst_seq_stride as u32,
+                    u32::from(apply_silu),
+                    self.stream,
+                )
+            };
+            makepad_cuda::check(status).map_err(|err| err.to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn gated_delta_net_f32(
+            &self,
+            q: &CudaBuffer,
+            k: &CudaBuffer,
+            v: &CudaBuffer,
+            g: &CudaBuffer,
+            beta: &CudaBuffer,
+            state: &CudaBuffer,
+            dst: &CudaBuffer,
+            sv: usize,
+            h: usize,
+            n_tokens: usize,
+            n_seqs: usize,
+            sq1: usize,
+            sq2: usize,
+            sq3: usize,
+            sv1: usize,
+            sv2: usize,
+            sv3: usize,
+            sb1: usize,
+            sb2: usize,
+            sb3: usize,
+            neqk1: usize,
+            rq3: usize,
+            kda: bool,
+        ) -> Result<(), String> {
+            self.prepare_device()?;
+            let status = unsafe {
+                makepad_ggml_cuda_gated_delta_net_f32(
+                    q.inner.ptr.as_ptr().cast::<f32>(),
+                    k.inner.ptr.as_ptr().cast::<f32>(),
+                    v.inner.ptr.as_ptr().cast::<f32>(),
+                    g.inner.ptr.as_ptr().cast::<f32>(),
+                    beta.inner.ptr.as_ptr().cast::<f32>(),
+                    state.inner.ptr.as_ptr().cast::<f32>(),
+                    dst.inner.ptr.as_ptr().cast::<f32>(),
+                    sv as u32,
+                    h as u32,
+                    n_tokens as u32,
+                    n_seqs as u32,
+                    sq1 as u32,
+                    sq2 as u32,
+                    sq3 as u32,
+                    sv1 as u32,
+                    sv2 as u32,
+                    sv3 as u32,
+                    sb1 as u32,
+                    sb2 as u32,
+                    sb3 as u32,
+                    neqk1 as u32,
+                    rq3 as u32,
+                    u32::from(kda),
                     self.stream,
                 )
             };
@@ -4398,7 +4539,7 @@ mod imp {
     use std::mem::size_of;
 }
 
-#[cfg(not(all(target_os = "linux", makepad_ggml_cuda_kernels)))]
+#[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ggml_cuda_kernels)))]
 mod imp {
     use crate::backend::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
@@ -4727,6 +4868,56 @@ mod imp {
             _row_stride: usize,
             _n: usize,
             _split_offset: usize,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn ssm_conv_f32(
+            &self,
+            _src0: &CudaBuffer,
+            _src1: &CudaBuffer,
+            _dst: &CudaBuffer,
+            _d_conv: usize,
+            _d_inner: usize,
+            _n_tokens: usize,
+            _n_seqs: usize,
+            _src0_token_stride: usize,
+            _src0_seq_stride: usize,
+            _src1_inner_stride: usize,
+            _dst_token_stride: usize,
+            _dst_seq_stride: usize,
+            _apply_silu: bool,
+        ) -> Result<(), String> {
+            Err("CUDA runtime is unavailable".to_string())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn gated_delta_net_f32(
+            &self,
+            _q: &CudaBuffer,
+            _k: &CudaBuffer,
+            _v: &CudaBuffer,
+            _g: &CudaBuffer,
+            _beta: &CudaBuffer,
+            _state: &CudaBuffer,
+            _dst: &CudaBuffer,
+            _sv: usize,
+            _h: usize,
+            _n_tokens: usize,
+            _n_seqs: usize,
+            _sq1: usize,
+            _sq2: usize,
+            _sq3: usize,
+            _sv1: usize,
+            _sv2: usize,
+            _sv3: usize,
+            _sb1: usize,
+            _sb2: usize,
+            _sb3: usize,
+            _neqk1: usize,
+            _rq3: usize,
+            _kda: bool,
         ) -> Result<(), String> {
             Err("CUDA runtime is unavailable".to_string())
         }

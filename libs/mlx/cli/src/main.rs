@@ -1,4 +1,4 @@
-use makepad_mlx::chat::{GemmaChatDecodeMode, GemmaChatRole, GemmaChatSession};
+use makepad_mlx::chat::{MlxChatDecodeMode, MlxChatRole, MlxChatSession, MlxChatStopReason};
 use makepad_mlx::text_runtime::{
     GemmaTextBackendConfig, GemmaTextBackendMode, GemmaTextKvCompressionMode,
 };
@@ -26,12 +26,10 @@ fn format_max_new_tokens(max_new_tokens: Option<usize>) -> String {
         .unwrap_or_else(|| "unbounded".to_owned())
 }
 
-fn format_stop_reason(stop_reason: makepad_mlx::text_runtime::GemmaStopReason) -> String {
+fn format_stop_reason(stop_reason: MlxChatStopReason) -> String {
     match stop_reason {
-        makepad_mlx::text_runtime::GemmaStopReason::MaxNewTokens => "max_new_tokens".to_owned(),
-        makepad_mlx::text_runtime::GemmaStopReason::EosToken(token_id) => {
-            format!("eos({token_id})")
-        }
+        MlxChatStopReason::MaxNewTokens => "max_new_tokens".to_owned(),
+        MlxChatStopReason::EosToken(token_id) => format!("eos({token_id})"),
     }
 }
 
@@ -55,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut model_path = default_model_path();
     let mut initial_image_path = None;
     let mut max_new_tokens = None;
-    let mut decode_mode = GemmaChatDecodeMode::Sampled;
+    let mut decode_mode = MlxChatDecodeMode::Sampled;
     let mut backend_config = GemmaTextBackendConfig::default();
 
     while let Some(arg) = args.next() {
@@ -70,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_new_tokens = Some(value.parse::<usize>()?);
             }
             "--greedy" => {
-                decode_mode = GemmaChatDecodeMode::Greedy;
+                decode_mode = MlxChatDecodeMode::Greedy;
             }
             "--reference-text-backend" => {
                 backend_config.backend_mode = GemmaTextBackendMode::Disabled;
@@ -100,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!("loading model={}...", model_path.display());
-    let mut session = GemmaChatSession::load_with_mode_and_backend_config(
+    let mut session = MlxChatSession::load_with_mode_and_backend_config(
         &model_path,
         max_new_tokens,
         decode_mode,
@@ -110,6 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         session.set_image(image_path);
     }
     println!("model={}", model_path.display());
+    println!("family={}", session.family().as_str());
     println!(
         "max_new_tokens={}",
         format_max_new_tokens(session.max_new_tokens())
@@ -117,8 +116,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "decode_mode={}",
         match session.decode_mode() {
-            GemmaChatDecodeMode::Sampled => "sampled",
-            GemmaChatDecodeMode::Greedy => "greedy",
+            MlxChatDecodeMode::Sampled => "sampled",
+            MlxChatDecodeMode::Greedy => "greedy",
         }
     );
     println!(
@@ -175,8 +174,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/history" => {
                 for message in session.messages() {
                     let prefix = match message.role {
-                        GemmaChatRole::User => "user> ",
-                        GemmaChatRole::Assistant => "assistant> ",
+                        MlxChatRole::System => "system> ",
+                        MlxChatRole::User => "user> ",
+                        MlxChatRole::Assistant => "assistant> ",
                     };
                     print_block(prefix, message.content.as_ref());
                 }
@@ -196,7 +196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         io::stdout().flush()?;
         let mut buffered_output = String::new();
         let mut last_flush = Instant::now();
-        let output = session.send_user_message_streaming(input, |delta| {
+        let output = match session.send_user_message_streaming(input, |delta| {
             buffered_output.push_str(delta);
             if buffered_output.len() >= STREAM_FLUSH_CHARS
                 || last_flush.elapsed() >= STREAM_FLUSH_INTERVAL
@@ -207,7 +207,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_flush = Instant::now();
             }
             Ok(())
-        })?;
+        }) {
+            Ok(output) => output,
+            Err(err) => {
+                if !buffered_output.is_empty() {
+                    print!("{buffered_output}");
+                    buffered_output.clear();
+                }
+                println!();
+                println!("Error: {err}");
+                continue;
+            }
+        };
         if !buffered_output.is_empty() {
             print!("{buffered_output}");
         }
