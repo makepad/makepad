@@ -46,3 +46,6 @@ CLAUDE.md
 
 # aichat example saves real user/AI chat history here
 examples/aichat/aichat_history.json
+
+# Opt-in streaming diagnostics (AICHAT_STREAM_LOG=1)
+examples/aichat/aichat_stream.log

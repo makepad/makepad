@@ -4,7 +4,10 @@ pub use makepad_widgets;
 use makepad_ai::*;
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
 use makepad_widgets::*;
-use streaming_markdown_kit::{SanitizeOptions, streaming_display_with_latex_autowrap, wrap_bare_latex};
+use streaming_markdown_kit::{
+    SanitizeOptions, streaming_display_with_latex_autowrap,
+    streaming_display_with_latex_autowrap_remend, wrap_bare_latex,
+};
 
 app_main!(App);
 
@@ -63,19 +66,36 @@ script_mod! {
         }
     }
 
-    // Override the global monospace font so CJK characters render in both
-    // inline `<code>` and the CodeView widget used by
-    // `use_code_block_widget: true`. Fonts live under `resources/` in this
-    // crate (shipped with the streaming-markdown-kit installer step).
+    // Override theme fonts. Two purposes:
+    //   1. font_code — CJK-capable monospace (LXGW Mono) so `` `inline` ``
+    //      and CodeView render Chinese correctly.
+    //   2. font_regular/bold/italic/bold_italic — add a `symbols` fallback
+    //      (NotoSans) so Unicode blocks outside IBM Plex Sans's repertoire
+    //      (arrows U+2190-U+21FF, math operators, misc technical) render
+    //      as glyphs instead of tofu. Observed trigger: `1→5` in prose.
+    //
+    // Note: Makepad's Markdown widget bakes `theme.font_*` at expansion
+    // time, so these theme-level overrides are **necessary but not
+    // sufficient** — per-instance overrides on each Markdown instance
+    // (text_style_fixed / text_style_normal / …) are also applied below.
     mod.themes.dark = mod.themes.dark{
         font_code: TextStyle{
             font_size: theme.font_size_code
             font_family: FontFamily{
                 latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
                 chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
                 emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.35
+        }
+        font_regular: mod.themes.dark.font_regular{
+            font_family: FontFamily{
+                latin := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+            }
         }
     }
 
@@ -108,9 +128,38 @@ script_mod! {
                     width: Fill
                     height: Fit
                     selectable: true
-                    use_code_block_widget: true
+                    // BISECT (2026-04-19): temporarily false to test whether
+                    // CodeView is the source of P2 long-code-block "content
+                    // disappears" issue. Revert to true once bisect done.
+                    use_code_block_widget: false
                     use_math_widget: true
                     body: ""
+                    // Per-instance override for `` `inline code` ``. The
+                    // Markdown widget bakes `theme.font_code` at expansion
+                    // time, so a later `mod.themes.dark{...}` override
+                    // doesn't reach it — same issue as CodeView's comment
+                    // below. Without this override, CJK inside backticks
+                    // renders as tofu (no glyph) because Liberation Mono
+                    // is Latin-only.
+                    text_style_fixed: theme.font_code{
+                        font_family: FontFamily{
+                            latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                            chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                            symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                            emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                        }
+                    }
+                    // Prose font family with symbols fallback — fixes "tofu"
+                    // for Unicode arrows / math / misc technical symbols
+                    // (observed trigger: `1→5`, `≤`, `≥`, `α` in prose).
+                    text_style_normal: theme.font_regular{
+                        font_family: FontFamily{
+                            latin := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                            chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                            symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                            emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                        }
+                    }
                     code_block := View {
                         width: Fill
                         height: Fit
@@ -179,9 +228,21 @@ script_mod! {
                         width: Fill
                         height: Fit
                         selectable: true
-                        use_code_block_widget: true
+                        // BISECT (2026-04-19): temporarily false to test whether
+                    // CodeView is the source of P2 long-code-block "content
+                    // disappears" issue. Revert to true once bisect done.
+                    use_code_block_widget: false
                         use_math_widget: true
                         body: ""
+                        // Per-instance override — same as User's Markdown
+                        // above. Fixes `` `中文` `` inline-code tofu.
+                        text_style_fixed: theme.font_code{
+                            font_family: FontFamily{
+                                latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                            }
+                        }
                         draw_text +: {
                             get_color: fn() {
                                 let fade_chars = 50.0
@@ -341,6 +402,22 @@ script_mod! {
                             width: Fill
                             height: Fit
                             empty_text: "Type a message... (Enter to send)"
+                            // Per-instance font override — TextInput bakes
+                            // `theme.font_regular` at DSL-expansion time, same
+                            // issue as Markdown/CodeView. Without this the
+                            // input box shows tofu for CJK and U+2192 arrows.
+                            draw_text +: {
+                                text_style: theme.font_regular{
+                                    line_spacing: theme.font_wdgt_line_spacing
+                                    font_size: theme.font_size_p
+                                    font_family: FontFamily{
+                                        latin := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                                        chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                                        symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                                        emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                                    }
+                                }
+                            }
                         }
 
                         send_button := Button {
@@ -391,6 +468,49 @@ pub static CHAT_DATA: std::sync::RwLock<ChatData> = std::sync::RwLock::new(ChatD
 // delegates to set_mermaid_src → rusty-mermaid → SVG → DrawSvg. No aichat-
 // side extraction or cache is needed — MermaidSvgView dedupes by content
 // hash internally.
+
+/// Some LLMs, when asked "show me a markdown file demo with ... inside",
+/// wrap their ENTIRE reply in a single ```markdown ... ``` fence. Because
+/// CommonMark does not support fence nesting, pulldown-cmark then treats
+/// the whole reply as ONE code block — collapsing markdown structure
+/// (headings, lists, inner mermaid fences, math, …) into monospace text
+/// and killing the streaming fade animation (CodeView's DrawText doesn't
+/// carry the per-char fade shader the way our Markdown widget does).
+///
+/// Strategy is **aggressive**: as soon as the text starts with
+/// ```markdown\n (or ```md\n), strip that opener even if the outer fence
+/// hasn't closed yet. Otherwise we'd keep the whole streaming reply stuck
+/// in code-block mode until the final token arrives. The trailing outer
+/// ``` is stripped too when present (so `# …\n```mermaid\n…\n```\n````
+/// becomes `# …\n```mermaid\n…\n````), which lets inner fenced blocks
+/// render correctly while the outer wrapper is folded away.
+fn unwrap_outer_markdown_fence(text: &str) -> &str {
+    let trimmed_text = text.trim_start();
+    // CommonMark allows fences of any length ≥ 3 — 3 backticks for plain
+    // code, 4+ for wrappers that want to contain inner 3-backtick blocks.
+    // LLMs use both (3 when they're not thinking about nesting, 4 when our
+    // system prompt tells them to). Handle any length.
+    let bt_count = trimmed_text.bytes().take_while(|b| *b == b'`').count();
+    if bt_count < 3 {
+        return text;
+    }
+    let after_ticks = &trimmed_text[bt_count..];
+    let body_start = after_ticks
+        .strip_prefix("markdown\n")
+        .or_else(|| after_ticks.strip_prefix("md\n"));
+    let Some(body) = body_start else {
+        return text;
+    };
+    // Try to strip a matching closing fence at the end: same length or
+    // longer, optionally followed by trailing whitespace. If streaming is
+    // mid-way and there's no close yet, return the opener-stripped body.
+    let close_pat = "`".repeat(bt_count);
+    let end_trimmed = body.trim_end();
+    if let Some(without_close) = end_trimmed.strip_suffix(&close_pat) {
+        return without_close.trim_end_matches('\n').trim_end();
+    }
+    body
+}
 
 const CHAT_SAVE_PATH: &str = "aichat_history.json";
 
@@ -499,6 +619,27 @@ pub struct MermaidSvgView {
     content_h: f64,
     #[rust]
     last_src_hash: u64,
+    /// Debounce: hash of the source we saw on the immediately previous call
+    /// but haven't rendered yet. Rendering only fires when the SAME hash
+    /// arrives twice in a row — during streaming the source changes every
+    /// chunk, so we skip; once the stream pauses (fence closed or LLM
+    /// catching breath), the next set_text with the same content triggers
+    /// the actual mermaid layout + SVG generation. Cuts per-token cost of
+    /// large diagrams from "render every chunk" to "render at most once
+    /// per stream pause".
+    #[rust]
+    pending_src_hash: u64,
+    /// Cache of text commands extracted from `self.doc`. `collect_text_cmds`
+    /// walks the entire SVG tree, which is O(nodes). draw_walk runs per
+    /// frame (because the flow-dot animation self-schedules NextFrame), so
+    /// without this cache we walk the tree on every frame of every mermaid
+    /// widget. Invalidate on `set_svg_str`.
+    #[rust]
+    cached_text_cmds: Vec<SvgTextCmd>,
+    /// Cache of edge geometries for the flow-dot animation. Same rationale
+    /// as `cached_text_cmds`.
+    #[rust]
+    cached_edges: Vec<SvgEdge>,
     // -- pan/zoom state --
     /// Current zoom factor. 1.0 = fit-to-widget, >1 zoomed in, <1 zoomed out.
     #[rust(1.0f64)]
@@ -539,6 +680,12 @@ impl MermaidSvgView {
         }
         self.last_src_hash = h;
         self.doc = parse_svg(svg);
+        // Rebuild per-doc caches exactly once per SVG swap. draw_walk runs
+        // per frame (flow-dot animation self-schedules), so computing these
+        // here instead of inside draw_walk cuts scroll/zoom cost from
+        // O(nodes × frames) to O(nodes once).
+        self.cached_text_cmds = collect_text_cmds(&self.doc);
+        self.cached_edges = collect_edges(&self.doc);
         self.draw_svg.cache_valid = false;
         self.draw_svg.set_doc_bounds(&self.doc);
         if let Some(vb) = self.doc.viewbox.as_ref() {
@@ -568,9 +715,24 @@ impl MermaidSvgView {
         let mut hs = DefaultHasher::new();
         trimmed.hash(&mut hs);
         let h = hs.finish();
+
+        // Already rendered this exact src — nothing to do.
         if h == self.last_src_hash && !self.doc.root.is_empty() {
             return;
         }
+
+        // Streaming debounce: only render when the SAME new hash arrives
+        // twice in a row. During an active stream the mermaid body grows
+        // every chunk, so each call has a fresh hash and we skip. When the
+        // stream pauses (fence closed, LLM paused, chunk coalesced) the
+        // next identical call triggers the render. Big diagrams (15+
+        // nodes) go from "dagre layout every chunk" to "render once per
+        // stream pause".
+        if h != self.pending_src_hash {
+            self.pending_src_hash = h;
+            return;
+        }
+
         match streaming_markdown_kit::render_mermaid_to_svg(trimmed) {
             Ok(svg) => {
                 self.set_svg_str(cx, &svg);
@@ -697,19 +859,25 @@ impl Widget for MermaidSvgView {
             size: rect.size * z,
         };
 
-        let text_cmds = collect_text_cmds(&self.doc);
-        let edges = collect_edges(&self.doc);
+        // Use caches populated in set_svg_str — walking the SVG doc tree
+        // every frame is what made scroll/zoom laggy on 15+ node diagrams.
         self.draw_svg.svg_doc = Some(std::mem::take(&mut self.doc));
         self.draw_svg.has_animations = false;
         self.draw_svg.render_to_rect(cx, &eff, 0.0);
         self.doc = self.draw_svg.svg_doc.take().unwrap_or_default();
 
+        let text_cmds = std::mem::take(&mut self.cached_text_cmds);
         self.render_text_cmds(cx, &eff, &text_cmds);
+        self.cached_text_cmds = text_cmds;
+
+        let edges = std::mem::take(&mut self.cached_edges);
         self.render_flow_dots(cx, &eff, &edges);
+        let has_edges = !edges.is_empty();
+        self.cached_edges = edges;
 
         // Self-sustaining animation: if we have at least one edge, keep an
         // outstanding NextFrame pending so `handle_event` keeps ticking.
-        if !edges.is_empty() {
+        if has_edges {
             self.next_frame = cx.new_next_frame();
         }
         DrawStep::done()
@@ -721,7 +889,6 @@ impl MermaidSvgView {
         if cmds.is_empty() {
             return;
         }
-        log!("[mermaid-svg] drawing {} text cmds", cmds.len());
         let (min_x, min_y, max_x, max_y) = self.draw_svg.content_bounds;
         let content_w = (max_x - min_x) as f64;
         let content_h = (max_y - min_y) as f64;
@@ -905,14 +1072,52 @@ impl Widget for ChatList {
                                 trim_unclosed_fence: false,
                                 ..SanitizeOptions::default()
                             };
-                            streaming_body = streaming_display_with_latex_autowrap(
-                                &data.streaming_text,
-                                opts,
-                            );
+                            // P2 bisect (2026-04-19) confirmed remend is NOT
+                            // the source of content-disappear; CodeView is.
+                            // Remend is validated and back on. The toggle is
+                            // kept as a one-line diagnostic hook in case a
+                            // future regression needs the same A/B test.
+                            const USE_REMEND: bool = true;
+                            streaming_body = if USE_REMEND {
+                                streaming_display_with_latex_autowrap_remend(
+                                    &data.streaming_text,
+                                    opts,
+                                )
+                            } else {
+                                streaming_display_with_latex_autowrap(
+                                    &data.streaming_text,
+                                    opts,
+                                )
+                            };
+                            // Debug: record set_text calls so we can see what
+                            // the buffer looks like when content disappears.
+                            // Writes to aichat_stream.log next to the exe.
+                            if std::env::var("AICHAT_STREAM_LOG").is_ok() {
+                                use std::io::Write;
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true).append(true).open("aichat_stream.log")
+                                {
+                                    let n = streaming_body.len();
+                                    let mut ts = n.saturating_sub(120);
+                                    while ts < n && !streaming_body.is_char_boundary(ts) {
+                                        ts += 1;
+                                    }
+                                    let tail = &streaming_body[ts..];
+                                    let _ = writeln!(
+                                        f,
+                                        "[set_text] remend={} len={} tail={:?}",
+                                        USE_REMEND, n, tail,
+                                    );
+                                }
+                            }
                             &streaming_body
                         };
                         let mut markdown = item_widget.markdown(cx, ids!(selectable));
-                        markdown.set_text(cx, text);
+                        // Unwrap outer ```markdown wrapper in streaming
+                        // content too: some LLMs emit the wrapper as the
+                        // very first tokens, so we'd otherwise render a
+                        // growing code block for the whole stream.
+                        markdown.set_text(cx, unwrap_outer_markdown_fence(text));
                         if just_started {
                             markdown.reset_all_streaming_animations();
                         } else {
@@ -935,7 +1140,8 @@ impl Widget for ChatList {
                         // handled by the Markdown widget itself via the
                         // `mermaid_block` template — no aichat-side
                         // extraction needed.
-                        let rendered = wrap_bare_latex(&msg.text);
+                        let unwrapped = unwrap_outer_markdown_fence(&msg.text);
+                        let rendered = wrap_bare_latex(unwrapped);
                         markdown.set_text(cx, &rendered);
                         if is_animating {
                             markdown.stop_streaming_animation();
@@ -1320,6 +1526,17 @@ impl App {
         if text.trim().is_empty() {
             return;
         }
+        if std::env::var("AICHAT_STREAM_LOG").is_ok() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true).append(true).open("aichat_stream.log")
+            {
+                let head: String = text.chars().take(40).collect();
+                let _ = writeln!(
+                    f, "[send_message] user_input={:?}", head
+                );
+            }
+        }
 
         let (agent, session_id) = match (&mut self.agent, self.session_id) {
             (Some(agent), Some(session_id)) => (agent, session_id),
@@ -1373,6 +1590,24 @@ impl App {
         self.ui.redraw(cx);
     }
 
+    /// Open a URL in the system browser. Platform-dispatched via std::process::Command
+    /// so we don't pull a new crate dependency. Returns Err if the process couldn't be
+    /// spawned; caller may ignore.
+    fn open_url_in_browser(url: &str) -> std::io::Result<()> {
+        #[cfg(target_os = "macos")]
+        let cmd = std::process::Command::new("open").arg(url).spawn();
+        #[cfg(target_os = "linux")]
+        let cmd = std::process::Command::new("xdg-open").arg(url).spawn();
+        #[cfg(target_os = "windows")]
+        let cmd = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        let cmd: std::io::Result<std::process::Child> = Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unsupported platform",
+        ));
+        cmd.map(|_| ())
+    }
+
     fn cancel_request(&mut self, cx: &mut Cx) {
         if let (Some(agent), Some(prompt_id)) = (&mut self.agent, self.current_prompt.take()) {
             agent.cancel_prompt(cx, prompt_id);
@@ -1404,6 +1639,18 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        // Markdown link click — open the URL in the system browser only
+        // when Cmd (macOS) / Super (Linux/Windows) was held. Plain clicks
+        // are reserved for drag-selection inside the Markdown widget.
+        for action in actions {
+            if let Some(md_action) = action.downcast_ref::<makepad_widgets::markdown::MarkdownAction>() {
+                if let makepad_widgets::markdown::MarkdownAction::LinkNavigated { url, modifiers } = md_action {
+                    if modifiers.logo {
+                        let _ = Self::open_url_in_browser(url);
+                    }
+                }
+            }
+        }
         if self.ui.button(cx, ids!(send_button)).clicked(actions) {
             self.send_message(cx);
         }
@@ -1498,6 +1745,20 @@ impl AppMain for App {
                     AgentEvent::TextDelta { text, .. } => {
                         let item_id = {
                             let mut data = CHAT_DATA.write().unwrap();
+                            if std::env::var("AICHAT_STREAM_LOG").is_ok() {
+                                use std::io::Write;
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true).append(true).open("aichat_stream.log")
+                                {
+                                    let dlen = text.len();
+                                    let bhead: String = text.chars().take(40).collect();
+                                    let _ = writeln!(
+                                        f,
+                                        "[delta] buf_before={} delta_len={} delta_head={:?}",
+                                        data.streaming_text.len(), dlen, bhead,
+                                    );
+                                }
+                            }
                             data.streaming_text.push_str(&text);
                             data.messages.len()
                         };
@@ -1509,6 +1770,14 @@ impl AppMain for App {
                         cx.redraw_all();
                     }
                     AgentEvent::TurnComplete { .. } => {
+                        if std::env::var("AICHAT_STREAM_LOG").is_ok() {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true).append(true).open("aichat_stream.log")
+                            {
+                                let _ = writeln!(f, "[TurnComplete]");
+                            }
+                        }
                         let mut data = CHAT_DATA.write().unwrap();
                         let text = std::mem::take(&mut data.streaming_text);
                         if !text.is_empty() {
