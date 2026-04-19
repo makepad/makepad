@@ -10,13 +10,12 @@ license = "MIT OR Apache-2.0"
 makepad-widgets = { path = "../../widgets", features = ["maps", "pdf"] }
 makepad-code-editor = { path = "../../code_editor" }
 makepad-ai = { path = "../../old/studio/ai" }
-# NOTE: path dep (not git) because streaming-markdown-kit transitively
-# depends on streaming-markdown-sanitizer which isn't yet published. To
-# build this example, clone both sibling repos next to `makepad/`:
+# NOTE: path dep (not git) because streaming-markdown-kit isn't yet
+# published to crates.io. To build this example, clone it next to
+# `makepad/`:
 #     .../
-#     ├── makepad/                       (this repo)
-#     ├── streaming-markdown-kit/        (git@github.com:Project-Robius-China/streaming-markdown-kit)
-#     └── streaming-markdown-sanitizer/  (TODO: publish)
+#     ├── makepad/                 (this repo)
+#     └── streaming-markdown-kit/  (git@github.com:Project-Robius-China/streaming-markdown-kit)
 streaming-markdown-kit = { path = "../../../../streaming-markdown-kit", features = ["mermaid"] }
 # Cross-platform URL opener. std::process::Command only works on desktop —
 # iOS/Android/WASM need platform-specific plumbing (UIApplication, Intent,
