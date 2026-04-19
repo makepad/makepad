@@ -176,6 +176,18 @@ script_mod! {
             margin: theme.mspace_v_1
         }
 
+        draw_table_bg +: {
+            color: #x1f2937
+        }
+
+        draw_table_header_bg +: {
+            color: #x334155
+        }
+
+        draw_table_line +: {
+            color: #x475569
+        }
+
         draw_block +: {
             line_color: theme.color_label_inner
             sep_color: theme.color_shadow
@@ -278,6 +290,51 @@ pub struct Markdown {
     auto_id: u64,
     #[live]
     heading_base_scale: f64,
+
+    // --- Table rendering state ---
+    // Table rendering is a two-pass process. During the first pass we buffer
+    // every cell's text into `table_rows` (respecting in_table_head for the
+    // header). During the second pass, triggered at End(Tag::Table), we
+    // measure each column's width via the real font layouter and draw the
+    // grid with DrawColor/DrawText primitives inside a single
+    // `walk_turtle(Walk::fixed(W,H))` reserved region.
+    /// Set to the link's destination URL while reading the body of a
+    /// `[text](url)` construct. We buffer the link's display text between
+    /// Start(Link) and End(Link) into `link_text`, then instantiate the
+    /// `link` template with both href AND text at End(Link). The previous
+    /// approach instantiated an empty LinkLabel at Start and let link text
+    /// flow into the outer turtle as plain text — the net effect was a
+    /// zero-width invisible LinkLabel followed by unstyled inline text
+    /// with no click handler.
+    #[rust]
+    in_link: Option<String>,
+    #[rust]
+    link_text: String,
+
+    #[rust]
+    in_table: bool,
+    #[rust]
+    in_table_head: bool,
+    #[rust]
+    table_has_header: bool,
+    #[rust]
+    table_rows: Vec<Vec<String>>,
+    #[rust]
+    table_current_row: Vec<String>,
+    #[rust]
+    table_current_cell: String,
+
+    /// Background fill for the table container (drawn behind the grid).
+    #[live]
+    draw_table_bg: DrawColor,
+    /// Header-row background tint — drawn on top of the main bg only behind
+    /// row 0 when `has_header` is true. Makes the header visually distinct
+    /// even if the bold-font override is absent in the consuming app.
+    #[live]
+    draw_table_header_bg: DrawColor,
+    /// Grid line color (borders + dividers between cells).
+    #[live]
+    draw_table_line: DrawColor,
 }
 
 impl Widget for Markdown {
@@ -509,22 +566,44 @@ impl Markdown {
                     tf.underline.pop();
                 }
                 MdEvent::Start(Tag::Link { dest_url, .. }) => {
-                    self.auto_id += 1;
-                    let item = tf.item(cx, LiveId(self.auto_id), live_id!(link));
-                    item.as_markdown_link().set_href(&dest_url);
-                    item.draw_all_unscoped(cx);
+                    // Inside a table, links flatten to plain text in the
+                    // cell buffer (no widget instancing, no click). Outside
+                    // a table, buffer the link's text now; instantiate the
+                    // LinkLabel at End(Link) with both href AND set_text.
+                    if !self.in_table {
+                        self.in_link = Some(dest_url.into_string());
+                        self.link_text.clear();
+                    }
                 }
                 MdEvent::End(TagEnd::Link) => {
-                    // Link handling is done in Start event
+                    if let Some(href) = self.in_link.take() {
+                        let text = std::mem::take(&mut self.link_text);
+                        if !text.is_empty() {
+                            self.auto_id += 1;
+                            let item = tf.item(cx, LiveId(self.auto_id), live_id!(link));
+                            let link = item.as_markdown_link();
+                            link.set_href(&href);
+                            item.set_text(cx, &text);
+                            item.draw_all_unscoped(cx);
+                        }
+                    }
                 }
                 MdEvent::Start(Tag::Image {
                     dest_url, title, ..
                 }) => {
-                    tf.draw_text(cx, "Image[name:");
-                    tf.draw_text(cx, &title);
-                    tf.draw_text(cx, ", url:");
-                    tf.draw_text(cx, &dest_url);
-                    tf.draw_text(cx, "]");
+                    // Images require async URL fetch + decode + inline
+                    // DrawImage placement, which is substantial work we
+                    // haven't done yet. For now render a compact inline
+                    // placeholder so the image's presence is at least
+                    // visible. Alt text (pulldown's "title" field carries
+                    // this in GFM) is included when present.
+                    tf.draw_text(cx, "🖼 ");
+                    let label = if !title.is_empty() {
+                        title.as_ref()
+                    } else {
+                        dest_url.as_ref()
+                    };
+                    tf.draw_text(cx, label);
                 }
                 MdEvent::Start(Tag::CodeBlock(kind)) => {
                     if !is_first_block {
@@ -608,18 +687,31 @@ impl Markdown {
                 }
                 // Inline code
                 MdEvent::Code(text) => {
-                    const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
-                    tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
-                    tf.fixed.push();
-                    tf.inline_code.push();
-                    tf.draw_text(cx, &text);
-                    tf.font_sizes.pop();
-                    tf.fixed.pop();
-                    tf.inline_code.pop();
+                    if self.in_table {
+                        // v1 cells accept plain text only — collapse inline
+                        // code runs into the cell's buffer without the
+                        // fixed-font styling, so row geometry stays clean.
+                        self.table_current_cell.push_str(&text);
+                    } else {
+                        const FIXED_FONT_SIZE_SCALE: f64 = 0.85;
+                        tf.push_size_rel_scale(FIXED_FONT_SIZE_SCALE);
+                        tf.fixed.push();
+                        tf.inline_code.push();
+                        tf.draw_text(cx, &text);
+                        tf.font_sizes.pop();
+                        tf.fixed.pop();
+                        tf.inline_code.pop();
+                    }
                 }
                 // Inline math ($...$)
                 MdEvent::InlineMath(text) => {
-                    if self.use_math_widget {
+                    // Inside a table we buffer the raw math source into the
+                    // cell as plain text — MathView is its own sub-widget and
+                    // firing it during the buffering phase would draw live
+                    // into the parent turtle, corrupting the delayed grid.
+                    if self.in_table {
+                        self.table_current_cell.push_str(&text);
+                    } else if self.use_math_widget {
                         let entry_id = tf.new_counted_id();
                         tf.item_with(cx, entry_id, live_id!(inline_math), |cx, item, _tf| {
                             item.set_text(cx, &text);
@@ -660,7 +752,11 @@ impl Markdown {
                     }
                 }
                 MdEvent::Text(text) => {
-                    if self.in_splash_block {
+                    if self.in_link.is_some() {
+                        self.link_text.push_str(&text);
+                    } else if self.in_table {
+                        self.table_current_cell.push_str(&text);
+                    } else if self.in_splash_block {
                         self.splash_block_string.push_str(&text);
                     } else if self.in_mermaid_block {
                         self.mermaid_block_string.push_str(&text);
@@ -671,7 +767,9 @@ impl Markdown {
                     }
                 }
                 MdEvent::SoftBreak => {
-                    if self.in_splash_block {
+                    if self.in_table {
+                        self.table_current_cell.push(' ');
+                    } else if self.in_splash_block {
                         self.splash_block_string.push('\n');
                     } else if self.in_mermaid_block {
                         self.mermaid_block_string.push('\n');
@@ -682,7 +780,9 @@ impl Markdown {
                     }
                 }
                 MdEvent::HardBreak => {
-                    if self.in_splash_block {
+                    if self.in_table {
+                        self.table_current_cell.push(' ');
+                    } else if self.in_splash_block {
                         self.splash_block_string.push('\n');
                     } else if self.in_mermaid_block {
                         self.mermaid_block_string.push('\n');
@@ -703,32 +803,227 @@ impl Markdown {
                 MdEvent::TaskListMarker(_) => {
                     // TODO: Implement task list markers
                 }
-                MdEvent::Start(Tag::Table(_)) => {
-                    // TODO: Implement table support
+                // Tables use a two-pass approach: buffer all cell text first,
+                // then measure + draw the grid in End(Tag::Table) via the
+                // Markdown::draw_table associated fn. See struct field docs
+                // on `table_rows`.
+                MdEvent::Start(Tag::Table(_alignments)) => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+                    self.in_table = true;
+                    self.table_has_header = false;
+                    self.table_rows.clear();
+                    self.table_current_row.clear();
+                    self.table_current_cell.clear();
                 }
                 MdEvent::End(TagEnd::Table) => {
-                    // TODO: Implement table support
+                    // Drive the grid draw via an associated fn so the
+                    // &mut self.text_flow loan held by `tf` stays disjoint
+                    // from the other fields we need to touch here.
+                    Self::draw_table(
+                        cx,
+                        tf,
+                        &mut self.draw_table_bg,
+                        &mut self.draw_table_header_bg,
+                        &mut self.draw_table_line,
+                        &self.table_rows,
+                        self.table_has_header,
+                    );
+                    self.in_table = false;
+                    self.table_rows.clear();
+                    self.table_current_row.clear();
+                    self.table_current_cell.clear();
+                    tf.first_thing_on_a_line = true;
                 }
                 MdEvent::Start(Tag::TableHead) => {
-                    // TODO: Implement table header support
+                    self.in_table_head = true;
+                    self.table_has_header = true;
+                    self.table_current_row.clear();
                 }
                 MdEvent::End(TagEnd::TableHead) => {
-                    // TODO: Implement table header support
+                    self.table_rows.push(std::mem::take(&mut self.table_current_row));
+                    self.in_table_head = false;
                 }
                 MdEvent::Start(Tag::TableRow) => {
-                    // TODO: Implement table row support
+                    self.table_current_row.clear();
                 }
                 MdEvent::End(TagEnd::TableRow) => {
-                    // TODO: Implement table row support
+                    self.table_rows.push(std::mem::take(&mut self.table_current_row));
                 }
                 MdEvent::Start(Tag::TableCell) => {
-                    // TODO: Implement table cell support
+                    self.table_current_cell.clear();
                 }
                 MdEvent::End(TagEnd::TableCell) => {
-                    // TODO: Implement table cell support
+                    self.table_current_row.push(std::mem::take(&mut self.table_current_cell));
                 }
                 _ => {} // Unimplemented or unnecessary events
             }
+        }
+
+        // Streaming partial-render: if the parser reached EOF while still
+        // inside an unclosed table, flush whatever we've collected and
+        // draw it now. Without this, the table stays invisible across
+        // every streaming chunk until the closing `|` row arrives —
+        // producing a "whole table pops in at the end" UX.
+        if self.in_table {
+            if !self.table_current_cell.is_empty() {
+                self.table_current_row.push(std::mem::take(&mut self.table_current_cell));
+            }
+            if !self.table_current_row.is_empty() {
+                self.table_rows.push(std::mem::take(&mut self.table_current_row));
+            }
+            if !self.table_rows.is_empty() {
+                let tf = &mut self.text_flow;
+                Self::draw_table(
+                    cx,
+                    tf,
+                    &mut self.draw_table_bg,
+                    &mut self.draw_table_header_bg,
+                    &mut self.draw_table_line,
+                    &self.table_rows,
+                    self.table_has_header,
+                );
+            }
+            self.in_table = false;
+            self.table_rows.clear();
+        }
+    }
+
+    /// Draws the collected table grid at the current turtle position.
+    ///
+    /// Takes disjoint `&mut` borrows so the caller can keep its outer
+    /// `&mut self.text_flow` loan live. Responsibilities:
+    ///   1. Measure each column's max content width via the font layouter.
+    ///   2. Reserve a `Walk::fixed(W, H)` rectangle in the parent turtle.
+    ///   3. Paint a background, then cell text, then grid lines (in that
+    ///      order so lines render on top of both).
+    fn draw_table(
+        cx: &mut Cx2d,
+        tf: &mut TextFlow,
+        draw_bg: &mut DrawColor,
+        draw_header_bg: &mut DrawColor,
+        draw_line: &mut DrawColor,
+        rows: &[Vec<String>],
+        has_header: bool,
+    ) {
+        if rows.is_empty() || rows[0].is_empty() {
+            return;
+        }
+
+        // Layout constants. Tune in the DSL eventually; these match the
+        // visual target spec (~8px horizontal, 4-6px vertical padding).
+        const CELL_PAD_H: f64 = 8.0;
+        const CELL_PAD_V: f64 = 5.0;
+        const MAX_COL_W: f64 = 400.0;
+        const LINE_W: f64 = 1.0;
+        const LINE_HEIGHT_MULT: f64 = 1.4;
+
+        let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        if ncols == 0 {
+            return;
+        }
+
+        let font_size = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f32;
+
+        // --- Pass 1: measure column widths ---
+        //
+        // `DrawText::layout` returns an Rc<LaidoutText> with size_in_lpxs.
+        // We swap in the bold style for header cells to get accurate widths
+        // when the header is rendered bold.
+        let mut col_widths: Vec<f64> = vec![0.0; ncols];
+        let normal_style = tf.text_style_normal.clone();
+        let bold_style = tf.text_style_bold.clone();
+        for (r, row) in rows.iter().enumerate() {
+            let is_header_row = has_header && r == 0;
+            let style = if is_header_row { &bold_style } else { &normal_style };
+            tf.draw_text.text_style = style.clone();
+            tf.draw_text.text_style.font_size = font_size;
+            for (c, cell) in row.iter().enumerate() {
+                if c >= ncols { break; }
+                if cell.is_empty() { continue; }
+                let laid = tf.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), cell);
+                let w = laid.size_in_lpxs.width as f64;
+                if w > col_widths[c] {
+                    col_widths[c] = w.min(MAX_COL_W);
+                }
+            }
+        }
+        // Columns with no content get a minimum so dividers still render.
+        for w in col_widths.iter_mut() {
+            if *w < font_size as f64 { *w = font_size as f64; }
+        }
+
+        // Row height is derived from font size (single-line cells in v1).
+        let row_h = (font_size as f64 * LINE_HEIGHT_MULT) + CELL_PAD_V * 2.0;
+        let col_total_w: f64 = col_widths.iter().sum::<f64>() + (CELL_PAD_H * 2.0) * ncols as f64;
+        let total_w = col_total_w + LINE_W; // +1 for trailing right border
+        let total_h = row_h * rows.len() as f64 + LINE_W;
+
+        // --- Pass 2: reserve space and draw ---
+        let rect = cx.walk_turtle(Walk::fixed(total_w, total_h));
+        let ox = rect.pos.x;
+        let oy = rect.pos.y;
+
+        // Background fill first.
+        draw_bg.draw_abs(cx, Rect { pos: dvec2(ox, oy), size: dvec2(total_w, total_h) });
+
+        // Header-row bg tint overlaid on main bg so the header is visually
+        // distinct even when the bold-font override is missing / subtle.
+        if has_header {
+            draw_header_bg.draw_abs(cx, Rect { pos: dvec2(ox, oy), size: dvec2(total_w, row_h) });
+        }
+
+        // Cell text. Per-cell: set the font style + color + size, then
+        // draw_abs at (origin + x-pad, origin + y-pad).
+        let mut y = oy;
+        for (r, row) in rows.iter().enumerate() {
+            let is_header_row = has_header && r == 0;
+            let style = if is_header_row { &bold_style } else { &normal_style };
+            tf.draw_text.text_style = style.clone();
+            tf.draw_text.text_style.font_size = font_size;
+            tf.draw_text.color = tf.font_color;
+            tf.draw_text.temp_y_shift = style.top_drop;
+
+            let mut x = ox;
+            for c in 0..ncols {
+                let col_w = col_widths[c] + CELL_PAD_H * 2.0;
+                if let Some(cell) = row.get(c) {
+                    if !cell.is_empty() {
+                        let text_y = y + CELL_PAD_V;
+                        let text_x = x + CELL_PAD_H;
+                        tf.draw_text.draw_abs(cx, dvec2(text_x, text_y), cell);
+                    }
+                }
+                x += col_w;
+            }
+            y += row_h;
+        }
+
+        // Grid lines last (draw on top). Outer border.
+        let border = draw_line;
+        // Top
+        border.draw_abs(cx, Rect { pos: dvec2(ox, oy), size: dvec2(total_w, LINE_W) });
+        // Bottom
+        border.draw_abs(cx, Rect { pos: dvec2(ox, oy + total_h - LINE_W), size: dvec2(total_w, LINE_W) });
+        // Left
+        border.draw_abs(cx, Rect { pos: dvec2(ox, oy), size: dvec2(LINE_W, total_h) });
+        // Right
+        border.draw_abs(cx, Rect { pos: dvec2(ox + total_w - LINE_W, oy), size: dvec2(LINE_W, total_h) });
+
+        // Horizontal separator below each row (between rows and after header).
+        let mut y = oy + row_h;
+        for _ in 1..rows.len() {
+            border.draw_abs(cx, Rect { pos: dvec2(ox, y), size: dvec2(total_w, LINE_W) });
+            y += row_h;
+        }
+
+        // Vertical separators between each column.
+        let mut x = ox;
+        for c in 0..ncols.saturating_sub(1) {
+            x += col_widths[c] + CELL_PAD_H * 2.0;
+            border.draw_abs(cx, Rect { pos: dvec2(x, oy), size: dvec2(LINE_W, total_h) });
         }
     }
 }
@@ -791,10 +1086,13 @@ struct MarkdownLink {
 
 impl WidgetMatchEvent for MarkdownLink {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
-        if self.link.clicked(actions) {
+        if let Some(modifiers) = self.link.clicked_modifiers(actions) {
             cx.widget_action(
                 self.widget_uid(),
-                MarkdownAction::LinkNavigated(self.href.clone()),
+                MarkdownAction::LinkNavigated {
+                    url: self.href.clone(),
+                    modifiers,
+                },
             );
         }
     }
@@ -832,5 +1130,11 @@ impl MarkdownLinkRef {
 pub enum MarkdownAction {
     #[default]
     None,
-    LinkNavigated(String),
+    /// Emitted when a `[text](url)` link is clicked. The app decides what
+    /// to do with it (e.g., open the URL only when `modifiers.logo` is set
+    /// to avoid conflicting with drag-selection on the Markdown widget).
+    LinkNavigated {
+        url: String,
+        modifiers: makepad_platform::KeyModifiers,
+    },
 }
