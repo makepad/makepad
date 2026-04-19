@@ -61,6 +61,14 @@ script_mod! {
             }
 
             Hr{}
+            H4{text: "Collapsible sections (<details> / <summary>)"}
+            P{text: "Click the triangle to expand or collapse. The first <details> uses the open attribute to start expanded; the others start collapsed. Nested <details> are supported, and summaries can contain styled text."}
+            Html{
+                width: Fill height: Fit
+                body: "<details open><summary>What is this widget?</summary><p>This is a collapsible section. Each <code>&lt;details&gt;</code> tag wraps a <code>&lt;summary&gt;</code> followed by hidden content that is shown when expanded. Use the <code>open</code> attribute to make it expanded by default.</p></details><details><summary><b>Keyboard shortcuts</b></summary><ul><li><code>Cmd</code> + <code>S</code> — save</li><li><code>Cmd</code> + <code>Z</code> — undo</li><li><code>Cmd</code> + <code>Shift</code> + <code>Z</code> — redo</li></ul></details><details><summary>Nested <i>details</i> with H<sub>2</sub>O inside</summary><p>The outer summary holds a subscript and italics. Inside, you can nest more <code>&lt;details&gt;</code>:</p><details><summary>Level 2: click me</summary><p>Hidden level 2 content. Links still work: <a href='https://example.com'>example.com</a>.</p><details><summary>Level 3: click me too</summary><p>Deeply nested content. Blockquotes work here:</p><blockquote>A quote inside a collapsed-by-default section.</blockquote></details></details></details>"
+            }
+
+            Hr{}
             H4{text: "Numeric HTML table (all columns right-aligned)"}
             P{text: "Typical numeric layout using align='right' on every cell. Header, body rows, and a bold totals row."}
             Html{
