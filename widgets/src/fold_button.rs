@@ -131,6 +131,22 @@ impl FoldButton {
         self.animator_in_state(cx, ids!(active.on))
     }
 
+    /// Overrides the triangle's base, hover, and active colors with a single
+    /// value. Intended for callers that want the triangle to match the color
+    /// of surrounding content (e.g. the HTML `<summary>` text color).
+    pub fn set_draw_color(&mut self, cx: &Cx, color: Vec4f) {
+        let values = [color.x, color.y, color.z, color.w];
+        self.draw_bg
+            .draw_vars
+            .set_uniform(cx, live_id!(color), &values);
+        self.draw_bg
+            .draw_vars
+            .set_uniform(cx, live_id!(color_hover), &values);
+        self.draw_bg
+            .draw_vars
+            .set_uniform(cx, live_id!(color_active), &values);
+    }
+
     pub fn draw_walk_fold_button(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.draw_walk(cx, walk);
     }
