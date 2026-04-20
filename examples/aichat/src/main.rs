@@ -1627,8 +1627,8 @@ impl MatchEvent for App {
         // available for drag-selection inside the Markdown widget; mobile &
         // web have no modifier concept, so a plain tap opens the URL.
         for action in actions {
-            if let Some(md_action) = action.downcast_ref::<makepad_widgets::markdown::MarkdownAction>() {
-                if let makepad_widgets::markdown::MarkdownAction::LinkNavigated { url, modifiers } = md_action {
+            if let Some(widget_action) = action.as_widget_action() {
+                if let makepad_widgets::markdown::MarkdownAction::LinkNavigated { url, modifiers } = widget_action.cast() {
                     let should_open = {
                         #[cfg(any(target_os = "ios", target_os = "android", target_arch = "wasm32"))]
                         {
@@ -1641,7 +1641,7 @@ impl MatchEvent for App {
                         }
                     };
                     if should_open {
-                        if let Err(e) = robius_open::Uri::new(url).open() {
+                        if let Err(e) = robius_open::Uri::new(&url).open() {
                             log::warn!("failed to open URL {}: {:?}", url, e);
                         }
                     }

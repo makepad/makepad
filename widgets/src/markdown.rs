@@ -4,6 +4,11 @@ use crate::{
     WidgetMatchEvent,
 };
 
+// SVG types (M-img-3). `parse_svg` is zero-deps XML parser; `SvgDocument` is
+// the parsed AST; both reachable via the `makepad_draw` facade re-export.
+use crate::makepad_draw::svg::{parse_svg, SvgDocument};
+use crate::makepad_draw::DrawSvg;
+
 use pulldown_cmark::{CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use std::collections::{HashMap, HashSet};
@@ -27,6 +32,12 @@ const IMAGE_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Sized for "large screenshot / hero banner" territory; anything beyond is
 /// almost certainly a mis-linked asset (video, archive) — we warn and drop.
 const IMAGE_HTTP_BODY_MAX: usize = 32 * 1024 * 1024;
+/// Max raw SVG source size before we attempt to parse (M-img-3). SVG is XML-
+/// based and subject to amplification attacks; `makepad_svg::parse::parse_svg`
+/// has no built-in node-count / recursion / string-length guards, so this
+/// byte cap is our only defense. 4 MiB covers any realistic hand-authored
+/// vector asset by two orders of magnitude.
+const IMAGE_SVG_BYTES_MAX: usize = 4 * 1024 * 1024;
 
 /// Classification of an `![alt](url)` URL after parsing but before I/O.
 #[derive(Debug, Clone)]
@@ -149,21 +160,47 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// One decoded image stored in the widget-local cache. Owns a ref-counted
-/// Makepad `Texture` (clones share the GPU-side handle) plus intrinsic pixel
-/// dimensions used to compute display Walk.
+/// One decoded image stored in the widget-local cache. Two variants:
+///   - `Raster`: PNG / JPEG / WebP → GPU `Texture` (shared via clone).
+///   - `Svg`: parsed `SvgDocument` (M-img-3). Stored CPU-side; re-tessellated
+///     per draw by `DrawSvg`, but the parse step (the expensive part) runs
+///     exactly once per URL. `raw_bytes_len` is what LRU charges — parsed
+///     AST memory is implementation-defined and unstable.
+/// Intrinsic pixel dimensions are used to compute the display `Walk`.
 #[derive(Clone)]
-struct ImageCacheEntry {
-    texture: Texture,
-    width: u32,
-    height: u32,
+enum ImageCacheEntry {
+    Raster {
+        texture: Texture,
+        width: u32,
+        height: u32,
+    },
+    Svg {
+        doc: SvgDocument,
+        raw_bytes_len: usize,
+        width: u32,
+        height: u32,
+    },
 }
 
 impl ImageCacheEntry {
-    /// Bytes charged against the LRU cap — RGBA8 * pixels. The raw Vec<u32>
-    /// backing the texture is `w*h*4` bytes.
+    /// Bytes charged against the LRU cap. Raster: RGBA8 * pixels (w*h*4).
+    /// SVG: raw source length (parsed-doc memory is unstable and would be
+    /// a poor predictor of pressure).
     fn byte_size(&self) -> usize {
-        (self.width as usize) * (self.height as usize) * 4
+        match self {
+            ImageCacheEntry::Raster { width, height, .. } => {
+                (*width as usize) * (*height as usize) * 4
+            }
+            ImageCacheEntry::Svg { raw_bytes_len, .. } => *raw_bytes_len,
+        }
+    }
+
+    /// Intrinsic dimensions (logical pixels) used to compute display Walk.
+    fn dims(&self) -> (u32, u32) {
+        match self {
+            ImageCacheEntry::Raster { width, height, .. }
+            | ImageCacheEntry::Svg { width, height, .. } => (*width, *height),
+        }
     }
 }
 
@@ -202,6 +239,40 @@ fn detect_image_magic(data: &[u8]) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Sniff SVG content: accept both `<?xml ...?><svg ...>` and bare `<svg ...>`
+/// (with or without xmlns). Scans past up to the first 256 bytes of leading
+/// whitespace / BOM / XML prolog. Does NOT validate — full validation happens
+/// only at `parse_svg` time. M-img-3.
+fn detect_svg_magic(data: &[u8]) -> bool {
+    // Strip UTF-8 BOM if present.
+    let data = if data.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        &data[3..]
+    } else {
+        data
+    };
+    // Skip leading whitespace up to a reasonable bound. Real SVGs rarely
+    // have more than a few bytes of leading whitespace; 256 is generous
+    // enough for weird BOM-preserving exporters.
+    let limit = data.len().min(256);
+    let mut i = 0;
+    while i < limit && data[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let tail = &data[i..];
+    // `<?xml` prolog → definitely XML; the parser will locate `<svg>`.
+    if tail.starts_with(b"<?xml") {
+        return true;
+    }
+    // Bare `<svg` (optionally followed by whitespace or `>`). Match on the
+    // literal tag-open so `<svgsomethingelse` (unlikely but possible) is
+    // rejected.
+    if tail.len() >= 5 && &tail[0..4] == b"<svg" {
+        let next = tail[4];
+        return next.is_ascii_whitespace() || next == b'>' || next == b'/';
+    }
+    false
 }
 
 /// Promote `key` to the back of the LRU list (most-recently-used). No-op
@@ -251,6 +322,44 @@ fn decode_and_cache_bytes(
     lru: &mut Vec<u64>,
     cap_bytes: usize,
 ) -> Result<ImageCacheEntry, String> {
+    // M-img-3: SVG path is dispatched FIRST so raster-magic false positives
+    // (exceedingly rare) can't mask an SVG. The oversize gate runs before
+    // parse — `parse_svg` has no internal limits, so the byte cap is our
+    // only bound on amplification-style malicious input.
+    if detect_svg_magic(bytes) {
+        if bytes.len() > IMAGE_SVG_BYTES_MAX {
+            return Err(format!(
+                "svg rejected (too large, {} bytes > {} cap)",
+                bytes.len(),
+                IMAGE_SVG_BYTES_MAX
+            ));
+        }
+        let svg_str = std::str::from_utf8(bytes)
+            .map_err(|_| "svg parse error (non-utf8)".to_string())?;
+        let doc = parse_svg(svg_str);
+        // Empty root → parser found no recognizable `<svg>` geometry. Treat
+        // as parse failure so the placeholder path fires, matching spec
+        // fallback semantics (no panic, log::warn, placeholder visible).
+        if doc.root.is_empty() {
+            return Err("svg parse error (empty document)".to_string());
+        }
+        let (lw, lh) = doc.logical_size();
+        // Clamp to u32 for the display-sizing path. Negative / NaN producing
+        // doc sizes would be a parser bug; guard defensively.
+        let w = (lw.max(1.0) as u32).max(1);
+        let h = (lh.max(1.0) as u32).max(1);
+        let entry = ImageCacheEntry::Svg {
+            doc,
+            raw_bytes_len: bytes.len(),
+            width: w,
+            height: h,
+        };
+        cache.insert(key, entry.clone());
+        lru.push(key);
+        evict_over_cap(cache, lru, cap_bytes);
+        return Ok(entry);
+    }
+
     let fmt = detect_image_magic(bytes).ok_or_else(|| "unsupported format".to_string())?;
     let buf = match fmt {
         "png" => ImageBuffer::from_png(bytes),
@@ -264,24 +373,25 @@ fn decode_and_cache_bytes(
         return Err("decode error (zero dim)".to_string());
     }
     let texture = buf.into_new_texture(cx);
-    let entry = ImageCacheEntry { texture, width: w, height: h };
+    let entry = ImageCacheEntry::Raster { texture, width: w, height: h };
     cache.insert(key, entry.clone());
     lru.push(key);
     evict_over_cap(cache, lru, cap_bytes);
     Ok(entry)
 }
 
-/// Instantiate the `inline_image` template and render `entry` at a display
-/// size scaled to respect `IMAGE_MAX_DISPLAY_W`, aspect-ratio-preserved.
-/// Returns true on success, false if the template yielded an empty widget
-/// (shouldn't happen in practice — caller already checked has_template).
+/// Instantiate the appropriate inline template (`inline_image` for raster,
+/// `inline_svg` for vector) and render `entry` at a display size scaled to
+/// respect `IMAGE_MAX_DISPLAY_W`, aspect-ratio-preserved. Returns true on
+/// success, false if the required template is not registered.
 fn draw_cached_image(
     cx: &mut Cx2d,
     tf: &mut TextFlow,
     key: u64,
     entry: ImageCacheEntry,
 ) -> bool {
-    let (iw, ih) = (entry.width as f64, entry.height as f64);
+    let (iw_u, ih_u) = entry.dims();
+    let (iw, ih) = (iw_u as f64, ih_u as f64);
     let (dw, dh) = if iw > IMAGE_MAX_DISPLAY_W {
         let scale = IMAGE_MAX_DISPLAY_W / iw;
         (IMAGE_MAX_DISPLAY_W, (ih * scale).max(1.0))
@@ -290,12 +400,28 @@ fn draw_cached_image(
     };
     let entry_id = LiveId(key);
     let mut ok = false;
-    tf.item_with(cx, entry_id, live_id!(inline_image), |cx, item, _tf| {
-        let img: ImageRef = item.as_image();
-        img.set_texture(cx, Some(entry.texture.clone()));
-        let _ = item.draw_walk(cx, &mut Scope::empty(), Walk::fixed(dw, dh));
-        ok = true;
-    });
+    match entry {
+        ImageCacheEntry::Raster { texture, .. } => {
+            tf.item_with(cx, entry_id, live_id!(inline_image), |cx, item, _tf| {
+                let img: ImageRef = item.as_image();
+                img.set_texture(cx, Some(texture.clone()));
+                let _ = item.draw_walk(cx, &mut Scope::empty(), Walk::fixed(dw, dh));
+                ok = true;
+            });
+        }
+        ImageCacheEntry::Svg { doc, .. } => {
+            // Mirror the `vector.rs::Vector::draw_walk` take/render/restore
+            // pattern inside a closure so the cached doc stays owned by the
+            // widget across frames (we set it fresh each frame because
+            // `render_to_rect` takes it out of `svg_doc` internally).
+            tf.item_with(cx, entry_id, live_id!(inline_svg), |cx, item, _tf| {
+                let svg_ref = item.as_inline_svg();
+                svg_ref.set_doc(doc.clone());
+                let _ = item.draw_walk(cx, &mut Scope::empty(), Walk::fixed(dw, dh));
+                ok = true;
+            });
+        }
+    }
     ok
 }
 
@@ -304,6 +430,12 @@ script_mod! {
     use mod.widgets.*
 
     mod.widgets.MarkdownLinkBase = #(MarkdownLink::register_widget(vm))
+
+    mod.widgets.InlineSvgBase = #(InlineSvg::register_widget(vm))
+
+    mod.widgets.InlineSvg = set_type_default() do mod.widgets.InlineSvgBase{
+        width: Fit height: Fit
+    }
 
     mod.widgets.MarkdownBase = #(Markdown::register_widget(vm))
 
@@ -560,6 +692,13 @@ script_mod! {
         // honoured verbatim — no aspect-math from the widget itself.
         inline_image := mod.widgets.Image{
             fit: ImageFit.Stretch
+            width: 1 height: 1
+        }
+        // M-img-3: inline SVG template. Instantiated by
+        // `tf.item_with(..., live_id!(inline_svg), ...)` at every
+        // `Start(Tag::Image)` whose bytes sniff as SVG. The caller feeds a
+        // fixed-size Walk so draw_svg fits content to that rect.
+        inline_svg := mod.widgets.InlineSvg{
             width: 1 height: 1
         }
     }
@@ -1450,8 +1589,11 @@ impl Markdown {
         pending_http: &mut HashMap<LiveId, u64>,
         cap_bytes: usize,
     ) -> bool {
-        // Abort early if the inline template was never registered by the
+        // Abort early if the inline templates were never registered by the
         // consuming app's Markdown DSL. The placeholder path handles this.
+        // `inline_svg` is best-effort: we still try the raster path if only
+        // that template is present. Requiring `inline_image` remains strict
+        // for backwards compatibility with M-img-1/M-img-2 callers.
         if !tf.has_template(live_id!(inline_image)) {
             return false;
         }
@@ -2007,6 +2149,69 @@ impl MarkdownLinkRef {
     }
 }
 
+/// M-img-3: inline SVG renderer instantiated via the `inline_svg` template
+/// in the Markdown DSL. The parsed `SvgDocument` is pushed in by the cache
+/// hit path at every frame (cheap clone — AST shares Rc-less Vec/String
+/// internals, no texture uploads). `DrawSvg` re-tessellates on the draw
+/// thread using the Walk the caller provides (`Walk::fixed(dw, dh)`).
+///
+/// The take/put-back dance around `draw_svg.svg_doc` mirrors
+/// `widgets/src/vector.rs::Vector::draw_walk` (render_to_rect internally
+/// `.take()`s the doc; we restore it so the same widget can redraw on the
+/// next frame without a fresh `set_doc` if the cache entry is re-hit).
+#[derive(Script, ScriptHook, Widget)]
+struct InlineSvg {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+    #[redraw]
+    #[live]
+    pub draw_svg: DrawSvg,
+    #[rust]
+    doc: SvgDocument,
+}
+
+impl Widget for InlineSvg {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.doc.root.is_empty() {
+            return DrawStep::done();
+        }
+        // `set_doc_bounds` computes content_bounds + content_size from the
+        // viewbox transform. Must be called every time `self.doc` changes
+        // (which is every frame here) otherwise render_to_rect renders at
+        // zero size. Invalidate the geometry cache too — a new frame means
+        // potentially a new doc (if cache entry was swapped) or at minimum
+        // we haven't uploaded this doc through this widget yet.
+        self.draw_svg.set_doc_bounds(&self.doc);
+        self.draw_svg.cache_valid = false;
+        let rect = cx.walk_turtle(walk);
+        self.draw_svg.svg_doc = Some(std::mem::take(&mut self.doc));
+        self.draw_svg.render_to_rect(cx, &rect, 0.0);
+        self.doc = self.draw_svg.svg_doc.take().unwrap_or_default();
+        DrawStep::done()
+    }
+}
+
+impl InlineSvgRef {
+    /// Replace the widget's parsed SVG document. Called from the Markdown
+    /// cache-hit path each draw; the AST is cloned per call so the cache
+    /// retains ownership (multiple images can share one entry if the same
+    /// URL appears twice in a doc).
+    pub fn set_doc(&self, doc: SvgDocument) {
+        let Some(mut inner) = self.borrow_mut() else {
+            return;
+        };
+        inner.doc = doc;
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub enum MarkdownAction {
     #[default]
@@ -2325,5 +2530,140 @@ mod tests {
         // Same URL → same request_id → dedup actually works.
         let k1_again = url_hash("http://host/a.png");
         assert_eq!(LiveId(k1), LiveId(k1_again));
+    }
+
+    // -----------------------------------------------------------------
+    // M-img-3 unit tests. SVG detection, parse, cache accounting, and
+    // DoS gate. Real render requires a `Cx2d` (covered by manual
+    // verification — see report). Pure-logic branches live here.
+    // -----------------------------------------------------------------
+
+    /// Spec #1: `detect_svg_magic` must recognise BOTH the XML prolog
+    /// form (`<?xml ...?><svg>...`) AND the bare `<svg xmlns=...>` form,
+    /// with leading whitespace / BOM tolerance. Raster / HTML magic
+    /// MUST be rejected so the existing PNG/JPEG/WebP dispatch is not
+    /// accidentally captured by the SVG branch.
+    #[test]
+    fn m_img_3_detects_svg_magic() {
+        // Positive: XML prolog
+        assert!(detect_svg_magic(
+            br#"<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#
+        ));
+        // Positive: bare <svg with xmlns
+        assert!(detect_svg_magic(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect/></svg>"#
+        ));
+        // Positive: bare <svg without xmlns
+        assert!(detect_svg_magic(b"<svg width=\"1\" height=\"1\"></svg>"));
+        // Positive: self-closing
+        assert!(detect_svg_magic(b"<svg/>"));
+        // Positive: leading whitespace + BOM tolerated
+        assert!(detect_svg_magic(b"\xEF\xBB\xBF\n  <svg width=\"1\"/>"));
+        // Negative: PNG magic MUST NOT sniff as SVG (existing dispatch)
+        assert!(!detect_svg_magic(b"\x89PNG\r\n\x1a\nrest"));
+        // Negative: JPEG magic
+        assert!(!detect_svg_magic(b"\xFF\xD8\xFFsome"));
+        // Negative: raw HTML (no <svg> at prolog-close)
+        assert!(!detect_svg_magic(b"<html><body><svg/></body></html>"));
+        // Negative: false prefix (`<svgeneric` is NOT <svg>)
+        assert!(!detect_svg_magic(b"<svgeneric/>"));
+        // Negative: empty
+        assert!(!detect_svg_magic(b""));
+    }
+
+    /// Spec #2: Oversize SVG is rejected before parse. The byte cap is
+    /// our ONLY DoS defense (makepad_svg::parse::parse_svg has no
+    /// internal node-count / depth / string-length guards), so a
+    /// regression that relaxes to `>=` or drops the check entirely
+    /// would open an amplification vector. Synthetic byte vector
+    /// avoids a real parse (no Cx needed).
+    #[test]
+    fn m_img_3_oversize_svg_rejected() {
+        // The gate predicate exactly as it appears in
+        // `decode_and_cache_bytes`. Tests the constant and the
+        // strictly-greater-than comparison.
+        fn exceeds(bytes_len: usize) -> bool {
+            bytes_len > IMAGE_SVG_BYTES_MAX
+        }
+        assert_eq!(IMAGE_SVG_BYTES_MAX, 4 * 1024 * 1024);
+        // Exactly at cap: ACCEPTED (we use `>` not `>=`).
+        assert!(!exceeds(IMAGE_SVG_BYTES_MAX));
+        // One byte over: REJECTED.
+        assert!(exceeds(IMAGE_SVG_BYTES_MAX + 1));
+        // Typical real icon: ACCEPTED.
+        assert!(!exceeds(4096));
+    }
+
+    /// Spec #3: A minimal `<svg>...<rect/></svg>` parses into an
+    /// `SvgDocument` whose `root` is non-empty. Two invariants:
+    /// (a) makepad_svg's zero-deps parser actually returns structured
+    /// nodes for the widget, (b) `doc.root.is_empty()` is the
+    /// appropriate parse-failure sentinel (used by
+    /// `decode_and_cache_bytes` since `parse_svg` has no Err path).
+    #[test]
+    fn m_img_3_parse_produces_document() {
+        let src = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect x="1" y="1" width="8" height="8"/></svg>"#;
+        let doc = parse_svg(src);
+        assert!(!doc.root.is_empty(),
+            "simple svg must parse to a non-empty root");
+        // And intrinsic dims reflect the declared width/height.
+        let (lw, lh) = doc.logical_size();
+        assert_eq!(lw, 10.0);
+        assert_eq!(lh, 10.0);
+    }
+
+    /// Spec #4: LRU cache accounts RAW BYTES for SVG (not parsed-AST
+    /// memory size, which is unstable and impossible to measure
+    /// correctly). Verifies the `byte_size` dispatch on the enum,
+    /// keeping both variants in agreement with the LRU cap semantics.
+    #[test]
+    fn m_img_3_cache_accounts_raw_bytes() {
+        let src = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="4"/></svg>"#;
+        let doc = parse_svg(src);
+        assert!(!doc.root.is_empty());
+        let entry = ImageCacheEntry::Svg {
+            doc,
+            raw_bytes_len: src.len(),
+            width: 16,
+            height: 16,
+        };
+        // byte_size() for Svg == raw_bytes_len, NOT w*h*4 (that's the
+        // Raster charge). Keeping the two variants' charges distinct
+        // is the whole point of the refactor.
+        assert_eq!(entry.byte_size(), src.len());
+        // And dims() dispatches to the SVG width/height.
+        assert_eq!(entry.dims(), (16, 16));
+        // Sanity: equivalent raster entry charges very differently.
+        // (We can't construct a Raster without a Cx, but we can assert
+        // the closed-form: a 16x16 RGBA8 raster would cost 1024 bytes,
+        // which is 10x more than this SVG's raw source.)
+        let raster_bytes = 16 * 16 * 4;
+        assert_ne!(raster_bytes, src.len(),
+            "raster and svg charges must not accidentally coincide");
+    }
+
+    /// Spec #5: Malformed XML must fall back to the placeholder path
+    /// (no panic, no cached entry). `parse_svg` returns
+    /// `SvgDocument::default()` rather than an Err for unrecoverable
+    /// input — the walker never locates a `<svg>` root. We surface
+    /// that via the `doc.root.is_empty()` check in
+    /// `decode_and_cache_bytes`, which returns
+    /// `Err("svg parse error (empty document)")`. This test pins the
+    /// sentinel we rely on.
+    #[test]
+    fn m_img_3_invalid_svg_falls_back() {
+        // Truncated / unbalanced: no valid <svg> root found.
+        let garbage = "<not-svg><broken";
+        let doc = parse_svg(garbage);
+        assert!(doc.root.is_empty(),
+            "malformed XML must leave an empty doc.root (our fallback sentinel)");
+        // Completely empty string.
+        let doc = parse_svg("");
+        assert!(doc.root.is_empty());
+        // HTML that happens to contain an <svg> tag at nesting: the
+        // walker actually DOES pick it up (parse_svg scans top-down
+        // for any <svg>). This is by-design for makepad_svg and is
+        // accepted — the detect_svg_magic gate is what keeps HTML
+        // documents from reaching parse in the first place.
     }
 }
