@@ -7,6 +7,17 @@ use std::sync::{Arc, Mutex};
 
 type CudaResult<T> = std::result::Result<T, String>;
 
+const QWEN_PREFILL_CHUNK_TOKENS: usize = 512;
+
+fn q8_1_bytes_for_len(len: usize) -> CudaResult<usize> {
+    if len % 32 != 0 {
+        return Err(format!("q8_1 quantization expects len divisible by 32, got {len}"));
+    }
+    len.checked_div(32)
+        .and_then(|blocks| blocks.checked_mul(36))
+        .ok_or_else(|| format!("q8_1 byte size overflow for len {len}"))
+}
+
 pub(super) fn try_cuda_generation_backend(
     runtime_session: Arc<MlxQwen35MoeRuntimeSession>,
     capacity_tokens: usize,
@@ -355,8 +366,7 @@ struct CudaQwenAttentionLayer {
     attn_norm: CudaBuffer,
     post_attention_norm: CudaBuffer,
     wq: CudaAffineTensor,
-    wk: CudaAffineTensor,
-    wv: CudaAffineTensor,
+    wkv: CudaAffineTensor,
     wo: CudaAffineTensor,
     q_norm: CudaBuffer,
     k_norm: CudaBuffer,
@@ -366,10 +376,7 @@ struct CudaQwenAttentionLayer {
 struct CudaQwenRecurrentLayer {
     attn_norm: CudaBuffer,
     post_attention_norm: CudaBuffer,
-    wqkv: CudaAffineTensor,
-    wqkv_gate: CudaAffineTensor,
-    ssm_beta: CudaAffineTensor,
-    ssm_alpha: CudaAffineTensor,
+    wqkv_aux: CudaAffineTensor,
     ssm_out: CudaAffineTensor,
     ssm_conv1d: CudaBuffer,
     ssm_dt: CudaBuffer,
@@ -422,15 +429,18 @@ struct CudaQwenWorkspace {
     hidden_b: CudaBuffer,
     hidden_norm: CudaBuffer,
     hidden_bf16: CudaBuffer,
+    hidden_q8_1: CudaBuffer,
     qg_out: CudaBuffer,
     query: CudaBuffer,
     gate: CudaBuffer,
+    kv_out: CudaBuffer,
     key: CudaBuffer,
     value: CudaBuffer,
     attention_logits: CudaBuffer,
     attn_out: CudaBuffer,
     attn_gated: CudaBuffer,
     attn_bf16: CudaBuffer,
+    attn_q8_1: CudaBuffer,
     attn_proj: CudaBuffer,
     residual: CudaBuffer,
     ffn_input: CudaBuffer,
@@ -442,6 +452,7 @@ struct CudaQwenWorkspace {
     moe_shared_gate_scalar: CudaBuffer,
     moe_shared_gate_up: CudaBuffer,
     moe_shared_act: CudaBuffer,
+    moe_shared_act_q8_1: CudaBuffer,
     moe_shared_down: CudaBuffer,
     moe_expert_gate_up: CudaBuffer,
     moe_expert_gate_up_batch: CudaBuffer,
@@ -453,7 +464,7 @@ struct CudaQwenWorkspace {
     moe_expert_down_batch: CudaBuffer,
     moe_expert_act_bf16: CudaBuffer,
     moe_expert_act_bf16_batch: CudaBuffer,
-    recurrent_qkv: CudaBuffer,
+    recurrent_qkv_aux: CudaBuffer,
     recurrent_gate_z: CudaBuffer,
     recurrent_beta_logits: CudaBuffer,
     recurrent_beta: CudaBuffer,
@@ -466,6 +477,7 @@ struct CudaQwenWorkspace {
     recurrent_out_norm: CudaBuffer,
     recurrent_gated: CudaBuffer,
     recurrent_gated_bf16: CudaBuffer,
+    recurrent_gated_q8_1: CudaBuffer,
     recurrent_proj: CudaBuffer,
     final_norm: CudaBuffer,
     logits: CudaBuffer,
@@ -502,6 +514,55 @@ struct CudaQwenPrefillGraph {
     token_state: CudaQwenDeviceTokenState,
 }
 
+struct CudaQwenPrefillBuffers {
+    row_capacity: usize,
+    seq_capacity: usize,
+    hidden_a: CudaBuffer,
+    hidden_b: CudaBuffer,
+    hidden_norm: CudaBuffer,
+    hidden_bf16: CudaBuffer,
+    qg_out: CudaBuffer,
+    query: CudaBuffer,
+    query_bf16: CudaBuffer,
+    gate: CudaBuffer,
+    kv_out: CudaBuffer,
+    key: CudaBuffer,
+    value: CudaBuffer,
+    attention_logits: CudaBuffer,
+    attention_probs_bf16: CudaBuffer,
+    attn_out: CudaBuffer,
+    attn_gated: CudaBuffer,
+    attn_bf16: CudaBuffer,
+    attn_proj: CudaBuffer,
+    recurrent_qkv_aux: CudaBuffer,
+    recurrent_gate_z: CudaBuffer,
+    recurrent_beta_logits: CudaBuffer,
+    recurrent_beta: CudaBuffer,
+    recurrent_alpha: CudaBuffer,
+    recurrent_conv: CudaBuffer,
+    recurrent_decay: CudaBuffer,
+    recurrent_gated_delta: CudaBuffer,
+    recurrent_out_norm: CudaBuffer,
+    recurrent_gated: CudaBuffer,
+    recurrent_gated_bf16: CudaBuffer,
+    recurrent_proj: CudaBuffer,
+    residual: CudaBuffer,
+    moe_router_logits: CudaBuffer,
+    moe_route_indices: CudaBuffer,
+    moe_route_weights: CudaBuffer,
+    moe_routed_accum: CudaBuffer,
+    moe_shared_gate_scalar: CudaBuffer,
+    moe_shared_gate_up: CudaBuffer,
+    moe_shared_act: CudaBuffer,
+    moe_shared_act_bf16: CudaBuffer,
+    moe_shared_down: CudaBuffer,
+    moe_expert_gate_up: CudaBuffer,
+    moe_expert_act: CudaBuffer,
+    moe_expert_act_bf16: CudaBuffer,
+    moe_expert_down_batch: CudaBuffer,
+    base_position: CudaMappedHostU32Buffer,
+}
+
 struct CudaQwenDecodeGraph {
     exec: CudaGraphExec,
     token_state: CudaQwenDeviceTokenState,
@@ -517,6 +578,15 @@ struct CudaQwenDecodeChunkGraph {
     disallowed_count: CudaMappedHostU32Buffer,
     step_tokens: CudaBuffer,
     step_count: usize,
+}
+
+pub(super) struct CudaQwenGenerationResources {
+    session: CudaQwenDecodeSession,
+    prefill_buffers: Option<CudaQwenPrefillBuffers>,
+    prefill_graph: Option<CudaQwenPrefillGraph>,
+    decode_graph: Option<CudaQwenDecodeGraph>,
+    decode_chunk_graphs: Vec<CudaQwenDecodeChunkGraph>,
+    graph_enabled: bool,
 }
 
 struct QwenDebugPrefillCompare {
@@ -555,10 +625,8 @@ struct QwenAttentionReferenceDebug {
 
 pub(super) struct QwenCudaGenerationBackend {
     runtime: Arc<Mutex<CudaQwenTextRuntime>>,
-    session: CudaQwenDecodeSession,
-    prefill_graph: Option<CudaQwenPrefillGraph>,
-    decode_graph: Option<CudaQwenDecodeGraph>,
-    decode_chunk_graphs: Vec<CudaQwenDecodeChunkGraph>,
+    cache_slot: Arc<Mutex<Option<CudaQwenGenerationResources>>>,
+    resources: Option<CudaQwenGenerationResources>,
     sampling: QwenSamplingOptions,
     disallowed_token_ids: Vec<u32>,
     rng: QwenSamplingRng,
@@ -574,6 +642,17 @@ impl QwenCudaGenerationBackend {
             && std::env::var("MAKEPAD_MLX_QWEN_COMPARE_ATTENTION_LAYER").is_err()
             && std::env::var("MAKEPAD_MLX_QWEN_COMPARE_RECURRENT_LAYER").is_err()
             && std::env::var("MAKEPAD_MLX_QWEN_COMPARE_MOE_LAYER").is_err()
+    }
+
+    fn bucket_capacity_tokens(requested_capacity_tokens: usize) -> CudaResult<usize> {
+        const CAPACITY_BUCKET: usize = 256;
+        let rounded = requested_capacity_tokens
+            .max(CAPACITY_BUCKET)
+            .checked_add(CAPACITY_BUCKET - 1)
+            .ok_or_else(|| "qwen cuda generation capacity overflow".to_string())?
+            / CAPACITY_BUCKET
+            * CAPACITY_BUCKET;
+        Ok(rounded)
     }
 
     fn new(
@@ -601,32 +680,64 @@ impl QwenCudaGenerationBackend {
                     .map_err(|err| err.to_string())
             })
             .transpose()?;
+        let graph_enabled = Self::allow_decode_graph(debug_compare.is_some());
+        let requested_capacity_tokens = capacity_tokens;
+        let bucketed_capacity_tokens = Self::bucket_capacity_tokens(capacity_tokens)?;
+        let cache_slot = runtime_session.cuda_generation_resources.clone();
+        let mut resources = if debug_compare.is_none() {
+            cache_slot
+                .lock()
+                .map_err(|_| "qwen cuda generation cache mutex poisoned".to_string())?
+                .take()
+                .filter(|cached| {
+                    cached.session.capacity_tokens >= requested_capacity_tokens
+                        && cached.graph_enabled == graph_enabled
+                })
+        } else {
+            None
+        };
         let runtime_guard = runtime
             .lock()
             .map_err(|_| "qwen cuda runtime mutex poisoned".to_string())?;
-        let mut session = runtime_guard.new_decode_session(capacity_tokens, &disallowed_token_ids)?;
-        let (prefill_graph, decode_graph, decode_chunk_graphs) =
-            if Self::allow_decode_graph(debug_compare.is_some()) {
+        if let Some(cached) = resources.as_mut() {
+            runtime_guard.reset_decode_session(&mut cached.session)?;
+        } else {
+            let mut session =
+                runtime_guard.new_decode_session(bucketed_capacity_tokens, &disallowed_token_ids)?;
+            let (prefill_graph, decode_graph, decode_chunk_graphs) = if graph_enabled {
                 (
                     Some(runtime_guard.capture_prefill_graph(&mut session)?),
                     Some(runtime_guard.capture_decode_graph(&mut session)?),
                     Vec::new(),
                 )
-        } else {
-            (None, None, Vec::new())
-        };
+            } else {
+                (None, None, Vec::new())
+            };
+            resources = Some(CudaQwenGenerationResources {
+                session,
+                prefill_buffers: None,
+                prefill_graph,
+                decode_graph,
+                decode_chunk_graphs,
+                graph_enabled,
+            });
+        }
         drop(runtime_guard);
         Ok(Self {
             runtime,
-            session,
-            prefill_graph,
-            decode_graph,
-            decode_chunk_graphs,
+            cache_slot,
+            resources,
             sampling,
             disallowed_token_ids,
             rng: QwenSamplingRng::new(0),
             debug_compare,
         })
+    }
+
+    fn resources(&self) -> &CudaQwenGenerationResources {
+        self.resources
+            .as_ref()
+            .expect("qwen cuda generation resources missing")
     }
 
     fn maybe_debug_compare_prefill_step(
@@ -635,97 +746,137 @@ impl QwenCudaGenerationBackend {
         position: usize,
         cuda_top1: u32,
     ) -> CudaResult<()> {
-        let Some(debug_compare) = self.debug_compare.as_mut() else {
+        let Some(mut debug_compare) = self.debug_compare.take() else {
             return Ok(());
         };
-        if position >= debug_compare.steps || self.sampling.do_sample {
+        let result = (|| -> CudaResult<()> {
+            if position >= debug_compare.steps || self.sampling.do_sample {
+                debug_compare.observed_tokens.push(token_id);
+                return Ok(());
+            }
+            let logits = debug_compare
+                .runtime_session
+                .eval_token_logits_reference_f32(
+                    token_id,
+                    position,
+                    &mut debug_compare.reference_state,
+                )
+                .map_err(|err| err.to_string())?;
+            let reference_top1 = argmax_index(&logits) as u32;
+            eprintln!(
+                "[qwen-prefill-compare] position={position} input_token={token_id} ref_top1={reference_top1} cuda_top1={cuda_top1}"
+            );
+            if position + 1 <= debug_compare.steps {
+                let runtime = self
+                    .runtime
+                    .lock()
+                    .map_err(|_| "qwen cuda runtime mutex poisoned".to_string())?;
+                runtime.debug_compare_decode_state(
+                    &self.resources().session,
+                    &debug_compare.reference_state,
+                    position,
+                )?;
+            }
+            if reference_top1 != cuda_top1 && !debug_compare.reported_mismatch {
+                debug_compare.reported_mismatch = true;
+            }
             debug_compare.observed_tokens.push(token_id);
-            return Ok(());
-        }
-        let logits = debug_compare
-            .runtime_session
-            .eval_token_logits_reference_f32(token_id, position, &mut debug_compare.reference_state)
-            .map_err(|err| err.to_string())?;
-        let reference_top1 = argmax_index(&logits) as u32;
-        eprintln!(
-            "[qwen-prefill-compare] position={position} input_token={token_id} ref_top1={reference_top1} cuda_top1={cuda_top1}"
-        );
-        if position + 1 <= debug_compare.steps {
-            let runtime = self
-                .runtime
-                .lock()
-                .map_err(|_| "qwen cuda runtime mutex poisoned".to_string())?;
-            runtime.debug_compare_decode_state(
-                &self.session,
-                &debug_compare.reference_state,
-                position,
-            )?;
-        }
-        if reference_top1 != cuda_top1 && !debug_compare.reported_mismatch {
-            debug_compare.reported_mismatch = true;
-        }
-        debug_compare.observed_tokens.push(token_id);
-        Ok(())
+            Ok(())
+        })();
+        self.debug_compare = Some(debug_compare);
+        result
     }
 
     fn eval_and_select(&mut self, token_id: u32, position: usize) -> CudaResult<u32> {
-        let runtime = self
-            .runtime
+        let Self {
+            runtime,
+            resources,
+            sampling,
+            disallowed_token_ids,
+            rng,
+            debug_compare,
+            ..
+        } = self;
+        let runtime = runtime
             .lock()
             .map_err(|_| "qwen cuda runtime mutex poisoned".to_string())?;
-        if let Some(decode_graph) = self.decode_graph.as_ref() {
+        let resources = resources
+            .as_mut()
+            .expect("qwen cuda generation resources missing");
+        let sampling = *sampling;
+        let decode_graph = resources.decode_graph.as_ref();
+        if let Some(decode_graph) = decode_graph {
             return runtime.eval_and_select_graph(
-                &mut self.session,
+                &mut resources.session,
                 decode_graph,
                 token_id,
                 position,
-                self.sampling.do_sample,
-                &self.disallowed_token_ids,
-                &self.sampling,
-                &mut self.rng,
+                sampling.do_sample,
+                disallowed_token_ids,
+                &sampling,
+                rng,
             );
         }
-        let reference_state_before = self
-            .debug_compare
+        let reference_state_before = debug_compare
             .as_ref()
-            .filter(|debug_compare| position + 1 == debug_compare.steps && !self.sampling.do_sample)
+            .filter(|debug_compare| position + 1 == debug_compare.steps && !sampling.do_sample)
             .map(|debug_compare| debug_compare.reference_state.clone());
         if let (Some(debug_compare), Some(reference_state_before)) =
-            (self.debug_compare.as_ref(), reference_state_before.as_ref())
+            (debug_compare.as_ref(), reference_state_before.as_ref())
         {
             runtime.eval_token_logits_with_layer_compare(
-                &mut self.session,
+                &mut resources.session,
                 token_id,
                 position,
                 &debug_compare.runtime_session,
                 reference_state_before,
             )?;
         } else {
-            runtime.eval_token_logits(&mut self.session, token_id, position)?;
+            runtime.eval_token_logits(&mut resources.session, token_id, position)?;
         }
-        if self.sampling.do_sample {
+        if sampling.do_sample {
             let logits = runtime
                 .cuda
-                .read_f32s(&self.session.workspace.logits, runtime.vocab_size)?;
+                .read_f32s(&resources.session.workspace.logits, runtime.vocab_size)?;
             return sample_token_from_logits_f32(
                 &logits,
-                &self.disallowed_token_ids,
-                &self.sampling,
-                &mut self.rng,
+                disallowed_token_ids,
+                &sampling,
+                rng,
             )
             .map(|token| token.token_id);
         }
         runtime.cuda.masked_argmax_f32(
-            &self.session.workspace.logits,
-            &self.session.workspace.disallowed_token_ids,
-            self.session.disallowed_count,
-            &self.session.workspace.argmax_out,
+            &resources.session.workspace.logits,
+            &resources.session.workspace.disallowed_token_ids,
+            resources.session.disallowed_count,
+            &resources.session.workspace.argmax_out,
             runtime.vocab_size,
         )?;
-        let top1 = runtime.cuda.read_u32(&self.session.workspace.argmax_out)?;
+        let top1 = runtime.cuda.read_u32(&resources.session.workspace.argmax_out)?;
         drop(runtime);
         self.maybe_debug_compare_prefill_step(token_id, position, top1)?;
         Ok(top1)
+    }
+}
+
+impl Drop for QwenCudaGenerationBackend {
+    fn drop(&mut self) {
+        if self.debug_compare.is_some() {
+            return;
+        }
+        let Some(resources) = self.resources.take() else {
+            return;
+        };
+        if let Ok(mut cache_slot) = self.cache_slot.lock() {
+            let replace = match cache_slot.as_ref() {
+                Some(cached) => cached.session.capacity_tokens < resources.session.capacity_tokens,
+                None => true,
+            };
+            if replace {
+                *cache_slot = Some(resources);
+            }
+        }
     }
 }
 
@@ -735,44 +886,109 @@ impl crate::qwen_runtime::lazy::QwenGenerationBackend for QwenCudaGenerationBack
     }
 
     fn prefill_prompt(&mut self, prompt_token_ids: &[u32]) -> CudaResult<u32> {
-        if let Some(prefill_graph) = self.prefill_graph.as_ref() {
-            let runtime = self
-                .runtime
-                .lock()
-                .map_err(|_| "qwen cuda runtime mutex poisoned".to_string())?;
+        if prompt_token_ids.is_empty() {
+            return Err("generation requires at least one prompt token".to_string());
+        }
+        let Self {
+            runtime,
+            resources,
+            sampling,
+            disallowed_token_ids,
+            rng,
+            ..
+        } = self;
+        let runtime = runtime
+            .lock()
+            .map_err(|_| "qwen cuda runtime mutex poisoned".to_string())?;
+        let resources = resources
+            .as_mut()
+            .expect("qwen cuda generation resources missing");
+        if prompt_token_ids.len() >= QWEN_PREFILL_CHUNK_TOKENS {
+            let chunk_capacity = prompt_token_ids.len().min(QWEN_PREFILL_CHUNK_TOKENS);
+            let needs_prefill_buffers = resources.prefill_buffers.as_ref().is_none_or(|prefill| {
+                prefill.row_capacity < chunk_capacity
+                    || prefill.seq_capacity < resources.session.capacity_tokens
+            });
+            if needs_prefill_buffers {
+                resources.prefill_buffers = Some(
+                    runtime.alloc_prefill_buffers(resources.session.capacity_tokens, chunk_capacity)?,
+                );
+            }
+            let prefill = resources
+                .prefill_buffers
+                .as_mut()
+                .ok_or_else(|| "missing qwen prefill buffers".to_string())?;
+            let mut chunk_start = 0usize;
+            while chunk_start < prompt_token_ids.len() {
+                let chunk_len = (prompt_token_ids.len() - chunk_start).min(chunk_capacity);
+                let chunk_tokens = &prompt_token_ids[chunk_start..chunk_start + chunk_len];
+                runtime.eval_prefill_chunk_exact(
+                    &mut resources.session,
+                    prefill,
+                    chunk_tokens,
+                    chunk_start,
+                    chunk_start + chunk_len == prompt_token_ids.len(),
+                )?;
+                chunk_start += chunk_len;
+            }
+            if sampling.do_sample {
+                runtime.cuda.synchronize()?;
+                let logits = runtime
+                    .cuda
+                    .read_f32s(&resources.session.workspace.logits, runtime.vocab_size)?;
+                return sample_token_from_logits_f32(
+                    &logits,
+                    disallowed_token_ids,
+                    sampling,
+                    rng,
+                )
+                .map(|token| token.token_id);
+            }
+            runtime.cuda.masked_argmax_f32(
+                &resources.session.workspace.logits,
+                &resources.session.workspace.disallowed_token_ids,
+                disallowed_token_ids.len(),
+                &resources.session.workspace.argmax_out,
+                runtime.vocab_size,
+            )?;
+            runtime.cuda.synchronize()?;
+            return runtime.cuda.read_u32(&resources.session.workspace.argmax_out);
+        }
+        if let Some(prefill_graph) = resources.prefill_graph.as_ref() {
             for (position, &token_id) in prompt_token_ids.iter().enumerate() {
                 runtime.write_device_token_state(
                     &prefill_graph.token_state,
                     token_id,
                     position,
-                    self.disallowed_token_ids.len(),
+                    disallowed_token_ids.len(),
                 )?;
                 runtime.cuda.launch_graph(&prefill_graph.exec)?;
             }
-            self.session.disallowed_count = self.disallowed_token_ids.len();
-            runtime.set_attention_stored_tokens(&mut self.session, prompt_token_ids.len());
-            if self.sampling.do_sample {
+            resources.session.disallowed_count = disallowed_token_ids.len();
+            runtime.set_attention_stored_tokens(&mut resources.session, prompt_token_ids.len());
+            if sampling.do_sample {
                 runtime.cuda.synchronize()?;
                 let logits = runtime
                     .cuda
-                    .read_f32s(&self.session.workspace.logits, runtime.vocab_size)?;
+                    .read_f32s(&resources.session.workspace.logits, runtime.vocab_size)?;
                 return sample_token_from_logits_f32(
                     &logits,
-                    &self.disallowed_token_ids,
-                    &self.sampling,
-                    &mut self.rng,
+                    disallowed_token_ids,
+                    sampling,
+                    rng,
                 )
                 .map(|token| token.token_id);
             }
             runtime.cuda.masked_argmax_f32(
-                &self.session.workspace.logits,
-                &self.session.workspace.disallowed_token_ids,
-                self.session.disallowed_count,
-                &self.session.workspace.argmax_out,
+                &resources.session.workspace.logits,
+                &resources.session.workspace.disallowed_token_ids,
+                resources.session.disallowed_count,
+                &resources.session.workspace.argmax_out,
                 runtime.vocab_size,
             )?;
-            return runtime.cuda.read_u32(&self.session.workspace.argmax_out);
+            return runtime.cuda.read_u32(&resources.session.workspace.argmax_out);
         }
+        drop(runtime);
         let mut next_token_id = None;
         for (position, &token_id) in prompt_token_ids.iter().enumerate() {
             next_token_id = Some(self.eval_and_select(token_id, position)?);
@@ -793,7 +1009,22 @@ impl crate::qwen_runtime::lazy::QwenGenerationBackend for QwenCudaGenerationBack
         if token_count == 0 {
             return Ok(Vec::new());
         }
-        if self.sampling.do_sample || self.decode_chunk_graphs.is_empty() {
+        let Self {
+            runtime,
+            resources,
+            sampling,
+            disallowed_token_ids,
+            rng,
+            ..
+        } = self;
+        let sampling = *sampling;
+        if sampling.do_sample
+            || resources
+                .as_ref()
+                .expect("qwen cuda generation resources missing")
+                .decode_chunk_graphs
+                .is_empty()
+        {
             let mut out = Vec::with_capacity(token_count);
             let mut current_token_id = token_id;
             let mut current_position = position;
@@ -806,27 +1037,29 @@ impl crate::qwen_runtime::lazy::QwenGenerationBackend for QwenCudaGenerationBack
             return Ok(out);
         }
 
-        let runtime = self
-            .runtime
+        let runtime = runtime
             .lock()
             .map_err(|_| "qwen cuda runtime mutex poisoned".to_string())?;
+        let resources = resources
+            .as_mut()
+            .expect("qwen cuda generation resources missing");
         let mut out = Vec::with_capacity(token_count);
         let mut current_token_id = token_id;
         let mut current_position = position;
         let mut remaining = token_count;
 
         while remaining > 0 {
-            if let Some(decode_chunk_graph) = self
+            if let Some(decode_chunk_graph) = resources
                 .decode_chunk_graphs
                 .iter()
                 .find(|graph| graph.step_count <= remaining)
             {
                 let chunk_tokens = runtime.eval_token_chunk_graph(
-                    &mut self.session,
+                    &mut resources.session,
                     decode_chunk_graph,
                     current_token_id,
                     current_position,
-                    &self.disallowed_token_ids,
+                    disallowed_token_ids,
                 )?;
                 current_token_id = *chunk_tokens
                     .last()
@@ -836,16 +1069,17 @@ impl crate::qwen_runtime::lazy::QwenGenerationBackend for QwenCudaGenerationBack
                 out.extend(chunk_tokens);
             } else {
                 let next_token_id = runtime.eval_and_select_graph(
-                    &mut self.session,
-                    self.decode_graph
+                    &mut resources.session,
+                    resources
+                        .decode_graph
                         .as_ref()
                         .ok_or_else(|| "missing qwen single-step decode graph".to_string())?,
                     current_token_id,
                     current_position,
                     false,
-                    &self.disallowed_token_ids,
-                    &self.sampling,
-                    &mut self.rng,
+                    disallowed_token_ids,
+                    &sampling,
+                    rng,
                 )?;
                 out.push(next_token_id);
                 current_token_id = next_token_id;
@@ -883,8 +1117,11 @@ impl CudaQwenTextRuntime {
                         attn_norm,
                         post_attention_norm,
                         wq: CudaAffineTensor::load(&cuda, &runtime_session.weights, &attention.wq)?,
-                        wk: CudaAffineTensor::load(&cuda, &runtime_session.weights, &attention.wk)?,
-                        wv: CudaAffineTensor::load(&cuda, &runtime_session.weights, &attention.wv)?,
+                        wkv: CudaAffineTensor::load_concat_rows(
+                            &cuda,
+                            &runtime_session.weights,
+                            &[&attention.wk, &attention.wv],
+                        )?,
                         wo: CudaAffineTensor::load(&cuda, &runtime_session.weights, &attention.wo)?,
                         q_norm: load_vector_f32(
                             &cuda,
@@ -915,25 +1152,15 @@ impl CudaQwenTextRuntime {
                     layers.push(CudaQwenLayer::Recurrent(CudaQwenRecurrentLayer {
                         attn_norm,
                         post_attention_norm,
-                        wqkv: CudaAffineTensor::load(
+                        wqkv_aux: CudaAffineTensor::load_concat_rows(
                             &cuda,
                             &runtime_session.weights,
-                            &recurrent.wqkv,
-                        )?,
-                        wqkv_gate: CudaAffineTensor::load(
-                            &cuda,
-                            &runtime_session.weights,
-                            &recurrent.wqkv_gate,
-                        )?,
-                        ssm_beta: CudaAffineTensor::load(
-                            &cuda,
-                            &runtime_session.weights,
-                            &recurrent.ssm_beta,
-                        )?,
-                        ssm_alpha: CudaAffineTensor::load(
-                            &cuda,
-                            &runtime_session.weights,
-                            &recurrent.ssm_alpha,
+                            &[
+                                &recurrent.wqkv,
+                                &recurrent.wqkv_gate,
+                                &recurrent.ssm_beta,
+                                &recurrent.ssm_alpha,
+                            ],
                         )?,
                         ssm_out: CudaAffineTensor::load(
                             &cuda,
@@ -1059,11 +1286,13 @@ impl CudaQwenTextRuntime {
             hidden_b: self.cuda.alloc_f32(self.hidden_size)?,
             hidden_norm: self.cuda.alloc_f32(self.hidden_size)?,
             hidden_bf16: self.cuda.alloc_bytes(self.hidden_size * std::mem::size_of::<u16>())?,
+            hidden_q8_1: self.cuda.alloc_bytes(q8_1_bytes_for_len(self.hidden_size)?)?,
             qg_out: self.cuda.alloc_f32(self.attention_qg_width)?,
             query: self
                 .cuda
                 .alloc_f32(self.attention_query_width.max(self.recurrent_q_width))?,
             gate: self.cuda.alloc_f32(self.attention_query_width)?,
+            kv_out: self.cuda.alloc_f32(self.attention_kv_width * 2)?,
             key: self
                 .cuda
                 .alloc_f32(self.attention_kv_width.max(self.recurrent_q_width))?,
@@ -1076,6 +1305,9 @@ impl CudaQwenTextRuntime {
             attn_bf16: self
                 .cuda
                 .alloc_bytes(self.attention_query_width * std::mem::size_of::<u16>())?,
+            attn_q8_1: self
+                .cuda
+                .alloc_bytes(q8_1_bytes_for_len(self.attention_query_width)?)?,
             attn_proj: self.cuda.alloc_f32(self.hidden_size)?,
             residual: self.cuda.alloc_f32(self.hidden_size)?,
             ffn_input: self.cuda.alloc_f32(self.hidden_size)?,
@@ -1089,6 +1321,9 @@ impl CudaQwenTextRuntime {
                 .cuda
                 .alloc_f32(self.shared_expert_intermediate * 2)?,
             moe_shared_act: self.cuda.alloc_f32(self.shared_expert_intermediate)?,
+            moe_shared_act_q8_1: self
+                .cuda
+                .alloc_bytes(q8_1_bytes_for_len(self.shared_expert_intermediate)?)?,
             moe_shared_down: self.cuda.alloc_f32(self.hidden_size)?,
             moe_expert_gate_up: self.cuda.alloc_f32(self.expert_intermediate * 2)?,
             moe_expert_gate_up_batch: self
@@ -1114,7 +1349,9 @@ impl CudaQwenTextRuntime {
                         * self.expert_intermediate
                         * std::mem::size_of::<u16>(),
                 )?,
-            recurrent_qkv: self.cuda.alloc_f32(self.recurrent_qkv_width)?,
+            recurrent_qkv_aux: self.cuda.alloc_f32(
+                self.recurrent_qkv_width + self.recurrent_v_width + self.recurrent_num_v_heads * 2,
+            )?,
             recurrent_gate_z: self.cuda.alloc_f32(self.recurrent_v_width)?,
             recurrent_beta_logits: self.cuda.alloc_f32(self.recurrent_num_v_heads)?,
             recurrent_beta: self.cuda.alloc_f32(self.recurrent_num_v_heads)?,
@@ -1129,6 +1366,9 @@ impl CudaQwenTextRuntime {
             recurrent_gated_bf16: self
                 .cuda
                 .alloc_bytes(self.recurrent_v_width * std::mem::size_of::<u16>())?,
+            recurrent_gated_q8_1: self
+                .cuda
+                .alloc_bytes(q8_1_bytes_for_len(self.recurrent_v_width)?)?,
             recurrent_proj: self.cuda.alloc_f32(self.hidden_size)?,
             final_norm: self.cuda.alloc_f32(self.hidden_size)?,
             logits: self.cuda.alloc_f32(self.vocab_size)?,
@@ -1151,6 +1391,156 @@ impl CudaQwenTextRuntime {
             seq_len: self.cuda.alloc_mapped_u32(1)?,
             start_slot: self.cuda.alloc_mapped_u32(1)?,
             disallowed_count: self.cuda.alloc_mapped_u32(1)?,
+        })
+    }
+
+    fn alloc_prefill_buffers(
+        &self,
+        seq_capacity: usize,
+        row_capacity: usize,
+    ) -> CudaResult<CudaQwenPrefillBuffers> {
+        let hidden_len = row_capacity
+            .checked_mul(self.hidden_size)
+            .ok_or_else(|| "qwen prefill hidden size overflow".to_string())?;
+        let hidden_bf16_bytes = hidden_len
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "qwen prefill hidden bf16 byte size overflow".to_string())?;
+        let qg_len = row_capacity
+            .checked_mul(self.attention_qg_width)
+            .ok_or_else(|| "qwen prefill qg size overflow".to_string())?;
+        let query_buffer_width = self.attention_query_width.max(self.recurrent_q_width);
+        let key_buffer_width = self.attention_kv_width.max(self.recurrent_q_width);
+        let value_buffer_width = self.attention_kv_width.max(self.recurrent_v_width);
+        let query_len = row_capacity
+            .checked_mul(query_buffer_width)
+            .ok_or_else(|| "qwen prefill query size overflow".to_string())?;
+        let attention_query_len = row_capacity
+            .checked_mul(self.attention_query_width)
+            .ok_or_else(|| "qwen prefill attention query size overflow".to_string())?;
+        let query_bf16_bytes = attention_query_len
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "qwen prefill query bf16 byte size overflow".to_string())?;
+        let key_len = row_capacity
+            .checked_mul(key_buffer_width)
+            .ok_or_else(|| "qwen prefill key size overflow".to_string())?;
+        let value_len = row_capacity
+            .checked_mul(value_buffer_width)
+            .ok_or_else(|| "qwen prefill kv size overflow".to_string())?;
+        let attention_logits_len = row_capacity
+            .checked_mul(self.attention_heads)
+            .and_then(|len| len.checked_mul(seq_capacity))
+            .ok_or_else(|| "qwen prefill attention logits size overflow".to_string())?;
+        let attention_probs_bf16_bytes = attention_logits_len
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "qwen prefill attention probs byte size overflow".to_string())?;
+        let recurrent_qkv_aux_width = self
+            .recurrent_qkv_width
+            .checked_add(self.recurrent_v_width)
+            .and_then(|value| value.checked_add(self.recurrent_num_v_heads * 2))
+            .ok_or_else(|| "qwen prefill recurrent qkv aux width overflow".to_string())?;
+        let recurrent_qkv_aux_len = row_capacity
+            .checked_mul(recurrent_qkv_aux_width)
+            .ok_or_else(|| "qwen prefill recurrent qkv aux size overflow".to_string())?;
+        let recurrent_head_scalars_len = row_capacity
+            .checked_mul(self.recurrent_num_v_heads)
+            .ok_or_else(|| "qwen prefill recurrent head scalar size overflow".to_string())?;
+        let recurrent_conv_len = row_capacity
+            .checked_mul(self.recurrent_qkv_width)
+            .ok_or_else(|| "qwen prefill recurrent conv size overflow".to_string())?;
+        let recurrent_value_len = row_capacity
+            .checked_mul(self.recurrent_v_width)
+            .ok_or_else(|| "qwen prefill recurrent value size overflow".to_string())?;
+        let recurrent_state_len = self
+            .recurrent_num_v_heads
+            .checked_mul(self.recurrent_head_v_dim)
+            .and_then(|value| value.checked_mul(self.recurrent_head_k_dim))
+            .ok_or_else(|| "qwen prefill recurrent state size overflow".to_string())?;
+        let recurrent_gated_delta_len = recurrent_value_len
+            .checked_add(recurrent_state_len)
+            .ok_or_else(|| "qwen prefill recurrent gated delta size overflow".to_string())?;
+        let recurrent_gated_bf16_bytes = recurrent_value_len
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "qwen prefill recurrent gated bf16 byte size overflow".to_string())?;
+        let moe_router_logits_len = row_capacity
+            .checked_mul(self.expert_count + 1)
+            .ok_or_else(|| "qwen prefill moe router logits size overflow".to_string())?;
+        let moe_route_len = row_capacity
+            .checked_mul(self.experts_used_count)
+            .ok_or_else(|| "qwen prefill moe route size overflow".to_string())?;
+        let moe_hidden_len = row_capacity
+            .checked_mul(self.hidden_size)
+            .ok_or_else(|| "qwen prefill moe hidden size overflow".to_string())?;
+        let moe_shared_gate_up_len = row_capacity
+            .checked_mul(self.shared_expert_intermediate)
+            .and_then(|value| value.checked_mul(2))
+            .ok_or_else(|| "qwen prefill moe shared gate/up size overflow".to_string())?;
+        let moe_shared_act_len = row_capacity
+            .checked_mul(self.shared_expert_intermediate)
+            .ok_or_else(|| "qwen prefill moe shared activation size overflow".to_string())?;
+        let moe_shared_act_bf16_bytes = moe_shared_act_len
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "qwen prefill moe shared activation bf16 size overflow".to_string())?;
+        let moe_expert_gate_up_len = row_capacity
+            .checked_mul(self.expert_intermediate)
+            .and_then(|value| value.checked_mul(2))
+            .ok_or_else(|| "qwen prefill moe expert gate/up size overflow".to_string())?;
+        let moe_expert_act_len = row_capacity
+            .checked_mul(self.expert_intermediate)
+            .ok_or_else(|| "qwen prefill moe expert activation size overflow".to_string())?;
+        let moe_expert_act_bf16_bytes = moe_expert_act_len
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "qwen prefill moe expert activation bf16 size overflow".to_string())?;
+        let moe_expert_down_batch_len = moe_hidden_len
+            .checked_mul(self.experts_used_count)
+            .ok_or_else(|| "qwen prefill moe expert down batch size overflow".to_string())?;
+
+        Ok(CudaQwenPrefillBuffers {
+            row_capacity,
+            seq_capacity,
+            hidden_a: self.cuda.alloc_f32(hidden_len)?,
+            hidden_b: self.cuda.alloc_f32(hidden_len)?,
+            hidden_norm: self.cuda.alloc_f32(hidden_len)?,
+            hidden_bf16: self.cuda.alloc_bytes(hidden_bf16_bytes)?,
+            qg_out: self.cuda.alloc_f32(qg_len)?,
+            query: self.cuda.alloc_f32(query_len)?,
+            query_bf16: self.cuda.alloc_bytes(query_bf16_bytes)?,
+            gate: self.cuda.alloc_f32(query_len)?,
+            kv_out: self.cuda.alloc_f32(row_capacity * self.attention_kv_width * 2)?,
+            key: self.cuda.alloc_f32(key_len)?,
+            value: self.cuda.alloc_f32(value_len)?,
+            attention_logits: self.cuda.alloc_f32(attention_logits_len)?,
+            attention_probs_bf16: self.cuda.alloc_bytes(attention_probs_bf16_bytes)?,
+            attn_out: self.cuda.alloc_f32(query_len)?,
+            attn_gated: self.cuda.alloc_f32(query_len)?,
+            attn_bf16: self.cuda.alloc_bytes(query_bf16_bytes)?,
+            attn_proj: self.cuda.alloc_f32(hidden_len)?,
+            recurrent_qkv_aux: self.cuda.alloc_f32(recurrent_qkv_aux_len)?,
+            recurrent_gate_z: self.cuda.alloc_f32(recurrent_value_len)?,
+            recurrent_beta_logits: self.cuda.alloc_f32(recurrent_head_scalars_len)?,
+            recurrent_beta: self.cuda.alloc_f32(recurrent_head_scalars_len)?,
+            recurrent_alpha: self.cuda.alloc_f32(recurrent_head_scalars_len)?,
+            recurrent_conv: self.cuda.alloc_f32(recurrent_conv_len)?,
+            recurrent_decay: self.cuda.alloc_f32(recurrent_head_scalars_len)?,
+            recurrent_gated_delta: self.cuda.alloc_f32(recurrent_gated_delta_len)?,
+            recurrent_out_norm: self.cuda.alloc_f32(recurrent_value_len)?,
+            recurrent_gated: self.cuda.alloc_f32(recurrent_value_len)?,
+            recurrent_gated_bf16: self.cuda.alloc_bytes(recurrent_gated_bf16_bytes)?,
+            recurrent_proj: self.cuda.alloc_f32(hidden_len)?,
+            residual: self.cuda.alloc_f32(hidden_len)?,
+            moe_router_logits: self.cuda.alloc_f32(moe_router_logits_len)?,
+            moe_route_indices: self.cuda.alloc_u32(moe_route_len)?,
+            moe_route_weights: self.cuda.alloc_f32(moe_route_len)?,
+            moe_routed_accum: self.cuda.alloc_f32(moe_hidden_len)?,
+            moe_shared_gate_scalar: self.cuda.alloc_f32(row_capacity)?,
+            moe_shared_gate_up: self.cuda.alloc_f32(moe_shared_gate_up_len)?,
+            moe_shared_act: self.cuda.alloc_f32(moe_shared_act_len)?,
+            moe_shared_act_bf16: self.cuda.alloc_bytes(moe_shared_act_bf16_bytes)?,
+            moe_shared_down: self.cuda.alloc_f32(moe_hidden_len)?,
+            moe_expert_gate_up: self.cuda.alloc_f32(moe_expert_gate_up_len)?,
+            moe_expert_act: self.cuda.alloc_f32(moe_expert_act_len)?,
+            moe_expert_act_bf16: self.cuda.alloc_bytes(moe_expert_act_bf16_bytes)?,
+            moe_expert_down_batch: self.cuda.alloc_f32(moe_expert_down_batch_len)?,
+            base_position: self.cuda.alloc_mapped_u32(1)?,
         })
     }
 
@@ -1829,7 +2219,10 @@ impl CudaQwenTextRuntime {
                             .read_f32s(&session.workspace.hidden_norm, self.hidden_size)?;
                         let actual_qkv = self
                             .cuda
-                            .read_f32s(&session.workspace.recurrent_qkv, self.recurrent_qkv_width)?;
+                            .read_f32s(
+                                &session.workspace.recurrent_qkv_aux,
+                                self.recurrent_qkv_width,
+                            )?;
                         let actual_gate_z = self
                             .cuda
                             .read_f32s(&session.workspace.recurrent_gate_z, self.recurrent_v_width)?;
@@ -2009,21 +2402,36 @@ impl CudaQwenTextRuntime {
         )?;
         self.cuda
             .f32_to_bf16(&workspace.hidden_norm, &workspace.hidden_bf16, self.hidden_size)?;
+        self.cuda
+            .quantize_q8_1_f32(&workspace.hidden_norm, &workspace.hidden_q8_1, self.hidden_size)?;
         layer
             .wq
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.qg_out)?;
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.hidden_bf16,
+                &workspace.hidden_q8_1,
+                &workspace.qg_out,
+            )?;
         layer
-            .wk
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.key)?;
-        layer
-            .wv
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.value)?;
+            .wkv
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.hidden_bf16,
+                &workspace.hidden_q8_1,
+                &workspace.kv_out,
+            )?;
         self.cuda.qwen_split_interleaved_query_gate_f32(
             &workspace.qg_out,
             &workspace.query,
             &workspace.gate,
             self.attention_heads,
             self.attention_head_dim,
+        )?;
+        self.cuda.qwen_split_kv_f32(
+            &workspace.kv_out,
+            &workspace.key,
+            &workspace.value,
+            self.attention_kv_width,
         )?;
         self.cuda.rms_norm_rows_weighted_f32_f32weights_precise(
             &workspace.query,
@@ -2113,9 +2521,16 @@ impl CudaQwenTextRuntime {
         )?;
         self.cuda
             .f32_to_bf16(&workspace.attn_gated, &workspace.attn_bf16, self.attention_query_width)?;
+        self.cuda
+            .quantize_q8_1_f32(&workspace.attn_gated, &workspace.attn_q8_1, self.attention_query_width)?;
         layer
             .wo
-            .matvec(&self.cuda, &workspace.attn_bf16, &workspace.attn_proj)?;
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.attn_bf16,
+                &workspace.attn_q8_1,
+                &workspace.attn_proj,
+            )?;
         self.cuda
             .add_f32(input_hidden, &workspace.attn_proj, &workspace.residual, self.hidden_size)?;
         self.eval_moe_device(
@@ -2150,21 +2565,36 @@ impl CudaQwenTextRuntime {
         )?;
         self.cuda
             .f32_to_bf16(&workspace.hidden_norm, &workspace.hidden_bf16, self.hidden_size)?;
+        self.cuda
+            .quantize_q8_1_f32(&workspace.hidden_norm, &workspace.hidden_q8_1, self.hidden_size)?;
         layer
             .wq
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.qg_out)?;
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.hidden_bf16,
+                &workspace.hidden_q8_1,
+                &workspace.qg_out,
+            )?;
         layer
-            .wk
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.key)?;
-        layer
-            .wv
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.value)?;
+            .wkv
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.hidden_bf16,
+                &workspace.hidden_q8_1,
+                &workspace.kv_out,
+            )?;
         self.cuda.qwen_split_interleaved_query_gate_f32(
             &workspace.qg_out,
             &workspace.query,
             &workspace.gate,
             self.attention_heads,
             self.attention_head_dim,
+        )?;
+        self.cuda.qwen_split_kv_f32(
+            &workspace.kv_out,
+            &workspace.key,
+            &workspace.value,
+            self.attention_kv_width,
         )?;
         self.cuda.rms_norm_rows_weighted_f32_f32weights_precise(
             &workspace.query,
@@ -2252,9 +2682,16 @@ impl CudaQwenTextRuntime {
         )?;
         self.cuda
             .f32_to_bf16(&workspace.attn_gated, &workspace.attn_bf16, self.attention_query_width)?;
+        self.cuda
+            .quantize_q8_1_f32(&workspace.attn_gated, &workspace.attn_q8_1, self.attention_query_width)?;
         layer
             .wo
-            .matvec(&self.cuda, &workspace.attn_bf16, &workspace.attn_proj)?;
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.attn_bf16,
+                &workspace.attn_q8_1,
+                &workspace.attn_proj,
+            )?;
         self.cuda
             .add_f32(input_hidden, &workspace.attn_proj, &workspace.residual, self.hidden_size)?;
         self.eval_moe_device(
@@ -2286,22 +2723,27 @@ impl CudaQwenTextRuntime {
         )?;
         self.cuda
             .f32_to_bf16(&workspace.hidden_norm, &workspace.hidden_bf16, self.hidden_size)?;
+        self.cuda
+            .quantize_q8_1_f32(&workspace.hidden_norm, &workspace.hidden_q8_1, self.hidden_size)?;
         layer
-            .wqkv
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.recurrent_qkv)?;
-        layer
-            .wqkv_gate
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.recurrent_gate_z)?;
-        layer.ssm_beta.matvec(
-            &self.cuda,
-            &workspace.hidden_bf16,
+            .wqkv_aux
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.hidden_bf16,
+                &workspace.hidden_q8_1,
+                &workspace.recurrent_qkv_aux,
+            )?;
+        self.cuda.qwen_split_recurrent_aux_f32_offsets(
+            &workspace.recurrent_qkv_aux,
+            self.recurrent_qkv_width,
+            &workspace.recurrent_gate_z,
             &workspace.recurrent_beta_logits,
+            &workspace.recurrent_alpha,
+            self.recurrent_v_width,
+            self.recurrent_num_v_heads,
         )?;
-        layer
-            .ssm_alpha
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.recurrent_alpha)?;
         self.cuda.qwen_ssm_conv_with_state_f32(
-            &workspace.recurrent_qkv,
+            &workspace.recurrent_qkv_aux,
             &state.conv_state,
             &layer.ssm_conv1d,
             &workspace.recurrent_conv,
@@ -2394,9 +2836,15 @@ impl CudaQwenTextRuntime {
             &workspace.recurrent_gated_bf16,
             self.recurrent_v_width,
         )?;
-        layer.ssm_out.matvec(
+        self.cuda.quantize_q8_1_f32(
+            &workspace.recurrent_gated,
+            &workspace.recurrent_gated_q8_1,
+            self.recurrent_v_width,
+        )?;
+        layer.ssm_out.matvec_preferring_q8_1(
             &self.cuda,
             &workspace.recurrent_gated_bf16,
+            &workspace.recurrent_gated_q8_1,
             &workspace.recurrent_proj,
         )?;
         self.cuda.add_f32(
@@ -2434,22 +2882,27 @@ impl CudaQwenTextRuntime {
         )?;
         self.cuda
             .f32_to_bf16(&workspace.hidden_norm, &workspace.hidden_bf16, self.hidden_size)?;
+        self.cuda
+            .quantize_q8_1_f32(&workspace.hidden_norm, &workspace.hidden_q8_1, self.hidden_size)?;
         layer
-            .wqkv
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.recurrent_qkv)?;
-        layer
-            .wqkv_gate
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.recurrent_gate_z)?;
-        layer.ssm_beta.matvec(
-            &self.cuda,
-            &workspace.hidden_bf16,
+            .wqkv_aux
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.hidden_bf16,
+                &workspace.hidden_q8_1,
+                &workspace.recurrent_qkv_aux,
+            )?;
+        self.cuda.qwen_split_recurrent_aux_f32_offsets(
+            &workspace.recurrent_qkv_aux,
+            self.recurrent_qkv_width,
+            &workspace.recurrent_gate_z,
             &workspace.recurrent_beta_logits,
+            &workspace.recurrent_alpha,
+            self.recurrent_v_width,
+            self.recurrent_num_v_heads,
         )?;
-        layer
-            .ssm_alpha
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.recurrent_alpha)?;
         self.cuda.qwen_ssm_conv_with_state_f32(
-            &workspace.recurrent_qkv,
+            &workspace.recurrent_qkv_aux,
             &state.conv_state,
             &layer.ssm_conv1d,
             &workspace.recurrent_conv,
@@ -2542,9 +2995,15 @@ impl CudaQwenTextRuntime {
             &workspace.recurrent_gated_bf16,
             self.recurrent_v_width,
         )?;
-        layer.ssm_out.matvec(
+        self.cuda.quantize_q8_1_f32(
+            &workspace.recurrent_gated,
+            &workspace.recurrent_gated_q8_1,
+            self.recurrent_v_width,
+        )?;
+        layer.ssm_out.matvec_preferring_q8_1(
             &self.cuda,
             &workspace.recurrent_gated_bf16,
+            &workspace.recurrent_gated_q8_1,
             &workspace.recurrent_proj,
         )?;
         self.cuda.add_f32(
@@ -2559,6 +3018,543 @@ impl CudaQwenTextRuntime {
             workspace,
             !input_is_a,
         )
+    }
+
+    fn eval_attention_layer_prefill_chunk(
+        &self,
+        layer: &CudaQwenAttentionLayer,
+        state: &mut CudaQwenAttentionLayerState,
+        workspace: &mut CudaQwenWorkspace,
+        prefill: &mut CudaQwenPrefillBuffers,
+        chunk_start_position: usize,
+        chunk_len: usize,
+        input_is_a: bool,
+    ) -> CudaResult<()> {
+        if chunk_len == 0 {
+            return Ok(());
+        }
+        let input_hidden = if input_is_a {
+            &prefill.hidden_a
+        } else {
+            &prefill.hidden_b
+        };
+        let output_is_a = !input_is_a;
+        let hidden_len = chunk_len
+            .checked_mul(self.hidden_size)
+            .ok_or_else(|| "qwen attention prefill hidden size overflow".to_string())?;
+        self.cuda.rms_norm_rows_weighted_f32_f32weights_precise(
+            input_hidden,
+            &layer.attn_norm,
+            &prefill.hidden_norm,
+            chunk_len,
+            self.hidden_size,
+            self.hidden_size,
+            self.rms_norm_eps,
+        )?;
+        self.cuda
+            .f32_to_bf16(&prefill.hidden_norm, &prefill.hidden_bf16, hidden_len)?;
+        layer
+            .wq
+            .matmul_rows(&self.cuda, &prefill.hidden_bf16, chunk_len, &prefill.qg_out)?;
+        layer
+            .wkv
+            .matmul_rows(&self.cuda, &prefill.hidden_bf16, chunk_len, &prefill.kv_out)?;
+        self.cuda.qwen_split_interleaved_query_gate_rows_f32(
+            &prefill.qg_out,
+            &prefill.query,
+            &prefill.gate,
+            chunk_len,
+            self.attention_qg_width,
+            self.attention_query_width,
+            self.attention_heads,
+            self.attention_head_dim,
+        )?;
+        self.cuda.qwen_split_kv_rows_f32(
+            &prefill.kv_out,
+            &prefill.key,
+            &prefill.value,
+            chunk_len,
+            self.attention_kv_width * 2,
+            self.attention_kv_width,
+            self.attention_kv_width,
+        )?;
+        self.cuda.rms_norm_rows_weighted_f32_f32weights_precise(
+            &prefill.query,
+            &layer.q_norm,
+            &prefill.query,
+            chunk_len * self.attention_heads,
+            self.attention_head_dim,
+            self.attention_head_dim,
+            self.rms_norm_eps,
+        )?;
+        self.cuda.rms_norm_rows_weighted_f32_f32weights_precise(
+            &prefill.key,
+            &layer.k_norm,
+            &prefill.key,
+            chunk_len * self.attention_kv_heads,
+            self.attention_head_dim,
+            self.attention_head_dim,
+            self.rms_norm_eps,
+        )?;
+        prefill
+            .base_position
+            .write_u32(0, chunk_start_position as u32)?;
+        self.cuda.qwen_text_mrope_rows_f32_device_u32_grouped_ptr(
+            &prefill.query,
+            &prefill.query,
+            chunk_len * self.attention_heads,
+            self.attention_head_dim,
+            self.attention_heads,
+            self.rotary_dim,
+            self.rope_theta,
+            prefill.base_position.device_u32_ptr(),
+            self.rope_sections4,
+        )?;
+        self.cuda.qwen_text_mrope_rows_f32_device_u32_grouped_ptr(
+            &prefill.key,
+            &prefill.key,
+            chunk_len * self.attention_kv_heads,
+            self.attention_head_dim,
+            self.attention_kv_heads,
+            self.rotary_dim,
+            self.rope_theta,
+            prefill.base_position.device_u32_ptr(),
+            self.rope_sections4,
+        )?;
+        let session_capacity = session_capacity_tokens(state, self.attention_kv_width);
+        for row in 0..chunk_len {
+            let key_offset = row * self.attention_kv_width;
+            let slot = state
+                .stored_tokens
+                .checked_add(row)
+                .ok_or_else(|| "qwen attention prefill slot overflow".to_string())?;
+            self.cuda.kv_append_f32_offsets(
+                &prefill.key,
+                key_offset,
+                &prefill.value,
+                key_offset,
+                &state.key_cache,
+                &state.value_cache,
+                self.attention_kv_heads,
+                self.attention_head_dim,
+                session_capacity,
+                slot,
+            )?;
+        }
+        let kv_row_stride = session_capacity
+            .checked_mul(self.attention_head_dim)
+            .ok_or_else(|| "qwen attention prefill kv row stride overflow".to_string())?;
+        self.cuda.attention_seq_softmax_weighted_sum_rows_blas_f32(
+            &prefill.query,
+            &prefill.query_bf16,
+            &state.key_cache,
+            &state.value_cache,
+            &prefill.attention_logits,
+            &prefill.attention_probs_bf16,
+            &prefill.attn_out,
+            chunk_len,
+            self.attention_heads,
+            self.attention_q_heads_per_kv,
+            self.attention_head_dim,
+            kv_row_stride,
+            self.attention_query_width,
+            self.attention_query_width,
+            state.stored_tokens,
+            session_capacity,
+        )?;
+        state.stored_tokens += chunk_len;
+        let query_len = chunk_len
+            .checked_mul(self.attention_query_width)
+            .ok_or_else(|| "qwen attention prefill query size overflow".to_string())?;
+        self.cuda.qwen_sigmoid_mul_f32(
+            &prefill.attn_out,
+            &prefill.gate,
+            &prefill.attn_gated,
+            query_len,
+        )?;
+        self.cuda
+            .f32_to_bf16(&prefill.attn_gated, &prefill.attn_bf16, query_len)?;
+        layer
+            .wo
+            .matmul_rows(&self.cuda, &prefill.attn_bf16, chunk_len, &prefill.attn_proj)?;
+        self.cuda
+            .add_f32(input_hidden, &prefill.attn_proj, &prefill.residual, hidden_len)?;
+        if layer.moe.ffn_gate_up_exps.is_some() {
+            self.eval_moe_prefill_rows(
+                &layer.moe,
+                &layer.post_attention_norm,
+                prefill,
+                chunk_len,
+                output_is_a,
+            )?;
+        } else {
+            let output_hidden = if output_is_a {
+                &prefill.hidden_a
+            } else {
+                &prefill.hidden_b
+            };
+            for row in 0..chunk_len {
+                let hidden_offset = row * self.hidden_size;
+                self.cuda.copy_f32(
+                    &prefill.residual,
+                    hidden_offset,
+                    &workspace.residual,
+                    0,
+                    self.hidden_size,
+                )?;
+                self.eval_moe_device(&layer.moe, &layer.post_attention_norm, workspace, true)?;
+                self.cuda.copy_f32(
+                    &workspace.hidden_a,
+                    0,
+                    output_hidden,
+                    hidden_offset,
+                    self.hidden_size,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn eval_recurrent_layer_prefill_chunk(
+        &self,
+        layer: &CudaQwenRecurrentLayer,
+        state: &mut CudaQwenRecurrentLayerState,
+        workspace: &mut CudaQwenWorkspace,
+        prefill: &mut CudaQwenPrefillBuffers,
+        chunk_len: usize,
+        input_is_a: bool,
+    ) -> CudaResult<()> {
+        if chunk_len == 0 {
+            return Ok(());
+        }
+        let input_hidden = if input_is_a {
+            &prefill.hidden_a
+        } else {
+            &prefill.hidden_b
+        };
+        let output_is_a = !input_is_a;
+        let hidden_len = chunk_len
+            .checked_mul(self.hidden_size)
+            .ok_or_else(|| "qwen recurrent prefill hidden size overflow".to_string())?;
+        let recurrent_qkv_aux_width = self
+            .recurrent_qkv_width
+            .checked_add(self.recurrent_v_width)
+            .and_then(|value| value.checked_add(self.recurrent_num_v_heads * 2))
+            .ok_or_else(|| "qwen recurrent prefill qkv aux width overflow".to_string())?;
+        let recurrent_value_len = chunk_len
+            .checked_mul(self.recurrent_v_width)
+            .ok_or_else(|| "qwen recurrent prefill recurrent value size overflow".to_string())?;
+        let recurrent_state_len = self
+            .recurrent_num_v_heads
+            .checked_mul(self.recurrent_head_v_dim)
+            .and_then(|value| value.checked_mul(self.recurrent_head_k_dim))
+            .ok_or_else(|| "qwen recurrent prefill recurrent state size overflow".to_string())?;
+
+        self.cuda.rms_norm_rows_weighted_f32_f32weights_precise(
+            input_hidden,
+            &layer.attn_norm,
+            &prefill.hidden_norm,
+            chunk_len,
+            self.hidden_size,
+            self.hidden_size,
+            self.rms_norm_eps,
+        )?;
+        self.cuda
+            .f32_to_bf16(&prefill.hidden_norm, &prefill.hidden_bf16, hidden_len)?;
+        layer.wqkv_aux.matmul_rows(
+            &self.cuda,
+            &prefill.hidden_bf16,
+            chunk_len,
+            &prefill.recurrent_qkv_aux,
+        )?;
+        self.cuda.qwen_split_recurrent_aux_rows_f32_offsets(
+            &prefill.recurrent_qkv_aux,
+            self.recurrent_qkv_width,
+            &prefill.recurrent_gate_z,
+            &prefill.recurrent_beta_logits,
+            &prefill.recurrent_alpha,
+            chunk_len,
+            recurrent_qkv_aux_width,
+            self.recurrent_v_width,
+            self.recurrent_num_v_heads,
+            self.recurrent_v_width,
+            self.recurrent_num_v_heads,
+        )?;
+        self.cuda.qwen_ssm_conv_with_state_rows_f32(
+            &prefill.recurrent_qkv_aux,
+            &state.conv_state,
+            &layer.ssm_conv1d,
+            &prefill.recurrent_conv,
+            chunk_len,
+            recurrent_qkv_aux_width,
+            self.recurrent_qkv_width,
+            self.layers_conv_prefix() + 1,
+            self.recurrent_qkv_width,
+        )?;
+        self.cuda.qwen_split_recurrent_qkv_rows_f32(
+            &prefill.recurrent_conv,
+            &prefill.query,
+            &prefill.key,
+            &prefill.value,
+            chunk_len,
+            self.recurrent_qkv_width,
+            self.recurrent_q_width,
+            self.recurrent_v_width,
+            self.recurrent_q_width,
+            self.recurrent_v_width,
+        )?;
+        self.cuda.rms_norm_rows_no_scale_f32_precise(
+            &prefill.query,
+            &prefill.query,
+            chunk_len * self.recurrent_num_k_heads,
+            self.recurrent_head_k_dim,
+            self.recurrent_head_k_dim,
+            self.rms_norm_eps,
+        )?;
+        self.cuda.rms_norm_rows_no_scale_f32_precise(
+            &prefill.key,
+            &prefill.key,
+            chunk_len * self.recurrent_num_k_heads,
+            self.recurrent_head_k_dim,
+            self.recurrent_head_k_dim,
+            self.rms_norm_eps,
+        )?;
+        let inv_scale = (self.recurrent_head_k_dim as f32).sqrt().recip();
+        self.cuda
+            .scale_f32_inplace(&prefill.query, inv_scale, chunk_len * self.recurrent_q_width)?;
+        self.cuda
+            .scale_f32_inplace(&prefill.key, inv_scale, chunk_len * self.recurrent_q_width)?;
+        self.cuda.qwen_sigmoid_f32_offsets(
+            &prefill.recurrent_beta_logits,
+            0,
+            &prefill.recurrent_beta,
+            0,
+            chunk_len * self.recurrent_num_v_heads,
+        )?;
+        self.cuda.qwen_decay_gate_rows_f32(
+            &layer.ssm_a,
+            &prefill.recurrent_alpha,
+            &layer.ssm_dt,
+            &prefill.recurrent_decay,
+            chunk_len,
+            self.recurrent_num_v_heads,
+        )?;
+        self.cuda.copy_f32(
+            &state.gated_delta,
+            self.recurrent_v_width,
+            &prefill.recurrent_gated_delta,
+            recurrent_value_len,
+            recurrent_state_len,
+        )?;
+        self.cuda.gated_delta_net_f32_state_offset(
+            &prefill.query,
+            &prefill.key,
+            &prefill.value,
+            &prefill.recurrent_decay,
+            &prefill.recurrent_beta,
+            &prefill.recurrent_gated_delta,
+            recurrent_value_len,
+            self.recurrent_head_k_dim,
+            self.recurrent_num_v_heads,
+            chunk_len,
+            1,
+            self.recurrent_head_k_dim,
+            self.recurrent_q_width,
+            chunk_len * self.recurrent_q_width,
+            self.recurrent_head_v_dim,
+            self.recurrent_v_width,
+            chunk_len * self.recurrent_v_width,
+            1,
+            self.recurrent_num_v_heads,
+            chunk_len * self.recurrent_num_v_heads,
+            self.recurrent_num_k_heads,
+            1,
+            false,
+        )?;
+        self.cuda.copy_f32(
+            &prefill.recurrent_gated_delta,
+            recurrent_value_len,
+            &state.gated_delta,
+            self.recurrent_v_width,
+            recurrent_state_len,
+        )?;
+        self.cuda.copy_f32(
+            &prefill.recurrent_gated_delta,
+            recurrent_value_len - self.recurrent_v_width,
+            &state.gated_delta,
+            0,
+            self.recurrent_v_width,
+        )?;
+        self.cuda.rms_norm_rows_weighted_f32_f32weights_precise(
+            &prefill.recurrent_gated_delta,
+            &layer.ssm_norm,
+            &prefill.recurrent_out_norm,
+            chunk_len * self.recurrent_num_v_heads,
+            self.recurrent_head_v_dim,
+            self.recurrent_head_v_dim,
+            self.rms_norm_eps,
+        )?;
+        self.cuda.qwen_silu_mul_f32(
+            &prefill.recurrent_out_norm,
+            &prefill.recurrent_gate_z,
+            &prefill.recurrent_gated,
+            recurrent_value_len,
+        )?;
+        self.cuda.f32_to_bf16(
+            &prefill.recurrent_gated,
+            &prefill.recurrent_gated_bf16,
+            recurrent_value_len,
+        )?;
+        layer.ssm_out.matmul_rows(
+            &self.cuda,
+            &prefill.recurrent_gated_bf16,
+            chunk_len,
+            &prefill.recurrent_proj,
+        )?;
+        self.cuda.add_f32(
+            input_hidden,
+            &prefill.recurrent_proj,
+            &prefill.residual,
+            hidden_len,
+        )?;
+        if layer.moe.ffn_gate_up_exps.is_some() {
+            self.eval_moe_prefill_rows(
+                &layer.moe,
+                &layer.post_attention_norm,
+                prefill,
+                chunk_len,
+                output_is_a,
+            )?;
+        } else {
+            let output_hidden = if output_is_a {
+                &prefill.hidden_a
+            } else {
+                &prefill.hidden_b
+            };
+            for row in 0..chunk_len {
+                let hidden_offset = row * self.hidden_size;
+                self.cuda.copy_f32(
+                    &prefill.residual,
+                    hidden_offset,
+                    &workspace.residual,
+                    0,
+                    self.hidden_size,
+                )?;
+                self.eval_moe_device(&layer.moe, &layer.post_attention_norm, workspace, !input_is_a)?;
+                self.cuda.copy_f32(
+                    if input_is_a {
+                        &workspace.hidden_b
+                    } else {
+                        &workspace.hidden_a
+                    },
+                    0,
+                    output_hidden,
+                    hidden_offset,
+                    self.hidden_size,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn eval_prefill_chunk_exact(
+        &self,
+        session: &mut CudaQwenDecodeSession,
+        prefill: &mut CudaQwenPrefillBuffers,
+        prompt_token_ids: &[u32],
+        chunk_start_position: usize,
+        write_logits: bool,
+    ) -> CudaResult<()> {
+        if prompt_token_ids.is_empty() {
+            return Ok(());
+        }
+        let chunk_len = prompt_token_ids.len();
+        if chunk_len > prefill.row_capacity {
+            return Err(format!(
+                "qwen prefill chunk len {} exceeds row capacity {}",
+                chunk_len, prefill.row_capacity
+            ));
+        }
+        if session.capacity_tokens > prefill.seq_capacity {
+            return Err(format!(
+                "qwen prefill seq capacity {} exceeds prefill buffer capacity {}",
+                session.capacity_tokens, prefill.seq_capacity
+            ));
+        }
+
+        for (row, &token_id) in prompt_token_ids.iter().enumerate() {
+            self.token_embd
+                .get_row(&self.cuda, token_id as usize, &session.workspace.hidden_a)?;
+            self.cuda.copy_f32(
+                &session.workspace.hidden_a,
+                0,
+                &prefill.hidden_a,
+                row * self.hidden_size,
+                self.hidden_size,
+            )?;
+        }
+
+        let mut hidden_is_a = true;
+        for (layer, state) in self.layers.iter().zip(session.layer_states.iter_mut()) {
+            match (layer, state) {
+                (CudaQwenLayer::Attention(layer), CudaQwenLayerState::Attention(state)) => {
+                    self.eval_attention_layer_prefill_chunk(
+                        layer,
+                        state,
+                        &mut session.workspace,
+                        prefill,
+                        chunk_start_position,
+                        chunk_len,
+                        hidden_is_a,
+                    )?;
+                }
+                (CudaQwenLayer::Recurrent(layer), CudaQwenLayerState::Recurrent(state)) => {
+                    self.eval_recurrent_layer_prefill_chunk(
+                        layer,
+                        state,
+                        &mut session.workspace,
+                        prefill,
+                        chunk_len,
+                        hidden_is_a,
+                    )?;
+                }
+                _ => return Err("qwen cuda layer/state mismatch".to_string()),
+            }
+            hidden_is_a = !hidden_is_a;
+        }
+
+        if write_logits {
+            let final_hidden = if hidden_is_a {
+                &prefill.hidden_a
+            } else {
+                &prefill.hidden_b
+            };
+            self.cuda.copy_f32(
+                final_hidden,
+                (chunk_len - 1) * self.hidden_size,
+                &session.workspace.hidden_a,
+                0,
+                self.hidden_size,
+            )?;
+            self.cuda.rms_norm_row_weighted_f32_f32weights_precise(
+                &session.workspace.hidden_a,
+                &self.output_norm,
+                &session.workspace.final_norm,
+                self.hidden_size,
+                self.rms_norm_eps,
+            )?;
+            self.cuda.f32_to_bf16(
+                &session.workspace.final_norm,
+                &session.workspace.hidden_bf16,
+                self.hidden_size,
+            )?;
+            self.output.matvec(
+                &self.cuda,
+                &session.workspace.hidden_bf16,
+                &session.workspace.logits,
+            )?;
+        }
+        Ok(())
     }
 
     fn eval_moe(
@@ -2583,8 +3579,15 @@ impl CudaQwenTextRuntime {
         )?;
         self.cuda
             .f32_to_bf16(&workspace.ffn_input, &workspace.hidden_bf16, self.hidden_size)?;
+        self.cuda
+            .quantize_q8_1_f32(&workspace.ffn_input, &workspace.hidden_q8_1, self.hidden_size)?;
         moe.ffn_gate_inp_shared
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_router_logits)?;
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.hidden_bf16,
+                &workspace.hidden_q8_1,
+                &workspace.moe_router_logits,
+            )?;
         if trace_moe {
             eprintln!("[qwen-moe-trace] router");
         }
@@ -2677,11 +3680,21 @@ impl CudaQwenTextRuntime {
             eprintln!("[qwen-moe-trace] shared");
         }
         moe.ffn_gate_up_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate_up)?;
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.hidden_bf16,
+                &workspace.hidden_q8_1,
+                &workspace.moe_shared_gate_up,
+            )?;
         self.cuda.qwen_swiglu_split_f32(
             &workspace.moe_shared_gate_up,
             &workspace.moe_shared_act,
             self.shared_expert_intermediate,
+            self.shared_expert_intermediate,
+        )?;
+        self.cuda.quantize_q8_1_f32(
+            &workspace.moe_shared_act,
+            &workspace.moe_shared_act_q8_1,
             self.shared_expert_intermediate,
         )?;
         self.cuda.f32_to_bf16(
@@ -2689,9 +3702,10 @@ impl CudaQwenTextRuntime {
             &workspace.moe_expert_act_bf16,
             self.shared_expert_intermediate,
         )?;
-        moe.ffn_down_shexp.matvec(
+        moe.ffn_down_shexp.matvec_preferring_q8_1(
             &self.cuda,
             &workspace.moe_expert_act_bf16,
+            &workspace.moe_shared_act_q8_1,
             &workspace.moe_shared_down,
         )?;
         self.cuda.scale_f32_inplace(
@@ -2710,6 +3724,151 @@ impl CudaQwenTextRuntime {
         }
         self.cuda
             .add_f32(&workspace.residual, &workspace.moe_output, output_hidden, self.hidden_size)
+    }
+
+    fn eval_moe_prefill_rows(
+        &self,
+        moe: &CudaQwenMoeLayer,
+        ffn_norm: &CudaBuffer,
+        prefill: &mut CudaQwenPrefillBuffers,
+        row_count: usize,
+        output_is_a: bool,
+    ) -> CudaResult<()> {
+        if row_count == 0 {
+            return Ok(());
+        }
+        let merged_gate_up = moe
+            .ffn_gate_up_exps
+            .as_ref()
+            .ok_or_else(|| "missing merged expert gate/up weights".to_string())?;
+        let hidden_len = row_count
+            .checked_mul(self.hidden_size)
+            .ok_or_else(|| "qwen prefill moe hidden size overflow".to_string())?;
+        let expert_act_len = row_count
+            .checked_mul(self.expert_intermediate)
+            .ok_or_else(|| "qwen prefill moe expert activation size overflow".to_string())?;
+        let shared_act_len = row_count
+            .checked_mul(self.shared_expert_intermediate)
+            .ok_or_else(|| "qwen prefill moe shared activation size overflow".to_string())?;
+        let router_row_stride = self.expert_count + 1;
+        let route_row_stride = self.experts_used_count;
+        let output_hidden = if output_is_a {
+            &prefill.hidden_a
+        } else {
+            &prefill.hidden_b
+        };
+
+        self.cuda.rms_norm_rows_weighted_f32_f32weights_precise(
+            &prefill.residual,
+            ffn_norm,
+            &prefill.hidden_norm,
+            row_count,
+            self.hidden_size,
+            self.hidden_size,
+            self.rms_norm_eps,
+        )?;
+        self.cuda
+            .f32_to_bf16(&prefill.hidden_norm, &prefill.hidden_bf16, hidden_len)?;
+        moe.ffn_gate_inp_shared.matmul_rows(
+            &self.cuda,
+            &prefill.hidden_bf16,
+            row_count,
+            &prefill.moe_router_logits,
+        )?;
+        self.cuda.qwen_softmax_topk_routes_rows_f32(
+            &prefill.moe_router_logits,
+            &prefill.moe_route_indices,
+            &prefill.moe_route_weights,
+            row_count,
+            router_row_stride,
+            self.expert_count,
+            self.experts_used_count,
+        )?;
+        zero_buffer_f32(&self.cuda, &prefill.moe_routed_accum, hidden_len)?;
+
+        for route_slot in 0..self.experts_used_count {
+            merged_gate_up.matmul_rows_select_plane_device_indices(
+                &self.cuda,
+                &prefill.hidden_bf16,
+                row_count,
+                &prefill.moe_expert_gate_up,
+                &prefill.moe_route_indices,
+                route_row_stride,
+                route_slot,
+            )?;
+            self.cuda.qwen_swiglu_split_batched_f32(
+                &prefill.moe_expert_gate_up,
+                &prefill.moe_expert_act,
+                self.expert_intermediate,
+                self.expert_intermediate,
+                row_count,
+            )?;
+            self.cuda.f32_to_bf16(
+                &prefill.moe_expert_act,
+                &prefill.moe_expert_act_bf16,
+                expert_act_len,
+            )?;
+            moe.ffn_down_exps
+                .matmul_rows_select_plane_device_indices(
+                    &self.cuda,
+                    &prefill.moe_expert_act_bf16,
+                    row_count,
+                    &prefill.moe_expert_down_batch,
+                    &prefill.moe_route_indices,
+                    route_row_stride,
+                    route_slot,
+                )?;
+            self.cuda.add_scaled_rows_f32_indexed(
+                &prefill.moe_expert_down_batch,
+                &prefill.moe_route_weights,
+                &prefill.moe_routed_accum,
+                row_count,
+                self.hidden_size,
+                route_row_stride,
+                route_slot,
+            )?;
+        }
+
+        moe.ffn_gate_up_shexp.matmul_rows(
+            &self.cuda,
+            &prefill.hidden_bf16,
+            row_count,
+            &prefill.moe_shared_gate_up,
+        )?;
+        self.cuda.qwen_swiglu_split_batched_f32(
+            &prefill.moe_shared_gate_up,
+            &prefill.moe_shared_act,
+            self.shared_expert_intermediate,
+            self.shared_expert_intermediate,
+            row_count,
+        )?;
+        self.cuda.f32_to_bf16(
+            &prefill.moe_shared_act,
+            &prefill.moe_shared_act_bf16,
+            shared_act_len,
+        )?;
+        moe.ffn_down_shexp.matmul_rows(
+            &self.cuda,
+            &prefill.moe_shared_act_bf16,
+            row_count,
+            &prefill.moe_shared_down,
+        )?;
+        self.cuda.qwen_gather_sigmoid_rows_f32(
+            &prefill.moe_router_logits,
+            &prefill.moe_shared_gate_scalar,
+            row_count,
+            router_row_stride,
+            self.expert_count,
+        )?;
+        self.cuda.add_scaled_rows_f32(
+            &prefill.moe_shared_down,
+            &prefill.moe_shared_gate_scalar,
+            &prefill.moe_routed_accum,
+            row_count,
+            self.hidden_size,
+        )?;
+        self.cuda
+            .add_f32(&prefill.residual, &prefill.moe_routed_accum, output_hidden, hidden_len)
     }
 
     fn eval_moe_device(
@@ -2734,8 +3893,15 @@ impl CudaQwenTextRuntime {
         )?;
         self.cuda
             .f32_to_bf16(&workspace.ffn_input, &workspace.hidden_bf16, self.hidden_size)?;
+        self.cuda
+            .quantize_q8_1_f32(&workspace.ffn_input, &workspace.hidden_q8_1, self.hidden_size)?;
         moe.ffn_gate_inp_shared
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_router_logits)?;
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.hidden_bf16,
+                &workspace.hidden_q8_1,
+                &workspace.moe_router_logits,
+            )?;
         if trace_moe {
             eprintln!("[qwen-moe-trace] router");
         }
@@ -2753,20 +3919,33 @@ impl CudaQwenTextRuntime {
         let use_batched_experts = moe.ffn_gate_up_exps.is_some()
             && self.experts_used_count > 1
             && self.experts_used_count <= 8;
+        let use_fixed8_batched_experts = use_batched_experts && self.experts_used_count == 8;
         if use_batched_experts {
             if trace_moe {
                 eprintln!("[qwen-moe-trace] batched_gate_up");
             }
-            moe.ffn_gate_up_exps
-                .as_ref()
-                .ok_or_else(|| "missing merged expert gate/up weights".to_string())?
-                .matvec_planes_device_indices(
-                    &self.cuda,
-                    &workspace.hidden_bf16,
-                    &workspace.moe_expert_gate_up_batch,
-                    &workspace.moe_route_indices,
-                    self.experts_used_count,
-                )?;
+            if use_fixed8_batched_experts {
+                moe.ffn_gate_up_exps
+                    .as_ref()
+                    .ok_or_else(|| "missing merged expert gate/up weights".to_string())?
+                    .matvec_planes_device_indices_fixed8_known_valid(
+                        &self.cuda,
+                        &workspace.hidden_bf16,
+                        &workspace.moe_expert_gate_up_batch,
+                        &workspace.moe_route_indices,
+                    )?;
+            } else {
+                moe.ffn_gate_up_exps
+                    .as_ref()
+                    .ok_or_else(|| "missing merged expert gate/up weights".to_string())?
+                    .matvec_planes_device_indices(
+                        &self.cuda,
+                        &workspace.hidden_bf16,
+                        &workspace.moe_expert_gate_up_batch,
+                        &workspace.moe_route_indices,
+                        self.experts_used_count,
+                    )?;
+            }
             self.cuda.qwen_swiglu_split_batched_f32(
                 &workspace.moe_expert_gate_up_batch,
                 &workspace.moe_expert_act_batch,
@@ -2782,14 +3961,25 @@ impl CudaQwenTextRuntime {
             if trace_moe {
                 eprintln!("[qwen-moe-trace] batched_down");
             }
-            moe.ffn_down_exps.matvec_planes_device_indices_input_strided(
-                &self.cuda,
-                &workspace.moe_expert_act_bf16_batch,
-                self.expert_intermediate,
-                &workspace.moe_expert_down_batch,
-                &workspace.moe_route_indices,
-                self.experts_used_count,
-            )?;
+            if use_fixed8_batched_experts {
+                moe.ffn_down_exps
+                    .matvec_planes_device_indices_input_strided_fixed8_known_valid(
+                        &self.cuda,
+                        &workspace.moe_expert_act_bf16_batch,
+                        self.expert_intermediate,
+                        &workspace.moe_expert_down_batch,
+                        &workspace.moe_route_indices,
+                    )?;
+            } else {
+                moe.ffn_down_exps.matvec_planes_device_indices_input_strided(
+                    &self.cuda,
+                    &workspace.moe_expert_act_bf16_batch,
+                    self.expert_intermediate,
+                    &workspace.moe_expert_down_batch,
+                    &workspace.moe_route_indices,
+                    self.experts_used_count,
+                )?;
+            }
             self.cuda.weighted_sum_rows_f32(
                 &workspace.moe_expert_down_batch,
                 &workspace.moe_route_weights,
@@ -2882,11 +4072,21 @@ impl CudaQwenTextRuntime {
             eprintln!("[qwen-moe-trace] shared");
         }
         moe.ffn_gate_up_shexp
-            .matvec(&self.cuda, &workspace.hidden_bf16, &workspace.moe_shared_gate_up)?;
+            .matvec_preferring_q8_1(
+                &self.cuda,
+                &workspace.hidden_bf16,
+                &workspace.hidden_q8_1,
+                &workspace.moe_shared_gate_up,
+            )?;
         self.cuda.qwen_swiglu_split_f32(
             &workspace.moe_shared_gate_up,
             &workspace.moe_shared_act,
             self.shared_expert_intermediate,
+            self.shared_expert_intermediate,
+        )?;
+        self.cuda.quantize_q8_1_f32(
+            &workspace.moe_shared_act,
+            &workspace.moe_shared_act_q8_1,
             self.shared_expert_intermediate,
         )?;
         self.cuda.f32_to_bf16(
@@ -2894,9 +4094,10 @@ impl CudaQwenTextRuntime {
             &workspace.moe_expert_act_bf16,
             self.shared_expert_intermediate,
         )?;
-        moe.ffn_down_shexp.matvec(
+        moe.ffn_down_shexp.matvec_preferring_q8_1(
             &self.cuda,
             &workspace.moe_expert_act_bf16,
+            &workspace.moe_shared_act_q8_1,
             &workspace.moe_shared_down,
         )?;
         self.cuda.qwen_sigmoid_f32_offsets(
@@ -3287,6 +4488,101 @@ impl CudaAffineTensor {
         )
     }
 
+    fn matmul_rows(
+        &self,
+        cuda: &CudaRuntime,
+        input_bf16: &CudaBuffer,
+        input_rows: usize,
+        output_f32: &CudaBuffer,
+    ) -> CudaResult<()> {
+        cuda.affine_qmv_bf16_to_f32_rows_precise(
+            input_bf16,
+            &self.packed_weights,
+            &self.scales,
+            &self.biases,
+            output_f32,
+            self.row_width(),
+            self.weight_words_per_row,
+            self.qparams_per_row,
+            self.out_rows,
+            input_rows,
+            self.bits,
+        )
+    }
+
+    fn matmul_rows_select_plane_device_indices(
+        &self,
+        cuda: &CudaRuntime,
+        input_bf16: &CudaBuffer,
+        input_rows: usize,
+        output_f32: &CudaBuffer,
+        plane_indices_u32: &CudaBuffer,
+        plane_indices_row_stride: usize,
+        plane_slot: usize,
+    ) -> CudaResult<()> {
+        cuda.affine_qmv_bf16_to_f32_select_plane_rows_precise(
+            input_bf16,
+            &self.packed_weights,
+            &self.scales,
+            &self.biases,
+            plane_indices_u32,
+            plane_indices_row_stride,
+            plane_slot,
+            output_f32,
+            self.row_width(),
+            self.weight_words_per_row,
+            self.qparams_per_row,
+            self.out_rows,
+            input_rows,
+            self.weight_words_per_plane,
+            self.qparams_words_per_plane,
+            self.plane_count,
+            self.bits,
+        )
+    }
+
+    fn matvec_q8_1(
+        &self,
+        cuda: &CudaRuntime,
+        input_bf16: &CudaBuffer,
+        input_q8_1: &CudaBuffer,
+        output_f32: &CudaBuffer,
+    ) -> CudaResult<()> {
+        if self.row_width() % 64 != 0 {
+            return Err(format!(
+                "q8_1 affine matvec expects row width divisible by 64, got {}",
+                self.row_width()
+            ));
+        }
+        cuda.affine_qmv_q8_1_to_f32_precise(
+            input_bf16,
+            input_q8_1,
+            &self.packed_weights,
+            0,
+            &self.scales,
+            0,
+            &self.biases,
+            0,
+            output_f32,
+            self.row_width(),
+            self.weight_words_per_row,
+            self.qparams_per_row,
+            self.out_rows,
+            self.bits,
+        )
+    }
+
+    fn matvec_preferring_q8_1(
+        &self,
+        cuda: &CudaRuntime,
+        input_bf16: &CudaBuffer,
+        input_q8_1: &CudaBuffer,
+        output_f32: &CudaBuffer,
+    ) -> CudaResult<()> {
+        let _ = input_q8_1;
+        self.matvec(cuda, input_bf16, output_f32)
+    }
+
     fn matvec_plane(
         &self,
         cuda: &CudaRuntime,
@@ -3371,6 +4667,30 @@ impl CudaAffineTensor {
         )
     }
 
+    fn matvec_planes_device_indices_fixed8_known_valid(
+        &self,
+        cuda: &CudaRuntime,
+        input_bf16: &CudaBuffer,
+        output_f32: &CudaBuffer,
+        plane_indices_u32: &CudaBuffer,
+    ) -> CudaResult<()> {
+        cuda.affine_qmv_bf16_to_f32_select_planes_fixed8_known_valid_precise(
+            input_bf16,
+            &self.packed_weights,
+            &self.scales,
+            &self.biases,
+            plane_indices_u32,
+            output_f32,
+            self.row_width(),
+            self.weight_words_per_row,
+            self.qparams_per_row,
+            self.out_rows,
+            self.weight_words_per_plane,
+            self.qparams_words_per_plane,
+            self.bits,
+        )
+    }
+
     fn matvec_planes_device_indices_input_strided(
         &self,
         cuda: &CudaRuntime,
@@ -3396,6 +4716,32 @@ impl CudaAffineTensor {
             self.weight_words_per_plane,
             self.qparams_words_per_plane,
             self.plane_count,
+            self.bits,
+        )
+    }
+
+    fn matvec_planes_device_indices_input_strided_fixed8_known_valid(
+        &self,
+        cuda: &CudaRuntime,
+        input_bf16: &CudaBuffer,
+        input_words_per_slot: usize,
+        output_f32: &CudaBuffer,
+        plane_indices_u32: &CudaBuffer,
+    ) -> CudaResult<()> {
+        cuda.affine_qmv_bf16_to_f32_select_planes_input_offsets_fixed8_known_valid_precise(
+            input_bf16,
+            input_words_per_slot,
+            &self.packed_weights,
+            &self.scales,
+            &self.biases,
+            plane_indices_u32,
+            output_f32,
+            self.row_width(),
+            self.weight_words_per_row,
+            self.qparams_per_row,
+            self.out_rows,
+            self.weight_words_per_plane,
+            self.qparams_words_per_plane,
             self.bits,
         )
     }
@@ -4026,6 +5372,57 @@ mod tests {
     }
 
     #[test]
+    fn cuda_qwen_ssm_conv_with_state_rows_matches_reference() {
+        if !makepad_ggml::backend::cuda::is_available() {
+            return;
+        }
+        let cuda = CudaRuntime::load().unwrap();
+        let rows = [
+            vec![1.0, 2.0, 10.0, 20.0],
+            vec![1.5, 2.5, 10.5, 20.5],
+            vec![2.0, 3.0, 11.0, 21.0],
+        ];
+        let current = rows.concat();
+        let initial_state = vec![0.5, 0.25, 5.0, 2.5, 1.5, 0.75, 15.0, 7.5];
+        let kernel = vec![
+            0.25, 0.50, 0.75, //
+            0.10, 0.20, 0.30, //
+            1.00, 0.50, 0.25, //
+            0.40, 0.30, 0.20, //
+        ];
+
+        let mut expected_state = initial_state.clone();
+        let mut expected = Vec::new();
+        for row in &rows {
+            expected.extend(
+                apply_ssm_conv_with_state_f32(row, &mut expected_state, &kernel, 3).unwrap(),
+            );
+        }
+
+        let current_buf = cuda.load_bytes(&f32_bytes(&current)).unwrap();
+        let state_buf = cuda.load_bytes(&f32_bytes(&initial_state)).unwrap();
+        let kernel_buf = cuda.load_bytes(&f32_bytes(&kernel)).unwrap();
+        let out_buf = cuda.alloc_f32(current.len()).unwrap();
+        cuda.qwen_ssm_conv_with_state_rows_f32(
+            &current_buf,
+            &state_buf,
+            &kernel_buf,
+            &out_buf,
+            rows.len(),
+            rows[0].len(),
+            rows[0].len(),
+            3,
+            rows[0].len(),
+        )
+        .unwrap();
+
+        let actual = cuda.read_f32s(&out_buf, current.len()).unwrap();
+        let actual_state = cuda.read_f32s(&state_buf, initial_state.len()).unwrap();
+        assert_close("ssm_conv_rows_output", &actual, &expected, 6.5e-2);
+        assert_close("ssm_conv_rows_state", &actual_state, &expected_state, 1.0e-5);
+    }
+
+    #[test]
     fn cuda_qwen_mrope_rows_matches_reference() {
         if !makepad_ggml::backend::cuda::is_available() {
             return;
@@ -4307,6 +5704,132 @@ mod tests {
                 1.0e-1,
             );
         }
+    }
+
+    #[test]
+    fn cuda_qwen_gated_delta_matches_reference_across_rows() {
+        if !makepad_ggml::backend::cuda::is_available() {
+            return;
+        }
+        let cuda = CudaRuntime::load().unwrap();
+        let q_steps = [
+            vec![1.0, 0.5, -0.25, 0.75],
+            vec![0.25, -0.75, 1.0, 0.5],
+            vec![-0.5, 1.25, 0.75, -0.25],
+        ];
+        let k_steps = [
+            vec![0.25, -0.5, 0.75, 1.0],
+            vec![1.0, 0.5, -0.25, -0.75],
+            vec![0.5, 0.75, -1.0, 0.25],
+        ];
+        let v_steps = [
+            vec![2.0, 4.0, 6.0, 8.0, 1.5, -2.0, 3.5, 4.5],
+            vec![1.0, -1.5, 2.5, 3.0, 0.5, 1.5, -0.5, 2.0],
+            vec![3.0, 2.0, 1.0, 0.0, 4.0, 3.0, 2.0, 1.0],
+        ];
+        let log_gate_steps: [Vec<f32>; 3] = [
+            vec![-0.1, -0.4],
+            vec![-0.2, -0.3],
+            vec![-0.5, -0.05],
+        ];
+        let beta_steps = [
+            vec![0.5, 0.25],
+            vec![0.4, 0.3],
+            vec![0.2, 0.6],
+        ];
+
+        let mut expected_state = vec![
+            0.5, -0.25, 0.75, 1.25, //
+            -0.5, 0.25, -0.75, 0.5, //
+            1.0, -1.0, 0.5, -0.5, //
+            0.25, 0.5, -0.25, -0.75, //
+            -0.2, 0.4, -0.6, 0.8, //
+            0.1, -0.3, 0.5, -0.7, //
+            0.9, -0.8, 0.7, -0.6, //
+            0.3, -0.2, 0.1, -0.4, //
+        ];
+        let mut expected_out = Vec::new();
+        for step in 0..q_steps.len() {
+            let q_reference = q_steps[step]
+                .iter()
+                .map(|value| *value * 0.5)
+                .collect::<Vec<_>>();
+            let gate = log_gate_steps[step]
+                .iter()
+                .map(|value| value.exp())
+                .collect::<Vec<_>>();
+            expected_out.extend(
+                gated_delta_net_step_f32(
+                    &q_reference,
+                    &k_steps[step],
+                    &v_steps[step],
+                    &gate,
+                    &beta_steps[step],
+                    &mut expected_state,
+                    4,
+                    1,
+                    4,
+                    2,
+                )
+                .unwrap(),
+            );
+        }
+
+        let q = q_steps.concat();
+        let k = k_steps.concat();
+        let v = v_steps.concat();
+        let log_gate = log_gate_steps.concat();
+        let beta = beta_steps.concat();
+        let state_offset = expected_out.len();
+        let mut state_dst = vec![0.0f32; state_offset];
+        state_dst.extend_from_slice(&[
+            0.5, -0.25, 0.75, 1.25, //
+            -0.5, 0.25, -0.75, 0.5, //
+            1.0, -1.0, 0.5, -0.5, //
+            0.25, 0.5, -0.25, -0.75, //
+            -0.2, 0.4, -0.6, 0.8, //
+            0.1, -0.3, 0.5, -0.7, //
+            0.9, -0.8, 0.7, -0.6, //
+            0.3, -0.2, 0.1, -0.4, //
+        ]);
+        let q_buf = cuda.load_bytes(&f32_bytes(&q)).unwrap();
+        let k_buf = cuda.load_bytes(&f32_bytes(&k)).unwrap();
+        let v_buf = cuda.load_bytes(&f32_bytes(&v)).unwrap();
+        let log_gate_buf = cuda.load_bytes(&f32_bytes(&log_gate)).unwrap();
+        let beta_buf = cuda.load_bytes(&f32_bytes(&beta)).unwrap();
+        let state_dst_buf = cuda.load_bytes(&f32_bytes(&state_dst)).unwrap();
+        cuda.gated_delta_net_f32_state_offset(
+            &q_buf,
+            &k_buf,
+            &v_buf,
+            &log_gate_buf,
+            &beta_buf,
+            &state_dst_buf,
+            state_offset,
+            4,
+            2,
+            q_steps.len(),
+            1,
+            4,
+            4,
+            q.len(),
+            4,
+            8,
+            v.len(),
+            1,
+            2,
+            beta.len(),
+            1,
+            1,
+            false,
+        )
+        .unwrap();
+
+        let actual_out = cuda.read_f32s(&state_dst_buf, state_offset).unwrap();
+        let actual_all = cuda.read_f32s(&state_dst_buf, state_dst.len()).unwrap();
+        let actual_state = &actual_all[state_offset..];
+        assert_close("gated_delta_rows_output", &actual_out, &expected_out, 5.0e-2);
+        assert_close("gated_delta_rows_state", actual_state, &expected_state, 2.0e-2);
     }
 
     #[test]
@@ -5043,6 +6566,103 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "experimental q8_1 affine path is not numerically validated yet"]
+    fn cuda_affine_q8_1_input_matches_reference() {
+        if !makepad_ggml::backend::cuda::is_available() {
+            return;
+        }
+        let cuda = CudaRuntime::load().unwrap();
+        let input_f32 = (0..64)
+            .map(|i| (((i as f32) * 0.13).sin() * 3.0) + (((i as f32) * 0.07).cos() * 0.5))
+            .collect::<Vec<_>>();
+        let input_bf16 = input_f32
+            .iter()
+            .copied()
+            .map(qwen_f32_to_bf16_word)
+            .collect::<Vec<_>>();
+        let input_bf16_buf = cuda.load_bytes(&u16_bytes(&input_bf16)).unwrap();
+        let input_f32_buf = cuda.load_bytes(&f32_bytes(&input_f32)).unwrap();
+        let input_q8_1_buf = cuda.alloc_bytes(q8_1_bytes_for_len(input_f32.len()).unwrap()).unwrap();
+        cuda.quantize_q8_1_f32(&input_f32_buf, &input_q8_1_buf, input_f32.len())
+            .unwrap();
+
+        let packed_weights = vec![
+            0x7f80_0102u32,
+            0x0304_0506u32,
+            0x0708_090au32,
+            0x0b0c_0d0eu32,
+            0x0f10_1112u32,
+            0x1314_1516u32,
+            0x1718_191au32,
+            0x1b1c_1d1eu32,
+            0x2021_2223u32,
+            0x2425_2627u32,
+            0x2829_2a2bu32,
+            0x2c2d_2e2fu32,
+            0x3031_3233u32,
+            0x3435_3637u32,
+            0x3839_3a3bu32,
+            0x3c3d_3e3fu32,
+            0x4041_4243u32,
+            0x4445_4647u32,
+            0x4849_4a4bu32,
+            0x4c4d_4e4fu32,
+            0x5051_5253u32,
+            0x5455_5657u32,
+            0x5859_5a5bu32,
+            0x5c5d_5e5fu32,
+            0x6061_6263u32,
+            0x6465_6667u32,
+            0x6869_6a6bu32,
+            0x6c6d_6e6fu32,
+            0x7071_7273u32,
+            0x7475_7677u32,
+            0x7879_7a7bu32,
+            0x7c7d_7e7fu32,
+        ];
+        let scales = vec![qwen_f32_to_bf16_word(0.015625), qwen_f32_to_bf16_word(0.03125)];
+        let biases = vec![qwen_f32_to_bf16_word(-1.5), qwen_f32_to_bf16_word(-0.75)];
+        let tensor = CudaAffineTensor {
+            packed_weights: cuda.load_bytes(&u32_bytes(&packed_weights)).unwrap(),
+            scales: cuda.load_bytes(&u16_bytes(&scales)).unwrap(),
+            biases: cuda.load_bytes(&u16_bytes(&biases)).unwrap(),
+            bits: 8,
+            out_rows: 2,
+            weight_words_per_row: 16,
+            qparams_per_row: 1,
+            plane_count: 1,
+            weight_words_per_plane: 32,
+            qparams_words_per_plane: 2,
+        };
+        let out_buf = cuda.alloc_f32(2).unwrap();
+        tensor
+            .matvec_q8_1(&cuda, &input_bf16_buf, &input_q8_1_buf, &out_buf)
+            .unwrap();
+        let actual = cuda.read_f32s(&out_buf, 2).unwrap();
+        let expected = affine_quantized_matmul_fallback(
+            &input_bf16,
+            &packed_weights,
+            &scales,
+            &biases,
+            2,
+            16,
+            1,
+            64,
+            8,
+        )
+        .unwrap();
+        let max_diff = actual
+            .iter()
+            .zip(expected.iter())
+            .map(|(a, e)| (a - e).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff < 0.5,
+            "affine_q8_1_input max_diff={max_diff} actual={actual:?} expected={expected:?}"
+        );
+    }
+
+    #[test]
     fn cuda_qwen_softmax_topk_routes_matches_reference() {
         if !makepad_ggml::backend::cuda::is_available() {
             return;
@@ -5171,68 +6791,639 @@ mod tests {
 
         let expected_qkv =
             cpu_project_vector_bf16_words(runtime_session.as_ref(), &input_words, &recurrent.wqkv);
-        let qkv_buf = cuda_runtime.cuda.alloc_f32(expected_qkv.len()).unwrap();
         let layer0 = match &cuda_runtime.layers[0] {
             CudaQwenLayer::Recurrent(layer) => layer,
             CudaQwenLayer::Attention(_) => panic!("expected recurrent layer 0"),
         };
-        layer0
-            .wqkv
-            .matvec(&cuda_runtime.cuda, &input_buf, &qkv_buf)
-            .unwrap();
-        let actual_qkv = cuda_runtime
-            .cuda
-            .read_f32s(&qkv_buf, expected_qkv.len())
-            .unwrap();
-        assert_close("real_layer0_wqkv", &actual_qkv, &expected_qkv, 1.0e-4);
 
         let expected_z = cpu_project_vector_bf16_words(
             runtime_session.as_ref(),
             &input_words,
             &recurrent.wqkv_gate,
         );
-        let z_buf = cuda_runtime.cuda.alloc_f32(expected_z.len()).unwrap();
-        layer0
-            .wqkv_gate
-            .matvec(&cuda_runtime.cuda, &input_buf, &z_buf)
-            .unwrap();
-        let actual_z = cuda_runtime
-            .cuda
-            .read_f32s(&z_buf, expected_z.len())
-            .unwrap();
-        assert_close("real_layer0_wqkv_gate", &actual_z, &expected_z, 1.0e-4);
-
         let expected_beta = cpu_project_vector_bf16_words(
             runtime_session.as_ref(),
             &input_words,
             &recurrent.ssm_beta,
         );
-        let beta_buf = cuda_runtime.cuda.alloc_f32(expected_beta.len()).unwrap();
-        layer0
-            .ssm_beta
-            .matvec(&cuda_runtime.cuda, &input_buf, &beta_buf)
-            .unwrap();
-        let actual_beta = cuda_runtime
-            .cuda
-            .read_f32s(&beta_buf, expected_beta.len())
-            .unwrap();
-        assert_close("real_layer0_ssm_beta", &actual_beta, &expected_beta, 1.0e-4);
-
         let expected_alpha = cpu_project_vector_bf16_words(
             runtime_session.as_ref(),
             &input_words,
             &recurrent.ssm_alpha,
         );
+        let qkv_aux_buf = cuda_runtime
+            .cuda
+            .alloc_f32(
+                expected_qkv.len()
+                    + expected_z.len()
+                    + expected_beta.len()
+                    + expected_alpha.len(),
+            )
+            .unwrap();
+        let z_buf = cuda_runtime.cuda.alloc_f32(expected_z.len()).unwrap();
+        let beta_buf = cuda_runtime.cuda.alloc_f32(expected_beta.len()).unwrap();
         let alpha_buf = cuda_runtime.cuda.alloc_f32(expected_alpha.len()).unwrap();
         layer0
-            .ssm_alpha
-            .matvec(&cuda_runtime.cuda, &input_buf, &alpha_buf)
+            .wqkv_aux
+            .matvec(&cuda_runtime.cuda, &input_buf, &qkv_aux_buf)
+            .unwrap();
+        let actual_qkv = cuda_runtime
+            .cuda
+            .read_f32s(&qkv_aux_buf, expected_qkv.len())
+            .unwrap();
+        assert_close("real_layer0_wqkv", &actual_qkv, &expected_qkv, 1.0e-4);
+        cuda_runtime
+            .cuda
+            .qwen_split_recurrent_aux_f32_offsets(
+                &qkv_aux_buf,
+                expected_qkv.len(),
+                &z_buf,
+                &beta_buf,
+                &alpha_buf,
+                expected_z.len(),
+                expected_beta.len(),
+            )
+            .unwrap();
+        let actual_z = cuda_runtime
+            .cuda
+            .read_f32s(&z_buf, expected_z.len())
+            .unwrap();
+        let actual_beta = cuda_runtime
+            .cuda
+            .read_f32s(&beta_buf, expected_beta.len())
             .unwrap();
         let actual_alpha = cuda_runtime
             .cuda
             .read_f32s(&alpha_buf, expected_alpha.len())
             .unwrap();
+        assert_close("real_layer0_wqkv_gate", &actual_z, &expected_z, 1.0e-4);
+        assert_close("real_layer0_ssm_beta", &actual_beta, &expected_beta, 1.0e-4);
         assert_close("real_layer0_ssm_alpha", &actual_alpha, &expected_alpha, 1.0e-4);
+    }
+
+    #[test]
+    fn cuda_real_layer0_recurrent_concat_rows_match_sources() {
+        if !makepad_ggml::backend::cuda::is_available() {
+            return;
+        }
+        let Some(model_dir) = real_qwen_model_dir() else {
+            return;
+        };
+        let runtime_session = MlxQwen35MoeRuntimeSession::load(&model_dir).unwrap();
+        let cuda = makepad_ggml::backend::cuda::CudaRuntime::load().unwrap();
+        let layer = &runtime_session.tensors.layers[0];
+        let recurrent = layer.recurrent.as_ref().unwrap();
+
+        let qkv = CudaAffineTensor::load(&cuda, &runtime_session.weights, &recurrent.wqkv).unwrap();
+        let z = CudaAffineTensor::load(&cuda, &runtime_session.weights, &recurrent.wqkv_gate).unwrap();
+        let beta = CudaAffineTensor::load(&cuda, &runtime_session.weights, &recurrent.ssm_beta).unwrap();
+        let alpha = CudaAffineTensor::load(&cuda, &runtime_session.weights, &recurrent.ssm_alpha).unwrap();
+        let concat = CudaAffineTensor::load_concat_rows(
+            &cuda,
+            &runtime_session.weights,
+            &[&recurrent.wqkv, &recurrent.wqkv_gate, &recurrent.ssm_beta, &recurrent.ssm_alpha],
+        )
+        .unwrap();
+
+        let row_width = qkv.row_width();
+        let direct_buf = cuda.alloc_f32(row_width).unwrap();
+        let concat_buf = cuda.alloc_f32(row_width).unwrap();
+
+        let checks = [
+            (&qkv, 0usize, 0usize, "concat_qkv_first"),
+            (&qkv, qkv.out_rows - 1, qkv.out_rows - 1, "concat_qkv_last"),
+            (&z, 0usize, qkv.out_rows, "concat_z_first"),
+            (&z, z.out_rows - 1, qkv.out_rows + z.out_rows - 1, "concat_z_last"),
+            (&beta, 0usize, qkv.out_rows + z.out_rows, "concat_beta_first"),
+            (
+                &alpha,
+                alpha.out_rows - 1,
+                qkv.out_rows + z.out_rows + beta.out_rows + alpha.out_rows - 1,
+                "concat_alpha_last",
+            ),
+        ];
+
+        for (tensor, source_row, concat_row, label) in checks {
+            tensor.get_row(&cuda, source_row, &direct_buf).unwrap();
+            concat.get_row(&cuda, concat_row, &concat_buf).unwrap();
+            let direct = cuda.read_f32s(&direct_buf, row_width).unwrap();
+            let merged = cuda.read_f32s(&concat_buf, row_width).unwrap();
+            assert_close(label, &merged, &direct, 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn cuda_real_layer0_recurrent_concat_matvec_matches_sources() {
+        if !makepad_ggml::backend::cuda::is_available() {
+            return;
+        }
+        let Some(model_dir) = real_qwen_model_dir() else {
+            return;
+        };
+        let runtime_session = MlxQwen35MoeRuntimeSession::load(&model_dir).unwrap();
+        let cuda = makepad_ggml::backend::cuda::CudaRuntime::load().unwrap();
+        let layer = &runtime_session.tensors.layers[0];
+        let recurrent = layer.recurrent.as_ref().unwrap();
+        let hidden = runtime_session.token_embedding_f32(248045).unwrap();
+        let attn_input = runtime_session
+            .rms_norm_weighted_f32(
+                &hidden,
+                &layer.attn_norm,
+                runtime_session.weights.snapshot.config.text_config.rms_norm_eps,
+            )
+            .unwrap();
+        let input_words = f32_to_bf16_words(&attn_input);
+        let input_buf = cuda.load_bytes(&u16_bytes(&input_words)).unwrap();
+
+        let qkv = CudaAffineTensor::load(&cuda, &runtime_session.weights, &recurrent.wqkv).unwrap();
+        let z = CudaAffineTensor::load(&cuda, &runtime_session.weights, &recurrent.wqkv_gate).unwrap();
+        let beta = CudaAffineTensor::load(&cuda, &runtime_session.weights, &recurrent.ssm_beta).unwrap();
+        let alpha = CudaAffineTensor::load(&cuda, &runtime_session.weights, &recurrent.ssm_alpha).unwrap();
+        let concat = CudaAffineTensor::load_concat_rows(
+            &cuda,
+            &runtime_session.weights,
+            &[&recurrent.wqkv, &recurrent.wqkv_gate, &recurrent.ssm_beta, &recurrent.ssm_alpha],
+        )
+        .unwrap();
+
+        let qkv_buf = cuda.alloc_f32(qkv.out_rows).unwrap();
+        let z_buf = cuda.alloc_f32(z.out_rows).unwrap();
+        let beta_buf = cuda.alloc_f32(beta.out_rows).unwrap();
+        let alpha_buf = cuda.alloc_f32(alpha.out_rows).unwrap();
+        let concat_buf = cuda
+            .alloc_f32(qkv.out_rows + z.out_rows + beta.out_rows + alpha.out_rows)
+            .unwrap();
+
+        qkv.matvec(&cuda, &input_buf, &qkv_buf).unwrap();
+        z.matvec(&cuda, &input_buf, &z_buf).unwrap();
+        beta.matvec(&cuda, &input_buf, &beta_buf).unwrap();
+        alpha.matvec(&cuda, &input_buf, &alpha_buf).unwrap();
+        concat.matvec(&cuda, &input_buf, &concat_buf).unwrap();
+
+        let direct_qkv = cuda.read_f32s(&qkv_buf, qkv.out_rows).unwrap();
+        let direct_z = cuda.read_f32s(&z_buf, z.out_rows).unwrap();
+        let direct_beta = cuda.read_f32s(&beta_buf, beta.out_rows).unwrap();
+        let direct_alpha = cuda.read_f32s(&alpha_buf, alpha.out_rows).unwrap();
+        let merged = cuda
+            .read_f32s(&concat_buf, qkv.out_rows + z.out_rows + beta.out_rows + alpha.out_rows)
+            .unwrap();
+
+        assert_close("concat_matvec_qkv", &merged[..qkv.out_rows], &direct_qkv, 1.0e-4);
+        assert_close(
+            "concat_matvec_z",
+            &merged[qkv.out_rows..qkv.out_rows + z.out_rows],
+            &direct_z,
+            1.0e-4,
+        );
+        assert_close(
+            "concat_matvec_beta",
+            &merged[qkv.out_rows + z.out_rows..qkv.out_rows + z.out_rows + beta.out_rows],
+            &direct_beta,
+            1.0e-4,
+        );
+        assert_close(
+            "concat_matvec_alpha",
+            &merged[qkv.out_rows + z.out_rows + beta.out_rows..],
+            &direct_alpha,
+            1.0e-4,
+        );
+    }
+
+    #[test]
+    fn cuda_real_first_recurrent_prefill_chunk_matches_sequential() {
+        if !makepad_ggml::backend::cuda::is_available() {
+            return;
+        }
+        let Some(model_dir) = real_qwen_model_dir() else {
+            return;
+        };
+        let runtime_session = MlxQwen35MoeRuntimeSession::load(&model_dir).unwrap();
+        let prompt_text = runtime_session
+            .format_chat_prompt(
+                &[QwenChatMessage::new(
+                    QwenChatRole::User,
+                    "Write a short haiku about rain.",
+                )],
+                false,
+            )
+            .unwrap();
+        let prompt_token_ids = runtime_session.tokenize_prompt(&prompt_text).unwrap();
+        let chunk_len = 8usize.min(prompt_token_ids.len());
+        let runtime = runtime_session.cuda_text_runtime().unwrap();
+        let runtime = runtime.lock().unwrap();
+        let layer_index = runtime
+            .layers
+            .iter()
+            .position(|layer| matches!(layer, CudaQwenLayer::Recurrent(_)))
+            .unwrap();
+        let capacity_tokens = chunk_len + 1;
+        let disallowed_token_ids = runtime_session.generation_disallowed_token_ids();
+        let mut chunk_session = runtime
+            .new_decode_session(capacity_tokens, &disallowed_token_ids)
+            .unwrap();
+        let mut single_session = runtime
+            .new_decode_session(capacity_tokens, &disallowed_token_ids)
+            .unwrap();
+        let mut prefill = runtime.alloc_prefill_buffers(capacity_tokens, chunk_len).unwrap();
+
+        for (row, &token_id) in prompt_token_ids.iter().take(chunk_len).enumerate() {
+            runtime
+                .token_embd
+                .get_row(&runtime.cuda, token_id as usize, &single_session.workspace.hidden_a)
+                .unwrap();
+            runtime
+                .cuda
+                .copy_f32(
+                    &single_session.workspace.hidden_a,
+                    0,
+                    &prefill.hidden_a,
+                    row * runtime.hidden_size,
+                    runtime.hidden_size,
+                )
+                .unwrap();
+        }
+
+        let chunk_output = {
+            let layer = match &runtime.layers[layer_index] {
+                CudaQwenLayer::Recurrent(layer) => layer,
+                _ => unreachable!(),
+            };
+            let state = match &mut chunk_session.layer_states[layer_index] {
+                CudaQwenLayerState::Recurrent(state) => state,
+                _ => unreachable!(),
+            };
+            runtime
+                .eval_recurrent_layer_prefill_chunk(
+                    layer,
+                    state,
+                    &mut chunk_session.workspace,
+                    &mut prefill,
+                    chunk_len,
+                    true,
+                )
+                .unwrap();
+            runtime
+                .cuda
+                .read_f32s(&prefill.hidden_b, chunk_len * runtime.hidden_size)
+                .unwrap()
+        };
+        let chunk_recurrent_proj = runtime
+            .cuda
+            .read_f32s(&prefill.recurrent_proj, chunk_len * runtime.hidden_size)
+            .unwrap();
+        let chunk_recurrent_qkv_aux = runtime
+            .cuda
+            .read_f32s(
+                &prefill.recurrent_qkv_aux,
+                chunk_len
+                    * (runtime.recurrent_qkv_width
+                        + runtime.recurrent_v_width
+                        + runtime.recurrent_num_v_heads * 2),
+            )
+            .unwrap();
+        let chunk_recurrent_conv = runtime
+            .cuda
+            .read_f32s(&prefill.recurrent_conv, chunk_len * runtime.recurrent_qkv_width)
+            .unwrap();
+        let chunk_query = runtime
+            .cuda
+            .read_f32s(&prefill.query, chunk_len * runtime.recurrent_q_width)
+            .unwrap();
+        let chunk_key = runtime
+            .cuda
+            .read_f32s(&prefill.key, chunk_len * runtime.recurrent_q_width)
+            .unwrap();
+        let chunk_value = runtime
+            .cuda
+            .read_f32s(&prefill.value, chunk_len * runtime.recurrent_v_width)
+            .unwrap();
+        let chunk_beta = runtime
+            .cuda
+            .read_f32s(&prefill.recurrent_beta, chunk_len * runtime.recurrent_num_v_heads)
+            .unwrap();
+        let chunk_decay = runtime
+            .cuda
+            .read_f32s(&prefill.recurrent_decay, chunk_len * runtime.recurrent_num_v_heads)
+            .unwrap();
+        let chunk_gated_delta_out = runtime
+            .cuda
+            .read_f32s(&prefill.recurrent_gated_delta, chunk_len * runtime.recurrent_v_width)
+            .unwrap();
+
+        let mut sequential_output = Vec::with_capacity(chunk_len * runtime.hidden_size);
+        let mut sequential_recurrent_proj = Vec::with_capacity(chunk_len * runtime.hidden_size);
+        let mut sequential_recurrent_qkv_aux = Vec::with_capacity(
+            chunk_len
+                * (runtime.recurrent_qkv_width
+                    + runtime.recurrent_v_width
+                    + runtime.recurrent_num_v_heads * 2),
+        );
+        let mut sequential_recurrent_conv =
+            Vec::with_capacity(chunk_len * runtime.recurrent_qkv_width);
+        let mut sequential_query = Vec::with_capacity(chunk_len * runtime.recurrent_q_width);
+        let mut sequential_key = Vec::with_capacity(chunk_len * runtime.recurrent_q_width);
+        let mut sequential_value = Vec::with_capacity(chunk_len * runtime.recurrent_v_width);
+        let mut sequential_beta =
+            Vec::with_capacity(chunk_len * runtime.recurrent_num_v_heads);
+        let mut sequential_decay =
+            Vec::with_capacity(chunk_len * runtime.recurrent_num_v_heads);
+        let mut sequential_gated_delta_out =
+            Vec::with_capacity(chunk_len * runtime.recurrent_v_width);
+        for row in 0..chunk_len {
+            runtime
+                .cuda
+                .copy_f32(
+                    &prefill.hidden_a,
+                    row * runtime.hidden_size,
+                    &single_session.workspace.hidden_a,
+                    0,
+                    runtime.hidden_size,
+                )
+                .unwrap();
+            let layer = match &runtime.layers[layer_index] {
+                CudaQwenLayer::Recurrent(layer) => layer,
+                _ => unreachable!(),
+            };
+            let state = match &mut single_session.layer_states[layer_index] {
+                CudaQwenLayerState::Recurrent(state) => state,
+                _ => unreachable!(),
+            };
+            runtime
+                .eval_recurrent_layer(layer, state, &mut single_session.workspace, true)
+                .unwrap();
+            sequential_output.extend(
+                runtime
+                    .cuda
+                    .read_f32s(&single_session.workspace.hidden_b, runtime.hidden_size)
+                    .unwrap(),
+            );
+            sequential_recurrent_proj.extend(
+                runtime
+                    .cuda
+                    .read_f32s(&single_session.workspace.recurrent_proj, runtime.hidden_size)
+                    .unwrap(),
+            );
+            sequential_recurrent_qkv_aux.extend(
+                runtime
+                    .cuda
+                    .read_f32s(
+                        &single_session.workspace.recurrent_qkv_aux,
+                        runtime.recurrent_qkv_width
+                            + runtime.recurrent_v_width
+                            + runtime.recurrent_num_v_heads * 2,
+                    )
+                    .unwrap(),
+            );
+            sequential_recurrent_conv.extend(
+                runtime
+                    .cuda
+                    .read_f32s(
+                        &single_session.workspace.recurrent_conv,
+                        runtime.recurrent_qkv_width,
+                    )
+                    .unwrap(),
+            );
+            sequential_query.extend(
+                runtime
+                    .cuda
+                    .read_f32s(&single_session.workspace.query, runtime.recurrent_q_width)
+                    .unwrap(),
+            );
+            sequential_key.extend(
+                runtime
+                    .cuda
+                    .read_f32s(&single_session.workspace.key, runtime.recurrent_q_width)
+                    .unwrap(),
+            );
+            sequential_value.extend(
+                runtime
+                    .cuda
+                    .read_f32s(&single_session.workspace.recurrent_v, runtime.recurrent_v_width)
+                    .unwrap(),
+            );
+            sequential_beta.extend(
+                runtime
+                    .cuda
+                    .read_f32s(
+                        &single_session.workspace.recurrent_beta,
+                        runtime.recurrent_num_v_heads,
+                    )
+                    .unwrap(),
+            );
+            sequential_decay.extend(
+                runtime
+                    .cuda
+                    .read_f32s(
+                        &single_session.workspace.recurrent_decay,
+                        runtime.recurrent_num_v_heads,
+                    )
+                    .unwrap(),
+            );
+            sequential_gated_delta_out.extend(
+                runtime
+                    .cuda
+                    .read_f32s(&state.gated_delta, runtime.recurrent_v_width)
+                    .unwrap(),
+            );
+        }
+
+        assert_close(
+            "real_recurrent_prefill_chunk_qkv_aux",
+            &chunk_recurrent_qkv_aux,
+            &sequential_recurrent_qkv_aux,
+            2.0e-3,
+        );
+        assert_close(
+            "real_recurrent_prefill_chunk_conv",
+            &chunk_recurrent_conv,
+            &sequential_recurrent_conv,
+            2.0e-3,
+        );
+        assert_close(
+            "real_recurrent_prefill_chunk_query",
+            &chunk_query,
+            &sequential_query,
+            2.0e-3,
+        );
+        assert_close(
+            "real_recurrent_prefill_chunk_key",
+            &chunk_key,
+            &sequential_key,
+            2.0e-3,
+        );
+        assert_close(
+            "real_recurrent_prefill_chunk_value",
+            &chunk_value,
+            &sequential_value,
+            2.0e-3,
+        );
+        assert_close(
+            "real_recurrent_prefill_chunk_beta",
+            &chunk_beta,
+            &sequential_beta,
+            2.0e-3,
+        );
+        assert_close(
+            "real_recurrent_prefill_chunk_decay",
+            &chunk_decay,
+            &sequential_decay,
+            2.0e-3,
+        );
+        assert_close(
+            "real_recurrent_prefill_chunk_gated_delta_output",
+            &chunk_gated_delta_out,
+            &sequential_gated_delta_out,
+            2.0e-3,
+        );
+        assert_close(
+            "real_recurrent_prefill_chunk_recurrent_proj",
+            &chunk_recurrent_proj,
+            &sequential_recurrent_proj,
+            2.0e-3,
+        );
+        assert_close(
+            "real_recurrent_prefill_chunk_output",
+            &chunk_output,
+            &sequential_output,
+            2.0e-3,
+        );
+        let chunk_state = match &chunk_session.layer_states[layer_index] {
+            CudaQwenLayerState::Recurrent(state) => state,
+            _ => unreachable!(),
+        };
+        let single_state = match &single_session.layer_states[layer_index] {
+            CudaQwenLayerState::Recurrent(state) => state,
+            _ => unreachable!(),
+        };
+        let chunk_conv_state = runtime
+            .cuda
+            .read_f32s(&chunk_state.conv_state, runtime.layers_conv_prefix() * runtime.recurrent_qkv_width)
+            .unwrap();
+        let single_conv_state = runtime
+            .cuda
+            .read_f32s(&single_state.conv_state, runtime.layers_conv_prefix() * runtime.recurrent_qkv_width)
+            .unwrap();
+        assert_close(
+            "real_recurrent_prefill_chunk_conv_state",
+            &chunk_conv_state,
+            &single_conv_state,
+            1.0e-5,
+        );
+        let gated_delta_len = runtime.recurrent_v_width
+            + runtime.recurrent_num_v_heads * runtime.recurrent_head_v_dim * runtime.recurrent_head_k_dim;
+        let chunk_gated_delta = runtime
+            .cuda
+            .read_f32s(&chunk_state.gated_delta, gated_delta_len)
+            .unwrap();
+        let single_gated_delta = runtime
+            .cuda
+            .read_f32s(&single_state.gated_delta, gated_delta_len)
+            .unwrap();
+        assert_close(
+            "real_recurrent_prefill_chunk_gated_delta",
+            &chunk_gated_delta,
+            &single_gated_delta,
+            2.0e-3,
+        );
+    }
+
+    #[test]
+    fn cuda_real_moe_prefill_rows_matches_single_row_device() {
+        if !makepad_ggml::backend::cuda::is_available() {
+            return;
+        }
+        let Some(model_dir) = real_qwen_model_dir() else {
+            return;
+        };
+        let runtime_session = MlxQwen35MoeRuntimeSession::load(&model_dir).unwrap();
+        let runtime = CudaQwenTextRuntime::load(runtime_session.as_ref()).unwrap();
+        let layer_index = runtime
+            .layers
+            .iter()
+            .position(|layer| matches!(layer, CudaQwenLayer::Attention(_)))
+            .unwrap();
+        let seed_token_ids = runtime_session
+            .tokenizer
+            .encode("Write a short haiku about rain.")
+            .unwrap();
+        let prompt_token_ids = seed_token_ids
+            .iter()
+            .copied()
+            .cycle()
+            .take(512)
+            .collect::<Vec<_>>();
+        let row_count = prompt_token_ids.len();
+        assert!(row_count > 0);
+
+        let mut prefill = runtime.alloc_prefill_buffers(row_count + 1, row_count).unwrap();
+        let disallowed_token_ids = runtime_session.generation_disallowed_token_ids();
+        let mut single_session = runtime
+            .new_decode_session(row_count + 2, &disallowed_token_ids)
+            .unwrap();
+        for (row, &token_id) in prompt_token_ids.iter().take(row_count).enumerate() {
+            runtime
+                .token_embd
+                .get_row(&runtime.cuda, token_id as usize, &single_session.workspace.hidden_a)
+                .unwrap();
+            runtime
+                .cuda
+                .copy_f32(
+                    &single_session.workspace.hidden_a,
+                    0,
+                    &prefill.residual,
+                    row * runtime.hidden_size,
+                    runtime.hidden_size,
+                )
+                .unwrap();
+        }
+
+        let layer = match &runtime.layers[layer_index] {
+            CudaQwenLayer::Attention(layer) => layer,
+            _ => unreachable!(),
+        };
+        runtime
+            .eval_moe_prefill_rows(
+                &layer.moe,
+                &layer.post_attention_norm,
+                &mut prefill,
+                row_count,
+                false,
+            )
+            .unwrap();
+        let batched = runtime
+            .cuda
+            .read_f32s(&prefill.hidden_b, row_count * runtime.hidden_size)
+            .unwrap();
+
+        let mut sequential = Vec::with_capacity(row_count * runtime.hidden_size);
+        for row in 0..row_count {
+            runtime
+                .cuda
+                .copy_f32(
+                    &prefill.residual,
+                    row * runtime.hidden_size,
+                    &single_session.workspace.residual,
+                    0,
+                    runtime.hidden_size,
+                )
+                .unwrap();
+            runtime
+                .eval_moe_device(
+                    &layer.moe,
+                    &layer.post_attention_norm,
+                    &mut single_session.workspace,
+                    true,
+                )
+                .unwrap();
+            sequential.extend(
+                runtime
+                    .cuda
+                    .read_f32s(&single_session.workspace.hidden_a, runtime.hidden_size)
+                    .unwrap(),
+            );
+        }
+
+        assert_close("real_moe_prefill_rows_output", &batched, &sequential, 2.0e-3);
     }
 
     #[test]
@@ -5274,10 +7465,15 @@ mod tests {
 
         let mut non_graph = QwenCudaGenerationBackend {
             runtime: runtime.clone(),
-            session: non_graph_session,
-            prefill_graph: None,
-            decode_graph: None,
-            decode_chunk_graphs: Vec::new(),
+            cache_slot: Arc::new(Mutex::new(None)),
+            resources: Some(CudaQwenGenerationResources {
+                session: non_graph_session,
+                prefill_buffers: None,
+                prefill_graph: None,
+                decode_graph: None,
+                decode_chunk_graphs: Vec::new(),
+                graph_enabled: false,
+            }),
             sampling,
             disallowed_token_ids: disallowed_token_ids.clone(),
             rng: QwenSamplingRng::new(0),
@@ -5285,10 +7481,15 @@ mod tests {
         };
         let mut graph = QwenCudaGenerationBackend {
             runtime,
-            session: graph_session,
-            prefill_graph: None,
-            decode_graph: Some(decode_graph),
-            decode_chunk_graphs: Vec::new(),
+            cache_slot: Arc::new(Mutex::new(None)),
+            resources: Some(CudaQwenGenerationResources {
+                session: graph_session,
+                prefill_buffers: None,
+                prefill_graph: None,
+                decode_graph: Some(decode_graph),
+                decode_chunk_graphs: Vec::new(),
+                graph_enabled: true,
+            }),
             sampling,
             disallowed_token_ids,
             rng: QwenSamplingRng::new(0),
@@ -5305,11 +7506,14 @@ mod tests {
                     let runtime = non_graph.runtime.lock().unwrap();
                     let non_graph_logits = runtime
                         .cuda
-                        .read_f32s(&non_graph.session.workspace.logits, runtime.vocab_size)
+                        .read_f32s(
+                            &non_graph.resources().session.workspace.logits,
+                            runtime.vocab_size,
+                        )
                         .unwrap();
                     let graph_logits = runtime
                         .cuda
-                        .read_f32s(&graph.session.workspace.logits, runtime.vocab_size)
+                        .read_f32s(&graph.resources().session.workspace.logits, runtime.vocab_size)
                         .unwrap();
                     (non_graph_logits, graph_logits)
                 };
@@ -5406,6 +7610,46 @@ mod tests {
         );
 
         assert_eq!(chunk_tokens, single_step_tokens);
+    }
+
+    #[test]
+    fn cuda_real_long_prefill_exact_matches_single_step_first_token() {
+        if !makepad_ggml::backend::cuda::is_available() {
+            return;
+        }
+        let Some(model_dir) = real_qwen_model_dir() else {
+            return;
+        };
+        let runtime_session = MlxQwen35MoeRuntimeSession::load(&model_dir).unwrap();
+        let repeated = "Explain in detail how rain forms and why clouds precipitate over mountains. ";
+        let prompt_text = runtime_session
+            .format_chat_prompt(
+                &[QwenChatMessage::new(
+                    QwenChatRole::User,
+                    &repeated.repeat(80),
+                )],
+                false,
+            )
+            .unwrap();
+        let prompt_token_ids = runtime_session.tokenize_prompt(&prompt_text).unwrap();
+        assert!(
+            prompt_token_ids.len() >= QWEN_PREFILL_CHUNK_TOKENS,
+            "prompt must trigger exact long-prefill path"
+        );
+        let capacity_tokens = prompt_token_ids.len() + 2;
+
+        let mut exact_backend =
+            QwenCudaGenerationBackend::new(runtime_session.clone(), capacity_tokens, false)
+                .unwrap();
+        let mut single_step_backend =
+            QwenCudaGenerationBackend::new(runtime_session, capacity_tokens, false).unwrap();
+
+        let exact_first = exact_backend.prefill_prompt(&prompt_token_ids).unwrap();
+        let mut next = None;
+        for (position, &token_id) in prompt_token_ids.iter().enumerate() {
+            next = Some(single_step_backend.eval_and_select(token_id, position).unwrap());
+        }
+        assert_eq!(Some(exact_first), next);
     }
 
     #[test]

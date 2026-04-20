@@ -98,16 +98,16 @@ static __global__ void makepad_ggml_cuda_quantize_q8_1_f32_kernel(
 
     const float xi = input[block_idx * 32 + lane];
     float amax = fabsf(xi);
-    float sum = xi;
     amax = makepad_ggml_cuda_warp_reduce_max(amax);
-    sum = makepad_ggml_cuda_warp_reduce_sum(sum);
     const float d = amax / 127.0f;
     const float id = d != 0.0f ? 1.0f / d : 0.0f;
     const int8_t q = amax == 0.0f ? 0 : static_cast<int8_t>(lrintf(xi * id));
+    int sum = static_cast<int>(q);
+    sum = makepad_ggml_cuda_warp_reduce_sum(sum);
     output[block_idx].qs[lane] = q;
     if (lane == 0) {
         output[block_idx].d = __float2half_rn(d);
-        output[block_idx].s = __float2half_rn(sum);
+        output[block_idx].s = __float2half_rn(static_cast<float>(sum) * d);
     }
 }
 
@@ -158,6 +158,17 @@ static __global__ void makepad_ggml_cuda_add_f32_kernel(
     out[idx] = makepad_ggml_cuda_bf16_round(left[idx] + right[idx]);
 }
 
+static __global__ void makepad_ggml_cuda_copy_f32_kernel(
+        const float * __restrict__ input,
+        float * __restrict__ output,
+        uint32_t n) {
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) {
+        return;
+    }
+    output[idx] = input[idx];
+}
+
 static __global__ void makepad_ggml_cuda_weighted_sum_rows_f32_kernel(
         const float * __restrict__ batched_inputs,
         const float * __restrict__ weights,
@@ -173,6 +184,63 @@ static __global__ void makepad_ggml_cuda_weighted_sum_rows_f32_kernel(
         total += batched_inputs[slot * row_count + row] * weights[slot];
     }
     output[row] = makepad_ggml_cuda_bf16_round(total);
+}
+
+static __global__ void makepad_ggml_cuda_weighted_sum_rows_grouped_f32_kernel(
+        const float * __restrict__ batched_inputs,
+        const float * __restrict__ weights,
+        float * __restrict__ output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t input_count) {
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t total = row_count * row_stride;
+    if (idx >= total) {
+        return;
+    }
+    const uint32_t row = idx / row_stride;
+    const uint32_t col = idx - row * row_stride;
+    float accum = 0.0f;
+    for (uint32_t slot = 0; slot < input_count; ++slot) {
+        const uint32_t input_idx = slot * total + row * row_stride + col;
+        accum += batched_inputs[input_idx] * weights[row * input_count + slot];
+    }
+    output[idx] = makepad_ggml_cuda_bf16_round(accum);
+}
+
+static __global__ void makepad_ggml_cuda_add_scaled_rows_f32_kernel(
+        const float * __restrict__ input,
+        const float * __restrict__ scales,
+        float * __restrict__ output,
+        uint32_t row_count,
+        uint32_t row_stride) {
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t total = row_count * row_stride;
+    if (idx >= total) {
+        return;
+    }
+    const uint32_t row = idx / row_stride;
+    const float product = makepad_ggml_cuda_bf16_round(input[idx] * scales[row]);
+    output[idx] = makepad_ggml_cuda_bf16_round(output[idx] + product);
+}
+
+static __global__ void makepad_ggml_cuda_add_scaled_rows_f32_indexed_kernel(
+        const float * __restrict__ input,
+        const float * __restrict__ scales,
+        float * __restrict__ output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t scale_row_stride,
+        uint32_t scale_column) {
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t total = row_count * row_stride;
+    if (idx >= total) {
+        return;
+    }
+    const uint32_t row = idx / row_stride;
+    const float scale = scales[row * scale_row_stride + scale_column];
+    const float product = makepad_ggml_cuda_bf16_round(input[idx] * scale);
+    output[idx] = makepad_ggml_cuda_bf16_round(output[idx] + product);
 }
 
 static __global__ void makepad_ggml_cuda_mul_f32_kernel(
@@ -2478,6 +2546,23 @@ static __device__ __forceinline__ bool makepad_ggml_cuda_argmax_candidate_is_bet
         || (candidate_value == current_value && candidate_index < current_index);
 }
 
+static __device__ __forceinline__ void makepad_ggml_cuda_warp_reduce_argmax(
+        float & value,
+        uint32_t & index) {
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        const float other_value = __shfl_down_sync(0xffffffffu, value, offset);
+        const uint32_t other_index = __shfl_down_sync(0xffffffffu, index, offset);
+        if (makepad_ggml_cuda_argmax_candidate_is_better(
+                other_value,
+                other_index,
+                value,
+                index)) {
+            value = other_value;
+            index = other_index;
+        }
+    }
+}
+
 static __global__ void makepad_ggml_cuda_masked_argmax_f32_kernel(
         const float * __restrict__ logits,
         const uint32_t * __restrict__ disallowed_token_ids,
@@ -2496,33 +2581,27 @@ static __global__ void makepad_ggml_cuda_masked_argmax_f32_kernel(
             best_index = idx;
         }
     }
+    makepad_ggml_cuda_warp_reduce_argmax(best_value, best_index);
 
-    __shared__ float shared_values[256];
-    __shared__ uint32_t shared_indices[256];
-    shared_values[threadIdx.x] = best_value;
-    shared_indices[threadIdx.x] = best_index;
+    __shared__ float shared_values[32];
+    __shared__ uint32_t shared_indices[32];
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t warp = threadIdx.x >> 5;
+    const uint32_t warp_count = (blockDim.x + 31u) >> 5;
+    if (lane == 0) {
+        shared_values[warp] = best_value;
+        shared_indices[warp] = best_index;
+    }
     __syncthreads();
 
-    for (uint32_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride) {
-            const float other_value = shared_values[threadIdx.x + stride];
-            const uint32_t other_index = shared_indices[threadIdx.x + stride];
-            const float self_value = shared_values[threadIdx.x];
-            const uint32_t self_index = shared_indices[threadIdx.x];
-            if (makepad_ggml_cuda_argmax_candidate_is_better(
-                    other_value,
-                    other_index,
-                    self_value,
-                    self_index)) {
-                shared_values[threadIdx.x] = other_value;
-                shared_indices[threadIdx.x] = other_index;
-            }
-        }
-        __syncthreads();
+    if (warp == 0) {
+        best_value = lane < warp_count ? shared_values[lane] : -CUDART_INF_F;
+        best_index = lane < warp_count ? shared_indices[lane] : UINT32_MAX;
+        makepad_ggml_cuda_warp_reduce_argmax(best_value, best_index);
     }
 
     if (threadIdx.x == 0) {
-        *out_index = shared_indices[0];
+        *out_index = best_index;
     }
 }
 
@@ -2545,33 +2624,27 @@ static __global__ void makepad_ggml_cuda_masked_argmax_f32_device_u32_kernel(
             best_index = idx;
         }
     }
+    makepad_ggml_cuda_warp_reduce_argmax(best_value, best_index);
 
-    __shared__ float shared_values[256];
-    __shared__ uint32_t shared_indices[256];
-    shared_values[threadIdx.x] = best_value;
-    shared_indices[threadIdx.x] = best_index;
+    __shared__ float shared_values[32];
+    __shared__ uint32_t shared_indices[32];
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t warp = threadIdx.x >> 5;
+    const uint32_t warp_count = (blockDim.x + 31u) >> 5;
+    if (lane == 0) {
+        shared_values[warp] = best_value;
+        shared_indices[warp] = best_index;
+    }
     __syncthreads();
 
-    for (uint32_t stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride) {
-            const float other_value = shared_values[threadIdx.x + stride];
-            const uint32_t other_index = shared_indices[threadIdx.x + stride];
-            const float self_value = shared_values[threadIdx.x];
-            const uint32_t self_index = shared_indices[threadIdx.x];
-            if (makepad_ggml_cuda_argmax_candidate_is_better(
-                    other_value,
-                    other_index,
-                    self_value,
-                    self_index)) {
-                shared_values[threadIdx.x] = other_value;
-                shared_indices[threadIdx.x] = other_index;
-            }
-        }
-        __syncthreads();
+    if (warp == 0) {
+        best_value = lane < warp_count ? shared_values[lane] : -CUDART_INF_F;
+        best_index = lane < warp_count ? shared_indices[lane] : UINT32_MAX;
+        makepad_ggml_cuda_warp_reduce_argmax(best_value, best_index);
     }
 
     if (threadIdx.x == 0) {
-        *out_index = shared_indices[0];
+        *out_index = best_index;
     }
 }
 
@@ -2653,6 +2726,20 @@ extern "C" cudaError_t makepad_ggml_cuda_add_f32(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t makepad_ggml_cuda_copy_f32(
+        const float * input,
+        float * output,
+        uint32_t n,
+        cudaStream_t stream) {
+    if (n == 0) {
+        return cudaSuccess;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid((n + block.x - 1) / block.x, 1, 1);
+    makepad_ggml_cuda_copy_f32_kernel<<<grid, block, 0, stream>>>(input, output, n);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t makepad_ggml_cuda_weighted_sum_rows_f32(
         const float * batched_inputs,
         const float * weights,
@@ -2671,6 +2758,78 @@ extern "C" cudaError_t makepad_ggml_cuda_weighted_sum_rows_f32(
         output,
         row_count,
         input_count);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_weighted_sum_rows_grouped_f32(
+        const float * batched_inputs,
+        const float * weights,
+        float * output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t input_count,
+        cudaStream_t stream) {
+    if (row_count == 0 || row_stride == 0 || input_count == 0) {
+        return cudaSuccess;
+    }
+    const uint32_t total = row_count * row_stride;
+    const dim3 block(256, 1, 1);
+    const dim3 grid((total + block.x - 1) / block.x, 1, 1);
+    makepad_ggml_cuda_weighted_sum_rows_grouped_f32_kernel<<<grid, block, 0, stream>>>(
+        batched_inputs,
+        weights,
+        output,
+        row_count,
+        row_stride,
+        input_count);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_add_scaled_rows_f32(
+        const float * input,
+        const float * scales,
+        float * output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        cudaStream_t stream) {
+    if (row_count == 0 || row_stride == 0) {
+        return cudaSuccess;
+    }
+    const uint32_t total = row_count * row_stride;
+    const dim3 block(256, 1, 1);
+    const dim3 grid((total + block.x - 1) / block.x, 1, 1);
+    makepad_ggml_cuda_add_scaled_rows_f32_kernel<<<grid, block, 0, stream>>>(
+        input,
+        scales,
+        output,
+        row_count,
+        row_stride);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t makepad_ggml_cuda_add_scaled_rows_f32_indexed(
+        const float * input,
+        const float * scales,
+        float * output,
+        uint32_t row_count,
+        uint32_t row_stride,
+        uint32_t scale_row_stride,
+        uint32_t scale_column,
+        cudaStream_t stream) {
+    if (row_count == 0 || row_stride == 0 || scale_row_stride == 0) {
+        return cudaSuccess;
+    }
+    const uint32_t total = row_count * row_stride;
+    const dim3 block(256, 1, 1);
+    const dim3 grid((total + block.x - 1) / block.x, 1, 1);
+    makepad_ggml_cuda_add_scaled_rows_f32_indexed_kernel<<<grid, block, 0, stream>>>(
+        input,
+        scales,
+        output,
+        row_count,
+        row_stride,
+        scale_row_stride,
+        scale_column);
     return cudaGetLastError();
 }
 
@@ -3622,7 +3781,7 @@ extern "C" cudaError_t makepad_ggml_cuda_masked_argmax_f32(
         makepad_ggml_cuda_argmax_f32_kernel<<<1, 256, 0, stream>>>(logits, out_index, n);
         return cudaGetLastError();
     }
-    makepad_ggml_cuda_masked_argmax_f32_kernel<<<1, 256, 0, stream>>>(
+    makepad_ggml_cuda_masked_argmax_f32_kernel<<<1, 512, 0, stream>>>(
         logits,
         disallowed_token_ids,
         disallowed_count,
@@ -3641,7 +3800,7 @@ extern "C" cudaError_t makepad_ggml_cuda_masked_argmax_f32_device_u32(
     if (n == 0) {
         return cudaErrorInvalidValue;
     }
-    makepad_ggml_cuda_masked_argmax_f32_device_u32_kernel<<<1, 256, 0, stream>>>(
+    makepad_ggml_cuda_masked_argmax_f32_device_u32_kernel<<<1, 512, 0, stream>>>(
         logits,
         disallowed_token_ids,
         disallowed_count_device_u32,
