@@ -80,6 +80,11 @@ struct InFlightRequest {
     tool_calls: Vec<ToolCallAccumulator>,
     usage: Option<OpenAiUsage>,
     finish_reason: Option<String>,
+    /// SSE event-stream buffer. TCP/HTTP chunks arrive at arbitrary byte
+    /// boundaries, so a single `data: {...}\n\n` event may span multiple
+    /// `process_stream_data` calls. Accumulate here, process only complete
+    /// `\n\n`-terminated chunks, keep the trailing partial for the next call.
+    sse_buffer: String,
 }
 
 // === OpenAI Backend Implementation ===
@@ -280,8 +285,26 @@ impl OpenAiBackend {
 
         let request_id = in_flight.request_id;
 
-        // OpenAI uses "data: <json>\n\n" format with "data: [DONE]" at end
-        for chunk in data.split("\n\n") {
+        // OpenAI uses "data: <json>\n\n" format with "data: [DONE]" at end.
+        // Append incoming bytes to the per-request SSE buffer, then slice off
+        // only the complete chunks (everything up to the last "\n\n") and
+        // keep the trailing partial for the next call. Without this, a JSON
+        // event split mid-string across TCP chunks fails to parse and spams
+        // the log with recoverable errors.
+        in_flight.sse_buffer.push_str(data);
+        let (complete, remainder) = match in_flight.sse_buffer.rfind("\n\n") {
+            Some(idx) => {
+                let cutoff = idx + 2;
+                (
+                    in_flight.sse_buffer[..cutoff].to_string(),
+                    in_flight.sse_buffer[cutoff..].to_string(),
+                )
+            }
+            None => return events, // no complete event yet; wait for more bytes
+        };
+        in_flight.sse_buffer = remainder;
+
+        for chunk in complete.split("\n\n") {
             let chunk = chunk.trim();
             if chunk.is_empty() {
                 continue;
@@ -392,6 +415,7 @@ impl AiBackend for OpenAiBackend {
                 tool_calls: vec![],
                 usage: None,
                 finish_reason: None,
+                sse_buffer: String::new(),
             },
         );
 
