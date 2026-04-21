@@ -4,12 +4,48 @@ pub use makepad_widgets;
 use makepad_ai::*;
 use makepad_widgets::makepad_platform::makepad_micro_serde::*;
 use makepad_widgets::*;
+use streaming_markdown_kit::{
+    SanitizeOptions, streaming_display_with_latex_autowrap_remend, wrap_bare_latex,
+};
 
 app_main!(App);
 
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.CodeView
+    use mod.text.*
+    use mod.res.*
+
+    // Override theme fonts. Two purposes:
+    //   1. font_code — CJK-capable monospace (LXGW Mono) so `` `inline` ``
+    //      and CodeView render Chinese correctly.
+    //   2. font_regular — add a symbols-capable latin (NotoSans) so Unicode
+    //      blocks outside IBM Plex Sans's repertoire (arrows U+2190-U+21FF,
+    //      math operators, misc technical) render as glyphs instead of tofu.
+    //
+    // Note: Makepad's Markdown widget bakes `theme.font_*` at expansion time,
+    // so these theme-level overrides are necessary but not sufficient —
+    // per-instance overrides on each Markdown instance are also applied below.
+    mod.themes.dark = mod.themes.dark{
+        font_code: TextStyle{
+            font_size: theme.font_size_code
+            font_family: FontFamily{
+                latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+            }
+            line_spacing: 1.35
+        }
+        font_regular: mod.themes.dark.font_regular{
+            font_family: FontFamily{
+                latin := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+            }
+        }
+    }
 
     let ChatList = #(ChatList::register_widget(vm)) {
         width: Fill
@@ -43,6 +79,31 @@ script_mod! {
                     use_code_block_widget: true
                     use_math_widget: true
                     body: ""
+                    // Per-instance override for `` `inline code` ``. The
+                    // Markdown widget bakes `theme.font_code` at expansion
+                    // time, so a later `mod.themes.dark{...}` override
+                    // doesn't reach it. Without this override, CJK inside
+                    // backticks renders as tofu (no glyph) because Liberation
+                    // Mono is Latin-only.
+                    text_style_fixed: theme.font_code{
+                        font_family: FontFamily{
+                            latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                            chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                            symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                            emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                        }
+                    }
+                    // Prose font family with symbols fallback — fixes "tofu"
+                    // for Unicode arrows / math / misc technical symbols
+                    // (observed trigger: `1→5`, `≤`, `≥`, `α` in prose).
+                    text_style_normal: theme.font_regular{
+                        font_family: FontFamily{
+                            latin := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                            chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                            symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                            emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                        }
+                    }
                     code_block := View {
                         width: Fill
                         height: Fit
@@ -113,6 +174,15 @@ script_mod! {
                         use_code_block_widget: true
                         use_math_widget: true
                         body: ""
+                        // Per-instance override — same as User's Markdown
+                        // above. Fixes `` `中文` `` inline-code tofu.
+                        text_style_fixed: theme.font_code{
+                            font_family: FontFamily{
+                                latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                            }
+                        }
                         draw_text +: {
                             get_color: fn() {
                                 let fade_chars = 50.0
@@ -131,6 +201,28 @@ script_mod! {
                                 editor +: {
                                     height: Fit
                                     draw_bg +: { color: #1a1a2e }
+                                    // Local font override: CodeView is defined in the
+                                    // makepad-code-editor crate and bakes `theme.font_code`
+                                    // at its own expansion time, so later `mod.themes.dark`
+                                    // overrides don't reach it. Override per-instance.
+                                    draw_text +: {
+                                        text_style: theme.font_code{
+                                            font_family: FontFamily{
+                                                latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                                                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                                                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                                            }
+                                        }
+                                    }
+                                    draw_gutter +: {
+                                        text_style: theme.font_code{
+                                            font_family: FontFamily{
+                                                latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                                                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                                                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -158,6 +250,17 @@ script_mod! {
                     width: Fill
                     height: Fit
                     align: Align{x: 1.0}
+                    copy_button := ButtonFlat {
+                        width: Fit
+                        height: Fit
+                        padding: Inset{top: 2 bottom: 2 left: 6 right: 6}
+                        margin: Inset{top: 2 right: 2}
+                        text: "copy"
+                        draw_text +: {
+                            color: #888
+                            text_style +: { font_size: 9 }
+                        }
+                    }
                     delete_button := ButtonFlat {
                         width: Fit
                         height: Fit
@@ -205,7 +308,7 @@ script_mod! {
 
                         backend_dropdown := DropDown {
                             width: 170
-                            labels: ["Claude Splash" "Claude (ACP)" "Claude (API)" "Gemini" "Gemini Splash" "OpenAI"]
+                            labels: ["Claude Splash" "Claude (ACP)" "Claude (API)" "Gemini" "Gemini Splash" "OpenAI" "Moonshot"]
                         }
                     }
 
@@ -222,6 +325,22 @@ script_mod! {
                             width: Fill
                             height: Fit
                             empty_text: "Type a message... (Enter to send)"
+                            // Per-instance font override — TextInput bakes
+                            // `theme.font_regular` at DSL-expansion time, same
+                            // issue as Markdown/CodeView. Without this the
+                            // input box shows tofu for CJK and U+2192 arrows.
+                            draw_text +: {
+                                text_style: theme.font_regular{
+                                    line_spacing: theme.font_wdgt_line_spacing
+                                    font_size: theme.font_size_p
+                                    font_family: FontFamily{
+                                        latin := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                                        chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
+                                        symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
+                                        emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                                    }
+                                }
+                            }
                         }
 
                         send_button := Button {
@@ -265,6 +384,45 @@ pub static CHAT_DATA: std::sync::RwLock<ChatData> = std::sync::RwLock::new(ChatD
     streaming_text: String::new(),
     is_streaming: false,
 });
+
+/// Some LLMs, when asked "show me a markdown file demo with ... inside",
+/// wrap their ENTIRE reply in a single ```markdown ... ``` fence. Because
+/// CommonMark does not support fence nesting, pulldown-cmark then treats
+/// the whole reply as ONE code block — collapsing markdown structure
+/// (headings, lists, inner fences, math, …) into monospace text and killing
+/// the streaming fade animation.
+///
+/// Strategy is aggressive: as soon as the text starts with ```markdown\n (or
+/// ```md\n), strip that opener even if the outer fence hasn't closed yet.
+/// Otherwise we'd keep the whole streaming reply stuck in code-block mode
+/// until the final token arrives. The trailing outer fence is stripped too
+/// when present.
+fn unwrap_outer_markdown_fence(text: &str) -> &str {
+    let trimmed_text = text.trim_start();
+    // CommonMark allows fences of any length ≥ 3 — 3 backticks for plain
+    // code, 4+ for wrappers that want to contain inner 3-backtick blocks.
+    // LLMs use both; handle any length.
+    let bt_count = trimmed_text.bytes().take_while(|b| *b == b'`').count();
+    if bt_count < 3 {
+        return text;
+    }
+    let after_ticks = &trimmed_text[bt_count..];
+    let body_start = after_ticks
+        .strip_prefix("markdown\n")
+        .or_else(|| after_ticks.strip_prefix("md\n"));
+    let Some(body) = body_start else {
+        return text;
+    };
+    // Try to strip a matching closing fence at the end: same length or
+    // longer, optionally followed by trailing whitespace. If streaming is
+    // mid-way and there's no close yet, return the opener-stripped body.
+    let close_pat = "`".repeat(bt_count);
+    let end_trimmed = body.trim_end();
+    if let Some(without_close) = end_trimmed.strip_suffix(&close_pat) {
+        return without_close.trim_end_matches('\n').trim_end();
+    }
+    body
+}
 
 const CHAT_SAVE_PATH: &str = "aichat_history.json";
 
@@ -337,7 +495,7 @@ impl ChatData {
     }
 }
 
-// ChatList widget wrapping PortalList for chat message display
+// ChatList widget wrapping PortalList for chat message display.
 #[derive(Script, ScriptHook, Widget)]
 pub struct ChatList {
     #[deref]
@@ -363,14 +521,32 @@ impl Widget for ChatList {
                             self.animating_msg = Some(item_id);
                         }
 
-                        let (item_widget, _) = list.item_with_existed(cx, item_id, id!(Assistant));
-                        let text = if data.streaming_text.is_empty() {
+                        let (item_widget, _) =
+                            list.item_with_existed(cx, item_id, id!(Assistant));
+                        let streaming_body;
+                        let text: &str = if data.streaming_text.is_empty() {
                             "..."
                         } else {
-                            &data.streaming_text
+                            let opts = SanitizeOptions {
+                                trim_unclosed_fence: false,
+                                ..SanitizeOptions::default()
+                            };
+                            // Remend keeps fenced blocks, tables and math
+                            // self-consistent mid-stream so the Markdown
+                            // widget doesn't re-layout a half-closed block
+                            // on every token.
+                            streaming_body = streaming_display_with_latex_autowrap_remend(
+                                &data.streaming_text,
+                                opts,
+                            );
+                            &streaming_body
                         };
                         let mut markdown = item_widget.markdown(cx, ids!(selectable));
-                        markdown.set_text(cx, text);
+                        // Unwrap outer ```markdown wrapper in streaming
+                        // content: some LLMs emit the wrapper as the very
+                        // first tokens, so we'd otherwise render a growing
+                        // code block for the whole stream.
+                        markdown.set_text(cx, unwrap_outer_markdown_fence(text));
                         if just_started {
                             markdown.reset_all_streaming_animations();
                         } else {
@@ -388,7 +564,11 @@ impl Widget for ChatList {
                         };
                         let item_widget = list.item(cx, item_id, template);
                         let mut markdown = item_widget.markdown(cx, ids!(selectable));
-                        markdown.set_text(cx, &msg.text);
+                        // wrap_bare_latex wraps `\cmd{…}` with `$…$` so
+                        // MathView can render them.
+                        let unwrapped = unwrap_outer_markdown_fence(&msg.text);
+                        let rendered = wrap_bare_latex(unwrapped);
+                        markdown.set_text(cx, &rendered);
                         if is_animating {
                             markdown.stop_streaming_animation();
                         }
@@ -405,6 +585,21 @@ impl Widget for ChatList {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
+
+        if let Event::Actions(actions) = event {
+            let list = self.view.portal_list(cx, ids!(list));
+            if list.any_items_with_actions(actions) {
+                for (item_id, item) in list.items_with_actions(actions) {
+                    let copy_btn = item.button(cx, ids!(copy_button));
+                    if copy_btn.clicked(actions) {
+                        let data = CHAT_DATA.read().unwrap();
+                        if let Some(msg) = data.messages.get(item_id) {
+                            cx.copy_to_clipboard(&msg.text);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -416,15 +611,17 @@ enum BackendType {
     Gemini,
     GeminiSplash,
     OpenAi,
+    Moonshot,
 }
 
-const ALL_BACKENDS: [BackendType; 6] = [
+const ALL_BACKENDS: [BackendType; 7] = [
     BackendType::ClaudeSplash,
     BackendType::ClaudeAcp,
     BackendType::ClaudeApi,
     BackendType::Gemini,
     BackendType::GeminiSplash,
     BackendType::OpenAi,
+    BackendType::Moonshot,
 ];
 
 impl BackendType {
@@ -444,6 +641,7 @@ impl BackendType {
             Self::Gemini => "Active: Gemini",
             Self::GeminiSplash => "Active: Gemini Splash (UI Agent)",
             Self::OpenAi => "Active: OpenAI",
+            Self::Moonshot => "Active: Moonshot",
         }
     }
 
@@ -468,7 +666,13 @@ Here is the complete Splash scripting manual. Follow it exactly:
 {splash_md}"#
                 )
             }
-            _ => "You are a helpful assistant. Be concise but thorough.".to_string(),
+            _ => r#"You are a helpful assistant. Be concise but thorough.
+
+Formatting: respond in GitHub-flavoured Markdown. Wrap every mathematical expression in LaTeX delimiters — `$…$` for inline math (e.g. `$a^2 + b^2 = c^2$`) and `$$…$$` on their own lines for display math. NEVER write LaTeX commands (`\frac`, `\mathbb`, `\sum`, `\forall`, etc.) outside these delimiters, even when the math is short.
+
+## Fence nesting — use 4+ backticks for OUTER wrappers
+
+CommonMark closes a 3-backtick fence at the next 3-backtick sequence — there is no nesting of same-length fences. If you want to show MARKDOWN SOURCE that itself contains fenced blocks, wrap the outer demo in at least **four backticks**."#.to_string(),
         }
     }
 }
@@ -508,6 +712,9 @@ impl App {
         if Self::read_key_file("OPENAI_API_KEY").is_some() {
             available_backends.push(BackendType::OpenAi);
         }
+        if Self::read_key("MOONSHOT_API_KEY").is_some() {
+            available_backends.push(BackendType::Moonshot);
+        }
         available_backends
     }
 
@@ -516,6 +723,15 @@ impl App {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+
+    /// Read a key by trying env var first, then a file of the same name in CWD.
+    fn read_key(name: &str) -> Option<String> {
+        std::env::var(name)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .or_else(|| Self::read_key_file(name))
     }
 
     fn create_agent(&self, backend: BackendType) -> Option<Box<dyn Agent>> {
@@ -547,6 +763,21 @@ impl App {
                         api_key: key,
                         model: "gpt-4o".to_string(),
                         base_url: None,
+                        reasoning_effort: None,
+                    },
+                )))) as Box<dyn Agent>
+            }),
+            BackendType::Moonshot => Self::read_key("MOONSHOT_API_KEY").map(|key| {
+                let model = std::env::var("MOONSHOT_MODEL")
+                    .unwrap_or_else(|_| "kimi-k2.5".to_string());
+                let base_url = std::env::var("MOONSHOT_BASE_URL").unwrap_or_else(|_| {
+                    "https://api.moonshot.ai/v1/chat/completions".to_string()
+                });
+                Box::new(StatelessBackendAdapter::new(Box::new(OpenAiBackend::new(
+                    BackendConfig::OpenAI {
+                        api_key: key,
+                        model,
+                        base_url: Some(base_url),
                         reasoning_effort: None,
                     },
                 )))) as Box<dyn Agent>
@@ -687,6 +918,22 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        // Markdown link click — dispatch through robius-open for cross-platform
+        // coverage (macOS/Linux/Windows/iOS/Android/WASM). The current
+        // `MarkdownAction::LinkNavigated(url)` variant fires on any click, so
+        // every click opens the URL; a follow-up PR gates desktop opens on the
+        // Cmd/Ctrl modifier (so plain clicks can drag-select inside prose).
+        for action in actions {
+            if let Some(widget_action) = action.as_widget_action() {
+                if let makepad_widgets::markdown::MarkdownAction::LinkNavigated(url) =
+                    widget_action.cast()
+                {
+                    if let Err(e) = robius_open::Uri::new(&url).open() {
+                        log::warn!("failed to open URL {}: {:?}", url, e);
+                    }
+                }
+            }
+        }
         if self.ui.button(cx, ids!(send_button)).clicked(actions) {
             self.send_message(cx);
         }
