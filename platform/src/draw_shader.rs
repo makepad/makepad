@@ -1,13 +1,14 @@
 use {
     crate::{
         cx::Cx,
-        draw_vars::DrawVars,
+        draw_vars::{DrawVars, DRAW_CALL_UNIFORM_BUFFER_SLOTS},
         geometry::GeometryId,
         makepad_live_id::*,
         makepad_script::heap::ScriptHeap,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
         makepad_script::shader::*,
-        makepad_script::value::ScriptObject,
+        makepad_script::value::{ScriptObject, ScriptPodType},
+        makepad_script::NoTrap,
         makepad_script::ScriptObjectRef,
         os::CxOsDrawShader,
     },
@@ -21,10 +22,25 @@ use {
 // Re-export UniformBufferBindings for use in other modules
 pub use makepad_script::shader::UniformBufferBindings;
 
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
     pub debug_id: Option<LiveId>,
+    pub depth_write: bool,
+    pub alpha_blend: bool,
+    pub backface_culling: bool,
+}
+
+impl Default for CxDrawShaderOptions {
+    fn default() -> Self {
+        Self {
+            draw_call_group: LiveId(0),
+            debug_id: None,
+            depth_write: true,
+            alpha_blend: true,
+            backface_culling: false,
+        }
+    }
 }
 
 impl CxDrawShaderOptions {
@@ -70,6 +86,7 @@ pub struct CxDrawShaders {
     pub os_shaders: Vec<CxOsDrawShader>,
     pub compile_set: BTreeSet<usize>,
 
+    pub cache_object_reuse_epoch_seen: u64,
     pub cache_object_id_to_shader: HashMap<ScriptObject, DrawShaderId>,
     pub cache_functions_to_shader: LiveIdMap<LiveId, DrawShaderId>,
     pub cache_code_to_shader: HashMap<CxDrawShaderCode, DrawShaderId>,
@@ -81,11 +98,8 @@ pub struct CxDrawShaders {
 
 impl CxDrawShaders {
     pub fn reset_for_live_reload(&mut self) {
-        /*
-        self.ptr_to_item.clear();
-        self.fingerprints.clear();
-        self.error_set.clear();
-        self.error_fingerprints.clear();*/
+        self.cache_object_id_to_shader.clear();
+        self.cache_functions_to_shader.clear();
     }
 }
 
@@ -207,7 +221,8 @@ impl DrawShaderInputs {
     pub fn push(&mut self, id: LiveId, slots: usize, attr_format: DrawShaderAttrFormat) {
         match self.packing_method {
             DrawShaderInputPacking::Attribute => {
-                if attr_format != DrawShaderAttrFormat::Float && (self.total_slots & 3) != 0 {
+                let needs_int_align = attr_format != DrawShaderAttrFormat::Float && slots > 1;
+                if needs_int_align && (self.total_slots & 3) != 0 {
                     self.total_slots += 4 - (self.total_slots & 3);
                 }
                 self.inputs.push(DrawShaderInput {
@@ -217,7 +232,7 @@ impl DrawShaderInputs {
                     attr_format,
                 });
                 self.total_slots += slots;
-                if attr_format != DrawShaderAttrFormat::Float && (self.total_slots & 3) != 0 {
+                if needs_int_align && (self.total_slots & 3) != 0 {
                     self.total_slots += 4 - (self.total_slots & 3);
                 }
             }
@@ -231,9 +246,18 @@ impl DrawShaderInputs {
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsGLSL140 => {
-                if (self.total_slots & 3) + slots > 4 {
-                    // goes over the boundary
-                    self.total_slots += 4 - (self.total_slots & 3); // make jump to new slot
+                // std140 alignment rules:
+                // scalar (1 slot): no alignment requirement
+                // vec2 (2 slots): 2-slot aligned
+                // vec3/vec4 (3-4 slots): 4-slot aligned
+                // larger (matrices, arrays): 4-slot aligned
+                let alignment = match slots {
+                    1 => 1,
+                    2 => 2,
+                    _ => 4,
+                };
+                if self.total_slots % alignment != 0 {
+                    self.total_slots += alignment - (self.total_slots % alignment);
                 }
                 self.inputs.push(DrawShaderInput {
                     id,
@@ -244,9 +268,12 @@ impl DrawShaderInputs {
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsHLSL => {
-                if (self.total_slots & 3) + slots > 4 {
-                    // goes over the boundary
-                    self.total_slots += 4 - (self.total_slots & 3); // make jump to new slot
+                if slots > 4 {
+                    if (self.total_slots & 3) != 0 {
+                        self.total_slots += 4 - (self.total_slots & 3);
+                    }
+                } else if (self.total_slots & 3) + slots > 4 {
+                    self.total_slots += 4 - (self.total_slots & 3);
                 }
                 self.inputs.push(DrawShaderInput {
                     id,
@@ -257,10 +284,19 @@ impl DrawShaderInputs {
                 self.total_slots += slots;
             }
             DrawShaderInputPacking::UniformsMetal => {
+                // Metal struct alignment rules:
+                // float (1 slot): 4-byte aligned (1-float)
+                // float2 (2 slots): 8-byte aligned (2-float)
+                // float3/float4 (3-4 slots): 16-byte aligned (4-float)
+                // larger (matrices, arrays): 16-byte aligned (4-float)
                 let aligned_slots = if slots == 3 { 4 } else { slots };
-                if (self.total_slots & 3) + aligned_slots > 4 {
-                    // goes over the boundary
-                    self.total_slots += 4 - (self.total_slots & 3); // make jump to new slot
+                let alignment = match aligned_slots {
+                    1 => 1,
+                    2 => 2,
+                    _ => 4,
+                };
+                if self.total_slots % alignment != 0 {
+                    self.total_slots += alignment - (self.total_slots % alignment);
                 }
                 self.inputs.push(DrawShaderInput {
                     id,
@@ -294,11 +330,24 @@ pub struct DrawShaderTextureInput {
     pub tex_type: TextureType,
 }
 
+#[derive(Clone, Debug)]
+pub struct DrawShaderUniformBufferInput {
+    pub id: LiveId,
+    pub block_name: String,
+    pub ty: ScriptPodType,
+    pub size: usize,
+    pub align: usize,
+    pub buffer_index: usize,
+}
+
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DrawShaderFlags {
-    pub debug: bool,
+    pub debug_draw: bool,
+    pub debug_layout: bool,
+    pub debug_code: bool,
     pub draw_call_nocompare: bool,
     pub draw_call_always: bool,
+    pub async_compile: bool,
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -317,6 +366,7 @@ pub struct CxDrawShaderMapping {
     pub dyn_uniforms: DrawShaderInputs,
     pub geometries: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
+    pub uniform_buffers: Vec<DrawShaderUniformBufferInput>,
     pub samplers: Vec<ShaderSampler>,
     pub texture_sampler_indices: Vec<usize>,
     pub uses_time: bool,
@@ -355,6 +405,83 @@ impl CxDrawShaderMapping {
         }
     }
 
+    pub fn debug_dump_shader_draw_call(
+        backend: &str,
+        draw_item_id: usize,
+        draw_shader: &CxDrawShader,
+        draw_call: &crate::draw_list::CxDrawCall,
+        instance_data: &[f32],
+        instances: usize,
+    ) {
+        let instance_slots = draw_shader.mapping.instances.total_slots;
+        if instance_slots == 0 {
+            crate::log!(
+                "debug_draw [{}] item={} shader={} debug_id={:?}: no instance layout",
+                backend,
+                draw_item_id,
+                draw_call.draw_shader_id.index,
+                draw_call.options.debug_id.unwrap_or(draw_shader.debug_id)
+            );
+            return;
+        }
+
+        let dyn_slots = draw_shader
+            .mapping
+            .dyn_uniforms
+            .total_slots
+            .min(draw_call.dyn_uniforms.len());
+        crate::log!(
+        "debug_draw [{}] item={} shader={} debug_id={:?} instances={} instance_slots={} dyn_uniform_slots={}",
+        backend,
+        draw_item_id,
+        draw_call.draw_shader_id.index,
+        draw_call.options.debug_id.unwrap_or(draw_shader.debug_id),
+        instances,
+        instance_slots,
+        dyn_slots
+    );
+
+        for input in &draw_shader.mapping.dyn_uniforms.inputs {
+            if input.offset >= dyn_slots {
+                continue;
+            }
+            let end = (input.offset + input.slots).min(dyn_slots);
+            crate::log!(
+                "debug_draw [{}]   u {:?}: {:?}",
+                backend,
+                input.id,
+                &draw_call.dyn_uniforms[input.offset..end]
+            );
+        }
+
+        for inst_idx in 0..instances {
+            let base = inst_idx * instance_slots;
+            if base + instance_slots > instance_data.len() {
+                break;
+            }
+            let mut parts = Vec::new();
+            for input in &draw_shader.mapping.instances.inputs {
+                let start = base + input.offset;
+                let end = start + input.slots;
+                if end > instance_data.len() {
+                    continue;
+                }
+                let vals = &instance_data[start..end];
+                if input.slots == 1 {
+                    parts.push(format!("{:?}={}", input.id, vals[0]));
+                } else {
+                    parts.push(format!("{:?}={:?}", input.id, vals));
+                }
+            }
+            crate::log!(
+                "debug_draw [{}]   i[{}] {}",
+                backend,
+                inst_idx,
+                parts.join(" ")
+            );
+        }
+    }
+
     pub fn from_shader_output(
         source: ScriptObjectRef,
         code: CxDrawShaderCode,
@@ -362,6 +489,22 @@ impl CxDrawShaderMapping {
         output: &ShaderOutput,
         geometry_id: Option<GeometryId>,
     ) -> CxDrawShaderMapping {
+        let debug_draw = heap
+            .value(source.as_object(), id!(debug_draw).into(), NoTrap)
+            .as_bool()
+            == Some(true);
+        let debug_layout = heap
+            .value(source.as_object(), id!(debug_layout).into(), NoTrap)
+            .as_bool()
+            == Some(true);
+        let debug_code = heap
+            .value(source.as_object(), id!(debug_code).into(), NoTrap)
+            .as_bool()
+            == Some(true);
+        let async_compile = heap
+            .value(source.as_object(), id!(async_compile).into(), NoTrap)
+            .as_bool()
+            == Some(true);
         // Use attribute packing for instances (they're vertex attributes)
         // instances contains ALL instance fields (dyn first, then rust)
         let mut instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
@@ -372,6 +515,7 @@ impl CxDrawShaderMapping {
         // Geometries for vertex buffer fields
         let mut geometries = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         let mut textures = Vec::new();
+        let mut uniform_buffers = Vec::new();
         let mut texture_sampler_indices = Vec::new();
 
         let mut rect_pos = None;
@@ -456,6 +600,40 @@ impl CxDrawShaderMapping {
             }
         }
 
+        for io in &output.io {
+            if let ShaderIoKind::UniformBuffer = io.kind {
+                let pod_ty = heap.pod_type_ref(io.ty);
+                if matches!(
+                    pod_ty.name,
+                    Some(id!(DrawPassUniforms))
+                        | Some(id!(DrawListUniforms))
+                        | Some(id!(DrawCallUniforms))
+                ) {
+                    continue;
+                }
+                let io_name = output.backend.map_io_name(io.name);
+                uniform_buffers.push(DrawShaderUniformBufferInput {
+                    id: io.name,
+                    block_name: format!("{}_Uniforms", io_name),
+                    ty: io.ty,
+                    size: pod_ty.ty.size_of(),
+                    align: pod_ty.ty.align_of(),
+                    buffer_index: io
+                        .buffer_index
+                        .expect("UniformBuffer must have buffer_index assigned"),
+                });
+            }
+        }
+
+        if uniform_buffers.len() > DRAW_CALL_UNIFORM_BUFFER_SLOTS {
+            panic!(
+                "shader {:?} declares {} custom uniform buffers but only {} draw-call slots are available",
+                source.as_object(),
+                uniform_buffers.len(),
+                DRAW_CALL_UNIFORM_BUFFER_SLOTS
+            );
+        }
+
         instances.finalize();
         dyn_instances.finalize();
         dyn_uniforms.finalize();
@@ -490,6 +668,129 @@ impl CxDrawShaderMapping {
         // Allocate the buffer for scope uniforms (as f32 slots)
         let scope_uniforms_buf = vec![0.0f32; scope_uniforms.total_slots];
 
+        if debug_layout {
+            crate::log!(
+                "debug_layout shader {:?}: flags draw={} layout={} code={} uniform_packing={:?}",
+                source.as_object(),
+                debug_draw,
+                debug_layout,
+                debug_code,
+                dyn_uniforms.packing_method
+            );
+
+            for io in output
+                .io
+                .iter()
+                .filter(|io| matches!(io.kind, ShaderIoKind::DynInstance))
+            {
+                let pod_ty = heap.pod_type_ref(io.ty);
+                if let Some(input) = dyn_instances
+                    .inputs
+                    .iter()
+                    .find(|input| input.id == io.name)
+                {
+                    crate::log!(
+                        "debug_layout shader {:?}: dyn_instance {:?} ty={:?} slots={} offset={} attr={:?}",
+                        source.as_object(),
+                        io.name,
+                        pod_ty.ty,
+                        input.slots,
+                        input.offset,
+                        input.attr_format
+                    );
+                }
+            }
+
+            for io in output
+                .io
+                .iter()
+                .filter(|io| matches!(io.kind, ShaderIoKind::RustInstance))
+            {
+                let pod_ty = heap.pod_type_ref(io.ty);
+                if let Some(input) = instances.inputs.iter().find(|input| input.id == io.name) {
+                    crate::log!(
+                        "debug_layout shader {:?}: rust_instance {:?} ty={:?} slots={} offset={} attr={:?}",
+                        source.as_object(),
+                        io.name,
+                        pod_ty.ty,
+                        input.slots,
+                        input.offset,
+                        input.attr_format
+                    );
+                }
+            }
+
+            for io in output
+                .io
+                .iter()
+                .filter(|io| matches!(io.kind, ShaderIoKind::Uniform))
+            {
+                let pod_ty = heap.pod_type_ref(io.ty);
+                if let Some(input) = dyn_uniforms.inputs.iter().find(|input| input.id == io.name) {
+                    crate::log!(
+                        "debug_layout shader {:?}: dyn_uniform {:?} ty={:?} size={} slots={} offset={} attr={:?}",
+                        source.as_object(),
+                        io.name,
+                        pod_ty.ty,
+                        pod_ty.ty.size_of(),
+                        input.slots,
+                        input.offset,
+                        input.attr_format
+                    );
+                }
+            }
+
+            for io in output
+                .io
+                .iter()
+                .filter(|io| matches!(io.kind, ShaderIoKind::VertexBuffer))
+            {
+                let pod_ty = heap.pod_type_ref(io.ty);
+                if let Some(input) = geometries.inputs.iter().find(|input| input.id == io.name) {
+                    crate::log!(
+                        "debug_layout shader {:?}: vertex_buffer {:?} ty={:?} slots={} offset={} attr={:?}",
+                        source.as_object(),
+                        io.name,
+                        pod_ty.ty,
+                        input.slots,
+                        input.offset,
+                        input.attr_format
+                    );
+                }
+            }
+
+            for input in &scope_uniforms.inputs {
+                crate::log!(
+                    "debug_layout shader {:?}: scope_uniform {:?} slots={} offset={} attr={:?}",
+                    source.as_object(),
+                    input.id,
+                    input.slots,
+                    input.offset,
+                    input.attr_format
+                );
+            }
+
+            for (type_name, idx) in &uniform_buffer_bindings.bindings {
+                crate::log!(
+                    "debug_layout shader {:?}: uniform_buffer {} -> b{}",
+                    source.as_object(),
+                    type_name,
+                    idx
+                );
+            }
+
+            crate::log!(
+                "debug_layout shader {:?}: totals dyn_instances={} instances={} dyn_uniforms={} geometries={} scope_uniforms={} textures={}",
+                source.as_object(),
+                dyn_instances.total_slots,
+                instances.total_slots,
+                dyn_uniforms.total_slots,
+                geometries.total_slots,
+                scope_uniforms.total_slots,
+                textures.len()
+            );
+        }
+
         // Check if shader uses draw_pass->time (requires repaint every frame)
         let uses_time = match &code {
             CxDrawShaderCode::Combined { code } => code.contains("draw_pass->time"),
@@ -501,12 +802,19 @@ impl CxDrawShaderMapping {
         CxDrawShaderMapping {
             source,
             code,
-            flags: DrawShaderFlags::default(),
+            flags: DrawShaderFlags {
+                debug_draw,
+                debug_layout,
+                debug_code,
+                async_compile,
+                ..DrawShaderFlags::default()
+            },
             instances,
             dyn_instances,
             dyn_uniforms,
             geometries,
             textures,
+            uniform_buffers,
             samplers: output.samplers.clone(),
             texture_sampler_indices,
             uses_time,

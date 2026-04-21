@@ -39,4 +39,6 @@ experiments/websocket-windows/nodejs-websocketserver
 experiments/svgloader
 CLAUDE.md
 
+/tools/__pycache__/
 **/*.obsidian
+/xr/util/dumps/

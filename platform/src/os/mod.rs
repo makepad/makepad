@@ -12,7 +12,7 @@ pub mod cx_native;
 #[macro_use]
 pub mod cx_shared;
 
-pub mod cx_stdin;
+pub mod shared_framebuf;
 
 #[cfg(headless)]
 pub mod headless;
@@ -53,14 +53,16 @@ pub mod linux;
 #[cfg(all(not(headless), any(target_os = "android", target_os = "linux")))]
 pub use crate::os::linux::*;
 
+#[cfg(all(test, not(headless), target_os = "macos"))]
+pub mod linux_test_stub;
+
+#[cfg(all(test, not(headless), target_os = "macos"))]
+pub use crate::os::linux_test_stub as linux;
+
 #[cfg(all(not(headless), target_os = "android"))]
 pub use crate::os::linux::android::android_media::*;
 
-#[cfg(all(
-    not(headless),
-    target_os = "linux",
-    not(target_env = "ohos")
-))]
+#[cfg(all(not(headless), target_os = "linux", not(target_env = "ohos")))]
 pub use crate::os::linux::linux_media::*;
 
 #[cfg(all(not(headless), target_env = "ohos"))]

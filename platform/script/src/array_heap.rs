@@ -14,6 +14,13 @@ impl ScriptHeap {
         if let Some(arr) = self.arrays_free.pop() {
             // arr already has the correct generation from gc.rs sweep
             let array = &mut self.arrays[arr];
+            // Reused array slots may come from typed buffers (U8/U16/U32/F32).
+            // New arrays must start as generic ScriptValue storage.
+            if !matches!(array.storage, ScriptArrayStorage::ScriptValue(_)) {
+                array.storage = ScriptArrayStorage::ScriptValue(Default::default());
+            } else {
+                array.storage.clear();
+            }
             array.tag.set_alloced();
             arr
         } else {
@@ -32,8 +39,8 @@ impl ScriptHeap {
 
     pub fn array_push(&mut self, array: ScriptArray, value: ScriptValue, trap: ScriptTrap) {
         let array = &mut self.arrays[array];
-        if array.tag.is_frozen() {
-            script_err_immutable!(trap, "array is frozen");
+        if array.tag.is_immutable() {
+            script_err_immutable!(trap, "array is immutable");
             return;
         }
         array.tag.set_dirty();
@@ -42,7 +49,7 @@ impl ScriptHeap {
 
     pub fn array_pop_front_option(&mut self, array: ScriptArray) -> Option<ScriptValue> {
         let array = &mut self.arrays[array];
-        if array.tag.is_frozen() {
+        if array.tag.is_immutable() {
             return None;
         }
         array.tag.set_dirty();
@@ -51,8 +58,8 @@ impl ScriptHeap {
 
     pub fn array_push_vec(&mut self, array: ScriptArray, object: ScriptObject, trap: ScriptTrap) {
         let array = &mut self.arrays[array];
-        if array.tag.is_frozen() {
-            script_err_immutable!(trap, "array is frozen");
+        if array.tag.is_immutable() {
+            script_err_immutable!(trap, "array is immutable");
             return;
         }
         array.tag.set_dirty();
@@ -84,8 +91,8 @@ impl ScriptHeap {
         };
 
         let target_arr = &mut self.arrays[target];
-        if target_arr.tag.is_frozen() {
-            script_err_immutable!(trap, "array is frozen");
+        if target_arr.tag.is_immutable() {
+            script_err_immutable!(trap, "array is immutable");
             return;
         }
         target_arr.tag.set_dirty();
@@ -119,8 +126,8 @@ impl ScriptHeap {
         trap: ScriptTrap,
     ) -> Option<&mut ScriptArrayStorage> {
         let array = &mut self.arrays[array];
-        if array.tag.is_frozen() {
-            script_err_immutable!(trap, "array is frozen");
+        if array.tag.is_immutable() {
+            script_err_immutable!(trap, "array is immutable");
             return None;
         }
         array.tag.set_dirty();
@@ -158,8 +165,8 @@ impl ScriptHeap {
         trap: ScriptTrap,
     ) -> ScriptValue {
         let array = &mut self.arrays[array];
-        if array.tag.is_frozen() {
-            return script_err_immutable!(trap, "array is frozen");
+        if array.tag.is_immutable() {
+            return script_err_immutable!(trap, "array is immutable");
         }
         array.tag.set_dirty();
         if index >= array.storage.len() {
@@ -175,8 +182,8 @@ impl ScriptHeap {
 
     pub fn array_pop(&mut self, array: ScriptArray, trap: ScriptTrap) -> ScriptValue {
         let array = &mut self.arrays[array];
-        if array.tag.is_frozen() {
-            return script_err_immutable!(trap, "array is frozen");
+        if array.tag.is_immutable() {
+            return script_err_immutable!(trap, "array is immutable");
         }
         if let Some(value) = array.storage.pop() {
             array.tag.set_dirty();
@@ -188,8 +195,8 @@ impl ScriptHeap {
 
     pub fn array_clear(&mut self, array: ScriptArray, trap: ScriptTrap) {
         let array = &mut self.arrays[array];
-        if array.tag.is_frozen() {
-            script_err_immutable!(trap, "array is frozen");
+        if array.tag.is_immutable() {
+            script_err_immutable!(trap, "array is immutable");
             return;
         }
         if array.storage.len() != 0 {
@@ -228,11 +235,40 @@ impl ScriptHeap {
         trap: ScriptTrap,
     ) -> ScriptValue {
         let array = &mut self.arrays[array];
-        if array.tag.is_frozen() {
-            return script_err_immutable!(trap, "array is frozen");
+        if array.tag.is_immutable() {
+            return script_err_immutable!(trap, "array is immutable");
         }
         array.tag.set_dirty();
         array.storage.set_index(index, value);
         NIL
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::array::ScriptArrayStorage;
+
+    #[test]
+    fn reused_array_slot_resets_to_script_value_storage() {
+        let mut heap = ScriptHeap::default();
+
+        let typed_array = heap.new_array_from_vec_u8(vec![1, 2, 3, 4]);
+        let index = typed_array.index() as usize;
+
+        // Simulate GC sweep/free for this slot.
+        heap.arrays[typed_array].clear();
+        heap.arrays.free_slot(typed_array.index());
+        let new_gen = heap.arrays.generation(index);
+        heap.arrays_free
+            .push(ScriptArray::new(typed_array.index(), new_gen));
+
+        let reused = heap.new_array();
+        assert_eq!(reused.index(), typed_array.index());
+        assert!(matches!(
+            heap.arrays[reused].storage,
+            ScriptArrayStorage::ScriptValue(_)
+        ));
+        assert_eq!(heap.array_len(reused), 0);
     }
 }

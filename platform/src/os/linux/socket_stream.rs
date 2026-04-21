@@ -64,7 +64,7 @@ fn last_ssl_error() -> String {
         if err == 0 {
             return "unknown OpenSSL error".to_string();
         }
-        let mut buf = [0i8; 256];
+        let mut buf = [0 as c_char; 256];
         ERR_error_string_n(err, buf.as_mut_ptr(), buf.len());
         CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()
     }
@@ -103,7 +103,10 @@ impl OpenSslStream {
 
         let ssl_ctx = unsafe { SSL_CTX_new(method) };
         if ssl_ctx.is_null() {
-            return Err(io_other(format!("SSL_CTX_new failed: {}", last_ssl_error())));
+            return Err(io_other(format!(
+                "SSL_CTX_new failed: {}",
+                last_ssl_error()
+            )));
         }
 
         if verify_peer {
@@ -190,7 +193,10 @@ impl OpenSslStream {
                         SSL_free(ssl);
                         SSL_CTX_free(ssl_ctx);
                     }
-                    return Err(io_other(format!("SSL_connect failed: {}", last_ssl_error())));
+                    return Err(io_other(format!(
+                        "SSL_connect failed: {}",
+                        last_ssl_error()
+                    )));
                 }
             }
         }
@@ -242,9 +248,10 @@ impl Read for OpenSslStream {
 
         let ssl_err = unsafe { SSL_get_error(self.ssl, ret) };
         match ssl_err {
-            SSL_ERROR_WANT_READ | SSL_ERROR_WANT_WRITE => {
-                Err(io::Error::new(io::ErrorKind::WouldBlock, "SSL_read would block"))
-            }
+            SSL_ERROR_WANT_READ | SSL_ERROR_WANT_WRITE => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "SSL_read would block",
+            )),
             SSL_ERROR_SYSCALL => {
                 let os_err = io::Error::last_os_error();
                 if matches!(
@@ -278,9 +285,10 @@ impl Write for OpenSslStream {
 
         let ssl_err = unsafe { SSL_get_error(self.ssl, ret) };
         match ssl_err {
-            SSL_ERROR_WANT_READ | SSL_ERROR_WANT_WRITE => {
-                Err(io::Error::new(io::ErrorKind::WouldBlock, "SSL_write would block"))
-            }
+            SSL_ERROR_WANT_READ | SSL_ERROR_WANT_WRITE => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "SSL_write would block",
+            )),
             SSL_ERROR_SYSCALL => {
                 let os_err = io::Error::last_os_error();
                 if matches!(

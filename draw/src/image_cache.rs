@@ -1,4 +1,5 @@
 use crate::makepad_platform::*;
+use makepad_webp::WebPDecoder;
 use makepad_zune_jpeg::JpegDecoder;
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
 use makepad_zune_png::{post_process_image, PngDecoder};
@@ -7,10 +8,11 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
+pub use makepad_webp::DecodingError as WebpDecodeErrors;
 pub use makepad_zune_jpeg::errors::DecodeErrors as JpgDecodeErrors;
 pub use makepad_zune_png::error::PngDecodeErrors;
 
@@ -24,48 +26,50 @@ pub struct ImageBuffer {
 
 impl ImageBuffer {
     pub fn new(in_data: &[u8], width: usize, height: usize) -> Result<ImageBuffer, ImageError> {
-        let mut out = Vec::new();
         let pixels = width * height;
-        out.resize(pixels, 0u32);
+        if pixels == 0 {
+            return Ok(ImageBuffer {
+                width,
+                height,
+                data: Vec::new(),
+                animation: None,
+            });
+        }
+        let mut out = Vec::with_capacity(pixels);
         match in_data.len() / pixels {
             4 => {
-                for i in 0..pixels {
-                    let r = in_data[i * 4];
-                    let g = in_data[i * 4 + 1];
-                    let b = in_data[i * 4 + 2];
-                    let a = in_data[i * 4 + 3];
-                    out[i] = ((a as u32) << 24)
-                        | ((r as u32) << 16)
-                        | ((g as u32) << 8)
-                        | ((b as u32) << 0);
+                for rgba in in_data.chunks_exact(4).take(pixels) {
+                    let r = rgba[0];
+                    let g = rgba[1];
+                    let b = rgba[2];
+                    let a = rgba[3];
+                    out.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+                    );
                 }
             }
             3 => {
-                for i in 0..pixels {
-                    let r = in_data[i * 3];
-                    let g = in_data[i * 3 + 1];
-                    let b = in_data[i * 3 + 2];
-                    out[i] =
-                        0xff000000 | ((r as u32) << 16) | ((g as u32) << 8) | ((b as u32) << 0);
+                for rgb in in_data.chunks_exact(3).take(pixels) {
+                    let r = rgb[0];
+                    let g = rgb[1];
+                    let b = rgb[2];
+                    out.push(0xff000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
                 }
             }
             2 => {
-                for i in 0..pixels {
-                    let r = in_data[i * 2];
-                    let a = in_data[i * 2 + 1];
-                    out[i] = ((a as u32) << 24)
-                        | ((r as u32) << 16)
-                        | ((r as u32) << 8)
-                        | ((r as u32) << 0);
+                for ra in in_data.chunks_exact(2).take(pixels) {
+                    let r = ra[0];
+                    let a = ra[1];
+                    out.push(
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((r as u32) << 8) | (r as u32),
+                    );
                 }
             }
             1 => {
-                for i in 0..pixels {
-                    let r = in_data[i];
-                    out[i] = ((0xff as u32) << 24)
-                        | ((r as u32) << 16)
-                        | ((r as u32) << 8)
-                        | ((r as u32) << 0);
+                for r in in_data.iter().copied().take(pixels) {
+                    out.push(
+                        (0xff_u32 << 24) | ((r as u32) << 16) | ((r as u32) << 8) | (r as u32),
+                    );
                 }
             }
             unsupported => return Err(ImageError::InvalidPixelAlignment(unsupported)),
@@ -167,7 +171,7 @@ impl ImageBuffer {
                         "Failed to get animated PNG image info",
                     )))?;
             post_process_image(
-                &info,
+                info,
                 colorspace,
                 &frame,
                 &pix,
@@ -188,7 +192,7 @@ impl ImageBuffer {
                                 << 24)
                                 | ((r as u32) << 16)
                                 | ((g as u32) << 8)
-                                | ((b as u32) << 0);
+                                | (b as u32);
                         }
                     }
                 }
@@ -198,10 +202,8 @@ impl ImageBuffer {
                             let r = output[y * width * 3 + x * 3];
                             let g = output[y * width * 3 + x * 3 + 1];
                             let b = output[y * width * 3 + x * 3 + 2];
-                            final_buffer.data[(y + cy) * total_width + (x + cx)] = 0xff000000
-                                | ((r as u32) << 16)
-                                | ((g as u32) << 8)
-                                | ((b as u32) << 0);
+                            final_buffer.data[(y + cy) * total_width + (x + cx)] =
+                                0xff000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                         }
                     }
                 }
@@ -214,6 +216,21 @@ impl ImageBuffer {
             }
         }
         Ok(final_buffer)
+    }
+
+    pub fn from_webp(data: &[u8]) -> Result<Self, ImageError> {
+        let cursor = std::io::Cursor::new(data);
+        let mut decoder =
+            WebPDecoder::new(std::io::BufReader::new(cursor)).map_err(ImageError::WebpDecode)?;
+        let (width, height) = decoder.dimensions();
+        let buf_size = decoder
+            .output_buffer_size()
+            .ok_or(ImageError::WebpDecode(WebpDecodeErrors::ImageTooLarge))?;
+        let mut buf = vec![0u8; buf_size];
+        decoder
+            .read_image(&mut buf)
+            .map_err(ImageError::WebpDecode)?;
+        Self::new(&buf, width as usize, height as usize)
     }
 
     pub fn from_jpg(data: &[u8]) -> Result<Self, ImageError> {
@@ -251,6 +268,12 @@ pub struct ImageCache {
     pub pending_http_requests: HashMap<LiveId, PathBuf>,
 }
 
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ImageCache {
     pub fn new() -> Self {
         Self {
@@ -268,6 +291,7 @@ pub enum ImageError {
     JpgDecode(JpgDecodeErrors),
     PathNotFound(PathBuf),
     PngDecode(PngDecodeErrors),
+    WebpDecode(WebpDecodeErrors),
     UnsupportedFormat,
     Http(String),
 }
@@ -300,6 +324,22 @@ fn image_decode_debug_enabled() -> bool {
     })
 }
 
+#[inline]
+fn decode_timing_start() -> Option<Instant> {
+    if !image_decode_debug_enabled() {
+        return None;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(Instant::now())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn headless_mode_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -314,12 +354,21 @@ fn detect_image_format(data: &[u8]) -> Option<&'static str> {
         Some("png")
     } else if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
         Some("jpg")
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some("webp")
     } else {
         None
     }
 }
 
 fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Option<&'static str> {
+    // Prefer magic-byte detection over file extensions so in-memory/binary
+    // resources decode correctly even when their synthetic path has no extension.
+    if let Some(format) = detect_image_format(data) {
+        return Some(format);
+    }
+
+    // Keep extension fallback for edge cases where headers are unavailable.
     let ext = image_path
         .extension()
         .and_then(|s| s.to_str())
@@ -327,7 +376,8 @@ fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Opt
     match ext.as_deref() {
         Some("jpg") | Some("jpeg") => Some("jpg"),
         Some("png") => Some("png"),
-        _ => detect_image_format(data),
+        Some("webp") => Some("webp"),
+        _ => None,
     }
 }
 
@@ -337,6 +387,7 @@ fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, Im
     match format {
         "jpg" => ImageBuffer::from_jpg(data),
         "png" => ImageBuffer::from_png(data),
+        "webp" => ImageBuffer::from_webp(data),
         _ => Err(ImageError::UnsupportedFormat),
     }
 }
@@ -349,7 +400,7 @@ fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), 
             let cursor = ZCursor::new(data);
             let mut decoder = JpegDecoder::new(cursor);
             decoder.decode_headers().map_err(ImageError::JpgDecode)?;
-            let image_info = decoder.info().ok_or_else(|| {
+            let image_info = decoder.info().ok_or({
                 ImageError::JpgDecode(JpgDecodeErrors::FormatStatic(
                     "Failed to get JPG image info after decoding headers",
                 ))
@@ -364,6 +415,13 @@ fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), 
                 PngDecodeErrors::GenericStatic("Failed to get PNG image dimensions"),
             ))?;
             Ok((width, height))
+        }
+        "webp" => {
+            let cursor = std::io::Cursor::new(data);
+            let decoder = WebPDecoder::new(std::io::BufReader::new(cursor))
+                .map_err(ImageError::WebpDecode)?;
+            let (width, height) = decoder.dimensions();
+            Ok((width as usize, height as usize))
         }
         _ => Err(ImageError::UnsupportedFormat),
     }
@@ -391,7 +449,7 @@ fn spawn_decode_job(cx: &mut Cx, image_path: PathBuf, data: Arc<Vec<u8>>) {
         .as_mut()
         .unwrap()
         .execute_rev(image_path, move |image_path| {
-            let start = Instant::now();
+            let start = decode_timing_start();
             if image_decode_debug_enabled() {
                 log!(
                     "ImageCache: decode_start key={} bytes={}",
@@ -401,17 +459,24 @@ fn spawn_decode_job(cx: &mut Cx, image_path: PathBuf, data: Arc<Vec<u8>>) {
             }
             let result = decode_image_buffer(&image_path, &data);
             if image_decode_debug_enabled() {
-                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
                 let status = match &result {
                     Ok(buffer) => format!("ok {}x{}", buffer.width, buffer.height),
                     Err(err) => format!("err {err}"),
                 };
-                log!(
-                    "ImageCache: decode_done key={} elapsed_ms={:.1} {}",
-                    image_path.display(),
-                    elapsed_ms,
-                    status
-                );
+                if let Some(start) = start {
+                    log!(
+                        "ImageCache: decode_done key={} elapsed_ms={:.1} {}",
+                        image_path.display(),
+                        start.elapsed().as_secs_f64() * 1000.0,
+                        status
+                    );
+                } else {
+                    log!(
+                        "ImageCache: decode_done key={} {}",
+                        image_path.display(),
+                        status
+                    );
+                }
             }
             Cx::post_action(AsyncImageLoad {
                 image_path,
@@ -433,16 +498,25 @@ pub fn process_async_image_load(
     if let Ok(data) = result {
         let width = data.width;
         let height = data.height;
-        let upload_start = Instant::now();
+        let upload_start = decode_timing_start();
         let texture = data.into_new_texture(cx);
         if image_decode_debug_enabled() {
-            log!(
-                "ImageCache: gpu_commit key={} elapsed_ms={:.1} size={}x{}",
-                image_path.display(),
-                upload_start.elapsed().as_secs_f64() * 1000.0,
-                width,
-                height
-            );
+            if let Some(upload_start) = upload_start {
+                log!(
+                    "ImageCache: gpu_commit key={} elapsed_ms={:.1} size={}x{}",
+                    image_path.display(),
+                    upload_start.elapsed().as_secs_f64() * 1000.0,
+                    width,
+                    height
+                );
+            } else {
+                log!(
+                    "ImageCache: gpu_commit key={} size={}x{}",
+                    image_path.display(),
+                    width,
+                    height
+                );
+            }
         }
         cx.get_global::<ImageCache>()
             .map
@@ -478,9 +552,15 @@ pub fn load_image_from_data_async(
         None => {}
     }
 
-    // Headless single-frame runs should decode synchronously so textured output
-    // is available in the first emitted PNG.
-    if headless_mode_enabled() {
+    // On wasm, decode synchronously on the UI thread since thread pools
+    // are not reliably available. Also decode synchronously for headless
+    // single-frame runs so textured output is available in the first emitted PNG.
+    #[cfg(target_arch = "wasm32")]
+    let force_sync = true;
+    #[cfg(not(target_arch = "wasm32"))]
+    let force_sync = headless_mode_enabled();
+
+    if force_sync {
         let image = decode_image_buffer(image_path, &data)?;
         let texture = image.into_new_texture(cx);
         cx.get_global::<ImageCache>()
@@ -549,25 +629,33 @@ pub fn handle_image_cache_network_responses(cx: &mut Cx, e: &NetworkResponsesEve
         return;
     }
 
-    let mut decode_queue = Vec::<(PathBuf, Arc<Vec<u8>>)>::new();
+    let mut decode_queue = Vec::<(PathBuf, Arc<Vec<u8>>)>::with_capacity(e.len());
 
     {
         let cache = cx.get_global::<ImageCache>();
-        for item in e {
-            let Some(image_path) = cache.pending_http_requests.remove(&item.request_id) else {
-                continue;
-            };
-
-            match &item.response {
-                NetworkResponse::HttpRequestError(err) => {
+        for response in e {
+            match response {
+                NetworkResponse::HttpError { request_id, error } => {
+                    let Some(image_path) = cache.pending_http_requests.remove(request_id) else {
+                        continue;
+                    };
                     error!(
                         "image http request failed for {:?}: {}",
-                        image_path, err.message
+                        image_path, error.message
                     );
                     cache.map.remove(&image_path);
                 }
-                NetworkResponse::HttpResponse(response)
-                | NetworkResponse::HttpStreamComplete(response) => {
+                NetworkResponse::HttpResponse {
+                    request_id,
+                    response,
+                }
+                | NetworkResponse::HttpStreamComplete {
+                    request_id,
+                    response,
+                } => {
+                    let Some(image_path) = cache.pending_http_requests.remove(request_id) else {
+                        continue;
+                    };
                     if !(200..300).contains(&response.status_code) {
                         cache.map.remove(&image_path);
                         continue;
@@ -579,7 +667,12 @@ pub fn handle_image_cache_network_responses(cx: &mut Cx, e: &NetworkResponsesEve
                         cache.map.remove(&image_path);
                     }
                 }
-                NetworkResponse::HttpProgress(_) | NetworkResponse::HttpStreamResponse(_) => {}
+                NetworkResponse::HttpProgress { .. }
+                | NetworkResponse::HttpStreamChunk { .. }
+                | NetworkResponse::WsOpened { .. }
+                | NetworkResponse::WsMessage { .. }
+                | NetworkResponse::WsClosed { .. }
+                | NetworkResponse::WsError { .. } => {}
             }
         }
     }

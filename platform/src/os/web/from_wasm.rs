@@ -6,11 +6,6 @@ use crate::{
 // WebBrowser API
 
 #[derive(FromWasm)]
-pub struct FromWasmLoadDeps {
-    pub deps: Vec<String>,
-}
-
-#[derive(FromWasm)]
 pub struct FromWasmStartTimer {
     pub repeats: bool,
     pub timer_id: f64,
@@ -89,6 +84,17 @@ pub struct FromWasmOpenUrl {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmBrowserUpdateUrl {
+    pub url: String,
+    pub replace: bool,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmBrowserHistoryGo {
+    pub delta: f64,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmShowTextIME {
     pub x: f64,
     pub y: f64,
@@ -140,6 +146,7 @@ impl DrawShaderTextureInput {
     }
 }
 
+#[cfg(target_feature = "atomics")]
 #[derive(FromWasm)]
 pub struct FromWasmCreateThread {
     pub context_ptr: u32,
@@ -255,6 +262,15 @@ pub struct FromWasmAllocTextureImage2D_RGBAf32 {
     pub data: WasmPtrF32,
 }
 
+#[allow(non_camel_case_types)]
+#[derive(FromWasm)]
+pub struct FromWasmAllocTextureCube_BGRAu8_32 {
+    pub texture_id: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data: WasmPtrU32,
+}
+
 #[derive(FromWasm, Default)]
 pub struct WColorTarget {
     pub texture_id: usize,
@@ -291,6 +307,8 @@ pub struct FromWasmSetDefaultDepthAndBlendMode {}
 pub struct FromWasmDrawCall {
     pub vao_id: usize,
     pub shader_id: usize,
+    pub depth_write: bool,
+    pub backface_culling: bool,
     pub pass_uniforms: WasmPtrF32,
     pub draw_list_uniforms: WasmPtrF32,
     pub draw_call_uniforms: WasmPtrF32,
@@ -332,3 +350,59 @@ pub struct FromWasmStartAudioOutput {
 
 #[derive(FromWasm)]
 pub struct FromWasmStopAudioOutput {}
+
+// Video Playback API
+
+#[derive(FromWasm)]
+pub struct FromWasmPrepareVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+    pub texture_id: usize,
+    pub source_url: String,
+    pub autoplay: bool,
+    pub should_loop: bool,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmBeginVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmPauseVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmResumeVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmMuteVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmUnmuteVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmSeekVideoPlayback {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+    pub position_ms_lo: u32,
+    pub position_ms_hi: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmCleanupVideoPlaybackResources {
+    pub video_id_lo: u32,
+    pub video_id_hi: u32,
+}

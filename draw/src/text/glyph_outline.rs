@@ -113,6 +113,12 @@ pub struct Builder {
     commands: Vec<Command>,
 }
 
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Builder {
     pub fn new() -> Self {
         Self {

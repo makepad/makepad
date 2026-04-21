@@ -6,13 +6,13 @@ use {
     crate::{
         cx::{Cx, OpenHarmonyParams, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        cx_stdin::{PollTimer, PollTimers},
         draw_pass::{CxDrawPassParent, DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         egl_sys::{self, LibEgl, EGL_NONE},
         event::{Event, KeyCode, KeyEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom},
         gpu_info::GpuPerformance,
         makepad_math::*,
         os::cx_native::EventFlow,
+        shared_framebuf::{PollTimer, PollTimers},
         thread::SignalToUI,
         window::CxWindowPool,
         WindowGeomChangeEvent,
@@ -84,6 +84,7 @@ impl Cx {
                 }
             }
         }
+        self.call_event_handler(&Event::Shutdown);
     }
 
     fn handle_all_pending_messages(&mut self, from_ohos_rx: &mpsc::Receiver<FromOhosMessage>) {
@@ -123,10 +124,7 @@ impl Cx {
         // }
 
         // Live edits
-        if self.handle_live_edit() {
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-        }
+        self.run_live_edit_if_needed("open-harmony");
 
         // Platform operations
         self.handle_platform_ops();
@@ -188,6 +186,7 @@ impl Cx {
                     position: dvec2(0.0, 0.0),
                     inner_size: size,
                     outer_size: size,
+                    ..Default::default()
                 };
                 let new_geom = window.window_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
@@ -530,7 +529,27 @@ impl Cx {
                         position: dvec2(0.0, 0.0),
                         inner_size: size,
                         outer_size: size,
+                        ..Default::default()
                     };
+                    window.is_created = true;
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let window = &mut self.windows[window_id];
+                    window.window_geom.position = position;
+                    window.window_geom.inner_size = size;
+                    window.window_geom.outer_size = size;
+                    window.window_geom.dpi_factor = self.os.dpi_factor;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
                     window.is_created = true;
                 }
                 CxOsOp::StartTimer {
@@ -549,7 +568,7 @@ impl Cx {
                 CxOsOp::Quit => {
                     self.os.quit = true;
                 }
-                CxOsOp::ShowTextIME(_area, _pos) => {
+                CxOsOp::ShowTextIME(_area, _pos, _config) => {
                     let _ = self.os.arkts_obj.as_mut().unwrap().call_js_function(
                         "showKeyBoard",
                         0,
@@ -576,9 +595,8 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
-        self.live_registry.borrow_mut().package_root = Some("makepad".to_string());
-        self.live_expand();
-        self.live_scan_dependencies();
+        self.package_root = Some("makepad".to_string());
+        self.native_load_dependencies();
     }
 
     fn spawn_thread<F>(&mut self, f: F)

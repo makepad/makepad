@@ -218,26 +218,38 @@ pub fn define_macos_window_delegate() -> *const Class {
         //WindowDelegate::emit_event(state, WindowEvent::HoveredFileCancelled);
     }
 
-    // Invoked when entered fullscreen
-    extern "C" fn window_did_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+    // Fullscreen lifecycle: set `is_fullscreen` in the `will` callbacks so the
+    // widget layer can show/hide the caption bar at the START of the animation,
+    // not after it finishes.  The `did` callbacks fire a second change event so
+    // the final geometry (after the animation) is also picked up.
+
+    extern "C" fn window_will_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
         let cw = get_cocoa_window(this);
         cw.is_fullscreen = true;
         cw.send_change_event();
     }
 
-    // Invoked when before enter fullscreen
-    extern "C" fn window_will_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
-        let _cw = get_cocoa_window(this);
+    extern "C" fn window_did_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+        let cw = get_cocoa_window(this);
+        cw.send_change_event();
     }
 
-    // Invoked when exited fullscreen
-    extern "C" fn window_did_exit_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+    extern "C" fn window_will_exit_fullscreen(this: &Object, _: Sel, _: ObjcId) {
         let cw = get_cocoa_window(this);
         cw.is_fullscreen = false;
         cw.send_change_event();
     }
 
-    extern "C" fn window_did_fail_to_enter_fullscreen(_this: &Object, _: Sel, _: ObjcId) {}
+    extern "C" fn window_did_exit_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+        let cw = get_cocoa_window(this);
+        cw.send_change_event();
+    }
+
+    extern "C" fn window_did_fail_to_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+        let cw = get_cocoa_window(this);
+        cw.is_fullscreen = false;
+        cw.send_change_event();
+    }
 
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("RenderWindowDelegate", superclass).unwrap();
@@ -318,6 +330,10 @@ pub fn define_macos_window_delegate() -> *const Class {
             window_will_enter_fullscreen as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
+            sel!(windowWillExitFullScreen:),
+            window_will_exit_fullscreen as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
             sel!(windowDidExitFullScreen:),
             window_did_exit_fullscreen as extern "C" fn(&Object, Sel, ObjcId),
         );
@@ -358,6 +374,26 @@ pub fn define_macos_window_class() -> *const Class {
     return decl.register();
 }
 
+pub fn define_macos_panel_class() -> *const Class {
+    extern "C" fn yes(_: &Object, _: Sel) -> BOOL {
+        YES
+    }
+
+    let panel_superclass = class!(NSPanel);
+    let mut decl = ClassDecl::new("RenderPanel", panel_superclass).unwrap();
+    unsafe {
+        decl.add_method(
+            sel!(canBecomeMainWindow),
+            yes as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(canBecomeKeyWindow),
+            yes as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+    }
+    decl.register()
+}
+
 pub fn define_cocoa_view_class() -> *const Class {
     extern "C" fn dealloc(this: &Object, _sel: Sel) {
         unsafe {
@@ -389,6 +425,15 @@ pub fn define_cocoa_view_class() -> *const Class {
             }
 
             this
+        }
+    }
+
+    extern "C" fn needs_panel_to_become_key(this: &Object, _sel: Sel) -> BOOL {
+        let cw = get_cocoa_window(this);
+        if cw.needs_panel_to_become_key() {
+            YES
+        } else {
+            NO
         }
     }
 
@@ -654,10 +699,14 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
 
     extern "C" fn key_down(this: &Object, _sel: Sel, event: ObjcId) {
-        let _cw = get_cocoa_window(this);
-        unsafe {
-            let input_context: ObjcId = msg_send![this, inputContext];
-            let () = msg_send![input_context, handleEvent: event];
+        let cw = get_cocoa_window(this);
+        // Only forward to NSTextInputContext when IME is active (a text field has focus).
+        // Otherwise, typing outside the TextInput still trigger the system IME.
+        if cw.ime_active {
+            unsafe {
+                let input_context: ObjcId = msg_send![this, inputContext];
+                let () = msg_send![input_context, handleEvent: event];
+            }
         }
     }
 
@@ -820,7 +869,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         (Arc::new(items), pos)
     }
 
-    extern "C" fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
+    extern "C" fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) -> BOOL {
         //let window = get_cocoa_window(this);
         //window.end_live_resize();
         let modifiers = unsafe {
@@ -830,12 +879,18 @@ pub fn define_cocoa_view_class() -> *const Class {
         };
         let window = get_cocoa_window(this);
         let (items, pos) = get_drag_items_from_pasteboard(this, sender);
+        let handled = Arc::new(Mutex::new(false));
         window.do_callback(MacosEvent::Drop(DropEvent {
             modifiers,
-            handled: Arc::new(Mutex::new(false)),
+            handled: handled.clone(),
             abs: pos,
             items,
         }));
+        if *handled.lock().unwrap() {
+            YES
+        } else {
+            NO
+        }
     }
 
     /*
@@ -962,6 +1017,10 @@ pub fn define_cocoa_view_class() -> *const Class {
             yes_function as extern "C" fn(&Object, Sel, ObjcId) -> BOOL,
         );
         decl.add_method(
+            sel!(needsPanelToBecomeKey),
+            needs_panel_to_become_key as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
             sel!(acceptsFirstResponder:),
             yes_function as extern "C" fn(&Object, Sel, ObjcId) -> BOOL,
         );
@@ -1000,7 +1059,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             );
             decl.add_method(
                 sel!(performDragOperation:),
-                perform_drag_operation as extern "C" fn(&Object, Sel, ObjcId),
+                perform_drag_operation as extern "C" fn(&Object, Sel, ObjcId) -> BOOL,
             );
             decl.add_method(
                 sel!(draggingEnded:),

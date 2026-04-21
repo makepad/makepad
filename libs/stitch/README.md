@@ -14,28 +14,22 @@ We could add a fallback mode to Stitch that relies on a trampoline instead of ta
 
 ## Performance
 
-Stitch is very fast. I've compared it against several other engines, shown in the table here below:
+Stitch is very fast. I've compared it against Wasmi:
 
-| Name      | Description                                                  |
-| --------- | ------------------------------------------------------------ |
-| [Wasmi]   | The only other Wasm interpreter written in Rust that I know. |
-| [Wasm3]   | The fastest Wasm interpreter written in C that I know.       |
-| [Wasmtime] | A JIT compiler for Wasm.                                    |
+| Name    | Description                                                   |
+| ------- | ------------------------------------------------------------- |
+| [Wasmi] | The only other Wasm interpreter written in Rust that I know. |
 
 [Wasmi]: https://github.com/wasmi-labs/wasmi
-[Wasm3]: https://github.com/wasm3/wasm3
-[Wasmtime]: https://github.com/bytecodealliance/wasmtime
 
 ### Coremark Results
 
-The following table shows the Coremark scores for Stitch and the other engines I've compared it against on the three major 64-bit platforms:
+The following table shows the Coremark scores for Stitch and Wasmi on the three major 64-bit platforms:
 
 | Engine   | Mac   | Linux | Windows |
 | -------- | ----- | ----- | ------- |
 | Stitch   | 2950  | 1684  | 4592    |
-| Wasm3    | 2911  | 1734  | 3951    |
 | Wasmi    | 788   | 645   | 1574    |
-| Wasmtime | 12807 | 13724 | 34796   |
 
 The following table shows the CPU I've used for each platform:
 
@@ -46,15 +40,9 @@ The following table shows the CPU I've used for each platform:
 | Windows  | Intel i9-13900K @ 3.0GHz   |
 
 
-As you can see, Stitch is several times faster than Wasmi on all major platforms. Compared to Wasm3, it is slightly faster on Mac, slightly slower on Linux, and significantly faster on Windows.
-
-Stitch is much slower than Wasmtime (about 4x on Mac, about 8x on Linux and Windows), but that is to be expected, given that Wasmtime is a JIT compiler, whereas Stitch is an interpreter.
+As you can see, Stitch is several times faster than Wasmi on all major platforms.
 
 The reason Stitch is faster than Wasmi is that Stitch uses threaded code, whereas Wasmi uses an interpreter loop.
-
-The reason Stitch is slightly faster than Wasm3 on Mac, but slightly slower on Linux, is likely because Stitch has more variants per instruction compared to Wasm3, which puts pressure on the instruction cache. I suspect this gives Stitch the edge on the Apple M2 Pro, with its large instruction cache, but Wasm3 the edge on the Intel Xeon E312xx, with its smaller instruciton cache.
-
-The reason Stitch is significantly faster than Wasm3 on Windows is likely because Stitch uses the System V calling convention for its threaded code, while Wasm3 uses the vectorcall calling convention, which has fewer registers available to pass integer arguments.
 
 The above results were obtained by going to the `coremark` directory and running:
 
@@ -89,9 +77,8 @@ The following table shows how fast Stitch compiles on Mac compared to other Wasm
 | -------- | ------------ |
 | Stitch   | 2.29s        |
 | Wasmi    | 15.61s       |
-| Wasmtime | 81.02s       |
 
-As you can see, Stitch compiles much faster than either Wasmi or Wasmtime. If compile time is important to you, Stitch might be a good choice for you.
+As you can see, Stitch compiles much faster than Wasmi. If compile time is important to you, Stitch might be a good choice for you.
 
 ## Features
 
@@ -126,7 +113,7 @@ Stitch compiles and passes the Wasm core test suite on all the three major 64-bi
 
 Stitch currently does not run on 32-bit platforms. The reason for this is that I have not yet found a way to get LLVM to perform sibling call optimisation on these platforms (ideas welcome).
 
-If you need broader portability than this, either Wasmi or Wasm3 might be a better choice for you.
+If you need broader portability than this, Wasmi might be a better choice for you.
 
 ## Security
 

@@ -51,7 +51,16 @@ impl<T> Image<T> {
         &mut self.pixels
     }
 
-    pub unsafe fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
+    pub fn take_pixels(&mut self) -> Vec<T> {
+        mem::take(&mut self.pixels)
+    }
+
+    pub fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
+        assert_eq!(
+            self.size.width * self.size.height,
+            pixels.len(),
+            "pixel buffer length must match image size"
+        );
         mem::replace(&mut self.pixels, pixels)
     }
 

@@ -114,20 +114,17 @@ impl<'a> CxDraw<'a> {
                         scroll_stack.push(*area);
                     }
                     NavItem::EndScroll(area) => {
-                        if *area != scroll_stack.pop().unwrap() {
-                            panic!()
-                        };
+                        let popped = scroll_stack.pop()?;
+                        if *area != popped {
+                            return None;
+                        }
                     }
                 }
             }
             None
         }
-        if let Some(area) = iterate_nav_stops(cx, &mut scroll_stack, nav_tree, root, &mut callback)
-        {
-            Some((area, scroll_stack))
-        } else {
-            None
-        }
+        iterate_nav_stops(cx, &mut scroll_stack, nav_tree, root, &mut callback)
+            .map(|area| (area, scroll_stack))
     }
 
     pub fn nav_list_clear(&mut self, draw_list_id: DrawListId) {

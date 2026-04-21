@@ -9,12 +9,24 @@ impl ScriptHandleGc for Geometry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GeometryId(usize, u64);
 
 impl Geometry {
     pub fn geometry_id(&self) -> GeometryId {
         GeometryId(self.0.id, self.0.generation)
+    }
+}
+
+impl GeometryId {
+    #[allow(dead_code)]
+    pub(crate) fn slot_index(self) -> usize {
+        self.0
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn generation(self) -> u64 {
+        self.1
     }
 }
 
@@ -66,6 +78,8 @@ impl Geometry {
         cx.geometries[geometry.geometry_id()].indices.clear();
         cx.geometries[geometry.geometry_id()].vertices.clear();
         cx.geometries[geometry.geometry_id()].dirty = true;
+        cx.geometries[geometry.geometry_id()].dirty_vertices = true;
+        cx.geometries[geometry.geometry_id()].dirty_indices = true;
         geometry
     }
 
@@ -74,6 +88,35 @@ impl Geometry {
         cxgeom.indices = indices;
         cxgeom.vertices = vertices;
         cxgeom.dirty = true;
+        cxgeom.dirty_vertices = true;
+        cxgeom.dirty_indices = true;
+    }
+
+    /// Swap geometry buffers with caller-owned buffers without cloning.
+    ///
+    /// The caller receives the previous geometry buffers (cleared), preserving
+    /// their capacity for re-use on subsequent frames.
+    pub fn update_with_recycled_buffers(
+        &self,
+        cx: &mut Cx,
+        indices: &mut Vec<u32>,
+        vertices: &mut Vec<f32>,
+    ) {
+        let cxgeom = &mut cx.geometries[self.geometry_id()];
+        std::mem::swap(&mut cxgeom.indices, indices);
+        std::mem::swap(&mut cxgeom.vertices, vertices);
+        indices.clear();
+        vertices.clear();
+        cxgeom.dirty = true;
+        cxgeom.dirty_vertices = true;
+        cxgeom.dirty_indices = true;
+    }
+
+    pub fn update_indices(&self, cx: &mut Cx, indices: Vec<u32>) {
+        let cxgeom = &mut cx.geometries[self.geometry_id()];
+        cxgeom.indices = indices;
+        cxgeom.dirty = true;
+        cxgeom.dirty_indices = true;
     }
 }
 
@@ -82,6 +125,8 @@ pub struct CxGeometry {
     pub indices: Vec<u32>,
     pub vertices: Vec<f32>,
     pub dirty: bool,
+    pub dirty_vertices: bool,
+    pub dirty_indices: bool,
     #[allow(unused)]
     pub os: CxOsGeometry,
 }

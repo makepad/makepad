@@ -1,0 +1,9 @@
+[package]
+name = "makepad-openexr"
+version = "0.1.0"
+edition = "2021"
+description = "Focused OpenEXR scanline reader/writer for Makepad"
+
+[dependencies]
+makepad-fast-inflate = { path = "../fast_inflate" }
+makepad-half = { path = "../vulkan/makepad-half" }

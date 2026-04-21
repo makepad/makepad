@@ -26,6 +26,8 @@ pub struct ScrollBars {
     show_scroll_x: bool,
     #[live]
     show_scroll_y: bool,
+    #[live(false)]
+    ignore_scroll_input: bool,
     #[live]
     scroll_bar_x: ScrollBar,
     #[live]
@@ -132,34 +134,36 @@ impl ScrollBars {
         _scope: &mut Scope,
         actions: &mut Vec<ScrollBarsAction>,
     ) {
-        if self.show_scroll_x {
-            let mut ret_x = None;
-            self.scroll_bar_x
-                .handle_scroll_event(cx, event, self.area, &mut |_cx, action| match action {
-                    ScrollBarAction::Scroll { scroll_pos, .. } => {
-                        ret_x = Some(scroll_pos);
-                        actions.push(ScrollBarsAction::ScrollX(scroll_pos))
-                    }
-                    _ => (),
-                });
-            if let Some(x) = ret_x {
-                self.scroll.x = x;
-                self.redraw(cx);
+        if !self.ignore_scroll_input {
+            if self.show_scroll_x {
+                let mut ret_x = None;
+                self.scroll_bar_x
+                    .handle_scroll_event(cx, event, self.area, &mut |_cx, action| match action {
+                        ScrollBarAction::Scroll { scroll_pos, .. } => {
+                            ret_x = Some(scroll_pos);
+                            actions.push(ScrollBarsAction::ScrollX(scroll_pos))
+                        }
+                        _ => (),
+                    });
+                if let Some(x) = ret_x {
+                    self.scroll.x = x;
+                    self.redraw(cx);
+                }
             }
-        }
-        if self.show_scroll_y {
-            let mut ret_y = None;
-            self.scroll_bar_y
-                .handle_scroll_event(cx, event, self.area, &mut |_cx, action| match action {
-                    ScrollBarAction::Scroll { scroll_pos, .. } => {
-                        ret_y = Some(scroll_pos);
-                        actions.push(ScrollBarsAction::ScrollY(scroll_pos))
-                    }
-                    _ => (),
-                });
-            if let Some(y) = ret_y {
-                self.scroll.y = y;
-                self.redraw(cx);
+            if self.show_scroll_y {
+                let mut ret_y = None;
+                self.scroll_bar_y
+                    .handle_scroll_event(cx, event, self.area, &mut |_cx, action| match action {
+                        ScrollBarAction::Scroll { scroll_pos, .. } => {
+                            ret_y = Some(scroll_pos);
+                            actions.push(ScrollBarsAction::ScrollY(scroll_pos))
+                        }
+                        _ => (),
+                    });
+                if let Some(y) = ret_y {
+                    self.scroll.y = y;
+                    self.redraw(cx);
+                }
             }
         }
     }

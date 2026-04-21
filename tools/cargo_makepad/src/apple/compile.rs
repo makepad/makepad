@@ -3,12 +3,29 @@ use crate::makepad_shell::*;
 use crate::utils::*;
 use std::path::{Path, PathBuf};
 
+const IOS_DEPLOYMENT_TARGET: &str = "15.0";
+
+/// Resolve the cargo target directory for apple builds.
+/// Defaults to `target/apple` to avoid invalidating desktop build caches.
+fn cargo_target_dir(cwd: &Path) -> PathBuf {
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        if target_dir.is_absolute() {
+            target_dir
+        } else {
+            cwd.join(target_dir)
+        }
+    } else {
+        cwd.join("target").join("apple")
+    }
+}
+
 pub struct PlistValues {
-    identifier: String,
-    display_name: String,
-    name: String,
-    executable: String,
-    version: String,
+    pub identifier: String,
+    pub display_name: String,
+    pub name: String,
+    pub executable: String,
+    pub version: String,
 }
 
 pub struct ParsedProfiles {
@@ -140,6 +157,33 @@ pub fn parse_profiles() -> Result<ParsedProfiles, String> {
         }
     }
 
+    // Also discover devices via ios-deploy for older iOS versions (< 17)
+    if let Ok(ios_deploy_list) = shell_env_cap(
+        &[],
+        &cwd,
+        "ios-deploy",
+        &["-c", "--timeout", "3", "--no-wifi"],
+    ) {
+        for line in ios_deploy_list.split('\n') {
+            if let Some(idx) = line.find("Found ") {
+                let rest = &line[idx + "Found ".len()..];
+                if let Some(end) = rest.find(' ') {
+                    let udid = rest[..end].to_string();
+                    // Don't add if already present (devicectl UUID format differs from UDID)
+                    if !devices.iter().any(|(_, id)| id == &udid) {
+                        let name = line
+                            .split("a.k.a. '")
+                            .nth(1)
+                            .and_then(|s| s.split('\'').next())
+                            .unwrap_or("iOS Device")
+                            .to_string();
+                        devices.push((name, udid));
+                    }
+                }
+            }
+        }
+    }
+
     Ok(ParsedProfiles {
         profiles,
         certs,
@@ -218,6 +262,10 @@ impl PlistValues {
                 <string>{version}</string>
                 <key>CFBundleShortVersionString</key>
                 <string>{version}</string>
+                <key>CFBundleDevelopmentRegion</key>
+                <string>en</string>
+                <key>CFBundleIconName</key>
+                <string>AppIcon</string>
                 <key>UILaunchStoryboardName</key>
                 <string></string>
                 <key>CFBundleSupportedPlatforms</key>
@@ -231,11 +279,11 @@ impl PlistValues {
                 <key>DTPlatformName</key>
                 <string>iphoneos</string>
                 <key>DTPlatformVersion</key>
-                <string>17.5</string>
+                <string>26.0</string>
                 <key>DTSDKBuild</key>
                 <string>22A3362</string>
                 <key>DTSDKName</key>
-                <string>iphoneos17.5</string>
+                <string>iphoneos26.0</string>
                 <key>DTXcode</key>
                 <string>1600</string>
                 <key>DTXcodeBuild</key>
@@ -248,7 +296,7 @@ impl PlistValues {
                 <key>LSRequiresIPhoneOS</key>
                 <true/>
                 <key>MinimumOSVersion</key>
-                <string>17.5</string>
+                <string>15.0</string>
                 <key>UIApplicationSupportsIndirectInputEvents</key>
                 <true/>
                 <key>UIDeviceFamily</key>
@@ -283,6 +331,8 @@ impl PlistValues {
                 <false/>
                 <key>NSFaceIDUsageDescription</key>
                 <string>For biometric authentication</string>
+                <key>NSCameraUsageDescription</key>
+                <string>This app needs access to the camera for video capture functionality.</string>
                 <key>NSMicrophoneUsageDescription</key>
                 <string>This app needs access to the microphone for audio recording functionality.</string>
             </dict>
@@ -332,7 +382,7 @@ impl PlistValues {
             <key>DTPlatformName</key>
             <string>appletvos</string>
             <key>DTPlatformVersion</key>
-            <string>17.0</string>
+            <string>15.0</string>
             <key>DTSDKBuild</key>
             <string>21J351</string>
             <key>DTSDKName</key>
@@ -344,7 +394,7 @@ impl PlistValues {
             <key>LSRequiresIPhoneOS</key>
             <true/>
             <key>MinimumOSVersion</key>
-            <string>17.0</string>
+            <string>15.0</string>
             <key>UIDeviceFamily</key>
             <array>
             <integer>3</integer>
@@ -398,11 +448,206 @@ impl Scent {
     }
 }
 
+/// Generate and compile an Asset Catalog with AppIcon from the crate's
+/// `resources/` directory.  Requires a 1024×1024 PNG at minimum
+/// (`icon_1024.png`).  Smaller sizes are optional; iOS will scale down
+/// from the largest available.
+fn generate_app_icon_xcassets(app_dir: &Path, build_crate: &str) -> Result<bool, String> {
+    let crate_dir = get_crate_dir(build_crate)?;
+    let res = crate_dir.join("resources");
+    let icon_1024 = res.join("icon_1024.png");
+    if !icon_1024.is_file() {
+        return Ok(false);
+    }
+
+    // Build Assets.xcassets/AppIcon.appiconset/
+    let xcassets = app_dir.join("Assets.xcassets");
+    let appiconset = xcassets.join("AppIcon.appiconset");
+    mkdir(&appiconset)?;
+
+    // Copy available icon PNGs
+    let sizes: &[(&str, &str)] = &[("icon_1024.png", "icon_1024.png")];
+    for (src_name, dst_name) in sizes {
+        let src = res.join(src_name);
+        if src.is_file() {
+            cp(&src, &appiconset.join(dst_name), false)?;
+        }
+    }
+
+    // Contents.json — universal+platform entry for iOS 16+, classic
+    // idiom entries for iOS 15 and earlier (actool scales from 1024px).
+    let contents_json = r#"{
+  "images": [
+    {
+      "filename": "icon_1024.png",
+      "idiom": "universal",
+      "platform": "ios",
+      "size": "1024x1024"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "2x",
+      "size": "20x20"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "3x",
+      "size": "20x20"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "2x",
+      "size": "29x29"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "3x",
+      "size": "29x29"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "2x",
+      "size": "40x40"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "3x",
+      "size": "40x40"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "2x",
+      "size": "60x60"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "iphone",
+      "scale": "3x",
+      "size": "60x60"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "1x",
+      "size": "20x20"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "2x",
+      "size": "20x20"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "1x",
+      "size": "29x29"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "2x",
+      "size": "29x29"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "1x",
+      "size": "40x40"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "2x",
+      "size": "40x40"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "2x",
+      "size": "76x76"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ipad",
+      "scale": "2x",
+      "size": "83.5x83.5"
+    },
+    {
+      "filename": "icon_1024.png",
+      "idiom": "ios-marketing",
+      "scale": "1x",
+      "size": "1024x1024"
+    }
+  ],
+  "info": {
+    "author": "cargo-makepad",
+    "version": 1
+  }
+}"#;
+    write_text(&appiconset.join("Contents.json"), contents_json)?;
+
+    // Root Contents.json for Assets.xcassets
+    write_text(
+        &xcassets.join("Contents.json"),
+        r#"{"info":{"author":"cargo-makepad","version":1}}"#,
+    )?;
+
+    // Compile with actool
+    let cwd = std::env::current_dir().unwrap();
+    shell_env_cap(
+        &[],
+        &cwd,
+        "xcrun",
+        &[
+            "actool",
+            &xcassets.to_string_lossy(),
+            "--compile",
+            &app_dir.to_string_lossy(),
+            "--platform",
+            "iphoneos",
+            "--minimum-deployment-target",
+            IOS_DEPLOYMENT_TARGET,
+            "--app-icon",
+            "AppIcon",
+            "--output-partial-info-plist",
+            &app_dir.join("actool-Info.plist").to_string_lossy(),
+        ],
+    )?;
+
+    // Merge actool's partial Info.plist (contains CFBundleIcons for iOS 15)
+    // into the main Info.plist.
+    let actool_plist = app_dir.join("actool-Info.plist");
+    if actool_plist.is_file() {
+        let main_plist = app_dir.join("Info.plist");
+        // PlistBuddy Merge copies all keys from source into destination
+        shell_env_cap(
+            &[],
+            &cwd,
+            "/usr/libexec/PlistBuddy",
+            &[
+                "-c",
+                &format!("Merge {}", actool_plist.to_string_lossy()),
+                &main_plist.to_string_lossy(),
+            ],
+        )?;
+    }
+
+    Ok(true)
+}
+
 pub struct IosBuildResult {
-    app_dir: PathBuf,
-    build_dir: PathBuf,
-    plist: PlistValues,
-    dst_bin: PathBuf,
+    pub app_dir: PathBuf,
+    pub build_dir: PathBuf,
+    pub plist: PlistValues,
+    pub dst_bin: PathBuf,
 }
 
 pub fn build(
@@ -413,8 +658,13 @@ pub fn build(
     apple_target: AppleTarget,
 ) -> Result<IosBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
+    let binary_name =
+        get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
 
     let cwd = std::env::current_dir().unwrap();
+    let target_dir = cargo_target_dir(&cwd);
+    let target_dir_str = target_dir.to_string_lossy().to_string();
+    let target_dir_arg = format!("--target-dir={target_dir_str}");
     let target_opt = format!("--target={}", apple_target.toolchain());
 
     let base_args = &[
@@ -423,6 +673,7 @@ pub fn build(
         "cargo",
         "build",
         &target_opt,
+        &target_dir_arg,
     ];
 
     let mut args_out = Vec::new();
@@ -436,28 +687,31 @@ pub fn build(
         args_out.push("build-std=std");
     }
 
-    shell_env(
-        &[
-            ("RUST_BACKTRACE", "1"),
-            ("MAKEPAD", if stable { "" } else { "lines" }),
-        ],
-        &cwd,
-        "rustup",
-        &args_out,
-    )?;
+    let mut rust_env = vec![
+        ("RUST_BACKTRACE", "1"),
+        ("MAKEPAD", if stable { "" } else { "lines" }),
+        // The aws-lc-sys crate requires the cmake builder (not the cc builder)
+        // for iOS/tvOS cross-compilation targets.
+        ("AWS_LC_SYS_CMAKE_BUILDER", "1"),
+    ];
+    if matches!(apple_target.os(), AppleOs::Ios) {
+        rust_env.push(("IPHONEOS_DEPLOYMENT_TARGET", IOS_DEPLOYMENT_TARGET));
+        rust_env.push(("IPHONESIMULATOR_DEPLOYMENT_TARGET", IOS_DEPLOYMENT_TARGET));
+    }
+    shell_env(&rust_env, &cwd, "rustup", &args_out)?;
 
     // alright lets make the .app file with manifest
     let plist = PlistValues {
         identifier: format!("{org}.{product}").to_string(),
         display_name: product.to_string(),
         name: product.to_string(),
-        executable: build_crate.to_string(),
+        executable: binary_name.clone(),
         version: "1.0.0".to_string(),
     };
     let profile = get_profile_from_args(args);
 
-    let app_dir = cwd.join(format!(
-        "target/makepad-apple-app/{}/{profile}/{build_crate}.app",
+    let app_dir = target_dir.join(format!(
+        "makepad-apple-app/{}/{profile}/{build_crate}.app",
         apple_target.toolchain()
     ));
     mkdir(&app_dir)?;
@@ -465,12 +719,26 @@ pub fn build(
     let plist_file = app_dir.join("Info.plist");
     write_text(&plist_file, &plist.to_plist_file(apple_target.os()))?;
 
-    let build_dir = cwd.join(format!("target/{}/{profile}/", apple_target.toolchain()));
-    let src_bin = cwd.join(format!(
-        "target/{}/{profile}/{build_crate}",
+    if matches!(apple_target.os(), AppleOs::Ios) {
+        match generate_app_icon_xcassets(&app_dir, build_crate) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!(
+                    "warning: no icon_1024.png in resources/. iOS app will use default icon."
+                );
+            }
+            Err(e) => {
+                eprintln!("warning: failed to compile app icon asset catalog: {e}");
+            }
+        }
+    }
+
+    let build_dir = target_dir.join(format!("{}/{profile}/", apple_target.toolchain()));
+    let src_bin = target_dir.join(format!(
+        "{}/{profile}/{binary_name}",
         apple_target.toolchain()
     ));
-    let dst_bin = app_dir.join(build_crate.to_string());
+    let dst_bin = app_dir.join(binary_name.clone());
 
     cp(&src_bin, &dst_bin, false)?;
 
@@ -487,32 +755,36 @@ pub fn run_on_sim(
     args: &[String],
     apple_target: AppleTarget,
 ) -> Result<(), String> {
-    if apple_args.org.is_none() || apple_args.app.is_none() {
-        return Err(
-            "Please set --org=org --app=app on the commandline inbetween ios and run-sim."
-                .to_string(),
-        );
+    if apple_args.org.is_none() {
+        return Err("Please set --org=org before run-sim.".to_string());
     }
+
+    let build_crate = get_build_crate_from_args(args)?;
+    let default_app =
+        get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
 
     let result = build(
         apple_args.stable,
         &apple_args.org.unwrap_or("orgname".to_string()),
-        &apple_args.app.unwrap_or("productname".to_string()),
+        &apple_args.app.unwrap_or(default_app),
         args,
         apple_target,
     )?;
+    let build_crate = get_build_crate_from_args(args)?;
+    copy_resources(
+        &result.app_dir,
+        build_crate,
+        &result.build_dir,
+        apple_target,
+    )?;
+    let app_dir = result.app_dir.into_os_string().into_string().unwrap();
 
     let cwd = std::env::current_dir().unwrap();
     shell_env(
         &[],
         &cwd,
         "xcrun",
-        &[
-            "simctl",
-            "install",
-            "booted",
-            &result.app_dir.into_os_string().into_string().unwrap(),
-        ],
+        &["simctl", "install", "booted", &app_dir],
     )?;
 
     shell_env(
@@ -714,34 +986,55 @@ impl ProvisionData {
     }
 }
 
-fn copy_resources(
+pub fn copy_resources(
     app_dir: &Path,
     build_crate: &str,
     build_dir: &Path,
     apple_target: AppleTarget,
 ) -> Result<(), String> {
     /*let mut assets_to_add: Vec<String> = Vec::new();*/
+    let add_assets_dir =
+        |crate_name: &str, source_dir: &Path, asset_subdir: &str| -> Result<(), String> {
+            if !source_dir.is_dir() {
+                return Ok(());
+            }
+            let crate_name = crate_name.replace('-', "_");
+            let dst_dir = app_dir.join(format!("makepad/{crate_name}/{asset_subdir}"));
+            mkdir(&dst_dir)?;
+            cp_all(source_dir, &dst_dir, false)?;
+            Ok(())
+        };
+    let add_font_assets_dir = |crate_name: &str, source_dir: &Path| -> Result<(), String> {
+        if !source_dir.is_dir() {
+            return Ok(());
+        }
+        let crate_name = crate_name.replace('-', "_");
+        let dst_dir = app_dir.join(format!("makepad/{crate_name}/fonts"));
+        let assets = ls(source_dir)?;
+        for path in &assets {
+            let ext = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase());
+            if !matches!(
+                ext.as_deref(),
+                Some("ttf" | "otf" | "ttc" | "woff" | "woff2")
+            ) {
+                continue;
+            }
+            cp(&source_dir.join(path), &dst_dir.join(path), false)?;
+        }
+        Ok(())
+    };
 
     let build_crate_dir = get_crate_dir(build_crate)?;
-
-    let local_resources_path = build_crate_dir.join("resources");
-
-    if local_resources_path.is_dir() {
-        let underscore_build_crate = build_crate.replace('-', "_");
-        let dst_dir = app_dir.join(format!("makepad/{underscore_build_crate}/resources"));
-        mkdir(&dst_dir)?;
-        cp_all(&local_resources_path, &dst_dir, false)?;
-    }
+    add_assets_dir(build_crate, &build_crate_dir.join("resources"), "resources")?;
+    add_font_assets_dir(build_crate, &build_crate_dir.join("fonts"))?;
 
     let deps = get_crate_dep_dirs(build_crate, &build_dir, apple_target.toolchain());
     for (name, dep_dir) in deps.iter() {
-        let resources_path = dep_dir.join("resources");
-        if resources_path.is_dir() {
-            let name = name.replace("-", "_");
-            let dst_dir = app_dir.join(format!("makepad/{name}/resources"));
-            mkdir(&dst_dir)?;
-            cp_all(&resources_path, &dst_dir, false)?;
-        }
+        add_assets_dir(name, &dep_dir.join("resources"), "resources")?;
+        add_font_assets_dir(name, &dep_dir.join("fonts"))?;
     }
 
     Ok(())
@@ -788,9 +1081,12 @@ pub fn run_on_device(
     let provision = provision.unwrap();
 
     let org = apple_args.org.unwrap();
-    let app = apple_args.app.unwrap();
 
     let build_crate = get_build_crate_from_args(args)?;
+    let default_app =
+        get_package_binary_name(build_crate).unwrap_or_else(|| build_crate.to_string());
+    let app = apple_args.app.unwrap_or(default_app);
+
     let result = build(apple_args.stable, &org, &app, args, apple_target)?;
 
     let scent = Scent {
@@ -798,8 +1094,9 @@ pub fn run_on_device(
         team_id: provision.team_ident.to_string(),
     };
 
-    let scent_file = cwd.join(format!(
-        "target/makepad-apple-app/{}/release/{build_crate}.scent",
+    let target_dir = cargo_target_dir(&cwd);
+    let scent_file = target_dir.join(format!(
+        "makepad-apple-app/{}/release/{build_crate}.scent",
         apple_target.toolchain()
     ));
     write_text(&scent_file, &scent.to_scent_file())?;
@@ -854,7 +1151,9 @@ pub fn run_on_device(
         let device_identifier = parsed
             .device(device_identifier)
             .expect("cannot find signing device");
-        let answer = shell_env_cap(
+
+        // Try devicectl first, fall back to ios-deploy for older iOS (< 17)
+        let devicectl_result = shell_env_cap(
             &[],
             &cwd,
             "xcrun",
@@ -867,33 +1166,66 @@ pub fn run_on_device(
                 device_identifier,
                 &app_dir,
             ],
-        )?;
-        // Parse the bundleID from the installation output and launch the app
-        let mut bundle_id = None;
-        for line in answer.split("\n") {
-            if let Some(idx) = line.find("bundleID:") {
-                bundle_id = Some(line[idx + "bundleID:".len()..].trim().to_string());
-                break;
-            }
-        }
+        );
 
-        if let Some(bundle_id) = bundle_id {
-            shell_env(
-                &[],
-                &cwd,
-                "xcrun",
-                &[
-                    "devicectl",
-                    "device",
-                    "process",
-                    "launch",
-                    "--device",
-                    device_identifier,
-                    &bundle_id,
-                ],
-            )?;
-        } else {
-            return Err(format!("Failed to find bundleID in installation output"));
+        match devicectl_result {
+            Ok(answer) => {
+                // Parse the bundleID from the installation output and launch the app
+                let mut bundle_id = None;
+                for line in answer.split("\n") {
+                    if let Some(idx) = line.find("bundleID:") {
+                        bundle_id = Some(line[idx + "bundleID:".len()..].trim().to_string());
+                        break;
+                    }
+                }
+
+                if let Some(bundle_id) = bundle_id {
+                    shell_env(
+                        &[],
+                        &cwd,
+                        "xcrun",
+                        &[
+                            "devicectl",
+                            "device",
+                            "process",
+                            "launch",
+                            "--device",
+                            device_identifier,
+                            &bundle_id,
+                        ],
+                    )?;
+                } else {
+                    return Err(format!("Failed to find bundleID in installation output"));
+                }
+            }
+            Err(_) => {
+                // devicectl failed (device too old or unavailable), try ios-deploy
+                println!("devicectl failed, falling back to ios-deploy...");
+                // ios-deploy --justlaunch exits non-zero (253) when device debug
+                // symbols are missing, but the app is still installed and launched.
+                // Use shell_env_route to show progress output directly.
+                let result = shell_env_cap(
+                    &[],
+                    &cwd,
+                    "ios-deploy",
+                    &[
+                        "--bundle",
+                        &app_dir,
+                        "--id",
+                        device_identifier,
+                        "--justlaunch",
+                    ],
+                );
+                if let Err(e) = &result {
+                    if !e.contains("Unable to locate DeviceSupport") {
+                        return Err(e.clone());
+                    }
+                    // Missing debug symbols is non-fatal — app was installed and launched
+                    println!(
+                        "App installed and launched (debug symbols unavailable on this device)."
+                    );
+                }
+            }
         }
     }
 

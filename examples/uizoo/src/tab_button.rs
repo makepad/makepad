@@ -35,7 +35,7 @@ script_mod! {
                         gradient_fill_horizontal: instance(1.0)
                         color: #f00
                         color_2: #00f
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
                     text: "Button"
                 }
@@ -62,7 +62,7 @@ script_mod! {
                         gradient_fill_horizontal: instance(1.0)
                         color: #f00
                         color_2: #00f
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
                 }
             }
@@ -101,7 +101,7 @@ script_mod! {
                 ButtonGradientXIcon{
                     draw_icon +: {
                         color: #f00
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
                 }
             }
@@ -140,7 +140,7 @@ script_mod! {
                 ButtonGradientYIcon{
                     draw_icon +: {
                         color: #f00
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
                 }
             }
@@ -151,7 +151,7 @@ script_mod! {
                 ButtonFlat{
                     draw_icon +: {
                         color: #f00
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
                     text: "ButtonFlat"
                 }
@@ -160,7 +160,7 @@ script_mod! {
                     flow: Down
                     icon_walk: Walk{width: 15.}
                     draw_icon +: {
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
                     text: "ButtonFlat"
                 }
@@ -172,7 +172,7 @@ script_mod! {
                 ButtonFlatIcon{
                     draw_icon +: {
                         color: #f00
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
                 }
             }
@@ -183,7 +183,7 @@ script_mod! {
                 ButtonFlatter{
                     draw_icon +: {
                         color: #f00
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
                     text: "ButtonFlatter"
                 }
@@ -195,7 +195,7 @@ script_mod! {
                 ButtonFlatterIcon{
                     draw_icon +: {
                         color: #f00
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
                 }
             }

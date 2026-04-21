@@ -14,6 +14,8 @@ pub mod direct;
 pub mod openxr;
 #[cfg(target_os = "android")]
 pub mod openxr_anchor;
+#[cfg(all(target_os = "android", use_vulkan))]
+pub(crate) mod openxr_depth;
 #[cfg(target_os = "android")]
 pub mod openxr_input;
 #[cfg(target_os = "android")]
@@ -25,18 +27,25 @@ pub mod open_harmony;
 pub mod egl_sys;
 #[macro_use]
 pub mod gl_sys;
+pub(crate) mod gl_video_upload;
 pub mod libc_sys;
 pub mod module_loader;
 pub mod opengl;
 #[cfg(use_vulkan)]
-pub mod vulkan_naga;
-#[cfg(use_vulkan)]
 pub mod vulkan;
+#[cfg(use_vulkan)]
+pub mod vulkan_naga;
 
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod dma_buf;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod gstreamer_sys;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod ipc;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod linux_video_playback;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod linux_video_player;
 
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod alsa_audio;
@@ -46,6 +55,12 @@ pub mod alsa_midi;
 pub mod alsa_sys;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod linux_media;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod v4l2_camera;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod v4l2_camera_player;
+#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+pub mod v4l2_sys;
 
 #[cfg(not(target_os = "android"))]
 pub mod select_timer;
@@ -55,12 +70,8 @@ pub mod pulse_audio;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod pulse_sys;
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
-pub mod http;
-#[cfg(not(any(target_env = "ohos", target_os = "android")))]
+#[allow(dead_code)]
 mod socket_stream;
-
-#[cfg(not(target_os = "android"))]
-mod web_socket;
 
 #[cfg(target_os = "android")]
 pub mod android;
@@ -87,9 +98,3 @@ pub(crate) use self::android::android_midi::{OsMidiInput, OsMidiOutput};
 
 //#[cfg(target_env="ohos")]
 //pub(crate) use self::open_harmony::oh_media::{OsMidiInput, OsMidiOutput};
-
-#[cfg(not(target_os = "android"))]
-pub(crate) use web_socket::OsWebSocket;
-
-#[cfg(target_os = "android")]
-pub(crate) use self::android::android_web_socket::OsWebSocket;

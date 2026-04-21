@@ -18,12 +18,19 @@ mod apple_resources;
 pub mod apple_classes;
 pub mod apple_game_input;
 pub mod apple_media;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod apple_video_playback;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod apple_video_player;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod apple_webview;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod apple_yuv_metal;
 #[cfg(target_os = "macos")]
 pub mod audio_tap;
 pub mod audio_unit;
 pub mod av_capture;
 pub mod core_midi;
-pub mod url_session;
 
 #[cfg(target_os = "ios")]
 pub(crate) use self::ios::*;
@@ -34,4 +41,3 @@ pub(crate) use self::metal::*;
 pub(crate) use self::tvos::*;
 
 pub(crate) use self::core_midi::{OsMidiInput, OsMidiOutput};
-pub(crate) use self::url_session::OsWebSocket;

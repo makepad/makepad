@@ -28,10 +28,10 @@ pub fn parse_style_from_element(walker: &HtmlWalker, parent_style: &SvgStyle) ->
 
 fn apply_presentation_attrs(walker: &HtmlWalker, style: &mut SvgStyle) {
     if let Some(v) = walker.find_attr_lc(live_id!(fill)) {
-        style.fill = Some(parse_svg_paint(v));
+        style.fill = parse_svg_paint(v);
     }
     if let Some(v) = walker.find_attr_lc(live_id!(stroke)) {
-        style.stroke = Some(parse_svg_paint(v));
+        style.stroke = parse_svg_paint(v);
     }
     if let Some(v) = walker.find_attr_lc(live_id!(opacity)) {
         if let Some(n) = parse_number(v) {
@@ -101,10 +101,10 @@ fn apply_inline_style(style_str: &str, style: &mut SvgStyle) {
             let value = value.trim();
             match key.as_str() {
                 "fill" => {
-                    style.fill = Some(parse_svg_paint(value));
+                    style.fill = parse_svg_paint(value);
                 }
                 "stroke" => {
-                    style.stroke = Some(parse_svg_paint(value));
+                    style.stroke = parse_svg_paint(value);
                 }
                 "opacity" => {
                     if let Some(n) = parse_number(value) {
@@ -162,27 +162,30 @@ fn apply_inline_style(style_str: &str, style: &mut SvgStyle) {
     }
 }
 
-pub fn parse_svg_paint(s: &str) -> SvgPaint {
+pub fn parse_svg_paint(s: &str) -> Option<SvgPaint> {
     let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
     if s.eq_ignore_ascii_case("none") {
-        return SvgPaint::None;
+        return Some(SvgPaint::None);
     }
     if s.eq_ignore_ascii_case("currentColor") {
-        return SvgPaint::CurrentColor;
+        return Some(SvgPaint::CurrentColor);
     }
     // url(#id) reference for gradients
     if let Some(rest) = s.strip_prefix("url(") {
         if let Some(inner) = rest.strip_suffix(')') {
             let inner = inner.trim().trim_matches(|c| c == '\'' || c == '"');
             if let Some(id) = inner.strip_prefix('#') {
-                return SvgPaint::GradientRef(id.to_string());
+                return Some(SvgPaint::GradientRef(id.to_string()));
             }
         }
     }
     if let Some((r, g, b, a)) = parse_color(s) {
-        SvgPaint::Color(r, g, b, a)
+        Some(SvgPaint::Color(r, g, b, a))
     } else {
-        SvgPaint::None
+        None
     }
 }
 

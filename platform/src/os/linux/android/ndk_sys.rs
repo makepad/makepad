@@ -12,6 +12,12 @@ pub struct ANativeWindow {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct AHardwareBuffer {
+    _unused: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct AAssetManager {
     _unused: [u8; 0],
 }
@@ -53,7 +59,14 @@ extern "C" {
         frameRate: f32,
         compatibility: i8,
     ) -> i32;
+
+    pub fn AHardwareBuffer_acquire(buffer: *mut AHardwareBuffer);
+    pub fn AHardwareBuffer_release(buffer: *mut AHardwareBuffer);
 }
+
+pub const AHARDWAREBUFFER_USAGE_CPU_READ_RARELY: u64 = 2;
+pub const AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN: u64 = 3;
+pub const AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE: u64 = 1 << 8;
 
 pub type AChoreographer = c_void;
 pub type AChoreographerFrameCallbackData = c_void;

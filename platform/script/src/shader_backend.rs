@@ -39,12 +39,11 @@ impl ShaderBackend {
                     ShaderMode::Vertex => match io_type {
                         SHADER_IO_RUST_INSTANCE => (
                             ShaderIoKind::RustInstance,
-                            ShaderIoPrefix::Prefix("_io.i[_iov.iid]."),
+                            ShaderIoPrefix::Prefix("_io.i->"),
                         ),
-                        SHADER_IO_DYN_INSTANCE => (
-                            ShaderIoKind::DynInstance,
-                            ShaderIoPrefix::Prefix("_io.i[_iov.iid]."),
-                        ),
+                        SHADER_IO_DYN_INSTANCE => {
+                            (ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i->"))
+                        }
                         SHADER_IO_DYN_UNIFORM => {
                             (ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u->"))
                         }
@@ -106,6 +105,10 @@ impl ShaderBackend {
                             ShaderIoKind::Texture(TextureType::TextureDepthArray),
                             ShaderIoPrefix::Prefix("_io."),
                         ),
+                        SHADER_IO_TEXTURE_VIDEO => (
+                            ShaderIoKind::Texture(TextureType::TextureVideo),
+                            ShaderIoPrefix::Prefix("_io."),
+                        ),
                         SHADER_IO_SAMPLER => (
                             ShaderIoKind::Sampler(ShaderSamplerOptions::default()),
                             ShaderIoPrefix::Prefix("_io."),
@@ -131,12 +134,11 @@ impl ShaderBackend {
                         match io_type {
                             SHADER_IO_RUST_INSTANCE => (
                                 ShaderIoKind::RustInstance,
-                                ShaderIoPrefix::Prefix("_io.i[_iof.v->_iid]."),
+                                ShaderIoPrefix::Prefix("_io.i->"),
                             ),
-                            SHADER_IO_DYN_INSTANCE => (
-                                ShaderIoKind::DynInstance,
-                                ShaderIoPrefix::Prefix("_io.i[_iof.v->_iid]."),
-                            ),
+                            SHADER_IO_DYN_INSTANCE => {
+                                (ShaderIoKind::DynInstance, ShaderIoPrefix::Prefix("_io.i->"))
+                            }
                             SHADER_IO_DYN_UNIFORM => {
                                 (ShaderIoKind::Uniform, ShaderIoPrefix::Prefix("_io.u->"))
                             }
@@ -189,6 +191,10 @@ impl ShaderBackend {
                             ),
                             SHADER_IO_TEXTURE_DEPTH_ARRAY => (
                                 ShaderIoKind::Texture(TextureType::TextureDepthArray),
+                                ShaderIoPrefix::Prefix("_io."),
+                            ),
+                            SHADER_IO_TEXTURE_VIDEO => (
+                                ShaderIoKind::Texture(TextureType::TextureVideo),
                                 ShaderIoPrefix::Prefix("_io."),
                             ),
                             SHADER_IO_SAMPLER => (
@@ -284,6 +290,10 @@ impl ShaderBackend {
                                 ShaderIoKind::Texture(TextureType::TextureDepthArray),
                                 ShaderIoPrefix::Prefix(""),
                             ),
+                            SHADER_IO_TEXTURE_VIDEO => (
+                                ShaderIoKind::Texture(TextureType::TextureVideo),
+                                ShaderIoPrefix::Prefix(""),
+                            ),
                             SHADER_IO_SAMPLER => (
                                 ShaderIoKind::Sampler(ShaderSamplerOptions::default()),
                                 ShaderIoPrefix::Prefix(""),
@@ -365,6 +375,10 @@ impl ShaderBackend {
                             ),
                             SHADER_IO_TEXTURE_DEPTH_ARRAY => (
                                 ShaderIoKind::Texture(TextureType::TextureDepthArray),
+                                ShaderIoPrefix::Prefix(""),
+                            ),
+                            SHADER_IO_TEXTURE_VIDEO => (
+                                ShaderIoKind::Texture(TextureType::TextureVideo),
                                 ShaderIoPrefix::Prefix(""),
                             ),
                             SHADER_IO_SAMPLER => (
@@ -458,6 +472,10 @@ impl ShaderBackend {
                         ShaderIoKind::Texture(TextureType::TextureDepthArray),
                         ShaderIoPrefix::Prefix("rcx.tex_"),
                     ),
+                    SHADER_IO_TEXTURE_VIDEO => (
+                        ShaderIoKind::Texture(TextureType::TextureVideo),
+                        ShaderIoPrefix::Prefix("rcx.tex_"),
+                    ),
                     SHADER_IO_SAMPLER => (
                         ShaderIoKind::Sampler(ShaderSamplerOptions::default()),
                         ShaderIoPrefix::Prefix("rcx.sampler_"),
@@ -542,6 +560,10 @@ impl ShaderBackend {
                     ),
                     SHADER_IO_TEXTURE_DEPTH_ARRAY => (
                         ShaderIoKind::Texture(TextureType::TextureDepthArray),
+                        ShaderIoPrefix::Prefix("tex_"),
+                    ),
+                    SHADER_IO_TEXTURE_VIDEO => (
+                        ShaderIoKind::Texture(TextureType::TextureVideo),
                         ShaderIoPrefix::Prefix("tex_"),
                     ),
                     SHADER_IO_SAMPLER => (
@@ -1051,6 +1073,7 @@ impl ShaderBackend {
                 id_lut!(dfdy);
                 id_lut!(ddx);
                 id_lut!(ddy);
+                id_lut!(_mp_inverse);
                 id_lut!(rsqrt);
                 id_lut!(fmod);
                 id_lut!(frac);
@@ -1079,6 +1102,7 @@ impl ShaderBackend {
                 // Builtin function names
                 id_lut!(dFdx);
                 id_lut!(dFdy);
+                id_lut!(inverse);
                 id_lut!(inversesqrt);
                 id_lut!(mod);
             }
@@ -1086,10 +1110,12 @@ impl ShaderBackend {
                 // Builtin function names
                 id_lut!(dpdx);
                 id_lut!(dpdy);
+                id_lut!(inverse);
             }
             Self::Rust => {
                 // Rust uses canonical names from makepad_math - no remapping needed
                 // Register builtin function names used in Rust backend
+                id_lut!(inverse);
                 id_lut!(inverseSqrt);
                 id_lut!(modf);
             }
@@ -1101,6 +1127,7 @@ impl ShaderBackend {
             Self::Metal => match name_in {
                 id!(dFdx) => id!(dfdx),
                 id!(dFdy) => id!(dfdy),
+                id!(inverse) => id!(_mp_inverse),
                 id!(inverseSqrt) => id!(rsqrt),
                 id!(modf) => id!(fmod),
                 id!(discard) => id!(discard_fragment),
@@ -1120,6 +1147,7 @@ impl ShaderBackend {
                     // GLSL uses dFdx/dFdy natively, mod is native
                     id!(inverseSqrt) => id!(inversesqrt),
                     id!(modf) => id!(mod),
+                    id!(atan2) => id!(atan),
                     x => x,
                 }
             }
@@ -1171,16 +1199,17 @@ impl ShaderBackend {
                     id!(vec2b) => id!(packed_bool2),
                     id!(vec3b) => id!(packed_bool3),
                     id!(vec4b) => id!(packed_bool4),
-                    // Matrices use packed column vectors
-                    id!(mat2x2f) => id!(packed_float2x2),
-                    id!(mat2x3f) => id!(packed_float2x3),
-                    id!(mat2x4f) => id!(packed_float2x4),
-                    id!(mat3x2f) => id!(packed_float3x2),
-                    id!(mat3x3f) => id!(packed_float3x3),
-                    id!(mat3x4f) => id!(packed_float3x4),
-                    id!(mat4x2f) => id!(packed_float4x2),
-                    id!(mat4x3f) => id!(packed_float4x3),
-                    id!(mat4x4f) => id!(packed_float4x4),
+                    // Metal exposes packed vector types, but not packed matrix aliases.
+                    // Keep matrix names plain and rely on their native column layout.
+                    id!(mat2x2f) => id!(float2x2),
+                    id!(mat2x3f) => id!(float2x3),
+                    id!(mat2x4f) => id!(float2x4),
+                    id!(mat3x2f) => id!(float3x2),
+                    id!(mat3x3f) => id!(float3x3),
+                    id!(mat3x4f) => id!(float3x4),
+                    id!(mat4x2f) => id!(float4x2),
+                    id!(mat4x3f) => id!(float4x3),
+                    id!(mat4x4f) => id!(float4x4),
                     x => x,
                 }
             }
@@ -1272,7 +1301,43 @@ impl ShaderBackend {
             let pod_type = heap.pod_type_ref(ty);
             if let ScriptPodTy::Struct { .. } = &pod_type.ty {
                 let mut referenced = BTreeSet::new();
-                self.pod_type_def(heap, ty, &mut referenced, out);
+                self.pod_type_def_impl(heap, ty, &mut referenced, out, false);
+            }
+        }
+    }
+
+    pub fn pod_struct_defs_mixed(
+        &self,
+        heap: &ScriptHeap,
+        plain_root_structs: &BTreeSet<ScriptPodType>,
+        packed_root_structs: &BTreeSet<ScriptPodType>,
+        out: &mut String,
+    ) {
+        let mut packed_visited = BTreeSet::new();
+        let mut packed_order = Vec::new();
+        for root in packed_root_structs {
+            self.pod_struct_visit(heap, *root, &mut packed_visited, &mut packed_order);
+        }
+
+        let mut plain_visited = packed_visited.clone();
+        let mut plain_order = Vec::new();
+        for root in plain_root_structs {
+            self.pod_struct_visit(heap, *root, &mut plain_visited, &mut plain_order);
+        }
+
+        for ty in packed_order {
+            let pod_type = heap.pod_type_ref(ty);
+            if let ScriptPodTy::Struct { .. } = &pod_type.ty {
+                let mut referenced = BTreeSet::new();
+                self.pod_type_def_impl(heap, ty, &mut referenced, out, true);
+            }
+        }
+
+        for ty in plain_order {
+            let pod_type = heap.pod_type_ref(ty);
+            if let ScriptPodTy::Struct { .. } = &pod_type.ty {
+                let mut referenced = BTreeSet::new();
+                self.pod_type_def_impl(heap, ty, &mut referenced, out, false);
             }
         }
     }
@@ -1320,6 +1385,17 @@ impl ShaderBackend {
         referenced: &mut BTreeSet<ScriptPodType>,
         out: &mut String,
     ) {
+        self.pod_type_def_impl(heap, pod_ty, referenced, out, false)
+    }
+
+    fn pod_type_def_impl(
+        &self,
+        heap: &ScriptHeap,
+        pod_ty: ScriptPodType,
+        referenced: &mut BTreeSet<ScriptPodType>,
+        out: &mut String,
+        packed_fields: bool,
+    ) {
         let pod_type = heap.pod_type_ref(pod_ty);
         if let ScriptPodTy::Struct { fields, .. } = &pod_type.ty {
             if matches!(self, Self::Rust) {
@@ -1336,9 +1412,19 @@ impl ShaderBackend {
                     Self::Metal | Self::Hlsl | Self::Glsl => {
                         write!(out, "    ").ok();
                         if let ScriptPodTy::FixedArray { .. } = &field.ty.data.ty {
-                            self.pod_type_def_metal_array(&field.ty, &field.name, referenced, out);
+                            self.pod_type_def_metal_array(
+                                &field.ty,
+                                &field.name,
+                                referenced,
+                                out,
+                                packed_fields,
+                            );
                         } else {
-                            self.pod_type_name_referenced(&field.ty, referenced, out);
+                            if packed_fields {
+                                self.pod_type_name_packed_referenced(&field.ty, referenced, out);
+                            } else {
+                                self.pod_type_name_referenced(&field.ty, referenced, out);
+                            }
                             let field_name = self.map_field_name(field.name);
                             writeln!(out, " {};", field_name).ok();
                         }
@@ -1402,6 +1488,7 @@ impl ShaderBackend {
         name: &LiveId,
         referenced: &mut BTreeSet<ScriptPodType>,
         out: &mut String,
+        packed: bool,
     ) {
         let mut dims = String::new();
         let mut curr = ty;
@@ -1414,7 +1501,11 @@ impl ShaderBackend {
                 _ => break,
             }
         }
-        self.pod_type_name_referenced(curr, referenced, out);
+        if packed {
+            self.pod_type_name_packed_referenced(curr, referenced, out);
+        } else {
+            self.pod_type_name_referenced(curr, referenced, out);
+        }
         let mapped = self.map_field_name(*name);
         writeln!(out, " {}{};", mapped, dims).ok();
     }
@@ -1443,6 +1534,33 @@ impl ShaderBackend {
                 out.push_str(">");
             }
             _ => self.pod_type_name(ty, out),
+        }
+    }
+
+    fn pod_type_name_packed_referenced(
+        &self,
+        ty: &ScriptPodTypeInline,
+        referenced: &mut BTreeSet<ScriptPodType>,
+        out: &mut String,
+    ) {
+        match &ty.data.ty {
+            ScriptPodTy::Struct { .. } => {
+                referenced.insert(ty.self_ref);
+                let name = ty.data.name.unwrap();
+                let name = self.map_pod_name(name);
+                write!(out, "{}", name).ok();
+            }
+            ScriptPodTy::FixedArray { ty: inner, len, .. } => {
+                out.push_str("array<");
+                self.pod_type_name_packed_referenced(inner, referenced, out);
+                write!(out, ", {}>", len).ok();
+            }
+            ScriptPodTy::VariableArray { ty: inner, .. } => {
+                out.push_str("array<");
+                self.pod_type_name_packed_referenced(inner, referenced, out);
+                out.push_str(">");
+            }
+            _ => self.pod_type_name_packed(ty, out),
         }
     }
 

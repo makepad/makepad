@@ -3,8 +3,15 @@ use {
         cx::*,
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
-        event::game_input::*,
-        event::*,
+        event::{
+            game_input::*,
+            video_playback::{
+                VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
+                VideoPlaybackResourcesReleasedEvent, VideoTextureUpdatedEvent,
+                VideoYuvTexturesReady,
+            },
+            *,
+        },
         game_input::*,
         makepad_live_id::*,
         makepad_math::*,
@@ -17,14 +24,16 @@ use {
                 win32_window::Win32Window,
                 windows_game_input::WindowsGameInput,
                 windows_media::CxWindowsMedia,
+                windows_video_player::WindowsUnifiedVideoPlayer,
             },
         },
+        texture::{Texture, TextureFormat},
         //permission::{PermissionResult, PermissionStatus},
         thread::SignalToUI,
-        window::CxWindowPool,
+        window::{CxWindowPool, WindowId},
         windows::Win32::Graphics::Direct3D11::ID3D11Device,
     },
-    std::{cell::RefCell, rc::Rc, time::Instant},
+    std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant},
 };
 
 impl Cx {
@@ -37,13 +46,11 @@ impl Cx {
         // hack: store ID3D11Device in CxOs, so texture-related operations become possible on the makepad/studio side, yet don't completely destroy the code there
         cx.borrow_mut().os.d3d11_device = Some(d3d11_cx.borrow().device.clone());
 
-        for arg in std::env::args() {
-            if arg == "--stdin-loop" {
-                let mut cx = cx.borrow_mut();
-                cx.in_makepad_studio = true;
-                let mut d3d11_cx = d3d11_cx.borrow_mut();
-                return cx.stdin_event_loop(&mut d3d11_cx);
-            }
+        if crate::app_main::should_run_stdin_loop_from_env() {
+            let mut cx = cx.borrow_mut();
+            cx.in_makepad_studio = true;
+            let mut d3d11_cx = d3d11_cx.borrow_mut();
+            return cx.stdin_event_loop(&mut d3d11_cx);
         }
 
         let d3d11_windows = Rc::new(RefCell::new(Vec::new()));
@@ -72,6 +79,7 @@ impl Cx {
         d3d11_windows: &mut Vec<D3d11Window>,
     ) -> EventFlow {
         if let EventFlow::Exit = self.handle_platform_ops(d3d11_windows, d3d11_cx) {
+            self.call_event_handler(&Event::Shutdown);
             return EventFlow::Exit;
         }
 
@@ -97,6 +105,9 @@ impl Cx {
             }
             Win32Event::WindowLostFocus(window_id) => {
                 self.call_event_handler(&Event::WindowLostFocus(window_id));
+            }
+            Win32Event::PopupDismissed(event) => {
+                self.call_event_handler(&Event::PopupDismissed(event));
             }
             Win32Event::WindowResizeLoopStart(window_id) => {
                 if let Some(window) = d3d11_windows.iter_mut().find(|w| w.window_id == window_id) {
@@ -135,6 +146,28 @@ impl Cx {
             }
             Win32Event::WindowClosed(wc) => {
                 let window_id = wc.window_id;
+                // Cascade-close any popup windows parented to this window
+                let popup_ids: Vec<WindowId> = d3d11_windows
+                    .iter()
+                    .filter(|w| self.windows[w.window_id].popup_parent == Some(window_id))
+                    .map(|w| w.window_id)
+                    .collect();
+                for popup_id in popup_ids {
+                    self.call_event_handler(&Event::PopupDismissed(
+                        crate::event::PopupDismissedEvent {
+                            window_id: popup_id,
+                            reason: crate::event::PopupDismissReason::ParentClosed,
+                        },
+                    ));
+                    self.call_event_handler(&Event::WindowClosed(WindowClosedEvent {
+                        window_id: popup_id,
+                    }));
+                    self.windows[popup_id].is_created = false;
+                    if let Some(idx) = d3d11_windows.iter().position(|w| w.window_id == popup_id) {
+                        d3d11_windows[idx].win32_window.close_window();
+                        d3d11_windows.remove(idx);
+                    }
+                }
                 self.call_event_handler(&Event::WindowClosed(wc));
                 // lets remove the window from the set
                 self.windows[window_id].is_created = false;
@@ -147,6 +180,75 @@ impl Cx {
                 }
             }
             Win32Event::Paint => {
+                // Poll video players for new frames
+                if !self.os.video_players.is_empty() {
+                    let mut players = std::mem::take(&mut self.os.video_players);
+                    let mut video_events = Vec::new();
+                    for (_id, player) in players.iter_mut() {
+                        match player.check_prepared() {
+                            Some(Ok(crate::media_plugin::PlaybackPrepared {
+                                width,
+                                height,
+                                duration_ms: duration,
+                                is_seekable,
+                                video_tracks,
+                                audio_tracks,
+                            })) => {
+                                video_events.push(Event::VideoPlaybackPrepared(
+                                    VideoPlaybackPreparedEvent {
+                                        video_id: player.video_id,
+                                        video_width: width,
+                                        video_height: height,
+                                        duration,
+                                        is_seekable,
+                                        video_tracks,
+                                        audio_tracks,
+                                    },
+                                ));
+                            }
+                            Some(Err(err)) => {
+                                video_events.push(Event::VideoDecodingError(
+                                    VideoDecodingErrorEvent {
+                                        video_id: player.video_id,
+                                        error: err,
+                                    },
+                                ));
+                            }
+                            None => {}
+                        }
+                        if player.poll_frame(&mut self.textures) {
+                            video_events.push(Event::VideoTextureUpdated(
+                                VideoTextureUpdatedEvent {
+                                    video_id: player.video_id,
+                                    current_position_ms: player.current_position_ms(),
+                                    yuv: crate::event::video_playback::VideoYuvMetadata {
+                                        enabled: player.is_software_mode(),
+                                        matrix: player.yuv_matrix(),
+                                        biplanar: false,
+                                        rotation_steps: 0.0,
+                                    },
+                                },
+                            ));
+                        }
+                        if player.check_eos() {
+                            video_events.push(Event::VideoPlaybackCompleted(
+                                VideoPlaybackCompletedEvent {
+                                    video_id: player.video_id,
+                                },
+                            ));
+                        }
+                    }
+                    let needs_repaint = players.values().any(|p| p.is_playing());
+                    self.os.video_players = players;
+                    for event in video_events {
+                        self.call_event_handler(&event);
+                    }
+                    // Keep paint loop alive while any player is actively playing
+                    if needs_repaint {
+                        self.new_next_frame();
+                    }
+                }
+
                 let time_now = with_win32_app(|app| app.time_now());
                 if self.new_next_frames.len() != 0 {
                     self.call_next_frame_event(time_now);
@@ -229,11 +331,9 @@ impl Cx {
                 if SignalToUI::check_and_clear_action_signal() {
                     self.handle_action_receiver();
                 }
+                self.poll_control_channel();
 
-                //if self.handle_live_edit() {
-                //    self.call_event_handler(&Event::LiveEdit);
-                //    self.redraw_all();
-                //}
+                self.run_live_edit_if_needed("windows");
                 self.handle_networking_events();
 
                 self.win32_event_callback(Win32Event::Paint, d3d11_cx, d3d11_windows);
@@ -270,6 +370,9 @@ impl Cx {
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
                         //let dpi_factor = window.window_geom.dpi_factor;
+                        if window.is_in_resize {
+                            window.sync_background_color(self.passes[*draw_pass_id].clear_color);
+                        }
                         window.resize_buffers(&d3d11_cx);
                         self.draw_pass_to_window(*draw_pass_id, false, window, d3d11_cx);
                     }
@@ -286,14 +389,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
-        let mut out = Vec::new();
-        while let Ok(event) = self.os.network_response.receiver.try_recv() {
-            out.push(event);
-        }
-        if out.len() > 0 {
-            self.handle_script_network_events(&out);
-            self.call_event_handler(&Event::NetworkResponses(out))
-        }
+        self.dispatch_network_runtime_events();
     }
 
     pub(crate) fn handle_game_input_events(&mut self) {
@@ -336,7 +432,55 @@ impl Cx {
                         &window.create_title,
                         window.is_fullscreen,
                     );
+                    let visuals = window.window_visuals();
+                    let mut d3d11_window = d3d11_window;
+                    d3d11_window.win32_window.apply_window_visuals(visuals);
 
+                    window.window_geom = d3d11_window.window_geom.clone();
+                    d3d11_windows.push(d3d11_window);
+                    window.is_created = true;
+                    geom_changes.push(WindowGeomChangeEvent {
+                        window_id,
+                        old_geom: window.window_geom.clone(),
+                        new_geom: window.window_geom.clone(),
+                    });
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let window = &mut self.windows[window_id];
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+
+                    // Convert parent-relative position to screen coordinates
+                    let screen_position = if let Some(parent_d3d11) = d3d11_windows
+                        .iter()
+                        .find(|w| w.window_id == parent_window_id)
+                    {
+                        let parent_pos = parent_d3d11.win32_window.get_position();
+                        let parent_dpi = parent_d3d11.win32_window.get_dpi_factor();
+                        // parent_pos is already in screen pixels / dpi, position is in logical coords
+                        dvec2(
+                            parent_pos.x + position.x * parent_dpi,
+                            parent_pos.y + position.y * parent_dpi,
+                        )
+                    } else {
+                        position
+                    };
+
+                    let d3d11_window =
+                        D3d11Window::new_popup(window_id, &d3d11_cx, size, screen_position);
+                    let mut d3d11_window = d3d11_window;
+                    d3d11_window
+                        .win32_window
+                        .apply_window_visuals(window.window_visuals());
                     window.window_geom = d3d11_window.window_geom.clone();
                     d3d11_windows.push(d3d11_window);
                     window.is_created = true;
@@ -354,7 +498,6 @@ impl Cx {
                         d3d11_windows[index].win32_window.close_window();
                         d3d11_windows.remove(index);
                         if d3d11_windows.len() == 0 {
-                            self.call_event_handler(&Event::Shutdown);
                             ret = EventFlow::Exit
                         }
                     }
@@ -368,6 +511,8 @@ impl Cx {
                 }
                 CxOsOp::Deminiaturize(_window_id) => todo!(),
                 CxOsOp::HideWindow(_window_id) => todo!(),
+                CxOsOp::HideWindowButtons(_) => {}
+                CxOsOp::ShowWindowButtons(_) => {}
                 CxOsOp::MaximizeWindow(window_id) => {
                     if let Some(window) =
                         d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
@@ -409,9 +554,21 @@ impl Cx {
                         window.win32_window.set_topmost(is_topmost);
                     }
                 }
+                CxOsOp::SetWindowVisuals(window_id, visuals) => {
+                    if let Some(window) =
+                        d3d11_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.win32_window.apply_window_visuals(visuals);
+                    }
+                }
                 CxOsOp::CopyToClipboard(content) => unsafe {
                     Win32Window::copy_to_clipboard(&content);
                 },
+                CxOsOp::SetPrimarySelection(_) => {}
+                CxOsOp::ShowSelectionHandles { .. } => {}
+                CxOsOp::UpdateSelectionHandles { .. } => {}
+                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::SetCursor(cursor) => {
                     with_win32_app(|app| app.set_mouse_cursor(cursor));
                 }
@@ -432,23 +589,18 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    use crate::os::windows::http::WindowsHttpSocket;
-                    WindowsHttpSocket::open(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
-
-                    //todo!("HttpRequest not implemented yet on windows, we'll get there");
+                    let _ = self.net.http_start(request_id, request);
                 }
-                CxOsOp::ShowTextIME(area, pos) => {
+                CxOsOp::ShowTextIME(area, pos, _config) => {
                     let pos = area.clipped_rect(self).pos + pos;
                     d3d11_windows.iter_mut().for_each(|w| {
+                        w.win32_window.set_ime_active(true);
                         w.win32_window.set_ime_spot(pos);
                     });
                 }
                 CxOsOp::HideTextIME => {
                     d3d11_windows.iter_mut().for_each(|w| {
+                        w.win32_window.set_ime_active(false);
                         w.win32_window.set_ime_spot(Vec2d::default());
                     });
                 }
@@ -477,6 +629,124 @@ impl Cx {
                             status: crate::permission::PermissionStatus::Granted,
                         },
                     ));
+                }
+                // Mobile-only ops (soft keyboard, clipboard UI); no-op on desktop
+                CxOsOp::SyncImeState { .. } => {}
+                CxOsOp::ShowClipboardActions { .. } => {}
+                CxOsOp::HideClipboardActions => {}
+                CxOsOp::PrepareVideoPlayback(
+                    video_id,
+                    source,
+                    _camera_preview_mode,
+                    _external_texture_id,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                ) => {
+                    if self.os.video_players.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(device) = self.os.d3d11_device.clone() {
+                        // Allocate YUV textures internally for software decode path
+                        let tex_y = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
+                        let tex_u = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
+                        let tex_v = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
+                        let tex_y_id = tex_y.texture_id();
+                        let tex_u_id = tex_u.texture_id();
+                        let tex_v_id = tex_v.texture_id();
+                        let player = WindowsUnifiedVideoPlayer::new(
+                            &device,
+                            video_id,
+                            texture_id,
+                            tex_y_id,
+                            tex_u_id,
+                            tex_v_id,
+                            source,
+                            autoplay,
+                            should_loop,
+                        );
+                        self.os.video_players.insert(video_id, player);
+                        // Notify widget so it can bind textures to shader slots
+                        self.call_event_handler(&Event::VideoYuvTexturesReady(
+                            VideoYuvTexturesReady {
+                                video_id,
+                                tex_y,
+                                tex_u,
+                                tex_v,
+                            },
+                        ));
+                    } else {
+                        self.call_event_handler(&Event::VideoDecodingError(
+                            VideoDecodingErrorEvent {
+                                video_id,
+                                error: "D3D11 device unavailable for Windows video playback"
+                                    .to_string(),
+                            },
+                        ));
+                        crate::error!(
+                            "VIDEO: PrepareVideoPlayback skipped for {:?}: missing D3D11 device",
+                            video_id
+                        );
+                    }
+                }
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.play();
+                    }
+                }
+                CxOsOp::PauseVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.pause();
+                    }
+                }
+                CxOsOp::ResumeVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.resume();
+                    }
+                }
+                CxOsOp::MuteVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.mute();
+                    }
+                }
+                CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.unmute();
+                    }
+                }
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    if let Some(mut player) = self.os.video_players.remove(&video_id) {
+                        player.cleanup();
+                        self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id },
+                        ));
+                    }
+                }
+                CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.seek_to(position_ms);
+                    }
+                }
+                CxOsOp::SetVideoVolume(video_id, volume) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.set_volume(volume);
+                    }
+                }
+                CxOsOp::SetVideoPlaybackRate(video_id, rate) => {
+                    if let Some(player) = self.os.video_players.get_mut(&video_id) {
+                        player.set_playback_rate(rate);
+                    }
+                }
+                CxOsOp::AttachCameraNativePreview { .. }
+                | CxOsOp::UpdateCameraNativePreview { .. }
+                | CxOsOp::DetachCameraNativePreview { .. } => {
+                    // Native camera preview is emulated via composited texture path on Windows.
+                }
+                CxOsOp::PrepareAudioPlayback(_, _, _, _) => {
+                    // TODO: implement Windows audio-only playback
+                }
+                CxOsOp::UpdateVideoSurfaceTexture(_) => {
+                    // Android-only, no-op on Windows
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
@@ -530,15 +800,10 @@ impl CxGameInputApi for Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
-        if let Some(_item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
-            //    self.live_registry.borrow_mut().package_root = Some(item.to_string());
+        if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
+            self.package_root = Some(item.to_string());
         }
 
-        //self.live_expand();
-        //if std::env::args().find( | v | v == "--stdin-loop").is_none() {
-        //    self.start_disk_live_file_watcher(100);
-        //}
-        //self.live_scan_dependencies();
         self.native_load_dependencies();
 
         self.os.windows_game_input = Some(WindowsGameInput::init());
@@ -567,8 +832,8 @@ pub struct CxOs {
     pub(crate) start_time: Option<Instant>,
     pub(crate) media: CxWindowsMedia,
     pub(crate) d3d11_device: Option<ID3D11Device>,
-    pub(crate) network_response: NetworkResponseChannel,
     pub(crate) game_input_events: GameInputEventChannel,
     pub(crate) windows_game_input: Option<WindowsGameInput>,
-    //pub (crate) new_frame_being_rendered: Option<crate::cx_stdin::PresentableDraw>,
+    pub(crate) video_players: HashMap<LiveId, WindowsUnifiedVideoPlayer>,
+    pub(crate) async_hlsl_compile: crate::os::windows::d3d11::AsyncHlslCompile,
 }

@@ -1,9 +1,14 @@
 use {
     crate::{
-        animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+        animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
         makepad_derive_widget::*,
         makepad_draw::{
             event::finger::TouchState,
+            event::keyboard::CharOffset,
+            ime::{
+                AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
+                TextInputConfig,
+            },
             text::{
                 geom::Point,
                 layouter::{LaidoutText, SelectionRect},
@@ -12,6 +17,7 @@ use {
             *,
         },
         makepad_script::{ScriptFnRef, ScriptRefOptionExt},
+        scroll_bar::{ScrollAxis, ScrollBar},
         widget::*,
         widget_async::ScriptAsyncResult,
     },
@@ -35,6 +41,12 @@ script_mod! {
         is_read_only: false
         is_numeric_only: false
         empty_text: "Your text here"
+        scroll_bar: mod.widgets.ScrollBar {
+            bar_size: 8.0
+            bar_side_margin: 2.0
+            min_handle_size: 20.0
+            drag_scrolling: true
+        }
 
         draw_bg +: {
             hover: instance(0.0)
@@ -192,8 +204,13 @@ script_mod! {
             get_color: fn() {
                 return self.color
                     .mix(self.color_hover.mix(self.color_down, self.down), self.hover)
-                    .mix(self.color_empty, self.empty)
-                    .mix(self.color_focus, self.focus)
+                    .mix(
+                        self.color_empty
+                            .mix(self.color_empty_hover, self.hover)
+                            .mix(self.color_empty_focus, self.focus),
+                        self.empty
+                    )
+                    .mix(self.color_focus, self.focus * (1.0 - self.empty))
                     .mix(self.color_disabled, self.disabled)
             }
         }
@@ -287,6 +304,14 @@ script_mod! {
                     mix(theme.color_u_hidden, self.color, (1.0 - self.blink) * self.focus)
                 )
                 return sdf.result
+            }
+        }
+
+        draw_composition_underline +: {
+            color: uniform(#8)
+
+            pixel: fn() {
+                return self.color
             }
         }
 
@@ -479,6 +504,8 @@ pub struct TextInput {
     draw_selection: DrawQuad,
     #[live]
     draw_cursor: DrawQuad,
+    #[live]
+    draw_composition_underline: DrawQuad,
 
     #[layout]
     layout: Layout,
@@ -494,10 +521,25 @@ pub struct TextInput {
     #[live]
     is_numeric_only: bool,
     #[live]
+    input_mode: InputMode,
+    #[live]
+    autocapitalize: AutoCapitalize,
+    #[live]
+    autocorrect: AutoCorrect,
+    #[live]
+    return_key_type: ReturnKeyType,
+    #[live(false)]
+    is_multiline: bool,
+    #[live]
+    scroll_bar: ScrollBar,
+    #[live]
     scroll_y: f64,
+    /// Horizontal scroll offset for single-line mode (in logical pixels).
+    #[rust]
+    scroll_x: f64,
     #[live]
     empty_text: String,
-    #[rust]
+    #[live]
     text: String,
     #[live(0.5)]
     blink_speed: f64,
@@ -506,6 +548,8 @@ pub struct TextInput {
     password_text: String,
     #[rust]
     laidout_text: Option<Rc<LaidoutText>>,
+    #[rust]
+    laidout_width: Option<f32>,
     #[rust]
     text_area: Area,
     #[rust]
@@ -516,15 +560,39 @@ pub struct TextInput {
     blink_timer: Timer,
     #[rust]
     preserved_selection_cursor: Option<Cursor>,
+    /// When true, the next draw will scroll to keep the cursor visible.
+    /// Set when the cursor/selection changes; cleared after scroll_to_cursor runs.
+    #[rust(true)]
+    needs_scroll_to_cursor: bool,
+    /// Cached maximum vertical scroll offset from the last draw pass. Used during event
+    /// handling to ensure boundary checks match exactly (avoiding floating-point
+    /// mismatch between draw-time and event-time computations).
+    #[rust]
+    cached_max_scroll_y: f64,
+    /// Cached maximum horizontal scroll offset from the last draw pass.
+    #[rust]
+    cached_max_scroll_x: f64,
     /// Skip finger move after long press to prevent selection changes
     #[rust]
     ignore_next_move: bool,
     /// IME composition tracking - byte index where composition starts
     #[rust]
     composition_start: usize,
-    /// IME composition tracking - byte length of current composition
+    /// IME composition tracking - byte index where composition ends
     #[rust]
-    composition_length: usize,
+    composition_end: usize,
+    /// Frame ID when IME input was last received (echo prevention)
+    #[rust]
+    ime_update_frame: u64,
+    /// Cached text last sent to platform IME (echo prevention)
+    #[rust]
+    last_sent_ime_text: String,
+    /// Cached selection start (byte index) last sent to platform IME
+    #[rust]
+    last_sent_ime_sel_start: usize,
+    /// Cached selection end (byte index) last sent to platform IME
+    #[rust]
+    last_sent_ime_sel_end: usize,
 
     #[live]
     on_change: Option<ScriptFnRef>,
@@ -561,6 +629,22 @@ impl TextInput {
                 vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
             });
         }
+    }
+
+    pub fn is_multiline(&self) -> bool {
+        self.is_multiline
+    }
+
+    pub fn set_is_multiline(&mut self, cx: &mut Cx, is_multiline: bool) {
+        self.is_multiline = is_multiline;
+        if !is_multiline {
+            self.scroll_y = 0.0;
+            self.cached_max_scroll_y = 0.0;
+        }
+        self.scroll_x = 0.0;
+        self.cached_max_scroll_x = 0.0;
+        self.laidout_text = None;
+        self.draw_bg.redraw(cx);
     }
 
     pub fn is_password(&self) -> bool {
@@ -622,6 +706,7 @@ impl TextInput {
 
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
         self.selection = selection;
+        self.needs_scroll_to_cursor = true;
         self.history.force_new_edit_group();
         self.draw_bg.redraw(cx);
     }
@@ -739,7 +824,16 @@ impl TextInput {
     }
 
     fn layout_text(&mut self, cx: &mut Cx2d) {
-        if self.laidout_text.is_some() {
+        let turtle_rect = cx.turtle().inner_rect();
+        // For single-line mode, don't constrain the max width so the text lays out
+        // at its natural width. This allows us to detect overflow and scroll horizontally.
+        // For multiline mode, constrain to the available width for proper wrapping.
+        let max_width_in_lpxs = if self.is_multiline && !turtle_rect.size.x.is_nan() {
+            Some(turtle_rect.size.x as f32)
+        } else {
+            None
+        };
+        if self.laidout_text.is_some() && self.laidout_width == max_width_in_lpxs {
             return;
         }
         let text = if self.is_password {
@@ -752,13 +846,9 @@ impl TextInput {
         } else {
             &self.text
         };
-        let turtle_rect = cx.turtle().inner_rect();
-        let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
-            Some(turtle_rect.size.x as f32)
-        } else {
-            None
-        };
-        let wrap = cx.turtle().layout().flow == Flow::right_wrap();
+
+        let wrap = self.is_multiline && cx.turtle().layout().flow == Flow::right_wrap();
+        self.laidout_width = max_width_in_lpxs;
         self.laidout_text = Some(self.draw_text.layout(
             cx,
             0.0,
@@ -792,7 +882,14 @@ impl TextInput {
             .cursor_to_position(self.selection.cursor)
             .ok()
             .expect("layout should not be `None` because we called `layout_text` in `draw_walk`");
-        let x_in_lpxs = x_in_lpxs.min(cx.turtle().inner_rect().size.x as f32 - 2.0);
+        // For multiline, clamp cursor x to viewport width to prevent it from
+        // extending past the right edge. For single-line, don't clamp because
+        // the text may be scrolled horizontally, and the clip rect handles overflow.
+        let x_in_lpxs = if self.is_multiline {
+            x_in_lpxs.min(cx.turtle().inner_rect().size.x as f32 - 2.0)
+        } else {
+            x_in_lpxs
+        };
         let laidout_text = self
             .laidout_text
             .as_ref()
@@ -879,42 +976,104 @@ impl TextInput {
         let text_offset_x = widget_rect.pos.x + self.layout.padding.left as f64;
         let text_offset_y = widget_rect.pos.y + self.layout.padding.top as f64;
 
-        let sel_x = text_offset_x + (min_x * self.draw_text.font_scale) as f64;
-        let sel_y = text_offset_y + (min_y * self.draw_text.font_scale) as f64;
+        let sel_x = text_offset_x + (min_x * self.draw_text.font_scale) as f64 - self.scroll_x;
+        let sel_y = text_offset_y + (min_y * self.draw_text.font_scale) as f64 - self.scroll_y;
         let sel_width = ((max_x - min_x) * self.draw_text.font_scale) as f64;
         let sel_height = ((max_y - min_y) * self.draw_text.font_scale) as f64;
 
         rect(sel_x, sel_y, sel_width.max(10.0), sel_height.max(20.0))
     }
 
-    fn scroll_to_cursor(&mut self, cx: &mut Cx2d) {
-        // Compute the final size of the turtle, and obtain its inner height.
+    fn scroll_to_cursor(&mut self, cx: &mut Cx2d, content_clip_index: usize) {
+        // Compute the final size of the turtle, and obtain its inner dimensions.
+        // For multiline inputs, also clamp to the tightest ancestor max height,
+        // so that scrolling kicks in even when the TextInput's own walk height
+        // is unbounded Fit (relying on ancestors for the constraint).
         cx.compute_final_size();
-        let height = cx.turtle().inner_rect().size.y;
+        if self.is_multiline {
+            let ancestor_max = cx.compute_max_height_from_ancestors();
+            if ancestor_max < f64::MAX {
+                let turtle = cx.turtle_mut();
+                if turtle.height() > ancestor_max {
+                    turtle.set_height(ancestor_max);
+                }
+            }
+        }
+        // For single-line inputs with Fit width, clamp to the tightest ancestor
+        // max width so that horizontal scrolling kicks in when the text overflows
+        // the available space (e.g., parent has a fixed width).
+        if !self.is_multiline && self.walk.width.is_fit() {
+            let ancestor_max = cx.compute_max_width_from_ancestors();
+            if ancestor_max < f64::MAX {
+                let turtle = cx.turtle_mut();
+                if turtle.width() > ancestor_max {
+                    turtle.set_width(ancestor_max);
+                }
+            }
+        }
+        let inner_rect = cx.turtle().inner_rect();
+        let height = inner_rect.size.y;
+        let width = inner_rect.size.x;
 
-        // Compute the min and max y of the row that the cursor is on.
+        // Only auto-scroll to keep the cursor visible when the cursor has actually
+        // moved (typing, arrow keys, clicking). Don't do this on every redraw, as
+        // that would fight with user-initiated mouse wheel scrolling.
+        if self.needs_scroll_to_cursor {
+            self.needs_scroll_to_cursor = false;
+
+            let laidout_text = self.laidout_text.as_ref().unwrap();
+
+            if self.is_multiline {
+                let position = self.cursor_to_position(self.cursor()).unwrap();
+                let laidout_row = &laidout_text.rows[position.row_index];
+                let y_min =
+                    (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
+                let y_max =
+                    (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
+
+                // If the min y of the row is less than the scroll position, scroll up so
+                // that the top of the row appears at the top.
+                if y_min < self.scroll_y {
+                    self.scroll_y = y_min;
+                }
+
+                // If the max y of the row is greater than the scroll position, scroll
+                // down so that the bottom of the row appears at the bottom.
+                if y_max > self.scroll_y + height {
+                    self.scroll_y = y_max - height;
+                }
+            } else {
+                // Single-line: auto-scroll horizontally to keep the cursor visible.
+                let password_cursor =
+                    self.cursor_to_password_cursor(self.cursor());
+                let cursor_pos = laidout_text.cursor_to_position(password_cursor);
+                let cursor_x = cursor_pos.x_in_lpxs as f64;
+
+                // If the cursor is to the left of the visible area, scroll left.
+                if cursor_x < self.scroll_x {
+                    self.scroll_x = cursor_x;
+                }
+
+                // If the cursor is to the right of the visible area, scroll right.
+                if cursor_x > self.scroll_x + width {
+                    self.scroll_x = cursor_x - width;
+                }
+            }
+        }
+
+        // Always clamp the scroll positions to valid bounds, and cache
+        // the max values so the event handler uses the exact same values
+        // (avoiding floating-point mismatch with relative Fit bounds).
         let laidout_text = self.laidout_text.as_ref().unwrap();
         let laidout_text_height = laidout_text.size_in_lpxs.height as f64;
-        let position = self.cursor_to_position(self.cursor()).unwrap();
-        let laidout_row = &laidout_text.rows[position.row_index];
-        let y_min = (laidout_row.origin_in_lpxs.y - laidout_row.ascender_in_lpxs) as f64;
-        let y_max = (laidout_row.origin_in_lpxs.y - laidout_row.descender_in_lpxs) as f64;
-
-        // If the min y of the row is less than the scroll position, scroll up so that the top of
-        // the row appears at the top.
-        if y_min < self.scroll_y {
-            self.scroll_y = y_min;
-        }
-
-        // If the max y of the row is greater than the scroll position, scroll down so that the
-        // bottom of the row appears at the bottom.
-        if y_max > self.scroll_y + height {
-            self.scroll_y = y_max - height;
-        }
-
-        // Clamp the scroll position so that we cannot scroll past the start or end of the text.
-        let max_scroll_y = laidout_text_height.max(height) - height;
+        let max_scroll_y = (laidout_text_height - height).max(0.0);
+        self.cached_max_scroll_y = max_scroll_y;
         self.scroll_y = self.scroll_y.max(0.0).min(max_scroll_y);
+
+        let laidout_text_width = laidout_text.size_in_lpxs.width as f64;
+        let max_scroll_x = (laidout_text_width - width).max(0.0);
+        self.cached_max_scroll_x = max_scroll_x;
+        self.scroll_x = self.scroll_x.max(0.0).min(max_scroll_x);
 
         // Shift the align range of the turtle with the scroll position, but do not include the
         // begin entry, since that would also scroll the background.
@@ -924,8 +1083,30 @@ impl TextInput {
                 start: align_range.start + 1,
                 end: align_range.end,
             },
-            dvec2(0.0, -self.scroll_y),
+            dvec2(-self.scroll_x, -self.scroll_y),
         );
+
+        // Update the content clip rect AFTER shift_align_range, because the shift
+        // also moves BeginClip entries. By setting the clip to inner_rect here,
+        // we override whatever shift was applied, keeping the clip at the correct
+        // absolute position (the inner area excluding padding).
+        cx.update_clip_rect_at(content_clip_index, inner_rect);
+    }
+
+    /// Draws the vertical scrollbar when the text content overflows the visible area.
+    fn draw_scroll_bar(&mut self, cx: &mut Cx2d) {
+        if !self.is_multiline {
+            return;
+        }
+        let Some(laidout_text) = self.laidout_text.as_ref() else {
+            return;
+        };
+        let view_rect = cx.turtle().inner_rect();
+        let view_total = dvec2(view_rect.size.x, laidout_text.size_in_lpxs.height as f64);
+        // Sync scroll_y (which scroll_to_cursor may have updated) into the scrollbar.
+        self.scroll_bar.set_scroll_pos_no_action(cx, self.scroll_y);
+        self.scroll_bar
+            .draw_scroll_bar(cx, ScrollAxis::Vertical, view_rect, view_total);
     }
 
     /// Moves the cursor one column to the left.
@@ -1070,6 +1251,8 @@ impl TextInput {
         self.animator_play(cx, ids!(blink.on));
         cx.stop_timer(self.blink_timer);
         cx.hide_text_ime();
+        self.composition_start = 0;
+        self.composition_end = 0;
         // Only hide clipboard actions on mobile platforms where they're supported
         match cx.os_type() {
             OsType::Android(_) | OsType::Ios(_) => {
@@ -1078,6 +1261,93 @@ impl TextInput {
             _ => {}
         }
         cx.widget_action(uid, TextInputAction::KeyFocusLost);
+    }
+
+    fn has_composition(&self) -> bool {
+        self.composition_end > self.composition_start
+    }
+
+    fn get_ime_config(&self) -> TextInputConfig {
+        TextInputConfig {
+            soft_keyboard: SoftKeyboardConfig {
+                input_mode: if self.is_numeric_only && self.input_mode == InputMode::Text {
+                    InputMode::Decimal
+                } else {
+                    self.input_mode
+                },
+                autocapitalize: self.autocapitalize,
+                autocorrect: self.autocorrect,
+                return_key_type: self.return_key_type,
+            },
+            is_multiline: self.is_multiline,
+            is_secure: self.is_password,
+        }
+    }
+
+    fn update_ime_context(&mut self, cx: &mut Cx) {
+        if self.has_composition() {
+            return;
+        }
+
+        let sel_start_chars = self.text[..self.selection.start().index].chars().count();
+        let sel_end_chars = self.text[..self.selection.end().index].chars().count();
+
+        if self.text != self.last_sent_ime_text
+            || self.selection.start().index != self.last_sent_ime_sel_start
+            || self.selection.end().index != self.last_sent_ime_sel_end
+        {
+            self.last_sent_ime_text = self.text.clone();
+            self.last_sent_ime_sel_start = self.selection.start().index;
+            self.last_sent_ime_sel_end = self.selection.end().index;
+
+            cx.sync_ime_state(
+                self.text.clone(),
+                CharOffset(sel_start_chars)..CharOffset(sel_end_chars),
+                None,
+            );
+        }
+    }
+
+    fn draw_composition_underline(&mut self, cx: &mut Cx2d, text_rect: Rect) {
+        if !self.has_composition() {
+            return;
+        }
+
+        let laidout_text = self
+            .laidout_text
+            .as_ref()
+            .expect("layout should never be `None` here");
+
+        let composition_selection = Selection {
+            anchor: Cursor {
+                index: self.composition_start.min(self.text.len()),
+                prefer_next_row: false,
+            },
+            cursor: Cursor {
+                index: self.composition_end.min(self.text.len()),
+                prefer_next_row: false,
+            },
+        };
+
+        let selection = self.selection_to_password_selection(composition_selection);
+        let underline_height = 1.5 * self.draw_text.font_scale;
+
+        self.draw_composition_underline.begin_many_instances(cx);
+        for SelectionRect { rect_in_lpxs, .. } in laidout_text.selection_rects(selection) {
+            let scaled_x =
+                text_rect.pos.x + (rect_in_lpxs.origin.x * self.draw_text.font_scale) as f64;
+            let scaled_y = text_rect.pos.y
+                + ((rect_in_lpxs.origin.y + rect_in_lpxs.size.height) * self.draw_text.font_scale)
+                    as f64
+                - underline_height as f64;
+            let scaled_w = (rect_in_lpxs.size.width * self.draw_text.font_scale) as f64;
+
+            self.draw_composition_underline.draw_abs(
+                cx,
+                rect(scaled_x, scaled_y, scaled_w, underline_height as f64),
+            );
+        }
+        self.draw_composition_underline.end_many_instances(cx);
     }
 
     fn ceil_word_boundary(&self, index: usize) -> usize {
@@ -1107,26 +1377,44 @@ impl TextInput {
         if input.len() == 1 && input.chars().next().unwrap() <= '\u{1d}' {
             return String::new();
         }
-        if self.is_numeric_only {
-            let mut contains_dot = if is_set_text {
-                false
-            } else {
-                let before_selection = self.text[..self.selection.start().index].to_string();
-                let after_selection = self.text[self.selection.end().index..].to_string();
-                before_selection.contains('.') || after_selection.contains('.')
-            };
-            input
-                .chars()
-                .filter(|char| match char {
-                    '.' | ',' if !contains_dot => {
-                        contains_dot = true;
-                        true
-                    }
-                    char => char.is_ascii_digit(),
-                })
-                .collect()
+        // Use input_mode for filtering; fall back to is_numeric_only for backwards compat
+        let effective_mode = if self.is_numeric_only && self.input_mode == InputMode::Text {
+            InputMode::Decimal
         } else {
-            input.to_string()
+            self.input_mode
+        };
+        match effective_mode {
+            InputMode::Ascii => input.chars().filter(|c| c.is_ascii()).collect(),
+            InputMode::Numeric => input.chars().filter(|c| c.is_ascii_digit()).collect(),
+            InputMode::Decimal => {
+                let mut contains_dot = if is_set_text {
+                    false
+                } else {
+                    let before_selection = self.text[..self.selection.start().index].to_string();
+                    let after_selection = self.text[self.selection.end().index..].to_string();
+                    before_selection.contains('.') || after_selection.contains('.')
+                };
+                input
+                    .chars()
+                    .filter(|c| match c {
+                        '.' if !contains_dot => {
+                            contains_dot = true;
+                            true
+                        }
+                        '-' | '+' => true,
+                        c => c.is_ascii_digit(),
+                    })
+                    .collect()
+            }
+            InputMode::Tel => input
+                .chars()
+                .filter(|c| {
+                    c.is_ascii_digit() || matches!(c, '+' | '-' | ' ' | '(' | ')' | '*' | '#')
+                })
+                .collect(),
+            InputMode::Text | InputMode::Url | InputMode::Email | InputMode::Search => {
+                input.to_string()
+            }
         }
     }
 
@@ -1138,6 +1426,7 @@ impl TextInput {
     fn apply_edit(&mut self, cx: &mut Cx, edit: Edit) {
         self.selection.cursor.index = edit.start + edit.replace_with.len();
         self.selection.anchor.index = self.selection.cursor.index;
+        self.needs_scroll_to_cursor = true;
         self.history.apply_edit(edit, &mut self.text);
         self.laidout_text = None;
         self.check_text_is_empty(cx);
@@ -1147,6 +1436,7 @@ impl TextInput {
         if let Some(new_selection) = self.history.undo(self.selection, &mut self.text) {
             self.laidout_text = None;
             self.selection = new_selection;
+            self.needs_scroll_to_cursor = true;
             self.check_text_is_empty(cx);
             true
         } else {
@@ -1158,6 +1448,7 @@ impl TextInput {
         if let Some(new_selection) = self.history.redo(self.selection, &mut self.text) {
             self.laidout_text = None;
             self.selection = new_selection;
+            self.needs_scroll_to_cursor = true;
             self.check_text_is_empty(cx);
             true
         } else {
@@ -1188,12 +1479,12 @@ impl Widget for TextInput {
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
                 let trap = vm.bx.threads.cur().trap.pass();
-                let str_val = vm.bx.heap.vec_value(args_obj, 0, trap);
-                let new_text = vm
-                    .bx
-                    .heap
-                    .string_mut_self_with(str_val, |_, s| s.to_string());
-                if let Some(new_text) = new_text {
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    let new_text = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(value, out);
+                        out.to_string()
+                    });
                     vm.with_cx_mut(|cx| {
                         self.set_text(cx, &new_text);
                     });
@@ -1232,17 +1523,38 @@ impl Widget for TextInput {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_selection.append_to_draw_call(cx);
+        self.draw_composition_underline.append_to_draw_call(cx);
+        // Push an inner clip rect to prevent scrolled text from bleeding into
+        // the padding area. For multiline, this clips vertically-scrolled content.
+        // For single-line, this clips horizontally-scrolled content that overflows.
+        // We use a placeholder rect here (inner_origin with large size);
+        // scroll_to_cursor will tighten the bounds after compute_final_size
+        // determines the actual dimensions.
+        let inner_origin = cx.turtle().inner_origin();
+        let content_clip_index = cx.push_clip_rect_tracked(rect(
+            inner_origin.x,
+            inner_origin.y,
+            f64::MAX,
+            f64::MAX,
+        ));
         self.layout_text(cx);
         let text_rect = self.draw_text(cx);
         let cursor_rect = self.draw_cursor(cx, text_rect);
         self.draw_selection(cx, text_rect);
-        self.scroll_to_cursor(cx);
+        self.draw_composition_underline(cx, text_rect);
+        self.scroll_to_cursor(cx, content_clip_index);
+        cx.pop_clip_rect();
+        self.draw_scroll_bar(cx);
         self.draw_bg.end(cx);
         if cx.has_key_focus(self.draw_bg.area()) {
+            if self.ime_update_frame != cx.redraw_id() {
+                self.update_ime_context(cx);
+            }
             let cursor_bottom_pos = cursor_rect.pos + cursor_rect.size;
-            cx.show_text_ime(
+            cx.show_text_ime_with_config(
                 self.draw_bg.area(),
-                dvec2(cursor_bottom_pos.x, cursor_bottom_pos.y - self.scroll_y),
+                dvec2(cursor_bottom_pos.x - self.scroll_x, cursor_bottom_pos.y - self.scroll_y),
+                self.get_ime_config(),
             );
         }
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
@@ -1308,17 +1620,95 @@ impl Widget for TextInput {
             }
         }
 
+        // Handle scrollbar events for multiline text inputs.
+        if self.is_multiline {
+            // Handle mouse wheel / trackpad scroll directly.
+            // Makepad convention: positive scroll.y = viewport moves down = scroll_pos increases.
+            // self.scroll_y is the single source of truth; the ScrollBar is synced from it
+            // during draw_scroll_bar, so we don't update the ScrollBar here (which would
+            // trigger next_frame callbacks and cause feedback loops).
+            if let Event::Scroll(e) = event {
+                let bg_rect = self.draw_bg.area().rect(cx);
+                if !e.handled_y.get() && bg_rect.contains(e.abs) {
+                    // Use the cached max_scroll_y from the last draw pass to ensure
+                    // boundary checks match exactly, avoiding floating-point mismatch
+                    // with relative Fit bounds.
+                    let max_scroll_y = self.cached_max_scroll_y;
+                    if max_scroll_y > 0.0 {
+                        let new_scroll_y = (self.scroll_y + e.scroll.y).max(0.0).min(max_scroll_y);
+                        if new_scroll_y != self.scroll_y {
+                            self.scroll_y = new_scroll_y;
+                            self.draw_bg.redraw(cx);
+                            e.handled_y.set(true);
+                        }
+                    }
+                }
+            }
+
+            // Handle clicking/dragging on the scrollbar handle itself.
+            // We pass an empty callback because we sync scroll_y from the ScrollBar
+            // below, only when the scrollbar has actually captured the finger.
+            self.scroll_bar.handle_event_with(cx, event, &mut |_, _| {});
+
+            // If the scrollbar has captured the finger (user is dragging the handle),
+            // sync scroll_y from the ScrollBar (which is the source of truth during
+            // drag).
+            if self.scroll_bar.is_area_captured(cx) {
+                self.scroll_y = self.scroll_bar.get_scroll_pos();
+                self.draw_bg.redraw(cx);
+            }
+        }
+
+        // Handle horizontal scroll events for single-line text inputs.
+        // Only consume horizontal scroll (scroll.x), NOT vertical scroll —
+        // vertical scroll should propagate to parent containers.
+        if !self.is_multiline {
+            if let Event::Scroll(e) = event {
+                if !e.handled_x.get() && e.scroll.x != 0.0 {
+                    let bg_rect = self.draw_bg.area().rect(cx);
+                    if bg_rect.contains(e.abs) {
+                        let max_scroll_x = self.cached_max_scroll_x;
+                        if max_scroll_x > 0.0 {
+                            let new_scroll_x =
+                                (self.scroll_x + e.scroll.x).max(0.0).min(max_scroll_x);
+                            if new_scroll_x != self.scroll_x {
+                                self.scroll_x = new_scroll_x;
+                                self.draw_bg.redraw(cx);
+                                e.handled_x.set(true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Skip finger event processing if the scrollbar owns the finger,
+        // so dragging the scrollbar doesn't also move the text cursor.
+        let scrollbar_captured = self.is_multiline && self.scroll_bar.is_area_captured(cx);
+
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Text);
                 self.animator_play(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Default);
                 self.animator_play(cx, ids!(hover.off));
             }
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
                 self.reset_blink_timer(cx);
+                // Sync text state to platform IME before keyboard shows
+                let sel_start_chars = self.text[..self.selection.start().index].chars().count();
+                let sel_end_chars = self.text[..self.selection.end().index].chars().count();
+                cx.sync_ime_state(
+                    self.text.clone(),
+                    CharOffset(sel_start_chars)..CharOffset(sel_end_chars),
+                    None,
+                );
+                self.last_sent_ime_text = self.text.clone();
+                self.last_sent_ime_sel_start = self.selection.start().index;
+                self.last_sent_ime_sel_end = self.selection.end().index;
                 cx.widget_action(uid, TextInputAction::KeyFocus);
             }
             Hit::KeyFocusLost(_) => {
@@ -1426,7 +1816,7 @@ impl Widget for TextInput {
                 tap_count,
                 device,
                 ..
-            }) if device.is_primary_hit() => {
+            }) if device.is_primary_hit() && !scrollbar_captured => {
                 self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;
@@ -1538,7 +1928,7 @@ impl Widget for TextInput {
                 tap_count,
                 device,
                 ..
-            }) if device.is_primary_hit() => {
+            }) if device.is_primary_hit() && !scrollbar_captured => {
                 // Skip first move after long press to prevent selection changes
                 if self.ignore_next_move {
                     self.ignore_next_move = false;
@@ -1568,8 +1958,26 @@ impl Widget for TextInput {
                 modifiers: mods @ KeyModifiers { shift: false, .. },
                 ..
             }) => {
-                cx.hide_text_ime();
-                self.emit_return(cx, uid, mods);
+                // For multiline text input, plain Return inserts a newline
+                // For single-line, Return hides the keyboard and emits Returned action
+                if self.is_multiline && !self.is_read_only {
+                    self.reset_blink_timer(cx);
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: self.selection.start().index,
+                            end: self.selection.end().index,
+                            replace_with: "\n".to_string(),
+                        },
+                    );
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                } else {
+                    cx.hide_text_ime();
+                    cx.set_key_focus(Area::Empty);
+                    self.emit_return(cx, uid, mods);
+                }
             }
 
             Hit::KeyDown(KeyEvent {
@@ -1662,51 +2070,130 @@ impl Widget for TextInput {
                 self.draw_bg.redraw(cx);
                 self.emit_change(cx, uid);
             }
-            Hit::TextInput(TextInputEvent {
-                input,
-                replace_last,
-                was_paste,
-                ..
-            }) if !self.is_read_only => {
-                let input = self.filter_input(&input, false);
-                if input.is_empty() {
-                    // Empty input with replace_last means composition was cancelled
-                    if replace_last && self.composition_length > 0 {
-                        // Remove the composition text
-                        self.create_or_extend_edit_group(EditKind::Other);
-                        self.apply_edit(
-                            cx,
-                            Edit {
-                                start: self.composition_start,
-                                end: self.composition_start + self.composition_length,
-                                replace_with: String::new(),
-                            },
-                        );
-                        self.composition_length = 0;
-                        self.draw_bg.redraw(cx);
-                        self.emit_change(cx, uid);
+            Hit::TextInput(event) if !self.is_read_only => {
+                // Text changes invalidate any preserved cursor from a pending tap gesture
+                self.preserved_selection_cursor = None;
+
+                // Handle Android full state sync (authoritative from Java InputConnection)
+                if let Some(full_state) = &event.full_state_sync {
+                    let text_changed = self.text != full_state.text;
+                    if text_changed {
+                        self.history
+                            .create_or_extend_edit_group(EditKind::Other, self.selection);
+                        self.text = full_state.text.clone();
+                        self.laidout_text = None;
+                    }
+
+                    let sel_start_byte = full_state.selection.start.to_byte_index(&self.text);
+                    let sel_end_byte = full_state.selection.end.to_byte_index(&self.text);
+                    self.needs_scroll_to_cursor = true;
+                    self.selection = Selection {
+                        anchor: Cursor {
+                            index: sel_start_byte,
+                            prefer_next_row: false,
+                        },
+                        cursor: Cursor {
+                            index: sel_end_byte,
+                            prefer_next_row: false,
+                        },
+                    };
+
+                    if let Some(composition_range) = &full_state.composition {
+                        self.composition_start = composition_range.start.to_byte_index(&self.text);
+                        self.composition_end = composition_range.end.to_byte_index(&self.text);
+                    } else {
+                        self.composition_start = 0;
+                        self.composition_end = 0;
+                    }
+
+                    self.last_sent_ime_text = self.text.clone();
+                    self.last_sent_ime_sel_start = sel_start_byte;
+                    self.last_sent_ime_sel_end = sel_end_byte;
+                    self.ime_update_frame = cx.redraw_id();
+
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                    if text_changed {
+                        cx.hide_clipboard_actions();
                     }
                     return;
                 }
 
-                if replace_last {
-                    // IME composition update
-                    if self.composition_length > 0 {
-                        // Replace previous composition text
+                // Handle iOS range replacement (autocorrect/paste)
+                if let Some((start, end)) = event.replace_range {
+                    let filtered_text = self.filter_input(&event.input, false);
+                    if filtered_text.is_empty() && !event.input.is_empty() {
+                        self.update_ime_context(cx);
+                        return;
+                    }
+
+                    let byte_start = start.to_byte_index(&self.text);
+                    let byte_end = end.to_byte_index(&self.text);
+
+                    if self.has_composition() && byte_start < self.composition_start {
+                        let edit_delta =
+                            filtered_text.len() as isize - (byte_end - byte_start) as isize;
+                        self.composition_start =
+                            (self.composition_start as isize + edit_delta).max(0) as usize;
+                    }
+                    self.composition_end = self.composition_start;
+                    self.create_or_extend_edit_group(EditKind::Other);
+                    self.apply_edit(
+                        cx,
+                        Edit {
+                            start: byte_start,
+                            end: byte_end,
+                            replace_with: filtered_text,
+                        },
+                    );
+                    self.ime_update_frame = cx.redraw_id();
+
+                    self.animator_play(cx, ids!(empty.off));
+                    self.draw_bg.redraw(cx);
+                    self.emit_change(cx, uid);
+                    cx.hide_clipboard_actions();
+                    return;
+                }
+
+                // Handle regular text input and composition (all platforms)
+                let input = self.filter_input(&event.input, false);
+                if input.is_empty() {
+                    // Composition cancelled, remove preview text
+                    if event.replace_last && self.has_composition() {
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
                             Edit {
-                                start: self.composition_start,
-                                end: self.composition_start + self.composition_length,
+                                start: self.composition_start.min(self.text.len()),
+                                end: self.composition_end.min(self.text.len()),
+                                replace_with: String::new(),
+                            },
+                        );
+                        self.draw_bg.redraw(cx);
+                        self.emit_change(cx, uid);
+                    }
+                    self.composition_end = self.composition_start;
+                    return;
+                }
+
+                if event.replace_last {
+                    // IME composition preview
+                    if self.has_composition() {
+                        let start = self.composition_start.min(self.text.len());
+                        let end = self.composition_end.min(self.text.len());
+                        self.create_or_extend_edit_group(EditKind::Other);
+                        self.apply_edit(
+                            cx,
+                            Edit {
+                                start,
+                                end,
                                 replace_with: input.clone(),
                             },
                         );
-                        self.composition_length = input.len();
+                        self.composition_end = self.composition_start + input.len();
                     } else {
-                        // First composition character - record start position
                         self.composition_start = self.selection.start().index;
-                        self.composition_length = input.len();
+                        self.composition_end = self.composition_start + input.len();
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
@@ -1717,23 +2204,24 @@ impl Widget for TextInput {
                             },
                         );
                     }
+                    self.ime_update_frame = cx.redraw_id();
                 } else {
                     // Final commit or regular text input
-                    if self.composition_length > 0 {
-                        // Replace composition with final committed text
+                    if self.has_composition() {
+                        let start = self.composition_start.min(self.text.len());
+                        let end = self.composition_end.min(self.text.len());
                         self.create_or_extend_edit_group(EditKind::Other);
                         self.apply_edit(
                             cx,
                             Edit {
-                                start: self.composition_start,
-                                end: self.composition_start + self.composition_length,
+                                start,
+                                end,
                                 replace_with: input,
                             },
                         );
-                        self.composition_length = 0;
+                        self.composition_end = self.composition_start;
                     } else {
-                        // Normal text input (no active composition)
-                        self.create_or_extend_edit_group(if was_paste {
+                        self.create_or_extend_edit_group(if event.was_paste {
                             EditKind::Other
                         } else {
                             EditKind::Insert
@@ -1751,6 +2239,7 @@ impl Widget for TextInput {
                 self.animator_play(cx, ids!(empty.off));
                 self.draw_bg.redraw(cx);
                 self.emit_change(cx, uid);
+                cx.hide_clipboard_actions();
             }
             Hit::TextRangeReplace(event) if !self.is_read_only => {
                 // iOS autocorrect sends range replacement events
@@ -1768,8 +2257,11 @@ impl Widget for TextInput {
                     .map(|(i, _)| i)
                     .unwrap_or(self.text.len());
 
+                // Ensure valid range (guard against backwards indices)
+                let (byte_start, byte_end) = (byte_start.min(byte_end), byte_start.max(byte_end));
+
                 // Clear any active composition
-                self.composition_length = 0;
+                self.composition_end = self.composition_start;
 
                 // Perform the replacement
                 self.create_or_extend_edit_group(EditKind::Other);
@@ -1806,6 +2298,21 @@ impl Widget for TextInput {
                     self.emit_change(cx, uid);
                 }
             }
+            Hit::ImeAction(event) => {
+                use crate::makepad_platform::event::ImeAction;
+                let mods = KeyModifiers::default();
+                match event.action {
+                    ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
+                        cx.hide_text_ime();
+                        cx.set_key_focus(Area::Empty);
+                        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
+                    }
+                    ImeAction::Next | ImeAction::Previous => {
+                        cx.widget_action(uid, TextInputAction::Returned(self.text.clone(), mods));
+                    }
+                    ImeAction::Unspecified | ImeAction::None => {}
+                }
+            }
             Hit::KeyDown(event) => {
                 cx.widget_action(uid, TextInputAction::KeyDownUnhandled(event));
             }
@@ -1815,6 +2322,20 @@ impl Widget for TextInput {
 }
 
 impl TextInputRef {
+    pub fn is_multiline(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.is_multiline()
+        } else {
+            false
+        }
+    }
+
+    pub fn set_is_multiline(&self, cx: &mut Cx, is_multiline: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_is_multiline(cx, is_multiline);
+        }
+    }
+
     pub fn is_password(&self) -> bool {
         if let Some(inner) = self.borrow() {
             inner.is_password()

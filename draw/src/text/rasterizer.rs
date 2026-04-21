@@ -9,7 +9,7 @@ use super::{
     sdfer,
     sdfer::Sdfer,
 };
-use std::collections::{HashMap, HashSet};
+use fxhash::{FxHashMap, FxHashSet};
 //use std::{fs::File, io::BufWriter, path::Path, slice};
 
 #[derive(Debug)]
@@ -21,28 +21,17 @@ pub struct Rasterizer {
     outline_rasterization_mode: OutlineRasterizationMode,
     atlas: ColorAtlas,
     allocator: MultiPlaneAllocator,
-    cached_slots: HashMap<GlyphImageKey, AtlasSlot>,
-    outline_msdf_ready: HashSet<GlyphImageKey>,
-    outline_msdf_pending: HashSet<GlyphImageKey>,
-    outline_msdf_failed: HashSet<GlyphImageKey>,
+    cached_slots: FxHashMap<GlyphImageKey, AtlasSlot>,
+    outline_msdf_ready: FxHashSet<GlyphImageKey>,
+    outline_msdf_pending: FxHashSet<GlyphImageKey>,
+    outline_msdf_failed: FxHashSet<GlyphImageKey>,
     queued_msdf_jobs: Vec<QueuedMsdfJob>,
     atlas_epoch: u64,
 }
 
 impl Rasterizer {
     pub fn new(settings: Settings) -> Self {
-        let atlas_size = Size::new(
-            settings
-                .grayscale_atlas_size
-                .width
-                .max(settings.color_atlas_size.width)
-                .max(settings.msdf_atlas_size.width),
-            settings
-                .grayscale_atlas_size
-                .height
-                .max(settings.color_atlas_size.height)
-                .max(settings.msdf_atlas_size.height),
-        );
+        let atlas_size = settings.atlas_size;
         Self {
             sdfer: Sdfer::new(settings.sdfer),
             msdfer: Msdfer::new(settings.msdfer),
@@ -51,10 +40,10 @@ impl Rasterizer {
             outline_rasterization_mode: settings.outline_rasterization_mode,
             atlas: ColorAtlas::new(atlas_size),
             allocator: MultiPlaneAllocator::new(atlas_size),
-            cached_slots: HashMap::new(),
-            outline_msdf_ready: HashSet::new(),
-            outline_msdf_pending: HashSet::new(),
-            outline_msdf_failed: HashSet::new(),
+            cached_slots: FxHashMap::default(),
+            outline_msdf_ready: FxHashSet::default(),
+            outline_msdf_pending: FxHashSet::default(),
+            outline_msdf_failed: FxHashSet::default(),
             queued_msdf_jobs: Vec::new(),
             atlas_epoch: 0,
         }
@@ -218,16 +207,36 @@ impl Rasterizer {
         glyph_id: GlyphId,
         dpxs_per_em: f32,
     ) -> Option<RasterizedGlyph> {
-        if let Some(rasterized_glyph) = self.rasterize_glyph_outline(font, glyph_id, dpxs_per_em) {
-            return Some(rasterized_glyph);
-        };
         if let Some(rasterized_glyph) =
             self.rasterize_glyph_raster_image(font, glyph_id, dpxs_per_em)
         {
             return Some(rasterized_glyph);
         }
+        if let Some(rasterized_glyph) = self.rasterize_glyph_outline(font, glyph_id, dpxs_per_em) {
+            return Some(rasterized_glyph);
+        }
         None
     }
+
+    pub fn rasterize_glyph_stable_fallback(
+        &mut self,
+        font: &Font,
+        glyph_id: GlyphId,
+        dpxs_per_em: f32,
+    ) -> Option<RasterizedGlyph> {
+        if let Some(rasterized_glyph) =
+            self.rasterize_glyph_raster_image(font, glyph_id, dpxs_per_em)
+        {
+            return Some(rasterized_glyph);
+        }
+        if let Some(rasterized_glyph) =
+            self.rasterize_glyph_outline_sdf(font, glyph_id, dpxs_per_em)
+        {
+            return Some(rasterized_glyph);
+        }
+        None
+    }
+
     /*
     pub fn save_to_png(item:&Image<R>, path: impl AsRef<Path>) {
         let file = File::create(path).unwrap();
@@ -309,7 +318,7 @@ impl Rasterizer {
             slot.rect
         };
 
-        return Some(RasterizedGlyph {
+        Some(RasterizedGlyph {
             atlas_kind: AtlasKind::Grayscale,
             atlas_size: self.atlas.size(),
             atlas_image_bounds,
@@ -317,7 +326,7 @@ impl Rasterizer {
             atlas_plane: slot.plane.index(),
             origin_in_dpxs: bounds_in_ems.origin * dpxs_per_em,
             dpxs_per_em,
-        });
+        })
     }
 
     fn rasterize_glyph_outline_msdf(
@@ -394,34 +403,35 @@ impl Rasterizer {
     ) -> Option<RasterizedGlyph> {
         const PADDING: usize = 2;
 
-        let raster_image = font.glyph_raster_image(glyph_id, dpxs_per_em)?;
-        let key = GlyphImageKey {
-            font_id: font.id(),
-            glyph_id,
-            size: raster_image.decode_size() + Size::from(2 * PADDING),
-            kind: GlyphImageKind::Color,
-        };
-        let (slot, allocated) = self.allocate_shared_slot(key)?;
-        let atlas_image_bounds = if !allocated {
-            slot.rect
-        } else {
-            let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
-            {
-                let size = image.size();
-                image = image.subimage_mut(Rect::from(size).unpad(PADDING));
-                raster_image.decode(&mut image);
-            }
-            slot.rect
-        };
-        return Some(RasterizedGlyph {
-            atlas_kind: AtlasKind::Color,
-            atlas_size: self.atlas.size(),
-            atlas_image_bounds,
-            atlas_image_padding: PADDING,
-            atlas_plane: AtlasPlane::R.index(),
-            origin_in_dpxs: raster_image.origin_in_dpxs(),
-            dpxs_per_em: raster_image.dpxs_per_em(),
-        });
+        font.with_glyph_raster_image(glyph_id, dpxs_per_em, |raster_image| {
+            let key = GlyphImageKey {
+                font_id: font.id(),
+                glyph_id,
+                size: raster_image.decode_size() + Size::from(2 * PADDING),
+                kind: GlyphImageKind::Color,
+            };
+            let (slot, allocated) = self.allocate_shared_slot(key)?;
+            let atlas_image_bounds = if !allocated {
+                slot.rect
+            } else {
+                let mut image = self.atlas.get_cached_glyph_image_mut(slot.rect);
+                {
+                    let size = image.size();
+                    image = image.subimage_mut(Rect::from(size).unpad(PADDING));
+                    raster_image.decode(&mut image);
+                }
+                slot.rect
+            };
+            Some(RasterizedGlyph {
+                atlas_kind: AtlasKind::Color,
+                atlas_size: self.atlas.size(),
+                atlas_image_bounds,
+                atlas_image_padding: PADDING,
+                atlas_plane: AtlasPlane::R.index(),
+                origin_in_dpxs: raster_image.origin_in_dpxs(),
+                dpxs_per_em: raster_image.dpxs_per_em(),
+            })
+        })?
     }
 }
 
@@ -788,9 +798,7 @@ pub struct Settings {
     pub msdf_resolution: MsdfResolutionSettings,
     pub msdf_complexity: MsdfComplexitySettings,
     pub outline_rasterization_mode: OutlineRasterizationMode,
-    pub grayscale_atlas_size: Size<usize>,
-    pub color_atlas_size: Size<usize>,
-    pub msdf_atlas_size: Size<usize>,
+    pub atlas_size: Size<usize>,
 }
 
 #[derive(Clone, Debug)]

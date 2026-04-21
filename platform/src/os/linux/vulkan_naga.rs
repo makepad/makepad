@@ -1,8 +1,6 @@
 use {
     crate::makepad_script::{
-        shader::ShaderOutput,
-        shader_wgsl::compile_draw_shader_wgsl_source,
-        value::ScriptObject,
+        shader::ShaderOutput, shader_wgsl::compile_draw_shader_wgsl_source, value::ScriptObject,
         vm::ScriptVm,
     },
     std::fmt::Write,
@@ -15,6 +13,7 @@ pub struct CxVulkanShaderBinary {
     pub dyn_uniform_binding: u32,
     pub texture_binding_base: u32,
     pub sampler_binding_base: u32,
+    pub xr_depth_binding: u32,
     pub geometry_slots: usize,
     pub instance_slots: usize,
 }
@@ -57,7 +56,7 @@ fn compile_wgsl_to_spirv(wgsl: &str) -> Result<(Option<Vec<u32>>, Option<Vec<u32
     })?;
 
     let mut validator =
-        valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::empty());
+        valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all());
     let module_info = validator
         .validate(&module)
         .map_err(|e| format!("WGSL validation error: {e}"))?;
@@ -121,11 +120,13 @@ pub(crate) fn compile_draw_shader_wgsl_to_spirv(
     vm: &mut ScriptVm,
     io_self: ScriptObject,
     layout_source: &ShaderOutput,
+    xr_multiview: bool,
 ) -> Result<CxVulkanShaderBinary, String> {
-    let wgsl_source = compile_draw_shader_wgsl_source(vm, io_self, layout_source)?;
+    let wgsl_source = compile_draw_shader_wgsl_source(vm, io_self, layout_source, xr_multiview)?;
 
     if std::env::var_os("MAKEPAD_DUMP_VULKAN_WGSL").is_some() {
-        crate::log!("---- Vulkan WGSL ----\n{}", wgsl_source.wgsl);
+        let variant = if xr_multiview { "xr" } else { "window" };
+        crate::log!("---- Vulkan WGSL ({variant}) ----\n{}", wgsl_source.wgsl);
     }
 
     let (vertex_spirv, fragment_spirv) = compile_wgsl_to_spirv(&wgsl_source.wgsl)
@@ -137,6 +138,7 @@ pub(crate) fn compile_draw_shader_wgsl_to_spirv(
         dyn_uniform_binding: wgsl_source.dyn_uniform_binding,
         texture_binding_base: wgsl_source.texture_binding_base,
         sampler_binding_base: wgsl_source.sampler_binding_base,
+        xr_depth_binding: wgsl_source.xr_depth_binding,
         geometry_slots: wgsl_source.geometry_slots,
         instance_slots: wgsl_source.instance_slots,
     })

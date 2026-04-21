@@ -80,12 +80,9 @@ impl ShaderOutput {
                 };
                 let mut field_exprs = Vec::new();
                 for field in fields {
-                    field_exprs.push(self.hlsl_reconstruct_from_scalars(
-                        vm,
-                        &field.ty,
-                        scalars,
-                        scalar_idx,
-                    ));
+                    field_exprs.push(
+                        self.hlsl_reconstruct_from_scalars(vm, &field.ty, scalars, scalar_idx),
+                    );
                 }
                 format!("consfn_{}({})", struct_name, field_exprs.join(", "))
             }
@@ -105,7 +102,13 @@ impl ShaderOutput {
                 let args = scalars[start..end].join(", ");
                 let mut ty_name = String::new();
                 self.backend.pod_type_name(ty, &mut ty_name);
-                format!("{}({})", ty_name, args)
+                if matches!(ty.data.ty, ScriptPodTy::Mat(_)) {
+                    // Mat4f/MatNxM are stored column-major in CPU slot streams.
+                    // HLSL scalar constructors consume row-major order, so transpose.
+                    format!("transpose({}({}))", ty_name, args)
+                } else {
+                    format!("{}({})", ty_name, args)
+                }
             }
         }
     }
@@ -264,7 +267,7 @@ impl ShaderOutput {
                         out,
                         " {} : VARY{};",
                         self.backend.map_io_name(io.name),
-                        index_to_char(semantic_idx)
+                        index_to_semantic(semantic_idx)
                     )
                     .ok();
                     semantic_idx += 1;
@@ -301,7 +304,8 @@ impl ShaderOutput {
                 let slots = pod_ty.ty.slots();
                 let io_name = self.backend.map_io_name(io.name);
                 if Self::hlsl_input_needs_chunks(vm, io.ty) {
-                    for (chunk_idx, chunk_slots) in Self::hlsl_slot_chunks(slots).into_iter().enumerate()
+                    for (chunk_idx, chunk_slots) in
+                        Self::hlsl_slot_chunks(slots).into_iter().enumerate()
                     {
                         writeln!(
                             out,
@@ -309,7 +313,7 @@ impl ShaderOutput {
                             Self::hlsl_chunk_ty(chunk_slots),
                             io_name,
                             chunk_idx,
-                            index_to_char(semantic_idx),
+                            index_to_semantic(semantic_idx),
                             chunk_idx
                         )
                         .ok();
@@ -321,7 +325,7 @@ impl ShaderOutput {
                         out,
                         " vb_{} : GEOM{};",
                         io_name,
-                        index_to_char(semantic_idx)
+                        index_to_semantic(semantic_idx)
                     )
                     .ok();
                 }
@@ -338,7 +342,8 @@ impl ShaderOutput {
                 let slots = pod_ty.ty.slots();
                 let io_name = self.backend.map_io_name(io.name);
                 if Self::hlsl_input_needs_chunks(vm, io.ty) {
-                    for (chunk_idx, chunk_slots) in Self::hlsl_slot_chunks(slots).into_iter().enumerate()
+                    for (chunk_idx, chunk_slots) in
+                        Self::hlsl_slot_chunks(slots).into_iter().enumerate()
                     {
                         writeln!(
                             out,
@@ -346,7 +351,7 @@ impl ShaderOutput {
                             Self::hlsl_chunk_ty(chunk_slots),
                             io_name,
                             chunk_idx,
-                            index_to_char(semantic_idx),
+                            index_to_semantic(semantic_idx),
                             chunk_idx
                         )
                         .ok();
@@ -354,7 +359,13 @@ impl ShaderOutput {
                 } else {
                     write!(out, "    ").ok();
                     self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                    writeln!(out, " i_{} : INST{};", io_name, index_to_char(semantic_idx)).ok();
+                    writeln!(
+                        out,
+                        " i_{} : INST{};",
+                        io_name,
+                        index_to_semantic(semantic_idx)
+                    )
+                    .ok();
                 }
                 semantic_idx += 1;
             }
@@ -366,7 +377,8 @@ impl ShaderOutput {
                 let slots = pod_ty.ty.slots();
                 let io_name = self.backend.map_io_name(io.name);
                 if Self::hlsl_input_needs_chunks(vm, io.ty) {
-                    for (chunk_idx, chunk_slots) in Self::hlsl_slot_chunks(slots).into_iter().enumerate()
+                    for (chunk_idx, chunk_slots) in
+                        Self::hlsl_slot_chunks(slots).into_iter().enumerate()
                     {
                         writeln!(
                             out,
@@ -374,7 +386,7 @@ impl ShaderOutput {
                             Self::hlsl_chunk_ty(chunk_slots),
                             io_name,
                             chunk_idx,
-                            index_to_char(semantic_idx),
+                            index_to_semantic(semantic_idx),
                             chunk_idx
                         )
                         .ok();
@@ -382,7 +394,13 @@ impl ShaderOutput {
                 } else {
                     write!(out, "    ").ok();
                     self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                    writeln!(out, " i_{} : INST{};", io_name, index_to_char(semantic_idx)).ok();
+                    writeln!(
+                        out,
+                        " i_{} : INST{};",
+                        io_name,
+                        index_to_semantic(semantic_idx)
+                    )
+                    .ok();
                 }
                 semantic_idx += 1;
             }
@@ -454,6 +472,7 @@ impl ShaderOutput {
                         TextureType::TextureCubeArray => "TextureCubeArray",
                         TextureType::TextureDepth => "Texture2D",
                         TextureType::TextureDepthArray => "Texture2DArray",
+                        TextureType::TextureVideo => "Texture2D", // Video textures are standard Texture2D on HLSL
                     };
                     let io_name = self.backend.map_io_name(io.name);
                     writeln!(out, "{} {} : register(t{});", hlsl_type, io_name, tex_idx).ok();
@@ -555,7 +574,18 @@ impl ShaderOutput {
     }
 }
 
-/// Convert index to HLSL semantic character (A, B, C, ...)
-pub fn index_to_char(index: usize) -> char {
-    std::char::from_u32(index as u32 + 65).unwrap_or('?')
+/// Convert index to HLSL semantic suffix (A..Z, AA..AZ, BA..).
+pub fn index_to_semantic(index: usize) -> String {
+    const LETTERS: &[u8; 26] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let mut value = index;
+    let mut out = Vec::new();
+    loop {
+        let rem = value % 26;
+        out.push(LETTERS[rem] as char);
+        if value < 26 {
+            break;
+        }
+        value = value / 26 - 1;
+    }
+    out.iter().rev().collect()
 }

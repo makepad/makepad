@@ -357,6 +357,10 @@ impl Area {
     pub fn set_rect(&self, cx: &mut Cx, rect: &Rect) {
         match self {
             Area::Instance(inst) => {
+                if inst.instance_count == 0 {
+                    error!("set_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
+                    return;
+                }
                 let cxview = &mut cx.draw_lists[inst.draw_list_id];
                 if cxview.redraw_id != inst.redraw_id {
                     //println!("set_rect called on invalid area pointer, use mark/sweep correctly!");
@@ -368,12 +372,34 @@ impl Area {
                 let sh = &cx.draw_shaders[draw_call.draw_shader_id.index]; // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_mut().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
-                    buf[inst.instance_offset + rect_pos + 0] = rect.pos.x as f32;
-                    buf[inst.instance_offset + rect_pos + 1] = rect.pos.y as f32;
+                    let x_index = inst.instance_offset + rect_pos;
+                    let y_index = inst.instance_offset + rect_pos + 1;
+                    if y_index >= buf.len() {
+                        error!(
+                            "set_rect rect_pos out of bounds: offset={} rect_pos={} len={}",
+                            inst.instance_offset,
+                            rect_pos,
+                            buf.len()
+                        );
+                        return;
+                    }
+                    buf[x_index] = rect.pos.x as f32;
+                    buf[y_index] = rect.pos.y as f32;
                 }
                 if let Some(rect_size) = sh.mapping.rect_size {
-                    buf[inst.instance_offset + rect_size + 0] = rect.size.x as f32;
-                    buf[inst.instance_offset + rect_size + 1] = rect.size.y as f32;
+                    let w_index = inst.instance_offset + rect_size;
+                    let h_index = inst.instance_offset + rect_size + 1;
+                    if h_index >= buf.len() {
+                        error!(
+                            "set_rect rect_size out of bounds: offset={} rect_size={} len={}",
+                            inst.instance_offset,
+                            rect_size,
+                            buf.len()
+                        );
+                        return;
+                    }
+                    buf[w_index] = rect.size.x as f32;
+                    buf[h_index] = rect.size.y as f32;
                 }
             }
             Area::Rect(ra) => {

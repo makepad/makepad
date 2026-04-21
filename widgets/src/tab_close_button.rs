@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     makepad_derive_widget::*,
     makepad_draw::*,
 };
@@ -82,6 +82,10 @@ pub struct TabCloseButton {
 impl TabCloseButton {
     pub fn draw(&mut self, cx: &mut Cx2d) {
         self.draw_button.draw_walk(cx, self.walk);
+    }
+
+    pub fn set_draw_depth(&mut self, depth: f32) {
+        self.draw_button.draw_depth = depth;
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> TabCloseButtonAction {

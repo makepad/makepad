@@ -113,6 +113,15 @@ fn derive_script_impl_inner(
         tb.add("           if <Self as ScriptHook>::on_custom_apply(self, vm, apply, scope, value) || value.is_nil(){return};");
         tb.add("           <Self as ScriptHookDeref>::on_deref_before_apply(self, vm, apply, scope, value);");
 
+        let ui_root_field = fields.iter().find_map(|field| {
+            let ty = field.ty.to_string().replace(' ', "");
+            if field.name == "ui" && (ty == "WidgetRef" || ty.ends_with("::WidgetRef")) {
+                Some(field.name.clone())
+            } else {
+                None
+            }
+        });
+
         // Declare variables for apply_default fields to store their dirty values
 
         for field in &fields {
@@ -131,14 +140,24 @@ fn derive_script_impl_inner(
                 .iter()
                 .any(|a| a.name == "live" || a.name == "apply_default")
             {
-                tb.add("if let Some(v) = vm.bx.heap.value_for_apply(value, id!(")
+                tb.add("{ let mut __field_value = vm.bx.heap.value_for_apply(value, id!(")
                     .ident(&field.name)
-                    .add(").into(), apply){");
+                    .add(").into(), apply);");
+                tb.add("if __field_value.is_none() && apply.is_reload(){");
+                tb.add("    let default_value = <")
+                    .stream(Some(field.ty.clone()))
+                    .add(" as ScriptNew>::script_reload_default(vm);");
+                tb.add("    if !default_value.is_nil(){");
+                tb.add("        __field_value = Some(default_value);");
+                tb.add("    }");
+                tb.add("}");
+                tb.add("if let Some(v) = __field_value {");
                 tb.add("<")
                     .stream(Some(field.ty.clone()))
                     .add(" as ScriptApply>::script_apply(&mut self.")
                     .ident(&field.name)
                     .add(",vm, apply, scope, v);");
+                tb.add("}");
                 tb.add("}");
             }
             if field
@@ -152,6 +171,12 @@ fn derive_script_impl_inner(
                     .ident(&field.name)
                     .add(", vm, apply, scope, value);");
             }
+        }
+
+        if let Some(field_name) = &ui_root_field {
+            tb.add("self.")
+                .ident(field_name)
+                .add(".register_as_ui_root(vm);");
         }
 
         for field in &fields {
@@ -480,6 +505,16 @@ fn derive_script_impl_inner(
         // not use the type default (which is the enum API object with all variants)
         tb.add("    fn script_new_with_default(vm:&mut ScriptVm)->Self{");
         tb.add("        Self::script_new(vm)");
+        tb.add("    }");
+
+        tb.add("    fn script_reload_default(vm:&mut ScriptVm)->ScriptValue{");
+        tb.add(
+            "        if vm.bx.heap.type_default_for_id(Self::script_type_id_static()).is_some(){",
+        );
+        tb.add("            Self::script_new_with_default(vm).script_to_value(vm)");
+        tb.add("        } else {");
+        tb.add("            NIL");
+        tb.add("        }");
         tb.add("    }");
 
         tb.add("    fn script_type_check(heap:&ScriptHeap, value:ScriptValue)->bool{");

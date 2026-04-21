@@ -1,322 +1,396 @@
+pub use crate::makepad_network::WebSocketMessage;
 #[allow(unused_imports)]
 use crate::{
     cx_api::*,
-    event::{HttpMethod, HttpRequest},
+    event::Event,
+    makepad_live_id::LiveId,
     makepad_micro_serde::*,
-    os::OsWebSocket,
-    studio::{AppToStudio, AppToStudioVec},
+    makepad_network::{
+        HttpMethod, HttpRequest, NetworkResponse, NetworkRuntime, WebSocketTransport, WsMessage,
+        WsSend,
+    },
+    thread::SignalToUI,
     Cx,
+};
+use makepad_studio_protocol::{
+    hub_protocol::HubToClient, AppToStudio, AppToStudioVec, LocalProfileSample, StudioToApp,
+    StudioToAppVec,
 };
 #[allow(unused_imports)]
 use std::{
-    cell::RefCell,
-    collections::HashMap,
+    sync::Arc,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{channel, Receiver, RecvError, RecvTimeoutError, Sender, TryRecvError},
+        atomic::{AtomicBool, Ordering},
+        mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError},
         Mutex,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+pub type WebSocket = u64;
+
 #[derive(Debug)]
-pub enum WebSocketThreadMsg {
-    Open {
-        socket_id: u64,
-        request: HttpRequest,
-        rx_sender: Sender<WebSocketMessage>,
-    },
-    Close {
-        socket_id: u64,
-    },
-    SendMessage {
-        socket_id: u64,
-        message: WebSocketMessage,
-    },
-    AppToStudio {
-        message: AppToStudio,
-    },
+enum StudioWebSocketThreadMsg {
+    AppToStudio { message: AppToStudio },
     Terminate,
 }
 
-pub struct WebSocket {
-    socket_id: u64,
-    pub rx_receiver: Receiver<WebSocketMessage>,
-}
-
-#[derive(Debug)]
-pub enum WebSocketMessage {
-    Error(String),
-    Binary(Vec<u8>),
-    String(String),
-    Opened,
-    Closed,
-}
-
-pub(crate) static WEB_SOCKET_THREAD_SENDER: Mutex<Option<Sender<WebSocketThreadMsg>>> =
+static STUDIO_WEB_SOCKET_THREAD_SENDER: Mutex<Option<Sender<StudioWebSocketThreadMsg>>> =
     Mutex::new(None);
-pub(crate) static WEB_SOCKET_ID: AtomicU64 = AtomicU64::new(0);
+static STUDIO_NET_RUNTIME: Mutex<Option<Arc<NetworkRuntime>>> = Mutex::new(None);
 pub(crate) static HAS_STUDIO_WEB_SOCKET: AtomicBool = AtomicBool::new(false);
+pub(crate) static STUDIO_WEB_SOCKET_CONNECTED: AtomicBool = AtomicBool::new(false);
+pub(crate) static STUDIO_STDOUT_MODE: AtomicBool = AtomicBool::new(false);
+pub(crate) static LOCAL_PROFILE_CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
+pub(crate) static CONTROL_CHANNEL: Mutex<Option<Receiver<StudioToApp>>> = Mutex::new(None);
+pub(crate) static LOCAL_PROFILE_SAMPLES: Mutex<Vec<LocalProfileSample>> = Mutex::new(Vec::new());
+const LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT: usize = 16_384;
+const STUDIO_SOCKET_ID: u64 = 0;
 
-impl Drop for WebSocket {
-    fn drop(&mut self) {
-        self.close();
+pub(crate) fn consume_studio_socket_response(
+    response: &NetworkResponse,
+) -> Option<Vec<StudioToApp>> {
+    match response {
+        NetworkResponse::WsOpened { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
+            STUDIO_WEB_SOCKET_CONNECTED.store(true, Ordering::SeqCst);
+            Some(Vec::new())
+        }
+        NetworkResponse::WsClosed { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
+            STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+            crate::warning!("studio websocket closed");
+            Some(Vec::new())
+        }
+        NetworkResponse::WsError { socket_id, message } if socket_id.0 == STUDIO_SOCKET_ID => {
+            STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+            crate::error!("studio websocket error: {}", message);
+            Some(Vec::new())
+        }
+        NetworkResponse::WsMessage { socket_id, message } if socket_id.0 == STUDIO_SOCKET_ID => {
+            let msgs = match message {
+                WsMessage::Binary(data) => match StudioToAppVec::deserialize_bin(data) {
+                    Ok(msgs) => msgs.0,
+                    Err(err) => match HubToClient::deserialize_bin(data) {
+                        Ok(HubToClient::Hello { .. }) => Vec::new(),
+                        Ok(_) => {
+                            crate::warning!(
+                                "Ignoring unexpected HubToClient payload on studio app websocket"
+                            );
+                            Vec::new()
+                        }
+                        Err(_) => {
+                            crate::error!(
+                                "Cant parse studio websocket binary payload in windowed mode: {:?}",
+                                err
+                            );
+                            Vec::new()
+                        }
+                    },
+                },
+                WsMessage::Text(text) => {
+                    if text.trim().is_empty() {
+                        Vec::new()
+                    } else if let Ok(msg) = StudioToApp::deserialize_json(text) {
+                        vec![msg]
+                    } else {
+                        crate::warning!(
+                            "Ignoring unexpected studio websocket text: {}",
+                            text.trim()
+                        );
+                        Vec::new()
+                    }
+                }
+            };
+            Some(msgs)
+        }
+        _ => None,
     }
 }
+
+fn recv_studio_thread_msg(
+    rx: &Receiver<StudioWebSocketThreadMsg>,
+    timeout: Duration,
+) -> Result<StudioWebSocketThreadMsg, RecvTimeoutError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return rx.recv_timeout(timeout);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        if timeout == Duration::MAX {
+            return rx.recv().map_err(|_| RecvTimeoutError::Disconnected);
+        }
+
+        let deadline = Cx::time_now() + timeout.as_secs_f64();
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => return Ok(msg),
+                Err(TryRecvError::Empty) => {
+                    if Cx::time_now() >= deadline {
+                        return Err(RecvTimeoutError::Timeout);
+                    }
+                    std::thread::yield_now();
+                }
+                Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+            }
+        }
+    }
+}
+
+fn studio_ws_send_binary(data: Vec<u8>) -> Result<(), ()> {
+    let runtime = STUDIO_NET_RUNTIME
+        .lock()
+        .ok()
+        .and_then(|runtime| runtime.as_ref().cloned())
+        .ok_or(())?;
+    runtime
+        .ws_send(LiveId(STUDIO_SOCKET_ID), WsSend::Binary(data))
+        .map_err(|_| ())
+}
+
 impl Cx {
     pub fn has_studio_web_socket() -> bool {
         HAS_STUDIO_WEB_SOCKET.load(Ordering::SeqCst)
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn run_websocket_thread(&mut self) {
-        let (rx_sender, rx_receiver) = channel();
-        let mut thread_sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
-        *thread_sender = Some(rx_sender);
-        let sockets = Mutex::new(RefCell::new(HashMap::new()));
-        self.spawn_timer_thread(16, move || {
-            let mut app_to_studio = AppToStudioVec(Vec::new());
-            while let Ok(msg) = rx_receiver.try_recv() {
-                match msg {
-                    WebSocketThreadMsg::Open {
-                        socket_id,
-                        request,
-                        rx_sender,
-                    } => {
-                        let socket = OsWebSocket::open(socket_id, request, rx_sender);
-                        sockets
-                            .lock()
-                            .unwrap()
-                            .borrow_mut()
-                            .insert(socket_id, socket);
-                    }
-                    WebSocketThreadMsg::SendMessage { socket_id, message } => {
-                        if let Some(socket) =
-                            sockets.lock().unwrap().borrow_mut().get_mut(&socket_id)
-                        {
-                            socket.send_message(message).unwrap();
-                        }
-                    }
-                    WebSocketThreadMsg::AppToStudio { message } => {
-                        app_to_studio.0.push(message);
-                    }
-                    WebSocketThreadMsg::Close { socket_id } => {
-                        sockets.lock().unwrap().borrow_mut().remove(&socket_id);
-                    }
-                    WebSocketThreadMsg::Terminate {} => {
-                        for socket in sockets.lock().unwrap().borrow_mut().values_mut() {
-                            socket.close();
-                        }
-                        sockets.lock().unwrap().borrow_mut().clear();
-                    }
-                }
-            }
-            if app_to_studio.0.len() > 0 {
-                if let Some(socket) = sockets.lock().unwrap().borrow_mut().get_mut(&0) {
-                    socket
-                        .send_message(WebSocketMessage::Binary(app_to_studio.serialize_bin()))
-                        .unwrap()
-                }
-            }
-        });
+    pub fn has_studio_web_socket_connected() -> bool {
+        STUDIO_WEB_SOCKET_CONNECTED.load(Ordering::SeqCst)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn run_websocket_thread(&mut self) {
-        // lets create a thread
-        let (rx_sender, rx_receiver) = channel();
-        let mut thread_sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
-        *thread_sender = Some(rx_sender);
+    /// Enable stdout mode for studio messages. When enabled,
+    /// `send_studio_message` writes JSON lines to stdout instead of
+    /// the websocket. Also sets `HAS_STUDIO_WEB_SOCKET` so that
+    /// internal code paths (screenshots, widget dumps, event profiling)
+    /// remain active.
+    pub fn set_studio_stdout_mode(enabled: bool) {
+        STUDIO_STDOUT_MODE.store(enabled, Ordering::SeqCst);
+        HAS_STUDIO_WEB_SOCKET.store(enabled, Ordering::SeqCst);
+        STUDIO_WEB_SOCKET_CONNECTED.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Set a control channel for receiving StudioToApp messages.
+    /// Messages are polled by the event loop and dispatched as events.
+    /// The sender should call `SignalToUI::set_ui_signal()` after sending.
+    pub fn set_control_channel(rx: Receiver<StudioToApp>) {
+        *CONTROL_CHANNEL.lock().unwrap() = Some(rx);
+    }
+
+    pub fn local_profile_capture_enabled() -> bool {
+        LOCAL_PROFILE_CAPTURE_ENABLED.load(Ordering::SeqCst)
+    }
+
+    pub fn set_local_profile_capture_enabled(enabled: bool) {
+        LOCAL_PROFILE_CAPTURE_ENABLED.store(enabled, Ordering::SeqCst);
+        if !enabled {
+            if let Ok(mut samples) = LOCAL_PROFILE_SAMPLES.lock() {
+                samples.clear();
+            }
+        }
+    }
+
+    pub fn take_local_profile_samples() -> Vec<LocalProfileSample> {
+        if let Ok(mut samples) = LOCAL_PROFILE_SAMPLES.lock() {
+            return samples.drain(..).collect();
+        }
+        Vec::new()
+    }
+
+    fn capture_local_profile_sample(msg: &AppToStudio) {
+        if !Self::local_profile_capture_enabled() {
+            return;
+        }
+
+        let sample = match msg {
+            AppToStudio::EventSample(sample)
+                if Event::name_from_u32(sample.event_u32) == "Draw" =>
+            {
+                LocalProfileSample::Event(sample.clone())
+            }
+            AppToStudio::GPUSample(sample) => LocalProfileSample::GPU(sample.clone()),
+            AppToStudio::GCSample(sample) => LocalProfileSample::GC(sample.clone()),
+            _ => return,
+        };
+
+        if let Ok(mut samples) = LOCAL_PROFILE_SAMPLES.lock() {
+            samples.push(sample);
+            if samples.len() > LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT {
+                let remove = samples.len() - LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT;
+                samples.drain(0..remove);
+            }
+        }
+        SignalToUI::set_ui_signal();
+    }
+
+    fn run_studio_websocket_thread(&mut self) {
+        let (tx, rx) = channel();
+        *STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap() = Some(tx);
+
         self.spawn_thread(move || {
-            // this is the websocket thread.
-            let mut sockets = HashMap::new();
             let mut app_to_studio = AppToStudioVec(Vec::new());
-            let mut first_message = None;
-            let collect_time = Duration::from_millis(16);
+            let mut first_message_time = None;
+            let default_collect_time = Duration::from_millis(16);
+            let urgent_collect_time = Duration::from_millis(1);
+            let mut collect_time = default_collect_time;
             let mut cycle_time = Duration::MAX;
+
             loop {
-                // the idea is that this loop collects AppToStudio messages for a minimum of collect_time
-                // and then batches it. this solves flooding underlying platform websocket overhead (esp on web)
-                match rx_receiver.recv_timeout(cycle_time) {
-                    Ok(msg) => match msg {
-                        WebSocketThreadMsg::Open {
-                            socket_id,
-                            request,
-                            rx_sender,
-                        } => {
-                            let socket = OsWebSocket::open(socket_id, request, rx_sender);
-                            sockets.insert(socket_id, socket);
+                match recv_studio_thread_msg(&rx, cycle_time) {
+                    Ok(StudioWebSocketThreadMsg::AppToStudio { message }) => {
+                        if first_message_time.is_none() {
+                            first_message_time = Some(Cx::time_now());
                         }
-                        WebSocketThreadMsg::SendMessage { socket_id, message } => {
-                            if let Some(socket) = sockets.get_mut(&socket_id) {
-                                if socket.send_message(message).is_err() {
-                                    crate::log!("Websocket sender closed unexpectedly");
-                                    return;
-                                }
-                            }
+                        if matches!(
+                            &message,
+                            AppToStudio::BeforeStartup
+                                | AppToStudio::AfterStartup
+                                | AppToStudio::RequestAnimationFrame
+                                | AppToStudio::DrawCompleteAndFlip(_)
+                        ) {
+                            collect_time = urgent_collect_time;
                         }
-                        WebSocketThreadMsg::AppToStudio { message } => {
-                            if first_message.is_none() {
-                                first_message = Some(Instant::now())
-                            }
-                            app_to_studio.0.push(message);
-                            cycle_time = collect_time; // we should now block with a max of collect time since we received the first message
-                        }
-                        WebSocketThreadMsg::Close { socket_id } => {
-                            if let Some(socket) = sockets.get_mut(&socket_id) {
-                                socket.close();
-                            }
-                            sockets.remove(&socket_id);
-                        }
-                        WebSocketThreadMsg::Terminate => {
-                            for socket in sockets.values_mut() {
-                                socket.close();
-                            }
-                            *WEB_SOCKET_THREAD_SENDER.lock().unwrap() = None;
-                            return;
-                        }
-                    },
+                        app_to_studio.0.push(message);
+                        cycle_time = collect_time;
+                    }
+                    Ok(StudioWebSocketThreadMsg::Terminate) => {
+                        break;
+                    }
                     Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Disconnected) => break,
                 }
-                if let Some(first_time) = first_message {
-                    if Instant::now().duration_since(first_time) >= collect_time {
-                        // lets send it
-                        if let Some(socket) = sockets.get_mut(&0) {
-                            if socket
-                                .send_message(WebSocketMessage::Binary(
-                                    app_to_studio.serialize_bin(),
-                                ))
-                                .is_err()
-                            {
-                                println!("Studio websocket disconnected!");
-                                // studio disconnected, just stop the threadloop
-                                break;
-                            };
+
+                if let Some(first_time) = first_message_time {
+                    if (Cx::time_now() - first_time) >= collect_time.as_secs_f64() {
+                        if studio_ws_send_binary(app_to_studio.serialize_bin()).is_err() {
+                            STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+                            break;
                         }
                         app_to_studio.0.clear();
-                        first_message = None;
+                        first_message_time = None;
+                        collect_time = default_collect_time;
                         cycle_time = Duration::MAX;
                     }
                 }
             }
+            *STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap() = None;
         });
     }
 
     fn start_studio_websocket(&mut self, studio_http: &str) {
-        if studio_http.len() == 0 {
+        if studio_http.is_empty() {
+            crate::log!("studio websocket disabled: empty studio_http");
             return;
         }
         self.studio_http = studio_http.into();
 
         #[cfg(all(not(target_os = "tvos"), not(target_os = "ios")))]
         {
-            // lets open a websocket
             HAS_STUDIO_WEB_SOCKET.store(true, Ordering::SeqCst);
-            let request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
-            self.studio_web_socket = Some(WebSocket::open(request));
+            STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+            let mut request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
+            request.set_websocket_transport(WebSocketTransport::PlainTcp);
+            *STUDIO_NET_RUNTIME.lock().unwrap() = Some(self.net.clone());
+            if let Err(err) = self.net.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
+                crate::error!("could not open studio websocket: {err}");
+                HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
+                STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+                *STUDIO_NET_RUNTIME.lock().unwrap() = None;
+            }
         }
     }
 
     pub fn stop_studio_websocket(&mut self) {
-        self.studio_web_socket = None;
+        let _ = self.net.ws_close(LiveId(STUDIO_SOCKET_ID));
+        *STUDIO_NET_RUNTIME.lock().unwrap() = None;
         HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
-        let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
+        STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+        let sender = STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap();
         if let Some(sender) = &*sender {
-            sender.send(WebSocketThreadMsg::Terminate).unwrap();
+            let _ = sender.send(StudioWebSocketThreadMsg::Terminate);
         }
     }
 
     #[cfg(any(target_os = "tvos", target_os = "ios"))]
     pub fn start_studio_websocket_delayed(&mut self) {
         HAS_STUDIO_WEB_SOCKET.store(true, Ordering::SeqCst);
-        let request = HttpRequest::new(self.studio_http.clone(), HttpMethod::GET);
-        self.studio_web_socket = Some(WebSocket::open(request));
+        STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+        let mut request = HttpRequest::new(self.studio_http.clone(), HttpMethod::GET);
+        request.set_websocket_transport(WebSocketTransport::PlainTcp);
+        *STUDIO_NET_RUNTIME.lock().unwrap() = Some(self.net.clone());
+        if let Err(err) = self.net.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
+            crate::error!("could not open delayed studio websocket: {err}");
+            HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
+            STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+            *STUDIO_NET_RUNTIME.lock().unwrap() = None;
+        }
     }
 
     pub fn init_websockets(&mut self, studio_http: &str) {
-        self.run_websocket_thread();
+        self.run_studio_websocket_thread();
         self.start_studio_websocket(studio_http);
     }
 
-    pub fn send_studio_message(msg: AppToStudio) {
-        if !Cx::has_studio_web_socket() {
-            return;
-        }
-        let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
-        if let Some(sender) = &*sender {
-            let _ = sender.send(WebSocketThreadMsg::AppToStudio { message: msg });
-        } else {
-            println!("Web socket thread not running (yet) for {:?}", msg);
-        }
-    }
-}
-
-impl WebSocket {
-    pub fn close(&mut self) {
-        if let Ok(sender) = WEB_SOCKET_THREAD_SENDER.lock() {
-            if let Some(sender) = &*sender {
-                let _ = sender.send(WebSocketThreadMsg::Close {
-                    socket_id: self.socket_id,
-                });
+    #[cfg(not(target_os = "android"))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
+        loop {
+            let response = self.net.recv().ok()?;
+            match response {
+                NetworkResponse::WsOpened { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
+                    STUDIO_WEB_SOCKET_CONNECTED.store(true, Ordering::SeqCst);
+                    return Some(WebSocketMessage::Opened);
+                }
+                NetworkResponse::WsClosed { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
+                    STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+                    return Some(WebSocketMessage::Closed);
+                }
+                NetworkResponse::WsError { socket_id, message }
+                    if socket_id.0 == STUDIO_SOCKET_ID =>
+                {
+                    STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+                    return Some(WebSocketMessage::Error(message));
+                }
+                NetworkResponse::WsMessage { socket_id, message }
+                    if socket_id.0 == STUDIO_SOCKET_ID =>
+                {
+                    return Some(match message {
+                        WsMessage::Binary(data) => WebSocketMessage::Binary(data),
+                        WsMessage::Text(data) => WebSocketMessage::String(data),
+                    });
+                }
+                response => {
+                    if matches!(
+                        response,
+                        NetworkResponse::WsOpened { .. }
+                            | NetworkResponse::WsClosed { .. }
+                            | NetworkResponse::WsError { .. }
+                            | NetworkResponse::WsMessage { .. }
+                    ) {
+                        self.handle_script_web_socket_event(response.clone());
+                    }
+                    self.handle_script_network_events(std::slice::from_ref(&response));
+                    self.call_event_handler(&Event::NetworkResponses(vec![response]));
+                }
             }
         }
     }
 
-    pub fn open(request: HttpRequest) -> WebSocket {
-        let (rx_sender, rx_receiver) = channel();
-        let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
-        let socket_id = WEB_SOCKET_ID.fetch_add(1, Ordering::SeqCst);
-        if let Some(sender) = &*sender {
-            sender
-                .send(WebSocketThreadMsg::Open {
-                    socket_id,
-                    rx_sender,
-                    request,
-                })
-                .unwrap();
+    pub fn send_studio_message(msg: AppToStudio) {
+        Self::capture_local_profile_sample(&msg);
+        if STUDIO_STDOUT_MODE.load(Ordering::SeqCst) {
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(msg.to_json().as_bytes());
+            let _ = std::io::stdout().write_all(b"\n");
+            let _ = std::io::stdout().flush();
+            return;
+        }
+        if !Cx::has_studio_web_socket() {
+            return;
+        }
+
+        if let Some(sender) = STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap().as_ref() {
+            let _ = sender.send(StudioWebSocketThreadMsg::AppToStudio { message: msg });
         } else {
-            panic!("Web socket thread not running")
+            let _ = studio_ws_send_binary(AppToStudioVec(vec![msg]).serialize_bin());
         }
-        WebSocket {
-            socket_id,
-            rx_receiver,
-        }
-    }
-
-    pub fn send_binary(&mut self, data: Vec<u8>) -> Result<(), ()> {
-        let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
-        if let Some(sender) = &*sender {
-            sender
-                .send(WebSocketThreadMsg::SendMessage {
-                    socket_id: self.socket_id,
-                    message: WebSocketMessage::Binary(data),
-                })
-                .map_err(|_| ())
-        } else {
-            panic!("Web socket thread not running")
-        }
-    }
-
-    pub fn send_string(&mut self, data: String) -> Result<(), ()> {
-        let sender = WEB_SOCKET_THREAD_SENDER.lock().unwrap();
-        if let Some(sender) = &*sender {
-            sender
-                .send(WebSocketThreadMsg::SendMessage {
-                    socket_id: self.socket_id,
-                    message: WebSocketMessage::String(data),
-                })
-                .map_err(|_| ())
-        } else {
-            panic!("Web socket thread not running")
-        }
-    }
-
-    pub fn try_recv(&mut self) -> Result<WebSocketMessage, TryRecvError> {
-        self.rx_receiver.try_recv()
-    }
-
-    pub fn recv(&mut self) -> Result<WebSocketMessage, RecvError> {
-        self.rx_receiver.recv()
     }
 }

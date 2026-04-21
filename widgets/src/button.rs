@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_script::ScriptFnRef,
@@ -26,13 +26,13 @@ script_mod! {
         label_walk: Walk{width: Fit, height: Fit}
 
         draw_text +: {
-            hover: instance(0.0)
+            hover: 0.0
             down: instance(0.0)
             focus: instance(0.0)
             disabled: instance(0.0)
 
             color: theme.color_label_inner
-            color_hover: uniform(theme.color_label_inner_hover)
+            color_hover: theme.color_label_inner_hover
             color_down: uniform(theme.color_label_inner_down)
             color_focus: uniform(theme.color_label_inner_focus)
             color_disabled: uniform(theme.color_label_inner_disabled)
@@ -49,7 +49,7 @@ script_mod! {
             }
         }
 
-        icon_walk: Walk{width: Fit, height: Fit}
+        icon_walk: Walk{width: 22.0, height: Fit}
 
         draw_bg +: {
             hover: instance(0.0)
@@ -421,6 +421,13 @@ pub struct Button {
     #[live]
     on_click: ScriptFnRef,
 
+    #[live]
+    on_press: ScriptFnRef,
+
+    /// Legacy compatibility flag that fires `on_click` on press instead of click.
+    #[live]
+    trigger_on_press: bool,
+
     #[action_data]
     #[rust]
     action_data: WidgetActionData,
@@ -431,12 +438,39 @@ impl Widget for Button {
         &mut self,
         vm: &mut ScriptVm,
         method: LiveId,
-        _args: ScriptValue,
+        args: ScriptValue,
     ) -> ScriptAsyncResult {
+        if method == live_id!(text) {
+            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            return ScriptAsyncResult::Return(str_val.into());
+        }
+        if method == live_id!(set_text) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    let new_text = vm.bx.heap.temp_string_with(|heap, out| {
+                        heap.cast_to_string(value, out);
+                        out.to_string()
+                    });
+                    vm.with_cx_mut(|cx| {
+                        self.set_text(cx, &new_text);
+                    });
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
         if method == live_id!(on_click) {
             let uid = self.widget_uid();
             vm.with_cx_mut(|cx| {
                 cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+            });
+            return ScriptAsyncResult::Return(TRUE);
+        }
+        if method == live_id!(on_press) {
+            let uid = self.widget_uid();
+            vm.with_cx_mut(|cx| {
+                cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_press.clone(), &[]);
             });
             return ScriptAsyncResult::Return(TRUE);
         }
@@ -463,13 +497,6 @@ impl Widget for Button {
             self.draw_bg.redraw(cx);
         }
 
-        match event.hit_designer(cx, self.draw_bg.area()) {
-            HitDesigner::DesignerPick(_e) => {
-                cx.widget_action_with_data(&self.action_data, uid, WidgetDesignAction::PickedBody)
-            }
-            _ => (),
-        }
-
         // The button only handles hits when it's visible and enabled.
         // If it's not enabled, we still show the button, but we set
         // the NotAllowed mouse cursor upon hover instead of the Hand cursor.
@@ -490,6 +517,16 @@ impl Widget for Button {
                     uid,
                     ButtonAction::Pressed(fe.modifiers),
                 );
+                cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_press.clone(), &[]);
+                if self.trigger_on_press {
+                    cx.widget_to_script_call(
+                        uid,
+                        NIL,
+                        self.source.clone(),
+                        self.on_click.clone(),
+                        &[],
+                    );
+                }
                 self.animator_play(cx, ids!(hover.down));
                 self.set_key_focus(cx);
             }
@@ -520,13 +557,15 @@ impl Widget for Button {
                         uid,
                         ButtonAction::Clicked(fe.modifiers),
                     );
-                    cx.widget_to_script_call(
-                        uid,
-                        NIL,
-                        self.source.clone(),
-                        self.on_click.clone(),
-                        &[],
-                    );
+                    if !self.trigger_on_press {
+                        cx.widget_to_script_call(
+                            uid,
+                            NIL,
+                            self.source.clone(),
+                            self.on_click.clone(),
+                            &[],
+                        );
+                    }
                     if self.reset_hover_on_click {
                         self.animator_cut(cx, ids!(hover.off));
                     } else if fe.has_hovers() {
@@ -578,6 +617,10 @@ impl Button {
         self.draw_text
             .draw_walk(cx, self.label_walk, Align::default(), label);
         self.draw_bg.end(cx);
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Returns `true` if this button was clicked.

@@ -1,8 +1,8 @@
 use crate::{
     cx::Cx,
-    draw_shader::CxDrawShaderCode,
     draw_list::DrawListId,
     draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
+    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping},
     draw_vars::DRAW_CALL_TEXTURE_SLOTS,
     makepad_math::*,
     makepad_wasm_bridge::*,
@@ -19,16 +19,32 @@ impl Cx {
         zbias_step: f32,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
+        let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         self.draw_lists[draw_list_id]
             .draw_list_uniforms
             .view_transform = Mat4f::identity();
 
-        for draw_item_id in 0..draw_items_len {
+        for order_index in 0..draw_order_len {
+            let Some(draw_item_id) =
+                self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
+            else {
+                continue;
+            };
             if let Some(sub_list_id) =
                 self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
             {
-                self.render_view(draw_pass_id, sub_list_id, zbias, zbias_step);
+                let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
+                let mut child_zbias = 0.0f32;
+                self.render_view(
+                    draw_pass_id,
+                    sub_list_id,
+                    if child_resets_zbias {
+                        &mut child_zbias
+                    } else {
+                        zbias
+                    },
+                    zbias_step,
+                );
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
@@ -91,6 +107,19 @@ impl Cx {
                                         data: WasmPtrU32::new((*data).as_ref().unwrap()),
                                     });
                                 }
+                                TextureFormat::VecMipBGRAu8_32 {
+                                    width,
+                                    height,
+                                    data,
+                                    ..
+                                } => {
+                                    self.os.from_wasm(FromWasmAllocTextureImage2D_BGRAu8_32 {
+                                        texture_id: texture_id.0,
+                                        width: *width,
+                                        height: *height,
+                                        data: WasmPtrU32::new((*data).as_ref().unwrap()),
+                                    });
+                                }
                                 TextureFormat::VecRu8 {
                                     width,
                                     height,
@@ -117,7 +146,20 @@ impl Cx {
                                         data: WasmPtrF32::new((*data).as_ref().unwrap()),
                                     });
                                 }
-                                x => panic!("Texture format not implemented for webGL {:?}", x),
+                                TextureFormat::VecCubeBGRAu8_32 {
+                                    width,
+                                    height,
+                                    data,
+                                    ..
+                                } => {
+                                    self.os.from_wasm(FromWasmAllocTextureCube_BGRAu8_32 {
+                                        texture_id: texture_id.0,
+                                        width: *width,
+                                        height: *height,
+                                        data: WasmPtrU32::new((*data).as_ref().unwrap()),
+                                    });
+                                }
+                                _ => continue,
                             }
                         }
                     }
@@ -131,27 +173,30 @@ impl Cx {
 
                 let geometry = &mut self.geometries[geometry_id];
 
-                if geometry.dirty || geometry.os.vb_id.is_none() || geometry.os.ib_id.is_none() {
+                if geometry.dirty_vertices || geometry.os.vb_id.is_none() {
                     if geometry.os.vb_id.is_none() {
                         geometry.os.vb_id = Some(self.os.vertex_buffers);
                         self.os.vertex_buffers += 1;
-                    }
-                    if geometry.os.ib_id.is_none() {
-                        geometry.os.ib_id = Some(self.os.index_buffers);
-                        self.os.index_buffers += 1;
                     }
                     self.os.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: geometry.os.vb_id.unwrap(),
                         data: WasmPtrF32::new(&geometry.vertices),
                     });
+                    geometry.dirty_vertices = false;
+                }
 
+                if geometry.dirty_indices || geometry.os.ib_id.is_none() {
+                    if geometry.os.ib_id.is_none() {
+                        geometry.os.ib_id = Some(self.os.index_buffers);
+                        self.os.index_buffers += 1;
+                    }
                     self.os.from_wasm(FromWasmAllocIndexBuffer {
                         buffer_id: geometry.os.ib_id.unwrap(),
                         data: WasmPtrU32::new(&geometry.indices),
                     });
-
-                    geometry.dirty = false;
+                    geometry.dirty_indices = false;
                 }
+                geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
 
                 // lets check if our vao is still valid
                 if draw_item.os.vao.is_none() {
@@ -187,6 +232,23 @@ impl Cx {
                 }
 
                 let pass_uniforms = &self.passes[draw_pass_id].pass_uniforms;
+                let instances = if sh.mapping.instances.total_slots == 0 {
+                    0
+                } else {
+                    draw_item.instances.as_ref().map_or(0, |instances| {
+                        instances.len() / sh.mapping.instances.total_slots
+                    })
+                };
+                if sh.mapping.flags.debug_draw && instances > 0 {
+                    CxDrawShaderMapping::debug_dump_shader_draw_call(
+                        "webgl",
+                        draw_item_id,
+                        sh,
+                        draw_call,
+                        draw_item.instances.as_ref().unwrap(),
+                        instances,
+                    );
+                }
 
                 let mut textures = [None; DRAW_CALL_TEXTURE_SLOTS];
                 for (index, texture_slot) in draw_call.texture_slots.iter().enumerate() {
@@ -198,6 +260,8 @@ impl Cx {
                 self.os.from_wasm(FromWasmDrawCall {
                     shader_id: sh.os_shader_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
+                    depth_write: draw_call.options.depth_write,
+                    backface_culling: draw_call.options.backface_culling,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
                     draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
                     draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),
@@ -216,12 +280,33 @@ impl Cx {
         }*/
     }
 
-    pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId) -> Vec2d {
+    pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId, to_texture: bool) -> Vec2d {
         self.passes[draw_pass_id].paint_dirty = false;
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
-        self.passes[draw_pass_id].set_dpi_factor(dpi_factor);
-        self.passes[draw_pass_id].set_ortho_matrix(pass_rect.pos, pass_rect.size);
+        let pass = &mut self.passes[draw_pass_id];
+        pass.set_dpi_factor(dpi_factor);
+        if to_texture {
+            // WebGL render-to-texture coordinates are vertically inverted relative to
+            // onscreen canvas rendering. Flip Y in the projection for offscreen passes.
+            let offset = pass_rect.pos + pass.view_shift;
+            let size = pass_rect.size * pass.view_scale;
+            pass.pass_uniforms.camera_projection = Mat4f::ortho(
+                offset.x as f32,
+                (offset.x + size.x) as f32,
+                (offset.y + size.y) as f32,
+                offset.y as f32,
+                100.0,
+                -100.0,
+                1.0,
+                1.0,
+            );
+            pass.pass_uniforms.camera_view = Mat4f::identity();
+        } else {
+            if !pass.keep_camera_matrix {
+                pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            }
+        }
         pass_rect.size
     }
 
@@ -247,7 +332,7 @@ impl Cx {
             clear_depth,
         });
 
-        self.setup_render_pass(draw_pass_id);
+        self.setup_render_pass(draw_pass_id, false);
 
         self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
 
@@ -260,7 +345,7 @@ impl Cx {
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
-        let pass_size = self.setup_render_pass(draw_pass_id);
+        let pass_size = self.setup_render_pass(draw_pass_id, true);
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         /*
         self.platform.from_wasm(FromWasmBeginRenderTargets {
@@ -335,7 +420,7 @@ impl Cx {
     pub fn webgl_compile_shaders(&mut self) {
         let compile_set: Vec<usize> = self.draw_shaders.compile_set.iter().copied().collect();
         for draw_shader_id in compile_set {
-            let (vertex, pixel, geometry_slots, instance_slots, textures, debug) = {
+            let (vertex, pixel, geometry_slots, instance_slots, textures, debug_code) = {
                 let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
                 let (vertex, pixel) = match &cx_shader.mapping.code {
                     CxDrawShaderCode::Separate { vertex, fragment } => {
@@ -358,11 +443,11 @@ impl Cx {
                     cx_shader.mapping.geometries.total_slots,
                     cx_shader.mapping.instances.total_slots,
                     textures,
-                    cx_shader.mapping.flags.debug,
+                    cx_shader.mapping.flags.debug_code,
                 )
             };
 
-            if debug {
+            if debug_code {
                 crate::log!("{}\n{}", vertex, pixel);
             }
 
@@ -401,13 +486,16 @@ impl CxOsDrawShader {
     pub fn new(in_vertex: String, in_pixel: String) -> Self {
         let vertex = format!(
             "#version 300 es
+#define VIEW_ID 0
 precision highp float;
 precision highp int;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
+vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
 vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
 vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
 vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
-vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
+vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){{return textureLod(sampler, dir, lod);}}
+vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir).zyxw;}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
             in_vertex
@@ -415,13 +503,16 @@ vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 
         let pixel = format!(
             "#version 300 es
+#define VIEW_ID 0
 precision highp float;
 precision highp int;
 vec4 sample2d(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y));}}
+vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){{return textureLod(sampler, vec2(pos.x, pos.y), lod);}}
 vec4 sample2d_bgra(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, pos.y)).zyxw;}}
 vec4 sample2d_rt(sampler2D sampler, vec2 pos){{return texture(sampler, vec2(pos.x, 1.0 - pos.y));}}
 vec4 samplecube(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
-vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir);}}
+vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){{return textureLod(sampler, dir, lod);}}
+vec4 samplecube_bgra(samplerCube sampler, vec3 dir){{return texture(sampler, dir).zyxw;}}
 vec4 depth_clip(vec4 w, vec4 c, float clip){{return c;}}
 {}",
             in_pixel
@@ -467,6 +558,9 @@ pub struct CxOsDrawShader {
 
 #[derive(Clone, Default)]
 pub struct CxOsTexture {}
+
+#[derive(Clone, Default)]
+pub struct CxOsUniformBuffer {}
 
 #[derive(Clone, Default)]
 pub struct CxOsGeometry {

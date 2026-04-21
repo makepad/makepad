@@ -11,16 +11,18 @@ use std::{
 use windows::{
     core::{PCWSTR, PWSTR},
     Win32::{
-        Foundation::{CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT},
+        Foundation::{
+            CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+        },
         Security::SECURITY_ATTRIBUTES,
         System::{
-            Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole},
+            Console::{ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON},
             Pipes::CreatePipe,
             Threading::{
-                CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-                InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-                PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
+                CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
                 TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+                EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
             },
         },
     },
@@ -88,18 +90,19 @@ impl Pty {
         rows: u16,
         shell: Option<&str>,
         env: &[(&str, &str)],
+        cwd: Option<&std::path::Path>,
     ) -> io::Result<Self> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            Self::spawn_unix(cols, rows, shell, env)
+            Self::spawn_unix(cols, rows, shell, env, cwd)
         }
         #[cfg(windows)]
         {
-            Self::spawn_windows(cols, rows, shell, env)
+            Self::spawn_windows(cols, rows, shell, env, cwd)
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
-            let _ = (cols, rows, shell, env);
+            let _ = (cols, rows, shell, env, cwd);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "PTY not implemented for this platform",
@@ -113,6 +116,7 @@ impl Pty {
         rows: u16,
         shell: Option<&str>,
         _env: &[(&str, &str)],
+        cwd: Option<&std::path::Path>,
     ) -> io::Result<Self> {
         let shell = shell
             .map(str::to_owned)
@@ -198,6 +202,11 @@ impl Pty {
         startup_info.lpAttributeList = attr_list.raw();
 
         let mut process_info = PROCESS_INFORMATION::default();
+        let cwd_wide = cwd.map(|path| wide_null_os(path.as_os_str()));
+        let cwd_ptr = cwd_wide
+            .as_ref()
+            .map(|value| PCWSTR(value.as_ptr()))
+            .unwrap_or(PCWSTR::null());
         unsafe {
             CreateProcessW(
                 PCWSTR::null(),
@@ -207,7 +216,7 @@ impl Pty {
                 false,
                 EXTENDED_STARTUPINFO_PRESENT,
                 None,
-                PCWSTR::null(),
+                cwd_ptr,
                 &startup_info.StartupInfo,
                 &mut process_info,
             )
@@ -241,6 +250,7 @@ impl Pty {
         rows: u16,
         shell: Option<&str>,
         env: &[(&str, &str)],
+        cwd: Option<&std::path::Path>,
     ) -> io::Result<Self> {
         use std::os::fd::FromRawFd;
         use std::os::unix::process::CommandExt;
@@ -263,6 +273,9 @@ impl Pty {
         cmd.env("TERM", "xterm-256color");
         for (k, v) in env {
             cmd.env(k, v);
+        }
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
         }
 
         // Make the spawned shell/session own the slave PTY as controlling terminal,
@@ -308,19 +321,17 @@ impl Pty {
         })
     }
 
-    pub fn write(&self, data: &[u8]) -> io::Result<()> {
+    pub fn try_write(&self, data: &[u8]) -> io::Result<usize> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            return write_all_fd(self.master_fd, data);
+            return write_fd_once(self.master_fd, data);
         }
         #[cfg(windows)]
         {
             let mut stdin = self.stdin.lock().map_err(|_| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "terminal stdin lock poisoned")
             })?;
-            stdin.write_all(data)?;
-            stdin.flush()?;
-            return Ok(());
+            return stdin.write(data);
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
@@ -330,6 +341,24 @@ impl Pty {
                 "PTY not implemented for this platform",
             ));
         }
+    }
+
+    pub fn write(&self, data: &[u8]) -> io::Result<()> {
+        let mut offset = 0usize;
+        while offset < data.len() {
+            match self.try_write(&data[offset..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "PTY write returned 0",
+                    ));
+                }
+                Ok(n) => offset += n,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
     }
 
     pub fn writer_clone(&self) -> PtyWriter {
@@ -472,6 +501,12 @@ fn windows_err(err: windows::core::Error) -> io::Error {
 #[cfg(windows)]
 fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn wide_null_os(value: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(windows)]
@@ -634,18 +669,17 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
     let mut offset = 0usize;
     while offset < data.len() {
         let n = unsafe {
-            libc_ffi::write(
-                fd,
-                data[offset..].as_ptr() as *const _,
-                data.len() - offset,
-            )
+            libc_ffi::write(fd, data[offset..].as_ptr() as *const _, data.len() - offset)
         };
         if n > 0 {
             offset += n as usize;
             continue;
         }
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "PTY write returned 0"));
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "PTY write returned 0",
+            ));
         }
 
         let err = io::Error::last_os_error();
@@ -660,12 +694,26 @@ fn write_all_fd(fd: i32, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-fn write_all_fd(_fd: i32, _data: &[u8]) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "PTY not implemented for this platform",
-    ))
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn write_fd_once(fd: i32, data: &[u8]) -> io::Result<usize> {
+    let n = unsafe { libc_ffi::write(fd, data.as_ptr() as *const _, data.len()) };
+    if n > 0 {
+        return Ok(n as usize);
+    }
+    if n == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "PTY write returned 0",
+        ));
+    }
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(code) if code == libc_ffi::EINTR => Err(io::Error::new(io::ErrorKind::Interrupted, err)),
+        Some(code) if code == libc_ffi::EAGAIN || code == libc_ffi::EWOULDBLOCK => {
+            Err(io::Error::new(io::ErrorKind::WouldBlock, err))
+        }
+        _ => Err(err),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

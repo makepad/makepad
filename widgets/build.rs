@@ -16,13 +16,14 @@ fn main() {
     let mut file = File::create(path.join("makepad-widgets.path")).unwrap();
     file.write_all(&format!("{}", cwd.display()).as_bytes())
         .unwrap();
-    println!("cargo:rustc-check-cfg=cfg(ignore_query, panic_query)");
+    println!("cargo:rustc-check-cfg=cfg(ignore_query, panic_query, force_whisper)");
     println!("cargo:rerun-if-env-changed=MAKEPAD");
     if let Ok(configs) = env::var("MAKEPAD") {
-        for config in configs.split('+') {
+        for config in configs.split(['+', ',']) {
             match config {
                 "ignore_query" => println!("cargo:rustc-cfg=ignore_query"),
                 "panic_query" => println!("cargo:rustc-cfg=panic_query"),
+                "whisper" => println!("cargo:rustc-cfg=force_whisper"),
                 _ => {}
             }
         }

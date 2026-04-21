@@ -15,6 +15,10 @@ impl ScriptHeap {
         if let Some(obj) = self.objects_free.pop() {
             // obj already has the correct generation from gc.rs sweep
             let object = &mut self.objects[obj];
+            debug_assert!(
+                object.map.is_empty() && object.vec.is_empty() && object.proto.is_nil(),
+                "reused object slot was not fully cleared before reuse"
+            );
             object.tag.set_alloced();
             object.proto = id!(object).into();
             obj
@@ -75,6 +79,10 @@ impl ScriptHeap {
                 let (o1, o2) = self.objects.slots_split_at_mut(proto_ptr.index as usize);
                 (&mut o1[index as usize].data, &mut o2[0].data)
             };
+            debug_assert!(
+                object.map.is_empty() && object.vec.is_empty() && object.proto.is_nil(),
+                "reused object slot was not fully cleared before proto allocation"
+            );
             object.tag.set_alloced();
             object.tag.set_proto_fwd(proto_fwd);
             object.proto = proto;
@@ -257,17 +265,12 @@ impl ScriptHeap {
         let mut ptr = ptr;
         loop {
             let object = &mut self.objects[ptr];
-            let is_static = object.tag.is_static();
-            let is_frozen = object.tag.is_frozen();
+            let is_immutable = object.tag.is_immutable();
             // Check vec for key
             for kv in object.vec.iter_mut().rev() {
                 if kv.key == key {
-                    // Found key - check if we can modify
-                    if is_static {
-                        return script_err_immutable!(trap, "cannot modify static object");
-                    }
-                    if is_frozen {
-                        return script_err_immutable!(trap, "cannot modify frozen object");
+                    if is_immutable {
+                        return script_err_immutable!(trap, "cannot modify immutable object");
                     }
                     kv.value = value;
                     return NIL;
@@ -275,12 +278,8 @@ impl ScriptHeap {
             }
             // Check map for key
             if object.map_get(&key).is_some() {
-                // Found key - check if we can modify
-                if is_static {
-                    return script_err_immutable!(trap, "cannot modify static object");
-                }
-                if is_frozen {
-                    return script_err_immutable!(trap, "cannot modify frozen object");
+                if is_immutable {
+                    return script_err_immutable!(trap, "cannot modify immutable object");
                 }
                 object.map_set_if_exist(key, value);
                 return NIL;
@@ -293,6 +292,9 @@ impl ScriptHeap {
         }
         // alright nothing found
         let object = &mut self.objects[ptr];
+        if object.tag.is_immutable() {
+            return script_err_immutable!(trap, "cannot modify immutable object");
+        }
         if object.tag.is_vec2() {
             object.vec.push(ScriptVecValue { key, value });
         } else {
@@ -314,11 +316,8 @@ impl ScriptHeap {
         trap: ScriptTrap,
     ) -> ScriptValue {
         let object = &self.objects[top_ptr];
-        if object.tag.is_static() {
-            return script_err_immutable!(trap, "cannot set property on static object");
-        }
-        if object.tag.is_frozen() {
-            return script_err_immutable!(trap, "cannot set property on frozen object");
+        if object.tag.is_immutable() {
+            return script_err_immutable!(trap, "cannot set property on immutable object");
         }
 
         if let Some(ty) = object.tag.as_type_index() {
@@ -463,9 +462,12 @@ impl ScriptHeap {
         ptr: ScriptObject,
         key: ScriptValue,
         value: ScriptValue,
-        _trap: ScriptTrap,
+        trap: ScriptTrap,
     ) -> ScriptValue {
         let object = &mut self.objects[ptr];
+        if object.tag.is_immutable() {
+            return script_err_immutable!(trap, "cannot set property on immutable object");
+        }
         if object.tag.is_vec2() {
             for kv in object.vec.iter_mut().rev() {
                 if kv.key == key {
@@ -554,6 +556,9 @@ impl ScriptHeap {
         loop {
             let object = &mut self.objects[ptr];
             if let Some(set) = object.map.get_mut(&key.into()) {
+                if object.tag.is_immutable() {
+                    return script_err_immutable!(trap, "cannot modify immutable object");
+                }
                 set.value = value;
                 return NIL;
             }
@@ -1142,6 +1147,9 @@ impl ScriptHeap {
             let (o1, o2) = self.objects.slots_split_at_mut(source.index as usize);
             (&mut o1[target.index as usize].data, &mut o2[0].data)
         };
+        if target_obj.tag.is_immutable() {
+            return script_err_immutable!(trap, "cannot merge into immutable object");
+        }
         if !target_obj.tag.is_vec_frozen() {
             target_obj.push_vec_from_other(source_obj);
         }

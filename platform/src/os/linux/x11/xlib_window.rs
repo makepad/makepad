@@ -5,7 +5,7 @@ use {
         cell::Cell,
         ffi::{CStr, CString, OsStr},
         mem,
-        os::raw::{c_char, c_long, c_ulong, c_void},
+        os::raw::{c_char, c_int, c_long, c_ulong, c_void},
         ptr,
         rc::Rc,
     },
@@ -25,6 +25,10 @@ pub struct XlibWindow {
     pub ime_spot: Vec2d,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2d,
+    // When ime_active is false, XSetICFocus is not used so the IME candidate window does not show.
+    pub ime_active: bool,
+    pub is_popup: bool,
+    pub popup_parent: Option<WindowId>,
 }
 /*
 #[derive(Clone)]
@@ -51,6 +55,9 @@ impl XlibWindow {
             ime_spot: Vec2d::default(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2d::default(),
+            ime_active: false,
+            is_popup: false,
+            popup_parent: None,
         }
     }
 
@@ -63,6 +70,8 @@ impl XlibWindow {
         visual_info: x11_sys::XVisualInfo,
         custom_window_chrome: bool,
     ) {
+        self.is_popup = false;
+        self.popup_parent = None;
         unsafe {
             let display = get_xlib_app_global().display;
 
@@ -156,6 +165,17 @@ impl XlibWindow {
             // The title should be set prior to mapping the window.
             let title_bytes = format!("{}\0", title);
             let title_ptr = title_bytes.as_ptr() as *mut c_char;
+
+            // Set USPosition so the WM (e.g. GNOME/Mutter) honors our requested position.
+            // Without this hint many WMs ignore the position from XCreateWindow and apply
+            // their own smart-placement algorithm instead.
+            let mut size_hints = mem::zeroed::<x11_sys::XSizeHints>();
+            if let Some(pos) = position {
+                size_hints.flags = x11_sys::USPosition | x11_sys::PPosition;
+                size_hints.x = pos.x as c_int;
+                size_hints.y = pos.y as c_int;
+            }
+
             x11_sys::Xutf8SetWMProperties(
                 display,
                 window,
@@ -163,7 +183,7 @@ impl XlibWindow {
                 title_ptr,
                 ptr::null_mut(),
                 0,
-                ptr::null_mut(),
+                &mut size_hints,
                 ptr::null_mut(),
                 ptr::null_mut(),
             );
@@ -197,28 +217,37 @@ impl XlibWindow {
                 );
             }
 
+            // Set window icon via _NET_WM_ICON
+            Self::set_x11_icon(display, window);
+
+            // Reinforce the requested position before mapping. Calling XMoveWindow before
+            // XMapWindow ensures the coordinates are root-relative (the window's parent is
+            // still the root window at this point). After XMapWindow the WM reparents the
+            // window into a decoration frame, and any subsequent XMoveWindow would be
+            // interpreted relative to that frame rather than the root, which can cause the
+            // client area to end up at an unexpected position inside the WM frame.
+            if let Some(pos) = position {
+                x11_sys::XMoveWindow(display, window, pos.x as i32, pos.y as i32);
+            }
+
             // Map the window to the screen
             x11_sys::XMapWindow(display, window);
             x11_sys::XFlush(display);
 
-            // Explicitly set the window position after mapping
-            // This is necessary because some window managers might ignore the initial position
-            // and override it with their own heuristics.
-            if let Some(pos) = position {
-                x11_sys::XMoveWindow(display, window, pos.x as i32, pos.y as i32);
-                x11_sys::XFlush(display);
-            }
-
-            let xic = x11_sys::XCreateIC(
-                get_xlib_app_global().xim,
-                x11_sys::XNInputStyle.as_ptr(),
-                (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
-                x11_sys::XNClientWindow.as_ptr(),
-                window,
-                x11_sys::XNFocusWindow.as_ptr(),
-                window,
-                ptr::null_mut() as *mut c_void,
-            );
+            let xic = if !get_xlib_app_global().xim.is_null() {
+                Some(x11_sys::XCreateIC(
+                    get_xlib_app_global().xim,
+                    x11_sys::XNInputStyle.as_ptr(),
+                    (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
+                    x11_sys::XNClientWindow.as_ptr(),
+                    window,
+                    x11_sys::XNFocusWindow.as_ptr(),
+                    window,
+                    ptr::null_mut() as *mut c_void,
+                ))
+            } else {
+                None
+            };
 
             // Create a window
             get_xlib_app_global().window_map.insert(window, self);
@@ -226,7 +255,7 @@ impl XlibWindow {
             self.attributes = Some(attributes);
             self.visual_info = Some(visual_info);
             self.window = Some(window);
-            self.xic = Some(xic);
+            self.xic = xic;
             self.last_window_geom = self.get_window_geom();
 
             let new_geom = self.get_window_geom();
@@ -239,6 +268,134 @@ impl XlibWindow {
                 self.maximize();
             }
         }
+    }
+
+    pub fn init_popup(
+        &mut self,
+        parent_window_id: WindowId,
+        size: Vec2d,
+        position: Vec2d,
+        visual_info: x11_sys::XVisualInfo,
+    ) {
+        self.is_popup = true;
+        self.popup_parent = Some(parent_window_id);
+        unsafe {
+            let display = get_xlib_app_global().display;
+            let default_screen = x11_sys::XDefaultScreen(display);
+            let root_window = x11_sys::XRootWindow(display, default_screen);
+
+            let mut attributes = mem::zeroed::<x11_sys::XSetWindowAttributes>();
+            attributes.border_pixel = 0;
+            attributes.override_redirect = 1;
+            attributes.colormap = x11_sys::XCreateColormap(
+                display,
+                root_window,
+                visual_info.visual,
+                x11_sys::AllocNone as i32,
+            );
+            attributes.event_mask = (x11_sys::ExposureMask
+                | x11_sys::StructureNotifyMask
+                | x11_sys::ButtonMotionMask
+                | x11_sys::PointerMotionMask
+                | x11_sys::ButtonPressMask
+                | x11_sys::ButtonReleaseMask
+                | x11_sys::KeyPressMask
+                | x11_sys::KeyReleaseMask
+                | x11_sys::VisibilityChangeMask
+                | x11_sys::FocusChangeMask
+                | x11_sys::EnterWindowMask
+                | x11_sys::LeaveWindowMask) as c_long;
+
+            let dpi_factor = self.get_dpi_factor();
+            let window = x11_sys::XCreateWindow(
+                display,
+                root_window,
+                position.x as i32,
+                position.y as i32,
+                (size.x * dpi_factor) as u32,
+                (size.y * dpi_factor) as u32,
+                0,
+                visual_info.depth,
+                x11_sys::InputOutput as u32,
+                visual_info.visual,
+                (x11_sys::CWBorderPixel
+                    | x11_sys::CWColormap
+                    | x11_sys::CWEventMask
+                    | x11_sys::CWOverrideRedirect) as c_ulong,
+                &mut attributes,
+            );
+
+            x11_sys::XChangeProperty(
+                display,
+                window,
+                get_xlib_app_global().atoms.net_wm_window_type,
+                get_xlib_app_global().atoms.atom,
+                32,
+                x11_sys::PropModeReplace as i32,
+                &get_xlib_app_global().atoms.net_wm_window_type_popup_menu as *const _ as *const u8,
+                1,
+            );
+
+            x11_sys::XMapRaised(display, window);
+            x11_sys::XFlush(display);
+
+            let xic = x11_sys::XCreateIC(
+                get_xlib_app_global().xim,
+                x11_sys::XNInputStyle.as_ptr(),
+                (x11_sys::XIMPreeditNothing | x11_sys::XIMStatusNothing) as i32,
+                x11_sys::XNClientWindow.as_ptr(),
+                window,
+                x11_sys::XNFocusWindow.as_ptr(),
+                window,
+                ptr::null_mut() as *mut c_void,
+            );
+
+            get_xlib_app_global().window_map.insert(window, self);
+
+            self.attributes = Some(attributes);
+            self.visual_info = Some(visual_info);
+            self.window = Some(window);
+            self.xic = Some(xic);
+            self.last_window_geom = self.get_window_geom();
+
+            let new_geom = self.get_window_geom();
+            self.do_callback(XlibEvent::WindowGeomChange(WindowGeomChangeEvent {
+                window_id: self.window_id,
+                old_geom: new_geom.clone(),
+                new_geom,
+            }));
+        }
+    }
+
+    /// Set `_NET_WM_ICON` from the default Makepad icon (RGBA8 → ARGB u32 array).
+    unsafe fn set_x11_icon(display: *mut x11_sys::Display, window: c_ulong) {
+        let icon = crate::app_icon::window_icon();
+        let buf = match icon.buffers.first() {
+            Some(b) => b,
+            None => return,
+        };
+        // _NET_WM_ICON format: [width, height, pixel_data...] as u32 ARGB
+        let pixel_count = (buf.width * buf.height) as usize;
+        let mut data: Vec<c_ulong> = Vec::with_capacity(2 + pixel_count);
+        data.push(buf.width as c_ulong);
+        data.push(buf.height as c_ulong);
+        for chunk in buf.data.chunks_exact(4) {
+            let r = chunk[0] as c_ulong;
+            let g = chunk[1] as c_ulong;
+            let b = chunk[2] as c_ulong;
+            let a = chunk[3] as c_ulong;
+            data.push((a << 24) | (r << 16) | (g << 8) | b);
+        }
+        x11_sys::XChangeProperty(
+            display,
+            window,
+            get_xlib_app_global().atoms.net_wm_icon,
+            get_xlib_app_global().atoms.cardinal,
+            32,
+            x11_sys::PropModeReplace as i32,
+            data.as_ptr() as *const u8,
+            data.len() as i32,
+        );
     }
 
     fn restore_or_maximize(&self, add_remove: c_long) {
@@ -315,6 +472,7 @@ impl XlibWindow {
             outer_size: self.get_outer_size(),
             dpi_factor: self.get_dpi_factor(),
             position: self.get_position(),
+            ..Default::default()
         }
     }
 
@@ -363,27 +521,86 @@ impl XlibWindow {
     }
 
     pub fn set_ime_spot(&mut self, spot: Vec2d) {
+        if self.ime_spot == spot {
+            return;
+        }
         self.ime_spot = spot;
+        let Some(xic) = self.xic else {
+            return;
+        };
+        let dpi_factor = self.get_dpi_factor();
+        let spot_px = x11_sys::XPoint {
+            x: (spot.x * dpi_factor) as i16,
+            y: (spot.y * dpi_factor) as i16,
+        };
+        let area_px = x11_sys::XRectangle {
+            x: spot_px.x,
+            y: spot_px.y,
+            width: 1,
+            height: 1,
+        };
+        unsafe {
+            let preedit_attr = x11_sys::XVaCreateNestedList(
+                0,
+                x11_sys::XNSpotLocation.as_ptr(),
+                &spot_px,
+                x11_sys::XNArea.as_ptr(),
+                &area_px,
+                ptr::null_mut::<c_void>(),
+            );
+            if preedit_attr.is_null() {
+                return;
+            }
+
+            x11_sys::XSetICValues(
+                xic,
+                x11_sys::XNPreeditAttributes.as_ptr(),
+                preedit_attr,
+                ptr::null_mut::<c_void>(),
+            );
+            x11_sys::XFree(preedit_attr);
+        }
+    }
+
+    pub fn set_ime_active(&mut self, active: bool) {
+        if self.ime_active == active {
+            return;
+        }
+        self.ime_active = active;
+        if let Some(xic) = self.xic {
+            if self.ime_active {
+                unsafe { x11_sys::XSetICFocus(xic) };
+            } else {
+                unsafe { x11_sys::XUnsetICFocus(xic) };
+            }
+        }
     }
 
     pub fn get_position(&self) -> Vec2d {
         unsafe {
-            let mut xwa = mem::MaybeUninit::uninit();
             let display = get_xlib_app_global().display;
-            x11_sys::XGetWindowAttributes(display, self.window.unwrap(), xwa.as_mut_ptr());
-            let xwa = xwa.assume_init();
-            return Vec2d {
-                x: xwa.x as f64,
-                y: xwa.y as f64,
-            };
-            /*
-            let mut child = mem::uninitialized();
-            let default_screen = X11_sys::XDefaultScreen(display);
-            let root_window = X11_sys::XRootWindow(display, default_screen);
-            let mut x:c_int = 0;
-            let mut y:c_int = 0;
-            X11_sys::XTranslateCoordinates(display, self.window.unwrap(), root_window, 0, 0, &mut x, &mut y, &mut child );
-            */
+            let default_screen = x11_sys::XDefaultScreen(display);
+            let root_window = x11_sys::XRootWindow(display, default_screen);
+            let mut x: c_int = 0;
+            let mut y: c_int = 0;
+            let mut child = mem::MaybeUninit::uninit();
+            // XGetWindowAttributes returns position relative to the parent window,
+            // which after WM reparenting is the decoration frame (not the root).
+            // XTranslateCoordinates gives the correct root-relative (screen) position.
+            x11_sys::XTranslateCoordinates(
+                display,
+                self.window.unwrap(),
+                root_window,
+                0,
+                0,
+                &mut x,
+                &mut y,
+                child.as_mut_ptr(),
+            );
+            Vec2d {
+                x: x as f64,
+                y: y as f64,
+            }
         }
     }
 
@@ -500,6 +717,22 @@ impl XlibWindow {
         self.do_callback(XlibEvent::WindowLostFocus(self.window_id));
     }
 
+    pub fn contains_root_pos(&self, root_x: i32, root_y: i32) -> bool {
+        unsafe {
+            let mut xwa = mem::MaybeUninit::uninit();
+            x11_sys::XGetWindowAttributes(
+                get_xlib_app_global().display,
+                self.window.unwrap(),
+                xwa.as_mut_ptr(),
+            );
+            let xwa = xwa.assume_init();
+            root_x >= xwa.x
+                && root_y >= xwa.y
+                && root_x <= xwa.x + xwa.width
+                && root_y <= xwa.y + xwa.height
+        }
+    }
+
     pub fn send_mouse_down(&mut self, button: MouseButton, modifiers: KeyModifiers) {
         self.do_callback(XlibEvent::MouseDown(MouseDownEvent {
             button,
@@ -549,6 +782,7 @@ impl XlibWindow {
             input,
             was_paste: false,
             replace_last,
+            ..Default::default()
         }))
     }
 }

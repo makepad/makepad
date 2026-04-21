@@ -1,4 +1,5 @@
 use crate::{
+    event::window::PopupDismissedEvent,
     event::{
         DragEvent, DropEvent, GameInputConnectedEvent, KeyEvent, MouseDownEvent, MouseMoveEvent,
         MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
@@ -11,6 +12,7 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub enum MacosEvent {
+    PopupDismissed(PopupDismissedEvent),
     WindowGotFocus(WindowId),
     WindowLostFocus(WindowId),
     WindowResizeLoopStart(WindowId),

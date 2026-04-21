@@ -4,33 +4,7 @@ use crate::{
     os::apple::apple_sys::*,
 };
 
-pub const fn four_char_as_u32(s: &str) -> u32 {
-    let b = s.as_bytes();
-    ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)
-}
-
-pub fn nsstring_to_string(string: ObjcId) -> String {
-    unsafe {
-        let utf8_string: *const std::os::raw::c_uchar = msg_send![string, UTF8String];
-        let utf8_len: usize = msg_send![string, lengthOfBytesUsingEncoding: UTF8_ENCODING];
-        let slice = std::slice::from_raw_parts(utf8_string, utf8_len);
-        std::str::from_utf8_unchecked(slice).to_owned()
-    }
-}
-
-pub fn str_to_nsstring(str: &str) -> ObjcId {
-    unsafe {
-        let ns_string: ObjcId = msg_send![class!(NSString), alloc];
-        let ns_string: ObjcId = msg_send![
-            ns_string,
-            initWithBytes: str.as_ptr()
-            length: str.len()
-            encoding: UTF8_ENCODING as ObjcId
-        ];
-        let _: () = msg_send![ns_string, autorelease];
-        ns_string
-    }
-}
+pub use makepad_apple_sys::{four_char_as_u32, nsstring_to_string, str_to_nsstring};
 
 pub fn load_native_cursor(cursor_name: &str) -> ObjcId {
     let sel = Sel::register(cursor_name);

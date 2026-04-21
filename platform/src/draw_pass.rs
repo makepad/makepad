@@ -94,6 +94,8 @@ pub struct ScriptDrawPass {
     pub clear_color: Vec4f,
     #[live]
     pub dont_clear: bool,
+    #[live]
+    pub keep_camera_matrix: bool,
 }
 
 impl std::ops::Deref for ScriptDrawPass {
@@ -113,6 +115,8 @@ impl ScriptHook for ScriptDrawPass {
     ) {
         vm.host.cx_mut().passes[self.handle.draw_pass_id()].clear_color = self.clear_color;
         vm.host.cx_mut().passes[self.handle.draw_pass_id()].dont_clear = self.dont_clear;
+        vm.host.cx_mut().passes[self.handle.draw_pass_id()].keep_camera_matrix =
+            self.keep_camera_matrix;
     }
 }
 
@@ -240,6 +244,22 @@ impl DrawPass {
         cxpass.color_textures.push(CxDrawPassColorTexture {
             texture: texture.clone(),
             clear_color: clear_color,
+            cube_face: None,
+        })
+    }
+
+    pub fn add_color_texture_face(
+        &self,
+        cx: &mut Cx,
+        texture: &Texture,
+        cube_face: u32,
+        clear_color: DrawPassClearColor,
+    ) {
+        let cxpass = &mut cx.passes[self.draw_pass_id()];
+        cxpass.color_textures.push(CxDrawPassColorTexture {
+            texture: texture.clone(),
+            clear_color,
+            cube_face: Some(cube_face),
         })
     }
 
@@ -254,11 +274,36 @@ impl DrawPass {
             cxpass.color_textures[0] = CxDrawPassColorTexture {
                 texture: texture.clone(),
                 clear_color: clear_color,
+                cube_face: None,
             }
         } else {
             cxpass.color_textures.push(CxDrawPassColorTexture {
                 texture: texture.clone(),
                 clear_color: clear_color,
+                cube_face: None,
+            })
+        }
+    }
+
+    pub fn set_color_texture_face(
+        &self,
+        cx: &mut Cx,
+        texture: &Texture,
+        cube_face: u32,
+        clear_color: DrawPassClearColor,
+    ) {
+        let cxpass = &mut cx.passes[self.draw_pass_id()];
+        if cxpass.color_textures.len() != 0 {
+            cxpass.color_textures[0] = CxDrawPassColorTexture {
+                texture: texture.clone(),
+                clear_color,
+                cube_face: Some(cube_face),
+            }
+        } else {
+            cxpass.color_textures.push(CxDrawPassColorTexture {
+                texture: texture.clone(),
+                clear_color,
+                cube_face: Some(cube_face),
             })
         }
     }
@@ -307,6 +352,7 @@ pub enum DrawPassClearDepth {
 pub struct CxDrawPassColorTexture {
     pub clear_color: DrawPassClearColor,
     pub texture: Texture,
+    pub cube_face: Option<u32>,
 }
 
 #[derive(Default, Clone, Script, ScriptHook)]
@@ -330,6 +376,8 @@ pub struct DrawPassUniforms {
     pub depth_view_r: Mat4f,
     #[live]
     pub camera_inv: Mat4f,
+    #[live]
+    pub camera_inv_r: Mat4f,
     #[live]
     pub dpi_factor: f32,
     #[live]
@@ -361,6 +409,7 @@ pub struct CxDrawPass {
     pub depth_texture: Option<Texture>,
     pub clear_depth: DrawPassClearDepth,
     pub dont_clear: bool,
+    pub keep_camera_matrix: bool,
     pub depth_init: f64,
     pub clear_color: Vec4f,
     pub dpi_factor: Option<f64>,
@@ -380,6 +429,7 @@ impl Default for CxDrawPass {
         CxDrawPass {
             debug: false,
             dont_clear: false,
+            keep_camera_matrix: false,
             debug_name: String::new(),
             zbias_step: 0.001,
             pass_uniforms: DrawPassUniforms::default(),
@@ -422,6 +472,7 @@ impl CxDrawPass {
     pub fn set_ortho_matrix(&mut self, offset: Vec2d, size: Vec2d) {
         let offset = offset + self.view_shift;
         let size = size * self.view_scale;
+        let zero = Mat4f { v: [0.0; 16] };
 
         let ortho = Mat4f::ortho(
             offset.x as f32,
@@ -435,5 +486,12 @@ impl CxDrawPass {
         );
         self.pass_uniforms.camera_projection = ortho;
         self.pass_uniforms.camera_view = Mat4f::identity();
+        // Regular 2D passes don't participate in XR scene-depth clipping.
+        self.pass_uniforms.depth_projection = zero;
+        self.pass_uniforms.depth_projection_r = zero;
+        self.pass_uniforms.depth_view = zero;
+        self.pass_uniforms.depth_view_r = zero;
+        self.pass_uniforms.camera_inv = Mat4f::identity();
+        self.pass_uniforms.camera_inv_r = Mat4f::identity();
     }
 }

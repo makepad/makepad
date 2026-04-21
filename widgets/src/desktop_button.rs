@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     button::ButtonAction,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -26,11 +26,22 @@ script_mod! {
             color_hover: uniform(theme.color_label_inner_hover)
             color_down: uniform(theme.color_label_inner_down)
 
+            bg_color: uniform(#00000000)
+            bg_color_hover: uniform(#00000000)
+            bg_color_down: uniform(#00000000)
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.aa = sdf.aa * 3.0
                 let sz = 4.5
                 let c = self.rect_size * vec2(0.5, 0.5)
+
+                // Draw background
+                let bg = self.bg_color
+                    .mix(self.bg_color_hover, self.hover)
+                    .mix(self.bg_color_down, self.down);
+                sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
+                sdf.fill(bg);
 
                 let color = self.color
                     .mix(self.color_hover, self.hover)
@@ -89,6 +100,18 @@ script_mod! {
                         sdf.fill(color)
                         return sdf.result
                     }
+                    DesktopButtonType.RecordOff => {
+                        let rr = 5.0
+                        sdf.circle(c.x, c.y, rr)
+                        sdf.stroke(#ff3b30, 1.0 + 0.5 * self.draw_pass.dpi_dilate)
+                        return sdf.result
+                    }
+                    DesktopButtonType.RecordOn => {
+                        let rr = 5.0
+                        sdf.circle(c.x, c.y, rr)
+                        sdf.fill(#ff3b30)
+                        return sdf.result
+                    }
                 }
                 return #f00
             }
@@ -141,6 +164,8 @@ pub enum DesktopButtonType {
     XRMode = 5,
     #[pick]
     Fullscreen = 6,
+    RecordOff = 7,
+    RecordOn = 8,
 }
 
 #[derive(Script, ScriptHook, Widget, Animator)]
@@ -153,6 +178,9 @@ pub struct DesktopButton {
     animator: Animator,
     #[walk]
     walk: Walk,
+    #[visible]
+    #[live(true)]
+    visible: bool,
     #[redraw]
     #[live]
     draw_bg: DrawQuad,
@@ -160,6 +188,10 @@ pub struct DesktopButton {
 
 impl Widget for DesktopButton {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible {
+            return;
+        }
+
         let uid = self.widget_uid();
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
@@ -198,6 +230,10 @@ impl Widget for DesktopButton {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
+
         let _ = self.draw_bg.draw_walk(cx, walk);
         DrawStep::done()
     }

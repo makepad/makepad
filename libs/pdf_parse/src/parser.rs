@@ -6,9 +6,20 @@ use std::collections::HashMap;
 /// Parsed cross-reference entry.
 #[derive(Clone, Debug)]
 pub struct XRefEntry {
-    pub offset: usize,
+    pub location: XRefLocation,
     pub gen: u16,
     pub in_use: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum XRefLocation {
+    Uncompressed {
+        offset: usize,
+    },
+    Compressed {
+        obj_stream_obj_num: u32,
+        index: usize,
+    },
 }
 
 /// Parsed cross-reference table + trailer.
@@ -96,7 +107,9 @@ fn parse_xref_table(data: &[u8], offset: usize) -> PdfResult<XRefTable> {
                 entries.insert(
                     start_obj + i,
                     XRefEntry {
-                        offset: entry_offset,
+                        location: XRefLocation::Uncompressed {
+                            offset: entry_offset,
+                        },
                         gen: entry_gen,
                         in_use: true,
                     },
@@ -206,20 +219,24 @@ fn parse_xref_stream(data: &[u8], offset: usize) -> PdfResult<XRefTable> {
                     entries.insert(
                         obj_num,
                         XRefEntry {
-                            offset: field1 as usize,
+                            location: XRefLocation::Uncompressed {
+                                offset: field1 as usize,
+                            },
                             gen: field2 as u16,
                             in_use: true,
                         },
                     );
                 }
                 2 => {
-                    // Compressed object in object stream: field1=stream_obj_num, field2=index
-                    // Store with a special marker - we'll handle these in document.rs
+                    // Compressed object in object stream: field1=stream_obj_num, field2=index.
                     entries.insert(
                         obj_num,
                         XRefEntry {
-                            offset: field1 as usize, // obj stream number
-                            gen: field2 as u16,      // index within obj stream
+                            location: XRefLocation::Compressed {
+                                obj_stream_obj_num: field1 as u32,
+                                index: field2 as usize,
+                            },
+                            gen: 0,
                             in_use: true,
                         },
                     );
@@ -271,7 +288,7 @@ fn brute_force_xref(data: &[u8]) -> PdfResult<XRefTable> {
                 entries.insert(
                     obj_num,
                     XRefEntry {
-                        offset: i,
+                        location: XRefLocation::Uncompressed { offset: i },
                         gen,
                         in_use: true,
                     },

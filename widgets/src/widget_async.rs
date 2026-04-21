@@ -3,6 +3,7 @@ use {
     crate::makepad_script::{script_err_not_found, ScriptFnRef, ScriptThreadId},
     crate::widget::WidgetUid,
     crate::widget_tree::CxWidgetExt,
+    std::any::Any,
     std::collections::{HashMap, VecDeque},
     std::sync::atomic::{AtomicU64, Ordering},
 };
@@ -157,13 +158,7 @@ pub(crate) fn update_global_ui_handle(cx: &mut Cx, root_uid: WidgetUid) {
     cx.global::<CxWidgetAsync>().global_ui_root_uid = root_uid;
     cx.with_vm(|vm| {
         let ui_handle = vm.build_ui_handle_for_uid(root_uid);
-        let scope_objects: Vec<ScriptObject> = {
-            let bodies = vm.bx.code.bodies.borrow();
-            bodies.iter().map(|body| body.scope.as_object()).collect()
-        };
-        for scope_obj in &scope_objects {
-            force_set_map_value(&mut vm.bx.heap, *scope_obj, id!(ui), ui_handle);
-        }
+        vm.set_injected_global(id!(ui), ui_handle);
     });
 }
 
@@ -570,14 +565,24 @@ fn register_ui_handle(vm: &mut ScriptVm) {
 
     vm.set_handle_getter(ui_type, move |vm, pself, prop| {
         if let Some(handle) = pself.as_handle() {
-            let Some(parent_uid) = vm
+            let Some(target_uid) = vm
                 .downcast_handle_gc::<CxWidgetHandleGc>(handle)
                 .map(|gc| gc.uid)
             else {
                 return script_err_not_found!(vm.trap(), "invalid ui handle");
             };
 
-            let child_ref = vm.with_cx(|cx| cx.widget_tree().find_flood(parent_uid, &[prop]));
+            if prop == live_id!(root) {
+                let root_uid = vm.with_cx(|cx| cx.widget_tree().root_uid());
+                if root_uid == WidgetUid(0) {
+                    return script_err_not_found!(vm.trap(), "ui root not found");
+                }
+                return vm.build_ui_handle_for_uid(root_uid);
+            }
+
+            // Script UI handles intentionally use upward flood search semantics:
+            // look in current subtree first, then expand outward through ancestors.
+            let child_ref = vm.with_cx(|cx| cx.widget_tree().find_flood(target_uid, &[prop]));
             if child_ref.is_empty() {
                 return script_err_not_found!(vm.trap(), "widget '{:?}' not found in tree", prop);
             }
@@ -742,6 +747,22 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
 }
 
 fn register_task_hooks(cx: &mut Cx) {
-    cx.add_script_task_on_thread_completed_hook(on_widget_script_thread_completed);
-    cx.add_script_task_pump_hook(pump_widget_async);
+    cx.add_script_task_on_thread_completed_hook(on_widget_script_thread_completed_hook);
+    cx.add_script_task_pump_hook(pump_widget_async_hook);
+}
+
+fn on_widget_script_thread_completed_hook(
+    host: &mut dyn Any,
+    thread_id: ScriptThreadId,
+    result: ScriptValue,
+) -> bool {
+    host.downcast_mut::<Cx>()
+        .map(|cx| on_widget_script_thread_completed(cx, thread_id, result))
+        .unwrap_or(false)
+}
+
+fn pump_widget_async_hook(host: &mut dyn Any) -> bool {
+    host.downcast_mut::<Cx>()
+        .map(pump_widget_async)
+        .unwrap_or(false)
 }

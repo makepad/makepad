@@ -3,7 +3,7 @@ use {
         event::game_input::*,
         makepad_live_id::*,
         makepad_math::Vec2,
-        windows::core::{BOOL, GUID, Interface},
+        windows::core::{Interface, BOOL, GUID},
         windows::Win32::Devices::HumanInterfaceDevice::{
             DirectInput8Create, GUID_RxAxis, GUID_RyAxis, GUID_RzAxis, GUID_Slider, GUID_XAxis,
             GUID_YAxis, GUID_ZAxis, IDirectInput8W, IDirectInputDevice8W, IDirectInputEffect,

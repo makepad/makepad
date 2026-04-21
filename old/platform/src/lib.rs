@@ -188,7 +188,7 @@ pub use {
     makepad_derive_live::*,
 
     makepad_error_log,
-    makepad_http,
+    makepad_network,
     //makepad_script::vm,
     makepad_live_compiler::{
         live_error_origin, vec4_ext::*, InlineString, LiveBinding, LiveComponentInfo,

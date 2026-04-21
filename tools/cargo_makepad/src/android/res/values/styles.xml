@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="MakepadAppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+    <style name="MakepadLaunchTheme" parent="@style/MakepadAppTheme">
+        <item name="android:windowBackground">@drawable/makepad_launch_background</item>
+        <item name="android:windowIsTranslucent">false</item>
+    </style>
+</resources>

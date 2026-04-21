@@ -6,6 +6,9 @@ pub struct Grid {
     pub rows: usize,
     cells: Vec<Cell>,
     dirty: Vec<bool>,
+    /// Per-row flag: true if the row soft-wrapped into the next row
+    /// (content continued due to reaching the right margin).
+    pub line_wrapped: Vec<bool>,
 }
 
 impl Grid {
@@ -15,6 +18,7 @@ impl Grid {
             rows,
             cells: vec![Cell::default(); cols * rows],
             dirty: vec![true; rows],
+            line_wrapped: vec![false; rows],
         }
     }
 
@@ -58,6 +62,7 @@ impl Grid {
             c.clear();
         }
         self.dirty.fill(true);
+        self.line_wrapped.fill(false);
     }
 
     /// Clear a single row with optional background style
@@ -77,16 +82,16 @@ impl Grid {
         for row in top..bottom - count {
             let src_start = (row + count) * self.cols;
             let dst_start = row * self.cols;
-            // Can't use copy_within directly on Vec slice with overlap nicely,
-            // so copy row by row
             for col in 0..self.cols {
                 self.cells[dst_start + col] = self.cells[src_start + col];
             }
             self.dirty[row] = true;
+            self.line_wrapped[row] = self.line_wrapped[row + count];
         }
         // Clear new lines at bottom
         for row in (bottom - count)..bottom {
             self.clear_row(row, style);
+            self.line_wrapped[row] = false;
         }
     }
 
@@ -102,10 +107,12 @@ impl Grid {
                 self.cells[dst_start + col] = self.cells[src_start + col];
             }
             self.dirty[row] = true;
+            self.line_wrapped[row] = self.line_wrapped[row - count];
         }
         // Clear new lines at top
         for row in top..top + count {
             self.clear_row(row, style);
+            self.line_wrapped[row] = false;
         }
     }
 
@@ -115,16 +122,19 @@ impl Grid {
         let copy_rows = self.rows.min(new_rows);
         let copy_cols = self.cols.min(new_cols);
 
+        let mut new_wrapped = vec![false; new_rows];
         for row in 0..copy_rows {
             for col in 0..copy_cols {
                 new_cells[row * new_cols + col] = self.cells[row * self.cols + col];
             }
+            new_wrapped[row] = self.line_wrapped[row];
         }
 
         self.cells = new_cells;
         self.cols = new_cols;
         self.rows = new_rows;
         self.dirty = vec![true; new_rows];
+        self.line_wrapped = new_wrapped;
     }
 
     /// Insert `count` blank characters at (col, row), shifting right.

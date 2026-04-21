@@ -9,7 +9,7 @@ use crate::trap::*;
 use crate::value::*;
 use crate::vm::*;
 use crate::*;
-use makepad_math::{Vec2f, Vec3f, Vec4f};
+use makepad_math::{Mat4f, Vec2f, Vec3f, Vec4f};
 
 // Helper trait to add vm-based conversion methods for NumericValue
 trait NumericValueVmExt {
@@ -311,6 +311,24 @@ pub fn define_shader_builtins(
     native.add_method(
         heap,
         math,
+        id_lut!(inverse),
+        script_args!(x = 0.0),
+        |vm, args| {
+            let x_val = vm
+                .bx
+                .heap
+                .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+            match NumericValue::from_script_value_vm(vm, x_val) {
+                NumericValue::Mat4(m) => {
+                    NumericValue::Mat4(Mat4f { v: m }.invert().v).to_script_value_vm(vm)
+                }
+                other => other.to_script_value_vm(vm),
+            }
+        },
+    );
+    native.add_method(
+        heap,
+        math,
         id_lut!(length),
         script_args!(x = 0.0),
         |vm, args| {
@@ -537,6 +555,93 @@ pub fn define_shader_builtins(
         id_lut!(discard),
         script_args!(),
         |_vm, _args| ScriptValue::NIL,
+    );
+
+    // Bitcast helpers for shader code. These are primarily intended for shader use,
+    // but we provide scalar runtime behavior so expressions can still evaluate.
+    native.add_method(
+        heap,
+        math,
+        id_lut!(asuint),
+        script_args!(x = 0.0),
+        |vm, args| {
+            let x_val = vm
+                .bx
+                .heap
+                .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+            if let Some(v) = x_val.as_u32() {
+                return ScriptValue::from_u32(v);
+            }
+            if let Some(v) = x_val.as_i32() {
+                return ScriptValue::from_u32(v as u32);
+            }
+            if let Some(v) = x_val.as_f32() {
+                return ScriptValue::from_u32(v.to_bits());
+            }
+            if let Some(v) = x_val.as_f16() {
+                return ScriptValue::from_u32(v.to_bits());
+            }
+            let f = vm
+                .bx
+                .heap
+                .cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
+            ScriptValue::from_u32(f.to_bits())
+        },
+    );
+    native.add_method(
+        heap,
+        math,
+        id_lut!(asint),
+        script_args!(x = 0.0),
+        |vm, args| {
+            let x_val = vm
+                .bx
+                .heap
+                .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+            if let Some(v) = x_val.as_i32() {
+                return ScriptValue::from_i32(v);
+            }
+            if let Some(v) = x_val.as_u32() {
+                return ScriptValue::from_i32(v as i32);
+            }
+            if let Some(v) = x_val.as_f32() {
+                return ScriptValue::from_i32(v.to_bits() as i32);
+            }
+            if let Some(v) = x_val.as_f16() {
+                return ScriptValue::from_i32(v.to_bits() as i32);
+            }
+            let f = vm
+                .bx
+                .heap
+                .cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
+            ScriptValue::from_i32(f.to_bits() as i32)
+        },
+    );
+    native.add_method(
+        heap,
+        math,
+        id_lut!(asfloat),
+        script_args!(x = 0.0),
+        |vm, args| {
+            let x_val = vm
+                .bx
+                .heap
+                .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
+            if let Some(v) = x_val.as_f32() {
+                return ScriptValue::from_f32(v);
+            }
+            if let Some(v) = x_val.as_u32() {
+                return ScriptValue::from_f32(f32::from_bits(v));
+            }
+            if let Some(v) = x_val.as_i32() {
+                return ScriptValue::from_f32(f32::from_bits(v as u32));
+            }
+            let f = vm
+                .bx
+                .heap
+                .cast_to_f64(x_val, vm.bx.threads.cur_ref().trap.ip) as f32;
+            ScriptValue::from_f32(f)
+        },
     );
 
     // 2 argument functions - support f64, Vec2f, Vec3f, Vec4f, Color
@@ -1008,6 +1113,69 @@ pub fn type_table_builtin(
     let is_any_int = |t| is_int(t) || is_vec_int(t);
 
     match name {
+        id!(asuint) => {
+            if args.len() != 1 {
+                script_err_invalid_args!(
+                    trap,
+                    "shader builtin 'asuint' requires 1 arg, got {}",
+                    args.len()
+                );
+                return builtins.pod_void;
+            }
+            return match args[0] {
+                t if t == f32_t || t == f16_t || t == u32_t => u32_t,
+                t => {
+                    script_err_type_mismatch!(
+                        trap,
+                        "shader builtin 'asuint' requires scalar float arg, got {}",
+                        fmt_ty(t)
+                    );
+                    builtins.pod_void
+                }
+            };
+        }
+        id!(asint) => {
+            if args.len() != 1 {
+                script_err_invalid_args!(
+                    trap,
+                    "shader builtin 'asint' requires 1 arg, got {}",
+                    args.len()
+                );
+                return builtins.pod_void;
+            }
+            return match args[0] {
+                t if t == f32_t || t == f16_t || t == i32_t => i32_t,
+                t => {
+                    script_err_type_mismatch!(
+                        trap,
+                        "shader builtin 'asint' requires scalar float arg, got {}",
+                        fmt_ty(t)
+                    );
+                    builtins.pod_void
+                }
+            };
+        }
+        id!(asfloat) => {
+            if args.len() != 1 {
+                script_err_invalid_args!(
+                    trap,
+                    "shader builtin 'asfloat' requires 1 arg, got {}",
+                    args.len()
+                );
+                return builtins.pod_void;
+            }
+            return match args[0] {
+                t if t == u32_t || t == i32_t || t == f32_t => f32_t,
+                t => {
+                    script_err_type_mismatch!(
+                        trap,
+                        "shader builtin 'asfloat' requires scalar int arg, got {}",
+                        fmt_ty(t)
+                    );
+                    builtins.pod_void
+                }
+            };
+        }
         // Float only 1 argument
         id!(acos)
         | id!(acosh)
@@ -1023,6 +1191,7 @@ pub fn type_table_builtin(
         | id!(exp2)
         | id!(floor)
         | id!(fract)
+        | id!(inverse)
         | id!(inverseSqrt)
         | id!(log)
         | id!(log2)
@@ -1046,6 +1215,18 @@ pub fn type_table_builtin(
                 return builtins.pod_void;
             }
             let t = args[0];
+            if name == id!(inverse) {
+                if t == builtins.pod_mat4x4f {
+                    return t;
+                }
+                script_err_type_mismatch!(
+                    trap,
+                    "shader builtin {:?} requires mat4 arg, got {}",
+                    name,
+                    fmt_ty(t)
+                );
+                return builtins.pod_void;
+            }
             if is_any_float(t) {
                 return t;
             }
@@ -1336,6 +1517,28 @@ pub fn type_table_builtin(
             script_err_type_mismatch!(
                 trap,
                 "shader builtin 'clamp' requires 3 matching float/int args, got {}, {}, {}",
+                fmt_ty(t1),
+                fmt_ty(t2),
+                fmt_ty(t3)
+            );
+            return builtins.pod_void;
+        }
+        id!(depth_clip) => {
+            if args.len() != 3 {
+                script_err_invalid_args!(
+                    trap,
+                    "shader builtin 'depth_clip' requires 3 args (world, color, clip), got {}",
+                    args.len()
+                );
+                return builtins.pod_void;
+            }
+            let (t1, t2, t3) = (args[0], args[1], args[2]);
+            if t1 == vec4f_t && t2 == vec4f_t && is_float(t3) {
+                return vec4f_t;
+            }
+            script_err_type_mismatch!(
+                trap,
+                "shader builtin 'depth_clip' requires (vec4f, vec4f, float), got {}, {}, {}",
                 fmt_ty(t1),
                 fmt_ty(t2),
                 fmt_ty(t3)

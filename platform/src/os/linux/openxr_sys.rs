@@ -8,6 +8,18 @@ use std::ffi::CString;
 use std::fmt;
 use std::os::raw::c_char;
 use std::os::raw::c_void;
+
+// Vulkan raw handle types used by OpenXR graphics bindings.
+pub type VkInstance = *const c_void;
+pub type VkPhysicalDevice = *const c_void;
+pub type VkDevice = *const c_void;
+pub type VkImage = u64;
+pub type VkInstanceCreateInfo = c_void;
+pub type VkDeviceCreateInfo = c_void;
+pub type VkAllocationCallbacks = c_void;
+pub type VkResult = i32;
+pub type VkGetInstanceProcAddr =
+    unsafe extern "system" fn(VkInstance, *const c_char) -> Option<unsafe extern "system" fn()>;
 // Consts
 
 pub const MAX_APPLICATION_NAME_SIZE: usize = 128usize;
@@ -42,6 +54,26 @@ macro_rules! get_proc_addr {
                 Err(format!("Cannot find symbol {} {:?}", stringify!($ty), res))
             } else {
                 Ok({ std::mem::transmute_copy::<_, $ty>(&f) })
+            }
+        }
+    };
+}
+
+macro_rules! get_optional_proc_addr {
+    ($get_addr:expr, $inst:expr, $ty:ident) => {
+        unsafe {
+            let mut f: *mut c_void = 0 as *mut _;
+            let _ = $get_addr(
+                $inst,
+                CStr::from_bytes_with_nul(&concat!(stringify!($ty), "\0").as_bytes()[1..])
+                    .unwrap()
+                    .as_ptr(),
+                &mut f as *mut _ as _,
+            );
+            if f.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute_copy::<_, $ty>(&f))
             }
         }
     };
@@ -101,14 +133,35 @@ impl LibOpenXrLoader {
             _keep_module_alive: module,
         })
     }
+
+    pub fn destroy_instance(&self, instance: XrInstance) {
+        match get_proc_addr!(self.xrGetInstanceProcAddr, instance, TxrDestroyInstance) {
+            Ok(xr_destroy_instance) => {
+                unsafe { (xr_destroy_instance)(instance) }.log_error("xrDestroyInstance");
+            }
+            Err(err) => {
+                crate::error!("OpenXR cleanup failed while loading xrDestroyInstance: {err}")
+            }
+        }
+    }
 }
 
 pub struct LibOpenXr {
     pub xrGetInstanceProperties: TxrGetInstanceProperties,
     pub xrGetSystem: TxrGetSystem,
     pub xrGetSystemProperties: TxrGetSystemProperties,
+    #[cfg(use_vulkan)]
+    pub xrCreateVulkanInstanceKHR: TxrCreateVulkanInstanceKHR,
+    #[cfg(use_vulkan)]
+    pub xrCreateVulkanDeviceKHR: TxrCreateVulkanDeviceKHR,
+    #[cfg(use_vulkan)]
+    pub xrGetVulkanGraphicsRequirements2KHR: TxrGetVulkanGraphicsRequirements2KHR,
+    #[cfg(use_vulkan)]
+    pub xrGetVulkanGraphicsDevice2KHR: TxrGetVulkanGraphicsDevice2KHR,
+    #[cfg(not(use_vulkan))]
     pub xrGetOpenGLESGraphicsRequirementsKHR: TxrGetOpenGLESGraphicsRequirementsKHR,
     pub xrCreateSession: TxrCreateSession,
+    pub xrEnumerateSwapchainFormats: TxrEnumerateSwapchainFormats,
     pub xrEnumerateViewConfigurations: TxrEnumerateViewConfigurations,
     pub xrGetViewConfigurationProperties: TxrGetViewConfigurationProperties,
     pub xrEnumerateViewConfigurationViews: TxrEnumerateViewConfigurationViews,
@@ -119,6 +172,10 @@ pub struct LibOpenXr {
     pub xrCreatePassthroughLayerFB: TxrCreatePassthroughLayerFB,
     pub xrPassthroughStartFB: TxrPassthroughStartFB,
     pub xrPassthroughLayerResumeFB: TxrPassthroughLayerResumeFB,
+    pub xrCreateFoveationProfileFB: Option<TxrCreateFoveationProfileFB>,
+    pub xrEnumerateDisplayRefreshRatesFB: Option<TxrEnumerateDisplayRefreshRatesFB>,
+    pub xrGetDisplayRefreshRateFB: Option<TxrGetDisplayRefreshRateFB>,
+    pub xrRequestDisplayRefreshRateFB: Option<TxrRequestDisplayRefreshRateFB>,
     pub xrCreateEnvironmentDepthProviderMETA: TxrCreateEnvironmentDepthProviderMETA,
     pub xrCreateEnvironmentDepthSwapchainMETA: TxrCreateEnvironmentDepthSwapchainMETA,
     pub xrGetEnvironmentDepthSwapchainStateMETA: TxrGetEnvironmentDepthSwapchainStateMETA,
@@ -138,11 +195,13 @@ pub struct LibOpenXr {
     pub xrWaitSwapchainImage: TxrWaitSwapchainImage,
     pub xrAcquireEnvironmentDepthImageMETA: TxrAcquireEnvironmentDepthImageMETA,
     pub xrReleaseSwapchainImage: TxrReleaseSwapchainImage,
+    pub xrUpdateSwapchainFB: Option<TxrUpdateSwapchainFB>,
     pub xrEndSession: TxrEndSession,
     pub xrStopEnvironmentDepthProviderMETA: TxrStopEnvironmentDepthProviderMETA,
     pub xrDestroyEnvironmentDepthProviderMETA: TxrDestroyEnvironmentDepthProviderMETA,
     pub xrPassthroughPauseFB: TxrPassthroughPauseFB,
     pub xrDestroyPassthroughFB: TxrDestroyPassthroughFB,
+    pub xrDestroyFoveationProfileFB: Option<TxrDestroyFoveationProfileFB>,
     pub xrDestroySwapchain: TxrDestroySwapchain,
     pub xrDestroyEnvironmentDepthSwapchainMETA: TxrDestroyEnvironmentDepthSwapchainMETA,
     pub xrDestroySpace: TxrDestroySpace,
@@ -150,6 +209,7 @@ pub struct LibOpenXr {
     pub xrDestroyInstance: TxrDestroyInstance,
     pub xrStringToPath: TxrStringToPath,
     pub xrCreateActionSet: TxrCreateActionSet,
+    pub xrDestroyActionSet: TxrDestroyActionSet,
     pub xrCreateAction: TxrCreateAction,
     pub xrSuggestInteractionProfileBindings: TxrSuggestInteractionProfileBindings,
     pub xrAttachSessionActionSets: TxrAttachSessionActionSets,
@@ -188,12 +248,34 @@ impl LibOpenXr {
             xrGetInstanceProperties: get_proc_addr!(gipa, instance, TxrGetInstanceProperties)?,
             xrGetSystem: get_proc_addr!(gipa, instance, TxrGetSystem)?,
             xrGetSystemProperties: get_proc_addr!(gipa, instance, TxrGetSystemProperties)?,
+            #[cfg(use_vulkan)]
+            xrCreateVulkanInstanceKHR: get_proc_addr!(gipa, instance, TxrCreateVulkanInstanceKHR)?,
+            #[cfg(use_vulkan)]
+            xrCreateVulkanDeviceKHR: get_proc_addr!(gipa, instance, TxrCreateVulkanDeviceKHR)?,
+            #[cfg(use_vulkan)]
+            xrGetVulkanGraphicsRequirements2KHR: get_proc_addr!(
+                gipa,
+                instance,
+                TxrGetVulkanGraphicsRequirements2KHR
+            )?,
+            #[cfg(use_vulkan)]
+            xrGetVulkanGraphicsDevice2KHR: get_proc_addr!(
+                gipa,
+                instance,
+                TxrGetVulkanGraphicsDevice2KHR
+            )?,
+            #[cfg(not(use_vulkan))]
             xrGetOpenGLESGraphicsRequirementsKHR: get_proc_addr!(
                 gipa,
                 instance,
                 TxrGetOpenGLESGraphicsRequirementsKHR
             )?,
             xrCreateSession: get_proc_addr!(gipa, instance, TxrCreateSession)?,
+            xrEnumerateSwapchainFormats: get_proc_addr!(
+                gipa,
+                instance,
+                TxrEnumerateSwapchainFormats
+            )?,
             xrEnumerateViewConfigurations: get_proc_addr!(
                 gipa,
                 instance,
@@ -228,6 +310,26 @@ impl LibOpenXr {
                 instance,
                 TxrPassthroughLayerResumeFB
             )?,
+            xrCreateFoveationProfileFB: get_optional_proc_addr!(
+                gipa,
+                instance,
+                TxrCreateFoveationProfileFB
+            ),
+            xrEnumerateDisplayRefreshRatesFB: get_optional_proc_addr!(
+                gipa,
+                instance,
+                TxrEnumerateDisplayRefreshRatesFB
+            ),
+            xrGetDisplayRefreshRateFB: get_optional_proc_addr!(
+                gipa,
+                instance,
+                TxrGetDisplayRefreshRateFB
+            ),
+            xrRequestDisplayRefreshRateFB: get_optional_proc_addr!(
+                gipa,
+                instance,
+                TxrRequestDisplayRefreshRateFB
+            ),
             xrCreateEnvironmentDepthProviderMETA: get_proc_addr!(
                 gipa,
                 instance,
@@ -278,6 +380,7 @@ impl LibOpenXr {
                 TxrAcquireEnvironmentDepthImageMETA
             )?,
             xrReleaseSwapchainImage: get_proc_addr!(gipa, instance, TxrReleaseSwapchainImage)?,
+            xrUpdateSwapchainFB: get_optional_proc_addr!(gipa, instance, TxrUpdateSwapchainFB),
             xrEndSession: get_proc_addr!(gipa, instance, TxrEndSession)?,
             xrStopEnvironmentDepthProviderMETA: get_proc_addr!(
                 gipa,
@@ -291,6 +394,11 @@ impl LibOpenXr {
             )?,
             xrPassthroughPauseFB: get_proc_addr!(gipa, instance, TxrPassthroughPauseFB)?,
             xrDestroyPassthroughFB: get_proc_addr!(gipa, instance, TxrDestroyPassthroughFB)?,
+            xrDestroyFoveationProfileFB: get_optional_proc_addr!(
+                gipa,
+                instance,
+                TxrDestroyFoveationProfileFB
+            ),
             xrDestroySwapchain: get_proc_addr!(gipa, instance, TxrDestroySwapchain)?,
             xrDestroyEnvironmentDepthSwapchainMETA: get_proc_addr!(
                 gipa,
@@ -302,6 +410,7 @@ impl LibOpenXr {
             xrDestroyInstance: get_proc_addr!(gipa, instance, TxrDestroyInstance)?,
             xrStringToPath: get_proc_addr!(gipa, instance, TxrStringToPath)?,
             xrCreateActionSet: get_proc_addr!(gipa, instance, TxrCreateActionSet)?,
+            xrDestroyActionSet: get_proc_addr!(gipa, instance, TxrDestroyActionSet)?,
             xrCreateAction: get_proc_addr!(gipa, instance, TxrCreateAction)?,
             xrSuggestInteractionProfileBindings: get_proc_addr!(
                 gipa,
@@ -424,6 +533,45 @@ pub type TxrGetSystemProperties = unsafe extern "C" fn(
     properties: *mut XrSystemProperties,
 ) -> XrResult;
 
+pub type TxrGetVulkanGraphicsRequirementsKHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    system_id: XrSystemId,
+    graphics_requirements: *mut XrGraphicsRequirementsVulkanKHR,
+) -> XrResult;
+
+pub type TxrGetVulkanGraphicsRequirements2KHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    system_id: XrSystemId,
+    graphics_requirements: *mut XrGraphicsRequirementsVulkanKHR,
+) -> XrResult;
+
+pub type TxrCreateVulkanInstanceKHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    create_info: *const XrVulkanInstanceCreateInfoKHR,
+    vulkan_instance: *mut VkInstance,
+    vulkan_result: *mut VkResult,
+) -> XrResult;
+
+pub type TxrCreateVulkanDeviceKHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    create_info: *const XrVulkanDeviceCreateInfoKHR,
+    vulkan_device: *mut VkDevice,
+    vulkan_result: *mut VkResult,
+) -> XrResult;
+
+pub type TxrGetVulkanGraphicsDeviceKHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    system_id: XrSystemId,
+    vk_instance: VkInstance,
+    vk_physical_device: *mut VkPhysicalDevice,
+) -> XrResult;
+
+pub type TxrGetVulkanGraphicsDevice2KHR = unsafe extern "C" fn(
+    instance: XrInstance,
+    get_info: *const XrVulkanGraphicsDeviceGetInfoKHR,
+    vk_physical_device: *mut VkPhysicalDevice,
+) -> XrResult;
+
 pub type TxrGetOpenGLESGraphicsRequirementsKHR = unsafe extern "C" fn(
     instance: XrInstance,
     system_id: XrSystemId,
@@ -472,17 +620,30 @@ pub type TxrCreateSwapchain = unsafe extern "C" fn(
     swapchain: *mut XrSwapchain,
 ) -> XrResult;
 
+pub type TxrEnumerateSwapchainFormats = unsafe extern "C" fn(
+    session: XrSession,
+    format_capacity_input: u32,
+    format_count_output: *mut u32,
+    formats: *mut i64,
+) -> XrResult;
+
 pub type TxrEnumerateSwapchainImages = unsafe extern "C" fn(
     swapchain: XrSwapchain,
     image_capacity_input: u32,
     image_count_output: *mut u32,
-    images: *mut XrSwapchainImageOpenGLESKHR,
+    images: *mut c_void,
 ) -> XrResult;
 
 pub type TxrCreatePassthroughFB = unsafe extern "C" fn(
     session: XrSession,
     create_info: *const XrPassthroughCreateInfoFB,
     out_passthrough: *mut XrPassthroughFB,
+) -> XrResult;
+
+pub type TxrCreateFoveationProfileFB = unsafe extern "C" fn(
+    session: XrSession,
+    create_info: *const XrFoveationProfileCreateInfoFB,
+    profile: *mut XrFoveationProfileFB,
 ) -> XrResult;
 
 pub type TxrCreatePassthroughLayerFB = unsafe extern "C" fn(
@@ -517,7 +678,7 @@ pub type TxrEnumerateEnvironmentDepthSwapchainImagesMETA = unsafe extern "C" fn(
     swapchain: XrEnvironmentDepthSwapchainMETA,
     image_capacity_input: u32,
     image_count_output: *mut u32,
-    images: *mut XrSwapchainImageOpenGLESKHR,
+    images: *mut c_void,
 ) -> XrResult;
 
 pub type TxrStartEnvironmentDepthProviderMETA =
@@ -552,6 +713,19 @@ pub type TxrBeginFrame =
 
 pub type TxrEndFrame =
     unsafe extern "C" fn(session: XrSession, frame_end_info: *const XrFrameEndInfo) -> XrResult;
+
+pub type TxrEnumerateDisplayRefreshRatesFB = unsafe extern "C" fn(
+    session: XrSession,
+    display_refresh_rate_capacity_input: u32,
+    display_refresh_rate_count_output: *mut u32,
+    display_refresh_rates: *mut f32,
+) -> XrResult;
+
+pub type TxrGetDisplayRefreshRateFB =
+    unsafe extern "C" fn(session: XrSession, display_refresh_rate: *mut f32) -> XrResult;
+
+pub type TxrRequestDisplayRefreshRateFB =
+    unsafe extern "C" fn(session: XrSession, display_refresh_rate: f32) -> XrResult;
 
 pub type TxrLocateSpace = unsafe extern "C" fn(
     space: XrSpace,
@@ -591,6 +765,11 @@ pub type TxrReleaseSwapchainImage = unsafe extern "C" fn(
     release_info: *const XrSwapchainImageReleaseInfo,
 ) -> XrResult;
 
+pub type TxrUpdateSwapchainFB = unsafe extern "C" fn(
+    swapchain: XrSwapchain,
+    state: *const XrSwapchainStateBaseHeaderFB,
+) -> XrResult;
+
 pub type TxrEndSession = unsafe extern "C" fn(session: XrSession) -> XrResult;
 
 pub type TxrStopEnvironmentDepthProviderMETA =
@@ -602,6 +781,9 @@ pub type TxrDestroyEnvironmentDepthProviderMETA =
 pub type TxrPassthroughPauseFB = unsafe extern "C" fn(passthrough: XrPassthroughFB) -> XrResult;
 
 pub type TxrDestroyPassthroughFB = unsafe extern "C" fn(passthrough: XrPassthroughFB) -> XrResult;
+
+pub type TxrDestroyFoveationProfileFB =
+    unsafe extern "C" fn(profile: XrFoveationProfileFB) -> XrResult;
 
 pub type TxrDestroySwapchain = unsafe extern "C" fn(swapchain: XrSwapchain) -> XrResult;
 
@@ -625,6 +807,8 @@ pub type TxrCreateActionSet = unsafe extern "C" fn(
     create_info: *const XrActionSetCreateInfo,
     action_set: *mut XrActionSet,
 ) -> XrResult;
+
+pub type TxrDestroyActionSet = unsafe extern "C" fn(action_set: XrActionSet) -> XrResult;
 
 pub type TxrCreateAction = unsafe extern "C" fn(
     action_set: XrActionSet,
@@ -878,6 +1062,10 @@ pub struct XrPassthroughFB(pub u64);
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct XrPassthroughLayerFB(pub u64);
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct XrFoveationProfileFB(pub u64);
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -2028,6 +2216,13 @@ impl Default for XrCompositionLayerPassthroughFB {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct XrSwapchainStateBaseHeaderFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct XrSwapchainImageReleaseInfo {
     pub ty: XrStructureType,
     pub next: *const c_void,
@@ -2323,6 +2518,16 @@ pub struct XrEventDataSessionStateChanged {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct XrEventDataDisplayRefreshRateChangedFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub session: XrSession,
+    pub from_display_refresh_rate: f32,
+    pub to_display_refresh_rate: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct XrEventDataBuffer {
     pub ty: XrStructureType,
     pub next: *const c_void,
@@ -2421,6 +2626,82 @@ impl Default for XrPassthroughCreateInfoFB {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct XrFoveationProfileCreateInfoFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+}
+
+impl Default for XrFoveationProfileCreateInfoFB {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::FOVEATION_PROFILE_CREATE_INFO_FB,
+            next: 0 as *const _,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSwapchainCreateInfoFoveationFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub flags: XrSwapchainCreateFoveationFlagsFB,
+}
+
+impl Default for XrSwapchainCreateInfoFoveationFB {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::SWAPCHAIN_CREATE_INFO_FOVEATION_FB,
+            next: 0 as *const _,
+            flags: XrSwapchainCreateFoveationFlagsFB(0),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSwapchainStateFoveationFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub flags: XrSwapchainStateFoveationFlagsFB,
+    pub profile: XrFoveationProfileFB,
+}
+
+impl Default for XrSwapchainStateFoveationFB {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::SWAPCHAIN_STATE_FOVEATION_FB,
+            next: 0 as *const _,
+            flags: XrSwapchainStateFoveationFlagsFB(0),
+            profile: XrFoveationProfileFB(0),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrFoveationLevelProfileCreateInfoFB {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub level: XrFoveationLevelFB,
+    pub verticalOffset: f32,
+    pub dynamic: XrFoveationDynamicFB,
+}
+
+impl Default for XrFoveationLevelProfileCreateInfoFB {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::FOVEATION_LEVEL_PROFILE_CREATE_INFO_FB,
+            next: 0 as *const _,
+            level: XrFoveationLevelFB::NONE,
+            verticalOffset: 0.0,
+            dynamic: XrFoveationDynamicFB::DISABLED,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct XrSwapchainImageOpenGLESKHR {
     pub ty: XrStructureType,
     pub next: *mut c_void,
@@ -2433,6 +2714,46 @@ impl Default for XrSwapchainImageOpenGLESKHR {
             ty: XrStructureType::SWAPCHAIN_IMAGE_OPENGL_ES_KHR,
             next: 0 as *mut _,
             image: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSwapchainImageVulkanKHR {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub image: VkImage,
+}
+
+impl Default for XrSwapchainImageVulkanKHR {
+    fn default() -> Self {
+        XrSwapchainImageVulkanKHR {
+            ty: XrStructureType::SWAPCHAIN_IMAGE_VULKAN_KHR,
+            next: 0 as *mut _,
+            image: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSwapchainImageFoveationVulkanFB {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub image: VkImage,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Default for XrSwapchainImageFoveationVulkanFB {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::SWAPCHAIN_IMAGE_FOVEATION_VULKAN_FB,
+            next: 0 as *mut _,
+            image: 0,
+            width: 0,
+            height: 0,
         }
     }
 }
@@ -2612,6 +2933,100 @@ impl Default for XrGraphicsRequirementsOpenGLESKHR {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
+pub struct XrGraphicsRequirementsVulkanKHR {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub min_api_version_supported: XrVersion,
+    pub max_api_version_supported: XrVersion,
+}
+
+impl Default for XrGraphicsRequirementsVulkanKHR {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::GRAPHICS_REQUIREMENTS_VULKAN_KHR,
+            next: 0 as *mut _,
+            min_api_version_supported: XrVersion(0),
+            max_api_version_supported: XrVersion(0),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct XrVulkanInstanceCreateInfoKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub system_id: XrSystemId,
+    pub create_flags: XrVulkanInstanceCreateFlagsKHR,
+    pub pfn_get_instance_proc_addr: Option<VkGetInstanceProcAddr>,
+    pub vulkan_create_info: *const VkInstanceCreateInfo,
+    pub vulkan_allocator: *const VkAllocationCallbacks,
+}
+
+impl Default for XrVulkanInstanceCreateInfoKHR {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::VULKAN_INSTANCE_CREATE_INFO_KHR,
+            next: std::ptr::null(),
+            system_id: XrSystemId(0),
+            create_flags: XrVulkanInstanceCreateFlagsKHR(0),
+            pfn_get_instance_proc_addr: None,
+            vulkan_create_info: std::ptr::null(),
+            vulkan_allocator: std::ptr::null(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct XrVulkanDeviceCreateInfoKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub system_id: XrSystemId,
+    pub create_flags: XrVulkanDeviceCreateFlagsKHR,
+    pub pfn_get_instance_proc_addr: Option<VkGetInstanceProcAddr>,
+    pub vulkan_physical_device: VkPhysicalDevice,
+    pub vulkan_create_info: *const VkDeviceCreateInfo,
+    pub vulkan_allocator: *const VkAllocationCallbacks,
+}
+
+impl Default for XrVulkanDeviceCreateInfoKHR {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::VULKAN_DEVICE_CREATE_INFO_KHR,
+            next: std::ptr::null(),
+            system_id: XrSystemId(0),
+            create_flags: XrVulkanDeviceCreateFlagsKHR(0),
+            pfn_get_instance_proc_addr: None,
+            vulkan_physical_device: std::ptr::null(),
+            vulkan_create_info: std::ptr::null(),
+            vulkan_allocator: std::ptr::null(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrVulkanGraphicsDeviceGetInfoKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub system_id: XrSystemId,
+    pub vulkan_instance: VkInstance,
+}
+
+impl Default for XrVulkanGraphicsDeviceGetInfoKHR {
+    fn default() -> Self {
+        Self {
+            ty: XrStructureType::VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR,
+            next: 0 as *const _,
+            system_id: XrSystemId(0),
+            vulkan_instance: std::ptr::null(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
 pub struct XrSystemGetInfo {
     pub ty: XrStructureType,
     pub next: *const c_void,
@@ -2760,6 +3175,18 @@ pub struct XrGraphicsBindingOpenGLESAndroidKHR {
     pub display: EGLDisplay,
     pub config: EGLConfig,
     pub context: EGLContext,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrGraphicsBindingVulkanKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub instance: VkInstance,
+    pub physical_device: VkPhysicalDevice,
+    pub device: VkDevice,
+    pub queue_family_index: u32,
+    pub queue_index: u32,
 }
 
 #[repr(C)]
@@ -2936,6 +3363,21 @@ impl XrSwapchainCreateFlags {
     pub const PROTECTED_CONTENT: XrSwapchainCreateFlags = Self(1 << 0u64);
     pub const STATIC_IMAGE: XrSwapchainCreateFlags = Self(1 << 1u64);
 }
+bitmask!(XrSwapchainCreateFlags);
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct XrSwapchainCreateFoveationFlagsFB(pub u64);
+impl XrSwapchainCreateFoveationFlagsFB {
+    pub const SCALED_BIN_BIT_FB: Self = Self(0x00000001);
+    pub const FRAGMENT_DENSITY_MAP_BIT_FB: Self = Self(0x00000002);
+}
+bitmask!(XrSwapchainCreateFoveationFlagsFB);
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct XrSwapchainStateFoveationFlagsFB(pub u64);
+bitmask!(XrSwapchainStateFoveationFlagsFB);
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -2951,6 +3393,16 @@ impl XrSwapchainUsageFlags {
     pub const INPUT_ATTACHMENT: XrSwapchainUsageFlags = Self(1 << 7u64);
 }
 bitmask!(XrSwapchainUsageFlags);
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct XrVulkanInstanceCreateFlagsKHR(pub u64);
+bitmask!(XrVulkanInstanceCreateFlagsKHR);
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct XrVulkanDeviceCreateFlagsKHR(pub u64);
+bitmask!(XrVulkanDeviceCreateFlagsKHR);
 
 // Enums
 
@@ -3342,6 +3794,55 @@ impl fmt::Debug for XrViewConfigurationType {
         }
     }
 }
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct XrFoveationLevelFB(i32);
+impl XrFoveationLevelFB {
+    pub const NONE: Self = Self(0);
+    pub const LOW: Self = Self(1);
+    pub const MEDIUM: Self = Self(2);
+    pub const HIGH: Self = Self(3);
+}
+impl fmt::Debug for XrFoveationLevelFB {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let name = match *self {
+            Self::NONE => Some("NONE"),
+            Self::LOW => Some("LOW"),
+            Self::MEDIUM => Some("MEDIUM"),
+            Self::HIGH => Some("HIGH"),
+            _ => None,
+        };
+        if let Some(name) = name {
+            write!(fmt, "{}", name)
+        } else {
+            write!(fmt, "unknown XrFoveationLevelFB {}", self.0)
+        }
+    }
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub struct XrFoveationDynamicFB(i32);
+impl XrFoveationDynamicFB {
+    pub const DISABLED: Self = Self(0);
+    pub const LEVEL_ENABLED: Self = Self(1);
+}
+impl fmt::Debug for XrFoveationDynamicFB {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let name = match *self {
+            Self::DISABLED => Some("DISABLED"),
+            Self::LEVEL_ENABLED => Some("LEVEL_ENABLED"),
+            _ => None,
+        };
+        if let Some(name) = name {
+            write!(fmt, "{}", name)
+        } else {
+            write!(fmt, "unknown XrFoveationDynamicFB {}", self.0)
+        }
+    }
+}
+
 impl fmt::Debug for XrFormFactor {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         let name = match *self {

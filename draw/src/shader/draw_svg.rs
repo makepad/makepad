@@ -30,35 +30,20 @@ script_mod! {
         // Animation time in seconds, available for custom shader effects
         svg_time: uniform(float(0.0))
 
+        // Hook to allow custom transformations on the SVG geometry (e.g. rotation)
+        transform_svg_point: fn(pos: vec2) -> vec2 {
+            return pos
+        }
+
         vertex: fn() {
             var pos = vec2(self.geom.x, self.geom.y);
-            // Fill fringe outer vertices (u=0, stroke_mult>1e5) have
-            // the outward normal stored in (v, stroke_dist). Expand
-            // them so the fringe is ~1px wide on screen regardless of
-            // svg_scale. We keep the edge centered like NanoVG:
-            // fill/body verts move inward by 0.5px, outer fringe verts
-            // move outward by 0.5px.
-            if self.geom.stroke_mult > 1e5 {
-                let normal = vec2(self.geom.v, self.geom.stroke_dist);
-                let nlen = length(normal);
-                if nlen > 0.0001 {
-                    let un = normal / nlen;
-                    // Convert screen px into local-space distance along un.
-                    let screen_scale = length(vec2(un.x * self.svg_scale.x, un.y * self.svg_scale.y));
-                    if screen_scale > 0.0001 {
-                        let half_px = 0.5 / screen_scale;
-                        if self.geom.u < 0.25 {
-                            // transparent outer fringe vertex
-                            pos = pos + un * half_px;
-                        } else if self.geom.u > 0.25 {
-                            // opaque edge/body vertex
-                            pos = pos - un * half_px;
-                        }
-                    }
-                }
-            }
-            // Apply cached SVG transform on GPU
-            let transformed = pos * self.svg_scale + self.svg_offset;
+            // SVG fill uses pre-computed fringe (not GPU-expand), so fringe
+            // vertices already have physically offset positions. No GPU-side
+            // expansion needed.
+            // Keep tessellated SVG geometry relative and apply rect_pos as the
+            // final anchor so turtle alignment can move it like DrawQuad.
+            let transformed_local = self.transform_svg_point(pos * self.svg_scale + self.svg_offset);
+            let transformed = transformed_local + self.rect_pos;
             self.v_tcoord = vec2(self.geom.u, self.geom.v);
             self.v_color = vec4(self.geom.color_r, self.geom.color_g, self.geom.color_b, self.geom.color_a);
             self.v_stroke_mult = self.geom.stroke_mult;
@@ -66,27 +51,27 @@ script_mod! {
             self.v_shape_id = self.geom.shape_id;
             self.v_param0 = self.geom.param0;
             self.v_param5 = self.geom.param5;
-            // Transform gradient geometry params by svg_scale/svg_offset
+            // Transform gradient geometry params by svg_scale/svg_offset and custom hook
             let grad_type = self.geom.param0;
             if grad_type > 0.5 && grad_type < 1.5 {
                 // Linear gradient: p1,p2 = start point, p3,p4 = end point
-                let p0 = vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset;
-                let p1 = vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset;
+                let p0 = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset) + self.rect_pos;
+                let p1 = self.transform_svg_point(vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset) + self.rect_pos;
                 self.v_param1 = p0.x;
                 self.v_param2 = p0.y;
                 self.v_param3 = p1.x;
                 self.v_param4 = p1.y;
             } else if grad_type > 1.5 {
                 // Radial gradient: p1,p2 = center, p3,p4 = rx, ry
-                let center = vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset;
+                let center = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset) + self.rect_pos;
                 self.v_param1 = center.x;
                 self.v_param2 = center.y;
                 self.v_param3 = self.geom.param3 * self.svg_scale.x;
                 self.v_param4 = self.geom.param4 * self.svg_scale.y;
             } else if self.geom.shape_id > 0.5 {
                 // Effect shape with bbox in params: transform bbox by svg_scale/svg_offset
-                let bbox_min = vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset;
-                let bbox_max = vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset;
+                let bbox_min = self.transform_svg_point(vec2(self.geom.param1, self.geom.param2) * self.svg_scale + self.svg_offset) + self.rect_pos;
+                let bbox_max = self.transform_svg_point(vec2(self.geom.param3, self.geom.param4) * self.svg_scale + self.svg_offset) + self.rect_pos;
                 self.v_param1 = bbox_min.x;
                 self.v_param2 = bbox_min.y;
                 self.v_param3 = bbox_max.x;
@@ -100,18 +85,21 @@ script_mod! {
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
 
-            // Early clip rejection: merge both clip rects (in transformed space), single check
-            let cr = self.geom.clip_radius * max(self.svg_scale.x, self.svg_scale.y);
-            let clip = vec4(
-                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
-                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
-                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
-                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
-            );
-            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
-                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
-                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
-                return
+            // Early clip rejection in final draw space.
+            let cr = self.geom.clip_radius * max(abs(self.svg_scale.x), abs(self.svg_scale.y));
+            let is_shadow = self.geom.stroke_mult < -0.5;
+            if cr > 0.0 && !is_shadow {
+                let clip = vec4(
+                    max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                    max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                    min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                    min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+                );
+                if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                    || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                    self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
+                    return
+                }
             }
 
             let world = self.draw_list.view_transform * vec4(
@@ -120,6 +108,7 @@ script_mod! {
                 self.draw_depth + self.draw_call.zbias + self.geom.zbias
                 1.
             );
+            self.v_world_clip = world;
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
         }
 
@@ -202,9 +191,15 @@ impl DrawSvg {
     }
 
     pub fn render_to_rect(&mut self, cx: &mut Cx2d, rect: &Rect, time: f32) {
-        let doc = self.svg_doc.take().unwrap();
+        self.draw_super.rect_pos = rect.pos.into();
+        self.draw_super.rect_size = rect.size.into();
+
+        let Some(doc) = self.svg_doc.take() else {
+            return;
+        };
 
         let (lw, lh) = doc.logical_size();
+        let mut use_uploaded_cache = false;
 
         if self.has_animations {
             // Animated SVGs must re-tessellate every frame
@@ -220,18 +215,8 @@ impl DrawSvg {
             self.cached_gradient_row_count = self.draw_super.gradient_row_count;
             self.cache_valid = true;
         } else {
-            // Replay cached geometry and gradient texture data
-            self.draw_super.begin();
-            self.draw_super
-                .acc_verts
-                .extend_from_slice(&self.cached_verts);
-            self.draw_super
-                .acc_indices
-                .extend_from_slice(&self.cached_indices);
-            self.draw_super
-                .gradient_texture_data
-                .extend_from_slice(&self.cached_gradient_data);
-            self.draw_super.gradient_row_count = self.cached_gradient_row_count;
+            // Static SVG geometry is already uploaded; submit it directly.
+            use_uploaded_cache = true;
         }
 
         // Compute GPU-side scale + offset from content bounds to target rect
@@ -250,8 +235,9 @@ impl DrawSvg {
                 (tw / bw, th / bh)
             };
 
-            let offset_x = rect.pos.x as f32 + (tw - bw * sx) * 0.5 - bmin_x * sx;
-            let offset_y = rect.pos.y as f32 + (th - bh * sy) * 0.5 - bmin_y * sy;
+            // Keep geometry local; rect_pos is the final anchor applied in the shader.
+            let offset_x = (tw - bw * sx) * 0.5 - bmin_x * sx;
+            let offset_y = (th - bh * sy) * 0.5 - bmin_y * sy;
 
             // svg_scale at uniform offset 0..1, svg_offset at 2..3, svg_time at 4
             let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
@@ -264,12 +250,31 @@ impl DrawSvg {
             let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
             uniforms[0] = 1.0;
             uniforms[1] = 1.0;
-            uniforms[2] = rect.pos.x as f32;
-            uniforms[3] = rect.pos.y as f32;
+            uniforms[2] = 0.0;
+            uniforms[3] = 0.0;
             uniforms[4] = time;
         }
 
-        self.draw_super.end(cx);
+        if use_uploaded_cache {
+            if !self.draw_super.submit_existing_geometry(cx) {
+                // Geometry cache is missing (e.g. after context loss); rebuild
+                // from CPU cache and re-upload once.
+                self.draw_super.begin();
+                self.draw_super
+                    .acc_verts
+                    .extend_from_slice(&self.cached_verts);
+                self.draw_super
+                    .acc_indices
+                    .extend_from_slice(&self.cached_indices);
+                self.draw_super
+                    .gradient_texture_data
+                    .extend_from_slice(&self.cached_gradient_data);
+                self.draw_super.gradient_row_count = self.cached_gradient_row_count;
+                self.draw_super.end(cx);
+            }
+        } else {
+            self.draw_super.end(cx);
+        }
         self.svg_doc = Some(doc);
     }
 
@@ -330,7 +335,7 @@ impl DrawSvg {
         let data = if let Some(data) = cx.get_resource(handle) {
             data
         } else {
-            cx.load_all_script_resources();
+            cx.load_script_resource(handle);
             match cx.get_resource(handle) {
                 Some(data) => data,
                 // Resource not yet available (may be loading via HTTP) - don't

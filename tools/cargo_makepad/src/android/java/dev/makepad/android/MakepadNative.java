@@ -29,6 +29,7 @@ public class MakepadNative {
     public native static void surfaceOnKeyUp(int keycode, int meta_state);
     public native static void surfaceOnCharacter(int character);
     public native static void surfaceOnResizeTextIME(int keyboard_height, boolean is_open);
+    public native static void surfaceOnSafeAreaInsets(float top, float right, float bottom, float left);
 
     // networking
     public native static void onHttpResponse(long id, long metadata_id, int status_code, String headers, byte[] body);
@@ -40,6 +41,9 @@ public class MakepadNative {
     // clipboard
     public native static void onClipboardAction(String action);
     public native static void onClipboardPaste(String content);
+
+    // selection handles
+    public native static void onSelectionHandleDrag(int handle, int phase, float x, float y, long timeMillis);
 
     // IME events - unified text state notification (Java→Rust)
     // Called when IME changes text (composition, commit, delete, selection change)
@@ -66,4 +70,8 @@ public class MakepadNative {
     public static native void onVideoPlaybackCompleted(long videoId);
     public static native void onVideoPlayerReleased(long videoId);
     public static native void onVideoDecodingError(long videoId, String error);
+    public static native void onH264EncoderPacket(long encoderId, long ptsUs, int flags, byte[] data);
+    public static native void onH264EncoderError(long encoderId, String error);
+    public static native void onCameraPreviewSurfaceReady(long videoId, Surface surface, int width, int height);
+    public static native void onCameraPreviewSurfaceDestroyed(long videoId);
 }

@@ -1,53 +1,130 @@
-use {
-    rustybuzz,
-    rustybuzz::ttf_parser,
-    std::{fmt, marker::PhantomPinned, mem, pin::Pin, rc::Rc},
-};
+use std::{cell::RefCell, fmt, rc::Rc};
+use {super::loader::FontData, rustybuzz, rustybuzz::ttf_parser};
 
-#[derive(Debug)]
-pub struct FontFace(Pin<Box<FontFaceInner>>);
+pub struct FontFace {
+    parsed: Rc<ParsedFontFace>,
+    variations: Vec<rustybuzz::Variation>,
+    /// Cached `ttf_parser::Face` with the current variations applied.
+    /// Invalidated when `set_variations` is called.
+    cached_ttf_face: RefCell<Option<ttf_parser::Face<'static>>>,
+    /// Cached `rustybuzz::Face` built from the parsed `ttf_parser::Face`.
+    /// Invalidated when `set_variations` is called, since variations affect
+    /// the rustybuzz shaping tables.
+    ///
+    /// # Safety
+    /// Same lifetime considerations as `ParsedFontFace::face` — the rustybuzz
+    /// face borrows from the same stable heap-allocated font data.
+    cached_rb_face: RefCell<Option<rustybuzz::Face<'static>>>,
+}
+
+struct ParsedFontFace {
+    data: FontData,
+    index: u32,
+    face: ttf_parser::Face<'static>,
+}
+
+impl Clone for FontFace {
+    fn clone(&self) -> Self {
+        Self {
+            parsed: self.parsed.clone(),
+            variations: self.variations.clone(),
+            cached_ttf_face: RefCell::new(None),
+            cached_rb_face: RefCell::new(None),
+        }
+    }
+}
+
+impl fmt::Debug for ParsedFontFace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ParsedFontFace")
+            .field("index", &self.index)
+            .field("len", &self.data.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for FontFace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FontFace")
+            .field("parsed", &self.parsed)
+            .field("variation_count", &self.variations.len())
+            .finish()
+    }
+}
 
 impl FontFace {
-    pub fn from_data_and_index(data: Rc<Vec<u8>>, index: u32) -> Option<Self> {
-        let mut inner = Box::pin(FontFaceInner {
+    pub fn from_data_and_index(data: FontData, index: u32) -> Option<Self> {
+        let parsed_data = data.clone();
+        let face = ttf_parser::Face::parse(parsed_data.as_slice(), index).ok()?;
+        let parsed = ParsedFontFace {
             data,
-            ttf_parser_face: None,
-            rustybuzz_face: None,
-            _pinned: PhantomPinned,
-        });
-        unsafe {
-            let data: &'static [u8] = mem::transmute(&**inner.data);
-            let ttf_parser_face = ttf_parser::Face::parse(data, index).ok()?;
-            let rustybuzz_face = rustybuzz::Face::from_face(ttf_parser_face.clone());
-            let inner_ref = Pin::as_mut(&mut inner).get_unchecked_mut();
-            inner_ref.ttf_parser_face = Some(ttf_parser_face);
-            inner_ref.rustybuzz_face = Some(rustybuzz_face);
+            index,
+            // SAFETY: `ttf_parser::Face` only borrows the bytes inside `data`.
+            // `ParsedFontFace` owns `data`, which is backed by heap/mmap storage
+            // (via `Rc` inside `SharedBytes`) whose address remains stable even if
+            // `ParsedFontFace` itself moves. The transmuted face never outlives the
+            // owned bytes because both are stored in the same `Rc<ParsedFontFace>`.
+            face: unsafe {
+                std::mem::transmute::<ttf_parser::Face<'_>, ttf_parser::Face<'static>>(face)
+            },
+        };
+        Some(Self {
+            parsed: Rc::new(parsed),
+            variations: Vec::new(),
+            cached_ttf_face: RefCell::new(None),
+            cached_rb_face: RefCell::new(None),
+        })
+    }
+
+    pub fn with_ttf_parser_face<R>(&self, f: impl FnOnce(&ttf_parser::Face<'_>) -> R) -> R {
+        if self.variations.is_empty() {
+            return f(&self.parsed.face);
         }
-        Some(Self(inner))
+
+        {
+            let mut ttf_cache = self.cached_ttf_face.borrow_mut();
+            if ttf_cache.is_none() {
+                let mut face = self.parsed.face.clone();
+                for variation in &self.variations {
+                    let _ = face.set_variation(variation.tag, variation.value);
+                }
+                *ttf_cache = Some(face);
+            }
+        }
+
+        let ttf_cache = self.cached_ttf_face.borrow();
+        f(ttf_cache.as_ref().unwrap())
     }
 
-    pub fn as_ttf_parser_face(&self) -> &ttf_parser::Face<'_> {
-        self.0.ttf_parser_face.as_ref().unwrap()
+    pub fn with_rustybuzz_face<R>(&self, f: impl FnOnce(&rustybuzz::Face<'_>) -> R) -> R {
+        // Populate the rustybuzz cache if empty.
+        {
+            let mut rb_cache = self.cached_rb_face.borrow_mut();
+            if rb_cache.is_none() {
+                let mut rb_face = rustybuzz::Face::from_face(self.parsed.face.clone());
+                if !self.variations.is_empty() {
+                    rb_face.set_variations(&self.variations);
+                }
+                *rb_cache = Some(rb_face);
+            }
+        }
+        let rb_cache = self.cached_rb_face.borrow();
+        f(rb_cache.as_ref().unwrap())
     }
 
-    pub fn as_rustybuzz_face(&self) -> &rustybuzz::Face<'_> {
-        self.0.rustybuzz_face.as_ref().unwrap()
+    pub fn data(&self) -> &FontData {
+        &self.parsed.data
     }
 
-    pub fn data(&self) -> &Rc<Vec<u8>> {
-        &self.0.data
-    }
-}
-
-struct FontFaceInner {
-    data: Rc<Vec<u8>>,
-    ttf_parser_face: Option<ttf_parser::Face<'static>>,
-    rustybuzz_face: Option<rustybuzz::Face<'static>>,
-    _pinned: PhantomPinned,
-}
-
-impl fmt::Debug for FontFaceInner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FontFaceInner").finish_non_exhaustive()
+    pub fn set_variations(&mut self, variations: &[(u32, f32)]) {
+        self.variations.clear();
+        self.variations
+            .extend(variations.iter().map(|&(tag, value)| rustybuzz::Variation {
+                tag: ttf_parser::Tag::from_bytes(&tag.to_be_bytes()),
+                value,
+            }));
+        *self.cached_ttf_face.borrow_mut() = None;
+        // Invalidate the cached rustybuzz face since variations affect shaping.
+        *self.cached_rb_face.borrow_mut() = None;
     }
 }

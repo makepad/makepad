@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_micro_serde::*,
@@ -120,6 +120,7 @@ script_mod! {
 }
 
 #[derive(Copy, Clone, Debug, Script, ScriptHook, Default, SerRon, DeRon)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SplitterAxis {
     #[pick]
     #[default]
@@ -128,6 +129,7 @@ pub enum SplitterAxis {
 }
 
 #[derive(Clone, Copy, Debug, Script, ScriptHook, SerRon, DeRon)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SplitterAlign {
     #[live(50.0)]
     FromA(f64),
@@ -267,7 +269,7 @@ impl Widget for Splitter {
             Hit::FingerHoverOut(_) => {
                 self.animator_play(cx, ids!(hover.off));
             }
-            Hit::FingerDown(_) => {
+            Hit::FingerDown(fe) if self.drag_start_align.is_none() && fe.is_primary_hit() => {
                 match self.axis {
                     SplitterAxis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
                     SplitterAxis::Vertical => cx.set_cursor(MouseCursor::RowResize),
@@ -421,6 +423,10 @@ impl Splitter {
         self.align
     }
 
+    pub fn position(&self) -> f64 {
+        self.position
+    }
+
     pub fn set_align(&mut self, align: SplitterAlign) {
         self.align = align;
     }
@@ -477,5 +483,9 @@ impl SplitterRef {
 
     pub fn align(&self) -> Option<SplitterAlign> {
         self.borrow().map(|inner| inner.align())
+    }
+
+    pub fn position(&self) -> Option<f64> {
+        self.borrow().map(|inner| inner.position())
     }
 }

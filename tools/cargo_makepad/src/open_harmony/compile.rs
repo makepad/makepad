@@ -328,33 +328,39 @@ pub fn rust_build(
         for arg in args {
             args_out.push(arg);
         }
-        let makepad_env = std::env::var("MAKEPAD").unwrap_or("lines".to_string());
-        shell_env(
-            &[
-                (&format!("CC_{toolchain}"), cc_path.to_str().unwrap()),
-                (
-                    &format!("CXX_{toolchain}"),
-                    full_clangpp_path.to_str().unwrap(),
-                ),
-                (
-                    &format!("AR_{toolchain}"),
-                    full_llvm_ar_path.to_str().unwrap(),
-                ),
-                (
-                    &format!("RANLIB_{toolchain}"),
-                    full_llvm_ranlib_path.to_str().unwrap(),
-                ),
-                // Use the regular clang for the linker.
-                (
-                    &format!("CARGO_TARGET_{}_LINKER", toolchain.to_uppercase()),
-                    full_clang_path.to_str().unwrap(),
-                ),
-                ("MAKEPAD", &makepad_env),
-            ],
-            &cwd,
-            "rustup",
-            &args_out,
-        )?;
+        let makepad_env = std::env::var("MAKEPAD")
+            .ok()
+            .filter(|value| !value.is_empty());
+        let mut env: Vec<(String, String)> = vec![
+            (
+                format!("CC_{toolchain}"),
+                cc_path.to_string_lossy().to_string(),
+            ),
+            (
+                format!("CXX_{toolchain}"),
+                full_clangpp_path.to_string_lossy().to_string(),
+            ),
+            (
+                format!("AR_{toolchain}"),
+                full_llvm_ar_path.to_string_lossy().to_string(),
+            ),
+            (
+                format!("RANLIB_{toolchain}"),
+                full_llvm_ranlib_path.to_string_lossy().to_string(),
+            ),
+            (
+                format!("CARGO_TARGET_{}_LINKER", toolchain.to_uppercase()),
+                full_clang_path.to_string_lossy().to_string(),
+            ),
+        ];
+        if let Some(makepad_env) = makepad_env {
+            env.push(("MAKEPAD".to_string(), makepad_env));
+        }
+        let env_refs = env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        shell_env(&env_refs, &cwd, "rustup", &args_out)?;
     }
     Ok(())
 }

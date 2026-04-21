@@ -5,7 +5,7 @@ use {
         image::{Bgra, Image, Subimage, SubimageMut},
         num::Zero,
     },
-    std::collections::HashMap,
+    fxhash::FxHashMap,
 };
 
 #[derive(Clone, Debug)]
@@ -14,7 +14,7 @@ pub struct FontAtlas<T> {
     image: Image<T>,
     dirty_rect: Rect<usize>,
     free_rects: Vec<Rect<usize>>,
-    cached_glyph_image_rects: HashMap<GlyphImageKey, Rect<usize>>,
+    cached_glyph_image_rects: FxHashMap<GlyphImageKey, Rect<usize>>,
 }
 
 impl<T> FontAtlas<T> {
@@ -27,7 +27,7 @@ impl<T> FontAtlas<T> {
             image: Image::new(size),
             dirty_rect: Rect::ZERO,
             free_rects: vec![Rect::from(size)],
-            cached_glyph_image_rects: HashMap::new(),
+            cached_glyph_image_rects: FxHashMap::default(),
         }
     }
 
@@ -51,7 +51,11 @@ impl<T> FontAtlas<T> {
         &self.image
     }
 
-    pub unsafe fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
+    pub fn take_pixels(&mut self) -> Vec<T> {
+        self.image.take_pixels()
+    }
+
+    pub fn replace_pixels(&mut self, pixels: Vec<T>) -> Vec<T> {
         self.image.replace_pixels(pixels)
     }
 

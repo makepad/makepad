@@ -12,6 +12,14 @@ pub struct Texture(Rc<PoolId>);
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct TextureId(pub(crate) usize, u64);
 
+impl Default for TextureId {
+    /// Returns a sentinel `TextureId` that does not correspond to any allocated texture.
+    /// Used for audio-only players that carry no video output.
+    fn default() -> Self {
+        TextureId(usize::MAX, 0)
+    }
+}
+
 impl Texture {
     pub fn texture_id(&self) -> TextureId {
         TextureId(self.0.id, self.0.generation)
@@ -126,6 +134,13 @@ pub enum TextureFormat {
         max_level: Option<usize>,
         updated: TextureUpdated,
     },
+    VecMipRGBAf32 {
+        width: usize,
+        height: usize,
+        data: Option<Vec<f32>>,
+        max_level: Option<usize>,
+        updated: TextureUpdated,
+    },
     VecRGBAf32 {
         width: usize,
         height: usize,
@@ -160,6 +175,10 @@ pub enum TextureFormat {
         size: TextureSize,
         initial: bool,
     },
+    RenderCubeBGRAu8 {
+        size: TextureSize,
+        initial: bool,
+    },
     RenderRGBAf16 {
         size: TextureSize,
         initial: bool,
@@ -172,11 +191,20 @@ pub enum TextureFormat {
     SharedBGRAu8 {
         width: usize,
         height: usize,
-        id: crate::cx_stdin::PresentableImageId,
+        id: crate::shared_framebuf::PresentableImageId,
         initial: bool,
     },
-    #[cfg(any(target_os = "android", target_os = "linux"))]
-    VideoRGB,
+    /// A single YUV plane texture (Y, U, or V). Backend-managed — the render
+    /// backend or platform layer creates/uploads the GPU texture directly.
+    /// Used for both I420 (three R8 planes) and NV12 (R8 luma + RG8 chroma).
+    VideoYuvPlane,
+    /// An opaque external video texture whose contents are managed outside the
+    /// normal texture upload path (e.g. Android SurfaceTexture/OES, or
+    /// platform-native composited video output).
+    VideoExternal,
+    /// Android/Vulkan camera texture backed by an imported RGBA
+    /// `AHardwareBuffer`.
+    VideoRgbaHardwareBuffer,
 }
 
 impl std::fmt::Debug for TextureFormat {
@@ -194,6 +222,10 @@ impl std::fmt::Debug for TextureFormat {
             TextureFormat::VecMipBGRAu8_32 { width, height, .. } => write!(
                 f,
                 "TextureFormat::VecMipBGRAu8_32(width:{width},height:{height})"
+            ),
+            TextureFormat::VecMipRGBAf32 { width, height, .. } => write!(
+                f,
+                "TextureFormat::VecMipRGBAf32(width:{width},height:{height})"
             ),
             TextureFormat::VecRGBAf32 { width, height, .. } => write!(
                 f,
@@ -214,6 +246,9 @@ impl std::fmt::Debug for TextureFormat {
             TextureFormat::RenderBGRAu8 { size, .. } => {
                 write!(f, "TextureFormat::RenderBGRAu8(size:{:?})", size)
             }
+            TextureFormat::RenderCubeBGRAu8 { size, .. } => {
+                write!(f, "TextureFormat::RenderCubeBGRAu8(size:{:?})", size)
+            }
             TextureFormat::RenderRGBAf16 { size, .. } => {
                 write!(f, "TextureFormat::RenderRGBAf16(size:{:?})", size)
             }
@@ -224,8 +259,11 @@ impl std::fmt::Debug for TextureFormat {
                 f,
                 "TextureFormat::SharedBGRAu8(width:{width},height:{height})"
             ),
-            #[cfg(any(target_os = "android", target_os = "linux"))]
-            TextureFormat::VideoRGB => write!(f, "TextureFormat::VideoRGB"),
+            TextureFormat::VideoYuvPlane => write!(f, "TextureFormat::VideoYuvPlane"),
+            TextureFormat::VideoExternal => write!(f, "TextureFormat::VideoExternal"),
+            TextureFormat::VideoRgbaHardwareBuffer => {
+                write!(f, "TextureFormat::VideoRgbaHardwareBuffer")
+            }
         }
     }
 }
@@ -249,8 +287,10 @@ pub(crate) struct TextureAlloc {
 #[derive(Clone, Debug)]
 pub enum TextureCategory {
     Vec,
+    VecMip,
     VecCube,
     Render,
+    RenderCube,
     DepthBuffer,
     Shared,
     Video,
@@ -266,6 +306,13 @@ impl PartialEq for TextureCategory {
                     false
                 }
             }
+            Self::VecMip { .. } => {
+                if let Self::VecMip { .. } = other {
+                    true
+                } else {
+                    false
+                }
+            }
             Self::VecCube { .. } => {
                 if let Self::VecCube { .. } = other {
                     true
@@ -275,6 +322,13 @@ impl PartialEq for TextureCategory {
             }
             Self::Render { .. } => {
                 if let Self::Render { .. } = other {
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::RenderCube { .. } => {
+                if let Self::RenderCube { .. } = other {
                     true
                 } else {
                     false
@@ -348,8 +402,13 @@ pub(crate) enum TexturePixel {
     RGu8,
     Rf32,
     D32,
-    #[cfg(any(target_os = "android", target_os = "linux"))]
-    VideoRGB,
+    /// YUV plane pixel type. Individual planes are R8 (luma, I420 chroma) or
+    /// RG8 (NV12 chroma); the actual GPU format is set at upload/wrap time.
+    VideoYuvPlane,
+    /// Opaque external video pixel type (e.g. Android OES, composited RGBA).
+    VideoExternal,
+    /// Android/Vulkan imported RGBA hardware buffer.
+    VideoRgbaHardwareBuffer,
 }
 
 impl CxTexture {
@@ -359,6 +418,7 @@ impl CxTexture {
             TextureFormat::VecBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecCubeBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
+            TextureFormat::VecMipRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
             TextureFormat::VecRGu8 { updated, .. } => updated,
@@ -372,6 +432,7 @@ impl CxTexture {
         match self.format {
             TextureFormat::DepthD32 { initial, .. } => initial,
             TextureFormat::RenderBGRAu8 { initial, .. } => initial,
+            TextureFormat::RenderCubeBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
             TextureFormat::RenderRGBAf32 { initial, .. } => initial,
             TextureFormat::SharedBGRAu8 { initial, .. } => initial,
@@ -385,6 +446,7 @@ impl CxTexture {
             TextureFormat::VecBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecCubeBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
+            TextureFormat::VecMipRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRGBAf32 { updated, .. } => updated,
             TextureFormat::VecRu8 { updated, .. } => updated,
             TextureFormat::VecRGu8 { updated, .. } => updated,
@@ -397,6 +459,7 @@ impl CxTexture {
         *match &mut self.format {
             TextureFormat::DepthD32 { initial, .. } => initial,
             TextureFormat::RenderBGRAu8 { initial, .. } => initial,
+            TextureFormat::RenderCubeBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
             TextureFormat::RenderRGBAf32 { initial, .. } => initial,
             TextureFormat::SharedBGRAu8 { initial, .. } => initial,
@@ -461,7 +524,6 @@ impl CxTexture {
         false
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     #[allow(unused)]
     pub(crate) fn alloc_video(&mut self) -> bool {
         if let Some(alloc) = self.format.as_video_alloc() {
@@ -486,6 +548,7 @@ impl TextureFormat {
             Self::VecBGRAu8_32 { .. } => true,
             Self::VecCubeBGRAu8_32 { .. } => true,
             Self::VecMipBGRAu8_32 { .. } => true,
+            Self::VecMipRGBAf32 { .. } => true,
             Self::VecRGBAf32 { .. } => true,
             Self::VecRu8 { .. } => true,
             Self::VecRGu8 { .. } => true,
@@ -497,6 +560,7 @@ impl TextureFormat {
     pub fn is_render(&self) -> bool {
         match self {
             Self::RenderBGRAu8 { .. } => true,
+            Self::RenderCubeBGRAu8 { .. } => true,
             Self::RenderRGBAf16 { .. } => true,
             Self::RenderRGBAf32 { .. } => true,
             _ => false,
@@ -511,11 +575,18 @@ impl TextureFormat {
     }
 
     pub fn is_video(&self) -> bool {
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        if let Self::VideoRGB = self {
-            return true;
-        }
-        false
+        matches!(
+            self,
+            Self::VideoYuvPlane | Self::VideoExternal | Self::VideoRgbaHardwareBuffer
+        )
+    }
+
+    pub fn is_video_external(&self) -> bool {
+        matches!(self, Self::VideoExternal)
+    }
+
+    pub fn is_video_rgba_hardware_buffer(&self) -> bool {
+        matches!(self, Self::VideoRgbaHardwareBuffer)
     }
 
     pub fn vec_width_height(&self) -> Option<(usize, usize)> {
@@ -523,6 +594,7 @@ impl TextureFormat {
             Self::VecBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecCubeBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecMipBGRAu8_32 { width, height, .. } => Some((*width, *height)),
+            Self::VecMipRGBAf32 { width, height, .. } => Some((*width, *height)),
             Self::VecRGBAf32 { width, height, .. } => Some((*width, *height)),
             Self::VecRu8 { width, height, .. } => Some((*width, *height)),
             Self::VecRGu8 { width, height, .. } => Some((*width, *height)),
@@ -550,7 +622,13 @@ impl TextureFormat {
                 width: *width,
                 height: *height,
                 pixel: TexturePixel::BGRAu8,
-                category: TextureCategory::Vec,
+                category: TextureCategory::VecMip,
+            }),
+            Self::VecMipRGBAf32 { width, height, .. } => Some(TextureAlloc {
+                width: *width,
+                height: *height,
+                pixel: TexturePixel::RGBAf32,
+                category: TextureCategory::VecMip,
             }),
             Self::VecRGBAf32 { width, height, .. } => Some(TextureAlloc {
                 width: *width,
@@ -591,6 +669,15 @@ impl TextureFormat {
                     category: TextureCategory::Render,
                 })
             }
+            Self::RenderCubeBGRAu8 { size, .. } => {
+                let (width, height) = size.width_height(width, height);
+                Some(TextureAlloc {
+                    width,
+                    height,
+                    pixel: TexturePixel::BGRAu8,
+                    category: TextureCategory::RenderCube,
+                })
+            }
             Self::RenderRGBAf16 { size, .. } => {
                 let (width, height) = size.width_height(width, height);
                 Some(TextureAlloc {
@@ -629,14 +716,25 @@ impl TextureFormat {
         }
     }
 
-    #[cfg(any(target_os = "android", target_os = "linux"))]
     #[allow(unused)]
     pub(crate) fn as_video_alloc(&self) -> Option<TextureAlloc> {
         match self {
-            Self::VideoRGB => Some(TextureAlloc {
+            Self::VideoYuvPlane => Some(TextureAlloc {
                 width: 0,
                 height: 0,
-                pixel: TexturePixel::VideoRGB,
+                pixel: TexturePixel::VideoYuvPlane,
+                category: TextureCategory::Video,
+            }),
+            Self::VideoExternal => Some(TextureAlloc {
+                width: 0,
+                height: 0,
+                pixel: TexturePixel::VideoExternal,
+                category: TextureCategory::Video,
+            }),
+            Self::VideoRgbaHardwareBuffer => Some(TextureAlloc {
+                width: 0,
+                height: 0,
+                pixel: TexturePixel::VideoRgbaHardwareBuffer,
                 category: TextureCategory::Video,
             }),
             _ => None,
@@ -658,11 +756,7 @@ impl TextureFormat {
 
     #[allow(unused)]
     fn is_compatible_with(&self, other: &Self) -> bool {
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        {
-            return !(self.is_video() ^ other.is_video());
-        }
-        true
+        !(self.is_video() ^ other.is_video())
     }
 }
 
@@ -726,6 +820,34 @@ impl Texture {
         *updated = updated.update(None);
     }
 
+    /// Replace the pixel data and dimensions of a BGRA u32 texture.
+    /// Unlike `put_back_vec_u32`, this also updates width and height,
+    /// making it safe for image sources that change resolution (e.g.
+    /// animated images with varying frame sizes, or lazily-loaded images
+    /// replacing a placeholder).
+    pub fn set_data_u32(
+        &self,
+        cx: &mut Cx,
+        new_width: usize,
+        new_height: usize,
+        new_data: Vec<u32>,
+    ) {
+        let cx_texture = &mut cx.textures[self.texture_id()];
+        let (width, height, data, updated) = match &mut cx_texture.format {
+            TextureFormat::VecBGRAu8_32 {
+                width,
+                height,
+                data,
+                updated,
+            } => (width, height, data, updated),
+            _ => panic!("incorrect texture format for u32 image data"),
+        };
+        *width = new_width;
+        *height = new_height;
+        *data = Some(new_data);
+        *updated = updated.update(None);
+    }
+
     pub fn put_back_vec_u32(&self, cx: &mut Cx, new_data: Vec<u32>, dirty_rect: Option<RectUsize>) {
         let cx_texture = &mut cx.textures[self.texture_id()];
         let (data, updated) = match &mut cx_texture.format {
@@ -763,6 +885,7 @@ impl Texture {
         let cx_texture = &mut cx.textures[self.texture_id()];
         let data = match &mut cx_texture.format {
             TextureFormat::VecRf32 { data, .. } => data,
+            TextureFormat::VecMipRGBAf32 { data, .. } => data,
             TextureFormat::VecRGBAf32 { data, .. } => data,
             _ => panic!("Not the correct texture desc for f32 image data"),
         };
@@ -773,6 +896,7 @@ impl Texture {
         let cx_texture = &mut cx.textures[self.texture_id()];
         let (data, updated) = match &mut cx_texture.format {
             TextureFormat::VecRf32 { data, updated, .. } => (data, updated),
+            TextureFormat::VecMipRGBAf32 { data, updated, .. } => (data, updated),
             TextureFormat::VecRGBAf32 { data, updated, .. } => (data, updated),
             _ => panic!("incorrect texture format for f32 image data"),
         };

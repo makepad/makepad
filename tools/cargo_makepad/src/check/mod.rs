@@ -103,8 +103,15 @@ const TOOLCHAINS: [(&str, BuildTy, Platform); 16] = [
 
 /// Check a crate on all supported platforms.
 pub fn check_crate(build_crate: &str, args: &[String]) -> Result<(), String> {
-    let crate_dir = get_crate_dir(build_crate).expect("Can't find crate dir");
+    check_crate_with_icon(build_crate, args, None)
+}
 
+fn check_crate_with_icon(
+    build_crate: &str,
+    args: &[String],
+    icon_env: Option<AppIconEnv>,
+) -> Result<(), String> {
+    let crate_dir = get_crate_dir(build_crate).expect("Can't find crate dir");
     // Parse Cargo.toml for metadata
     let cargo_str = std::fs::read_to_string(crate_dir.join("Cargo.toml"))
         .expect("Can't find Cargo.toml");
@@ -127,7 +134,7 @@ pub fn check_crate(build_crate: &str, args: &[String]) -> Result<(), String> {
 
     println!("Check all for {} on {} builds", build_crate, build_count);
 
-    let results = run_parallel_checks(&platform_filter, nightly_only, args);
+    let results = run_parallel_checks(&platform_filter, nightly_only, args, icon_env);
     report_results(results)
 }
 
@@ -173,6 +180,7 @@ fn run_parallel_checks(
     platform_filter: &[Platform],
     nightly_only: bool,
     args: &[String],
+    icon_env: Option<AppIconEnv>,
 ) -> Vec<BuildCheckResult> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut handles = Vec::new();
@@ -186,10 +194,11 @@ fn run_parallel_checks(
         let ty = *ty;
         let args = args.to_vec();
         let sender = sender.clone();
-
+        let icon_env = icon_env.clone();
         let handle = std::thread::spawn(move || {
             if !nightly_only && !ty.nightly_only() {
-                let (stdout, stderr, success) = run_check(&toolchain, "stable", ty, &args, index);
+                let (stdout, stderr, success) =
+                    run_check(&toolchain, "stable", ty, &args, index, icon_env.clone());
                 let _ = sender.send(BuildCheckResult {
                     branch: "stable",
                     toolchain: toolchain.clone(),
@@ -199,8 +208,8 @@ fn run_parallel_checks(
                     success,
                 });
             }
-
-            let (stdout, stderr, success) = run_check(&toolchain, "nightly", ty, &args, index);
+            let (stdout, stderr, success) =
+                run_check(&toolchain, "nightly", ty, &args, index, icon_env.clone());
             let _ = sender.send(BuildCheckResult {
                 branch: "nightly",
                 toolchain,
@@ -263,6 +272,7 @@ fn run_check(
     ty: BuildTy,
     args: &[String],
     par: usize,
+    icon_env: Option<AppIconEnv>,
 ) -> (String, String, bool) {
     let target_arg = format!("--target={}", toolchain);
     let target_dir = format!("--target-dir=target/check_all/check{}", par);
@@ -273,26 +283,47 @@ fn run_check(
         args_out.push(arg);
     }
     args_out.push(&target_dir);
-
-    let makepad_env = match (ty, branch) {
-        (BuildTy::LinuxDirect, "stable") => "linux_direct",
-        (BuildTy::LinuxDirect, _) => "lines,linux_direct",
-        (_, "stable") => " ",
-        _ => "lines",
+    let run = |makepad: &str, args_out: &[&str]| {
+        let mut envs = vec![("MAKEPAD", makepad)];
+        if let Some(icon) = icon_env.as_ref() {
+            for (var, value) in APP_ICON_ENV_VARS.iter().zip(icon.iter()) {
+                envs.push((var, value.as_str()));
+            }
+        }
+        shell_env_cap_split(&envs, &cwd, "rustup", args_out)
     };
 
     match ty {
-        BuildTy::Binary | BuildTy::LinuxDirect => {
-            shell_env_cap_split(&[("MAKEPAD", makepad_env)], &cwd, "rustup", &args_out)
+        BuildTy::Binary => {
+            if branch == "stable" {
+                run(" ", &args_out)
+            } else {
+                run("lines", &args_out)
+            }
         }
         BuildTy::BinaryBuildStd => {
             args_out.push("-Z");
             args_out.push("build-std=std");
-            shell_env_cap_split(&[("MAKEPAD", makepad_env)], &cwd, "rustup", &args_out)
+            if branch == "stable" {
+                run(" ", &args_out)
+            } else {
+                run("lines", &args_out)
+            }
         }
         BuildTy::Lib => {
             args_out.push("--lib");
-            shell_env_cap_split(&[("MAKEPAD", makepad_env)], &cwd, "rustup", &args_out)
+            if branch == "stable" {
+                run(" ", &args_out)
+            } else {
+                run("lines", &args_out)
+            }
+        }
+        BuildTy::LinuxDirect => {
+            if branch == "stable" {
+                run("linux_direct", &args_out)
+            } else {
+                run("lines,linux_direct", &args_out)
+            }
         }
     }
 }
@@ -338,7 +369,8 @@ pub fn handle_check(args: &[String]) -> Result<(), String> {
         "all" => {
             let cwd = std::env::current_dir().unwrap();
             if let Ok(build_crate) = get_build_crate_from_args(&args[1..]) {
-                check_crate(&build_crate, &args[1..])
+                let icon_env = resolve_app_icon_env(&build_crate)?;
+                check_crate_with_icon(&build_crate, &args[1..], icon_env)
             } else if let Err(e) = shell_env_cap(&[], &cwd, "cargo", &["run", "--bin"]) {
                 // Parse available binaries from error message
                 let mut after_av = false;
@@ -349,7 +381,8 @@ pub fn handle_check(args: &[String]) -> Result<(), String> {
                             let mut args = args[1..].to_vec();
                             args.insert(0, binary.to_string());
                             args.insert(0, "-p".to_string());
-                            check_crate(binary, &args)?;
+                            let icon_env = resolve_app_icon_env(binary)?;
+                            check_crate_with_icon(binary, &args, icon_env)?;
                         }
                     }
                     if line.contains("Available binaries:") {

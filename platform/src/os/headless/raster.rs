@@ -5,7 +5,7 @@ use crate::{
     cx::Cx,
     draw_list::{CxDrawKind, DrawListId},
     draw_pass::{CxDrawPassParent, DrawPassId},
-    draw_shader::CxDrawShaderCode,
+    draw_shader::{CxDrawShaderCode, CxDrawShaderMapping},
     makepad_live_id::*,
     makepad_math::*,
     texture::TextureFormat,
@@ -72,7 +72,11 @@ fn configured_parallel_min_tris(default_min: usize) -> usize {
         .unwrap_or(default_min)
 }
 
-fn compute_index_chunks(total: usize, desired_chunks: usize, min_items_per_chunk: usize) -> Vec<RowChunk> {
+fn compute_index_chunks(
+    total: usize,
+    desired_chunks: usize,
+    min_items_per_chunk: usize,
+) -> Vec<RowChunk> {
     if total == 0 {
         return Vec::new();
     }
@@ -132,7 +136,13 @@ fn headless_texture_info(
     cache: &mut TextureConversionCache,
 ) -> Option<[usize; 4]> {
     match &cxtexture.format {
-        TextureFormat::VecRGBAf32 {
+        TextureFormat::VecMipRGBAf32 {
+            width,
+            height,
+            data: Some(data),
+            ..
+        }
+        | TextureFormat::VecRGBAf32 {
             width,
             height,
             data: Some(data),
@@ -158,10 +168,12 @@ fn headless_texture_info(
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
             };
-            let entry = cache.entry(texture_index).or_insert_with(|| CachedTextureConversion {
-                signature: sig,
-                rgba: Vec::new(),
-            });
+            let entry = cache
+                .entry(texture_index)
+                .or_insert_with(|| CachedTextureConversion {
+                    signature: sig,
+                    rgba: Vec::new(),
+                });
             if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
                 entry.signature = sig;
                 entry.rgba.clear();
@@ -198,10 +210,12 @@ fn headless_texture_info(
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
             };
-            let entry = cache.entry(texture_index).or_insert_with(|| CachedTextureConversion {
-                signature: sig,
-                rgba: Vec::new(),
-            });
+            let entry = cache
+                .entry(texture_index)
+                .or_insert_with(|| CachedTextureConversion {
+                    signature: sig,
+                    rgba: Vec::new(),
+                });
             if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
                 entry.signature = sig;
                 entry.rgba.clear();
@@ -239,10 +253,12 @@ fn headless_texture_info(
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
             };
-            let entry = cache.entry(texture_index).or_insert_with(|| CachedTextureConversion {
-                signature: sig,
-                rgba: Vec::new(),
-            });
+            let entry = cache
+                .entry(texture_index)
+                .or_insert_with(|| CachedTextureConversion {
+                    signature: sig,
+                    rgba: Vec::new(),
+                });
             if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
                 entry.signature = sig;
                 entry.rgba.clear();
@@ -276,10 +292,12 @@ fn headless_texture_info(
                 data_ptr: data.as_ptr() as usize,
                 data_len: data.len(),
             };
-            let entry = cache.entry(texture_index).or_insert_with(|| CachedTextureConversion {
-                signature: sig,
-                rgba: Vec::new(),
-            });
+            let entry = cache
+                .entry(texture_index)
+                .or_insert_with(|| CachedTextureConversion {
+                    signature: sig,
+                    rgba: Vec::new(),
+                });
             if entry.signature != sig || !updated.is_empty() || entry.rgba.is_empty() {
                 entry.signature = sig;
                 entry.rgba.clear();
@@ -442,7 +460,13 @@ fn rasterize_instances_rows(
                         fragment_fn(rcx_buf.as_mut_ptr() as *mut f32, rcx_f32s as u32);
                     }
 
-                    write_varyings(&mut rcx_buf, rcx_vary_offset, varyings, vary_bytes, rcx_size);
+                    write_varyings(
+                        &mut rcx_buf,
+                        rcx_vary_offset,
+                        varyings,
+                        vary_bytes,
+                        rcx_size,
+                    );
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
                     let write_pixel =
@@ -512,7 +536,13 @@ fn rasterize_instances_rows(
                  -> Option<[f32; 4]> {
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 8, lane_x);
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 12, lane_y);
-                    write_varyings(&mut rcx_buf, rcx_vary_offset, varyings, vary_bytes, rcx_size);
+                    write_varyings(
+                        &mut rcx_buf,
+                        rcx_vary_offset,
+                        varyings,
+                        vary_bytes,
+                        rcx_size,
+                    );
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset, 2);
                     set_u32(&mut rcx_buf, rcx_quad_mode_offset + 4, 0);
                     let write_pixel =
@@ -603,7 +633,9 @@ impl Cx {
                     let height = (size.y * dpi_factor).round().max(1.0) as usize;
 
                     // Set up pass uniforms
-                    self.passes[*draw_pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size);
+                    if !self.passes[*draw_pass_id].keep_camera_matrix {
+                        self.passes[*draw_pass_id].set_ortho_matrix(dvec2(0.0, 0.0), size);
+                    }
                     self.passes[*draw_pass_id].set_dpi_factor(dpi_factor);
                     self.passes[*draw_pass_id].set_time(time as f32);
 
@@ -633,12 +665,14 @@ impl Cx {
         }
 
         let elapsed = frame_start.elapsed();
-        eprintln!(
-            "[headless] frame render: {:.1}ms",
-            elapsed.as_secs_f64() * 1000.0
-        );
         if profile_enabled {
-            eprintln!(
+            crate::log!(
+                "[headless] frame render: {:.1}ms",
+                elapsed.as_secs_f64() * 1000.0
+            );
+        }
+        if profile_enabled {
+            crate::log!(
                 "[headless][profile] draws={} serial={} parallel={} inst={} tris={} vertex={:.1}ms raster={:.1}ms",
                 profile.draw_calls,
                 profile.serial_draw_calls,
@@ -697,9 +731,14 @@ impl Cx {
     ) {
         let only_shader = std::env::var("MAKEPAD_HEADLESS_ONLY_SHADER").ok();
         let debug_text = std::env::var("MAKEPAD_HEADLESS_DEBUG_TEXT").is_ok();
-        let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
+        let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
 
-        for draw_item_id in 0..draw_items_len {
+        for order_index in 0..draw_order_len {
+            let Some(draw_item_id) =
+                self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
+            else {
+                continue;
+            };
             let kind_tag = match &self.draw_lists[draw_list_id].draw_items[draw_item_id].kind {
                 CxDrawKind::SubList(sub_id) => Some(*sub_id),
                 CxDrawKind::DrawCall(_) => None,
@@ -707,10 +746,16 @@ impl Cx {
             };
 
             if let Some(sub_list_id) = kind_tag {
+                let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
+                let mut child_zbias = 0.0f32;
                 self.headless_render_view(
                     draw_pass_id,
                     sub_list_id,
-                    zbias,
+                    if child_resets_zbias {
+                        &mut child_zbias
+                    } else {
+                        zbias
+                    },
                     zbias_step,
                     render_threads,
                     parallel_min_tris,
@@ -854,7 +899,9 @@ impl Cx {
                 if let Some(texture) = &draw_call.texture_slots[tex_idx] {
                     let texture_id = texture.texture_id();
                     let cxtexture = &self.textures[texture_id];
-                    if let Some(info) = headless_texture_info(texture_id.0, cxtexture, texture_cache) {
+                    if let Some(info) =
+                        headless_texture_info(texture_id.0, cxtexture, texture_cache)
+                    {
                         tex_infos.push(info);
                     } else {
                         tex_infos.push([0, 0, 0, 0]);
@@ -914,6 +961,16 @@ impl Cx {
             if instance_count == 0 {
                 continue;
             }
+            if sh.mapping.flags.debug_draw {
+                CxDrawShaderMapping::debug_dump_shader_draw_call(
+                    "headless",
+                    draw_item_id,
+                    sh,
+                    draw_call,
+                    instances_data,
+                    instance_count,
+                );
+            }
 
             let geom_slots = sh.mapping.geometries.total_slots;
             let varying_slots = sh.mapping.varying_total_slots;
@@ -951,8 +1008,8 @@ impl Cx {
                     let geom_slice = &vertices[geom_offset..geom_offset + geom_slots];
                     let shaded_idx = inst_base + vert_idx;
                     let vary_offset = shaded_idx * varying_slots;
-                    let varying_out =
-                        &mut shaded_varyings[vary_offset..vary_offset.saturating_add(varying_slots)];
+                    let varying_out = &mut shaded_varyings
+                        [vary_offset..vary_offset.saturating_add(varying_slots)];
 
                     unsafe {
                         vertex_fn(
@@ -1118,7 +1175,6 @@ impl Cx {
             if let Some(p) = profile.as_deref_mut() {
                 p.raster_ms += raster_start.elapsed().as_secs_f64() * 1000.0;
             }
-
         }
     }
 }

@@ -6,6 +6,7 @@ pub mod web_audio;
 pub mod web_gl;
 pub mod web_media;
 pub mod web_midi;
+pub mod web_network;
 mod web_socket;
 pub use crate::os::web::web::*;
 pub use crate::os::web::web_gl::*;

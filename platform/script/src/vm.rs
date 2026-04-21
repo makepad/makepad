@@ -21,6 +21,24 @@ use crate::*;
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub struct ScriptModKey {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl ScriptModKey {
+    pub fn from_script_mod(script_mod: &ScriptMod) -> Self {
+        Self {
+            file: script_mod.file.clone(),
+            line: script_mod.line,
+            column: script_mod.column,
+        }
+    }
+}
 
 #[derive(Default, Debug)]
 pub struct ScriptMod {
@@ -40,6 +58,7 @@ pub enum ScriptSource {
 
 pub struct ScriptBody {
     pub source: ScriptSource,
+    pub effective_code: String,
     pub tokenizer: ScriptTokenizer,
     pub parser: ScriptParser,
     pub scope: ScriptObjectRef,
@@ -71,7 +90,8 @@ pub struct ScriptCode {
     pub builtins: ScriptBuiltins,
     pub native: RefCell<ScriptNative>,
     pub bodies: RefCell<Vec<ScriptBody>>,
-    pub crate_manifests: RefCell<HashMap<String, String>>,
+    pub crate_manifests: Rc<RefCell<HashMap<String, String>>>,
+    pub script_mod_overrides: Rc<RefCell<HashMap<ScriptModKey, String>>>,
 }
 
 pub struct ScriptLoc {
@@ -95,21 +115,42 @@ impl std::fmt::Display for ScriptLoc {
 impl ScriptCode {
     pub fn ip_to_loc(&self, ip: ScriptIp) -> Option<ScriptLoc> {
         if let Some(body) = self.bodies.borrow().get(ip.body as usize) {
-            if let Some(Some(index)) = body.parser.source_map.get(ip.index as usize) {
-                if let Some(rc) = body.tokenizer.token_index_to_row_col(*index) {
+            let source_map = &body.parser.source_map;
+            let ip_index = ip.index as usize;
+
+            let direct_token = source_map.get(ip_index).and_then(|slot| *slot);
+            // Some opcodes are synthetic and have `None` in source_map.
+            // For error reporting, fall back to the nearest mapped token so we still
+            // surface a real file/line instead of "unknown".
+            let nearest_token = if direct_token.is_some() {
+                direct_token
+            } else {
+                let left = ip_index.min(source_map.len().saturating_sub(1));
+                let left_token = (0..=left)
+                    .rev()
+                    .find_map(|idx| source_map.get(idx).and_then(|slot| *slot));
+                if left_token.is_some() {
+                    left_token
+                } else {
+                    ((ip_index + 1)..source_map.len())
+                        .find_map(|idx| source_map.get(idx).and_then(|slot| *slot))
+                }
+            };
+
+            if let Some(token_index) = nearest_token {
+                if let Some(rc) = body.tokenizer.token_index_to_row_col(token_index) {
                     if let ScriptSource::Mod(script_mod) = &body.source {
                         return Some(ScriptLoc {
                             file: script_mod.file.clone(),
                             line: rc.0 + script_mod.line as u32,
                             col: rc.1,
                         });
-                    } else {
-                        return Some(ScriptLoc {
-                            file: "generated".into(),
-                            line: rc.0,
-                            col: rc.1,
-                        });
-                    };
+                    }
+                    return Some(ScriptLoc {
+                        file: "generated".into(),
+                        line: rc.0,
+                        col: rc.1,
+                    });
                 }
             }
         }
@@ -123,6 +164,7 @@ impl ScriptCode {
 
 pub struct ScriptVm<'a> {
     pub host: &'a mut dyn Any,
+    pub std: &'a mut dyn Any,
     pub bx: Box<ScriptVmBase>,
 }
 
@@ -209,6 +251,17 @@ impl<'a> ScriptVm<'a> {
         f(self)
     }
 
+    pub fn is_reload(&self) -> bool {
+        self.bx.is_reload
+    }
+
+    pub fn with_reload<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> R {
+        let was_reload = std::mem::replace(&mut self.bx.is_reload, true);
+        let out = f(self);
+        self.bx.is_reload = was_reload;
+        out
+    }
+
     fn script_me_from_value(&mut self, me: ScriptValue) -> Option<ScriptMe> {
         if me.is_nil() {
             return None;
@@ -276,6 +329,35 @@ impl<'a> ScriptVm<'a> {
 
     pub fn call(&mut self, fnobj: ScriptValue, args: &[ScriptValue]) -> ScriptValue {
         self.call_with_me(fnobj, args, NIL)
+    }
+
+    pub fn call_with_self(
+        &mut self,
+        fnobj: ScriptValue,
+        args: &[ScriptValue],
+        sself: ScriptValue,
+    ) -> ScriptValue {
+        let scope = self.bx.heap.new_with_proto(fnobj);
+
+        self.bx.heap.clear_object_deep(scope);
+        if fnobj.is_err() {
+            return fnobj;
+        }
+
+        let trap = self.bx.threads.cur().trap.pass();
+        let err = self.bx.heap.push_all_fn_args(scope, args, trap);
+        if err.is_err() {
+            return err;
+        }
+        if !sself.is_nil() {
+            self.bx
+                .heap
+                .force_value_in_map(scope, id!(self).into(), sself);
+        }
+
+        self.bx.heap.set_object_deep(scope);
+        self.bx.heap.set_object_storage_auto(scope);
+        self.call_with_scope(scope, NIL)
     }
 
     pub fn call_with_me(
@@ -783,6 +865,41 @@ impl<'a> ScriptVm<'a> {
             .add_method(&mut self.bx.heap, module, method, args, f)
     }
 
+    fn apply_injected_globals_to_scope(&mut self, scope_obj: ScriptObject) {
+        if self.bx.injected_globals.is_empty() {
+            return;
+        }
+        let globals: Vec<(LiveId, ScriptValue)> = self
+            .bx
+            .injected_globals
+            .iter()
+            .map(|(key, value)| (*key, *value))
+            .collect();
+        for (key, value) in globals {
+            self.bx
+                .heap
+                .force_value_in_map(scope_obj, key.into(), value);
+        }
+    }
+
+    fn apply_injected_globals_to_all_scopes(&mut self) {
+        if self.bx.injected_globals.is_empty() {
+            return;
+        }
+        let scope_objects: Vec<ScriptObject> = {
+            let bodies = self.bx.code.bodies.borrow();
+            bodies.iter().map(|body| body.scope.as_object()).collect()
+        };
+        for scope_obj in scope_objects {
+            self.apply_injected_globals_to_scope(scope_obj);
+        }
+    }
+
+    pub fn set_injected_global(&mut self, key: LiveId, value: ScriptValue) {
+        self.bx.injected_globals.insert(key, value);
+        self.apply_injected_globals_to_all_scopes();
+    }
+
     /// Registers a native function to be used as an apply_transform and returns its NativeId.
     /// This is used for creating objects that transform to a computed value when applied.
     pub fn add_apply_transform_fn<F>(&mut self, f: F) -> NativeId
@@ -807,12 +924,25 @@ impl<'a> ScriptVm<'a> {
         self.bx
             .heap
             .set_value_def(scope_obj, id!(mod).into(), self.bx.heap.modules.into());
+        self.apply_injected_globals_to_scope(scope_obj);
         let scope = self.bx.heap.new_object_ref(scope_obj);
         let me_obj = self.bx.heap.new_with_proto(id!(root_me).into());
         let me = self.bx.heap.new_object_ref(me_obj);
+        let key = ScriptModKey::from_script_mod(&new_mod);
+        let override_code = self
+            .bx
+            .code
+            .script_mod_overrides
+            .borrow()
+            .get(&key)
+            .cloned();
+        let effective_code = override_code
+            .clone()
+            .unwrap_or_else(|| new_mod.code.clone());
 
         let new_body = ScriptBody {
             source: ScriptSource::Mod(new_mod),
+            effective_code,
             tokenizer: ScriptTokenizer::default(),
             parser: ScriptParser::default(),
             scope,
@@ -828,7 +958,17 @@ impl<'a> ScriptVm<'a> {
                         && script_mod.line == new_mod.line
                         && script_mod.column == new_mod.column
                     {
-                        *body = new_body;
+                        let values_changed = script_mod.values != new_mod.values;
+                        body.source = new_body.source;
+                        body.scope = new_body.scope;
+                        body.me = new_body.me;
+                        if body.effective_code != new_body.effective_code || values_changed {
+                            body.effective_code = new_body.effective_code;
+                            body.tokenizer = ScriptTokenizer::default();
+                            body.parser = ScriptParser::default();
+                            body.checkpoint = None;
+                            body.source_len = 0;
+                        }
                         return i as u16;
                     }
                 }
@@ -869,14 +1009,19 @@ impl<'a> ScriptVm<'a> {
         let body = &mut bodies[body_id as usize];
 
         if let ScriptSource::Mod(script_mod) = &body.source {
-            // Only log short scripts (likely test scripts)
-            body.tokenizer.tokenize(&script_mod.code, &mut self.bx.heap);
-            body.parser.parse(
-                &body.tokenizer,
-                &script_mod.file,
-                (script_mod.line, script_mod.column),
-                &script_mod.values,
-            );
+            if body.source_len == 0 {
+                body.tokenizer.clear();
+                body.parser = ScriptParser::default();
+                body.tokenizer
+                    .tokenize(&body.effective_code, &mut self.bx.heap);
+                body.parser.parse(
+                    &body.tokenizer,
+                    &script_mod.file,
+                    (script_mod.line, script_mod.column),
+                    &script_mod.values,
+                );
+                body.source_len = body.effective_code.len();
+            }
             drop(bodies);
             // lets point our thread to it
             let result = self.run_root(body_id);
@@ -1012,6 +1157,8 @@ pub struct ScriptVmBase {
     pub code: ScriptCode,
     pub heap: ScriptHeap,
     pub threads: ScriptThreads,
+    pub injected_globals: std::collections::HashMap<LiveId, ScriptValue>,
+    pub is_reload: bool,
     pub debug_trace: bool,
     pub silence_errors: bool,
 }
@@ -1023,6 +1170,8 @@ impl ScriptVmBase {
             code: ScriptCode::default(),
             threads: ScriptThreads::empty(),
             heap: ScriptHeap::empty(),
+            injected_globals: Default::default(),
+            is_reload: false,
             debug_trace: false,
             silence_errors: false,
         }
@@ -1048,11 +1197,54 @@ impl ScriptVmBase {
                 native: RefCell::new(native),
                 bodies: Default::default(),
                 crate_manifests: Default::default(),
+                script_mod_overrides: Default::default(),
             },
             threads: ScriptThreads::new(),
             heap: heap,
+            injected_globals: Default::default(),
+            is_reload: false,
             debug_trace: false,
             silence_errors: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Script, ScriptHook, Default)]
+    struct ApplyEvalParityTest {
+        #[source]
+        source: ScriptObjectRef,
+        #[live]
+        is_even: f32,
+    }
+
+    #[test]
+    fn script_apply_eval_refreshes_interpolated_values_on_reused_callsite() {
+        let mut host = ();
+        let mut std = ();
+        let mut vm = ScriptVm {
+            host: &mut host,
+            std: &mut std,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+
+        let mut item = ApplyEvalParityTest::default();
+        let obj = vm.heap_mut().new_object();
+        item.source = vm.heap_mut().new_object_ref(obj);
+
+        for idx in 0..6 {
+            let is_even_f = if idx % 2 == 0 { 1.0f32 } else { 0.0f32 };
+            script_apply_eval!(vm, item, {
+                is_even: #(is_even_f)
+            });
+            assert_eq!(
+                item.is_even, is_even_f,
+                "reused script_apply_eval callsite kept stale value at iteration {}",
+                idx
+            );
         }
     }
 }

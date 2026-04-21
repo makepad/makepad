@@ -51,6 +51,6 @@ optional = true
 default = ["std"]
 serde = [
     "dep:serde",
-    "bit-vec/serde",
+    "bit-vec/serde_std",
 ]
 std = ["bit-vec/std"]

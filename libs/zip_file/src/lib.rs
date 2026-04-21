@@ -1,6 +1,6 @@
 // zip fileformat reading
 
-use miniz_oxide::inflate::decompress_to_vec;
+use makepad_fast_inflate::inflate::decompress_to_vec;
 use std::io::{Read, Seek, SeekFrom};
 
 pub const COMPRESS_METHOD_UNCOMPRESSED: u16 = 0;

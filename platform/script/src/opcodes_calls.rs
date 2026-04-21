@@ -237,7 +237,7 @@ impl<'a> ScriptVm<'a> {
             } else {
                 script_err_not_found!(
                     self.bx.threads.cur_ref().trap,
-                    "method {:?} not found on type {:?}",
+                    "method {:?} not found on {}",
                     method,
                     type_index
                 );

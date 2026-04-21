@@ -1,6 +1,9 @@
 workspace.members = [
+    "widgets/dll",
     # === examples ===
+    "examples/hotload_ui",
     "examples/teamtalk",
+    "examples/automate",
     "examples/map",
     "examples/arracing",
     "examples/splash",
@@ -8,31 +11,64 @@ workspace.members = [
     "examples/charts",
     "examples/scratchpad",
     "examples/todo",
+    "examples/git",
     "examples/vector",
-    "examples/gltf",
-    "examples/physics",
     "examples/comfyui",
     "examples/aichat",
     "examples/pdf",
+    "examples/exf",
+    "examples/shader",
+    "examples/text_input",
+    "examples/text_selection",
+    "examples/counter",
+    "examples/browser",
+    "examples/camera",
+    "examples/windows_blur",
+    "examples/floating_panel",
+    "examples/xr",
 #    "examples/matrix",
     "libs/gltf",
-    "libs/makepad_physics",
+    "libs/splat",
+    # "libs/makepad_physics",
     "libs/latex_math",
     "libs/mbtile_reader",
+    "libs/makepad_ai",
     "libs/pdf_parse",
     "libs/regex",
     "libs/svg",
+    "libs/apple_sys",
+    "libs/mlx",
+    "libs/mlx/cli",
+    "libs/shared_bytes",
+    "libs/tsdf",
+    "platform/network",
+    "libs/filesystem_watcher",
+    "libs/live_reload_core",
     "platform/script/test",
-    "widgets/test",
-    "studio",
-    "studio/ai",
+    "platform/script/std",
+    "platform/studio",
+    # "widgets/test",
+    "studio/hub",
+    "libs/makepad_test",
+    "libs/makepad_test/macros",
+    "studio/desktop",
     "tools/cargo_makepad",
-    "tools/remote",
-    "libs/terminal_core",
-#    "libs/matrix",
+    "tools/tui_test",
+    "libs/mb3d",
+    "libs/openexr",
+    "libs/git",
+    "libs/fast_inflate",
+    "libs/lz4",
+    "xr",
+    "libs/cef",
 ]
 
 workspace.exclude = [
+    "libs/terminal_core",
+    "libs/ggml",
+    "libs/voice",
+    "libs/voice2",
+    "widgets/test",
     "libs/stitch",
     "libs/wasm_bridge/test",
     # vendored third-party libs (tests require external dev-deps)
@@ -47,7 +83,6 @@ workspace.exclude = [
     "libs/fxhash",
     "libs/jpeg-encoder",
     "libs/memchr",
-    "libs/miniz_oxide",
     "libs/pulldown-cmark",
     "libs/rustybuzz",
     "libs/sdfer",
@@ -62,11 +97,42 @@ workspace.exclude = [
     "libs/unicode/unicode-properties",
     "libs/unicode/unicode-script",
     "libs/unicode/unicode-segmentation",
-    # vendored zune libs (doctests reference original crate names)
+    # vendored image libs (doctests reference original crate names)
+    "libs/byteorder-lite",
+    "libs/webp",
     "libs/zune/zune-core",
     "libs/zune/zune-inflate",
     "libs/zune/zune-jpeg",
     "libs/zune/zune-png",
+    # vendored Vulkan crates (patched crates.io crates; tests/benches pull
+    # upstream-only dev-deps or missing packaged assets)
+    "libs/vulkan/arrayvec",
+    "libs/vulkan/ash",
+    "libs/vulkan/bit-set",
+    "libs/vulkan/bit-vec",
+    "libs/vulkan/bitflags",
+    "libs/vulkan/cfg-if",
+    "libs/vulkan/cfg_aliases",
+    "libs/vulkan/crunchy",
+    "libs/vulkan/equivalent",
+    "libs/vulkan/foldhash",
+    "libs/vulkan/half",
+    "libs/vulkan/hashbrown",
+    "libs/vulkan/hexf-parse",
+    "libs/vulkan/indexmap",
+    "libs/vulkan/libloading",
+    "libs/vulkan/log",
+    "libs/vulkan/makepad-half",
+    "libs/vulkan/naga",
+    "libs/vulkan/num-traits",
+    "libs/vulkan/once_cell",
+    "libs/vulkan/rustc-hash",
+    "libs/vulkan/spirv",
+    "libs/vulkan/thiserror",
+    "libs/vulkan/thiserror-impl",
+    "libs/vulkan/unicode-ident",
+    "libs/vulkan/zerocopy",
+    "libs/rapier",
     # platform-specific libs
     "libs/windows/windows-collections",
     "libs/windows/windows-core",
@@ -115,7 +181,6 @@ rustc-hash = { path = "libs/vulkan/rustc-hash" }
 spirv = { path = "libs/vulkan/spirv" }
 thiserror = { path = "libs/vulkan/thiserror" }
 thiserror-impl = { path = "libs/vulkan/thiserror-impl" }
-unicode-ident = { path = "libs/vulkan/unicode-ident" }
 windows-link = { path = "libs/windows/windows-link" }
 crunchy = { path = "libs/vulkan/crunchy" }
 zerocopy = { path = "libs/vulkan/zerocopy" }
@@ -128,6 +193,13 @@ lto = true        # Enable link-time optimization
 codegen-units = 1 # Reduce number of codegen units to increase optimizations
 panic = 'abort'   # Abort on panic
 strip = true
+
+[profile.profile]
+inherits = "release"
+debug = true
+
+[profile.release.package.makepad-voice]
+codegen-units = 1
 
 
 #[profile.dev.package.makepad-live-tokenizer]

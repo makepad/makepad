@@ -1,0 +1,23 @@
+[package]
+name = "makepad-voice"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust CPU-only SIMD+threaded Whisper inference"
+license = "MIT"
+
+[features]
+default = []
+metal-precompile = []
+
+[dependencies]
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+makepad-objc-sys = { path = "../objc-sys", version = "1.0.0" }
+
+[[bin]]
+name = "whisper-test"
+path = "src/bin/whisper_test.rs"
+
+[[bin]]
+name = "apple-speech-test"
+path = "src/bin/apple_speech_test.rs"

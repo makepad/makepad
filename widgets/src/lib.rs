@@ -5,6 +5,8 @@ pub use makepad_draw::makepad_platform;
 pub use makepad_draw::*;
 pub use makepad_platform::log;
 pub use makepad_platform::makepad_script;
+pub use makepad_script::script_eval;
+pub use makepad_script::{ScriptValue, ScriptVm};
 
 pub use makepad_html;
 #[cfg(feature = "pdf")]
@@ -30,6 +32,7 @@ pub mod scroll_bars;
 pub mod view;
 pub mod view_ui;
 
+pub mod browser;
 pub mod button;
 pub mod check_box;
 pub mod icon;
@@ -44,8 +47,12 @@ pub mod adaptive_view;
 pub mod desktop_button;
 pub mod keyboard_view;
 pub mod nav_control;
+#[cfg(feature = "voice")]
+pub mod voice_wave;
 pub mod window;
 pub mod window_menu;
+#[cfg(feature = "voice")]
+mod window_voice_input;
 
 pub mod drop_down;
 pub mod popup_menu;
@@ -57,6 +64,7 @@ pub mod splitter;
 pub mod fold_button;
 pub mod fold_header;
 
+pub mod glass_panel;
 pub mod loading_spinner;
 
 pub mod bare_step;
@@ -83,7 +91,6 @@ pub mod math_view;
 pub mod pdf_view;
 pub mod splash;
 pub mod svg;
-pub mod gltf_view;
 pub mod vector;
 
 // Touch gesture support (used by expandable_panel)
@@ -94,13 +101,13 @@ pub mod expandable_panel;
 pub mod scroll_shadow;
 pub mod stack_navigation;
 
+pub mod callout_tooltip;
 pub mod file_tree;
 pub mod modal;
 pub mod page_flip;
 pub mod popup_notification;
 pub mod slides_view;
 pub mod tooltip;
-#[cfg(target_os = "android")]
 pub mod video;
 
 pub mod command_text_input;
@@ -121,22 +128,15 @@ pub mod chart;
 // pub mod debug_view;
 // pub mod performance_view;
 // pub mod data_binding;
-// pub mod designer;
-// pub mod designer_dummy;
-// pub mod designer_theme;
-// pub mod designer_outline_tree;
-// pub mod designer_view;
-// pub mod designer_outline;
-// pub mod designer_data;
-// pub mod designer_toolbox;
 
 pub use crate::{
     adaptive_view::*,
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     // loading_spinner - no public exports
     bare_step::*,
     button::*,
     cached_widget::*,
+    callout_tooltip::*,
     check_box::*,
     desktop_button::*,
     dock::*,
@@ -209,6 +209,12 @@ pub use crate::{
     window_menu::*,
 };
 
+#[cfg(feature = "cef")]
+pub use crate::browser::*;
+
+#[cfg(feature = "voice")]
+pub use crate::voice_wave::*;
+
 pub use crate::html::*;
 
 pub use crate::markdown::*;
@@ -223,45 +229,275 @@ pub use crate::splash::*;
 #[cfg(feature = "pdf")]
 pub use crate::pdf_view::*;
 pub use crate::svg::*;
-pub use crate::gltf_view::*;
 pub use crate::vector::*;
 
 pub use crate::chart::*;
 
-#[cfg(target_os = "android")]
 pub use crate::video::*;
 
-pub fn script_mod(vm: &mut ScriptVm) {
+pub fn theme_mod(vm: &mut ScriptVm) {
     makepad_draw::script_mod(vm);
+    if !vm.is_reload() {
+        makepad_platform::ime::script_mod(vm);
+    }
 
     vm.bx.heap.new_module(id!(prelude));
     vm.bx.heap.new_module(id!(themes));
-    crate::theme_desktop_dark::script_mod(vm);
     crate::animator::script_mod(vm);
-    // make the prelude for our own widgets
-    {
-        script_mod! {
-            mod.prelude.widgets_internal = {
-                ..mod.res,
-                ..mod.helper,
-                ..mod.animator,
-                ..mod.animator.Play,
-                ..mod.animator.Ease,
-                ..mod.pod,
-                ..mod.math,
-                ..mod.sdf,
-                ..mod.shader,
-                ..mod.turtle,
-                ..mod.turtle.Size,
-                ..mod.turtle.Flow,
-                ..mod.std
-                theme:mod.theme,
-                draw:mod.draw,
-                MouseCursor:mod.draw.MouseCursor
+    crate::theme_desktop_dark::script_mod(vm);
+    crate::theme_desktop_light::script_mod(vm);
+    crate::theme_desktop_skeleton::script_mod(vm);
+    #[cfg(not(target_arch = "wasm32"))]
+    script_eval!(vm, {
+        mod.helper = {
+            startup: |v|{
+                mod.res.load_all_resources()
+                //mod.gc.set_static(mod.prelude.widgets_header);
+                //mod.gc.set_static(mod.prelude.widgets_internal);
+                //mod.gc.set_static(mod.prelude.widgets);
+                v
             }
         }
-        script_mod(vm);
-    }
+    });
+    #[cfg(target_arch = "wasm32")]
+    script_eval!(vm, {
+        mod.helper = {
+            startup: |v|{
+                v
+            }
+        }
+    });
+    #[cfg(target_arch = "wasm32")]
+    script_eval!(vm, {
+        use mod.text.*
+        use mod.res.*
+
+        mod.themes.dark = mod.themes.dark{
+            font_label: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_regular: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_italic: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold_italic: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_regular_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_italic_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold_italic_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+        }
+
+        mod.themes.light = mod.themes.light{
+            font_label: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_regular: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_italic: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold_italic: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_regular_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_italic_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold_italic_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+        }
+
+        mod.themes.skeleton = mod.themes.skeleton{
+            font_label: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_regular: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_italic: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold_italic: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_regular_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_italic_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-Italic.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+            font_bold_italic_i18n: TextStyle{
+                font_family: FontFamily{
+                    latin := FontMember{res: crate_resource("self:resources/IBMPlexSans-BoldItalic.ttf") asc: -0.1 desc: 0.0}
+                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                }
+                line_spacing: 1.2
+            }
+        }
+    });
+    script_eval!(vm, {
+        mod.prelude.widgets_header = {
+            ..mod.res,
+            ..mod.helper,
+            ..mod.std,
+            ..mod.pod,
+            ..mod.math,
+            ..mod.sdf,
+            ..mod.animator,
+            ..mod.turtle,
+            ..mod.text,
+            ..mod.ime,
+            ..mod.shader,
+            ..mod.animator.Play,
+            ..mod.animator.Ease,
+            draw:mod.draw,
+            MouseCursor:mod.draw.MouseCursor
+        }
+        mod.theme = mod.themes.dark
+
+    });
+}
+
+pub fn widgets_mod(vm: &mut ScriptVm) {
+    // make the prelude for our own widgets
+    script_eval!(vm, {
+        mod.prelude.widgets_internal = {
+            ..mod.prelude.widgets_header,
+            theme:mod.theme,
+        }
+    });
 
     vm.bx.heap.new_module(id!(widgets));
 
@@ -274,6 +510,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::label::script_mod(vm);
     crate::link_label::script_mod(vm);
     crate::button::script_mod(vm);
+    #[cfg(feature = "cef")]
+    crate::browser::script_mod(vm);
     crate::check_box::script_mod(vm);
     crate::radio_button::script_mod(vm);
     crate::image::script_mod(vm);
@@ -283,6 +521,15 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::adaptive_view::script_mod(vm);
     crate::desktop_button::script_mod(vm);
     crate::keyboard_view::script_mod(vm);
+    #[cfg(feature = "voice")]
+    crate::voice_wave::script_mod(vm);
+    #[cfg(not(feature = "voice"))]
+    script_eval!(vm, {
+        use mod.widgets.View
+        mod.widgets.VoiceWave = mod.widgets.View {
+            visible: false
+        }
+    });
     crate::window_menu::script_mod(vm);
     crate::nav_control::script_mod(vm);
     crate::window::script_mod(vm);
@@ -298,6 +545,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::fold_header::script_mod(vm);
 
     crate::loading_spinner::script_mod(vm);
+    crate::glass_panel::script_mod(vm);
 
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);
@@ -319,8 +567,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::expandable_panel::script_mod(vm);
     crate::modal::script_mod(vm);
     crate::tooltip::script_mod(vm);
+    crate::callout_tooltip::script_mod(vm);
     crate::popup_notification::script_mod(vm);
-    #[cfg(target_os = "android")]
     crate::video::script_mod(vm);
     crate::page_flip::script_mod(vm);
     crate::file_tree::script_mod(vm);
@@ -335,7 +583,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     #[cfg(feature = "pdf")]
     crate::pdf_view::script_mod(vm);
     crate::svg::script_mod(vm);
-    crate::gltf_view::script_mod(vm);
     crate::vector::script_mod(vm);
     crate::chart::script_mod(vm);
     #[cfg(feature = "maps")]
@@ -344,37 +591,49 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::map::view::script_mod(vm);
     crate::math_view::script_mod(vm);
 
-    // make the prelude.widgetst with all our components
-
+    // Safe area inset values (in logical points). Populated from the platform's
+    // display_context which is set before Startup on iOS/Android. On desktop
+    // platforms these remain 0.0. Updated at runtime on WindowGeomChange events.
     {
-        script_mod! {
-            mod.prelude.widgets = {
-                ..mod.res,
-                ..mod.helper,
-                ..mod.std,
-                ..mod.pod,
-                ..mod.math,
-                ..mod.sdf,
-                theme:mod.theme,
-                draw:mod.draw,
-                net:mod.net,
-                ..mod.animator,
-                ..mod.animator.Play,
-                ..mod.animator.Ease,
-                ..mod.shader,
-                ..mod.widgets,
-                ..mod.turtle,
-                ..mod.turtle.Size,
-                ..mod.turtle.Flow,
-                ..mod.draw.MouseCursor
-            }
-        }
-        script_mod(vm);
+        use makepad_script::trap::NoTrap;
+        let insets = vm.cx().display_context.safe_area_insets;
+        let widgets = vm.module(id!(widgets));
+        vm.bx.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_TOP).into(),
+            insets.top.into(),
+            NoTrap,
+        );
+        vm.bx.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_BOTTOM).into(),
+            insets.bottom.into(),
+            NoTrap,
+        );
+        vm.bx.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_LEFT).into(),
+            insets.left.into(),
+            NoTrap,
+        );
+        vm.bx.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_RIGHT).into(),
+            insets.right.into(),
+            NoTrap,
+        );
     }
-    //crate::theme_desktop_dark::script_mod(vm);
-    //makepad_fonts_emoji2::script_mod(vm);
-    //makepad_fonts_chinese_regular2::script_mod(vm);
-    //makepad_fonts_chinese_regular2_2::script_mod(vm);
-    //makepad_fonts_chinese_bold2::script_mod(vm);
-    //makepad_fonts_chinese_bold2_2::script_mod(vm);
+
+    script_eval!(vm, {
+        mod.prelude.widgets = {
+            ..mod.prelude.widgets_header,
+            theme:mod.theme,
+            ..mod.widgets,
+        }
+    });
+}
+
+pub fn script_mod(vm: &mut ScriptVm) {
+    theme_mod(vm);
+    widgets_mod(vm);
 }

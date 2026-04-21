@@ -63,6 +63,40 @@ pub struct PbrVertex {
     pub tangent: Vec4f, // tangent xyz + handedness
 }
 
+#[derive(Clone, Script, ScriptHook)]
+pub struct CubeVertex {
+    #[live]
+    pub geom_pos: Vec3f,
+    #[live]
+    pub geom_id: f32,
+    #[live]
+    pub geom_normal: Vec3f,
+    #[live]
+    pub geom_pad: f32,
+    #[live]
+    pub geom_uv: Vec2f,
+    #[live]
+    pub geom_tail_pad_0: f32,
+    #[live]
+    pub geom_tail_pad_1: f32,
+}
+
+#[derive(Clone, Script, ScriptHook)]
+pub struct IcoVertex {
+    #[live]
+    pub pos: Vec4f,
+    #[live]
+    pub normal: Vec4f,
+}
+
+#[derive(Clone, Script, ScriptHook)]
+pub struct DepthMeshVertex {
+    #[live]
+    pub pos: Vec4f,
+    #[live]
+    pub barycentric: Vec4f,
+}
+
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     let geom = vm.new_module(id!(geom));
     // lets make a Quad geometry here
@@ -84,6 +118,25 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         .into_geometry(vm.cx_mut())
         .into_script_handle(vm);
     set_script_value!(vm, geom.PbrGeom = pgen);
+    // Cube geometry: unit cube in the old geom_pos/geom_normal/geom_uv layout.
+    set_script_value_to_pod!(vm, geom.CubeVertex);
+    let cgen = GeometryGen::from_cube_3d(1.0, 1.0, 1.0, 1, 1, 1)
+        .into_cube_vertex_pod()
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
+    set_script_value!(vm, geom.CubeGeom = cgen);
+    // Ico geometry: minimal pos/normal layout for faceted solids.
+    set_script_value_to_pod!(vm, geom.IcoVertex);
+    let igen = GeometryGen::from_triangle_ico()
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
+    set_script_value!(vm, geom.IcoGeom = igen);
+    // Depth mesh geometry: position plus per-triangle barycentrics.
+    set_script_value_to_pod!(vm, geom.DepthMeshVertex);
+    let dgen = GeometryGen::from_triangle_depth_mesh()
+        .into_geometry(vm.cx_mut())
+        .into_script_handle(vm);
+    set_script_value!(vm, geom.DepthMeshGeom = dgen);
     NIL
 }
 
@@ -152,6 +205,34 @@ impl GeometryGen {
         g
     }
 
+    /// Placeholder single-triangle geometry for minimal faceted-vertex drawing.
+    pub fn from_triangle_ico() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[
+                0.0, 0.0, 0.0, 1.0, // pos xyz + pad
+                0.0, 0.0, 1.0, 0.0, // normal xyz + pad
+            ]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    /// Placeholder single-triangle geometry for depth-mesh drawing with barycentrics.
+    pub fn from_triangle_depth_mesh() -> GeometryGen {
+        let mut g = Self::default();
+        g.vertices.extend_from_slice(&[
+            0.0, 0.0, 0.0, 1.0, // pos xyz + pad
+            1.0, 0.0, 0.0, 0.0, // barycentric xyz + pad
+            0.0, 0.0, 0.0, 1.0, // pos xyz + pad
+            0.0, 1.0, 0.0, 0.0, // barycentric xyz + pad
+            0.0, 0.0, 0.0, 1.0, // pos xyz + pad
+            0.0, 0.0, 1.0, 0.0, // barycentric xyz + pad
+        ]);
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
     pub fn from_cube_3d(
         width: f32,
         height: f32,
@@ -172,6 +253,28 @@ impl GeometryGen {
         g
     }
 
+    pub fn into_cube_vertex_pod(self) -> GeometryGen {
+        let vertex_count = self.vertices.len() / 9;
+        let mut out = GeometryGen {
+            vertices: Vec::with_capacity(vertex_count * 12),
+            indices: self.indices,
+        };
+
+        for chunk in self.vertices.chunks_exact(9) {
+            // Expand the old cube layout:
+            // pos3, id1, normal3, uv2
+            // into the POD layout the script vertex buffer expects:
+            // pos3, id1, normal3, pad1, uv2, tail_pad2
+            out.vertices.extend_from_slice(&chunk[0..7]);
+            out.vertices.push(0.0);
+            out.vertices.extend_from_slice(&chunk[7..9]);
+            out.vertices.push(0.0);
+            out.vertices.push(0.0);
+        }
+
+        out
+    }
+
     // requires pos:vec2 normalized layout
     pub fn add_quad_2d(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
         let vertex_offset = self.vertices.len() as u32;
@@ -183,12 +286,12 @@ impl GeometryGen {
         self.vertices.push(y2);
         self.vertices.push(x1);
         self.vertices.push(y2);
-        self.indices.push(vertex_offset + 0);
+        self.indices.push(vertex_offset);
         self.indices.push(vertex_offset + 1);
         self.indices.push(vertex_offset + 2);
         self.indices.push(vertex_offset + 2);
         self.indices.push(vertex_offset + 3);
-        self.indices.push(vertex_offset + 0);
+        self.indices.push(vertex_offset);
     }
 
     // requires pos:vec3, id:float, normal:vec3, uv:vec2 layout
@@ -282,6 +385,7 @@ impl GeometryGen {
     }
 
     // requires pos:vec3, id:float, normal:vec3, uv:vec2 layout
+    #[allow(clippy::too_many_arguments)]
     pub fn add_plane_3d(
         &mut self,
         u: GeometryAxis,

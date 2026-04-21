@@ -8,8 +8,8 @@ use {
         draw_list::DrawListId,
         //midi::{Midi1InputData, MidiInputInfo},
         event::{
-            designer::*, drag_drop::*, finger::*, game_input::*, keyboard::*, network::*,
-            video_playback::*, window::*, xr::*,
+            drag_drop::*, finger::*, game_input::*, keyboard::*, network::*, video_playback::*,
+            window::*, xr::*,
         },
         //makepad_live_compiler::LiveEditEvent,
         makepad_live_id::LiveId,
@@ -136,6 +136,7 @@ pub enum Event {
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
+    PopupDismissed(PopupDismissedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
     VirtualKeyboard(VirtualKeyboardEvent),
     ClearAtlasses,
@@ -150,6 +151,9 @@ pub enum Event {
     /// Do not match upon or handle this event directly; instead, use the family of
     /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit`].
     MouseMove(MouseMoveEvent),
+    /// A studio/debug-only ray cast request that probes widget hit geometry
+    /// without changing regular input/hover state.
+    TweakRay(TweakRayEvent),
     /// The raw event that occurs when the user releases a previously-pressed mouse button.
     ///
     /// Do not match upon or handle this event directly; instead, use the family of
@@ -190,10 +194,16 @@ pub enum Event {
     TextRangeReplace(TextRangeReplaceEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
+    ImeAction(ImeActionEvent),
+    SelectionHandleDrag(SelectionHandleDragEvent),
 
     Drag(DragEvent),
     Drop(DropEvent),
     DragEnd,
+
+    /// Application-defined event sent via the studio/debug control protocol.
+    /// Respond with `Cx::send_studio_message(AppToStudio::Custom(..))`.
+    Custom(String),
 
     Actions(ActionsBuf),
     AudioDevices(AudioDevicesEvent),
@@ -207,6 +217,9 @@ pub enum Event {
     VideoPlaybackResourcesReleased(VideoPlaybackResourcesReleasedEvent),
     VideoDecodingError(VideoDecodingErrorEvent),
     TextureHandleReady(TextureHandleReadyEvent),
+    VideoYuvTexturesReady(VideoYuvTexturesReady),
+    VideoSeekableRanges(VideoSeekableRangesEvent),
+    VideoBufferedRanges(VideoBufferedRangesEvent),
 
     /// The "go back" navigational button or gesture was performed.
     ///
@@ -224,8 +237,6 @@ pub enum Event {
 
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
-
-    DesignerPick(DesignerPickEvent),
 }
 
 impl Event {
@@ -261,6 +272,7 @@ impl Event {
 
             20 => "MouseDown",
             21 => "MouseMove",
+            59 => "TweakRay",
             22 => "MouseUp",
             23 => "TouchUpdate",
             24 => "LongPress",
@@ -295,6 +307,9 @@ impl Event {
             48 => "VideoDecodingError",
             49 => "VideoPlaybackResourcesReleased",
             50 => "TextureHandleReady",
+            63 => "VideoSeekableRanges",
+            64 => "VideoBufferedRanges",
+            65 => "VideoYuvTexturesReady",
             51 => "MouseLeave",
             52 => "Actions",
             53 => "BackPressed",
@@ -303,8 +318,11 @@ impl Event {
             #[cfg(target_arch = "wasm32")]
             55 => "ToWasmMsg",
 
-            56 => "DesignerPick",
             57 => "XrLocal",
+            58 => "ImeAction",
+            60 => "Custom",
+            61 => "PopupDismissed",
+            62 => "SelectionHandleDrag",
             _ => panic!(),
         }
     }
@@ -334,9 +352,11 @@ impl Event {
             Self::WindowGeomChange(_) => 17,
             Self::VirtualKeyboard(_) => 18,
             Self::ClearAtlasses => 19,
+            Self::PopupDismissed(_) => 61,
 
             Self::MouseDown(_) => 20,
             Self::MouseMove(_) => 21,
+            Self::TweakRay(_) => 59,
             Self::MouseUp(_) => 22,
             Self::TouchUpdate(_) => 23,
             Self::LongPress(_) => 24,
@@ -355,6 +375,8 @@ impl Event {
             Self::TextRangeReplace(_) => 35,
             Self::TextCopy(_) => 36,
             Self::TextCut(_) => 37,
+            Self::ImeAction(_) => 58,
+            Self::SelectionHandleDrag(_) => 62,
 
             Self::Drag(_) => 38,
             Self::Drop(_) => 39,
@@ -371,6 +393,9 @@ impl Event {
             Self::VideoDecodingError(_) => 48,
             Self::VideoPlaybackResourcesReleased(_) => 49,
             Self::TextureHandleReady(_) => 50,
+            Self::VideoSeekableRanges(_) => 63,
+            Self::VideoBufferedRanges(_) => 64,
+            Self::VideoYuvTexturesReady(_) => 65,
             Self::MouseLeave(_) => 51,
             Self::Actions(_) => 52,
             Self::BackPressed { .. } => 53,
@@ -379,8 +404,8 @@ impl Event {
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_) => 55,
 
-            Self::DesignerPick(_) => 56,
             Self::XrLocal(_) => 57,
+            Self::Custom(_) => 60,
         }
     }
 
@@ -410,6 +435,7 @@ pub enum Hit {
     TextRangeReplace(TextRangeReplaceEvent),
     TextCopy(TextClipboardEvent),
     TextCut(TextClipboardEvent),
+    ImeAction(ImeActionEvent),
 
     FingerScroll(FingerScrollEvent),
     FingerDown(FingerDownEvent),
@@ -419,8 +445,7 @@ pub enum Hit {
     FingerHoverOut(FingerHoverEvent),
     FingerUp(FingerUpEvent),
     FingerLongPress(FingerLongPressEvent),
-
-    DesignerPick(DesignerPickEvent),
+    SelectionHandleDrag(SelectionHandleDragEvent),
 
     Nothing,
 }
@@ -436,9 +461,11 @@ pub enum DragHit {
 impl Event {
     pub fn requires_visibility(&self) -> bool {
         match self {
-            Self::MouseDown(_) | Self::MouseMove(_) | Self::TouchUpdate(_) | Self::Scroll(_) => {
-                true
-            }
+            Self::MouseDown(_)
+            | Self::MouseMove(_)
+            | Self::TweakRay(_)
+            | Self::TouchUpdate(_)
+            | Self::Scroll(_) => true,
             _ => false,
         }
     }
@@ -1019,6 +1046,31 @@ use crate::makepad_wasm_bridge::ToWasmMsg;
 
 #[cfg(target_arch = "wasm32")]
 use crate::makepad_wasm_bridge::ToWasmMsgRef;
+
+// ---------------------------------------------------------------------------
+// Selection handle drag (mobile)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionHandleKind {
+    Start,
+    End,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionHandlePhase {
+    Begin,
+    Move,
+    End,
+}
+
+#[derive(Clone, Debug)]
+pub struct SelectionHandleDragEvent {
+    pub handle: SelectionHandleKind,
+    pub phase: SelectionHandlePhase,
+    pub abs: crate::makepad_math::Vec2d,
+    pub time: f64,
+}
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug)]

@@ -1,8 +1,8 @@
 use crate::{
     event::{
-        DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
-        TextClipboardEvent, TextInputEvent, TimerEvent, WindowCloseRequestedEvent,
-        WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
+        DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+        PopupDismissedEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
+        WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
     },
     window::WindowId,
 };
@@ -13,6 +13,7 @@ pub enum XlibEvent {
     WindowLostFocus(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     WindowClosed(WindowClosedEvent),
+    PopupDismissed(PopupDismissedEvent),
     Paint,
 
     MouseDown(MouseDownEvent),

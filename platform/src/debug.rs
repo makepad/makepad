@@ -111,7 +111,7 @@ impl Cx {
             for _i in 0..depth {
                 indent.push_str("|   ");
             }
-            let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
+            let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
             //if draw_list_id == 0 {
             //    writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
             // }
@@ -120,7 +120,7 @@ impl Cx {
             writeln!(
                 s,
                 "{}{} {:?}: len:{}",
-                indent, cx.draw_lists[draw_list_id].debug_id, draw_list_id, draw_items_len,
+                indent, cx.draw_lists[draw_list_id].debug_id, draw_list_id, draw_order_len,
             )
             .unwrap();
             indent.push_str("  ");
@@ -128,7 +128,12 @@ impl Cx {
             for _i in 0..depth + 1 {
                 indent.push_str("|   ");
             }
-            for draw_item_id in 0..draw_items_len {
+            for order_index in 0..draw_order_len {
+                let Some(draw_item_id) =
+                    cx.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
+                else {
+                    continue;
+                };
                 if let Some(sub_list_id) =
                     cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
                 {
@@ -142,50 +147,81 @@ impl Cx {
                     let instances = darw_item.instances.as_ref().unwrap().len() / slots;
                     writeln!(
                         s,
-                        "{}({}) sid:{} inst:{}",
+                        "{}({}) sid:{} inst:{} zbias:{:.6} group:{}",
                         indent,
                         draw_call.options.debug_id.unwrap_or(sh.debug_id),
                         draw_call.draw_shader_id.index,
                         instances,
+                        draw_call.draw_call_uniforms.zbias,
+                        draw_call.options.draw_call_group.0,
                     )
                     .unwrap();
                     // lets dump the instance geometry
                     if dump_instances {
+                        if !sh.mapping.dyn_uniforms.inputs.is_empty() {
+                            let mut uout = String::new();
+                            for input in &sh.mapping.dyn_uniforms.inputs {
+                                let off = input.offset;
+                                let buf = &draw_call.dyn_uniforms;
+                                match input.slots {
+                                    1 => uout.push_str(&format!("{}:{} ", input.id, buf[off])),
+                                    2 => uout.push_str(&format!(
+                                        "{}:v2({},{}) ",
+                                        input.id,
+                                        buf[off],
+                                        buf[off + 1]
+                                    )),
+                                    3 => uout.push_str(&format!(
+                                        "{}:v3({},{},{}) ",
+                                        input.id,
+                                        buf[off],
+                                        buf[off + 1],
+                                        buf[off + 2]
+                                    )),
+                                    4 => uout.push_str(&format!(
+                                        "{}:v4({},{},{},{}) ",
+                                        input.id,
+                                        buf[off],
+                                        buf[off + 1],
+                                        buf[off + 2],
+                                        buf[off + 3]
+                                    )),
+                                    _ => {}
+                                }
+                            }
+                            writeln!(s, "  {}uniforms: {}", indent, uout).unwrap();
+                        }
                         for inst in 0..instances.min(1) {
                             let mut out = String::new();
-                            let mut off = 0;
                             for input in &sh.mapping.instances.inputs {
                                 let buf = darw_item.instances.as_ref().unwrap();
+                                let off = input.offset;
+                                let base = inst * slots + off;
                                 match input.slots {
-                                    1 => out.push_str(&format!(
-                                        "{}:{} ",
-                                        input.id,
-                                        buf[inst * slots + off]
-                                    )),
+                                    1 => out.push_str(&format!("{}:{} ", input.id, buf[base])),
                                     2 => out.push_str(&format!(
                                         "{}:v2({},{}) ",
                                         input.id,
-                                        buf[inst * slots + off],
-                                        buf[inst * slots + 1 + off]
+                                        buf[base],
+                                        buf[base + 1]
                                     )),
                                     3 => out.push_str(&format!(
                                         "{}:v3({},{},{}) ",
                                         input.id,
-                                        buf[inst * slots + off],
-                                        buf[inst * slots + 1 + off],
-                                        buf[inst * slots + 1 + off]
+                                        buf[base],
+                                        buf[base + 1],
+                                        buf[base + 2]
                                     )),
                                     4 => out.push_str(&format!(
                                         "{}:v4({},{},{},{}) ",
                                         input.id,
-                                        buf[inst * slots + off],
-                                        buf[inst * slots + 1 + off],
-                                        buf[inst * slots + 2 + off],
-                                        buf[inst * slots + 3 + off]
+                                        buf[base],
+                                        buf[base + 1],
+                                        buf[base + 2],
+                                        buf[base + 3]
                                     )),
                                     _ => {}
                                 }
-                                off += input.slots;
                             }
                             writeln!(s, "  {}instance {}: {}", indent, inst, out).unwrap();
                         }

@@ -8,19 +8,27 @@ use {
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
         dvec2,
+        event::keyboard::CharOffset,
         event::xr::XrAnchor,
-        event::{DragItem, HttpRequest, NextFrame, Timer, Trigger, VideoSource},
+        event::{
+            video_playback::CameraPreviewMode, DragItem, NextFrame, Timer, Trigger, VideoSource,
+        },
         gpu_info::GpuInfo,
+        ime::TextInputConfig,
         macos_menu::MacosMenu,
         makepad_futures::executor::Spawner,
         makepad_live_id::*,
         makepad_math::{Rect, Vec2d},
+        makepad_network::HttpRequest,
         makepad_script::value::ScriptHandle,
-        texture::Texture,
+        shared_bytes::SharedBytes,
+        texture::{Texture, TextureId},
         window::WindowId,
+        window::WindowVisuals,
     },
     std::{
         any::{Any, TypeId},
+        ops::Range,
         rc::Rc,
     },
 };
@@ -28,6 +36,114 @@ pub enum OpenUrlInPlace {
     Yes,
     No,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CxThreadPriority {
+    #[default]
+    Normal,
+    Utility,
+    Background,
+    Idle,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrFrameCpuBreakdown {
+    pub total_ms: f64,
+    pub wait_frame_ms: f64,
+    pub begin_frame_ms: f64,
+    pub locate_space_ms: f64,
+    pub locate_views_ms: f64,
+    pub acquire_swapchain_ms: f64,
+    pub wait_swapchain_ms: f64,
+    pub acquire_depth_ms: f64,
+    pub update_prepare_ms: f64,
+    pub update_dispatch_ms: f64,
+    pub next_frame_ms: f64,
+    pub draw_event_ms: f64,
+    pub compile_shaders_ms: f64,
+    pub repaint_ms: f64,
+    pub repaint_wait_inflight_ms: f64,
+    pub repaint_prepare_textures_ms: f64,
+    pub repaint_record_draw_ms: f64,
+    pub repaint_submit_ms: f64,
+    pub repaint_texture_upload_count: u32,
+    pub repaint_texture_upload_bytes: u64,
+    pub repaint_packet_buffer_count: u32,
+    pub repaint_packet_buffer_bytes: u64,
+    pub repaint_geometry_upload_bytes: u64,
+    pub repaint_descriptor_set_count: u32,
+    pub repaint_draw_items: u64,
+    pub repaint_draw_calls: u64,
+    pub repaint_packets: u64,
+    pub repaint_instances: u64,
+    pub repaint_indices: u64,
+    pub depth_readback_ms: f64,
+    pub end_frame_ms: f64,
+    pub resize_projection_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SystemBrowserId(pub LiveId);
+
+impl From<LiveId> for SystemBrowserId {
+    fn from(value: LiveId) -> Self {
+        Self(value)
+    }
+}
+
+pub struct CxSystemBrowser<'a> {
+    cx: &'a mut Cx,
+    id: SystemBrowserId,
+}
+
+impl<'a> CxSystemBrowser<'a> {
+    pub fn id(&self) -> SystemBrowserId {
+        self.id
+    }
+
+    pub fn spawn(&mut self, url: &str) {
+        self.cx.platform_ops.push(CxOsOp::SpawnSystemBrowser {
+            browser_id: self.id.0,
+            url: url.to_string(),
+        });
+    }
+
+    pub fn update(&mut self, area: Area, visible: bool) {
+        self.cx.platform_ops.push(CxOsOp::UpdateSystemBrowser {
+            browser_id: self.id.0,
+            area,
+            visible,
+        });
+    }
+
+    pub fn detach(&mut self) {
+        self.cx.platform_ops.push(CxOsOp::DetachSystemBrowser {
+            browser_id: self.id.0,
+        });
+    }
+
+    pub fn set_url(&mut self, url: &str, replace: bool) {
+        self.cx.platform_ops.push(CxOsOp::SetSystemBrowserUrl {
+            browser_id: self.id.0,
+            url: url.to_string(),
+            replace,
+        });
+    }
+
+    pub fn history_go(&mut self, delta: i32) {
+        self.cx.platform_ops.push(CxOsOp::SystemBrowserHistoryGo {
+            browser_id: self.id.0,
+            delta,
+        });
+    }
+
+    pub fn close(&mut self) {
+        self.cx.platform_ops.push(CxOsOp::CloseSystemBrowser {
+            browser_id: self.id.0,
+        });
+    }
+}
+
 pub trait CxOsApi {
     fn init_cx_os(&mut self);
 
@@ -41,6 +157,10 @@ pub trait CxOsApi {
     }
 
     fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace);
+
+    fn browser_update_url(&mut self, _url: &str, _replace: bool) {}
+
+    fn browser_history_go(&mut self, _delta: i32) {}
 
     fn seconds_since_app_start(&self) -> f64;
 
@@ -60,14 +180,69 @@ pub trait CxOsApi {
         0.00001
     }
 
+    fn xr_render_scale(&self) -> Option<f64> {
+        None
+    }
+
+    fn xr_gpu_frame_time_ms(&self) -> Option<f64> {
+        None
+    }
+
+    fn xr_frame_cpu_time_ms(&self) -> Option<f64> {
+        None
+    }
+
+    fn xr_render_cpu_time_ms(&self) -> Option<f64> {
+        None
+    }
+
+    fn xr_depth_readback_cpu_time_ms(&self) -> Option<f64> {
+        None
+    }
+
+    fn xr_frame_cpu_breakdown(&self) -> Option<XrFrameCpuBreakdown> {
+        None
+    }
+
+    fn xr_display_refresh_rate_hz(&self) -> Option<f64> {
+        None
+    }
+
+    fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
+        None
+    }
+
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
 }
 
+/// Type-erased accessibility tree update payload. PartialEq always returns
+/// false — accessibility updates are never deduplicated.
+pub struct AccessibilityUpdatePayload(pub Box<dyn std::any::Any + Send>);
+
+impl PartialEq for AccessibilityUpdatePayload {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
+impl std::fmt::Debug for AccessibilityUpdatePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AccessibilityUpdatePayload(..)")
+    }
+}
+
 #[derive(PartialEq)]
 pub enum CxOsOp {
     CreateWindow(WindowId),
+    CreatePopupWindow {
+        window_id: WindowId,
+        parent_window_id: WindowId,
+        position: Vec2d,
+        size: Vec2d,
+        grab_keyboard: bool,
+    },
     ResizeWindow(WindowId, Vec2d),
     RepositionWindow(WindowId, Vec2d),
     CloseWindow(WindowId),
@@ -78,11 +253,19 @@ pub enum CxOsOp {
     NormalizeWindow(WindowId),
     RestoreWindow(WindowId),
     HideWindow(WindowId),
+    HideWindowButtons(WindowId),
+    ShowWindowButtons(WindowId),
     SetTopmost(WindowId, bool),
+    SetWindowVisuals(WindowId, WindowVisuals),
     ShowInDock(bool),
 
-    ShowTextIME(Area, Vec2d),
+    ShowTextIME(Area, Vec2d, TextInputConfig),
     HideTextIME,
+    SyncImeState {
+        text: String,
+        selection: Range<CharOffset>,
+        composition: Option<Range<CharOffset>>,
+    },
     SetCursor(MouseCursor),
     StartTimer {
         timer_id: u64,
@@ -101,6 +284,17 @@ pub enum CxOsOp {
     },
     HideClipboardActions,
     CopyToClipboard(String),
+    SetPrimarySelection(String),
+    ShowSelectionHandles {
+        start: Vec2d,
+        end: Vec2d,
+    },
+    UpdateSelectionHandles {
+        start: Vec2d,
+        end: Vec2d,
+    },
+    HideSelectionHandles,
+    AccessibilityUpdate(AccessibilityUpdatePayload),
 
     CheckPermission {
         permission: crate::permission::Permission,
@@ -119,13 +313,61 @@ pub enum CxOsOp {
         request_id: LiveId,
     },
 
-    PrepareVideoPlayback(LiveId, VideoSource, u32, bool, bool),
+    PrepareVideoPlayback(
+        LiveId,
+        VideoSource,
+        CameraPreviewMode,
+        u32,
+        TextureId,
+        bool,
+        bool,
+    ),
+    AttachCameraNativePreview {
+        video_id: LiveId,
+        area: Area,
+    },
+    UpdateCameraNativePreview {
+        video_id: LiveId,
+        area: Area,
+        visible: bool,
+    },
+    DetachCameraNativePreview {
+        video_id: LiveId,
+    },
+    SpawnSystemBrowser {
+        browser_id: LiveId,
+        url: String,
+    },
+    UpdateSystemBrowser {
+        browser_id: LiveId,
+        area: Area,
+        visible: bool,
+    },
+    DetachSystemBrowser {
+        browser_id: LiveId,
+    },
+    SetSystemBrowserUrl {
+        browser_id: LiveId,
+        url: String,
+        replace: bool,
+    },
+    SystemBrowserHistoryGo {
+        browser_id: LiveId,
+        delta: i32,
+    },
+    CloseSystemBrowser {
+        browser_id: LiveId,
+    },
+    PrepareAudioPlayback(LiveId, VideoSource, bool, bool),
     BeginVideoPlayback(LiveId),
     PauseVideoPlayback(LiveId),
     ResumeVideoPlayback(LiveId),
     MuteVideoPlayback(LiveId),
     UnmuteVideoPlayback(LiveId),
     CleanupVideoPlaybackResources(LiveId),
+    SeekVideoPlayback(LiveId, u64),
+    SetVideoVolume(LiveId, f64),
+    SetVideoPlaybackRate(LiveId, f64),
     UpdateVideoSurfaceTexture(LiveId),
 
     CreateWebView {
@@ -147,7 +389,9 @@ pub enum CxOsOp {
     SelectFolderDialog(FileDialog),
 
     XrStartPresenting,
+    XrSetRenderScale(f32),
     XrSetLocalAnchor(XrAnchor),
+    XrSetLocalFloor(f32),
     XrAdvertiseAnchor(XrAnchor),
     XrDiscoverAnchor(u8),
     XrStopPresenting,
@@ -157,6 +401,7 @@ impl std::fmt::Debug for CxOsOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CreateWindow(..) => write!(f, "CreateWindow"),
+            Self::CreatePopupWindow { .. } => write!(f, "CreatePopupWindow"),
             Self::CloseWindow(..) => write!(f, "CloseWindow"),
             Self::MinimizeWindow(..) => write!(f, "MinimizeWindow"),
             Self::Deminiaturize(..) => write!(f, "Deminiaturize"),
@@ -165,11 +410,15 @@ impl std::fmt::Debug for CxOsOp {
             Self::NormalizeWindow(..) => write!(f, "NormalizeWindow"),
             Self::RestoreWindow(..) => write!(f, "RestoreWindow"),
             Self::HideWindow(..) => write!(f, "HideWindow"),
+            Self::HideWindowButtons(..) => write!(f, "HideWindowButtons"),
+            Self::ShowWindowButtons(..) => write!(f, "ShowWindowButtons"),
             Self::SetTopmost(..) => write!(f, "SetTopmost"),
+            Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
 
             Self::ShowTextIME(..) => write!(f, "ShowTextIME"),
             Self::HideTextIME => write!(f, "HideTextIME"),
+            Self::SyncImeState { .. } => write!(f, "SyncImeState"),
             Self::SetCursor(..) => write!(f, "SetCursor"),
             Self::StartTimer { .. } => write!(f, "StartTimer"),
             Self::StopTimer(..) => write!(f, "StopTimer"),
@@ -180,6 +429,11 @@ impl std::fmt::Debug for CxOsOp {
             Self::ShowClipboardActions { .. } => write!(f, "ShowClipboardActions"),
             Self::HideClipboardActions => write!(f, "HideClipboardActions"),
             Self::CopyToClipboard(..) => write!(f, "CopyToClipboard"),
+            Self::SetPrimarySelection(..) => write!(f, "SetPrimarySelection"),
+            Self::ShowSelectionHandles { .. } => write!(f, "ShowSelectionHandles"),
+            Self::UpdateSelectionHandles { .. } => write!(f, "UpdateSelectionHandles"),
+            Self::HideSelectionHandles => write!(f, "HideSelectionHandles"),
+            Self::AccessibilityUpdate(..) => write!(f, "AccessibilityUpdate"),
 
             Self::CheckPermission { .. } => write!(f, "CheckPermission"),
             Self::RequestPermission { .. } => write!(f, "RequestPermission"),
@@ -188,12 +442,25 @@ impl std::fmt::Debug for CxOsOp {
             Self::CancelHttpRequest { .. } => write!(f, "CancelHttpRequest"),
 
             Self::PrepareVideoPlayback(..) => write!(f, "PrepareVideoPlayback"),
+            Self::AttachCameraNativePreview { .. } => write!(f, "AttachCameraNativePreview"),
+            Self::UpdateCameraNativePreview { .. } => write!(f, "UpdateCameraNativePreview"),
+            Self::DetachCameraNativePreview { .. } => write!(f, "DetachCameraNativePreview"),
+            Self::SpawnSystemBrowser { .. } => write!(f, "SpawnSystemBrowser"),
+            Self::UpdateSystemBrowser { .. } => write!(f, "UpdateSystemBrowser"),
+            Self::DetachSystemBrowser { .. } => write!(f, "DetachSystemBrowser"),
+            Self::SetSystemBrowserUrl { .. } => write!(f, "SetSystemBrowserUrl"),
+            Self::SystemBrowserHistoryGo { .. } => write!(f, "SystemBrowserHistoryGo"),
+            Self::CloseSystemBrowser { .. } => write!(f, "CloseSystemBrowser"),
+            Self::PrepareAudioPlayback(..) => write!(f, "PrepareAudioPlayback"),
             Self::BeginVideoPlayback(..) => write!(f, "BeginVideoPlayback"),
             Self::PauseVideoPlayback(..) => write!(f, "PauseVideoPlayback"),
             Self::ResumeVideoPlayback(..) => write!(f, "ResumeVideoPlayback"),
             Self::MuteVideoPlayback(..) => write!(f, "MuteVideoPlayback"),
             Self::UnmuteVideoPlayback(..) => write!(f, "UnmuteVideoPlayback"),
             Self::CleanupVideoPlaybackResources(..) => write!(f, "CleanupVideoPlaybackResources"),
+            Self::SeekVideoPlayback(..) => write!(f, "SeekVideoPlayback"),
+            Self::SetVideoVolume(..) => write!(f, "SetVideoVolume"),
+            Self::SetVideoPlaybackRate(..) => write!(f, "SetVideoPlaybackRate"),
             Self::UpdateVideoSurfaceTexture(..) => write!(f, "UpdateVideoSurfaceTexture"),
             Self::CreateWebView { .. } => write!(f, "CreateWebView"),
             Self::UpdateWebView { .. } => write!(f, "UpdateWebView"),
@@ -206,9 +473,11 @@ impl std::fmt::Debug for CxOsOp {
             Self::RepositionWindow(..) => write!(f, "RepositionWindow"),
 
             Self::XrStartPresenting => write!(f, "XrStartPresenting"),
+            Self::XrSetRenderScale(_) => write!(f, "XrSetRenderScale"),
             Self::XrStopPresenting => write!(f, "XrStopPresenting"),
             Self::XrAdvertiseAnchor(_) => write!(f, "XrAdvertiseAnchor"),
             Self::XrSetLocalAnchor(_) => write!(f, "XrSetLocalAnchor"),
+            Self::XrSetLocalFloor(_) => write!(f, "XrSetLocalFloor"),
             Self::XrDiscoverAnchor(_) => write!(f, "XrDiscoverAnchor"),
         }
     }
@@ -218,8 +487,118 @@ impl Cx {
         self.in_draw_event
     }
 
+    /// Updates the `mod.widgets.SAFE_INSET_PAD_*` values on the script heap
+    /// so that Splash code can reference them in widget definitions.
+    /// Requests a deferred re-application of all script/Splash widget definitions,
+    /// causing widgets to pick up updated values from the script heap.
+    /// The re-apply happens on the next event loop iteration (not synchronously),
+    /// to avoid re-entrancy issues when called from within an event handler.
+    pub fn request_script_reapply(&mut self) {
+        self.pending_script_reapply = true;
+    }
+
+    pub fn update_safe_inset_script_values(&mut self, insets: crate::event::SafeAreaInsets) {
+        use makepad_script::trap::NoTrap;
+        let Some(vm) = self.script_vm.as_mut() else {
+            return;
+        };
+        let widgets = vm.heap.module(id!(widgets));
+        vm.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_TOP).into(),
+            insets.top.into(),
+            NoTrap,
+        );
+        vm.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_BOTTOM).into(),
+            insets.bottom.into(),
+            NoTrap,
+        );
+        vm.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_LEFT).into(),
+            insets.left.into(),
+            NoTrap,
+        );
+        vm.heap.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_RIGHT).into(),
+            insets.right.into(),
+            NoTrap,
+        );
+    }
+
     pub fn xr_capabilities(&self) -> &XrCapabilities {
         &self.xr_capabilities
+    }
+
+    pub fn xr_tsdf(&self) -> crate::xr_tsdf::XrTsdfStore {
+        crate::xr_tsdf::xr_tsdf_store()
+    }
+
+    pub fn xr_render_scale(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_render_scale(self)
+    }
+
+    pub fn xr_gpu_frame_time_ms(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_gpu_frame_time_ms(self)
+    }
+
+    pub fn xr_frame_cpu_time_ms(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_frame_cpu_time_ms(self)
+    }
+
+    pub fn xr_render_cpu_time_ms(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_render_cpu_time_ms(self)
+    }
+
+    pub fn xr_depth_readback_cpu_time_ms(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_depth_readback_cpu_time_ms(self)
+    }
+
+    pub fn xr_frame_cpu_breakdown(&self) -> Option<XrFrameCpuBreakdown> {
+        <Self as CxOsApi>::xr_frame_cpu_breakdown(self)
+    }
+
+    pub fn xr_display_refresh_rate_hz(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_display_refresh_rate_hz(self)
+    }
+
+    pub fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
+        <Self as CxOsApi>::xr_effective_frame_rate_hz(self)
+    }
+
+    pub fn geometry_pool_slot_count(&self) -> usize {
+        self.geometries.0.slot_count()
+    }
+
+    pub fn geometry_pool_live_count(&self) -> usize {
+        self.geometries.0.live_count()
+    }
+
+    pub fn draw_list_pool_slot_count(&self) -> usize {
+        self.draw_lists.0.slot_count()
+    }
+
+    pub fn draw_list_pool_live_count(&self) -> usize {
+        self.draw_lists.0.live_count()
+    }
+
+    pub fn texture_pool_slot_count(&self) -> usize {
+        self.textures.0.slot_count()
+    }
+
+    pub fn texture_pool_live_count(&self) -> usize {
+        self.textures.0.live_count()
+    }
+
+    pub fn set_thread_priority(priority: CxThreadPriority) {
+        #[cfg(target_os = "android")]
+        crate::os::linux::android::android::set_current_thread_priority(priority);
+
+        #[cfg(not(target_os = "android"))]
+        let _ = priority;
     }
 
     pub fn get_ref(&self) -> CxRef {
@@ -238,7 +617,9 @@ impl Cx {
 
         #[cfg(target_os = "android")]
         {
-            if let Some(data) = unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) } {
+            if let Some(data) =
+                unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) }
+            {
                 return Ok(Rc::new(data));
             }
             if let Some(package_root) = self.package_root.as_deref() {
@@ -269,7 +650,9 @@ impl Cx {
 
         #[cfg(target_os = "android")]
         {
-            if let Some(data) = unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) } {
+            if let Some(data) =
+                unsafe { crate::os::linux::android::android_jni::to_java_load_asset(path) }
+            {
                 return Ok(Rc::new(data));
             }
             if let Some(package_root) = self.package_root.as_deref() {
@@ -309,6 +692,37 @@ impl Cx {
         }
 
         None
+    }
+
+    /// Get the absolute path registered for a script resource handle.
+    pub fn get_resource_abs_path(&self, handle: ScriptHandle) -> Option<String> {
+        let resources = self.script_data.resources.resources.borrow();
+        resources
+            .iter()
+            .find(|res| res.handle == handle)
+            .map(|res| res.abs_path.clone())
+    }
+
+    /// Get resource data intended for font parsing.
+    ///
+    /// This reads local file-backed resources directly, then falls back to
+    /// already-loaded resource bytes (required for wasm/network-backed assets).
+    pub fn get_resource_font_bytes(&mut self, handle: ScriptHandle) -> Option<SharedBytes> {
+        let resource_path = {
+            let resources = self.script_data.resources.resources.borrow();
+            resources
+                .iter()
+                .find(|res| res.handle == handle)
+                .map(|res| res.abs_path.clone())
+        };
+
+        if let Some(path) = resource_path {
+            if let Ok(bytes) = SharedBytes::from_file_mmap_or_read(&path) {
+                return Some(bytes);
+            }
+        }
+
+        self.get_resource(handle).map(SharedBytes::from_owned)
     }
 
     pub fn null_texture(&self) -> Texture {
@@ -356,12 +770,20 @@ impl Cx {
         self.platform_ops.push(CxOsOp::XrStartPresenting);
     }
 
+    pub fn xr_set_render_scale(&mut self, scale: f32) {
+        self.platform_ops.push(CxOsOp::XrSetRenderScale(scale));
+    }
+
     pub fn xr_advertise_anchor(&mut self, anchor: XrAnchor) {
         self.platform_ops.push(CxOsOp::XrAdvertiseAnchor(anchor));
     }
 
     pub fn xr_set_local_anchor(&mut self, anchor: XrAnchor) {
         self.platform_ops.push(CxOsOp::XrSetLocalAnchor(anchor));
+    }
+
+    pub fn xr_set_local_floor(&mut self, floor_y: f32) {
+        self.platform_ops.push(CxOsOp::XrSetLocalFloor(floor_y));
     }
 
     pub fn xr_discover_anchor(&mut self, id: u8) {
@@ -371,6 +793,22 @@ impl Cx {
     pub fn quit(&mut self) {
         self.platform_ops.push(CxOsOp::Quit);
     }
+
+    pub fn browser_update_url(&mut self, url: &str, replace: bool) {
+        <Self as CxOsApi>::browser_update_url(self, url, replace);
+    }
+
+    pub fn browser_history_go(&mut self, delta: i32) {
+        <Self as CxOsApi>::browser_history_go(self, delta);
+    }
+
+    pub fn system_browser(&mut self, id: impl Into<SystemBrowserId>) -> CxSystemBrowser<'_> {
+        CxSystemBrowser {
+            cx: self,
+            id: id.into(),
+        }
+    }
+
     // Determines whether to show your application in the dock when it runs. The default value is true.
     // You can remove the dock icon by setting this value to false.
     pub fn show_in_dock(&mut self, show: bool) {
@@ -383,10 +821,28 @@ impl Cx {
     }
 
     pub fn show_text_ime(&mut self, area: Area, pos: Vec2d) {
+        self.show_text_ime_with_config(area, pos, TextInputConfig::default());
+    }
+
+    pub fn show_text_ime_with_config(&mut self, area: Area, pos: Vec2d, config: TextInputConfig) {
         if !self.keyboard.text_ime_dismissed {
             self.ime_area = area;
-            self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
+            self.platform_ops
+                .push(CxOsOp::ShowTextIME(area, pos, config));
         }
+    }
+
+    pub fn sync_ime_state(
+        &mut self,
+        text: String,
+        selection: Range<CharOffset>,
+        composition: Option<Range<CharOffset>>,
+    ) {
+        self.platform_ops.push(CxOsOp::SyncImeState {
+            text,
+            selection,
+            composition,
+        });
     }
 
     pub fn hide_text_ime(&mut self) {
@@ -440,6 +896,41 @@ impl Cx {
     pub fn copy_to_clipboard(&mut self, content: &str) {
         self.platform_ops
             .push(CxOsOp::CopyToClipboard(content.to_owned()));
+    }
+
+    /// Sets the primary selection (Linux middle-click paste).
+    /// No-op on non-Linux platforms.
+    pub fn set_primary_selection(&mut self, content: &str) {
+        self.platform_ops
+            .push(CxOsOp::SetPrimarySelection(content.to_owned()));
+    }
+
+    /// Forward an accessibility tree update to the platform adapter.
+    ///
+    /// The `update` is a type-erased `accesskit::TreeUpdate`. Platform backends
+    /// downcast it when an accessibility adapter is active.
+    pub fn update_accessibility_tree(&mut self, update: Box<dyn std::any::Any + Send>) {
+        self.platform_ops
+            .push(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(
+                update,
+            )));
+    }
+
+    /// Show native selection handles at the given start and end positions (mobile).
+    pub fn show_selection_handles(&mut self, start: Vec2d, end: Vec2d) {
+        self.platform_ops
+            .push(CxOsOp::ShowSelectionHandles { start, end });
+    }
+
+    /// Update positions of visible selection handles (mobile).
+    pub fn update_selection_handles(&mut self, start: Vec2d, end: Vec2d) {
+        self.platform_ops
+            .push(CxOsOp::UpdateSelectionHandles { start, end });
+    }
+
+    /// Hide selection handles (mobile).
+    pub fn hide_selection_handles(&mut self) {
+        self.platform_ops.push(CxOsOp::HideSelectionHandles);
     }
 
     pub fn start_dragging(&mut self, items: Vec<DragItem>) {
@@ -526,6 +1017,15 @@ impl Cx {
     pub fn request_permission(&mut self, permission: crate::permission::Permission) -> i32 {
         self.permissions_request_id += 1;
         self.platform_ops.push(CxOsOp::RequestPermission {
+            request_id: self.permissions_request_id,
+            permission,
+        });
+        self.permissions_request_id
+    }
+
+    pub fn check_permission(&mut self, permission: crate::permission::Permission) -> i32 {
+        self.permissions_request_id += 1;
+        self.platform_ops.push(CxOsOp::CheckPermission {
             request_id: self.permissions_request_id,
             permission,
         });
@@ -808,15 +1308,15 @@ impl Cx {
     }
 
     pub fn http_request(&mut self, request_id: LiveId, request: HttpRequest) {
-        self.platform_ops.push(CxOsOp::HttpRequest {
-            request_id,
-            request,
-        });
+        if let Err(err) = self.net.http_start(request_id, request) {
+            crate::error!("http_request failed for {}: {}", request_id.0, err);
+        }
     }
 
     pub fn cancel_http_request(&mut self, request_id: LiveId) {
-        self.platform_ops
-            .push(CxOsOp::CancelHttpRequest { request_id });
+        if let Err(err) = self.net.http_cancel(request_id) {
+            crate::error!("cancel_http_request failed for {}: {}", request_id.0, err);
+        }
     }
     /*
         pub fn web_socket_open(&mut self, request_id: LiveId, request: HttpRequest) {
@@ -837,17 +1337,144 @@ impl Cx {
         &mut self,
         video_id: LiveId,
         source: VideoSource,
+        camera_preview_mode: CameraPreviewMode,
         external_texture_id: u32,
+        texture_id: TextureId,
         autoplay: bool,
         should_loop: bool,
     ) {
+        self.prepare_video_playback_with_permission(
+            video_id,
+            source,
+            camera_preview_mode,
+            external_texture_id,
+            texture_id,
+            autoplay,
+            should_loop,
+            crate::permission::Permission::Camera,
+        );
+    }
+
+    pub fn prepare_headset_camera_playback(
+        &mut self,
+        video_id: LiveId,
+        source: VideoSource,
+        camera_preview_mode: CameraPreviewMode,
+        external_texture_id: u32,
+        texture_id: TextureId,
+        autoplay: bool,
+        should_loop: bool,
+    ) {
+        self.prepare_video_playback_with_permission(
+            video_id,
+            source,
+            camera_preview_mode,
+            external_texture_id,
+            texture_id,
+            autoplay,
+            should_loop,
+            crate::permission::Permission::HeadsetCamera,
+        );
+    }
+
+    fn prepare_video_playback_with_permission(
+        &mut self,
+        video_id: LiveId,
+        source: VideoSource,
+        camera_preview_mode: CameraPreviewMode,
+        external_texture_id: u32,
+        texture_id: TextureId,
+        autoplay: bool,
+        should_loop: bool,
+        permission: crate::permission::Permission,
+    ) {
+        if let VideoSource::Camera(..) = &source {
+            self.pending_camera_playbacks
+                .push(crate::cx::PendingCameraPlayback {
+                    permission,
+                    video_id,
+                    source,
+                    camera_preview_mode,
+                    external_texture_id,
+                    texture_id,
+                    autoplay,
+                    should_loop,
+                });
+            let _request_id = self.request_permission(permission);
+            return;
+        }
         self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
             video_id,
             source,
+            camera_preview_mode,
             external_texture_id,
+            texture_id,
             autoplay,
             should_loop,
         ));
+    }
+
+    pub fn handle_camera_permission_result(
+        &mut self,
+        result: &crate::permission::PermissionResult,
+    ) {
+        if !matches!(
+            result.permission,
+            crate::permission::Permission::Camera | crate::permission::Permission::HeadsetCamera
+        ) {
+            return;
+        }
+        let pending: Vec<_> = self.pending_camera_playbacks.drain(..).collect();
+        for p in pending {
+            if p.permission != result.permission {
+                self.pending_camera_playbacks.push(p);
+                continue;
+            }
+            match result.status {
+                crate::permission::PermissionStatus::Granted => {
+                    self.platform_ops.push(CxOsOp::PrepareVideoPlayback(
+                        p.video_id,
+                        p.source,
+                        p.camera_preview_mode,
+                        p.external_texture_id,
+                        p.texture_id,
+                        p.autoplay,
+                        p.should_loop,
+                    ));
+                }
+                _ => {
+                    self.call_event_handler(&crate::event::Event::VideoDecodingError(
+                        crate::event::VideoDecodingErrorEvent {
+                            video_id: p.video_id,
+                            error: match p.permission {
+                                crate::permission::Permission::HeadsetCamera => {
+                                    "Headset camera permission denied".to_string()
+                                }
+                                _ => "Camera permission denied".to_string(),
+                            },
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    pub fn attach_camera_native_preview(&mut self, video_id: LiveId, area: Area) {
+        self.platform_ops
+            .push(CxOsOp::AttachCameraNativePreview { video_id, area });
+    }
+
+    pub fn update_camera_native_preview(&mut self, video_id: LiveId, area: Area, visible: bool) {
+        self.platform_ops.push(CxOsOp::UpdateCameraNativePreview {
+            video_id,
+            area,
+            visible,
+        });
+    }
+
+    pub fn detach_camera_native_preview(&mut self, video_id: LiveId) {
+        self.platform_ops
+            .push(CxOsOp::DetachCameraNativePreview { video_id });
     }
 
     pub fn begin_video_playback(&mut self, video_id: LiveId) {
@@ -877,6 +1504,41 @@ impl Cx {
             .push(CxOsOp::CleanupVideoPlaybackResources(video_id));
     }
 
+    pub fn cancel_pending_camera_playback(&mut self, video_id: LiveId) {
+        self.pending_camera_playbacks
+            .retain(|pending| pending.video_id != video_id);
+    }
+
+    pub fn seek_video_playback(&mut self, video_id: LiveId, position_ms: u64) {
+        self.platform_ops
+            .push(CxOsOp::SeekVideoPlayback(video_id, position_ms));
+    }
+
+    pub fn set_video_volume(&mut self, video_id: LiveId, volume: f64) {
+        self.platform_ops
+            .push(CxOsOp::SetVideoVolume(video_id, volume));
+    }
+
+    pub fn set_video_playback_rate(&mut self, video_id: LiveId, rate: f64) {
+        self.platform_ops
+            .push(CxOsOp::SetVideoPlaybackRate(video_id, rate));
+    }
+
+    pub fn prepare_audio_playback(
+        &mut self,
+        video_id: LiveId,
+        source: VideoSource,
+        autoplay: bool,
+        should_loop: bool,
+    ) {
+        self.platform_ops.push(CxOsOp::PrepareAudioPlayback(
+            video_id,
+            source,
+            autoplay,
+            should_loop,
+        ));
+    }
+
     pub fn println_resources(&self) {
         println!("Num textures: {}", self.textures.0.pool.len());
     }
@@ -904,6 +1566,55 @@ impl Cx {
     pub fn event_id(&self) -> u64 {
         self.event_id
     }
+}
+
+/// Returns the canPlayType string for the given MIME type on the current platform.
+/// Possible values: `""` (cannot play), `"maybe"`, `"probably"`.
+pub fn can_play_type(mime: &str) -> &'static str {
+    can_play_type_impl(mime)
+}
+
+#[cfg(all(target_os = "linux", not(target_os = "android")))]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::linux::linux_video_playback::can_play_type(mime)
+}
+
+#[cfg(target_os = "android")]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::linux::android::android_video_playback::can_play_type(mime)
+}
+
+#[cfg(all(
+    any(target_os = "macos", target_os = "ios", target_os = "tvos"),
+    not(headless)
+))]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::apple::apple_video_playback::can_play_type(mime)
+}
+
+#[cfg(all(
+    any(target_os = "macos", target_os = "ios", target_os = "tvos"),
+    headless
+))]
+fn can_play_type_impl(_mime: &str) -> &'static str {
+    ""
+}
+
+#[cfg(target_os = "windows")]
+fn can_play_type_impl(mime: &str) -> &'static str {
+    crate::os::windows::windows_video_playback::WindowsVideoPlayer::can_play_type(mime)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "windows",
+)))]
+fn can_play_type_impl(_mime: &str) -> &'static str {
+    ""
 }
 
 #[macro_export]

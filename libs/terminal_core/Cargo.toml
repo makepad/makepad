@@ -21,3 +21,5 @@ features = [
 [[bin]]
 name = "terminal-test"
 path = "src/bin/terminal_test.rs"
+
+[workspace]

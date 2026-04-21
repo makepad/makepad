@@ -38,7 +38,7 @@ script_mod! {
                 1.
             );
             // only pass the clipped position forward
-            return self.draw_pass.camera_projection * (self.draw_pass.camera_view * (self.world))
+            return self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
         }
 
         transform_vertex: fn(rect_pos, rect_size){
@@ -59,7 +59,7 @@ script_mod! {
         }
 
         fragment: fn(){
-            self.fb0 = self.pixel()
+            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
         }
 
         pixel: fn(){
@@ -90,7 +90,7 @@ pub struct DrawQuad {
     pub draw_clip: Vec4f,
     #[live(1.0)]
     pub depth_clip: f32,
-    #[live(1.0)]
+    #[live(0.0)]
     pub draw_depth: f32,
     #[live]
     pub pad1: f32,
@@ -109,6 +109,8 @@ pub struct DrawColor {
 
 impl DrawQuad {
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
+        cx.push_draw_call_parent();
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         cx.begin_turtle(walk, layout);
         if self.draw_vars.draw_shader_id.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
@@ -119,6 +121,7 @@ impl DrawQuad {
     pub fn end(&mut self, cx: &mut Cx2d) {
         let rect = cx.end_turtle();
         self.draw_vars.area.set_rect(cx, &rect);
+        cx.pop_draw_call_parent();
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> Rect {
@@ -130,6 +133,7 @@ impl DrawQuad {
     }
 
     pub fn draw(&mut self, cx: &mut Cx2d) {
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         if let Some(mi) = &mut self.many_instances {
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
         } else if self.draw_vars.can_instance() {
@@ -157,11 +161,13 @@ impl DrawQuad {
         self.draw(cx);
     }
 
-    pub fn new_draw_call(&self, cx: &mut Cx2d) {
+    pub fn new_draw_call(&mut self, cx: &mut Cx2d) {
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         cx.new_draw_call(&self.draw_vars);
     }
 
-    pub fn append_to_draw_call(&self, cx: &mut Cx2d) {
+    pub fn append_to_draw_call(&mut self, cx: &mut Cx2d) {
+        self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         cx.append_to_draw_call(&self.draw_vars);
     }
 
@@ -246,7 +252,7 @@ pub struct DrawQuad {
     #[calc] pub rect_size: Vec2f,
     #[calc] pub draw_clip: Vec4f,
     #[live(1.0)] pub depth_clip: f32,
-    #[live(1.0)] pub draw_depth: f32,
+    #[live(0.0)] pub draw_depth: f32,
 }
 
 impl LiveHook for DrawQuad{

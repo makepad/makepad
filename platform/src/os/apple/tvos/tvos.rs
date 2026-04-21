@@ -3,17 +3,14 @@ use {
         cx::{Cx, IosParams, OsType},
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
-        event::{Event, NetworkResponseChannel},
+        event::Event,
         //makepad_live_id::*,
         os::{
             apple::apple_sys::*,
             apple::apple_util::{nsstring_to_string, str_to_nsstring},
-            apple::{
-                tvos::{
-                    tvos_app::{get_tvos_app_global, init_tvos_app_global, TvosApp},
-                    tvos_event::TvosEvent,
-                },
-                url_session::AppleHttpRequests,
+            apple::tvos::{
+                tvos_app::{get_tvos_app_global, init_tvos_app_global, TvosApp},
+                tvos_event::TvosEvent,
             },
             apple_classes::init_apple_classes_global,
             apple_media::CxAppleMedia,
@@ -114,15 +111,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
-        let mut out = Vec::new();
-        while let Ok(item) = self.os.network_response.receiver.try_recv() {
-            self.os.http_requests.handle_response_item(&item);
-            out.push(item);
-        }
-        if out.len() > 0 {
-            self.handle_script_network_events(&out);
-            self.call_event_handler(&Event::NetworkResponses(out))
-        }
+        self.dispatch_network_runtime_events();
     }
 
     fn tvos_event_callback(&mut self, event: TvosEvent, metal_cx: &mut MetalCx) -> EventFlow {
@@ -143,12 +132,7 @@ impl Cx {
                         self.handle_action_receiver();
                     }
 
-                    if self.handle_live_edit() {
-                        // self.draw_shaders.ptr_to_item.clear();
-                        // self.draw_shaders.fingerprints.clear();
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }
+                    self.run_live_edit_if_needed("tvos");
                     self.handle_networking_events();
                 }
             }
@@ -218,6 +202,26 @@ impl Cx {
                     window.window_geom = get_tvos_app_global().last_window_geom.clone();
                     window.is_created = true;
                 }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let mut geom = get_tvos_app_global().last_window_geom.clone();
+                    geom.position = position;
+                    geom.inner_size = size;
+                    geom.outer_size = size;
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = geom;
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    window.is_created = true;
+                }
                 CxOsOp::StartTimer {
                     timer_id,
                     interval,
@@ -232,21 +236,23 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    self.os.http_requests.make_http_request(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    self.os.http_requests.cancel_http_request(request_id);
+                    let _ = self.net.http_cancel(request_id);
                 }
-                CxOsOp::ShowClipboardActions { .. } => {
-                    crate::log!("Show clipboard actions not supported yet");
-                }
+                // Mobile-only ops; no-op on tvOS
+                CxOsOp::SyncImeState { .. } => {}
+                CxOsOp::ShowClipboardActions { .. } => {}
+                CxOsOp::HideClipboardActions => {}
                 CxOsOp::CopyToClipboard(_request) => {
                     crate::error!("Clipboard actions not yet implemented for tvOS");
                 }
+                CxOsOp::SetPrimarySelection(_) => {}
+                CxOsOp::ShowSelectionHandles { .. } => {}
+                CxOsOp::UpdateSelectionHandles { .. } => {}
+                CxOsOp::HideSelectionHandles => {}
+                CxOsOp::AccessibilityUpdate(_) => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 }
@@ -302,7 +308,11 @@ pub struct CxOs {
     pub(crate) media: CxAppleMedia,
     pub(crate) bytes_written: usize,
     pub(crate) draw_calls_done: usize,
-    pub(crate) network_response: NetworkResponseChannel,
-    pub(crate) http_requests: AppleHttpRequests,
+    pub(crate) instances_done: u64,
+    pub(crate) vertices_done: u64,
+    pub(crate) instance_bytes_uploaded: u64,
+    pub(crate) uniform_bytes_uploaded: u64,
+    pub(crate) vertex_buffer_bytes_uploaded: u64,
+    pub(crate) texture_bytes_uploaded: u64,
     pub(crate) apple_game_input: Option<crate::os::apple::apple_game_input::AppleGameInput>,
 }

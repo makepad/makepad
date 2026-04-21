@@ -32,14 +32,25 @@ pub struct ShaderSampler {
     pub filter: SamplerFilter,
     pub address: SamplerAddress,
     pub coord: SamplerCoord,
+    pub is_video: bool,
 }
 
 impl Default for ShaderSampler {
     fn default() -> Self {
         Self {
             filter: SamplerFilter::Linear,
-            address: SamplerAddress::Repeat,
+            address: SamplerAddress::ClampToEdge,
             coord: SamplerCoord::Normalized,
+            is_video: false,
+        }
+    }
+}
+
+impl ShaderSampler {
+    pub fn video() -> Self {
+        Self {
+            is_video: true,
+            ..Self::default()
         }
     }
 }
@@ -79,6 +90,7 @@ pub enum TextureType {
     TextureCubeArray,
     TextureDepth,
     TextureDepthArray,
+    TextureVideo,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +189,7 @@ pub enum ShaderMode {
 pub struct ShaderOutput {
     pub mode: ShaderMode,
     pub backend: ShaderBackend,
+    pub use_vulkan: bool,
     pub io: Vec<ShaderIo>,
     pub recur_block: Vec<ScriptObject>,
     pub structs: BTreeSet<ScriptPodType>,
@@ -341,6 +354,17 @@ impl ShaderOutput {
                                     });
                                 }
                             }
+
+                            SHADER_IO_UNIFORM_BUFFER => {
+                                if let Some(pod_ty) = pod_ty {
+                                    self.io.push(ShaderIo {
+                                        kind: ShaderIoKind::UniformBuffer,
+                                        name: field_id,
+                                        ty: pod_ty,
+                                        buffer_index: None,
+                                    });
+                                }
+                            }
                             
                             // Fragment outputs
                             io_type if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 
@@ -373,7 +397,8 @@ impl ShaderOutput {
                             SHADER_IO_TEXTURE_CUBE_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureCubeArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
                             SHADER_IO_TEXTURE_DEPTH => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureDepth), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
                             SHADER_IO_TEXTURE_DEPTH_ARRAY => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureDepthArray), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
-                            
+                            SHADER_IO_TEXTURE_VIDEO => self.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::TextureVideo), name: field_id, ty: ScriptPodType::VOID, buffer_index: None }),
+
                             // Other IO types are handled during compilation or elsewhere
                             _ => {}
                         }
@@ -412,14 +437,44 @@ impl ShaderOutput {
     }
 
     pub fn create_struct_defs(&mut self, vm: &ScriptVm, out: &mut String) {
+        let mut plain_structs = self.structs.clone();
+        let mut packed_structs = BTreeSet::new();
+
         for io in &self.io {
             let ty = io.ty;
-            if let ScriptPodTy::Struct { .. } = vm.bx.heap.pod_type_ref(ty).ty {
-                self.structs.insert(ty);
+            if !matches!(vm.bx.heap.pod_type_ref(ty).ty, ScriptPodTy::Struct { .. }) {
+                continue;
+            }
+
+            if matches!(self.backend, ShaderBackend::Metal)
+                && matches!(
+                    io.kind,
+                    ShaderIoKind::UniformBuffer
+                        | ShaderIoKind::VertexBuffer
+                        | ShaderIoKind::RustInstance
+                        | ShaderIoKind::DynInstance
+                )
+            {
+                packed_structs.insert(ty);
+            } else {
+                plain_structs.insert(ty);
             }
         }
-        self.backend
-            .pod_struct_defs(&vm.bx.heap, &self.structs, out);
+
+        for ty in &packed_structs {
+            plain_structs.remove(ty);
+        }
+
+        self.structs.extend(plain_structs.iter().copied());
+        self.structs.extend(packed_structs.iter().copied());
+
+        if matches!(self.backend, ShaderBackend::Metal) {
+            self.backend
+                .pod_struct_defs_mixed(&vm.bx.heap, &plain_structs, &packed_structs, out);
+        } else {
+            self.backend
+                .pod_struct_defs(&vm.bx.heap, &self.structs, out);
+        }
     }
 
     pub fn create_functions(&self, out: &mut String) {

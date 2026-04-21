@@ -8,11 +8,11 @@ pub mod cx_3d;
 pub mod cx_draw;
 pub mod draw_list_2d;
 pub mod geometry;
-pub mod gltf_bridge;
 pub mod image_cache;
 pub mod match_event;
 pub mod nav;
 pub mod overlay;
+pub mod scene_3d;
 pub mod shader;
 pub mod svg;
 pub mod text;
@@ -33,11 +33,14 @@ pub use crate::{
     match_event::MatchEvent,
     nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
     overlay::Overlay,
+    scene_3d::{SceneDrawCallAnchor, SceneScope3D, SceneState3D},
     shader::{
-        draw_glyph::DrawGlyph, draw_pbr::DrawPbr, draw_quad::DrawColor, draw_quad::DrawQuad,
-        draw_rotated_text::DrawRotatedText, draw_rotated_text::PathGlyphInstance,
-        draw_rotated_text::PathTextPlacement, draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText,
-        draw_text::TextStyle, draw_vector::DrawVector,
+        draw_cube::DrawCube, draw_glyph::DrawGlyph, draw_pbr::DrawPbr,
+        draw_pbr::DrawPbrMaterialState, draw_pbr::DrawPbrRefractive, draw_pbr::DrawPbrTextureSet,
+        draw_quad::DrawColor, draw_quad::DrawQuad, draw_rotated_text::DrawRotatedText,
+        draw_rotated_text::PathGlyphInstance, draw_rotated_text::PathTextPlacement,
+        draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText, draw_text::TextStyle,
+        draw_text_3d::DrawText3d, draw_vector::DrawVector,
     },
     /*
     geometry::{
@@ -48,10 +51,6 @@ pub use crate::{
     vector::{GradientStop, VectorPaint},
 };
 
-pub use crate::gltf_bridge::{
-    GltfDecodedMeshes, GltfDecodedPrimitiveObject, GltfDrawObject, GltfMaterialState,
-    GltfMeshObjects, GltfPrimitiveObject, GltfRenderer,
-};
 pub use crate::shader::draw_svg::DrawSvg;
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
@@ -59,9 +58,11 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::sdf::script_mod(vm);
     crate::geometry::script_mod(vm);
     crate::shader::draw_quad::script_mod(vm);
+    crate::shader::draw_cube::script_mod(vm);
     crate::shader::draw_glyph::script_mod(vm);
     crate::shader::draw_text::script_mod(vm);
     crate::shader::draw_rotated_text::script_mod(vm);
+    crate::shader::draw_text_3d::script_mod(vm);
     crate::shader::draw_vector::script_mod(vm);
     crate::shader::draw_pbr::script_mod(vm);
     crate::shader::draw_svg::script_mod(vm);

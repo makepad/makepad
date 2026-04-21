@@ -13,10 +13,12 @@ use {
         shaper::{self, ShapedText},
         substr::Substr,
     },
+    fxhash::FxHashMap,
     std::{
         borrow::Borrow,
         cell::RefCell,
-        collections::{HashMap, VecDeque},
+        collections::VecDeque,
+        env,
         hash::{Hash, Hasher},
         mem,
         rc::Rc,
@@ -26,22 +28,46 @@ use {
 
 const LPXS_PER_INCH: f32 = 96.0;
 const PTS_PER_INCH: f32 = 72.0;
+const LAYOUT_CACHE_MAX_TEXT_LEN: usize = 512;
+const LAYOUT_CACHE_MULTILINE_TEXT_LEN: usize = 192;
+const LAYOUT_CACHE_MULTILINE_LINE_COUNT: usize = 4;
 
 #[derive(Debug)]
 pub struct Layouter {
-    loader: Loader,
+    pub(crate) loader: Loader,
     cache_size: usize,
     cached_params: VecDeque<OwnedLayoutParams>,
-    cached_results: HashMap<OwnedLayoutParams, Rc<LaidoutText>>,
+    cached_results: FxHashMap<OwnedLayoutParams, Rc<LaidoutText>>,
 }
 
 impl Layouter {
+    fn should_cache_text(text: &str) -> bool {
+        if text.len() > LAYOUT_CACHE_MAX_TEXT_LEN {
+            return false;
+        }
+        if text.len() > LAYOUT_CACHE_MULTILINE_TEXT_LEN {
+            let line_count = text
+                .as_bytes()
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count()
+                + 1;
+            if line_count >= LAYOUT_CACHE_MULTILINE_LINE_COUNT {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn new(settings: Settings) -> Self {
         Self {
             loader: Loader::new(settings.loader),
             cache_size: settings.cache_size,
             cached_params: VecDeque::with_capacity(settings.cache_size),
-            cached_results: HashMap::with_capacity(settings.cache_size),
+            cached_results: FxHashMap::with_capacity_and_hasher(
+                settings.cache_size,
+                Default::default(),
+            ),
         }
     }
 
@@ -80,6 +106,9 @@ impl Layouter {
     }
 
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
+        if self.cache_size == 0 || !Self::should_cache_text(params.text()) {
+            return Rc::new(self.layout(params.to_owned()));
+        }
         if let Some(result) = self.cached_results.get(&params as &dyn LayoutParams) {
             return result.clone();
         }
@@ -88,9 +117,10 @@ impl Layouter {
             self.cached_results.remove(&params);
         }
         let params = params.to_owned();
-        let result = Rc::new(self.layout(params.clone()));
-        self.cached_params.push_back(params.clone());
-        self.cached_results.insert(params, result.clone());
+        let cache_key = params.clone();
+        let result = Rc::new(self.layout(params));
+        self.cached_params.push_back(cache_key.clone());
+        self.cached_results.insert(cache_key, result.clone());
         result
     }
 
@@ -112,6 +142,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
+        let atlas_size = default_text_atlas_size();
         Self {
             loader: loader::Settings {
                 shaper: shaper::Settings { cache_size: 4096 },
@@ -141,14 +172,43 @@ impl Default for Settings {
                         max_estimated_segments: 1000,
                     },
                     outline_rasterization_mode: rasterizer::OutlineRasterizationMode::Msdf,
-                    grayscale_atlas_size: Size::new(4096, 4096),
-                    color_atlas_size: Size::new(2048, 2048),
-                    msdf_atlas_size: Size::new(4096, 4096),
+                    atlas_size,
                 },
             },
             cache_size: 4096,
         }
     }
+}
+
+fn default_text_atlas_size() -> Size<usize> {
+    atlas_size_override_from_env().unwrap_or_else(|| Size::new(2048, 2048))
+}
+
+fn atlas_size_override_from_env() -> Option<Size<usize>> {
+    let raw = env::var("MAKEPAD_TEXT_ATLAS_SIZE").ok()?;
+    parse_text_atlas_size_value(raw.trim())
+}
+
+fn parse_text_atlas_size_value(value: &str) -> Option<Size<usize>> {
+    if value.is_empty() {
+        return None;
+    }
+
+    fn parse_dim(dim: &str) -> Option<usize> {
+        let parsed = dim.trim().parse::<usize>().ok()?;
+        if (256..=8192).contains(&parsed) {
+            Some(parsed)
+        } else {
+            None
+        }
+    }
+
+    if let Some((w, h)) = value.split_once('x').or_else(|| value.split_once('X')) {
+        return Some(Size::new(parse_dim(w)?, parse_dim(h)?));
+    }
+
+    let dim = parse_dim(value)?;
+    Some(Size::new(dim, dim))
 }
 
 #[derive(Debug)]
@@ -216,6 +276,8 @@ impl LayoutContext {
     }
 
     fn layout_multiline(mut self) -> LaidoutText {
+        let has_ellipsis_config = self.options.max_rows.is_some() || self.options.ellipsis;
+
         for (line_index, len) in self
             .text
             .clone()
@@ -226,10 +288,24 @@ impl LayoutContext {
             if line_index != 0 {
                 self.finish_current_row(true);
             }
+            if self.is_past_max_rows() {
+                break;
+            }
             self.layout(len);
         }
-        self.finish_current_row(false);
-        self.finish()
+
+        if has_ellipsis_config {
+            self.apply_ellipsis_truncation()
+        } else {
+            self.finish_current_row(false);
+            self.finish_with(false)
+        }
+    }
+
+    fn is_past_max_rows(&self) -> bool {
+        self.options
+            .max_rows
+            .map_or(false, |max| self.rows.len() >= max)
     }
 
     fn layout(&mut self, len: usize) {
@@ -248,10 +324,16 @@ impl LayoutContext {
             SegmentKind::Word,
         );
         while !fitter.is_empty() {
+            if self.is_past_max_rows() {
+                break;
+            }
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
                 Some(text) => self.append_text(&text),
                 None => {
-                    if self.current_row_is_empty() && !self.current_row_is_continuation() {
+                    let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
+                    if next_word.chars().all(|char| char.is_whitespace()) {
+                        self.layout_directly(fitter.pop());
+                    } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
                         self.layout_by_grapheme(fitter.pop());
                     } else {
                         self.finish_current_row(false);
@@ -269,6 +351,9 @@ impl LayoutContext {
             SegmentKind::Grapheme,
         );
         while !fitter.is_empty() {
+            if self.is_past_max_rows() {
+                break;
+            }
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
                 Some(text) => self.append_text(&text),
                 None => {
@@ -311,7 +396,7 @@ impl LayoutContext {
     }
 
     fn finish_current_row(&mut self, newline: bool) {
-        let font = self.font_family.fonts().get(0);
+        let font = self.font_family.fonts().first();
         let font_size_in_lpxs = self.style.font_size_in_lpxs();
         let ascender_in_lpxs = font.map_or(0.0, |font| font.ascender_in_ems()) * font_size_in_lpxs;
         let descender_in_lpxs =
@@ -352,7 +437,8 @@ impl LayoutContext {
         self.rows.push(row);
     }
 
-    fn finish(self) -> LaidoutText {
+    fn finish_with(self, is_truncated: bool) -> LaidoutText {
+        let last_row = self.rows.last().unwrap();
         LaidoutText {
             text: self.text,
             size_in_lpxs: Size::new(
@@ -361,9 +447,115 @@ impl LayoutContext {
                     .map(|row| row.width_in_lpxs)
                     .reduce(f32::max)
                     .unwrap_or(0.0),
-                self.current_point_in_lpxs.y - self.rows.last().unwrap().descender_in_lpxs,
+                last_row.origin_in_lpxs.y - last_row.descender_in_lpxs,
             ),
             rows: self.rows,
+            is_truncated,
+        }
+    }
+
+    /// Applies ellipsis truncation as a post-processing step after layout.
+    ///
+    /// Truncation is triggered when:
+    /// 1. `max_rows` is set and more text exists than fits in that many rows.
+    /// 2. `ellipsis` is true, wrap is false, and a single row exceeds `max_width_in_lpxs`.
+    fn apply_ellipsis_truncation(mut self) -> LaidoutText {
+        self.finish_current_row_if_pending();
+
+        // Detect whether all text was consumed during layout.
+        // If not, text was truncated by the max_rows early-exit.
+        let all_text_consumed = self.current_row_end >= self.text.len()
+            || (self.current_row_end + 1 == self.text.len()
+                && self.text.as_bytes()[self.current_row_end] == b'\n');
+
+        let max_rows = match self.options.max_rows {
+            Some(max) if max > 0 => max,
+            _ => {
+                // No max_rows constraint: check single-line non-wrapping overflow
+                if self.options.ellipsis && !self.options.wrap {
+                    if let Some(max_width) = self.options.max_width_in_lpxs {
+                        if self.rows.len() == 1 && self.rows[0].width_in_lpxs > max_width {
+                            self.truncate_last_row_with_ellipsis(max_width);
+                            return self.finish_with(true);
+                        }
+                    }
+                }
+                return self.finish_with(false);
+            }
+        };
+
+        let text_was_truncated = self.rows.len() > max_rows || !all_text_consumed;
+
+        self.rows.truncate(max_rows);
+
+        if !text_was_truncated {
+            return self.finish_with(false);
+        }
+
+        if self.options.ellipsis {
+            let max_width = self.options.max_width_in_lpxs.unwrap_or(f32::MAX);
+            self.truncate_last_row_with_ellipsis(max_width);
+        }
+
+        self.finish_with(true)
+    }
+
+    /// Truncates the last row to fit within `max_width` and appends an ellipsis glyph.
+    fn truncate_last_row_with_ellipsis(&mut self, max_width: f32) {
+        let ellipsis_shaped = self.font_family.get_or_shape("…".into());
+        let font_size_in_lpxs = self.style.font_size_in_lpxs();
+        let ellipsis_width: f32 = ellipsis_shaped
+            .glyphs
+            .iter()
+            .map(|g| g.advance_in_ems * font_size_in_lpxs)
+            .sum();
+
+        let last_row = match self.rows.last_mut() {
+            Some(row) => row,
+            None => return,
+        };
+
+        // Remove glyphs from the end until remaining + ellipsis fits
+        while last_row.width_in_lpxs + ellipsis_width > max_width && !last_row.glyphs.is_empty() {
+            let removed = last_row.glyphs.pop().unwrap();
+            last_row.width_in_lpxs -= removed.advance_in_lpxs();
+        }
+
+        // Trim trailing whitespace glyphs for a cleaner look before the ellipsis.
+        while last_row.glyphs.last().map_or(false, |g| {
+            last_row.text[g.cluster..]
+                .chars()
+                .next()
+                .map_or(false, |c| c.is_whitespace())
+        }) {
+            let removed = last_row.glyphs.pop().unwrap();
+            last_row.width_in_lpxs -= removed.advance_in_lpxs();
+        }
+
+        // Append ellipsis glyphs
+        for glyph in &ellipsis_shaped.glyphs {
+            let ellipsis_glyph = LaidoutGlyph {
+                origin_in_lpxs: Point::new(last_row.width_in_lpxs, 0.0),
+                font: glyph.font.clone(),
+                font_size_in_lpxs,
+                color: self.style.color,
+                id: glyph.id,
+                cluster: last_row.text.len(), // beyond the text range
+                advance_in_ems: glyph.advance_in_ems,
+                offset_in_ems: glyph.offset_in_ems,
+            };
+            last_row.width_in_lpxs += ellipsis_glyph.advance_in_lpxs();
+            last_row.glyphs.push(ellipsis_glyph);
+        }
+    }
+
+    /// Finishes any pending glyphs into a row (without a newline).
+    /// Always ensures at least one row exists.
+    fn finish_current_row_if_pending(&mut self) {
+        let has_pending_content =
+            self.current_row_start != self.current_row_end || !self.glyphs.is_empty();
+        if has_pending_content || self.rows.is_empty() {
+            self.finish_current_row(false);
         }
     }
 }
@@ -372,7 +564,6 @@ impl LayoutContext {
 struct Fitter {
     text: Substr,
     font_family: Rc<FontFamily>,
-    font_size_in_lpxs: f32,
     lens: Vec<usize>,
     widths_in_lpxs: Vec<f32>,
 }
@@ -384,13 +575,16 @@ impl Fitter {
         font_size_in_lpxs: f32,
         segment_kind: SegmentKind,
     ) -> Self {
-        let lens: Vec<_> = match segment_kind {
+        let mut lens: Vec<_> = match segment_kind {
             SegmentKind::Word => text
                 .split_word_bounds()
                 .map(|segment| segment.len())
                 .collect(),
             SegmentKind::Grapheme => text.graphemes(true).map(|segment| segment.len()).collect(),
         };
+        if matches!(segment_kind, SegmentKind::Word) {
+            merge_segments_for_line_breaking(&text, &mut lens);
+        }
         let widths_in_lpxs: Vec<_> = lens
             .iter()
             .copied()
@@ -406,7 +600,6 @@ impl Fitter {
         Self {
             text,
             font_family,
-            font_size_in_lpxs,
             lens,
             widths_in_lpxs,
         }
@@ -414,6 +607,10 @@ impl Fitter {
 
     fn is_empty(&self) -> bool {
         self.text.is_empty()
+    }
+
+    fn next_len(&self) -> usize {
+        self.lens[0]
     }
 
     fn fit(&mut self, wrap_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
@@ -442,17 +639,18 @@ impl Fitter {
     }
 
     fn can_fit(&self, count: usize, wrap_width_in_lpxs: f32) -> bool {
-        let len = self.lens[..count].iter().sum();
+        // Use the pre-computed per-segment widths to estimate whether `count`
+        // segments fit within the wrap width. This avoids calling get_or_shape()
+        // on progressively longer substrings during the binary search — those
+        // cumulative substrings are unique and always miss the shaper cache,
+        // making each call a full HarfBuzz shape operation.
+        //
+        // The sum of individual segment widths is a close approximation of the
+        // actual shaped width (it doesn't account for inter-word kerning, but
+        // that's negligible for wrap-width decisions). The final shaped text
+        // in `fit()` uses get_or_shape() for the exact result.
         let estimated_width_in_lpxs: f32 = self.widths_in_lpxs[..count].iter().sum();
-        if 0.5 * estimated_width_in_lpxs > wrap_width_in_lpxs {
-            return false;
-        }
-        let text = self.font_family.get_or_shape(self.text.substr(0..len));
-        let actual_width_in_lpxs = text.width_in_ems * self.font_size_in_lpxs;
-        if actual_width_in_lpxs > wrap_width_in_lpxs {
-            return false;
-        }
-        true
+        estimated_width_in_lpxs <= wrap_width_in_lpxs
     }
 
     fn pop(&mut self) -> usize {
@@ -467,6 +665,88 @@ impl Fitter {
 enum SegmentKind {
     Word,
     Grapheme,
+}
+
+/// Merges word-boundary segments to prevent line breaks at typographically
+/// incorrect positions, following standard line-breaking conventions
+/// (UAX#14 / CSS Text Module Level 3).
+///
+/// Trailing/closing punctuation (`.` `,` `;` `)` etc.) is merged into the
+/// preceding segment so it won't wrap to a new line by itself. Opening
+/// punctuation (`(` `[` etc.) is merged into the following segment so it
+/// won't be stranded at the end of a line.
+fn merge_segments_for_line_breaking(text: &str, lens: &mut Vec<usize>) {
+    // Pass 1: Merge "no-break-before" segments (trailing/closing punctuation)
+    // into the preceding segment.
+    if lens.len() >= 2 {
+        let mut i = 1;
+        let mut byte_offset = lens[0];
+        while i < lens.len() {
+            let seg_end = byte_offset + lens[i];
+            let seg_text = &text[byte_offset..seg_end];
+            if seg_text.chars().all(is_no_break_before_char) {
+                lens[i - 1] += lens[i];
+                lens.remove(i);
+            } else {
+                i += 1;
+            }
+            byte_offset = seg_end;
+        }
+    }
+
+    // Pass 2: Merge "no-break-after" segments (opening punctuation)
+    // into the following segment.
+    if lens.len() >= 2 {
+        let mut i = 0;
+        let mut byte_offset = 0;
+        while i + 1 < lens.len() {
+            let seg_end = byte_offset + lens[i];
+            let seg_text = &text[byte_offset..seg_end];
+            if seg_text.chars().all(is_no_break_after_char) {
+                lens[i + 1] = lens[i] + lens[i + 1];
+                lens.remove(i);
+            } else {
+                byte_offset = seg_end;
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Characters before which a line break should not occur (UAX#14 classes
+/// CL, CP, EX, IS and common typographic conventions).
+fn is_no_break_before_char(c: char) -> bool {
+    matches!(
+        c,
+        // IS: Infix Numeric Separator
+        '.' | ',' | ':' | ';'
+        // EX: Exclamation / Interrogation
+        | '!' | '?'
+        // CP: Close Parenthesis, CL: Close Punctuation
+        | ')' | ']' | '}'
+        // CL: Closing quotation marks
+        | '\u{2019}' // '
+        | '\u{201D}' // \u{201d}
+        | '\u{203A}' // ›
+        | '\u{00BB}' // »
+        // Other common no-break-before characters
+        | '\u{2026}' // …
+        | '%'
+        | '\u{00B0}' // °
+    )
+}
+
+/// Characters after which a line break should not occur (UAX#14 class OP).
+fn is_no_break_after_char(c: char) -> bool {
+    matches!(
+        c,
+        '(' | '[' | '{'
+        // Opening quotation marks
+        | '\u{2018}' // '
+        | '\u{201C}' // \u{201c}
+        | '\u{2039}' // ‹
+        | '\u{00AB}' // «
+    )
 }
 
 pub trait LayoutParams {
@@ -621,6 +901,13 @@ pub struct LayoutOptions {
     pub wrap: bool,
     pub align: f32,
     pub line_spacing_scale: f32,
+    /// Maximum number of rows to display. `None` means unlimited.
+    /// When set and the text exceeds this many rows, excess rows are discarded.
+    pub max_rows: Option<usize>,
+    /// When true and text is truncated (by `max_rows` or by exceeding `max_width_in_lpxs`
+    /// on a single non-wrapping line), an ellipsis character (U+2026 "…") is appended
+    /// to the last visible row.
+    pub ellipsis: bool,
 }
 
 impl Default for LayoutOptions {
@@ -632,6 +919,8 @@ impl Default for LayoutOptions {
             wrap: false,
             align: 0.0,
             line_spacing_scale: 1.0,
+            max_rows: None,
+            ellipsis: false,
         }
     }
 }
@@ -648,28 +937,25 @@ impl Hash for LayoutOptions {
             .to_bits()
             .hash(hasher);
         self.max_width_in_lpxs.map(f32::to_bits).hash(hasher);
+        self.wrap.hash(hasher);
         self.align.to_bits().hash(hasher);
         self.line_spacing_scale.to_bits().hash(hasher);
+        self.max_rows.hash(hasher);
+        self.ellipsis.hash(hasher);
     }
 }
 
 impl PartialEq for LayoutOptions {
     fn eq(&self, other: &Self) -> bool {
-        if self.first_row_indent_in_lpxs.to_bits() != other.first_row_indent_in_lpxs.to_bits() {
-            return false;
-        }
-        if self.first_row_min_line_spacing_below_in_lpxs.to_bits()
-            != other.first_row_min_line_spacing_below_in_lpxs.to_bits()
-        {
-            return false;
-        }
-        if self.max_width_in_lpxs.map(f32::to_bits) != other.max_width_in_lpxs.map(f32::to_bits) {
-            return false;
-        }
-        if self.align != other.align {
-            return false;
-        }
-        true
+        self.first_row_indent_in_lpxs.to_bits() == other.first_row_indent_in_lpxs.to_bits()
+            && self.first_row_min_line_spacing_below_in_lpxs.to_bits()
+                == other.first_row_min_line_spacing_below_in_lpxs.to_bits()
+            && self.max_width_in_lpxs.map(f32::to_bits) == other.max_width_in_lpxs.map(f32::to_bits)
+            && self.wrap == other.wrap
+            && self.align.to_bits() == other.align.to_bits()
+            && self.line_spacing_scale.to_bits() == other.line_spacing_scale.to_bits()
+            && self.max_rows == other.max_rows
+            && self.ellipsis == other.ellipsis
     }
 }
 
@@ -678,6 +964,8 @@ pub struct LaidoutText {
     pub text: Substr,
     pub size_in_lpxs: Size<f32>,
     pub rows: Vec<LaidoutRow>,
+    /// True when the text was truncated (e.g., due to `max_rows` or ellipsis).
+    pub is_truncated: bool,
 }
 
 impl LaidoutText {
@@ -696,10 +984,9 @@ impl LaidoutText {
             if cursor.index < row.text.end_in_parent() {
                 return row_index;
             }
-            if cursor.index == row.text.end_in_parent() {
-                if row.newline || !cursor.prefer_next_row {
-                    return row_index;
-                }
+            if cursor.index == row.text.end_in_parent() && (row.newline || !cursor.prefer_next_row)
+            {
+                return row_index;
             }
         }
         self.rows.len() - 1
@@ -734,7 +1021,7 @@ impl LaidoutText {
         let index = row.x_in_lpxs_to_index(position.x_in_lpxs);
         Cursor {
             index: row.text.start_in_parent() + index,
-            prefer_next_row: if index == 0 { true } else { false },
+            prefer_next_row: index == 0,
         }
     }
 
@@ -934,5 +1221,119 @@ impl LaidoutGlyph {
 
     pub fn rasterize(&self, dpx_per_em: f32) -> Option<RasterizedGlyph> {
         self.font.rasterize_glyph(self.id, dpx_per_em)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        merge_segments_for_line_breaking, parse_text_atlas_size_value, Layouter, Size,
+        LAYOUT_CACHE_MAX_TEXT_LEN, LAYOUT_CACHE_MULTILINE_LINE_COUNT,
+        LAYOUT_CACHE_MULTILINE_TEXT_LEN,
+    };
+    use unicode_segmentation::UnicodeSegmentation;
+
+    #[test]
+    fn parses_text_atlas_size_from_env_value() {
+        assert_eq!(
+            parse_text_atlas_size_value("1024"),
+            Some(Size::new(1024, 1024))
+        );
+        assert_eq!(
+            parse_text_atlas_size_value("1024x2048"),
+            Some(Size::new(1024, 2048))
+        );
+        assert_eq!(
+            parse_text_atlas_size_value("1024X2048"),
+            Some(Size::new(1024, 2048))
+        );
+        assert_eq!(parse_text_atlas_size_value(""), None);
+        assert_eq!(parse_text_atlas_size_value("64"), None);
+        assert_eq!(parse_text_atlas_size_value("bogus"), None);
+    }
+
+    /// Helper: split text by word bounds and return segment lengths,
+    /// then apply merging, then reconstruct the segment strings.
+    fn merged_segments(text: &str) -> Vec<String> {
+        let mut lens: Vec<usize> = text.split_word_bounds().map(|s| s.len()).collect();
+        merge_segments_for_line_breaking(text, &mut lens);
+        let mut result = Vec::new();
+        let mut offset = 0;
+        for len in &lens {
+            result.push(text[offset..offset + len].to_string());
+            offset += len;
+        }
+        result
+    }
+
+    #[test]
+    fn trailing_punctuation_merges_into_preceding_word() {
+        assert_eq!(merged_segments("Hello."), vec!["Hello."]);
+        assert_eq!(merged_segments("Hello,"), vec!["Hello,"]);
+        assert_eq!(merged_segments("Hello;"), vec!["Hello;"]);
+        assert_eq!(merged_segments("Hello!"), vec!["Hello!"]);
+        assert_eq!(merged_segments("Hello?"), vec!["Hello?"]);
+    }
+
+    #[test]
+    fn multiple_trailing_punctuation_marks_merge() {
+        assert_eq!(merged_segments("end.)"), vec!["end.)"]);
+        assert_eq!(merged_segments("end...)"), vec!["end...)"]);
+    }
+
+    #[test]
+    fn punctuation_between_words_merges_correctly() {
+        assert_eq!(
+            merged_segments("Hello, world."),
+            vec!["Hello,", " ", "world."]
+        );
+    }
+
+    #[test]
+    fn opening_punctuation_merges_into_following_word() {
+        assert_eq!(
+            merged_segments("say (hello) now"),
+            vec!["say", " ", "(hello)", " ", "now"]
+        );
+    }
+
+    #[test]
+    fn consecutive_trailing_punctuation_chains_merge() {
+        // ")" and ":" are both no-break-before, so they chain-merge
+        // into the preceding word.
+        assert_eq!(
+            merged_segments("(News Hello): world"),
+            vec!["(News", " ", "Hello):", " ", "world"]
+        );
+    }
+
+    #[test]
+    fn no_merge_for_plain_words() {
+        assert_eq!(merged_segments("hello world"), vec!["hello", " ", "world"]);
+    }
+
+    #[test]
+    fn single_word_no_change() {
+        assert_eq!(merged_segments("hello"), vec!["hello"]);
+    }
+
+    #[test]
+    fn empty_text() {
+        assert_eq!(merged_segments(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn skips_layout_cache_for_large_or_multiline_debug_text() {
+        assert!(Layouter::should_cache_text("fps 90.0"));
+        assert!(!Layouter::should_cache_text(
+            &"x".repeat(LAYOUT_CACHE_MAX_TEXT_LEN + 1)
+        ));
+
+        let multiline = (0..LAYOUT_CACHE_MULTILINE_LINE_COUNT)
+            .map(|index| format!("line {index}: {}", "metric ".repeat(8)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(multiline.len() > LAYOUT_CACHE_MULTILINE_TEXT_LEN);
+        assert!(!Layouter::should_cache_text(&multiline));
     }
 }

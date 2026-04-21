@@ -44,7 +44,7 @@ impl<'a> DerefMut for CxDraw<'a> {
 
 impl<'a> Drop for CxDraw<'a> {
     fn drop(&mut self) {
-        if !self.fonts.borrow_mut().prepare_textures(&mut self.cx) {
+        if !self.fonts.borrow_mut().prepare_textures(self.cx) {
             self.cx.redraw_all();
         }
     }
@@ -60,7 +60,7 @@ impl<'a> CxDraw<'a> {
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
         Self {
             fonts,
-            cx: cx,
+            cx,
             draw_event,
             pass_stack: Vec::new(),
             draw_list_stack: Vec::with_capacity(64),
@@ -81,7 +81,13 @@ impl<'a> CxDraw<'a> {
             return false;
         }
         let mut fonts = Fonts::new(cx, layouter::Settings::default());
-        fonts.define_font_family(0.into(), FontFamilyDefinition { font_ids: vec![] });
+        fonts.define_font_family(
+            0.into(),
+            FontFamilyDefinition {
+                font_ids: vec![],
+                expected_member_count: 0,
+            },
+        );
         cx.set_global(Rc::new(RefCell::new(fonts)));
         true
     }
@@ -95,8 +101,19 @@ impl<'a> CxDraw<'a> {
         self.pass_stack.last().unwrap().dpi_factor
     }
 
+    pub fn set_current_pass_dpi_factor(&mut self, dpi_factor: f64) {
+        if let Some(pass_id) = self.pass_stack.last().map(|stack_item| stack_item.pass_id) {
+            if let Some(stack_item) = self.pass_stack.last_mut() {
+                stack_item.dpi_factor = dpi_factor;
+            }
+            let cxpass = &mut self.passes[pass_id];
+            cxpass.dpi_factor = Some(dpi_factor);
+            cxpass.set_dpi_factor(dpi_factor);
+        }
+    }
+
     pub fn inside_pass(&self) -> bool {
-        self.pass_stack.len() > 0
+        !self.pass_stack.is_empty()
     }
 
     pub fn make_child_pass(&mut self, pass: &DrawPass) {

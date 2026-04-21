@@ -1,8 +1,8 @@
 use super::CxOsDrawShader;
 use crate::{
     draw_shader::{
-        CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat,
-        DrawShaderId, DrawShaderInputPacking, DrawShaderInputs,
+        CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderId,
+        DrawShaderInputPacking, DrawShaderInputs,
     },
     draw_vars::DrawVars,
     geometry::Geometry,
@@ -49,6 +49,7 @@ impl DrawVars {
             // Use the Rust backend so the shader compiler emits Rust syntax for
             // function signatures, bodies, struct defs, and type names.
             output.backend = ShaderBackend::Rust;
+            output.use_vulkan = false;
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
 
@@ -93,10 +94,22 @@ impl DrawVars {
 
             output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
 
-            let gen_result = generate_headless_rust_shader_module(&mut output, vm, io_self);
-            let varying_total_slots = gen_result.varying_total_slots;
-            let code = CxDrawShaderCode::Combined {
-                code: gen_result.source.clone(),
+            let no_draw = vm.host.cx().os.no_draw;
+            let (varying_total_slots, code) = if no_draw {
+                (
+                    count_varying_slots(&output, vm),
+                    CxDrawShaderCode::Combined {
+                        code: format!("// makepad headless no-draw shader {:016x}", fnhash.0),
+                    },
+                )
+            } else {
+                let gen_result = generate_headless_rust_shader_module(&mut output, vm, io_self);
+                (
+                    gen_result.varying_total_slots,
+                    CxDrawShaderCode::Combined {
+                        code: gen_result.source,
+                    },
+                )
             };
 
             {
@@ -142,11 +155,6 @@ impl DrawVars {
             mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
             mapping.varying_total_slots = varying_total_slots;
 
-            let debug_value = vm.bx.heap.value(io_self, id!(debug).into(), NoTrap);
-            if let Some(true) = debug_value.as_bool() {
-                mapping.flags.debug = true;
-            }
-
             self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
             self.dyn_instance_slots = mapping.instances.total_slots;
 
@@ -177,6 +185,21 @@ impl DrawVars {
 impl Cx {
     pub(crate) fn headless_compile_shaders(&mut self) {
         let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
+        if self.os.no_draw {
+            for shader_index in compile_set {
+                let cx_shader = &mut self.draw_shaders.shaders[shader_index];
+                if cx_shader.os_shader_id.is_some() {
+                    continue;
+                }
+                let os_shader_id = self.draw_shaders.os_shaders.len();
+                self.draw_shaders.os_shaders.push(CxOsDrawShader {
+                    load_error: Some("headless --no-draw: raster/JIT disabled".to_string()),
+                    ..Default::default()
+                });
+                cx_shader.os_shader_id = Some(os_shader_id);
+            }
+            return;
+        }
         for shader_index in compile_set {
             let cx_shader = &mut self.draw_shaders.shaders[shader_index];
             if cx_shader.os_shader_id.is_some() {
@@ -196,6 +219,9 @@ impl Cx {
                     }
                 }
             };
+            if cx_shader.mapping.flags.debug_code {
+                crate::log!("{}", source);
+            }
             let source_hash = hash_string(source);
 
             if let Some((existing_index, _)) = self
@@ -235,11 +261,13 @@ impl Cx {
                         {
                             os_shader.rcx_quad_mode_offset = f() as usize;
                         }
-                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_flat_varying_slots")
+                        if let Ok(f) =
+                            module.symbol::<LayoutFn>("makepad_headless_flat_varying_slots")
                         {
                             os_shader.flat_varying_slots = f() as usize;
                         }
-                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_uses_derivatives")
+                        if let Ok(f) =
+                            module.symbol::<LayoutFn>("makepad_headless_uses_derivatives")
                         {
                             os_shader.uses_derivatives = f() != 0;
                             has_derivative_export = true;

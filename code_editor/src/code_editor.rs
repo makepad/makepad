@@ -79,12 +79,10 @@ script_mod! {
         scroll_bars: mod.widgets.ScrollBars {}
         draw_bg +: { color: theme.color_bg_container }
         draw_gutter +: {
-            draw_depth: 1.0
             text_style: theme.font_code
             color: theme.color_label_outer
         }
         draw_text +: {
-            draw_depth: 1.0
             text_style: theme.font_code
             get_brightness: fn() {
                 return 1.1
@@ -321,10 +319,21 @@ impl CodeEditor {
         let text = self
             .draw_text
             .layout(cx, 0.0, 0.0, None, false, Align::default(), "!");
-        let first_row = text.rows.first().unwrap();
-        let first_glyph = first_row.glyphs.first().unwrap();
-        let width_in_lpxs = first_glyph.advance_in_lpxs();
-        let height_in_lpxs = first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs();
+        let (width_in_lpxs, height_in_lpxs) = if let Some(first_glyph) = text
+            .rows
+            .first()
+            .and_then(|first_row| first_row.glyphs.first())
+        {
+            (
+                first_glyph.advance_in_lpxs(),
+                first_glyph.ascender_in_lpxs() - first_glyph.descender_in_lpxs(),
+            )
+        } else {
+            // On wasm the code font can still be loading on the first draw.
+            // Fall back to a reasonable monospace cell size instead of aborting.
+            let font_size = self.draw_text.text_style.font_size.max(1.0);
+            (font_size * 0.6, font_size)
+        };
         let line_spacing_in_lpxs = height_in_lpxs * self.draw_text.text_style.line_spacing;
         self.cell_size = dvec2(width_in_lpxs as f64, line_spacing_in_lpxs as f64);
         self.cell_offset_y = ((line_spacing_in_lpxs - height_in_lpxs) / 2.0) as f64;
@@ -529,6 +538,19 @@ impl CodeEditor {
 
         self.scroll_bars.end(cx);
 
+        if !self.read_only && cx.has_key_focus(self.scroll_bars.area()) {
+            let area_rect = self.scroll_bars.area().clipped_rect(cx);
+            let ime_pos = self
+                .last_cursor_screen_pos
+                .map(|pos| {
+                    self.viewport_rect.pos - area_rect.pos + pos + dvec2(0.0, self.cell_size.y)
+                })
+                .unwrap_or_else(|| {
+                    self.viewport_rect.pos - area_rect.pos + dvec2(0.0, self.cell_size.y)
+                });
+            cx.show_text_ime(self.scroll_bars.area(), ime_pos);
+        }
+
         if session.update_folds() {
             cx.redraw_area_in_draw(self.scroll_bars.area());
         } else if self.keep_cursor_in_view.is_locked() {
@@ -659,6 +681,7 @@ impl CodeEditor {
         let mut keyboard_moved_cursor = false;
         match event.hits(cx, self.scroll_bars.area()) {
             Hit::KeyFocusLost(_) => {
+                cx.hide_text_ime();
                 // Don't dim selection if external_selection_focus is active
                 // (cross-child selection where PortalList has focus)
                 if !self.external_selection_focus {

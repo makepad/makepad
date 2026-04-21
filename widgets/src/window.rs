@@ -1,5 +1,7 @@
+#[cfg(feature = "voice")]
+use crate::voice_wave::VoiceWaveWidgetExt;
 use crate::{
-    desktop_button::DesktopButtonWidgetExt, makepad_derive_widget::*, makepad_draw::*,
+    desktop_button::DesktopButtonWidgetExt, label::*, makepad_derive_widget::*, makepad_draw::*,
     nav_control::NavControl, view::*, widget::*,
 };
 
@@ -13,12 +15,14 @@ script_mod! {
     use mod.widgets.KeyboardView
     use mod.widgets.WindowMenu
     use mod.widgets.NavControl
+    use mod.widgets.VoiceWave
     use mod.widgets.MenuItem
     use mod.draw.KeyCode
 
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
+        show_caption_bar: true
         pass +: { clear_color: theme.color_bg_app }
         flow: Down
         nav_control: NavControl {}
@@ -28,28 +32,48 @@ script_mod! {
             flow: Right
 
             draw_bg.color: theme.color_app_caption_bar
-            height: 27
+            // Note: by default, the caption bar height is calculated at runtime
+            // based on window chrome button geometry to ensure the buttons are vertically centered.
+            // If you want to override this height with a fixed value, set the `caption_bar_height_override` on the Window itself.
+            height: Fit
             caption_label := View {
                 width: Fill height: Fill
                 align: Center
-                label := Label {text: "Makepad" margin: Inset{left: 100}}
+                label := Label {text: "Makepad"}
             }
+            voice_wave := VoiceWave {}
             windows_buttons := View {
                 visible: false
                 width: Fit height: Fit
-                min := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMin width: 46 height: 29}
-                max := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsMax width: 46 height: 29}
-                close := DesktopButton {draw_bg.button_type: DesktopButtonType.WindowsClose width: 46 height: 29}
+                min := DesktopButton {
+                    draw_bg.button_type: DesktopButtonType.WindowsMin
+                    width: 46 height: 29
+                    draw_bg +: {
+                        color: #000, color_hover: #000, color_down: #000
+                        bg_color_hover: #E9E9E9, bg_color_down: #CCCCCC
+                    }
+                }
+                max := DesktopButton {
+                    draw_bg.button_type: DesktopButtonType.WindowsMax
+                    width: 46 height: 29
+                    draw_bg +: {
+                        color: #000, color_hover: #000, color_down: #000
+                        bg_color_hover: #E9E9E9, bg_color_down: #CCCCCC
+                    }
+                }
+                close := DesktopButton {
+                    draw_bg.button_type: DesktopButtonType.WindowsClose
+                    width: 46 height: 29
+                    draw_bg +: {
+                        color: #000, color_hover: #FFF, color_down: #FFF
+                        bg_color_hover: #E81123, bg_color_down: #F1707A
+                    }
+                }
             }
             web_fullscreen := View {
                 visible: false
                 width: Fit height: Fit
                 fullscreen := DesktopButton {draw_bg.button_type: DesktopButtonType.Fullscreen width: 50 height: 36}
-            }
-            web_xr := View {
-                visible: false
-                width: Fit height: Fit
-                xr_on := DesktopButton {draw_bg.button_type: DesktopButtonType.XRMode width: 50 height: 36}
             }
         }
         window_menu := WindowMenu {
@@ -155,8 +179,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Window {
-    #[uid]
-    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     //#[rust] caption_size: Vec2d,
     #[live]
     last_mouse_pos: Vec2d,
@@ -164,6 +188,8 @@ pub struct Window {
     mouse_cursor_size: Vec2d,
     #[live]
     demo: bool,
+    #[live]
+    show_caption_bar: bool,
     #[rust]
     demo_next_frame: NextFrame,
     #[live]
@@ -192,8 +218,13 @@ pub struct Window {
     hide_caption_on_fullscreen: bool,
     #[live]
     show_performance_view: bool,
-    #[rust(Mat4f::nonuniform_scaled_translation(vec3(0.0004,-0.0004,-0.0004),vec3(-0.25,0.25,-0.5)))]
-    xr_view_matrix: Mat4f,
+    #[rust]
+    has_focus: bool,
+    /// The calculated value of the caption bar height, a value that will result in
+    /// the window chrome buttons being nicely vertically centered within the caption bar.
+    /// `None` means no geometry has been reported by the platform yet.
+    #[rust]
+    system_caption_bar_height: Option<f64>,
     #[deref]
     view: View,
 
@@ -219,7 +250,102 @@ pub enum WindowAction {
 }
 
 impl Window {
+    fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
+        match cx.os_type() {
+            OsType::Windows => {
+                self.view(cx, ids!(caption_bar))
+                    .set_visible(cx, self.show_caption_bar);
+                self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
+            }
+            OsType::Macos => {
+                // In macOS fullscreen, the OS provides its own auto-hiding
+                // toolbar with traffic-light buttons, so hide our caption bar.
+                let is_fullscreen = self.window.handle.is_fullscreen(cx);
+                self.view(cx, ids!(caption_bar))
+                    .set_visible(cx, self.show_caption_bar && !is_fullscreen);
+            }
+            OsType::LinuxWindow(params) => {
+                // Only show the caption bar if we're drawing our own window chrome
+                // (e.g. Wayland without server-side decorations). On X11 the WM
+                // provides native decorations, so we hide the in-app caption bar.
+                let custom_chrome = params.custom_window_chrome;
+                self.view(cx, ids!(caption_bar))
+                    .set_visible(cx, self.show_caption_bar && custom_chrome);
+                if custom_chrome {
+                    self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
+                }
+            }
+            OsType::LinuxDirect | OsType::Android(_) => {
+                //self.frame.get_view(ids!(caption_bar)).set_visible(false);
+            }
+            OsType::Web(_) => {
+                // self.frame.get_view(ids!(caption_bar)).set_visible(false);
+            }
+            _ => (),
+        }
+    }
+
+    fn sync_caption_bar_height(&mut self, cx: &mut Cx) {
+        // Explicit DSL override takes priority, then system-calculated.
+        let height = self
+            .window
+            .caption_bar_height_override
+            .or(self.system_caption_bar_height);
+        if let Some(h) = height {
+            let caption_bar = self.view(cx, ids!(caption_bar));
+            if let Some(mut bar) = caption_bar.borrow_mut() {
+                bar.walk.height = Size::Fixed(h);
+            }
+            drop(caption_bar);
+        }
+    }
+
+    /// Adjusts the caption label's left padding so that the title text appears
+    /// centered in the full caption bar width when there's enough room.
+    /// When the window is too narrow, the padding gracefully reduces to 0,
+    /// transitioning to a left-aligned title.
+    fn sync_caption_centering(&mut self, cx: &mut Cx) {
+        let bar_width = self.view(cx, ids!(caption_bar)).area().rect(cx).size.x;
+        let buttons_width = self.view(cx, ids!(windows_buttons)).area().rect(cx).size.x;
+
+        if bar_width <= 0.0 {
+            return; // No area info yet (first frame)
+        }
+
+        let fill_width = bar_width - buttons_width;
+        // At wide widths: padding = buttons_width, so the label's center
+        // aligns with the bar's center (truly centered).
+        // At narrow widths: padding shrinks toward 0, so the title
+        // shifts left to maximize the available text space.
+        let padding_left = buttons_width.min((fill_width - buttons_width).max(0.0));
+
+        let caption_label = self.view(cx, ids!(caption_label));
+        if let Some(mut inner) = caption_label.borrow_mut() {
+            inner.layout.padding.left = padding_left;
+        }
+        drop(caption_label);
+    }
+
+    fn sync_caption_title(&mut self, cx: &mut Cx) {
+        let title = if self.window.title.is_empty() {
+            cx.windows[self.window.handle.window_id()]
+                .create_title
+                .clone()
+        } else {
+            self.window.title.clone()
+        };
+        if !title.is_empty() {
+            self.label(cx, ids!(caption_label.label))
+                .set_text(cx, &title);
+        }
+    }
+
     fn ensure_initialized(&mut self, cx: &mut Cx) {
+        self.sync_caption_bar_state(cx);
+        self.sync_caption_bar_height(cx);
+        self.sync_caption_title(cx);
+        self.sync_caption_centering(cx);
+
         if self.initialized {
             return;
         }
@@ -240,42 +366,8 @@ impl Window {
             DrawPassClearDepth::ClearWith(1.0),
         );
 
-        // check if we are ar/vr capable
-        if cx.xr_capabilities().vr_supported {
-            // lets show a VR button
-            self.view(cx, ids!(web_xr)).set_visible(cx, true);
-            log!("VR IS SUPPORTED");
-        }
-
-        // OS-specific caption bar setup
         if self.demo {
             self.demo_next_frame = cx.new_next_frame();
-        }
-        match cx.os_type() {
-            OsType::Windows => {
-                if !cx.in_makepad_studio() {
-                    self.view(cx, ids!(caption_bar)).set_visible(cx, true);
-                    self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
-                }
-            }
-            OsType::Macos => {
-                if !cx.in_makepad_studio() {
-                    self.view(cx, ids!(caption_bar)).set_visible(cx, true);
-                }
-            }
-            OsType::LinuxWindow(params) => {
-                if params.custom_window_chrome && !cx.in_makepad_studio() {
-                    self.view(cx, ids!(caption_bar)).set_visible(cx, true);
-                    self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
-                }
-            }
-            OsType::LinuxDirect | OsType::Android(_) => {
-                //self.frame.get_view(ids!(caption_bar)).set_visible(false);
-            }
-            OsType::Web(_) => {
-                // self.frame.get_view(ids!(caption_bar)).set_visible(false);
-            }
-            _ => (),
         }
     }
 
@@ -377,9 +469,25 @@ impl Window {
             .handle
             .configure_window(cx, inner_size, position, is_fullscreen, title);
     }
+
+    pub fn configure_macos_window(&mut self, cx: &mut Cx, config: MacosWindowConfig) {
+        self.window.handle.configure_macos_window(cx, config);
+    }
+
+    pub fn window_index(&self) -> usize {
+        self.window.handle.window_id().id()
+    }
+
+    pub fn position(&self, cx: &Cx) -> Vec2d {
+        self.window.handle.get_position(cx)
+    }
 }
 
 impl WindowRef {
+    pub fn window_id(&self) -> Option<WindowId> {
+        self.borrow().map(|inner| inner.window.handle.window_id())
+    }
+
     pub fn get_inner_size(&self, cx: &Cx) -> Vec2d {
         if let Some(inner) = self.borrow() {
             inner.window.handle.get_inner_size(cx)
@@ -418,6 +526,11 @@ impl WindowRef {
             inner.set_fullscreen(cx);
         }
     }
+    pub fn disable_fullscreen(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.window.handle.normal(cx);
+        }
+    }
     /// Configure the window's size and position, and whether it's fullscreen or not.
     ///
     /// If `fullscreen` is `true`, the window will be set to the monitor's size and the
@@ -441,6 +554,12 @@ impl WindowRef {
             inner.configure_window(cx, inner_size, position, fullscreen, title);
         }
     }
+
+    pub fn configure_macos_window(&self, cx: &mut Cx, config: MacosWindowConfig) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.configure_macos_window(cx, config);
+        }
+    }
 }
 
 impl Widget for Window {
@@ -451,6 +570,7 @@ impl Widget for Window {
             self.draw_all(cx, scope);
             return;
         }
+        self.ensure_initialized(cx);
 
         let uid = self.widget_uid();
 
@@ -484,7 +604,8 @@ impl Widget for Window {
                                 if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
                                     self.view(cx, ids!(caption_bar)).set_visible(cx, false);
                                 } else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
-                                    self.view(cx, ids!(caption_bar)).set_visible(cx, true);
+                                    self.view(cx, ids!(caption_bar))
+                                        .set_visible(cx, self.show_caption_bar);
                                 };
                             }
                         }
@@ -492,8 +613,32 @@ impl Widget for Window {
                     }
 
                     // Update the display context if the screen size has changed
+                    let old_insets = cx.display_context.safe_area_insets;
                     cx.display_context.screen_size = ev.new_geom.inner_size;
+                    cx.display_context.safe_area_insets = ev.new_geom.safe_area_insets;
                     cx.display_context.updated_on_event_id = cx.event_id();
+
+                    // Update safe area inset values on the script heap so
+                    // Splash code can reference mod.widgets.SAFE_INSET_PAD_*.
+                    cx.update_safe_inset_script_values(ev.new_geom.safe_area_insets);
+
+                    // If the platform reports native chrome button geometry, derive
+                    // the caption bar height so the buttons are vertically centered:
+                    // height = top_margin * 2 + button_height = pos.y * 2 + size.y.
+                    let new_buttons = ev.new_geom.window_chrome_buttons;
+                    if new_buttons != Rect::default() {
+                        let h = (new_buttons.pos.y * 2.0 + new_buttons.size.y).ceil();
+                        if self.system_caption_bar_height != Some(h) {
+                            self.system_caption_bar_height = Some(h);
+                            self.view(cx, ids!(caption_bar)).redraw(cx);
+                        }
+                    }
+
+                    // If safe area insets changed, trigger a script re-apply
+                    // so widgets pick up new values.
+                    if old_insets != ev.new_geom.safe_area_insets {
+                        cx.request_script_reapply();
+                    }
 
                     cx.widget_action(uid, WindowAction::WindowGeomChange(ev.clone()));
                     return;
@@ -503,19 +648,19 @@ impl Widget for Window {
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
                     if self.view(cx, ids!(caption_bar)).visible() {
-                        let size = self.window.get_inner_size(cx);
+                        let caption_rect = self.view(cx, ids!(caption_bar)).area().rect(cx);
+                        let buttons_rect = self.view(cx, ids!(windows_buttons)).area().rect(cx);
 
-                        if dq.abs.y < 25. {
-                            if dq.abs.x < size.x - 135.0 {
-                                dq.response.set(WindowDragQueryResponse::Caption);
-                            } else {
+                        if caption_rect.contains(dq.abs) {
+                            if buttons_rect.size != Vec2d::default()
+                                && buttons_rect.contains(dq.abs)
+                            {
                                 dq.response.set(WindowDragQueryResponse::Client);
+                            } else {
+                                dq.response.set(WindowDragQueryResponse::Caption);
                             }
                             cx.set_cursor(MouseCursor::Default);
                         }
-                        /*
-                        if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
-                        }*/
                     }
                 }
                 true
@@ -527,6 +672,7 @@ impl Widget for Window {
             Event::Scroll(ev) => ev.window_id != self.window.window_id(),
             Event::WindowGotFocus(window_id) => {
                 if *window_id == self.window.window_id() {
+                    self.has_focus = true;
                     cx.set_key_focus(self.last_known_area);
                 }
 
@@ -534,6 +680,7 @@ impl Widget for Window {
             }
             Event::WindowLostFocus(window_id) => {
                 if *window_id == self.window.window_id() {
+                    self.has_focus = false;
                     self.last_known_area = cx.key_focus();
                     cx.set_key_focus(Area::Empty);
                 }
@@ -547,21 +694,15 @@ impl Widget for Window {
             cx.widget_action(uid, WindowAction::EventForOtherWindow);
             return;
         } else {
-            // lets store our inverse matrix
-            if cx.in_xr_mode() {
-                if let Event::XrUpdate(e) = &event {
-                    let event =
-                        Event::XrLocal(XrLocalEvent::from_update_event(e, &self.xr_view_matrix));
-                    self.view.handle_event(cx, &event, scope);
-                } else {
-                    self.view.handle_event(cx, event, scope);
-                }
-            } else {
-                self.view.handle_event(cx, event, scope);
-            }
+            self.view.handle_event(cx, event, scope);
         }
 
         if let Event::Actions(actions) = event {
+            #[cfg(feature = "voice")]
+            {
+                let voice_wave = self.voice_wave(cx, ids!(voice_wave));
+                voice_wave.handle_actions(cx, actions, &mut self.view, scope);
+            }
             if self
                 .desktop_button(cx, ids!(windows_buttons.min))
                 .clicked(&actions)
@@ -583,12 +724,6 @@ impl Widget for Window {
                 .clicked(&actions)
             {
                 self.window.handle.close(cx);
-            }
-            if self
-                .desktop_button(cx, ids!(web_xr.xr_on))
-                .clicked(&actions)
-            {
-                cx.xr_start_presenting();
             }
         }
 
@@ -624,31 +759,6 @@ impl Widget for Window {
             self.draw_state.end();
             self.end(cx);
         }
-
-        DrawStep::done()
-    }
-
-    fn draw_3d(&mut self, cx: &mut Cx3d, scope: &mut Scope) -> DrawStep {
-        // lets create a Cx2d in which we can draw. we dont support stepping here
-        let cx = &mut Cx2d::new(cx.cx);
-
-        self.main_draw_list.begin_always(cx);
-
-        let size = dvec2(1500.0, 1200.0);
-        cx.begin_root_turtle(size, Layout::flow_down());
-
-        self.overlay.begin(cx);
-
-        self.view.draw_walk_all(cx, scope, Walk::default());
-
-        //self.debug_view.draw(cx);
-
-        self.main_draw_list
-            .set_view_transform(cx, &self.xr_view_matrix);
-
-        cx.end_pass_sized_turtle();
-
-        self.main_draw_list.end(cx);
 
         DrawStep::done()
     }

@@ -1,8 +1,8 @@
 use crate::{
     event::{
         KeyEvent, LongPressEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent,
-        TextClipboardEvent, TextInputEvent, TextRangeReplaceEvent, TimerEvent, TouchUpdateEvent,
-        VirtualKeyboardEvent, WindowGeomChangeEvent,
+        SelectionHandleDragEvent, TextClipboardEvent, TextInputEvent, TextRangeReplaceEvent,
+        TimerEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeomChangeEvent,
     },
     permission::PermissionResult,
     window::WindowId,
@@ -26,6 +26,7 @@ pub enum IosEvent {
 
     TextInput(TextInputEvent),
     TextRangeReplace(TextRangeReplaceEvent),
+    SelectionHandleDrag(SelectionHandleDragEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextCopy(TextClipboardEvent),

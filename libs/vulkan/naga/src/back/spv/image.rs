@@ -6,7 +6,8 @@ use spirv::Word;
 
 use super::{
     selection::{MergeTuple, Selection},
-    Block, BlockContext, Error, IdGenerator, Instruction, LocalType, LookupType, NumericType,
+    Block, BlockContext, Error, IdGenerator, ImageTypeFlags, Instruction, LocalImageType,
+    LocalType, LookupType, NumericType,
 };
 use crate::arena::Handle;
 
@@ -818,15 +819,14 @@ impl BlockContext<'_> {
         // image
         let image_id = self.get_handle_id(image);
         let image_type = self.fun_info[image].ty.handle().unwrap();
+        let image_class = match self.ir_module.types[image_type].inner {
+            crate::TypeInner::Image { class, .. } => class,
+            _ => return Err(Error::Validation("image type")),
+        };
         // SPIR-V doesn't know about our `Depth` class, and it returns
         // `vec4<f32>`, so we need to grab the first component out of it.
-        let needs_sub_access = match self.ir_module.types[image_type].inner {
-            crate::TypeInner::Image {
-                class: crate::ImageClass::Depth { .. },
-                ..
-            } => depth_ref.is_none() && gather.is_none(),
-            _ => false,
-        };
+        let needs_sub_access =
+            matches!(image_class, crate::ImageClass::Depth { .. }) && depth_ref.is_none() && gather.is_none();
         let sample_result_type_id = if needs_sub_access {
             self.get_numeric_type_id(NumericType::Vector {
                 size: crate::VectorSize::Quad,
@@ -836,12 +836,22 @@ impl BlockContext<'_> {
             result_type_id
         };
 
-        // OpTypeSampledImage
         let image_type_id = self.get_handle_type_id(image_type);
-        let sampled_image_type_id =
-            self.get_type_id(LookupType::Local(LocalType::SampledImage { image_type_id }));
-
-        let sampler_id = self.get_handle_id(sampler);
+        let external_image_type_id = if matches!(image_class, crate::ImageClass::External) {
+            Some(self.writer.get_localtype_id(LocalType::Image(LocalImageType {
+                sampled_type: crate::Scalar::F32,
+                dim: spirv::Dim::Dim2D,
+                flags: ImageTypeFlags::SAMPLED,
+                image_format: spirv::ImageFormat::Unknown,
+            })))
+        } else {
+            None
+        };
+        let sampled_image_type_id = if matches!(image_class, crate::ImageClass::External) {
+            image_type_id
+        } else {
+            self.get_type_id(LookupType::Local(LocalType::SampledImage { image_type_id }))
+        };
 
         let coordinates = self.write_image_coordinates(coordinate, array_index, block)?;
         let coordinates_id = if clamp_to_edge {
@@ -865,11 +875,24 @@ impl BlockContext<'_> {
             let image_size_id = self.gen_id();
             let vec2u_type_id = self.writer.get_vec2u_type_id();
             let const_zero_uint_id = self.writer.get_constant_scalar(crate::Literal::U32(0));
+            let query_image_id = if matches!(image_class, crate::ImageClass::External) {
+                let query_image_type_id = external_image_type_id
+                    .ok_or(Error::Validation("external image query type"))?;
+                let query_image_id = self.gen_id();
+                block.body.push(Instruction::image(
+                    query_image_type_id,
+                    query_image_id,
+                    image_id,
+                ));
+                query_image_id
+            } else {
+                image_id
+            };
             let mut query_inst = Instruction::image_query(
                 spirv::Op::ImageQuerySizeLod,
                 vec2u_type_id,
                 image_size_id,
-                image_id,
+                query_image_id,
             );
             query_inst.add_operand(const_zero_uint_id);
             block.body.push(query_inst);
@@ -936,13 +959,19 @@ impl BlockContext<'_> {
             coordinates.value_id
         };
 
-        let sampled_image_id = self.gen_id();
-        block.body.push(Instruction::sampled_image(
-            sampled_image_type_id,
-            sampled_image_id,
-            image_id,
-            sampler_id,
-        ));
+        let sampled_image_id = if matches!(image_class, crate::ImageClass::External) {
+            image_id
+        } else {
+            let sampler_id = self.get_handle_id(sampler);
+            let sampled_image_id = self.gen_id();
+            block.body.push(Instruction::sampled_image(
+                sampled_image_type_id,
+                sampled_image_id,
+                image_id,
+                sampler_id,
+            ));
+            sampled_image_id
+        };
         let id = self.gen_id();
 
         let depth_id = depth_ref.map(|handle| self.cached[handle]);

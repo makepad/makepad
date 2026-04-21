@@ -4,22 +4,31 @@ use {
     crate::{
         area::Area,
         cursor::MouseCursor,
-        event::*,
+        event::{PopupDismissReason, PopupDismissedEvent, *},
         makepad_math::*,
         os::windows::{
             droptarget::*,
             win32_app::{encode_wide, with_win32_app, Win32App},
             win32_event::*,
         },
-        window::WindowId,
+        window::{WindowBackdrop, WindowId, WindowVisuals},
         windows::{
             core::PCWSTR,
             //core::IntoParam,
             //core::Result as coreResult,
             //core::HRESULT,
             Win32::{
-                Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM},
-                Graphics::{Dwm::DwmExtendFrameIntoClientArea, Gdi::ScreenToClient},
+                Foundation::{
+                    COLORREF, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, WPARAM,
+                },
+                Graphics::{
+                    Dwm::{
+                        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW,
+                        DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW,
+                        DWMWA_SYSTEMBACKDROP_TYPE,
+                    },
+                    Gdi::ScreenToClient,
+                },
                 System::{
                     DataExchange::{
                         CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard,
@@ -40,8 +49,8 @@ use {
                     Controls::{MARGINS, WM_MOUSELEAVE},
                     Input::{
                         Ime::{
-                            ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, CFS_POINT,
-                            COMPOSITIONFORM,
+                            ImmAssociateContext, ImmGetContext, ImmReleaseContext,
+                            ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM, HIMC,
                         },
                         KeyboardAndMouse::{
                             GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
@@ -64,18 +73,19 @@ use {
                     WindowsAndMessaging::{
                         CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
                         GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, MoveWindow,
-                        PostMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CW_USEDEFAULT,
-                        GWLP_USERDATA, GWL_EXSTYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-                        HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTSYSMENU, HTTOP, HTTOPLEFT,
-                        HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-                        SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT,
-                        WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-                        WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_IME_STARTCOMPOSITION,
-                        WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-                        WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST,
-                        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
-                        WM_XBUTTONDOWN, WM_XBUTTONUP, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-                        WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE,
+                        PostMessageW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+                        ShowWindow, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, HTBOTTOM,
+                        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT,
+                        HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST,
+                        LWA_ALPHA, SWP_NOMOVE, SWP_NOSIZE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+                        SW_SHOW, WA_ACTIVE, WINDOWPLACEMENT, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
+                        WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+                        WM_EXITSIZEMOVE, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
+                        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+                        WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP,
+                        WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+                        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW,
+                        WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE,
                         WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SIZEBOX, WS_SYSMENU,
                     },
                 },
@@ -84,7 +94,7 @@ use {
     },
     std::{
         cell::{Cell, RefCell},
-        ffi::OsStr,
+        ffi::{c_void, OsStr},
         mem,
         os::windows::ffi::OsStrExt,
         rc::Rc,
@@ -92,6 +102,31 @@ use {
         sync::Mutex,
     },
 };
+
+#[repr(C)]
+struct AccentPolicy {
+    accent_state: u32,
+    accent_flags: u32,
+    gradient_color: u32,
+    animation_id: u32,
+}
+
+#[repr(C)]
+struct WindowCompositionAttribData {
+    attrib: u32,
+    pv_data: *mut c_void,
+    cb_data: usize,
+}
+
+#[inline]
+unsafe fn SetWindowCompositionAttribute(
+    hwnd: HWND,
+    data: *mut WindowCompositionAttribData,
+) -> windows_core::BOOL {
+    windows_core::link!("user32.dll" "system" fn SetWindowCompositionAttribute(hwnd : HWND, data : *mut WindowCompositionAttribData) -> windows_core::BOOL);
+    unsafe { SetWindowCompositionAttribute(hwnd, data) }
+}
+
 /*
 // Copied from Microsoft so it refers to the right IDropTarget
 #[allow(non_snake_case)]
@@ -118,6 +153,8 @@ pub struct Win32Window {
     pub hwnd: HWND,
     pub track_mouse_event: bool,
     pub is_fullscreen: bool,
+    pub is_popup: bool,
+    ime_saved_himc: HIMC,
 }
 
 impl Win32Window {
@@ -186,6 +223,55 @@ impl Win32Window {
             hwnd,
             track_mouse_event: false,
             is_fullscreen,
+            is_popup: false,
+            ime_saved_himc: HIMC::default(),
+        }
+    }
+
+    pub fn new_popup(window_id: WindowId, position: Vec2d, size: Vec2d) -> Win32Window {
+        let title = encode_wide("Makepad Popup");
+
+        let style = WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+        let style_ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+
+        let dpi = with_win32_app(|app| app.dpi_functions.system_dpi_factor() as f64);
+        let x = (position.x * dpi) as i32;
+        let y = (position.y * dpi) as i32;
+        let w = (size.x * dpi) as i32;
+        let h = (size.y * dpi) as i32;
+
+        let hwnd = unsafe {
+            CreateWindowExW(
+                style_ex,
+                PCWSTR(with_win32_app(|app| app.window_class_name.as_ptr())),
+                PCWSTR(title.as_ptr()),
+                style,
+                x,
+                y,
+                w,
+                h,
+                None,
+                None,
+                Some(GetModuleHandleW(None).unwrap().into()),
+                None,
+            )
+            .unwrap()
+        };
+
+        Win32Window {
+            window_id,
+            mouse_buttons_down: 0,
+            last_window_geom: WindowGeom::default(),
+            last_key_mod: KeyModifiers::default(),
+            ime_spot: Vec2d::default(),
+            current_cursor: MouseCursor::Default,
+            last_mouse_pos: Vec2d::default(),
+            ignore_wmsize: 0,
+            hwnd,
+            track_mouse_event: false,
+            is_fullscreen: false,
+            is_popup: true,
+            ime_saved_himc: HIMC::default(),
         }
     }
 
@@ -218,7 +304,14 @@ impl Win32Window {
                 if wparam.0 & 0xffff == WA_ACTIVE as usize {
                     window.do_callback(Win32Event::WindowGotFocus(window.window_id));
                 } else {
-                    window.do_callback(Win32Event::WindowLostFocus(window.window_id));
+                    if window.is_popup {
+                        window.do_callback(Win32Event::PopupDismissed(PopupDismissedEvent {
+                            window_id: window.window_id,
+                            reason: PopupDismissReason::FocusLost,
+                        }));
+                    } else {
+                        window.do_callback(Win32Event::WindowLostFocus(window.window_id));
+                    }
                 }
             }
             WM_NCCALCSIZE => {
@@ -381,6 +474,13 @@ impl Win32Window {
                 // detect control/cmd - c / v / x
                 let modifiers = Self::get_key_modifiers();
                 let key_code = Self::virtual_key_to_key_code(wparam);
+                if window.is_popup && key_code == KeyCode::Escape {
+                    window.do_callback(Win32Event::PopupDismissed(PopupDismissedEvent {
+                        window_id: window.window_id,
+                        reason: PopupDismissReason::Escape,
+                    }));
+                    return LRESULT(0);
+                }
                 if modifiers.alt && key_code == KeyCode::F4 {
                     PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap();
                 }
@@ -414,6 +514,7 @@ impl Win32Window {
                                             input: utf8,
                                             was_paste: true,
                                             replace_last: false,
+                                            ..Default::default()
                                         }));
                                     }
                                 } else {
@@ -471,6 +572,7 @@ impl Win32Window {
                             input: utf8,
                             was_paste: false,
                             replace_last: false,
+                            ..Default::default()
                         }));
                     }
                 }
@@ -503,6 +605,14 @@ impl Win32Window {
             WM_EXITSIZEMOVE => {
                 with_win32_app(|app| app.stop_resize());
                 window.do_callback(Win32Event::WindowResizeLoopStop(window.window_id));
+            }
+            // WM_SIZING (0x0214) fires BEFORE the window is resized with
+            // the proposed new rect. By pre-rendering at this size, the
+            // swap chain frame is ready when DWM composites the window at
+            // the new size, eliminating the empty gap at growing edges.
+            0x0214 => {
+                let proposed_rect = &*(lparam.0 as *const RECT);
+                window.send_sizing_event(proposed_rect);
             }
             WM_SIZE | WM_DPICHANGED => {
                 window.send_change_event();
@@ -739,19 +849,37 @@ impl Win32Window {
     }
 
     pub fn get_window_geom(&self) -> WindowGeom {
+        // Three caption buttons (minimize / maximize / close), each 46 × 29 logical px,
+        // right-aligned at the top of the caption bar.
+        const BUTTON_W: f64 = 46.0;
+        const BUTTON_H: f64 = 29.0;
+        const BUTTON_COUNT: f64 = 3.0;
+        const BUTTONS_W: f64 = BUTTON_W * BUTTON_COUNT;
+        let inner_size = if self.get_is_maximized() {
+            self.get_outer_size()
+        } else {
+            self.get_inner_size()
+        };
         WindowGeom {
             xr_is_presenting: false,
             can_fullscreen: false,
             is_topmost: self.get_is_topmost(),
             is_fullscreen: self.get_is_maximized(),
-            inner_size: if self.get_is_maximized() {
-                self.get_outer_size()
-            } else {
-                self.get_inner_size()
-            },
+            inner_size,
             outer_size: self.get_outer_size(),
             dpi_factor: self.get_dpi_factor(),
             position: self.get_position(),
+            window_chrome_buttons: Rect {
+                pos: Vec2d {
+                    x: inner_size.x - BUTTONS_W,
+                    y: 0.0,
+                },
+                size: Vec2d {
+                    x: BUTTONS_W,
+                    y: BUTTON_H,
+                },
+            },
+            ..Default::default()
         }
     }
 
@@ -870,6 +998,85 @@ impl Win32Window {
         }
     }
 
+    pub fn apply_window_visuals(&mut self, visuals: WindowVisuals) {
+        const WCA_ACCENT_POLICY: u32 = 19;
+        const ACCENT_DISABLED: u32 = 0;
+        const ACCENT_ENABLE_BLURBEHIND: u32 = 3;
+
+        let intensity = visuals.backdrop_intensity.clamp(0.0, 1.0);
+        let accent_alpha = (intensity * 255.0).round() as u32;
+        let accent_color = accent_alpha << 24;
+
+        let backdrop = match visuals.backdrop {
+            WindowBackdrop::None => DWMSBT_NONE,
+            WindowBackdrop::Auto | WindowBackdrop::Mica => DWMSBT_MAINWINDOW,
+            WindowBackdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
+            WindowBackdrop::Vibrancy | WindowBackdrop::Blur => DWMSBT_TABBEDWINDOW,
+        };
+
+        unsafe {
+            let mut ex_style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+            if visuals.transparent {
+                ex_style |= WS_EX_LAYERED.0;
+            } else {
+                ex_style &= !WS_EX_LAYERED.0;
+            }
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex_style as isize);
+            let _ = SetLayeredWindowAttributes(self.hwnd, COLORREF(0), 255, LWA_ALPHA);
+
+            let margins = if visuals.transparent {
+                MARGINS {
+                    cxLeftWidth: -1,
+                    cxRightWidth: -1,
+                    cyTopHeight: -1,
+                    cyBottomHeight: -1,
+                }
+            } else {
+                MARGINS {
+                    cxLeftWidth: 0,
+                    cxRightWidth: 0,
+                    cyTopHeight: 0,
+                    cyBottomHeight: 0,
+                }
+            };
+            DwmExtendFrameIntoClientArea(self.hwnd, &margins).unwrap();
+        }
+
+        let hr = unsafe {
+            DwmSetWindowAttribute(
+                self.hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                &(backdrop.0) as *const _ as *const c_void,
+                std::mem::size_of::<i32>() as u32,
+            )
+        };
+
+        let accent_state = if visuals.transparent || visuals.backdrop != WindowBackdrop::None {
+            ACCENT_ENABLE_BLURBEHIND
+        } else {
+            ACCENT_DISABLED
+        };
+        let gradient_color = if visuals.backdrop == WindowBackdrop::None {
+            0
+        } else {
+            accent_color
+        };
+        let mut accent = AccentPolicy {
+            accent_state,
+            accent_flags: if hr.is_ok() { 0x20 } else { 0 },
+            gradient_color,
+            animation_id: 0,
+        };
+        let mut data = WindowCompositionAttribData {
+            attrib: WCA_ACCENT_POLICY,
+            pv_data: &mut accent as *mut _ as *mut c_void,
+            cb_data: std::mem::size_of::<AccentPolicy>(),
+        };
+        unsafe {
+            let _ = SetWindowCompositionAttribute(self.hwnd, &mut data);
+        }
+    }
+
     pub fn set_inner_size(&self, size: Vec2d) {
         unsafe {
             let mut window_rect = RECT {
@@ -920,6 +1127,44 @@ impl Win32Window {
             window_id: self.window_id,
             old_geom: old_geom,
             new_geom: new_geom,
+        }));
+        self.do_callback(Win32Event::Paint);
+    }
+
+    /// Pre-render at a proposed window size from WM_SIZING. This fires
+    /// BEFORE the window is actually resized, so the swap chain frame is
+    /// ready when DWM composites the window at the new size — eliminating
+    /// the empty-edge gap that appears when growing the window.
+    pub fn send_sizing_event(&mut self, proposed_rect: &RECT) {
+        let dpi = self.get_dpi_factor();
+        let proposed_size = Vec2d {
+            x: (proposed_rect.right - proposed_rect.left) as f64 / dpi,
+            y: (proposed_rect.bottom - proposed_rect.top) as f64 / dpi,
+        };
+
+        let mut new_geom = self.last_window_geom.clone();
+        // For custom chrome, inner size == outer size.
+        new_geom.inner_size = proposed_size;
+        new_geom.outer_size = proposed_size;
+        new_geom.position = Vec2d {
+            x: proposed_rect.left as f64,
+            y: proposed_rect.top as f64,
+        };
+
+        let old_geom = self.last_window_geom.clone();
+        if old_geom.inner_size == new_geom.inner_size {
+            return; // Size didn't change (e.g. just a move), nothing to pre-render.
+        }
+        // Skip degenerate sizes — ResizeBuffers rejects zero dimensions.
+        if proposed_size.x < 1.0 || proposed_size.y < 1.0 {
+            return;
+        }
+        self.last_window_geom = new_geom.clone();
+
+        self.do_callback(Win32Event::WindowGeomChange(WindowGeomChangeEvent {
+            window_id: self.window_id,
+            old_geom,
+            new_geom,
         }));
         self.do_callback(Win32Event::Paint);
     }
@@ -1021,7 +1266,21 @@ impl Win32Window {
             input: input,
             was_paste: false,
             replace_last: replace_last,
+            ..Default::default()
         }))
+    }
+
+    pub fn set_ime_active(&mut self, active: bool) {
+        if active {
+            if !self.ime_saved_himc.is_invalid() {
+                unsafe { ImmAssociateContext(self.hwnd, self.ime_saved_himc) };
+                self.ime_saved_himc = HIMC::default();
+            }
+        } else {
+            if self.ime_saved_himc.is_invalid() {
+                self.ime_saved_himc = unsafe { ImmAssociateContext(self.hwnd, HIMC::default()) };
+            }
+        }
     }
 
     pub fn virtual_key_to_key_code(wparam: WPARAM) -> KeyCode {

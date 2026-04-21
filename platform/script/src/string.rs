@@ -89,6 +89,23 @@ impl ScriptStringData {
         native.add_type_method(
             heap,
             ScriptValueType::REDUX_STRING,
+            id!(len),
+            &[],
+            |vm, args| {
+                let sself = script_value!(vm, args.self);
+                if let Some(len) = vm.bx.heap.string_with(sself, |_heap, s| s.len()) {
+                    return (len as f64).into();
+                }
+                script_err_unexpected!(
+                    vm.bx.threads.cur_ref().trap,
+                    "len called on non-string value"
+                )
+            },
+        );
+
+        native.add_type_method(
+            heap,
+            ScriptValueType::REDUX_STRING,
             id!(to_f64),
             &[],
             |vm, args| {

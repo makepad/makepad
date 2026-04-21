@@ -13,6 +13,8 @@ script_mod! {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct Splash {
+    #[source]
+    source: ScriptObjectRef,
     #[deref]
     pub view: View,
     #[live]

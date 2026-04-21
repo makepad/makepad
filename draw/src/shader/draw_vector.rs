@@ -19,6 +19,7 @@ script_mod! {
 
         v_tcoord: varying(vec2f)
         v_world: varying(vec2f)
+        v_world_clip: varying(vec4f)
         v_color: varying(vec4f)
         v_stroke_mult: varying(float)
         v_stroke_dist: varying(float)
@@ -46,18 +47,21 @@ script_mod! {
             let shifted = pos + self.draw_list.view_shift;
             self.v_world = shifted;
 
-            // Early clip rejection: merge both clip rects (in local space), single check
+            // Early clip rejection in local space.
             let cr = self.geom.clip_radius;
-            let clip = vec4(
-                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
-                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
-                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
-                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
-            );
-            if pos.x + cr < clip.x || pos.y + cr < clip.y
-                || pos.x - cr > clip.z || pos.y - cr > clip.w {
-                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
-                return
+            let is_shadow = self.geom.stroke_mult < -0.5;
+            if cr > 0.0 && !is_shadow {
+                let clip = vec4(
+                    max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                    max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                    min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                    min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+                );
+                if pos.x + cr < clip.x || pos.y + cr < clip.y
+                    || pos.x - cr > clip.z || pos.y - cr > clip.w {
+                    self.vertex_pos = vec4(2.0, 2.0, 2.0, 1.0);
+                    return
+                }
             }
 
             let world = self.draw_list.view_transform * vec4(
@@ -66,11 +70,12 @@ script_mod! {
                 self.draw_depth + self.draw_call.zbias + self.geom.zbias
                 1.
             );
+            self.v_world_clip = world;
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
         }
 
         fragment: fn(){
-            self.fb0 = self.pixel()
+            self.fb0 = depth_clip(self.v_world_clip, self.pixel(), self.depth_clip)
         }
 
         // --- Shadow utilities ---
@@ -231,7 +236,8 @@ script_mod! {
                 let shadow_half = vec2(self.v_param2, self.v_param3);
                 let shadow_corner = self.v_param4;
                 let shadow_blur = self.v_param5;
-                let p = self.v_world - shadow_center;
+                // Shadow params are authored in local space; align with clip/local coords.
+                let p = local - shadow_center;
                 let alpha = self.shadow_rounded_rect(p, shadow_half, shadow_corner, shadow_blur);
                 return self.v_color * alpha
             }
@@ -311,13 +317,13 @@ pub struct DrawVector {
     #[live]
     pub draw_clip: Vec4f,
     #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
     pub draw_depth: f32,
     #[live]
     pub pad1: f32,
     #[live]
     pub pad2: f32,
-    #[live]
-    pub pad3: f32,
 }
 
 impl DrawVector {
@@ -388,6 +394,7 @@ impl DrawVector {
         const TEX_WIDTH: usize = 2048;
         let row = self.gradient_row_count;
         self.gradient_row_count += 1;
+        self.gradient_texture_data.reserve(TEX_WIDTH);
 
         // Rasterize stops into TEX_WIDTH pixels
         for i in 0..TEX_WIDTH {
@@ -490,6 +497,7 @@ impl DrawVector {
     /// Draw a blurred rounded-rect shadow.
     /// (x,y,w,h) = rect, corner = corner radius, blur = blur sigma,
     /// offset_x/y = shadow offset. Uses current paint color.
+    #[allow(clippy::too_many_arguments)]
     pub fn shadow(
         &mut self,
         x: f32,
@@ -556,11 +564,7 @@ impl DrawVector {
             VectorPaint::Solid { color } => {
                 // For shapes with shader effects, store the world-space bounding box
                 // in param1-param4 so the pixel shader can compute proper UVs.
-                let params = if let Some(bbox) = self.cur_effect_bbox {
-                    bbox
-                } else {
-                    [0.0; 4]
-                };
+                let params = self.cur_effect_bbox.unwrap_or([0.0; 4]);
                 (0.0, params, *color)
             }
             VectorPaint::LinearGradient {
@@ -669,13 +673,27 @@ impl DrawVector {
         }
 
         let geom = self.geometry.get_or_insert_with(|| Geometry::new(cx.cx.cx));
-        geom.update(cx.cx.cx, self.acc_indices.clone(), self.acc_verts.clone());
+        geom.update_with_recycled_buffers(cx.cx.cx, &mut self.acc_indices, &mut self.acc_verts);
         self.draw_vars.geometry_id = Some(geom.geometry_id());
         cx.new_draw_call(&self.draw_vars);
         if self.draw_vars.can_instance() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
+    }
+
+    /// Submit the already uploaded geometry as a draw call without rebuilding or reuploading.
+    pub fn submit_existing_geometry(&mut self, cx: &mut Cx2d) -> bool {
+        let Some(geom) = self.geometry.as_ref() else {
+            return false;
+        };
+        self.draw_vars.geometry_id = Some(geom.geometry_id());
+        cx.new_draw_call(&self.draw_vars);
+        if self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+        true
     }
 
     /// Convenience: walk_turtle, begin, call draw_fn, end

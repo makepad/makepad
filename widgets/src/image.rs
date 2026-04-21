@@ -1,9 +1,11 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl},
+    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     image_cache::*,
     makepad_derive_widget::*,
     makepad_draw::*,
+    makepad_script::ScriptArrayStorage,
     widget::*,
+    widget_async::ScriptAsyncResult,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,9 +22,24 @@ script_mod! {
         image_scale: vec2(1.0, 1.0)
         image_pan: vec2(0.0, 0.0)
         async_load: 0.0
+        rotation: 0.0
+
+        rotate_2d_from_center: fn(coord: vec2, angle_deg: float) -> vec2 {
+            let angle = angle_deg * 3.141592653589793 / 180.0
+            let cos_a = cos(-angle)
+            let sin_a = sin(-angle)
+            let centered = coord - vec2(0.5, 0.5)
+            let rotated = vec2(
+                centered.x * cos_a - centered.y * sin_a
+                centered.x * sin_a + centered.y * cos_a
+            )
+            return rotated + vec2(0.5, 0.5)
+        }
 
         get_color_scale_pan: fn(scale: vec2, pan: vec2) {
-            return self.image_texture.sample_as_bgra(self.pos * scale + pan)
+            let uv = self.pos * scale + pan
+            let rotated_uv = self.rotate_2d_from_center(uv, self.rotation)
+            return self.image_texture.sample_as_bgra(rotated_uv)
         }
 
         get_color: fn() {
@@ -51,11 +68,13 @@ pub struct DrawImage {
     #[live]
     pub opacity: f32,
     #[live]
-    image_scale: Vec2f,
+    pub image_scale: Vec2f,
     #[live]
-    image_pan: Vec2f,
+    pub image_pan: Vec2f,
     #[live]
     async_load: f32,
+    #[live]
+    pub rotation: f32,
 }
 
 #[derive(Copy, Clone, Debug, Default, Script, ScriptHook)]
@@ -145,7 +164,7 @@ impl Image {
         let data = if let Some(data) = cx.get_resource(handle) {
             data
         } else {
-            cx.load_all_script_resources();
+            cx.load_script_resource(handle);
             match cx.get_resource(handle) {
                 Some(data) => data,
                 None => {
@@ -178,6 +197,65 @@ impl Image {
 }
 
 impl Widget for Image {
+    fn script_call(
+        &mut self,
+        vm: &mut ScriptVm,
+        method: LiveId,
+        args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        if method == live_id!(set_src) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    if value.is_nil() {
+                        vm.with_cx_mut(|cx| {
+                            self.src = None;
+                            self.src_loaded = false;
+                            self.texture = None;
+                            self.async_image_path = None;
+                            self.async_image_size = None;
+                            self.redraw(cx);
+                        });
+                    } else if let Some(handle) = value.as_handle() {
+                        let handle_ref = vm.bx.heap.new_handle_ref(handle);
+                        vm.with_cx_mut(|cx| {
+                            self.src = Some(handle_ref);
+                            self.src_loaded = false;
+                            self.texture = None;
+                            self.async_image_path = None;
+                            self.async_image_size = None;
+                            self.redraw(cx);
+                        });
+                    }
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        if method == live_id!(load_image_from_data_async) {
+            if let Some(args_obj) = args.as_object() {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                if !value.is_err() {
+                    if let Some(data_array) = value.as_array() {
+                        if let ScriptArrayStorage::U8(data) = vm.bx.heap.array_storage(data_array) {
+                            let path = PathBuf::from(format!(
+                                "script_image_data://{}",
+                                LiveId::unique().0
+                            ));
+                            let bytes = Arc::new(data.clone());
+                            vm.with_cx_mut(|cx| {
+                                let _ = self.load_image_from_data_async(cx, &path, bytes);
+                            });
+                        }
+                    }
+                }
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
+        ScriptAsyncResult::MethodNotFound
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
@@ -344,6 +422,12 @@ impl Image {
                 let scale_y = h as f32 / height as f32;
                 self.draw_bg.image_scale = vec2(scale_x, scale_y);
                 (w, h)
+            } else if image_texture.get_format(cx).is_render() {
+                // GL render target textures use Y-up (bottom-left origin) convention.
+                // Flip Y so the image displays correctly in Makepad's Y-down coordinate system.
+                self.draw_bg.image_scale = vec2(1.0, -1.0);
+                self.draw_bg.image_pan = vec2(0.0, 1.0);
+                (width as f64 * self.width_scale, height as f64)
             } else {
                 (width as f64 * self.width_scale, height as f64)
             }

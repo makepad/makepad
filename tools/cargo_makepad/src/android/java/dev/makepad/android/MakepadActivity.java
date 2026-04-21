@@ -1,21 +1,31 @@
 package dev.makepad.android;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentCallbacks2;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.Manifest;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
+import android.media.MediaFormat;
 import android.media.midi.MidiDevice;
 import android.media.midi.MidiDeviceInfo;
 import android.media.midi.MidiManager;
@@ -32,11 +42,13 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.PixelCopy;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -52,6 +64,8 @@ import android.text.Editable;
 import android.text.InputType;
 import android.text.Selection;
 import android.text.SpannableStringBuilder;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 
 import java.io.BufferedReader;
@@ -163,7 +177,6 @@ class MakepadSurface
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
-        Log.i("SAPP", "surfaceCreated");
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceCreated(surface);
@@ -171,7 +184,13 @@ class MakepadSurface
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
-        Log.i("SAPP", "surfaceDestroyed");
+        Context context = getContext();
+        if (context instanceof MakepadActivity) {
+            MakepadActivity activity = (MakepadActivity) context;
+            if (activity.hasRecoverySnapshotAvailable()) {
+                activity.setSurfaceCoverVisible(true);
+            }
+        }
         Surface surface = holder.getSurface();
         MakepadNative.surfaceOnSurfaceDestroyed(surface);
     }
@@ -181,7 +200,6 @@ class MakepadSurface
                                int format,
                                int width,
                                int height) {
-        Log.i("SAPP", "surfaceChanged");
         Surface surface = holder.getSurface();
         //surface.setFrameRate(120f,0);
         MakepadNative.surfaceOnSurfaceChanged(surface, width, height);
@@ -553,6 +571,51 @@ class MakepadSurface
     }
 }
 
+class CameraPreviewSurface extends SurfaceView implements SurfaceHolder.Callback {
+    private final long mVideoId;
+
+    public CameraPreviewSurface(Context context, long videoId) {
+        super(context);
+        mVideoId = videoId;
+        getHolder().addCallback(this);
+        setZOrderMediaOverlay(true);
+    }
+
+    @Override
+    public void surfaceCreated(SurfaceHolder holder) {
+        Surface surface = holder.getSurface();
+        if (surface != null) {
+            MakepadNative.onCameraPreviewSurfaceReady(mVideoId, surface, getWidth(), getHeight());
+        }
+    }
+
+    @Override
+    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        Surface surface = holder.getSurface();
+        if (surface != null) {
+            MakepadNative.onCameraPreviewSurfaceReady(mVideoId, surface, width, height);
+        }
+    }
+
+    @Override
+    public void surfaceDestroyed(SurfaceHolder holder) {
+        MakepadNative.onCameraPreviewSurfaceDestroyed(mVideoId);
+    }
+}
+
+class SelectionHandleView extends View {
+    public SelectionHandleView(Context context, int color, int sizePx) {
+        super(context);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.OVAL);
+        bg.setColor(color);
+        setBackground(bg);
+        setClickable(true);
+        setFocusable(false);
+        setLayoutParams(new FrameLayout.LayoutParams(sizePx, sizePx));
+    }
+}
+
 class ResizingLayout
     extends
         LinearLayout
@@ -561,9 +624,9 @@ class ResizingLayout
 
     public ResizingLayout(Context context){
         super(context);
-        // When viewing in landscape mode with keyboard shown, there are
-        // gaps on both sides so we fill the negative space with black.
-        setBackgroundColor(Color.BLACK);
+        // Keep a stable non-black fallback behind the SurfaceView for task snapshots
+        // and system transition frames that cannot capture the separate surface layer.
+        setBackgroundResource(R.drawable.makepad_launch_background);
         setOnApplyWindowInsetsListener(this);
     }
 
@@ -571,6 +634,20 @@ class ResizingLayout
     public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
         Insets imeInsets = insets.getInsets(WindowInsets.Type.ime());
         v.setPadding(0, 0, 0, imeInsets.bottom);
+
+        // Compute safe area insets from system bars and display cutout.
+        // These are in physical pixels; convert to logical points by dividing by density.
+        float density = getResources().getDisplayMetrics().density;
+        Insets systemBarInsets = insets.getInsets(
+            WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout()
+        );
+        MakepadNative.surfaceOnSafeAreaInsets(
+            systemBarInsets.top / density,
+            systemBarInsets.right / density,
+            systemBarInsets.bottom / density,
+            systemBarInsets.left / density
+        );
+
         return insets;
     }
 }
@@ -579,19 +656,30 @@ public class MakepadActivity
     extends Activity
     implements MidiManager.OnDeviceOpenedListener
 {
+    private static final String LOG_TAG = "Makepad";
+    private static final long SURFACE_COVER_FADE_OUT_MS = 100;
+    private static final long WARM_RESUME_SNAPSHOT_MAX_AGE_MS = 10000;
+    private static final int TASK_DESCRIPTION_BACKGROUND_COLOR = 0xFFF5F7FA;
+    private static Bitmap sWarmResumeSurfaceSnapshot;
+    private static long sWarmResumeSurfaceSnapshotUptimeMs;
+    private static int sWarmResumeSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
     //% MAIN_ACTIVITY_BODY
 
     private MakepadSurface view;
-    Handler mHandler;
+    private final Handler mHandler = new Handler(Looper.getMainLooper());
 
     // video playback
     Handler mVideoPlaybackHandler;
+    HandlerThread mVideoPlaybackThread;
     HashMap<Long, VideoPlayerRunnable> mVideoPlayerRunnables;
 
     // networking, make these static because of activity switching
+    static HandlerThread mWebSocketsThread;
     static Handler mWebSocketsHandler;
     static HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
     static HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
+    static HashMap<Long, MakepadSocketStream> mActiveSocketStreams = new HashMap<>();
+    private boolean mIsSwitchingActivity = false;
 
     // clipboard actions (ActionMode for copy/paste/cut)
     private ActionMode mActionMode;
@@ -599,32 +687,221 @@ public class MakepadActivity
     private int[] mSelectionBounds = new int[4]; // left, top, right, bottom
     private int mKeyboardShift = 0; // keyboard shift amount from Rust
 
+    // native camera preview overlays
+    private FrameLayout mRootLayout;
+    private FrameLayout mSurfaceCoverOverlay;
+    private ImageView mSurfaceSnapshotBackdrop;
+    private ImageView mSurfaceSnapshotOverlay;
+    private FrameLayout mCameraPreviewOverlay;
+    private HashMap<Long, CameraPreviewSurface> mCameraPreviewViews = new HashMap<>();
+    private Bitmap mLatestSurfaceSnapshot;
+    private int mLatestSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
+    private boolean mSurfaceSnapshotCopyInFlight = false;
+    private boolean mSurfaceRecoveryOverlayVisible = false;
+
+    // selection handles overlay
+    private static final int SELECTION_HANDLE_START = 0;
+    private static final int SELECTION_HANDLE_END = 1;
+    private static final int SELECTION_DRAG_BEGIN = 0;
+    private static final int SELECTION_DRAG_MOVE = 1;
+    private static final int SELECTION_DRAG_END = 2;
+    private FrameLayout mSelectionHandleOverlay;
+    private SelectionHandleView mSelectionHandleStart;
+    private SelectionHandleView mSelectionHandleEnd;
+    private int mSelectionHandleSizePx;
+
     static {
         System.loadLibrary("makepad");
     }
 
+    private void cacheWarmResumeSurfaceSnapshot(Bitmap snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        sWarmResumeSurfaceSnapshot = snapshot;
+        sWarmResumeSurfaceSnapshotUptimeMs = SystemClock.uptimeMillis();
+        sWarmResumeSurfaceSnapshotOrientation = getResources().getConfiguration().orientation;
+    }
+
+    private boolean canRestoreWarmResumeSurfaceSnapshot() {
+        if (sWarmResumeSurfaceSnapshot == null) {
+            return false;
+        }
+        if (SystemClock.uptimeMillis() - sWarmResumeSurfaceSnapshotUptimeMs > WARM_RESUME_SNAPSHOT_MAX_AGE_MS) {
+            clearWarmResumeSurfaceSnapshot();
+            return false;
+        }
+        int orientation = getResources().getConfiguration().orientation;
+        return sWarmResumeSurfaceSnapshotOrientation == android.content.res.Configuration.ORIENTATION_UNDEFINED
+            || sWarmResumeSurfaceSnapshotOrientation == orientation;
+    }
+
+    private void clearWarmResumeSurfaceSnapshot() {
+        sWarmResumeSurfaceSnapshot = null;
+        sWarmResumeSurfaceSnapshotUptimeMs = 0;
+        sWarmResumeSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
+    }
+
+    private void clearLatestSurfaceSnapshot() {
+        mLatestSurfaceSnapshot = null;
+        mLatestSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
+    }
+
+    private void trimSurfaceSnapshotCaches() {
+        clearWarmResumeSurfaceSnapshot();
+        clearLatestSurfaceSnapshot();
+
+        if (mSurfaceSnapshotBackdrop != null) {
+            mSurfaceSnapshotBackdrop.setImageBitmap(null);
+            mSurfaceSnapshotBackdrop.setVisibility(View.GONE);
+        }
+        if (mSurfaceSnapshotOverlay != null) {
+            mSurfaceSnapshotOverlay.animate().cancel();
+            mSurfaceSnapshotOverlay.setImageBitmap(null);
+            mSurfaceSnapshotOverlay.setAlpha(1.0f);
+            mSurfaceSnapshotOverlay.setVisibility(View.GONE);
+        }
+        if (mSurfaceRecoveryOverlayVisible && mSurfaceCoverOverlay != null) {
+            mSurfaceCoverOverlay.animate().cancel();
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            mSurfaceCoverOverlay.setVisibility(View.VISIBLE);
+            mSurfaceCoverOverlay.bringToFront();
+        }
+    }
+
+    boolean hasRecoverySnapshotAvailable() {
+        return mLatestSurfaceSnapshot != null;
+    }
+
+    private boolean hasCurrentOrientationRecoverySnapshot() {
+        if (mLatestSurfaceSnapshot == null) {
+            return false;
+        }
+        int orientation = getResources().getConfiguration().orientation;
+        return mLatestSurfaceSnapshotOrientation == android.content.res.Configuration.ORIENTATION_UNDEFINED
+            || mLatestSurfaceSnapshotOrientation == orientation;
+    }
+
+    private void restoreWarmResumeSurfaceSnapshotIfAvailable() {
+        if (!canRestoreWarmResumeSurfaceSnapshot()) {
+            return;
+        }
+        mLatestSurfaceSnapshot = sWarmResumeSurfaceSnapshot;
+        mLatestSurfaceSnapshotOrientation = getResources().getConfiguration().orientation;
+        updateSurfaceSnapshotBackdrop();
+        clearWarmResumeSurfaceSnapshot();
+    }
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        
-        HandlerThread webSocketsThreadHandler = new HandlerThread("WebSocketsThread");
-        webSocketsThreadHandler.start();
-        mWebSocketsHandler = new Handler(webSocketsThreadHandler.getLooper());
+        if (mWebSocketsThread == null || !mWebSocketsThread.isAlive()) {
+            mWebSocketsThread = new HandlerThread("WebSocketsThread");
+            mWebSocketsThread.start();
+            mWebSocketsHandler = new Handler(mWebSocketsThread.getLooper());
+        }
+
+        // On API 30+, Theme.NoTitleBar.Fullscreen sets FLAG_FULLSCREEN which positions
+        // the window below the status bar, conflicting with the modern WindowInsetsController.
+        // Switch from the launch theme to the app theme and handle fullscreen programmatically.
+        if (Build.VERSION.SDK_INT >= 30) {
+            setTheme(R.style.MakepadAppTheme);
+        }
         
         super.onCreate(savedInstanceState);
         
         this.requestWindowFeature(Window.FEATURE_NO_TITLE);
 
+        // Default state: content below system bars (status bar visible).
+        // Apps that want fullscreen can request CxOsOp::FullscreenWindow which
+        // calls applyFullScreen(true) to hide bars and extend content behind them.
+
         view = new MakepadSurface(this);
         // Put it inside a parent layout which can resize it using padding
         ResizingLayout layout = new ResizingLayout(this);
-        layout.addView(view);
-        setContentView(layout);
+        FrameLayout surfaceContentLayout = new FrameLayout(this);
+        surfaceContentLayout.setLayoutParams(new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        surfaceContentLayout.setBackgroundResource(R.drawable.makepad_launch_background);
+
+        mSurfaceSnapshotBackdrop = new ImageView(this);
+        mSurfaceSnapshotBackdrop.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        mSurfaceSnapshotBackdrop.setBackgroundResource(R.drawable.makepad_launch_background);
+        mSurfaceSnapshotBackdrop.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        mSurfaceSnapshotBackdrop.setClickable(false);
+        mSurfaceSnapshotBackdrop.setFocusable(false);
+        mSurfaceSnapshotBackdrop.setVisibility(View.GONE);
+        surfaceContentLayout.addView(mSurfaceSnapshotBackdrop);
+
+        view.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        surfaceContentLayout.addView(view);
+        layout.addView(surfaceContentLayout);
+
+        mRootLayout = new FrameLayout(this);
+        mRootLayout.addView(layout);
+
+        mSurfaceCoverOverlay = new FrameLayout(this);
+        mSurfaceCoverOverlay.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        mSurfaceCoverOverlay.setBackgroundResource(R.drawable.makepad_launch_background);
+        mSurfaceCoverOverlay.setClickable(false);
+        mSurfaceCoverOverlay.setFocusable(false);
+        mSurfaceCoverOverlay.setAlpha(1.0f);
+        mSurfaceCoverOverlay.setVisibility(View.GONE);
+        mRootLayout.addView(mSurfaceCoverOverlay);
+
+        mSurfaceSnapshotOverlay = new ImageView(this);
+        mSurfaceSnapshotOverlay.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        mSurfaceSnapshotOverlay.setBackgroundResource(R.drawable.makepad_launch_background);
+        mSurfaceSnapshotOverlay.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        mSurfaceSnapshotOverlay.setClickable(false);
+        mSurfaceSnapshotOverlay.setFocusable(false);
+        mSurfaceSnapshotOverlay.setAlpha(1.0f);
+        mSurfaceSnapshotOverlay.setVisibility(View.GONE);
+        mRootLayout.addView(mSurfaceSnapshotOverlay);
+
+        mCameraPreviewOverlay = new FrameLayout(this);
+        mRootLayout.addView(mCameraPreviewOverlay);
+
+        mSelectionHandleOverlay = new FrameLayout(this);
+        mSelectionHandleOverlay.setLayoutParams(new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        mSelectionHandleOverlay.setClickable(false);
+        mSelectionHandleOverlay.setFocusable(false);
+        mSelectionHandleOverlay.setVisibility(View.GONE);
+        mRootLayout.addView(mSelectionHandleOverlay);
+
+        mSelectionHandleSizePx = Math.max(24, (int) (getResources().getDisplayMetrics().density * 24.0f));
+        mSelectionHandleStart = new SelectionHandleView(this, 0xFF4A90E2, mSelectionHandleSizePx);
+        mSelectionHandleEnd = new SelectionHandleView(this, 0xFF4A90E2, mSelectionHandleSizePx);
+        mSelectionHandleStart.setOnTouchListener(createSelectionHandleDragListener(SELECTION_HANDLE_START));
+        mSelectionHandleEnd.setOnTouchListener(createSelectionHandleDragListener(SELECTION_HANDLE_END));
+        mSelectionHandleOverlay.addView(mSelectionHandleStart);
+        mSelectionHandleOverlay.addView(mSelectionHandleEnd);
+
+        setContentView(mRootLayout);
+        restoreWarmResumeSurfaceSnapshotIfAvailable();
+        updateTaskDescription();
 
         MakepadNative.activityOnCreate(this);
 
-        HandlerThread decoderThreadHandler = new HandlerThread("VideoPlayerThread");
-        decoderThreadHandler.start(); // TODO: only start this if its needed.
-        mVideoPlaybackHandler = new Handler(decoderThreadHandler.getLooper());
+        mVideoPlaybackThread = new HandlerThread("VideoPlayerThread");
+        mVideoPlaybackThread.start(); // TODO: only start this if its needed.
+        mVideoPlaybackHandler = new Handler(mVideoPlaybackThread.getLooper());
         mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
 
@@ -652,18 +929,22 @@ public class MakepadActivity
     @Override
     protected void onStart() {
         super.onStart();
+        restoreSurfaceViewForWarmResumeIfNeeded();
         MakepadNative.activityOnStart();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        restoreSurfaceViewForWarmResumeIfNeeded();
+        updateTaskDescription();
         MakepadNative.activityOnResume();
 
         //% MAIN_ACTIVITY_ON_RESUME
     }
     @Override
     protected void onPause() {
+        prepareSurfaceSnapshotOverlayForPause();
         super.onPause();
         MakepadNative.activityOnPause();
 
@@ -678,8 +959,65 @@ public class MakepadActivity
 
     @Override
     protected void onDestroy() {
+        if (mCameraPreviewOverlay != null) {
+            for (Long videoId : mCameraPreviewViews.keySet()) {
+                MakepadNative.onCameraPreviewSurfaceDestroyed(videoId);
+            }
+            mCameraPreviewViews.clear();
+            mCameraPreviewOverlay.removeAllViews();
+        }
+        if (mSelectionHandleOverlay != null) {
+            mSelectionHandleOverlay.removeAllViews();
+            mSelectionHandleOverlay = null;
+            mSelectionHandleStart = null;
+            mSelectionHandleEnd = null;
+        }
+        if (mSurfaceCoverOverlay != null) {
+            mRootLayout.removeView(mSurfaceCoverOverlay);
+            mSurfaceCoverOverlay = null;
+        }
+        if (mSurfaceSnapshotBackdrop != null) {
+            mSurfaceSnapshotBackdrop.setImageBitmap(null);
+            mSurfaceSnapshotBackdrop = null;
+        }
+        if (mSurfaceSnapshotOverlay != null) {
+            mSurfaceSnapshotOverlay.setImageBitmap(null);
+            mRootLayout.removeView(mSurfaceSnapshotOverlay);
+            mSurfaceSnapshotOverlay = null;
+        }
+        clearLatestSurfaceSnapshot();
+        mSurfaceSnapshotCopyInFlight = false;
+        cleanupVideoPlaybackState();
+        shutdownVideoPlaybackThread();
+        if (!mIsSwitchingActivity) {
+            cleanupNetworkState();
+            shutdownWebSocketsThread();
+        }
         super.onDestroy();
         MakepadNative.activityOnDestroy();
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        switch (level) {
+            case ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE:
+            case ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW:
+            case ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL:
+            case ComponentCallbacks2.TRIM_MEMORY_BACKGROUND:
+            case ComponentCallbacks2.TRIM_MEMORY_MODERATE:
+            case ComponentCallbacks2.TRIM_MEMORY_COMPLETE:
+                trimSurfaceSnapshotCaches();
+                break;
+            default:
+                break;
+        }
+    }
+
+    @Override
+    public void onLowMemory() {
+        super.onLowMemory();
+        trimSurfaceSnapshotCaches();
     }
 
     @Override
@@ -693,6 +1031,19 @@ public class MakepadActivity
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         MakepadNative.activityOnWindowFocusChanged(hasFocus);
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        prepareSurfaceSnapshotOverlayForPause();
+        super.onUserLeaveHint();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        restoreSurfaceViewForWarmResumeIfNeeded();
     }
 
     @Override
@@ -763,34 +1114,419 @@ public class MakepadActivity
         runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
-                    View decorView = getWindow().getDecorView();
-
-                    if (fullscreen) {
-                        getWindow().setFlags(LayoutParams.FLAG_LAYOUT_NO_LIMITS, LayoutParams.FLAG_LAYOUT_NO_LIMITS);
-                        getWindow().getAttributes().layoutInDisplayCutoutMode = LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-                        if (Build.VERSION.SDK_INT >= 30) {
-                            getWindow().setDecorFitsSystemWindows(false);
-                        } else {
-                            int uiOptions = View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
-                            decorView.setSystemUiVisibility(uiOptions);
-                        }
-                    }
-                    else {
-                        if (Build.VERSION.SDK_INT >= 30) {
-                            getWindow().setDecorFitsSystemWindows(true);
-                        } else {
-                          decorView.setSystemUiVisibility(0);
-                        }
-
-                    }
+                    applyFullScreen(fullscreen);
                 }
             });
     }
+
+    private boolean canCaptureSurfaceSnapshot() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return false;
+        }
+        if (view == null || view.getWidth() <= 0 || view.getHeight() <= 0) {
+            return false;
+        }
+        Surface surface = view.getHolder().getSurface();
+        return surface != null && surface.isValid();
+    }
+
+    private void refreshSurfaceSnapshotCache() {
+        if (!canCaptureSurfaceSnapshot() || mSurfaceSnapshotCopyInFlight) {
+            return;
+        }
+        mSurfaceSnapshotCopyInFlight = true;
+
+        final Bitmap snapshot = Bitmap.createBitmap(
+            view.getWidth(),
+            view.getHeight(),
+            Bitmap.Config.ARGB_8888
+        );
+        PixelCopy.request(view, snapshot, copyResult -> {
+            mSurfaceSnapshotCopyInFlight = false;
+            if (copyResult != PixelCopy.SUCCESS) {
+                return;
+            }
+            mLatestSurfaceSnapshot = snapshot;
+            mLatestSurfaceSnapshotOrientation = getResources().getConfiguration().orientation;
+            cacheWarmResumeSurfaceSnapshot(snapshot);
+            updateSurfaceSnapshotBackdrop();
+            if (mSurfaceRecoveryOverlayVisible) {
+                showSurfaceRecoverySnapshotIfAvailable();
+            }
+        }, mHandler);
+    }
+
+    private void prepareSurfaceSnapshotOverlayForPause() {
+        if (mSurfaceRecoveryOverlayVisible && view != null && view.getVisibility() != View.VISIBLE) {
+            return;
+        }
+        if (!hasRecoverySnapshotAvailable()) {
+            refreshSurfaceSnapshotCache();
+            return;
+        }
+        mSurfaceRecoveryOverlayVisible = true;
+        cacheWarmResumeSurfaceSnapshot(mLatestSurfaceSnapshot);
+        updateSurfaceSnapshotBackdrop();
+        if (view != null) {
+            view.setVisibility(View.INVISIBLE);
+        }
+        showSurfaceRecoverySnapshotIfAvailable();
+        refreshSurfaceSnapshotCache();
+    }
+
+    private void restoreSurfaceViewForWarmResumeIfNeeded() {
+        if (!mSurfaceRecoveryOverlayVisible || view == null) {
+            return;
+        }
+
+        Surface surface = view.getHolder().getSurface();
+        boolean surfaceValid = surface != null && surface.isValid();
+        if (view.getVisibility() == View.VISIBLE && surfaceValid) {
+            return;
+        }
+
+        // Keep the recovery overlay visible, but restore the SurfaceView itself
+        // so Android can recreate its surface on same-activity warm resumes.
+        view.setVisibility(View.VISIBLE);
+        if (!showSurfaceRecoverySnapshotIfAvailable() && mSurfaceCoverOverlay != null) {
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            mSurfaceCoverOverlay.setVisibility(View.VISIBLE);
+            mSurfaceCoverOverlay.bringToFront();
+        }
+        updateSurfaceSnapshotBackdrop();
+    }
+
+    private Bitmap createTaskDescriptionIconBitmap() {
+        int iconResId = getApplicationIconResId();
+        if (iconResId == 0) {
+            return null;
+        }
+        Drawable drawable = getDrawable(iconResId);
+        if (drawable == null) {
+            return null;
+        }
+        int width = Math.max(1, drawable.getIntrinsicWidth());
+        int height = Math.max(1, drawable.getIntrinsicHeight());
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        drawable.setBounds(0, 0, width, height);
+        drawable.draw(canvas);
+        return bitmap;
+    }
+
+    @SuppressWarnings("deprecation")
+    private void updateTaskDescription() {
+        try {
+            String label = getApplicationName();
+            int iconResId = getApplicationIconResId();
+            ActivityManager.TaskDescription taskDescription;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                taskDescription = new ActivityManager.TaskDescription.Builder()
+                    .setLabel(label)
+                    .setIcon(iconResId)
+                    .setPrimaryColor(TASK_DESCRIPTION_BACKGROUND_COLOR)
+                    .setBackgroundColor(TASK_DESCRIPTION_BACKGROUND_COLOR)
+                    .build();
+            }
+            else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                taskDescription = new ActivityManager.TaskDescription(
+                    label,
+                    iconResId,
+                    TASK_DESCRIPTION_BACKGROUND_COLOR
+                );
+            }
+            else {
+                taskDescription = new ActivityManager.TaskDescription(
+                    label,
+                    createTaskDescriptionIconBitmap(),
+                    TASK_DESCRIPTION_BACKGROUND_COLOR
+                );
+            }
+            setTaskDescription(taskDescription);
+        }
+        catch (Throwable throwable) {
+            Log.w(LOG_TAG, "Failed to update task description", throwable);
+        }
+    }
+
+    private void updateSurfaceSnapshotBackdrop() {
+        if (mSurfaceSnapshotBackdrop == null) {
+            return;
+        }
+
+        if (hasCurrentOrientationRecoverySnapshot()) {
+            mSurfaceSnapshotBackdrop.setImageBitmap(mLatestSurfaceSnapshot);
+            mSurfaceSnapshotBackdrop.setVisibility(View.VISIBLE);
+            return;
+        }
+
+        mSurfaceSnapshotBackdrop.setImageBitmap(null);
+        mSurfaceSnapshotBackdrop.setVisibility(View.GONE);
+    }
+
+    private boolean showSurfaceRecoverySnapshotIfAvailable() {
+        if (mSurfaceSnapshotOverlay == null || mSurfaceCoverOverlay == null) {
+            return false;
+        }
+
+        if (hasCurrentOrientationRecoverySnapshot()) {
+            mSurfaceSnapshotOverlay.setImageBitmap(mLatestSurfaceSnapshot);
+            mSurfaceSnapshotOverlay.setAlpha(1.0f);
+            mSurfaceSnapshotOverlay.setVisibility(View.VISIBLE);
+            mSurfaceSnapshotOverlay.bringToFront();
+            mSurfaceCoverOverlay.setVisibility(View.GONE);
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            return true;
+        }
+
+        mSurfaceSnapshotOverlay.setImageBitmap(null);
+        mSurfaceSnapshotOverlay.setVisibility(View.GONE);
+        return false;
+    }
+
+    private void applySurfaceCoverVisibility(boolean visible) {
+        if (mSurfaceCoverOverlay == null || mSurfaceSnapshotOverlay == null) {
+            return;
+        }
+
+        boolean wasRecoveryOverlayVisible = mSurfaceRecoveryOverlayVisible;
+        if (visible && !hasRecoverySnapshotAvailable()) {
+            mSurfaceRecoveryOverlayVisible = true;
+            if (view != null) {
+                view.setVisibility(View.INVISIBLE);
+            }
+            mSurfaceCoverOverlay.animate().cancel();
+            mSurfaceSnapshotOverlay.animate().cancel();
+            mSurfaceSnapshotOverlay.setImageBitmap(null);
+            mSurfaceSnapshotOverlay.setVisibility(View.GONE);
+            mSurfaceSnapshotOverlay.setAlpha(1.0f);
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            mSurfaceCoverOverlay.setVisibility(View.VISIBLE);
+            mSurfaceCoverOverlay.bringToFront();
+            if (!wasRecoveryOverlayVisible) {
+                refreshSurfaceSnapshotCache();
+            }
+            return;
+        }
+        mSurfaceRecoveryOverlayVisible = visible;
+        if (view != null) {
+            view.setVisibility(visible ? View.INVISIBLE : view.getVisibility());
+        }
+        if (visible && !wasRecoveryOverlayVisible) {
+            refreshSurfaceSnapshotCache();
+        }
+
+        mSurfaceCoverOverlay.animate().cancel();
+        mSurfaceSnapshotOverlay.animate().cancel();
+        if (visible) {
+            if (showSurfaceRecoverySnapshotIfAvailable()) {
+                return;
+            }
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            mSurfaceCoverOverlay.setVisibility(View.VISIBLE);
+            mSurfaceCoverOverlay.bringToFront();
+            return;
+        }
+
+        if (mSurfaceCoverOverlay.getVisibility() != View.VISIBLE
+            && mSurfaceSnapshotOverlay.getVisibility() != View.VISIBLE) {
+            mSurfaceCoverOverlay.setAlpha(1.0f);
+            mSurfaceSnapshotOverlay.setAlpha(1.0f);
+            if (view != null) {
+                view.setVisibility(View.VISIBLE);
+            }
+            clearWarmResumeSurfaceSnapshot();
+            return;
+        }
+
+        final FrameLayout surfaceCoverOverlay = mSurfaceCoverOverlay;
+        final ImageView surfaceSnapshotOverlay = mSurfaceSnapshotOverlay;
+        if (surfaceSnapshotOverlay.getVisibility() == View.VISIBLE) {
+            surfaceCoverOverlay.setVisibility(View.GONE);
+            surfaceCoverOverlay.setAlpha(1.0f);
+            surfaceSnapshotOverlay.animate()
+                .alpha(0.0f)
+                .setDuration(SURFACE_COVER_FADE_OUT_MS)
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (mSurfaceCoverOverlay != surfaceCoverOverlay
+                            || mSurfaceSnapshotOverlay != surfaceSnapshotOverlay) {
+                            return;
+                        }
+                        surfaceSnapshotOverlay.setVisibility(View.GONE);
+                        surfaceSnapshotOverlay.setAlpha(1.0f);
+                        if (view != null) {
+                            view.setVisibility(View.VISIBLE);
+                        }
+                        clearWarmResumeSurfaceSnapshot();
+                    }
+                });
+            return;
+        }
+
+        surfaceCoverOverlay.animate()
+            .alpha(0.0f)
+            .setDuration(SURFACE_COVER_FADE_OUT_MS)
+            .withEndAction(new Runnable() {
+                @Override
+                public void run() {
+                    if (mSurfaceCoverOverlay != surfaceCoverOverlay) {
+                        return;
+                    }
+                    surfaceCoverOverlay.setVisibility(View.GONE);
+                    surfaceCoverOverlay.setAlpha(1.0f);
+                    if (view != null) {
+                        view.setVisibility(View.VISIBLE);
+                    }
+                    clearWarmResumeSurfaceSnapshot();
+                }
+            });
+    }
+
+    public void setSurfaceCoverVisible(final boolean visible) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            applySurfaceCoverVisibility(visible);
+            return;
+        }
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                applySurfaceCoverVisibility(visible);
+            }
+        });
+    }
+
+    public void requestSurfaceSnapshotRefresh() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            refreshSurfaceSnapshotCache();
+            return;
+        }
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                refreshSurfaceSnapshotCache();
+            }
+        });
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applyFullScreen(boolean fullscreen) {
+        View decorView = getWindow().getDecorView();
+
+        if (fullscreen) {
+            // LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS = 3 (API 30+), fall back to SHORT_EDGES
+            getWindow().getAttributes().layoutInDisplayCutoutMode =
+                Build.VERSION.SDK_INT >= 30 ? 3 : LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            if (Build.VERSION.SDK_INT >= 30) {
+                getWindow().setDecorFitsSystemWindows(false);
+                android.view.WindowInsetsController controller = getWindow().getInsetsController();
+                if (controller != null) {
+                    controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                    // BEHAVIOR_SHOW_TRANSIENT_BARS_BY_GESTURE = 2
+                    controller.setSystemBarsBehavior(2);
+                }
+            } else {
+                int uiOptions = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+                decorView.setSystemUiVisibility(uiOptions);
+            }
+        }
+        else {
+            if (Build.VERSION.SDK_INT >= 30) {
+                getWindow().setDecorFitsSystemWindows(true);
+                android.view.WindowInsetsController controller = getWindow().getInsetsController();
+                if (controller != null) {
+                    controller.show(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                }
+            } else {
+                decorView.setSystemUiVisibility(0);
+            }
+        }
+
+        // Force a layout pass so the SurfaceView gets the new dimensions
+        if (view != null) {
+            view.requestLayout();
+        }
+    }
     
     public void switchActivityClass(Class c){
+        mIsSwitchingActivity = true;
         Intent intent = new Intent(getApplicationContext(), c);
+        Intent currentIntent = getIntent();
+        if (currentIntent != null && currentIntent.getExtras() != null) {
+            intent.putExtras(currentIntent.getExtras());
+        }
         startActivity(intent);
         finish();
+    }
+
+    private void cleanupVideoPlaybackState() {
+        if (mVideoPlayerRunnables != null) {
+            ArrayList<Long> videoIds = new ArrayList<>(mVideoPlayerRunnables.keySet());
+            for (Long videoId : videoIds) {
+                cleanupVideoPlaybackResources(videoId);
+            }
+            mVideoPlayerRunnables.clear();
+        }
+        if (mVideoPlaybackHandler != null) {
+            mVideoPlaybackHandler.removeCallbacksAndMessages(null);
+        }
+    }
+
+    private void shutdownVideoPlaybackThread() {
+        if (mVideoPlaybackThread == null) {
+            mVideoPlaybackHandler = null;
+            return;
+        }
+        mVideoPlaybackThread.quitSafely();
+        try {
+            mVideoPlaybackThread.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        mVideoPlaybackThread = null;
+        mVideoPlaybackHandler = null;
+    }
+
+    private static void cleanupNetworkState() {
+        for (MakepadWebSocket socket : new ArrayList<>(mActiveWebsockets.values())) {
+            if (socket != null) {
+                socket.closeSocketAndClearCallback();
+            }
+        }
+        mActiveWebsockets.clear();
+        mActiveWebsocketsReaders.clear();
+
+        for (MakepadSocketStream socket : new ArrayList<>(mActiveSocketStreams.values())) {
+            if (socket != null) {
+                socket.close();
+            }
+        }
+        mActiveSocketStreams.clear();
+
+        if (mWebSocketsHandler != null) {
+            mWebSocketsHandler.removeCallbacksAndMessages(null);
+        }
+    }
+
+    private static void shutdownWebSocketsThread() {
+        if (mWebSocketsThread == null) {
+            mWebSocketsHandler = null;
+            return;
+        }
+        mWebSocketsThread.quitSafely();
+        try {
+            mWebSocketsThread.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        mWebSocketsThread = null;
+        mWebSocketsHandler = null;
     }
     
     // Configure keyboard settings before showing - called from Rust
@@ -864,6 +1600,11 @@ public class MakepadActivity
         ApplicationInfo applicationInfo = getApplicationContext().getApplicationInfo();
         CharSequence appName = applicationInfo.loadLabel(getPackageManager());
         return appName.toString();
+    }
+
+    private int getApplicationIconResId() {
+        ApplicationInfo applicationInfo = getApplicationContext().getApplicationInfo();
+        return applicationInfo.icon;
     }
 
     public void showClipboardActions(final boolean hasSelection, final int left, final int top, final int right, final int bottom, final int keyboardShift) {
@@ -1027,6 +1768,95 @@ public class MakepadActivity
         mHasSelection = false;
     }
 
+    private View.OnTouchListener createSelectionHandleDragListener(final int handleKind) {
+        return new View.OnTouchListener() {
+            private final int[] rootLocation = new int[2];
+
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+                if (mRootLayout == null) {
+                    return false;
+                }
+                mRootLayout.getLocationOnScreen(rootLocation);
+                float absX = event.getRawX() - rootLocation[0];
+                float absY = event.getRawY() - rootLocation[1];
+                int action = event.getActionMasked();
+
+                if (action == MotionEvent.ACTION_DOWN) {
+                    setSelectionHandlePosition(v, absX, absY);
+                    MakepadNative.onSelectionHandleDrag(handleKind, SELECTION_DRAG_BEGIN, absX, absY, event.getEventTime());
+                    return true;
+                }
+                if (action == MotionEvent.ACTION_MOVE) {
+                    setSelectionHandlePosition(v, absX, absY);
+                    MakepadNative.onSelectionHandleDrag(handleKind, SELECTION_DRAG_MOVE, absX, absY, event.getEventTime());
+                    return true;
+                }
+                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    setSelectionHandlePosition(v, absX, absY);
+                    MakepadNative.onSelectionHandleDrag(handleKind, SELECTION_DRAG_END, absX, absY, event.getEventTime());
+                    return true;
+                }
+                return false;
+            }
+        };
+    }
+
+    private void setSelectionHandlePosition(View handle, float x, float y) {
+        if (handle == null) {
+            return;
+        }
+        handle.setX(x - (mSelectionHandleSizePx * 0.5f));
+        handle.setY(y - (mSelectionHandleSizePx * 0.5f));
+    }
+
+    public void showSelectionHandles(final float startX, final float startY, final float endX, final float endY) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mSelectionHandleOverlay == null || mSelectionHandleStart == null || mSelectionHandleEnd == null) {
+                    return;
+                }
+                mSelectionHandleOverlay.setVisibility(View.VISIBLE);
+                setSelectionHandlePosition(mSelectionHandleStart, startX, startY);
+                setSelectionHandlePosition(mSelectionHandleEnd, endX, endY);
+                mSelectionHandleStart.setVisibility(View.VISIBLE);
+                mSelectionHandleEnd.setVisibility(View.VISIBLE);
+                mSelectionHandleOverlay.bringToFront();
+            }
+        });
+    }
+
+    public void updateSelectionHandles(final float startX, final float startY, final float endX, final float endY) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mSelectionHandleOverlay == null || mSelectionHandleStart == null || mSelectionHandleEnd == null) {
+                    return;
+                }
+                mSelectionHandleOverlay.setVisibility(View.VISIBLE);
+                setSelectionHandlePosition(mSelectionHandleStart, startX, startY);
+                setSelectionHandlePosition(mSelectionHandleEnd, endX, endY);
+                mSelectionHandleStart.setVisibility(View.VISIBLE);
+                mSelectionHandleEnd.setVisibility(View.VISIBLE);
+            }
+        });
+    }
+
+    public void hideSelectionHandles() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mSelectionHandleOverlay == null || mSelectionHandleStart == null || mSelectionHandleEnd == null) {
+                    return;
+                }
+                mSelectionHandleStart.setVisibility(View.GONE);
+                mSelectionHandleEnd.setVisibility(View.GONE);
+                mSelectionHandleOverlay.setVisibility(View.GONE);
+            }
+        });
+    }
+
     public void requestHttp(long id, long metadataId, String url, String method, String headers, byte[] body) {
         try {
             MakepadNetwork network = new MakepadNetwork();
@@ -1045,7 +1875,6 @@ public class MakepadActivity
     }
 
     public void openWebSocket(long id, String url, long callback) {
-        
         MakepadWebSocket webSocket = new MakepadWebSocket(id, url, callback);
         mActiveWebsockets.put(id, webSocket);
         webSocket.connect();
@@ -1054,6 +1883,8 @@ public class MakepadActivity
             MakepadWebSocketReader reader = new MakepadWebSocketReader(this, webSocket);
             mWebSocketsHandler.post(reader);
             mActiveWebsocketsReaders.put(id, reader);
+        } else {
+            Log.e("Makepad", "openWebSocket failed id=" + id + " url=" + url);
         }
     }
 
@@ -1078,6 +1909,53 @@ public class MakepadActivity
         
         mActiveWebsocketsReaders.remove(id);
         mActiveWebsockets.remove(id);
+    }
+
+    public boolean openSocketStream(long id, String host, int port, boolean useTls, boolean ignoreSslCert) {
+        MakepadSocketStream socket = new MakepadSocketStream();
+        if (!socket.connect(host, port, useTls, ignoreSslCert)) {
+            return false;
+        }
+        mActiveSocketStreams.put(id, socket);
+        return true;
+    }
+
+    public byte[] socketStreamRead(long id, int maxBytes) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket == null) {
+            return null;
+        }
+        return socket.read(maxBytes);
+    }
+
+    public int socketStreamWrite(long id, byte[] message) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket == null) {
+            return -1;
+        }
+        return socket.write(message);
+    }
+
+    public void socketStreamSetReadTimeout(long id, int timeoutMs) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket != null) {
+            socket.setReadTimeout(timeoutMs);
+        }
+    }
+
+    public void socketStreamSetWriteTimeout(long id, int timeoutMs) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket != null) {
+            socket.setWriteTimeout(timeoutMs);
+        }
+    }
+
+    public void closeSocketStream(long id) {
+        MakepadSocketStream socket = mActiveSocketStreams.get(id);
+        if (socket != null) {
+            socket.close();
+            mActiveSocketStreams.remove(id);
+        }
     }
 
     public void webSocketConnectionDone(long id, long callback) {
@@ -1131,7 +2009,7 @@ public class MakepadActivity
                     if(device.getType() == BluetoothDevice.DEVICE_TYPE_LE){
                         String name =device.getName();
                         bt_names.add(name);
-                        mm.openBluetoothDevice(device, this, new Handler(Looper.getMainLooper()));
+                        mm.openBluetoothDevice(device, this, mHandler);
                     }
                 }
                 // this appears to give you nonworking BLE midi devices. So we skip those by name (not perfect but ok)
@@ -1145,7 +2023,7 @@ public class MakepadActivity
                         }
                     }
                     if(!found){
-                        mm.openDevice(info, this, new Handler(Looper.getMainLooper()));
+                        mm.openDevice(info, this, mHandler);
                     }
                 }
             }
@@ -1171,6 +2049,166 @@ public class MakepadActivity
             String name = info.getProperties().getCharSequence(MidiDeviceInfo.PROPERTY_NAME).toString();
             MakepadNative.onMidiDeviceOpened(name, device);
         }
+    }
+
+    public void attachCameraNativePreview(final long videoId, final int left, final int top, final int right, final int bottom) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mCameraPreviewOverlay == null) {
+                    return;
+                }
+                CameraPreviewSurface preview = mCameraPreviewViews.get(videoId);
+                if (preview == null) {
+                    preview = new CameraPreviewSurface(MakepadActivity.this, videoId);
+                    mCameraPreviewViews.put(videoId, preview);
+                    mCameraPreviewOverlay.addView(preview);
+                }
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    Math.max(1, right - left),
+                    Math.max(1, bottom - top)
+                );
+                lp.leftMargin = left;
+                lp.topMargin = top;
+                preview.setLayoutParams(lp);
+                preview.setVisibility(View.VISIBLE);
+            }
+        });
+    }
+
+    public void updateCameraNativePreview(final long videoId, final int left, final int top, final int right, final int bottom, final boolean visible) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                CameraPreviewSurface preview = mCameraPreviewViews.get(videoId);
+                if (preview == null) {
+                    if (visible) {
+                        attachCameraNativePreview(videoId, left, top, right, bottom);
+                    }
+                    return;
+                }
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    Math.max(1, right - left),
+                    Math.max(1, bottom - top)
+                );
+                lp.leftMargin = left;
+                lp.topMargin = top;
+                preview.setLayoutParams(lp);
+                preview.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
+            }
+        });
+    }
+
+    public void detachCameraNativePreview(final long videoId) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                CameraPreviewSurface preview = mCameraPreviewViews.remove(videoId);
+                if (preview != null && mCameraPreviewOverlay != null) {
+                    mCameraPreviewOverlay.removeView(preview);
+                }
+            }
+        });
+    }
+
+    private static boolean codecLooksSoftware(MediaCodecInfo info) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            if (info.isSoftwareOnly()) return true;
+            if (info.isHardwareAccelerated()) return false;
+        }
+        String name = info.getName().toLowerCase();
+        return name.startsWith("omx.google.") || name.startsWith("c2.android.") || name.contains("sw");
+    }
+
+    private static boolean codecLooksHardware(MediaCodecInfo info) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            if (info.isHardwareAccelerated()) return true;
+            if (info.isSoftwareOnly()) return false;
+        }
+        return !codecLooksSoftware(info);
+    }
+
+    public int[] queryH264CodecSupport() {
+        boolean encHw = false;
+        boolean encSw = false;
+        boolean decHw = false;
+        boolean decSw = false;
+        int maxWidth = 0;
+        int maxHeight = 0;
+        int maxFps = 0;
+        int maxBitrate = 0;
+        int widthAlign = 2;
+        int heightAlign = 2;
+
+        try {
+            MediaCodecList list = new MediaCodecList(MediaCodecList.ALL_CODECS);
+            for (MediaCodecInfo info : list.getCodecInfos()) {
+                String[] types = info.getSupportedTypes();
+                boolean supportsAvc = false;
+                for (String t : types) {
+                    if ("video/avc".equalsIgnoreCase(t)) {
+                        supportsAvc = true;
+                        break;
+                    }
+                }
+                if (!supportsAvc) {
+                    continue;
+                }
+
+                boolean hw = codecLooksHardware(info);
+                boolean sw = codecLooksSoftware(info);
+
+                boolean probeOk = false;
+                MediaCodec codec = null;
+                try {
+                    codec = MediaCodec.createByCodecName(info.getName());
+                    probeOk = codec != null;
+                } catch (Throwable ignored) {
+                    probeOk = false;
+                } finally {
+                    if (codec != null) {
+                        try { codec.release(); } catch (Throwable ignored) {}
+                    }
+                }
+                if (!probeOk) {
+                    continue;
+                }
+
+                try {
+                    MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType("video/avc");
+                    if (caps != null && caps.getVideoCapabilities() != null) {
+                        MediaCodecInfo.VideoCapabilities vc = caps.getVideoCapabilities();
+                        maxWidth = Math.max(maxWidth, vc.getSupportedWidths().getUpper().intValue());
+                        maxHeight = Math.max(maxHeight, vc.getSupportedHeights().getUpper().intValue());
+                        maxBitrate = Math.max(maxBitrate, vc.getBitrateRange().getUpper().intValue());
+                        maxFps = Math.max(maxFps, vc.getSupportedFrameRates().getUpper().intValue());
+                        widthAlign = Math.max(widthAlign, vc.getWidthAlignment());
+                        heightAlign = Math.max(heightAlign, vc.getHeightAlignment());
+                    }
+                } catch (Throwable ignored) {}
+
+                if (info.isEncoder()) {
+                    if (hw) encHw = true;
+                    if (sw) encSw = true;
+                } else {
+                    if (hw) decHw = true;
+                    if (sw) decSw = true;
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        return new int[] {
+            encHw ? 1 : 0,
+            encSw ? 1 : 0,
+            decHw ? 1 : 0,
+            decSw ? 1 : 0,
+            maxWidth,
+            maxHeight,
+            maxFps,
+            maxBitrate,
+            widthAlign,
+            heightAlign,
+        };
     }
 
     public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop) {
@@ -1220,12 +2258,28 @@ public class MakepadActivity
         }
     }
 
+    public void seekVideoPlayback(long videoId, long positionMs) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            runnable.seekToPosition(positionMs);
+        }
+    }
+
+    public long getVideoPlaybackPosition(long videoId) {
+        VideoPlayerRunnable runnable = mVideoPlayerRunnables.get(videoId);
+        if(runnable != null) {
+            return runnable.getCurrentPositionMs();
+        }
+        return 0;
+    }
+
     public void cleanupVideoPlaybackResources(long videoId) {
         VideoPlayerRunnable runnable = mVideoPlayerRunnables.remove(videoId);
         if(runnable != null) {
             runnable.cleanupVideoPlaybackResources();
             runnable = null;
         }
+        detachCameraNativePreview(videoId);
     }
     
                 

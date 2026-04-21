@@ -10,7 +10,6 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 wasm-smith = "0.200.0"
-wasmtime = "19.0.2"
 
 [dependencies.makepad-stitch]
 path = ".."

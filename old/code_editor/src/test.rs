@@ -217,7 +217,7 @@ live_design! {
             text_style: <FONT_CODE> {}
         }
         draw_selection: {
-            draw_depth: 1.0,
+            draw_depth: 0.1,
         }
         draw_cursor: {
             draw_depth: 2.0,
@@ -4235,7 +4235,7 @@ live_design! {
             text_style: <FONT_CODE> {}
         }
         draw_selection: {
-            draw_depth: 1.0,
+            draw_depth: 0.1,
         }
         draw_cursor: {
             draw_depth: 2.0,
@@ -8253,7 +8253,7 @@ live_design! {
             text_style: <FONT_CODE> {}
         }
         draw_selection: {
-            draw_depth: 1.0,
+            draw_depth: 0.1,
         }
         draw_cursor: {
             draw_depth: 2.0,
@@ -12271,7 +12271,7 @@ live_design! {
             text_style: <FONT_CODE> {}
         }
         draw_selection: {
-            draw_depth: 1.0,
+            draw_depth: 0.1,
         }
         draw_cursor: {
             draw_depth: 2.0,
@@ -16289,7 +16289,7 @@ live_design! {
             text_style: <FONT_CODE> {}
         }
         draw_selection: {
-            draw_depth: 1.0,
+            draw_depth: 0.1,
         }
         draw_cursor: {
             draw_depth: 2.0,

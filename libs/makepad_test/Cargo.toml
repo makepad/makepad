@@ -1,0 +1,14 @@
+[package]
+name = "makepad-test"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Rust-native UI test helpers for Makepad apps and examples"
+readme = "README.md"
+
+[dependencies]
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
+makepad-network = { path = "../../platform/network", version = "1.0.0" }
+makepad-studio-hub = { path = "../../studio/hub", version = "0.1.0" }
+makepad-studio-protocol = { path = "../../platform/studio", version = "0.1.0" }
+makepad-test-macros = { path = "./macros", version = "0.1.0" }

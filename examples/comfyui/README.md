@@ -1,25 +1,15 @@
-# Makepad Example: ChatGPT
+# Makepad Example: ComfyUI
 
-A simple example of a Makepad Framework application that uses its network layer to interact with OpenAI's GPT model.
+A Makepad example that uses an OpenAI-compatible LLM to generate image prompts and then submits them to ComfyUI.
 
 ## How to Run
 
-1. Set up your OpenAI API key:
-   - Visit [OpenAI's API Key page](https://platform.openai.com/api-keys) and follow the instructions to create and retrieve your API key.
-   - Note: Using the OpenAI API incurs costs.
+1. Check the hardcoded endpoints in [`src/app.rs`](./src/app.rs):
+   - `llm_base` defaults to `http://10.0.0.217:8080`
+   - `comfy_ip` points at the ComfyUI server
+   - `self_ip` and `displays` should match your local network
 
-2. Configure the API key as an environment variable:
+2. Run the example:
    ```sh
-   export OPENAI_API_KEY=your_openai_api_key
-   ```
-
-   Optionally, you can configure the model and endpoint:
-   ```sh
-   export OPENAI_MODEL=your_desired_model  # default is "gpt-4o"
-   export OPENAI_BASE_URL=your_custom_api_base_url  # default is "https://api.openai.com/v1"
-   ```
-
-3. Run the application:
-   ```sh
-   cargo run
+   cargo run -p makepad-example-comfyui
    ```

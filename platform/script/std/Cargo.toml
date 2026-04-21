@@ -1,0 +1,13 @@
+[package]
+name = "makepad-script-std"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Cx-free standard runtime modules for Makepad script"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-network = { path = "../../network", version = "1.0.0", features = ["script"] }
+makepad-script = { path = "..", version = "1.0.0" }

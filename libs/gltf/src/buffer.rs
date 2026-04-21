@@ -3,6 +3,7 @@ use crate::{
     error::GltfError,
     loader::LoadedGltf,
 };
+use makepad_math::DecodedPrimitive;
 
 pub const GLTF_COMPONENT_TYPE_BYTE: u32 = 5120;
 pub const GLTF_COMPONENT_TYPE_UNSIGNED_BYTE: u32 = 5121;
@@ -10,16 +11,6 @@ pub const GLTF_COMPONENT_TYPE_SHORT: u32 = 5122;
 pub const GLTF_COMPONENT_TYPE_UNSIGNED_SHORT: u32 = 5123;
 pub const GLTF_COMPONENT_TYPE_UNSIGNED_INT: u32 = 5125;
 pub const GLTF_COMPONENT_TYPE_FLOAT: u32 = 5126;
-
-#[derive(Clone, Debug)]
-pub struct DecodedPrimitive {
-    pub positions: Vec<[f32; 3]>,
-    pub normals: Option<Vec<[f32; 3]>>,
-    pub tangents: Option<Vec<[f32; 4]>>,
-    pub texcoords0: Option<Vec<[f32; 2]>>,
-    pub indices: Vec<u32>,
-    pub material: Option<usize>,
-}
 
 pub fn decode_mesh_primitive(
     loaded: &LoadedGltf,
@@ -118,7 +109,10 @@ pub fn decode_mesh_primitive(
     })
 }
 
-pub fn read_accessor_f32x2(loaded: &LoadedGltf, accessor_index: usize) -> Result<Vec<[f32; 2]>, GltfError> {
+pub fn read_accessor_f32x2(
+    loaded: &LoadedGltf,
+    accessor_index: usize,
+) -> Result<Vec<[f32; 2]>, GltfError> {
     let view = AccessorView::new(&loaded.document, &loaded.buffers, accessor_index)?;
     if view.accessor.component_type != GLTF_COMPONENT_TYPE_FLOAT {
         return Err(GltfError::Unsupported(format!(
@@ -141,7 +135,10 @@ pub fn read_accessor_f32x2(loaded: &LoadedGltf, accessor_index: usize) -> Result
     Ok(out)
 }
 
-pub fn read_accessor_f32x3(loaded: &LoadedGltf, accessor_index: usize) -> Result<Vec<[f32; 3]>, GltfError> {
+pub fn read_accessor_f32x3(
+    loaded: &LoadedGltf,
+    accessor_index: usize,
+) -> Result<Vec<[f32; 3]>, GltfError> {
     let view = AccessorView::new(&loaded.document, &loaded.buffers, accessor_index)?;
     if view.accessor.component_type != GLTF_COMPONENT_TYPE_FLOAT {
         return Err(GltfError::Unsupported(format!(
@@ -159,7 +156,11 @@ pub fn read_accessor_f32x3(loaded: &LoadedGltf, accessor_index: usize) -> Result
     let mut out = Vec::with_capacity(view.accessor.count);
     for i in 0..view.accessor.count {
         let item = view.item_bytes(i)?;
-        out.push([read_f32_le(item, 0)?, read_f32_le(item, 4)?, read_f32_le(item, 8)?]);
+        out.push([
+            read_f32_le(item, 0)?,
+            read_f32_le(item, 4)?,
+            read_f32_le(item, 8)?,
+        ]);
     }
     Ok(out)
 }
@@ -278,9 +279,11 @@ impl<'a> AccessorView<'a> {
             ))
         })?;
 
-        let buffer = buffers.get(buffer_view.buffer).ok_or(GltfError::MissingBuffer {
-            index: buffer_view.buffer,
-        })?;
+        let buffer = buffers
+            .get(buffer_view.buffer)
+            .ok_or(GltfError::MissingBuffer {
+                index: buffer_view.buffer,
+            })?;
 
         let component_size = component_type_size(accessor.component_type).ok_or_else(|| {
             GltfError::Unsupported(format!(
@@ -288,12 +291,13 @@ impl<'a> AccessorView<'a> {
                 accessor.component_type
             ))
         })?;
-        let component_count = accessor_component_count(&accessor.accessor_type).ok_or_else(|| {
-            GltfError::Unsupported(format!(
-                "accessor[{accessor_index}] uses unsupported accessor type {}",
-                accessor.accessor_type
-            ))
-        })?;
+        let component_count =
+            accessor_component_count(&accessor.accessor_type).ok_or_else(|| {
+                GltfError::Unsupported(format!(
+                    "accessor[{accessor_index}] uses unsupported accessor type {}",
+                    accessor.accessor_type
+                ))
+            })?;
 
         let element_size = component_size * component_count;
         let stride = buffer_view.byte_stride.unwrap_or(element_size);
@@ -414,11 +418,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn damaged_helmet_path(subpath: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-            format!(
-                "../../examples/gltf/resources/glTF-Sample-Models/2.0/DamagedHelmet/{subpath}"
-            ),
-        )
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../examples/gltf/resources/glTF-Sample-Models/2.0/DamagedHelmet/{subpath}"
+        ))
     }
 
     #[test]

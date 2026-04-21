@@ -95,11 +95,11 @@ use std::string::String;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
-#[cfg(feature = "serde")]
+#[cfg(any(feature = "serde_std", feature = "serde_no_std"))]
 extern crate serde;
-#[cfg(feature = "serde")]
+#[cfg(any(feature = "serde_std", feature = "serde_no_std"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "borsh")]
+#[cfg(feature = "borsh_std")]
 extern crate borsh;
 #[cfg(feature = "miniserde")]
 extern crate miniserde;
@@ -233,9 +233,12 @@ static FALSE: bool = false;
 /// println!("{:?}", bv);
 /// println!("total bits set to true: {}", bv.iter().filter(|x| *x).count());
 /// ```
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(
-    feature = "borsh",
+    any(feature = "serde_std", feature = "serde_no_std"),
+    derive(Serialize, Deserialize)
+)]
+#[cfg_attr(
+    feature = "borsh_std",
     derive(borsh::BorshDeserialize, borsh::BorshSerialize)
 )]
 #[cfg_attr(
@@ -2941,7 +2944,7 @@ mod tests {
         let _a: Iter = b.iter();
     }
 
-    #[cfg(feature = "serde")]
+    #[cfg(any(feature = "serde_std", feature = "serde_no_std"))]
     #[test]
     fn test_serialization() {
         let bit_vec: BitVec = BitVec::new();
@@ -2988,7 +2991,7 @@ mod tests {
         assert_eq!(bit_vec, unserialized);
     }
 
-    #[cfg(feature = "borsh")]
+    #[cfg(feature = "borsh_std")]
     #[test]
     fn test_borsh_serialization() {
         let bit_vec: BitVec = BitVec::new();

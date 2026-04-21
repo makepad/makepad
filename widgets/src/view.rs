@@ -70,7 +70,7 @@ pub struct View {
     #[uid]
     uid: WidgetUid,
     #[source]
-    source: ScriptObjectRef,
+    pub source: ScriptObjectRef,
     // draw info per UI element
     #[live]
     pub draw_bg: DrawQuad,
@@ -109,7 +109,7 @@ pub struct View {
     #[live(false)]
     block_signal_event: bool,
     #[live]
-    cursor: Option<MouseCursor>,
+    pub cursor: Option<MouseCursor>,
     #[live(false)]
     capture_overload: bool,
     #[live]
@@ -168,8 +168,6 @@ impl ScriptHook for View {
     ) {
         if apply.is_reload() {
             self.live_update_order.clear();
-            // TEST: Clear all children to rebuild from scratch
-            self.children.clear();
         }
     }
 
@@ -394,6 +392,12 @@ impl ViewRef {
         }
     }
 
+    pub fn animator_play_with(&self, cx: &mut Cx, state: &[LiveId; 2], play: Play) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.animator_play_with(cx, state, play);
+        }
+    }
+
     pub fn toggle_state(
         &self,
         cx: &mut Cx,
@@ -447,6 +451,15 @@ impl ViewRef {
         }
     }
 
+    pub fn cached_texture_id(&self) -> Option<TextureId> {
+        self.borrow().and_then(|inner| {
+            inner
+                .texture_cache
+                .as_ref()
+                .map(|cache| cache.color_texture.texture_id())
+        })
+    }
+
     pub fn child_count(&self) -> usize {
         if let Some(inner) = self.borrow_mut() {
             inner.children.len()
@@ -472,6 +485,12 @@ impl ViewSet {
     pub fn animator_play(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
             item.animator_play(cx, state);
+        }
+    }
+
+    pub fn animator_play_with(&self, cx: &mut Cx, state: &[LiveId; 2], play: Play) {
+        for item in self.iter() {
+            item.animator_play_with(cx, state, play);
         }
     }
 
@@ -749,10 +768,7 @@ impl Widget for View {
             }
         }
 
-        match event.hit_designer(cx, self.area()) {
-            HitDesigner::DesignerPick(_e) => cx.widget_action(uid, WidgetDesignAction::PickedBody),
-            _ => (),
-        }
+        event.hit_tweak_ray(self.area(), self.widget_uid());
 
         if self.visible && self.cursor.is_some() || self.animator.is_defined {
             match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
@@ -992,6 +1008,20 @@ impl Widget for View {
             }
         }
         DrawStep::done()
+    }
+}
+
+trait EventTweakRayExt {
+    fn hit_tweak_ray(&self, area: Area, widget_uid: WidgetUid);
+}
+
+impl EventTweakRayExt for Event {
+    fn hit_tweak_ray(&self, area: Area, widget_uid: WidgetUid) {
+        if let Event::TweakRay(e) = self {
+            if !area.is_empty() {
+                e.hit_widget_uids.borrow_mut().push(widget_uid.0);
+            }
+        }
     }
 }
 

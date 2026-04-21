@@ -1,6 +1,7 @@
 use {
     crate::{
         animator::AnimatorImpl,
+        event::{TouchState, TAP_COUNT_DISTANCE},
         makepad_derive_widget::*,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
@@ -38,6 +39,11 @@ enum ScrollState {
     Stopped,
     Drag {
         samples: Vec<ScrollSample>,
+        /// The initial touch position along the scroll axis at FingerDown.
+        initial_abs: f64,
+        /// Whether this drag has exceeded the minimum threshold to be treated
+        /// as scroll rather than a tap. Until committed, no scroll deltas are applied.
+        committed: bool,
     },
     Flick {
         delta: f64,
@@ -50,6 +56,9 @@ enum ScrollState {
         target_id: usize,
         delta: f64,
         next_frame: NextFrame,
+        /// Pixel offset from the top of the viewport where the target item's
+        /// top edge should end up once scrolling completes.
+        top_offset: f64,
     },
     Tailing {
         next_frame: NextFrame,
@@ -374,6 +383,22 @@ pub struct PortalList {
     grab_key_focus: bool,
     #[live(true)]
     drag_scrolling: bool,
+    /// The minimum distance (in pixels) a finger/mouse must move before a drag is
+    /// "committed" and treated as a scroll gesture rather than a tap/click.
+    /// This prevents accidental micro-scrolling when tapping interactive items.
+    /// Defaults to `TAP_COUNT_DISTANCE`, keeping it consistent with the
+    /// platform's tap-vs-drag distinction.
+    #[rust(TAP_COUNT_DISTANCE)]
+    drag_scroll_threshold: f64,
+
+    /// Whether the current gesture should be suppressed from child widgets.
+    /// Set when either:
+    /// - A drag scroll commits (finger moves past threshold), or
+    /// - A finger-down/click occurs while a scroll animation was in progress
+    ///   (the tap-to-stop-scroll gesture).
+    /// Cleared on the next finger-down that arrives when not scrolling.
+    #[rust]
+    suppress_child_events: bool,
 
     #[rust]
     first_id: usize,
@@ -424,7 +449,7 @@ pub struct PortalList {
     #[rust]
     items: ComponentMap<usize, WidgetItem>,
     #[rust]
-    reusable_items: Vec<WidgetItem>,
+    reusable_items: HashMap<LiveId, Vec<WidgetItem>>,
 
     #[rust(ScrollState::Stopped)]
     scroll_state: ScrollState,
@@ -527,7 +552,11 @@ impl PortalList {
     }
 
     fn end(&mut self, cx: &mut Cx2d) {
-        self.at_end = false;
+        // Note: we intentionally do NOT reset `at_end` here. It is explicitly
+        // set to true or false in every code path below. If the draw cycle
+        // doesn't reach the calculation (e.g., draw_state isn't End, or list
+        // is empty), we preserve the previous value rather than introducing
+        // a spurious `false` that would cause downstream consumers to flicker.
         self.not_filling_viewport = false;
 
         let vi = self.vec_index;
@@ -547,15 +576,24 @@ impl PortalList {
 
                 let mut last_pos = self.first_scroll;
                 let mut last_item_pos = None;
+                let mut last_drawn_index = None;
                 for i in first_index..list.len() {
                     let item = &list[i];
                     last_pos += item.size.index(vi);
                     if item.index < self.range_end {
                         last_item_pos = Some(last_pos);
+                        last_drawn_index = Some(item.index);
                     } else {
                         break;
                     }
                 }
+                // Whether the very last item in the range was actually drawn.
+                // The draw loop can stop early when it encounters a zero-size
+                // item (e.g., an empty placeholder widget), which would leave
+                // `last_item_pos` far short of the viewport bottom. Without
+                // this guard, `at_end` could become a false positive whenever
+                // a zero-size item appears in the middle of the visible range.
+                let drew_last_item = last_drawn_index == Some(self.range_end.saturating_sub(1));
 
                 if list[0].index == self.range_start {
                     let mut total = 0.0;
@@ -569,6 +607,10 @@ impl PortalList {
                 }
 
                 if list.first().unwrap().index == self.range_start && first_pos > 0.0 {
+                    // We're at the top of the list with a gap above the first item.
+                    // We're also at the end if all content fits in the viewport.
+                    self.at_end = self.not_filling_viewport && drew_last_item;
+
                     let min = if let ScrollState::Stopped = self.scroll_state {
                         0.0
                     } else {
@@ -590,15 +632,19 @@ impl PortalList {
                 } else {
                     let shift = if let Some(last_item_pos) = last_item_pos {
                         if self.align_top_when_empty && self.not_filling_viewport {
+                            // All items fit in the viewport without filling it.
+                            self.at_end = drew_last_item;
                             -first_pos
                         } else {
                             let ret = viewport.size.index(vi) - last_item_pos;
-                            if ret >= 0.0 {
-                                self.at_end = true;
-                            }
+                            // Use a 1px tolerance for floating-point accumulation
+                            // errors across item sizes, and require that the last
+                            // item in the range was actually drawn.
+                            self.at_end = ret >= -1.0 && drew_last_item;
                             ret.max(0.0)
                         }
                     } else {
+                        self.at_end = false;
                         0.0
                     };
 
@@ -753,13 +799,19 @@ impl PortalList {
             self.update_scroll_bar(cx);
         }
 
-        // Keep items when selecting so we can copy text from scrolled-out items
+        // Keep items when selecting so we can copy text from scrolled-out items.
+        // When a selection is active (but drag finished), keep selected items alive
+        // so their selection state persists when scrolled back into view.
         if !self.keep_invisible && !self.is_selecting {
+            let selection_range = self.get_selection_range();
             if self.reuse_items {
                 let reusable_items = &mut self.reusable_items;
-                self.items.retain_visible_with(|v| {
-                    reusable_items.push(v);
+                self.items.retain_visible_with(|v: WidgetItem| {
+                    reusable_items.entry(v.template).or_default().push(v);
                 });
+            } else if let Some((start, end)) = selection_range {
+                self.items
+                    .retain_visible_and(|item_id, _| *item_id >= start.0 && *item_id <= end.0);
             } else {
                 self.items.retain_visible();
             }
@@ -1038,12 +1090,24 @@ impl PortalList {
                     if occ.get().template == template {
                         (occ.get().widget.clone(), true)
                     } else {
-                        let widget_ref = if let Some(pos) = self
+                        let widget_ref = if let Some(reused) = self
                             .reusable_items
-                            .iter()
-                            .position(|v| v.template == template)
+                            .get_mut(&template)
+                            .and_then(|pool| pool.pop())
                         {
-                            self.reusable_items.remove(pos).widget
+                            let widget_ref = reused.widget;
+                            // Reused items must be reset to template defaults, otherwise
+                            // stale instance/animator state (e.g. selected) can leak to a new entry.
+                            cx.with_vm(|vm| {
+                                let mut widget_ref = widget_ref.clone();
+                                widget_ref.script_apply(
+                                    vm,
+                                    &Apply::Reload,
+                                    &mut Scope::empty(),
+                                    template_value,
+                                );
+                            });
+                            widget_ref
                         } else {
                             cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value))
                         };
@@ -1060,12 +1124,24 @@ impl PortalList {
                     }
                 }
                 Entry::Vacant(vac) => {
-                    let widget_ref = if let Some(pos) = self
+                    let widget_ref = if let Some(reused) = self
                         .reusable_items
-                        .iter()
-                        .position(|v| v.template == template)
+                        .get_mut(&template)
+                        .and_then(|pool| pool.pop())
                     {
-                        self.reusable_items.remove(pos).widget
+                        let widget_ref = reused.widget;
+                        // Reused items must be reset to template defaults, otherwise
+                        // stale instance/animator state (e.g. selected) can leak to a new entry.
+                        cx.with_vm(|vm| {
+                            let mut widget_ref = widget_ref.clone();
+                            widget_ref.script_apply(
+                                vm,
+                                &Apply::Reload,
+                                &mut Scope::empty(),
+                                template_value,
+                            );
+                        });
+                        widget_ref
                     } else {
                         cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value))
                     };
@@ -1197,13 +1273,42 @@ impl PortalList {
         self.visible_items
     }
 
-    /// Initiates a smooth scrolling animation to the specified target item in the list.
+    /// Computes the top position of `target_id` relative to the viewport top
+    /// using `first_id`, `first_scroll`, and the height tree.
+    ///
+    /// Returns `None` if the height tree is not yet available (before the first draw).
+    /// A return value of `0.0` means the item's top is exactly at the viewport top;
+    /// negative means it is above the viewport, positive means below.
+    fn item_top_from_height_tree(&self, target_id: usize) -> Option<f64> {
+        let tree = self.height_tree.as_ref()?;
+        let first_idx = self.first_id.saturating_sub(self.range_start);
+        let target_idx = target_id.saturating_sub(self.range_start);
+
+        let prefix = |i: usize| if i > 0 { tree.prefix_sum(i - 1) } else { 0.0 };
+
+        if target_id >= self.first_id {
+            Some(self.first_scroll + prefix(target_idx) - prefix(first_idx))
+        } else {
+            Some(self.first_scroll - (prefix(first_idx) - prefix(target_idx)))
+        }
+    }
+
+    /// Initiates a smooth scrolling animation to the specified target item.
+    ///
+    /// If the target item's top is already visible within the viewport, no scrolling
+    /// occurs and [`PortalListAction::SmoothScrollReached`] is emitted immediately.
+    ///
+    /// Otherwise, the list animates until the target item's top edge is positioned at
+    /// `top_offset` pixels below the viewport's top edge. A value of `0.0` places the
+    /// item flush with the viewport top; `20.0` leaves a 20 px margin. Negative values
+    /// are clamped to `0.0`.
     pub fn smooth_scroll_to(
         &mut self,
         cx: &mut Cx,
         target_id: usize,
         speed: f64,
         max_items_to_show: Option<usize>,
+        top_offset: f64,
     ) {
         if self.items.is_empty() {
             return;
@@ -1212,15 +1317,48 @@ impl PortalList {
             return;
         }
 
+        // Check if the target item's top is already visible in the viewport.
+        // Compute the target's top position relative to viewport using first_id,
+        // first_scroll, and the height_tree — this avoids relying on widget rects
+        // which may be clipped for partially-visible items.
+        let vi = self.vec_index;
+        let viewport_size = self.area.rect(cx).size.index(vi);
+        let item_top = self.item_top_from_height_tree(target_id);
+        if viewport_size > 0.0 {
+            if let Some(item_top) = item_top {
+                if item_top >= 0.0 && item_top < viewport_size {
+                    cx.widget_action(self.widget_uid(), PortalListAction::SmoothScrollReached);
+                    return;
+                }
+            }
+        }
+
         let max_items_to_show = max_items_to_show.unwrap_or(SMOOTH_SCROLL_MAXIMUM_WINDOW);
-        let scroll_direction: f64;
+
+        // Determine scroll direction from the item's actual pixel position
+        // relative to the viewport, not from index comparison alone.
+        // When first_scroll is very negative, items with target_id > first_id
+        // can still be above the viewport.
+        let scroll_direction: f64 = if let Some(item_top) = item_top {
+            if item_top < 0.0 {
+                1.0
+            } else {
+                -1.0
+            }
+        } else {
+            // Height tree unavailable; fall back to index comparison.
+            if target_id > self.first_id {
+                -1.0
+            } else {
+                1.0
+            }
+        };
+
         let starting_id: Option<usize>;
         if target_id > self.first_id {
-            scroll_direction = -1.0;
             starting_id = ((target_id.saturating_sub(self.first_id)) > max_items_to_show)
                 .then_some(target_id.saturating_sub(max_items_to_show));
         } else {
-            scroll_direction = 1.0;
             starting_id = ((self.first_id.saturating_sub(target_id)) > max_items_to_show)
                 .then_some(target_id + max_items_to_show);
         }
@@ -1232,6 +1370,7 @@ impl PortalList {
             target_id,
             delta: speed.abs() * scroll_direction,
             next_frame: cx.new_next_frame(),
+            top_offset,
         };
     }
 
@@ -1246,7 +1385,7 @@ impl PortalList {
             return;
         }
         let speed = speed * self.range_end as f64;
-        self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show);
+        self.smooth_scroll_to(cx, self.range_end, speed, max_items_to_show, 0.0);
     }
 
     /// Returns whether this PortalList is currently filling the viewport.
@@ -1295,6 +1434,7 @@ impl PortalList {
         for item in self.items.values() {
             item.widget.selection_clear();
         }
+        cx.hide_clipboard_actions();
         self.area.redraw(cx);
     }
 
@@ -1303,7 +1443,6 @@ impl PortalList {
     fn hit_test_selection(&self, cx: &Cx, abs: DVec2) -> Option<(usize, usize)> {
         let vi = self.vec_index;
         let mouse_pos = abs.index(vi);
-
         if self.items.is_empty() {
             return None;
         }
@@ -1362,7 +1501,6 @@ impl PortalList {
                 }
             }
         }
-
         // Mouse is inside viewport but not in any item (gap between items or empty space)
         // Find the closest item boundary and snap to it
 
@@ -1460,6 +1598,50 @@ impl PortalList {
         result
     }
 
+    fn selection_clipboard_rect(&self, cx: &Cx) -> Rect {
+        let Some((start, end)) = self.get_selection_range() else {
+            return self.area.rect(cx);
+        };
+
+        let mut out: Option<Rect> = None;
+        for item_id in start.0..=end.0 {
+            if let Some(item) = self.items.get(&item_id) {
+                let rect = item.widget.area().rect(cx);
+                if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+                    continue;
+                }
+                out = Some(if let Some(acc) = out {
+                    let x0 = acc.pos.x.min(rect.pos.x);
+                    let y0 = acc.pos.y.min(rect.pos.y);
+                    let x1 = (acc.pos.x + acc.size.x).max(rect.pos.x + rect.size.x);
+                    let y1 = (acc.pos.y + acc.size.y).max(rect.pos.y + rect.size.y);
+                    Rect {
+                        pos: dvec2(x0, y0),
+                        size: dvec2((x1 - x0).max(1.0), (y1 - y0).max(1.0)),
+                    }
+                } else {
+                    rect
+                });
+            }
+        }
+
+        out.unwrap_or_else(|| self.area.rect(cx))
+    }
+
+    fn select_all_visible(&mut self, cx: &mut Cx) {
+        let Some((&first_id, _)) = self.items.iter().min_by_key(|(id, _)| *id) else {
+            return;
+        };
+        let Some((&last_id, last_item)) = self.items.iter().max_by_key(|(id, _)| *id) else {
+            return;
+        };
+
+        self.selection_anchor = Some((first_id, 0));
+        self.selection_cursor = Some((last_id, last_item.widget.selection_text_len()));
+        self.update_item_selections(cx);
+        self.area.redraw(cx);
+    }
+
     /// Update selection visuals on TextFlow items based on current selection state
     fn update_item_selections(&mut self, cx: &mut Cx) {
         let Some((start, end)) = self.get_selection_range() else {
@@ -1544,6 +1726,25 @@ impl Widget for PortalList {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
 
+        // Selection autoscroll is driven by next-frame ticks. If pointer-up happens outside
+        // hit testing, selection can get "stuck" and keep scheduling frames. Clear it on
+        // global release/wheel-without-button as a safety net.
+        if self.is_selecting {
+            let clear_selection_autoscroll = match event {
+                Event::MouseUp(_) => true,
+                Event::TouchUpdate(e) => e
+                    .touches
+                    .iter()
+                    .any(|touch| matches!(touch.state, TouchState::Stop | TouchState::Stable)),
+                Event::Scroll(_) => cx.fingers.first_mouse_button.is_none(),
+                _ => false,
+            };
+            if clear_selection_autoscroll {
+                self.is_selecting = false;
+                self.select_scroll_state = None;
+            }
+        }
+
         let mut scroll_to = None;
         self.scroll_bar
             .handle_event_with(cx, event, &mut |_cx, action| {
@@ -1586,7 +1787,38 @@ impl Widget for PortalList {
         // Hover events (FingerHoverIn/Out/Over) are ALWAYS passed through so interactive items
         // can properly show/hide their hover states.
         let mut pass_through_to_children = true;
-        if self.selectable {
+
+        // Suppress all interaction events to children when:
+        // - A committed drag scroll is active (finger/mouse moved past threshold), or
+        // - The current gesture started as a tap-to-stop-scroll (user tapped while
+        //   a flick animation was in progress).
+        // Hover events are not suppressed so widgets can still update their hover state.
+        //
+        // For down events (MouseDown/TouchStart), we also check whether the scroll
+        // is currently animating. This is needed because `suppress_child_events` is
+        // set in hit processing which runs *after* child event forwarding.
+        let is_scroll_animating = matches!(
+            self.scroll_state,
+            ScrollState::Flick { .. }
+                | ScrollState::Pulldown { .. }
+                | ScrollState::ScrollingTo { .. }
+                | ScrollState::Tailing { .. }
+        );
+        if self.suppress_child_events || is_scroll_animating {
+            match event {
+                Event::TouchUpdate(_)
+                | Event::MouseDown(_)
+                | Event::MouseMove(_)
+                | Event::MouseUp(_) => {
+                    pass_through_to_children = false;
+                }
+                _ => {}
+            }
+        }
+
+        // The selectable logic can only further restrict pass-through, never override
+        // the drag-scroll suppression above.
+        if self.selectable && pass_through_to_children {
             match event {
                 // Always pass hover events through for proper hover state management
                 Event::MouseMove(_) => {
@@ -1670,25 +1902,63 @@ impl Widget for PortalList {
                 target_id,
                 delta,
                 next_frame,
+                top_offset,
             } => {
                 if next_frame.is_event(event).is_some() {
+                    // Copy values out of the borrow so we can call &self methods.
                     let target_id = *target_id;
+                    let delta_val = *delta;
+                    let top_offset = *top_offset;
+                    let scrolling_down = delta_val < 0.0;
 
-                    let distance_to_target = target_id as isize - self.first_id as isize;
-                    let target_passed = distance_to_target.signum() == delta.signum() as isize;
-                    if target_passed {
-                        self.first_id = target_id;
-                        self.area.redraw(cx);
+                    // Check if the target item has reached (or passed) the
+                    // desired position using the height tree for accuracy.
+                    let vi = self.vec_index;
+                    let viewport_size = self.area.rect(cx).size.index(vi);
+                    let item_top = self.item_top_from_height_tree(target_id);
+                    let mut target_reached = false;
+
+                    if let Some(item_top) = item_top {
+                        // Clamp: the item must at least reach the viewport (top >= 0).
+                        let effective_target = top_offset.max(0.0);
+                        if scrolling_down {
+                            target_reached = item_top <= effective_target;
+                        } else {
+                            target_reached = item_top >= effective_target;
+                        }
+
+                        // For boundary conditions (e.g., near list start/end), the
+                        // effective_target may not be reachable. Consider it reached
+                        // if the item's top is visible and we're at a list boundary.
+                        if !target_reached
+                            && item_top >= 0.0
+                            && item_top < viewport_size
+                            && (self.first_id == self.range_start || self.at_end)
+                        {
+                            target_reached = true;
+                        }
                     }
 
-                    let distance_to_target = target_id as isize - self.first_id as isize;
-                    let target_visible_at_end = self.at_end && target_id > self.first_id;
-                    let target_reached = distance_to_target == 0 || target_visible_at_end;
+                    // Fallback: if we're scrolling down and the list has hit
+                    // the end, the target is as visible as it can get.
+                    if scrolling_down && self.at_end && target_id > self.first_id {
+                        target_reached = true;
+                    }
 
                     if !target_reached {
-                        *next_frame = cx.new_next_frame();
-                        let delta = *delta;
-                        self.delta_top_scroll(cx, delta, true, false);
+                        // Overshoot protection: if first_id has scrolled past
+                        // target_id, snap it back so the item gets drawn.
+                        let distance_to_target = target_id as isize - self.first_id as isize;
+                        let overshot = distance_to_target.signum() == delta_val.signum() as isize;
+                        if overshot {
+                            self.first_id = target_id;
+                        }
+
+                        if let ScrollState::ScrollingTo { next_frame, .. } = &mut self.scroll_state
+                        {
+                            *next_frame = cx.new_next_frame();
+                        }
+                        self.delta_top_scroll(cx, delta_val, true, false);
                         cx.widget_action(uid, PortalListAction::Scroll);
                         self.area.redraw(cx);
                     } else {
@@ -1803,6 +2073,12 @@ impl Widget for PortalList {
                     // For mouse wheel: clip to top and don't transition to pulldown
                     // (pulldown/overscroll is only for touch drag/flick)
                     self.delta_top_scroll(cx, -e.scroll.index(vi), true, false);
+                    // Note: we intentionally do NOT reset `at_end` here.
+                    // `at_end` is authoritatively recalculated each draw cycle
+                    // in `end()`, and the redraw is already triggered below.
+                    // Eagerly resetting it here would create a stale `false` value
+                    // visible to any code that checks `is_at_end()` in response
+                    // to the Scroll action before the next draw completes.
                     cx.widget_action(uid, PortalListAction::Scroll);
                     self.area.redraw(cx);
                 }
@@ -1862,6 +2138,13 @@ impl Widget for PortalList {
                             self.update_scroll_bar(cx);
                         }
                     }
+                    KeyCode::KeyA => {
+                        if self.selectable && ke.modifiers.is_primary() {
+                            self.select_all_visible(cx);
+                            let selection_rect = self.selection_clipboard_rect(cx);
+                            cx.show_clipboard_actions(true, selection_rect, cx.keyboard_shift);
+                        }
+                    }
                     _ => (),
                 },
                 Hit::FingerDown(fe) => {
@@ -1870,10 +2153,16 @@ impl Widget for PortalList {
                     }
                     self.tail_range = false;
                     self.was_scrolling = match &self.scroll_state {
-                        ScrollState::Drag { samples } => samples.len() > 1,
+                        ScrollState::Drag { samples, .. } => samples.len() > 1,
                         ScrollState::Stopped => false,
                         _ => true,
                     };
+
+                    // If the list was animating (flick, pulldown, etc.) when the user
+                    // tapped/clicked, suppress forwarding this entire gesture to children.
+                    // The tap should only stop the scroll, not activate a child widget.
+                    // If the list was NOT scrolling, clear any previous suppression.
+                    self.suppress_child_events = self.was_scrolling;
 
                     // Handle selection when selectable, but not if clicking on interactive items
                     let on_interactive = self.point_hits_interactive_item(cx, fe.abs);
@@ -1881,6 +2170,9 @@ impl Widget for PortalList {
                         let hit = self.hit_test_selection(cx, fe.abs);
                         if let Some((item_id, char_idx)) = hit {
                             cx.set_key_focus(self.area);
+                            if fe.device.is_touch() {
+                                cx.hide_clipboard_actions();
+                            }
                             self.selection_anchor = Some((item_id, char_idx));
                             self.selection_cursor = Some((item_id, char_idx));
                             self.is_selecting = true;
@@ -1890,12 +2182,23 @@ impl Widget for PortalList {
                             });
                             self.update_item_selections(cx);
                         }
-                    } else if self.drag_scrolling && fe.is_primary_hit() && !on_interactive {
+                    } else if self.drag_scrolling && fe.is_primary_hit() {
+                        // Always enter drag state to enable drag-to-scroll even over
+                        // interactive widgets (buttons, links, etc.). The drag threshold
+                        // prevents micro-scrolling during taps/clicks, and child widgets
+                        // use `was_tap()` to distinguish taps from drags on FingerUp.
+                        let initial = fe.abs.index(vi);
                         self.scroll_state = ScrollState::Drag {
                             samples: vec![ScrollSample {
-                                abs: fe.abs.index(vi),
+                                abs: initial,
                                 time: fe.time,
                             }],
+                            initial_abs: initial,
+                            // When on interactive items, require a drag threshold before
+                            // committing to scroll (for both touch and mouse).
+                            // For non-interactive areas, commit immediately since
+                            // there's no ambiguity.
+                            committed: !on_interactive,
                         };
                     }
                 }
@@ -1916,12 +2219,38 @@ impl Widget for PortalList {
                             self.update_item_selections(cx);
                         }
                     } else {
-                        // Don't override cursor when over interactive items (they set their own)
-                        if !self.point_hits_interactive_item(cx, e.abs) {
+                        // Only update cursor for mouse — skip the expensive
+                        // interactive-widget hit test for touch events entirely.
+                        if !e.device.is_touch() && !self.point_hits_interactive_item(cx, e.abs) {
                             cx.set_cursor(MouseCursor::Default);
                         }
-                        if let ScrollState::Drag { samples } = &mut self.scroll_state {
+                        if let ScrollState::Drag {
+                            samples,
+                            initial_abs,
+                            committed,
+                        } = &mut self.scroll_state
+                        {
                             let new_abs = e.abs.index(vi);
+
+                            // Check if the drag threshold has been exceeded.
+                            if !*committed {
+                                if (new_abs - *initial_abs).abs() >= self.drag_scroll_threshold {
+                                    *committed = true;
+                                    self.suppress_child_events = true;
+                                } else {
+                                    // Still under threshold — track samples but don't scroll.
+                                    samples.push(ScrollSample {
+                                        abs: new_abs,
+                                        time: e.time,
+                                    });
+                                    if samples.len() > 4 {
+                                        samples.remove(0);
+                                    }
+                                    // Don't apply scroll delta yet.
+                                    return;
+                                }
+                            }
+
                             let old_sample = *samples.last().unwrap();
                             samples.push(ScrollSample {
                                 abs: new_abs,
@@ -1942,36 +2271,59 @@ impl Widget for PortalList {
                         self.select_scroll_state = None;
                     }
 
-                    if let ScrollState::Drag { samples } = &mut self.scroll_state {
-                        let mut last = None;
-                        let mut scaled_delta = 0.0;
-                        let mut total_delta = 0.0;
-                        for sample in samples.iter().rev() {
-                            if last.is_none() {
-                                last = Some(sample);
-                            } else {
-                                total_delta += last.unwrap().abs - sample.abs;
-                                scaled_delta += (last.unwrap().abs - sample.abs)
-                                    / (last.unwrap().time - sample.time);
-                            }
-                        }
-                        scaled_delta *= self.flick_scroll_scaling;
-                        if self.first_id == self.range_start && self.first_scroll > 0.0 {
-                            self.scroll_state = ScrollState::Pulldown {
-                                next_frame: cx.new_next_frame(),
-                            };
-                        } else if total_delta.abs() > 10.0
-                            && scaled_delta.abs() > self.flick_scroll_minimum
-                        {
-                            self.scroll_state = ScrollState::Flick {
-                                delta: scaled_delta
-                                    .min(self.flick_scroll_maximum)
-                                    .max(-self.flick_scroll_maximum),
-                                next_frame: cx.new_next_frame(),
-                            };
+                    if self.selectable && fe.device.is_touch() {
+                        let has_selection = self.has_selection();
+                        if has_selection {
+                            let selection_rect = self.selection_clipboard_rect(cx);
+                            cx.show_clipboard_actions(true, selection_rect, cx.keyboard_shift);
                         } else {
+                            cx.hide_clipboard_actions();
+                        }
+                    }
+
+                    // Always clear touch drag scrolling active flag on finger up.
+                    self.suppress_child_events = false;
+
+                    if let ScrollState::Drag {
+                        samples, committed, ..
+                    } = &mut self.scroll_state
+                    {
+                        // If the drag was never committed (finger didn't move past
+                        // threshold), just stop — this was a tap, not a scroll.
+                        if !*committed {
                             self.was_scrolling = false;
                             self.scroll_state = ScrollState::Stopped;
+                        } else {
+                            let mut last = None;
+                            let mut scaled_delta = 0.0;
+                            let mut total_delta = 0.0;
+                            for sample in samples.iter().rev() {
+                                if last.is_none() {
+                                    last = Some(sample);
+                                } else {
+                                    total_delta += last.unwrap().abs - sample.abs;
+                                    scaled_delta += (last.unwrap().abs - sample.abs)
+                                        / (last.unwrap().time - sample.time);
+                                }
+                            }
+                            scaled_delta *= self.flick_scroll_scaling;
+                            if self.first_id == self.range_start && self.first_scroll > 0.0 {
+                                self.scroll_state = ScrollState::Pulldown {
+                                    next_frame: cx.new_next_frame(),
+                                };
+                            } else if total_delta.abs() > 10.0
+                                && scaled_delta.abs() > self.flick_scroll_minimum
+                            {
+                                self.scroll_state = ScrollState::Flick {
+                                    delta: scaled_delta
+                                        .min(self.flick_scroll_maximum)
+                                        .max(-self.flick_scroll_maximum),
+                                    next_frame: cx.new_next_frame(),
+                                };
+                            } else {
+                                self.was_scrolling = false;
+                                self.scroll_state = ScrollState::Stopped;
+                            }
                         }
                     }
                 }
@@ -1991,6 +2343,15 @@ impl Widget for PortalList {
                 }
                 Hit::TextCopy(tc) => {
                     // Handle copy when selectable
+                    if self.selectable && self.has_selection() {
+                        let text = self.get_selected_text();
+                        if !text.is_empty() {
+                            *tc.response.borrow_mut() = Some(text);
+                        }
+                    }
+                }
+                Hit::TextCut(tc) => {
+                    // Non-editable text: treat cut as copy.
                     if self.selectable && self.has_selection() {
                         let text = self.get_selected_text();
                         if !text.is_empty() {
@@ -2085,6 +2446,74 @@ impl PortalListRef {
         inner.first_scroll
     }
 
+    /// Returns a compact debug line with the current animated scroll state.
+    pub fn debug_scroll_state_line(&self) -> String {
+        let Some(inner) = self.borrow() else {
+            return "state=detached".to_string();
+        };
+
+        let mut state = "Stopped";
+        let mut delta = 0.0;
+        let mut velocity = 0.0;
+        let mut target_id: Option<usize> = None;
+        let mut drag_samples = 0usize;
+
+        match &inner.scroll_state {
+            ScrollState::Stopped => {}
+            ScrollState::Drag { samples, .. } => {
+                state = "Drag";
+                drag_samples = samples.len();
+            }
+            ScrollState::Flick { delta: d, .. } => {
+                state = "Flick";
+                delta = *d;
+            }
+            ScrollState::Pulldown { .. } => {
+                state = "Pulldown";
+            }
+            ScrollState::ScrollingTo {
+                target_id: tid,
+                delta: d,
+                ..
+            } => {
+                state = "ScrollingTo";
+                target_id = Some(*tid);
+                delta = *d;
+            }
+            ScrollState::Tailing { velocity: v, .. } => {
+                state = "Tailing";
+                velocity = *v;
+            }
+        }
+
+        let bar_pos = inner.scroll_bar.get_scroll_pos();
+        let bar_total = inner.scroll_bar.get_scroll_view_total();
+        let bar_visible = inner.scroll_bar.get_scroll_view_visible();
+
+        format!(
+            "state={} first_id={} first_scroll={:.2} delta={:.2} velocity={:.2} target={:?} drag_samples={} tail_range={} tail_adjust={:.2} at_end={} not_fill={} auto_tail={} smooth_tail={} select_auto={} was_scrolling={} detect_tail={} bar={:.2}/{:.2} vis={:.2}",
+            state,
+            inner.first_id,
+            inner.first_scroll,
+            delta,
+            velocity,
+            target_id,
+            drag_samples,
+            inner.tail_range,
+            inner.tail_adjustment_needed,
+            inner.at_end,
+            inner.not_filling_viewport,
+            inner.auto_tail,
+            inner.smooth_tail,
+            inner.select_scroll_state.is_some(),
+            inner.was_scrolling,
+            inner.detect_tail_in_draw,
+            bar_pos,
+            bar_total,
+            bar_visible
+        )
+    }
+
     /// See [`PortalList::item()`].
     pub fn item(&self, cx: &mut Cx, entry_id: usize, template: LiveId) -> WidgetRef {
         if let Some(mut inner) = self.borrow_mut() {
@@ -2162,18 +2591,21 @@ impl PortalListRef {
         false
     }
 
-    /// Initiates a smooth scrolling animation to the specified target item in the list.
+    /// Initiates a smooth scrolling animation to the specified target item.
+    ///
+    /// See [`PortalList::smooth_scroll_to()`] for full documentation.
     pub fn smooth_scroll_to(
         &self,
         cx: &mut Cx,
         target_id: usize,
         speed: f64,
         max_items_to_show: Option<usize>,
+        top_offset: f64,
     ) {
         let Some(mut inner) = self.borrow_mut() else {
             return;
         };
-        inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show);
+        inner.smooth_scroll_to(cx, target_id, speed, max_items_to_show, top_offset);
     }
 
     /// Returns the ID of the item that is currently being smoothly scrolled to, if any.

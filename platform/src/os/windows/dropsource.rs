@@ -3,13 +3,11 @@
 #![allow(non_camel_case_types)]
 use crate::{
     windows::core::{self as wcore, BOOL},
-    windows::{
-        Win32::{
-            Foundation::{DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK},
-            System::{
-                Ole::{IDropSource, IDropSource_Impl, DROPEFFECT},
-                SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
-            },
+    windows::Win32::{
+        Foundation::{DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK},
+        System::{
+            Ole::{IDropSource, IDropSource_Impl, DROPEFFECT},
+            SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
         },
     },
 };

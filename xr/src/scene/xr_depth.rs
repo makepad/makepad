@@ -1,0 +1,681 @@
+#![allow(dead_code)]
+
+use super::xr_physics::{makepad_pose, DepthQuerySource, RapierScene};
+use super::*;
+use crate::algorithms::tsdf_query::{
+    depth_query_might_need_impact_refresh, depth_query_plane_supports_body, evaluate_tsdf_query,
+    DepthQuery, DepthQueryCollider, DepthQueryColliderGeometry, DepthQueryColliderRole,
+    DepthQueryHit, DepthQueryResult, DepthQuerySupportPlane,
+};
+use crate::util::depth_debug_mesh::{push_debug_depth_plane, DebugDepthMeshChunk};
+use crate::util::depth_debug_mesh_worker::{
+    XrDepthDebugMeshVisibleSet, XrDepthDebugMeshWorker, XrDepthDebugMeshWorkerResult,
+};
+use makepad_widgets::makepad_platform::{TsdfPublishedSnapshot, XrTsdfStore};
+
+#[derive(Clone, Copy)]
+pub(super) struct DepthSurfaceMeshChunkHandle {
+    geometry_id: GeometryId,
+    fingerprint: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DepthQuerySurfaceCollider {
+    pub(super) collider: ColliderHandle,
+    pub(super) fingerprint: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DepthQuerySurfaceTarget {
+    pub(super) collider: DepthQueryCollider,
+}
+
+#[derive(Clone)]
+struct RetainedDepthQuerySurface {
+    target: DepthQuerySurfaceTarget,
+    misses_left: u8,
+}
+
+fn depth_query_plane_edge_slack(plane: DepthQuerySupportPlane, body_position: Vec3f) -> f32 {
+    let offset = body_position - plane.point;
+    let tangent_slack = plane.half_extent_tangent - offset.dot(plane.tangent).abs();
+    let bitangent_slack = plane.half_extent_bitangent - offset.dot(plane.bitangent).abs();
+    tangent_slack.min(bitangent_slack)
+}
+
+fn depth_query_support_refresh_edge_margin(query_radius: f32) -> f32 {
+    (query_radius * XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_SCALE).clamp(
+        XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_MIN,
+        XR_DEPTH_QUERY_SUPPORT_REFRESH_EDGE_MARGIN_MAX,
+    )
+}
+
+fn depth_query_support_refresh_margin_scale(body_speed: f32) -> f32 {
+    (body_speed / XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN).clamp(0.25, 1.0)
+}
+
+fn depth_query_should_refresh_from_tsdf(
+    body_sleeping: bool,
+    can_skip_support_refresh: bool,
+    body_speed: f32,
+    needs_impact_refresh: bool,
+) -> bool {
+    !body_sleeping
+        && (!can_skip_support_refresh
+            || needs_impact_refresh
+            || body_speed >= XR_DEPTH_QUERY_SUPPORT_REFRESH_SPEED_MIN)
+}
+
+impl RetainedDepthQuerySurface {
+    fn sticky_supports(&self, body_position: Vec3f, query_radius: f32) -> bool {
+        if self.target.collider.role != DepthQueryColliderRole::Support {
+            return false;
+        }
+        let DepthQueryColliderGeometry::HalfSpace(plane) = self.target.collider.geometry;
+        depth_query_plane_supports_body(
+            plane,
+            body_position,
+            query_radius,
+            XR_DEPTH_QUERY_STICKY_KEEP_MARGIN,
+        )
+    }
+
+    fn safely_supports(&self, body_position: Vec3f, query_radius: f32, edge_margin: f32) -> bool {
+        if self.target.collider.role != DepthQueryColliderRole::Support {
+            return false;
+        }
+        let DepthQueryColliderGeometry::HalfSpace(plane) = self.target.collider.geometry;
+        depth_query_plane_supports_body(plane, body_position, query_radius, 0.0)
+            && depth_query_plane_edge_slack(plane, body_position) > edge_margin
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct RetainedDepthQueryHit {
+    surfaces: [Option<RetainedDepthQuerySurface>; XR_DEPTH_QUERY_SURFACES_PER_PROBE],
+}
+
+impl RetainedDepthQueryHit {
+    fn new(hit: &DepthQueryHit) -> Self {
+        let mut retained = Self {
+            surfaces: std::array::from_fn(|_| None),
+        };
+        retained.refresh_from_hit(hit);
+        retained
+    }
+
+    fn refresh_from_hit(&mut self, hit: &DepthQueryHit) {
+        let mut matched = [false; XR_DEPTH_QUERY_SURFACES_PER_PROBE];
+        self.absorb_surface(
+            DepthQuerySurfaceTarget {
+                collider: hit.collider.clone(),
+            },
+            true,
+            &mut matched,
+        );
+        for additional_hit in &hit.additional_hits {
+            self.absorb_surface(
+                DepthQuerySurfaceTarget {
+                    collider: additional_hit.collider.clone(),
+                },
+                true,
+                &mut matched,
+            );
+        }
+        for (index, slot) in self.surfaces.iter_mut().enumerate() {
+            if matched[index] {
+                continue;
+            }
+            if let Some(retained) = slot.as_mut() {
+                if retained.misses_left > 0 {
+                    retained.misses_left -= 1;
+                } else {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
+    fn absorb_surface(
+        &mut self,
+        target: DepthQuerySurfaceTarget,
+        allow_replace: bool,
+        matched: &mut [bool; XR_DEPTH_QUERY_SURFACES_PER_PROBE],
+    ) {
+        let misses_left = match target.collider.role {
+            DepthQueryColliderRole::Support => XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES,
+            DepthQueryColliderRole::Impact => 0,
+        };
+        let retained_surface = RetainedDepthQuerySurface {
+            target,
+            misses_left,
+        };
+
+        if let Some(index) = self.surfaces.iter().position(|slot| {
+            slot.as_ref().is_some_and(|existing| {
+                existing.target.collider.fingerprint == retained_surface.target.collider.fingerprint
+            })
+        }) {
+            self.surfaces[index] = Some(retained_surface);
+            matched[index] = true;
+            return;
+        }
+
+        if let Some(index) = self.surfaces.iter().position(Option::is_none) {
+            self.surfaces[index] = Some(retained_surface);
+            matched[index] = true;
+            return;
+        }
+
+        if !allow_replace {
+            return;
+        }
+
+        if let Some((index, _)) = self
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !matched[*index])
+            .filter_map(|(index, slot)| slot.as_ref().map(|retained| (index, retained.misses_left)))
+            .min_by_key(|(_, misses_left)| *misses_left)
+        {
+            self.surfaces[index] = Some(retained_surface);
+            matched[index] = true;
+        }
+    }
+
+    fn age_on_miss_with_sticky_support(&mut self, body_position: Vec3f, query_radius: f32) -> bool {
+        let mut any_alive = false;
+        for slot in &mut self.surfaces {
+            if let Some(retained) = slot.as_mut() {
+                if retained.sticky_supports(body_position, query_radius) {
+                    retained.misses_left = XR_DEPTH_QUERY_HIT_MISS_GRACE_FRAMES;
+                    any_alive = true;
+                    continue;
+                }
+                if retained.misses_left > 0 {
+                    retained.misses_left -= 1;
+                    any_alive = true;
+                } else {
+                    *slot = None;
+                }
+            }
+        }
+        any_alive
+    }
+
+    fn fill_targets(
+        &self,
+        targets: &mut [Option<DepthQuerySurfaceTarget>; XR_DEPTH_QUERY_SURFACES_PER_PROBE],
+    ) {
+        *targets = std::array::from_fn(|_| None);
+        for (index, retained) in self.surfaces.iter().enumerate() {
+            targets[index] = retained.as_ref().map(|retained| retained.target.clone());
+        }
+    }
+
+    fn can_skip_refresh(
+        &self,
+        body_position: Vec3f,
+        predicted_body_position: Vec3f,
+        query_radius: f32,
+        body_speed: f32,
+    ) -> bool {
+        let edge_margin = depth_query_support_refresh_edge_margin(query_radius)
+            * depth_query_support_refresh_margin_scale(body_speed);
+        self.surfaces.iter().any(|slot| {
+            slot.as_ref().is_some_and(|retained| {
+                retained.safely_supports(body_position, query_radius, edge_margin)
+                    && retained.safely_supports(predicted_body_position, query_radius, edge_margin)
+            })
+        })
+    }
+
+    fn retained_surfaces(&self) -> impl Iterator<Item = &RetainedDepthQuerySurface> + '_ {
+        self.surfaces.iter().filter_map(Option::as_ref)
+    }
+}
+
+#[cfg(test)]
+include!("../tests/scene/xr_depth.rs");
+
+impl XrEnv {
+    pub(super) fn depth_debug_enabled(&self) -> bool {
+        self.depth_mesh_visible() || self.depth_query_hits_visible()
+    }
+
+    fn sync_retained_depth_query_result(
+        retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
+        key: u64,
+        latest_result: Option<DepthQueryResult>,
+        body_position: Vec3f,
+        query_radius: f32,
+        expired_retained_keys: &mut Vec<u64>,
+    ) {
+        match latest_result {
+            Some(DepthQueryResult::Hit(hit)) => {
+                if let Some(retained) = retained_hits.get_mut(&key) {
+                    retained.refresh_from_hit(&hit);
+                } else {
+                    retained_hits.insert(key, RetainedDepthQueryHit::new(&hit));
+                }
+            }
+            Some(DepthQueryResult::Miss { .. }) | None => {
+                if let Some(retained) = retained_hits.get_mut(&key) {
+                    if !retained.age_on_miss_with_sticky_support(body_position, query_radius) {
+                        expired_retained_keys.push(key);
+                    }
+                }
+            }
+        }
+    }
+
+    fn build_depth_query_request(
+        key: u64,
+        pose: Pose,
+        velocity: Vec3f,
+        gravity: Vec3f,
+        query_radius: f32,
+    ) -> DepthQuery {
+        let speed = velocity.length();
+        let lookahead_seconds = if speed > 1.0e-6 {
+            XR_DEPTH_QUERY_LOOKAHEAD_SECONDS.min(XR_DEPTH_QUERY_MAX_LOOKAHEAD_DISTANCE / speed)
+        } else {
+            XR_DEPTH_QUERY_LOOKAHEAD_SECONDS
+        };
+        let lookahead = velocity.scale(lookahead_seconds)
+            + gravity.scale(0.5 * lookahead_seconds * lookahead_seconds);
+        DepthQuery {
+            key,
+            center: pose.position,
+            predicted_center: pose.position + lookahead,
+            velocity,
+            radius: query_radius.max(0.0005),
+            max_distance: XR_DEPTH_QUERY_MAX_DISTANCE,
+        }
+    }
+
+    fn sync_depth_query_source(
+        retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
+        scene: &mut RapierScene,
+        source: DepthQuerySource,
+        snapshot: Option<&TsdfPublishedSnapshot>,
+        clear_keys: &mut Vec<u64>,
+        expired_retained_keys: &mut Vec<u64>,
+    ) {
+        let key = RapierScene::depth_query_key(source.set_index);
+        let Some(body) = scene.bodies.get(source.body) else {
+            clear_keys.push(key);
+            return;
+        };
+        if !body.is_enabled() {
+            scene.sync_depth_query_surface_set(source.set_index, &std::array::from_fn(|_| None));
+            clear_keys.push(key);
+            return;
+        }
+        let body_sleeping = body.is_sleeping();
+        let body_pose = makepad_pose(body.position());
+        let linvel = body.linvel();
+        let body_velocity = vec3f(linvel.x, linvel.y, linvel.z);
+        let gravity = scene.gravity_vector();
+
+        let query_request = XrEnv::build_depth_query_request(
+            key,
+            body_pose,
+            body_velocity,
+            gravity,
+            source.query_radius,
+        );
+        let body_speed = body_velocity.length();
+        let can_skip_refresh = retained_hits.get(&key).is_some_and(|retained| {
+            retained.can_skip_refresh(
+                body_pose.position,
+                query_request.predicted_center,
+                source.query_radius,
+                body_speed,
+            )
+        });
+        let needs_impact_refresh = depth_query_might_need_impact_refresh(query_request);
+        if depth_query_should_refresh_from_tsdf(
+            body_sleeping,
+            can_skip_refresh,
+            body_speed,
+            needs_impact_refresh,
+        ) {
+            let latest_result =
+                snapshot.map(|snapshot| evaluate_tsdf_query(snapshot, query_request));
+            XrEnv::sync_retained_depth_query_result(
+                retained_hits,
+                key,
+                latest_result,
+                body_pose.position,
+                source.query_radius,
+                expired_retained_keys,
+            );
+        }
+
+        let mut surface_targets = std::array::from_fn(|_| None);
+        if let Some(retained) = retained_hits.get(&key) {
+            retained.fill_targets(&mut surface_targets);
+        }
+        scene.sync_depth_query_surface_set(source.set_index, &surface_targets);
+    }
+
+    pub(super) fn sync_depth_query_surfaces(
+        retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
+        scene: Option<&mut RapierScene>,
+        cx: &mut Cx,
+    ) {
+        if !XR_ENABLE_DEPTH_QUERY_PHYSICS {
+            return;
+        }
+        let Some(scene) = scene else {
+            return;
+        };
+        sync_depth_query_surfaces_with_store(retained_hits, Some(scene), &cx.xr_tsdf(), None);
+    }
+}
+
+impl XrDepthRuntime {
+    const SURFACE_MESH_UPSERTS_PER_FRAME: usize = 2;
+
+    fn alloc_surface_mesh_geometry(&mut self, cx: &mut Cx2d) -> Geometry {
+        self.recycled_mesh_geometries
+            .pop()
+            .unwrap_or_else(|| Geometry::new(cx.cx.cx))
+    }
+
+    fn recycle_surface_mesh_geometry(&mut self, geometry: Geometry) {
+        self.recycled_mesh_geometries.push(geometry);
+    }
+
+    fn clear_surface_mesh_chunks(&mut self) {
+        let recycled = self
+            .mesh_chunks
+            .drain()
+            .map(|(_, (geometry, _))| geometry)
+            .collect::<Vec<_>>();
+        self.recycled_mesh_geometries.extend(recycled);
+    }
+
+    fn recycle_hidden_surface_mesh_chunks(&mut self) {
+        let removed_keys = self
+            .mesh_chunks
+            .keys()
+            .copied()
+            .filter(|chunk_key| !self.visible_chunks.contains(chunk_key))
+            .collect::<Vec<_>>();
+        for chunk_key in removed_keys {
+            self.remove_surface_mesh_chunk(chunk_key);
+        }
+    }
+
+    pub(super) fn clear_surface_mesh(&mut self) {
+        self.surface_mesh_generation = 0;
+        self.surface_mesh_update_sequence = 0;
+        self.requested_snapshot_grid = None;
+        self.requested_selection_mode = None;
+        self.requested_head_pose = None;
+        self.requested_focus_grid = None;
+        self.snapshot_grid = None;
+        self.visible_request_id = 0;
+        self.visible_chunks.clear();
+        self.clear_surface_mesh_chunks();
+        self.pending_upserts.clear();
+        self.surface_mesh_worker = None;
+    }
+
+    pub(super) fn ensure_surface_mesh_worker(&mut self) -> &mut XrDepthDebugMeshWorker {
+        self.surface_mesh_worker
+            .get_or_insert_with(XrDepthDebugMeshWorker::new)
+    }
+
+    fn upsert_query_hit_geometry(
+        slot: &mut Option<Geometry>,
+        cx: &mut Cx2d,
+        indices: Vec<u32>,
+        vertices: Vec<f32>,
+    ) -> Option<GeometryId> {
+        if indices.is_empty() {
+            return None;
+        }
+        let geometry = slot.get_or_insert_with(|| Geometry::new(cx.cx.cx));
+        geometry.update(cx.cx.cx, indices, vertices);
+        Some(geometry.geometry_id())
+    }
+
+    fn build_query_hit_geometry(&mut self, cx: &mut Cx2d) -> Option<GeometryId> {
+        let mut quad_indices = Vec::new();
+        let mut quad_vertices = Vec::new();
+
+        let mut push_surface = |retained: &RetainedDepthQuerySurface| {
+            let DepthQueryColliderGeometry::HalfSpace(plane) = retained.target.collider.geometry;
+            push_debug_depth_plane(&mut quad_indices, &mut quad_vertices, plane);
+        };
+
+        for retained in self.query_retained_hits.values() {
+            for surface in retained.retained_surfaces() {
+                push_surface(surface);
+            }
+        }
+
+        Self::upsert_query_hit_geometry(
+            &mut self.query_hit_geometry,
+            cx,
+            quad_indices,
+            quad_vertices,
+        )
+    }
+
+    fn upsert_surface_mesh_chunk(&mut self, cx: &mut Cx2d, chunk: DebugDepthMeshChunk) {
+        let key = chunk.chunk_key;
+        if self
+            .mesh_chunks
+            .get(&key)
+            .map(|gpu_chunk| gpu_chunk.1.fingerprint == chunk.fingerprint)
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        if let Some((geometry, handle)) = self.mesh_chunks.get_mut(&key) {
+            geometry.update(cx.cx.cx, chunk.indices, chunk.vertices);
+            *handle = DepthSurfaceMeshChunkHandle {
+                geometry_id: geometry.geometry_id(),
+                fingerprint: chunk.fingerprint,
+            };
+        } else {
+            let geometry = self.alloc_surface_mesh_geometry(cx);
+            geometry.update(cx.cx.cx, chunk.indices, chunk.vertices);
+            let handle = DepthSurfaceMeshChunkHandle {
+                geometry_id: geometry.geometry_id(),
+                fingerprint: chunk.fingerprint,
+            };
+            self.mesh_chunks.insert(key, (geometry, handle));
+        }
+    }
+
+    fn apply_surface_mesh_visible_set(&mut self, result: XrDepthDebugMeshVisibleSet) {
+        if result.request_id < self.visible_request_id {
+            return;
+        }
+        let visible_chunks: HashSet<_> = result.visible_chunk_keys.into_iter().collect();
+        self.visible_request_id = result.request_id;
+        self.surface_mesh_generation = result.generation;
+        self.surface_mesh_update_sequence = result.update_sequence;
+        self.snapshot_grid = Some(result.snapshot_grid);
+        self.visible_chunks = visible_chunks;
+        self.recycle_hidden_surface_mesh_chunks();
+        self.pending_upserts.clear();
+    }
+
+    fn remove_surface_mesh_chunk(&mut self, chunk_key: ChunkKey) {
+        if let Some((geometry, _)) = self.mesh_chunks.remove(&chunk_key) {
+            self.recycle_surface_mesh_geometry(geometry);
+        }
+    }
+
+    fn enqueue_surface_mesh_upsert(&mut self, request_id: u64, chunk: DebugDepthMeshChunk) {
+        self.pending_upserts.push_back((request_id, chunk));
+    }
+
+    fn apply_pending_surface_mesh_upserts(&mut self, cx: &mut Cx2d) {
+        let pending_count = self
+            .pending_upserts
+            .len()
+            .min(Self::SURFACE_MESH_UPSERTS_PER_FRAME);
+        for _ in 0..pending_count {
+            let Some((request_id, chunk)) = self.pending_upserts.pop_front() else {
+                break;
+            };
+            if request_id != self.visible_request_id {
+                continue;
+            }
+            self.upsert_surface_mesh_chunk(cx, chunk);
+        }
+    }
+
+    fn apply_surface_mesh_worker_result(&mut self, result: XrDepthDebugMeshWorkerResult) {
+        match result {
+            XrDepthDebugMeshWorkerResult::VisibleSet(result) => {
+                self.apply_surface_mesh_visible_set(result);
+            }
+            XrDepthDebugMeshWorkerResult::ChunkUpserts { request_id, chunks } => {
+                if request_id < self.visible_request_id {
+                    return;
+                }
+                for chunk in chunks {
+                    self.enqueue_surface_mesh_upsert(request_id, chunk);
+                }
+            }
+            XrDepthDebugMeshWorkerResult::ChunkRemovals {
+                request_id,
+                chunk_keys,
+            } => {
+                if request_id != self.visible_request_id {
+                    return;
+                }
+                for chunk_key in chunk_keys {
+                    self.pending_upserts
+                        .retain(|(queued_request_id, queued_chunk)| {
+                            !(*queued_request_id == request_id
+                                && queued_chunk.chunk_key == chunk_key)
+                        });
+                    self.remove_surface_mesh_chunk(chunk_key);
+                }
+            }
+        }
+    }
+
+    pub(super) fn poll_surface_mesh_worker(&mut self, cx: &mut Cx2d) {
+        while let Some(result) = self
+            .surface_mesh_worker
+            .as_mut()
+            .and_then(|worker| worker.take_next_result())
+        {
+            self.apply_surface_mesh_worker_result(result);
+        }
+        self.apply_pending_surface_mesh_upserts(cx);
+    }
+
+    pub(super) fn draw_surface_mesh(
+        &mut self,
+        draw_depth_mesh: &mut DrawDepthMeshBasic,
+        cx: &mut Cx2d,
+        show_mesh: bool,
+        show_query_hits: bool,
+    ) {
+        if !show_mesh && !show_query_hits {
+            return;
+        }
+        let query_hits = if show_query_hits {
+            self.build_query_hit_geometry(cx)
+        } else {
+            None
+        };
+        if (!show_mesh || self.mesh_chunks.is_empty()) && query_hits.is_none() {
+            return;
+        }
+        draw_depth_mesh.base_color = vec4(0.60, 0.62, 0.66, 0.95);
+        if show_mesh && !self.mesh_chunks.is_empty() && !self.visible_chunks.is_empty() {
+            draw_depth_mesh.set_focus_fade(cx, self.focus_point);
+            let mut chunk_handles: Vec<_> = self
+                .visible_chunks
+                .iter()
+                .filter_map(|key| {
+                    self.mesh_chunks
+                        .get(key)
+                        .map(|chunk| (*key, chunk.1.geometry_id))
+                })
+                .collect();
+            chunk_handles.sort_by_key(|(key, _)| (key.x, key.y, key.z));
+            for (_, geometry_id) in chunk_handles {
+                draw_depth_mesh.draw_geometry(cx, geometry_id);
+            }
+        }
+
+        let mesh_depth_bias = draw_depth_mesh.depth_bias;
+        draw_depth_mesh.depth_bias = mesh_depth_bias + 0.004;
+        if show_query_hits {
+            if let Some(geometry_id) = query_hits {
+                draw_depth_mesh.set_focus_fade(cx, None);
+                draw_depth_mesh.base_color = vec4(1.0, 0.42, 0.08, 0.95);
+                draw_depth_mesh.draw_geometry(cx, geometry_id);
+            }
+        }
+        draw_depth_mesh.depth_bias = mesh_depth_bias;
+    }
+}
+
+pub(super) fn clear_depth_query_state_for_scene(
+    scene: Option<&RapierScene>,
+    retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
+) {
+    let _ = scene;
+    retained_hits.clear();
+}
+
+pub(super) fn sync_depth_query_surfaces_with_store(
+    retained_hits: &mut HashMap<u64, RetainedDepthQueryHit>,
+    scene: Option<&mut RapierScene>,
+    depth_mesh: &XrTsdfStore,
+    floor_y_override: Option<f32>,
+) {
+    let Some(scene) = scene else {
+        return;
+    };
+    let snapshot = depth_mesh.latest_tsdf_snapshot();
+    scene.sync_floor_halfspace(floor_y_override.or_else(|| {
+        snapshot
+            .as_deref()
+            .and_then(|snapshot| snapshot.lowest_y_meters())
+    }));
+    if !XR_ENABLE_DEPTH_QUERY_PHYSICS {
+        return;
+    }
+
+    let mut clear_keys = Vec::new();
+    let mut expired_retained_keys = Vec::new();
+    scene.begin_depth_query_stats_frame();
+
+    for cube_index in 0..scene.cubes.len() {
+        let cube = scene.cubes[cube_index];
+        for source in scene.cube_depth_query_sources(cube).into_iter().flatten() {
+            XrEnv::sync_depth_query_source(
+                retained_hits,
+                scene,
+                source,
+                snapshot.as_deref(),
+                &mut clear_keys,
+                &mut expired_retained_keys,
+            );
+        }
+    }
+
+    for key in clear_keys {
+        retained_hits.remove(&key);
+    }
+    for key in expired_retained_keys {
+        retained_hits.remove(&key);
+    }
+}

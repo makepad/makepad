@@ -1,13 +1,82 @@
+use crate::pod::{ScriptPodMat, ScriptPodTy};
 use crate::shader::{ShaderIoKind, ShaderOutput, TextureType};
 use crate::vm::ScriptVm;
 use makepad_live_id::{id, LiveId};
 use std::fmt::Write;
 
 impl ShaderOutput {
+    pub fn metal_create_helpers(&self, out: &mut String) {
+        writeln!(out, "inline float4x4 _mp_inverse(float4x4 m) {{").ok();
+        writeln!(out, "    float a00 = m[0][0];").ok();
+        writeln!(out, "    float a01 = m[0][1];").ok();
+        writeln!(out, "    float a02 = m[0][2];").ok();
+        writeln!(out, "    float a03 = m[0][3];").ok();
+        writeln!(out, "    float a10 = m[1][0];").ok();
+        writeln!(out, "    float a11 = m[1][1];").ok();
+        writeln!(out, "    float a12 = m[1][2];").ok();
+        writeln!(out, "    float a13 = m[1][3];").ok();
+        writeln!(out, "    float a20 = m[2][0];").ok();
+        writeln!(out, "    float a21 = m[2][1];").ok();
+        writeln!(out, "    float a22 = m[2][2];").ok();
+        writeln!(out, "    float a23 = m[2][3];").ok();
+        writeln!(out, "    float a30 = m[3][0];").ok();
+        writeln!(out, "    float a31 = m[3][1];").ok();
+        writeln!(out, "    float a32 = m[3][2];").ok();
+        writeln!(out, "    float a33 = m[3][3];").ok();
+        writeln!(out, "    float b00 = a00 * a11 - a01 * a10;").ok();
+        writeln!(out, "    float b01 = a00 * a12 - a02 * a10;").ok();
+        writeln!(out, "    float b02 = a00 * a13 - a03 * a10;").ok();
+        writeln!(out, "    float b03 = a01 * a12 - a02 * a11;").ok();
+        writeln!(out, "    float b04 = a01 * a13 - a03 * a11;").ok();
+        writeln!(out, "    float b05 = a02 * a13 - a03 * a12;").ok();
+        writeln!(out, "    float b06 = a20 * a31 - a21 * a30;").ok();
+        writeln!(out, "    float b07 = a20 * a32 - a22 * a30;").ok();
+        writeln!(out, "    float b08 = a20 * a33 - a23 * a30;").ok();
+        writeln!(out, "    float b09 = a21 * a32 - a22 * a31;").ok();
+        writeln!(out, "    float b10 = a21 * a33 - a23 * a31;").ok();
+        writeln!(out, "    float b11 = a22 * a33 - a23 * a32;").ok();
+        writeln!(
+            out,
+            "    float det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;"
+        )
+        .ok();
+        writeln!(out, "    if (det == 0.0) {{").ok();
+        writeln!(
+            out,
+            "        return float4x4(float4(1.0, 0.0, 0.0, 0.0), float4(0.0, 1.0, 0.0, 0.0), float4(0.0, 0.0, 1.0, 0.0), float4(0.0, 0.0, 0.0, 1.0));"
+        )
+        .ok();
+        writeln!(out, "    }}").ok();
+        writeln!(out, "    float idet = 1.0 / det;").ok();
+        writeln!(out, "    return float4x4(").ok();
+        writeln!(
+            out,
+            "        float4((a11 * b11 - a12 * b10 + a13 * b09) * idet, (a02 * b10 - a01 * b11 - a03 * b09) * idet, (a31 * b05 - a32 * b04 + a33 * b03) * idet, (a22 * b04 - a21 * b05 - a23 * b03) * idet),"
+        )
+        .ok();
+        writeln!(
+            out,
+            "        float4((a12 * b08 - a10 * b11 - a13 * b07) * idet, (a00 * b11 - a02 * b08 + a03 * b07) * idet, (a32 * b02 - a30 * b05 - a33 * b01) * idet, (a20 * b05 - a22 * b02 + a23 * b01) * idet),"
+        )
+        .ok();
+        writeln!(
+            out,
+            "        float4((a10 * b10 - a11 * b08 + a13 * b06) * idet, (a01 * b08 - a00 * b10 - a03 * b06) * idet, (a30 * b04 - a31 * b02 + a33 * b00) * idet, (a21 * b02 - a20 * b04 - a23 * b00) * idet),"
+        )
+        .ok();
+        writeln!(
+            out,
+            "        float4((a11 * b07 - a10 * b09 - a12 * b06) * idet, (a00 * b09 - a01 * b07 + a02 * b06) * idet, (a31 * b01 - a30 * b03 - a32 * b00) * idet, (a20 * b03 - a21 * b01 + a22 * b00) * idet)"
+        )
+        .ok();
+        writeln!(out, "    );").ok();
+        writeln!(out, "}}").ok();
+    }
+
     pub fn metal_create_io_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct Io {{").ok();
         writeln!(out, "    constant IoUniform *u;").ok();
-        writeln!(out, "    constant IoInstance *i;").ok();
+        writeln!(out, "    thread IoInstance *i;").ok();
 
         // Add scope uniforms buffer pointer if we have any scope uniforms
         let has_scope_uniforms = self
@@ -32,6 +101,7 @@ impl ShaderOutput {
                         TextureType::TextureCubeArray => "texturecube_array<float>",
                         TextureType::TextureDepth => "depth2d<float>",
                         TextureType::TextureDepthArray => "depth2d_array<float>",
+                        TextureType::TextureVideo => "texture2d<float>", // Video textures are standard texture2d on Metal
                     };
                     writeln!(out, "    {} {};", metal_type, io.name).ok();
                 }
@@ -83,16 +153,23 @@ impl ShaderOutput {
     }
 
     pub fn metal_create_instance_struct(&self, vm: &ScriptVm, out: &mut String) {
-        writeln!(out, "struct IoInstance {{").ok();
+        writeln!(out, "struct IoInstanceRaw {{").ok();
 
         // 1. Output Dyn instance fields first (order doesn't matter, just output as encountered)
         // Use packed types to match CPU-side repr(C) struct alignment
         for io in &self.io {
             if let ShaderIoKind::DynInstance = io.kind {
-                write!(out, "    ").ok();
-                self.backend
-                    .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " {};", io.name).ok();
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
+                    for col in 0..4 {
+                        writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
+                    }
+                } else {
+                    write!(out, "    ").ok();
+                    self.backend
+                        .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
+                    writeln!(out, " {};", io.name).ok();
+                }
             }
         }
 
@@ -100,14 +177,77 @@ impl ShaderOutput {
         // Use packed types to match CPU-side repr(C) struct alignment
         for io in &self.io {
             if let ShaderIoKind::RustInstance = io.kind {
-                write!(out, "    ").ok();
-                self.backend
-                    .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " {};", io.name).ok();
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
+                    for col in 0..4 {
+                        writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
+                    }
+                } else {
+                    write!(out, "    ").ok();
+                    self.backend
+                        .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
+                    writeln!(out, " {};", io.name).ok();
+                }
             }
         }
 
         writeln!(out, "}};").ok();
+
+        writeln!(out, "struct IoInstance {{").ok();
+        for io in &self.io {
+            if let ShaderIoKind::DynInstance = io.kind {
+                write!(out, "    ").ok();
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                writeln!(out, " {};", io.name).ok();
+            }
+        }
+        for io in &self.io {
+            if let ShaderIoKind::RustInstance = io.kind {
+                write!(out, "    ").ok();
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                writeln!(out, " {};", io.name).ok();
+            }
+        }
+        writeln!(out, "}};").ok();
+
+        writeln!(
+            out,
+            "inline IoInstance _mp_decode_instance(constant IoInstanceRaw &raw) {{"
+        )
+        .ok();
+        writeln!(out, "    IoInstance out_instance;").ok();
+        for io in &self.io {
+            if let ShaderIoKind::DynInstance = io.kind {
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
+                    writeln!(
+                        out,
+                        "    out_instance.{0} = float4x4(float4(raw.{0}_0), float4(raw.{0}_1), float4(raw.{0}_2), float4(raw.{0}_3));",
+                        io.name
+                    )
+                    .ok();
+                } else {
+                    writeln!(out, "    out_instance.{0} = raw.{0};", io.name).ok();
+                }
+            }
+        }
+        for io in &self.io {
+            if let ShaderIoKind::RustInstance = io.kind {
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
+                    writeln!(
+                        out,
+                        "    out_instance.{0} = float4x4(float4(raw.{0}_0), float4(raw.{0}_1), float4(raw.{0}_2), float4(raw.{0}_3));",
+                        io.name
+                    )
+                    .ok();
+                } else {
+                    writeln!(out, "    out_instance.{0} = raw.{0};", io.name).ok();
+                }
+            }
+        }
+        writeln!(out, "    return out_instance;").ok();
+        writeln!(out, "}}").ok();
     }
 
     pub fn metal_create_uniform_struct(&self, vm: &ScriptVm, out: &mut String) {
@@ -173,7 +313,7 @@ impl ShaderOutput {
 
         writeln!(out, "vertex IoVarying vertex_main(").ok();
         writeln!(out, "    constant IoVertexBuffer *vb [[buffer(0)]],").ok();
-        writeln!(out, "    constant IoInstance *i [[buffer(1)]],").ok();
+        writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
         writeln!(out, "    constant IoUniform *u [[buffer(2)]],").ok();
 
         // Use pre-assigned buffer indices from assign_uniform_buffer_indices()
@@ -222,6 +362,7 @@ impl ShaderOutput {
                         TextureType::TextureCubeArray => "texturecube_array<float>",
                         TextureType::TextureDepth => "depth2d<float>",
                         TextureType::TextureDepthArray => "depth2d_array<float>",
+                        TextureType::TextureVideo => "texture2d<float>", // Video textures are standard texture2d on Metal
                     };
                     writeln!(
                         out,
@@ -244,8 +385,13 @@ impl ShaderOutput {
         writeln!(out, ") {{").ok();
 
         writeln!(out, "    Io _io;").ok();
+        writeln!(
+            out,
+            "    IoInstance _inst = _mp_decode_instance(i_raw[iid]);"
+        )
+        .ok();
         writeln!(out, "    _io.vb = vb;").ok();
-        writeln!(out, "    _io.i = i;").ok();
+        writeln!(out, "    _io.i = &_inst;").ok();
         writeln!(out, "    _io.u = u;").ok();
 
         if has_scope_uniforms {
@@ -299,7 +445,7 @@ impl ShaderOutput {
         writeln!(out, "fragment IoFb fragment_main(").ok();
         writeln!(out, "    IoVarying v [[stage_in]],").ok();
         writeln!(out, "    constant IoVertexBuffer *vb [[buffer(0)]],").ok();
-        writeln!(out, "    constant IoInstance *i [[buffer(1)]],").ok();
+        writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
         write!(out, "    constant IoUniform *u [[buffer(2)]]").ok();
 
         // Use pre-assigned buffer indices from assign_uniform_buffer_indices()
@@ -349,6 +495,7 @@ impl ShaderOutput {
                         TextureType::TextureCubeArray => "texturecube_array<float>",
                         TextureType::TextureDepth => "depth2d<float>",
                         TextureType::TextureDepthArray => "depth2d_array<float>",
+                        TextureType::TextureVideo => "texture2d<float>", // Video textures are standard texture2d on Metal
                     };
                     writeln!(out, ",").ok();
                     write!(
@@ -371,8 +518,13 @@ impl ShaderOutput {
         writeln!(out, ") {{").ok();
 
         writeln!(out, "    Io _io;").ok();
+        writeln!(
+            out,
+            "    IoInstance _inst = _mp_decode_instance(i_raw[v._iid]);"
+        )
+        .ok();
         writeln!(out, "    _io.vb = vb;").ok();
-        writeln!(out, "    _io.i = i;").ok();
+        writeln!(out, "    _io.i = &_inst;").ok();
         writeln!(out, "    _io.u = u;").ok();
 
         if has_scope_uniforms {
@@ -439,7 +591,7 @@ impl ShaderOutput {
             };
             writeln!(
                 out,
-                "constexpr sampler _s{}(filter::{}, address::{}, coord::{});",
+                "constexpr sampler _s{}(filter::{}, mip_filter::linear, address::{}, coord::{});",
                 idx, filter, address, coord
             )
             .ok();

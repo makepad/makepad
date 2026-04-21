@@ -100,8 +100,10 @@ pub const TEXTURE_BORDER_COLOR: GLenum = 0x1004;
 pub const DEBUG_OUTPUT: GLenum = 0x92E0;
 
 pub const RGBA: GLenum = 0x1908;
+pub const RGBA32F: GLenum = 0x8814;
 pub const BGRA: GLenum = 0x80E1;
 pub const RED: GLenum = 0x1903;
+pub const R32F: GLenum = 0x822E;
 pub const RG: GLenum = 0x8227;
 pub const R8: GLenum = 0x8229;
 pub const UNSIGNED_BYTE: GLenum = 0x1401;
@@ -118,6 +120,8 @@ pub const TEXTURE_WRAP_R: GLenum = 0x8072;
 pub const CLAMP_TO_EDGE: GLenum = 0x812F;
 pub const CLAMP_TO_BORDER: GLenum = 0x812D;
 pub const PROGRAM_BINARY_LENGTH: GLenum = 0x8741;
+pub const MAX_SHADER_COMPILER_THREADS_KHR: GLenum = 0x91B0;
+pub const COMPLETION_STATUS_KHR: GLenum = 0x91B1;
 pub const NO_ERROR: GLenum = 0x0;
 pub const UNPACK_ALIGNMENT: GLenum = 0x0CF5;
 pub const UNPACK_ROW_LENGTH: GLenum = 0x0CF2;
@@ -134,6 +138,7 @@ pub const VENDOR: GLenum = 0x1F00;
 pub const RENDERER: GLenum = 0x1F01;
 pub const SCISSOR_TEST: GLenum = 0x0C11;
 pub const CULL_FACE: GLenum = 0x0B44;
+pub const BACK: GLenum = 0x0405;
 pub const DONT_CARE: GLenum = 0x1100;
 pub const UNIFORM_BUFFER: GLenum = 0x8A11;
 
@@ -193,6 +198,7 @@ pub type TglRenderbufferStorage = unsafe extern "C" fn(
     height: GLsizei,
 ) -> ();
 pub type TglDisable = unsafe extern "C" fn(cap: GLenum) -> ();
+pub type TglCullFace = unsafe extern "C" fn(mode: GLenum) -> ();
 pub type TglFramebufferRenderbuffer = unsafe extern "C" fn(
     target: GLenum,
     attachment: GLenum,
@@ -236,7 +242,9 @@ pub type TglCompileShader = unsafe extern "C" fn(shader: GLuint) -> ();
 pub type TglCreateProgram = unsafe extern "C" fn() -> GLuint;
 pub type TglAttachShader = unsafe extern "C" fn(program: GLuint, shader: GLuint) -> ();
 pub type TglLinkProgram = unsafe extern "C" fn(program: GLuint) -> ();
+pub type TglDeleteProgram = unsafe extern "C" fn(program: GLuint) -> ();
 pub type TglDeleteShader = unsafe extern "C" fn(shader: GLuint) -> ();
+pub type TglMaxShaderCompilerThreadsKHR = unsafe extern "C" fn(count: GLuint) -> ();
 pub type TglUniform1fv =
     unsafe extern "C" fn(location: GLint, count: GLsizei, value: *const GLfloat) -> ();
 pub type TglGenTextures = unsafe extern "C" fn(n: GLsizei, textures: *mut GLuint) -> ();
@@ -413,6 +421,7 @@ pub struct LibGl {
     pub glBindRenderbuffer: TglBindRenderbuffer,
     pub glRenderbufferStorage: TglRenderbufferStorage,
     pub glDisable: TglDisable,
+    pub glCullFace: TglCullFace,
     pub glFramebufferRenderbuffer: TglFramebufferRenderbuffer,
     pub glFramebufferTexture2D: TglFramebufferTexture2D,
     pub glGetShaderiv: TglGetShaderiv,
@@ -427,7 +436,9 @@ pub struct LibGl {
     pub glCreateProgram: TglCreateProgram,
     pub glAttachShader: TglAttachShader,
     pub glLinkProgram: TglLinkProgram,
+    pub glDeleteProgram: TglDeleteProgram,
     pub glDeleteShader: TglDeleteShader,
+    pub glMaxShaderCompilerThreadsKHR: Option<TglMaxShaderCompilerThreadsKHR>,
     pub glUniform1fv: TglUniform1fv,
     pub glGenTextures: TglGenTextures,
     pub glTexParameteri: TglTexParameteri,
@@ -625,6 +636,7 @@ impl LibGl {
                 "glRenderbufferStorageEXT"
             )?,
             glDisable: load!(loadfn, TglDisable, "glDisable")?,
+            glCullFace: load!(loadfn, TglCullFace, "glCullFace")?,
             glFramebufferRenderbuffer: load!(
                 loadfn,
                 TglFramebufferRenderbuffer,
@@ -684,7 +696,20 @@ impl LibGl {
                 "glAttachObjectARB"
             )?,
             glLinkProgram: load!(loadfn, TglLinkProgram, "glLinkProgram", "glLinkProgramARB")?,
+            glDeleteProgram: load!(
+                loadfn,
+                TglDeleteProgram,
+                "glDeleteProgram",
+                "glDeleteProgramARB"
+            )?,
             glDeleteShader: load!(loadfn, TglDeleteShader, "glDeleteShader")?,
+            glMaxShaderCompilerThreadsKHR: load!(
+                loadfn,
+                TglMaxShaderCompilerThreadsKHR,
+                "glMaxShaderCompilerThreadsKHR",
+                "glMaxShaderCompilerThreadsARB"
+            )
+            .ok(),
             glUniform1fv: load!(loadfn, TglUniform1fv, "glUniform1fv", "glUniform1fvARB")?,
             glGenTextures: load!(loadfn, TglGenTextures, "glGenTextures")?,
             glTexParameteri: load!(loadfn, TglTexParameteri, "glTexParameteri")?,

@@ -20,6 +20,12 @@ pub mod runtime;
 
 #[macro_export]
 macro_rules!objc_block {
+    (move || $ body: block) => {
+        $crate::objc_block!(move | | $ body)
+    };
+    (move || -> $ return_ty: ty $ body: block) => {
+        $crate::objc_block!(move | | : $ return_ty $ body)
+    };
     (move | $ ( $ arg_ident: ident: $ arg_ty: ty), * | $ (: $ return_ty: ty) ? $ body: block) => {
         {
             #[repr(C)]

@@ -205,8 +205,7 @@ impl ScriptObjectTag {
     }
 
     pub fn set_auto(&mut self) {
-        self.0 &= !Self::STORAGE_AUTO;
-        self.0 |= Self::STORAGE_MAP;
+        self.0 &= !Self::STORAGE_MASK;
     }
 
     pub fn set_map(&mut self) {
@@ -727,6 +726,12 @@ impl ScriptObjectData {
             script_args!(key = NIL),
             |vm, args| {
                 if let Some(sself) = script_value!(vm, args.self).as_object() {
+                    if vm.bx.heap.objects[sself].tag.is_immutable() {
+                        return script_err_immutable!(
+                            vm.bx.threads.cur_ref().trap,
+                            "cannot delete from immutable object"
+                        );
+                    }
                     let key = script_value!(vm, args.key);
                     if let Some(val) = vm.bx.heap.map_delete(sself, &key) {
                         return val;

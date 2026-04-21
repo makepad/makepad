@@ -57,7 +57,7 @@ script_mod! {
                         color: #xA00
                         color_hover: #xC00
                         color_down: #800
-                        svg_file: crate_resource("self:resources/Icon_Favorite.svg")
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
                     }
 
                     text: "Click me!"

@@ -10,6 +10,7 @@ pub struct PdfDocument<'a> {
     data: &'a [u8],
     xref: XRefTable,
     cache: HashMap<u32, PdfObj>,
+    object_stream_cache: HashMap<u32, HashMap<u32, PdfObj>>,
     pages: Vec<PageRef>,
 }
 
@@ -31,6 +32,7 @@ impl<'a> PdfDocument<'a> {
             data,
             xref,
             cache: HashMap::new(),
+            object_stream_cache: HashMap::new(),
             pages: Vec::new(),
         };
 
@@ -83,7 +85,13 @@ impl<'a> PdfDocument<'a> {
             .ok_or_else(|| PdfError::new(format!("object {} not in xref", num)))?
             .clone();
 
-        let obj = parse_indirect_object_at(self.data, entry.offset)?.1;
+        let obj = match entry.location {
+            XRefLocation::Uncompressed { offset } => parse_indirect_object_at(self.data, offset)?.1,
+            XRefLocation::Compressed {
+                obj_stream_obj_num,
+                index,
+            } => self.resolve_compressed_object(num, obj_stream_obj_num, index)?,
+        };
         self.cache.insert(num, obj.clone());
         Ok(obj)
     }
@@ -172,5 +180,167 @@ impl<'a> PdfDocument<'a> {
             PdfObj::Stream(s) => Ok(s.dict),
             _ => Err(PdfError::new("expected dict")),
         }
+    }
+
+    fn resolve_compressed_object(
+        &mut self,
+        obj_num: u32,
+        obj_stream_obj_num: u32,
+        index: usize,
+    ) -> PdfResult<PdfObj> {
+        self.load_object_stream(obj_stream_obj_num)?;
+
+        let stream_objects = self
+            .object_stream_cache
+            .get(&obj_stream_obj_num)
+            .ok_or_else(|| {
+                PdfError::new(format!(
+                    "object stream {} was not cached after decoding",
+                    obj_stream_obj_num
+                ))
+            })?;
+
+        stream_objects.get(&obj_num).cloned().ok_or_else(|| {
+            PdfError::new(format!(
+                "compressed object {} missing from object stream {} at index {}",
+                obj_num, obj_stream_obj_num, index
+            ))
+        })
+    }
+
+    fn load_object_stream(&mut self, obj_stream_obj_num: u32) -> PdfResult<()> {
+        if self.object_stream_cache.contains_key(&obj_stream_obj_num) {
+            return Ok(());
+        }
+
+        let stream_obj = self.resolve_obj_num(obj_stream_obj_num)?;
+        let stream = stream_obj
+            .as_stream()
+            .ok_or_else(|| PdfError::new("object stream entry did not resolve to a stream"))?;
+
+        if stream.dict.get_name("Type") != Some("ObjStm") {
+            return Err(PdfError::new(format!(
+                "xref compressed object points at non-object stream {}",
+                obj_stream_obj_num
+            )));
+        }
+
+        let count = stream
+            .dict
+            .get_int("N")
+            .ok_or_else(|| PdfError::new("object stream missing /N"))? as usize;
+        let first = stream
+            .dict
+            .get_int("First")
+            .ok_or_else(|| PdfError::new("object stream missing /First"))?
+            as usize;
+
+        let decoded = self.decode_stream(stream)?;
+        let mut header_lex = Lexer::new(&decoded, 0);
+        let mut object_entries = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            let embedded_num = match header_lex.read_object()? {
+                PdfObj::Int(n) if n >= 0 => n as u32,
+                _ => {
+                    return Err(PdfError::new(
+                        "object stream header contained invalid embedded object number",
+                    ))
+                }
+            };
+            let relative_offset = match header_lex.read_object()? {
+                PdfObj::Int(n) if n >= 0 => n as usize,
+                _ => {
+                    return Err(PdfError::new(
+                        "object stream header contained invalid embedded object offset",
+                    ))
+                }
+            };
+            object_entries.push((embedded_num, relative_offset));
+        }
+
+        let mut objects = HashMap::with_capacity(count);
+        for (embedded_num, relative_offset) in object_entries {
+            let start = first + relative_offset;
+            if start >= decoded.len() {
+                return Err(PdfError::new(format!(
+                    "object stream {} entry {} points past decoded data",
+                    obj_stream_obj_num, embedded_num
+                )));
+            }
+            let mut obj_lex = Lexer::new(&decoded, start);
+            let obj = obj_lex.read_object()?;
+            objects.insert(embedded_num, obj);
+        }
+
+        self.object_stream_cache.insert(obj_stream_obj_num, objects);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{XRefEntry, XRefLocation};
+
+    #[test]
+    fn resolves_compressed_objects_from_object_streams() {
+        let decoded = b"1 0 2 8 (Hello) 42";
+        let object_stream = format!(
+            "10 0 obj << /Type /ObjStm /N 2 /First 8 /Length {} >> stream\n{}\
+\nendstream\nendobj\n",
+            decoded.len(),
+            std::str::from_utf8(decoded).unwrap()
+        );
+        let data = object_stream.into_bytes();
+
+        let mut entries = HashMap::new();
+        entries.insert(
+            10,
+            XRefEntry {
+                location: XRefLocation::Uncompressed { offset: 0 },
+                gen: 0,
+                in_use: true,
+            },
+        );
+        entries.insert(
+            1,
+            XRefEntry {
+                location: XRefLocation::Compressed {
+                    obj_stream_obj_num: 10,
+                    index: 0,
+                },
+                gen: 0,
+                in_use: true,
+            },
+        );
+        entries.insert(
+            2,
+            XRefEntry {
+                location: XRefLocation::Compressed {
+                    obj_stream_obj_num: 10,
+                    index: 1,
+                },
+                gen: 0,
+                in_use: true,
+            },
+        );
+
+        let mut doc = PdfDocument {
+            data: &data,
+            xref: XRefTable {
+                entries,
+                trailer: PdfDict::new(),
+            },
+            cache: HashMap::new(),
+            object_stream_cache: HashMap::new(),
+            pages: Vec::new(),
+        };
+
+        assert_eq!(
+            doc.resolve_obj_num(1).unwrap(),
+            PdfObj::Str(b"Hello".to_vec())
+        );
+        assert_eq!(doc.resolve_obj_num(2).unwrap(), PdfObj::Int(42));
     }
 }

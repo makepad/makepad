@@ -3,13 +3,12 @@ use {
     crate::makepad_draw::*,
     crate::widget_async::{ScriptAsyncId, ScriptAsyncResult},
     crate::widget_tree::{set_ui_root, CxWidgetExt},
-    //crate::designer_data::DesignerDataToWidget,
-    std::any::TypeId,
+    std::any::{Any, TypeId},
     std::cell::RefCell,
     std::collections::BTreeMap,
     std::fmt,
     std::fmt::{Debug, Error, Formatter},
-    std::rc::Rc,
+    std::rc::{Rc, Weak},
     std::sync::atomic::{AtomicU64, Ordering},
     std::sync::Arc,
 };
@@ -25,24 +24,114 @@ impl WidgetUid {
     }
 }
 
-pub trait WidgetDesign: WidgetNode {}
-
-#[derive(Clone, Debug, Default)]
-pub enum WidgetDesignAction {
-    PickedBody,
-    #[default]
-    None,
-}
-
 pub trait WidgetNode: ScriptApply {
-    fn widget_uid(&self) -> WidgetUid {
-        WidgetUid(0)
-    }
-    fn widget_design(&mut self) -> Option<&mut dyn WidgetDesign> {
-        return None;
-    }
+    fn widget_uid(&self) -> WidgetUid;
     /// Enumerate direct children for widget-tree indexing.
     fn children(&self, _visit: &mut dyn FnMut(LiveId, WidgetRef)) {}
+
+    /// Find a descendant by child-id path, walking through `children()`.
+    /// Each segment is matched anywhere in the current subtree, i.e.
+    /// `a.b` behaves like `*.a.*.b`.
+    fn child_by_path(&self, path: &[LiveId]) -> WidgetRef {
+        fn find_descendant_by_name_bfs(
+            root: &WidgetRef,
+            target: LiveId,
+            queue: &mut std::collections::VecDeque<WidgetRef>,
+        ) -> WidgetRef {
+            queue.clear();
+            let mut found = WidgetRef::empty();
+
+            if !root.try_children(&mut |name, child| {
+                if found.is_empty() && name == target {
+                    found = child.clone();
+                }
+                queue.push_back(child);
+            }) {
+                return WidgetRef::empty();
+            }
+            if !found.is_empty() {
+                return found;
+            }
+
+            while let Some(node) = queue.pop_front() {
+                let mut found_here = WidgetRef::empty();
+                if !node.try_children(&mut |name, child| {
+                    if found_here.is_empty() && name == target {
+                        found_here = child.clone();
+                    }
+                    queue.push_back(child);
+                }) {
+                    return WidgetRef::empty();
+                }
+                if !found_here.is_empty() {
+                    return found_here;
+                }
+            }
+
+            WidgetRef::empty()
+        }
+
+        if path.is_empty() {
+            return WidgetRef::empty();
+        }
+        let first = path[0];
+
+        let mut queue = std::collections::VecDeque::<WidgetRef>::new();
+        let mut current = WidgetRef::empty();
+
+        queue.clear();
+        self.children(&mut |name, child| {
+            if !current.is_empty() {
+                queue.push_back(child);
+                return;
+            }
+            if name == first {
+                current = child.clone();
+            }
+            queue.push_back(child);
+        });
+
+        if current.is_empty() {
+            while let Some(node) = queue.pop_front() {
+                let mut found_here = WidgetRef::empty();
+                if !node.try_children(&mut |name, child| {
+                    if found_here.is_empty() && name == first {
+                        found_here = child.clone();
+                    }
+                    queue.push_back(child);
+                }) {
+                    return WidgetRef::empty();
+                }
+                if !found_here.is_empty() {
+                    current = found_here;
+                    break;
+                }
+            }
+            if current.is_empty() {
+                return current;
+            }
+        }
+
+        for i in 1..path.len() {
+            current = find_descendant_by_name_bfs(&current, path[i], &mut queue);
+            if current.is_empty() {
+                return current;
+            }
+        }
+
+        current
+    }
+
+    fn child(&self, id: LiveId) -> WidgetRef {
+        let mut found = WidgetRef::empty();
+        self.children(&mut |name, child| {
+            if found.is_empty() && name == id {
+                found = child;
+            }
+        });
+        found
+    }
+
     /// If true, global widget-tree search/flood will not traverse this node's descendants.
     /// The node is still indexed and can still be matched directly by name/path.
     fn skip_widget_tree_search(&self) -> bool {
@@ -74,6 +163,12 @@ pub trait WidgetNode: ScriptApply {
     fn action_data(&self) -> Option<Arc<dyn ActionTrait>> {
         None
     }
+    fn cast_inner_any(&self, _type_id: TypeId) -> Option<&dyn Any> {
+        None
+    }
+    fn cast_inner_any_mut(&mut self, _type_id: TypeId) -> Option<&mut dyn Any> {
+        None
+    }
 
     fn set_visible(&mut self, _cx: &mut Cx, _visible: bool) {}
     fn visible(&self) -> bool {
@@ -97,6 +192,18 @@ pub trait WidgetNode: ScriptApply {
     }
     fn selection_get_full_text(&self) -> String {
         String::new()
+    }
+
+    fn script_call_live(
+        &mut self,
+        _vm: &mut ScriptVm,
+        _method: LiveId,
+        _args: ScriptValue,
+    ) -> ScriptAsyncResult {
+        ScriptAsyncResult::MethodNotFound
+    }
+
+    fn script_result_live(&mut self, _vm: &mut ScriptVm, _id: ScriptAsyncId, _result: ScriptValue) {
     }
 }
 
@@ -302,6 +409,14 @@ impl dyn Widget {
             None
         }
     }
+    pub fn cast_inner<T: 'static>(&self) -> Option<&T> {
+        self.cast_inner_any(TypeId::of::<T>())
+            .and_then(|inner| inner.downcast_ref::<T>())
+    }
+    pub fn cast_inner_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.cast_inner_any_mut(TypeId::of::<T>())
+            .and_then(|inner| inner.downcast_mut::<T>())
+    }
 }
 
 pub trait WidgetFactory: 'static {
@@ -345,6 +460,9 @@ pub struct WidgetRefInner {
 }
 #[derive(Clone, Default)]
 pub struct WidgetRef(Rc<RefCell<Option<WidgetRefInner>>>);
+
+#[derive(Clone, Default)]
+pub struct WidgetWeakRef(Weak<RefCell<Option<WidgetRefInner>>>);
 
 impl Debug for WidgetRef {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
@@ -472,6 +590,21 @@ impl PartialEq for WidgetRef {
         !Rc::ptr_eq(&self.0, &other.0)
     }
 }
+
+impl PartialEq for WidgetWeakRef {
+    fn eq(&self, other: &WidgetWeakRef) -> bool {
+        Weak::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for WidgetWeakRef {}
+
+impl PartialEq<WidgetRef> for WidgetWeakRef {
+    fn eq(&self, other: &WidgetRef) -> bool {
+        let other_weak = Rc::downgrade(&other.0);
+        Weak::ptr_eq(&self.0, &other_weak)
+    }
+}
 pub trait OptionWidgetRefExt {
     fn into_ref(self) -> WidgetRef;
 }
@@ -521,6 +654,10 @@ impl WidgetRef {
 
     pub fn new_with_inner(widget: Box<dyn Widget>) -> Self {
         Self(Rc::new(RefCell::new(Some(WidgetRefInner { widget }))))
+    }
+
+    pub fn downgrade(&self) -> WidgetWeakRef {
+        WidgetWeakRef(Rc::downgrade(&self.0))
     }
     /// ## handle event with a sweep area
     ///
@@ -600,6 +737,13 @@ impl WidgetRef {
             .and_then(|r| r.as_ref().map(|w| w.widget.widget_uid()))
     }
 
+    pub fn widget_type_id(&self) -> Option<TypeId> {
+        self.0
+            .try_borrow()
+            .ok()
+            .and_then(|r| r.as_ref().map(|w| w.widget.ref_cast_type_id()))
+    }
+
     pub fn area(&self) -> Area {
         if let Some(inner) = self.0.borrow().as_ref() {
             return inner.widget.area();
@@ -648,6 +792,13 @@ impl WidgetRef {
     */
     pub fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         let _ = self.try_children(visit);
+    }
+
+    pub fn register_as_ui_root(&self, vm: &mut ScriptVm) {
+        if self.is_empty() {
+            return;
+        }
+        vm.with_cx_mut(|cx| set_ui_root(cx, self));
     }
 
     pub fn try_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
@@ -754,6 +905,24 @@ impl WidgetRef {
         } else {
             String::new()
         }
+    }
+
+    pub fn child_by_path(&self, path: &[LiveId]) -> WidgetRef {
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                return inner.widget.child_by_path(path);
+            }
+        }
+        WidgetRef::empty()
+    }
+
+    pub fn child(&self, id: LiveId) -> WidgetRef {
+        if let Ok(inner) = self.0.try_borrow() {
+            if let Some(inner) = inner.as_ref() {
+                return inner.widget.child(id);
+            }
+        }
+        WidgetRef::empty()
     }
 
     pub fn widget(&self, cx: &Cx, path: &[LiveId]) -> WidgetRef {
@@ -1002,10 +1171,38 @@ impl WidgetRef {
         }
     }
 
+    pub fn cast_inner_mut<T: 'static>(&self) -> Option<std::cell::RefMut<'_, T>> {
+        if let Ok(ret) = std::cell::RefMut::filter_map(self.0.borrow_mut(), |inner| {
+            if let Some(inner) = inner.as_mut() {
+                inner.widget.cast_inner_mut::<T>()
+            } else {
+                None
+            }
+        }) {
+            Some(ret)
+        } else {
+            None
+        }
+    }
+
     pub fn borrow<T: 'static + Widget>(&self) -> Option<std::cell::Ref<'_, T>> {
         if let Ok(ret) = std::cell::Ref::filter_map(self.0.borrow(), |inner| {
             if let Some(inner) = inner.as_ref() {
                 inner.widget.downcast_ref::<T>()
+            } else {
+                None
+            }
+        }) {
+            Some(ret)
+        } else {
+            None
+        }
+    }
+
+    pub fn cast_inner<T: 'static>(&self) -> Option<std::cell::Ref<'_, T>> {
+        if let Ok(ret) = std::cell::Ref::filter_map(self.0.borrow(), |inner| {
+            if let Some(inner) = inner.as_ref() {
+                inner.widget.cast_inner::<T>()
             } else {
                 None
             }
@@ -1082,6 +1279,16 @@ impl WidgetRef {
         if set_ui_after_apply {
             vm.with_cx_mut(|cx| set_ui_root(cx, self));
         }
+    }
+}
+
+impl WidgetWeakRef {
+    pub fn upgrade(&self) -> Option<WidgetRef> {
+        self.0.upgrade().map(WidgetRef)
+    }
+
+    pub fn to_widget_ref(&self) -> WidgetRef {
+        self.upgrade().unwrap_or_else(WidgetRef::empty)
     }
 }
 
@@ -1595,4 +1802,94 @@ macro_rules! register_widget {
                 ($crate::ComponentInfo { name }, Box::new(Factory())),
             );
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct InnerWidget {
+        uid: WidgetUid,
+        value: i32,
+    }
+
+    impl ScriptApply for InnerWidget {}
+
+    impl WidgetNode for InnerWidget {
+        fn widget_uid(&self) -> WidgetUid {
+            self.uid
+        }
+
+        fn walk(&mut self, _cx: &mut Cx) -> Walk {
+            Walk::default()
+        }
+
+        fn area(&self) -> Area {
+            Area::Empty
+        }
+
+        fn redraw(&mut self, _cx: &mut Cx) {}
+    }
+
+    impl Widget for InnerWidget {}
+
+    struct OuterWidget {
+        uid: WidgetUid,
+        inner: InnerWidget,
+    }
+
+    impl ScriptApply for OuterWidget {}
+
+    impl WidgetNode for OuterWidget {
+        fn widget_uid(&self) -> WidgetUid {
+            self.uid
+        }
+
+        fn cast_inner_any(&self, type_id: TypeId) -> Option<&dyn Any> {
+            if type_id == TypeId::of::<InnerWidget>() {
+                Some(&self.inner)
+            } else {
+                None
+            }
+        }
+
+        fn cast_inner_any_mut(&mut self, type_id: TypeId) -> Option<&mut dyn Any> {
+            if type_id == TypeId::of::<InnerWidget>() {
+                Some(&mut self.inner)
+            } else {
+                None
+            }
+        }
+
+        fn walk(&mut self, _cx: &mut Cx) -> Walk {
+            Walk::default()
+        }
+
+        fn area(&self) -> Area {
+            Area::Empty
+        }
+
+        fn redraw(&mut self, _cx: &mut Cx) {}
+    }
+
+    impl Widget for OuterWidget {}
+
+    #[test]
+    fn widget_ref_cast_inner_projects_without_changing_borrow() {
+        let widget = WidgetRef::new_with_inner(Box::new(OuterWidget {
+            uid: WidgetUid(1),
+            inner: InnerWidget {
+                uid: WidgetUid(2),
+                value: 7,
+            },
+        }));
+
+        assert!(widget.borrow::<OuterWidget>().is_some());
+        assert!(widget.borrow::<InnerWidget>().is_none());
+        assert_eq!(widget.cast_inner::<InnerWidget>().unwrap().value, 7);
+
+        widget.cast_inner_mut::<InnerWidget>().unwrap().value = 11;
+
+        assert_eq!(widget.cast_inner::<InnerWidget>().unwrap().value, 11);
+    }
 }

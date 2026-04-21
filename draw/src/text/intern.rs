@@ -9,11 +9,11 @@ pub trait Intern {
 
 impl Intern for str {
     fn intern(&self) -> Arc<str> {
-        INTERNER
-            .get_or_init(|| Mutex::new(Interner::new()))
-            .lock()
-            .unwrap()
-            .intern(self)
+        let interner = INTERNER.get_or_init(|| Mutex::new(Interner::new()));
+        match interner.lock() {
+            Ok(mut guard) => guard.intern(self),
+            Err(poisoned) => poisoned.into_inner().intern(self),
+        }
     }
 }
 

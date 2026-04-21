@@ -1,14 +1,10 @@
-use super::super::cx_stdin::PollTimers;
+use super::super::shared_framebuf::PollTimers;
+use super::gstreamer_sys::LibGStreamer;
 use super::linux_media::CxLinuxMedia;
+use super::linux_video_player::LinuxVideoPlayer;
 
-use crate::{
-    cx::Cx,
-    event::{Event, NetworkResponseChannel},
-    opengl_cx::OpenglCx,
-    CxOsApi,
-    OpenUrlInPlace,
-};
-use std::{cell::RefCell, rc::Rc, time::Instant};
+use crate::{cx::Cx, makepad_live_id::LiveId, opengl_cx::OpenglCx, CxOsApi, OpenUrlInPlace};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
 // Import OpenglCx from x11 for the unified type
 
 fn env_var_is_nonempty(name: &str) -> bool {
@@ -16,7 +12,7 @@ fn env_var_is_nonempty(name: &str) -> bool {
 }
 
 fn is_stdin_loop_mode() -> bool {
-    std::env::args().any(|arg| arg == "--stdin-loop")
+    crate::app_main::should_run_stdin_loop_from_env()
 }
 
 fn forced_windowing_protocol_from_args() -> Option<WindowingProtocol> {
@@ -34,12 +30,9 @@ fn forced_windowing_protocol_from_args() -> Option<WindowingProtocol> {
 
 // Protocol detection for windowing system
 fn detect_windowing_protocol() -> WindowingProtocol {
-    // Linux stdin-loop rendering path is currently implemented for X11.
-    // Force child processes started by Studio into that backend so they
-    // render into RunView instead of opening a standalone window.
-    if is_stdin_loop_mode() {
-        return WindowingProtocol::X11;
-    }
+    // stdin-loop mode renders into Studio's RunView via shared framebuffers.
+    // Both X11 and Wayland backends support this path, so let normal
+    // protocol detection proceed instead of forcing X11.
 
     if let Some(protocol) = forced_windowing_protocol_from_args() {
         return protocol;
@@ -135,14 +128,7 @@ impl Cx {
     }
 
     pub(crate) fn handle_networking_events(&mut self) {
-        let mut out = Vec::new();
-        while let Ok(item) = self.os.network_response.receiver.try_recv() {
-            out.push(item);
-        }
-        if !out.is_empty() {
-            self.handle_script_network_events(&out);
-            self.call_event_handler(&Event::NetworkResponses(out));
-        }
+        self.dispatch_network_runtime_events();
     }
 }
 
@@ -177,10 +163,11 @@ impl CxOsApi for Cx {
 #[derive(Default)]
 pub struct CxOs {
     pub(crate) media: CxLinuxMedia,
-    pub(crate) network_response: NetworkResponseChannel,
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
-    pub(super) opengl_cx: Option<OpenglCx>,
+    pub opengl_cx: Option<OpenglCx>,
+    pub(crate) video_players: HashMap<LiveId, LinuxVideoPlayer>,
+    pub(crate) gstreamer: Option<LibGStreamer>,
 }
 
 impl CxOs {

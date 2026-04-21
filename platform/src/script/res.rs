@@ -1,11 +1,16 @@
-use crate::event::network::HttpRequest;
+use crate::makepad_network::HttpRequest;
 use crate::script::vm::*;
 use crate::*;
 use makepad_script::id;
 use makepad_script::*;
 use std::cell::RefCell;
+use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Read;
+#[cfg(target_arch = "wasm32")]
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
@@ -40,10 +45,22 @@ pub struct CxScriptHttpResource {
 #[derive(Default)]
 pub struct CxScriptResources {
     pub resources: Rc<RefCell<Vec<CxScriptResource>>>,
+    pub handles_by_abs_path: Rc<RefCell<HashMap<String, ScriptHandle>>>,
     pub http_resources: Vec<CxScriptHttpResource>,
 }
 
 impl CxScriptResources {
+    pub fn get_handle_by_abs_path(&self, abs_path: &str) -> Option<ScriptHandle> {
+        self.handles_by_abs_path.borrow().get(abs_path).copied()
+    }
+
+    pub fn insert_resource(&self, resource: CxScriptResource) {
+        self.handles_by_abs_path
+            .borrow_mut()
+            .insert(resource.abs_path.clone(), resource.handle);
+        self.resources.borrow_mut().push(resource);
+    }
+
     /// Get the data for a resource by handle
     pub fn get_data(&self, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
         let resources = self.resources.borrow();
@@ -99,90 +116,236 @@ impl CxScriptResources {
             .iter()
             .any(|r| r.request_id == request_id)
     }
+}
 
-    /// Load all resources that haven't been loaded yet (skips Loading/HTTP resources)
-    pub fn load_all_resources(&self) {
-        let mut resources = self.resources.borrow_mut();
-        for res in resources.iter_mut() {
-            if matches!(res.data, CxScriptResourceData::NotLoaded) {
-                match File::open(&res.abs_path) {
-                    Ok(mut file) => {
-                        let mut data = Vec::new();
-                        match file.read_to_end(&mut data) {
-                            Ok(_) => {
-                                res.data = CxScriptResourceData::Loaded(Rc::new(data));
-                            }
-                            Err(e) => {
-                                res.data = CxScriptResourceData::Error(format!(
-                                    "Failed to read file: {}",
-                                    e
-                                ));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        res.data =
-                            CxScriptResourceData::Error(format!("Failed to open file: {}", e));
-                    }
-                }
-            }
-        }
+// ---------------------------------------------------------------------------
+// Platform-specific resource loading
+//
+// Loading order depends on whether we are packaged or not:
+//   - Desktop unpackaged (package_root is None):
+//       1. dependency table (populated at init)
+//       2. direct filesystem via abs_path
+//       3. error
+//   - Desktop packaged (package_root is Some):
+//       1. dependency table
+//       2. packaged path: package_root/dep_path on filesystem
+//       3. error
+//   - iOS/tvOS (always packaged, package_root = "makepad"):
+//       1. dependency table
+//       2. apple bundle: NSBundle.resourcePath / package_root / dep_path
+//       3. error
+//   - Android (always packaged, package_root = "makepad"):
+//       1. dependency table (get_dependency calls JNI asset manager)
+//       2. error
+//   - Wasm (always packaged, package_root = ""):
+//       1. dependency table (may have pre-loaded deps)
+//       2. HTTP fetch via web_url (async)
+//       3. error
+// ---------------------------------------------------------------------------
+
+/// Try to load a resource from the packaged location on Apple platforms
+/// using NSBundle to resolve the app bundle's resource path.
+#[cfg(any(target_os = "ios", target_os = "tvos", all(target_os = "macos", apple_bundle)))]
+fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
+    let bundle_path = if let Some(root) = cx.package_root.as_deref() {
+        format!("{}/{}", root, dep_path)
+    } else {
+        dep_path.to_string()
+    };
+    cx.apple_bundle_load_file(&bundle_path).ok()
+}
+
+/// Try to load a resource from the packaged location on desktop.
+/// Returns None when not in packaged mode (package_root is None).
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(any(target_os = "android", target_os = "ios", target_os = "tvos")),
+    not(all(target_os = "macos", apple_bundle))
+))]
+fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
+    let root = cx.package_root.as_deref()?;
+    let full_path = format!("{}/{}", root, dep_path);
+    let mut file = File::open(&full_path).ok()?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data).ok()?;
+    Some(Rc::new(data))
+}
+
+/// Load a file directly from the filesystem (desktop/mobile only, not wasm).
+#[cfg(not(target_arch = "wasm32"))]
+fn load_file_direct(abs_path: &str) -> Option<Result<Rc<Vec<u8>>, String>> {
+    let mut file = File::open(abs_path).ok()?;
+    let mut data = Vec::new();
+    match file.read_to_end(&mut data) {
+        Ok(_) => Some(Ok(Rc::new(data))),
+        Err(e) => Some(Err(format!("Failed to read file: {}", e))),
     }
 }
 
+fn should_skip_eager_resource_load(abs_path: &str) -> bool {
+    is_heavy_bundled_fallback_font_path(abs_path)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn remapped_small_font_dependency_path(path: &str) -> Option<&'static str> {
+    match path.replace('\\', "/").as_str() {
+        "makepad_widgets/resources/GoNotoKurrent-Bold.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-SemiBold.ttf")
+        }
+        "makepad_widgets/resources/GoNotoKurrent-Regular.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        "makepad_widgets/resources/LXGWWenKaiRegular.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        "makepad_widgets/resources/LXGWWenKaiBold.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        "makepad_widgets/resources/NotoColorEmoji.ttf" => {
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        }
+        _ => None,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_resource_request_path(cx: &Cx, dep_path: &str) -> String {
+    if let crate::cx::OsType::Web(params) = &cx.os_type {
+        if params.small_font_aliases {
+            if let Some(remapped) = remapped_small_font_dependency_path(dep_path) {
+                return remapped.to_string();
+            }
+        }
+    }
+    dep_path.to_string()
+}
+
+fn is_heavy_bundled_fallback_font_path(path: &str) -> bool {
+    if !is_widgets_resources_path(path) {
+        return false;
+    }
+    matches!(
+        resource_basename(path),
+        Some(name)
+            if name.eq_ignore_ascii_case("LXGWWenKaiRegular.ttf")
+                || name.eq_ignore_ascii_case("LXGWWenKaiBold.ttf")
+                || name.eq_ignore_ascii_case("NotoColorEmoji.ttf")
+    )
+}
+
+fn is_widgets_resources_path(path: &str) -> bool {
+    let mut prev_is_widgets = false;
+    for component in path.split(['/', '\\']) {
+        let is_resources = component.eq_ignore_ascii_case("resources");
+        if prev_is_widgets && is_resources {
+            return true;
+        }
+        prev_is_widgets = component.eq_ignore_ascii_case("widgets");
+    }
+    false
+}
+
+fn resource_basename(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\']).next()
+}
+
 impl Cx {
-    /// Load all script resources that are still pending.
-    ///
-    /// On web we first try wasm dependencies (`dependency_path`) and fall back to
-    /// async HTTP fetch via `web_url`.
-    pub fn load_all_script_resources(&mut self) {
-        let mut pending_http = Vec::<(LiveId, ScriptHandle, String)>::new();
-        let is_web = self.os_type().is_web();
+    fn load_script_resource_impl(
+        &mut self,
+        handle: ScriptHandle,
+        #[cfg(target_arch = "wasm32")] crate_manifests: &HashMap<String, String>,
+    ) {
+        // On wasm, skip loading if we haven't received ToWasmInit yet (os_type is Unknown).
+        #[cfg(target_arch = "wasm32")]
+        if matches!(self.os_type(), crate::cx::OsType::Unknown) {
+            return;
+        }
+
+        let is_packaged = self.package_root.is_some();
+
+        #[cfg(target_arch = "wasm32")]
+        let mut pending_http = None::<(LiveId, ScriptHandle, String)>;
 
         {
             let mut resources = self.script_data.resources.resources.borrow_mut();
-            for res in resources.iter_mut() {
-                if !matches!(res.data, CxScriptResourceData::NotLoaded) {
-                    continue;
-                }
+            let Some(res) = resources.iter_mut().find(|res| res.handle == handle) else {
+                return;
+            };
 
-                if let Some(dep_path) = res.dependency_path.as_deref() {
-                    if let Ok(data) = self.get_dependency(dep_path) {
-                        res.data = CxScriptResourceData::Loaded(data);
-                        continue;
-                    }
-                }
+            if !matches!(res.data, CxScriptResourceData::NotLoaded) {
+                return;
+            }
 
-                if is_web {
-                    if let Some(url) = res.web_url.clone() {
-                        let request_id = LiveId::unique();
-                        res.data = CxScriptResourceData::Loading;
-                        pending_http.push((request_id, res.handle, url));
-                        continue;
-                    }
+            #[cfg(target_arch = "wasm32")]
+            if res.dependency_path.is_none() {
+                if let Some(dep_path) = resolve_dependency_path_from_manifests(
+                    &res.abs_path,
+                    None,
+                    None,
+                    crate_manifests,
+                ) {
+                    res.dependency_path = Some(dep_path);
                 }
+            }
 
-                match File::open(&res.abs_path) {
-                    Ok(mut file) => {
-                        let mut data = Vec::new();
-                        match file.read_to_end(&mut data) {
-                            Ok(_) => {
-                                res.data = CxScriptResourceData::Loaded(Rc::new(data));
-                            }
-                            Err(e) => {
-                                res.data =
-                                    CxScriptResourceData::Error(format!("Failed to read file: {}", e));
-                            }
+            #[cfg(target_arch = "wasm32")]
+            if let Some(dep_path) = res.dependency_path.as_deref() {
+                res.web_url = Some(format!("/{}", web_resource_request_path(self, dep_path)));
+            } else {
+                res.web_url = None;
+            }
+
+            if let Some(dep_path) = res.dependency_path.as_deref() {
+                if let Ok(data) = self.get_dependency(dep_path) {
+                    res.data = CxScriptResourceData::Loaded(data);
+                    return;
+                }
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                if let Some(url) = res.web_url.clone() {
+                    let request_id = LiveId::unique();
+                    res.data = CxScriptResourceData::Loading;
+                    pending_http = Some((request_id, res.handle, url));
+                } else {
+                    res.data = CxScriptResourceData::Error(format!(
+                        "Failed to load resource: {} (dep: {:?}, packaged: {})",
+                        res.abs_path, res.dependency_path, is_packaged,
+                    ));
+                }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if is_packaged {
+                    #[cfg(not(target_os = "android"))]
+                    if let Some(dep_path) = res.dependency_path.as_deref() {
+                        if let Some(data) = load_packaged_resource(self, dep_path) {
+                            res.data = CxScriptResourceData::Loaded(data);
+                            return;
                         }
                     }
-                    Err(e) => {
-                        res.data = CxScriptResourceData::Error(format!("Failed to open file: {}", e));
-                    }
+                } else if let Some(result) = load_file_direct(&res.abs_path) {
+                    res.data = match result {
+                        Ok(data) => CxScriptResourceData::Loaded(data),
+                        Err(e) => CxScriptResourceData::Error(e),
+                    };
+                    return;
                 }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                res.data = CxScriptResourceData::Error(format!(
+                    "Failed to load resource: {} (dep: {:?}, packaged: {})",
+                    res.abs_path, res.dependency_path, is_packaged,
+                ));
             }
         }
 
-        for (request_id, handle, url) in pending_http {
+        #[cfg(target_arch = "wasm32")]
+        if let Some((request_id, handle, url)) = pending_http {
             self.script_data
                 .resources
                 .http_resources
@@ -190,23 +353,138 @@ impl Cx {
             self.http_request(request_id, HttpRequest::new(url, Default::default()));
         }
     }
+
+    pub fn load_script_resource(&mut self, handle: ScriptHandle) {
+        #[cfg(target_arch = "wasm32")]
+        let crate_manifests = self.script_data.crate_manifests.borrow().clone();
+
+        self.load_script_resource_impl(
+            handle,
+            #[cfg(target_arch = "wasm32")]
+            &crate_manifests,
+        );
+    }
+
+    /// Load all script resources that are still pending.
+    ///
+    /// Each platform uses a different loading strategy:
+    /// - Desktop unpackaged: dependency table, then direct filesystem
+    /// - Desktop packaged: dependency table, then package_root-relative file
+    /// - iOS/tvOS: dependency table, then apple bundle
+    /// - Android: dependency table only (JNI asset manager is inside get_dependency)
+    /// - Wasm: dependency table, then async HTTP fetch
+    pub fn load_all_script_resources(&mut self) {
+        // On wasm, skip loading if we haven't received ToWasmInit yet (os_type is Unknown).
+        #[cfg(target_arch = "wasm32")]
+        if matches!(self.os_type(), crate::cx::OsType::Unknown) {
+            return;
+        }
+
+        // On wasm, resolve web_url for resources that don't have one yet.
+        #[cfg(target_arch = "wasm32")]
+        let crate_manifests = self.script_data.crate_manifests.borrow().clone();
+
+        let handles = {
+            let resources = self.script_data.resources.resources.borrow();
+            resources
+                .iter()
+                .filter(|res| !should_skip_eager_resource_load(&res.abs_path))
+                .map(|res| res.handle)
+                .collect::<Vec<_>>()
+        };
+
+        for handle in handles {
+            self.load_script_resource_impl(
+                handle,
+                #[cfg(target_arch = "wasm32")]
+                &crate_manifests,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{remapped_small_font_dependency_path, should_skip_eager_resource_load};
+
+    #[test]
+    fn skips_only_heavy_widgets_fallback_fonts() {
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/LXGWWenKaiRegular.ttf"
+        ));
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/LXGWWenKaiBold.ttf"
+        ));
+        assert!(should_skip_eager_resource_load(
+            "/tmp/widgets/resources/NotoColorEmoji.ttf"
+        ));
+        assert!(!should_skip_eager_resource_load(
+            "/tmp/widgets/resources/IBMPlexSans-Text.ttf"
+        ));
+        assert!(!should_skip_eager_resource_load(
+            "/tmp/app/resources/LXGWWenKaiRegular.ttf"
+        ));
+    }
+
+    #[test]
+    fn remaps_only_known_small_font_fallback_dependency_paths() {
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiRegular.ttf"),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/LXGWWenKaiBold.ttf"),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/NotoColorEmoji.ttf"),
+            Some("makepad_widgets/resources/IBMPlexSans-Text.ttf")
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("makepad_widgets/resources/IBMPlexSans-Text.ttf"),
+            None
+        );
+        assert_eq!(
+            remapped_small_font_dependency_path("app/resources/LXGWWenKaiRegular.ttf"),
+            None
+        );
+    }
 }
 
 pub struct CxScriptResourceGc {
     pub resources: Rc<RefCell<Vec<CxScriptResource>>>,
+    pub handles_by_abs_path: Rc<RefCell<HashMap<String, ScriptHandle>>>,
     pub handle: ScriptHandle,
 }
 
 impl ScriptHandleGc for CxScriptResourceGc {
     fn gc(&mut self) {
-        self.resources
-            .borrow_mut()
-            .retain(|v| v.handle != self.handle)
+        let mut removed_paths = Vec::new();
+        self.resources.borrow_mut().retain(|v| {
+            if v.handle == self.handle {
+                removed_paths.push(v.abs_path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !removed_paths.is_empty() {
+            let mut handles_by_abs_path = self.handles_by_abs_path.borrow_mut();
+            for abs_path in removed_paths {
+                if handles_by_abs_path.get(&abs_path).copied() == Some(self.handle) {
+                    handles_by_abs_path.remove(&abs_path);
+                }
+            }
+        }
     }
     fn set_handle(&mut self, handle: ScriptHandle) {
         self.handle = handle
     }
 }
+
+// ---------------------------------------------------------------------------
+// Crate path resolution
+// ---------------------------------------------------------------------------
 
 /// Parses a crate path like "self:resources/file.jpg" or "other_crate:path/file.ext"
 /// Returns (crate_part, file_path)
@@ -215,6 +493,11 @@ fn parse_crate_path(path: &str) -> Option<(&str, &str)> {
     let crate_part = split.next()?;
     let file_path = split.next()?;
     Some((crate_part, file_path))
+}
+
+/// Accept both `self:path` and `self://path` syntax.
+fn strip_crate_resource_leading_slashes(file_path: &str) -> &str {
+    file_path.trim_start_matches('/')
 }
 
 fn normalize_dependency_file_path(path: &str) -> Option<String> {
@@ -232,6 +515,193 @@ fn normalize_dependency_file_path(path: &str) -> Option<String> {
         }
     }
     Some(stack.join("/"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn normalize_path(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            std::path::Component::RootDir => out.push(comp.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            std::path::Component::Normal(part) => out.push(part),
+        }
+    }
+    Some(out)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn normalize_manifest_relative_path(path: &Path) -> Option<String> {
+    normalize_dependency_file_path(&path.to_string_lossy().replace('\\', "/"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn resolve_dependency_path_from_manifests(
+    abs_path: &str,
+    default_crate_name: Option<&str>,
+    default_manifest_path: Option<&str>,
+    manifests: &HashMap<String, String>,
+) -> Option<String> {
+    let abs_norm = normalize_path(Path::new(abs_path))?;
+    let mut best: Option<(usize, String)> = None;
+
+    let mut candidates = Vec::<(String, String)>::new();
+    if let (Some(crate_name), Some(manifest_path)) = (default_crate_name, default_manifest_path) {
+        candidates.push((crate_name.to_string(), manifest_path.to_string()));
+    }
+    for (crate_name, manifest_path) in manifests {
+        candidates.push((crate_name.clone(), manifest_path.clone()));
+    }
+
+    for (crate_name, manifest_path) in candidates {
+        let Some(manifest_norm) = normalize_path(Path::new(&manifest_path)) else {
+            continue;
+        };
+        let Ok(rel) = abs_norm.strip_prefix(&manifest_norm) else {
+            continue;
+        };
+        let Some(rel_norm) = normalize_manifest_relative_path(rel) else {
+            continue;
+        };
+        let dep_path = format!("{}/{}", crate_name, rel_norm);
+        let manifest_len = manifest_norm.to_string_lossy().len();
+        match &best {
+            Some((best_len, _)) if *best_len >= manifest_len => {}
+            _ => best = Some((manifest_len, dep_path)),
+        }
+    }
+
+    best.map(|(_, dep_path)| dep_path)
+}
+
+// ---------------------------------------------------------------------------
+// Crate resource path resolution (wasm vs native)
+// ---------------------------------------------------------------------------
+
+/// On wasm, resolve crate resource paths and compute the web_url for HTTP fetching.
+/// The abs_path uses normalized Path joining to handle .. segments correctly.
+#[cfg(target_arch = "wasm32")]
+fn resolve_crate_resource_paths(
+    vm: &mut ScriptVm,
+    crate_part: &str,
+    file_path: &str,
+) -> Option<(String, Option<String>, Option<String>)> {
+    let file_path = strip_crate_resource_leading_slashes(file_path);
+    let manifests = vm.bx.code.crate_manifests.borrow().clone();
+    let (abs_path, default_crate_name, default_manifest_path) = if crate_part == "self" {
+        let bodies = vm.bx.code.bodies.borrow();
+        let body_id = vm.thread().trap.ip.body as usize;
+        let body = bodies.get(body_id)?;
+        let script_mod = match &body.source {
+            ScriptSource::Mod(script_mod) => script_mod,
+            _ => return None,
+        };
+        let abs_path = normalize_path(&Path::new(&script_mod.cargo_manifest_path).join(file_path))
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| {
+                let mut fallback = script_mod.cargo_manifest_path.clone();
+                fallback.push('/');
+                fallback.push_str(file_path);
+                fallback
+            });
+        let crate_name = script_mod
+            .module_path
+            .split("::")
+            .next()
+            .unwrap_or("")
+            .replace('-', "_");
+        (
+            abs_path,
+            Some(crate_name),
+            Some(script_mod.cargo_manifest_path.clone()),
+        )
+    } else {
+        let crate_name = crate_part.replace('-', "_");
+        let manifest_path = manifests.get(&crate_name)?.clone();
+        let abs_path = normalize_path(&Path::new(&manifest_path).join(file_path))
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| {
+                let mut fallback = manifest_path.clone();
+                fallback.push('/');
+                fallback.push_str(file_path);
+                fallback
+            });
+        (abs_path, Some(crate_name), Some(manifest_path))
+    };
+
+    let dependency_path = resolve_dependency_path_from_manifests(
+        &abs_path,
+        default_crate_name.as_deref(),
+        default_manifest_path.as_deref(),
+        &manifests,
+    );
+    let web_url = dependency_path.as_ref().map(|path| format!("/{}", path));
+    if web_url.is_none() {
+        crate::log!(
+            "crate_resource_unmapped crate_part={} file_path={} abs_path={}",
+            crate_part,
+            file_path,
+            abs_path
+        );
+    }
+    Some((abs_path, dependency_path, web_url))
+}
+
+/// On native platforms, resolve crate resource paths.
+/// Returns (abs_path, dependency_path). web_url is always None on native.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_crate_resource_paths(
+    vm: &mut ScriptVm,
+    crate_part: &str,
+    file_path: &str,
+) -> Option<(String, Option<String>, Option<String>)> {
+    let file_path = strip_crate_resource_leading_slashes(file_path);
+    let (abs_path, crate_name) = if crate_part == "self" {
+        let bodies = vm.bx.code.bodies.borrow();
+        let body_id = vm.thread().trap.ip.body as usize;
+        let body = bodies.get(body_id)?;
+        let script_mod = match &body.source {
+            ScriptSource::Mod(script_mod) => script_mod,
+            _ => return None,
+        };
+        let mut abs_path = script_mod.cargo_manifest_path.clone();
+        abs_path.push('/');
+        abs_path.push_str(file_path);
+        let crate_name = script_mod
+            .module_path
+            .split("::")
+            .next()
+            .unwrap_or("")
+            .replace('-', "_");
+        (abs_path, crate_name)
+    } else {
+        let crate_name = crate_part.replace('-', "_");
+        let manifests = vm.bx.code.crate_manifests.borrow();
+        let manifest_path = manifests.get(&crate_name)?.clone();
+        let mut abs_path = manifest_path;
+        abs_path.push('/');
+        abs_path.push_str(file_path);
+        (abs_path, crate_name)
+    };
+
+    let dependency_path = normalize_dependency_file_path(file_path)
+        .map(|file_path| format!("{}/{}", crate_name, file_path));
+    Some((abs_path, dependency_path, None))
+}
+
+fn script_value_to_u8_bytes(vm: &mut ScriptVm, value: ScriptValue) -> Option<Vec<u8>> {
+    if let Some(array) = value.as_array() {
+        if let ScriptArrayStorage::U8(data) = vm.bx.heap.array_storage(array) {
+            return Some(data.clone());
+        }
+    }
+    None
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {
@@ -287,7 +757,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         script_err_not_found!(vm.trap(), "invalid res prop")
     });
 
-    // res.load_all() - loads all pending resources from disk
+    // res.load_all() - loads all pending resources via the active platform backend
     vm.add_method(
         res,
         id_lut!(load_all_resources),
@@ -314,23 +784,24 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
             if let Some(abs_path) = vm.string_with(path, |_vm, s| s.to_string()) {
                 let cx = vm.host.cx_mut();
+                if let Some(existing) = cx.script_data.resources.get_handle_by_abs_path(&abs_path) {
+                    return existing.into();
+                }
+
                 let handle_gc = CxScriptResourceGc {
                     resources: cx.script_data.resources.resources.clone(),
+                    handles_by_abs_path: cx.script_data.resources.handles_by_abs_path.clone(),
                     handle: ScriptHandle::ZERO,
                 };
                 let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
 
-                cx.script_data
-                    .resources
-                    .resources
-                    .borrow_mut()
-                    .push(CxScriptResource {
-                        abs_path,
-                        dependency_path: None,
-                        web_url: None,
-                        data: CxScriptResourceData::NotLoaded,
-                        handle,
-                    });
+                cx.script_data.resources.insert_resource(CxScriptResource {
+                    abs_path,
+                    dependency_path: None,
+                    web_url: None,
+                    data: CxScriptResourceData::NotLoaded,
+                    handle,
+                });
 
                 return handle.into();
             }
@@ -356,68 +827,34 @@ pub fn script_mod(vm: &mut ScriptVm) {
             if let Some(path_string) = path_string {
                 // Parse "crate:path" format
                 if let Some((crate_part, file_path)) = parse_crate_path(&path_string) {
-                    let (abs_path, crate_name) = if crate_part == "self" {
-                        // Get cargo_manifest_path from current script body
-                        let bodies = vm.bx.code.bodies.borrow();
-                        let body_id = vm.thread().trap.ip.body as usize;
-                        if let Some(body) = bodies.get(body_id) {
-                            if let ScriptSource::Mod(script_mod) = &body.source {
-                                let mut final_path = script_mod.cargo_manifest_path.clone();
-                                final_path.push('/');
-                                final_path.push_str(file_path);
-                                let self_crate_name = script_mod
-                                    .module_path
-                                    .split("::")
-                                    .next()
-                                    .unwrap_or("")
-                                    .replace('-', "_");
-                                (Some(final_path), Some(self_crate_name))
-                            } else {
-                                (None, None)
-                            }
-                        } else {
-                            (None, None)
-                        }
-                    } else {
-                        // Look up crate name in the manifest table on ScriptCode
-                        let crate_name = crate_part.replace('-', "_");
-                        let manifests = vm.bx.code.crate_manifests.borrow();
-                        if let Some(manifest_path) = manifests.get(&crate_name) {
-                            let mut final_path = manifest_path.clone();
-                            final_path.push('/');
-                            final_path.push_str(file_path);
-                            (Some(final_path), Some(crate_name))
-                        } else {
-                            (None, None)
-                        }
-                    };
-                    if let Some(abs_path) = abs_path {
-                        let dependency_path = if let Some(crate_name) = crate_name {
-                            normalize_dependency_file_path(file_path)
-                                .map(|file_path| format!("{}/{}", crate_name, file_path))
-                        } else {
-                            None
-                        };
-                        let web_url = dependency_path.as_ref().map(|path| format!("/{}", path));
-
+                    if let Some((abs_path, dependency_path, web_url)) =
+                        resolve_crate_resource_paths(vm, crate_part, file_path)
+                    {
                         let cx = vm.host.cx_mut();
+                        if let Some(existing) =
+                            cx.script_data.resources.get_handle_by_abs_path(&abs_path)
+                        {
+                            return existing.into();
+                        }
+
                         let handle_gc = CxScriptResourceGc {
                             resources: cx.script_data.resources.resources.clone(),
+                            handles_by_abs_path: cx
+                                .script_data
+                                .resources
+                                .handles_by_abs_path
+                                .clone(),
                             handle: ScriptHandle::ZERO,
                         };
                         let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
 
-                        cx.script_data
-                            .resources
-                            .resources
-                            .borrow_mut()
-                            .push(CxScriptResource {
-                                abs_path,
-                                dependency_path,
-                                web_url,
-                                data: CxScriptResourceData::NotLoaded,
-                                handle,
-                            });
+                        cx.script_data.resources.insert_resource(CxScriptResource {
+                            abs_path,
+                            dependency_path,
+                            web_url,
+                            data: CxScriptResourceData::NotLoaded,
+                            handle,
+                        });
 
                         return handle.into();
                     }
@@ -442,24 +879,25 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
             if let Some(url_string) = vm.string_with(url, |_vm, s| s.to_string()) {
                 let cx = vm.host.cx_mut();
+                if let Some(existing) = cx.script_data.resources.get_handle_by_abs_path(&url_string)
+                {
+                    return existing.into();
+                }
                 let handle_gc = CxScriptResourceGc {
                     resources: cx.script_data.resources.resources.clone(),
+                    handles_by_abs_path: cx.script_data.resources.handles_by_abs_path.clone(),
                     handle: ScriptHandle::ZERO,
                 };
                 let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
 
                 // Create the resource in Loading state
-                cx.script_data
-                    .resources
-                    .resources
-                    .borrow_mut()
-                    .push(CxScriptResource {
-                        abs_path: url_string.clone(),
-                        dependency_path: None,
-                        web_url: None,
-                        data: CxScriptResourceData::Loading,
-                        handle,
-                    });
+                cx.script_data.resources.insert_resource(CxScriptResource {
+                    abs_path: url_string.clone(),
+                    dependency_path: None,
+                    web_url: None,
+                    data: CxScriptResourceData::Loading,
+                    handle,
+                });
 
                 // Fire the HTTP request
                 let request_id = LiveId::unique();
@@ -473,6 +911,41 @@ pub fn script_mod(vm: &mut ScriptVm) {
             }
 
             script_err_type_mismatch!(vm.trap(), "invalid res arg type")
+        },
+    );
+
+    // res.binary_resource(bytes_u8_array)
+    // Creates an in-memory resource directly from bytes.
+    vm.add_method(
+        res,
+        id_lut!(binary_resource),
+        script_args_def!(data = NIL),
+        move |vm, args| {
+            let data = script_value!(vm, args.data);
+            let Some(bytes) = script_value_to_u8_bytes(vm, data) else {
+                return script_err_type_mismatch!(
+                    vm.trap(),
+                    "binary_resource expects a U8 byte array"
+                );
+            };
+
+            let cx = vm.host.cx_mut();
+            let handle_gc = CxScriptResourceGc {
+                resources: cx.script_data.resources.resources.clone(),
+                handles_by_abs_path: cx.script_data.resources.handles_by_abs_path.clone(),
+                handle: ScriptHandle::ZERO,
+            };
+            let handle = vm.bx.heap.new_handle(res_type, Box::new(handle_gc));
+
+            cx.script_data.resources.insert_resource(CxScriptResource {
+                abs_path: format!("binary://{}", LiveId::unique().0),
+                dependency_path: None,
+                web_url: None,
+                data: CxScriptResourceData::Loaded(Rc::new(bytes)),
+                handle,
+            });
+
+            handle.into()
         },
     );
 }

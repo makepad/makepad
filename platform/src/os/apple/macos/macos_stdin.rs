@@ -1,26 +1,21 @@
-use {
-    crate::{
-        cx::Cx,
-        cx_api::CxOsOp,
-        draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
-        event::Event,
-        event::{TextClipboardEvent, WindowGeom, WindowGeomChangeEvent},
-        makepad_live_id::*,
-        makepad_math::*,
-        makepad_micro_serde::*,
-        os::{
-            cx_stdin::{
-                HostToStdin, PollTimer, PresentableDraw, PresentableImageId, StdinToHost,
-                SWAPCHAIN_IMAGE_COUNT,
-            },
-            metal::{DrawPassMode, MetalCx},
-        },
-        texture::{Texture, TextureFormat},
-        thread::SignalToUI,
-        window::CxWindowPool,
+use crate::{
+    cx::Cx,
+    cx_api::{CxOsApi, CxOsOp},
+    draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
+    event::Event,
+    event::{WindowGeom, WindowGeomChangeEvent},
+    makepad_math::*,
+    makepad_micro_serde::*,
+    os::{
+        metal::{DrawPassMode, MetalCx},
+        shared_framebuf::{PollTimer, PresentableDraw, PresentableImageId, SWAPCHAIN_IMAGE_COUNT},
     },
-    std::{cell::RefCell, io, io::prelude::*, io::BufReader, rc::Rc},
+    texture::{Texture, TextureFormat},
+    thread::SignalToUI,
+    web_socket::WebSocketMessage,
+    window::CxWindowPool,
 };
+use makepad_studio_protocol::{AppToStudio, GCSample, StudioToApp, StudioToAppVec};
 
 /// Local swapchain for client-side texture management
 struct LocalSwapchain {
@@ -46,13 +41,12 @@ impl StdinWindow {
 }
 
 impl Cx {
+    fn stdin_send_to_host(msg: AppToStudio) {
+        Cx::send_studio_message(msg);
+    }
+
     pub(crate) fn stdin_send_draw_complete(presentable_draw: PresentableDraw) {
-        let _ = io::stdout().write_all(
-            StdinToHost::DrawCompleteAndFlip(presentable_draw)
-                .to_json()
-                .as_bytes(),
-        );
-        let _ = io::stdout().flush();
+        Self::stdin_send_to_host(AppToStudio::DrawCompleteAndFlip(presentable_draw));
     }
 
     pub(crate) fn stdin_handle_repaint(
@@ -70,7 +64,10 @@ impl Cx {
             match self.passes[draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
-                    if let Some(swapchain) = &mut stdin_windows[window_id.id()].swapchain {
+                    let Some(stdin_window) = stdin_windows.get_mut(window_id.id()) else {
+                        continue;
+                    };
+                    if let Some(swapchain) = &mut stdin_window.swapchain {
                         let [current_image] = &swapchain.presentable_images;
                         if let Some(texture) = &current_image.texture {
                             let window = &mut self.windows[window_id];
@@ -78,6 +75,7 @@ impl Cx {
                             pass.color_textures = vec![CxDrawPassColorTexture {
                                 clear_color: DrawPassClearColor::ClearWith(pass.clear_color),
                                 texture: texture.clone(),
+                                cube_face: None,
                             }];
 
                             let kind_id = window.kind_id;
@@ -102,261 +100,261 @@ impl Cx {
                     }
                 }
                 CxDrawPassParent::DrawPass(_) => {
-                    self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::StdinTexture);
                 }
                 CxDrawPassParent::None => {
-                    self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::Texture);
+                    self.draw_pass(draw_pass_id, metal_cx, DrawPassMode::StdinTexture);
                 }
             }
         }
     }
 
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
-        let (json_msg_tx, json_msg_rx) = std::sync::mpsc::channel();
-        {
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(std::io::stdin().lock());
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    if let Ok(0) | Err(_) = reader.read_line(&mut line) {
-                        break;
-                    }
-
-                    // alright lets put the line in a json parser
-                    match HostToStdin::deserialize_json(&line) {
-                        Ok(msg) => {
-                            if json_msg_tx.send(msg).is_err() {
-                                break;
-                            }
-                        }
-                        Err(err) => {
-                            // we should output a log string
-                            crate::error!("Cant parse stdin-JSON {} {:?}", line, err)
-                        }
-                    }
-                }
-            });
-        }
-
-        let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
+        Self::stdin_send_to_host(AppToStudio::BeforeStartup);
 
         let mut stdin_windows: Vec<StdinWindow> = Vec::new();
-
         self.call_event_handler(&Event::Startup);
+        Self::stdin_send_to_host(AppToStudio::AfterStartup);
 
-        // lets create 2 windows
+        loop {
+            if !Self::has_studio_web_socket() {
+                crate::error!("--stdin-loop mode requires a studio websocket");
+                break;
+            }
+            let incoming = match self.recv_studio_websocket_message() {
+                Some(incoming) => incoming,
+                None => break,
+            };
 
-        while let Ok(msg) = json_msg_rx.recv() {
-            match msg {
-                /* HostToStdin::ReloadFile {file, contents} => {
-                    // alright lets reload this file in our DSL system
-                    let _ = self.live_file_change_sender.send(vec![LiveFileChange{
-                        file_name: file,
-                        content: contents
-                    }]);
-                }*/
-                HostToStdin::KeyDown(e) => {
-                    self.call_event_handler(&Event::KeyDown(e));
-                }
-                HostToStdin::KeyUp(e) => {
-                    self.call_event_handler(&Event::KeyUp(e));
-                }
-                HostToStdin::TextInput(e) => {
-                    self.call_event_handler(&Event::TextInput(e));
-                }
-                HostToStdin::TextCopy => {
-                    let response = Rc::new(RefCell::new(None));
-                    self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
-                        response: response.clone(),
-                    }));
-                    let text = response.borrow().clone();
-                    if let Some(text) = text {
-                        let _ = io::stdout()
-                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
-                        let _ = io::stdout().flush();
+            match incoming {
+                WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {
+                    Ok(msgs) => {
+                        for msg in msgs.0 {
+                            if self.stdin_handle_host_to_stdin(msg, metal_cx, &mut stdin_windows) {
+                                return;
+                            }
+                        }
+                        self.handle_actions();
+                    }
+                    Err(err) => {
+                        crate::error!(
+                            "Cant parse studio websocket binary payload in --stdin-loop: {:?}",
+                            err
+                        );
+                    }
+                },
+                WebSocketMessage::String(text) => {
+                    if let Ok(msg) = StudioToApp::deserialize_json(&text) {
+                        if self.stdin_handle_host_to_stdin(msg, metal_cx, &mut stdin_windows) {
+                            return;
+                        }
+                    } else if !text.trim().is_empty() {
+                        crate::warning!(
+                            "Ignoring unexpected studio websocket text: {}",
+                            text.trim()
+                        );
                     }
                 }
-                HostToStdin::TextCut => {
-                    let response = Rc::new(RefCell::new(None));
-                    self.call_event_handler(&Event::TextCut(TextClipboardEvent {
-                        response: response.clone(),
-                    }));
-                    let text = response.borrow().clone();
-                    if let Some(text) = text {
-                        let _ = io::stdout()
-                            .write_all(StdinToHost::SetClipboard(text).to_json().as_bytes());
-                        let _ = io::stdout().flush();
-                    }
+                WebSocketMessage::Error(err) => {
+                    crate::error!("Studio websocket error in --stdin-loop: {}", err);
+                    break;
                 }
-                HostToStdin::MouseDown(e) => {
-                    self.fingers.process_tap_count(dvec2(e.x, e.y), e.time);
-                    // store the window_id we mousedowned on
-                    let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
-                    let mouse_down_event = e.into_event(window_id, pos);
-                    self.fingers.mouse_down(mouse_down_event.button, window_id);
-                    self.call_event_handler(&Event::MouseDown(mouse_down_event));
-                }
-                HostToStdin::MouseMove(e) => {
-                    let (window_id, pos) =
-                        if let Some((_, window_id)) = self.fingers.first_mouse_button {
-                            (window_id, self.windows[window_id].window_geom.position)
-                        } else {
-                            self.windows.window_id_contains(dvec2(e.x, e.y))
-                        };
-                    self.call_event_handler(&Event::MouseMove(e.into_event(window_id, pos)));
-                    self.fingers.cycle_hover_area(live_id!(mouse).into());
-                    self.fingers.switch_captures();
-                }
-                HostToStdin::MouseUp(e) => {
-                    let (window_id, pos) =
-                        if let Some((_, window_id)) = self.fingers.first_mouse_button {
-                            (window_id, self.windows[window_id].window_geom.position)
-                        } else {
-                            self.windows.window_id_contains(dvec2(e.x, e.y))
-                        };
-                    let mouse_up_event = e.into_event(window_id, pos);
-                    let button = mouse_up_event.button;
-                    self.call_event_handler(&Event::MouseUp(mouse_up_event));
-                    self.fingers.mouse_up(button);
-                    self.fingers.cycle_hover_area(live_id!(mouse).into());
-                }
-                HostToStdin::Scroll(e) => {
-                    let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
-                    self.call_event_handler(&Event::Scroll(e.into_event(window_id, pos)));
-                }
-                HostToStdin::WindowGeomChange {
-                    dpi_factor,
-                    left,
-                    top,
-                    width,
-                    height,
+                WebSocketMessage::Closed => break,
+                WebSocketMessage::Opened => {}
+            }
+            self.run_live_edit_if_needed("macos-stdin");
+        }
+    }
+
+    fn stdin_handle_host_to_stdin(
+        &mut self,
+        msg: StudioToApp,
+        metal_cx: &mut MetalCx,
+        stdin_windows: &mut Vec<StdinWindow>,
+    ) -> bool {
+        match msg {
+            // Mouse events: resolve window_id from coordinates (stdin mode
+            // supports multiple virtual windows).
+            StudioToApp::MouseDown(ref e) => {
+                let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                return self.dispatch_studio_msg(msg, window_id, pos);
+            }
+            StudioToApp::MouseMove(ref e) => {
+                let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button
+                {
+                    (window_id, self.windows[window_id].window_geom.position)
+                } else {
+                    self.windows.window_id_contains(dvec2(e.x, e.y))
+                };
+                return self.dispatch_studio_msg(msg, window_id, pos);
+            }
+            StudioToApp::TweakRay(e) => {
+                let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                let dpi_factor = self.windows[window_id].window_geom.dpi_factor.max(1.0);
+                let tweak_ray = crate::event::TweakRayEvent {
+                    abs: dvec2(e.x - pos.x, e.y - pos.y),
                     window_id,
-                } => {
-                    let window_id = CxWindowPool::from_usize(window_id);
-
-                    if self.windows.is_valid(window_id) {
-                        let old_geom = self.windows[window_id].window_geom.clone();
-                        let new_geom = WindowGeom {
-                            position: dvec2(left, top),
-                            dpi_factor,
-                            inner_size: dvec2(width, height),
-                            ..Default::default()
-                        };
-                        self.windows[window_id].window_geom = new_geom.clone();
-                        let re = WindowGeomChangeEvent {
-                            window_id,
-                            new_geom,
-                            old_geom,
-                        };
-                        if re.old_geom.dpi_factor != re.new_geom.dpi_factor
-                            || re.old_geom.inner_size != re.new_geom.inner_size
-                        {
-                            if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                                self.redraw_pass_and_child_passes(main_pass_id);
-                            }
-                        }
-                        self.call_event_handler(&Event::WindowGeomChange(re));
-                    }
-                }
-                HostToStdin::Swapchain(new_swapchain) => {
-                    // Convert SharedSwapchain to LocalSwapchain
-                    stdin_windows[new_swapchain.window_id].swapchain = Some(LocalSwapchain {
-                        alloc_width: new_swapchain.alloc_width,
-                        alloc_height: new_swapchain.alloc_height,
-                        presentable_images: new_swapchain.presentable_images.map(|pi| {
-                            LocalPresentableImage {
-                                id: pi.id,
-                                iosurface_id: pi.iosurface_id,
-                                texture: None,
-                            }
-                        }),
-                    });
-
-                    self.redraw_all();
-                    self.stdin_handle_platform_ops(metal_cx, &mut stdin_windows);
-                }
-                HostToStdin::Tick => {
-                    for stdin_window in &mut stdin_windows {
-                        if let Some(swapchain) = stdin_window.swapchain.as_mut() {
-                            let [presentable_image] = &mut swapchain.presentable_images;
-                            // Create texture from IOSurface via global ID lookup
-                            if presentable_image.texture.is_none()
-                                && presentable_image.iosurface_id != 0
-                            {
-                                let format = TextureFormat::SharedBGRAu8 {
-                                    id: presentable_image.id,
-                                    width: swapchain.alloc_width as usize,
-                                    height: swapchain.alloc_height as usize,
-                                    initial: true,
-                                };
-                                let texture = Texture::new_with_format(self, format);
-                                if self.textures[texture.texture_id()].update_from_shared_handle(
-                                    metal_cx,
-                                    presentable_image.iosurface_id,
-                                ) {
-                                    presentable_image.texture = Some(texture);
-                                }
-                            }
-                        }
-                    }
-                    if SignalToUI::check_and_clear_ui_signal() {
-                        self.handle_media_signals();
-                        self.handle_script_signals();
-                        self.call_event_handler(&Event::Signal);
-                    }
-                    if SignalToUI::check_and_clear_action_signal() {
-                        self.handle_action_receiver();
-                    }
-                    let events = self.os.stdin_timers.get_dispatch();
-                    for event in events {
-                        self.handle_script_timer(&event);
-                        self.call_event_handler(&Event::Timer(event));
-                    }
-                    /*if self.handle_live_edit() {
-                        self.call_event_handler(&Event::LiveEdit);
-                        self.redraw_all();
-                    }*/
-
-                    self.handle_networking_events();
-                    self.handle_gamepad_events();
-                    self.stdin_handle_platform_ops(metal_cx, &mut stdin_windows);
-
-                    // we should now run all the stuff.
-                    let time_now = self.os.stdin_timers.time_now();
-                    if self.new_next_frames.len() != 0 {
-                        self.call_next_frame_event(time_now);
-                    }
-
-                    if self.need_redrawing() {
-                        self.call_draw_event(time_now);
-                        self.mtl_compile_shaders(metal_cx);
-                    }
-                    self.stdin_handle_repaint(
-                        metal_cx,
-                        &mut stdin_windows,
-                        self.os.stdin_timers.time_now() as f32,
-                    );
-
-                    // Run garbage collection if needed - safe moment after paint
-                    self.with_vm(|vm| {
-                        if vm.heap().needs_gc() {
-                            vm.gc();
-                        }
-                    });
-
-                    // If we have pending animations or timers, request another frame from the host
-                    if self.new_next_frames.len() != 0
-                        || self.need_redrawing()
-                        || !self.os.stdin_timers.timers.is_empty()
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                    dpi_factor,
+                    hit_widget_uids: std::cell::RefCell::new(Vec::new()),
+                    hit_rect: std::cell::Cell::new(None),
+                };
+                self.call_event_handler(&Event::TweakRay(tweak_ray));
+            }
+            StudioToApp::MouseUp(ref e) => {
+                let (window_id, pos) = if let Some((_, window_id)) = self.fingers.first_mouse_button
+                {
+                    (window_id, self.windows[window_id].window_geom.position)
+                } else {
+                    self.windows.window_id_contains(dvec2(e.x, e.y))
+                };
+                return self.dispatch_studio_msg(msg, window_id, pos);
+            }
+            StudioToApp::Scroll(ref e) => {
+                let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                return self.dispatch_studio_msg(msg, window_id, pos);
+            }
+            // Stdin-specific: window geometry and swapchain management.
+            StudioToApp::WindowGeomChange {
+                dpi_factor,
+                left: _left,
+                top: _top,
+                width,
+                height,
+                window_id,
+            } => {
+                let window_id = CxWindowPool::from_usize(window_id);
+                if self.windows.is_valid(window_id) {
+                    let old_geom = self.windows[window_id].window_geom.clone();
+                    let new_geom = WindowGeom {
+                        position: dvec2(0.0, 0.0),
+                        dpi_factor,
+                        inner_size: dvec2(width, height),
+                        ..Default::default()
+                    };
+                    self.windows[window_id].window_geom = new_geom.clone();
+                    let re = WindowGeomChangeEvent {
+                        window_id,
+                        new_geom,
+                        old_geom,
+                    };
+                    if re.old_geom.dpi_factor != re.new_geom.dpi_factor
+                        || re.old_geom.inner_size != re.new_geom.inner_size
                     {
-                        let _ = io::stdout()
-                            .write_all(StdinToHost::RequestAnimationFrame.to_json().as_bytes());
+                        if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                            self.redraw_pass_and_child_passes(main_pass_id);
+                        }
                     }
+                    self.call_event_handler(&Event::WindowGeomChange(re));
                 }
             }
+            StudioToApp::Swapchain(new_swapchain) => {
+                while new_swapchain.window_id >= stdin_windows.len() {
+                    stdin_windows.push(StdinWindow::new());
+                }
+                stdin_windows[new_swapchain.window_id].swapchain = Some(LocalSwapchain {
+                    alloc_width: new_swapchain.alloc_width,
+                    alloc_height: new_swapchain.alloc_height,
+                    presentable_images: new_swapchain.presentable_images.map(|pi| {
+                        LocalPresentableImage {
+                            id: pi.id,
+                            iosurface_id: pi.iosurface_id,
+                            texture: None,
+                        }
+                    }),
+                });
+                self.redraw_all();
+                self.stdin_handle_platform_ops(metal_cx, stdin_windows);
+            }
+            StudioToApp::RunViewFrameRequest(_) => {}
+            StudioToApp::Tick => {
+                for stdin_window in stdin_windows.iter_mut() {
+                    if let Some(swapchain) = stdin_window.swapchain.as_mut() {
+                        let [presentable_image] = &mut swapchain.presentable_images;
+                        if presentable_image.texture.is_none()
+                            && presentable_image.iosurface_id != 0
+                        {
+                            let format = TextureFormat::SharedBGRAu8 {
+                                id: presentable_image.id,
+                                width: swapchain.alloc_width as usize,
+                                height: swapchain.alloc_height as usize,
+                                initial: true,
+                            };
+                            let texture = Texture::new_with_format(self, format);
+                            if self.textures[texture.texture_id()]
+                                .update_from_shared_handle(metal_cx, presentable_image.iosurface_id)
+                            {
+                                presentable_image.texture = Some(texture);
+                            }
+                        }
+                    }
+                }
+                if SignalToUI::check_and_clear_ui_signal() {
+                    self.handle_media_signals();
+                    self.handle_script_signals();
+                    self.call_event_handler(&Event::Signal);
+                }
+                if SignalToUI::check_and_clear_action_signal() {
+                    self.handle_action_receiver();
+                }
+                self.poll_control_channel();
+                let events = self.os.stdin_timers.get_dispatch();
+                for event in events {
+                    self.handle_script_timer(&event);
+                    self.call_event_handler(&Event::Timer(event));
+                }
+
+                self.run_live_edit_if_needed("macos-stdin");
+                self.handle_networking_events();
+                self.handle_gamepad_events();
+                self.stdin_handle_platform_ops(metal_cx, stdin_windows);
+
+                let time_now = self.os.stdin_timers.time_now();
+                if !self.new_next_frames.is_empty() {
+                    self.call_next_frame_event(time_now);
+                }
+                if self.need_redrawing() {
+                    self.call_draw_event(time_now);
+                    self.mtl_compile_shaders(metal_cx);
+                }
+                self.stdin_handle_repaint(
+                    metal_cx,
+                    stdin_windows,
+                    self.os.stdin_timers.time_now() as f32,
+                );
+
+                let gc_start = self.seconds_since_app_start();
+                let mut gc_heap_live = None;
+                self.with_vm(|vm| {
+                    if vm.heap().needs_gc() {
+                        vm.gc();
+                        gc_heap_live = Some(vm.heap().gc_live_len() as u64);
+                    }
+                });
+                if let Some(heap_live) = gc_heap_live {
+                    let gc_end = self.seconds_since_app_start();
+                    Cx::send_studio_message(AppToStudio::GCSample(GCSample {
+                        start: gc_start,
+                        end: gc_end,
+                        heap_live,
+                    }));
+                }
+
+                if !self.new_next_frames.is_empty()
+                    || self.need_redrawing()
+                    || !self.os.stdin_timers.timers.is_empty()
+                {
+                    Self::stdin_send_to_host(AppToStudio::RequestAnimationFrame);
+                }
+            }
+            // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
+            // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.
+            other => {
+                return self.dispatch_studio_msg(other, CxWindowPool::id_zero(), dvec2(0.0, 0.0));
+            }
         }
-        // we should poll our runloop
+        false
     }
 
     fn stdin_handle_platform_ops(
@@ -372,19 +370,19 @@ impl Cx {
                     }
                     let window = &mut self.windows[window_id];
                     window.is_created = true;
-                    // we should call to the host to make a window with this id
-                    let _ = io::stdout().write_all(
-                        StdinToHost::CreateWindow {
-                            window_id: window_id.id(),
-                            kind_id: window.kind_id,
-                        }
-                        .to_json()
-                        .as_bytes(),
-                    );
+                    Self::stdin_send_to_host(AppToStudio::CreateWindow {
+                        window_id: window_id.id(),
+                        kind_id: window.kind_id,
+                    });
+                }
+                CxOsOp::CreatePopupWindow { window_id, .. } => {
+                    while window_id.id() >= stdin_windows.len() {
+                        stdin_windows.push(StdinWindow::new());
+                    }
+                    self.windows[window_id].is_created = true;
                 }
                 CxOsOp::SetCursor(cursor) => {
-                    let _ =
-                        io::stdout().write_all(StdinToHost::SetCursor(cursor).to_json().as_bytes());
+                    Self::stdin_send_to_host(AppToStudio::SetCursor(cursor.into()));
                 }
                 CxOsOp::StartTimer {
                     timer_id,
@@ -403,19 +401,13 @@ impl Cx {
                     request_id,
                     request,
                 } => {
-                    self.os.http_requests.make_http_request(
-                        request_id,
-                        request,
-                        self.os.network_response.sender.clone(),
-                    );
+                    let _ = self.net.http_start(request_id, request);
                 }
                 CxOsOp::CancelHttpRequest { request_id } => {
-                    self.os.http_requests.cancel_http_request(request_id);
+                    let _ = self.net.http_cancel(request_id);
                 }
                 CxOsOp::CopyToClipboard(content) => {
-                    let _ = io::stdout()
-                        .write_all(StdinToHost::SetClipboard(content).to_json().as_bytes());
-                    let _ = io::stdout().flush();
+                    Self::stdin_send_to_host(AppToStudio::SetClipboard(content));
                 }
                 _ => (), /*
                          CxOsOp::CloseWindow(_window_id) => {},
@@ -427,7 +419,7 @@ impl Cx {
                          CxOsOp::SetTopmost(_window_id, _is_topmost) => {}
                          CxOsOp::XrStartPresenting(_) => {},
                          CxOsOp::XrStopPresenting(_) => {},
-                         CxOsOp::ShowTextIME(_area, _pos) => {},
+                         CxOsOp::ShowTextIME(_area, _pos, _config) => {},
                          CxOsOp::HideTextIME => {},
                          CxOsOp::SetCursor(_cursor) => {},
                          CxOsOp::StartTimer {timer_id, interval, repeats} => {},

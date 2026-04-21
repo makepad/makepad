@@ -1,10 +1,11 @@
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
+#[cfg(use_vulkan)]
+use self::super::super::vulkan::CxVulkan;
 use crate::event::LongPressEvent;
 #[allow(unused)]
 use makepad_jni_sys as jni_sys;
-#[cfg(use_vulkan)]
-use self::super::super::vulkan::CxVulkan;
 
 use {
     self::super::super::{
@@ -16,38 +17,42 @@ use {
     self::super::{
         super::egl_sys::{self, LibEgl},
         super::libc_sys,
+        android_camera_player::AndroidCameraPlayer,
         android_jni::{self, *},
         android_keycodes::android_to_makepad_key_code,
         android_media::CxAndroidMedia,
+        android_video_playback::{force_native_video, force_software_video, AndroidVideoConfig},
         ndk_sys,
     },
     crate::{
-        cx::{Cx, OsType},
-        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
-        cx_stdin::{PollTimer, PollTimers},
+        cx::{AndroidParams, Cx, OsType},
+        cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace, XrFrameCpuBreakdown},
         draw_pass::CxDrawPassParent,
         draw_pass::{DrawPassClearColor, DrawPassClearDepth, DrawPassId},
         event::{
+            keyboard::{CharOffset, FullTextState, ImeAction, ImeActionEvent},
+            video_playback::CameraPreviewMode,
             Event,
-            HttpError,
-            HttpResponse,
             KeyCode,
             KeyEvent,
             KeyModifiers,
             NetworkResponse,
-            NetworkResponseItem,
+            SelectionHandleDragEvent,
             TextClipboardEvent,
             //TimerEvent,
             TextInputEvent,
+            drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             //TouchPoint,
             TouchUpdateEvent,
             VideoDecodingErrorEvent,
             VideoPlaybackCompletedEvent,
             VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent,
+            VideoSource,
             //HttpRequest,
             //HttpMethod,
             VideoTextureUpdatedEvent,
+            VideoYuvTexturesReady,
             VirtualKeyboardEvent,
             WindowGeom,
             WindowGeomChangeEvent,
@@ -55,17 +60,27 @@ use {
         gpu_info::GpuPerformance,
         makepad_live_id::*,
         makepad_math::*,
+        media_api::CxMediaApi,
         os::cx_native::EventFlow,
-        studio::{AppToStudio, GPUSample},
+        os::linux::gl_video_upload::upload_yuv_to_gl,
+        shared_framebuf::{PollTimer, PollTimers},
+        texture::TextureId,
+        texture::{TextureFormat, TextureUpdated},
         //makepad_live_compiler::LiveFileChange,
         thread::SignalToUI,
+        video::{VideoEncodeError, MAX_VIDEO_DEVICE_INDEX},
+        video_decode::software_video::PlaybackSessionHandle,
         web_socket::WebSocketMessage,
         //web_socket::WebSocket,
         window::CxWindowPool,
+        HttpError,
+        HttpResponse,
     },
     jni_sys::jobject,
-    makepad_http::websocket::ServerWebSocket as WebSocketImpl,
-    makepad_http::websocket::ServerWebSocketMessage as WebSocketMessageImpl,
+    makepad_network::{
+        ServerWebSocketMessage as WebSocketMessageImpl, WebSocketParser as WebSocketImpl,
+    },
+    makepad_studio_protocol::{AppToStudio, GPUSample},
     std::cell::RefCell,
     std::collections::HashMap,
     std::ffi::CString,
@@ -75,24 +90,210 @@ use {
     std::time::Instant,
 };
 
-/*
-fn android_debug_log(msg:&str){
+const ANDROID_XR_BUFFER_SCALE_MIN: f32 = 0.75;
+const ANDROID_XR_BUFFER_SCALE_DEFAULT: f32 = 1.4;
+const ANDROID_XR_BUFFER_SCALE_MAX: f32 = 1.5;
+const ANDROID_XR_MULTISAMPLES: usize = 4;
+const ANDROID_XR_FIXED_FOVEATION_LEVEL: u8 = 3;
+
+fn android_debug_log(prio: i32, msg: &str) {
     use std::ffi::c_int;
     extern "C" {
         pub fn __android_log_write(prio: c_int, tag: *const u8, text: *const u8) -> c_int;
     }
-    let msg = format!("{}\0", msg);
-    unsafe{__android_log_write(3, "Makepad\0".as_ptr(), msg.as_ptr())};
-}*/
+    let msg = format!("{msg}\0");
+    unsafe { __android_log_write(prio as c_int, "Makepad\0".as_ptr(), msg.as_ptr()) };
+}
+
+fn android_panic_summary(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = if let Some(payload) = info.payload().downcast_ref::<&str>() {
+        (*payload).to_string()
+    } else if let Some(payload) = info.payload().downcast_ref::<String>() {
+        payload.clone()
+    } else {
+        "non-string panic payload".to_string()
+    };
+    let location = info
+        .location()
+        .map(|location| {
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
+        })
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let thread = std::thread::current();
+    let thread_name = thread.name().unwrap_or("<unnamed>");
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    format!(
+        "Android panic hook: thread={thread_name} location={location} payload={payload}\n{backtrace}"
+    )
+}
+
+fn install_android_panic_hook() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let summary = android_panic_summary(info);
+        android_debug_log(6, &summary);
+        crate::error!("{summary}");
+        previous_hook(info);
+    }));
+}
+
+pub fn set_current_thread_priority(priority: crate::CxThreadPriority) {
+    use core::ffi::{c_int, c_uint};
+
+    const PRIO_PROCESS: c_int = 0;
+
+    unsafe extern "C" {
+        fn gettid() -> c_int;
+        fn setpriority(which: c_int, who: c_uint, prio: c_int) -> c_int;
+    }
+
+    let nice = match priority {
+        crate::CxThreadPriority::Normal => 0,
+        crate::CxThreadPriority::Utility => 5,
+        crate::CxThreadPriority::Background => 10,
+        crate::CxThreadPriority::Idle => 15,
+    };
+
+    unsafe {
+        let tid = gettid();
+        if tid > 0 {
+            let _ = setpriority(PRIO_PROCESS, tid as c_uint, nice);
+        }
+    }
+}
 
 impl Cx {
+    pub(crate) fn current_android_xr_options(&self) -> CxOpenXrOptions {
+        CxOpenXrOptions {
+            buffer_scale: self.os.xr_buffer_scale_requested,
+            multisamples: ANDROID_XR_MULTISAMPLES,
+            remove_hands_from_depth: false,
+            fixed_foveation_level: ANDROID_XR_FIXED_FOVEATION_LEVEL,
+        }
+    }
+
+    #[cfg(use_vulkan)]
+    fn replace_xr_pending_surface(
+        &mut self,
+        window: *mut ndk_sys::ANativeWindow,
+        width: i32,
+        height: i32,
+    ) {
+        unsafe {
+            if !self.os.xr_pending_surface_window.is_null() {
+                ndk_sys::ANativeWindow_release(self.os.xr_pending_surface_window);
+            }
+        }
+        self.os.xr_pending_surface_window = window;
+        self.os.xr_pending_surface_width = width;
+        self.os.xr_pending_surface_height = height;
+    }
+
+    #[cfg(use_vulkan)]
+    fn clear_xr_pending_surface(&mut self) {
+        unsafe {
+            if !self.os.xr_pending_surface_window.is_null() {
+                ndk_sys::ANativeWindow_release(self.os.xr_pending_surface_window);
+            }
+        }
+        self.os.xr_pending_surface_window = std::ptr::null_mut();
+        self.os.xr_pending_surface_width = 0;
+        self.os.xr_pending_surface_height = 0;
+        self.os.xr_retry_surface_after_destroy = false;
+    }
+
+    #[cfg(use_vulkan)]
+    fn try_create_xr_session_for_surface(
+        &mut self,
+        window: *mut ndk_sys::ANativeWindow,
+        width: i32,
+        height: i32,
+        reason: &str,
+    ) {
+        if !self.os.in_xr_mode || self.os.openxr.session.is_some() {
+            self.os.xr_retry_surface_after_destroy = false;
+            return;
+        }
+        if self.os.openxr.libxr.is_none() {
+            let activity_handle = makepad_android_state::get_activity();
+            match self.os.openxr.create_instance(activity_handle) {
+                Ok(()) => {}
+                Err(err) => {
+                    crate::error!("Android XR: {reason} create_instance failed: {err}");
+                    self.os.xr_retry_surface_after_destroy = true;
+                    return;
+                }
+            }
+        }
+        if self.os.openxr.libxr.is_none() {
+            self.os.xr_retry_surface_after_destroy = true;
+            return;
+        }
+
+        let width_u32 = width.max(1) as u32;
+        let height_u32 = height.max(1) as u32;
+
+        if let Some(mut old_vulkan) = self.os.vulkan.take() {
+            old_vulkan.suspend_surface();
+            drop(old_vulkan);
+        }
+
+        match self
+            .os
+            .openxr
+            .create_vulkan_backend(window, width_u32, height_u32)
+        {
+            Ok(vulkan) => {
+                self.os.vulkan = Some(vulkan);
+            }
+            Err(err) => {
+                crate::error!(
+                    "Android XR: fresh Vulkan backend init failed before XR session ({reason}): {err}"
+                );
+                self.os.xr_retry_surface_after_destroy = true;
+                return;
+            }
+        }
+
+        let mut vulkan = self.os.vulkan.take();
+        let result = self.os.openxr.create_session(
+            self.os.display.as_ref().unwrap(),
+            vulkan.as_mut(),
+            self.current_android_xr_options(),
+            &self.os_type,
+        );
+        self.os.vulkan = vulkan;
+        if let Err(e) = result {
+            crate::error!("OpenXR create_xr_session failed ({reason}): {}", e);
+            self.os.xr_retry_surface_after_destroy = true;
+        } else {
+            self.os.xr_buffer_scale_active = self.os.xr_buffer_scale_requested;
+            self.clear_xr_pending_surface();
+        }
+    }
+
     /// Main event loop for the Android platform.
     /// This method waits for messages from the Java side, particularly the RenderLoop message,
     /// which is sent on Android Choreographer callbacks to sync with vsync.
     /// It handles all incoming messages, processes other events, and manages drawing operations.
     pub fn main_loop(&mut self, from_java_rx: mpsc::Receiver<FromJavaMessage>) {
         self.gpu_info.performance = GpuPerformance::Tier1;
-
+        // Populate display_context and script heap with the initial display
+        // metrics BEFORE Startup, so app script_mod! definitions can use them.
+        let insets = self.os.safe_area_insets;
+        let dpi_factor = if self.os.dpi_factor > 0.0 {
+            self.os.dpi_factor
+        } else {
+            1.0
+        };
+        self.display_context.screen_size = self.os.display_size / dpi_factor;
+        self.display_context.safe_area_insets = insets;
+        self.update_safe_inset_script_values(insets);
         self.call_event_handler(&Event::Startup);
         self.redraw_all();
 
@@ -109,14 +310,77 @@ impl Cx {
             // This ensures we're in sync with the Android Choreographer when we receive a RenderLoop message.
             match from_java_rx.recv() {
                 Ok(FromJavaMessage::RenderLoop) => {
+                    // Drain all pending messages, coalescing consecutive touch-move
+                    // events to avoid redundant event dispatch before painting.
+                    // Start/Stop events are never dropped — only pure-Move events
+                    // are replaced by the next one.
+                    let mut pending_touch_move: Option<FromJavaMessage> = None;
                     while let Ok(msg) = from_java_rx.try_recv() {
+                        if let FromJavaMessage::Touch(ref touches) = msg {
+                            if touches.iter().all(|t| t.state == crate::event::finger::TouchState::Move) {
+                                // This is a pure move event — defer it; a newer one
+                                // may arrive and supersede it.
+                                pending_touch_move = Some(msg);
+                                continue;
+                            }
+                        }
+                        // A non-touch or non-pure-move message arrived.
+                        // Flush the deferred move first (if any) so ordering is preserved.
+                        if let Some(deferred) = pending_touch_move.take() {
+                            self.handle_message(deferred);
+                        }
                         self.handle_message(msg);
                     }
+                    // Flush the last deferred move (if any).
+                    if let Some(deferred) = pending_touch_move.take() {
+                        self.handle_message(deferred);
+                    }
                     self.handle_other_events();
-                    self.handle_drawing();
+                    if self.os.in_xr_mode && self.os.openxr.session.is_none() {
+                        if !self.os.openxr.logged_waiting_for_session {
+                            self.os.openxr.logged_waiting_for_session = true;
+                        }
+                        continue;
+                    }
+                    self.os.openxr.logged_waiting_for_session = false;
+                    // If a script re-apply was requested (e.g., safe area insets
+                    // changed on rotation), fire LiveEdit now.
+                    if self.pending_script_reapply {
+                        self.pending_script_reapply = false;
+                        self.call_event_handler(&Event::LiveEdit);
+                        self.redraw_all();
+                    }
+                    // Drop the frame entirely if the window surface has been
+                    // torn down (typically during background/foreground or a
+                    // rotation). Issuing GL calls without a current EGL context
+                    // — which is what `destroy_surface` leaves us in — is
+                    // undefined behavior and crashes Mali/Adreno drivers with
+                    // a SIGSEGV inside `render_view`.
+                    if self.os.has_drawable_surface() {
+                        // If we previously skipped frames because the surface
+                        // wasn't ready, the redraw request may have been consumed
+                        // by an earlier draw cycle that couldn't actually paint.
+                        // Force a full redraw on the first frame after the surface
+                        // becomes (or becomes again) drawable.
+                        if self.os.needs_first_draw {
+                            self.os.needs_first_draw = false;
+                            self.redraw_all();
+                        }
+                        self.handle_drawing();
+                    } else {
+                        // Surface not ready — remember that we need a full
+                        // redraw once it becomes available, since any pending
+                        // draw event may be consumed by handle_drawing() on
+                        // a future iteration when the surface is briefly valid
+                        // but immediately torn down again (rotation race).
+                        self.os.needs_first_draw = true;
+                    }
                 }
                 Ok(message) => {
                     self.handle_message(message);
+                    // Dispatch platform ops immediately after non-RenderLoop messages.
+                    // This ensures SyncImeState reaches Java before the IME's next buffer query.
+                    self.handle_platform_ops();
                 }
                 Err(e) => {
                     crate::error!("Error receiving message: {:?}", e);
@@ -124,11 +388,77 @@ impl Cx {
                 }
             }
         }
-        self.os
-            .openxr
-            .destroy_instance(&self.os.display.as_ref().unwrap().libgl)
-            .ok();
+        #[cfg(use_vulkan)]
+        {
+            let mut vulkan = self.os.vulkan.take();
+            self.os
+                .openxr
+                .destroy_instance(&self.os.display.as_ref().unwrap().libgl, vulkan.as_mut())
+                .ok();
+            self.os.vulkan = vulkan;
+        }
+
+        #[cfg(not(use_vulkan))]
+        {
+            self.os
+                .openxr
+                .destroy_instance(&self.os.display.as_ref().unwrap().libgl)
+                .ok();
+        }
         from_java_messages_clear()
+    }
+
+    fn sync_android_surface_alive_from_backend(&mut self) {
+        #[cfg(not(use_vulkan))]
+        {
+            self.os.surface_alive = self
+                .os
+                .display
+                .as_ref()
+                .map(|d| d.is_surface_alive())
+                .unwrap_or(false);
+        }
+
+        #[cfg(use_vulkan)]
+        {
+            self.os.surface_alive = if self.os.in_xr_mode && self.os.openxr.session.is_some() {
+                self.os.vulkan.is_some()
+            } else {
+                self.os
+                    .vulkan
+                    .as_ref()
+                    .map(|vulkan| vulkan.has_drawable_surface())
+                    .unwrap_or(false)
+            };
+        }
+    }
+
+    fn request_android_surface_redraw(&mut self) {
+        // A newly created/recreated surface starts with undefined contents.
+        // Always re-arm the first full redraw instead of relying on a later
+        // size-change callback to do it for us.
+        self.os.needs_first_draw = true;
+        self.redraw_all();
+    }
+
+    fn hide_android_surface_cover_after_first_present_if_needed(&mut self) {
+        if !self.os.hide_surface_cover_after_first_present || self.os.in_xr_mode {
+            return;
+        }
+        self.os.hide_surface_cover_after_first_present = false;
+        unsafe {
+            android_jni::to_java_set_surface_cover_visible(false);
+        }
+    }
+
+    fn request_android_surface_snapshot_refresh_after_present_if_needed(&mut self) {
+        if !self.os.refresh_surface_snapshot_after_first_present || self.os.in_xr_mode {
+            return;
+        }
+        self.os.refresh_surface_snapshot_after_first_present = false;
+        unsafe {
+            android_jni::to_java_request_surface_snapshot_refresh();
+        }
     }
 
     pub(crate) fn handle_message(&mut self, msg: FromJavaMessage) {
@@ -150,31 +480,62 @@ impl Cx {
                 });
             }
             FromJavaMessage::SurfaceCreated { window } => {
+                #[cfg(use_vulkan)]
+                let _has_vulkan = self.os.vulkan.is_some();
                 #[cfg(not(use_vulkan))]
-                unsafe {
-                    self.os.display.as_mut().unwrap().update_surface(window);
+                let _has_vulkan = false;
+                #[cfg(not(use_vulkan))]
+                if !self.os.in_xr_mode {
+                    unsafe {
+                        self.os.display.as_mut().unwrap().update_surface(window);
+                    }
                 }
 
                 #[cfg(use_vulkan)]
                 {
                     if let Some(display) = self.os.display.as_mut() {
                         unsafe {
-                            if !display.window.is_null() {
+                            if !display.window.is_null() && display.window != window {
                                 ndk_sys::ANativeWindow_release(display.window);
                             }
                         }
                         display.window = window;
                     }
-                    if let Some(vulkan) = self.os.vulkan.as_mut() {
-                        let width = self.os.display_size.x.max(1.0) as u32;
-                        let height = self.os.display_size.y.max(1.0) as u32;
-                        if let Err(err) = vulkan.update_surface(window, width, height) {
-                            crate::error!("Android Vulkan surface create/update failed: {err}");
+                    if !self.os.in_xr_mode {
+                        if let Some(vulkan) = self.os.vulkan.as_mut() {
+                            let width = self.os.display_size.x.max(1.0) as u32;
+                            let height = self.os.display_size.y.max(1.0) as u32;
+                            if let Err(err) = vulkan.update_surface(window, width, height) {
+                                crate::error!("Android Vulkan surface create/update failed: {err}");
+                            }
                         }
                     }
                 }
+
+                if !self.os.in_xr_mode {
+                    self.sync_android_surface_alive_from_backend();
+                    if self.os.surface_alive {
+                        self.request_android_surface_redraw();
+                    }
+                }
             }
-            FromJavaMessage::SurfaceDestroyed => {
+            FromJavaMessage::SurfaceDestroyed { ack } => {
+                // CRITICAL: clear `surface_alive` BEFORE tearing down the
+                // surface itself. The render thread is the only one allowed to
+                // touch GL state, and we are on the render thread right now —
+                // but the helper functions we call below (`destroy_surface`,
+                // `suspend_surface`) issue EGL/Vulkan calls that can themselves
+                // trip the renderer if it observes a half-torn-down state.
+                self.os.surface_alive = false;
+                // Ensure the next time the surface becomes drawable, we force
+                // a full redraw to avoid a black screen.
+                self.os.needs_first_draw = true;
+                // The Java host shows its placeholder cover before sending
+                // SurfaceDestroyed, so only arm the hide-on-present path for
+                // genuine surface teardown/rebuild cycles, not cold start.
+                self.os.hide_surface_cover_after_first_present = true;
+                self.os.refresh_surface_snapshot_after_first_present = true;
+
                 #[cfg(not(use_vulkan))]
                 unsafe {
                     self.os.display.as_mut().unwrap().destroy_surface();
@@ -190,37 +551,79 @@ impl Cx {
                             }
                         }
                     }
-                    if let Some(vulkan) = self.os.vulkan.as_mut() {
-                        vulkan.suspend_surface();
+                    let keep_xr_backend_alive =
+                        self.os.in_xr_mode && self.os.openxr.session.is_some();
+                    if !keep_xr_backend_alive {
+                        if let Some(vulkan) = self.os.vulkan.as_mut() {
+                            vulkan.suspend_surface();
+                        }
+                    }
+                    if self.os.in_xr_mode
+                        && self.os.openxr.session.is_none()
+                        && self.os.xr_retry_surface_after_destroy
+                        && !self.os.xr_pending_surface_window.is_null()
+                    {
+                        crate::log!(
+                            "Android XR retrying session creation after SurfaceDestroyed with stored surface {:?} size={}x{}",
+                            self.os.xr_pending_surface_window,
+                            self.os.xr_pending_surface_width,
+                            self.os.xr_pending_surface_height
+                        );
+                        self.try_create_xr_session_for_surface(
+                            self.os.xr_pending_surface_window,
+                            self.os.xr_pending_surface_width,
+                            self.os.xr_pending_surface_height,
+                            "surface-destroyed-retry",
+                        );
                     }
                 }
+
+                // Tell the JNI thread (which is blocked inside
+                // `surfaceOnSurfaceDestroyed`) that it's now safe to return to
+                // Android — we've fully released our hold on the surface.
+                signal_surface_ack(&ack);
             }
             FromJavaMessage::SurfaceChanged {
                 window,
                 width,
                 height,
             } => {
+                #[cfg(use_vulkan)]
+                let _has_vulkan = self.os.vulkan.is_some();
+                #[cfg(not(use_vulkan))]
+                let _has_vulkan = false;
+                #[cfg(use_vulkan)]
+                if self.os.in_xr_mode {
+                    self.replace_xr_pending_surface(window, width, height);
+                }
                 if self.os.in_xr_mode && self.os.openxr.session.is_none() {
-                    if self.os.openxr.libxr.is_none() {
-                        let activity_handle = makepad_android_state::get_activity();
-                        self.os.openxr.create_instance(activity_handle).ok();
+                    #[cfg(use_vulkan)]
+                    {
+                        self.try_create_xr_session_for_surface(
+                            window,
+                            width,
+                            height,
+                            "surface-changed",
+                        );
                     }
-                    if let Err(e) = self.os.openxr.create_session(
-                        self.os.display.as_ref().unwrap(),
-                        CxOpenXrOptions {
-                            buffer_scale: 1.5,
-                            multisamples: 4,
-                            remove_hands_from_depth: false,
-                        },
-                        &self.os_type,
-                    ) {
-                        crate::error!("OpenXR create_xr_session failed: {}", e);
+
+                    #[cfg(not(use_vulkan))]
+                    {
+                        if let Err(e) = self.os.openxr.create_session(
+                            self.os.display.as_ref().unwrap(),
+                            self.current_android_xr_options(),
+                            &self.os_type,
+                        ) {
+                            crate::error!("OpenXR create_xr_session failed: {}", e);
+                        }
                     }
                 }
 
                 #[cfg(not(use_vulkan))]
-                unsafe {
-                    self.os.display.as_mut().unwrap().update_surface(window);
+                if !self.os.in_xr_mode {
+                    unsafe {
+                        self.os.display.as_mut().unwrap().update_surface(window);
+                    }
                 }
 
                 #[cfg(use_vulkan)]
@@ -237,24 +640,32 @@ impl Cx {
 
                 #[cfg(use_vulkan)]
                 {
-                    let width_u32 = width.max(1) as u32;
-                    let height_u32 = height.max(1) as u32;
-                    if let Some(vulkan) = self.os.vulkan.as_mut() {
-                        if let Err(err) = vulkan.update_surface(window, width_u32, height_u32) {
-                            crate::error!("Android Vulkan surface update failed: {err}");
-                        }
-                    } else {
-                        match CxVulkan::new(window, width_u32, height_u32) {
-                            Ok(vulkan) => {
-                                crate::log!("Android Vulkan backend initialized");
-                                self.os.vulkan = Some(vulkan);
+                    if !self.os.in_xr_mode {
+                        let width_u32 = width.max(1) as u32;
+                        let height_u32 = height.max(1) as u32;
+                        if let Some(vulkan) = self.os.vulkan.as_mut() {
+                            if let Err(err) = vulkan.update_surface(window, width_u32, height_u32) {
+                                crate::error!("Android Vulkan surface update failed: {err}");
                             }
-                            Err(err) => {
-                                crate::error!(
-                                    "Android Vulkan backend init failed, falling back to OpenGL: {err}"
-                                );
+                        } else {
+                            match CxVulkan::new(window, width_u32, height_u32) {
+                                Ok(vulkan) => {
+                                    self.os.vulkan = Some(vulkan);
+                                }
+                                Err(err) => {
+                                    crate::error!(
+                                        "Android Vulkan backend init failed, falling back to OpenGL: {err}"
+                                    );
+                                }
                             }
                         }
+                    }
+                }
+
+                if !self.os.in_xr_mode {
+                    self.sync_android_surface_alive_from_backend();
+                    if self.os.surface_alive {
+                        self.request_android_surface_redraw();
                     }
                 }
 
@@ -274,6 +685,8 @@ impl Cx {
                     position: dvec2(0.0, 0.0),
                     inner_size: size,
                     outer_size: size,
+                    safe_area_insets: self.os.safe_area_insets,
+                    ..Default::default()
                 };
                 let new_geom = window.window_geom.clone();
                 self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
@@ -308,12 +721,23 @@ impl Cx {
                 let window = &mut self.windows[CxWindowPool::id_zero()];
                 let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
                 for touch in &mut touches {
-                    // When the software keyboard shifted the UI in the vertical axis,
-                    //we need to make the math here to keep touch events positions synchronized.
-                    //if self.os.keyboard_visible {touch.abs.y += self.os.keyboard_panning_offset as f64};
-                    //crate::log!("{} {:?} {} {}", time, touch.state, touch.uid, touch.abs);
                     touch.abs /= dpi_factor;
+                    touch.radius /= dpi_factor;
                 }
+
+                // Check for outside-click popup dismiss on touch start
+                if touches
+                    .iter()
+                    .any(|t| t.state == crate::event::finger::TouchState::Start)
+                {
+                    if let Some(popup_window_id) = self.find_popup_to_dismiss_on_touch(&touches) {
+                        self.dismiss_popup_window(
+                            popup_window_id,
+                            crate::event::PopupDismissReason::OutsideClick,
+                        );
+                    }
+                }
+
                 self.fingers.process_touch_update_start(time, &touches);
                 let e = Event::TouchUpdate(TouchUpdateEvent {
                     time,
@@ -327,6 +751,41 @@ impl Cx {
                 } else {
                     panic!()
                 };
+
+                // Synthesize internal drag-and-drop events from touch gestures.
+                if self.os.internal_drag_items.is_some() {
+                    if let Some(touch) = e.touches.iter().find(|t| {
+                        t.state == crate::event::finger::TouchState::Stop
+                    }) {
+                        // Touch lifted: fire Drop + DragEnd
+                        if let Some(items) = self.os.internal_drag_items.take() {
+                            self.call_event_handler(&Event::Drop(DropEvent {
+                                modifiers: e.modifiers.clone(),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs: touch.abs,
+                                items,
+                            }));
+                            self.drag_drop.cycle_drag();
+                            self.call_event_handler(&Event::DragEnd);
+                            self.drag_drop.cycle_drag();
+                        }
+                    } else if let Some(touch) = e.touches.iter().find(|t| {
+                        t.state == crate::event::finger::TouchState::Move
+                    }) {
+                        // Finger moving: fire Drag event
+                        if let Some(items) = self.os.internal_drag_items.as_ref() {
+                            self.call_event_handler(&Event::Drag(DragEvent {
+                                modifiers: e.modifiers.clone(),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs: touch.abs,
+                                items: items.clone(),
+                                response: Arc::new(Mutex::new(DragResponse::None)),
+                            }));
+                            self.drag_drop.cycle_drag();
+                        }
+                    }
+                }
+
                 self.fingers.process_touch_update_end(&e.touches);
             }
             FromJavaMessage::Character { character } => {
@@ -335,6 +794,7 @@ impl Cx {
                         input: character.to_string(),
                         replace_last: false,
                         was_paste: false,
+                        ..Default::default()
                     });
                     self.call_event_handler(&e);
                 }
@@ -374,6 +834,7 @@ impl Cx {
                                     input: content,
                                     replace_last: false,
                                     was_paste: true,
+                                    ..Default::default()
                                 });
                                 self.call_event_handler(&e);
                             }
@@ -453,14 +914,14 @@ impl Cx {
                 headers,
                 body,
             } => {
-                let out = vec![NetworkResponseItem {
+                let out = vec![NetworkResponse::HttpResponse {
                     request_id: LiveId(request_id),
-                    response: NetworkResponse::HttpResponse(HttpResponse::new(
+                    response: HttpResponse::from_header_string(
                         LiveId(metadata_id),
                         status_code,
                         headers,
                         Some(body),
-                    )),
+                    ),
                 }];
                 self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
@@ -472,12 +933,12 @@ impl Cx {
                 error,
                 ..
             } => {
-                let out = vec![NetworkResponseItem {
+                let out = vec![NetworkResponse::HttpError {
                     request_id: LiveId(request_id),
-                    response: NetworkResponse::HttpRequestError(HttpError {
+                    error: HttpError {
                         message: error,
                         metadata_id: LiveId(metadata_id),
-                    }),
+                    },
                 }];
                 self.handle_script_network_events(&out);
                 let e = Event::NetworkResponses(out);
@@ -527,6 +988,12 @@ impl Cx {
                 request_id,
                 status,
             } => {
+                crate::log!(
+                    "Android PermissionResult raw permission={} request_id={} status_code={}",
+                    permission,
+                    request_id,
+                    status
+                );
                 // Convert string permission back to enum
                 let perm = string_to_permission(&permission);
                 if let Some(perm) = perm {
@@ -563,6 +1030,13 @@ impl Cx {
                     video_width,
                     video_height,
                     duration,
+                    is_seekable: duration > 0,
+                    video_tracks: if video_width > 0 && video_height > 0 {
+                        vec!["video".to_string()]
+                    } else {
+                        vec![]
+                    },
+                    audio_tracks: vec!["audio".to_string()],
                 });
 
                 self.os
@@ -577,25 +1051,90 @@ impl Cx {
                 self.call_event_handler(&e);
             }
             FromJavaMessage::VideoPlayerReleased { video_id } => {
-                if let Some(decoder_ref) = self.os.video_surfaces.remove(&LiveId(video_id)) {
+                let live_id = LiveId(video_id);
+                if let Some(decoder_ref) = self.os.video_surfaces.remove(&live_id) {
                     unsafe {
                         let env = attach_jni_env();
                         android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
                     }
                 }
+                if let Some(mut asp) = self.os.software_video_players.remove(&live_id) {
+                    asp.player.cleanup();
+                }
+                self.os.video_configs.remove(&live_id);
 
                 let e =
                     Event::VideoPlaybackResourcesReleased(VideoPlaybackResourcesReleasedEvent {
-                        video_id: LiveId(video_id),
+                        video_id: live_id,
                     });
                 self.call_event_handler(&e);
             }
             FromJavaMessage::VideoDecodingError { video_id, error } => {
+                let live_id = LiveId(video_id);
+                let force_native = force_native_video();
+                if !force_native && !self.os.software_video_players.contains_key(&live_id) {
+                    if let Some(config) = self.os.video_configs.get(&live_id).cloned() {
+                        crate::log!(
+                            "VIDEO: Android native decode failed for {}, falling back to software video: {}",
+                            live_id.0,
+                            error
+                        );
+                        let asp = AndroidSoftwarePlayer {
+                            player: PlaybackSessionHandle::new(
+                                live_id,
+                                config.texture_id,
+                                config.source,
+                                config.autoplay,
+                                config.should_loop,
+                            ),
+                            tex_y_id: config.tex_y_id,
+                            tex_u_id: config.tex_u_id,
+                            tex_v_id: config.tex_v_id,
+                            yuv_matrix: 0.0,
+                        };
+                        self.os.software_video_players.insert(live_id, asp);
+                        self.redraw_all();
+                        return;
+                    }
+                }
+
                 let e = Event::VideoDecodingError(VideoDecodingErrorEvent {
-                    video_id: LiveId(video_id),
+                    video_id: live_id,
                     error,
                 });
                 self.call_event_handler(&e);
+            }
+            FromJavaMessage::CameraPreviewSurfaceReady {
+                video_id,
+                window,
+                width: _,
+                height: _,
+            } => {
+                let live_id = LiveId(video_id);
+                if let Some(player) = self.os.camera_players.get_mut(&live_id) {
+                    player.set_preview_window(Some(window));
+                } else {
+                    if let Some(old) = self
+                        .os
+                        .pending_camera_preview_windows
+                        .insert(live_id, window)
+                    {
+                        unsafe {
+                            ndk_sys::ANativeWindow_release(old);
+                        }
+                    }
+                }
+            }
+            FromJavaMessage::CameraPreviewSurfaceDestroyed { video_id } => {
+                let live_id = LiveId(video_id);
+                if let Some(player) = self.os.camera_players.get_mut(&live_id) {
+                    player.set_preview_window(None);
+                }
+                if let Some(window) = self.os.pending_camera_preview_windows.remove(&live_id) {
+                    unsafe {
+                        ndk_sys::ANativeWindow_release(window);
+                    }
+                }
             }
             FromJavaMessage::Pause => {
                 self.call_event_handler(&Event::Pause);
@@ -607,6 +1146,12 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, true);
                     }
                 }
+                // Java may keep a cached snapshot overlay visible across any
+                // pause/resume transition, even when Android never tears down
+                // the underlying SurfaceView. Always hide that overlay on the
+                // first successful present after resume.
+                self.os.hide_surface_cover_after_first_present = true;
+                self.os.refresh_surface_snapshot_after_first_present = true;
                 self.redraw_all();
                 self.reinitialise_media();
                 self.call_event_handler(&Event::Resume);
@@ -682,8 +1227,89 @@ impl Cx {
                     input: content,
                     replace_last: false,
                     was_paste: true,
+                    ..Default::default()
                 });
                 self.call_event_handler(&e);
+            }
+            FromJavaMessage::SelectionHandleDrag {
+                handle,
+                phase,
+                abs,
+                time,
+            } => {
+                let window = &self.windows[CxWindowPool::id_zero()];
+                let dpi_factor = window.dpi_override.unwrap_or(self.os.dpi_factor);
+                let e = Event::SelectionHandleDrag(SelectionHandleDragEvent {
+                    handle,
+                    phase,
+                    abs: abs / dpi_factor,
+                    time,
+                });
+                self.call_event_handler(&e);
+            }
+            FromJavaMessage::ImeTextStateChanged {
+                full_text,
+                selection_start,
+                selection_end,
+                composing_start,
+                composing_end,
+            } => {
+                let sel_start = CharOffset::from_utf16_index(&full_text, selection_start as usize);
+                let sel_end = CharOffset::from_utf16_index(&full_text, selection_end as usize);
+
+                let composition = if composing_start >= 0 && composing_end >= 0 {
+                    let comp_start =
+                        CharOffset::from_utf16_index(&full_text, composing_start as usize);
+                    let comp_end = CharOffset::from_utf16_index(&full_text, composing_end as usize);
+                    Some(comp_start..comp_end)
+                } else {
+                    None
+                };
+
+                let e = Event::TextInput(TextInputEvent {
+                    full_state_sync: Some(FullTextState {
+                        text: full_text,
+                        selection: sel_start..sel_end,
+                        composition,
+                    }),
+                    ..Default::default()
+                });
+                self.call_event_handler(&e);
+            }
+            FromJavaMessage::ImeEditorAction { action_code } => {
+                let action = ImeAction::from_android_action_code(action_code);
+                let e = Event::ImeAction(ImeActionEvent { action });
+                self.call_event_handler(&e);
+            }
+            FromJavaMessage::SafeAreaInsets {
+                top,
+                right,
+                bottom,
+                left,
+            } => {
+                let new_insets = crate::event::SafeAreaInsets {
+                    top,
+                    right,
+                    bottom,
+                    left,
+                };
+                if self.os.safe_area_insets != new_insets {
+                    self.os.safe_area_insets = new_insets;
+                    // Update the WindowGeom with the new safe area insets
+                    let window_id = CxWindowPool::id_zero();
+                    let window = &mut self.windows[window_id];
+                    let old_geom = window.window_geom.clone();
+                    window.window_geom.safe_area_insets = new_insets;
+                    let new_geom = window.window_geom.clone();
+                    if old_geom != new_geom {
+                        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                            window_id,
+                            new_geom,
+                            old_geom,
+                        }));
+                        self.redraw_all();
+                    }
+                }
             }
             FromJavaMessage::Init(_) => {}
         }
@@ -713,12 +1339,11 @@ impl Cx {
         }
     }
 
-    fn compile_shaders_for_active_backend(&mut self) {
+    pub(crate) fn compile_shaders_for_active_backend(&mut self) {
         #[cfg(use_vulkan)]
         {
-            // Vulkan mode is currently a staged path:
-            // run WGSL->SPIR-V compilation via the OpenGL shader compile entry point.
-            self.opengl_compile_shaders();
+            // In Vulkan mode shaders are compiled directly to SPIR-V during draw-shader
+            // creation; no GL shader compilation should occur on this path.
             return;
         }
 
@@ -729,14 +1354,29 @@ impl Cx {
     }
 
     fn draw_pass_to_window_for_active_backend(&mut self, draw_pass_id: DrawPassId) {
+        // No surface → no point dispatching to either backend. Both backends
+        // will SIGSEGV inside the GPU driver if their swapchain/window has
+        // been torn down out from under them.
+        if !self.os.has_drawable_surface() {
+            return;
+        }
+
         #[cfg(use_vulkan)]
         {
             if self.os.vulkan.is_some() {
                 let mut vulkan = self.os.vulkan.take().unwrap();
                 let result = vulkan.draw_pass_and_present(self, draw_pass_id);
                 self.os.vulkan = Some(vulkan);
-                if let Err(err) = result {
-                    crate::error!("Android Vulkan draw/present failed: {err}");
+                match result {
+                    Ok(presented) => {
+                        if presented {
+                            self.hide_android_surface_cover_after_first_present_if_needed();
+                            self.request_android_surface_snapshot_refresh_after_present_if_needed();
+                        }
+                    }
+                    Err(err) => {
+                        crate::error!("Android Vulkan draw/present failed: {err}");
+                    }
                 }
             } else {
                 self.draw_pass_to_fullscreen(draw_pass_id);
@@ -750,6 +1390,29 @@ impl Cx {
         }
     }
 
+    pub(crate) fn draw_pass_to_texture_for_active_backend(&mut self, draw_pass_id: DrawPassId) {
+        // Off-screen passes still issue GL/Vulkan commands against the active
+        // context, so they must respect surface validity for the same reason
+        // as window passes.
+        if !self.os.has_drawable_surface() {
+            return;
+        }
+
+        #[cfg(use_vulkan)]
+        {
+            if let Some(mut vulkan) = self.os.vulkan.take() {
+                let result = vulkan.draw_pass_to_texture(self, draw_pass_id);
+                self.os.vulkan = Some(vulkan);
+                if let Err(err) = result {
+                    crate::error!("Android Vulkan draw-to-texture failed: {err}");
+                }
+                return;
+            }
+        }
+
+        self.draw_pass_to_texture(draw_pass_id, None);
+    }
+
     fn present_window_for_active_backend(&mut self) {
         #[cfg(use_vulkan)]
         {
@@ -758,7 +1421,21 @@ impl Cx {
             if self.os.vulkan.is_none() {
                 unsafe {
                     if let Some(display) = &mut self.os.display {
-                        (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+                        // Skip the swap if the window surface has been torn
+                        // down — most drivers return EGL_BAD_SURFACE here, but
+                        // some (Mali/Adreno) crash inside the swap buffer
+                        // implementation when the underlying buffer queue is
+                        // already gone.
+                        if display.is_surface_alive() {
+                            let swapped = (display.libegl.eglSwapBuffers.unwrap())(
+                                display.egl_display,
+                                display.surface,
+                            );
+                            if swapped != 0 {
+                                self.hide_android_surface_cover_after_first_present_if_needed();
+                                self.request_android_surface_snapshot_refresh_after_present_if_needed();
+                            }
+                        }
                     }
                 }
             }
@@ -768,7 +1445,16 @@ impl Cx {
         #[cfg(not(use_vulkan))]
         unsafe {
             if let Some(display) = &mut self.os.display {
-                (display.libegl.eglSwapBuffers.unwrap())(display.egl_display, display.surface);
+                if display.is_surface_alive() {
+                    let swapped = (display.libegl.eglSwapBuffers.unwrap())(
+                        display.egl_display,
+                        display.surface,
+                    );
+                    if swapped != 0 {
+                        self.hide_android_surface_cover_after_first_present_if_needed();
+                        self.request_android_surface_snapshot_refresh_after_present_if_needed();
+                    }
+                }
             }
         }
     }
@@ -793,24 +1479,46 @@ impl Cx {
             self.handle_action_receiver();
         }
 
-        // Video updates
+        self.dispatch_network_runtime_events();
+        self.flush_studio_run_view_frame_results();
+
+        // Native video updates (SurfaceTexture path)
         let to_dispatch = self.get_video_updates();
         for video_id in to_dispatch {
-            let e = Event::VideoTextureUpdated(VideoTextureUpdatedEvent { video_id });
+            let current_position_ms = unsafe {
+                let env = attach_jni_env();
+                android_jni::to_java_get_video_position(env, video_id) as u128
+            };
+            let e = Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                video_id,
+                current_position_ms,
+                yuv: crate::event::video_playback::VideoYuvMetadata {
+                    enabled: false,
+                    matrix: 0.0,
+                    biplanar: false,
+                    rotation_steps: 0.0,
+                },
+            });
             self.call_event_handler(&e);
         }
 
+        // Camera player updates
+        self.poll_camera_players();
+
+        // Software AV1 fallback updates (rav1d path)
+        self.poll_software_video_players();
+
         // Live edits
-        if self.handle_live_edit() {
-            self.call_event_handler(&Event::LiveEdit);
-            self.redraw_all();
-        }
+        self.run_live_edit_if_needed("android");
 
         // Platform operations
         self.handle_platform_ops();
     }
 
     fn get_video_updates(&mut self) -> Vec<LiveId> {
+        if self.os.video_surfaces.is_empty() {
+            return Vec::new();
+        }
         let mut videos_to_update = Vec::new();
         for (live_id, surface_texture) in self.os.video_surfaces.iter_mut() {
             unsafe {
@@ -822,6 +1530,204 @@ impl Cx {
             }
         }
         videos_to_update
+    }
+
+    fn poll_camera_players(&mut self) {
+        if self.os.camera_players.is_empty() {
+            return;
+        }
+
+        let mut players = std::mem::take(&mut self.os.camera_players);
+        let needs_gl_upload = players.values().any(AndroidCameraPlayer::needs_gl_upload);
+        let gl = if needs_gl_upload {
+            Some(self.os.gl() as *const LibGl)
+        } else {
+            None
+        };
+        let mut events = Vec::new();
+
+        for (_video_id, player) in players.iter_mut() {
+            match player.check_prepared() {
+                Some(Ok(crate::media_plugin::PlaybackPrepared {
+                    width,
+                    height,
+                    duration_ms: duration,
+                    is_seekable,
+                    video_tracks,
+                    audio_tracks,
+                })) => {
+                    events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
+                        video_id: player.video_id,
+                        video_width: width,
+                        video_height: height,
+                        duration,
+                        is_seekable,
+                        video_tracks,
+                        audio_tracks,
+                    }));
+                }
+                Some(Err(err)) => {
+                    events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
+                        video_id: player.video_id,
+                        error: err,
+                    }));
+                }
+                None => {}
+            }
+
+            #[cfg(use_vulkan)]
+            if player.uses_hardware_buffer_texture() {
+                if let Some(frame) = player.take_hardware_buffer_frame() {
+                    let update_result = self
+                        .os
+                        .vulkan
+                        .as_mut()
+                        .ok_or_else(|| {
+                            "Android camera hardware-buffer texture requested without Vulkan backend"
+                                .to_string()
+                        })
+                        .and_then(|vk| {
+                            vk.update_video_external_hardware_buffer_texture(
+                                player.texture_id(),
+                                frame.buffer,
+                                frame.width,
+                                frame.height,
+                            )
+                        });
+                    match update_result {
+                        Ok(mut yuv) => {
+                            yuv.rotation_steps = player.yuv_rotation_steps();
+                            events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                                video_id: player.video_id,
+                                current_position_ms: 0,
+                                yuv,
+                            }));
+                        }
+                        Err(error) => {
+                            let should_fallback = error.contains("undefined Vulkan format")
+                                || error.contains("unsupported YUV Vulkan format");
+                            if should_fallback {
+                                crate::warning!(
+                                    "Android headset camera: Vulkan import unsupported, falling back to cpu-yuv video_id={} error={}",
+                                    player.video_id.0,
+                                    error,
+                                );
+                                if let Err(fallback_error) = player.fallback_to_cpu_yuv() {
+                                    events.push(Event::VideoDecodingError(
+                                        VideoDecodingErrorEvent {
+                                            video_id: player.video_id,
+                                            error: format!(
+                                                "{error}; cpu fallback failed: {fallback_error}"
+                                            ),
+                                        },
+                                    ));
+                                }
+                            } else {
+                                events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
+                                    video_id: player.video_id,
+                                    error,
+                                }));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let gl_ref = gl.map(|gl| unsafe { &*gl });
+            if player.poll_frame(gl_ref, &mut self.textures) {
+                events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                    video_id: player.video_id,
+                    current_position_ms: 0,
+                    yuv: crate::event::video_playback::VideoYuvMetadata {
+                        enabled: true,
+                        matrix: 1.0,
+                        biplanar: false,
+                        rotation_steps: player.yuv_rotation_steps(),
+                    },
+                }));
+            }
+        }
+
+        self.os.camera_players = players;
+        for event in events {
+            self.call_event_handler(&event);
+        }
+    }
+
+    fn poll_software_video_players(&mut self) {
+        if self.os.software_video_players.is_empty() {
+            return;
+        }
+
+        let gl: *const LibGl = self.os.gl();
+        let mut players = std::mem::take(&mut self.os.software_video_players);
+        let mut events = Vec::new();
+
+        for (_video_id, asp) in players.iter_mut() {
+            match asp.player.check_prepared() {
+                Some(Ok(crate::media_plugin::PlaybackPrepared {
+                    width,
+                    height,
+                    duration_ms: duration,
+                    is_seekable,
+                    video_tracks,
+                    audio_tracks,
+                })) => {
+                    events.push(Event::VideoPlaybackPrepared(VideoPlaybackPreparedEvent {
+                        video_id: asp.player.video_id,
+                        video_width: width,
+                        video_height: height,
+                        duration,
+                        is_seekable,
+                        video_tracks,
+                        audio_tracks,
+                    }));
+                }
+                Some(Err(err)) => {
+                    events.push(Event::VideoDecodingError(VideoDecodingErrorEvent {
+                        video_id: asp.player.video_id,
+                        error: err,
+                    }));
+                }
+                None => {}
+            }
+
+            if asp.player.poll_frame() {
+                if let Some(planes) = asp.player.take_yuv_frame() {
+                    asp.yuv_matrix = planes.matrix.as_f32();
+                    upload_yuv_to_gl(
+                        unsafe { &*gl },
+                        &mut self.textures,
+                        asp.tex_y_id,
+                        asp.tex_u_id,
+                        asp.tex_v_id,
+                        &planes,
+                    );
+                    events.push(Event::VideoTextureUpdated(VideoTextureUpdatedEvent {
+                        video_id: asp.player.video_id,
+                        current_position_ms: asp.player.current_position_ms(),
+                        yuv: crate::event::video_playback::VideoYuvMetadata {
+                            enabled: true,
+                            matrix: asp.yuv_matrix,
+                            biplanar: false,
+                            rotation_steps: 0.0,
+                        },
+                    }));
+                }
+            }
+
+            if asp.player.check_eos() {
+                events.push(Event::VideoPlaybackCompleted(VideoPlaybackCompletedEvent {
+                    video_id: asp.player.video_id,
+                }));
+            }
+        }
+
+        self.os.software_video_players = players;
+        for event in events {
+            self.call_event_handler(&event);
+        }
     }
 
     pub fn android_entry<F>(activity: *const std::ffi::c_void, startup: F)
@@ -846,9 +1752,7 @@ impl Cx {
 
         let (from_java_tx, from_java_rx) = mpsc::channel();
 
-        std::panic::set_hook(Box::new(|info| {
-            crate::log!("Custom panic hook: {}", info);
-        }));
+        install_android_panic_hook();
 
         android_jni::jni_set_activity(activity_handle);
         android_jni::jni_set_from_java_tx(from_java_tx);
@@ -860,33 +1764,66 @@ impl Cx {
             let mut cx = startup();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
 
-            #[cfg(use_vulkan)]
-            crate::log!("Android backend mode: Vulkan renderer + OpenGL shader compiler compatibility path");
-            #[cfg(not(use_vulkan))]
-            crate::log!("Android backend mode: OpenGL renderer");
-
             cx.os.activity_thread_id = Some(activity_thread_id);
             cx.os.render_thread_id =
                 Some(unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 });
 
-            let window = loop {
+            let mut initial_params: Option<AndroidParams> = None;
+            let mut initial_surface: Option<(*mut ndk_sys::ANativeWindow, i32, i32)> = None;
+
+            let (window, width, height, android_params) = loop {
                 // Here use blocking method `recv` to reduce CPU usage during cold start.
                 match from_java_rx.recv() {
                     Ok(FromJavaMessage::Init(params)) => {
-                        cx.os.dpi_factor = params.density;
-                        cx.os_type = OsType::Android(params);
+                        initial_params = Some(params);
+                    }
+                    Ok(FromJavaMessage::SurfaceCreated { window }) => {
+                        // Bootstrap off the first SurfaceChanged so we have a
+                        // real size. SurfaceCreated still hands us an acquired
+                        // ANativeWindow ref, so release it immediately here to
+                        // avoid leaking the unused bootstrap callback.
+                        unsafe {
+                            if !window.is_null() {
+                                ndk_sys::ANativeWindow_release(window);
+                            }
+                        }
                     }
                     Ok(FromJavaMessage::SurfaceChanged {
                         window,
                         width,
                         height,
                     }) => {
-                        cx.os.display_size = dvec2(width as f64, height as f64);
-                        break window;
+                        if let Some((old_window, _, _)) = initial_surface.replace((window, width, height)) {
+                            unsafe {
+                                if !old_window.is_null() {
+                                    ndk_sys::ANativeWindow_release(old_window);
+                                }
+                            }
+                        }
+                    }
+                    Ok(FromJavaMessage::SurfaceDestroyed { ack }) => {
+                        if let Some((old_window, _, _)) = initial_surface.take() {
+                            unsafe {
+                                if !old_window.is_null() {
+                                    ndk_sys::ANativeWindow_release(old_window);
+                                }
+                            }
+                        }
+                        signal_surface_ack(&ack);
                     }
                     _ => (),
                 }
+
+                if initial_params.is_some() && initial_surface.is_some() {
+                    let android_params = initial_params.take().unwrap();
+                    let (window, width, height) = initial_surface.take().unwrap();
+                    break (window, width, height, android_params);
+                }
             };
+
+            cx.os.dpi_factor = android_params.density;
+            cx.os_type = OsType::Android(android_params);
+            cx.os.display_size = dvec2(width as f64, height as f64);
 
             // SAFETY:
             // The LibEgl instance (libegl) has been properly loaded and initialized earlier.
@@ -979,7 +1916,6 @@ impl Cx {
                     cx.os.display_size.y.max(1.0) as u32,
                 ) {
                     Ok(vulkan) => {
-                        crate::log!("Android Vulkan backend initialized on startup");
                         cx.os.vulkan = Some(vulkan);
                     }
                     Err(err) => {
@@ -989,6 +1925,11 @@ impl Cx {
                     }
                 }
             }
+
+            // The initial SurfaceChanged was consumed during bootstrap so the
+            // regular lifecycle handler will not get a second chance to seed
+            // drawable-surface state for the first frame. Do it explicitly here.
+            cx.sync_android_surface_alive_from_backend();
 
             cx.main_loop(from_java_rx);
             cx.stop_studio_websocket();
@@ -1064,6 +2005,7 @@ impl Cx {
                      input: text,
                      replace_last: false,
                      was_paste: true,
+                     ..Default::default()
                  }
              );
              self.call_event_handler(&e);
@@ -1095,6 +2037,34 @@ impl Cx {
     }
 
     pub fn draw_pass_to_fullscreen(&mut self, draw_pass_id: DrawPassId) {
+        // Defense in depth: even though `main_loop` already gates `handle_drawing`
+        // on `has_drawable_surface`, this method is also reachable via the popup
+        // overlay path in `handle_repaint`, and we want a hard, local guarantee
+        // that we never issue GL commands without a current EGL context.
+        //
+        // 1. Bail immediately if the surface is gone.
+        // 2. Re-bind our context to its surface every frame. On Android the
+        //    EGL context can become "uncurrent" if foreign code (or our own
+        //    teardown path) called `eglMakeCurrent(NULL, ...)`. Re-binding is
+        //    cheap when already current and is the only way to recover from
+        //    a context that quietly drifted out of sync.
+        if !self.os.has_drawable_surface() {
+            return;
+        }
+        let make_current_ok = self
+            .os
+            .display
+            .as_ref()
+            .map(|d| d.try_make_current())
+            .unwrap_or(false);
+        if !make_current_ok {
+            // The display struct exists but the EGL surface is no longer
+            // bindable; mark it dead so we don't burn CPU re-checking until
+            // the next SurfaceCreated.
+            self.os.surface_alive = false;
+            return;
+        }
+
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
 
         self.setup_render_pass(draw_pass_id);
@@ -1158,20 +2128,65 @@ impl Cx {
                 CxDrawPassParent::Xr => {
                     // cant happen
                 }
-                CxDrawPassParent::Window(_) => {
-                    //let window = &self.windows[window_id];
+                CxDrawPassParent::Window(window_id) => {
+                    // Skip popup window passes — they are drawn as overlays
+                    // after their parent window pass below.
+                    if self.windows[window_id].is_popup {
+                        continue;
+                    }
                     let start = self.seconds_since_app_start();
+                    let metrics = self.collect_gpu_pass_metrics(*draw_pass_id);
                     self.draw_pass_to_window_for_active_backend(*draw_pass_id);
+
+                    // Draw popup window passes as overlays on the same surface
+                    for popup_pass_id in &passes_todo {
+                        if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent
+                        {
+                            let pw = &self.windows[pw_id];
+                            if pw.is_popup && pw.popup_parent == Some(window_id) {
+                                let saved = self.passes[*popup_pass_id].dont_clear;
+                                self.passes[*popup_pass_id].dont_clear = true;
+                                self.draw_pass_to_fullscreen(*popup_pass_id);
+                                self.passes[*popup_pass_id].dont_clear = saved;
+                            }
+                        }
+                    }
+
                     let end = self.seconds_since_app_start();
-                    Cx::send_studio_message(AppToStudio::GPUSample(GPUSample { start, end }));
+                    Cx::send_studio_message(AppToStudio::GPUSample(GPUSample {
+                        start,
+                        end,
+                        draw_calls: metrics.draw_calls,
+                        instances: metrics.instances,
+                        vertices: metrics.vertices,
+                        instance_bytes: metrics.instance_bytes,
+                        uniform_bytes: metrics.uniform_bytes,
+                        vertex_buffer_bytes: metrics.vertex_buffer_bytes,
+                        texture_bytes: metrics.texture_bytes,
+                    }));
                     self.present_window_for_active_backend();
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(*draw_pass_id, None);
+                    self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
                 }
                 CxDrawPassParent::None => {
-                    self.draw_pass_to_texture(*draw_pass_id, None);
+                    self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
+                }
+            }
+        }
+
+        let timestamp_ns = (self.os.timers.time_now().max(0.0) * 1_000_000_000.0) as u64;
+        for index in 0..MAX_VIDEO_DEVICE_INDEX {
+            if let Err(err) = self.video_encoder_capture_texture_frame(index, timestamp_ns) {
+                if err != VideoEncodeError::UnsupportedSource
+                    && err != VideoEncodeError::EncoderNotStarted
+                {
+                    crate::error!(
+                        "android video texture capture failed on slot {}: {:?}",
+                        index,
+                        err
+                    );
                 }
             }
         }
@@ -1193,6 +2208,8 @@ impl Cx {
                         position: dvec2(0.0, 0.0),
                         inner_size: size,
                         outer_size: size,
+                        safe_area_insets: self.os.safe_area_insets,
+                        ..Default::default()
                     };
                     window.is_created = true;
                     //let ret = unsafe{ndk_sys::ANativeWindow_setFrameRate(self.os.display.as_ref().unwrap().window, 120.0, 0)};
@@ -1204,6 +2221,45 @@ impl Cx {
                         new_geom,
                         old_geom,
                     }));
+                }
+                CxOsOp::CreatePopupWindow {
+                    window_id,
+                    parent_window_id,
+                    position,
+                    size,
+                    grab_keyboard,
+                } => {
+                    let dpi_factor = self.windows[parent_window_id]
+                        .dpi_override
+                        .unwrap_or(self.os.dpi_factor);
+                    let window = &mut self.windows[window_id];
+                    window.window_geom = WindowGeom {
+                        dpi_factor,
+                        can_fullscreen: false,
+                        xr_is_presenting: false,
+                        is_fullscreen: false,
+                        is_topmost: true,
+                        position,
+                        inner_size: size,
+                        outer_size: size,
+                        ..Default::default()
+                    };
+                    window.is_popup = true;
+                    window.popup_parent = Some(parent_window_id);
+                    window.popup_position = Some(position);
+                    window.popup_size = Some(size);
+                    window.popup_grab_keyboard = grab_keyboard;
+                    window.is_created = true;
+                }
+                CxOsOp::CloseWindow(window_id) => {
+                    let window = &mut self.windows[window_id];
+                    if window.is_popup {
+                        window.is_created = false;
+                        window.is_popup = false;
+                        window.popup_parent = None;
+                        window.popup_position = None;
+                        window.popup_size = None;
+                    }
                 }
                 CxOsOp::StartTimer {
                     timer_id,
@@ -1218,21 +2274,55 @@ impl Cx {
                 CxOsOp::StopTimer(timer_id) => {
                     self.os.timers.timers.remove(&timer_id);
                 }
-                CxOsOp::ShowTextIME(_area, _pos) => {
-                    //self.os.keyboard_trigger_position = area.get_clipped_rect(self).pos;
+                CxOsOp::ShowTextIME(_area, _pos, config) => unsafe {
+                    android_jni::to_java_configure_keyboard(&config);
+                    android_jni::to_java_show_keyboard(true);
+                },
+                CxOsOp::HideTextIME => unsafe {
+                    android_jni::to_java_show_keyboard(false);
+                },
+                CxOsOp::SyncImeState {
+                    text,
+                    selection,
+                    composition: _,
+                } => {
+                    let sel_start_utf16 = selection.start.to_utf16_index(&text) as i32;
+                    let sel_end_utf16 = selection.end.to_utf16_index(&text) as i32;
                     unsafe {
-                        android_jni::to_java_show_keyboard(true);
-                    }
-                }
-                CxOsOp::HideTextIME => {
-                    //self.os.keyboard_visible = false;
-                    unsafe {
-                        android_jni::to_java_show_keyboard(false);
+                        android_jni::to_java_update_ime_text_state(
+                            &text,
+                            sel_start_utf16,
+                            sel_end_utf16,
+                        );
                     }
                 }
                 CxOsOp::CopyToClipboard(content) => unsafe {
                     android_jni::to_java_copy_to_clipboard(content);
                 },
+                CxOsOp::SetPrimarySelection(_) => {}
+                CxOsOp::ShowSelectionHandles { start, end } => unsafe {
+                    // Rust positions are in logical points; Android overlay APIs expect physical pixels.
+                    let dpi_factor = self.windows[CxWindowPool::id_zero()]
+                        .dpi_override
+                        .unwrap_or(self.os.dpi_factor);
+                    android_jni::to_java_show_selection_handles(
+                        start * dpi_factor,
+                        end * dpi_factor,
+                    );
+                },
+                CxOsOp::UpdateSelectionHandles { start, end } => unsafe {
+                    let dpi_factor = self.windows[CxWindowPool::id_zero()]
+                        .dpi_override
+                        .unwrap_or(self.os.dpi_factor);
+                    android_jni::to_java_update_selection_handles(
+                        start * dpi_factor,
+                        end * dpi_factor,
+                    );
+                },
+                CxOsOp::HideSelectionHandles => unsafe {
+                    android_jni::to_java_hide_selection_handles();
+                },
+                CxOsOp::AccessibilityUpdate(_) => {}
                 CxOsOp::ShowClipboardActions {
                     has_selection,
                     rect,
@@ -1248,6 +2338,47 @@ impl Cx {
                 CxOsOp::HideClipboardActions => unsafe {
                     android_jni::to_java_dismiss_clipboard_actions();
                 },
+                CxOsOp::AttachCameraNativePreview { video_id, area } => {
+                    let rect = area.clipped_rect(self);
+                    let left = (rect.pos.x * self.os.dpi_factor) as i32;
+                    let top = (rect.pos.y * self.os.dpi_factor) as i32;
+                    let right = ((rect.pos.x + rect.size.x) * self.os.dpi_factor) as i32;
+                    let bottom = ((rect.pos.y + rect.size.y) * self.os.dpi_factor) as i32;
+                    unsafe {
+                        android_jni::to_java_attach_camera_preview(
+                            video_id, left, top, right, bottom,
+                        );
+                    }
+                }
+                CxOsOp::UpdateCameraNativePreview {
+                    video_id,
+                    area,
+                    visible,
+                } => {
+                    let rect = area.clipped_rect(self);
+                    let left = (rect.pos.x * self.os.dpi_factor) as i32;
+                    let top = (rect.pos.y * self.os.dpi_factor) as i32;
+                    let right = ((rect.pos.x + rect.size.x) * self.os.dpi_factor) as i32;
+                    let bottom = ((rect.pos.y + rect.size.y) * self.os.dpi_factor) as i32;
+                    unsafe {
+                        android_jni::to_java_update_camera_preview(
+                            video_id, left, top, right, bottom, visible,
+                        );
+                    }
+                }
+                CxOsOp::DetachCameraNativePreview { video_id } => {
+                    unsafe {
+                        android_jni::to_java_detach_camera_preview(video_id);
+                    }
+                    if let Some(player) = self.os.camera_players.get_mut(&video_id) {
+                        player.set_preview_window(None);
+                    }
+                    if let Some(window) = self.os.pending_camera_preview_windows.remove(&video_id) {
+                        unsafe {
+                            ndk_sys::ANativeWindow_release(window);
+                        }
+                    }
+                }
                 CxOsOp::CheckPermission {
                     permission,
                     request_id,
@@ -1269,45 +2400,340 @@ impl Cx {
                 CxOsOp::PrepareVideoPlayback(
                     video_id,
                     source,
+                    camera_preview_mode,
                     external_texture_id,
+                    texture_id,
                     autoplay,
                     should_loop,
-                ) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_prepare_video_playback(
-                        env,
+                ) => {
+                    // Camera source: use NDK camera player with YUV plane textures
+                    if let VideoSource::Camera(input_id, format_id) = source {
+                        let camera_access = self.os.media.android_camera();
+                        let native_preview =
+                            matches!(camera_preview_mode, CameraPreviewMode::Native);
+                        let use_hardware_buffer_texture = cfg!(use_vulkan)
+                            && !native_preview
+                            && texture_id != TextureId::default();
+                        let use_cpu_plane_textures = cfg!(use_vulkan) && !native_preview;
+                        let (camera_width, camera_height) = camera_access
+                            .lock()
+                            .unwrap()
+                            .format_size(input_id, format_id)
+                            .unwrap_or((1, 1));
+                        let luma_width = camera_width.max(1) as usize;
+                        let luma_height = camera_height.max(1) as usize;
+                        let chroma_width = camera_width.div_ceil(2).max(1) as usize;
+                        let chroma_height = camera_height.div_ceil(2).max(1) as usize;
+                        let tex_y = self.textures.alloc(if use_hardware_buffer_texture {
+                            TextureFormat::VideoYuvPlane
+                        } else if use_cpu_plane_textures {
+                            TextureFormat::VecRu8 {
+                                width: luma_width,
+                                height: luma_height,
+                                data: Some(vec![0; luma_width * luma_height]),
+                                unpack_row_length: None,
+                                updated: TextureUpdated::Full,
+                            }
+                        } else {
+                            TextureFormat::VideoYuvPlane
+                        });
+                        let tex_u = self.textures.alloc(if use_hardware_buffer_texture {
+                            TextureFormat::VideoYuvPlane
+                        } else if use_cpu_plane_textures {
+                            TextureFormat::VecRu8 {
+                                width: chroma_width,
+                                height: chroma_height,
+                                data: Some(vec![0; chroma_width * chroma_height]),
+                                unpack_row_length: None,
+                                updated: TextureUpdated::Full,
+                            }
+                        } else {
+                            TextureFormat::VideoYuvPlane
+                        });
+                        let tex_v = self.textures.alloc(if use_hardware_buffer_texture {
+                            TextureFormat::VideoYuvPlane
+                        } else if use_cpu_plane_textures {
+                            TextureFormat::VecRu8 {
+                                width: chroma_width,
+                                height: chroma_height,
+                                data: Some(vec![0; chroma_width * chroma_height]),
+                                unpack_row_length: None,
+                                updated: TextureUpdated::Full,
+                            }
+                        } else {
+                            TextureFormat::VideoYuvPlane
+                        });
+                        let tex_y_id = tex_y.texture_id();
+                        let tex_u_id = tex_u.texture_id();
+                        let tex_v_id = tex_v.texture_id();
+                        let preview_window = if native_preview {
+                            self.os.pending_camera_preview_windows.remove(&video_id)
+                        } else {
+                            if let Some(window) =
+                                self.os.pending_camera_preview_windows.remove(&video_id)
+                            {
+                                unsafe {
+                                    ndk_sys::ANativeWindow_release(window);
+                                }
+                            }
+                            None
+                        };
+                        let player = AndroidCameraPlayer::new(
+                            video_id,
+                            texture_id,
+                            tex_y_id,
+                            tex_u_id,
+                            tex_v_id,
+                            input_id,
+                            format_id,
+                            native_preview,
+                            use_hardware_buffer_texture,
+                            use_cpu_plane_textures,
+                            preview_window,
+                            camera_access,
+                        );
+                        self.os.camera_players.insert(video_id, player);
+                        self.call_event_handler(&Event::VideoYuvTexturesReady(
+                            VideoYuvTexturesReady {
+                                video_id,
+                                tex_y,
+                                tex_u,
+                                tex_v,
+                            },
+                        ));
+                        continue;
+                    }
+
+                    // Allocate YUV textures internally for software decode path
+                    let tex_y = self.textures.alloc(TextureFormat::VideoYuvPlane);
+                    let tex_u = self.textures.alloc(TextureFormat::VideoYuvPlane);
+                    let tex_v = self.textures.alloc(TextureFormat::VideoYuvPlane);
+                    let tex_y_id = tex_y.texture_id();
+                    let tex_u_id = tex_u.texture_id();
+                    let tex_v_id = tex_v.texture_id();
+                    self.os.video_configs.insert(
                         video_id,
-                        source,
-                        external_texture_id,
-                        autoplay,
-                        should_loop,
+                        AndroidVideoConfig {
+                            video_id,
+                            source: source.clone(),
+                            texture_id,
+                            tex_y_id,
+                            tex_u_id,
+                            tex_v_id,
+                            autoplay,
+                            should_loop,
+                        },
                     );
-                },
-                CxOsOp::BeginVideoPlayback(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_begin_video_playback(env, video_id);
-                },
-                CxOsOp::PauseVideoPlayback(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_pause_video_playback(env, video_id);
-                },
-                CxOsOp::ResumeVideoPlayback(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_resume_video_playback(env, video_id);
-                },
-                CxOsOp::MuteVideoPlayback(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_mute_video_playback(env, video_id);
-                },
-                CxOsOp::UnmuteVideoPlayback(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_unmute_video_playback(env, video_id);
-                },
-                CxOsOp::CleanupVideoPlaybackResources(video_id) => unsafe {
-                    let env = attach_jni_env();
-                    android_jni::to_java_cleanup_video_playback_resources(env, video_id);
-                },
+
+                    let force_software_env = force_software_video();
+                    let force_software = force_software_env || source.is_session();
+                    if force_software {
+                        if force_software_env {
+                            crate::log!(
+                                "VIDEO: MAKEPAD_FORCE_SOFTWARE_VIDEO set, using software video decoder"
+                            );
+                        } else if source.is_session() {
+                            crate::log!("VIDEO: session source uses software video decoder");
+                        }
+                        self.os.software_video_players.insert(
+                            video_id,
+                            AndroidSoftwarePlayer {
+                                player: PlaybackSessionHandle::new(
+                                    video_id,
+                                    texture_id,
+                                    source,
+                                    autoplay,
+                                    should_loop,
+                                ),
+                                tex_y_id,
+                                tex_u_id,
+                                tex_v_id,
+                                yuv_matrix: 0.0,
+                            },
+                        );
+                        // Notify widget so it can bind textures to shader slots
+                        self.call_event_handler(&Event::VideoYuvTexturesReady(
+                            VideoYuvTexturesReady {
+                                video_id,
+                                tex_y,
+                                tex_u,
+                                tex_v,
+                            },
+                        ));
+                        continue;
+                    }
+                    // Notify widget so it can bind textures to shader slots
+                    // (needed if native decode fails and we fall back to software)
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady {
+                        video_id,
+                        tex_y,
+                        tex_u,
+                        tex_v,
+                    }));
+
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_prepare_video_playback(
+                            env,
+                            video_id,
+                            source,
+                            external_texture_id,
+                            autoplay,
+                            should_loop,
+                        );
+                    }
+                }
+                CxOsOp::BeginVideoPlayback(video_id) => {
+                    if self.os.camera_players.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(asp) = self.os.software_video_players.get_mut(&video_id) {
+                        asp.player.play();
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_begin_video_playback(env, video_id);
+                        }
+                    }
+                }
+                CxOsOp::PauseVideoPlayback(video_id) => {
+                    if self.os.camera_players.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(asp) = self.os.software_video_players.get_mut(&video_id) {
+                        asp.player.pause();
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_pause_video_playback(env, video_id);
+                        }
+                    }
+                }
+                CxOsOp::ResumeVideoPlayback(video_id) => {
+                    if self.os.camera_players.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(asp) = self.os.software_video_players.get_mut(&video_id) {
+                        asp.player.resume();
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_resume_video_playback(env, video_id);
+                        }
+                    }
+                }
+                CxOsOp::MuteVideoPlayback(video_id) => {
+                    if self.os.camera_players.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(asp) = self.os.software_video_players.get(&video_id) {
+                        asp.player.mute();
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_mute_video_playback(env, video_id);
+                        }
+                    }
+                }
+                CxOsOp::UnmuteVideoPlayback(video_id) => {
+                    if self.os.camera_players.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(asp) = self.os.software_video_players.get(&video_id) {
+                        asp.player.unmute();
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_unmute_video_playback(env, video_id);
+                        }
+                    }
+                }
+                CxOsOp::CleanupVideoPlaybackResources(video_id) => {
+                    if let Some(mut player) = self.os.camera_players.remove(&video_id) {
+                        player.cleanup();
+                        unsafe {
+                            android_jni::to_java_detach_camera_preview(video_id);
+                        }
+                        if let Some(window) =
+                            self.os.pending_camera_preview_windows.remove(&video_id)
+                        {
+                            unsafe {
+                                ndk_sys::ANativeWindow_release(window);
+                            }
+                        }
+                        self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id },
+                        ));
+                        continue;
+                    }
+                    if let Some(mut asp) = self.os.software_video_players.remove(&video_id) {
+                        asp.player.cleanup();
+                        self.call_event_handler(&Event::VideoPlaybackResourcesReleased(
+                            VideoPlaybackResourcesReleasedEvent { video_id },
+                        ));
+                    }
+                    if let Some(decoder_ref) = self.os.video_surfaces.remove(&video_id) {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_cleanup_video_decoder_ref(env, decoder_ref);
+                            android_jni::to_java_cleanup_video_playback_resources(env, video_id);
+                        }
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_cleanup_video_playback_resources(env, video_id);
+                        }
+                    }
+                    self.os.video_configs.remove(&video_id);
+                }
+                CxOsOp::SeekVideoPlayback(video_id, position_ms) => {
+                    if self.os.camera_players.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(asp) = self.os.software_video_players.get_mut(&video_id) {
+                        asp.player.seek_to(position_ms);
+                    } else {
+                        unsafe {
+                            let env = attach_jni_env();
+                            android_jni::to_java_seek_video_playback(env, video_id, position_ms);
+                        }
+                    }
+                }
+                CxOsOp::SetVideoVolume(video_id, volume) => {
+                    if self.os.camera_players.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(asp) = self.os.software_video_players.get(&video_id) {
+                        asp.player.set_volume(volume);
+                    }
+                }
+                CxOsOp::SetVideoPlaybackRate(video_id, rate) => {
+                    if self.os.camera_players.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(asp) = self.os.software_video_players.get(&video_id) {
+                        asp.player.set_playback_rate(rate);
+                    }
+                }
+                CxOsOp::PrepareAudioPlayback(video_id, source, autoplay, should_loop) => {
+                    // Android: treat same as video but without a texture
+                    let _ = (video_id, source, autoplay, should_loop);
+                    // TODO: implement via MediaPlayer when needed
+                }
                 CxOsOp::XrStartPresenting => {
+                    self.os.xr_buffer_scale_requested = self
+                        .os
+                        .xr_buffer_scale_requested
+                        .clamp(ANDROID_XR_BUFFER_SCALE_MIN, ANDROID_XR_BUFFER_SCALE_MAX);
+                    self.os.xr_buffer_scale_active = self.os.xr_buffer_scale_requested;
+                    self.os.xr_display_refresh_rate_active_hz = None;
+                    self.os.xr_effective_frame_time_ms = None;
+                    self.os.xr_effective_frame_rate_hz = None;
+                    self.os.xr_frame_cpu_time_ms = None;
+                    self.os.xr_render_cpu_time_ms = None;
+                    self.os.xr_depth_readback_cpu_time_ms = None;
+                    self.os.xr_frame_cpu_breakdown = None;
+                    self.os.xr_retry_surface_after_destroy = true;
                     self.os.ignore_destroy = true;
                     if !self.os.in_xr_mode {
                         self.os.in_xr_mode = true;
@@ -1318,6 +2744,15 @@ impl Cx {
                     }
                 }
                 CxOsOp::XrStopPresenting => {
+                    #[cfg(use_vulkan)]
+                    self.clear_xr_pending_surface();
+                    self.os.xr_display_refresh_rate_active_hz = None;
+                    self.os.xr_effective_frame_time_ms = None;
+                    self.os.xr_effective_frame_rate_hz = None;
+                    self.os.xr_frame_cpu_time_ms = None;
+                    self.os.xr_render_cpu_time_ms = None;
+                    self.os.xr_depth_readback_cpu_time_ms = None;
+                    self.os.xr_frame_cpu_breakdown = None;
                     self.os.ignore_destroy = true;
                     if self.os.in_xr_mode {
                         self.os.in_xr_mode = false;
@@ -1327,17 +2762,46 @@ impl Cx {
                         }
                     }
                 }
+                CxOsOp::XrSetRenderScale(scale) => {
+                    let scale =
+                        scale.clamp(ANDROID_XR_BUFFER_SCALE_MIN, ANDROID_XR_BUFFER_SCALE_MAX);
+                    self.os.xr_buffer_scale_requested = scale;
+                    if !self.os.in_xr_mode || self.os.openxr.session.is_none() {
+                        self.os.xr_buffer_scale_active = scale;
+                    }
+                }
                 CxOsOp::XrAdvertiseAnchor(anchor) => {
                     self.os.openxr.advertise_anchor(anchor);
                 }
                 CxOsOp::XrSetLocalAnchor(anchor) => {
                     self.os.openxr.set_local_anchor(anchor);
                 }
+                CxOsOp::XrSetLocalFloor(floor_y) => {
+                    let os_type = self.os_type().clone();
+                    self.os.openxr.set_local_floor(floor_y, &os_type);
+                }
                 CxOsOp::XrDiscoverAnchor(id) => {
                     self.os.openxr.discover_anchor(id);
                 }
+                CxOsOp::FullscreenWindow(_window_id) => {
+                    self.os.fullscreen = true;
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_full_screen(env, true);
+                    }
+                }
+                CxOsOp::NormalizeWindow(_window_id) => {
+                    self.os.fullscreen = false;
+                    unsafe {
+                        let env = attach_jni_env();
+                        android_jni::to_java_set_full_screen(env, false);
+                    }
+                }
                 CxOsOp::SetCursor(_) => {
                     // no need
+                }
+                CxOsOp::StartDragging(items) => {
+                    self.os.internal_drag_items = Some(Arc::new(items));
                 }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
@@ -1350,6 +2814,7 @@ impl Cx {
 
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
+        super::android_network::install_network_backend_shim();
         self.package_root = Some("makepad".to_string());
     }
 
@@ -1381,18 +2846,129 @@ impl CxOsApi for Cx {
             0.00001
         }
     }
+
+    fn xr_render_scale(&self) -> Option<f64> {
+        if self.os.in_xr_mode {
+            Some(self.os.xr_buffer_scale_active as f64)
+        } else {
+            None
+        }
+    }
+
+    fn xr_gpu_frame_time_ms(&self) -> Option<f64> {
+        #[cfg(use_vulkan)]
+        {
+            self.os
+                .vulkan
+                .as_ref()
+                .and_then(|vulkan| vulkan.last_openxr_gpu_frame_time_ms())
+        }
+        #[cfg(not(use_vulkan))]
+        {
+            None
+        }
+    }
+
+    fn xr_frame_cpu_time_ms(&self) -> Option<f64> {
+        self.os.xr_frame_cpu_time_ms
+    }
+
+    fn xr_render_cpu_time_ms(&self) -> Option<f64> {
+        self.os.xr_render_cpu_time_ms
+    }
+
+    fn xr_depth_readback_cpu_time_ms(&self) -> Option<f64> {
+        self.os.xr_depth_readback_cpu_time_ms
+    }
+
+    fn xr_frame_cpu_breakdown(&self) -> Option<XrFrameCpuBreakdown> {
+        self.os.xr_frame_cpu_breakdown
+    }
+
+    fn xr_display_refresh_rate_hz(&self) -> Option<f64> {
+        self.os
+            .xr_display_refresh_rate_active_hz
+            .map(|value| value as f64)
+    }
+
+    fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
+        self.os.xr_effective_frame_rate_hz
+    }
 }
 
 fn to_android_permission(permission: crate::permission::Permission) -> &'static str {
     match permission {
         crate::permission::Permission::AudioInput => "android.permission.RECORD_AUDIO",
+        crate::permission::Permission::Camera => "android.permission.CAMERA",
+        crate::permission::Permission::HeadsetCamera => "horizonos.permission.HEADSET_CAMERA",
+        crate::permission::Permission::SceneAccess => "com.oculus.permission.USE_SCENE",
     }
 }
 
 impl Cx {
-    fn check_audio_permission_status(&self) -> crate::permission::PermissionStatus {
+    fn find_popup_to_dismiss_on_touch(
+        &self,
+        touches: &[crate::event::finger::TouchPoint],
+    ) -> Option<crate::window::WindowId> {
+        for i in (0..self.windows.len()).rev() {
+            let window_id = CxWindowPool::from_usize(i);
+            let window = &self.windows[window_id];
+            if !window.is_created || !window.is_popup {
+                continue;
+            }
+            if let (Some(pos), Some(size)) = (window.popup_position, window.popup_size) {
+                let rect = Rect {
+                    pos: pos,
+                    size: size,
+                };
+                for touch in touches {
+                    if touch.state == crate::event::finger::TouchState::Start
+                        && !rect.contains(touch.abs)
+                    {
+                        return Some(window_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn dismiss_popup_window(
+        &mut self,
+        window_id: crate::window::WindowId,
+        reason: crate::event::PopupDismissReason,
+    ) {
+        // First dismiss any child popups
+        let children: Vec<crate::window::WindowId> = (0..self.windows.len())
+            .filter_map(|i| {
+                let child_id = CxWindowPool::from_usize(i);
+                let w = &self.windows[child_id];
+                if w.is_created && w.is_popup && w.popup_parent == Some(window_id) {
+                    Some(child_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for child_id in children {
+            self.dismiss_popup_window(child_id, crate::event::PopupDismissReason::ParentClosed);
+        }
+        self.call_event_handler(&Event::PopupDismissed(crate::event::PopupDismissedEvent {
+            window_id,
+            reason,
+        }));
+        self.call_event_handler(&Event::WindowClosed(crate::event::WindowClosedEvent {
+            window_id,
+        }));
+        self.windows[window_id].is_created = false;
+    }
+
+    fn check_android_permission_status(
+        &self,
+        permission: crate::permission::Permission,
+    ) -> crate::permission::PermissionStatus {
         unsafe {
-            let status = android_jni::to_java_check_permission("android.permission.RECORD_AUDIO");
+            let status = android_jni::to_java_check_permission(to_android_permission(permission));
             match status {
                 0 => crate::permission::PermissionStatus::NotDetermined, // Never asked or permanently denied
                 1 => crate::permission::PermissionStatus::Granted,
@@ -1410,10 +2986,7 @@ impl Cx {
         permission: crate::permission::Permission,
         request_id: i32,
     ) {
-        let status = match permission {
-            crate::permission::Permission::AudioInput => self.check_audio_permission_status(),
-        };
-
+        let status = self.check_android_permission_status(permission);
         self.call_event_handler(&Event::PermissionResult(
             crate::permission::PermissionResult {
                 permission,
@@ -1428,49 +3001,37 @@ impl Cx {
         permission: crate::permission::Permission,
         request_id: i32,
     ) {
-        match permission {
-            crate::permission::Permission::AudioInput => {
-                let status = self.check_audio_permission_status();
-                match status {
-                    crate::permission::PermissionStatus::Granted => {
-                        // Already granted, don't re-ask
-                        self.call_event_handler(&Event::PermissionResult(
-                            crate::permission::PermissionResult {
-                                permission,
-                                request_id,
-                                status,
-                            },
-                        ));
-                    }
-                    crate::permission::PermissionStatus::DeniedCanRetry => {
-                        // Can request again - Android will show the permission dialog
-                        unsafe {
-                            android_jni::to_java_request_permission(
-                                to_android_permission(permission),
-                                request_id,
-                            );
-                        }
-                    }
-                    crate::permission::PermissionStatus::NotDetermined => {
-                        // Need to request permission
-                        unsafe {
-                            android_jni::to_java_request_permission(
-                                to_android_permission(permission),
-                                request_id,
-                            );
-                        }
-                    }
-                    _ => {
-                        // For other statuses (like DeniedPermanent), send the result directly
-                        self.call_event_handler(&Event::PermissionResult(
-                            crate::permission::PermissionResult {
-                                permission,
-                                request_id,
-                                status,
-                            },
-                        ));
-                    }
-                }
+        let status = self.check_android_permission_status(permission);
+        match status {
+            crate::permission::PermissionStatus::Granted => {
+                self.call_event_handler(&Event::PermissionResult(
+                    crate::permission::PermissionResult {
+                        permission,
+                        request_id,
+                        status,
+                    },
+                ));
+            }
+            crate::permission::PermissionStatus::DeniedCanRetry
+            | crate::permission::PermissionStatus::NotDetermined => unsafe {
+                crate::log!(
+                    "Android permission request dispatching Java dialog permission={:?} request_id={}",
+                    permission,
+                    request_id
+                );
+                android_jni::to_java_request_permission(
+                    to_android_permission(permission),
+                    request_id,
+                );
+            },
+            _ => {
+                self.call_event_handler(&Event::PermissionResult(
+                    crate::permission::PermissionResult {
+                        permission,
+                        request_id,
+                        status,
+                    },
+                ));
             }
         }
     }
@@ -1479,6 +3040,9 @@ impl Cx {
 fn string_to_permission(permission_str: &str) -> Option<crate::permission::Permission> {
     match permission_str {
         "android.permission.RECORD_AUDIO" => Some(crate::permission::Permission::AudioInput),
+        "android.permission.CAMERA" => Some(crate::permission::Permission::Camera),
+        "horizonos.permission.HEADSET_CAMERA" => Some(crate::permission::Permission::HeadsetCamera),
+        "com.oculus.permission.USE_SCENE" => Some(crate::permission::Permission::SceneAccess),
         _ => None,
     }
 }
@@ -1488,24 +3052,50 @@ impl Default for CxOs {
         Self {
             start_time: Instant::now(),
             first_after_resize: true,
+            needs_first_draw: true,
+            hide_surface_cover_after_first_present: false,
+            refresh_surface_snapshot_after_first_present: true,
             frame_time: 0,
             display_size: dvec2(100., 100.),
             dpi_factor: 1.5,
+            safe_area_insets: Default::default(),
             keyboard_closed: 0.0,
             media: CxAndroidMedia::default(),
             display: None,
+            surface_alive: false,
             #[cfg(use_vulkan)]
             vulkan: None,
             quit: false,
             fullscreen: false,
             timers: Default::default(),
             video_surfaces: HashMap::new(),
+            video_configs: HashMap::new(),
+            camera_players: HashMap::new(),
+            pending_camera_preview_windows: HashMap::new(),
+            software_video_players: HashMap::new(),
             websocket_parsers: HashMap::new(),
+            internal_drag_items: None,
             openxr: CxOpenXr::default(),
             activity_thread_id: None,
             render_thread_id: None,
             ignore_destroy: false,
             in_xr_mode: false,
+            xr_buffer_scale_active: ANDROID_XR_BUFFER_SCALE_DEFAULT,
+            xr_buffer_scale_requested: ANDROID_XR_BUFFER_SCALE_DEFAULT,
+            xr_display_refresh_rate_active_hz: None,
+            xr_effective_frame_time_ms: None,
+            xr_effective_frame_rate_hz: None,
+            xr_frame_cpu_time_ms: None,
+            xr_render_cpu_time_ms: None,
+            xr_depth_readback_cpu_time_ms: None,
+            xr_frame_cpu_breakdown: None,
+            #[cfg(use_vulkan)]
+            xr_pending_surface_window: std::ptr::null_mut(),
+            #[cfg(use_vulkan)]
+            xr_pending_surface_width: 0,
+            #[cfg(use_vulkan)]
+            xr_pending_surface_height: 0,
+            xr_retry_surface_after_destroy: false,
         }
     }
 }
@@ -1521,45 +3111,214 @@ pub struct CxAndroidDisplay {
     //event_handler: Box<dyn EventHandler>,
 }
 
+pub(crate) struct AndroidSoftwarePlayer {
+    pub player: PlaybackSessionHandle,
+    pub tex_y_id: TextureId,
+    pub tex_u_id: TextureId,
+    pub tex_v_id: TextureId,
+    pub yuv_matrix: f32,
+}
+
 pub struct CxOs {
     pub first_after_resize: bool,
+    /// Set to `true` when a `RenderLoop` callback arrives but the surface is not
+    /// yet drawable. When the surface later becomes ready, this flag triggers a
+    /// `redraw_all()` to ensure the first frame is painted. Without this, the app
+    /// can start up showing a black screen if the initial redraw request was
+    /// consumed before the surface was available.
+    pub needs_first_draw: bool,
+    /// Tracks whether the Java-side surface cover overlay should remain visible
+    /// until the next successful present reaches the rebuilt Android surface.
+    pub hide_surface_cover_after_first_present: bool,
+    /// Tracks whether Java should refresh its cached `SurfaceView` snapshot
+    /// after the next successful present. This keeps the task snapshot path
+    /// from falling back to black when Android backgrounds/resumes the app
+    /// without destroying the surface.
+    pub refresh_surface_snapshot_after_first_present: bool,
     pub display_size: Vec2d,
     pub dpi_factor: f64,
+    pub safe_area_insets: crate::event::SafeAreaInsets,
     pub keyboard_closed: f64,
     pub frame_time: i64,
     pub quit: bool,
     pub fullscreen: bool,
     pub(crate) start_time: Instant,
     pub(crate) timers: PollTimers,
-    pub(crate) display: Option<CxAndroidDisplay>,
+    pub display: Option<CxAndroidDisplay>,
+    /// Tracks whether the active rendering surface (EGL window surface in OpenGL
+    /// mode, or `ANativeWindow`-backed Vulkan surface in Vulkan mode) is currently
+    /// valid for drawing.
+    ///
+    /// Set to `true` after a successful `SurfaceCreated`/`SurfaceChanged` and to
+    /// `false` synchronously inside the `SurfaceDestroyed` handler. The render
+    /// thread MUST consult this before issuing any GL/Vulkan draw or present
+    /// calls — Android can pull the underlying buffer queue out from under us
+    /// at any moment, and the GPU drivers (Mali/Adreno) will SIGSEGV if you
+    /// touch GL state without a current/valid surface.
+    pub(crate) surface_alive: bool,
     #[cfg(use_vulkan)]
     pub(crate) vulkan: Option<CxVulkan>,
     pub(crate) media: CxAndroidMedia,
     pub(crate) video_surfaces: HashMap<LiveId, jobject>,
+    pub(crate) video_configs: HashMap<LiveId, AndroidVideoConfig>,
+    pub(crate) camera_players: HashMap<LiveId, AndroidCameraPlayer>,
+    pub(crate) pending_camera_preview_windows: HashMap<LiveId, *mut ndk_sys::ANativeWindow>,
+    pub(crate) software_video_players: HashMap<LiveId, AndroidSoftwarePlayer>,
     websocket_parsers: HashMap<u64, WebSocketImpl>,
+    pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
     pub(crate) openxr: CxOpenXr,
     pub(crate) activity_thread_id: Option<u64>,
     pub(crate) render_thread_id: Option<u64>,
     pub(crate) ignore_destroy: bool,
     pub(crate) in_xr_mode: bool,
+    pub(crate) xr_buffer_scale_active: f32,
+    pub(crate) xr_buffer_scale_requested: f32,
+    pub(crate) xr_display_refresh_rate_active_hz: Option<f32>,
+    pub(crate) xr_effective_frame_time_ms: Option<f64>,
+    pub(crate) xr_effective_frame_rate_hz: Option<f64>,
+    pub(crate) xr_frame_cpu_time_ms: Option<f64>,
+    pub(crate) xr_render_cpu_time_ms: Option<f64>,
+    pub(crate) xr_depth_readback_cpu_time_ms: Option<f64>,
+    pub(crate) xr_frame_cpu_breakdown: Option<XrFrameCpuBreakdown>,
+    #[cfg(use_vulkan)]
+    pub(crate) xr_pending_surface_window: *mut ndk_sys::ANativeWindow,
+    #[cfg(use_vulkan)]
+    pub(crate) xr_pending_surface_width: i32,
+    #[cfg(use_vulkan)]
+    pub(crate) xr_pending_surface_height: i32,
+    pub(crate) xr_retry_surface_after_destroy: bool,
 }
 
 impl CxOs {
     pub(crate) fn gl(&self) -> &LibGl {
         &self.display.as_ref().unwrap().libgl
     }
+
+    /// Returns `true` only when it is currently safe to issue draw / swap-buffer
+    /// calls against the active backend's window surface.
+    ///
+    /// This consults the `surface_alive` flag (set by the `SurfaceCreated`/
+    /// `SurfaceChanged`/`SurfaceDestroyed` message handlers) AND verifies that
+    /// the underlying handles still look healthy.
+    ///
+    /// On Android the only thread allowed to drive the renderer is the
+    /// dedicated render thread that owns the EGL/Vulkan context, so calling
+    /// this from anywhere else is meaningless.
+    ///
+    /// **XR mode escape hatch (Vulkan only):** when an OpenXR session is
+    /// active, rendering goes through OpenXR's own swapchains and a Vulkan
+    /// instance whose validity is **independent** of the Android window
+    /// surface lifecycle. The `SurfaceDestroyed` handler deliberately keeps
+    /// the Vulkan backend alive in that case (`keep_xr_backend_alive`) and
+    /// only nulls out `display.window`. Without this escape hatch the
+    /// off-screen texture passes invoked from `openxr_handle_repaint` (UI
+    /// surfaces composited into the XR scene) would be silently skipped any
+    /// time `display.window` is null — which would visibly break Quest 3
+    /// rendering whenever the host Activity surface is recycled.
+    pub(crate) fn has_drawable_surface(&self) -> bool {
+        #[cfg(use_vulkan)]
+        {
+            // Vulkan + active XR session: rendering is driven by OpenXR's own
+            // swapchains, not the Android window surface. Always allow passes
+            // to proceed; the actual draw uses Vulkan resources that we know
+            // are still alive (we never `suspend_surface()` while a session
+            // is running).
+            if self.in_xr_mode && self.openxr.session.is_some() {
+                return self.vulkan.is_some();
+            }
+        }
+
+        if !self.surface_alive {
+            return false;
+        }
+
+        #[cfg(not(use_vulkan))]
+        {
+            self.display
+                .as_ref()
+                .map(|d| d.is_surface_alive())
+                .unwrap_or(false)
+        }
+        #[cfg(use_vulkan)]
+        {
+            // Non-XR Vulkan: the EGL surface is a 1x1 pbuffer kept alive only
+            // for GL interop, so the relevant question is whether the Vulkan
+            // backend still has a live Android window surface + swapchain.
+            self.vulkan
+                .as_ref()
+                .map(|vulkan| vulkan.has_drawable_surface())
+                .unwrap_or(false)
+        }
+    }
 }
 
 impl CxAndroidDisplay {
+    /// Returns `true` if the EGL window surface is non-null. This is the
+    /// low-level test the GL backend uses; higher-level code should prefer
+    /// [`CxOs::has_drawable_surface`].
+    #[inline]
+    pub(crate) fn is_surface_alive(&self) -> bool {
+        !self.surface.is_null()
+    }
+
+    /// Make Makepad's EGL context current (with its surface).
+    /// Required before creating shared GL contexts.
+    ///
+    /// Panics if no surface is bound or if `eglMakeCurrent` fails. Call sites
+    /// that may run while the surface is being torn down should use
+    /// [`Self::try_make_current`] instead.
+    pub fn make_current(&self) {
+        unsafe {
+            assert!(
+                !self.surface.is_null(),
+                "CxAndroidDisplay::make_current called with no EGL surface bound"
+            );
+            let res = (self.libegl.eglMakeCurrent.unwrap())(
+                self.egl_display,
+                self.surface,
+                self.surface,
+                self.egl_context,
+            );
+            assert!(
+                res != 0,
+                "eglMakeCurrent failed in CxAndroidDisplay::make_current"
+            );
+        }
+    }
+
+    /// Fallible version of [`Self::make_current`]. Returns `false` if no
+    /// surface is bound or if `eglMakeCurrent` fails for any reason. The render
+    /// loop calls this on every frame as defense-in-depth: if the GL context
+    /// somehow got detached (driver-initiated, foreign code, etc.) we re-bind
+    /// it; if the surface is gone we silently skip the frame.
+    pub(crate) fn try_make_current(&self) -> bool {
+        if self.surface.is_null() {
+            return false;
+        }
+        unsafe {
+            (self.libegl.eglMakeCurrent.unwrap())(
+                self.egl_display,
+                self.surface,
+                self.surface,
+                self.egl_context,
+            ) != 0
+        }
+    }
+
     #[cfg(not(use_vulkan))]
     unsafe fn destroy_surface(&mut self) {
+        // Releasing the context from the current thread BEFORE destroying the
+        // surface is required by the EGL spec — otherwise the driver may
+        // dereference torn-down state on the next GL call.
         (self.libegl.eglMakeCurrent.unwrap())(
             self.egl_display,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
-        (self.libegl.eglDestroySurface.unwrap())(self.egl_display, self.surface);
+        if !self.surface.is_null() {
+            (self.libegl.eglDestroySurface.unwrap())(self.egl_display, self.surface);
+        }
         self.surface = std::ptr::null_mut();
     }
 

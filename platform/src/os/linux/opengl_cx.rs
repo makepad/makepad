@@ -186,11 +186,7 @@ impl OpenglCx {
         }
 
         // Create EGL context.
-        let ctx_attribs = [
-            egl_sys::EGL_CONTEXT_MAJOR_VERSION,
-            3,
-            egl_sys::EGL_NONE,
-        ];
+        let ctx_attribs = [egl_sys::EGL_CONTEXT_MAJOR_VERSION, 3, egl_sys::EGL_NONE];
 
         let egl_context = (libegl.eglCreateContext.unwrap())(
             egl_display,
@@ -333,12 +329,101 @@ impl Cx {
             );
         }
 
+        // Runtime PNG readback for deterministic local validation.
+        if let Some(path) = std::env::var_os("MAKEPAD_WRITE_FRAMEBUFFER_PNG") {
+            let w = pix_width.floor() as u32;
+            let h = pix_height.floor() as u32;
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            unsafe {
+                let gl = self.os.gl();
+                (gl.glReadPixels)(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
+                    pixels.as_mut_ptr() as *mut _,
+                );
+            }
+            let stride = (w * 4) as usize;
+            for y in 0..(h as usize / 2) {
+                let top = y * stride;
+                let bot = ((h as usize) - 1 - y) * stride;
+                for x in 0..stride {
+                    pixels.swap(top + x, bot + x);
+                }
+            }
+            if let Ok(png) = Self::encode_rgba_as_png(w, h, &pixels) {
+                let _ = std::fs::write(path, png);
+            }
+        }
+
+        // Studio screenshot readback: read framebuffer pixels before swap.
+        let request_ids = self.take_studio_screenshot_request_ids(0);
+        if !request_ids.is_empty() {
+            let w = pix_width.floor() as u32;
+            let h = pix_height.floor() as u32;
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            unsafe {
+                let gl = self.os.gl();
+                (gl.glReadPixels)(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
+                    pixels.as_mut_ptr() as *mut _,
+                );
+            }
+            // OpenGL reads bottom-up; flip rows for top-down PNG.
+            let stride = (w * 4) as usize;
+            for y in 0..(h as usize / 2) {
+                let top = y * stride;
+                let bot = ((h as usize) - 1 - y) * stride;
+                for x in 0..stride {
+                    pixels.swap(top + x, bot + x);
+                }
+            }
+            // Encode as PNG.
+            if let Ok(png) = Self::encode_rgba_as_png(w, h, &pixels) {
+                Self::send_studio_screenshot_response(request_ids, w, h, png);
+            }
+        }
+
+        #[cfg(target_os = "android")]
+        if let Some(request) = self.take_studio_run_view_frame_request(0) {
+            let w = pix_width.floor() as u32;
+            let h = pix_height.floor() as u32;
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            unsafe {
+                let gl = self.os.gl();
+                (gl.glReadPixels)(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    gl_sys::RGBA,
+                    gl_sys::UNSIGNED_BYTE,
+                    pixels.as_mut_ptr() as *mut _,
+                );
+            }
+            let stride = (w * 4) as usize;
+            for y in 0..(h as usize / 2) {
+                let top = y * stride;
+                let bot = ((h as usize) - 1 - y) * stride;
+                for x in 0..stride {
+                    pixels.swap(top + x, bot + x);
+                }
+            }
+            self.encode_studio_run_view_frame_async(request, w, h, pixels);
+        }
+
         unsafe {
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
-            let swap_ok = (opengl_cx.libegl.eglSwapBuffers.unwrap())(
-                opengl_cx.egl_display,
-                egl_surface,
-            );
+            let swap_ok =
+                (opengl_cx.libegl.eglSwapBuffers.unwrap())(opengl_cx.egl_display, egl_surface);
             if swap_ok == 0 {
                 let egl_error = (opengl_cx.libegl.eglGetError.unwrap())();
                 crate::error!(

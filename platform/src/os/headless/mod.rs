@@ -4,15 +4,15 @@ mod raster;
 mod shader;
 mod virtual_gpu;
 
-use crate::os::cx_stdin::PollTimers;
+use crate::os::shared_framebuf::PollTimers;
 use crate::{
     audio::{AudioDeviceId, AudioInputFn, AudioOutputFn},
-    event::HttpRequest,
+    makepad_network::HttpRequest,
+    makepad_network::WebSocketMessage,
     media_api::CxMediaApi,
     midi::{MidiData, MidiInput, MidiOutput, MidiPortId},
-    video::{VideoFormatId, VideoInputFn, VideoInputId},
-    web_socket::WebSocketMessage,
     thread::MessageThreadPool,
+    video::{VideoFormatId, VideoInputFn, VideoInputId},
     Cx,
 };
 use std::path::PathBuf;
@@ -33,6 +33,9 @@ pub struct CxOsGeometry {}
 
 #[derive(Default, Clone)]
 pub struct CxOsTexture {}
+
+#[derive(Default, Clone)]
+pub struct CxOsUniformBuffer {}
 
 #[derive(Default)]
 pub struct CxOsDrawShader {
@@ -61,6 +64,9 @@ pub struct CxOs {
     pub(crate) start_time: Option<Instant>,
     pub(crate) shader_jit: jit::HeadlessShaderJit,
     pub(crate) frame_dir: Option<PathBuf>,
+    pub(crate) no_draw: bool,
+    pub(crate) no_draw_initialized: bool,
+    pub(crate) draw_cycles: Option<usize>,
     pub(crate) render_pool: Option<MessageThreadPool<()>>,
     pub(crate) render_pool_threads: usize,
 }
@@ -72,6 +78,9 @@ impl Default for CxOs {
             start_time: None,
             shader_jit: Default::default(),
             frame_dir: None,
+            no_draw: false,
+            no_draw_initialized: false,
+            draw_cycles: None,
             render_pool: None,
             render_pool_threads: 0,
         }
@@ -156,7 +165,7 @@ impl Cx {
     pub fn share_texture_for_presentable_image(
         &mut self,
         _texture: &crate::Texture,
-    ) -> Option<crate::os::cx_stdin::LinuxOwnedImage> {
+    ) -> Option<crate::os::shared_framebuf::LinuxOwnedImage> {
         None
     }
 }

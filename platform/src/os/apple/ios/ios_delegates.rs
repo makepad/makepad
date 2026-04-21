@@ -1,5 +1,5 @@
 use crate::{
-    event::{Ease, TouchState, VirtualKeyboardEvent},
+    event::{Ease, SelectionHandleKind, SelectionHandlePhase, TouchState, VirtualKeyboardEvent},
     makepad_math::*,
     os::{
         apple::apple_sys::*,
@@ -33,6 +33,54 @@ pub fn try_with_ios_app<R>(
         })
         .ok()
         .flatten()
+}
+
+pub fn define_makepad_view_controller() -> *const Class {
+    let superclass = class!(UIViewController);
+    let mut decl = ClassDecl::new("MakepadViewController", superclass).unwrap();
+
+    decl.add_ivar::<BOOL>("_prefersStatusBarHidden");
+    decl.add_ivar::<BOOL>("_prefersHomeIndicatorAutoHidden");
+
+    extern "C" fn prefers_status_bar_hidden(this: &Object, _: Sel) -> BOOL {
+        unsafe { *this.get_ivar("_prefersStatusBarHidden") }
+    }
+
+    extern "C" fn prefers_home_indicator_auto_hidden(this: &Object, _: Sel) -> BOOL {
+        unsafe { *this.get_ivar("_prefersHomeIndicatorAutoHidden") }
+    }
+
+    // Called by iOS when the safe area insets change (e.g., device rotation).
+    // At this point the view's safeAreaInsets reflect the new orientation,
+    // unlike draw_size_will_change which may fire before the update.
+    extern "C" fn view_safe_area_insets_did_change(_this: &Object, _: Sel) {
+        let should_call = IOS_APP
+            .try_with(|app| match app.try_borrow_mut() {
+                Ok(app_ref) => app_ref.is_some(),
+                Err(_) => false,
+            })
+            .unwrap_or(false);
+        if should_call {
+            IosApp::check_window_geom();
+        }
+    }
+
+    unsafe {
+        decl.add_method(
+            sel!(prefersStatusBarHidden),
+            prefers_status_bar_hidden as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(prefersHomeIndicatorAutoHidden),
+            prefers_home_indicator_auto_hidden as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(viewSafeAreaInsetsDidChange),
+            view_safe_area_insets_did_change as extern "C" fn(&Object, Sel),
+        );
+    }
+
+    decl.register()
 }
 
 pub fn define_ios_app_delegate() -> *const Class {
@@ -246,8 +294,8 @@ pub fn define_mtk_view_delegate() -> *const Class {
         IosApp::draw_in_rect();
     }
 
-    extern "C" fn draw_size_will_change(_this: &Object, _: Sel, _: ObjcId, _: ObjcId) {
-        IosApp::draw_size_will_change();
+    extern "C" fn draw_size_will_change(_this: &Object, _: Sel, view: ObjcId, size: NSSize) {
+        IosApp::draw_size_will_change(view, size);
     }
     unsafe {
         decl.add_method(
@@ -256,7 +304,7 @@ pub fn define_mtk_view_delegate() -> *const Class {
         );
         decl.add_method(
             sel!(mtkView: drawableSizeWillChange:),
-            draw_size_will_change as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+            draw_size_will_change as extern "C" fn(&Object, Sel, ObjcId, NSSize),
         );
     }
 
@@ -307,6 +355,59 @@ pub fn define_gesture_recognizer_handler() -> *const Class {
     }
 
     return decl.register();
+}
+
+pub fn define_selection_handle_gesture_handler() -> *const Class {
+    let mut decl = ClassDecl::new("SelectionHandlePanRecognizerHandler", class!(NSObject)).unwrap();
+
+    decl.add_ivar::<i64>("handle_kind");
+
+    extern "C" fn handle_selection_handle_pan(this: &Object, _: Sel, gesture_recognizer: ObjcId) {
+        unsafe {
+            let state: i64 = msg_send![gesture_recognizer, state];
+            let phase = match state {
+                1 => Some(SelectionHandlePhase::Begin), // UIGestureRecognizerStateBegan
+                2 => Some(SelectionHandlePhase::Move),  // UIGestureRecognizerStateChanged
+                3 | 4 | 5 => Some(SelectionHandlePhase::End), // ended/cancelled/failed
+                _ => None,
+            };
+            let Some(phase) = phase else {
+                return;
+            };
+
+            let handle_kind_raw: i64 = *this.get_ivar("handle_kind");
+            let handle = if handle_kind_raw == 0 {
+                SelectionHandleKind::Start
+            } else {
+                SelectionHandleKind::End
+            };
+
+            let handle_view: ObjcId = msg_send![gesture_recognizer, view];
+            if handle_view == nil {
+                return;
+            }
+            let host_view: ObjcId = msg_send![handle_view, superview];
+            if host_view == nil {
+                return;
+            }
+            let location: NSPoint = msg_send![gesture_recognizer, locationInView: host_view];
+
+            // Keep the dragged handle visually under the finger; Rust will send authoritative
+            // positions back through update_selection_handles.
+            let () = msg_send![handle_view, setCenter: location];
+
+            IosApp::send_selection_handle_drag(handle, phase, dvec2(location.x, location.y));
+        }
+    }
+
+    unsafe {
+        decl.add_method(
+            sel!(handleSelectionHandlePan:),
+            handle_selection_handle_pan as extern "C" fn(&Object, Sel, ObjcId),
+        );
+    }
+
+    decl.register()
 }
 
 pub fn define_ios_timer_delegate() -> *const Class {
@@ -432,14 +533,15 @@ pub fn define_textfield_delegate() -> *const Class {
     }
     extern "C" fn input_mode_did_change(_: &Object, _: Sel, _notif: ObjcId) {
         // When keyboard language changes, reload input views so iOS re-queries
-        // autocorrectionType (which dynamically checks CJK vs non-CJK)
-        try_with_ios_app(|app| {
-            if let Some(text_input_view) = app.text_input_view {
-                unsafe {
-                    let () = msg_send![text_input_view, reloadInputViews];
-                }
+        // autocorrectionType (which dynamically checks CJK vs non-CJK).
+        // Extract the view pointer first; reloadInputViews can trigger
+        // synchronous UIKit callbacks that re-enter IOS_APP.
+        let view = try_with_ios_app(|app| app.text_input_view).flatten();
+        if let Some(text_input_view) = view {
+            unsafe {
+                let () = msg_send![text_input_view, reloadInputViews];
             }
-        });
+        }
     }
 
     unsafe {

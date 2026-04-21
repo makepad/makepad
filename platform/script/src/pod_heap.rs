@@ -420,6 +420,9 @@ impl ScriptHeap {
             pod.tag.set_alloced();
             pod.data
                 .resize(pod_ty.ty.size_of().next_multiple_of(4) >> 2, 0);
+            // Reused slots keep existing words when size stays equal.
+            // Always zero so old pod contents cannot leak into a fresh allocation.
+            pod.data.fill(0);
             ptr
         } else {
             let index = self.pods.len() as u32;
@@ -447,7 +450,10 @@ impl ScriptHeap {
         _trap: ScriptTrap,
     ) -> ScriptValue {
         let _pod = &self.pods[pod];
-        println!("pod_heap::set_pod_field - Want to set pod field {}, but not impplemented", field);
+        println!(
+            "pod_heap::set_pod_field - Want to set pod field {}, but not impplemented",
+            field
+        );
         NIL
     }
 

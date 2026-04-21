@@ -1,12 +1,24 @@
 use {
     crate::{
+        area::Area,
         cx::Cx,
         cx_api::CxOsApi,
         draw_pass::{CxDrawPassParent, DrawPassId},
-        event::{DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TimerEvent, TriggerEvent},
-        studio::{AppToStudio, EventSample},
+        event::{
+            DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TextClipboardEvent, TimerEvent,
+            TriggerEvent,
+        },
+        makepad_live_id::{live_id, LiveId},
+        makepad_network::NetworkResponse,
     },
+    makepad_studio_protocol::{
+        hub_protocol::FrameCodec, AppToStudio, EventSample, RunViewFrameData, RunViewFrameRequest,
+        RunViewKeyFocusRect, ScreenshotResponse, StudioToApp, WidgetQueryResponse, WidgetSnapshot,
+        WidgetSnapshotResponse, WidgetTreeDumpResponse,
+    },
+    std::cell::{Cell, RefCell},
     std::collections::{HashMap, HashSet},
+    std::rc::Rc,
 };
 
 impl Cx {
@@ -98,11 +110,514 @@ impl Cx {
         self.new_draw_event.will_redraw()
     }
 
+    pub(crate) fn dispatch_network_runtime_events(&mut self) {
+        use crate::makepad_math::dvec2;
+        use crate::window::CxWindowPool;
+
+        let mut responses = Vec::new();
+        while let Some(response) = self.net.try_recv() {
+            if let Some(msgs) = crate::web_socket::consume_studio_socket_response(&response) {
+                let window_id = CxWindowPool::id_zero();
+                let pos = dvec2(0.0, 0.0);
+                for msg in msgs {
+                    let _ = self.dispatch_studio_msg(msg, window_id, pos);
+                }
+                continue;
+            }
+            match &response {
+                NetworkResponse::WsOpened { .. }
+                | NetworkResponse::WsMessage { .. }
+                | NetworkResponse::WsClosed { .. }
+                | NetworkResponse::WsError { .. } => {
+                    self.handle_script_web_socket_event(response.clone())
+                }
+                NetworkResponse::HttpResponse { .. }
+                | NetworkResponse::HttpStreamChunk { .. }
+                | NetworkResponse::HttpStreamComplete { .. }
+                | NetworkResponse::HttpError { .. }
+                | NetworkResponse::HttpProgress { .. } => {}
+            }
+            responses.push(response);
+        }
+        if !responses.is_empty() {
+            self.handle_script_network_events(&responses);
+            self.call_event_handler(&Event::NetworkResponses(responses));
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn take_studio_screenshot_request_ids(&mut self, kind_id: u32) -> Vec<u64> {
+        let mut request_ids = Vec::new();
+        self.screenshot_requests.retain(|request| {
+            if request.kind_id == kind_id {
+                request_ids.push(request.request_id);
+                false
+            } else {
+                true
+            }
+        });
+        request_ids
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn send_studio_screenshot_response(
+        request_ids: Vec<u64>,
+        width: u32,
+        height: u32,
+        png: Vec<u8>,
+    ) {
+        if request_ids.is_empty() {
+            return;
+        }
+        Cx::send_studio_message(AppToStudio::Screenshot(ScreenshotResponse {
+            request_ids,
+            png,
+            width,
+            height,
+        }));
+    }
+
+    pub(crate) fn queue_studio_run_view_frame_request(&mut self, request: RunViewFrameRequest) {
+        self.run_view_frame_requests
+            .retain(|existing| existing.window_id != request.window_id);
+        self.run_view_frame_requests.push(request);
+        self.redraw_all();
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn take_studio_run_view_frame_request(
+        &mut self,
+        window_id: usize,
+    ) -> Option<RunViewFrameRequest> {
+        if self.run_view_frame_encode_in_flight {
+            return None;
+        }
+        let index = self
+            .run_view_frame_requests
+            .iter()
+            .rposition(|request| request.window_id == window_id)?;
+        Some(self.run_view_frame_requests.swap_remove(index))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn encode_studio_run_view_frame_async(
+        &mut self,
+        request: RunViewFrameRequest,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) {
+        if self.run_view_frame_encode_in_flight {
+            return;
+        }
+        self.run_view_frame_encode_in_flight = true;
+        let sender = self.run_view_frame_results.sender();
+        self.spawn_thread(move || {
+            let result = Cx::prepare_studio_run_view_rgba(&request, width, height, rgba).and_then(
+                |(width, height, rgba)| {
+                    Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {
+                        window_id: request.window_id,
+                        frame_id: request.frame_id,
+                        width,
+                        height,
+                        codec: Some(FrameCodec::Png),
+                        data: png,
+                    })
+                },
+            );
+            let _ = sender.send(result);
+        });
+    }
+
+    fn prepare_studio_run_view_rgba(
+        request: &RunViewFrameRequest,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(u32, u32, Vec<u8>), String> {
+        let expected_len = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        if rgba.len() != expected_len {
+            return Err(format!(
+                "runview frame rgba size mismatch: got {} bytes for {}x{}",
+                rgba.len(),
+                width,
+                height
+            ));
+        }
+
+        let target_width = request.width.max(1);
+        let target_height = request.height.max(1);
+
+        let out = if width == target_width && height == target_height {
+            rgba
+        } else {
+            let mut resized = vec![
+                0u8;
+                (target_width as usize)
+                    .saturating_mul(target_height as usize)
+                    .saturating_mul(4)
+            ];
+            for y in 0..target_height as usize {
+                let src_y = ((y as u64) * (height as u64) / (target_height as u64)) as usize;
+                for x in 0..target_width as usize {
+                    let src_x = ((x as u64) * (width as u64) / (target_width as u64)) as usize;
+                    let src = (src_y * width as usize + src_x) * 4;
+                    let dst = (y * target_width as usize + x) * 4;
+                    resized[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+                }
+            }
+            resized
+        };
+
+        Ok((target_width, target_height, out))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn flush_studio_run_view_frame_results(&mut self) {
+        loop {
+            let Ok(result) = self.run_view_frame_results.try_recv() else {
+                break;
+            };
+            self.run_view_frame_encode_in_flight = false;
+            match result {
+                Ok(frame) => Cx::send_studio_message(AppToStudio::RunViewFrame(frame)),
+                Err(err) => crate::error!("runview frame encode failed: {}", err),
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn send_studio_widget_tree_dump_response(&mut self, request_id: u64) {
+        self.widget_tree_dump_requests.push(request_id);
+        if self.in_draw_event {
+            return;
+        }
+        self.try_send_studio_widget_tree_dump_responses();
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn send_studio_widget_query_response(&self, request_id: u64, query: String) {
+        let rects = if let Some(callback) = self.widget_query_callback {
+            callback(self, &query)
+        } else {
+            Vec::new()
+        };
+        Cx::send_studio_message(AppToStudio::WidgetQuery(WidgetQueryResponse {
+            request_id,
+            query,
+            rects,
+        }));
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn send_studio_widget_snapshot_response(&mut self, request_id: u64) {
+        self.widget_snapshot_requests.push(request_id);
+        if self.in_draw_event {
+            return;
+        }
+        self.try_send_studio_widget_snapshot_responses();
+    }
+
+    fn studio_key_focus_rect_response(&self) -> RunViewKeyFocusRect {
+        let area = self.key_focus();
+        if !area.is_valid(self) {
+            return RunViewKeyFocusRect::default();
+        }
+        let rect = area.rect(self);
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return RunViewKeyFocusRect::default();
+        }
+        RunViewKeyFocusRect {
+            x: Some(rect.pos.x),
+            y: Some(rect.pos.y),
+            width: Some(rect.size.x),
+            height: Some(rect.size.y),
+        }
+    }
+
+    fn send_studio_key_focus_rect_response(&self) {
+        Cx::send_studio_message(AppToStudio::RunViewKeyFocusRect(
+            self.studio_key_focus_rect_response(),
+        ));
+    }
+
+    fn widget_tree_dump_ready(dump: &str) -> bool {
+        for line in dump.lines() {
+            let mut parts = line.split_whitespace();
+            let Some(first) = parts.next() else {
+                continue;
+            };
+            if first.starts_with('W') {
+                continue;
+            }
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            if tokens.len() < 2 {
+                continue;
+            }
+            let Some(h) = tokens.last().and_then(|v| v.parse::<i64>().ok()) else {
+                continue;
+            };
+            let Some(w) = tokens
+                .get(tokens.len().saturating_sub(2))
+                .and_then(|v| v.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            if w > 0 && h > 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn widget_snapshot_ready(widgets: &[WidgetSnapshot]) -> bool {
+        widgets
+            .iter()
+            .any(|widget| widget.visible && widget.width > 0 && widget.height > 0)
+    }
+
+    pub(crate) fn try_send_studio_widget_tree_dump_responses(&mut self) {
+        if self.widget_tree_dump_requests.is_empty() {
+            return;
+        }
+        if self.in_draw_event {
+            return;
+        }
+        let dump = if let Some(callback) = self.widget_tree_dump_callback {
+            callback(self)
+        } else {
+            "W1 0\n".to_string()
+        };
+        if !Self::widget_tree_dump_ready(&dump) {
+            return;
+        }
+        let request_ids: Vec<u64> = self.widget_tree_dump_requests.drain(..).collect();
+        for request_id in request_ids {
+            Cx::send_studio_message(AppToStudio::WidgetTreeDump(WidgetTreeDumpResponse {
+                request_id,
+                dump: dump.clone(),
+            }));
+        }
+    }
+
+    pub(crate) fn try_send_studio_widget_snapshot_responses(&mut self) {
+        if self.widget_snapshot_requests.is_empty() {
+            return;
+        }
+        if self.in_draw_event {
+            return;
+        }
+        let widgets = if let Some(callback) = self.widget_snapshot_callback {
+            callback(self)
+        } else {
+            Vec::new()
+        };
+        if !Self::widget_snapshot_ready(&widgets) {
+            return;
+        }
+        let request_ids: Vec<u64> = self.widget_snapshot_requests.drain(..).collect();
+        for request_id in request_ids {
+            Cx::send_studio_message(AppToStudio::WidgetSnapshot(WidgetSnapshotResponse {
+                request_id,
+                widgets: widgets.clone(),
+            }));
+        }
+    }
+
+    /// Dispatch a StudioToApp message as an event. Handles input, clipboard,
+    /// screenshot, widget dump, and kill. Returns true on Kill (caller should
+    /// shut down). Callers handle stdin-specific variants (Swapchain,
+    /// WindowGeomChange, Tick) before delegating here.
+    pub fn dispatch_studio_msg(
+        &mut self,
+        msg: StudioToApp,
+        window_id: crate::window::WindowId,
+        pos: crate::makepad_math::DVec2,
+    ) -> bool {
+        match msg {
+            StudioToApp::MouseDown(e) => {
+                let event = crate::event::MouseDownEvent {
+                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                    handled: Cell::new(Area::Empty),
+                };
+                self.fingers.process_tap_count(event.abs, event.time);
+                self.fingers.mouse_down(event.button, window_id);
+                self.call_event_handler(&Event::MouseDown(event));
+            }
+            StudioToApp::MouseMove(e) => {
+                self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
+                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                    handled: Cell::new(Area::Empty),
+                }));
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.fingers.switch_captures();
+            }
+            StudioToApp::MouseUp(e) => {
+                let event = crate::event::MouseUpEvent {
+                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                };
+                let button = event.button;
+                self.call_event_handler(&Event::MouseUp(event));
+                self.fingers.mouse_up(button);
+                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.send_studio_key_focus_rect_response();
+            }
+            StudioToApp::Scroll(e) => {
+                self.call_event_handler(&Event::Scroll(crate::event::ScrollEvent {
+                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    scroll: crate::makepad_math::dvec2(e.sx, e.sy),
+                    window_id,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    handled_x: Cell::new(false),
+                    handled_y: Cell::new(false),
+                    is_mouse: e.is_mouse,
+                    time: e.time,
+                }));
+            }
+            StudioToApp::KeyDown(e) => {
+                self.keyboard.process_key_down(e.clone());
+                self.call_event_handler(&Event::KeyDown(e));
+            }
+            StudioToApp::KeyUp(e) => {
+                self.keyboard.process_key_up(e.clone());
+                self.call_event_handler(&Event::KeyUp(e));
+            }
+            StudioToApp::TextInput(e) => {
+                self.call_event_handler(&Event::TextInput(e));
+            }
+            StudioToApp::TextCopy => {
+                let response = Rc::new(RefCell::new(None));
+                self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
+                    response: response.clone(),
+                }));
+                let text = response.borrow().clone();
+                if let Some(text) = text {
+                    Cx::send_studio_message(AppToStudio::SetClipboard(text));
+                }
+            }
+            StudioToApp::TextCut => {
+                let response = Rc::new(RefCell::new(None));
+                self.call_event_handler(&Event::TextCut(TextClipboardEvent {
+                    response: response.clone(),
+                }));
+                let text = response.borrow().clone();
+                if let Some(text) = text {
+                    Cx::send_studio_message(AppToStudio::SetClipboard(text));
+                }
+            }
+            StudioToApp::Screenshot(request) => {
+                self.screenshot_requests.push(request);
+                self.redraw_all();
+            }
+            StudioToApp::RunViewFrameRequest(request) => {
+                self.queue_studio_run_view_frame_request(request);
+            }
+            StudioToApp::WidgetTreeDump(request) => {
+                self.send_studio_widget_tree_dump_response(request.request_id);
+            }
+            StudioToApp::WidgetQuery(request) => {
+                self.send_studio_widget_query_response(request.request_id, request.query);
+            }
+            StudioToApp::WidgetSnapshot(request) => {
+                self.send_studio_widget_snapshot_response(request.request_id);
+            }
+            StudioToApp::Kill => {
+                self.call_event_handler(&Event::Shutdown);
+                return true;
+            }
+            StudioToApp::Custom(data) => {
+                self.call_event_handler(&Event::Custom(data));
+            }
+            StudioToApp::KeepAlive | StudioToApp::None => {}
+            StudioToApp::LiveChange { file_name, content } => {
+                self.script_data
+                    .live_reload
+                    .queue_file_change(file_name, content);
+            }
+            // Stdin-specific: Tick, Swapchain, WindowGeomChange are handled
+            // by callers before delegating here. In windowed mode they are
+            // no-ops (the native event loop handles them).
+            StudioToApp::Tick
+            | StudioToApp::Swapchain(_)
+            | StudioToApp::WindowGeomChange { .. }
+            | StudioToApp::TweakRay(_) => {}
+        }
+        false
+    }
+
+    /// Drain the global control channel and dispatch each message as an event.
+    /// Must be called from the event loop (not from inside an event handler).
+    pub fn poll_control_channel(&mut self) {
+        use crate::makepad_math::dvec2;
+        use crate::web_socket::CONTROL_CHANNEL;
+        use crate::window::CxWindowPool;
+        let msgs: Vec<StudioToApp> = {
+            let lock = CONTROL_CHANNEL.lock().unwrap();
+            if let Some(rx) = lock.as_ref() {
+                rx.try_iter().collect()
+            } else {
+                return;
+            }
+        };
+        let window_id = CxWindowPool::id_zero();
+        let pos = dvec2(0.0, 0.0);
+        for msg in msgs {
+            self.dispatch_studio_msg(msg, window_id, pos);
+        }
+    }
+
+    pub(crate) fn run_live_edit_if_needed(&mut self, _backend: &str) {
+        if self.handle_live_edit() {
+            self.draw_shaders.reset_for_live_reload();
+            self.call_event_handler(&Event::LiveEdit);
+            self.redraw_all();
+        }
+    }
+
+    // Same logic as headless::raster::encode_png_rgba which is behind
+    // cfg(headless) and unavailable to the windowed backend.
+    #[allow(dead_code)]
+    pub fn encode_rgba_as_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+        use makepad_zune_png::{
+            makepad_zune_core::{
+                bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions,
+            },
+            PngEncoder,
+        };
+        let options = EncoderOptions::default()
+            .set_width(width as usize)
+            .set_height(height as usize)
+            .set_depth(BitDepth::Eight)
+            .set_colorspace(ColorSpace::RGBA);
+        let mut encoder = PngEncoder::new(rgba, options);
+        let mut out = Vec::new();
+        encoder
+            .encode(&mut out)
+            .map_err(|err| format!("png encode failed: {err:?}"))?;
+        Ok(out)
+    }
+
     // event handler wrappers
 
     pub(crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
-        if Cx::has_studio_web_socket() {
+        if (Cx::has_studio_web_socket()
+            && !crate::web_socket::STUDIO_STDOUT_MODE.load(std::sync::atomic::Ordering::SeqCst))
+            || Cx::local_profile_capture_enabled()
+        {
             let start = self.seconds_since_app_start();
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);
@@ -122,6 +637,11 @@ impl Cx {
             let mut event_handler = self.event_handler.take().unwrap();
             event_handler(self, event);
             self.event_handler = Some(event_handler);
+        }
+
+        if Cx::has_studio_web_socket() {
+            self.try_send_studio_widget_tree_dump_responses();
+            self.try_send_studio_widget_snapshot_responses();
         }
 
         // Reset widget query invalidation after all views have processed it.
@@ -175,6 +695,9 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
+        if let Event::PermissionResult(result) = event {
+            self.handle_camera_permission_result(result);
+        }
         self.inner_call_event_handler(event);
         self.inner_key_focus_change();
         self.handle_triggers();
@@ -206,6 +729,11 @@ impl Cx {
 
         self.call_event_handler(&Event::Draw(draw_event));
         self.in_draw_event = false;
+
+        if Cx::has_studio_web_socket() {
+            self.try_send_studio_widget_tree_dump_responses();
+            self.try_send_studio_widget_snapshot_responses();
+        }
     }
 
     pub(crate) fn call_next_frame_event(&mut self, time: f64) {

@@ -1,0 +1,89 @@
+use mod.std.*
+use mod.hub;
+let RunItem = {
+    on_run: nil,
+    name: ""
+    package_name: ""
+    in_studio: true
+}
+
+let RunQuest = RunItem{
+    on_run: fn(id){
+        hub.run( 
+            {"STUDIO_HOST": hub.studio_ext_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.run "MAKEPAD": "vulkan"},
+            "cargo", 
+            [
+                "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"
+                "android" "--variant=quest" "--devices=all" "--no-icon" "--small-fonts" "run" "-p" self.run "--release"  "--message-format=json"
+            ],
+        )
+    }
+}
+
+let RunAndroid = RunItem{
+    on_run: fn(id){
+        hub.run(
+            {"STUDIO_HOST": hub.studio_ext_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name "MAKEPAD": "vulkan"},
+            "cargo", 
+            [
+                "run" "-p" "cargo-makepad" "--release" "--message-format=json" "--"
+                "android"  "--no-icon" "--small-fonts" "run" "-p" self.name "--release" "--message-format=json"
+            ],
+        )
+    }
+}
+
+let RunStudioRelease = RunItem{
+    on_run: fn(id){
+        hub.run(
+            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
+            "cargo", 
+            ["run" "-p" self.name "--release" "--message-format=json" "--" "--message-format=json" "--stdin-loop"],
+        )
+    }
+}
+
+let RunRelease = RunItem{
+    on_run: fn(id){
+        hub.run(
+            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.run},
+            "cargo", 
+            ["run" "-p" self.run "--release" "--message-format=json" "--" "--message-format=json"],
+        )
+    }
+}
+
+
+let RunStudio = RunItem{
+    on_run: fn(id){
+        hub.run(
+            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
+            "cargo", 
+            ["run" "-p" "makepad-studio" "--release" "--message-format=json" "--" "--message-format=json"  "--bind=0.0.0.0" "--stdin-loop"],
+        )
+    }
+}
+
+let RunStudioExt = RunItem{
+    on_run: fn(id){
+        hub.run(
+            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
+            "cargo", 
+            ["run" "-p" "makepad-studio" "--release" "--message-format=json" "--" "--message-format=json" "--bind=0.0.0.0"],
+        )
+    }    
+} 
+
+
+hub.set_run_items([
+    RunStudioRelease{name: "makepad-example-browser"}
+    RunStudioRelease{name: "makepad-example-charts"}
+    RunStudioRelease{name: "makepad-example-splash"}
+    RunAndroid{name: "makepad-example-pdf"}
+    RunStudioRelease{name: "makepad-example-map"}
+    RunStudioRelease{name: "makepad-example-todo"}
+    RunStudio{name: "makepad-studio"} 
+    RunStudioExt{name: "makepad-studio-ext"} 
+    RunStudioRelease{name: "makepad-example-xr"}
+    RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
+])

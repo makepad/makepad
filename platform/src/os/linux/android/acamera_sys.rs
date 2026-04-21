@@ -22,6 +22,7 @@ pub struct ACameraMetadata {
 }
 
 pub const ACAMERA_LENS_FACING: u32 = 524293;
+pub const ACAMERA_SENSOR_ORIENTATION: u32 = 393217;
 pub const ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS: u32 = 851978;
 pub const ACAMERA_CONTROL_AE_TARGET_FPS_RANGE: u32 = 65541;
 pub const ACAMERA_JPEG_QUALITY: u32 = 458756;
@@ -32,6 +33,8 @@ pub const ACAMERA_LENS_FACING_EXTERNAL: u8 = 2;
 
 pub const AIMAGE_FORMAT_YUV_420_888: u32 = 35;
 pub const AIMAGE_FORMAT_JPEG: u32 = 256;
+pub const AIMAGE_FORMAT_RGBA_8888: u32 = 1;
+pub const AIMAGE_FORMAT_PRIVATE: u32 = 0x22;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -99,11 +102,8 @@ pub struct ACaptureRequest {
     _unused: [u8; 0],
 }
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct ANativeWindow {
-    _unused: [u8; 0],
-}
+pub type ANativeWindow = super::ndk_sys::ANativeWindow;
+pub type AHardwareBuffer = super::ndk_sys::AHardwareBuffer;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -255,6 +255,15 @@ extern "C" {
         reader: *mut *mut AImageReader,
     ) -> media_status_t;
 
+    pub fn AImageReader_newWithUsage(
+        width: i32,
+        height: i32,
+        format: u32,
+        usage: u64,
+        maxImages: i32,
+        reader: *mut *mut AImageReader,
+    ) -> media_status_t;
+
     pub fn AImageReader_setImageListener(
         reader: *mut AImageReader,
         listener: *mut AImageReader_ImageListener,
@@ -272,11 +281,32 @@ extern "C" {
         image: *mut *mut AImage,
     ) -> media_status_t;
 
+    pub fn AImageReader_acquireLatestImage(
+        reader: *mut AImageReader,
+        image: *mut *mut AImage,
+    ) -> media_status_t;
+
     pub fn AImage_getPlaneData(
         image: *const AImage,
         planeIdx: ::std::os::raw::c_int,
         data: *mut *mut u8,
         dataLength: *mut ::std::os::raw::c_int,
+    ) -> media_status_t;
+    pub fn AImage_getTimestamp(image: *const AImage, timestampNs: *mut i64) -> media_status_t;
+    pub fn AImage_getPlaneRowStride(
+        image: *const AImage,
+        planeIdx: ::std::os::raw::c_int,
+        rowStride: *mut ::std::os::raw::c_int,
+    ) -> media_status_t;
+    pub fn AImage_getPlanePixelStride(
+        image: *const AImage,
+        planeIdx: ::std::os::raw::c_int,
+        pixelStride: *mut ::std::os::raw::c_int,
+    ) -> media_status_t;
+    pub fn AImage_getFormat(image: *const AImage, format: *mut i32) -> media_status_t;
+    pub fn AImage_getHardwareBuffer(
+        image: *const AImage,
+        buffer: *mut *mut AHardwareBuffer,
     ) -> media_status_t;
     pub fn AImage_delete(image: *mut AImage);
 
