@@ -2,6 +2,7 @@ use {
     crate::{
         animator::AnimatorImpl,
         event::{TouchState, TAP_COUNT_DISTANCE},
+        flat_list::WidgetItem,
         makepad_derive_widget::*,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
@@ -109,12 +110,6 @@ impl ListDrawState {
     fn is_down_again(&self) -> bool {
         matches!(self, Self::DownAgain { .. })
     }
-}
-
-#[derive(Default)]
-struct WidgetItem {
-    widget: WidgetRef,
-    template: LiveId,
 }
 
 struct AlignItem {
@@ -1168,6 +1163,62 @@ impl PortalList {
         self.items
             .get(&entry_id)
             .map(|item| (item.template, item.widget.clone()))
+    }
+
+    /// Returns the current in-use items in this PortalList, keyed by entry id.
+    ///
+    /// This excludes widgets in the reusable pool.
+    pub fn items(&self) -> &ComponentMap<usize, WidgetItem> {
+        &self.items
+    }
+
+    /// Returns an iterator over every widget instance this PortalList owns,
+    /// i.e., the currently-active items AND the widgets parked in the
+    /// reusable pool waiting to be re-used for a future entry. Each yielded
+    /// tuple is `(template, widget)`.
+    ///
+    /// Useful when you need to push a runtime change into every widget that
+    /// could plausibly be drawn — including ones that were scrolled out of
+    /// view and will be pulled back out of the pool when the user scrolls
+    /// back to them.
+    pub fn all_items_and_pool(&self) -> impl Iterator<Item = (LiveId, &WidgetRef)> + '_ {
+        let active = self
+            .items
+            .values()
+            .map(|item| (item.template, &item.widget));
+        let reusable = self
+            .reusable_items
+            .values()
+            .flat_map(|pool| pool.iter().map(|item| (item.template, &item.widget)));
+        active.chain(reusable)
+    }
+
+    /// Re-captures the template identified by `template_id` from
+    /// `mod.widgets.<template_id>` in the script heap, replacing the
+    /// previously-captured reference.
+    ///
+    /// Use this after re-assigning a template in the `widgets` module at
+    /// runtime (via `script_eval!`) so that future items — and items
+    /// re-applied from the reusable pool when scrolled back into view —
+    /// instantiate from the updated template. Without this, the PortalList
+    /// keeps serving items from the template object it captured at its
+    /// initial DSL apply.
+    ///
+    /// Returns `true` if the refresh succeeded, `false` if no matching
+    /// entry exists in `mod.widgets`.
+    pub fn refresh_widgets_mod_template(&mut self, cx: &mut Cx, template_id: LiveId) -> bool {
+        use makepad_script::trap::NoTrap;
+        cx.with_vm(|vm| {
+            let heap = vm.heap_mut();
+            let widgets_mod = heap.module(id!(widgets));
+            let value = heap.value(widgets_mod, template_id.into(), NoTrap);
+            let Some(obj) = value.as_object() else {
+                return false;
+            };
+            let new_ref = heap.new_object_ref(obj);
+            self.templates.insert(template_id, new_ref);
+            true
+        })
     }
 
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
@@ -2543,6 +2594,30 @@ impl PortalListRef {
             return None;
         };
         inner.get_item(entry_id)
+    }
+
+    /// See [`PortalList::refresh_widgets_mod_template()`].
+    pub fn refresh_widgets_mod_template(&self, cx: &mut Cx, template_id: LiveId) -> bool {
+        let Some(mut inner) = self.borrow_mut() else {
+            return false;
+        };
+        inner.refresh_widgets_mod_template(cx, template_id)
+    }
+
+    /// Returns a cloned vector of all current items in this PortalList.
+    ///
+    /// Note: this is an expensive operation; if you just want to iterate
+    /// over the items, borrow the PortalListRef and call [`PortalList::items()`].
+    pub fn clone_items(&self) -> Vec<(LiveId, WidgetRef)> {
+        self.borrow()
+            .map(|inner| {
+                inner
+                    .items()
+                    .values()
+                    .map(|item| (item.template, item.widget.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn position_of_item(&self, cx: &Cx, entry_id: usize) -> Option<f64> {
