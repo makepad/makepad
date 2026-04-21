@@ -261,7 +261,6 @@ script_mod! {
                             width: Fill
                             height: Fit
                             diagram_view := DiagramView {
-                                flow: Overlay
                                 width: Fit
                                 height: Fit
                             }
