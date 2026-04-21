@@ -1,4 +1,8 @@
 pub use makepad_code_editor;
+// Linking the kit activates its `script_mod!` block, which registers
+// `mod.widgets.DiagramView`. Without this `pub use`, the DSL can't resolve
+// the template below.
+pub use makepad_diagram_kit;
 pub use makepad_widgets;
 
 use makepad_ai::*;
@@ -13,6 +17,7 @@ app_main!(App);
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.CodeView
+    use mod.widgets.DiagramView
     use mod.text.*
     use mod.res.*
 
@@ -121,6 +126,18 @@ script_mod! {
                         height: Fit
                         splash_view := Splash {
                             width: Fill
+                            height: Fit
+                        }
+                    }
+                    // Diagram block — rendered by makepad-diagram-kit's
+                    // DiagramView. The inner `diagram_view` id matches what
+                    // the markdown widget's `ids!(diagram_view).set_text`
+                    // dispatch expects.
+                    diagram_block := View {
+                        width: Fill
+                        height: Fit
+                        diagram_view := DiagramView {
+                            width: Fit
                             height: Fit
                         }
                     }
@@ -234,6 +251,18 @@ script_mod! {
                             splash_view := Splash {
                                 flow: Overlay
                                 width: Fill
+                                height: Fit
+                            }
+                        }
+                        // Diagram block — see User-side comment.
+                        diagram_block := SolidView{
+                            flow: Overlay
+                            new_batch: true
+                            width: Fill
+                            height: Fit
+                            diagram_view := DiagramView {
+                                flow: Overlay
+                                width: Fit
                                 height: Fit
                             }
                         }
@@ -669,6 +698,14 @@ Here is the complete Splash scripting manual. Follow it exactly:
             _ => r#"You are a helpful assistant. Be concise but thorough.
 
 Formatting: respond in GitHub-flavoured Markdown. Wrap every mathematical expression in LaTeX delimiters — `$…$` for inline math (e.g. `$a^2 + b^2 = c^2$`) and `$$…$$` on their own lines for display math. NEVER write LaTeX commands (`\frac`, `\mathbb`, `\sum`, `\forall`, etc.) outside these delimiters, even when the math is short.
+
+## Diagrams — use ```diagram fenced JSON for visual structure
+
+When a user's question benefits from a visual diagram (hierarchy, layered stack, flow, 2-axis comparison, tree), emit a fenced code block with the language tag `diagram` whose body is JSON matching the diagram-kit v1 spec. Five types are supported: `pyramid`, `quadrant`, `tree`, `layers`, `flowchart`. Keep the body under 200 KB and each primary-axis element list under 30 items. Example — a 3-level pyramid:
+
+```diagram
+{"type":"pyramid","levels":[{"label":"Mission"},{"label":"Strategy"},{"label":"Tactics"}],"accent_idx":0}
+```
 
 ## Fence nesting — use 4+ backticks for OUTER wrappers
 
