@@ -1062,6 +1062,7 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         crate::makepad_code_editor::script_mod(vm);
+        crate::makepad_diagram_kit::script_mod(vm);
         self::script_mod(vm)
     }
 
