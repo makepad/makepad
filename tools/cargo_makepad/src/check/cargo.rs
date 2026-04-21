@@ -52,6 +52,13 @@ impl CargoPackage {
             .find(|t| t.kind.iter().any(|k| k == "lib"))
     }
 
+    /// Find the primary binary target for this package.
+    pub fn bin_target(&self) -> Option<&CargoTarget> {
+        self.targets
+            .iter()
+            .find(|t| t.kind.iter().any(|k| k == "bin"))
+    }
+
     /// Find a non-optional, non-target-specific dependency by name.
     pub fn find_dependency(&self, name: &str) -> Option<&CargoDependency> {
         self.dependencies
@@ -61,6 +68,11 @@ impl CargoPackage {
 }
 
 impl CargoDependency {
+    /// Rust crate identifier for this dependency.
+    pub fn crate_ident(&self) -> String {
+        self.name.replace('-', "_")
+    }
+
     /// Generate a TOML dependency entry string for this dependency.
     pub fn to_toml_entry(&self, alias: &str) -> String {
         let mut fields = Vec::<String>::new();

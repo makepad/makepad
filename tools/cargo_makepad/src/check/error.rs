@@ -158,7 +158,7 @@ pub enum CheckError {
     CargoMetadataError(String),
     /// Could not determine which package to check.
     PackageNotFound,
-    /// Package has no lib target for runtime checking.
+    /// Package has no compatible runtime entry target.
     NoLibTarget,
     /// Invalid package manifest path.
     InvalidManifestPath(PathBuf),
@@ -182,7 +182,7 @@ impl fmt::Display for CheckError {
             Self::NoManifestFound => write!(f, "No Cargo.toml found in current directory tree"),
             Self::CargoMetadataError(msg) => write!(f, "Cargo metadata error: {}", msg),
             Self::PackageNotFound => write!(f, "Could not determine package for script check"),
-            Self::NoLibTarget => write!(f, "Package has no lib target required for runtime script checking"),
+            Self::NoLibTarget => write!(f, "Package has no lib or bin target required for runtime script checking"),
             Self::InvalidManifestPath(path) => write!(f, "Invalid package manifest path: {}", path.display()),
             Self::NoScriptSources => write!(
                 f,

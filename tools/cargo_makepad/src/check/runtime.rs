@@ -28,6 +28,15 @@ pub struct BootstrapCall {
     pub call_expr: String,
 }
 
+#[derive(Debug, Clone)]
+pub enum CheckedCrateMode {
+    Dependency,
+    SourceModule {
+        entry_src_path: PathBuf,
+        crate_root_reexports: Vec<String>,
+    },
+}
+
 /// Configuration for generating the runtime harness.
 #[derive(Debug)]
 pub struct RuntimeHarnessPlan {
@@ -49,6 +58,8 @@ pub struct RuntimeHarnessPlan {
     pub widgets_bootstrap_expr: Option<String>,
     /// Extra bootstrap calls (e.g., openpad_widgets).
     pub extra_bootstrap_calls: Vec<BootstrapCall>,
+    /// How the checked crate is loaded into the runtime harness.
+    pub checked_crate_mode: CheckedCrateMode,
 }
 
 impl RuntimeHarnessPlan {
@@ -73,6 +84,21 @@ impl RuntimeHarnessPlan {
         for call in &self.extra_bootstrap_calls {
             call.module_name.hash(&mut hasher);
             call.call_expr.hash(&mut hasher);
+        }
+        match &self.checked_crate_mode {
+            CheckedCrateMode::Dependency => {
+                "dependency".hash(&mut hasher);
+            }
+            CheckedCrateMode::SourceModule {
+                entry_src_path,
+                crate_root_reexports,
+            } => {
+                "source_module".hash(&mut hasher);
+                entry_src_path.hash(&mut hasher);
+                for item in crate_root_reexports {
+                    item.hash(&mut hasher);
+                }
+            }
         }
         for m in &self.modules {
             m.module_path.hash(&mut hasher);
@@ -101,6 +127,7 @@ pub struct RuntimeHarnessPlanBuilder {
     runtime_log_path: Option<String>,
     widgets_bootstrap_expr: Option<String>,
     extra_bootstrap_calls: Vec<BootstrapCall>,
+    checked_crate_mode: Option<CheckedCrateMode>,
 }
 
 impl RuntimeHarnessPlanBuilder {
@@ -148,6 +175,11 @@ impl RuntimeHarnessPlanBuilder {
         self
     }
 
+    pub fn checked_crate_mode(mut self, mode: CheckedCrateMode) -> Self {
+        self.checked_crate_mode = Some(mode);
+        self
+    }
+
     pub fn build(self) -> CheckResult<RuntimeHarnessPlan> {
         Ok(RuntimeHarnessPlan {
             package_name: self
@@ -165,6 +197,9 @@ impl RuntimeHarnessPlanBuilder {
                 .unwrap_or_else(|| "makepad_error_log".to_string()),
             widgets_bootstrap_expr: self.widgets_bootstrap_expr,
             extra_bootstrap_calls: self.extra_bootstrap_calls,
+            checked_crate_mode: self
+                .checked_crate_mode
+                .unwrap_or(CheckedCrateMode::Dependency),
         })
     }
 }
@@ -311,70 +346,141 @@ pub fn build_harness_plan(
     restrict_to_explicit: bool,
     needs_widgets_prelude: bool,
 ) -> CheckResult<RuntimeHarnessPlan> {
-    let lib_target = package.lib_target().ok_or(CheckError::NoLibTarget)?;
+    let (entry_target, checked_crate_mode) = if let Some(lib_target) = package.lib_target() {
+        (lib_target, CheckedCrateMode::Dependency)
+    } else if let Some(bin_target) = package.bin_target() {
+        let crate_root_reexports = package
+            .dependencies
+            .iter()
+            .filter(|dep| !dep.optional && dep.target.is_none())
+            .map(|dep| dep.crate_ident())
+            .collect();
+        (
+            bin_target,
+            CheckedCrateMode::SourceModule {
+                entry_src_path: PathBuf::from(&bin_target.src_path),
+                crate_root_reexports,
+            },
+        )
+    } else {
+        return Err(CheckError::NoLibTarget);
+    };
 
-    let lib_src_path = PathBuf::from(&lib_target.src_path);
+    let entry_src_path = PathBuf::from(&entry_target.src_path);
     let package_dir = Path::new(&package.manifest_path)
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| CheckError::InvalidManifestPath(PathBuf::from(&package.manifest_path)))?;
 
-    let modules = discover_runtime_modules(&lib_src_path, explicit_rs_paths, restrict_to_explicit);
+    let modules =
+        discover_runtime_modules(&entry_src_path, explicit_rs_paths, restrict_to_explicit);
 
     let mut builder = RuntimeHarnessPlan::builder()
         .package_name(package.name.clone())
-        .crate_name(lib_target.name.clone())
+        .crate_name(entry_target.name.clone())
         .package_dir(package_dir)
-        .modules(modules);
+        .modules(modules)
+        .checked_crate_mode(checked_crate_mode.clone());
 
     // Configure runtime paths based on available dependencies
-    if package.name == "makepad-widgets" {
-        builder = builder.runtime_paths(
-            "checked_crate::Cx".to_string(),
-            "checked_crate::makepad_platform::makepad_error_log".to_string(),
-        );
-    } else if let Some(widgets_dep) = package.find_dependency("makepad-widgets") {
-        builder = builder
-            .add_dependency_entry(widgets_dep.to_toml_entry("runtime_makepad_widgets"))
-            .runtime_paths(
-                "runtime_makepad_widgets::Cx".to_string(),
-                "runtime_makepad_widgets::makepad_platform::makepad_error_log".to_string(),
-            );
-
-        if needs_widgets_prelude {
-            builder = builder
-                .widgets_bootstrap(Some("runtime_makepad_widgets::script_mod(vm);".to_string()));
-        }
-
-        // Check for openpad-widgets
-        if let Some(ow_dep) = package.find_dependency("openpad-widgets") {
-            builder = builder
-                .add_dependency_entry(ow_dep.to_toml_entry("runtime_openpad_widgets"))
-                .add_bootstrap_call(
-                    "openpad_widgets".to_string(),
-                    "runtime_openpad_widgets::script_mod(vm);".to_string(),
+    match checked_crate_mode {
+        CheckedCrateMode::Dependency => {
+            if package.name == "makepad-widgets" {
+                builder = builder.runtime_paths(
+                    "checked_crate::Cx".to_string(),
+                    "checked_crate::makepad_platform::makepad_error_log".to_string(),
                 );
+            } else if let Some(widgets_dep) = package.find_dependency("makepad-widgets") {
+                builder = builder
+                    .add_dependency_entry(widgets_dep.to_toml_entry("runtime_makepad_widgets"))
+                    .runtime_paths(
+                        "runtime_makepad_widgets::Cx".to_string(),
+                        "runtime_makepad_widgets::makepad_platform::makepad_error_log".to_string(),
+                    );
+
+                if needs_widgets_prelude {
+                    builder = builder.widgets_bootstrap(Some(
+                        "runtime_makepad_widgets::script_mod(vm);".to_string(),
+                    ));
+                }
+
+                if let Some(ow_dep) = package.find_dependency("openpad-widgets") {
+                    builder = builder
+                        .add_dependency_entry(ow_dep.to_toml_entry("runtime_openpad_widgets"))
+                        .add_bootstrap_call(
+                            "openpad_widgets".to_string(),
+                            "runtime_openpad_widgets::script_mod(vm);".to_string(),
+                        );
+                }
+            } else if let Some(platform_dep) = package.find_dependency("makepad-platform") {
+                builder = builder
+                    .add_dependency_entry(platform_dep.to_toml_entry("runtime_makepad_platform"))
+                    .runtime_paths(
+                        "runtime_makepad_platform::Cx".to_string(),
+                        "runtime_makepad_platform::makepad_error_log".to_string(),
+                    );
+            } else {
+                let platform_path = canonicalize_path(
+                    &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../platform"),
+                );
+                builder = builder
+                    .add_dependency_entry(format!(
+                        "runtime_makepad_platform = {{ package = \"makepad-platform\", path = \"{}\" }}\n",
+                        platform_path.display()
+                    ))
+                    .runtime_paths(
+                        "runtime_makepad_platform::Cx".to_string(),
+                        "runtime_makepad_platform::makepad_error_log".to_string(),
+                    );
+            }
         }
-    } else if let Some(platform_dep) = package.find_dependency("makepad-platform") {
-        builder = builder
-            .add_dependency_entry(platform_dep.to_toml_entry("runtime_makepad_platform"))
-            .runtime_paths(
-                "runtime_makepad_platform::Cx".to_string(),
-                "runtime_makepad_platform::makepad_error_log".to_string(),
-            );
-    } else {
-        // Fallback to bundled platform
-        let platform_path =
-            canonicalize_path(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../platform"));
-        builder = builder
-            .add_dependency_entry(format!(
-                "runtime_makepad_platform = {{ package = \"makepad-platform\", path = \"{}\" }}\n",
-                platform_path.display()
-            ))
-            .runtime_paths(
-                "runtime_makepad_platform::Cx".to_string(),
-                "runtime_makepad_platform::makepad_error_log".to_string(),
-            );
+        CheckedCrateMode::SourceModule { .. } => {
+            for dep in package
+                .dependencies
+                .iter()
+                .filter(|dep| !dep.optional && dep.target.is_none())
+            {
+                let alias = dep.crate_ident();
+                builder = builder.add_dependency_entry(dep.to_toml_entry(&alias));
+            }
+
+            if package.find_dependency("makepad-widgets").is_some() {
+                builder = builder.runtime_paths(
+                    "makepad_widgets::Cx".to_string(),
+                    "makepad_widgets::makepad_platform::makepad_error_log".to_string(),
+                );
+
+                if needs_widgets_prelude {
+                    builder = builder
+                        .widgets_bootstrap(Some("makepad_widgets::script_mod(vm);".to_string()));
+                }
+
+                if package.find_dependency("openpad-widgets").is_some() {
+                    builder = builder.add_bootstrap_call(
+                        "openpad_widgets".to_string(),
+                        "openpad_widgets::script_mod(vm);".to_string(),
+                    );
+                }
+            } else if package.find_dependency("makepad-platform").is_some() {
+                builder = builder.runtime_paths(
+                    "makepad_platform::Cx".to_string(),
+                    "makepad_platform::makepad_error_log".to_string(),
+                );
+            } else {
+                let platform_path = canonicalize_path(
+                    &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../platform"),
+                );
+                builder = builder
+                    .add_dependency_entry(format!(
+                        "makepad_platform = {{ package = \"makepad-platform\", path = \"{}\" }}\n",
+                        platform_path.display()
+                    ))
+                    .runtime_paths(
+                        "makepad_platform::Cx".to_string(),
+                        "makepad_platform::makepad_error_log".to_string(),
+                    );
+            }
+        }
     }
 
     builder.build()
@@ -435,8 +541,26 @@ fn generate_harness_source(plan: &RuntimeHarnessPlan) -> String {
         ));
     }
 
+    let checked_crate_prelude = match &plan.checked_crate_mode {
+        CheckedCrateMode::Dependency => String::new(),
+        CheckedCrateMode::SourceModule {
+            entry_src_path,
+            crate_root_reexports,
+        } => {
+            let mut prelude = String::new();
+            for ident in crate_root_reexports {
+                prelude.push_str(&format!("pub use {ident};\n"));
+            }
+            prelude.push_str(&format!(
+                "#[path = r#\"{}\"#]\nmod checked_crate;\n\n",
+                entry_src_path.display()
+            ));
+            prelude
+        }
+    };
+
     format!(
-        r#"use {cx_path};
+        r#"{checked_crate_prelude}use {cx_path};
 use std::sync::{{Mutex, OnceLock}};
 
 const PREFIX: &str = "{prefix}";
@@ -528,6 +652,7 @@ fn main() {{
     }}
 }}
 "#,
+        checked_crate_prelude = checked_crate_prelude,
         cx_path = plan.runtime_cx_path,
         prefix = RUNTIME_ISSUE_PREFIX,
         log_path = plan.runtime_log_path,
@@ -553,11 +678,13 @@ pub fn write_harness(plan: &RuntimeHarnessPlan) -> CheckResult<PathBuf> {
         cargo_toml.push_str(dep);
     }
 
-    cargo_toml.push_str(&format!(
-        "checked_crate = {{ package = \"{}\", path = \"{}\" }}\n",
-        plan.package_name,
-        package_dir.display()
-    ));
+    if matches!(plan.checked_crate_mode, CheckedCrateMode::Dependency) {
+        cargo_toml.push_str(&format!(
+            "checked_crate = {{ package = \"{}\", path = \"{}\" }}\n",
+            plan.package_name,
+            package_dir.display()
+        ));
+    }
 
     std::fs::write(dir.join("Cargo.toml"), cargo_toml).map_err(CheckError::HarnessWriteError)?;
 
