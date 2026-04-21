@@ -919,17 +919,40 @@ impl App {
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         // Markdown link click — dispatch through robius-open for cross-platform
-        // coverage (macOS/Linux/Windows/iOS/Android/WASM). The current
-        // `MarkdownAction::LinkNavigated(url)` variant fires on any click, so
-        // every click opens the URL; a follow-up PR gates desktop opens on the
-        // Cmd/Ctrl modifier (so plain clicks can drag-select inside prose).
+        // coverage (macOS/Linux/Windows/iOS/Android/WASM). Desktop requires a
+        // modifier (Cmd on macOS, Cmd/Ctrl elsewhere) so plain clicks stay
+        // available for drag-selection inside the Markdown widget; mobile &
+        // web have no modifier concept, so a plain tap opens the URL.
         for action in actions {
             if let Some(widget_action) = action.as_widget_action() {
-                if let makepad_widgets::markdown::MarkdownAction::LinkNavigated(url) =
-                    widget_action.cast()
+                if let makepad_widgets::markdown::MarkdownAction::LinkNavigated {
+                    url,
+                    modifiers,
+                } = widget_action.cast()
                 {
-                    if let Err(e) = robius_open::Uri::new(&url).open() {
-                        log::warn!("failed to open URL {}: {:?}", url, e);
+                    let should_open = {
+                        #[cfg(any(
+                            target_os = "ios",
+                            target_os = "android",
+                            target_arch = "wasm32"
+                        ))]
+                        {
+                            let _ = modifiers;
+                            true
+                        }
+                        #[cfg(not(any(
+                            target_os = "ios",
+                            target_os = "android",
+                            target_arch = "wasm32"
+                        )))]
+                        {
+                            modifiers.logo || modifiers.control
+                        }
+                    };
+                    if should_open {
+                        if let Err(e) = robius_open::Uri::new(&url).open() {
+                            log::warn!("failed to open URL {}: {:?}", url, e);
+                        }
                     }
                 }
             }

@@ -685,10 +685,13 @@ struct MarkdownLink {
 
 impl WidgetMatchEvent for MarkdownLink {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, _scope: &mut Scope) {
-        if self.link.clicked(actions) {
+        if let Some(modifiers) = self.link.clicked_modifiers(actions) {
             cx.widget_action(
                 self.widget_uid(),
-                MarkdownAction::LinkNavigated(self.href.clone()),
+                MarkdownAction::LinkNavigated {
+                    url: self.href.clone(),
+                    modifiers,
+                },
             );
         }
     }
@@ -726,5 +729,14 @@ impl MarkdownLinkRef {
 pub enum MarkdownAction {
     #[default]
     None,
-    LinkNavigated(String),
+    /// Emitted when a `[text](url)` link is clicked. Consumers receive the
+    /// URL along with the `KeyModifiers` that were held during the click, so
+    /// they can implement Cmd/Ctrl+click-to-open UX on desktop while leaving
+    /// plain clicks free for drag-to-select inside the Markdown widget. On
+    /// mobile & web there is no modifier concept, so consumers typically
+    /// ignore `modifiers` there and open on every tap.
+    LinkNavigated {
+        url: String,
+        modifiers: KeyModifiers,
+    },
 }
