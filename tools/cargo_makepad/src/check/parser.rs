@@ -1,5 +1,4 @@
 /// Rust source code parsing utilities for extracting script blocks.
-
 use std::path::{Path, PathBuf};
 
 /// The kind of script macro found in Rust source.
@@ -26,7 +25,12 @@ pub struct ScriptBlock {
 
 impl ScriptBlock {
     pub fn new(path: PathBuf, line_offset: u32, code: String, macro_kind: ScriptMacroKind) -> Self {
-        Self { path, line_offset, code, macro_kind }
+        Self {
+            path,
+            line_offset,
+            code,
+            macro_kind,
+        }
     }
 }
 
@@ -140,7 +144,10 @@ pub fn max_rust_value_index(code: &str) -> usize {
                 i += 1;
             }
             if i > start {
-                if let Ok(n) = std::str::from_utf8(&bytes[start..i]).unwrap_or("0").parse::<usize>() {
+                if let Ok(n) = std::str::from_utf8(&bytes[start..i])
+                    .unwrap_or("0")
+                    .parse::<usize>()
+                {
                     max = max.max(n);
                 }
             }
@@ -394,7 +401,10 @@ fn is_ident_char(c: u8) -> bool {
 }
 
 /// Find the next `script_mod!` or `script!` macro starting from position `search`.
-fn find_next_script_macro(content: &str, mut i: usize) -> Option<(usize, &'static str, ScriptMacroKind)> {
+fn find_next_script_macro(
+    content: &str,
+    mut i: usize,
+) -> Option<(usize, &'static str, ScriptMacroKind)> {
     let bytes = content.as_bytes();
 
     while i < bytes.len() {

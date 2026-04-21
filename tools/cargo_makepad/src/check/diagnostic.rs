@@ -214,8 +214,7 @@ pub fn print_diagnostics(
 ) {
     for issue in issues {
         let source = sources.get(&issue.file).map(String::as_str);
-        let diag = Diagnostic::new(issue)
-            .with_color(use_color);
+        let diag = Diagnostic::new(issue).with_color(use_color);
 
         let diag = match source {
             Some(s) => diag.with_source(s),
@@ -246,7 +245,11 @@ pub fn stderr_supports_color() -> bool {
 
     // Check if TERM looks like it supports color
     if let Ok(term) = std::env::var("TERM") {
-        if term.contains("color") || term.contains("256") || term.contains("xterm") || term.contains("screen") {
+        if term.contains("color")
+            || term.contains("256")
+            || term.contains("xterm")
+            || term.contains("screen")
+        {
             return true;
         }
     }

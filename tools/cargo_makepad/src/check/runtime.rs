@@ -1,5 +1,4 @@
 /// Runtime harness generation and execution for script validation.
-
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -142,19 +141,28 @@ impl RuntimeHarnessPlanBuilder {
     }
 
     pub fn add_bootstrap_call(mut self, module_name: String, call_expr: String) -> Self {
-        self.extra_bootstrap_calls.push(BootstrapCall { module_name, call_expr });
+        self.extra_bootstrap_calls.push(BootstrapCall {
+            module_name,
+            call_expr,
+        });
         self
     }
 
     pub fn build(self) -> CheckResult<RuntimeHarnessPlan> {
         Ok(RuntimeHarnessPlan {
-            package_name: self.package_name.ok_or_else(|| CheckError::PackageNotFound)?,
+            package_name: self
+                .package_name
+                .ok_or_else(|| CheckError::PackageNotFound)?,
             crate_name: self.crate_name.ok_or_else(|| CheckError::NoLibTarget)?,
-            package_dir: self.package_dir.ok_or_else(|| CheckError::PackageNotFound)?,
+            package_dir: self
+                .package_dir
+                .ok_or_else(|| CheckError::PackageNotFound)?,
             modules: self.modules,
             runtime_dependency_entries: self.runtime_dependency_entries,
             runtime_cx_path: self.runtime_cx_path.unwrap_or_else(|| "Cx".to_string()),
-            runtime_log_path: self.runtime_log_path.unwrap_or_else(|| "makepad_error_log".to_string()),
+            runtime_log_path: self
+                .runtime_log_path
+                .unwrap_or_else(|| "makepad_error_log".to_string()),
             widgets_bootstrap_expr: self.widgets_bootstrap_expr,
             extra_bootstrap_calls: self.extra_bootstrap_calls,
         })
@@ -263,7 +271,10 @@ pub fn discover_runtime_modules(
             continue;
         }
 
-        modules.push(RuntimeModule { module_path, file_path: file });
+        modules.push(RuntimeModule {
+            module_path,
+            file_path: file,
+        });
     }
 
     // Sort by call order from lib.rs
@@ -300,8 +311,7 @@ pub fn build_harness_plan(
     restrict_to_explicit: bool,
     needs_widgets_prelude: bool,
 ) -> CheckResult<RuntimeHarnessPlan> {
-    let lib_target = package.lib_target()
-        .ok_or(CheckError::NoLibTarget)?;
+    let lib_target = package.lib_target().ok_or(CheckError::NoLibTarget)?;
 
     let lib_src_path = PathBuf::from(&lib_target.src_path);
     let package_dir = Path::new(&package.manifest_path)
@@ -332,7 +342,8 @@ pub fn build_harness_plan(
             );
 
         if needs_widgets_prelude {
-            builder = builder.widgets_bootstrap(Some("runtime_makepad_widgets::script_mod(vm);".to_string()));
+            builder = builder
+                .widgets_bootstrap(Some("runtime_makepad_widgets::script_mod(vm);".to_string()));
         }
 
         // Check for openpad-widgets
@@ -353,7 +364,8 @@ pub fn build_harness_plan(
             );
     } else {
         // Fallback to bundled platform
-        let platform_path = canonicalize_path(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../platform"));
+        let platform_path =
+            canonicalize_path(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../platform"));
         builder = builder
             .add_dependency_entry(format!(
                 "runtime_makepad_platform = {{ package = \"makepad-platform\", path = \"{}\" }}\n",
@@ -530,8 +542,7 @@ pub fn write_harness(plan: &RuntimeHarnessPlan) -> CheckResult<PathBuf> {
     let dir = std::env::temp_dir().join(format!("makepad-script-check-{}", hash));
     let src_dir = dir.join("src");
 
-    std::fs::create_dir_all(&src_dir)
-        .map_err(CheckError::HarnessDirectoryError)?;
+    std::fs::create_dir_all(&src_dir).map_err(CheckError::HarnessDirectoryError)?;
 
     // Write Cargo.toml
     let package_dir = canonicalize_path(&plan.package_dir);
@@ -548,13 +559,12 @@ pub fn write_harness(plan: &RuntimeHarnessPlan) -> CheckResult<PathBuf> {
         package_dir.display()
     ));
 
-    std::fs::write(dir.join("Cargo.toml"), cargo_toml)
-        .map_err(CheckError::HarnessWriteError)?;
+    std::fs::write(dir.join("Cargo.toml"), cargo_toml).map_err(CheckError::HarnessWriteError)?;
 
     // Write main.rs
     let source = generate_harness_source(plan);
-    let mut f = std::fs::File::create(src_dir.join("main.rs"))
-        .map_err(CheckError::HarnessWriteError)?;
+    let mut f =
+        std::fs::File::create(src_dir.join("main.rs")).map_err(CheckError::HarnessWriteError)?;
     f.write_all(source.as_bytes())
         .map_err(CheckError::HarnessWriteError)?;
 
@@ -603,7 +613,9 @@ pub fn run_harness(plan: &RuntimeHarnessPlan) -> CheckResult<Vec<ScriptIssue>> {
         .arg("--manifest-path")
         .arg(&harness_manifest)
         .output()
-        .map_err(|e| CheckError::HarnessExecutionError(format!("Failed to execute harness: {}", e)))?;
+        .map_err(|e| {
+            CheckError::HarnessExecutionError(format!("Failed to execute harness: {}", e))
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

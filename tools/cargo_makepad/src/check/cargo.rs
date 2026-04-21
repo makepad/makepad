@@ -1,5 +1,4 @@
 /// Cargo metadata parsing and package discovery.
-
 use makepad_micro_serde::*;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,14 +47,16 @@ pub struct CargoDependency {
 impl CargoPackage {
     /// Find the library target for this package.
     pub fn lib_target(&self) -> Option<&CargoTarget> {
-        self.targets.iter().find(|t| t.kind.iter().any(|k| k == "lib"))
+        self.targets
+            .iter()
+            .find(|t| t.kind.iter().any(|k| k == "lib"))
     }
 
     /// Find a non-optional, non-target-specific dependency by name.
     pub fn find_dependency(&self, name: &str) -> Option<&CargoDependency> {
-        self.dependencies.iter().find(|dep| {
-            dep.name == name && !dep.optional && dep.target.is_none()
-        })
+        self.dependencies
+            .iter()
+            .find(|dep| dep.name == name && !dep.optional && dep.target.is_none())
     }
 }
 
@@ -92,7 +93,8 @@ impl CargoDependency {
         }
 
         if !self.features.is_empty() {
-            let features: String = self.features
+            let features: String = self
+                .features
                 .iter()
                 .map(|f| format!("\"{}\"", f))
                 .collect::<Vec<_>>()
@@ -181,7 +183,9 @@ pub fn read_cargo_metadata(manifest_path: &Path) -> CheckResult<CargoMetadata> {
         .arg("--manifest-path")
         .arg(manifest_path)
         .output()
-        .map_err(|e| CheckError::CargoMetadataError(format!("Failed to run cargo metadata: {}", e)))?;
+        .map_err(|e| {
+            CheckError::CargoMetadataError(format!("Failed to run cargo metadata: {}", e))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -192,8 +196,9 @@ pub fn read_cargo_metadata(manifest_path: &Path) -> CheckResult<CargoMetadata> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    DeJson::deserialize_json_lenient(&stdout)
-        .map_err(|e| CheckError::CargoMetadataError(format!("Failed to parse cargo metadata JSON: {:?}", e)))
+    DeJson::deserialize_json_lenient(&stdout).map_err(|e| {
+        CheckError::CargoMetadataError(format!("Failed to parse cargo metadata JSON: {:?}", e))
+    })
 }
 
 /// Select the appropriate package from metadata based on manifest path and cwd.
@@ -205,15 +210,18 @@ pub fn select_package<'a>(
     let manifest_canon = canonicalize_path(manifest_path);
 
     // First, try exact manifest match
-    if let Some(pkg) = metadata.packages.iter().find(|p| {
-        canonicalize_path(Path::new(&p.manifest_path)) == manifest_canon
-    }) {
+    if let Some(pkg) = metadata
+        .packages
+        .iter()
+        .find(|p| canonicalize_path(Path::new(&p.manifest_path)) == manifest_canon)
+    {
         return Some(pkg);
     }
 
     // Second, find packages whose directory contains cwd
     let cwd_canon = canonicalize_path(cwd);
-    let mut candidates: Vec<&CargoPackage> = metadata.packages
+    let mut candidates: Vec<&CargoPackage> = metadata
+        .packages
         .iter()
         .filter(|p| {
             let package_dir = Path::new(&p.manifest_path)

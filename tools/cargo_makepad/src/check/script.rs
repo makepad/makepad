@@ -1,25 +1,20 @@
 /// Script parsing and validation using makepad_script.
-
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use makepad_script::{
-    makepad_error_log,
-    parser::ScriptParser,
-    tokenizer::ScriptTokenizer,
-    ScriptHeap,
-    ScriptValue,
+    makepad_error_log, parser::ScriptParser, tokenizer::ScriptTokenizer, ScriptHeap, ScriptValue,
 };
 
+use super::analyzer::analyze_opcodes;
 use super::cargo::{find_manifest_path, read_cargo_metadata, select_package};
 use super::diagnostic::{print_diagnostics, stderr_supports_color};
 use super::error::{CheckError, IssueKind, ScriptIssue};
 use super::parser::{
-    discover_script_blocks, max_rust_value_index, normalize_rust_interpolations,
-    ScriptBlock, ScriptMacroKind,
+    discover_script_blocks, max_rust_value_index, normalize_rust_interpolations, ScriptBlock,
+    ScriptMacroKind,
 };
-use super::analyzer::analyze_opcodes;
 use super::runtime::{build_harness_plan, run_harness};
 
 thread_local! {
@@ -37,7 +32,10 @@ fn capture_parse_errors(
     message: String,
     level: makepad_error_log::LogLevel,
 ) {
-    if matches!(level, makepad_error_log::LogLevel::Error | makepad_error_log::LogLevel::Warning) {
+    if matches!(
+        level,
+        makepad_error_log::LogLevel::Error | makepad_error_log::LogLevel::Warning
+    ) {
         PARSE_ERRORS.with(|cell| {
             cell.borrow_mut().push(ScriptIssue::new(
                 IssueKind::ParseError,
@@ -83,7 +81,9 @@ pub fn parse_script_full(code: &str, file_name: &str) -> ParseResult {
 
     // Install capture logger
     let old_logger = {
-        let mut guard = makepad_error_log::LOG_WITH_LEVEL.write().expect("Logger lock poisoned");
+        let mut guard = makepad_error_log::LOG_WITH_LEVEL
+            .write()
+            .expect("Logger lock poisoned");
         let old = *guard;
         *guard = capture_parse_errors;
         old
@@ -107,7 +107,9 @@ pub fn parse_script_full(code: &str, file_name: &str) -> ParseResult {
 
     // Restore old logger
     {
-        let mut guard = makepad_error_log::LOG_WITH_LEVEL.write().expect("Logger lock poisoned");
+        let mut guard = makepad_error_log::LOG_WITH_LEVEL
+            .write()
+            .expect("Logger lock poisoned");
         *guard = old_logger;
     }
 
@@ -236,10 +238,14 @@ pub fn check_scripts(config: &CheckConfig) -> std::result::Result<ScriptCheckRes
 
     let mut issues = Vec::<ScriptIssue>::new();
     // Check if widgets prelude is needed
-    let needs_widgets_prelude = blocks.iter().any(|b| b.code.contains("mod.prelude.widgets"));
+    let needs_widgets_prelude = blocks
+        .iter()
+        .any(|b| b.code.contains("mod.prelude.widgets"));
 
     // Check if any script_mod blocks exist
-    let has_script_mod = blocks.iter().any(|b| b.macro_kind == ScriptMacroKind::ScriptMod);
+    let has_script_mod = blocks
+        .iter()
+        .any(|b| b.macro_kind == ScriptMacroKind::ScriptMod);
 
     // Try runtime validation for script_mod blocks
     if has_script_mod {
@@ -256,10 +262,7 @@ pub fn check_scripts(config: &CheckConfig) -> std::result::Result<ScriptCheckRes
     // Run parse checks for all blocks.
     // Runtime validation only executes reachable paths, so parser checks always run.
     // Semantic checks currently run only for `script!` blocks.
-    let parse_blocks: Vec<ScriptBlock> = blocks
-        .into_iter()
-        .filter(|_block| true)
-        .collect();
+    let parse_blocks: Vec<ScriptBlock> = blocks.into_iter().filter(|_block| true).collect();
 
     let parse_issues = run_parse_checks(&parse_blocks);
     issues.extend(parse_issues);
@@ -286,8 +289,7 @@ fn try_runtime_validation(
     let manifest_path = find_manifest_path(cwd)
         .ok_or_else(|| "No Cargo.toml found in current directory tree".to_string())?;
 
-    let metadata = read_cargo_metadata(&manifest_path)
-        .map_err(|e| format!("{}", e))?;
+    let metadata = read_cargo_metadata(&manifest_path).map_err(|e| format!("{}", e))?;
 
     let package = select_package(&metadata, &manifest_path, cwd)
         .ok_or_else(|| "Could not determine package for runtime script check".to_string())?;
@@ -306,8 +308,12 @@ fn try_runtime_validation(
     let covered_files = plan.covered_files();
 
     // Run the harness
-    let runtime_issues = run_harness(&plan)
-        .map_err(|e| format!("Runtime script validation unavailable: {}. Using parser fallback.", e))?;
+    let runtime_issues = run_harness(&plan).map_err(|e| {
+        format!(
+            "Runtime script validation unavailable: {}. Using parser fallback.",
+            e
+        )
+    })?;
 
     Ok((runtime_issues, covered_files))
 }
@@ -329,7 +335,10 @@ mod tests {
         let code = "x = 1";
         let result = parse_script_full(code, "test.splash");
         // Should have opcodes for the assignment
-        assert!(!result.opcodes.is_empty(), "Expected opcodes to be generated");
+        assert!(
+            !result.opcodes.is_empty(),
+            "Expected opcodes to be generated"
+        );
         // Should have no parse errors
         assert!(result.issues.is_empty(), "Expected no parse errors");
     }
@@ -370,7 +379,9 @@ mod tests {
 
         let issues = run_parse_checks(&[block]);
         assert!(
-            !issues.iter().any(|i| i.message.contains("undefined variable `sdf`")),
+            !issues
+                .iter()
+                .any(|i| i.message.contains("undefined variable `sdf`")),
             "Expected no false undefined-variable issue for script_mod, got: {:?}",
             issues
         );

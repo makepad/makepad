@@ -45,18 +45,25 @@ impl SymbolTable {
 
     /// Pop the current scope and return its symbols.
     pub fn pop_scope(&mut self) -> Vec<Symbol> {
-        self.scopes.pop().unwrap_or_default().into_values().collect()
+        self.scopes
+            .pop()
+            .unwrap_or_default()
+            .into_values()
+            .collect()
     }
 
     /// Define a new symbol in the current scope.
     pub fn define(&mut self, name: &str, line: u32, column: u32) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), Symbol {
-                name: name.to_string(),
-                line,
-                column,
-                used: false,
-            });
+            scope.insert(
+                name.to_string(),
+                Symbol {
+                    name: name.to_string(),
+                    line,
+                    column,
+                    used: false,
+                },
+            );
         }
     }
 
@@ -83,7 +90,8 @@ impl SymbolTable {
 
     /// Get all defined symbol names for suggestions.
     pub fn all_names(&self) -> Vec<&str> {
-        self.scopes.iter()
+        self.scopes
+            .iter()
             .flat_map(|s| s.keys().map(String::as_str))
             .collect()
     }
@@ -102,8 +110,12 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let m = a.len();
     let n = b.len();
 
-    if m == 0 { return n; }
-    if n == 0 { return m; }
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
 
     let mut prev: Vec<usize> = (0..=n).collect();
     let mut curr = vec![0; n + 1];
@@ -112,9 +124,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = i;
         for j in 1..=n {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -142,15 +152,42 @@ pub fn suggest_similar<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str
 
 /// Check if a name is a built-in that shouldn't be flagged as undefined.
 fn is_builtin(name: &str) -> bool {
-    matches!(name,
-        "print" | "println" | "log" | "mod" | "self" | "true" | "false" | "null" |
-        "Math" | "String" | "Array" | "Object" | "Number" | "Boolean" |
-        "console" | "JSON" | "Date" | "RegExp" | "Error" | "ui" | "vm" | "theme" |
-        "parseInt" | "parseFloat" | "isNaN" | "isFinite"
+    matches!(
+        name,
+        "print"
+            | "println"
+            | "log"
+            | "mod"
+            | "self"
+            | "true"
+            | "false"
+            | "null"
+            | "Math"
+            | "String"
+            | "Array"
+            | "Object"
+            | "Number"
+            | "Boolean"
+            | "console"
+            | "JSON"
+            | "Date"
+            | "RegExp"
+            | "Error"
+            | "ui"
+            | "vm"
+            | "theme"
+            | "parseInt"
+            | "parseFloat"
+            | "isNaN"
+            | "isFinite"
     )
 }
 
-fn prev_id_index(opcodes: &[makepad_script::ScriptValue], from: usize, ordinal: usize) -> Option<usize> {
+fn prev_id_index(
+    opcodes: &[makepad_script::ScriptValue],
+    from: usize,
+    ordinal: usize,
+) -> Option<usize> {
     let mut seen = 0usize;
     for idx in (0..from).rev() {
         if opcodes[idx].as_id().is_some() {
@@ -306,7 +343,10 @@ pub fn analyze_opcodes(result: &ParseResult, line_offset: u32) -> Vec<ScriptIssu
                     // Only handle direct `id.field` reads where the two previous entries are ids.
                     // This avoids false positives on chained access where the "object" comes from
                     // a prior FIELD opcode result (e.g. `mod.prelude.widgets`).
-                    if i >= 2 && opcodes[i - 1].as_id().is_some() && opcodes[i - 2].as_id().is_some() {
+                    if i >= 2
+                        && opcodes[i - 1].as_id().is_some()
+                        && opcodes[i - 2].as_id().is_some()
+                    {
                         if let Some(name_id) = opcodes[i - 2].as_id() {
                             let name = format!("{}", name_id);
                             if !table.is_defined(&name) && !is_builtin(&name) {
@@ -413,10 +453,15 @@ mod tests {
         let issues = analyze_opcodes(&result, 0);
 
         // Should have no undefined variable errors for properly defined vars
-        let undefined_errors: Vec<_> = issues.iter()
+        let undefined_errors: Vec<_> = issues
+            .iter()
             .filter(|i| i.message.contains("undefined"))
             .collect();
-        assert!(undefined_errors.is_empty(), "Expected no undefined variable errors, got: {:?}", undefined_errors);
+        assert!(
+            undefined_errors.is_empty(),
+            "Expected no undefined variable errors, got: {:?}",
+            undefined_errors
+        );
     }
 
     #[test]
@@ -427,7 +472,10 @@ mod tests {
         let result = parse_script_full(code, "test.splash");
 
         // Verify opcodes were generated
-        assert!(!result.opcodes.is_empty(), "Expected opcodes to be generated");
+        assert!(
+            !result.opcodes.is_empty(),
+            "Expected opcodes to be generated"
+        );
 
         // Run analysis - should not panic
         let _issues = analyze_opcodes(&result, 0);
@@ -448,7 +496,9 @@ mod tests {
         let issues = analyze_opcodes(&result, 0);
 
         assert!(
-            issues.iter().any(|i| i.message.contains("undefined variable `todo`")),
+            issues
+                .iter()
+                .any(|i| i.message.contains("undefined variable `todo`")),
             "Expected undefined variable `todo` issue, got: {:?}",
             issues
         );
@@ -492,7 +542,9 @@ mod tests {
         let result = parse_script_full(code, "test.splash");
         let issues = analyze_opcodes(&result, 0);
         assert!(
-            issues.iter().any(|i| i.message.contains("undefined variable `todoss`")),
+            issues
+                .iter()
+                .any(|i| i.message.contains("undefined variable `todoss`")),
             "Expected undefined variable `todoss` issue, got: {:?}",
             issues
         );

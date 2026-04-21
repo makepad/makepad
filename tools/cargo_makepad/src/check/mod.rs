@@ -45,7 +45,10 @@ pub fn handle_check_script(args: &[String]) -> Result<(), String> {
                 ))
             } else {
                 if result.warning_count > 0 {
-                    println!("Script checks completed with {} warning(s)", result.warning_count);
+                    println!(
+                        "Script checks completed with {} warning(s)",
+                        result.warning_count
+                    );
                 } else {
                     println!("All script checks completed successfully");
                 }
@@ -85,18 +88,38 @@ enum Platform {
 const TOOLCHAINS: [(&str, BuildTy, Platform); 16] = [
     ("aarch64-apple-darwin", BuildTy::Binary, Platform::Desktop),
     ("x86_64-pc-windows-msvc", BuildTy::Binary, Platform::Desktop),
-    ("x86_64-unknown-linux-gnu", BuildTy::Binary, Platform::Desktop),
-    ("x86_64-unknown-linux-gnu", BuildTy::LinuxDirect, Platform::Embedded),
+    (
+        "x86_64-unknown-linux-gnu",
+        BuildTy::Binary,
+        Platform::Desktop,
+    ),
+    (
+        "x86_64-unknown-linux-gnu",
+        BuildTy::LinuxDirect,
+        Platform::Embedded,
+    ),
     ("wasm32-unknown-unknown", BuildTy::Lib, Platform::Web),
     ("aarch64-linux-android", BuildTy::Lib, Platform::Mobile),
     ("aarch64-apple-ios", BuildTy::Binary, Platform::Mobile),
     ("x86_64-linux-android", BuildTy::Lib, Platform::Mobile),
-    ("aarch64-apple-tvos", BuildTy::BinaryBuildStd, Platform::Mobile),
-    ("aarch64-apple-tvos-sim", BuildTy::BinaryBuildStd, Platform::Mobile),
+    (
+        "aarch64-apple-tvos",
+        BuildTy::BinaryBuildStd,
+        Platform::Mobile,
+    ),
+    (
+        "aarch64-apple-tvos-sim",
+        BuildTy::BinaryBuildStd,
+        Platform::Mobile,
+    ),
     ("i686-linux-android", BuildTy::Lib, Platform::Mobile),
     ("aarch64-apple-ios-sim", BuildTy::Binary, Platform::Mobile),
     ("x86_64-apple-ios", BuildTy::Binary, Platform::Mobile),
-    ("x86_64-apple-tvos", BuildTy::BinaryBuildStd, Platform::Mobile),
+    (
+        "x86_64-apple-tvos",
+        BuildTy::BinaryBuildStd,
+        Platform::Mobile,
+    ),
     ("x86_64-apple-darwin", BuildTy::Binary, Platform::Desktop),
     ("x86_64-pc-windows-gnu", BuildTy::Binary, Platform::Desktop),
 ];
@@ -113,10 +136,9 @@ fn check_crate_with_icon(
 ) -> Result<(), String> {
     let crate_dir = get_crate_dir(build_crate).expect("Can't find crate dir");
     // Parse Cargo.toml for metadata
-    let cargo_str = std::fs::read_to_string(crate_dir.join("Cargo.toml"))
-        .expect("Can't find Cargo.toml");
-    let toml = makepad_toml_parser::parse_toml(&cargo_str)
-        .expect("Can't parse Cargo.toml");
+    let cargo_str =
+        std::fs::read_to_string(crate_dir.join("Cargo.toml")).expect("Can't find Cargo.toml");
+    let toml = makepad_toml_parser::parse_toml(&cargo_str).expect("Can't parse Cargo.toml");
 
     // Get platform filter from metadata
     let platforms = match toml.get("package.metadata.makepad-check-platform") {
@@ -146,7 +168,12 @@ fn parse_platform_filter(platforms: &str) -> Result<Vec<Platform>, String> {
             "mobile" => filter.push(Platform::Mobile),
             "web" => filter.push(Platform::Web),
             "embedded" => filter.push(Platform::Embedded),
-            e => return Err(format!("Unexpected platform in makepad-check-platform: {}", e)),
+            e => {
+                return Err(format!(
+                    "Unexpected platform in makepad-check-platform: {}",
+                    e
+                ))
+            }
         }
     }
     Ok(filter)

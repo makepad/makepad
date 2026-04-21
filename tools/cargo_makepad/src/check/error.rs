@@ -1,5 +1,4 @@
 /// Error types for the script check command.
-
 use std::fmt;
 use std::path::PathBuf;
 
@@ -140,7 +139,11 @@ impl fmt::Display for ScriptIssue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
             IssueKind::FallbackWarning => write!(f, "warning: {}", self.message),
-            _ => write!(f, "{}:{}:{}: {}", self.file, self.line, self.column, self.message),
+            _ => write!(
+                f,
+                "{}:{}:{}: {}",
+                self.file, self.line, self.column, self.message
+            ),
         }
     }
 }
@@ -197,7 +200,9 @@ impl fmt::Display for CheckError {
 impl std::error::Error for CheckError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::HarnessDirectoryError(e) | Self::HarnessWriteError(e) | Self::IoError(e) => Some(e),
+            Self::HarnessDirectoryError(e) | Self::HarnessWriteError(e) | Self::IoError(e) => {
+                Some(e)
+            }
             _ => None,
         }
     }
