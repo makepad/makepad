@@ -257,12 +257,24 @@ macro_rules! app_main {
                 return;
             }
 
+            // `app_value` caches the app's script root as a rooted
+            // `ScriptObjectRef` so `Event::ScriptReapply` can re-apply the
+            // widget tree without re-running `script_mod` (which would
+            // wipe runtime heap overrides like preference-driven template
+            // mutations). A rooted ref is required — storing a bare
+            // `ScriptValue` would let the script heap GC the slot out
+            // from under us between `Event::Startup` and the first reapply.
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let app_value: std::rc::Rc<std::cell::RefCell<Option<$crate::ScriptObjectRef>>>
+                = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(
                 move |cx, event| {
                     if let Event::Startup = event {
                         *app.borrow_mut() = Some(cx.with_vm(|vm| {
                             let value = <$app as AppMain>::script_mod(vm);
+                            if let Some(obj) = value.as_object() {
+                                *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                            }
                             let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
                             <$app as AppMain>::after_new_from_script(vm, &mut app);
                             app
@@ -274,6 +286,9 @@ macro_rules! app_main {
                         if let Some(app) = app_ref.as_mut() {
                             cx.with_vm(|vm| {
                                 let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                                if let Some(obj) = value.as_object() {
+                                    *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                                }
                                 <$app as $crate::ScriptApply>::script_apply(
                                     app,
                                     vm,
@@ -282,6 +297,33 @@ macro_rules! app_main {
                                     value,
                                 );
                             });
+                        }
+                    }
+                    if let Event::ScriptReapply = event {
+                        let mut app_ref = app.borrow_mut();
+                        if let Some(app) = app_ref.as_mut() {
+                            let value = app_value
+                                .borrow()
+                                .as_ref()
+                                .map(|r| $crate::ScriptValue::from(r.as_object()));
+                            if let Some(value) = value {
+                                eprintln!(
+                                    "AppMain Event::ScriptReapply: applying tree with value obj={:?}",
+                                    value.as_object(),
+                                );
+                                cx.with_vm(|vm| {
+                                    <$app as $crate::ScriptApply>::script_apply(
+                                        app,
+                                        vm,
+                                        &$crate::Apply::Reload,
+                                        &mut $crate::Scope::empty(),
+                                        value,
+                                    );
+                                });
+                                eprintln!("AppMain Event::ScriptReapply: done");
+                            } else {
+                                eprintln!("AppMain Event::ScriptReapply: app_value not set, skipping");
+                            }
                         }
                     }
                     if let Some(app) = &mut *app.borrow_mut() {
@@ -332,10 +374,15 @@ macro_rules! app_main {
             Cx::android_entry(activity, || {
                 let studio_http = $crate::resolve_studio_http();
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
+                let app_value: std::rc::Rc<std::cell::RefCell<Option<$crate::ScriptObjectRef>>>
+                    = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                     if let Event::Startup = event {
                         *app.borrow_mut() = Some(cx.with_vm(|vm| {
                             let value = <$app as AppMain>::script_mod(vm);
+                            if let Some(obj) = value.as_object() {
+                                *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                            }
                             let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
                             <$app as AppMain>::after_new_from_script(vm, &mut app);
                             app
@@ -347,6 +394,9 @@ macro_rules! app_main {
                         if let Some(app) = app_ref.as_mut() {
                             cx.with_vm(|vm| {
                                 let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                                if let Some(obj) = value.as_object() {
+                                    *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                                }
                                 <$app as $crate::ScriptApply>::script_apply(
                                     app,
                                     vm,
@@ -355,6 +405,26 @@ macro_rules! app_main {
                                     value,
                                 );
                             });
+                        }
+                    }
+                    if let Event::ScriptReapply = event {
+                        let mut app_ref = app.borrow_mut();
+                        if let Some(app) = app_ref.as_mut() {
+                            let value = app_value
+                                .borrow()
+                                .as_ref()
+                                .map(|r| $crate::ScriptValue::from(r.as_object()));
+                            if let Some(value) = value {
+                                cx.with_vm(|vm| {
+                                    <$app as $crate::ScriptApply>::script_apply(
+                                        app,
+                                        vm,
+                                        &$crate::Apply::Reload,
+                                        &mut $crate::Scope::empty(),
+                                        value,
+                                    );
+                                });
+                            }
                         }
                     }
                     if let Some(app) = &mut *app.borrow_mut() {
@@ -375,10 +445,15 @@ macro_rules! app_main {
         ) -> $crate::napi_ohos::Result<()> {
             Cx::ohos_init(exports, env, || {
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
+                let app_value: std::rc::Rc<std::cell::RefCell<Option<$crate::ScriptObjectRef>>>
+                    = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                     if let Event::Startup = event {
                         *app.borrow_mut() = Some(cx.with_vm(|vm| {
                             let value = <$app as AppMain>::script_mod(vm);
+                            if let Some(obj) = value.as_object() {
+                                *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                            }
                             let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
                             <$app as AppMain>::after_new_from_script(vm, &mut app);
                             app
@@ -390,6 +465,9 @@ macro_rules! app_main {
                         if let Some(app) = app_ref.as_mut() {
                             cx.with_vm(|vm| {
                                 let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                                if let Some(obj) = value.as_object() {
+                                    *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                                }
                                 <$app as $crate::ScriptApply>::script_apply(
                                     app,
                                     vm,
@@ -398,6 +476,26 @@ macro_rules! app_main {
                                     value,
                                 );
                             });
+                        }
+                    }
+                    if let Event::ScriptReapply = event {
+                        let mut app_ref = app.borrow_mut();
+                        if let Some(app) = app_ref.as_mut() {
+                            let value = app_value
+                                .borrow()
+                                .as_ref()
+                                .map(|r| $crate::ScriptValue::from(r.as_object()));
+                            if let Some(value) = value {
+                                cx.with_vm(|vm| {
+                                    <$app as $crate::ScriptApply>::script_apply(
+                                        app,
+                                        vm,
+                                        &$crate::Apply::Reload,
+                                        &mut $crate::Scope::empty(),
+                                        value,
+                                    );
+                                });
+                            }
                         }
                     }
                     if let Some(app) = &mut *app.borrow_mut() {
@@ -420,10 +518,15 @@ macro_rules! app_main {
         pub extern "C" fn create_wasm_app() -> u32 {
             Cx::init_log();
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let app_value: std::rc::Rc<std::cell::RefCell<Option<$crate::ScriptObjectRef>>>
+                = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                 if let Event::Startup = event {
                     *app.borrow_mut() = Some(cx.with_vm(|vm| {
                         let value = <$app as AppMain>::script_mod(vm);
+                        if let Some(obj) = value.as_object() {
+                            *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                        }
                         let mut app = <$app as $crate::ScriptNew>::script_from_value(vm, value);
                         <$app as AppMain>::after_new_from_script(vm, &mut app);
                         app
@@ -434,6 +537,9 @@ macro_rules! app_main {
                     if let Some(app) = app_ref.as_mut() {
                         cx.with_vm(|vm| {
                             let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                            if let Some(obj) = value.as_object() {
+                                *app_value.borrow_mut() = Some(vm.heap_mut().new_object_ref(obj));
+                            }
                             <$app as $crate::ScriptApply>::script_apply(
                                 app,
                                 vm,
@@ -442,6 +548,26 @@ macro_rules! app_main {
                                 value,
                             );
                         });
+                    }
+                }
+                if let Event::ScriptReapply = event {
+                    let mut app_ref = app.borrow_mut();
+                    if let Some(app) = app_ref.as_mut() {
+                        let value = app_value
+                            .borrow()
+                            .as_ref()
+                            .map(|r| $crate::ScriptValue::from(r.as_object()));
+                        if let Some(value) = value {
+                            cx.with_vm(|vm| {
+                                <$app as $crate::ScriptApply>::script_apply(
+                                    app,
+                                    vm,
+                                    &$crate::Apply::Reload,
+                                    &mut $crate::Scope::empty(),
+                                    value,
+                                );
+                            });
+                        }
                     }
                 }
                 if let Some(app) = &mut *app.borrow_mut() {

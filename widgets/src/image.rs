@@ -96,7 +96,7 @@ pub enum ImageAnimation {
     BounceFps(f64),
 }
 
-#[derive(Script, ScriptHook, Widget, Animator)]
+#[derive(Script, Widget, Animator)]
 pub struct Image {
     #[uid]
     uid: WidgetUid,
@@ -148,6 +148,61 @@ impl ImageCacheImpl for Image {
 
     fn set_texture(&mut self, texture: Option<Texture>, _id: usize) {
         self.texture = texture;
+    }
+}
+
+impl ScriptHook for Image {
+    fn on_before_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        // DIAGNOSTIC: only for Reload on Image widgets whose height was
+        // already an `Fit{max: Some(...)}` (i.e., an image-message image).
+        if apply.is_reload() {
+            if let Size::Fit { max: Some(_), .. } = self.walk.height {
+                use makepad_script::trap::NoTrap;
+                let value_obj = value.as_object();
+                let source_obj = self.source.as_object();
+                let raw_height = value_obj.map(|obj| {
+                    vm.bx.heap.value(obj, id!(height).into(), NoTrap)
+                });
+                let raw_height_from_source =
+                    vm.bx.heap.value(source_obj, id!(height).into(), NoTrap);
+                eprintln!(
+                    "Image::on_before_apply uid={:?}\n  \
+                     current walk.height={:?}\n  \
+                     value obj={:?}  source obj={:?}\n  \
+                     value.height (proto-walk)={:?}\n  \
+                     source.height (proto-walk)={:?}",
+                    self.uid, self.walk.height,
+                    value_obj, source_obj, raw_height, raw_height_from_source,
+                );
+            }
+        }
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        value: ScriptValue,
+    ) {
+        if apply.is_reload() {
+            if let Size::Fit { max: Some(_), .. } = self.walk.height {
+                use makepad_script::trap::NoTrap;
+                let raw_height = value.as_object().map(|obj| {
+                    vm.bx.heap.value(obj, id!(height).into(), NoTrap)
+                });
+                eprintln!(
+                    "Image::on_after_apply  uid={:?} post-apply walk.height={:?}  value.height={:?}",
+                    self.uid, self.walk.height, raw_height,
+                );
+            }
+        }
     }
 }
 

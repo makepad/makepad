@@ -519,6 +519,32 @@ impl ScriptHook for PortalList {
 
         // Update existing items if templates changed
         if apply.is_reload() {
+            // DIAGNOSTIC: log each template's captured object id + what its
+            // nested `.body.content.message.image_view.image.height` path
+            // resolves to, so we can tell whether an in-place heap mutation
+            // on the template chain is visible when we re-apply items.
+            {
+                use makepad_script::trap::NoTrap;
+                for (tid, template_ref) in self.templates.iter() {
+                    let obj = template_ref.as_object();
+                    let height = vm.bx.heap.value(obj, id!(body).into(), NoTrap)
+                        .as_object()
+                        .map(|o| vm.bx.heap.value(o, id!(content).into(), NoTrap))
+                        .and_then(|v| v.as_object())
+                        .map(|o| vm.bx.heap.value(o, id!(message).into(), NoTrap))
+                        .and_then(|v| v.as_object())
+                        .map(|o| vm.bx.heap.value(o, id!(image_view).into(), NoTrap))
+                        .and_then(|v| v.as_object())
+                        .map(|o| vm.bx.heap.value(o, id!(image).into(), NoTrap))
+                        .and_then(|v| v.as_object())
+                        .map(|o| vm.bx.heap.value(o, id!(height).into(), NoTrap));
+                    eprintln!(
+                        "PortalList reload: template {:?} -> obj={:?}  deep-height={:?}",
+                        tid, obj, height,
+                    );
+                }
+            }
+
             for (_, item) in self.items.iter_mut() {
                 if let Some(template_ref) = self.templates.get(&item.template) {
                     let template_value: ScriptValue = template_ref.as_object().into();

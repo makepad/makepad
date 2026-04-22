@@ -124,6 +124,15 @@ pub enum Event {
 
     Draw(DrawEvent),
     LiveEdit,
+    /// Request from `Cx::request_script_reapply()` to re-apply the widget
+    /// tree with `Apply::Reload` *without* re-running `script_mod!`.
+    ///
+    /// Used when runtime code has mutated `mod.widgets.*` in place (e.g.
+    /// `script_eval!` overriding a user preference) and wants every widget
+    /// that captured a template to re-resolve it against the current heap.
+    /// Unlike `Event::LiveEdit`, this preserves any runtime heap overrides
+    /// because the original source-defined defaults are not re-asserted.
+    ScriptReapply,
     /// A window has gained focus and is now the active window receiving user input.
     WindowGotFocus(WindowId),
     /// A window has lost focus and is no longer the active window receiving user input.
@@ -323,6 +332,7 @@ impl Event {
             60 => "Custom",
             61 => "PopupDismissed",
             62 => "SelectionHandleDrag",
+            66 => "ScriptReapply",
             _ => panic!(),
         }
     }
@@ -340,6 +350,7 @@ impl Event {
 
             Self::Draw(_) => 7,
             Self::LiveEdit => 8,
+            Self::ScriptReapply => 66,
             Self::WindowGotFocus(_) => 9,
             Self::WindowLostFocus(_) => 10,
             Self::GameInputConnected(_) => 11,
