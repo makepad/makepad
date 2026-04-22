@@ -38,6 +38,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.buffer_upload_serial = 0;
         this.pending_wasm_pump_id = 0;
         this.signal_poll_timer = 0;
+        this.signal_poll_delay_ms = 16;
         this.text_input_style = null;
         this.audio_resume_hook = null;
         this.loader_removed = false;
@@ -714,6 +715,21 @@ export class WasmWebBrowser extends WasmBridge {
         if (this.signal_poll_timer) {
             return;
         }
+        const reset_poll_delay = () => {
+            this.signal_poll_delay_ms = 16;
+        };
+        const next_poll_delay = () => {
+            if (
+                this.req_anim_frame_id ||
+                this.pending_wasm_pump_id ||
+                this.in_animation_frame
+            ) {
+                reset_poll_delay();
+                return this.signal_poll_delay_ms;
+            }
+            this.signal_poll_delay_ms = Math.min(this.signal_poll_delay_ms * 2, 128);
+            return this.signal_poll_delay_ms;
+        };
         let poll = () => {
             this.signal_poll_timer = 0;
             if (this.wasm == null) {
@@ -721,14 +737,16 @@ export class WasmWebBrowser extends WasmBridge {
             }
             let flags = this.exports.wasm_check_signal();
             if (flags != 0) {
+                reset_poll_delay();
                 this.to_wasm.ToWasmSignal({ flags });
                 this.schedule_wasm_pump();
             }
             if (this.wasm != null) {
-                this.signal_poll_timer = window.setTimeout(poll, 0.016 * 1000.0);
+                this.signal_poll_timer = window.setTimeout(poll, next_poll_delay());
             }
         };
-        this.signal_poll_timer = window.setTimeout(poll, 0.016 * 1000.0);
+        reset_poll_delay();
+        this.signal_poll_timer = window.setTimeout(poll, this.signal_poll_delay_ms);
     }
 
     parse_and_set_headers(request, headers_string) {
