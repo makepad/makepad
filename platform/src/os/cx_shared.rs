@@ -614,13 +614,11 @@ impl Cx {
             self.redraw_all();
             if self.pending_script_reapply {
                 self.pending_script_reapply = false;
-                eprintln!("run_live_edit_if_needed: firing ScriptReapply after LiveEdit");
                 self.call_event_handler(&Event::ScriptReapply);
                 self.redraw_all();
             }
         } else if self.pending_script_reapply {
             self.pending_script_reapply = false;
-            eprintln!("run_live_edit_if_needed: firing ScriptReapply (preference-driven)");
             self.call_event_handler(&Event::ScriptReapply);
             self.redraw_all();
         }

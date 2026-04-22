@@ -307,10 +307,6 @@ macro_rules! app_main {
                                 .as_ref()
                                 .map(|r| $crate::ScriptValue::from(r.as_object()));
                             if let Some(value) = value {
-                                eprintln!(
-                                    "AppMain Event::ScriptReapply: applying tree with value obj={:?}",
-                                    value.as_object(),
-                                );
                                 cx.with_vm(|vm| {
                                     <$app as $crate::ScriptApply>::script_apply(
                                         app,
@@ -320,9 +316,6 @@ macro_rules! app_main {
                                         value,
                                     );
                                 });
-                                eprintln!("AppMain Event::ScriptReapply: done");
-                            } else {
-                                eprintln!("AppMain Event::ScriptReapply: app_value not set, skipping");
                             }
                         }
                     }

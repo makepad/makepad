@@ -667,46 +667,6 @@ impl Dock {
         DockCompactDump { tabs, tab_headers }
     }
 
-    /// Re-captures the content template stored under `template_key` from
-    /// `mod.widgets.<mod_widgets_name>` in the script heap, replacing the
-    /// previously-captured reference in `self.templates`.
-    ///
-    /// Dock templates are declared in DSL like
-    /// `room_screen := mod.widgets.RoomScreen {}`, where the local key
-    /// (`room_screen`) typically doesn't match the `mod.widgets` entry
-    /// (`RoomScreen`). `template_key` is the local key stored in
-    /// `self.templates`; `mod_widgets_name` is the entry in `mod.widgets`
-    /// to look up.
-    ///
-    /// Use this after re-assigning a template in the `widgets` module at
-    /// runtime (via `script_eval!`) so that dock tabs instantiated
-    /// afterwards — e.g. when a closed tab is reopened — are built from
-    /// the updated template. Without this, the Dock keeps serving new
-    /// items from the template object it captured at its initial DSL
-    /// apply.
-    ///
-    /// Returns `true` if the refresh succeeded, `false` if no matching
-    /// entry exists in `mod.widgets`.
-    pub fn refresh_widgets_mod_template(
-        &mut self,
-        cx: &mut Cx,
-        template_key: LiveId,
-        mod_widgets_name: LiveId,
-    ) -> bool {
-        use makepad_script::trap::NoTrap;
-        cx.with_vm(|vm| {
-            let heap = vm.heap_mut();
-            let widgets_mod = heap.module(id!(widgets));
-            let value = heap.value(widgets_mod, mod_widgets_name.into(), NoTrap);
-            let Some(obj) = value.as_object() else {
-                return false;
-            };
-            let new_ref = heap.new_object_ref(obj);
-            self.templates.insert(template_key, new_ref);
-            true
-        })
-    }
-
     fn create_all_items(&mut self, cx: &mut Cx) {
         let mut items = Vec::new();
         for (item_id, item) in self.dock_items.iter() {
@@ -1974,18 +1934,5 @@ impl DockRef {
 
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
-    }
-
-    /// See [`Dock::refresh_widgets_mod_template()`].
-    pub fn refresh_widgets_mod_template(
-        &self,
-        cx: &mut Cx,
-        template_key: LiveId,
-        mod_widgets_name: LiveId,
-    ) -> bool {
-        let Some(mut dock) = self.borrow_mut() else {
-            return false;
-        };
-        dock.refresh_widgets_mod_template(cx, template_key, mod_widgets_name)
     }
 }
