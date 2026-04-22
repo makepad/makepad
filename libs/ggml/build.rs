@@ -106,6 +106,7 @@ fn build_cuda_backends(target_os: &str) {
         manifest_dir.join("src/backend/cuda/nvfp4.cu"),
         manifest_dir.join("src/backend/cuda/nvfp4_mmq.cu"),
         manifest_dir.join("src/backend/cuda/ops.cu"),
+        manifest_dir.join("src/backend/cuda/qwen_ops.cu"),
         manifest_dir.join("src/backend/cuda/ssm_conv.cu"),
     ];
     for src_path in &src_paths {

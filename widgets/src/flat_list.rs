@@ -23,6 +23,10 @@ pub enum FlatListAction {
     None,
 }
 
+/// A single entry managed by a list widget (e.g., [`FlatList`] or
+/// [`crate::portal_list::PortalList`]): the widget instance and the `LiveId`
+/// of the template it was created from.
+#[derive(Default)]
 pub struct WidgetItem {
     pub widget: WidgetRef,
     pub template: LiveId,

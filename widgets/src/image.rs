@@ -103,7 +103,7 @@ pub struct Image {
     #[source]
     source: ScriptObjectRef,
     #[walk]
-    walk: Walk,
+    pub walk: Walk,
     #[apply_default]
     animator: Animator,
     #[redraw]
@@ -437,6 +437,22 @@ impl Image {
         };
 
         let aspect = width / height;
+        // When `walk.height` is `Size::Fit { max: Some(m) }`, the rect returned by
+        // `peek_walk_turtle` has `size.y == NaN` (Fit evaluates to NaN — see
+        // `Turtle::next_walk_height`), so the max would otherwise be ignored by the
+        // aspect calculations below. Treat it as the effective vertical bound so
+        // the image scales proportionally instead of rendering at its natural
+        // height and getting clipped by an outer view.
+        let height_cap = if let Size::Fit { max: Some(fb), .. } = walk.height {
+            fb.eval_height(cx).unwrap_or(f64::INFINITY)
+        } else {
+            f64::INFINITY
+        };
+        let avail_height = if rect.size.y.is_nan() {
+            height_cap
+        } else {
+            rect.size.y.min(height_cap)
+        };
         match self.fit {
             ImageFit::Size => {
                 walk.width = Size::Fixed(width);
@@ -447,20 +463,23 @@ impl Image {
                 walk.height = Size::Fixed(rect.size.x / aspect);
             }
             ImageFit::Vertical => {
-                walk.width = Size::Fixed(rect.size.y * aspect);
+                walk.width = Size::Fixed(avail_height * aspect);
+                walk.height = Size::Fixed(avail_height);
             }
             ImageFit::Smallest => {
                 let walk_height = rect.size.x / aspect;
-                if walk_height > rect.size.y {
-                    walk.width = Size::Fixed(rect.size.y * aspect);
+                if walk_height > avail_height {
+                    walk.width = Size::Fixed(avail_height * aspect);
+                    walk.height = Size::Fixed(avail_height);
                 } else {
                     walk.height = Size::Fixed(walk_height);
                 }
             }
             ImageFit::Biggest => {
                 let walk_height = rect.size.x / aspect;
-                if walk_height < rect.size.y {
-                    walk.width = Size::Fixed(rect.size.y * aspect);
+                if walk_height < avail_height {
+                    walk.width = Size::Fixed(avail_height * aspect);
+                    walk.height = Size::Fixed(avail_height);
                 } else {
                     walk.height = Size::Fixed(walk_height);
                 }
