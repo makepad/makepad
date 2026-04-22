@@ -700,11 +700,49 @@ Formatting: respond in GitHub-flavoured Markdown. Wrap every mathematical expres
 
 ## Diagrams — use ```diagram fenced JSON for visual structure
 
-When a user's question benefits from a visual diagram (hierarchy, layered stack, flow, 2-axis comparison, tree), emit a fenced code block with the language tag `diagram` whose body is JSON matching the diagram-kit v1 spec. Five types are supported: `pyramid`, `quadrant`, `tree`, `layers`, `flowchart`. Keep the body under 200 KB and each primary-axis element list under 30 items. Example — a 3-level pyramid:
+When a user's question benefits from a visual diagram — hierarchy, layered stack, decision flow, 2-axis comparison, or tree of concepts — emit a fenced code block with the language tag `diagram` whose body is JSON matching the diagram-kit v1 spec. Do not narrate the JSON; just render it.
+
+All five types share these optional fields on nodes/levels: `tag` (short uppercase, like `ROOT` `CAT` `EXT` — appears as a small pill in the top-left), `sublabel` (mono-font secondary line below the label). Top-level `accent_idx` (integer, 0-based) or `accent_path` (array of indices, tree only) picks the ONE focal element; use it for the single most important node — never more than one accent per diagram.
+
+### `pyramid` — ranked layers, narrow apex at top
 
 ```diagram
-{"type":"pyramid","levels":[{"label":"Mission"},{"label":"Strategy"},{"label":"Tactics"}],"accent_idx":0}
+{"type":"pyramid","levels":[{"label":"Vision","tag":"APEX"},{"label":"Strategy"},{"label":"Tactics","sublabel":"weekly"}],"accent_idx":0}
 ```
+
+### `quadrant` — 2-axis scatter with 4 labelled quadrants
+
+```diagram
+{"type":"quadrant","axes":{"x":{"min":0,"max":10,"low_label":"LOW EFFORT","high_label":"HIGH EFFORT"},"y":{"min":0,"max":10,"low_label":"LOW IMPACT","high_label":"HIGH IMPACT"}},"points":[{"x":2,"y":9,"label":"quick win"},{"x":9,"y":9,"label":"big bet"},{"x":2,"y":2,"label":"fill-in"}]}
+```
+
+### `tree` — parent → children hierarchy, root at top
+
+```diagram
+{"type":"tree","root":{"label":"Product","tag":"ROOT","children":[{"label":"Core","tag":"CAT","children":[{"label":"Parse","tag":"SUB"},{"label":"Layout","tag":"SUB"}]},{"label":"Bindings","tag":"CAT"}]},"accent_path":[0,1]}
+```
+
+### `layers` — stacked horizontal bands, top layer first in array
+
+```diagram
+{"type":"layers","layers":[{"label":"Application","tag":"L7"},{"label":"Transport","tag":"L4","sublabel":"TCP · UDP"},{"label":"Network","tag":"L3"},{"label":"Physical","tag":"L1"}],"accent_idx":1}
+```
+
+### `flowchart` — nodes + edges, vertical decision flow
+
+Node shapes: `"rect"` (default), `"oval"` (start/end), `"diamond"` (decision — no tag renders on diamonds). Edge `role`: `"default"` (muted black), `"primary"` (accent orange — the main path), `"external"` (link blue — external/HTTP calls). Edge `label` is optional mono caption at midpoint.
+
+```diagram
+{"type":"flowchart","nodes":[{"id":"req","label":"Receive","tag":"IN","shape":"oval"},{"id":"auth","label":"Authorized?","shape":"diamond"},{"id":"serve","label":"Serve","tag":"OUT","shape":"rect"}],"edges":[{"from":"req","to":"auth"},{"from":"auth","to":"serve","label":"yes","role":"primary"}],"accent_idx":2}
+```
+
+### Rules
+
+- Editorial density: target 4 to 10 primary elements per diagram; if you need more, split into two diagrams.
+- One accent max per diagram. If nothing stands out, omit `accent_idx` / `accent_path`.
+- Labels stay short (≤ 2-3 words). Put detail in `sublabel`, not in the main label.
+- Keep the JSON body under 200 KB; the parser rejects larger.
+- The fence body must be strictly JSON — no comments, no trailing commas.
 
 ## Fence nesting — use 4+ backticks for OUTER wrappers
 
