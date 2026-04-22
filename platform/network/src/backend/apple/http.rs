@@ -61,7 +61,11 @@ pub fn define_url_session_data_delegate() -> *const Class {
 
             let bytes: *const u8 = msg_send![data, bytes];
             let length: usize = msg_send![data, length];
-            let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
+            let data_bytes: &[u8] = if bytes.is_null() || length == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(bytes, length)
+            };
 
             let message = NetworkResponse::HttpStreamChunk {
                 request_id: context_box.request_id,
@@ -315,7 +319,11 @@ impl AppleHttpRequests {
 
                         let bytes: *const u8 = msg_send![data, bytes];
                         let length: usize = msg_send![data, length];
-                        let data_bytes: &[u8] = std::slice::from_raw_parts(bytes, length);
+                        let data_bytes: &[u8] = if bytes.is_null() || length == 0 {
+                            &[]
+                        } else {
+                            std::slice::from_raw_parts(bytes, length)
+                        };
                         let status_code: u16 = msg_send![response, statusCode];
                         let headers: ObjcId = msg_send![response, allHeaderFields];
 
