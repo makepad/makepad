@@ -152,6 +152,16 @@ impl ScriptHeap {
     }
 
     pub fn new_module(&mut self, id: LiveId) -> ScriptObject {
+        // Idempotent: if a module is already registered under this id (e.g.
+        // on reload), reuse it so external references — animator tracks,
+        // widget templates, timer payloads — survive across the reapply.
+        // Subsequent `set_value_def` calls on this module object will
+        // overwrite individual fields without changing the container's
+        // identity.
+        let existing = self.value(self.modules, id.into(), NoTrap);
+        if let Some(existing_obj) = existing.as_object() {
+            return existing_obj;
+        }
         let md = self.new_with_proto(id.into());
         self.set_value_def(self.modules, id.into(), md.into());
         md
