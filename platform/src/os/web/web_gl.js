@@ -1338,7 +1338,7 @@ export class WasmWebGL extends WasmWebBrowser {
     );
 
     this.gpu_info = {
-      min_uniforms: Math.min(max_vertex_uniforms, max_fragment_uniforms),
+      min_uniform_vectors: Math.min(max_vertex_uniforms, max_fragment_uniforms),
       vendor: "unknown",
       renderer: "unknown",
     };

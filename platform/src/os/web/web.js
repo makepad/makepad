@@ -1271,6 +1271,9 @@ export class WasmWebBrowser extends WasmBridge {
         this.window_info.inner_height = canvas.offsetHeight;
         this.window_info.is_fullscreen = is_fullscreen();
         this.window_info.can_fullscreen = can_fullscreen();
+        this.window_info.xr_is_presenting = !!this.xr;
+        this.window_info.vr_supported = !!this.xr_capabilities.vr_supported;
+        this.window_info.ar_supported = !!this.xr_capabilities.ar_supported;
     }
 
     query_xr_capabilities() {
