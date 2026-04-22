@@ -47,7 +47,7 @@ pub use crate::{
         GeometryGen,
         GeometryQuad2D,
     },*/
-    turtle::{Align, DeferredWalk, Flow, Layout, Metrics, Size, TurtleAlignRange, Walk},
+    turtle::{Align, Base, DeferredWalk, FitBound, Flow, Layout, Metrics, Size, TurtleAlignRange, Walk},
     vector::{GradientStop, VectorPaint},
 };
 

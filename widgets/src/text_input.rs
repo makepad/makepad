@@ -530,6 +530,21 @@ pub struct TextInput {
     return_key_type: ReturnKeyType,
     #[live(false)]
     is_multiline: bool,
+    /// When `is_multiline` is true, controls whether plain Enter inserts a
+    /// newline or emits the `Returned` action.
+    ///
+    /// * `false` (default): plain Enter inserts a newline; the `Returned`
+    ///   action is emitted for Primary modifier + Enter (Cmd on macOS,
+    ///   Ctrl on other platforms).
+    /// * `true`: plain Enter emits `Returned`; Shift+Enter inserts a newline.
+    ///
+    /// Regardless of this setting, Primary modifier + Enter always emits
+    /// `Returned`, and Shift+Enter always inserts a newline.
+    ///
+    /// Ignored when `is_multiline` is false (single-line inputs always emit
+    /// `Returned` on Enter).
+    #[live(false)]
+    submit_on_enter: bool,
     #[live]
     scroll_bar: ScrollBar,
     #[live]
@@ -633,6 +648,18 @@ impl TextInput {
 
     pub fn is_multiline(&self) -> bool {
         self.is_multiline
+    }
+
+    /// Returns whether this (multiline) text input emits `Returned` on plain
+    /// Enter. See the [`TextInput::submit_on_enter`] field for details.
+    pub fn submit_on_enter(&self) -> bool {
+        self.submit_on_enter
+    }
+
+    /// Sets whether this (multiline) text input emits `Returned` on plain
+    /// Enter. See the [`TextInput::submit_on_enter`] field for details.
+    pub fn set_submit_on_enter(&mut self, submit_on_enter: bool) {
+        self.submit_on_enter = submit_on_enter;
     }
 
     pub fn set_is_multiline(&mut self, cx: &mut Cx, is_multiline: bool) {
@@ -1958,9 +1985,24 @@ impl Widget for TextInput {
                 modifiers: mods @ KeyModifiers { shift: false, .. },
                 ..
             }) => {
-                // For multiline text input, plain Return inserts a newline
-                // For single-line, Return hides the keyboard and emits Returned action
-                if self.is_multiline && !self.is_read_only {
+                // Decide whether this Enter press should submit (emit Returned)
+                // or insert a newline:
+                // * Single-line inputs always submit.
+                // * Primary modifier (Cmd on macOS, Ctrl on other platforms)
+                //   + Enter always submits — even in multiline mode.
+                // * When `submit_on_enter` is set, plain (un-modified) Enter
+                //   also submits.
+                // Any other modifier combination (e.g., Alt+Enter, or Ctrl+Enter
+                // on macOS) falls through to the newline-insertion path, which
+                // itself is gated on the input not being read-only.
+                let should_submit = !self.is_multiline
+                    || mods.is_primary()
+                    || (self.submit_on_enter && !mods.any());
+                if should_submit {
+                    cx.hide_text_ime();
+                    cx.set_key_focus(Area::Empty);
+                    self.emit_return(cx, uid, mods);
+                } else if !self.is_read_only {
                     self.reset_blink_timer(cx);
                     self.create_or_extend_edit_group(EditKind::Other);
                     self.apply_edit(
@@ -1973,10 +2015,6 @@ impl Widget for TextInput {
                     );
                     self.draw_bg.redraw(cx);
                     self.emit_change(cx, uid);
-                } else {
-                    cx.hide_text_ime();
-                    cx.set_key_focus(Area::Empty);
-                    self.emit_return(cx, uid, mods);
                 }
             }
 
@@ -2336,6 +2374,20 @@ impl TextInputRef {
         }
     }
 
+    /// Returns whether this (multiline) text input emits `Returned` on plain
+    /// Enter. See [`TextInput::submit_on_enter`] for details.
+    pub fn submit_on_enter(&self) -> bool {
+        self.borrow().map(|inner| inner.submit_on_enter()).unwrap_or(false)
+    }
+
+    /// Sets whether this (multiline) text input emits `Returned` on plain
+    /// Enter. See [`TextInput::submit_on_enter`] for details.
+    pub fn set_submit_on_enter(&self, submit_on_enter: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_submit_on_enter(submit_on_enter);
+        }
+    }
+
     pub fn is_password(&self) -> bool {
         if let Some(inner) = self.borrow() {
             inner.is_password()
@@ -2458,6 +2510,16 @@ impl TextInputRef {
     pub fn escaped(&self, actions: &Actions) -> bool {
         for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
             if let TextInputAction::Escaped = action {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Returns true if this TextInput lost keyboard focus in the given actions.
+    pub fn key_focus_lost(&self, actions: &Actions) -> bool {
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(self.widget_uid()) {
+            if let TextInputAction::KeyFocusLost = action {
                 return true;
             }
         }

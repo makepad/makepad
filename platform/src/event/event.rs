@@ -124,6 +124,16 @@ pub enum Event {
 
     Draw(DrawEvent),
     LiveEdit,
+    /// Request from `Cx::request_script_reapply()` to re-apply the widget
+    /// tree via `Apply::Reload` *without* re-running `script_mod!`.
+    ///
+    /// This is useful when something like a Splash-level script object
+    /// has been modified at runtime (e.g., `script_eval!`) and the application
+    /// wants every widget in the widget tree to pick up that new modified object value.
+    ///
+    /// Unlike `Event::LiveEdit`, this preserves any heap object values that have
+    /// already been modified at runtime.
+    ScriptReapply,
     /// A window has gained focus and is now the active window receiving user input.
     WindowGotFocus(WindowId),
     /// A window has lost focus and is no longer the active window receiving user input.
@@ -323,6 +333,7 @@ impl Event {
             60 => "Custom",
             61 => "PopupDismissed",
             62 => "SelectionHandleDrag",
+            66 => "ScriptReapply",
             _ => panic!(),
         }
     }
@@ -406,6 +417,7 @@ impl Event {
 
             Self::XrLocal(_) => 57,
             Self::Custom(_) => 60,
+            Self::ScriptReapply => 66,
         }
     }
 
