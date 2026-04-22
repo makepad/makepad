@@ -31,13 +31,18 @@ script_mod! {
                     padding: 20
 
                     title := Label{
-                        text: "econd hotpatch example"
+                        text: "Second hotpatch example"
                         draw_text.text_style.font_size: 24
                     }
 
                     note := Label{
-                        text: "Edit () in Rust, save, and watch the text update without restarting."
+                        text: "Edit hotpatch_message() in Rust, save, then press Render without restarting."
                         draw_text.text_style.font_size: 12
+                    }
+
+                    marker_label := Label{
+                        text: "Marker: (press Render)"
+                        draw_text.text_style.font_size: 16
                     }
 
                     main_view := View{
@@ -46,12 +51,8 @@ script_mod! {
                         flow: Down
                         spacing: 8
                         on_render: ||{
-                            marker := Label{
-                                text: "Marker: " + #(hotpatch_message())
-                                draw_text.text_style.font_size: 16
-                            }
                             clicks := Label{
-                                text: "Clicks: " + state.clicks
+                                text: "Clickss: " + state.clicks
                                 draw_text.text_style.font_size: 16
                             }
                         }
@@ -64,11 +65,11 @@ script_mod! {
                         spacing: 10
 
                         bump_button := Button{
-                            text: "Click + render"
+                            text: "Clickss + render"
                         }
 
                         render_button := Button{
-                            text: "Renders"
+                            text: "HEY"
                         }
                     }
                 }
@@ -83,17 +84,27 @@ pub struct App {
     ui: WidgetRef,
 }
 
+impl App {
+    fn refresh_marker(&self, cx: &mut Cx) {
+        self.ui
+            .label(cx, ids!(marker_label))
+            .set_text(cx, &format!("Marssker: {}", hotpatch_message()));
+    }
+}
+
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(cx, ids!(bump_button)).clicked(actions) {
             script_eval!(cx, {
-                mod.state.clicks += 1
+                mod.state.clicks += 2
                 ui.main_view.render()
             });
+            self.refresh_marker(cx);
         }
 
         if self.ui.button(cx, ids!(render_button)).clicked(actions) {
             script_eval!(cx, { ui.main_view.render() });
+            self.refresh_marker(cx);
         }
     }
 }
@@ -107,5 +118,8 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if matches!(event, Event::Startup) {
+            self.refresh_marker(cx);
+        }
     }
 }

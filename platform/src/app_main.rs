@@ -122,14 +122,17 @@ pub(crate) fn resolve_studio_host() -> String {
 }
 
 pub(crate) fn resolve_studio_build() -> Option<String> {
-    std::env::var("STUDIO_BUILD").ok().and_then(|build| {
-        let build = build.trim();
-        (!build.is_empty()).then(|| build.to_string())
-    }).or_else(|| {
-        std::env::var("STUDIO")
-            .ok()
-            .and_then(|studio| extract_studio_build_id(&studio))
-    })
+    std::env::var("STUDIO_BUILD")
+        .ok()
+        .and_then(|build| {
+            let build = build.trim();
+            (!build.is_empty()).then(|| build.to_string())
+        })
+        .or_else(|| {
+            std::env::var("STUDIO")
+                .ok()
+                .and_then(|studio| extract_studio_build_id(&studio))
+        })
 }
 
 pub(crate) fn resolve_studio_crate() -> Option<String> {
@@ -146,7 +149,11 @@ pub(crate) fn resolve_studio_crate() -> Option<String> {
         })
 }
 
-fn build_studio_http(studio_host: &str, studio_build: Option<&str>, studio_crate: Option<&str>) -> String {
+fn build_studio_http(
+    studio_host: &str,
+    studio_build: Option<&str>,
+    studio_crate: Option<&str>,
+) -> String {
     let studio_host = normalize_studio_host(studio_host);
     if studio_host.is_empty() {
         return String::new();
@@ -192,7 +199,10 @@ mod tests {
             extract_studio_build_id("127.0.0.1:8001/app/42"),
             Some("42".to_string())
         );
-        assert_eq!(extract_studio_build_id("http://127.0.0.1:8001/app/77"), Some("77".to_string()));
+        assert_eq!(
+            extract_studio_build_id("http://127.0.0.1:8001/app/77"),
+            Some("77".to_string())
+        );
     }
 
     #[test]
@@ -208,11 +218,7 @@ mod tests {
     #[test]
     fn build_studio_http_uses_query_identity() {
         assert_eq!(
-            build_studio_http(
-                "127.0.0.1:8001",
-                Some("77"),
-                Some("makepad-example-xr"),
-            ),
+            build_studio_http("127.0.0.1:8001", Some("77"), Some("makepad-example-xr"),),
             "http://127.0.0.1:8001/app?build=77&crate=makepad-example-xr"
         );
         assert_eq!(
@@ -363,16 +369,53 @@ pub fn apply_hotreload_if_pending<T>(
     hotreload_flag: &Arc<AtomicBool>,
     cx: &mut Cx,
 ) where
-    T: AppMain + crate::ScriptApply,
+    T: AppMain,
 {
     if !hotreload_flag.swap(false, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
 
-    if let Some(app) = app.borrow_mut().as_mut() {
-        apply_live_edit(app, cx);
-    }
+    let _ = app;
     cx.redraw_all();
+}
+
+#[cfg(test)]
+mod hotreload_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    struct HotreloadStateApp {
+        clicks: usize,
+    }
+
+    impl AppMain for HotreloadStateApp {
+        fn handle_event(&mut self, _cx: &mut Cx, _event: &Event) {}
+    }
+
+    #[test]
+    fn hotreload_pending_keeps_existing_app_state() {
+        let app = Rc::new(RefCell::new(Some(HotreloadStateApp { clicks: 7 })));
+        let hotreload_flag = Arc::new(AtomicBool::new(true));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+
+        apply_hotreload_if_pending(&app, &hotreload_flag, &mut cx);
+
+        assert_eq!(app.borrow().as_ref().unwrap().clicks, 7);
+        assert!(!hotreload_flag.load(Ordering::Relaxed));
+        assert!(cx.new_draw_event.redraw_all);
+    }
+
+    #[test]
+    fn hotreload_pending_noops_when_no_patch_is_waiting() {
+        let app = Rc::new(RefCell::new(Some(HotreloadStateApp { clicks: 3 })));
+        let hotreload_flag = Arc::new(AtomicBool::new(false));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+
+        apply_hotreload_if_pending(&app, &hotreload_flag, &mut cx);
+
+        assert_eq!(app.borrow().as_ref().unwrap().clicks, 3);
+        assert!(!cx.new_draw_event.redraw_all);
+    }
 }
 
 #[macro_export]
@@ -391,8 +434,7 @@ macro_rules! app_main {
             }
 
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-            let hotreload_flag =
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let hotreload_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             $crate::register_hotreload_handler(&hotreload_flag);
             let mut cx = std::rc::Rc::new(std::cell::RefCell::new(Cx::new(Box::new(
                 move |cx, event| {
@@ -455,8 +497,7 @@ macro_rules! app_main {
             Cx::android_entry(activity, || {
                 let studio_http = $crate::resolve_studio_http();
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-                let hotreload_flag =
-                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let hotreload_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 $crate::register_hotreload_handler(&hotreload_flag);
                 let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                     if let Event::Startup = event {
@@ -488,8 +529,7 @@ macro_rules! app_main {
         ) -> $crate::napi_ohos::Result<()> {
             Cx::ohos_init(exports, env, || {
                 let app = std::rc::Rc::new(std::cell::RefCell::new(None));
-                let hotreload_flag =
-                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let hotreload_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 $crate::register_hotreload_handler(&hotreload_flag);
                 let mut cx = Box::new(Cx::new(Box::new(move |cx, event| {
                     if let Event::Startup = event {

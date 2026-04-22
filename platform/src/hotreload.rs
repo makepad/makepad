@@ -13,6 +13,7 @@ use std::time::Duration;
 pub use subsecond;
 
 static HOTRELOAD_CONNECT_ONCE: Once = Once::new();
+const HOTRELOAD_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 pub type HotReloadFlag = Arc<AtomicBool>;
 
@@ -33,51 +34,63 @@ pub fn connect_once() {
         };
 
         std::thread::spawn(move || {
-            let request = hotreload_request(endpoint);
-            let split = request.split_url();
-            let mut stream = match connect_stream(&split) {
-                Ok(stream) => stream,
-                Err(_) => return,
-            };
-
-            if write_websocket_handshake(&mut stream, &request, &split).is_err() {
-                return;
-            }
-
-            let leftover = match read_websocket_handshake_response(&mut stream) {
-                Ok(leftover) => leftover,
-                Err(_) => return,
-            };
-
-            let mut parser = WebSocketParser::new();
-            if !leftover.is_empty() {
-                if parse_incoming(&mut parser, &mut stream, &leftover) {
-                    return;
-                }
-            }
-
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
-            loop {
-                let mut buffer = [0u8; 65535];
-                match stream.read(&mut buffer) {
-                    Ok(0) => return,
-                    Ok(bytes_read) => {
-                        if parse_incoming(&mut parser, &mut stream, &buffer[..bytes_read]) {
-                            return;
-                        }
-                    }
-                    Err(err)
-                        if matches!(
-                            err.kind(),
-                            std::io::ErrorKind::WouldBlock
-                                | std::io::ErrorKind::TimedOut
-                                | std::io::ErrorKind::Interrupted
-                        ) => {}
-                    Err(_) => return,
-                }
-            }
+            run_hotreload_connection_loop(
+                HOTRELOAD_RETRY_DELAY,
+                || true,
+                || run_hotreload_connection(&endpoint),
+            );
         });
     });
+}
+
+fn run_hotreload_connection_loop<F, K>(retry_delay: Duration, mut keep_running: K, mut run_once: F)
+where
+    F: FnMut() -> Result<(), String>,
+    K: FnMut() -> bool,
+{
+    while keep_running() {
+        let _ = run_once();
+        if keep_running() && !retry_delay.is_zero() {
+            std::thread::sleep(retry_delay);
+        }
+    }
+}
+
+fn run_hotreload_connection(endpoint: &str) -> Result<(), String> {
+    let request = hotreload_request(endpoint.to_string());
+    let split = request.split_url();
+    let mut stream = connect_stream(&split)?;
+
+    write_websocket_handshake(&mut stream, &request, &split)?;
+    let leftover = read_websocket_handshake_response(&mut stream)?;
+
+    let mut parser = WebSocketParser::new();
+    if !leftover.is_empty() && parse_incoming(&mut parser, &mut stream, &leftover) {
+        return Err("hotreload websocket disconnected".to_string());
+    }
+
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+    loop {
+        let mut buffer = [0u8; 65535];
+        match stream.read(&mut buffer) {
+            Ok(0) => return Err("hotreload websocket connection closed".to_string()),
+            Ok(bytes_read) => {
+                if parse_incoming(&mut parser, &mut stream, &buffer[..bytes_read]) {
+                    return Err("hotreload websocket disconnected".to_string());
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(err) => {
+                return Err(format!("failed to read hotreload websocket message: {err}"));
+            }
+        }
+    }
 }
 
 fn devserver_ws_endpoint_fallback() -> Option<String> {
@@ -244,5 +257,27 @@ fn handle_devserver_msg(msg: DevserverMsg) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn hotreload_connection_loop_retries_after_disconnect() {
+        let attempts = AtomicUsize::new(0);
+
+        run_hotreload_connection_loop(
+            Duration::ZERO,
+            || attempts.load(Ordering::Relaxed) < 3,
+            || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                Err("disconnected".to_string())
+            },
+        );
+
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
     }
 }

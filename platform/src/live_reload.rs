@@ -390,7 +390,25 @@ fn resolve_script_mod_file_candidates(script_mod: &ScriptMod) -> Vec<String> {
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn hot_reload_requested_from_args() -> bool {
-    std::env::args().any(|arg| arg == "--hot")
+    hot_reload_requested(
+        std::env::args(),
+        std::env::var_os("DIOXUS_CLI_ENABLED").is_some(),
+        std::env::var_os("DIOXUS_DEVSERVER_PORT").is_some(),
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn hot_reload_requested<I, S>(
+    args: I,
+    dioxus_cli_enabled: bool,
+    dioxus_devserver_port_present: bool,
+) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter().any(|arg| arg.as_ref() == "--hot")
+        || (dioxus_cli_enabled && dioxus_devserver_port_present)
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -1088,5 +1106,21 @@ mod tests {
         assert!(excluded.contains(&normalize_path_string(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../draw")
         )));
+    }
+
+    #[test]
+    fn hot_reload_request_accepts_legacy_hot_flag() {
+        assert!(hot_reload_requested(["app", "--hot"], false, false));
+    }
+
+    #[test]
+    fn hot_reload_request_accepts_dioxus_devserver_launch() {
+        assert!(hot_reload_requested(["app"], true, true));
+    }
+
+    #[test]
+    fn hot_reload_request_rejects_unrelated_launches() {
+        assert!(!hot_reload_requested(["app"], true, false));
+        assert!(!hot_reload_requested(["app"], false, true));
     }
 }

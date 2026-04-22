@@ -6,7 +6,7 @@ Minimal example to validate **subsecond Rust hotpatching** (Dioxus subsecond) in
 
 Open `examples/subsecond_example/src/main.rs` and change the string returned by `hotpatch_message()`.
 
-Then press **Render** in the UI to re-run the `on_render` script and show the new marker text.
+Then press **Render** in the UI to refresh the marker text through the patched Rust handler.
 
 ### Run on iOS Simulator (hotpatch)
 
@@ -28,4 +28,4 @@ dx serve --hotpatch --macos --package makepad-example-subsecond-example
 
 - Even though this example doesn’t explicitly use camera/microphone, iOS can terminate the app if the process enumerates capture devices without usage strings. We include them via `Dioxus.toml` `[permissions]` to avoid TCC crashes.
 - If you see `Hot-patching: ...` in the `dx` logs, the client handshake is working.
-
+- The click counter is script state. It should keep its current value across Rust hotpatches, so you can confirm the patch does not force a full `script_mod!` reload.
