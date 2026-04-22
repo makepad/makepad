@@ -78,6 +78,7 @@ pub trait ToWasm {
         wrapper.push_str(&format!("{}(t0){{\n", Self::type_name()));
         wrapper.push_str("let app = this.app;\n");
         wrapper.push_str(&format!("this.reserve_u32({});\n", 4 + Self::u32_size()));
+        wrapper.push_str("let block_start = (this.u32_offset - this.u32_ptr) >> 1;\n");
         wrapper.push_str(&format!(
             "app.u32[this.u32_offset ++] = {};\n",
             id.0 & 0xffff_ffff
@@ -113,7 +114,8 @@ pub trait ToWasm {
 
         wrapper.push_str("if( (this.u32_offset & 1) != 0){ app.u32[this.u32_offset ++] = 0;}\n");
         wrapper.push_str("let new_len = (this.u32_offset - this.u32_ptr) >> 1;\n");
-        wrapper.push_str("app.u32[this.u32_ptr + block_len_offset] = new_len;\n");
+        wrapper.push_str("let block_len = new_len - block_start;\n");
+        wrapper.push_str("app.u32[this.u32_ptr + block_len_offset] = block_len;\n");
         wrapper.push_str("app.u32[this.u32_ptr + 1] = new_len;\n");
         wrapper.push_str("}\n");
         wrapper
@@ -222,5 +224,49 @@ impl<'a> ToWasmMsgRef<'a> {
     pub fn was_last_block(&mut self) -> bool {
         self.u32_offset += self.u32_offset & 1;
         self.u32_offset >> 1 >= self.data.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestBlock;
+
+    impl ToWasm for TestBlock {
+        fn u32_size() -> usize {
+            1
+        }
+
+        fn type_name() -> &'static str {
+            "TestBlock"
+        }
+
+        fn live_id() -> LiveId {
+            LiveId(1)
+        }
+
+        fn read_to_wasm(_inp: &mut ToWasmMsgRef) -> Self {
+            TestBlock
+        }
+
+        fn to_wasm_js_body(
+            out: &mut WasmJSOutput,
+            slot: usize,
+            _is_recur: bool,
+            prop: &str,
+            _temp: usize,
+        ) {
+            out.push_ln(slot, &format!("app.u32[this.u32_offset++] = {};", prop));
+        }
+    }
+
+    #[test]
+    fn generated_js_uses_per_block_length_not_total_message_length() {
+        let js = TestBlock::to_js_code();
+        assert!(js.contains("let block_start = (this.u32_offset - this.u32_ptr) >> 1;"));
+        assert!(js.contains("let block_len = new_len - block_start;"));
+        assert!(js.contains("app.u32[this.u32_ptr + block_len_offset] = block_len;"));
+        assert!(!js.contains("app.u32[this.u32_ptr + block_len_offset] = new_len;"));
     }
 }
