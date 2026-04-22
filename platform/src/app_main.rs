@@ -302,9 +302,7 @@ macro_rules! app_main {
                     if let Event::ScriptReapply = event {
                         let mut app_ref = app.borrow_mut();
                         if let Some(app) = app_ref.as_mut() {
-                            let value = app_value
-                                .borrow()
-                                .as_ref()
+                            let value = app_value.borrow().as_ref()
                                 .map(|r| $crate::ScriptValue::from(r.as_object()));
                             if let Some(value) = value {
                                 cx.with_vm(|vm| {
@@ -403,9 +401,7 @@ macro_rules! app_main {
                     if let Event::ScriptReapply = event {
                         let mut app_ref = app.borrow_mut();
                         if let Some(app) = app_ref.as_mut() {
-                            let value = app_value
-                                .borrow()
-                                .as_ref()
+                            let value = app_value.borrow().as_ref()
                                 .map(|r| $crate::ScriptValue::from(r.as_object()));
                             if let Some(value) = value {
                                 cx.with_vm(|vm| {
@@ -474,9 +470,7 @@ macro_rules! app_main {
                     if let Event::ScriptReapply = event {
                         let mut app_ref = app.borrow_mut();
                         if let Some(app) = app_ref.as_mut() {
-                            let value = app_value
-                                .borrow()
-                                .as_ref()
+                            let value = app_value.borrow().as_ref()
                                 .map(|r| $crate::ScriptValue::from(r.as_object()));
                             if let Some(value) = value {
                                 cx.with_vm(|vm| {
@@ -546,9 +540,7 @@ macro_rules! app_main {
                 if let Event::ScriptReapply = event {
                     let mut app_ref = app.borrow_mut();
                     if let Some(app) = app_ref.as_mut() {
-                        let value = app_value
-                            .borrow()
-                            .as_ref()
+                        let value = app_value.borrow().as_ref()
                             .map(|r| $crate::ScriptValue::from(r.as_object()));
                         if let Some(value) = value {
                             cx.with_vm(|vm| {

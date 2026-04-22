@@ -262,24 +262,15 @@ impl ScriptHook for Dock {
                                     DockItemSplitter::script_type_id_static(),
                                 ) {
                                     if !is_reload || !self.dock_items.contains_key(&id) {
-                                        let splitter =
-                                            DockItemSplitter::script_from_value(vm, kv.value);
+                                        let splitter = DockItemSplitter::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, splitter.to_dock_item());
                                     }
-                                } else if vm
-                                    .bx
-                                    .heap
-                                    .type_matches_id(val_obj, DockItemTabs::script_type_id_static())
-                                {
+                                } else if vm.bx.heap.type_matches_id(val_obj, DockItemTabs::script_type_id_static()) {
                                     if !is_reload || !self.dock_items.contains_key(&id) {
                                         let tabs = DockItemTabs::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, tabs.to_dock_item());
                                     }
-                                } else if vm
-                                    .bx
-                                    .heap
-                                    .type_matches_id(val_obj, DockItemTab::script_type_id_static())
-                                {
+                                } else if vm.bx.heap.type_matches_id(val_obj, DockItemTab::script_type_id_static()) {
                                     if !is_reload || !self.dock_items.contains_key(&id) {
                                         let tab = DockItemTab::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, tab.to_dock_item());

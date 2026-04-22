@@ -2547,22 +2547,6 @@ impl PortalListRef {
         inner.get_item(entry_id)
     }
 
-    /// Returns a cloned vector of all current items in this PortalList.
-    ///
-    /// Note: this is an expensive operation; if you just want to iterate
-    /// over the items, borrow the PortalListRef and call [`PortalList::items()`].
-    pub fn clone_items(&self) -> Vec<(LiveId, WidgetRef)> {
-        self.borrow()
-            .map(|inner| {
-                inner
-                    .items()
-                    .values()
-                    .map(|item| (item.template, item.widget.clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     pub fn position_of_item(&self, cx: &Cx, entry_id: usize) -> Option<f64> {
         let Some(inner) = self.borrow() else {
             return None;
