@@ -242,6 +242,8 @@ pub trait AppMain {
     {
     }
 
+    fn on_hotreload(&mut self, _cx: &mut Cx) {}
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event);
     fn ui_runner(&self) -> UiRunner<Self>
     where
@@ -349,6 +351,39 @@ where
 }
 
 #[doc(hidden)]
+pub fn dispatch_app_hotreload<T>(app: &mut T, cx: &mut Cx)
+where
+    T: AppMain,
+{
+    #[cfg(all(
+        feature = "hotreload",
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
+    ))]
+    {
+        crate::hotreload::subsecond::call(|| <dyn AppMain>::on_hotreload(app, cx));
+    }
+    #[cfg(not(all(
+        feature = "hotreload",
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "ios",
+            target_os = "tvos"
+        )
+    )))]
+    {
+        <dyn AppMain>::on_hotreload(app, cx);
+    }
+}
+
+#[doc(hidden)]
 pub fn register_hotreload_handler(_flag: &Arc<AtomicBool>) {
     #[cfg(all(
         feature = "hotreload",
@@ -375,7 +410,9 @@ pub fn apply_hotreload_if_pending<T>(
         return;
     }
 
-    let _ = app;
+    if let Some(app) = app.borrow_mut().as_mut() {
+        dispatch_app_hotreload(app, cx);
+    }
     cx.redraw_all();
 }
 
@@ -386,34 +423,47 @@ mod hotreload_tests {
 
     struct HotreloadStateApp {
         clicks: usize,
+        hotreloads: usize,
     }
 
     impl AppMain for HotreloadStateApp {
+        fn on_hotreload(&mut self, _cx: &mut Cx) {
+            self.hotreloads += 1;
+        }
+
         fn handle_event(&mut self, _cx: &mut Cx, _event: &Event) {}
     }
 
     #[test]
-    fn hotreload_pending_keeps_existing_app_state() {
-        let app = Rc::new(RefCell::new(Some(HotreloadStateApp { clicks: 7 })));
+    fn hotreload_pending_invokes_hook_and_keeps_existing_app_state() {
+        let app = Rc::new(RefCell::new(Some(HotreloadStateApp {
+            clicks: 7,
+            hotreloads: 0,
+        })));
         let hotreload_flag = Arc::new(AtomicBool::new(true));
         let mut cx = Cx::new(Box::new(|_, _| {}));
 
         apply_hotreload_if_pending(&app, &hotreload_flag, &mut cx);
 
         assert_eq!(app.borrow().as_ref().unwrap().clicks, 7);
+        assert_eq!(app.borrow().as_ref().unwrap().hotreloads, 1);
         assert!(!hotreload_flag.load(Ordering::Relaxed));
         assert!(cx.new_draw_event.redraw_all);
     }
 
     #[test]
     fn hotreload_pending_noops_when_no_patch_is_waiting() {
-        let app = Rc::new(RefCell::new(Some(HotreloadStateApp { clicks: 3 })));
+        let app = Rc::new(RefCell::new(Some(HotreloadStateApp {
+            clicks: 3,
+            hotreloads: 0,
+        })));
         let hotreload_flag = Arc::new(AtomicBool::new(false));
         let mut cx = Cx::new(Box::new(|_, _| {}));
 
         apply_hotreload_if_pending(&app, &hotreload_flag, &mut cx);
 
         assert_eq!(app.borrow().as_ref().unwrap().clicks, 3);
+        assert_eq!(app.borrow().as_ref().unwrap().hotreloads, 0);
         assert!(!cx.new_draw_event.redraw_all);
     }
 }
@@ -442,13 +492,13 @@ macro_rules! app_main {
                         *app.borrow_mut() = Some($crate::build_app_from_script::<$app>(cx));
                         cx.start_hot_reload_file_observer_if_requested();
                     }
-                    $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
                     if let Event::LiveEdit = event {
                         let mut app_ref = app.borrow_mut();
                         if let Some(app) = app_ref.as_mut() {
                             $crate::apply_live_edit(app, cx);
                         }
                     }
+                    $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
                     if let Some(app) = &mut *app.borrow_mut() {
                         $crate::dispatch_app_event(app, cx, event);
                     }
@@ -504,13 +554,13 @@ macro_rules! app_main {
                         *app.borrow_mut() = Some($crate::build_app_from_script::<$app>(cx));
                         cx.start_hot_reload_file_observer_if_requested();
                     }
-                    $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
                     if let Event::LiveEdit = event {
                         let mut app_ref = app.borrow_mut();
                         if let Some(app) = app_ref.as_mut() {
                             $crate::apply_live_edit(app, cx);
                         }
                     }
+                    $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
                     if let Some(app) = &mut *app.borrow_mut() {
                         $crate::dispatch_app_event(app, cx, event);
                     }
@@ -536,13 +586,13 @@ macro_rules! app_main {
                         *app.borrow_mut() = Some($crate::build_app_from_script::<$app>(cx));
                         cx.start_hot_reload_file_observer_if_requested();
                     }
-                    $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
                     if let Event::LiveEdit = event {
                         let mut app_ref = app.borrow_mut();
                         if let Some(app) = app_ref.as_mut() {
                             $crate::apply_live_edit(app, cx);
                         }
                     }
+                    $crate::apply_hotreload_if_pending::<$app>(&app, &hotreload_flag, cx);
                     if let Some(app) = &mut *app.borrow_mut() {
                         $crate::dispatch_app_event(app, cx, event);
                     }

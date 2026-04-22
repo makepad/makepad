@@ -6,7 +6,7 @@ Minimal example to validate **subsecond Rust hotpatching** (Dioxus subsecond) in
 
 Open `examples/subsecond_example/src/main.rs` and change the string returned by `hotpatch_message()`.
 
-Then press **Render** in the UI to refresh the marker text through the patched Rust handler.
+The marker should refresh automatically after the hotpatch is applied.
 
 ### Run on iOS Simulator (hotpatch)
 
@@ -16,7 +16,7 @@ From the repo root:
 dx serve --hotpatch --ios --package makepad-example-subsecond-example
 ```
 
-Edit `hotpatch_message()` and save — you should see `dx` report **Hot-patching** without restarting the app.
+Edit `hotpatch_message()` and save — you should see `dx` report **Hot-patching** and the marker update without restarting the app.
 
 ### Run on macOS (hotpatch)
 

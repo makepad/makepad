@@ -4474,6 +4474,7 @@ View{
                     file: "streaming_test".to_string(),
                     line: 0,
                     column: 0,
+                    kind: ScriptModKind::Eval,
                     code: String::new(),
                     values: vec![],
                 };
@@ -4501,6 +4502,7 @@ View{
                     file: "streaming_20char".to_string(),
                     line: 0,
                     column: 0,
+                    kind: ScriptModKind::Eval,
                     code: String::new(),
                     values: vec![],
                 };

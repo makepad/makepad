@@ -5,7 +5,7 @@ use makepad_widgets::*;
 app_main!(App);
 
 fn hotpatch_message() -> &'static str {
-    "Hotpatch marker: v1 (edit me)"
+    "Hotpatttch marker: v1 (edit me)"
 }
 
 script_mod! {
@@ -22,7 +22,7 @@ script_mod! {
                 ui.main_view.render()
             }
             main_window := Window{
-                window.inner_size: vec2(560, 280)
+                window.inner_size: vec2(560, 480)
                 body +: {
                     width: Fill
                     height: Fill
@@ -69,7 +69,7 @@ script_mod! {
                         }
 
                         render_button := Button{
-                            text: "HEY"
+                            text: "hyyyy"
                         }
                     }
                 }
@@ -88,7 +88,7 @@ impl App {
     fn refresh_marker(&self, cx: &mut Cx) {
         self.ui
             .label(cx, ids!(marker_label))
-            .set_text(cx, &format!("Marssker: {}", hotpatch_message()));
+            .set_text(cx, &format!("whaaats Up: {}", hotpatch_message()));
     }
 }
 
@@ -96,7 +96,7 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(cx, ids!(bump_button)).clicked(actions) {
             script_eval!(cx, {
-                mod.state.clicks += 2
+                mod.state.clicks += 4
                 ui.main_view.render()
             });
             self.refresh_marker(cx);
@@ -113,6 +113,10 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         self::script_mod(vm)
+    }
+
+    fn on_hotreload(&mut self, cx: &mut Cx) {
+        self.refresh_marker(cx);
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {

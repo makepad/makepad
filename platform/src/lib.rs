@@ -100,6 +100,7 @@ pub use ::windows;
 pub use makepad_futures;
 pub use makepad_script_std::makepad_network;
 pub use makepad_script_std::makepad_script;
+pub use makepad_script_std::makepad_script::ScriptModKind;
 pub use makepad_studio_protocol as studio;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap

@@ -46,6 +46,7 @@ impl Splash {
             file: String::new(),
             line: self_id,
             column: 0,
+            kind: makepad_script::ScriptModKind::Eval,
             code: String::new(),
             values: vec![],
         };

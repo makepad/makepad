@@ -40,6 +40,13 @@ impl ScriptModKey {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ScriptModKind {
+    TopLevel,
+    #[default]
+    Eval,
+}
+
 #[derive(Default, Debug)]
 pub struct ScriptMod {
     pub cargo_manifest_path: String,
@@ -47,6 +54,7 @@ pub struct ScriptMod {
     pub file: String,
     pub line: usize,
     pub column: usize,
+    pub kind: ScriptModKind,
     pub code: String,
     pub values: Vec<ScriptValue>,
 }
