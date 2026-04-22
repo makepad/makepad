@@ -580,9 +580,46 @@ impl Cx {
     }
 
     pub(crate) fn run_live_edit_if_needed(&mut self, _backend: &str) {
-        if self.handle_live_edit() {
+        // Two independent triggers with distinct semantics:
+        //
+        //  1. `handle_live_edit()` returns `true` when the file watcher
+        //     delivered a hot-reloaded `script_mod!` block. We must re-run
+        //     `script_mod` (source-defined module-level assignments) before
+        //     re-applying the widget tree, because the reloaded code may
+        //     have changed those assignments. That's what `Event::LiveEdit`
+        //     signals — the AppMain handler re-runs `script_mod` under
+        //     `vm.with_reload(...)` and then applies the result with
+        //     `Apply::Reload`. Only this path needs `reset_for_live_reload`.
+        //
+        //  2. `pending_script_reapply` is set by `Cx::request_script_reapply`
+        //     after runtime mutations to the script heap (e.g. `script_eval!`
+        //     overriding a user preference). Re-running `script_mod` would
+        //     clobber those overrides by reasserting source-defined defaults.
+        //     Instead we fire `Event::ScriptReapply`, which the AppMain
+        //     handler services by re-applying the previously-captured app
+        //     value with `Apply::Reload` — no `script_mod` re-run, so the
+        //     overrides stick.
+        //
+        // If a file change just happened AND a user-level handler then
+        // requests a reapply (e.g. an `Event::LiveEdit` handler re-broadcasting
+        // preferences so a fresh source reload doesn't lose them), we follow
+        // up with a single `ScriptReapply` pass. That second pass is bounded
+        // — any further requests settle on the next event-loop tick rather
+        // than looping inside this one.
+        let file_edit_applied = self.handle_live_edit();
+        if file_edit_applied {
             self.draw_shaders.reset_for_live_reload();
+            self.pending_script_reapply = false;
             self.call_event_handler(&Event::LiveEdit);
+            self.redraw_all();
+            if self.pending_script_reapply {
+                self.pending_script_reapply = false;
+                self.call_event_handler(&Event::ScriptReapply);
+                self.redraw_all();
+            }
+        } else if self.pending_script_reapply {
+            self.pending_script_reapply = false;
+            self.call_event_handler(&Event::ScriptReapply);
             self.redraw_all();
         }
     }

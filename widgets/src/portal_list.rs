@@ -2,6 +2,7 @@ use {
     crate::{
         animator::AnimatorImpl,
         event::{TouchState, TAP_COUNT_DISTANCE},
+        flat_list::WidgetItem,
         makepad_derive_widget::*,
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
@@ -109,12 +110,6 @@ impl ListDrawState {
     fn is_down_again(&self) -> bool {
         matches!(self, Self::DownAgain { .. })
     }
-}
-
-#[derive(Default)]
-struct WidgetItem {
-    widget: WidgetRef,
-    template: LiveId,
 }
 
 struct AlignItem {
@@ -1168,6 +1163,13 @@ impl PortalList {
         self.items
             .get(&entry_id)
             .map(|item| (item.template, item.widget.clone()))
+    }
+
+    /// Returns the current in-use items in this PortalList, keyed by entry id.
+    ///
+    /// This excludes widgets in the reusable pool.
+    pub fn items(&self) -> &ComponentMap<usize, WidgetItem> {
+        &self.items
     }
 
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {

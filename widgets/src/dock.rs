@@ -237,8 +237,19 @@ impl ScriptHook for Dock {
         scope: &mut Scope,
         value: ScriptValue,
     ) {
-        // Collect templates and dock items from the object's vec
-        // Only collect during template applies (not eval) to avoid storing temporary objects
+        // Collect templates and dock items from the object's vec. Only
+        // during template applies (not eval) to avoid storing temporaries.
+        //
+        // On `Apply::Reload` we re-collect content templates — that's
+        // the point of reload: pick up freshly-evaluated `mod.widgets.*`
+        // entries. But dock-item entries (Splitter / Tabs / Tab) describe
+        // the *layout*, which at runtime may differ from the DSL defaults
+        // (tabs opened, splitters moved, etc.). Re-inserting from the DSL
+        // would clobber that runtime state and wipe the whole dock. On
+        // reload we therefore only insert dock items for IDs that don't
+        // already exist — allowing LiveEdit to add new default items while
+        // preserving runtime state for existing ones.
+        let is_reload = apply.is_reload();
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 vm.vec_with(obj, |vm, vec| {
@@ -250,23 +261,20 @@ impl ScriptHook for Dock {
                                     val_obj,
                                     DockItemSplitter::script_type_id_static(),
                                 ) {
-                                    let splitter =
-                                        DockItemSplitter::script_from_value(vm, kv.value);
-                                    self.dock_items.insert(id, splitter.to_dock_item());
-                                } else if vm
-                                    .bx
-                                    .heap
-                                    .type_matches_id(val_obj, DockItemTabs::script_type_id_static())
-                                {
-                                    let tabs = DockItemTabs::script_from_value(vm, kv.value);
-                                    self.dock_items.insert(id, tabs.to_dock_item());
-                                } else if vm
-                                    .bx
-                                    .heap
-                                    .type_matches_id(val_obj, DockItemTab::script_type_id_static())
-                                {
-                                    let tab = DockItemTab::script_from_value(vm, kv.value);
-                                    self.dock_items.insert(id, tab.to_dock_item());
+                                    if !is_reload || !self.dock_items.contains_key(&id) {
+                                        let splitter = DockItemSplitter::script_from_value(vm, kv.value);
+                                        self.dock_items.insert(id, splitter.to_dock_item());
+                                    }
+                                } else if vm.bx.heap.type_matches_id(val_obj, DockItemTabs::script_type_id_static()) {
+                                    if !is_reload || !self.dock_items.contains_key(&id) {
+                                        let tabs = DockItemTabs::script_from_value(vm, kv.value);
+                                        self.dock_items.insert(id, tabs.to_dock_item());
+                                    }
+                                } else if vm.bx.heap.type_matches_id(val_obj, DockItemTab::script_type_id_static()) {
+                                    if !is_reload || !self.dock_items.contains_key(&id) {
+                                        let tab = DockItemTab::script_from_value(vm, kv.value);
+                                        self.dock_items.insert(id, tab.to_dock_item());
+                                    }
                                 } else {
                                     // Not a dock item, treat as content template - root it
                                     self.templates

@@ -437,18 +437,23 @@ impl ScriptHook for StackNavigation {
 
 impl Widget for StackNavigation {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        // If the event requires visibility, only forward it to the visible views.
-        // If the event does not require visibility, forward it to all views,
-        // ensuring that we don't forward it to the root view twice.
-        let mut visible_views = self.get_visible_views(cx);
-        if !event.requires_visibility() {
-            let root_view = self.view.widget(cx, ids!(root_view));
-            if !visible_views.iter().any(|(_, w)| w == &root_view) {
-                visible_views.insert(0, (live_id!(root_view), root_view));
+        if event.requires_visibility() {
+            // Visibility-gated input (e.g., MouseDown): only forward to the
+            // currently-visible stack views, so inactive views don't receive
+            // input they shouldn't.
+            for (_id, widget_ref) in self.get_visible_views(cx) {
+                widget_ref.handle_event(cx, event, scope);
             }
-        }
-        for (_id, widget_ref) in visible_views {
-            widget_ref.handle_event(cx, event, scope);
+        } else {
+            // App-wide event (e.g., `Event::Actions`): delegate to the inner
+            // `View`, which propagates to every child — including inactive
+            // stack views. This lets them react to global state changes
+            // (e.g., preference updates) that are broadcast once and have no
+            // other way of reaching views that aren't currently on the stack.
+            // `View::handle_event` still gates children whose own `visible`
+            // flag is false, but only for events that require visibility,
+            // which this branch doesn't cover.
+            self.view.handle_event(cx, event, scope);
         }
 
         // Leaving this to the final step, so that the active stack view can handle the event first.
