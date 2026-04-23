@@ -422,6 +422,19 @@ impl ScriptHook for CheckBox {
         vm.with_cx_mut(|cx| {
             let active = self.animator_in_state(cx, ids!(active.on));
             self.animator_cut(cx, if active { ids!(active.on) } else { ids!(active.off) });
+
+            if self.animator_in_state(cx, ids!(hover.down)) {
+                self.animator_cut(cx, ids!(hover.down));
+            } else {
+                let hover_on = self.animator_in_state(cx, ids!(hover.on));
+                self.animator_cut(cx, if hover_on { ids!(hover.on) } else { ids!(hover.off) });
+            }
+
+            let focus_on = self.animator_in_state(cx, ids!(focus.on));
+            self.animator_cut(cx, if focus_on { ids!(focus.on) } else { ids!(focus.off) });
+
+            let disabled_on = self.animator_in_state(cx, ids!(disabled.on));
+            self.animator_cut(cx, if disabled_on { ids!(disabled.on) } else { ids!(disabled.off) });
         });
     }
 }
