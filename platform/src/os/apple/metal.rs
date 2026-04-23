@@ -1205,10 +1205,13 @@ impl Cx {
                 }
             }
 
-            let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
             if let Some(os_shader_id) = found_os_shader_id {
+                self.draw_shaders.record_backend_reuse();
+                let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
                 cx_shader.os_shader_id = Some(os_shader_id);
             } else {
+                self.draw_shaders.record_backend_compile();
+                let cx_shader = &mut self.draw_shaders.shaders[draw_shader_id];
                 if let Some(shp) =
                     CxOsDrawShader::new(metal_cx, mtlsl, &cx_shader.mapping, &bindings)
                 {
@@ -1414,8 +1417,8 @@ impl DrawVars {
         if let Some(io_self) = value.as_object() {
             // Cache 1: Check if this exact object has been compiled before
             {
-                let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                let cx = vm.host.cx_mut();
+                if let Some(shader_id) = cx.draw_shaders.cached_by_object(io_self) {
                     // log!("Shader cache HIT (object_id)");
                     self.finalize_cached_shader(vm, shader_id);
                     return;
@@ -1425,13 +1428,8 @@ impl DrawVars {
             // Cache 2: Compute function hash and check if we've seen these functions before
             let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
             {
-                let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
-                    // Add to object_id cache for faster lookup next time
-                    let cx = vm.host.cx_mut();
-                    cx.draw_shaders
-                        .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                let cx = vm.host.cx_mut();
+                if let Some(shader_id) = cx.draw_shaders.cached_by_functions(fnhash, io_self) {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -1516,16 +1514,8 @@ impl DrawVars {
 
             // Cache 3: Check if this exact code has been compiled before
             {
-                let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
-                    // Add to both object_id and function hash caches
-                    let cx = vm.host.cx_mut();
-                    cx.draw_shaders
-                        .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
-                    cx.draw_shaders
-                        .cache_functions_to_shader
-                        .insert(fnhash, shader_id);
+                let cx = vm.host.cx_mut();
+                if let Some(shader_id) = cx.draw_shaders.cached_by_code(&code, fnhash, io_self) {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -1580,12 +1570,7 @@ impl DrawVars {
 
             // Add to all caches
             cx.draw_shaders
-                .cache_object_id_to_shader
-                .insert(io_self, shader_id);
-            cx.draw_shaders
-                .cache_functions_to_shader
-                .insert(fnhash, shader_id);
-            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
+                .insert_cache_entries(io_self, fnhash, code, shader_id);
 
             // Add to compile set for later Metal compilation
             cx.draw_shaders.compile_set.insert(index);

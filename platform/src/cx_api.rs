@@ -990,6 +990,7 @@ impl Cx {
 
     pub fn start_timeout(&mut self, delay: f64) -> Timer {
         self.timer_id += 1;
+        self.performance_stats.redraw_cause_stats.timer_requests += 1;
         self.platform_ops.push(CxOsOp::StartTimer {
             timer_id: self.timer_id,
             interval: delay,
@@ -1000,6 +1001,7 @@ impl Cx {
 
     pub fn start_interval(&mut self, interval: f64) -> Timer {
         self.timer_id += 1;
+        self.performance_stats.redraw_cause_stats.timer_requests += 1;
         self.platform_ops.push(CxOsOp::StartTimer {
             timer_id: self.timer_id,
             interval,
@@ -1130,11 +1132,17 @@ impl Cx {
     }
 
     pub fn repaint_pass(&mut self, draw_pass_id: DrawPassId) {
+        self.performance_stats
+            .redraw_cause_stats
+            .repaint_pass_requests += 1;
         let cxpass = &mut self.passes[draw_pass_id];
         cxpass.paint_dirty = true;
     }
 
     pub fn repaint_pass_and_child_passes(&mut self, draw_pass_id: DrawPassId) {
+        self.performance_stats
+            .redraw_cause_stats
+            .repaint_pass_requests += 1;
         let cxpass = &mut self.passes[draw_pass_id];
         cxpass.paint_dirty = true;
         for sub_pass_id in self.passes.id_iter() {
@@ -1164,6 +1172,9 @@ impl Cx {
     }
 
     pub fn redraw_all(&mut self) {
+        self.performance_stats
+            .redraw_cause_stats
+            .redraw_all_requests += 1;
         self.new_draw_event.redraw_all = true;
     }
 
@@ -1202,6 +1213,9 @@ impl Cx {
         {
             return;
         }
+        self.performance_stats
+            .redraw_cause_stats
+            .redraw_list_requests += 1;
         self.new_draw_event.draw_lists.push(draw_list_id);
     }
 
@@ -1218,6 +1232,9 @@ impl Cx {
         {
             return;
         }
+        self.performance_stats
+            .redraw_cause_stats
+            .redraw_list_and_children_requests += 1;
         self.new_draw_event
             .draw_lists_and_children
             .push(draw_list_id);
@@ -1260,6 +1277,9 @@ impl Cx {
     pub fn new_next_frame(&mut self) -> NextFrame {
         let res = NextFrame(self.next_frame_id);
         self.next_frame_id += 1;
+        self.performance_stats
+            .redraw_cause_stats
+            .next_frame_requests += 1;
         self.new_next_frames.insert(res);
         res
     }

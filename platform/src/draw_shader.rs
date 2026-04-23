@@ -22,6 +22,17 @@ use {
 // Re-export UniformBufferBindings for use in other modules
 pub use makepad_script::shader::UniformBufferBindings;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CxDrawShaderCacheStats {
+    pub object_hits: u64,
+    pub function_hits: u64,
+    pub code_hits: u64,
+    pub misses: u64,
+    pub inserts: u64,
+    pub backend_reuses: u64,
+    pub backend_compiles: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
@@ -90,6 +101,7 @@ pub struct CxDrawShaders {
     pub cache_object_id_to_shader: HashMap<ScriptObject, DrawShaderId>,
     pub cache_functions_to_shader: LiveIdMap<LiveId, DrawShaderId>,
     pub cache_code_to_shader: HashMap<CxDrawShaderCode, DrawShaderId>,
+    pub cache_stats: CxDrawShaderCacheStats,
     //pub ptr_to_item: HashMap<DrawShaderPtr, CxDrawShaderItem>,
     //pub fingerprints: Vec<DrawShaderFingerprint>,
     //pub error_set: HashSet<DrawShaderPtr>,
@@ -100,6 +112,70 @@ impl CxDrawShaders {
     pub fn reset_for_live_reload(&mut self) {
         self.cache_object_id_to_shader.clear();
         self.cache_functions_to_shader.clear();
+    }
+
+    pub fn reset_cache_stats(&mut self) {
+        self.cache_stats = CxDrawShaderCacheStats::default();
+    }
+
+    pub fn cached_by_object(&mut self, object: ScriptObject) -> Option<DrawShaderId> {
+        let shader_id = self.cache_object_id_to_shader.get(&object).copied();
+        if shader_id.is_some() {
+            self.cache_stats.object_hits += 1;
+        }
+        shader_id
+    }
+
+    pub fn cached_by_functions(
+        &mut self,
+        functions_hash: LiveId,
+        object: ScriptObject,
+    ) -> Option<DrawShaderId> {
+        let shader_id = self.cache_functions_to_shader.get(&functions_hash).copied();
+        if let Some(shader_id) = shader_id {
+            self.cache_stats.function_hits += 1;
+            self.cache_object_id_to_shader.insert(object, shader_id);
+        }
+        shader_id
+    }
+
+    pub fn cached_by_code(
+        &mut self,
+        code: &CxDrawShaderCode,
+        functions_hash: LiveId,
+        object: ScriptObject,
+    ) -> Option<DrawShaderId> {
+        let shader_id = self.cache_code_to_shader.get(code).copied();
+        if let Some(shader_id) = shader_id {
+            self.cache_stats.code_hits += 1;
+            self.cache_object_id_to_shader.insert(object, shader_id);
+            self.cache_functions_to_shader
+                .insert(functions_hash, shader_id);
+        }
+        shader_id
+    }
+
+    pub fn insert_cache_entries(
+        &mut self,
+        object: ScriptObject,
+        functions_hash: LiveId,
+        code: CxDrawShaderCode,
+        shader_id: DrawShaderId,
+    ) {
+        self.cache_stats.misses += 1;
+        self.cache_stats.inserts += 1;
+        self.cache_object_id_to_shader.insert(object, shader_id);
+        self.cache_functions_to_shader
+            .insert(functions_hash, shader_id);
+        self.cache_code_to_shader.insert(code, shader_id);
+    }
+
+    pub fn record_backend_reuse(&mut self) {
+        self.cache_stats.backend_reuses += 1;
+    }
+
+    pub fn record_backend_compile(&mut self) {
+        self.cache_stats.backend_compiles += 1;
     }
 }
 
@@ -112,6 +188,56 @@ impl Cx {
         self.draw_shaders.fingerprints.clear();
         self.draw_shaders.error_set.clear();
         self.draw_shaders.error_fingerprints.clear();*/
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object(index: u32) -> ScriptObject {
+        ScriptObject::new(index, 0)
+    }
+
+    #[test]
+    fn shader_cache_lookups_record_hits_without_inserting_duplicates() {
+        let mut shaders = CxDrawShaders::default();
+        let shader_id = DrawShaderId { index: 7 };
+        let code = CxDrawShaderCode::Combined {
+            code: "shader-code".to_string(),
+        };
+        let functions_hash = LiveId(42);
+        let first_object = object(1);
+        let second_object = object(2);
+        let third_object = object(3);
+
+        shaders.insert_cache_entries(first_object, functions_hash, code.clone(), shader_id);
+        assert_eq!(shaders.cache_stats.inserts, 1);
+        assert_eq!(shaders.cache_stats.misses, 1);
+        assert_eq!(shaders.cache_code_to_shader.len(), 1);
+
+        assert_eq!(shaders.cached_by_object(first_object), Some(shader_id));
+        assert_eq!(
+            shaders.cached_by_functions(functions_hash, second_object),
+            Some(shader_id)
+        );
+        assert_eq!(
+            shaders.cached_by_code(&code, functions_hash, third_object),
+            Some(shader_id)
+        );
+
+        assert_eq!(shaders.cache_stats.object_hits, 1);
+        assert_eq!(shaders.cache_stats.function_hits, 1);
+        assert_eq!(shaders.cache_stats.code_hits, 1);
+        assert_eq!(shaders.cache_stats.inserts, 1);
+        assert_eq!(shaders.cache_code_to_shader.len(), 1);
+        assert_eq!(
+            shaders
+                .cache_object_id_to_shader
+                .get(&third_object)
+                .copied(),
+            Some(shader_id)
+        );
     }
 }
 
