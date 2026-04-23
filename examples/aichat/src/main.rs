@@ -736,6 +736,16 @@ Node shapes: `"rect"` (default), `"oval"` (start/end), `"diamond"` (decision —
 {"type":"flowchart","nodes":[{"id":"req","label":"Receive","tag":"IN","shape":"oval"},{"id":"auth","label":"Authorized?","shape":"diamond"},{"id":"serve","label":"Serve","tag":"OUT","shape":"rect"}],"edges":[{"from":"req","to":"auth"},{"from":"auth","to":"serve","label":"yes","role":"primary"}],"accent_idx":2}
 ```
 
+### `architecture` — 2D layered system diagram with role-tagged nodes
+
+For cloud / service / data-flow diagrams where each box plays a distinct architectural role. Nodes get a `role`: `"focal"` (THE highlighted component — tint fill, accent stroke), `"backend"` (compute — white fill, ink stroke), `"store"` (database / cache — light ink fill, muted stroke), `"external"` (client / 3rd-party — faded), `"input"` (user input source), `"optional"` (sidecar / observability), `"security"` (auth / encryption). Layout is left-to-right layered; `"orientation":"tb"` makes it top-down.
+
+Edges reuse the flowchart `role` enum: `"default"`, `"primary"`, `"external"`.
+
+```diagram
+{"type":"architecture","nodes":[{"id":"client","label":"Reader","tag":"EXT","role":"external"},{"id":"cdn","label":"Cloudflare","tag":"EDGE","role":"backend","sublabel":"Pages · cache"},{"id":"app","label":"Astro Origin","tag":"ORIG","role":"focal","sublabel":"SSR + MDX"},{"id":"mdx","label":"MDX Bundle","tag":"BUN","role":"store"},{"id":"cms","label":"Content CMS","tag":"CMS","role":"store"}],"edges":[{"from":"client","to":"cdn","label":"HTTPS","role":"external"},{"from":"cdn","to":"app","label":"SSR","role":"primary"},{"from":"app","to":"mdx","label":"READ"},{"from":"app","to":"cms","label":"QUERY"}]}
+```
+
 ### Rules
 
 - Editorial density: target 4 to 10 primary elements per diagram; if you need more, split into two diagrams.
