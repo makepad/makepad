@@ -116,11 +116,15 @@ export function init_env(env) {
 export class WasmBridge {
     static SPLIT_DATA_VERSION = 2;
     static SPLIT_SLOT_EXPORT_PREFIX = "$s";
+    static SHARED_WASM_MAX_PAGES = 32768;
 
     constructor(wasm, dispatch) {
         this.wasm = wasm;
         if (wasm === undefined) {
             return console.error("Wasm object is undefined, check your URL and build output")
+        }
+        if (wasm instanceof Error) {
+            throw wasm;
         }
         this.wasm._bridge = this;
         this.dispatch = dispatch;
@@ -254,13 +258,51 @@ export class WasmBridge {
         return Date.now() / 1000.0;
     }
 
-    static create_shared_memory() {
+    static parse_required_memory_pages(error) {
+        const message = error && error.message ? error.message : `${error}`;
+        const match = message.match(/declared initial of\s+(\d+)/);
+        if (!match) {
+            return null;
+        }
+        const pages = Number.parseInt(match[1], 10);
+        return Number.isFinite(pages) && pages > 0 ? pages : null;
+    }
+
+    static create_shared_memory(initial_pages = 64) {
         let timeout = setTimeout(_ => {
             document.body.innerHTML = "<div style='margin-top:30px;margin-left:30px; color:white;'>Please close and re-open the browsertab - Shared memory allocation failed, this is a bug of iOS safari and apple needs to fix it.</div>"
-        }, 1000)
-        let mem = new WebAssembly.Memory({ initial: 64, maximum: 16384, shared: true });
-        clearTimeout(timeout);
-        return mem;
+        }, 1000);
+        try {
+            return new WebAssembly.Memory({
+                initial: initial_pages,
+                maximum: this.SHARED_WASM_MAX_PAGES,
+                shared: true,
+            });
+        }
+        catch (error) {
+            throw this.wrap_threaded_wasm_error(
+                error,
+                "Failed to allocate shared WebAssembly memory for threaded wasm"
+            );
+        }
+        finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    static wrap_threaded_wasm_error(error, prefix = "Failed to initialize threaded wasm") {
+        const details = [];
+        if (typeof SharedArrayBuffer === "undefined") {
+            details.push("SharedArrayBuffer is unavailable in this browser context");
+        }
+        if (globalThis.crossOriginIsolated === false) {
+            details.push("crossOriginIsolated is false; threaded wasm requires COOP/COEP isolation");
+        }
+        const error_message = error && error.message ? error.message : `${error}`;
+        const detail_suffix = details.length > 0 ? ` ${details.join(". ")}.` : "";
+        const wrapped = new Error(`${prefix}: ${error_message}.${detail_suffix}`);
+        wrapped.cause = error;
+        return wrapped;
     }
 
     static async supports_simd() {
@@ -479,22 +521,32 @@ export class WasmBridge {
             return wasm
         }, error => {
             if (error.name == "LinkError") { // retry as multithreaded
-                env.memory = this.create_shared_memory();
-                return WebAssembly.instantiate(module, { env }).then(async wasm => {
-                    set_wasm(wasm);
-                    wasm._has_thread_support = true;
-                    wasm._memory = env.memory;
-                    wasm._module = module;
-                    wasm._env = env;
-                    return wasm
-                }, error => {
-                    console.error(error);
-                    return error
+                let current_initial_pages = 64;
+                const instantiate_with_shared_memory = (initial_pages = 64) => {
+                    current_initial_pages = initial_pages;
+                    env.memory = this.create_shared_memory(initial_pages);
+                    return WebAssembly.instantiate(module, { env }).then(async wasm => {
+                        set_wasm(wasm);
+                        wasm._has_thread_support = true;
+                        wasm._memory = env.memory;
+                        wasm._module = module;
+                        wasm._env = env;
+                        return wasm
+                    });
+                };
+
+                return instantiate_with_shared_memory().catch(error => {
+                    const required_pages = this.parse_required_memory_pages(error);
+                    if (required_pages !== null && required_pages > current_initial_pages) {
+                        return instantiate_with_shared_memory(required_pages).catch(error => {
+                            throw this.wrap_threaded_wasm_error(error);
+                        });
+                    }
+                    throw this.wrap_threaded_wasm_error(error);
                 })
             }
             else {
-                console.error(error);
-                return error
+                throw error;
             }
         })
     }
@@ -526,6 +578,7 @@ export class WasmBridge {
                 return wasm;
             })().catch(error => {
                 console.error(error);
+                throw error;
             });
         }
         return WebAssembly.compileStreaming(fetch(wasm_url))
