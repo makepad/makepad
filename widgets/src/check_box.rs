@@ -418,6 +418,12 @@ impl ScriptHook for CheckBox {
             });
         }
     }
+    fn on_after_reload(&mut self, vm: &mut ScriptVm) {
+        vm.with_cx_mut(|cx| {
+            let active = self.animator_in_state(cx, ids!(active.on));
+            self.animator_cut(cx, if active { ids!(active.on) } else { ids!(active.off) });
+        });
+    }
 }
 
 #[derive(Clone, Debug, Default)]
