@@ -889,10 +889,14 @@ impl ShaderBackend {
             }
             Self::Hlsl => {
                 fn join_n(lit: &str, n: usize) -> String {
-                    std::iter::repeat(lit)
-                        .take(n)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    let mut out = String::new();
+                    for index in 0..n {
+                        if index > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(lit);
+                    }
+                    out
                 }
                 match ty_name {
                     // Scalars

@@ -832,7 +832,7 @@ impl ShaderFnCompiler {
         let (ret, fn_name) =
             Self::compile_shader_def(vm, output, self.trap.pass(), name, fnobj, sself, args);
         if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust) {
-            out = Self::glsl_rewrite_call_args(vm, &out, &resolved_arg_types);
+            out = Self::glsl_rewrite_call_args(vm, out, &resolved_arg_types);
         }
         out.insert_str(0, &fn_name);
         out.push_str(")");
@@ -878,25 +878,26 @@ impl ShaderFnCompiler {
 
     fn glsl_rewrite_call_args(
         vm: &ScriptVm,
-        raw_args: &str,
+        raw_args: String,
         resolved_arg_types: &[ScriptPodType],
     ) -> String {
         if resolved_arg_types.is_empty() {
-            return raw_args.to_string();
+            return raw_args;
         }
         if !resolved_arg_types.iter().copied().any(|resolved_ty| {
             vm.bx.heap.pod_types[resolved_ty.index as usize]
                 .ty
                 .is_float_type()
         }) {
-            return raw_args.to_string();
+            return raw_args;
         }
 
-        let mut parts = Self::split_call_args_top_level(raw_args);
+        let mut parts = Self::split_call_args_top_level(&raw_args);
         if parts.is_empty() || parts.len() < resolved_arg_types.len() {
-            return raw_args.to_string();
+            return raw_args;
         }
 
+        let mut changed = false;
         let explicit_start = parts.len() - resolved_arg_types.len();
         for (i, resolved_ty) in resolved_arg_types.iter().copied().enumerate() {
             if !vm.bx.heap.pod_types[resolved_ty.index as usize]
@@ -909,10 +910,15 @@ impl ShaderFnCompiler {
             let value = parts[arg_index].trim();
             if Self::is_simple_int_literal(value) {
                 parts[arg_index] = format!("{}.0", value);
+                changed = true;
             }
         }
 
-        parts.join(", ")
+        if changed {
+            parts.join(", ")
+        } else {
+            raw_args
+        }
     }
 
     fn split_call_args_top_level(raw_args: &str) -> Vec<String> {
