@@ -1153,6 +1153,22 @@ impl LaidoutRow {
                 next_glyph_group[0].origin_in_lpxs.x
             });
             let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
+            let text = &self.text[start..end];
+            if text.is_ascii() {
+                let byte_count = text.len();
+                if byte_count == 0 {
+                    continue;
+                }
+                let byte_width_in_lpxs = width_in_lpxs / byte_count as f32;
+                let mut current_x_in_lpxs = start_x_in_lpxs;
+                for byte_index in 0..byte_count {
+                    if x_in_lpxs < current_x_in_lpxs + 0.5 * byte_width_in_lpxs {
+                        return start + byte_index;
+                    }
+                    current_x_in_lpxs += byte_width_in_lpxs;
+                }
+                continue;
+            }
             let grapheme_count = self.text[start..end].graphemes(true).count();
             let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
             let mut current_x_in_lpxs = start_x_in_lpxs;
@@ -1187,6 +1203,17 @@ impl LaidoutRow {
                     next_glyph_group[0].origin_in_lpxs.x
                 });
             let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
+            let text = &self.text[start..end];
+            if text.is_ascii() {
+                if text.is_empty() {
+                    continue;
+                }
+                if (start..end).contains(&index) {
+                    let byte_width_in_lpxs = width_in_lpxs / text.len() as f32;
+                    return start_x_in_lpxs + (index - start) as f32 * byte_width_in_lpxs;
+                }
+                continue;
+            }
             let grapheme_count = self.text[start..end].graphemes(true).count();
             let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
             let mut current_x_in_lpxs = start_x_in_lpxs;
@@ -1253,6 +1280,7 @@ mod tests {
             font::FontId,
             font_family::FontFamilyId,
             loader::{FontDefinition, FontFamilyDefinition},
+            selection::Cursor,
         },
     };
     use std::path::PathBuf;
@@ -1422,5 +1450,32 @@ mod tests {
             .map(|row| row.text.len() + usize::from(row.newline))
             .sum();
         assert_eq!(consumed_text_len, text.len());
+    }
+
+    #[test]
+    fn ascii_hit_testing_roundtrips_byte_indices() {
+        let (mut layouter, font_family_id) = test_layouter();
+        let text = "plain ascii";
+        let laidout = layouter.get_or_layout(BorrowedLayoutParams {
+            text,
+            style: Style {
+                font_family_id,
+                font_size_in_pts: 12.0,
+                color: None,
+            },
+            options: LayoutOptions::default(),
+        });
+        let row = &laidout.rows[0];
+
+        for index in 0..=text.len() {
+            let x_in_lpxs = row.index_to_x_in_lpxs(index);
+            assert_eq!(row.x_in_lpxs_to_index(x_in_lpxs), index);
+            let position = laidout.cursor_to_position(Cursor {
+                index,
+                prefer_next_row: false,
+            });
+            assert_eq!(position.row_index, 0);
+            assert_eq!(position.x_in_lpxs, x_in_lpxs);
+        }
     }
 }
