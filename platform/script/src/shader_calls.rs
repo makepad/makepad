@@ -1778,8 +1778,8 @@ impl ShaderFnCompiler {
                             method_id,
                             pod_ty,
                             self_s_slice,
-                            &self_s,
                         ) {
+                            self.stack.free_string(self_s);
                             return;
                         }
                     }
@@ -1804,9 +1804,9 @@ impl ShaderFnCompiler {
                     return;
                 } else {
                     // Try to resolve as PodType static method in script scope
-                    if self.handle_pod_type_method_call_args(
-                        vm, output, opargs, method_id, self_id, &self_s,
-                    ) {
+                    if self.handle_pod_type_method_call_args(vm, output, opargs, method_id, self_id)
+                    {
+                        self.stack.free_string(self_s);
                         return;
                     }
 
@@ -1840,15 +1840,9 @@ impl ShaderFnCompiler {
 
             // self_ty is directly a Pod type (not an Id that resolves to a Pod)
             if let ShaderType::Pod(pod_ty) = self_ty {
-                if self.handle_pod_method_call_args(
-                    vm,
-                    output,
-                    opargs,
-                    method_id,
-                    pod_ty,
-                    &self_s.clone(),
-                    &self_s,
-                ) {
+                if self.handle_pod_method_call_args(vm, output, opargs, method_id, pod_ty, &self_s)
+                {
+                    self.stack.free_string(self_s);
                     return;
                 }
                 // Method not found on pod type
@@ -2123,7 +2117,6 @@ impl ShaderFnCompiler {
         method_id: LiveId,
         pod_ty: ScriptPodType,
         self_s_slice: &str,
-        self_s: &String,
     ) -> bool {
         // First check for known shader builtin methods (mix, clamp, etc.)
         // These translate to builtin shader functions: x.mix(y, a) -> mix(x, y, a)
@@ -2135,7 +2128,6 @@ impl ShaderFnCompiler {
                 self_ty: pod_ty,
                 args: vec![(ShaderType::Pod(pod_ty), self_arg)],
             });
-            self.stack.free_string(self_s.clone());
             self.maybe_pop_to_me(vm, output, opargs);
             return true;
         }
@@ -2205,7 +2197,6 @@ impl ShaderFnCompiler {
                         });
                     }
                 }
-                self.stack.free_string(self_s.clone());
                 self.maybe_pop_to_me(vm, output, opargs);
                 return true;
             }
@@ -2231,7 +2222,6 @@ impl ShaderFnCompiler {
         opargs: OpcodeArgs,
         method_id: LiveId,
         self_id: LiveId,
-        self_s: &String,
     ) -> bool {
         let value = vm
             .bx
@@ -2268,7 +2258,6 @@ impl ShaderFnCompiler {
                             });
                         }
                     }
-                    self.stack.free_string(self_s.clone());
                     self.maybe_pop_to_me(vm, output, opargs);
                     return true;
                 }

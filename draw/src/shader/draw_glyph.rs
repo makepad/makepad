@@ -564,6 +564,10 @@ pub struct DrawGlyph {
     #[rust]
     band_dirty: bool,
     #[rust]
+    curve_uploaded_floats: usize,
+    #[rust]
+    band_uploaded_floats: usize,
+    #[rust]
     shapes: Vec<GlyphShape>,
     #[rust]
     curve_tex_width: usize,
@@ -1085,49 +1089,112 @@ impl DrawGlyph {
         });
 
         if self.curve_dirty {
-            let width = if self.curve_data.is_empty() {
-                1
-            } else {
-                self.curve_tex_width.max(1)
-            };
-            let texels = (self.curve_data.len() / 4).max(1);
-            let height = texels.div_ceil(width);
-            let mut data = if self.curve_data.is_empty() {
-                vec![0.0f32; width * height * 4]
-            } else {
-                self.curve_data.clone()
-            };
-            data.resize(width * height * 4, 0.0);
-            *curve_texture.get_format(cx) = TextureFormat::VecRGBAf32 {
-                width,
-                height,
-                data: Some(data),
-                updated: TextureUpdated::Full,
-            };
+            Self::prepare_append_only_rgba_f32_texture(
+                cx,
+                curve_texture,
+                self.curve_tex_width,
+                &self.curve_data,
+                &mut self.curve_uploaded_floats,
+            );
             self.curve_dirty = false;
         }
 
         if self.band_dirty {
-            let width = if self.band_data.is_empty() {
-                1
-            } else {
-                self.band_tex_width.max(1)
-            };
-            let texels = (self.band_data.len() / 4).max(1);
-            let height = texels.div_ceil(width);
-            let mut data = if self.band_data.is_empty() {
-                vec![0.0f32; width * height * 4]
-            } else {
-                self.band_data.clone()
-            };
-            data.resize(width * height * 4, 0.0);
-            *band_texture.get_format(cx) = TextureFormat::VecRGBAf32 {
+            Self::prepare_append_only_rgba_f32_texture(
+                cx,
+                band_texture,
+                self.band_tex_width,
+                &self.band_data,
+                &mut self.band_uploaded_floats,
+            );
+            self.band_dirty = false;
+        }
+    }
+
+    fn prepare_append_only_rgba_f32_texture(
+        cx: &mut Cx,
+        texture: &Texture,
+        preferred_width: usize,
+        source: &[f32],
+        uploaded_floats: &mut usize,
+    ) {
+        debug_assert_eq!(source.len() % 4, 0);
+
+        let new_width = if source.is_empty() {
+            1
+        } else {
+            preferred_width.max(1)
+        };
+        let new_texels = (source.len() / 4).max(1);
+        let new_height = new_texels.div_ceil(new_width);
+        let source_shrank = *uploaded_floats > source.len();
+        let append_start = (*uploaded_floats).min(source.len());
+
+        let format = texture.get_format(cx);
+        let (width, height, data, updated) = match format {
+            TextureFormat::VecRGBAf32 {
                 width,
                 height,
-                data: Some(data),
-                updated: TextureUpdated::Full,
-            };
-            self.band_dirty = false;
+                data,
+                updated,
+            } => (width, height, data, updated),
+            _ => panic!("expected VecRGBAf32 texture format for DrawGlyph atlas"),
+        };
+
+        let dims_changed = *width != new_width || *height != new_height;
+        let mut texture_data = data.take().unwrap_or_default();
+        let had_texture_data = !texture_data.is_empty();
+        let new_capacity = new_width * new_height * 4;
+        texture_data.resize(new_capacity, 0.0);
+
+        if !had_texture_data || dims_changed || source_shrank {
+            texture_data.fill(0.0);
+            if !source.is_empty() {
+                texture_data[..source.len()].copy_from_slice(source);
+            }
+        } else if append_start < source.len() {
+            texture_data[append_start..source.len()].copy_from_slice(&source[append_start..]);
+        }
+
+        *width = new_width;
+        *height = new_height;
+        *data = Some(texture_data);
+        *updated = if !had_texture_data || dims_changed || source_shrank {
+            TextureUpdated::Full
+        } else {
+            updated.update(Self::appended_dirty_rect(
+                new_width,
+                append_start / 4,
+                source.len() / 4,
+            ))
+        };
+        *uploaded_floats = source.len();
+    }
+
+    fn appended_dirty_rect(
+        width: usize,
+        old_texels: usize,
+        new_texels: usize,
+    ) -> Option<RectUsize> {
+        if width == 0 || new_texels <= old_texels {
+            return None;
+        }
+
+        let start_row = old_texels / width;
+        let start_col = old_texels % width;
+        let end_row = (new_texels - 1) / width;
+        let end_col = (new_texels - 1) % width;
+
+        if start_row == end_row {
+            Some(RectUsize::new(
+                PointUsize::new(start_col, start_row),
+                SizeUsize::new(end_col - start_col + 1, 1),
+            ))
+        } else {
+            Some(RectUsize::new(
+                PointUsize::new(0, start_row),
+                SizeUsize::new(width, end_row - start_row + 1),
+            ))
         }
     }
 }
@@ -1324,4 +1391,29 @@ fn cubic_to_quads_recursive(
 
     cubic_to_quads_recursive(p0, p01, p012, p0123, depth + 1, out, bounds);
     cubic_to_quads_recursive(p0123, p123, p23, p3, depth + 1, out, bounds);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DrawGlyph;
+
+    #[test]
+    fn appended_dirty_rect_stays_tight_within_one_row() {
+        let rect = DrawGlyph::appended_dirty_rect(8, 3, 6).expect("expected dirty rect");
+
+        assert_eq!(rect.origin.x, 3);
+        assert_eq!(rect.origin.y, 0);
+        assert_eq!(rect.size.width, 3);
+        assert_eq!(rect.size.height, 1);
+    }
+
+    #[test]
+    fn appended_dirty_rect_expands_to_full_rows_when_tail_crosses_rows() {
+        let rect = DrawGlyph::appended_dirty_rect(8, 6, 11).expect("expected dirty rect");
+
+        assert_eq!(rect.origin.x, 0);
+        assert_eq!(rect.origin.y, 0);
+        assert_eq!(rect.size.width, 8);
+        assert_eq!(rect.size.height, 2);
+    }
 }
