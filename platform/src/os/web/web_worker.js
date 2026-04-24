@@ -307,10 +307,7 @@ onmessage = async function (e) {
     }
 
     function u8_to_string(ptr, len) {
-        let u8 = new Uint8Array(env.memory.buffer, ptr, len);
-        let copy = new Uint8Array(len);
-        copy.set(u8);
-        return TEXT_DECODER.decode(copy);
+        return TEXT_DECODER.decode(new Uint8Array(env.memory.buffer, ptr, len));
     }
 
     function u8_to_array(ptr, len) {

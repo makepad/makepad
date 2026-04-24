@@ -29,6 +29,8 @@ export class WasmWebGL extends WasmWebBrowser {
     this.current_viewport = { x: -1, y: -1, w: -1, h: -1 };
     this.current_clear_color = { r: NaN, g: NaN, b: NaN, a: NaN };
     this.current_clear_depth = NaN;
+    this.current_vertex_array = undefined;
+    this.bound_buffers = {};
     this.init_webgl_context();
 
     this.load_deps();
@@ -232,9 +234,9 @@ export class WasmWebGL extends WasmWebBrowser {
     if (!gl_buf || !data || data.length == 0) {
       return;
     }
-    gl.bindBuffer(gl.UNIFORM_BUFFER, gl_buf);
+    this.bind_buffer(gl, gl.UNIFORM_BUFFER, gl_buf);
     this.upload_buffer_data(gl, gl.UNIFORM_BUFFER, gl_buf, data, usage);
-    gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+    this.bind_buffer(gl, gl.UNIFORM_BUFFER, null);
   }
 
   upload_buffer_data(gl, target, gl_buf, data, usage) {
@@ -332,6 +334,22 @@ export class WasmWebGL extends WasmWebBrowser {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
     this.current_framebuffer = framebuffer;
+  }
+
+  bind_vertex_array(gl, vao) {
+    if (this.current_vertex_array === vao) {
+      return;
+    }
+    gl.bindVertexArray(vao);
+    this.current_vertex_array = vao;
+  }
+
+  bind_buffer(gl, target, buffer) {
+    if (this.bound_buffers[target] === buffer) {
+      return;
+    }
+    gl.bindBuffer(target, buffer);
+    this.bound_buffers[target] = buffer;
   }
 
   set_viewport(gl, x, y, w, h) {
@@ -621,9 +639,9 @@ export class WasmWebGL extends WasmWebBrowser {
     );
     buf.length = array.length;
 
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.gl_buf);
+    this.bind_buffer(gl, gl.ELEMENT_ARRAY_BUFFER, buf.gl_buf);
     this.upload_buffer_data(gl, gl.ELEMENT_ARRAY_BUFFER, buf.gl_buf, array, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+    this.bind_buffer(gl, gl.ELEMENT_ARRAY_BUFFER, null);
   }
 
   FromWasmAllocArrayBuffer(args) {
@@ -643,9 +661,9 @@ export class WasmWebGL extends WasmWebBrowser {
     );
     buf.length = array.length;
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf.gl_buf);
+    this.bind_buffer(gl, gl.ARRAY_BUFFER, buf.gl_buf);
     this.upload_buffer_data(gl, gl.ARRAY_BUFFER, buf.gl_buf, array, gl.STATIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    this.bind_buffer(gl, gl.ARRAY_BUFFER, null);
   }
 
   FromWasmAllocVao(args) {
@@ -662,14 +680,14 @@ export class WasmWebGL extends WasmWebBrowser {
       inst_vb_id: args.inst_vb_id,
     });
 
-    gl.bindVertexArray(vao.gl_vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[args.geom_vb_id].gl_buf);
+    this.bind_vertex_array(gl, vao.gl_vao);
+    this.bind_buffer(gl, gl.ARRAY_BUFFER, this.array_buffers[args.geom_vb_id].gl_buf);
 
     // Try to finalise a pending parallel compile. If still compiling, skip
     // this VAO setup — it will be retried the next time a draw call needs it.
     const wait_for_shader = this.loader_removed;
     if (!this._try_finalize_shader(args.shader_id, wait_for_shader)) {
-      gl.bindVertexArray(null);
+      this.bind_vertex_array(gl, null);
       // Mark VAO as needing re-setup.
       this.vaos[args.vao_id]._needs_setup = true;
       return;
@@ -712,7 +730,7 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.vertexAttribDivisor(attr.loc, 0);
     }
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[args.inst_vb_id].gl_buf);
+    this.bind_buffer(gl, gl.ARRAY_BUFFER, this.array_buffers[args.inst_vb_id].gl_buf);
 
     for (let i = 0; i < shader.inst_attribs.length; i++) {
       let attr = shader.inst_attribs[i];
@@ -741,11 +759,12 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.vertexAttribDivisor(attr.loc, 1);
     }
 
-    gl.bindBuffer(
+    this.bind_buffer(
+      gl,
       gl.ELEMENT_ARRAY_BUFFER,
       this.index_buffers[args.geom_ib_id].gl_buf,
     );
-    gl.bindVertexArray(null);
+    this.bind_vertex_array(gl, null);
 
   }
 
@@ -789,7 +808,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
     let vao = this.vaos[args.vao_id];
 
-    gl.bindVertexArray(vao.gl_vao);
+    this.bind_vertex_array(gl, vao.gl_vao);
 
     let index_buffer = this.index_buffers[vao.geom_ib_id];
     let instance_buffer = this.array_buffers[vao.inst_vb_id];
@@ -924,7 +943,7 @@ export class WasmWebGL extends WasmWebBrowser {
       );
     }
 
-    gl.bindVertexArray(null);
+    this.bind_vertex_array(gl, null);
     this.set_depth_mask(gl, true);
   }
 

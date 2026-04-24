@@ -245,10 +245,7 @@ export class WasmBridge {
         this.update_array_buffer_refs();
     }
     u8_to_string(ptr, len) {
-        let u8 = new Uint8Array(this.memory.buffer, ptr, len);
-        let copy = new Uint8Array(len);
-        copy.set(u8);
-        return TEXT_DECODER.decode(copy);
+        return TEXT_DECODER.decode(new Uint8Array(this.memory.buffer, ptr, len));
     }
 
     js_console_log(u8_ptr, len) {
@@ -353,7 +350,7 @@ export class WasmBridge {
                 kind,
                 memory_index,
                 offset: address,
-                bytes: bytes.slice(offset, offset + len),
+                bytes: bytes.subarray(offset, offset + len),
             });
             offset += len;
         }
@@ -447,14 +444,14 @@ export class WasmBridge {
                 const rebuilt = new Uint8Array(
                     section_start + 1 + encoded_len.length + data_payload.length + (wasm_bytes.length - payload_end)
                 );
-                rebuilt.set(wasm_bytes.slice(0, section_start), 0);
+                rebuilt.set(wasm_bytes.subarray(0, section_start), 0);
                 let out_offset = section_start;
                 rebuilt[out_offset++] = 11;
                 rebuilt.set(encoded_len, out_offset);
                 out_offset += encoded_len.length;
                 rebuilt.set(data_payload, out_offset);
                 out_offset += data_payload.length;
-                rebuilt.set(wasm_bytes.slice(payload_end), out_offset);
+                rebuilt.set(wasm_bytes.subarray(payload_end), out_offset);
                 return rebuilt;
             }
             offset = payload_end;
