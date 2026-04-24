@@ -81,16 +81,32 @@ impl DrawSvgGlyph {
         let content_rect = self.compute_render_rect(rect);
         let shape_rect = self.map_shape_to_content_rect(&content_rect, shape);
         if override_color.x >= 0.0 {
-            let mut layers = shape.layers.clone();
-            for layer in &mut layers {
-                layer.color = vec4(
-                    override_color.x,
-                    override_color.y,
-                    override_color.z,
-                    override_color.w * layer.color.w,
-                );
+            match shape.layers.as_slice() {
+                [] => {}
+                [layer] => {
+                    let mut layer = *layer;
+                    layer.color = vec4(
+                        override_color.x,
+                        override_color.y,
+                        override_color.z,
+                        override_color.w * layer.color.w,
+                    );
+                    self.draw_super
+                        .draw_layers_abs(cx, shape_rect, std::slice::from_ref(&layer));
+                }
+                layers => {
+                    let mut layers = layers.to_vec();
+                    for layer in &mut layers {
+                        layer.color = vec4(
+                            override_color.x,
+                            override_color.y,
+                            override_color.z,
+                            override_color.w * layer.color.w,
+                        );
+                    }
+                    self.draw_super.draw_layers_abs(cx, shape_rect, &layers);
+                }
             }
-            self.draw_super.draw_layers_abs(cx, shape_rect, &layers);
         } else {
             self.draw_super.draw_shape_abs(cx, shape_id, shape_rect);
         }

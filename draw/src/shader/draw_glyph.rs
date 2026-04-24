@@ -837,8 +837,17 @@ impl DrawGlyph {
         let Some(shape) = self.shapes.get(shape_id.0) else {
             return;
         };
-        let layers = shape.layers.clone();
-        self.draw_layers_abs(cx, rect, &layers);
+        match shape.layers.as_slice() {
+            [] => {}
+            [layer] => {
+                let layer = *layer;
+                self.draw_layers_abs(cx, rect, std::slice::from_ref(&layer));
+            }
+            layers => {
+                let layers = layers.to_vec();
+                self.draw_layers_abs(cx, rect, &layers);
+            }
+        }
     }
 
     pub fn draw_shape(&mut self, cx: &mut Cx2d, shape_id: GlyphShapeId, pos: Vec2f, size: Vec2f) {

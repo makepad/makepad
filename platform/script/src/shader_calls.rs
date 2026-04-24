@@ -827,13 +827,12 @@ impl ShaderFnCompiler {
     ) {
         // we should compare number of arguments (needs to be exact)
         // Note: fn_name already includes "(" at the end from compile_shader_def
-        let arg_types = args.clone();
         let resolved_arg_types =
-            Self::resolve_script_call_arg_types(vm, fnobj, &arg_types, self.trap.pass());
+            Self::resolve_script_call_arg_types(vm, fnobj, &args, self.trap.pass());
         let (ret, fn_name) =
             Self::compile_shader_def(vm, output, self.trap.pass(), name, fnobj, sself, args);
         if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust) {
-            out = Self::glsl_rewrite_call_args(vm, &out, &arg_types, &resolved_arg_types);
+            out = Self::glsl_rewrite_call_args(vm, &out, &resolved_arg_types);
         }
         out.insert_str(0, &fn_name);
         out.push_str(")");
@@ -880,21 +879,26 @@ impl ShaderFnCompiler {
     fn glsl_rewrite_call_args(
         vm: &ScriptVm,
         raw_args: &str,
-        arg_types: &[ShaderType],
         resolved_arg_types: &[ScriptPodType],
     ) -> String {
-        let mut parts = Self::split_call_args_top_level(raw_args);
-        if parts.is_empty() || arg_types.is_empty() || parts.len() < arg_types.len() {
+        if resolved_arg_types.is_empty() {
+            return raw_args.to_string();
+        }
+        if !resolved_arg_types.iter().copied().any(|resolved_ty| {
+            vm.bx.heap.pod_types[resolved_ty.index as usize]
+                .ty
+                .is_float_type()
+        }) {
             return raw_args.to_string();
         }
 
-        let explicit_start = parts.len() - arg_types.len();
-        let explicit_len = arg_types.len().min(resolved_arg_types.len());
-        for i in 0..explicit_len {
-            if !matches!(arg_types[i], ShaderType::AbstractInt) {
-                continue;
-            }
-            let resolved_ty = resolved_arg_types[i];
+        let mut parts = Self::split_call_args_top_level(raw_args);
+        if parts.is_empty() || parts.len() < resolved_arg_types.len() {
+            return raw_args.to_string();
+        }
+
+        let explicit_start = parts.len() - resolved_arg_types.len();
+        for (i, resolved_ty) in resolved_arg_types.iter().copied().enumerate() {
             if !vm.bx.heap.pod_types[resolved_ty.index as usize]
                 .ty
                 .is_float_type()
