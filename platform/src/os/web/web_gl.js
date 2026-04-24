@@ -25,6 +25,10 @@ export class WasmWebGL extends WasmWebBrowser {
     this.current_depth_mask = null;
     this.current_cull_face = null;
     this.current_active_texture_slot = -1;
+    this.current_framebuffer = undefined;
+    this.current_viewport = { x: -1, y: -1, w: -1, h: -1 };
+    this.current_clear_color = { r: NaN, g: NaN, b: NaN, a: NaN };
+    this.current_clear_depth = NaN;
     this.init_webgl_context();
 
     this.load_deps();
@@ -320,6 +324,56 @@ export class WasmWebGL extends WasmWebBrowser {
     }
     gl.uniform1i(tex_loc.loc, slot);
     tex_loc.slot = slot;
+  }
+
+  bind_framebuffer(gl, framebuffer) {
+    if (this.current_framebuffer === framebuffer) {
+      return;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    this.current_framebuffer = framebuffer;
+  }
+
+  set_viewport(gl, x, y, w, h) {
+    let viewport = this.current_viewport;
+    if (
+      viewport.x === x &&
+      viewport.y === y &&
+      viewport.w === w &&
+      viewport.h === h
+    ) {
+      return;
+    }
+    gl.viewport(x, y, w, h);
+    viewport.x = x;
+    viewport.y = y;
+    viewport.w = w;
+    viewport.h = h;
+  }
+
+  set_clear_color(gl, c) {
+    let current = this.current_clear_color;
+    if (
+      current.r === c.r &&
+      current.g === c.g &&
+      current.b === c.b &&
+      current.a === c.a
+    ) {
+      return;
+    }
+    gl.clearColor(c.r, c.g, c.b, c.a);
+    current.r = c.r;
+    current.g = c.g;
+    current.b = c.b;
+    current.a = c.a;
+  }
+
+  set_clear_depth(gl, depth) {
+    if (this.current_clear_depth === depth) {
+      return;
+    }
+    gl.clearDepth(depth);
+    this.current_clear_depth = depth;
   }
 
   assert_no_gl_error(gl, where) {
@@ -814,7 +868,7 @@ export class WasmWebGL extends WasmWebBrowser {
       );
       let left = xr.left_eye;
       let lvp = left.viewport;
-      gl.viewport(lvp.x, lvp.y, lvp.width, lvp.height);
+      this.set_viewport(gl, lvp.x, lvp.y, lvp.width, lvp.height);
       let mlp = left.projection_matrix;
       for (let i = 0; i < 16; i++) pass_uniforms[i] = mlp[i];
       let mlt = left.transform_matrix;
@@ -836,7 +890,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
       let right = xr.right_eye;
       let rvp = right.viewport;
-      gl.viewport(rvp.x, rvp.y, rvp.width, rvp.height);
+      this.set_viewport(gl, rvp.x, rvp.y, rvp.width, rvp.height);
       let mrp = right.projection_matrix;
       for (let i = 0; i < 16; i++) pass_uniforms[i] = mrp[i];
       let mrt = right.transform_matrix;
@@ -1017,7 +1071,7 @@ export class WasmWebGL extends WasmWebBrowser {
     var gl_framebuffer =
       this.framebuffers[args.pass_id] ||
       (this.framebuffers[args.pass_id] = gl.createFramebuffer());
-    gl.bindFramebuffer(gl.FRAMEBUFFER, gl_framebuffer);
+    this.bind_framebuffer(gl, gl_framebuffer);
 
     let clear_flags = 0;
     let clear_depth = 0.0;
@@ -1066,11 +1120,11 @@ export class WasmWebGL extends WasmWebBrowser {
       );
     }
     // TODO implement depth target
-    gl.viewport(0, 0, args.width, args.height);
+    this.set_viewport(gl, 0, 0, args.width, args.height);
 
     if (clear_flags !== 0) {
-      gl.clearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
-      gl.clearDepth(clear_depth);
+      this.set_clear_color(gl, clear_color);
+      this.set_clear_depth(gl, clear_depth);
       gl.clear(clear_flags);
     }
   }
@@ -1081,15 +1135,15 @@ export class WasmWebGL extends WasmWebBrowser {
 
     if (xr !== undefined) {
       xr.in_xr_pass = true;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, xr.layer.framebuffer);
-      gl.viewport(0, 0, xr.layer.framebufferWidth, xr.layer.framebufferHeight);
+      this.bind_framebuffer(gl, xr.layer.framebuffer);
+      this.set_viewport(gl, 0, 0, xr.layer.framebufferWidth, xr.layer.framebufferHeight);
     } else {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      this.bind_framebuffer(gl, null);
+      this.set_viewport(gl, 0, 0, this.canvas.width, this.canvas.height);
     }
     let c = args.clear_color;
-    gl.clearColor(c.r, c.g, c.b, c.a);
-    gl.clearDepth(args.clear_depth);
+    this.set_clear_color(gl, c);
+    this.set_clear_depth(gl, args.clear_depth);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   }
 

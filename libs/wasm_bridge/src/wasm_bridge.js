@@ -1,3 +1,19 @@
+const TEXT_DECODER = new TextDecoder();
+const STRING_CHUNK_SIZE = 8192;
+
+function u32_to_string(u32, offset, len) {
+    if (len === 0) {
+        return "";
+    }
+    let out = "";
+    let end = offset + len;
+    for (let pos = offset; pos < end; pos += STRING_CHUNK_SIZE) {
+        let chunk_end = Math.min(pos + STRING_CHUNK_SIZE, end);
+        out += String.fromCodePoint.apply(null, u32.subarray(pos, chunk_end));
+    }
+    return out;
+}
+
 export function init_env(env) {
     let _wasm = null;
 
@@ -228,22 +244,11 @@ export class WasmBridge {
         this.exports.wasm_init_panic_hook();
         this.update_array_buffer_refs();
     }
-    /*
-    chars_to_string(chars_ptr, len) {
-        let out = "";
-        let array = new Uint32Array(this.memory.buffer, chars_ptr, len);
-        for (let i = 0; i < len; i ++) {
-            out += String.fromCharCode(array[i]);
-        }
-        return out
-    }*/
-
     u8_to_string(ptr, len) {
         let u8 = new Uint8Array(this.memory.buffer, ptr, len);
         let copy = new Uint8Array(len);
         copy.set(u8);
-        const decoder = new TextDecoder();
-        return decoder.decode(copy);
+        return TEXT_DECODER.decode(copy);
     }
 
     js_console_log(u8_ptr, len) {
@@ -699,11 +704,9 @@ export class FromWasmMsg {
     read_str() {
         let app = this.app;
         let len = app.u32[this.u32_offset++];
-        let str = "";
-        for (let i = 0; i < len; i++) {
-            str += String.fromCharCode(app.u32[this.u32_offset++]);
-        }
-        return str
+        let str = u32_to_string(app.u32, this.u32_offset, len);
+        this.u32_offset += len;
+        return str;
     }
 
     dispatch_on_app() {

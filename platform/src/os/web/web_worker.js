@@ -1,4 +1,20 @@
 const SPLIT_SLOT_EXPORT_PREFIX = "$s";
+const TEXT_DECODER = new TextDecoder();
+const TEXT_ENCODER = new TextEncoder();
+const STRING_CHUNK_SIZE = 8192;
+
+function u32_to_string(u32, offset, len) {
+    if (len === 0) {
+        return "";
+    }
+    let out = "";
+    let end = offset + len;
+    for (let pos = offset; pos < end; pos += STRING_CHUNK_SIZE) {
+        let chunk_end = Math.min(pos + STRING_CHUNK_SIZE, end);
+        out += String.fromCodePoint.apply(null, u32.subarray(pos, chunk_end));
+    }
+    return out;
+}
 
 function patch_split_table(primary_exports, secondary_exports) {
     const split_table = primary_exports.$s;
@@ -32,12 +48,8 @@ onmessage = async function (e) {
     }
 
     function chars_to_string(chars_ptr, len) {
-        let out = "";
         let array = new Uint32Array(thread_info.memory.buffer, chars_ptr, len);
-        for (let i = 0; i < len; i++) {
-            out += String.fromCharCode(array[i]);
-        }
-        return out
+        return u32_to_string(array, 0, len);
     }
 
     let web_sockets = {}
@@ -290,8 +302,7 @@ onmessage = async function (e) {
     };
 
     function string_to_u8(s) {
-        const encoder = new TextEncoder();
-        const u8_in = encoder.encode(s);
+        const u8_in = TEXT_ENCODER.encode(s);
         return array_to_u8(u8_in);
     }
 
@@ -299,8 +310,7 @@ onmessage = async function (e) {
         let u8 = new Uint8Array(env.memory.buffer, ptr, len);
         let copy = new Uint8Array(len);
         copy.set(u8);
-        const decoder = new TextDecoder();
-        return decoder.decode(copy);
+        return TEXT_DECODER.decode(copy);
     }
 
     function u8_to_array(ptr, len) {

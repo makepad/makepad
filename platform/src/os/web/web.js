@@ -1,5 +1,7 @@
 import { WasmBridge } from "../makepad_wasm_bridge/wasm_bridge.js"
 
+const TEXT_ENCODER = new TextEncoder();
+
 export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
         super(wasm, dispatch);
@@ -771,8 +773,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     string_to_u8(s) {
-        const encoder = new TextEncoder();
-        return this.alloc_u8(encoder.encode(s));
+        return this.alloc_u8(TEXT_ENCODER.encode(s));
     }
 
     array_to_u8(u8_array) {
