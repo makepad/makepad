@@ -17,6 +17,7 @@ impl Cx {
         draw_list_id: DrawListId,
         zbias: &mut f32,
         zbias_step: f32,
+        cmd: &mut Vec<u32>,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
@@ -44,6 +45,7 @@ impl Cx {
                         zbias
                     },
                     zbias_step,
+                    cmd,
                 );
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
@@ -253,19 +255,41 @@ impl Cx {
                     }
                 }
 
-                self.os.from_wasm(FromWasmDrawCall {
-                    shader_id: sh.os_shader_id.unwrap(),
-                    vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
-                    depth_write: draw_call.options.depth_write,
-                    backface_culling: draw_call.options.backface_culling,
-                    pass_uniforms: WasmPtrF32::new(pass_uniforms.as_slice()),
-                    draw_list_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice()),
-                    draw_call_uniforms: WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice()),
-                    user_uniforms: WasmPtrF32::new(draw_call.dyn_uniforms.as_slice()),
-                    live_uniforms: WasmPtrF32::new(&sh.mapping.scope_uniforms_buf),
-                    const_table: WasmPtrF32::new(&[]),
-                    textures,
-                });
+                // Pack draw calls into a single u32 command buffer to reduce JS dispatch overhead.
+                // Format (u32 words):
+                // [CMD_DRAW=1,
+                //  shader_id, vao_id, depth_write, backface_culling,
+                //  pass_ptr, pass_len,
+                //  draw_list_ptr, draw_list_len,
+                //  draw_call_ptr, draw_call_len,
+                //  user_ptr, user_len,
+                //  live_ptr, live_len,
+                //  tex0..texN (u32 id or 0xFFFF_FFFF)]
+                cmd.push(1);
+                cmd.push(sh.os_shader_id.unwrap() as u32);
+                cmd.push(draw_item.os.vao.as_ref().unwrap().vao_id as u32);
+                cmd.push(draw_call.options.depth_write as u32);
+                cmd.push(draw_call.options.backface_culling as u32);
+
+                let pass_uniforms = WasmPtrF32::new(pass_uniforms.as_slice());
+                cmd.push(pass_uniforms.ptr);
+                cmd.push(pass_uniforms.len as u32);
+                let draw_list_uniforms = WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice());
+                cmd.push(draw_list_uniforms.ptr);
+                cmd.push(draw_list_uniforms.len as u32);
+                let draw_call_uniforms = WasmPtrF32::new(draw_call.draw_call_uniforms.as_slice());
+                cmd.push(draw_call_uniforms.ptr);
+                cmd.push(draw_call_uniforms.len as u32);
+                let user_uniforms = WasmPtrF32::new(draw_call.dyn_uniforms.as_slice());
+                cmd.push(user_uniforms.ptr);
+                cmd.push(user_uniforms.len as u32);
+                let live_uniforms = WasmPtrF32::new(&sh.mapping.scope_uniforms_buf);
+                cmd.push(live_uniforms.ptr);
+                cmd.push(live_uniforms.len as u32);
+
+                for tex in textures {
+                    cmd.push(tex.unwrap_or(usize::MAX) as u32);
+                }
             }
         }
         /*
@@ -334,8 +358,21 @@ impl Cx {
 
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
-
-        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
+        let mut cmd_buf = std::mem::take(&mut self.os.render_cmd_buf);
+        cmd_buf.clear();
+        self.render_view(
+            draw_pass_id,
+            draw_list_id,
+            &mut zbias,
+            zbias_step,
+            &mut cmd_buf,
+        );
+        self.os.render_cmd_buf = cmd_buf;
+        if !self.os.render_cmd_buf.is_empty() {
+            self.os.from_wasm(FromWasmRenderCommandBuffer {
+                words: WasmPtrU32::new(&self.os.render_cmd_buf),
+            });
+        }
     }
 
     pub fn draw_pass_to_texture(&mut self, draw_pass_id: DrawPassId) {
@@ -409,8 +446,21 @@ impl Cx {
         self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
         let mut zbias = 0.0;
         let zbias_step = self.passes[draw_pass_id].zbias_step;
-
-        self.render_view(draw_pass_id, draw_list_id, &mut zbias, zbias_step);
+        let mut cmd_buf = std::mem::take(&mut self.os.render_cmd_buf);
+        cmd_buf.clear();
+        self.render_view(
+            draw_pass_id,
+            draw_list_id,
+            &mut zbias,
+            zbias_step,
+            &mut cmd_buf,
+        );
+        self.os.render_cmd_buf = cmd_buf;
+        if !self.os.render_cmd_buf.is_empty() {
+            self.os.from_wasm(FromWasmRenderCommandBuffer {
+                words: WasmPtrU32::new(&self.os.render_cmd_buf),
+            });
+        }
     }
 
     pub fn webgl_compile_shaders(&mut self) {
@@ -421,6 +471,10 @@ impl Cx {
                 let (vertex, pixel) = match &cx_shader.mapping.code {
                     CxDrawShaderCode::Separate { vertex, fragment } => {
                         (vertex.clone(), fragment.clone())
+                    }
+                    CxDrawShaderCode::Wgsl { .. } => {
+                        // WebGPU shaders compile elsewhere.
+                        continue;
                     }
                     CxDrawShaderCode::Combined { .. } => {
                         crate::error!("Combined shader code is not supported on wasm webgl");
@@ -473,6 +527,115 @@ impl Cx {
             }
 
             self.draw_shaders.shaders[draw_shader_id].os_shader_id = os_shader_id;
+        }
+        self.draw_shaders.compile_set.clear();
+    }
+
+    pub fn webgpu_compile_shaders(&mut self) {
+        let compile_set: Vec<usize> = self.draw_shaders.compile_set.iter().copied().collect();
+        for draw_shader_id in compile_set {
+            let (
+                wgsl,
+                geometry_slots,
+                instance_slots,
+                textures,
+                debug_code,
+                dyn_uniform_binding,
+                texture_binding_base,
+                sampler_binding_base,
+                xr_depth_binding,
+                texture_sampler_indices,
+                samplers,
+            ) = {
+                let cx_shader = &self.draw_shaders.shaders[draw_shader_id];
+                let (wgsl, dyn_uniform_binding, texture_binding_base, sampler_binding_base, xr_depth_binding) =
+                    match &cx_shader.mapping.code {
+                        CxDrawShaderCode::Wgsl {
+                            wgsl,
+                            dyn_uniform_binding,
+                            texture_binding_base,
+                            sampler_binding_base,
+                            xr_depth_binding,
+                        } => (
+                            wgsl.clone(),
+                            *dyn_uniform_binding,
+                            *texture_binding_base,
+                            *sampler_binding_base,
+                            *xr_depth_binding,
+                        ),
+                        _ => continue,
+                    };
+                let textures: Vec<WTextureInput> = cx_shader
+                    .mapping
+                    .textures
+                    .iter()
+                    .map(|v| v.to_from_wasm_texture_input())
+                    .collect();
+                let texture_sampler_indices = cx_shader.mapping.texture_sampler_indices.clone();
+                let samplers = cx_shader
+                    .mapping
+                    .samplers
+                    .iter()
+                    .map(|s| {
+                        let filter = match s.filter {
+                            makepad_script::shader_output::SamplerFilter::Nearest => 0,
+                            makepad_script::shader_output::SamplerFilter::Linear => 1,
+                        };
+                        let address = match s.address {
+                            makepad_script::shader_output::SamplerAddress::Repeat => 0,
+                            makepad_script::shader_output::SamplerAddress::ClampToEdge => 1,
+                            makepad_script::shader_output::SamplerAddress::ClampToZero => 2,
+                            makepad_script::shader_output::SamplerAddress::MirroredRepeat => 3,
+                        };
+                        let coord = match s.coord {
+                            makepad_script::shader_output::SamplerCoord::Normalized => 0,
+                            makepad_script::shader_output::SamplerCoord::Pixel => 1,
+                        };
+                        WSampler {
+                            filter,
+                            address,
+                            coord,
+                            is_video: s.is_video,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    wgsl,
+                    cx_shader.mapping.geometries.total_slots,
+                    cx_shader.mapping.instances.total_slots,
+                    textures,
+                    cx_shader.mapping.flags.debug_code,
+                    dyn_uniform_binding,
+                    texture_binding_base,
+                    sampler_binding_base,
+                    xr_depth_binding,
+                    texture_sampler_indices,
+                    samplers,
+                )
+            };
+
+            if debug_code {
+                crate::log!("{}", wgsl);
+            }
+
+            let shader_id = self.draw_shaders.os_shaders.len();
+            self.os.from_wasm(FromWasmCompileWebGPUShader {
+                shader_id,
+                wgsl: wgsl.clone(),
+                geometry_slots,
+                instance_slots,
+                textures,
+                texture_sampler_indices,
+                samplers,
+                dyn_uniform_binding,
+                texture_binding_base,
+                sampler_binding_base,
+                xr_depth_binding,
+            });
+
+            // Reuse `os_shader_id` as the WebGPU pipeline id.
+            self.draw_shaders.os_shaders.push(CxOsDrawShader::new(wgsl, String::new()));
+            self.draw_shaders.shaders[draw_shader_id].os_shader_id = Some(shader_id);
         }
         self.draw_shaders.compile_set.clear();
     }

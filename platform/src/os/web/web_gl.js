@@ -6,6 +6,7 @@ export class WasmWebGL extends WasmWebBrowser {
     if (wasm === undefined) {
       return;
     }
+    this.render_api = 0;
     this.draw_shaders = [];
     this.array_buffers = [];
     this.index_buffers = [];
@@ -345,6 +346,12 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   bind_buffer(gl, target, buffer) {
+    // ELEMENT_ARRAY_BUFFER binding is VAO state, not global state.
+    // Caching it globally can incorrectly skip binds after VAO switches.
+    if (target === gl.ELEMENT_ARRAY_BUFFER) {
+      gl.bindBuffer(target, buffer);
+      return;
+    }
     if (this.bound_buffers[target] === buffer) {
       return;
     }
@@ -670,7 +677,8 @@ export class WasmWebGL extends WasmWebBrowser {
     let gl = this.gl;
     let old_vao = this.vaos[args.vao_id];
     if (old_vao) {
-      gl.deleteVertexArray(old_vao.gl_vao);
+      // Keep the old VAO alive. Deleting can create churn on some drivers and
+      // is not required for correctness in this backend.
     }
     let gl_vao = gl.createVertexArray();
     let vao = (this.vaos[args.vao_id] = {
@@ -770,6 +778,9 @@ export class WasmWebGL extends WasmWebBrowser {
 
   FromWasmDrawCall(args) {
     var gl = this.gl;
+    if (this.perf) {
+      this.perf.draw_calls = (this.perf.draw_calls | 0) + 1;
+    }
 
     // Attempt to finalise a pending parallel shader compile. If the driver
     // hasn’t finished yet, skip this draw call silently — the next frame will
@@ -945,6 +956,152 @@ export class WasmWebGL extends WasmWebBrowser {
 
     this.bind_vertex_array(gl, null);
     this.set_depth_mask(gl, true);
+  }
+
+  FromWasmRenderCommandBuffer(args) {
+    const gl = this.gl;
+    const CMD_DRAW = 1;
+    const NONE_TEX = 0xffffffff;
+
+    const words = new Uint32Array(this.memory.buffer, args.words.ptr, args.words.len);
+    let at = 0;
+    while (at < words.length) {
+      const cmd = words[at++];
+      if (cmd === 0) {
+        break;
+      }
+      if (cmd !== CMD_DRAW) {
+        // Unknown command; stop to avoid desync.
+        break;
+      }
+      if (this.perf) {
+        this.perf.draw_calls = (this.perf.draw_calls | 0) + 1;
+      }
+
+      const shader_id = words[at++];
+      const vao_id = words[at++];
+      const depth_write = words[at++] !== 0;
+      const backface_culling = words[at++] !== 0;
+
+      const pass_ptr = words[at++]; const pass_len = words[at++];
+      const draw_list_ptr = words[at++]; const draw_list_len = words[at++];
+      const draw_call_ptr = words[at++]; const draw_call_len = words[at++];
+      const user_ptr = words[at++]; const user_len = words[at++];
+      const live_ptr = words[at++]; const live_len = words[at++];
+
+      // Attempt to finalise a pending parallel shader compile.
+      if (!this._try_finalize_shader(shader_id, this.loader_removed)) {
+        // Skip: next frame will retry.
+        at += 16; // texture slots
+        continue;
+      }
+      const shader = this.draw_shaders[shader_id];
+      if (!shader || shader.compile_failed) {
+        this.report_missing_shader_once("FromWasmRenderCommandBuffer", shader_id, vao_id);
+        at += 16;
+        continue;
+      }
+
+      // If the VAO setup was deferred, redo it now.
+      const vao_entry = this.vaos[vao_id];
+      if (vao_entry && vao_entry._needs_setup) {
+        delete vao_entry._needs_setup;
+        this.FromWasmAllocVao({
+          vao_id: vao_id,
+          shader_id: shader_id,
+          geom_ib_id: vao_entry.geom_ib_id,
+          geom_vb_id: vao_entry.geom_vb_id,
+          inst_vb_id: vao_entry.inst_vb_id,
+        });
+      }
+
+      this.use_program(gl, shader.program);
+      this.set_depth_mask(gl, depth_write);
+      this.set_cull_face(gl, backface_culling);
+
+      const vao = this.vaos[vao_id];
+      this.bind_vertex_array(gl, vao.gl_vao);
+
+      const index_buffer = this.index_buffers[vao.geom_ib_id];
+      const instance_buffer = this.array_buffers[vao.inst_vb_id];
+
+      // Some drivers/browsers can end up with ELEMENT_ARRAY_BUFFER not bound
+      // when driving draws via this batched path. Bind it explicitly to avoid
+      // GL_INVALID_OPERATION on glDrawElementsInstanced.
+      this.bind_buffer(gl, gl.ELEMENT_ARRAY_BUFFER, index_buffer.gl_buf);
+
+      const draw_list_uniforms = { ptr: draw_list_ptr, len: draw_list_len };
+      const draw_call_uniforms = { ptr: draw_call_ptr, len: draw_call_len };
+      const user_uniforms = { ptr: user_ptr, len: user_len };
+      const live_uniforms = { ptr: live_ptr, len: live_len };
+
+      this.upload_uniform_buffer_from_ptr(gl, shader.draw_list_uniform_buf, draw_list_uniforms);
+      this.upload_uniform_buffer_from_ptr(gl, shader.draw_call_uniform_buf, draw_call_uniforms);
+      this.upload_uniform_buffer_from_ptr(gl, shader.user_uniform_buf, user_uniforms);
+      this.upload_uniform_buffer_from_ptr(gl, shader.live_uniform_buf, live_uniforms);
+
+      this.bind_uniform_block(gl, shader.pass_uniforms_binding, shader.pass_uniform_buf);
+      this.bind_uniform_block(gl, shader.draw_list_uniforms_binding, shader.draw_list_uniform_buf);
+      this.bind_uniform_block(gl, shader.draw_call_uniforms_binding, shader.draw_call_uniform_buf);
+      this.bind_uniform_block(gl, shader.user_uniforms_binding, shader.user_uniform_buf);
+      this.bind_uniform_block(gl, shader.live_uniforms_binding, shader.live_uniform_buf);
+
+      const indices = index_buffer.length;
+      const instances = instance_buffer.length / shader.instance_slots;
+
+      const texture_slots = shader.texture_locs.length;
+      for (let i = 0; i < texture_slots; i++) {
+        const tex_loc = shader.texture_locs[i];
+        const texture_id = words[at + i];
+        const target = tex_loc.ty === "samplerCube" ? gl.TEXTURE_CUBE_MAP : gl.TEXTURE_2D;
+        if (texture_id !== NONE_TEX) {
+          this.bind_texture(gl, i, target, this.textures[texture_id]);
+          this.set_texture_uniform(gl, tex_loc, i);
+        } else {
+          this.bind_texture(gl, i, target, null);
+        }
+      }
+      at += 16;
+
+      const pass_uniforms = { ptr: pass_ptr, len: pass_len };
+      const xr = this.xr;
+      if (xr !== undefined && xr.in_xr_pass) {
+        const pass_uniforms_arr = new Float32Array(
+          this.memory.buffer,
+          pass_uniforms.ptr,
+          pass_uniforms.len,
+        );
+        const left = xr.left_eye;
+        const lvp = left.viewport;
+        this.set_viewport(gl, lvp.x, lvp.y, lvp.width, lvp.height);
+        const mlp = left.projection_matrix;
+        for (let i = 0; i < 16; i++) pass_uniforms_arr[i] = mlp[i];
+        const mlt = left.transform_matrix;
+        for (let i = 0; i < 16; i++) pass_uniforms_arr[i + 16] = mlt[i];
+        const mli = left.invtransform_matrix;
+        for (let i = 0; i < 16; i++) pass_uniforms_arr[i + 32] = mli[i];
+        this.upload_uniform_buffer_data(gl, shader.pass_uniform_buf, pass_uniforms_arr);
+        gl.drawElementsInstanced(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+
+        const right = xr.right_eye;
+        const rvp = right.viewport;
+        this.set_viewport(gl, rvp.x, rvp.y, rvp.width, rvp.height);
+        const mrp = right.projection_matrix;
+        for (let i = 0; i < 16; i++) pass_uniforms_arr[i] = mrp[i];
+        const mrt = right.transform_matrix;
+        for (let i = 0; i < 16; i++) pass_uniforms_arr[i + 16] = mrt[i];
+        const mri = right.invtransform_matrix;
+        for (let i = 0; i < 16; i++) pass_uniforms_arr[i + 32] = mri[i];
+        this.upload_uniform_buffer_data(gl, shader.pass_uniform_buf, pass_uniforms_arr);
+        gl.drawElementsInstanced(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+      } else {
+        this.upload_uniform_buffer_from_ptr(gl, shader.pass_uniform_buf, pass_uniforms);
+        gl.drawElementsInstanced(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+      }
+
+      this.bind_vertex_array(gl, null);
+      this.set_depth_mask(gl, true);
+    }
   }
 
   FromWasmAllocTextureImage2D_BGRAu8_32(args) {

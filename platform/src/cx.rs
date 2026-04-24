@@ -233,6 +233,8 @@ pub struct WebParams {
     pub hash: String,
     #[live]
     pub small_font_aliases: bool,
+    #[live]
+    pub render_api: u32,
 }
 
 #[derive(Clone, Debug, Default, Script, ScriptHook)]

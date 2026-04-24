@@ -99,6 +99,9 @@ impl Cx {
                         tw.gpu_info.renderer,
                     );
                     self.os_type = tw.browser_info.into();
+                    if let OsType::Web(params) = &mut self.os_type {
+                        params.render_api = tw.render_api;
+                    }
                     self.xr_capabilities = tw.xr_capabilities.into();
                     self.os.window_geom = tw.window_info.into();
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
@@ -469,7 +472,15 @@ impl Cx {
         if let Some(time) = is_animation_frame {
             if self.need_redrawing() {
                 self.call_draw_event(time);
-                self.webgl_compile_shaders();
+                let render_api = match &self.os_type {
+                    OsType::Web(params) => params.render_api,
+                    _ => 0,
+                };
+                if render_api == 1 {
+                    self.webgpu_compile_shaders();
+                } else {
+                    self.webgl_compile_shaders();
+                }
             }
             self.handle_repaint(time);
         }
@@ -886,6 +897,7 @@ impl CxOsApi for Cx {
             FromWasmXrStartPresenting::to_js_code(),
             FromWasmXrStopPresenting::to_js_code(),
             FromWasmCompileWebGLShader::to_js_code(),
+            FromWasmCompileWebGPUShader::to_js_code(),
             FromWasmAllocArrayBuffer::to_js_code(),
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),
@@ -897,6 +909,7 @@ impl CxOsApi for Cx {
             FromWasmBeginRenderCanvas::to_js_code(),
             FromWasmSetDefaultDepthAndBlendMode::to_js_code(),
             FromWasmDrawCall::to_js_code(),
+            FromWasmRenderCommandBuffer::to_js_code(),
             FromWasmOpenUrl::to_js_code(),
             FromWasmBrowserUpdateUrl::to_js_code(),
             FromWasmBrowserHistoryGo::to_js_code(),
@@ -1059,6 +1072,10 @@ pub struct CxOs {
     pub(crate) index_buffers: usize,
     pub(crate) vaos: usize,
 
+    // Scratch command buffer for the batched render protocol.
+    // Must live in wasm memory across a single pump so JS can read it.
+    pub(crate) render_cmd_buf: Vec<u32>,
+
     pub(crate) to_wasm_js: Vec<String>,
     pub(crate) from_wasm_js: Vec<String>,
 
@@ -1075,6 +1092,7 @@ impl Default for CxOs {
             vertex_buffers: 0,
             index_buffers: 0,
             vaos: 0,
+            render_cmd_buf: Vec::new(),
 
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),

@@ -245,7 +245,13 @@ export class WasmBridge {
         this.update_array_buffer_refs();
     }
     u8_to_string(ptr, len) {
-        return TEXT_DECODER.decode(new Uint8Array(this.memory.buffer, ptr, len));
+        const view = new Uint8Array(this.memory.buffer, ptr, len);
+        // Some browsers reject TextDecoder.decode() on SharedArrayBuffer-backed views.
+        // Copy to an unshared ArrayBuffer when needed.
+        if (typeof SharedArrayBuffer !== "undefined" && this.memory.buffer instanceof SharedArrayBuffer) {
+            return TEXT_DECODER.decode(view.slice());
+        }
+        return TEXT_DECODER.decode(view);
     }
 
     js_console_log(u8_ptr, len) {

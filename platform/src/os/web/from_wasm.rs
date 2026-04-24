@@ -195,6 +195,30 @@ pub struct FromWasmCompileWebGLShader {
     pub textures: Vec<WTextureInput>,
 }
 
+/// Compile a WebGPU WGSL shader module and create a render pipeline.
+#[derive(FromWasm)]
+pub struct FromWasmCompileWebGPUShader {
+    pub shader_id: usize,
+    pub wgsl: String,
+    pub geometry_slots: usize,
+    pub instance_slots: usize,
+    pub textures: Vec<WTextureInput>,
+    pub texture_sampler_indices: Vec<usize>,
+    pub samplers: Vec<WSampler>,
+    pub dyn_uniform_binding: u32,
+    pub texture_binding_base: u32,
+    pub sampler_binding_base: u32,
+    pub xr_depth_binding: u32,
+}
+
+#[derive(FromWasm, Clone, Copy, Default)]
+pub struct WSampler {
+    pub filter: u32,
+    pub address: u32,
+    pub coord: u32,
+    pub is_video: bool,
+}
+
 #[derive(FromWasm)]
 pub struct FromWasmAllocArrayBuffer {
     pub buffer_id: usize,
@@ -316,6 +340,15 @@ pub struct FromWasmDrawCall {
     pub live_uniforms: WasmPtrF32,
     pub const_table: WasmPtrF32,
     pub textures: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
+}
+
+/// Batched render command buffer (packed u32 words).
+///
+/// This is a stepping stone towards reducing per-draw JS dispatch overhead.
+/// The buffer is owned by `CxOs::render_cmd_buf` and referenced by pointer/len.
+#[derive(FromWasm)]
+pub struct FromWasmRenderCommandBuffer {
+    pub words: WasmPtrU32,
 }
 
 #[derive(FromWasm)]

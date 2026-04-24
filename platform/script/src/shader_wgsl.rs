@@ -742,6 +742,7 @@ fn build_draw_shader_wgsl(
     writeln!(out, "    return unibuf_draw_pass.camera_inv;").ok();
     writeln!(out, "}}").ok();
     writeln!(out).ok();
+
     output.create_functions(&mut out);
     writeln!(out).ok();
     writeln!(
