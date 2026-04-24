@@ -565,7 +565,9 @@ struct Fitter {
     text: Substr,
     font_family: Rc<FontFamily>,
     lens: Vec<usize>,
-    widths_in_lpxs: Vec<f32>,
+    prefix_lens: Vec<usize>,
+    prefix_widths_in_lpxs: Vec<f32>,
+    front: usize,
 }
 
 impl Fitter {
@@ -585,7 +587,7 @@ impl Fitter {
         if matches!(segment_kind, SegmentKind::Word) {
             merge_segments_for_line_breaking(&text, &mut lens);
         }
-        let widths_in_lpxs: Vec<_> = lens
+        let widths_in_lpxs = lens
             .iter()
             .copied()
             .scan(0, |state, len| {
@@ -596,12 +598,26 @@ impl Fitter {
                 *state = end;
                 Some(width_in_lpxs)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let mut prefix_widths_in_lpxs = Vec::with_capacity(widths_in_lpxs.len() + 1);
+        prefix_widths_in_lpxs.push(0.0);
+        for width in widths_in_lpxs {
+            let previous = *prefix_widths_in_lpxs.last().unwrap();
+            prefix_widths_in_lpxs.push(previous + width);
+        }
+        let mut prefix_lens = Vec::with_capacity(lens.len() + 1);
+        prefix_lens.push(0);
+        for len in &lens {
+            let previous = *prefix_lens.last().unwrap();
+            prefix_lens.push(previous + *len);
+        }
         Self {
             text,
             font_family,
             lens,
-            widths_in_lpxs,
+            prefix_lens,
+            prefix_widths_in_lpxs,
+            front: 0,
         }
     }
 
@@ -610,12 +626,12 @@ impl Fitter {
     }
 
     fn next_len(&self) -> usize {
-        self.lens[0]
+        self.lens[self.front]
     }
 
     fn fit(&mut self, wrap_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
         let mut min_count = 1;
-        let mut max_count = self.lens.len() + 1;
+        let mut max_count = self.lens.len() - self.front + 1;
         let mut best_count = None;
         while min_count < max_count {
             let mid_count = (min_count + max_count) / 2;
@@ -627,10 +643,9 @@ impl Fitter {
             }
         }
         if let Some(best_count) = best_count {
-            let best_len = self.lens[..best_count].iter().sum();
+            let best_len = self.prefix_lens[self.front + best_count] - self.prefix_lens[self.front];
             let best_text = self.font_family.get_or_shape(self.text.substr(0..best_len));
-            self.lens.drain(..best_count);
-            self.widths_in_lpxs.drain(..best_count);
+            self.front += best_count;
             self.text = self.text.substr(best_len..);
             Some(best_text)
         } else {
@@ -649,13 +664,14 @@ impl Fitter {
         // actual shaped width (it doesn't account for inter-word kerning, but
         // that's negligible for wrap-width decisions). The final shaped text
         // in `fit()` uses get_or_shape() for the exact result.
-        let estimated_width_in_lpxs: f32 = self.widths_in_lpxs[..count].iter().sum();
+        let estimated_width_in_lpxs =
+            self.prefix_widths_in_lpxs[self.front + count] - self.prefix_widths_in_lpxs[self.front];
         estimated_width_in_lpxs <= wrap_width_in_lpxs
     }
 
     fn pop(&mut self) -> usize {
-        let len = self.lens.remove(0);
-        self.widths_in_lpxs.remove(0);
+        let len = self.lens[self.front];
+        self.front += 1;
         self.text = self.text.substr(len..);
         len
     }
@@ -1227,11 +1243,52 @@ impl LaidoutGlyph {
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_segments_for_line_breaking, parse_text_atlas_size_value, Layouter, Size,
-        LAYOUT_CACHE_MAX_TEXT_LEN, LAYOUT_CACHE_MULTILINE_LINE_COUNT,
-        LAYOUT_CACHE_MULTILINE_TEXT_LEN,
+        merge_segments_for_line_breaking, parse_text_atlas_size_value, BorrowedLayoutParams,
+        LayoutOptions, Layouter, Size, Style, LAYOUT_CACHE_MAX_TEXT_LEN,
+        LAYOUT_CACHE_MULTILINE_LINE_COUNT, LAYOUT_CACHE_MULTILINE_TEXT_LEN,
     };
+    use crate::{
+        makepad_platform::SharedBytes,
+        text::{
+            font::FontId,
+            font_family::FontFamilyId,
+            loader::{FontDefinition, FontFamilyDefinition},
+        },
+    };
+    use std::path::PathBuf;
     use unicode_segmentation::UnicodeSegmentation;
+
+    fn bundled_font_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources/IBMPlexSans-Text.ttf")
+    }
+
+    fn test_layouter() -> (Layouter, FontFamilyId) {
+        let mut layouter = Layouter::new(Default::default());
+        let font_id: FontId = 0xFACE_FEED_u64.into();
+        let font_family_id: FontFamilyId = 0xFACE_F00D_u64.into();
+        let font_data = SharedBytes::from_file_mmap_or_read(bundled_font_path())
+            .expect("font bytes should load");
+
+        layouter.define_font(
+            font_id,
+            FontDefinition {
+                data: font_data,
+                index: 0,
+                ascender_fudge_in_ems: -0.1,
+                descender_fudge_in_ems: 0.0,
+                weight: None,
+                variations: Vec::new(),
+            },
+        );
+        layouter.define_font_family(
+            font_family_id,
+            FontFamilyDefinition {
+                font_ids: vec![font_id],
+                expected_member_count: 1,
+            },
+        );
+        (layouter, font_family_id)
+    }
 
     #[test]
     fn parses_text_atlas_size_from_env_value() {
@@ -1335,5 +1392,35 @@ mod tests {
             .join("\n");
         assert!(multiline.len() > LAYOUT_CACHE_MULTILINE_TEXT_LEN);
         assert!(!Layouter::should_cache_text(&multiline));
+    }
+
+    #[test]
+    fn wrapped_ascii_layout_preserves_all_input_text() {
+        let (mut layouter, font_family_id) = test_layouter();
+        let text = (0..96)
+            .map(|index| format!("word{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let laidout = layouter.get_or_layout(BorrowedLayoutParams {
+            text: &text,
+            style: Style {
+                font_family_id,
+                font_size_in_pts: 10.0,
+                color: None,
+            },
+            options: LayoutOptions {
+                max_width_in_lpxs: Some(180.0),
+                wrap: true,
+                ..Default::default()
+            },
+        });
+
+        assert!(laidout.rows.len() > 1);
+        let consumed_text_len: usize = laidout
+            .rows
+            .iter()
+            .map(|row| row.text.len() + usize::from(row.newline))
+            .sum();
+        assert_eq!(consumed_text_len, text.len());
     }
 }

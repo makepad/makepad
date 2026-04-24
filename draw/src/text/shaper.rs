@@ -259,9 +259,7 @@ impl Shaper {
                 // still has an unmapped glyph, so we can reshape the whole
                 // span with the next fallback font in one call.
                 let run_start = i;
-                while i < glyph_groups.len()
-                    && glyph_groups[i].iter().any(|glyph| glyph.id == 0)
-                {
+                while i < glyph_groups.len() && glyph_groups[i].iter().any(|glyph| glyph.id == 0) {
                     i += 1;
                 }
                 let run_end = i;
@@ -297,10 +295,7 @@ impl Shaper {
                 // back to rendering the missing groups as the primary font's
                 // .notdef glyph rather than panicking inside a recursive
                 // shape_step call on an inverted byte range.
-                if missing_start >= start
-                    && missing_end <= end
-                    && missing_start < missing_end
-                {
+                if missing_start >= start && missing_end <= end && missing_start < missing_end {
                     self.shape_recursive(
                         text,
                         primary_font,
@@ -326,8 +321,7 @@ impl Shaper {
                 // If we've exhausted all fallback fonts and still have
                 // unmapped glyphs (id == 0), use the primary font's .notdef
                 // so a visible placeholder is rendered instead of nothing.
-                if glyph_group.iter().any(|glyph| glyph.id == 0)
-                    && !Rc::ptr_eq(font, primary_font)
+                if glyph_group.iter().any(|glyph| glyph.id == 0) && !Rc::ptr_eq(font, primary_font)
                 {
                     out_glyphs.extend(glyph_group.iter().map(|glyph| {
                         let mut g = glyph.clone();
@@ -363,10 +357,17 @@ impl Shaper {
             Direction::Ltr => unicode_buffer.set_direction(rustybuzz::Direction::LeftToRight),
             Direction::Rtl => unicode_buffer.set_direction(rustybuzz::Direction::RightToLeft),
         }
-        for (index, grapheme) in text[start..end].grapheme_indices(true) {
-            let cluster = start + index;
-            for char in grapheme.chars() {
-                unicode_buffer.add(char, cluster as u32);
+        let text_run = &text[start..end];
+        if text_run.is_ascii() {
+            for (index, byte) in text_run.bytes().enumerate() {
+                unicode_buffer.add(byte as char, (start + index) as u32);
+            }
+        } else {
+            for (index, grapheme) in text_run.grapheme_indices(true) {
+                let cluster = start + index;
+                for char in grapheme.chars() {
+                    unicode_buffer.add(char, cluster as u32);
+                }
             }
         }
         // Convert the caller's `(tag, value)` feature pairs into rustybuzz's
