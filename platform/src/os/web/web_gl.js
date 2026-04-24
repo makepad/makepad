@@ -1,3 +1,5 @@
+// WebGL2 backend. Rust: `platform/src/os/web/web_gl.rs` (shader compile) and
+// `platform/src/os/web/web_render.rs` (shared `FromWasm*` draw protocol).
 import { WasmWebBrowser } from "./web.js";
 
 export class WasmWebGL extends WasmWebBrowser {

@@ -1,3 +1,5 @@
+// WebGPU backend. Rust: `platform/src/os/web/web_gpu.rs` (WGSL compile) and
+// `platform/src/os/web/web_render.rs` (same `FromWasm*` draw protocol as WebGL).
 import { WasmWebBrowser } from "./web.js";
 
 // WebGPU backend skeleton.
