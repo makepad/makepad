@@ -401,8 +401,6 @@ export class WasmWebGL extends WasmWebBrowser {
 
     this.mark_startup_shader_complete(pending);
     this.draw_shaders[shader_id] = {
-      vertex: args.vertex,
-      pixel: args.pixel,
       geom_attribs: get_attrib_locations(gl, program, "packed_geometry_", args.geometry_slots),
       inst_attribs: get_attrib_locations(gl, program, "packed_instance_", args.instance_slots),
       pass_uniforms_binding: this.get_uniform_block_binding(program, "passUniforms"),
