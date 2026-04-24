@@ -331,7 +331,7 @@ impl LayoutContext {
                 Some(text) => self.append_text(&text),
                 None => {
                     let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
-                    if next_word.chars().all(|char| char.is_whitespace()) {
+                    if is_all_whitespace(next_word) {
                         self.layout_directly(fitter.pop());
                     } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
                         self.layout_by_grapheme(fitter.pop());
@@ -587,23 +587,17 @@ impl Fitter {
         if matches!(segment_kind, SegmentKind::Word) {
             merge_segments_for_line_breaking(&text, &mut lens);
         }
-        let widths_in_lpxs = lens
-            .iter()
-            .copied()
-            .scan(0, |state, len| {
-                let start = *state;
-                let end = start + len;
-                let segment = font_family.get_or_shape(text.substr(start..end));
-                let width_in_lpxs = segment.width_in_ems * font_size_in_lpxs;
-                *state = end;
-                Some(width_in_lpxs)
-            })
-            .collect::<Vec<_>>();
-        let mut prefix_widths_in_lpxs = Vec::with_capacity(widths_in_lpxs.len() + 1);
+        let mut prefix_widths_in_lpxs = Vec::with_capacity(lens.len() + 1);
         prefix_widths_in_lpxs.push(0.0);
-        for width in widths_in_lpxs {
+        let mut offset = 0;
+        for len in &lens {
+            let start = offset;
+            let end = start + *len;
+            let segment = font_family.get_or_shape(text.substr(start..end));
+            let width = segment.width_in_ems * font_size_in_lpxs;
             let previous = *prefix_widths_in_lpxs.last().unwrap();
             prefix_widths_in_lpxs.push(previous + width);
+            offset = end;
         }
         let mut prefix_lens = Vec::with_capacity(lens.len() + 1);
         prefix_lens.push(0);
@@ -700,7 +694,7 @@ fn merge_segments_for_line_breaking(text: &str, lens: &mut Vec<usize>) {
         while i < lens.len() {
             let seg_end = byte_offset + lens[i];
             let seg_text = &text[byte_offset..seg_end];
-            if seg_text.chars().all(is_no_break_before_char) {
+            if is_all_no_break_before(seg_text) {
                 lens[i - 1] += lens[i];
                 lens.remove(i);
             } else {
@@ -718,7 +712,7 @@ fn merge_segments_for_line_breaking(text: &str, lens: &mut Vec<usize>) {
         while i + 1 < lens.len() {
             let seg_end = byte_offset + lens[i];
             let seg_text = &text[byte_offset..seg_end];
-            if seg_text.chars().all(is_no_break_after_char) {
+            if is_all_no_break_after(seg_text) {
                 lens[i + 1] = lens[i] + lens[i + 1];
                 lens.remove(i);
             } else {
@@ -726,6 +720,35 @@ fn merge_segments_for_line_breaking(text: &str, lens: &mut Vec<usize>) {
                 i += 1;
             }
         }
+    }
+}
+
+fn is_all_whitespace(text: &str) -> bool {
+    if text.is_ascii() {
+        text.bytes().all(|byte| byte.is_ascii_whitespace())
+    } else {
+        text.chars().all(char::is_whitespace)
+    }
+}
+
+fn is_all_no_break_before(text: &str) -> bool {
+    if text.is_ascii() {
+        text.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'.' | b',' | b':' | b';' | b'!' | b'?' | b')' | b']' | b'}' | b'%'
+            )
+        })
+    } else {
+        text.chars().all(is_no_break_before_char)
+    }
+}
+
+fn is_all_no_break_after(text: &str) -> bool {
+    if text.is_ascii() {
+        text.bytes().all(|byte| matches!(byte, b'(' | b'[' | b'{'))
+    } else {
+        text.chars().all(is_no_break_after_char)
     }
 }
 
