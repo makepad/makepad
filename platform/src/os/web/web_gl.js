@@ -19,6 +19,12 @@ export class WasmWebGL extends WasmWebBrowser {
     this.parallel_compile_ext = null;
     this.pending_startup_shader_compiles = 0;
     this.pending_startup_shader_frame_id = 0;
+    this.bound_uniform_buffers = [];
+    this.bound_textures = [];
+    this.current_program = null;
+    this.current_depth_mask = null;
+    this.current_cull_face = null;
+    this.current_active_texture_slot = -1;
     this.init_webgl_context();
 
     this.load_deps();
@@ -201,11 +207,12 @@ export class WasmWebGL extends WasmWebBrowser {
     if (!gl_buf || ptr_f32.ptr == 0 || ptr_f32.len == 0) {
       return;
     }
+    let memory_byte_length = this.memory.buffer.byteLength;
     if (
       gl_buf._last_upload_serial === this.buffer_upload_serial &&
       gl_buf._last_upload_ptr === ptr_f32.ptr &&
       gl_buf._last_upload_len === ptr_f32.len &&
-      gl_buf._last_upload_memory === this.memory.buffer
+      gl_buf._last_upload_memory_byte_length === memory_byte_length
     ) {
       return;
     }
@@ -214,7 +221,7 @@ export class WasmWebGL extends WasmWebBrowser {
     gl_buf._last_upload_serial = this.buffer_upload_serial;
     gl_buf._last_upload_ptr = ptr_f32.ptr;
     gl_buf._last_upload_len = ptr_f32.len;
-    gl_buf._last_upload_memory = this.memory.buffer;
+    gl_buf._last_upload_memory_byte_length = memory_byte_length;
   }
 
   upload_uniform_buffer_data(gl, gl_buf, data, usage = gl.DYNAMIC_DRAW) {
@@ -240,7 +247,79 @@ export class WasmWebGL extends WasmWebBrowser {
     if (binding === null || !gl_buf) {
       return;
     }
+    if (this.bound_uniform_buffers[binding] === gl_buf) {
+      return;
+    }
     gl.bindBufferBase(gl.UNIFORM_BUFFER, binding, gl_buf);
+    this.bound_uniform_buffers[binding] = gl_buf;
+  }
+
+  use_program(gl, program) {
+    if (this.current_program === program) {
+      return;
+    }
+    gl.useProgram(program);
+    this.current_program = program;
+  }
+
+  set_depth_mask(gl, enabled) {
+    if (this.current_depth_mask === enabled) {
+      return;
+    }
+    gl.depthMask(enabled);
+    this.current_depth_mask = enabled;
+  }
+
+  set_cull_face(gl, enabled) {
+    if (this.current_cull_face === enabled) {
+      return;
+    }
+    if (enabled) {
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+    } else {
+      gl.disable(gl.CULL_FACE);
+    }
+    this.current_cull_face = enabled;
+  }
+
+  active_texture(gl, slot) {
+    if (this.current_active_texture_slot === slot) {
+      return;
+    }
+    gl.activeTexture(gl.TEXTURE0 + slot);
+    this.current_active_texture_slot = slot;
+  }
+
+  bind_texture(gl, slot, target, texture) {
+    let bound = this.bound_textures[slot];
+    if (bound && bound[target] === texture) {
+      return;
+    }
+    this.active_texture(gl, slot);
+    gl.bindTexture(target, texture);
+    if (!bound) {
+      bound = this.bound_textures[slot] = {};
+    }
+    bound[target] = texture;
+  }
+
+  bind_texture_for_update(gl, target, texture) {
+    this.active_texture(gl, 0);
+    gl.bindTexture(target, texture);
+    let bound = this.bound_textures[0];
+    if (!bound) {
+      bound = this.bound_textures[0] = {};
+    }
+    bound[target] = texture;
+  }
+
+  set_texture_uniform(gl, tex_loc, slot) {
+    if (tex_loc.loc === null || tex_loc.slot === slot) {
+      return;
+    }
+    gl.uniform1i(tex_loc.loc, slot);
+    tex_loc.slot = slot;
   }
 
   assert_no_gl_error(gl, where) {
@@ -295,6 +374,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
       // Poll all pending startup shader compiles so loader gating does not
       // depend on individual draw/VAO paths being exercised.
+      const pending_before = this.pending_startup_shader_compiles;
       for (let shader_id = 0; shader_id < this.draw_shaders.length; shader_id++) {
         let shader = this.draw_shaders[shader_id];
         if (shader && shader._pending && shader._startup_pending) {
@@ -302,8 +382,10 @@ export class WasmWebGL extends WasmWebBrowser {
         }
       }
 
-      this.to_wasm.ToWasmRedrawAll();
-      this.schedule_wasm_pump();
+      if (this.pending_startup_shader_compiles < pending_before) {
+        this.to_wasm.ToWasmRedrawAll();
+        this.schedule_wasm_pump();
+      }
       if (this.pending_startup_shader_compiles > 0) {
         this.schedule_startup_shader_warmup();
       }
@@ -396,7 +478,7 @@ export class WasmWebGL extends WasmWebBrowser {
       if (loc === null) {
         loc = gl.getUniformLocation(program, "ds_" + tex_name);
       }
-      texture_locs.push({ name: tex_name, ty: args.textures[i].ty, loc: loc });
+      texture_locs.push({ ty: args.textures[i].ty, loc: loc });
     }
 
     this.mark_startup_shader_complete(pending);
@@ -437,6 +519,11 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.linkProgram(program);
 
     const use_parallel_compile = !!this.parallel_compile_ext && !this.loader_removed;
+    const shader_info = {
+      textures: args.textures,
+      geometry_slots: args.geometry_slots,
+      instance_slots: args.instance_slots,
+    };
 
     // Store as pending. If the extension is absent _try_finalize_shader will
     // resolve it synchronously on the first call (the blocking checks above
@@ -447,7 +534,7 @@ export class WasmWebGL extends WasmWebBrowser {
       program: program,
       vsh: vsh,
       fsh: fsh,
-      args: args,
+      args: shader_info,
       _parallel_compile: use_parallel_compile,
       _startup_pending: use_parallel_compile,
     };
@@ -642,14 +729,9 @@ export class WasmWebGL extends WasmWebBrowser {
       });
     }
 
-    gl.useProgram(shader.program);
-    gl.depthMask(!!args.depth_write);
-    if (args.backface_culling) {
-      gl.enable(gl.CULL_FACE);
-      gl.cullFace(gl.BACK);
-    } else {
-      gl.disable(gl.CULL_FACE);
-    }
+    this.use_program(gl, shader.program);
+    this.set_depth_mask(gl, !!args.depth_write);
+    this.set_cull_face(gl, !!args.backface_culling);
 
     let vao = this.vaos[args.vao_id];
 
@@ -716,23 +798,20 @@ export class WasmWebGL extends WasmWebBrowser {
       let target =
         tex_loc.ty === "samplerCube" ? gl.TEXTURE_CUBE_MAP : gl.TEXTURE_2D;
       if (texture_id !== undefined) {
-        let tex_obj = this.textures[texture_id];
-        gl.activeTexture(gl.TEXTURE0 + i);
-        gl.bindTexture(target, tex_obj);
-        gl.uniform1i(tex_loc.loc, i);
+        this.bind_texture(gl, i, target, this.textures[texture_id]);
+        this.set_texture_uniform(gl, tex_loc, i);
       } else {
-        gl.activeTexture(gl.TEXTURE0 + i);
-        gl.bindTexture(target, null);
+        this.bind_texture(gl, i, target, null);
       }
     }
 
     let xr = this.xr;
-    let pass_uniforms = new Float32Array(
-      this.memory.buffer,
-      args.pass_uniforms.ptr,
-      args.pass_uniforms.len,
-    );
     if (xr !== undefined && xr.in_xr_pass) {
+      let pass_uniforms = new Float32Array(
+        this.memory.buffer,
+        args.pass_uniforms.ptr,
+        args.pass_uniforms.len,
+      );
       let left = xr.left_eye;
       let lvp = left.viewport;
       gl.viewport(lvp.x, lvp.y, lvp.width, lvp.height);
@@ -777,10 +856,10 @@ export class WasmWebGL extends WasmWebBrowser {
         instances,
       );
     } else {
-      this.upload_uniform_buffer_data(
+      this.upload_uniform_buffer_from_ptr(
         gl,
         shader.pass_uniform_buf,
-        pass_uniforms,
+        args.pass_uniforms,
       );
       gl.drawElementsInstanced(
         gl.TRIANGLES,
@@ -792,14 +871,14 @@ export class WasmWebGL extends WasmWebBrowser {
     }
 
     gl.bindVertexArray(null);
-    gl.depthMask(true);
+    this.set_depth_mask(gl, true);
   }
 
   FromWasmAllocTextureImage2D_BGRAu8_32(args) {
     var gl = this.gl;
     var gl_tex = this.textures[args.texture_id] || gl.createTexture();
 
-    gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+    this.bind_texture_for_update(gl, gl.TEXTURE_2D, gl_tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -829,7 +908,7 @@ export class WasmWebGL extends WasmWebBrowser {
     var gl = this.gl;
     var gl_tex = this.textures[args.texture_id] || gl.createTexture();
 
-    gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+    this.bind_texture_for_update(gl, gl.TEXTURE_2D, gl_tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -860,7 +939,7 @@ export class WasmWebGL extends WasmWebBrowser {
     let gl = this.gl;
     let gl_tex = this.textures[args.texture_id] || gl.createTexture();
 
-    gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+    this.bind_texture_for_update(gl, gl.TEXTURE_2D, gl_tex);
     // Data textures are sampled as lookup tables; avoid interpolation artifacts.
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -889,7 +968,7 @@ export class WasmWebGL extends WasmWebBrowser {
     var gl = this.gl;
     var gl_tex = this.textures[args.texture_id] || gl.createTexture();
 
-    gl.bindTexture(gl.TEXTURE_CUBE_MAP, gl_tex);
+    this.bind_texture_for_update(gl, gl.TEXTURE_CUBE_MAP, gl_tex);
     gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -953,7 +1032,7 @@ export class WasmWebGL extends WasmWebBrowser {
       // resize or create texture
       clear_color = tgt.clear_color;
       if (gl_tex._width != args.width || gl_tex._height != args.height) {
-        gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+        this.bind_texture_for_update(gl, gl.TEXTURE_2D, gl_tex);
 
         clear_flags |= gl.COLOR_BUFFER_BIT;
 
@@ -1231,7 +1310,7 @@ export class WasmWebGL extends WasmWebBrowser {
       this.textures[player.texture_id] = gl_tex;
     }
 
-    gl.bindTexture(gl.TEXTURE_2D, gl_tex);
+    this.bind_texture_for_update(gl, gl.TEXTURE_2D, gl_tex);
 
     if (!player.texture_initialized) {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);

@@ -1199,8 +1199,12 @@ export class WasmWebBrowser extends WasmBridge {
 
     dispatch_first_msg() {
         let from_wasm = this.wasm_return_first_msg();
-        from_wasm.dispatch_on_app();
-        from_wasm.free();
+        try {
+            from_wasm.dispatch_on_app();
+        }
+        finally {
+            from_wasm.free();
+        }
     }
 
     do_wasm_pump() {
@@ -1213,9 +1217,13 @@ export class WasmWebBrowser extends WasmBridge {
         let to_wasm = this.to_wasm;
         this.to_wasm = this.new_to_wasm();
         let from_wasm = this.wasm_process_msg(to_wasm);
-        from_wasm.dispatch_on_app();
-        from_wasm.free();
-        this.update_startup_loader(performance.now() - started);
+        try {
+            from_wasm.dispatch_on_app();
+        }
+        finally {
+            from_wasm.free();
+            this.update_startup_loader(performance.now() - started);
+        }
     }
 
 

@@ -148,7 +148,15 @@ impl FromWasmMsg {
         }
     }
 
-    pub fn release_ownership(self) -> u32 {
+    /// Transfers the backing allocation to the caller and returns its wasm pointer.
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer must be handed back to `ToWasmMsg::take_ownership`
+    /// exactly once, either directly in Rust or through the exported
+    /// `wasm_msg_free` helper. Dropping the pointer leaks the allocation, and
+    /// taking ownership more than once is undefined behavior.
+    pub unsafe fn release_ownership(self) -> u32 {
         unsafe {
             let mut v = std::mem::ManuallyDrop::new(self.data);
             let ptr = v.as_mut_ptr();

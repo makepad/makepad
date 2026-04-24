@@ -484,15 +484,12 @@ impl Cx {
         self.handle_platform_ops();
         self.handle_media_signals();
 
-        if self.any_passes_dirty()
-            || self.need_redrawing()
-            || self.new_next_frames.len() != 0
-        {
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             self.os.from_wasm(FromWasmRequestAnimationFrame {});
         }
 
         //return wasm pointer to caller
-        self.os.from_wasm.take().unwrap().release_ownership()
+        unsafe { self.os.from_wasm.take().unwrap().release_ownership() }
     }
 
     pub fn handle_repaint(&mut self, time: f64) {
@@ -1121,7 +1118,7 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
     out.push_str("}\n");
     out.push_str("}");
     msg.push_str(&out);
-    msg.release_ownership()
+    unsafe { msg.release_ownership() }
 }
 
 #[export_name = "wasm_check_signal"]
