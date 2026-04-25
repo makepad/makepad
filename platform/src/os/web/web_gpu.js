@@ -109,6 +109,7 @@ export class WasmWebGPU extends WasmWebBrowser {
       alphaMode: "premultiplied",
     });
 
+    this._frame_id = 0;
     this._draw_count = 0;
     this.device.addEventListener('uncapturederror', (ev) => {
       console.error('[makepad:webgpu] uncaptured device error:', ev.error.message);
@@ -535,11 +536,14 @@ export class WasmWebGPU extends WasmWebBrowser {
     return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries: uniqueEntries });
   }
 
-  get_bind_group_for_shader(shader, textureViews, textureEntries, variant, texIds) {
+  get_bind_group_for_shader(shader, textureViews, textureEntries, variant, texIds, pool_idx = 0) {
     if (!shader.bindGroups) shader.bindGroups = new Map();
-    let key = variant.key;
+    let key = variant.key + '|P' + pool_idx;
     for (let i = 0; i < shader.texture_count; i++) {
-        key += '|' + (texIds[i] == null ? 'n' : texIds[i]);
+        const tid = texIds[i];
+        const entry = textureEntries[i];
+        const ver = entry ? (entry.version | 0) : 0;
+        key += '|' + (tid == null ? 'n' : tid) + ':' + ver;
     }
     let bg = shader.bindGroups.get(key);
     if (bg) return bg;
@@ -682,6 +686,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     if (!this.device) {
       return;
     }
+    this._frame_id = (this._frame_id || 0) + 1;
     if (this.xr !== undefined) {
       this.xr.in_xr_pass = true;
     }
@@ -767,6 +772,7 @@ export class WasmWebGPU extends WasmWebBrowser {
         rtW: w,
         rtH: h,
         cube: false,
+        version: (entry ? (entry.version | 0) + 1 : 1),
       };
     }
 
@@ -791,6 +797,7 @@ export class WasmWebGPU extends WasmWebBrowser {
           depthView: depthTexture.createView(),
           rtDW: w,
           rtDH: h,
+          version: (dEntry ? (dEntry.version | 0) + 1 : 1),
         };
       }
       const dView = this.textures[did].depthView;
@@ -850,6 +857,7 @@ export class WasmWebGPU extends WasmWebBrowser {
         { width: w, height: h, depthOrArrayLayers: 1 },
       );
     }
+    const entry = this.textures[args.texture_id];
     this.textures[args.texture_id] = {
       texture,
       view: texture.createView({ dimension: "cube" }),
@@ -857,6 +865,7 @@ export class WasmWebGPU extends WasmWebBrowser {
       h,
       format: "bgra8unorm",
       cube: true,
+      version: (entry ? (entry.version | 0) + 1 : 1),
     };
   }
 
@@ -935,6 +944,7 @@ export class WasmWebGPU extends WasmWebBrowser {
   }
 
   on_xr_animation_frame(time, frame) {
+    this._frame_id = (this._frame_id || 0) + 1;
     function empty_transform() {
       return {
         orientation: { a: 0, b: 0, c: 0, d: 0 },
@@ -1291,6 +1301,7 @@ export class WasmWebGPU extends WasmWebBrowser {
         w: vw,
         h: vh,
         format: "rgba8unorm",
+        version: (entry ? (entry.version | 0) + 1 : 1),
       };
       player.texture_initialized = true;
     }
@@ -1377,20 +1388,59 @@ export class WasmWebGPU extends WasmWebBrowser {
     if (!this._scratch_pass_f32) {
       this._scratch_pass_f32 = new Float32Array(1024);
     }
-    
-    const writeUBO = (uboName, ptr, len) => {
+
+    // In WebGPU, queue.writeBuffer() resolves BEFORE the submitted command buffer.
+    // This means if we reuse the same UBO for multiple draw calls within a render pass,
+    // only the last writeBuffer wins and all draws see that data.
+    // Fix: allocate a separate GPUBuffer per draw call from a pool, reset each frame.
+
+    if (!shader._ubo_pool) {
+      shader._ubo_pool = [];      // Array of {pass, list, call, user, live} buffer sets
+      shader._ubo_pool_idx = 0;
+    }
+    // Reset pool index at start of each frame
+    if (shader._ubo_pool_frame !== this._frame_id) {
+      shader._ubo_pool_idx = 0;
+      shader._ubo_pool_frame = this._frame_id;
+    }
+
+    const poolIdx = shader._ubo_pool_idx++;
+    if (!shader._ubo_pool[poolIdx]) {
+      shader._ubo_pool[poolIdx] = {
+        pass: null, list: null, call: null, user: null, live: null,
+      };
+    }
+    const poolSlot = shader._ubo_pool[poolIdx];
+
+    const ensurePoolBuf = (slot, byteLen) => {
+      let buf = poolSlot[slot];
+      const needed = Math.max(256, (byteLen + 255) & ~255);
+      if (!buf || buf.size < needed) {
+        if (buf) buf.destroy();
+        buf = this.device.createBuffer({
+          size: needed,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        poolSlot[slot] = buf;
+      }
+      return buf;
+    };
+
+    const writePoolUBO = (slot, ptr, len) => {
       const byteLen = len * 4;
-      this.ensure_ubo(shader, uboName, byteLen);
-      if (len === 0) return;
+      if (len === 0) return ensurePoolBuf(slot, 256);
+      const buf = ensurePoolBuf(slot, byteLen);
       if (len > this._scratch_f32.length) {
         this._scratch_f32 = new Float32Array(Math.max(len, this._scratch_f32.length * 2));
       }
       const src = new Float32Array(this.memory.buffer, ptr, len);
       const dst = this._scratch_f32.subarray(0, len);
       dst.set(src);
-      this.queue.writeBuffer(shader[uboName], 0, dst.buffer, dst.byteOffset, byteLen);
+      this.queue.writeBuffer(buf, 0, dst.buffer, dst.byteOffset, byteLen);
+      return buf;
     };
 
+    // Write pass uniforms into a dedicated scratch buffer (may be mutated for XR)
     if (pass_len > this._scratch_pass_f32.length) {
       this._scratch_pass_f32 = new Float32Array(Math.max(pass_len, this._scratch_pass_f32.length * 2));
     }
@@ -1398,13 +1448,17 @@ export class WasmWebGPU extends WasmWebBrowser {
     if (pass_len > 0) {
       pass_u.set(new Float32Array(this.memory.buffer, pass_ptr, pass_len));
     }
-    this.ensure_ubo(shader, "ubo_pass", pass_len * 4);
 
-    writeUBO("ubo_draw_list", list_ptr, list_len);
-    writeUBO("ubo_draw_call", call_ptr, call_len);
-    writeUBO("ubo_user", user_ptr, user_len);
-    writeUBO("ubo_live", live_ptr, live_len);
+    const passBuf = ensurePoolBuf("pass", pass_len * 4);
+    if (pass_len > 0) {
+      this.queue.writeBuffer(passBuf, 0, pass_u.buffer, pass_u.byteOffset, pass_len * 4);
+    }
+    const listBuf = writePoolUBO("list", list_ptr, list_len);
+    const callBuf = writePoolUBO("call", call_ptr, call_len);
+    const userBuf = writePoolUBO("user", user_ptr, user_len);
+    const liveBuf = writePoolUBO("live", live_ptr, live_len);
 
+    // Build a direct bind group using the pool buffers for this draw call
     const textureViews = new Array(shader.texture_count);
     const textureEntries = new Array(shader.texture_count);
     for (let i = 0; i < shader.texture_count; i++) {
@@ -1421,7 +1475,13 @@ export class WasmWebGPU extends WasmWebBrowser {
     }
 
     const variant = this.get_pipeline_variant(shader, textureEntries, depth_write, backface_culling);
-    const bindGroup = this.get_bind_group_for_shader(shader, textureViews, textureEntries, variant, texIds);
+
+    // Create bind group directly with pool buffers (no caching — each draw call is unique)
+    const bindGroup = this._create_bind_group_with_pool_bufs(
+      shader, variant, textureViews, textureEntries,
+      passBuf, listBuf, callBuf, userBuf, liveBuf
+    );
+
     this._pass.setPipeline(variant.pipeline);
     this._pass.setBindGroup(0, bindGroup);
 
@@ -1457,15 +1517,69 @@ export class WasmWebGPU extends WasmWebBrowser {
         for (let i = 0; i < 16; i++) m[i + 16] = mt[i];
         const mi = eye.invtransform_matrix;
         for (let i = 0; i < 16; i++) m[i + 32] = mi[i];
-        this.queue.writeBuffer(shader.ubo_pass, 0, pass_u.buffer, pass_u.byteOffset, pass_u.byteLength);
+        this.queue.writeBuffer(passBuf, 0, pass_u.buffer, pass_u.byteOffset, pass_u.byteLength);
         this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
       };
       applyEye(xr.left_eye);
       applyEye(xr.right_eye);
     } else {
-      this.queue.writeBuffer(shader.ubo_pass, 0, pass_u.buffer, pass_u.byteOffset, pass_u.byteLength);
       this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
     }
+  }
+
+  _create_bind_group_with_pool_bufs(shader, variant, textureViews, textureEntries, passBuf, listBuf, callBuf, userBuf, liveBuf) {
+    const entries = [];
+
+    // Map named UBO bindings to their pool buffers
+    const uboMap = new Map();
+    if (shader.ubo_binding_pass >= 0) uboMap.set(shader.ubo_binding_pass, passBuf);
+    if (shader.ubo_binding_draw_list >= 0) uboMap.set(shader.ubo_binding_draw_list, listBuf);
+    if (shader.ubo_binding_draw_call >= 0) uboMap.set(shader.ubo_binding_draw_call, callBuf);
+    if (shader.ubo_binding_user >= 0) uboMap.set(shader.ubo_binding_user, userBuf);
+    if (shader.ubo_binding_live >= 0) uboMap.set(shader.ubo_binding_live, liveBuf);
+
+    for (const [binding, kind] of shader.binding_kinds.entries()) {
+      if (kind !== "buffer") continue;
+      const buf = uboMap.get(binding) || shader.ubos.get(binding) || passBuf;
+      entries.push({ binding, resource: { buffer: buf } });
+    }
+
+    // Bind samplers
+    for (const sb of shader.samplerBindings || []) {
+      const samplerIndex = sb.samplerIndex | 0;
+      const b = sb.binding | 0;
+      if (shader.binding_kinds?.get(b) !== "sampler") continue;
+      const bindingType = this.sampler_binding_type_for_index(shader, samplerIndex, textureEntries);
+      const desc = shader.samplerDescs[samplerIndex];
+      const useOriginal =
+        (bindingType === "filtering" && desc && (desc.filter | 0) !== 0)
+        || (bindingType === "non-filtering" && (!desc || (desc.filter | 0) === 0));
+      entries.push({
+        binding: b,
+        resource: useOriginal
+          ? (shader.samplers[samplerIndex] || this.get_fallback_sampler())
+          : this.get_sampler_resource(desc, bindingType),
+      });
+    }
+
+    // Bind textures
+    for (const tb of shader.textureBindings || []) {
+      const isDepth = tb.declaredSampleType === "depth";
+      const entry = textureEntries[tb.textureIndex];
+      const view = isDepth
+        ? ((entry && entry.depthView) ? entry.depthView : this.get_fallback_depth_texture_view())
+        : (textureViews[tb.textureIndex] || this.get_fallback_texture_view());
+      const b = tb.binding | 0;
+      if (shader.binding_kinds?.get(b) !== "texture") continue;
+      entries.push({ binding: b, resource: view });
+    }
+
+    // Deduplicate bindings
+    const byBinding = new Map();
+    for (const e of entries) byBinding.set(e.binding | 0, e);
+    const uniqueEntries = Array.from(byBinding.values()).sort((a, b) => (a.binding | 0) - (b.binding | 0));
+
+    return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries: uniqueEntries });
   }
 
   FromWasmDrawCall(args) {
@@ -1556,6 +1670,7 @@ export class WasmWebGPU extends WasmWebBrowser {
         w,
         h,
         format: "rgba8unorm",
+        version: (entry ? (entry.version | 0) + 1 : 1),
       };
     }
     this._write_texture_2d_bytes(entry.texture, w, h, bytes, 4);
@@ -1583,6 +1698,7 @@ export class WasmWebGPU extends WasmWebBrowser {
         w,
         h,
         format: "r8unorm",
+        version: (entry ? (entry.version | 0) + 1 : 1),
       };
     }
     this._write_texture_2d_bytes(entry.texture, w, h, bytes, 1);
@@ -1610,6 +1726,7 @@ export class WasmWebGPU extends WasmWebBrowser {
         w,
         h,
         format: "rgba32float",
+        version: (entry ? (entry.version | 0) + 1 : 1),
       };
     }
     this._write_texture_2d_bytes(entry.texture, w, h, new Uint8Array(f32.buffer), 16);
