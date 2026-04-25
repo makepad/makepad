@@ -60,10 +60,42 @@ export class WasmWebGPU extends WasmWebBrowser {
     this._depth_tex = null;
     this._depth_view = null;
     this._last_size = { w: 0, h: 0 };
+    /** @type {GPUTextureFormat|null} color attachment format for current render pass */
+    this._pass_color_format = null;
+    /** @type {{ w: number, h: number }|null} */
+    this._pass_extent = null;
+    this.xr = undefined;
+    this.video_players = {};
+    this.video_anim_frame_id = 0;
+    this._missing_resource_reports = new Set();
+    this._draw_reported_shaders = new Set();
+    this._draw_report_limit = 250; // safety valve
+    this._draw_report_count = 0;
+    this._alloc_tex_reported = new Set();
+    this._pending_until_ready = [];
+    /** default depth/blend — pipelines encode blend; depth compare is default less-equal */
+    this._default_depth_write = true;
+    this._default_backface_cull = false;
+    this._debug_enabled = window.makepad_webgpu_debug === true || window.localStorage.getItem("makepad_webgpu_debug") === "1";
+    this._debug_once_keys = new Set();
 
-    // Async init; after WebGPU init, run the same dependency/bootstrap path.
+    // Async init; buffer protocol calls until the device exists.
     this._webgpu_init_promise = this.init_webgpu_context();
-    this._webgpu_init_promise.then(() => this.load_deps());
+    this._webgpu_init_promise.then(() => {
+      const queued = this._pending_until_ready;
+      this._pending_until_ready = [];
+      for (const q of queued) {
+        const fn = this[q.name];
+        if (typeof fn === "function") {
+          try {
+            fn.call(this, q.args);
+          } catch (e) {
+            console.error(`[makepad:webgpu] queued call failed name=${q.name} err=${e && e.message ? e.message : e}`);
+          }
+        }
+      }
+      this.load_deps();
+    });
   }
 
   async init_webgpu_context() {
@@ -78,10 +110,16 @@ export class WasmWebGPU extends WasmWebBrowser {
       throw new Error("WebGPU context unavailable");
     }
     this.format = navigator.gpu.getPreferredCanvasFormat();
+    console.log('[makepad:webgpu] INITIALIZED format=' + this.format + ' adapter=' + (this.adapter.info ? this.adapter.info.description : 'n/a'));
     this.context.configure({
       device: this.device,
       format: this.format,
       alphaMode: "premultiplied",
+    });
+
+    this._draw_count = 0;
+    this.device.addEventListener('uncapturederror', (ev) => {
+      console.error('[makepad:webgpu] uncaptured device error:', ev.error.message);
     });
 
     // Minimal gpu_info for ToWasmInit.
@@ -92,6 +130,29 @@ export class WasmWebGPU extends WasmWebBrowser {
     this.buffers.geometry = new WgpuRingBuffer(this.device, 8 * 1024 * 1024, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
     this.buffers.instances = new WgpuRingBuffer(this.device, 8 * 1024 * 1024, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST);
     this.buffers.indices = new WgpuRingBuffer(this.device, 4 * 1024 * 1024, GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST);
+
+    // Some shaders reference low texture ids very early (before the app allocates real textures).
+    // Provide a stable default so draws don't sample "missing" and output nothing.
+    if (!this.textures[3]) {
+      const tex = this.device.createTexture({
+        size: [1, 1, 1],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      this.queue.writeTexture({ texture: tex }, new Uint8Array([255, 255, 255, 255]), { bytesPerRow: 4 }, { width: 1, height: 1, depthOrArrayLayers: 1 });
+      this.textures[3] = { texture: tex, view: tex.createView(), w: 1, h: 1, format: "rgba8unorm" };
+      if (this._debug_enabled) {
+        console.log("[makepad:webgpu] init default texture id=3 rgba8 1x1");
+      }
+    }
+  }
+
+  debug_once(tag, details) {
+    if (!this._debug_enabled) return;
+    const key = `${tag}:${details}`;
+    if (this._debug_once_keys.has(key)) return;
+    this._debug_once_keys.add(key);
+    console.warn(`[makepad:webgpu] ${tag} ${details}`);
   }
 
   // ---- Protocol handlers ----
@@ -101,6 +162,31 @@ export class WasmWebGPU extends WasmWebBrowser {
     const device = this.device;
 
     const module = device.createShaderModule({ code: args.wgsl });
+    // Surface WGSL errors early; otherwise the app may silently render only clears.
+    if (typeof module.getCompilationInfo === "function") {
+      module.getCompilationInfo().then((info) => {
+        const errs = (info?.messages || []).filter((m) => m.type === "error");
+        if (errs.length) {
+          console.warn(`[makepad:webgpu] WGSL shader_id=${args.shader_id} compile errors:`);
+          for (const m of errs) {
+            console.warn(`  ${m.lineNum}:${m.linePos} ${m.message}`);
+          }
+        }
+      }).catch(() => {});
+    }
+    module.getCompilationInfo().then(info => {
+      for (const msg of info.messages) {
+        if (msg.type === 'error' || msg.type === 'warning') {
+          console.error(`[makepad:webgpu] shader ${args.shader_id} compile ${msg.type} line ${msg.lineNum}: ${msg.message}`);
+        }
+      }
+    });
+    if (args.samplers && args.samplers.length) {
+      const samplerDesc = args.samplers
+        .map((s, i) => `#${i}(f=${s.filter | 0},a=${s.address | 0},c=${s.coord | 0})`)
+        .join(",");
+      console.log(`[makepad:webgpu] shader ${args.shader_id} samplers ${samplerDesc}`);
+    }
 
     const geom_vec4s = Math.ceil(args.geometry_slots / 4);
     const inst_vec4s = Math.ceil(args.instance_slots / 4);
@@ -142,6 +228,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     const layoutEntries = [];
     const textureBindings = [];
     const samplerBindings = [];
+    const textureNameToIndex = new Map((args.textures || []).map((t, i) => [t.name, i]));
     let textureBindingIndex = 0;
     while ((match = bindingDecl.exec(args.wgsl)) !== null) {
       const binding = parseInt(match[1], 10) | 0;
@@ -199,13 +286,17 @@ export class WasmWebGPU extends WasmWebBrowser {
           visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
           texture: { sampleType, viewDimension },
         });
+        const mappedIndex = textureNameToIndex.get(varName);
+        const textureIndex = mappedIndex !== undefined ? mappedIndex : textureBindingIndex;
         textureBindings.push({
           binding,
-          textureIndex: textureBindingIndex,
+          textureIndex,
           viewDimension,
           declaredSampleType: sampleType,
         });
-        textureBindingIndex += 1;
+        if (mappedIndex === undefined) {
+          textureBindingIndex += 1;
+        }
       } else {
         // Default to uniform buffer for now.
         binding_kinds.set(binding, "buffer");
@@ -218,20 +309,6 @@ export class WasmWebGPU extends WasmWebBrowser {
       }
     }
     layoutEntries.sort((a, b) => a.binding - b.binding);
-    const bindGroupLayout = device.createBindGroupLayout({ entries: layoutEntries });
-    const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
-
-    const pipeline = device.createRenderPipeline({
-      layout: pipelineLayout,
-      vertex: { module, entryPoint: "vertex_main", buffers: vertexBuffers },
-      fragment: {
-        module,
-        entryPoint: "fragment_main",
-        targets: [{ format: this.format, blend: { color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } } }],
-      },
-      primitive: { topology: "triangle-list", cullMode: "none" },
-      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less-equal" },
-    });
 
     // Allocate persistent uniform buffers per shader.
     const makeUbo = (byteSize) =>
@@ -245,8 +322,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     const texBase = args.texture_binding_base | 0;
 
     const shader = {
-      pipeline,
-      bindGroupLayout,
+      id: args.shader_id | 0,
       shaderModule: module,
       vertexBuffers,
       binding_kinds,
@@ -261,6 +337,11 @@ export class WasmWebGPU extends WasmWebBrowser {
       ubo_draw_call: makeUbo(2048),
       ubo_user: makeUbo(2048),
       ubo_live: makeUbo(2048),
+      ubo_binding_pass: -1,
+      ubo_binding_draw_list: -1,
+      ubo_binding_draw_call: -1,
+      ubo_binding_user: -1,
+      ubo_binding_live: -1,
       sampler_binding_base: samplerBase,
       sampler_count: samplerCount,
       texture_binding_base: texBase,
@@ -283,11 +364,11 @@ export class WasmWebGPU extends WasmWebBrowser {
     // Alias known buffers by name (when present).
     for (const [binding, varName] of binding_vars.entries()) {
       if (!binding_kinds.get(binding) || binding_kinds.get(binding) !== "buffer") continue;
-      if (varName.includes("unibuf_draw_pass")) shader.ubo_pass = shader.ubos.get(binding);
-      else if (varName.includes("unibuf_draw_list")) shader.ubo_draw_list = shader.ubos.get(binding);
-      else if (varName.includes("unibuf_draw_call")) shader.ubo_draw_call = shader.ubos.get(binding);
-      else if (varName.includes("_mp_dyn_uniforms")) shader.ubo_user = shader.ubos.get(binding);
-      else if (varName.includes("_mp_scope_uniforms")) shader.ubo_live = shader.ubos.get(binding);
+      if (varName.includes("unibuf_draw_pass")) { shader.ubo_pass = shader.ubos.get(binding); shader.ubo_binding_pass = binding; }
+      else if (varName.includes("unibuf_draw_list")) { shader.ubo_draw_list = shader.ubos.get(binding); shader.ubo_binding_draw_list = binding; }
+      else if (varName.includes("unibuf_draw_call")) { shader.ubo_draw_call = shader.ubos.get(binding); shader.ubo_binding_draw_call = binding; }
+      else if (varName.includes("_mp_dyn_uniforms")) { shader.ubo_user = shader.ubos.get(binding); shader.ubo_binding_user = binding; }
+      else if (varName.includes("_mp_scope_uniforms")) { shader.ubo_live = shader.ubos.get(binding); shader.ubo_binding_live = binding; }
     }
     shader.baseBindGroup = null;
 
@@ -349,7 +430,7 @@ export class WasmWebGPU extends WasmWebBrowser {
     }
   }
 
-  make_pipeline_variant_key(shader, textureEntries) {
+  make_pipeline_variant_key(shader, textureEntries, colorFormat, depthWrite, backfaceCulling) {
     const textureKey = shader.textureBindings
       .map(({ textureIndex, declaredSampleType }) =>
         this.sample_type_for_texture_entry(textureEntries[textureIndex], declaredSampleType))
@@ -357,7 +438,10 @@ export class WasmWebGPU extends WasmWebBrowser {
     const samplerKey = shader.samplerDescs
       .map((_, samplerIndex) => this.sampler_binding_type_for_index(shader, samplerIndex, textureEntries))
       .join("|");
-    return `${textureKey}::${samplerKey}`;
+    const dw = depthWrite ? 1 : 0;
+    const bf = backfaceCulling ? 1 : 0;
+    const hd = this._pass_has_depth ? 1 : 0;
+    return `${colorFormat}|${dw}|${bf}|${hd}|${textureKey}::${samplerKey}`;
   }
 
   sampler_binding_type_for_index(shader, samplerIndex, textureEntries) {
@@ -370,8 +454,9 @@ export class WasmWebGPU extends WasmWebBrowser {
     return desc && (desc.filter | 0) !== 0 ? "filtering" : "non-filtering";
   }
 
-  get_pipeline_variant(shader, textureEntries) {
-    const key = this.make_pipeline_variant_key(shader, textureEntries);
+  get_pipeline_variant(shader, textureEntries, depthWrite, backfaceCulling) {
+    const colorFormat = this._pass_color_format || this.format;
+    const key = this.make_pipeline_variant_key(shader, textureEntries, colorFormat, depthWrite, backfaceCulling);
     let variant = shader.pipelineVariants.get(key);
     if (variant) return variant;
 
@@ -409,17 +494,40 @@ export class WasmWebGPU extends WasmWebBrowser {
 
     const bindGroupLayout = this.device.createBindGroupLayout({ entries: layoutEntries });
     const pipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
-    const pipeline = this.device.createRenderPipeline({
-      layout: pipelineLayout,
-      vertex: { module: shader.shaderModule, entryPoint: "vertex_main", buffers: shader.vertexBuffers },
-      fragment: {
-        module: shader.shaderModule,
-        entryPoint: "fragment_main",
-        targets: [{ format: this.format, blend: { color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } } }],
-      },
-      primitive: { topology: "triangle-list", cullMode: "none" },
-      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less-equal" },
-    });
+    const cullMode = backfaceCulling ? "back" : "none";
+    const hasDepthAttachment = !!this._pass_has_depth;
+    let pipeline;
+    try {
+      pipeline = this.device.createRenderPipeline({
+        layout: pipelineLayout,
+        vertex: { module: shader.shaderModule, entryPoint: "vertex_main", buffers: shader.vertexBuffers },
+        fragment: {
+          module: shader.shaderModule,
+          entryPoint: "fragment_main",
+          targets: [{
+            format: colorFormat,
+            blend: {
+              color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+              alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+            },
+          }],
+        },
+        primitive: { topology: "triangle-list", cullMode },
+        depthStencil: hasDepthAttachment
+          ? {
+              format: "depth24plus",
+              depthWriteEnabled: depthWrite,
+              depthCompare: "less-equal",
+            }
+          : undefined,
+      });
+    } catch (err) {
+      this.debug_once(
+        "pipeline-create-failed",
+        `fmt=${colorFormat} dw=${depthWrite ? 1 : 0} cull=${backfaceCulling ? 1 : 0} depthAtt=${hasDepthAttachment ? 1 : 0} err=${err && err.message ? err.message : err}`,
+      );
+      throw err;
+    }
 
     variant = { bindGroupLayout, pipeline };
     shader.pipelineVariants.set(key, variant);
@@ -435,41 +543,43 @@ export class WasmWebGPU extends WasmWebBrowser {
       entries.push({ binding, resource: { buffer: buf } });
     }
 
-    // Bind all samplers once.
-    for (let i = 0; i < shader.sampler_count; i++) {
-      const b = shader.sampler_binding_base + i;
+    // Bind samplers using their declared WGSL bindings.
+    for (const sb of shader.samplerBindings || []) {
+      const samplerIndex = sb.samplerIndex | 0;
+      const b = sb.binding | 0;
       if (shader.binding_kinds?.get(b) !== "sampler") continue;
-      const bindingType = this.sampler_binding_type_for_index(shader, i, textureEntries);
-      const desc = shader.samplerDescs[i];
+      const bindingType = this.sampler_binding_type_for_index(shader, samplerIndex, textureEntries);
+      const desc = shader.samplerDescs[samplerIndex];
       const useOriginal =
         (bindingType === "filtering" && desc && (desc.filter | 0) !== 0)
         || (bindingType === "non-filtering" && (!desc || (desc.filter | 0) === 0));
       entries.push({
         binding: b,
         resource: useOriginal
-          ? (shader.samplers[i] || this.get_fallback_sampler())
+          ? (shader.samplers[samplerIndex] || this.get_fallback_sampler())
           : this.get_sampler_resource(desc, bindingType),
       });
     }
 
-    // Bind textures at `texture_binding_base + i` (base comes from WGSL generator).
-    // We assume the generator packs textures sequentially.
-    const texBase = (shader.texture_binding_base | 0);
-    for (let i = 0; i < shader.texture_count; i++) {
-      const view = textureViews[i] || this.get_fallback_texture_view();
-      const b = texBase + i;
+    // Bind textures using their declared WGSL bindings (do not assume contiguous packing).
+    for (const tb of shader.textureBindings || []) {
+      const isDepth = tb.declaredSampleType === "depth";
+      const entry = textureEntries[tb.textureIndex];
+      const view = isDepth
+        ? ((entry && entry.depthView) ? entry.depthView : this.get_fallback_depth_texture_view())
+        : (textureViews[tb.textureIndex] || this.get_fallback_texture_view());
+      const b = tb.binding | 0;
       if (shader.binding_kinds?.get(b) !== "texture") continue;
       entries.push({ binding: b, resource: view });
     }
 
-    if (shader.binding_kinds?.get(shader.xr_depth_binding) === "texture") {
-      entries.push({
-        binding: shader.xr_depth_binding,
-        resource: this.get_fallback_depth_texture_view(),
-      });
-    }
+    // WGSL may contain multiple declarations that collapse to the same binding in our simplified model.
+    // WebGPU rejects duplicate binding entries, so keep the last write per binding.
+    const byBinding = new Map();
+    for (const e of entries) byBinding.set(e.binding | 0, e);
+    const uniqueEntries = Array.from(byBinding.values()).sort((a, b) => (a.binding | 0) - (b.binding | 0));
 
-    return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries });
+    return this.device.createBindGroup({ layout: variant.bindGroupLayout, entries: uniqueEntries });
   }
 
   get_fallback_sampler() {
@@ -588,20 +698,42 @@ export class WasmWebGPU extends WasmWebBrowser {
   }
 
   FromWasmBeginRenderCanvas(args) {
-    const w = this.canvas.width | 0;
-    const h = this.canvas.height | 0;
-    if (w !== this._last_size.w || h !== this._last_size.h || !this._depth_tex) {
-      this._last_size.w = w;
-      this._last_size.h = h;
-      this._depth_tex = this.device.createTexture({
-        size: [Math.max(1, w), Math.max(1, h), 1],
-        format: "depth24plus",
-        usage: GPUTextureUsage.RENDER_ATTACHMENT,
-      });
-      this._depth_view = this._depth_tex.createView();
+    if (!this.device) {
+      return;
+    }
+    if (this.xr !== undefined) {
+      this.xr.in_xr_pass = true;
+    }
+    let w = this.canvas.width | 0;
+    let h = this.canvas.height | 0;
+    let colorView;
+    let depthView = null;
+    const xr = this.xr;
+    if (xr !== undefined && xr.in_xr_pass && xr.layer) {
+      const L = xr.layer;
+      if (L.colorTexture) {
+        colorView = L.colorTexture.createView();
+        w = L.framebufferWidth || w;
+        h = L.framebufferHeight || h;
+      } else {
+        colorView = this.context.getCurrentTexture().createView();
+      }
+      if (L.depthStencilTexture) {
+        depthView = L.depthStencilTexture.createView();
+      }
+    } else {
+      colorView = this.context.getCurrentTexture().createView();
     }
 
-    const colorView = this.context.getCurrentTexture().createView();
+    // NOTE: WebGL path is effectively "no depth" for most 2D UI.
+    // Creating a depth attachment here can accidentally occlude 2D content if
+    // depth_write is enabled on some draw calls. Keep depth only when XR provides it.
+    // (Render-to-texture can still request depth explicitly via depth_targets.)
+
+    this._pass_color_format = this.format;
+    this._pass_extent = { w, h };
+    this._pass_has_depth = false;
+
     this._encoder = this.device.createCommandEncoder();
     this._pass = this._encoder.beginRenderPass({
       colorAttachments: [
@@ -612,17 +744,144 @@ export class WasmWebGPU extends WasmWebBrowser {
           storeOp: "store",
         },
       ],
-      depthStencilAttachment: {
-        view: this._depth_view,
-        depthClearValue: args.clear_depth,
-        depthLoadOp: "clear",
-        depthStoreOp: "store",
-      },
+      depthStencilAttachment: undefined,
     });
   }
 
+  FromWasmBeginRenderTexture(args) {
+    if (!this.device) {
+      return;
+    }
+    if (this.xr !== undefined) {
+      this.xr.in_xr_pass = false;
+    }
+
+    const w = Math.max(1, args.width | 0);
+    const h = Math.max(1, args.height | 0);
+    const tgt = args.color_targets[0];
+    const texId = tgt.texture_id | 0;
+    const clearColor = tgt.clear_color;
+    const needResize = (() => {
+      const e = this.textures[texId];
+      return !e || !e.texture || e.rtW !== w || e.rtH !== h;
+    })();
+    const loadOpColor = needResize || !tgt.init_only ? "clear" : "load";
+
+    let entry = this.textures[texId];
+    if (needResize) {
+      const texture = this.device.createTexture({
+        size: [w, h, 1],
+        format: "bgra8unorm",
+        usage:
+          GPUTextureUsage.RENDER_ATTACHMENT
+          | GPUTextureUsage.TEXTURE_BINDING
+          | GPUTextureUsage.COPY_DST,
+      });
+      entry = this.textures[texId] = {
+        texture,
+        view: texture.createView(),
+        w,
+        h,
+        format: "bgra8unorm",
+        rtW: w,
+        rtH: h,
+        cube: false,
+      };
+    }
+
+    let depthStencilAttachment;
+    const dt = args.depth_target;
+    if (dt && dt.texture_id) {
+      const did = dt.texture_id | 0;
+      const needDepth = (() => {
+        const e = this.textures[did];
+        return !e || !e.depthTexture || e.rtDW !== w || e.rtDH !== h;
+      })();
+      let dEntry = this.textures[did];
+      if (needDepth) {
+        const depthTexture = this.device.createTexture({
+          size: [w, h, 1],
+          format: "depth24plus",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        dEntry = this.textures[did] = {
+          ...dEntry,
+          depthTexture,
+          depthView: depthTexture.createView(),
+          rtDW: w,
+          rtDH: h,
+        };
+      }
+      const dView = this.textures[did].depthView;
+      depthStencilAttachment = {
+        view: dView,
+        depthClearValue: dt.clear_depth,
+        depthLoadOp: needDepth || !dt.init_only ? "clear" : "load",
+        depthStoreOp: "store",
+      };
+    }
+
+    this._pass_color_format = "bgra8unorm";
+    this._pass_extent = { w, h };
+    this._pass_has_depth = !!depthStencilAttachment;
+
+    this._encoder = this.device.createCommandEncoder();
+    this._pass = this._encoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: entry.view,
+          clearValue: clearColor,
+          loadOp: loadOpColor,
+          storeOp: "store",
+        },
+      ],
+      depthStencilAttachment,
+    });
+  }
+
+  FromWasmAllocTextureCube_BGRAu8_32(args) {
+    if (!this.device) {
+      return;
+    }
+    const w = Math.max(1, args.width | 0);
+    const h = Math.max(1, args.height | 0);
+    const rowBytes = w * 4;
+    const bytesPerRow = (rowBytes + 255) & ~255;
+    const faceBytes = rowBytes * h;
+    const all = new Uint8Array(this.memory.buffer, args.data.ptr, faceBytes * 6).slice();
+    const texture = this.device.createTexture({
+      dimension: "2d",
+      size: [w, h, 6],
+      format: "bgra8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    const staging = new Uint8Array(bytesPerRow * h);
+    for (let face = 0; face < 6; face++) {
+      const slice = all.subarray(face * faceBytes, (face + 1) * faceBytes);
+      staging.fill(0);
+      for (let row = 0; row < h; row++) {
+        staging.set(slice.subarray(row * rowBytes, row * rowBytes + rowBytes), row * bytesPerRow);
+      }
+      this.queue.writeTexture(
+        { texture, origin: { x: 0, y: 0, z: face } },
+        staging,
+        { offset: 0, bytesPerRow, rowsPerImage: h },
+        { width: w, height: h, depthOrArrayLayers: 1 },
+      );
+    }
+    this.textures[args.texture_id] = {
+      texture,
+      view: texture.createView({ dimension: "cube" }),
+      w,
+      h,
+      format: "bgra8unorm",
+      cube: true,
+    };
+  }
+
   FromWasmSetDefaultDepthAndBlendMode() {
-    // Pipeline state covers this on WebGPU; no-op.
+    this._default_depth_write = true;
+    this._default_backface_cull = false;
   }
 
   FromWasmRenderCommandBuffer(args) {
@@ -650,6 +909,10 @@ export class WasmWebGPU extends WasmWebBrowser {
       const shader = this.draw_shaders[shader_id];
       const vao = this.vaos[vao_id];
       if (!shader || !vao || !this._pass) {
+        this.debug_once(
+          "skip-draw-missing-state",
+          `shader=${shader_id} vao=${vao_id} haveShader=${!!shader} haveVao=${!!vao} havePass=${!!this._pass}`,
+        );
         at += 16;
         continue;
       }
@@ -661,62 +924,29 @@ export class WasmWebGPU extends WasmWebBrowser {
       const call_u = copyF32(draw_call_ptr, draw_call_len);
       const user_u = copyF32(user_ptr, user_len);
       const live_u = copyF32(live_ptr, live_len);
-      this.ensure_ubo(shader, "ubo_pass", pass_u.byteLength);
-      this.ensure_ubo(shader, "ubo_draw_list", list_u.byteLength);
-      this.ensure_ubo(shader, "ubo_draw_call", call_u.byteLength);
-      this.ensure_ubo(shader, "ubo_user", user_u.byteLength);
-      this.ensure_ubo(shader, "ubo_live", live_u.byteLength);
-      this.queue.writeBuffer(shader.ubo_pass, 0, pass_u.buffer, pass_u.byteOffset, pass_u.byteLength);
-      this.queue.writeBuffer(shader.ubo_draw_list, 0, list_u.buffer, list_u.byteOffset, list_u.byteLength);
-      this.queue.writeBuffer(shader.ubo_draw_call, 0, call_u.buffer, call_u.byteOffset, call_u.byteLength);
-      this.queue.writeBuffer(shader.ubo_user, 0, user_u.buffer, user_u.byteOffset, user_u.byteLength);
-      this.queue.writeBuffer(shader.ubo_live, 0, live_u.buffer, live_u.byteOffset, live_u.byteLength);
 
-      // Pipeline is created with defaults; depth_write/backface_culling are ignored for now.
-      // Build bind group for this draw based on textures.
-      const textureViews = new Array(shader.texture_count);
-      const textureEntries = new Array(shader.texture_count);
       const texIdsAt = at;
+      const texIds = [];
       for (let i = 0; i < shader.texture_count; i++) {
-        const texId = words[texIdsAt + i];
-        if (texId !== NONE_TEX) {
-          const tex = this.textures[texId];
-          textureViews[i] = tex ? tex.view : null;
-          textureEntries[i] = tex || null;
-        } else {
-          textureViews[i] = null;
-          textureEntries[i] = null;
-        }
+        texIds.push(words[texIdsAt + i]);
       }
-
-      const variant = this.get_pipeline_variant(shader, textureEntries);
-      const bindGroup = this.create_bind_group_for_shader(shader, textureViews, textureEntries, variant);
-
-      this._pass.setPipeline(variant.pipeline);
-      this._pass.setBindGroup(0, bindGroup);
-
-      const geomRaw = this.array_buffers[vao.geom_vb_id];
-      const instRaw = this.array_buffers[vao.inst_vb_id];
-      const ib = this.index_buffers[vao.geom_ib_id];
-      if (!geomRaw || !instRaw || !ib) {
-        at += 16;
-        continue;
+      while (texIds.length < 16) {
+        texIds.push(NONE_TEX);
       }
-
-      const geom = this.get_packed_vertex_buffer(geomRaw, shader.geometry_slots, shader.geom_vec4s);
-      const inst = this.get_packed_vertex_buffer(instRaw, shader.instance_slots, shader.inst_vec4s);
-
-      this._pass.setVertexBuffer(0, geom.buf);
-      this._pass.setVertexBuffer(1, inst.buf);
-      this._pass.setIndexBuffer(ib.buf, "uint32");
-
-      const indexCount = ib.length | 0;
-      const instanceCount = ((instRaw.length | 0) / shader.instance_slots) | 0;
-
-      // Skip texture ids (already consumed for bind group).
       at += 16;
 
-      this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
+      this._emitSingleDraw(
+        shader,
+        vao,
+        pass_u,
+        list_u,
+        call_u,
+        user_u,
+        live_u,
+        depth_write,
+        backface_culling,
+        texIds,
+      );
     }
 
     // End + submit each pump (simple but correct).
@@ -727,25 +957,687 @@ export class WasmWebGPU extends WasmWebBrowser {
     if (this._encoder) {
       const cmd = this._encoder.finish();
       this._encoder = null;
+      this.device.pushErrorScope('validation');
+      this.device.pushErrorScope('internal');
       this.queue.submit([cmd]);
+      this.device.popErrorScope().then(e => { if (e) console.error('[makepad:webgpu] internal GPU error:', e.message); });
+      this.device.popErrorScope().then(e => { if (e) console.error('[makepad:webgpu] validation GPU error:', e.message); });
     }
+  }
+
+  on_xr_animation_frame(time, frame) {
+    function empty_transform() {
+      return {
+        orientation: { a: 0, b: 0, c: 0, d: 0 },
+        position: { x: 0, y: 0, z: 0 },
+      };
+    }
+    function to_transform(pose_transform, tgt) {
+      const po = pose_transform.inverse.orientation;
+      const pp = pose_transform.position;
+      const o = tgt.orientation;
+      o.a = po.x;
+      o.b = po.y;
+      o.c = po.z;
+      o.d = po.w;
+      const p = tgt.position;
+      p.x = pp.x;
+      p.y = pp.y;
+      p.z = pp.z;
+    }
+    function get_matrices(layer, view, tgt) {
+      tgt.view = view;
+      tgt.viewport = layer.getViewport(view);
+      tgt.projection_matrix = view.projectionMatrix;
+      tgt.transform_matrix = view.transform.inverse.matrix;
+      tgt.invtransform_matrix = view.transform.matrix;
+      tgt.camera_pos = view.transform.inverse.position;
+    }
+    if (this.xr === undefined) {
+      return;
+    }
+    const ref_space = this.xr.ref_space;
+    const xr = this.xr;
+    xr.session.requestAnimationFrame(this.xr.on_animation_frame);
+    xr.pose = frame.getViewerPose(ref_space);
+    if (!xr.pose || !xr.pose.views || xr.pose.views.length < 2) {
+      return;
+    }
+    get_matrices(xr.layer, xr.pose.views[0], xr.left_eye);
+    get_matrices(xr.layer, xr.pose.views[1], xr.right_eye);
+    if (xr.xr_update === undefined) {
+      xr.xr_update = {
+        time: 0,
+        head_transform: empty_transform(),
+        inputs: [],
+      };
+    }
+    const xr_update = xr.xr_update;
+    xr_update.time = time / 1000.0;
+    to_transform(this.xr.pose.transform, xr_update.head_transform);
+    const inputs = xr_update.inputs;
+    for (let i = 0; i < inputs.length; i++) {
+      inputs[i].active = false;
+    }
+    const input_sources = this.xr.session.inputSources;
+    for (let i = 0; i < input_sources.length; i++) {
+      if (inputs[i] === undefined) {
+        inputs[i] = {
+          active: false,
+          grip: empty_transform(),
+          ray: empty_transform(),
+          hand: 0,
+          buttons: [],
+          axes: [],
+        };
+      }
+      const input = inputs[i];
+      const input_source = input_sources[i];
+      const grip_pose = frame.getPose(input_source.gripSpace, ref_space);
+      const ray_pose = frame.getPose(input_source.targetRaySpace, ref_space);
+      if (grip_pose == null || ray_pose == null) {
+        input.active = false;
+        continue;
+      }
+      to_transform(grip_pose.transform, input.grip);
+      to_transform(ray_pose.transform, input.ray);
+      const buttons = input.buttons;
+      const input_buttons = input_source.gamepad.buttons;
+      for (let j = 0; j < input_buttons.length; j++) {
+        if (buttons[j] === undefined) {
+          buttons[j] = { pressed: 0, value: 0 };
+        }
+        buttons[j].pressed = input_buttons[j].pressed ? 1 : 0;
+        buttons[j].value = input_buttons[j].value;
+      }
+      const axes = input.axes;
+      const input_axes = input_source.gamepad.axes;
+      for (let j = 0; j < input_axes.length; j++) {
+        axes[j] = input_axes[j];
+      }
+    }
+    this.to_wasm.ToWasmXRUpdate(xr_update);
+    this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0 });
+    this.in_animation_frame = true;
+    this.do_wasm_pump();
+    this.in_animation_frame = false;
+  }
+
+  FromWasmXrStartPresenting(_args) {
+    if (this.xr !== undefined || !this.device || !this.context) {
+      return;
+    }
+    if (!navigator.xr) {
+      return;
+    }
+    const LayerCtor = globalThis.XRWebGPULayer;
+    if (!LayerCtor) {
+      console.warn("[makepad] XRWebGPULayer not available; WebGPU XR unsupported in this browser");
+      return;
+    }
+    navigator.xr
+      .requestSession("immersive-vr", { requiredFeatures: ["local-floor"] })
+      .then((session) => {
+        let layer;
+        try {
+          layer = new LayerCtor(session, this.context, { device: this.device });
+        } catch (_e) {
+          try {
+            layer = new LayerCtor(session, { device: this.device, context: this.context });
+          } catch (e2) {
+            console.warn("[makepad] XRWebGPULayer construction failed", e2);
+            return;
+          }
+        }
+        session.updateRenderState({ baseLayer: layer });
+        session.requestReferenceSpace("local-floor").then((ref_space) => {
+          window.localStorage.setItem("xr_presenting", "true");
+          this.xr = {
+            left_eye: {},
+            right_eye: {},
+            layer,
+            ref_space,
+            session,
+            in_xr_pass: false,
+            on_animation_frame: (t, f) => this.on_xr_animation_frame(t, f),
+          };
+          session.requestAnimationFrame(this.xr.on_animation_frame);
+          session.addEventListener("end", () => {
+            window.localStorage.setItem("xr_presenting", "false");
+            this.xr = undefined;
+            this.FromWasmRequestAnimationFrame();
+          });
+        });
+      })
+      .catch((e) => console.warn("[makepad] XR session request failed", e));
+  }
+
+  FromWasmXrStopPresenting() {}
+
+  FromWasmPrepareVideoPlayback(args) {
+    if (!this.device) {
+      return;
+    }
+    const key = `${args.video_id_lo}_${args.video_id_hi}`;
+    const video = document.createElement("video");
+    video.crossOrigin = "anonymous";
+    video.playsInline = true;
+    video.preload = "auto";
+    video.loop = args.should_loop;
+    video.muted = args.autoplay;
+    const player = {
+      video,
+      texture_id: args.texture_id,
+      video_id_lo: args.video_id_lo,
+      video_id_hi: args.video_id_hi,
+      playing: false,
+      use_video_frame_callback: typeof video.requestVideoFrameCallback === "function",
+      video_frame_callback_id: 0,
+      texture_initialized: false,
+    };
+    this.video_players[key] = player;
+    video.addEventListener("loadedmetadata", () => {
+      const duration_ms = Math.round(video.duration * 1000);
+      this.to_wasm.ToWasmVideoPlaybackPrepared({
+        video_id_lo: args.video_id_lo,
+        video_id_hi: args.video_id_hi,
+        video_width: video.videoWidth,
+        video_height: video.videoHeight,
+        duration_lo: duration_ms & 0xffffffff,
+        duration_hi: Math.floor(duration_ms / 0x100000000),
+      });
+      this.do_wasm_pump();
+    });
+    video.addEventListener("ended", () => {
+      player.playing = false;
+      this.cancel_video_frame_callback(player);
+      this.to_wasm.ToWasmVideoPlaybackCompleted({
+        video_id_lo: args.video_id_lo,
+        video_id_hi: args.video_id_hi,
+      });
+      this.do_wasm_pump();
+    });
+    video.addEventListener("play", () => {
+      player.playing = true;
+      this.schedule_video_texture_updates(player);
+    });
+    video.addEventListener("pause", () => {
+      player.playing = false;
+      this.cancel_video_frame_callback(player);
+    });
+    video.src = args.source_url;
+    if (args.autoplay) {
+      video.play().catch((e) => console.warn("Video autoplay failed:", e));
+    }
+  }
+
+  FromWasmBeginVideoPlayback(args) {
+    const key = `${args.video_id_lo}_${args.video_id_hi}`;
+    const player = this.video_players[key];
+    if (player) {
+      player.video.play().catch((e) => console.warn("Video play failed:", e));
+    }
+  }
+
+  FromWasmPauseVideoPlayback(args) {
+    const key = `${args.video_id_lo}_${args.video_id_hi}`;
+    const player = this.video_players[key];
+    if (player) {
+      player.video.pause();
+    }
+  }
+
+  FromWasmResumeVideoPlayback(args) {
+    const key = `${args.video_id_lo}_${args.video_id_hi}`;
+    const player = this.video_players[key];
+    if (player) {
+      player.video.play().catch((e) => console.warn("Video resume failed:", e));
+    }
+  }
+
+  FromWasmMuteVideoPlayback(args) {
+    const key = `${args.video_id_lo}_${args.video_id_hi}`;
+    const player = this.video_players[key];
+    if (player) {
+      player.video.muted = true;
+    }
+  }
+
+  FromWasmUnmuteVideoPlayback(args) {
+    const key = `${args.video_id_lo}_${args.video_id_hi}`;
+    const player = this.video_players[key];
+    if (player) {
+      player.video.muted = false;
+    }
+  }
+
+  FromWasmSeekVideoPlayback(args) {
+    const key = `${args.video_id_lo}_${args.video_id_hi}`;
+    const player = this.video_players[key];
+    if (player) {
+      const position_ms = args.position_ms_lo + args.position_ms_hi * 0x100000000;
+      player.video.currentTime = position_ms / 1000.0;
+    }
+  }
+
+  FromWasmCleanupVideoPlaybackResources(args) {
+    const key = `${args.video_id_lo}_${args.video_id_hi}`;
+    const player = this.video_players[key];
+    if (player) {
+      player.playing = false;
+      this.cancel_video_frame_callback(player);
+      player.video.pause();
+      player.video.removeAttribute("src");
+      player.video.load();
+      delete this.video_players[key];
+      this.to_wasm.ToWasmVideoPlaybackResourcesReleased({
+        video_id_lo: args.video_id_lo,
+        video_id_hi: args.video_id_hi,
+      });
+      this.do_wasm_pump();
+    }
+  }
+
+  ensure_video_animation_frame() {
+    if (this.video_anim_frame_id) {
+      return;
+    }
+    this.video_anim_frame_id = window.requestAnimationFrame(() => {
+      this.video_anim_frame_id = 0;
+      this.update_video_textures();
+    });
+  }
+
+  schedule_video_texture_updates(player) {
+    if (!player || !player.playing) {
+      return;
+    }
+    if (player.use_video_frame_callback) {
+      if (player.video_frame_callback_id) {
+        return;
+      }
+      const key = `${player.video_id_lo}_${player.video_id_hi}`;
+      player.video_frame_callback_id = player.video.requestVideoFrameCallback(() => {
+        player.video_frame_callback_id = 0;
+        if (!player.playing || this.video_players[key] !== player) {
+          return;
+        }
+        if (this.update_video_texture(player)) {
+          this.do_wasm_pump();
+        }
+        if (player.playing && this.video_players[key] === player) {
+          this.schedule_video_texture_updates(player);
+        }
+      });
+      return;
+    }
+    this.ensure_video_animation_frame();
+  }
+
+  cancel_video_frame_callback(player) {
+    if (!player || !player.video_frame_callback_id) {
+      return;
+    }
+    if (
+      player.use_video_frame_callback
+      && typeof player.video.cancelVideoFrameCallback === "function"
+    ) {
+      player.video.cancelVideoFrameCallback(player.video_frame_callback_id);
+    }
+    player.video_frame_callback_id = 0;
+  }
+
+  update_video_texture(player) {
+    const video = player.video;
+    if (video.readyState < 2 || !this.device) {
+      return false;
+    }
+    if (typeof this.queue.copyExternalImageToTexture !== "function") {
+      return false;
+    }
+    const vw = video.videoWidth | 0;
+    const vh = video.videoHeight | 0;
+    if (vw < 1 || vh < 1) {
+      return false;
+    }
+    let entry = this.textures[player.texture_id];
+    if (
+      !entry
+      || !entry.texture
+      || entry.w !== vw
+      || entry.h !== vh
+      || entry.format !== "rgba8unorm"
+    ) {
+      const texture = this.device.createTexture({
+        size: [vw, vh, 1],
+        format: "rgba8unorm",
+        usage:
+          GPUTextureUsage.TEXTURE_BINDING
+          | GPUTextureUsage.COPY_DST
+          | GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      entry = this.textures[player.texture_id] = {
+        texture,
+        view: texture.createView(),
+        w: vw,
+        h: vh,
+        format: "rgba8unorm",
+      };
+      player.texture_initialized = true;
+    }
+    this.queue.copyExternalImageToTexture(
+      { source: video },
+      { texture: entry.texture },
+      { width: vw, height: vh, depthOrArrayLayers: 1 },
+    );
+    const current_ms = Math.round(video.currentTime * 1000);
+    this.to_wasm.ToWasmVideoTextureUpdated({
+      video_id_lo: player.video_id_lo,
+      video_id_hi: player.video_id_hi,
+      current_position_lo: current_ms & 0xffffffff,
+      current_position_hi: Math.floor(current_ms / 0x100000000),
+    });
+    return true;
+  }
+
+  update_video_textures() {
+    let any_fallback_playing = false;
+    let any_updated = false;
+    for (const key in this.video_players) {
+      const player = this.video_players[key];
+      if (!player.playing) {
+        continue;
+      }
+      if (player.use_video_frame_callback) {
+        continue;
+      }
+      any_fallback_playing = true;
+      if (this.update_video_texture(player)) {
+        any_updated = true;
+      }
+    }
+    if (any_updated) {
+      this.do_wasm_pump();
+    }
+    if (any_fallback_playing) {
+      this.ensure_video_animation_frame();
+    }
+  }
+
+  _write_texture_2d_bytes(texture, w, h, bytes, bytesPerPixel) {
+    const rowBytes = w * bytesPerPixel;
+    const bytesPerRow = (rowBytes + 255) & ~255;
+    if (bytesPerRow === rowBytes) {
+      this.queue.writeTexture(
+        { texture },
+        bytes,
+        { bytesPerRow, rowsPerImage: h },
+        { width: w, height: h, depthOrArrayLayers: 1 },
+      );
+      return;
+    }
+    const staging = new Uint8Array(bytesPerRow * h);
+    for (let row = 0; row < h; row++) {
+      staging.set(bytes.subarray(row * rowBytes, row * rowBytes + rowBytes), row * bytesPerRow);
+    }
+    this.queue.writeTexture(
+      { texture },
+      staging,
+      { bytesPerRow, rowsPerImage: h },
+      { width: w, height: h, depthOrArrayLayers: 1 },
+    );
+  }
+
+  _emitSingleDraw(shader, vao, pass_u, list_u, call_u, user_u, live_u, depth_write, backface_culling, texIds) {
+    const NONE_TEX = 0xffffffff;
+    this.ensure_ubo(shader, "ubo_pass", pass_u.byteLength);
+    this.ensure_ubo(shader, "ubo_draw_list", list_u.byteLength);
+    this.ensure_ubo(shader, "ubo_draw_call", call_u.byteLength);
+    this.ensure_ubo(shader, "ubo_user", user_u.byteLength);
+    this.ensure_ubo(shader, "ubo_live", live_u.byteLength);
+    this.queue.writeBuffer(shader.ubo_draw_list, 0, list_u.buffer, list_u.byteOffset, list_u.byteLength);
+    this.queue.writeBuffer(shader.ubo_draw_call, 0, call_u.buffer, call_u.byteOffset, call_u.byteLength);
+    this.queue.writeBuffer(shader.ubo_user, 0, user_u.buffer, user_u.byteOffset, user_u.byteLength);
+    this.queue.writeBuffer(shader.ubo_live, 0, live_u.buffer, live_u.byteOffset, live_u.byteLength);
+
+    const textureViews = new Array(shader.texture_count);
+    const textureEntries = new Array(shader.texture_count);
+    for (let i = 0; i < shader.texture_count; i++) {
+      const tid = texIds[i];
+      const texId = tid === undefined || tid === null ? NONE_TEX : tid >>> 0;
+      if (texId !== NONE_TEX) {
+        const tex = this.textures[texId];
+        textureViews[i] = tex ? tex.view : null;
+        textureEntries[i] = tex || null;
+      } else {
+        textureViews[i] = null;
+        textureEntries[i] = null;
+      }
+    }
+
+    // One-time per-shader draw report: helps map "missing visuals" to shader id + bindings + texture ids.
+    if (
+      shader
+      && !this._draw_reported_shaders.has(shader.id | 0)
+      && (this._draw_report_count | 0) < (this._draw_report_limit | 0)
+      && (((shader.textureBindings || []).length | 0) > 0 || ((shader.samplerBindings || []).length | 0) > 0 || (shader.texture_count | 0) > 0)
+    ) {
+      this._draw_reported_shaders.add(shader.id | 0);
+      this._draw_report_count = (this._draw_report_count | 0) + 1;
+      const texIdsDump = [];
+      for (let i = 0; i < shader.texture_count; i++) texIdsDump.push(texIds[i] == null ? NONE_TEX : (texIds[i] >>> 0));
+      const texMeta = textureEntries.map((t) => {
+        if (!t) return null;
+        return {
+          format: t.format,
+          w: t.w ?? t.rtW ?? t.rtDW ?? null,
+          h: t.h ?? t.rtH ?? t.rtDH ?? null,
+          cube: !!t.cube,
+          hasView: !!t.view,
+          hasDepthView: !!t.depthView,
+        };
+      });
+      if (this._debug_enabled) {
+        console.log(
+          `[makepad:webgpu] draw-report shader=${shader.id} texCount=${shader.texture_count} ` +
+          `depthWrite=${depth_write ? 1 : 0} cull=${backface_culling ? 1 : 0} ` +
+          `texIds=${JSON.stringify(texIdsDump)}`,
+        );
+        console.log(
+          `[makepad:webgpu] draw-report shader=${shader.id} textureBindings=${JSON.stringify(shader.textureBindings || [])}`,
+        );
+        console.log(
+          `[makepad:webgpu] draw-report shader=${shader.id} samplerBindings=${JSON.stringify(shader.samplerBindings || [])}`,
+        );
+        console.log(
+          `[makepad:webgpu] draw-report shader=${shader.id} texturesMeta=${JSON.stringify(texMeta)}`,
+        );
+      }
+    }
+
+    // Minimal diagnostics: only report missing/invalid resources that are actually referenced.
+    // This helps pinpoint why SVG/vector/math/markup content might disappear.
+    for (let i = 0; i < shader.texture_count; i++) {
+      const texId = (texIds[i] == null ? NONE_TEX : (texIds[i] >>> 0));
+      if (texId === NONE_TEX) continue;
+      const entry = this.textures[texId];
+      if (!entry || !entry.view) {
+        const key = `shader=${shader.id}|texIndex=${i}|texId=${texId}`;
+        if (!this._missing_resource_reports.has(key)) {
+          this._missing_resource_reports.add(key);
+          if (this._debug_enabled) {
+            console.log(
+              `[makepad:webgpu] missing texture view: ${key} format=${entry?.format || "n/a"} ` +
+              `hasTexture=${!!entry?.texture} hasView=${!!entry?.view}`,
+            );
+            console.log(
+              `[makepad:webgpu] shader ${shader.id} textureBindings=` +
+              `${JSON.stringify(shader.textureBindings || [])} samplerBindings=` +
+              `${JSON.stringify(shader.samplerBindings || [])}`,
+            );
+          }
+        }
+      }
+    }
+
+    // Validate that declared bindings exist in the shader's binding_kinds map.
+    for (const tb of shader.textureBindings || []) {
+      const b = tb.binding | 0;
+      if (shader.binding_kinds?.get(b) !== "texture") {
+        const key = `shader=${shader.id}|missingBindingKind=texture|binding=${b}`;
+        if (!this._missing_resource_reports.has(key)) {
+          this._missing_resource_reports.add(key);
+          console.log(`[makepad:webgpu] unexpected texture binding kind: ${key} kind=${shader.binding_kinds?.get(b)}`);
+        }
+      }
+    }
+    for (const sb of shader.samplerBindings || []) {
+      const b = sb.binding | 0;
+      if (shader.binding_kinds?.get(b) !== "sampler") {
+        const key = `shader=${shader.id}|missingBindingKind=sampler|binding=${b}`;
+        if (!this._missing_resource_reports.has(key)) {
+          this._missing_resource_reports.add(key);
+          console.log(`[makepad:webgpu] unexpected sampler binding kind: ${key} kind=${shader.binding_kinds?.get(b)}`);
+        }
+      }
+    }
+    const variant = this.get_pipeline_variant(shader, textureEntries, depth_write, backface_culling);
+    const bindGroup = this.create_bind_group_for_shader(shader, textureViews, textureEntries, variant);
+    this._pass.setPipeline(variant.pipeline);
+    this._pass.setBindGroup(0, bindGroup);
+
+    const geomRaw = this.array_buffers[vao.geom_vb_id];
+    const instRaw = this.array_buffers[vao.inst_vb_id];
+    const ib = this.index_buffers[vao.geom_ib_id];
+    if (!geomRaw || !instRaw || !ib) {
+      this.debug_once(
+        "skip-draw-missing-buffers",
+        `geomVb=${vao.geom_vb_id} instVb=${vao.inst_vb_id} ib=${vao.geom_ib_id} haveGeom=${!!geomRaw} haveInst=${!!instRaw} haveIb=${!!ib}`,
+      );
+      return;
+    }
+    const geom = this.get_packed_vertex_buffer(geomRaw, shader.geometry_slots, shader.geom_vec4s);
+    const inst = this.get_packed_vertex_buffer(instRaw, shader.instance_slots, shader.inst_vec4s);
+    this._pass.setVertexBuffer(0, geom.buf);
+    this._pass.setVertexBuffer(1, inst.buf);
+    this._pass.setIndexBuffer(ib.buf, "uint32");
+    const indexCount = ib.length | 0;
+    const instanceCount = shader.instance_slots > 0
+      ? (((instRaw.length | 0) / shader.instance_slots) | 0)
+      : 0;
+    if (instanceCount <= 0 || indexCount <= 0) {
+      this.debug_once(
+        "skip-draw-empty-geometry",
+        `indexCount=${indexCount} instanceCount=${instanceCount} instSlots=${shader.instance_slots} vaoInstVb=${vao.inst_vb_id} vaoGeomIb=${vao.geom_ib_id} instLen=${instRaw.length | 0} geomLen=${geomRaw.length | 0}`,
+      );
+      return;
+    }
+
+    const xr = this.xr;
+    if (xr !== undefined && xr.in_xr_pass && xr.left_eye && xr.left_eye.viewport) {
+      const applyEye = (eye) => {
+        const vp = eye.viewport;
+        this._pass.setViewport(vp.x | 0, vp.y | 0, Math.max(1, vp.width | 0), Math.max(1, vp.height | 0), 0, 1);
+        this._pass.setScissorRect(vp.x | 0, vp.y | 0, Math.max(1, vp.width | 0), Math.max(1, vp.height | 0));
+        const m = pass_u;
+        const mp = eye.projection_matrix;
+        for (let i = 0; i < 16; i++) m[i] = mp[i];
+        const mt = eye.transform_matrix;
+        for (let i = 0; i < 16; i++) m[i + 16] = mt[i];
+        const mi = eye.invtransform_matrix;
+        for (let i = 0; i < 16; i++) m[i + 32] = mi[i];
+        this.queue.writeBuffer(shader.ubo_pass, 0, pass_u.buffer, pass_u.byteOffset, pass_u.byteLength);
+        this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
+      };
+      applyEye(xr.left_eye);
+      applyEye(xr.right_eye);
+    } else {
+      this.queue.writeBuffer(shader.ubo_pass, 0, pass_u.buffer, pass_u.byteOffset, pass_u.byteLength);
+      this._draw_count = (this._draw_count | 0) + 1;
+      if (this._debug_enabled && this._draw_count <= 5) {
+        console.log('[makepad:webgpu] draw#' + this._draw_count + ' indexCount=' + indexCount + ' instanceCount=' + instanceCount + ' shader=' + (shader.id | 0));
+      }
+      this._pass.drawIndexed(indexCount, instanceCount, 0, 0, 0);
+    }
+  }
+
+  FromWasmDrawCall(args) {
+    if (!this.device || !this._pass) {
+      return;
+    }
+    const shader = this.draw_shaders[args.shader_id];
+    const vao = this.vaos[args.vao_id];
+    if (!shader || !vao) {
+      return;
+    }
+    const copyF32 = (ptr) => new Float32Array(this.memory.buffer, ptr.ptr, ptr.len).slice();
+    const pass_u = copyF32(args.pass_uniforms);
+    const list_u = copyF32(args.draw_list_uniforms);
+    const call_u = copyF32(args.draw_call_uniforms);
+    const user_u = copyF32(args.user_uniforms);
+    const live_u = copyF32(args.live_uniforms);
+    const texIds = [];
+    for (let i = 0; i < shader.texture_count; i++) {
+      const t = args.textures[i];
+      texIds.push(t == null ? 0xffffffff : t >>> 0);
+    }
+    while (texIds.length < 16) {
+      texIds.push(0xffffffff);
+    }
+    this._emitSingleDraw(
+      shader,
+      vao,
+      pass_u,
+      list_u,
+      call_u,
+      user_u,
+      live_u,
+      !!args.depth_write,
+      !!args.backface_culling,
+      texIds,
+    );
   }
 
   ensure_ubo(shader, field, requiredBytes) {
     const buf = shader[field];
     if (buf && buf.size >= requiredBytes) return;
     const nextSize = Math.max(256, (requiredBytes + 255) & ~255);
-    shader[field] = this.device.createBuffer({
+    const next = this.device.createBuffer({
       size: nextSize,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+    shader[field] = next;
+    // Keep `shader.ubos` in sync, since bind groups are sourced from `ubos`.
+    let binding = -1;
+    switch (field) {
+      case "ubo_pass": binding = shader.ubo_binding_pass; break;
+      case "ubo_draw_list": binding = shader.ubo_binding_draw_list; break;
+      case "ubo_draw_call": binding = shader.ubo_binding_draw_call; break;
+      case "ubo_user": binding = shader.ubo_binding_user; break;
+      case "ubo_live": binding = shader.ubo_binding_live; break;
+      default: break;
+    }
+    if (binding >= 0) {
+      shader.ubos.set(binding, next);
+    }
   }
 
   // --- Texture uploads from wasm ---
 
   FromWasmAllocTextureImage2D_BGRAu8_32(args) {
-    // Upload as RGBA8; input is BGRA in u32 but wasm packs it already for WebGL path.
-    // Treat it as raw bytes.
+    if (!this.device) {
+      this._pending_until_ready.push({ name: "FromWasmAllocTextureImage2D_BGRAu8_32", args });
+      return;
+    }
+    // Input bytes are BGRA; store them in an RGBA texture and let the shader's
+    // `sample*_bgra` helpers swizzle to RGBA (mirrors the WebGL path).
+    const tid = args.texture_id | 0;
+    if (this._debug_enabled && !this._alloc_tex_reported.has(tid)) {
+      this._alloc_tex_reported.add(tid);
+      console.log(
+        `[makepad:webgpu] alloc-tex BGRAu8_32 id=${tid} w=${args.width | 0} h=${args.height | 0} bytes=${args.data.len | 0}`,
+      );
+    }
     const w = args.width | 0;
     const h = args.height | 0;
     const bytes = new Uint8Array(this.memory.buffer, args.data.ptr, w * h * 4).slice();
@@ -764,15 +1656,21 @@ export class WasmWebGPU extends WasmWebBrowser {
         format: "rgba8unorm",
       };
     }
-    this.queue.writeTexture(
-      { texture: entry.texture },
-      bytes,
-      { bytesPerRow: w * 4 },
-      { width: w, height: h, depthOrArrayLayers: 1 },
-    );
+    this._write_texture_2d_bytes(entry.texture, w, h, bytes, 4);
   }
 
   FromWasmAllocTextureImage2D_Ru8(args) {
+    if (!this.device) {
+      this._pending_until_ready.push({ name: "FromWasmAllocTextureImage2D_Ru8", args });
+      return;
+    }
+    const tid = args.texture_id | 0;
+    if (this._debug_enabled && !this._alloc_tex_reported.has(tid)) {
+      this._alloc_tex_reported.add(tid);
+      console.log(
+        `[makepad:webgpu] alloc-tex Ru8 id=${tid} w=${args.width | 0} h=${args.height | 0} bytes=${args.data.len | 0}`,
+      );
+    }
     const w = args.width | 0;
     const h = args.height | 0;
     const bytes = new Uint8Array(this.memory.buffer, args.data.ptr, w * h).slice();
@@ -791,15 +1689,21 @@ export class WasmWebGPU extends WasmWebBrowser {
         format: "r8unorm",
       };
     }
-    this.queue.writeTexture(
-      { texture: entry.texture },
-      bytes,
-      { bytesPerRow: w },
-      { width: w, height: h, depthOrArrayLayers: 1 },
-    );
+    this._write_texture_2d_bytes(entry.texture, w, h, bytes, 1);
   }
 
   FromWasmAllocTextureImage2D_RGBAf32(args) {
+    if (!this.device) {
+      this._pending_until_ready.push({ name: "FromWasmAllocTextureImage2D_RGBAf32", args });
+      return;
+    }
+    const tid = args.texture_id | 0;
+    if (this._debug_enabled && !this._alloc_tex_reported.has(tid)) {
+      this._alloc_tex_reported.add(tid);
+      console.log(
+        `[makepad:webgpu] alloc-tex RGBAf32 id=${tid} w=${args.width | 0} h=${args.height | 0} floats=${args.data.len | 0}`,
+      );
+    }
     const w = args.width | 0;
     const h = args.height | 0;
     const f32 = new Float32Array(this.memory.buffer, args.data.ptr, w * h * 4).slice();
@@ -818,12 +1722,7 @@ export class WasmWebGPU extends WasmWebBrowser {
         format: "rgba32float",
       };
     }
-    this.queue.writeTexture(
-      { texture: entry.texture },
-      new Uint8Array(f32.buffer),
-      { bytesPerRow: w * 16 },
-      { width: w, height: h, depthOrArrayLayers: 1 },
-    );
+    this._write_texture_2d_bytes(entry.texture, w, h, new Uint8Array(f32.buffer), 16);
   }
 }
 
