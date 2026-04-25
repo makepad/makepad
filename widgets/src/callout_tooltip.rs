@@ -257,70 +257,155 @@ impl WidgetMatchEvent for CalloutTooltip {
 }
 
 impl CalloutTooltip {
-    /// Calculate tooltip position and layout parameters for a given position
+    /// Calculate tooltip position and layout parameters for a given position.
+    ///
+    /// For `Top`/`Bottom`, the tooltip is centered horizontally on the target
+    /// widget (clamped to the available rect). For `Left`/`Right`, the tooltip
+    /// is centered vertically on the target widget (clamped to the available
+    /// rect). If the tooltip can't fit the available axis, `fixed_width` is
+    /// set so the caller can constrain the layout width and force text
+    /// wrapping.
+    ///
+    /// `available_rect` is the on-screen region the tooltip is allowed to
+    /// occupy — typically the full pass minus any platform safe-area insets
+    /// (notch, rounded corners, home indicator). Tooltips will not be drawn
+    /// outside this rect.
     fn calculate_position(
         options: &CalloutTooltipOptions,
         widget_rect: Rect,
         expected_dimension: DVec2,
-        screen_size: DVec2,
+        available_rect: Rect,
         triangle_height: f64,
     ) -> PositionCalculation {
         let pos = widget_rect.pos;
         let size = widget_rect.size;
-        let mut tooltip_pos = DVec2 {
-            x: min(pos.x, screen_size.x - expected_dimension.x),
-            y: min(
-                pos.y + widget_rect.size.y,
-                screen_size.y - expected_dimension.y,
-            ),
-        };
+        let widget_center_x = pos.x + size.x * 0.5;
+        let widget_center_y = pos.y + size.y * 0.5;
+
+        let avail_left = available_rect.pos.x;
+        let avail_top = available_rect.pos.y;
+        let avail_right = avail_left + available_rect.size.x;
+        let avail_bottom = avail_top + available_rect.size.y;
+        let avail_width = available_rect.size.x;
+        let avail_height = available_rect.size.y;
+
+        let mut tooltip_pos = DVec2::default();
         let mut fixed_width = false;
         let mut callout_position = 0.0;
-        let mut width_to_be_fixed = screen_size.x;
+        let mut width_to_be_fixed = avail_width;
+
+        // Skip full layout calculations until we know the tooltip's natural
+        // size (first pre-draw pass reports zero). Position at the target's
+        // top-left so the initial invisible draw is cheap.
+        if expected_dimension.x <= 0.0 || avail_width <= 0.0 {
+            tooltip_pos = DVec2 { x: pos.x, y: pos.y };
+            return PositionCalculation {
+                tooltip_pos,
+                callout_position,
+                fixed_width,
+                width_to_be_fixed,
+            };
+        }
 
         match options.position {
-            TooltipPosition::Top => {
-                tooltip_pos.y = widget_rect.pos.y - max(expected_dimension.y, size.y);
-                callout_position = 180.0;
-            }
-            TooltipPosition::Bottom => {
-                if tooltip_pos.y == screen_size.y - expected_dimension.y {
-                    tooltip_pos.y = widget_rect.pos.y - max(expected_dimension.y, size.y);
-                    callout_position = 180.0;
+            TooltipPosition::Top | TooltipPosition::Bottom => {
+                // Center the tooltip horizontally on the target widget.
+                let mut desired_x = widget_center_x - expected_dimension.x * 0.5;
+                if expected_dimension.x >= avail_width {
+                    // Tooltip is (or would be) wider than the available area:
+                    // pin to the available left edge and clamp the width so
+                    // the text wraps.
+                    fixed_width = true;
+                    width_to_be_fixed = avail_width;
+                    desired_x = avail_left;
                 } else {
-                    tooltip_pos.y = widget_rect.pos.y + widget_rect.size.y;
+                    // Clamp so the tooltip stays inside the available rect.
+                    if desired_x < avail_left {
+                        desired_x = avail_left;
+                    } else if desired_x + expected_dimension.x > avail_right {
+                        desired_x = avail_right - expected_dimension.x;
+                    }
+                }
+                tooltip_pos.x = desired_x;
+
+                // Choose vertical placement. For `Top` we go above the widget
+                // (flipping below if there isn't room). For `Bottom` we go
+                // below (flipping above if there isn't room).
+                let y_above = pos.y - max(expected_dimension.y, size.y);
+                let y_below = pos.y + size.y;
+                let fits_above = y_above >= avail_top;
+                let fits_below = y_below + expected_dimension.y <= avail_bottom;
+
+                match options.position {
+                    TooltipPosition::Top => {
+                        if fits_above || !fits_below {
+                            tooltip_pos.y = y_above;
+                            callout_position = 180.0;
+                        } else {
+                            tooltip_pos.y = y_below;
+                            callout_position = 0.0;
+                        }
+                    }
+                    TooltipPosition::Bottom => {
+                        if fits_below || !fits_above {
+                            tooltip_pos.y = y_below;
+                            callout_position = 0.0;
+                        } else {
+                            tooltip_pos.y = y_above;
+                            callout_position = 180.0;
+                        }
+                    }
+                    _ => {}
                 }
             }
             TooltipPosition::Left => {
-                tooltip_pos.x = widget_rect.pos.x
-                    - max(expected_dimension.x, widget_rect.size.x)
-                    - triangle_height;
-                tooltip_pos.y = widget_rect.pos.y
-                    + 0.5 * (widget_rect.size.y - max(expected_dimension.y, widget_rect.size.y));
+                tooltip_pos.x = pos.x - expected_dimension.x - triangle_height;
+                if tooltip_pos.x < avail_left {
+                    fixed_width = true;
+                    // Leave room for the callout arrow.
+                    width_to_be_fixed = (pos.x - triangle_height - avail_left).max(24.0);
+                    tooltip_pos.x = avail_left;
+                }
+
+                let mut desired_y = widget_center_y - expected_dimension.y * 0.5;
+                if desired_y < avail_top {
+                    desired_y = avail_top;
+                } else if desired_y + expected_dimension.y > avail_bottom {
+                    desired_y = (avail_bottom - expected_dimension.y).max(avail_top);
+                }
+                tooltip_pos.y = desired_y;
                 callout_position = 90.0;
             }
             TooltipPosition::Right => {
-                tooltip_pos.x = widget_rect.pos.x + widget_rect.size.x;
-                tooltip_pos.y =
-                    widget_rect.pos.y + 0.5 * widget_rect.size.y - expected_dimension.y * 0.5;
-                width_to_be_fixed = max(
-                    screen_size.x - (pos.x + widget_rect.size.x + triangle_height * 2.0),
-                    expected_dimension.x,
-                );
+                tooltip_pos.x = pos.x + size.x;
+                let available_x =
+                    (avail_right - tooltip_pos.x - triangle_height * 2.0).max(0.0);
+                if expected_dimension.x > available_x {
+                    fixed_width = true;
+                    width_to_be_fixed = available_x.max(24.0);
+                }
+
+                let mut desired_y = widget_center_y - expected_dimension.y * 0.5;
+                if desired_y < avail_top {
+                    desired_y = avail_top;
+                } else if desired_y + expected_dimension.y > avail_bottom {
+                    desired_y = (avail_bottom - expected_dimension.y).max(avail_top);
+                }
+                tooltip_pos.y = desired_y;
                 callout_position = 270.0;
             }
         }
-        if expected_dimension.x > 0.0 && screen_size.x > 0.0 {
-            Self::apply_edge_case_fix(
-                &options.position,
-                &mut tooltip_pos,
-                &mut fixed_width,
-                &mut width_to_be_fixed,
-                screen_size,
-                expected_dimension,
-                widget_rect,
-                triangle_height,
-            );
+
+        // Final top/bottom clamp to keep the tooltip inside the available rect.
+        if tooltip_pos.y < avail_top {
+            tooltip_pos.y = avail_top;
+        } else if tooltip_pos.y + expected_dimension.y > avail_bottom {
+            tooltip_pos.y = (avail_bottom - expected_dimension.y).max(avail_top);
+        }
+        // Vertical height clamp: tooltip wider than available height shouldn't
+        // overflow — pin to top and let the content clip if necessary.
+        if expected_dimension.y >= avail_height {
+            tooltip_pos.y = avail_top;
         }
 
         PositionCalculation {
@@ -328,47 +413,6 @@ impl CalloutTooltip {
             callout_position,
             fixed_width,
             width_to_be_fixed,
-        }
-    }
-
-    /// Check if width fixing is needed for edge cases
-    fn needs_width_fix(tooltip_x: f64, screen_width: f64, expected_width: f64) -> bool {
-        tooltip_x == screen_width - expected_width && tooltip_x < 0.0
-    }
-
-    /// Apply edge case handling for position and width fixing
-    fn apply_edge_case_fix(
-        position: &TooltipPosition,
-        tooltip_pos: &mut DVec2,
-        fixed_width: &mut bool,
-        width_to_be_fixed: &mut f64,
-        screen_size: DVec2,
-        expected_dimension: DVec2,
-        widget_rect: Rect,
-        triangle_height: f64,
-    ) {
-        match position {
-            TooltipPosition::Top | TooltipPosition::Bottom => {
-                if Self::needs_width_fix(tooltip_pos.x, screen_size.x, expected_dimension.x) {
-                    *fixed_width = true;
-                    tooltip_pos.x = 0.0;
-                }
-            }
-            TooltipPosition::Left => {
-                if tooltip_pos.x < 0.0 {
-                    *fixed_width = true;
-                    *width_to_be_fixed = widget_rect.pos.x - triangle_height;
-                    tooltip_pos.x = 0.0;
-                }
-            }
-            TooltipPosition::Right => {
-                if *width_to_be_fixed == expected_dimension.x
-                    && *width_to_be_fixed > screen_size.x - widget_rect.pos.x - widget_rect.size.x
-                {
-                    *fixed_width = true;
-                    *width_to_be_fixed = screen_size.x - widget_rect.pos.x - widget_rect.size.x;
-                }
-            }
         }
     }
 
@@ -398,21 +442,11 @@ impl CalloutTooltip {
             bottom: 0.0,
         };
 
-        let mut content_view = tooltip.view(cx, ids!(content));
-        script_apply_eval!(cx, content_view, {
-            margin: #(margin)
-        });
-        if position_calc.fixed_width {
-            let fixed_width = position_calc.width_to_be_fixed.max(24.0);
-            script_apply_eval!(cx, content_view, {
-                width: #(fixed_width)
-            });
-        } else {
-            script_apply_eval!(cx, content_view, {
-                width: #(Size::fit())
-            });
-        }
-
+        // Apply the draw_bg shader instances FIRST. `script_apply_eval!` on a
+        // View runs `apply` over the whole struct, which can reset fields not
+        // mentioned in the script (like `walk.width`) back to their DSL
+        // defaults (Fit). Doing this BEFORE the direct walk writes below
+        // ensures our width override wins.
         let mut content = tooltip.view(cx, ids!(content));
         script_apply_eval!(cx, content, {
             draw_bg +: {
@@ -426,16 +460,38 @@ impl CalloutTooltip {
             }
         });
 
+        // Now set the content view's walk fields directly via `borrow_mut()`
+        // so the next draw uses the correct width. We use `Size::Fixed` for
+        // both the content view AND the label when `fixed_width` is set,
+        // because the wrapping in `DrawText::draw_walk` keys off the turtle's
+        // resolved width — `Size::Fill` inside an Overlay-flow parent can
+        // resolve to the full pass width on some platforms instead of the
+        // parent's constrained inner width, which is the iOS bug we hit.
+        // `Size::Fixed` removes that ambiguity entirely.
+        const CONTENT_PADDING: f64 = 15.0;
+        let content_view = tooltip.view(cx, ids!(content));
+        if let Some(mut view) = content_view.borrow_mut() {
+            view.walk.margin = margin;
+            if position_calc.fixed_width {
+                let fixed_width = position_calc.width_to_be_fixed.max(24.0);
+                view.walk.width = Size::Fixed(fixed_width);
+            } else {
+                view.walk.width = Size::fit();
+            }
+            view.redraw(cx);
+        }
+
         let tooltip_label = tooltip.label(cx, ids!(content.tooltip_label));
         if let Some(mut label) = tooltip_label.borrow_mut() {
             label.draw_text.color = text_color;
             if position_calc.fixed_width {
-                // Because parent width is constrained, we MUST Fill so the text wraps line-by-line
-                label.walk.width = Size::fill();
+                let fixed_width = position_calc.width_to_be_fixed.max(24.0);
+                let label_width = (fixed_width - CONTENT_PADDING * 2.0).max(24.0);
+                label.walk.width = Size::Fixed(label_width);
             } else {
-                // Because parent width is Fit, we MUST Fit so the string natural width evaluates properly
                 label.walk.width = Size::fit();
             }
+            label.redraw(cx);
         };
     }
 
@@ -466,12 +522,41 @@ impl CalloutTooltip {
             .label(cx, ids!(content.tooltip_label))
             .set_text(cx, &pad_last_line(text));
 
-        let mut expected_dimension = tooltip.view(cx, ids!(content)).area().rect(cx).size;
         let screen_size = tooltip.area().rect(cx).size;
+
+        // Subtract platform safe-area insets (notch, rounded corners, home
+        // indicator) so the tooltip doesn't spill into hardware-occluded
+        // regions. On macOS/desktop these are all zero.
+        let insets = cx.display_context.safe_area_insets;
+        let available_rect = Rect {
+            pos: DVec2 {
+                x: insets.left,
+                y: insets.top,
+            },
+            size: DVec2 {
+                x: (screen_size.x - insets.left - insets.right).max(0.0),
+                y: (screen_size.y - insets.top - insets.bottom).max(0.0),
+            },
+        };
+
+        // On the external (non-internal-redraw) call we MUST NOT trust the
+        // content view's `area().rect()`: it still reflects the previous
+        // draw of the *previous* tooltip text. Saving that as
+        // `text_unwrapped_width` would lock the wrap decision to a stale
+        // value (e.g. a previous "Fully synced" tooltip) and the new long
+        // text would never trigger `fixed_width`. Force `expected_dimension`
+        // to zero on the external call; the next draw measures the new
+        // text's natural width with `Size::Fit`, and the internal redraw
+        // (5ms later) reads that fresh value.
+        let mut expected_dimension = if is_internal_redraw {
+            tooltip.view(cx, ids!(content)).area().rect(cx).size
+        } else {
+            DVec2::default()
+        };
 
         if let Some(w) = self.text_unwrapped_width {
             expected_dimension.x = w;
-        } else if expected_dimension.x > 0.0 {
+        } else if is_internal_redraw && expected_dimension.x > 0.0 {
             self.text_unwrapped_width = Some(expected_dimension.x);
         }
 
@@ -479,7 +564,7 @@ impl CalloutTooltip {
             &options,
             widget_rect,
             expected_dimension,
-            screen_size,
+            available_rect,
             options.triangle_height,
         );
 
@@ -584,16 +669,19 @@ pub enum TooltipAction {
 /// This is useful for creating tooltips that line up with the text above
 /// them.
 fn pad_last_line(text: &str) -> String {
-    let lines = text.split('\n');
-    let (lines_len, _) = lines.size_hint();
-    if lines_len <= 1 {
+    // `Split::size_hint()` returns a bound, not the actual count, so the
+    // previous version often early-returned without padding. Collect once and
+    // use the real length.
+    let lines: Vec<&str> = text.split('\n').collect();
+    if lines.len() <= 1 {
         return text.to_string();
     }
-    let longest_line = lines.clone().map(|s| s.len()).max().unwrap_or(0);
+    let longest_line = lines.iter().map(|s| s.len()).max().unwrap_or(0);
+    let last_idx = lines.len() - 1;
     let mut full_text = String::with_capacity(text.len() + longest_line + 4);
-    for (i, line) in lines.enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         full_text.push_str(line);
-        if i < lines_len - 1 {
+        if i < last_idx {
             full_text.push('\n');
         } else {
             // Plus 4 is added to add more width to the last line otherwise the first line is still being cut off
@@ -601,4 +689,181 @@ fn pad_last_line(text: &str) -> String {
         }
     }
     full_text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_options(position: TooltipPosition) -> CalloutTooltipOptions {
+        CalloutTooltipOptions {
+            position,
+            ..Default::default()
+        }
+    }
+
+    fn full_screen(width: f64, height: f64) -> Rect {
+        Rect {
+            pos: DVec2::default(),
+            size: DVec2 { x: width, y: height },
+        }
+    }
+
+    #[test]
+    fn top_centers_horizontally_on_widget_when_fits() {
+        // Widget at x=180-220 (center=200), screen 400 wide, tooltip natural 100 wide.
+        let options = make_options(TooltipPosition::Top);
+        let widget_rect = Rect {
+            pos: DVec2 { x: 180.0, y: 100.0 },
+            size: DVec2 { x: 40.0, y: 30.0 },
+        };
+        let expected = DVec2 { x: 100.0, y: 50.0 };
+        let avail = full_screen(400.0, 600.0);
+        let calc = CalloutTooltip::calculate_position(&options, widget_rect, expected, avail, 7.5);
+
+        // Tooltip should be centered horizontally on widget (center=200 - 50 = 150).
+        assert_eq!(calc.tooltip_pos.x, 150.0);
+        assert!(!calc.fixed_width, "tooltip fits, should not need fixed_width");
+    }
+
+    #[test]
+    fn top_clamps_to_left_edge_when_widget_near_left() {
+        // Widget at x=10-30 (center=20), tooltip 100 wide, would extend past left edge.
+        let options = make_options(TooltipPosition::Top);
+        let widget_rect = Rect {
+            pos: DVec2 { x: 10.0, y: 100.0 },
+            size: DVec2 { x: 20.0, y: 30.0 },
+        };
+        let expected = DVec2 { x: 100.0, y: 50.0 };
+        let avail = full_screen(400.0, 600.0);
+        let calc = CalloutTooltip::calculate_position(&options, widget_rect, expected, avail, 7.5);
+
+        assert_eq!(calc.tooltip_pos.x, 0.0);
+        assert!(!calc.fixed_width);
+    }
+
+    #[test]
+    fn top_clamps_to_right_edge_when_widget_near_right() {
+        // Widget at x=370-390, tooltip 100 wide centered would extend past right edge (400).
+        let options = make_options(TooltipPosition::Top);
+        let widget_rect = Rect {
+            pos: DVec2 { x: 370.0, y: 100.0 },
+            size: DVec2 { x: 20.0, y: 30.0 },
+        };
+        let expected = DVec2 { x: 100.0, y: 50.0 };
+        let avail = full_screen(400.0, 600.0);
+        let calc = CalloutTooltip::calculate_position(&options, widget_rect, expected, avail, 7.5);
+
+        // Right edge of tooltip should be at screen edge => tooltip_pos.x = 300.
+        assert_eq!(calc.tooltip_pos.x, 300.0);
+        assert!(!calc.fixed_width);
+    }
+
+    #[test]
+    fn top_triggers_fixed_width_when_tooltip_wider_than_screen() {
+        // Tooltip natural width 600 > screen 400. Should set fixed_width = true.
+        let options = make_options(TooltipPosition::Top);
+        let widget_rect = Rect {
+            pos: DVec2 { x: 350.0, y: 100.0 },
+            size: DVec2 { x: 30.0, y: 30.0 },
+        };
+        let expected = DVec2 { x: 600.0, y: 50.0 };
+        let avail = full_screen(400.0, 600.0);
+        let calc = CalloutTooltip::calculate_position(&options, widget_rect, expected, avail, 7.5);
+
+        assert!(calc.fixed_width, "tooltip wider than screen must trigger fixed_width");
+        assert_eq!(calc.tooltip_pos.x, 0.0);
+        assert_eq!(calc.width_to_be_fixed, 400.0);
+    }
+
+    #[test]
+    fn external_call_with_zero_expected_dimension_early_returns() {
+        // expected.x = 0 (uninitialized) => early return, fixed_width = false.
+        let options = make_options(TooltipPosition::Top);
+        let widget_rect = Rect {
+            pos: DVec2 { x: 100.0, y: 100.0 },
+            size: DVec2 { x: 40.0, y: 30.0 },
+        };
+        let expected = DVec2 { x: 0.0, y: 0.0 };
+        let avail = full_screen(400.0, 600.0);
+        let calc = CalloutTooltip::calculate_position(&options, widget_rect, expected, avail, 7.5);
+
+        assert!(!calc.fixed_width);
+        assert_eq!(calc.tooltip_pos.x, 100.0);
+        assert_eq!(calc.tooltip_pos.y, 100.0);
+    }
+
+    #[test]
+    fn safe_area_insets_clamp_to_inset_left_edge() {
+        // Landscape iOS: 60px left inset (notch), tooltip wider than safe area.
+        // Tooltip should pin to the inset left edge, not absolute x=0, and the
+        // fixed width should be the safe-area width, not the full screen.
+        let options = make_options(TooltipPosition::Top);
+        let widget_rect = Rect {
+            pos: DVec2 { x: 700.0, y: 350.0 },
+            size: DVec2 { x: 50.0, y: 50.0 },
+        };
+        let expected = DVec2 { x: 800.0, y: 80.0 };
+        // Full screen is 800x400; safe area excludes 60px on left/right.
+        let avail = Rect {
+            pos: DVec2 { x: 60.0, y: 0.0 },
+            size: DVec2 { x: 680.0, y: 400.0 },
+        };
+        let calc = CalloutTooltip::calculate_position(&options, widget_rect, expected, avail, 7.5);
+
+        assert!(calc.fixed_width);
+        assert_eq!(calc.tooltip_pos.x, 60.0, "should pin to safe-area left, not 0");
+        assert_eq!(calc.width_to_be_fixed, 680.0, "should use safe-area width");
+    }
+
+    #[test]
+    fn safe_area_insets_clamp_centered_tooltip_inside_inset_right_edge() {
+        // Widget near the safe-area right edge: centered tooltip would extend
+        // past the inset right edge — clamp it back inside.
+        let options = make_options(TooltipPosition::Top);
+        let widget_rect = Rect {
+            pos: DVec2 { x: 720.0, y: 200.0 },
+            size: DVec2 { x: 20.0, y: 20.0 },
+        };
+        let expected = DVec2 { x: 200.0, y: 60.0 };
+        let avail = Rect {
+            pos: DVec2 { x: 60.0, y: 0.0 },
+            size: DVec2 { x: 680.0, y: 400.0 },
+        };
+        let calc = CalloutTooltip::calculate_position(&options, widget_rect, expected, avail, 7.5);
+
+        // Available right edge = 60 + 680 = 740. Tooltip right edge clamped
+        // to 740 => tooltip_pos.x = 740 - 200 = 540.
+        assert_eq!(calc.tooltip_pos.x, 540.0);
+        assert!(!calc.fixed_width);
+    }
+
+    #[test]
+    fn pad_last_line_pads_multiline_to_longest() {
+        // Longest line "This device is unverif" is 22 chars; last line
+        // "verify it." is 10 chars. Last line should be padded with
+        // (22 - 10) + 4 = 16 trailing spaces.
+        let input = "Logged in.\nThis device is unverif\nverify it.";
+        let out = pad_last_line(input);
+        assert!(out.starts_with("Logged in.\nThis device is unverif\nverify it."));
+        let trailing_spaces = out.chars().rev().take_while(|c| *c == ' ').count();
+        assert_eq!(trailing_spaces, 16);
+    }
+
+    #[test]
+    fn pad_last_line_leaves_single_line_unchanged() {
+        let input = "Just one line";
+        assert_eq!(pad_last_line(input), input);
+    }
+
+    #[test]
+    fn pad_last_line_handles_empty_lines() {
+        // Real-world tooltip text uses "\n\n" for paragraph breaks.
+        let input = "First.\n\nSecond.";
+        let out = pad_last_line(input);
+        assert!(out.starts_with("First.\n\nSecond."));
+        // Longest is "Second." (7) — last line is "Second." (7) — pad = 0 + 4.
+        let trailing_spaces = out.chars().rev().take_while(|c| *c == ' ').count();
+        assert_eq!(trailing_spaces, 4);
+    }
 }
